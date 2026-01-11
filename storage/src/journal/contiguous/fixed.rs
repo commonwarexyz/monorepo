@@ -63,7 +63,7 @@ use commonware_codec::{CodecFixed, CodecFixedShared, DecodeExt as _, ReadExt as 
 use commonware_runtime::{
     buffer::pool::{Append, PoolRef},
     telemetry::metrics::status::GaugeExt,
-    Blob, Error as RError, Metrics, Storage,
+    Error as RError, Metrics, Storage,
 };
 use commonware_utils::hex;
 use futures::{
@@ -110,7 +110,7 @@ pub struct Config {
 /// and
 /// [rocksdb](https://github.com/facebook/rocksdb/blob/0c533e61bc6d89fdf1295e8e0bcee4edb3aef401/include/rocksdb/options.h#L441-L445),
 /// the first invalid data read will be considered the new end of the journal (and the
-/// underlying [Blob] will be truncated to the last valid item). Repair occurs during
+/// underlying blob will be truncated to the last valid item). Repair occurs during
 /// init because only the tail blob can have trailing bytes.
 pub struct Journal<E: Storage + Metrics, A: CodecFixed> {
     pub(crate) context: E,

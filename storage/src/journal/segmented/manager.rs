@@ -15,23 +15,45 @@ use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::{collections::BTreeMap, future::Future, num::NonZeroUsize};
 use tracing::debug;
 
-/// A buffer that wraps a blob and provides size information.
+/// A buffer that wraps a blob and provides size, sync, and resize operations.
 ///
 /// Both [`Append`] and [`Write`] implement this trait.
-pub trait SectionBuffer: Blob + Clone + Send + Sync {
+pub trait SectionBuffer: Clone + Send + Sync {
     /// Returns the current logical size of the buffer including any buffered data.
     fn size(&self) -> impl Future<Output = u64> + Send;
+
+    /// Sync any buffered data to the underlying blob.
+    fn sync(&self) -> impl Future<Output = Result<(), RError>> + Send;
+
+    /// Resize the blob to the provided logical size.
+    fn resize(&self, size: u64) -> impl Future<Output = Result<(), RError>> + Send;
 }
 
 impl<B: Blob> SectionBuffer for Append<B> {
     async fn size(&self) -> u64 {
         Self::size(self).await
     }
+
+    async fn sync(&self) -> Result<(), RError> {
+        Self::sync(self).await
+    }
+
+    async fn resize(&self, size: u64) -> Result<(), RError> {
+        Self::resize(self, size).await
+    }
 }
 
 impl<B: Blob> SectionBuffer for Write<B> {
     async fn size(&self) -> u64 {
         Self::size(self).await
+    }
+
+    async fn sync(&self) -> Result<(), RError> {
+        Blob::sync(self).await
+    }
+
+    async fn resize(&self, size: u64) -> Result<(), RError> {
+        Blob::resize(self, size).await
     }
 }
 

@@ -1496,6 +1496,7 @@ name = "commonware-runtime-fuzz"
 version = "0.0.64"
 dependencies = [
  "arbitrary",
+ "bytes",
  "commonware-runtime",
  "commonware-utils",
  "libfuzzer-sys",

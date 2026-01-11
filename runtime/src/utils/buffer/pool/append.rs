@@ -35,7 +35,6 @@ use crate::{
     Blob, Error, RwLock, RwLockWriteGuard,
 };
 use commonware_cryptography::Crc32;
-use commonware_utils::StableBuf;
 use std::{
     num::{NonZeroU16, NonZeroUsize},
     sync::Arc,
@@ -812,71 +811,12 @@ impl<B: Blob> Append<B> {
         );
         Ok(Replay::new(reader))
     }
-}
 
-impl<B: Blob> Blob for Append<B> {
-    async fn read_at(
-        &self,
-        buf: impl Into<StableBuf> + Send,
-        logical_offset: u64,
-    ) -> Result<StableBuf, Error> {
-        let mut buf = buf.into();
-
-        // Ensure the read doesn't overflow.
-        let end_offset = logical_offset
-            .checked_add(buf.len() as u64)
-            .ok_or(Error::OffsetOverflow)?;
-
-        // Acquire a read lock on the buffer.
-        let buffer = self.buffer.read().await;
-
-        // If the data required is beyond the size of the blob, return an error.
-        if end_offset > buffer.size() {
-            return Err(Error::BlobInsufficientLength);
-        }
-
-        // Extract any bytes from the buffer that overlap with the requested range.
-        let remaining = buffer.extract(buf.as_mut(), logical_offset);
-
-        // Release buffer lock before potential I/O.
-        drop(buffer);
-
-        if remaining == 0 {
-            return Ok(buf);
-        }
-
-        // Fast path: try to read *only* from pool cache without acquiring blob lock. This allows
-        // concurrent reads even while a flush is in progress.
-        let cached = self
-            .pool_ref
-            .read_cached(self.id, &mut buf.as_mut()[..remaining], logical_offset)
-            .await;
-
-        if cached == remaining {
-            // All bytes found in cache.
-            return Ok(buf);
-        }
-
-        // Slow path: cache miss (partial or full), acquire blob read lock to ensure any in-flight
-        // write completes before we read from the blob.
-        let blob_guard = self.blob_state.read().await;
-
-        // Read remaining bytes that were not already obtained from the earlier cache read.
-        let uncached_offset = logical_offset + cached as u64;
-        let uncached_len = remaining - cached;
-        self.pool_ref
-            .read(
-                &blob_guard.blob,
-                self.id,
-                &mut buf.as_mut()[cached..cached + uncached_len],
-                uncached_offset,
-            )
-            .await?;
-
-        Ok(buf)
-    }
-
-    async fn sync(&self) -> Result<(), Error> {
+    /// Sync any buffered data to the underlying blob.
+    ///
+    /// This flushes all buffered data (including any partial page) to disk and syncs the
+    /// underlying blob to ensure durability.
+    pub async fn sync(&self) -> Result<(), Error> {
         // Flush any buffered data, including any partial page. When flush_internal returns,
         // write_at has completed and data has been written to the underlying blob.
         let buf_guard = self.buffer.write().await;
@@ -891,13 +831,6 @@ impl<B: Blob> Blob for Append<B> {
         blob_state.blob.sync().await
     }
 
-    /// This [Blob] trait method is unimplemented by [Append] and unconditionally panics.
-    async fn write_at(&self, _buf: impl Into<StableBuf> + Send, _offset: u64) -> Result<(), Error> {
-        // TODO(<https://github.com/commonwarexyz/monorepo/issues/1207>): Extend the buffer pool to
-        // support arbitrary writes.
-        unimplemented!("append-only blob type does not support write_at")
-    }
-
     /// Resize the blob to the provided logical `size`.
     ///
     /// This truncates the blob to contain only `size` logical bytes. The physical blob size will
@@ -908,7 +841,7 @@ impl<B: Blob> Blob for Append<B> {
     /// - Concurrent mutable operations (append, resize) are not supported and will cause data loss.
     /// - Concurrent readers which try to read past the new size during the resize may error.
     /// - The resize is not guaranteed durable until the next sync.
-    async fn resize(&self, size: u64) -> Result<(), Error> {
+    pub async fn resize(&self, size: u64) -> Result<(), Error> {
         let current_size = self.size().await;
 
         // Handle growing by appending zero bytes.
@@ -988,8 +921,9 @@ impl<B: Blob> Blob for Append<B> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{super::CachedBuf, *};
     use crate::{deterministic, Runner as _, Storage as _};
+    use bytes::Buf;
     use commonware_codec::ReadExt;
     use commonware_macros::test_traced;
     use commonware_utils::{NZUsize, NZU16};
@@ -997,6 +931,12 @@ mod tests {
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(103); // janky size to ensure we test page alignment
     const BUFFER_SIZE: usize = PAGE_SIZE.get() as usize * 2;
+
+    fn buf_to_vec(mut buf: CachedBuf) -> Vec<u8> {
+        let mut result = vec![0u8; buf.remaining()];
+        buf.copy_to_slice(&mut result);
+        result
+    }
 
     #[test_traced("DEBUG")]
     fn test_append_crc_empty() {
@@ -1066,19 +1006,16 @@ mod tests {
             assert_eq!(append.size().await, 10);
 
             // Read back the first chunk and verify.
-            let read_buf = vec![0u8; 5];
-            let read_buf = append.read_at(read_buf, 0).await.unwrap();
-            assert_eq!(read_buf.as_ref(), &data[..]);
+            let read_data = buf_to_vec(append.read_buf(0, 5).await.unwrap());
+            assert_eq!(read_data, data);
 
             // Read back the second chunk and verify.
-            let read_buf = vec![0u8; 5];
-            let read_buf = append.read_at(read_buf, 5).await.unwrap();
-            assert_eq!(read_buf.as_ref(), &more_data[..]);
+            let read_data = buf_to_vec(append.read_buf(5, 5).await.unwrap());
+            assert_eq!(read_data, more_data);
 
             // Read all data at once and verify.
-            let read_buf = vec![0u8; 10];
-            let read_buf = append.read_at(read_buf, 0).await.unwrap();
-            assert_eq!(read_buf.as_ref(), &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+            let read_data = buf_to_vec(append.read_buf(0, 10).await.unwrap());
+            assert_eq!(read_data, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
 
             // Close and reopen the blob and make sure the data is still there and the trailing
             // checksum is written & stripped as expected.
@@ -1101,15 +1038,13 @@ mod tests {
             assert_eq!(append.size().await, 110);
 
             // Read back data that spans the page boundary.
-            let read_buf = vec![0u8; 100];
-            let read_buf = append.read_at(read_buf, 10).await.unwrap();
-            assert_eq!(read_buf.as_ref(), &spanning_data[..]);
+            let read_data = buf_to_vec(append.read_buf(10, 100).await.unwrap());
+            assert_eq!(read_data, spanning_data);
 
             // Read all 110 bytes at once.
-            let read_buf = vec![0u8; 110];
-            let read_buf = append.read_at(read_buf, 0).await.unwrap();
+            let read_data = buf_to_vec(append.read_buf(0, 110).await.unwrap());
             let expected: Vec<u8> = (1..=110).collect();
-            assert_eq!(read_buf.as_ref(), &expected[..]);
+            assert_eq!(read_data, expected);
 
             // Drop and re-open and make sure bytes are still there.
             append.sync().await.unwrap();
@@ -1132,10 +1067,9 @@ mod tests {
             assert_eq!(append.size().await, 206);
 
             // Verify we can read it back.
-            let read_buf = vec![0u8; 206];
-            let read_buf = append.read_at(read_buf, 0).await.unwrap();
+            let read_data = buf_to_vec(append.read_buf(0, 206).await.unwrap());
             let expected: Vec<u8> = (1..=206).collect();
-            assert_eq!(read_buf.as_ref(), &expected[..]);
+            assert_eq!(read_data, expected);
 
             // Drop and re-open at the page boundary.
             append.sync().await.unwrap();
@@ -1150,9 +1084,8 @@ mod tests {
             assert_eq!(append.size().await, 206);
 
             // Verify data is still readable after reopen.
-            let read_buf = vec![0u8; 206];
-            let read_buf = append.read_at(read_buf, 0).await.unwrap();
-            assert_eq!(read_buf.as_ref(), &expected[..]);
+            let read_data = buf_to_vec(append.read_buf(0, 206).await.unwrap());
+            assert_eq!(read_data, expected);
         });
     }
 
@@ -1653,7 +1586,7 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(append.size().await, 120);
-            let all_data: Vec<u8> = append.read_at(vec![0u8; 120], 0).await.unwrap().into();
+            let all_data = buf_to_vec(append.read_buf(0, 120).await.unwrap());
             let expected: Vec<u8> = (1..=120).collect();
             assert_eq!(all_data, expected);
         });
@@ -1730,7 +1663,7 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(append.size().await, 30);
-            let all_data: Vec<u8> = append.read_at(vec![0u8; 30], 0).await.unwrap().into();
+            let all_data = buf_to_vec(append.read_buf(0, 30).await.unwrap());
             let expected: Vec<u8> = (1..=30).collect();
             assert_eq!(all_data, expected);
             drop(append);
@@ -1764,14 +1697,14 @@ mod tests {
             );
 
             // Verify the data is the original 10 bytes
-            let fallback_data: Vec<u8> = append.read_at(vec![0u8; 10], 0).await.unwrap().into();
+            let fallback_data = buf_to_vec(append.read_buf(0, 10).await.unwrap());
             assert_eq!(
                 fallback_data, data1,
                 "Fallback data should match original 10 bytes"
             );
 
             // Reading beyond 10 bytes should fail
-            let result = append.read_at(vec![0u8; 11], 0).await;
+            let result = append.read_buf(0, 11).await;
             assert!(result.is_err(), "Reading beyond fallback size should fail");
         });
     }
@@ -1870,7 +1803,7 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(append.size().await, 113);
-            let all_data: Vec<u8> = append.read_at(vec![0u8; 113], 0).await.unwrap().into();
+            let all_data = buf_to_vec(append.read_buf(0, 113).await.unwrap());
             let expected: Vec<u8> = (1..=113).collect();
             assert_eq!(all_data, expected);
             drop(append);
@@ -1907,7 +1840,7 @@ mod tests {
 
             // Try to read from page 0 - this should fail with InvalidChecksum because
             // the fallback CRC has len=10 (partial), which is invalid for a non-last page.
-            let result = append.read_at(vec![0u8; 10], 0).await;
+            let result = append.read_buf(0, 10).await;
             assert!(
                 result.is_err(),
                 "Reading from corrupted non-last page via Append should fail, but got: {:?}",
@@ -2048,7 +1981,7 @@ mod tests {
             );
 
             // Verify data is still readable.
-            let data: Vec<u8> = append.read_at(vec![0u8; 5], 0).await.unwrap().into();
+            let data = buf_to_vec(append.read_buf(0, 5).await.unwrap());
             assert_eq!(data, vec![1, 2, 3, 4, 5]);
         });
     }

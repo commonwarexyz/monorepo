@@ -7,7 +7,7 @@
 //! # Format
 //!
 //! Data stored in `Journal` is persisted in one of many Blobs within a caller-provided `partition`.
-//! The particular [Blob] in which data is stored is identified by a `section` number (`u64`).
+//! The particular blob in which data is stored is identified by a `section` number (`u64`).
 //! Within a `section`, data is appended as an `item` with the following format:
 //!
 //! ```text
@@ -85,7 +85,7 @@ use commonware_codec::{
 };
 use commonware_runtime::{
     buffer::pool::{Append, PoolRef},
-    Blob, Metrics, Storage,
+    Metrics, Storage,
 };
 use futures::stream::{self, Stream, StreamExt};
 use std::num::NonZeroUsize;
@@ -147,7 +147,7 @@ fn decode_item<V: Codec>(item_data: impl Buf, cfg: &V::Cfg, compressed: bool) ->
 /// and
 /// [rocksdb](https://github.com/facebook/rocksdb/blob/0c533e61bc6d89fdf1295e8e0bcee4edb3aef401/include/rocksdb/options.h#L441-L445),
 /// the first invalid data read will be considered the new end of the journal (and the
-/// underlying [Blob] will be truncated to the last valid item). Repair occurs during
+/// underlying blob will be truncated to the last valid item). Repair occurs during
 /// replay (not init) because any blob could have trailing bytes.
 pub struct Journal<E: Storage + Metrics, V: Codec> {
     manager: Manager<E, AppendFactory>,

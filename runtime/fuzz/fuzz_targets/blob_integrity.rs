@@ -15,6 +15,7 @@
 #![no_main]
 
 use arbitrary::{Arbitrary, Unstructured};
+use bytes::Buf;
 use commonware_runtime::{
     buffer::pool::{Append, PoolRef},
     deterministic, Blob, Runner, Storage,
@@ -203,14 +204,14 @@ fn fuzz(input: FuzzInput) {
                     }
                 }
             } else {
-                // Use Append.read_at directly.
-                let buf = vec![0u8; len];
-                let read_result = append.read_at(buf, offset).await;
+                // Use Append.read_buf directly.
+                let read_result = append.read_buf(offset, len).await;
 
                 match read_result {
-                    Ok(buf) => {
+                    Ok(mut cached_buf) => {
                         // Read succeeded - data must match expected.
-                        let buf: Vec<u8> = buf.into();
+                        let mut buf = vec![0u8; cached_buf.remaining()];
+                        cached_buf.copy_to_slice(&mut buf);
                         let expected_slice = &expected_data[offset as usize..offset as usize + len];
                         assert_eq!(
                             &buf, expected_slice,

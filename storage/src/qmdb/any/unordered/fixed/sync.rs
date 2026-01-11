@@ -12,7 +12,7 @@ use crate::{
 use commonware_codec::CodecFixedShared;
 use commonware_cryptography::{DigestOf, Hasher};
 use commonware_runtime::{
-    buffer::pool::Append, telemetry::metrics::status::GaugeExt, Blob, Clock, Metrics, Storage,
+    buffer::pool::Append, telemetry::metrics::status::GaugeExt, Clock, Metrics, Storage,
 };
 use commonware_utils::Array;
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};

@@ -123,172 +123,6 @@ impl PoolRef {
         Pool::offset_to_page(self.page_size, offset)
     }
 
-    /// Try to read the specified bytes from the buffer pool cache only. Returns the number of
-    /// bytes successfully read from cache and copied to `buf` before a page fault, if any.
-    pub(super) async fn read_cached(
-        &self,
-        blob_id: u64,
-        mut buf: &mut [u8],
-        mut logical_offset: u64,
-    ) -> usize {
-        let original_len = buf.len();
-        let buffer_pool = self.pool.read().await;
-        while !buf.is_empty() {
-            let count = buffer_pool.read_at(self.page_size, blob_id, buf, logical_offset);
-            if count == 0 {
-                // Cache miss - return how many bytes we successfully read
-                break;
-            }
-            logical_offset += count as u64;
-            buf = &mut buf[count..];
-        }
-        original_len - buf.len()
-    }
-
-    /// Read the specified bytes, preferentially from the buffer pool cache. Bytes not found in the
-    /// buffer pool will be read from the provided `blob` and cached for future reads.
-    pub(super) async fn read<B: Blob>(
-        &self,
-        blob: &B,
-        blob_id: u64,
-        mut buf: &mut [u8],
-        mut offset: u64,
-    ) -> Result<(), Error> {
-        // Read up to a page worth of data at a time from either the buffer pool or the `blob`,
-        // until the requested data is fully read.
-        while !buf.is_empty() {
-            // Read lock the buffer pool and see if we can get (some of) the data from it.
-            {
-                let buffer_pool = self.pool.read().await;
-                let count = buffer_pool.read_at(self.page_size, blob_id, buf, offset);
-                if count != 0 {
-                    offset += count as u64;
-                    buf = &mut buf[count..];
-                    continue;
-                }
-            }
-
-            // Handle page fault.
-            let count = self
-                .read_after_page_fault(blob, blob_id, buf, offset)
-                .await?;
-            offset += count as u64;
-            buf = &mut buf[count..];
-        }
-
-        Ok(())
-    }
-
-    /// Fetch the requested page after encountering a page fault, which may involve retrieving it
-    /// from `blob` & caching the result in `pool`. Returns the number of bytes read, which should
-    /// always be non-zero.
-    pub(super) async fn read_after_page_fault<B: Blob>(
-        &self,
-        blob: &B,
-        blob_id: u64,
-        buf: &mut [u8],
-        offset: u64,
-    ) -> Result<usize, Error> {
-        assert!(!buf.is_empty());
-
-        let (page_num, offset_in_page) = Pool::offset_to_page(self.page_size, offset);
-        let offset_in_page = offset_in_page as usize;
-        trace!(page_num, blob_id, "page fault");
-
-        // Create or clone a future that retrieves the desired page from the underlying blob. This
-        // requires a write lock on the buffer pool since we may need to modify `page_fetches` if
-        // this is the first fetcher.
-        let (fetch_future, is_first_fetcher) = {
-            let mut pool = self.pool.write().await;
-
-            // There's a (small) chance the page was fetched & buffered by another task before we
-            // were able to acquire the write lock, so check the cache before doing anything else.
-            let count = pool.read_at(self.page_size, blob_id, buf, offset);
-            if count != 0 {
-                return Ok(count);
-            }
-
-            let entry = pool.page_fetches.entry((blob_id, page_num));
-            match entry {
-                Entry::Occupied(o) => {
-                    // Another thread is already fetching this page, so clone its existing future.
-                    (o.get().clone(), false)
-                }
-                Entry::Vacant(v) => {
-                    // Nobody is currently fetching this page, so create a future that will do the
-                    // work. get_page_from_blob handles CRC validation and returns only logical bytes.
-                    let blob = blob.clone();
-                    let page_size = self.page_size;
-                    let future = async move {
-                        let page = get_page_from_blob(&blob, page_num, page_size)
-                            .await
-                            .map_err(Arc::new)?;
-                        // We should never be fetching partial pages through the buffer pool. This can happen
-                        // if a non-last page is corrupted and falls back to a partial CRC.
-                        let len = page.as_ref().len();
-                        if len != page_size as usize {
-                            error!(
-                                page_num,
-                                expected = page_size,
-                                actual = len,
-                                "attempted to fetch partial page from blob"
-                            );
-                            return Err(Arc::new(Error::InvalidChecksum));
-                        }
-                        Ok(page)
-                    };
-
-                    // Make the future shareable and insert it into the map.
-                    let shareable = future.boxed().shared();
-                    v.insert(shareable.clone());
-
-                    (shareable, true)
-                }
-            }
-        };
-
-        // Await the future and get the page buffer. If this isn't the task that initiated the
-        // fetch, we can return immediately with the result. Note that we cannot return immediately
-        // on error, since we'd bypass the cleanup required of the first fetcher.
-        let fetch_result = fetch_future.await;
-        if !is_first_fetcher {
-            // Copy the requested portion of the page into the buffer and return immediately.
-            let page_buf = fetch_result.map_err(|_| Error::ReadFailed)?;
-            let bytes_to_copy = std::cmp::min(buf.len(), page_buf.as_ref().len() - offset_in_page);
-            buf[..bytes_to_copy].copy_from_slice(
-                &page_buf.as_ref()[offset_in_page..offset_in_page + bytes_to_copy],
-            );
-            return Ok(bytes_to_copy);
-        }
-
-        // This is the task that initiated the fetch, so it is responsible for cleaning up the
-        // inserted entry, and caching the page in the buffer pool if the fetch didn't error out.
-        // This requires a write lock on the buffer pool to modify `page_fetches` and cache the
-        // page.
-        let mut pool = self.pool.write().await;
-
-        // Remove the entry from `page_fetches`.
-        let _ = pool.page_fetches.remove(&(blob_id, page_num));
-
-        // Cache the result in the buffer pool. get_page_from_blob already validated the CRC.
-        let page_buf = match fetch_result {
-            Ok(page_buf) => page_buf,
-            Err(err) => {
-                error!(page_num, ?err, "Page fetch failed");
-                return Err(Error::ReadFailed);
-            }
-        };
-
-        pool.cache(self.page_size, blob_id, page_buf.as_ref(), page_num);
-
-        // Copy the requested portion of the page into the buffer.
-        let bytes_to_copy = std::cmp::min(buf.len(), page_buf.as_ref().len() - offset_in_page);
-        buf[..bytes_to_copy]
-            .copy_from_slice(&page_buf.as_ref()[offset_in_page..offset_in_page + bytes_to_copy]);
-
-        Ok(bytes_to_copy)
-    }
-
     /// Cache the provided pages of data in the buffer pool, returning the remaining bytes that
     /// didn't fill a whole page. `offset` must be page aligned.
     ///
@@ -439,6 +273,7 @@ impl PoolRef {
 ///
 /// This struct implements `Buf` and navigates through multiple cached page slices
 /// without copying data. Created by `PoolRef::read_buf()`.
+#[derive(Debug)]
 pub struct CachedBuf {
     /// Slices from cached pages, consumed as data is read.
     slices: VecDeque<Bytes>,
@@ -532,6 +367,7 @@ impl Pool {
     /// never more than `self.page_size` or the length of `buf`. The returned bytes won't cross a
     /// page boundary, so multiple reads may be required even if all data in the desired range is
     /// buffered.
+    #[cfg(test)]
     fn read_at(&self, page_size: u64, blob_id: u64, buf: &mut [u8], logical_offset: u64) -> usize {
         let (page_num, offset_in_page) = Self::offset_to_page(page_size, logical_offset);
         let page_index = self.index.get(&(blob_id, page_num));
@@ -627,9 +463,8 @@ impl Pool {
 
 #[cfg(test)]
 mod tests {
-    use super::{super::Checksum, *};
-    use crate::{buffer::pool::CHECKSUM_SIZE, deterministic, Runner as _, Storage as _};
-    use commonware_cryptography::Crc32;
+    use super::*;
+    use crate::{buffer::pool::CHECKSUM_SIZE, deterministic, Runner as _};
     use commonware_macros::test_traced;
     use commonware_utils::{NZUsize, NZU16};
     use std::num::NonZeroU16;
@@ -681,63 +516,6 @@ mod tests {
             &buf[..PAGE_SIZE.get() as usize - 2],
             [1; PAGE_SIZE.get() as usize - 2]
         );
-    }
-
-    #[test_traced]
-    fn test_pool_read_with_blob() {
-        // Initialize the deterministic context
-        let executor = deterministic::Runner::default();
-        // Start the test within the executor
-        executor.start(|context| async move {
-            // Physical page size = logical + CRC record.
-            let physical_page_size = PAGE_SIZE_U64 + CHECKSUM_SIZE;
-
-            // Populate a blob with 11 consecutive pages of CRC-protected data.
-            let (blob, size) = context
-                .open("test", "blob".as_bytes())
-                .await
-                .expect("Failed to open blob");
-            assert_eq!(size, 0);
-            for i in 0..11 {
-                // Write logical data followed by Checksum.
-                let logical_data = vec![i as u8; PAGE_SIZE.get() as usize];
-                let crc = Crc32::checksum(&logical_data);
-                let record = Checksum::new(PAGE_SIZE.get(), crc);
-                let mut page_data = logical_data;
-                page_data.extend_from_slice(&record.to_bytes());
-                blob.write_at(page_data, i * physical_page_size)
-                    .await
-                    .unwrap();
-            }
-
-            // Fill the buffer pool with the blob's data via PoolRef::read.
-            let pool_ref = PoolRef::new(PAGE_SIZE, NZUsize!(10));
-            assert_eq!(pool_ref.next_id().await, 0);
-            assert_eq!(pool_ref.next_id().await, 1);
-            for i in 0..11 {
-                // Read expects logical bytes only (CRCs are stripped).
-                let mut buf = vec![0; PAGE_SIZE.get() as usize];
-                pool_ref
-                    .read(&blob, 0, &mut buf, i * PAGE_SIZE_U64)
-                    .await
-                    .unwrap();
-                assert_eq!(buf, [i as u8; PAGE_SIZE.get() as usize]);
-            }
-
-            // Repeat the read to exercise reading from the buffer pool. Must start at 1 because
-            // page 0 should be evicted.
-            for i in 1..11 {
-                let mut buf = vec![0; PAGE_SIZE.get() as usize];
-                pool_ref
-                    .read(&blob, 0, &mut buf, i * PAGE_SIZE_U64)
-                    .await
-                    .unwrap();
-                assert_eq!(buf, [i as u8; PAGE_SIZE.get() as usize]);
-            }
-
-            // Cleanup.
-            blob.sync().await.unwrap();
-        });
     }
 
     #[test_traced]
