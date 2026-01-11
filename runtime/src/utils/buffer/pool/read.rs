@@ -2,12 +2,22 @@ use super::Checksum;
 use crate::{utils::Handle, Blob, Error, Spawner};
 use bytes::{Buf, Bytes};
 use commonware_codec::FixedSize;
-use std::{collections::VecDeque, num::NonZeroU16};
+use futures::{
+    channel::{mpsc, oneshot},
+    StreamExt,
+};
+use std::{collections::VecDeque, marker::PhantomData, num::NonZeroU16};
 use tracing::error;
 
 struct PrefetchParams {
     start_offset: u64,
     pages_to_read: usize,
+}
+
+struct PrefetchRequest {
+    offset: u64,
+    size: usize,
+    response_tx: oneshot::Sender<Result<Bytes, Error>>,
 }
 
 /// Fetches pages from a blob, validates CRCs, and yields logical bytes per page.
@@ -72,6 +82,11 @@ impl<B: Blob> PageReader<B> {
     /// Returns the logical size of the blob.
     pub const fn blob_size(&self) -> u64 {
         self.logical_blob_size
+    }
+
+    /// Returns the physical page size (logical + checksum).
+    pub const fn page_size(&self) -> usize {
+        self.page_size
     }
 
     /// Fills the buffer with the next batch of pages.
@@ -186,29 +201,6 @@ impl<B: Blob> PageReader<B> {
         })
     }
 
-    /// Starts a prefetch I/O operation by spawning a background task.
-    ///
-    /// Returns the handle and parameters needed to complete the prefetch later.
-    fn start_prefetch<S: Spawner>(
-        &self,
-        spawner: S,
-    ) -> Option<(Handle<Result<Bytes, Error>>, PrefetchParams)> {
-        let params = self.calculate_next_read()?;
-        let bytes_to_read = params.pages_to_read * self.page_size;
-        let start_offset = params.start_offset;
-
-        let blob = self.blob.clone();
-        let handle = spawner.spawn(move |_| async move {
-            let physical_buf: Vec<u8> = blob
-                .read_at(vec![0u8; bytes_to_read], start_offset)
-                .await?
-                .into();
-            Ok(Bytes::from(physical_buf))
-        });
-
-        Some((handle, params))
-    }
-
     /// Completes a prefetch by validating CRCs and updating state.
     ///
     /// Returns the number of pages processed.
@@ -320,25 +312,44 @@ impl Buf for ReplayBuf {
 /// and provides a `Buf` interface for decoding. It tracks whether the reader has been
 /// exhausted to help callers handle end-of-data scenarios.
 ///
-/// The implementation overlaps I/O with decoding by spawning a background task to
-/// prefetch the next batch of pages while the decoder consumes the current buffer.
+/// The implementation overlaps I/O with decoding using a dedicated I/O worker task
+/// that receives prefetch requests via channel. This avoids spawn overhead per request.
 pub struct Replay<B: Blob, S: Spawner> {
     reader: PageReader<B>,
     buf: ReplayBuf,
     exhausted: bool,
-    spawner: S,
-    prefetch: Option<(Handle<Result<Bytes, Error>>, PrefetchParams)>,
+    request_tx: mpsc::Sender<PrefetchRequest>,
+    pending_response: Option<(oneshot::Receiver<Result<Bytes, Error>>, PrefetchParams)>,
+    _worker: Handle<()>,
+    _spawner: PhantomData<S>,
 }
 
 impl<B: Blob, S: Spawner> Replay<B, S> {
     /// Creates a new Replay from a PageReader and Spawner.
+    ///
+    /// Spawns a dedicated I/O worker that handles all prefetch requests via channel.
     pub(super) fn new(reader: PageReader<B>, spawner: S) -> Self {
+        let (request_tx, mut request_rx) = mpsc::channel::<PrefetchRequest>(1);
+        let blob = reader.blob.clone();
+
+        let worker = spawner.spawn(move |_| async move {
+            while let Some(req) = request_rx.next().await {
+                let result = blob
+                    .read_at(vec![0u8; req.size], req.offset)
+                    .await
+                    .map(|buf| Bytes::from(Vec::from(buf)));
+                let _ = req.response_tx.send(result);
+            }
+        });
+
         Self {
             reader,
             buf: ReplayBuf::new(),
             exhausted: false,
-            spawner,
-            prefetch: None,
+            request_tx,
+            pending_response: None,
+            _worker: worker,
+            _spawner: PhantomData,
         }
     }
 
@@ -367,20 +378,18 @@ impl<B: Blob, S: Spawner> Replay<B, S> {
     /// contain valid data that doesn't require the full `n` bytes.
     ///
     /// The implementation keeps exactly one prefetch in flight. After every
-    /// completed read, the next prefetch is spawned immediately so it runs
-    /// in the background while the caller processes the returned data.
+    /// completed read, the next prefetch request is sent immediately so the
+    /// I/O worker runs in the background while the caller processes the data.
     pub async fn ensure(&mut self, n: usize) -> Result<bool, Error> {
         while self.buf.remaining() < n && !self.exhausted {
-            if let Some((handle, params)) = self.prefetch.take() {
-                // Await pending prefetch
-                let physical_buf = handle.await??;
+            if let Some((response_rx, params)) = self.pending_response.take() {
+                let physical_buf = response_rx.await.map_err(|_| Error::Closed)??;
                 match self.reader.complete_prefetch(physical_buf, &params) {
                     Ok(0) => self.exhausted = true,
                     Ok(_) => self.drain_pages(),
                     Err(err) => return Err(err),
                 }
             } else {
-                // No prefetch pending (first call) - do sync read
                 match self.reader.fill().await {
                     Ok(0) => self.exhausted = true,
                     Ok(_) => self.drain_pages(),
@@ -388,16 +397,29 @@ impl<B: Blob, S: Spawner> Replay<B, S> {
                 }
             }
 
-            // Immediately spawn next prefetch (runs while caller decodes)
             if !self.exhausted {
-                self.prefetch = self.reader.start_prefetch(self.spawner.clone());
-                if self.prefetch.is_none() {
-                    self.exhausted = true;
-                }
+                self.send_prefetch_request();
             }
         }
 
         Ok(self.buf.remaining() >= n)
+    }
+
+    /// Sends a prefetch request to the I/O worker (non-blocking).
+    fn send_prefetch_request(&mut self) {
+        if let Some(params) = self.reader.calculate_next_read() {
+            let (response_tx, response_rx) = oneshot::channel();
+            let req = PrefetchRequest {
+                offset: params.start_offset,
+                size: params.pages_to_read * self.reader.page_size(),
+                response_tx,
+            };
+            if self.request_tx.try_send(req).is_ok() {
+                self.pending_response = Some((response_rx, params));
+            }
+        } else {
+            self.exhausted = true;
+        }
     }
 
     /// Drains all available pages from the reader into the buffer.

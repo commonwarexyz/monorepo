@@ -36,7 +36,7 @@ async fn bench_run(journal: &Journal<Context, FixedBytes<ITEM_SIZE>>, buffer: us
 /// Benchmark the replaying of items from a journal containing exactly that
 /// number of items.
 fn bench_fixed_replay(c: &mut Criterion) {
-    for items in [1_000, 10_000, 100_000, 500_000] {
+    for items in [1_000, 10_000, 100_000, 500_000, 1_000_000] {
         // Create a config we can use across all benchmarks (with a fixed `storage_directory`),
         // allowing the same test file to be re-used.
         let cfg = Config::default();
@@ -51,7 +51,7 @@ fn bench_fixed_replay(c: &mut Criterion) {
 
         // Run the benchmarks.
         let runner = tokio::Runner::new(cfg.clone());
-        for buffer in [16_384, 65_536, 1_048_576] {
+        for buffer in [16_384, 65_536, 1_048_576, 4_194_304] {
             c.bench_function(
                 &format!(
                     "{}/items={} buffer={} size={}",
