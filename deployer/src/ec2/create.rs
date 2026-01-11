@@ -208,7 +208,44 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
         presign_duration,
     )
     .await?;
-    info!("generated pre-signed URLs");
+    info!("generated pre-signed URLs for tools");
+
+    // Upload instance binaries and configs to S3 and generate pre-signed URLs
+    info!("uploading instance binaries and configs to S3");
+    let mut instance_binary_urls: HashMap<String, String> = HashMap::new();
+    let mut instance_config_urls: HashMap<String, String> = HashMap::new();
+    for instance in &config.instances {
+        let binary_key = binary_s3_key(tag, &instance.name);
+        let config_key = config_s3_key(tag, &instance.name);
+
+        upload_file(
+            &s3_client,
+            S3_BUCKET_NAME,
+            &binary_key,
+            std::path::Path::new(&instance.binary),
+        )
+        .await?;
+        upload_file(
+            &s3_client,
+            S3_BUCKET_NAME,
+            &config_key,
+            std::path::Path::new(&instance.config),
+        )
+        .await?;
+
+        let binary_url =
+            presign_url(&s3_client, S3_BUCKET_NAME, &binary_key, presign_duration).await?;
+        let config_url =
+            presign_url(&s3_client, S3_BUCKET_NAME, &config_key, presign_duration).await?;
+
+        instance_binary_urls.insert(instance.name.clone(), binary_url);
+        instance_config_urls.insert(instance.name.clone(), config_url);
+        info!(
+            instance = instance.name.as_str(),
+            "uploaded binary and config"
+        );
+    }
+    info!("uploaded all instance binaries and configs");
 
     // Initialize resources for each region
     info!(?regions, "initializing resources");
@@ -533,6 +570,8 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     // Configure monitoring instance
     info!("configuring monitoring instance");
     wait_for_instances_ready(&ec2_clients[&monitoring_region], &[monitoring_instance_id]).await?;
+
+    // Generate and upload monitoring config files to S3
     let instances: Vec<(&str, &str, &str)> = deployments
         .iter()
         .map(|d| {
@@ -543,124 +582,234 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
             )
         })
         .collect();
+
+    // Write config files locally, upload to S3, and generate pre-signed URLs
     let prom_config = generate_prometheus_config(&instances);
     let prom_path = tag_directory.join("prometheus.yml");
-    std::fs::write(&prom_path, prom_config)?;
+    std::fs::write(&prom_path, &prom_config)?;
+    upload_file(
+        &s3_client,
+        S3_BUCKET_NAME,
+        &prometheus_config_s3_key(tag),
+        &prom_path,
+    )
+    .await?;
+    let prometheus_config_url = presign_url(
+        &s3_client,
+        S3_BUCKET_NAME,
+        &prometheus_config_s3_key(tag),
+        presign_duration,
+    )
+    .await?;
+
     let datasources_path = tag_directory.join("datasources.yml");
     std::fs::write(&datasources_path, DATASOURCES_YML)?;
+    upload_file(
+        &s3_client,
+        S3_BUCKET_NAME,
+        &monitoring_static_s3_key(tag, "datasources.yml"),
+        &datasources_path,
+    )
+    .await?;
+    let datasources_url = presign_url(
+        &s3_client,
+        S3_BUCKET_NAME,
+        &monitoring_static_s3_key(tag, "datasources.yml"),
+        presign_duration,
+    )
+    .await?;
+
     let all_yaml_path = tag_directory.join("all.yml");
     std::fs::write(&all_yaml_path, ALL_YML)?;
+    upload_file(
+        &s3_client,
+        S3_BUCKET_NAME,
+        &monitoring_static_s3_key(tag, "all.yml"),
+        &all_yaml_path,
+    )
+    .await?;
+    let all_yml_url = presign_url(
+        &s3_client,
+        S3_BUCKET_NAME,
+        &monitoring_static_s3_key(tag, "all.yml"),
+        presign_duration,
+    )
+    .await?;
+
+    upload_file(
+        &s3_client,
+        S3_BUCKET_NAME,
+        &dashboard_s3_key(tag),
+        std::path::Path::new(&config.monitoring.dashboard),
+    )
+    .await?;
+    let dashboard_url = presign_url(
+        &s3_client,
+        S3_BUCKET_NAME,
+        &dashboard_s3_key(tag),
+        presign_duration,
+    )
+    .await?;
+
     let loki_config_path = tag_directory.join("loki.yml");
     std::fs::write(&loki_config_path, LOKI_CONFIG)?;
+    upload_file(
+        &s3_client,
+        S3_BUCKET_NAME,
+        &monitoring_static_s3_key(tag, "loki.yml"),
+        &loki_config_path,
+    )
+    .await?;
+    let loki_yml_url = presign_url(
+        &s3_client,
+        S3_BUCKET_NAME,
+        &monitoring_static_s3_key(tag, "loki.yml"),
+        presign_duration,
+    )
+    .await?;
+
     let pyroscope_config_path = tag_directory.join("pyroscope.yml");
     std::fs::write(&pyroscope_config_path, PYROSCOPE_CONFIG)?;
+    upload_file(
+        &s3_client,
+        S3_BUCKET_NAME,
+        &monitoring_static_s3_key(tag, "pyroscope.yml"),
+        &pyroscope_config_path,
+    )
+    .await?;
+    let pyroscope_yml_url = presign_url(
+        &s3_client,
+        S3_BUCKET_NAME,
+        &monitoring_static_s3_key(tag, "pyroscope.yml"),
+        presign_duration,
+    )
+    .await?;
+
     let tempo_yml_path = tag_directory.join("tempo.yml");
     std::fs::write(&tempo_yml_path, TEMPO_CONFIG)?;
-    rsync_file(
-        private_key,
-        prom_path.to_str().unwrap(),
-        &monitoring_ip,
-        "/home/ubuntu/prometheus.yml",
+    upload_file(
+        &s3_client,
+        S3_BUCKET_NAME,
+        &monitoring_static_s3_key(tag, "tempo.yml"),
+        &tempo_yml_path,
     )
     .await?;
-    rsync_file(
-        private_key,
-        datasources_path.to_str().unwrap(),
-        &monitoring_ip,
-        "/home/ubuntu/datasources.yml",
+    let tempo_yml_url = presign_url(
+        &s3_client,
+        S3_BUCKET_NAME,
+        &monitoring_static_s3_key(tag, "tempo.yml"),
+        presign_duration,
     )
     .await?;
-    rsync_file(
-        private_key,
-        all_yaml_path.to_str().unwrap(),
-        &monitoring_ip,
-        "/home/ubuntu/all.yml",
+
+    // Upload service files
+    upload_file(
+        &s3_client,
+        S3_BUCKET_NAME,
+        &monitoring_static_s3_key(tag, "prometheus.service"),
+        &prometheus_service_path,
     )
     .await?;
-    rsync_file(
-        private_key,
-        &config.monitoring.dashboard,
-        &monitoring_ip,
-        "/home/ubuntu/dashboard.json",
+    let prometheus_service_url = presign_url(
+        &s3_client,
+        S3_BUCKET_NAME,
+        &monitoring_static_s3_key(tag, "prometheus.service"),
+        presign_duration,
     )
     .await?;
-    rsync_file(
-        private_key,
-        prometheus_service_path.to_str().unwrap(),
-        &monitoring_ip,
-        "/home/ubuntu/prometheus.service",
+
+    upload_file(
+        &s3_client,
+        S3_BUCKET_NAME,
+        &monitoring_static_s3_key(tag, "loki.service"),
+        &loki_service_path,
     )
     .await?;
-    rsync_file(
-        private_key,
-        loki_config_path.to_str().unwrap(),
-        &monitoring_ip,
-        "/home/ubuntu/loki.yml",
+    let loki_service_url = presign_url(
+        &s3_client,
+        S3_BUCKET_NAME,
+        &monitoring_static_s3_key(tag, "loki.service"),
+        presign_duration,
     )
     .await?;
-    rsync_file(
-        private_key,
-        loki_service_path.to_str().unwrap(),
-        &monitoring_ip,
-        "/home/ubuntu/loki.service",
+
+    upload_file(
+        &s3_client,
+        S3_BUCKET_NAME,
+        &monitoring_static_s3_key(tag, "pyroscope.service"),
+        &pyroscope_service_path,
     )
     .await?;
-    rsync_file(
-        private_key,
-        node_exporter_service_path.to_str().unwrap(),
-        &monitoring_ip,
-        "/home/ubuntu/node_exporter.service",
+    let pyroscope_service_url = presign_url(
+        &s3_client,
+        S3_BUCKET_NAME,
+        &monitoring_static_s3_key(tag, "pyroscope.service"),
+        presign_duration,
     )
     .await?;
-    rsync_file(
-        private_key,
-        pyroscope_config_path.to_str().unwrap(),
-        &monitoring_ip,
-        "/home/ubuntu/pyroscope.yml",
+
+    upload_file(
+        &s3_client,
+        S3_BUCKET_NAME,
+        &monitoring_static_s3_key(tag, "tempo.service"),
+        &tempo_service_path,
     )
     .await?;
-    rsync_file(
-        private_key,
-        pyroscope_service_path.to_str().unwrap(),
-        &monitoring_ip,
-        "/home/ubuntu/pyroscope.service",
+    let tempo_service_url = presign_url(
+        &s3_client,
+        S3_BUCKET_NAME,
+        &monitoring_static_s3_key(tag, "tempo.service"),
+        presign_duration,
     )
     .await?;
-    rsync_file(
-        private_key,
-        tempo_yml_path.to_str().unwrap(),
-        &monitoring_ip,
-        "/home/ubuntu/tempo.yml",
+
+    upload_file(
+        &s3_client,
+        S3_BUCKET_NAME,
+        &monitoring_static_s3_key(tag, "node_exporter.service"),
+        &node_exporter_service_path,
     )
     .await?;
-    rsync_file(
-        private_key,
-        tempo_service_path.to_str().unwrap(),
-        &monitoring_ip,
-        "/home/ubuntu/tempo.service",
+    let monitoring_node_exporter_service_url = presign_url(
+        &s3_client,
+        S3_BUCKET_NAME,
+        &monitoring_static_s3_key(tag, "node_exporter.service"),
+        presign_duration,
     )
     .await?;
+
+    info!("uploaded monitoring config files to S3");
+
+    // Install and configure monitoring services
     enable_bbr(private_key, &monitoring_ip, bbr_conf_path.to_str().unwrap()).await?;
+    let monitoring_urls = MonitoringUrls {
+        prometheus_bin: prometheus_url,
+        grafana_bin: grafana_url,
+        loki_bin: loki_url,
+        pyroscope_bin: pyroscope_url,
+        tempo_bin: tempo_url,
+        node_exporter_bin: node_exporter_url.clone(),
+        prometheus_config: prometheus_config_url,
+        datasources_yml: datasources_url,
+        all_yml: all_yml_url,
+        dashboard: dashboard_url,
+        loki_yml: loki_yml_url,
+        pyroscope_yml: pyroscope_yml_url,
+        tempo_yml: tempo_yml_url,
+        prometheus_service: prometheus_service_url,
+        loki_service: loki_service_url,
+        pyroscope_service: pyroscope_service_url,
+        tempo_service: tempo_service_url,
+        node_exporter_service: monitoring_node_exporter_service_url,
+    };
     ssh_execute(
         private_key,
         &monitoring_ip,
-        &setup_node_exporter_cmd(&node_exporter_url, NODE_EXPORTER_VERSION),
+        &install_monitoring_cmd(&monitoring_urls, PROMETHEUS_VERSION),
     )
     .await?;
+    ssh_execute(private_key, &monitoring_ip, start_monitoring_services_cmd()).await?;
     poll_service_active(private_key, &monitoring_ip, "node_exporter").await?;
-    ssh_execute(
-        private_key,
-        &monitoring_ip,
-        &install_monitoring_cmd(
-            &prometheus_url,
-            &grafana_url,
-            &loki_url,
-            &pyroscope_url,
-            &tempo_url,
-            PROMETHEUS_VERSION,
-        ),
-    )
-    .await?;
     poll_service_active(private_key, &monitoring_ip, "prometheus").await?;
     poll_service_active(private_key, &monitoring_ip, "loki").await?;
     poll_service_active(private_key, &monitoring_ip, "pyroscope").await?;
@@ -682,13 +831,189 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     };
     let hosts_yaml = serde_yaml::to_string(&hosts)?;
     let hosts_path = tag_directory.join("hosts.yaml");
-    std::fs::write(&hosts_path, hosts_yaml)?;
+    std::fs::write(&hosts_path, &hosts_yaml)?;
+
+    // Upload shared static service files to S3 (once for all instances)
+    info!("uploading binary instance static files to S3");
+    upload_file(
+        &s3_client,
+        S3_BUCKET_NAME,
+        &instance_static_s3_key(tag, "promtail.service"),
+        &promtail_service_path,
+    )
+    .await?;
+    let promtail_service_url = presign_url(
+        &s3_client,
+        S3_BUCKET_NAME,
+        &instance_static_s3_key(tag, "promtail.service"),
+        presign_duration,
+    )
+    .await?;
+
+    upload_file(
+        &s3_client,
+        S3_BUCKET_NAME,
+        &instance_static_s3_key(tag, "node_exporter.service"),
+        &node_exporter_service_path,
+    )
+    .await?;
+    let instance_node_exporter_service_url = presign_url(
+        &s3_client,
+        S3_BUCKET_NAME,
+        &instance_static_s3_key(tag, "node_exporter.service"),
+        presign_duration,
+    )
+    .await?;
+
+    upload_file(
+        &s3_client,
+        S3_BUCKET_NAME,
+        &instance_static_s3_key(tag, "binary.service"),
+        &binary_service_path,
+    )
+    .await?;
+    let binary_service_url = presign_url(
+        &s3_client,
+        S3_BUCKET_NAME,
+        &instance_static_s3_key(tag, "binary.service"),
+        presign_duration,
+    )
+    .await?;
+
+    upload_file(
+        &s3_client,
+        S3_BUCKET_NAME,
+        &instance_static_s3_key(tag, "logrotate.conf"),
+        &logrotate_conf_path,
+    )
+    .await?;
+    let logrotate_conf_url = presign_url(
+        &s3_client,
+        S3_BUCKET_NAME,
+        &instance_static_s3_key(tag, "logrotate.conf"),
+        presign_duration,
+    )
+    .await?;
+
+    upload_file(
+        &s3_client,
+        S3_BUCKET_NAME,
+        &instance_static_s3_key(tag, "pyroscope-agent.service"),
+        &pyroscope_agent_service_path,
+    )
+    .await?;
+    let pyroscope_agent_service_url = presign_url(
+        &s3_client,
+        S3_BUCKET_NAME,
+        &instance_static_s3_key(tag, "pyroscope-agent.service"),
+        presign_duration,
+    )
+    .await?;
+
+    upload_file(
+        &s3_client,
+        S3_BUCKET_NAME,
+        &instance_static_s3_key(tag, "pyroscope-agent.timer"),
+        &pyroscope_agent_timer_path,
+    )
+    .await?;
+    let pyroscope_agent_timer_url = presign_url(
+        &s3_client,
+        S3_BUCKET_NAME,
+        &instance_static_s3_key(tag, "pyroscope-agent.timer"),
+        presign_duration,
+    )
+    .await?;
+
+    // Upload per-instance dynamic files to S3
+    info!("uploading per-instance config files to S3");
+    let mut instance_urls_map: HashMap<String, InstanceUrls> = HashMap::new();
+    for deployment in &deployments {
+        let instance = &deployment.instance;
+        let ip = &deployment.ip;
+
+        // Upload hosts.yaml for this instance
+        upload_file(
+            &s3_client,
+            S3_BUCKET_NAME,
+            &hosts_s3_key(tag, &instance.name),
+            &hosts_path,
+        )
+        .await?;
+        let hosts_url = presign_url(
+            &s3_client,
+            S3_BUCKET_NAME,
+            &hosts_s3_key(tag, &instance.name),
+            presign_duration,
+        )
+        .await?;
+
+        // Generate and upload promtail config
+        let promtail_cfg =
+            promtail_config(&monitoring_private_ip, &instance.name, ip, &instance.region);
+        let promtail_config_path = tag_directory.join(format!("promtail_{}.yml", instance.name));
+        std::fs::write(&promtail_config_path, &promtail_cfg)?;
+        upload_file(
+            &s3_client,
+            S3_BUCKET_NAME,
+            &promtail_config_s3_key(tag, &instance.name),
+            &promtail_config_path,
+        )
+        .await?;
+        let promtail_config_url = presign_url(
+            &s3_client,
+            S3_BUCKET_NAME,
+            &promtail_config_s3_key(tag, &instance.name),
+            presign_duration,
+        )
+        .await?;
+
+        // Generate and upload pyroscope agent script
+        let pyroscope_script =
+            generate_pyroscope_script(&monitoring_private_ip, &instance.name, ip, &instance.region);
+        let pyroscope_script_path =
+            tag_directory.join(format!("pyroscope-agent_{}.sh", instance.name));
+        std::fs::write(&pyroscope_script_path, &pyroscope_script)?;
+        upload_file(
+            &s3_client,
+            S3_BUCKET_NAME,
+            &pyroscope_script_s3_key(tag, &instance.name),
+            &pyroscope_script_path,
+        )
+        .await?;
+        let pyroscope_script_url = presign_url(
+            &s3_client,
+            S3_BUCKET_NAME,
+            &pyroscope_script_s3_key(tag, &instance.name),
+            presign_duration,
+        )
+        .await?;
+
+        instance_urls_map.insert(
+            instance.name.clone(),
+            InstanceUrls {
+                binary: instance_binary_urls[&instance.name].clone(),
+                config: instance_config_urls[&instance.name].clone(),
+                hosts: hosts_url,
+                promtail_bin: promtail_url.clone(),
+                promtail_config: promtail_config_url,
+                promtail_service: promtail_service_url.clone(),
+                node_exporter_bin: node_exporter_url.clone(),
+                node_exporter_service: instance_node_exporter_service_url.clone(),
+                binary_service: binary_service_url.clone(),
+                logrotate_conf: logrotate_conf_url.clone(),
+                pyroscope_script: pyroscope_script_url,
+                pyroscope_service: pyroscope_agent_service_url.clone(),
+                pyroscope_timer: pyroscope_agent_timer_url.clone(),
+            },
+        );
+    }
+    info!("uploaded all instance config files to S3");
 
     // Configure binary instances
     info!("configuring binary instances");
     let mut start_futures = Vec::new();
     for deployment in &deployments {
-        let tag_directory = tag_directory.clone();
         let instance = deployment.instance.clone();
         wait_for_instances_ready(
             &ec2_clients[&instance.region],
@@ -696,122 +1021,18 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
         )
         .await?;
         let ip = deployment.ip.clone();
-        let monitoring_private_ip = monitoring_private_ip.clone();
-        let hosts_path = hosts_path.clone();
-        let logrotate_conf_path = logrotate_conf_path.clone();
         let bbr_conf_path = bbr_conf_path.clone();
-        let promtail_service_path = promtail_service_path.clone();
-        let node_exporter_service_path = node_exporter_service_path.clone();
-        let binary_service_path = binary_service_path.clone();
-        let pyroscope_agent_service_path = pyroscope_agent_service_path.clone();
-        let pyroscope_agent_timer_path = pyroscope_agent_timer_path.clone();
-        let promtail_url = promtail_url.clone();
-        let node_exporter_url = node_exporter_url.clone();
+        let urls = instance_urls_map.remove(&instance.name).unwrap();
         let future = async move {
-            rsync_file(private_key, &instance.binary, &ip, "/home/ubuntu/binary").await?;
-            rsync_file(
-                private_key,
-                &instance.config,
-                &ip,
-                "/home/ubuntu/config.conf",
-            )
-            .await?;
-            rsync_file(
-                private_key,
-                hosts_path.to_str().unwrap(),
-                &ip,
-                "/home/ubuntu/hosts.yaml",
-            )
-            .await?;
-            let promtail_config_path =
-                tag_directory.join(format!("promtail_{}.yml", instance.name));
-            std::fs::write(
-                &promtail_config_path,
-                promtail_config(
-                    &monitoring_private_ip,
-                    &instance.name,
-                    ip.as_str(),
-                    instance.region.as_str(),
-                ),
-            )?;
-            rsync_file(
-                private_key,
-                promtail_config_path.to_str().unwrap(),
-                &ip,
-                "/home/ubuntu/promtail.yml",
-            )
-            .await?;
-            rsync_file(
-                private_key,
-                promtail_service_path.to_str().unwrap(),
-                &ip,
-                "/home/ubuntu/promtail.service",
-            )
-            .await?;
-            rsync_file(
-                private_key,
-                node_exporter_service_path.to_str().unwrap(),
-                &ip,
-                "/home/ubuntu/node_exporter.service",
-            )
-            .await?;
-            rsync_file(
-                private_key,
-                binary_service_path.to_str().unwrap(),
-                &ip,
-                "/home/ubuntu/binary.service",
-            )
-            .await?;
-            rsync_file(
-                private_key,
-                logrotate_conf_path.to_str().unwrap(),
-                &ip,
-                "/home/ubuntu/logrotate.conf",
-            )
-            .await?;
-            rsync_file(
-                private_key,
-                pyroscope_agent_service_path.to_str().unwrap(),
-                &ip,
-                "/home/ubuntu/pyroscope-agent.service",
-            )
-            .await?;
-            let pyroscope_agent_script_path =
-                tag_directory.join(format!("pyroscope-agent_{}.sh", instance.name));
-            std::fs::write(
-                &pyroscope_agent_script_path,
-                generate_pyroscope_script(
-                    &monitoring_private_ip,
-                    &instance.name,
-                    &ip,
-                    &instance.region,
-                ),
-            )?;
-            rsync_file(
-                private_key,
-                pyroscope_agent_script_path.to_str().unwrap(),
-                &ip,
-                "/home/ubuntu/pyroscope-agent.sh",
-            )
-            .await?;
-            rsync_file(
-                private_key,
-                pyroscope_agent_timer_path.to_str().unwrap(),
-                &ip,
-                "/home/ubuntu/pyroscope-agent.timer",
-            )
-            .await?;
             enable_bbr(private_key, &ip, bbr_conf_path.to_str().unwrap()).await?;
-            ssh_execute(private_key, &ip, &setup_promtail_cmd(&promtail_url)).await?;
-            poll_service_active(private_key, &ip, "promtail").await?;
             ssh_execute(
                 private_key,
                 &ip,
-                &setup_node_exporter_cmd(&node_exporter_url, NODE_EXPORTER_VERSION),
+                &install_binary_cmd(&urls, instance.profiling),
             )
             .await?;
+            poll_service_active(private_key, &ip, "promtail").await?;
             poll_service_active(private_key, &ip, "node_exporter").await?;
-            ssh_execute(private_key, &ip, &install_binary_cmd(instance.profiling)).await?;
             poll_service_active(private_key, &ip, "binary").await?;
             info!(
                 ip = ip.as_str(),

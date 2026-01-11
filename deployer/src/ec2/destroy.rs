@@ -31,7 +31,7 @@ pub async fn destroy(config: &PathBuf) -> Result<(), Error> {
         return Ok(());
     }
 
-    // Clean up S3 deployment prefix (preserves cached tools)
+    // Clean up S3 deployment data (preserves cached tools)
     info!("cleaning up S3 deployment data");
     let s3_client = create_s3_client(Region::new(MONITORING_REGION)).await;
     let deployment_prefix = format!("{}/{}/", S3_DEPLOYMENTS_PREFIX, tag);

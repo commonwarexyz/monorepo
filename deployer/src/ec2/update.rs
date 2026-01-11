@@ -1,12 +1,12 @@
 //! `update` subcommand for `ec2`
 
 use crate::ec2::{
-    aws::*, deployer_directory, utils::*, Config, Error, InstanceConfig, CREATED_FILE_NAME,
-    DESTROYED_FILE_NAME, MONITORING_NAME, MONITORING_REGION,
+    aws::*, deployer_directory, s3::*, services::*, utils::*, Config, Error, InstanceConfig,
+    CREATED_FILE_NAME, DESTROYED_FILE_NAME, MONITORING_NAME, MONITORING_REGION,
 };
 use aws_sdk_ec2::types::Filter;
 use futures::future::try_join_all;
-use std::{collections::HashMap, fs::File, path::PathBuf};
+use std::{collections::HashMap, fs::File, path::PathBuf, time::Duration};
 use tracing::{error, info};
 
 /// Updates the binary and configuration on all binary nodes
@@ -44,6 +44,45 @@ pub async fn update(config_path: &PathBuf) -> Result<(), Error> {
         .iter()
         .map(|i| (i.name.clone(), i.clone()))
         .collect();
+
+    // Upload updated binaries and configs to S3 and generate pre-signed URLs
+    info!("uploading updated binaries and configs to S3");
+    let s3_client = create_s3_client(Region::new(MONITORING_REGION)).await;
+    let presign_duration = Duration::from_secs(6 * 60 * 60);
+    let mut instance_binary_urls: HashMap<String, String> = HashMap::new();
+    let mut instance_config_urls: HashMap<String, String> = HashMap::new();
+    for instance in &config.instances {
+        let binary_key = binary_s3_key(tag, &instance.name);
+        let config_key = config_s3_key(tag, &instance.name);
+
+        upload_file(
+            &s3_client,
+            S3_BUCKET_NAME,
+            &binary_key,
+            std::path::Path::new(&instance.binary),
+        )
+        .await?;
+        upload_file(
+            &s3_client,
+            S3_BUCKET_NAME,
+            &config_key,
+            std::path::Path::new(&instance.config),
+        )
+        .await?;
+
+        let binary_url =
+            presign_url(&s3_client, S3_BUCKET_NAME, &binary_key, presign_duration).await?;
+        let config_url =
+            presign_url(&s3_client, S3_BUCKET_NAME, &config_key, presign_duration).await?;
+
+        instance_binary_urls.insert(instance.name.clone(), binary_url);
+        instance_config_urls.insert(instance.name.clone(), config_url);
+        info!(
+            instance = instance.name.as_str(),
+            "uploaded binary and config"
+        );
+    }
+    info!("uploaded all updated binaries and configs");
 
     // Determine all regions (binary + monitoring)
     let mut regions = config
@@ -88,12 +127,12 @@ pub async fn update(config_path: &PathBuf) -> Result<(), Error> {
     // Update each binary instance concurrently
     let mut futures = Vec::new();
     for (name, ip) in binary_instances {
-        if let Some(instance_config) = instance_map.get(&name) {
+        if instance_map.contains_key(&name) {
             let private_key = private_key_path.to_str().unwrap();
-            let binary_path = instance_config.binary.clone();
-            let config_path = instance_config.config.clone();
+            let binary_url = instance_binary_urls[&name].clone();
+            let config_url = instance_config_urls[&name].clone();
             let future = async move {
-                update_instance(private_key, &ip, &binary_path, &config_path).await?;
+                update_instance(private_key, &ip, &binary_url, &config_url).await?;
                 info!(name, ip, "updated instance");
                 Ok::<(), Error>(())
             };
@@ -109,12 +148,12 @@ pub async fn update(config_path: &PathBuf) -> Result<(), Error> {
     Ok(())
 }
 
-/// Updates a single instance with new binary and config
+/// Updates a single instance with new binary and config via S3 pre-signed URLs
 async fn update_instance(
     private_key: &str,
     ip: &str,
-    binary_path: &str,
-    config_path: &str,
+    binary_url: &str,
+    config_url: &str,
 ) -> Result<(), Error> {
     // Stop the binary service
     ssh_execute(private_key, ip, "sudo systemctl stop binary").await?;
@@ -126,9 +165,12 @@ async fn update_instance(
     ssh_execute(private_key, ip, "rm -f /home/ubuntu/binary").await?;
     ssh_execute(private_key, ip, "rm -f /home/ubuntu/config.conf").await?;
 
-    // Push the latest binary and config
-    rsync_file(private_key, binary_path, ip, "/home/ubuntu/binary").await?;
-    rsync_file(private_key, config_path, ip, "/home/ubuntu/config.conf").await?;
+    // Download the latest binary and config from S3 via pre-signed URLs
+    let download_cmd = format!(
+        "wget -q -O /home/ubuntu/binary '{}' && wget -q -O /home/ubuntu/config.conf '{}'",
+        binary_url, config_url
+    );
+    ssh_execute(private_key, ip, &download_cmd).await?;
 
     // Ensure the binary is executable
     ssh_execute(private_key, ip, "chmod +x /home/ubuntu/binary").await?;

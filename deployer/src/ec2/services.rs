@@ -1,6 +1,6 @@
 //! Service configuration for Prometheus, Loki, Grafana, Promtail, and a caller-provided binary
 
-use crate::ec2::s3::S3_TOOLS_PREFIX;
+use crate::ec2::s3::{S3_DEPLOYMENTS_PREFIX, S3_TOOLS_PREFIX};
 
 /// Version of Prometheus to download and install
 pub const PROMETHEUS_VERSION: &str = "3.2.0";
@@ -56,6 +56,51 @@ pub fn node_exporter_s3_key(version: &str) -> String {
 /// Returns the S3 key for Promtail
 pub fn promtail_s3_key(version: &str) -> String {
     format!("{S3_TOOLS_PREFIX}/promtail-{version}-linux-arm64.zip")
+}
+
+/// Returns the S3 key for an instance's binary
+pub fn binary_s3_key(tag: &str, instance_name: &str) -> String {
+    format!("{S3_DEPLOYMENTS_PREFIX}/{tag}/instances/{instance_name}/binary")
+}
+
+/// Returns the S3 key for an instance's config
+pub fn config_s3_key(tag: &str, instance_name: &str) -> String {
+    format!("{S3_DEPLOYMENTS_PREFIX}/{tag}/instances/{instance_name}/config.conf")
+}
+
+/// Returns the S3 key for an instance's hosts.yaml
+pub fn hosts_s3_key(tag: &str, instance_name: &str) -> String {
+    format!("{S3_DEPLOYMENTS_PREFIX}/{tag}/instances/{instance_name}/hosts.yaml")
+}
+
+/// Returns the S3 key for an instance's promtail config
+pub fn promtail_config_s3_key(tag: &str, instance_name: &str) -> String {
+    format!("{S3_DEPLOYMENTS_PREFIX}/{tag}/instances/{instance_name}/promtail.yml")
+}
+
+/// Returns the S3 key for an instance's pyroscope agent script
+pub fn pyroscope_script_s3_key(tag: &str, instance_name: &str) -> String {
+    format!("{S3_DEPLOYMENTS_PREFIX}/{tag}/instances/{instance_name}/pyroscope-agent.sh")
+}
+
+/// Returns the S3 key for monitoring prometheus config
+pub fn prometheus_config_s3_key(tag: &str) -> String {
+    format!("{S3_DEPLOYMENTS_PREFIX}/{tag}/monitoring/prometheus.yml")
+}
+
+/// Returns the S3 key for monitoring dashboard
+pub fn dashboard_s3_key(tag: &str) -> String {
+    format!("{S3_DEPLOYMENTS_PREFIX}/{tag}/monitoring/dashboard.json")
+}
+
+/// Returns the S3 key for static monitoring files
+pub fn monitoring_static_s3_key(tag: &str, filename: &str) -> String {
+    format!("{S3_DEPLOYMENTS_PREFIX}/{tag}/monitoring/{filename}")
+}
+
+/// Returns the S3 key for static binary instance files
+pub fn instance_static_s3_key(tag: &str, filename: &str) -> String {
+    format!("{S3_DEPLOYMENTS_PREFIX}/{tag}/static/{filename}")
 }
 
 /// Returns the download URL for Prometheus from GitHub
@@ -290,26 +335,58 @@ compactor:
     compaction_cycle: 1h
 "#;
 
+/// URLs for monitoring service installation
+pub struct MonitoringUrls {
+    pub prometheus_bin: String,
+    pub grafana_bin: String,
+    pub loki_bin: String,
+    pub pyroscope_bin: String,
+    pub tempo_bin: String,
+    pub node_exporter_bin: String,
+    pub prometheus_config: String,
+    pub datasources_yml: String,
+    pub all_yml: String,
+    pub dashboard: String,
+    pub loki_yml: String,
+    pub pyroscope_yml: String,
+    pub tempo_yml: String,
+    pub prometheus_service: String,
+    pub loki_service: String,
+    pub pyroscope_service: String,
+    pub tempo_service: String,
+    pub node_exporter_service: String,
+}
+
 /// Command to install monitoring services (Prometheus, Loki, Grafana, Pyroscope, Tempo) on the monitoring instance
-pub fn install_monitoring_cmd(
-    prometheus_url: &str,
-    grafana_url: &str,
-    loki_url: &str,
-    pyroscope_url: &str,
-    tempo_url: &str,
-    prometheus_version: &str,
-) -> String {
+pub fn install_monitoring_cmd(urls: &MonitoringUrls, prometheus_version: &str) -> String {
     format!(
         r#"
 sudo apt-get update -y
-sudo apt-get install -y unzip adduser libfontconfig1 wget
+sudo apt-get install -y unzip adduser libfontconfig1 wget tar
 
-# Download from S3 via pre-signed URLs (faster than external sources)
-wget -q -O /home/ubuntu/prometheus.tar.gz '{prometheus_url}'
-wget -q -O /home/ubuntu/grafana.deb '{grafana_url}'
-wget -q -O /home/ubuntu/loki.zip '{loki_url}'
-wget -q -O /home/ubuntu/pyroscope.tar.gz '{pyroscope_url}'
-wget -q -O /home/ubuntu/tempo.tar.gz '{tempo_url}'
+# Download binaries from S3 via pre-signed URLs
+wget -q -O /home/ubuntu/prometheus.tar.gz '{}'
+wget -q -O /home/ubuntu/grafana.deb '{}'
+wget -q -O /home/ubuntu/loki.zip '{}'
+wget -q -O /home/ubuntu/pyroscope.tar.gz '{}'
+wget -q -O /home/ubuntu/tempo.tar.gz '{}'
+wget -q -O /home/ubuntu/node_exporter.tar.gz '{}'
+
+# Download config files from S3
+wget -q -O /home/ubuntu/prometheus.yml '{}'
+wget -q -O /home/ubuntu/datasources.yml '{}'
+wget -q -O /home/ubuntu/all.yml '{}'
+wget -q -O /home/ubuntu/dashboard.json '{}'
+wget -q -O /home/ubuntu/loki.yml '{}'
+wget -q -O /home/ubuntu/pyroscope.yml '{}'
+wget -q -O /home/ubuntu/tempo.yml '{}'
+
+# Download service files from S3
+wget -q -O /home/ubuntu/prometheus.service '{}'
+wget -q -O /home/ubuntu/loki.service '{}'
+wget -q -O /home/ubuntu/pyroscope.service '{}'
+wget -q -O /home/ubuntu/tempo.service '{}'
+wget -q -O /home/ubuntu/node_exporter.service '{}'
 
 # Install Prometheus
 sudo mkdir -p /opt/prometheus /opt/prometheus/data
@@ -343,6 +420,13 @@ tar xvfz /home/ubuntu/tempo.tar.gz -C /home/ubuntu
 sudo mv /home/ubuntu/tempo /opt/tempo/tempo
 sudo chmod +x /opt/tempo/tempo
 
+# Install Node Exporter
+sudo mkdir -p /opt/node_exporter
+tar xvfz /home/ubuntu/node_exporter.tar.gz -C /home/ubuntu
+sudo mv /home/ubuntu/node_exporter-*.linux-arm64 /opt/node_exporter/
+sudo ln -s /opt/node_exporter/node_exporter-*.linux-arm64/node_exporter /opt/node_exporter/node_exporter
+sudo chmod +x /opt/node_exporter/node_exporter
+
 # Configure Grafana
 sudo sed -i '/^\[auth.anonymous\]$/,/^\[/ {{ /^; *enabled = /s/.*/enabled = true/; /^; *org_role = /s/.*/org_role = Admin/ }}' /etc/grafana/grafana.ini
 sudo mkdir -p /etc/grafana/provisioning/datasources /etc/grafana/provisioning/dashboards /var/lib/grafana/dashboards
@@ -350,7 +434,7 @@ sudo mkdir -p /etc/grafana/provisioning/datasources /etc/grafana/provisioning/da
 # Install Pyroscope data source plugin
 sudo grafana-cli plugins install grafana-pyroscope-datasource
 
-# Move configuration files (assuming they are uploaded via SCP)
+# Install configuration files
 sudo mv /home/ubuntu/prometheus.yml /opt/prometheus/prometheus.yml
 sudo mv /home/ubuntu/datasources.yml /etc/grafana/provisioning/datasources/datasources.yml
 sudo mv /home/ubuntu/all.yml /etc/grafana/provisioning/dashboards/all.yml
@@ -365,17 +449,43 @@ sudo mkdir -p /etc/tempo
 sudo mv /home/ubuntu/tempo.yml /etc/tempo/tempo.yml
 sudo chown root:root /etc/tempo/tempo.yml
 
-# Move service files
+# Install service files
 sudo mv /home/ubuntu/prometheus.service /etc/systemd/system/prometheus.service
 sudo mv /home/ubuntu/loki.service /etc/systemd/system/loki.service
 sudo mv /home/ubuntu/pyroscope.service /etc/systemd/system/pyroscope.service
 sudo mv /home/ubuntu/tempo.service /etc/systemd/system/tempo.service
+sudo mv /home/ubuntu/node_exporter.service /etc/systemd/system/node_exporter.service
+"#,
+        urls.prometheus_bin,
+        urls.grafana_bin,
+        urls.loki_bin,
+        urls.pyroscope_bin,
+        urls.tempo_bin,
+        urls.node_exporter_bin,
+        urls.prometheus_config,
+        urls.datasources_yml,
+        urls.all_yml,
+        urls.dashboard,
+        urls.loki_yml,
+        urls.pyroscope_yml,
+        urls.tempo_yml,
+        urls.prometheus_service,
+        urls.loki_service,
+        urls.pyroscope_service,
+        urls.tempo_service,
+        urls.node_exporter_service,
+    )
+}
 
-# Set ownership
+/// Continuation of monitoring install command (services startup)
+pub fn start_monitoring_services_cmd() -> &'static str {
+    r#"
 sudo chown -R grafana:grafana /etc/grafana /var/lib/grafana
 
 # Start services
 sudo systemctl daemon-reload
+sudo systemctl start node_exporter
+sudo systemctl enable node_exporter
 sudo systemctl start prometheus
 sudo systemctl enable prometheus
 sudo systemctl start loki
@@ -387,16 +497,64 @@ sudo systemctl enable tempo
 sudo systemctl restart grafana-server
 sudo systemctl enable grafana-server
 "#
-    )
 }
 
-/// Command to install the binary on binary instances
-pub fn install_binary_cmd(profiling: bool) -> String {
-    let mut script = String::from(
+/// URLs for binary instance installation
+pub struct InstanceUrls {
+    pub binary: String,
+    pub config: String,
+    pub hosts: String,
+    pub promtail_bin: String,
+    pub promtail_config: String,
+    pub promtail_service: String,
+    pub node_exporter_bin: String,
+    pub node_exporter_service: String,
+    pub binary_service: String,
+    pub logrotate_conf: String,
+    pub pyroscope_script: String,
+    pub pyroscope_service: String,
+    pub pyroscope_timer: String,
+}
+
+/// Command to install all services on binary instances
+pub fn install_binary_cmd(urls: &InstanceUrls, profiling: bool) -> String {
+    let mut script = format!(
         r#"
-# Install base tools and binary dependencies
+# Install base tools and dependencies
 sudo apt-get update -y
-sudo apt-get install -y logrotate jq wget libjemalloc2 linux-tools-common linux-tools-generic linux-tools-$(uname -r)
+sudo apt-get install -y logrotate jq wget unzip libjemalloc2 linux-tools-common linux-tools-generic linux-tools-$(uname -r)
+
+# Download all files from S3 via pre-signed URLs
+wget -q -O /home/ubuntu/binary '{}'
+wget -q -O /home/ubuntu/config.conf '{}'
+wget -q -O /home/ubuntu/hosts.yaml '{}'
+wget -q -O /home/ubuntu/promtail.zip '{}'
+wget -q -O /home/ubuntu/promtail.yml '{}'
+wget -q -O /home/ubuntu/promtail.service '{}'
+wget -q -O /home/ubuntu/node_exporter.tar.gz '{}'
+wget -q -O /home/ubuntu/node_exporter.service '{}'
+wget -q -O /home/ubuntu/binary.service '{}'
+wget -q -O /home/ubuntu/logrotate.conf '{}'
+wget -q -O /home/ubuntu/pyroscope-agent.sh '{}'
+wget -q -O /home/ubuntu/pyroscope-agent.service '{}'
+wget -q -O /home/ubuntu/pyroscope-agent.timer '{}'
+
+# Install Promtail
+sudo mkdir -p /opt/promtail /etc/promtail
+unzip -o /home/ubuntu/promtail.zip -d /home/ubuntu
+sudo mv /home/ubuntu/promtail-linux-arm64 /opt/promtail/promtail
+sudo chmod +x /opt/promtail/promtail
+sudo mv /home/ubuntu/promtail.yml /etc/promtail/promtail.yml
+sudo mv /home/ubuntu/promtail.service /etc/systemd/system/promtail.service
+sudo chown root:root /etc/promtail/promtail.yml
+
+# Install Node Exporter
+sudo mkdir -p /opt/node_exporter
+tar xvfz /home/ubuntu/node_exporter.tar.gz -C /home/ubuntu
+sudo mv /home/ubuntu/node_exporter-*.linux-arm64 /opt/node_exporter/
+sudo ln -s /opt/node_exporter/node_exporter-*.linux-arm64/node_exporter /opt/node_exporter/node_exporter
+sudo chmod +x /opt/node_exporter/node_exporter
+sudo mv /home/ubuntu/node_exporter.service /etc/systemd/system/node_exporter.service
 
 # Setup binary
 chmod +x /home/ubuntu/binary
@@ -408,7 +566,7 @@ sudo mv /home/ubuntu/logrotate.conf /etc/logrotate.d/binary
 sudo chown root:root /etc/logrotate.d/binary
 echo "0 * * * * /usr/sbin/logrotate /etc/logrotate.d/binary" | crontab -
 
-# Setup pyroscope agent script and timer
+# Setup pyroscope agent
 sudo ln -s "$(find /usr/lib/linux-tools/*/perf | head -1)" /usr/local/bin/perf
 sudo chmod +x /home/ubuntu/pyroscope-agent.sh
 sudo mv /home/ubuntu/pyroscope-agent.service /etc/systemd/system/pyroscope-agent.service
@@ -416,8 +574,23 @@ sudo mv /home/ubuntu/pyroscope-agent.timer /etc/systemd/system/pyroscope-agent.t
 
 # Start services
 sudo systemctl daemon-reload
+sudo systemctl enable --now promtail
+sudo systemctl enable --now node_exporter
 sudo systemctl enable --now binary
 "#,
+        urls.binary,
+        urls.config,
+        urls.hosts,
+        urls.promtail_bin,
+        urls.promtail_config,
+        urls.promtail_service,
+        urls.node_exporter_bin,
+        urls.node_exporter_service,
+        urls.binary_service,
+        urls.logrotate_conf,
+        urls.pyroscope_script,
+        urls.pyroscope_service,
+        urls.pyroscope_timer,
     );
     if profiling {
         script.push_str(
@@ -427,34 +600,6 @@ sudo systemctl enable --now pyroscope-agent.timer
         );
     }
     script
-}
-
-/// Command to set up Promtail on binary instances
-pub fn setup_promtail_cmd(promtail_url: &str) -> String {
-    format!(
-        r#"
-sudo apt-get update -y
-sudo apt-get install -y unzip wget
-
-# Download Promtail from S3 via pre-signed URL
-wget -q -O /home/ubuntu/promtail.zip '{promtail_url}'
-
-# Install Promtail
-sudo mkdir -p /opt/promtail
-unzip /home/ubuntu/promtail.zip -d /home/ubuntu
-sudo mv /home/ubuntu/promtail-linux-arm64 /opt/promtail/promtail
-sudo chmod +x /opt/promtail/promtail
-sudo mkdir -p /etc/promtail
-sudo mv /home/ubuntu/promtail.yml /etc/promtail/promtail.yml
-sudo mv /home/ubuntu/promtail.service /etc/systemd/system/promtail.service
-sudo chown root:root /etc/promtail/promtail.yml
-
-# Start service
-sudo systemctl daemon-reload
-sudo systemctl start promtail
-sudo systemctl enable promtail
-"#
-    )
 }
 
 /// Generates Promtail configuration with the monitoring instance's private IP and instance name
@@ -483,32 +628,6 @@ scrape_configs:
           deployer_ip: {ip}
           deployer_region: {region}
           __path__: /var/log/binary.log
-"#
-    )
-}
-
-/// Command to install Node Exporter on instances
-pub fn setup_node_exporter_cmd(node_exporter_url: &str, node_exporter_version: &str) -> String {
-    format!(
-        r#"
-sudo apt-get update -y
-sudo apt-get install -y tar wget
-
-# Download Node Exporter from S3 via pre-signed URL
-wget -q -O /home/ubuntu/node_exporter.tar.gz '{node_exporter_url}'
-
-# Install Node Exporter
-sudo mkdir -p /opt/node_exporter
-tar xvfz /home/ubuntu/node_exporter.tar.gz -C /home/ubuntu
-sudo mv /home/ubuntu/node_exporter-{node_exporter_version}.linux-arm64 /opt/node_exporter/node_exporter-{node_exporter_version}.linux-arm64
-sudo ln -s /opt/node_exporter/node_exporter-{node_exporter_version}.linux-arm64/node_exporter /opt/node_exporter/node_exporter
-sudo chmod +x /opt/node_exporter/node_exporter
-sudo mv /home/ubuntu/node_exporter.service /etc/systemd/system/node_exporter.service
-
-# Start service
-sudo systemctl daemon-reload
-sudo systemctl start node_exporter
-sudo systemctl enable node_exporter
 "#
     )
 }
