@@ -32,25 +32,25 @@ impl Cursor {
     /// Create a new [Cursor].
     fn new(section: u64, offset: u64, size: u32) -> Self {
         let mut buf = [0u8; u64::SIZE + u64::SIZE + u32::SIZE];
-        buf[..u64::SIZE].copy_from_slice(&section.to_be_bytes());
-        buf[u64::SIZE..u64::SIZE + u64::SIZE].copy_from_slice(&offset.to_be_bytes());
-        buf[u64::SIZE + u64::SIZE..].copy_from_slice(&size.to_be_bytes());
+        buf[..u64::SIZE].copy_from_slice(&section.to_le_bytes());
+        buf[u64::SIZE..u64::SIZE + u64::SIZE].copy_from_slice(&offset.to_le_bytes());
+        buf[u64::SIZE + u64::SIZE..].copy_from_slice(&size.to_le_bytes());
         Self(buf)
     }
 
     /// Get the section of the cursor.
     fn section(&self) -> u64 {
-        u64::from_be_bytes(self.0[..u64::SIZE].try_into().unwrap())
+        u64::from_le_bytes(self.0[..u64::SIZE].try_into().unwrap())
     }
 
     /// Get the offset of the cursor.
     fn offset(&self) -> u64 {
-        u64::from_be_bytes(self.0[u64::SIZE..u64::SIZE + u64::SIZE].try_into().unwrap())
+        u64::from_le_bytes(self.0[u64::SIZE..u64::SIZE + u64::SIZE].try_into().unwrap())
     }
 
     /// Get the size of the value.
     fn size(&self) -> u32 {
-        u32::from_be_bytes(self.0[u64::SIZE + u64::SIZE..].try_into().unwrap())
+        u32::from_le_bytes(self.0[u64::SIZE + u64::SIZE..].try_into().unwrap())
     }
 }
 
@@ -197,10 +197,10 @@ impl Entry {
     /// Compute a checksum for [Entry].
     fn compute_crc(epoch: u64, section: u64, position: u64, added: u8) -> u32 {
         let mut hasher = Crc32::new();
-        hasher.update(&epoch.to_be_bytes());
-        hasher.update(&section.to_be_bytes());
-        hasher.update(&position.to_be_bytes());
-        hasher.update(&added.to_be_bytes());
+        hasher.update(&epoch.to_le_bytes());
+        hasher.update(&section.to_le_bytes());
+        hasher.update(&position.to_le_bytes());
+        hasher.update(&added.to_le_bytes());
         hasher.finalize().as_u32()
     }
 

@@ -144,8 +144,8 @@ impl FixedSize for Header {
 impl CodecWrite for Header {
     fn write(&self, buf: &mut impl BufMut) {
         buf.put_slice(&self.magic);
-        buf.put_u16(self.runtime_version);
-        buf.put_u16(self.blob_version);
+        buf.put_u16_le(self.runtime_version);
+        buf.put_u16_le(self.blob_version);
     }
 }
 
@@ -157,8 +157,8 @@ impl CodecRead for Header {
         }
         let mut magic = [0u8; Self::MAGIC_LENGTH];
         buf.copy_to_slice(&mut magic);
-        let runtime_version = buf.get_u16();
-        let blob_version = buf.get_u16();
+        let runtime_version = buf.get_u16_le();
+        let blob_version = buf.get_u16_le();
         Ok(Self {
             magic,
             runtime_version,

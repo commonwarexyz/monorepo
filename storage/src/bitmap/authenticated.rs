@@ -320,7 +320,7 @@ impl<D: Digest, const N: usize> CleanBitMap<D, N> {
 
         let key: U64 = U64::new(PRUNED_CHUNKS_PREFIX, 0);
         let pruned_chunks = match metadata.get(&key) {
-            Some(bytes) => u64::from_be_bytes(bytes.as_slice().try_into().map_err(|_| {
+            Some(bytes) => u64::from_le_bytes(bytes.as_slice().try_into().map_err(|_| {
                 error!("pruned chunks value not a valid u64");
                 Error::DataCorrupted("pruned chunks value not a valid u64")
             })?),
@@ -391,7 +391,7 @@ impl<D: Digest, const N: usize> CleanBitMap<D, N> {
 
         // Write the number of pruned chunks.
         let key = U64::new(PRUNED_CHUNKS_PREFIX, 0);
-        metadata.put(key, self.bitmap.pruned_chunks().to_be_bytes().to_vec());
+        metadata.put(key, self.bitmap.pruned_chunks().to_le_bytes().to_vec());
 
         // Write the pinned nodes.
         // This will never panic because pruned_chunks is always less than MAX_LOCATION.

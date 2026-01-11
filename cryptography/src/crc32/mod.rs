@@ -115,7 +115,7 @@ impl Digest {
     /// Get the digest as a `u32` value.
     #[inline]
     pub const fn as_u32(&self) -> u32 {
-        u32::from_be_bytes(self.0)
+        u32::from_le_bytes(self.0)
     }
 }
 
@@ -150,7 +150,7 @@ impl From<[u8; SIZE]> for Digest {
 
 impl From<u32> for Digest {
     fn from(value: u32) -> Self {
-        Self(value.to_be_bytes())
+        Self(value.to_le_bytes())
     }
 }
 
@@ -420,7 +420,7 @@ mod tests {
         let value: u32 = 0xDEADBEEF;
         let digest = Digest::from(value);
         assert_eq!(digest.as_u32(), value);
-        assert_eq!(digest.0, [0xDE, 0xAD, 0xBE, 0xEF]);
+        assert_eq!(digest.0, [0xEF, 0xBE, 0xAD, 0xDE]); // little-endian
     }
 
     #[test]

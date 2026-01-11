@@ -145,7 +145,7 @@ fn prepare_data(data: Vec<u8>, k: usize, m: usize) -> Vec<Vec<u8>> {
     }
 
     // Prepare data
-    let length_bytes = (data_len as u32).to_be_bytes();
+    let length_bytes = (data_len as u32).to_le_bytes();
     let mut padded = vec![0u8; k * shard_len];
     padded[..u32::SIZE].copy_from_slice(&length_bytes);
     padded[u32::SIZE..u32::SIZE + data_len].copy_from_slice(&data);
@@ -169,7 +169,7 @@ fn extract_data(shards: Vec<&[u8]>, k: usize) -> Vec<u8> {
         .collect::<Vec<_>>()
         .try_into()
         .expect("insufficient data");
-    let data_len = u32::from_be_bytes(data_len) as usize;
+    let data_len = u32::from_le_bytes(data_len) as usize;
 
     // Extract data
     data.take(data_len).copied().collect()

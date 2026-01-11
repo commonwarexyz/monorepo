@@ -36,7 +36,7 @@ fn fuzz(input: FuzzInput) {
             let from_u64: U64 = value.into();
             assert_eq!(from_u64, value.into());
 
-            let bytes = value.to_be_bytes();
+            let bytes = value.to_le_bytes();
             let from_bytes: U64 = bytes.into();
             assert_eq!(from_bytes, value.into());
 

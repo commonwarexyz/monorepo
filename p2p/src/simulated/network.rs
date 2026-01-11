@@ -1186,7 +1186,7 @@ impl<P: PublicKey> Peer<P> {
 
                             // Continually receive messages from the dialer and send them to the inbox
                             while let Ok(data) = recv_frame(&mut stream, max_size).await {
-                                let channel = Channel::from_be_bytes(
+                                let channel = Channel::from_le_bytes(
                                     data[..Channel::SIZE].try_into().unwrap(),
                                 );
                                 let message = data.slice(Channel::SIZE..);
@@ -1270,7 +1270,7 @@ impl Link {
                 context.sleep_until(receive_complete_at).await;
 
                 // Send the message
-                let data = Bytes::from_owner(channel.to_be_bytes()).chain(message);
+                let data = Bytes::from_owner(channel.to_le_bytes()).chain(message);
                 let _ = send_frame(&mut sink, data, max_size).await;
 
                 // Bump received messages metric

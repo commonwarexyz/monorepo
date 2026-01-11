@@ -24,7 +24,7 @@ pub struct U64([u8; u64::SIZE]);
 
 impl U64 {
     pub const fn new(value: u64) -> Self {
-        Self(value.to_be_bytes())
+        Self(value.to_le_bytes())
     }
 }
 
@@ -58,19 +58,19 @@ impl From<[u8; Self::SIZE]> for U64 {
 
 impl From<u64> for U64 {
     fn from(value: u64) -> Self {
-        Self(value.to_be_bytes())
+        Self(value.to_le_bytes())
     }
 }
 
 impl From<U64> for u64 {
     fn from(value: U64) -> Self {
-        Self::from_be_bytes(value.0)
+        Self::from_le_bytes(value.0)
     }
 }
 
 impl From<&U64> for u64 {
     fn from(value: &U64) -> Self {
-        Self::from_be_bytes(value.0)
+        Self::from_le_bytes(value.0)
     }
 }
 
@@ -89,13 +89,13 @@ impl Deref for U64 {
 
 impl Debug for U64 {
     fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
-        write!(f, "{}", u64::from_be_bytes(self.0))
+        write!(f, "{}", u64::from_le_bytes(self.0))
     }
 }
 
 impl Display for U64 {
     fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
-        write!(f, "{}", u64::from_be_bytes(self.0))
+        write!(f, "{}", u64::from_le_bytes(self.0))
     }
 }
 

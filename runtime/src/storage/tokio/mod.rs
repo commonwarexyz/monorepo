@@ -296,7 +296,7 @@ mod tests {
         // Header version (bytes 4-5) and App version (bytes 6-7)
         assert_eq!(
             &raw_content[Header::MAGIC_LENGTH..Header::MAGIC_LENGTH + Header::VERSION_LENGTH],
-            &Header::RUNTIME_VERSION.to_be_bytes()
+            &Header::RUNTIME_VERSION.to_le_bytes()
         );
         // Data should start at offset 8
         assert_eq!(&raw_content[Header::SIZE..], data);

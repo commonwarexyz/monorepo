@@ -32,3 +32,16 @@ paste.workspace = true
 rand = { workspace = true, optional = true }
 rand_chacha = { workspace = true, optional = true }
 thiserror.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+rand.workspace = true
+rand_chacha.workspace = true
+
+[lib]
+bench = false
+
+[[bench]]
+name = "codec"
+harness = false
+path = "src/benches/bench.rs"
