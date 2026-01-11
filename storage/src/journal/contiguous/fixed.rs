@@ -59,8 +59,10 @@ use crate::{
     Persistable,
 };
 use commonware_codec::{CodecFixed, CodecFixedShared, DecodeExt as _};
+use bytes::Buf;
+use commonware_codec::ReadExt as _;
 use commonware_runtime::{
-    buffer::pool::{Append, PoolRef},
+    buffer::pool::{Append, PoolRef, ReplayBuf},
     telemetry::metrics::status::GaugeExt,
     Blob, Error as RError, Metrics, Storage,
 };
@@ -468,14 +470,14 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         let blobs = self.blobs.range(start_blob..).collect::<Vec<_>>();
         let mut readers = Vec::with_capacity(blobs.len() + 1);
         for (blob_index, blob) in blobs {
-            let reader = blob.as_blob_reader(buffer).await?;
+            let reader = blob.as_page_reader(buffer).await?;
             readers.push((*blob_index, reader));
         }
 
         // Include the tail blob.
-        let tail_reader = self.tail.as_blob_reader(buffer).await?;
+        let tail_reader = self.tail.as_page_reader(buffer).await?;
         readers.push((self.tail_index, tail_reader));
-        let start_offset = (start_pos % items_per_blob) * Self::CHUNK_SIZE_U64;
+        let start_item_in_blob = start_pos % items_per_blob;
 
         // Stream items as they are read to avoid occupying too much memory.
         // Each blob is processed sequentially, yielding batches of items that are then
@@ -484,41 +486,88 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         // Note: Unlike segmented journals, contiguous journals handle trailing byte truncation
         // during `init` rather than during replay. This is because contiguous journals validate
         // blob sizes at initialization time.
-        let stream = stream::iter(readers).flat_map(move |(blob_index, mut reader)| {
-            // If this is the very first blob then we need to seek to the starting position.
-            let initial_offset = if blob_index == start_blob {
-                reader.seek_to(start_offset).expect("invalid start_pos");
-                start_offset
+        let stream = stream::iter(readers).flat_map(move |(blob_index, reader)| {
+            // Calculate starting item index within this blob
+            let initial_item_idx = if blob_index == start_blob {
+                start_item_in_blob
             } else {
                 0
             };
+            // Calculate how many bytes to skip at the start
+            let skip_bytes = initial_item_idx * Self::CHUNK_SIZE_U64;
 
             stream::unfold(
-                (reader, initial_offset),
-                move |(mut reader, mut blob_offset)| async move {
-                    let mut batch = Vec::new();
+                (reader, ReplayBuf::new(), initial_item_idx, skip_bytes, false),
+                move |(mut reader, mut buf, mut item_idx, mut skip_bytes, mut done)| async move {
+                    if done {
+                        return None;
+                    }
 
-                    // Decode a batch of items from the buffer. The callback transforms each
-                    // decoded item into (position, item) tuple or an error.
-                    let (count, _trailing) = match reader
-                        .decode_batch_fixed::<A, _, _>(&mut batch, |i, result| {
-                            let item_pos = items_per_blob * blob_index
-                                + blob_offset / Self::CHUNK_SIZE_U64
-                                + i as u64;
-                            result.map(|item| (item_pos, item)).map_err(Error::Codec)
-                        })
-                        .await
-                    {
-                        Ok((0, _)) => return None, // End of blob
-                        Ok((count, trailing)) => (count, trailing),
-                        Err(err) => {
-                            let blob_size = reader.blob_size();
-                            return Some((vec![Err(Error::Runtime(err))], (reader, blob_size)));
+                    let mut batch: Vec<Result<(u64, A), Error>> = Vec::new();
+
+                    loop {
+                        // Fill buffer if we need more data
+                        while buf.remaining() < Self::CHUNK_SIZE {
+                            match reader.fill().await {
+                                Ok(0) => {
+                                    // No more pages - we're done with this blob
+                                    done = true;
+                                    if batch.is_empty() {
+                                        return None;
+                                    }
+                                    return Some((
+                                        batch,
+                                        (reader, buf, item_idx, skip_bytes, done),
+                                    ));
+                                }
+                                Ok(_) => {
+                                    while let Some(page) = reader.next_page() {
+                                        buf.push(page);
+                                    }
+                                }
+                                Err(err) => {
+                                    batch.push(Err(Error::Runtime(err)));
+                                    done = true;
+                                    return Some((
+                                        batch,
+                                        (reader, buf, item_idx, skip_bytes, done),
+                                    ));
+                                }
+                            }
                         }
-                    };
 
-                    blob_offset += (count * Self::CHUNK_SIZE) as u64;
-                    Some((batch, (reader, blob_offset)))
+                        // Skip bytes if needed (for start_pos within first blob)
+                        if skip_bytes > 0 {
+                            let to_skip = skip_bytes.min(buf.remaining() as u64) as usize;
+                            buf.advance(to_skip);
+                            skip_bytes -= to_skip as u64;
+                            continue;
+                        }
+
+                        // Decode items from buffer
+                        while buf.remaining() >= Self::CHUNK_SIZE {
+                            let item_pos = items_per_blob * blob_index + item_idx;
+                            match A::read(&mut buf) {
+                                Ok(item) => {
+                                    batch.push(Ok((item_pos, item)));
+                                    item_idx += 1;
+                                }
+                                Err(err) => {
+                                    batch.push(Err(Error::Codec(err)));
+                                    done = true;
+                                    return Some((
+                                        batch,
+                                        (reader, buf, item_idx, skip_bytes, done),
+                                    ));
+                                }
+                            }
+                        }
+
+                        // Return batch if we have items
+                        if !batch.is_empty() {
+                            return Some((batch, (reader, buf, item_idx, skip_bytes, done)));
+                        }
+                    }
                 },
             )
             .flat_map(stream::iter)

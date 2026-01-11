@@ -84,7 +84,7 @@ use commonware_codec::{
     varint::UInt, Codec, CodecShared, EncodeSize, ReadExt, Write as CodecWrite,
 };
 use commonware_runtime::{
-    buffer::pool::{Append, PoolRef},
+    buffer::pool::{Append, PoolRef, ReplayBuf},
     Blob, Metrics, Storage,
 };
 use futures::stream::{self, Stream, StreamExt};
@@ -282,7 +282,7 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
     pub async fn replay(
         &self,
         start_section: u64,
-        mut offset: u64,
+        mut start_offset: u64,
         buffer: NonZeroUsize,
     ) -> Result<impl Stream<Item = Result<(u64, u64, u32, V), Error>> + Send + '_, Error> {
         // Collect all blobs to replay (keeping blob reference for potential resize)
@@ -293,7 +293,7 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
             blobs.push((
                 section,
                 blob.clone(),
-                blob.as_blob_reader(buffer).await?,
+                blob.as_page_reader(buffer).await?,
                 codec_config.clone(),
                 compressed,
             ));
@@ -301,146 +301,129 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
 
         // Stream items as they are read to avoid occupying too much memory
         Ok(stream::iter(blobs).flat_map(
-            move |(section, blob, mut reader, codec_config, compressed)| {
-                if section == start_section && offset != 0 {
-                    if let Err(err) = reader.seek_to(offset) {
-                        warn!(section, offset, ?err, "failed to seek to offset");
-                        return stream::once(async move { Err(err.into()) }).left_stream();
-                    }
+            move |(section, blob, reader, codec_config, compressed)| {
+                // Calculate initial skip bytes for first blob
+                let skip_bytes = if section == start_section {
+                    start_offset
                 } else {
-                    offset = 0;
-                }
+                    start_offset = 0;
+                    0
+                };
 
                 stream::unfold(
                     (
                         section,
                         blob,
                         reader,
-                        offset,
-                        0u64,
+                        ReplayBuf::new(),
+                        skip_bytes,
+                        0u64,        // offset (logical position in blob)
+                        0u64,        // valid_offset (last successfully parsed position)
                         codec_config,
                         compressed,
+                        false, // done
                     ),
                     move |(
                         section,
                         blob,
                         mut reader,
+                        mut buf,
+                        mut skip_bytes,
                         mut offset,
                         mut valid_offset,
                         codec_config,
                         compressed,
+                        mut done,
                     )| async move {
-                        let blob_size = reader.blob_size();
-
-                        // Fill buffer once per unfold iteration
-                        match reader.fill().await {
-                            Ok(0) => return None,
-                            Err(err) => {
-                                return Some((
-                                    vec![Err(err.into())],
-                                    (
-                                        section,
-                                        blob,
-                                        reader,
-                                        blob_size,
-                                        valid_offset,
-                                        codec_config,
-                                        compressed,
-                                    ),
-                                ));
-                            }
-                            Ok(_) => {}
+                        if done {
+                            return None;
                         }
 
-                        // Parse as many complete items as possible from buffer
+                        let blob_size = reader.blob_size();
                         let mut batch: Vec<Result<(u64, u64, u32, V), Error>> = Vec::new();
 
+                        // Track whether we've exhausted the reader
+                        let mut reader_exhausted = done;
+
                         loop {
-                            let mut physical_buf = reader.available();
-                            if physical_buf.is_empty() {
-                                break;
+                            // Fill buffer if we need more data for varint header.
+                            // Note: we break (not return) when reader is exhausted so we can still
+                            // try to decode items from any remaining bytes in the buffer.
+                            while buf.remaining() < MAX_VARINT_SIZE && !reader_exhausted {
+                                match reader.fill().await {
+                                    Ok(0) => {
+                                        // No more pages to read
+                                        reader_exhausted = true;
+                                        if buf.is_empty() {
+                                            // No data left at all - we're done
+                                            done = true;
+                                            if batch.is_empty() {
+                                                return None;
+                                            }
+                                            return Some((
+                                                batch,
+                                                (
+                                                    section,
+                                                    blob,
+                                                    reader,
+                                                    buf,
+                                                    skip_bytes,
+                                                    offset,
+                                                    valid_offset,
+                                                    codec_config,
+                                                    compressed,
+                                                    done,
+                                                ),
+                                            ));
+                                        }
+                                        // Buffer still has data - break out and try to decode
+                                        break;
+                                    }
+                                    Ok(_) => {
+                                        while let Some(page) = reader.next_page() {
+                                            buf.push(page);
+                                        }
+                                    }
+                                    Err(err) => {
+                                        batch.push(Err(err.into()));
+                                        done = true;
+                                        return Some((
+                                            batch,
+                                            (
+                                                section,
+                                                blob,
+                                                reader,
+                                                buf,
+                                                skip_bytes,
+                                                offset,
+                                                valid_offset,
+                                                codec_config,
+                                                compressed,
+                                                done,
+                                            ),
+                                        ));
+                                    }
+                                }
                             }
-                            let buf_remaining = physical_buf.remaining();
 
-                            match find_item(&mut physical_buf, offset) {
-                                Ok((
-                                    next_offset,
-                                    ItemInfo::Complete {
-                                        varint_len,
-                                        data_len,
-                                    },
-                                )) => {
-                                    // physical_buf is now positioned after varint
-                                    let data = physical_buf.copy_to_bytes(data_len);
-                                    match decode_item::<V>(data, &codec_config, compressed) {
-                                        Ok(decoded) => {
-                                            let consumed = varint_len + data_len;
-                                            reader.advance(consumed);
-                                            batch.push(Ok((
-                                                section,
-                                                offset,
-                                                data_len as u32,
-                                                decoded,
-                                            )));
-                                            valid_offset = next_offset;
-                                            offset = next_offset;
-                                        }
-                                        Err(err) => {
-                                            batch.push(Err(err));
-                                            break;
-                                        }
-                                    }
-                                }
-                                Ok((
-                                    next_offset,
-                                    ItemInfo::Incomplete {
-                                        varint_len,
-                                        prefix_len,
-                                        total_len,
-                                    },
-                                )) => {
-                                    // physical_buf is positioned after varint, get available prefix
-                                    let prefix = physical_buf.copy_to_bytes(prefix_len);
+                            // Skip bytes if needed (for start_offset)
+                            if skip_bytes > 0 {
+                                let to_skip = skip_bytes.min(buf.remaining() as u64) as usize;
+                                buf.advance(to_skip);
+                                skip_bytes -= to_skip as u64;
+                                offset += to_skip as u64;
+                                continue;
+                            }
 
-                                    // Advance reader past consumed data (varint + prefix)
-                                    reader.advance(varint_len + prefix_len);
-
-                                    // Read remaining bytes from new pages
-                                    let remainder_len = total_len - prefix_len;
-                                    let remainder = match reader.read_bytes(remainder_len).await {
-                                        Ok(r) => r,
-                                        Err(err) => {
-                                            batch.push(Err(err.into()));
-                                            break;
-                                        }
-                                    };
-
-                                    // Chain without copying
-                                    let chained = prefix.chain(remainder);
-                                    match decode_item::<V>(chained, &codec_config, compressed) {
-                                        Ok(decoded) => {
-                                            batch.push(Ok((
-                                                section,
-                                                offset,
-                                                total_len as u32,
-                                                decoded,
-                                            )));
-                                            valid_offset = next_offset;
-                                            offset = next_offset;
-                                        }
-                                        Err(err) => {
-                                            batch.push(Err(err));
-                                        }
-                                    }
-                                    break;
-                                }
+                            // Try to decode length prefix
+                            let before_remaining = buf.remaining();
+                            let (item_size, varint_len) = match decode_length_prefix(&mut buf) {
+                                Ok(result) => result,
                                 Err(err) => {
-                                    // Could be codec error from incomplete varint - treat as
-                                    // end if at physical end
-                                    let at_physical_end =
-                                        offset + buf_remaining as u64 >= blob_size;
-                                    if at_physical_end {
-                                        if valid_offset < blob_size {
+                                    // Could be incomplete varint - check if reader exhausted
+                                    if reader_exhausted || before_remaining < MAX_VARINT_SIZE {
+                                        // Treat as trailing bytes
+                                        if valid_offset < blob_size && offset < blob_size {
                                             warn!(
                                                 blob = section,
                                                 bad_offset = offset,
@@ -449,34 +432,166 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
                                             );
                                             blob.resize(valid_offset).await.ok()?;
                                         }
-                                        break;
+                                        done = true;
+                                        if batch.is_empty() {
+                                            return None;
+                                        }
+                                        return Some((
+                                            batch,
+                                            (
+                                                section,
+                                                blob,
+                                                reader,
+                                                buf,
+                                                skip_bytes,
+                                                offset,
+                                                valid_offset,
+                                                codec_config,
+                                                compressed,
+                                                done,
+                                            ),
+                                        ));
                                     }
                                     batch.push(Err(err));
-                                    break;
+                                    done = true;
+                                    return Some((
+                                        batch,
+                                        (
+                                            section,
+                                            blob,
+                                            reader,
+                                            buf,
+                                            skip_bytes,
+                                            offset,
+                                            valid_offset,
+                                            codec_config,
+                                            compressed,
+                                            done,
+                                        ),
+                                    ));
+                                }
+                            };
+
+                            // Fill more pages if item body spans buffer
+                            while buf.remaining() < item_size {
+                                match reader.fill().await {
+                                    Ok(0) => {
+                                        // Incomplete item at end - truncate
+                                        warn!(
+                                            blob = section,
+                                            bad_offset = offset,
+                                            new_size = valid_offset,
+                                            "incomplete item at end: truncating"
+                                        );
+                                        blob.resize(valid_offset).await.ok()?;
+                                        done = true;
+                                        if batch.is_empty() {
+                                            return None;
+                                        }
+                                        return Some((
+                                            batch,
+                                            (
+                                                section,
+                                                blob,
+                                                reader,
+                                                buf,
+                                                skip_bytes,
+                                                offset,
+                                                valid_offset,
+                                                codec_config,
+                                                compressed,
+                                                done,
+                                            ),
+                                        ));
+                                    }
+                                    Ok(_) => {
+                                        while let Some(page) = reader.next_page() {
+                                            buf.push(page);
+                                        }
+                                    }
+                                    Err(err) => {
+                                        batch.push(Err(err.into()));
+                                        done = true;
+                                        return Some((
+                                            batch,
+                                            (
+                                                section,
+                                                blob,
+                                                reader,
+                                                buf,
+                                                skip_bytes,
+                                                offset,
+                                                valid_offset,
+                                                codec_config,
+                                                compressed,
+                                                done,
+                                            ),
+                                        ));
+                                    }
                                 }
                             }
-                        }
 
-                        if batch.is_empty() {
-                            return None;
-                        }
-
-                        Some((
-                            batch,
-                            (
-                                section,
-                                blob,
-                                reader,
-                                offset,
-                                valid_offset,
-                                codec_config,
+                            // Decode item - use take() to limit bytes read
+                            let item_offset = offset;
+                            let next_offset = offset + varint_len as u64 + item_size as u64;
+                            match decode_item::<V>(
+                                (&mut buf).take(item_size),
+                                &codec_config,
                                 compressed,
-                            ),
-                        ))
+                            ) {
+                                Ok(decoded) => {
+                                    batch.push(Ok((
+                                        section,
+                                        item_offset,
+                                        item_size as u32,
+                                        decoded,
+                                    )));
+                                    valid_offset = next_offset;
+                                    offset = next_offset;
+                                }
+                                Err(err) => {
+                                    batch.push(Err(err));
+                                    done = true;
+                                    return Some((
+                                        batch,
+                                        (
+                                            section,
+                                            blob,
+                                            reader,
+                                            buf,
+                                            skip_bytes,
+                                            offset,
+                                            valid_offset,
+                                            codec_config,
+                                            compressed,
+                                            done,
+                                        ),
+                                    ));
+                                }
+                            }
+
+                            // Return batch if we have items
+                            if !batch.is_empty() && buf.remaining() < MAX_VARINT_SIZE {
+                                return Some((
+                                    batch,
+                                    (
+                                        section,
+                                        blob,
+                                        reader,
+                                        buf,
+                                        skip_bytes,
+                                        offset,
+                                        valid_offset,
+                                        codec_config,
+                                        compressed,
+                                        done,
+                                    ),
+                                ));
+                            }
+                        }
                     },
                 )
                 .flat_map(stream::iter)
-                .right_stream()
             },
         ))
     }

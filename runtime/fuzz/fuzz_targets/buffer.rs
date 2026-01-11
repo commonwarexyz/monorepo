@@ -331,12 +331,12 @@ fn fuzz(input: FuzzInput) {
                 FuzzOperation::AppendAsReader { buffer_size } => {
                     if let Some(ref append) = append_buffer {
                         let buffer_size = NZUsize!((buffer_size as usize).clamp(1, MAX_SIZE));
-                        // This fuzzer never corrupts data, so CRC validation in as_blob_reader
+                        // This fuzzer never corrupts data, so CRC validation in as_page_reader
                         // should always succeed. A failure here indicates a bug.
                         let _ = append
-                            .as_blob_reader(buffer_size)
+                            .as_page_reader(buffer_size)
                             .await
-                            .expect("Failed to create blob reader");
+                            .expect("Failed to create page reader");
                     }
                 }
 

@@ -28,7 +28,7 @@
 
 use crate::{
     buffer::{
-        pool::{Checksum, PoolRef, Read, CHECKSUM_SIZE},
+        pool::{Checksum, PageReader, PoolRef, CHECKSUM_SIZE},
         tip::Buffer,
     },
     Blob, Error, RwLock, RwLockWriteGuard,
@@ -716,18 +716,19 @@ impl<B: Blob> Append<B> {
         }
     }
 
-    /// Flushes any buffered data, then returns a [Read] wrapper for the underlying blob.
+    /// Flushes any buffered data, then returns a [PageReader] for the underlying blob.
     ///
-    /// The returned reader can be used to sequentially read all data from the blob while ensuring
-    /// all data passes integrity verification.
-    pub async fn as_blob_reader(&self, capacity_pages: NonZeroUsize) -> Result<Read<B>, Error> {
+    /// The returned reader can be used to sequentially read all pages from the blob while ensuring
+    /// all data passes integrity verification. CRCs are validated but not included in the output.
+    pub async fn as_page_reader(
+        &self,
+        prefetch_pages: NonZeroUsize,
+    ) -> Result<PageReader<B>, Error> {
         let logical_page_size = self.pool_ref.page_size();
         let logical_page_size_nz =
             NonZeroU16::new(logical_page_size as u16).expect("page_size is non-zero");
 
-        // Flush any buffered data (without fsync) so the Read wrapper sees all written data.
-        // We don't need fsync here since we just want to ensure data has been written to the
-        // underlying blob, not durably persisted.
+        // Flush any buffered data (without fsync) so the reader sees all written data.
         {
             let buf_guard = self.buffer.write().await;
             if !buf_guard.immutable {
@@ -759,11 +760,11 @@ impl<B: Blob> Append<B> {
                 },
             );
 
-        Ok(Read::new(
+        Ok(PageReader::new(
             blob_guard.blob.clone(),
             physical_blob_size,
             logical_blob_size,
-            capacity_pages,
+            prefetch_pages.get(),
             logical_page_size_nz,
         ))
     }
@@ -1819,7 +1820,7 @@ mod tests {
             );
             drop(append);
 
-            // Also verify that reading via a Read wrapper fails the same way.
+            // Also verify that reading via a PageReader fails the same way.
             let (blob, size) = context
                 .open("test_partition", b"non_last_page")
                 .await
@@ -1827,13 +1828,13 @@ mod tests {
             let append = Append::new(blob, size, BUFFER_SIZE, pool_ref.clone())
                 .await
                 .unwrap();
-            let mut reader = append.as_blob_reader(NZUsize!(1024)).await.unwrap();
+            let mut reader = append.as_page_reader(NZUsize!(1024)).await.unwrap();
 
-            // Try to read from offset 0 (page 0) via the Read wrapper.
-            let result = reader.read_up_to(vec![0u8; 10]).await;
+            // Try to fill pages - should fail on CRC validation.
+            let result = reader.fill().await;
             assert!(
                 result.is_err(),
-                "Reading from corrupted non-last page via Read wrapper should fail, but got: {:?}",
+                "Reading from corrupted non-last page via PageReader should fail, but got: {:?}",
                 result
             );
         });

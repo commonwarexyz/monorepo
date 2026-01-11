@@ -22,8 +22,12 @@
 
 use super::manager::{AppendFactory, Config as ManagerConfig, Manager};
 use crate::journal::Error;
-use commonware_codec::{CodecFixed, CodecFixedShared, DecodeExt as _};
-use commonware_runtime::{buffer::PoolRef, Blob, Metrics, Storage};
+use bytes::Buf;
+use commonware_codec::{CodecFixed, CodecFixedShared, DecodeExt as _, ReadExt as _};
+use commonware_runtime::{
+    buffer::pool::{PoolRef, ReplayBuf},
+    Blob, Metrics, Storage,
+};
 use futures::{
     stream::{self, Stream},
     StreamExt,
@@ -180,7 +184,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         // Pre-create readers from blobs (async operation)
         let mut blob_info = Vec::new();
         for (&section, blob) in self.manager.sections_from(start_section) {
-            let reader = blob.as_blob_reader(buffer).await?;
+            let reader = blob.as_page_reader(buffer).await?;
             blob_info.push((section, reader));
         }
 
@@ -189,35 +193,59 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         // flattened into individual stream elements.
         Ok(stream::iter(blob_info).flat_map(move |(section, reader)| {
             stream::unfold(
-                (section, reader, 0u64),
-                move |(section, mut reader, mut offset)| async move {
-                    let blob_size = reader.blob_size();
-                    let mut batch = Vec::new();
+                (section, reader, ReplayBuf::new(), 0u64, false),
+                move |(section, mut reader, mut buf, mut position, mut done)| async move {
+                    if done {
+                        return None;
+                    }
 
-                    // Decode a batch of items from the buffer. The callback transforms each
-                    // decoded item into (section, position, item) tuple or an error.
-                    let count = match reader
-                        .decode_batch_fixed::<A, _, _>(&mut batch, |i, result| {
-                            let position = offset / Self::CHUNK_SIZE_U64 + i as u64;
-                            result
-                                .map(|item| (section, position, item))
-                                .map_err(Error::Codec)
-                        })
-                        .await
-                    {
-                        Ok((0, _)) => return None, // End of blob
-                        Ok((count, _)) => count,
-                        Err(err) => {
-                            return Some((
-                                vec![Err(Error::Runtime(err))],
-                                (section, reader, blob_size),
-                            ))
+                    let mut batch: Vec<Result<(u64, u64, A), Error>> = Vec::new();
+
+                    loop {
+                        // Fill buffer if we need more data
+                        while buf.remaining() < Self::CHUNK_SIZE {
+                            match reader.fill().await {
+                                Ok(0) => {
+                                    // No more pages - we're done with this blob
+                                    done = true;
+                                    if batch.is_empty() {
+                                        return None;
+                                    }
+                                    return Some((batch, (section, reader, buf, position, done)));
+                                }
+                                Ok(_) => {
+                                    while let Some(page) = reader.next_page() {
+                                        buf.push(page);
+                                    }
+                                }
+                                Err(err) => {
+                                    batch.push(Err(Error::Runtime(err)));
+                                    done = true;
+                                    return Some((batch, (section, reader, buf, position, done)));
+                                }
+                            }
                         }
-                    };
 
-                    offset += (count * Self::CHUNK_SIZE) as u64;
+                        // Decode items from buffer
+                        while buf.remaining() >= Self::CHUNK_SIZE {
+                            match A::read(&mut buf) {
+                                Ok(item) => {
+                                    batch.push(Ok((section, position, item)));
+                                    position += 1;
+                                }
+                                Err(err) => {
+                                    batch.push(Err(Error::Codec(err)));
+                                    done = true;
+                                    return Some((batch, (section, reader, buf, position, done)));
+                                }
+                            }
+                        }
 
-                    Some((batch, (section, reader, offset)))
+                        // Return batch if we have items
+                        if !batch.is_empty() {
+                            return Some((batch, (section, reader, buf, position, done)));
+                        }
+                    }
                 },
             )
             .flat_map(stream::iter)
