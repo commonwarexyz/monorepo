@@ -34,7 +34,7 @@ mod page_cache;
 mod read;
 
 pub use append::Append;
-pub use page_cache::PoolRef;
+pub use page_cache::{CachedBuf, PoolRef};
 pub use read::Replay;
 use tracing::{debug, error};
 

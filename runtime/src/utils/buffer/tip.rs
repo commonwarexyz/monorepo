@@ -1,3 +1,5 @@
+use bytes::Bytes;
+
 /// A buffer for caching data written to the tip of a blob.
 ///
 /// The buffer always represents data at the "tip" of the logical blob, starting at `offset` and
@@ -165,6 +167,39 @@ impl Buffer {
         self.data.extend_from_slice(data);
 
         self.over_capacity()
+    }
+
+    /// Returns a `Bytes` slice for any data in the requested range that overlaps with this buffer,
+    /// along with the number of bytes before the buffer that must be read from disk.
+    ///
+    /// Returns `None` if the requested range does not overlap with the buffer at all.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the end offset of the requested data falls outside the range of the logical blob.
+    pub(super) fn extract_bytes(&self, offset: u64, len: usize) -> Option<(Bytes, usize)> {
+        let end_offset = offset.checked_add(len as u64).expect("end_offset overflow");
+        assert!(end_offset <= self.size());
+
+        if end_offset <= self.offset {
+            // Range does not overlap with the buffer.
+            return None;
+        }
+
+        let (start, bytes_before_buffer) = if offset < self.offset {
+            // Some data is before the buffer.
+            (0, (self.offset - offset) as usize)
+        } else {
+            // Can read entirely from the buffer.
+            ((offset - self.offset) as usize, 0)
+        };
+
+        let end = start + len - bytes_before_buffer;
+        assert!(end <= self.data.len());
+
+        // Create a Bytes slice from the buffer data.
+        let slice = Bytes::copy_from_slice(&self.data[start..end]);
+        Some((slice, bytes_before_buffer))
     }
 
     /// Whether the buffer is over capacity and should be taken & flushed to the underlying blob.

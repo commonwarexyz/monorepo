@@ -79,7 +79,7 @@
 
 use super::manager::{AppendFactory, Config as ManagerConfig, Manager};
 use crate::journal::Error;
-use bytes::{Buf, BufMut, Bytes};
+use bytes::{Buf, BufMut};
 use commonware_codec::{
     varint::UInt, Codec, CodecShared, EncodeSize, ReadExt, Write as CodecWrite,
 };
@@ -88,7 +88,7 @@ use commonware_runtime::{
     Blob, Metrics, Storage,
 };
 use futures::stream::{self, Stream, StreamExt};
-use std::{io::Cursor, num::NonZeroUsize};
+use std::num::NonZeroUsize;
 use tracing::{trace, warn};
 use zstd::{bulk::compress, decode_all};
 
@@ -123,55 +123,6 @@ fn decode_length_prefix(buf: &mut impl Buf) -> Result<(usize, usize), Error> {
     let size = UInt::<u32>::read(buf)?.0 as usize;
     let varint_len = initial - buf.remaining();
     Ok((size, varint_len))
-}
-
-/// Result of finding an item in a buffer (offsets/lengths, not slices).
-enum ItemInfo {
-    /// All item data is available in the buffer.
-    Complete {
-        /// Length of the varint prefix.
-        varint_len: usize,
-        /// Length of the item data.
-        data_len: usize,
-    },
-    /// Only some item data is available.
-    Incomplete {
-        /// Length of the varint prefix.
-        varint_len: usize,
-        /// Bytes of item data available in buffer.
-        prefix_len: usize,
-        /// Full size of the item.
-        total_len: usize,
-    },
-}
-
-/// Find an item in a buffer by decoding its length prefix.
-///
-/// Returns (next_offset, item_info). The buffer is advanced past the varint.
-fn find_item(buf: &mut impl Buf, offset: u64) -> Result<(u64, ItemInfo), Error> {
-    let available = buf.remaining();
-    let (size, varint_len) = decode_length_prefix(buf)?;
-    let next_offset = offset
-        .checked_add(varint_len as u64)
-        .ok_or(Error::OffsetOverflow)?
-        .checked_add(size as u64)
-        .ok_or(Error::OffsetOverflow)?;
-    let buffered = available.saturating_sub(varint_len);
-
-    let item = if buffered >= size {
-        ItemInfo::Complete {
-            varint_len,
-            data_len: size,
-        }
-    } else {
-        ItemInfo::Incomplete {
-            varint_len,
-            prefix_len: buffered,
-            total_len: size,
-        }
-    };
-
-    Ok((next_offset, item))
 }
 
 /// Decode item data with optional decompression.
@@ -231,49 +182,29 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
         })
     }
 
-    /// Reads an item from the blob at the given offset.
+    /// Reads an item from the blob at the given offset using zero-copy buffering.
     async fn read(
         compressed: bool,
         cfg: &V::Cfg,
         blob: &Append<E::Blob>,
         offset: u64,
     ) -> Result<(u64, u32, V), Error> {
-        // Read varint header (max 5 bytes for u32)
-        let buf = vec![0u8; MAX_VARINT_SIZE];
-        let (stable_buf, available) = blob.read_up_to(buf, offset).await?;
-        let buf = Bytes::from(stable_buf);
-        let mut cursor = Cursor::new(buf.slice(..available));
-        let (next_offset, item_info) = find_item(&mut cursor, offset)?;
+        // Get zero-copy buffer for varint header (use read_buf_up_to since we may
+        // be at the end of the blob with fewer than MAX_VARINT_SIZE bytes available)
+        let mut header_buf = blob.read_buf_up_to(offset, MAX_VARINT_SIZE).await?;
+        let (item_size, varint_len) = decode_length_prefix(&mut header_buf)?;
 
-        // Decode item - either directly from buffer or by chaining prefix with remainder
-        let (item_size, decoded) = match item_info {
-            ItemInfo::Complete {
-                varint_len,
-                data_len,
-            } => {
-                // Data follows varint in buffer
-                let data = buf.slice(varint_len..varint_len + data_len);
-                let decoded = decode_item::<V>(data, cfg, compressed)?;
-                (data_len as u32, decoded)
-            }
-            ItemInfo::Incomplete {
-                varint_len,
-                prefix_len,
-                total_len,
-            } => {
-                // Read remainder and chain with prefix to avoid copying
-                let prefix = buf.slice(varint_len..varint_len + prefix_len);
-                let read_offset = offset + varint_len as u64 + prefix_len as u64;
-                let remainder_len = total_len - prefix_len;
-                let mut remainder = vec![0u8; remainder_len];
-                blob.read_into(&mut remainder, read_offset).await?;
-                let chained = prefix.chain(Bytes::from(remainder));
-                let decoded = decode_item::<V>(chained, cfg, compressed)?;
-                (total_len as u32, decoded)
-            }
-        };
+        // Calculate offsets
+        let item_offset = offset + varint_len as u64;
+        let next_offset = item_offset + item_size as u64;
 
-        Ok((next_offset, item_size, decoded))
+        // Get zero-copy buffer for item data
+        let item_buf = blob.read_buf(item_offset, item_size).await?;
+
+        // Decode directly from cached buffer
+        let decoded = decode_item::<V>(item_buf, cfg, compressed)?;
+
+        Ok((next_offset, item_size as u32, decoded))
     }
 
     /// Returns an ordered stream of all items in the journal starting with the item at the given

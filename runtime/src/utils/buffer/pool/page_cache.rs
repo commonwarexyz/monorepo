@@ -3,10 +3,11 @@
 
 use super::get_page_from_blob;
 use crate::{Blob, Error, RwLock};
+use bytes::{Buf, Bytes};
 use commonware_utils::StableBuf;
 use futures::{future::Shared, FutureExt};
 use std::{
-    collections::{hash_map::Entry, HashMap},
+    collections::{hash_map::Entry, HashMap, VecDeque},
     future::Future,
     num::{NonZeroU16, NonZeroUsize},
     pin::Pin,
@@ -67,9 +68,9 @@ struct CacheEntry {
     /// A bit indicating whether this page was recently referenced.
     referenced: AtomicBool,
 
-    /// The cached page itself. Only logical bytes are cached, so the vector will be 12 bytes shorter
-    /// than the physical page size.
-    data: Vec<u8>,
+    /// The cached page itself. Only logical bytes are cached, so the buffer will be 12 bytes
+    /// shorter than the physical page size. Uses Bytes for zero-copy slicing.
+    data: Bytes,
 }
 
 /// A reference to a page cache that can be shared across threads via cloning, along with the page
@@ -314,6 +315,115 @@ impl PoolRef {
 
         buf.len()
     }
+
+    /// Returns a `CachedBuf` for zero-copy reading from cache.
+    ///
+    /// This ensures all required pages are cached (fetching from blob if needed),
+    /// then returns a `Buf` implementation that reads directly from cached pages
+    /// without any copying.
+    pub async fn read_buf<B: Blob>(
+        &self,
+        blob: &B,
+        blob_id: u64,
+        mut offset: u64,
+        mut len: usize,
+    ) -> Result<CachedBuf, Error> {
+        // Ensure all required pages are in cache
+        let mut slices = VecDeque::new();
+
+        while len > 0 {
+            // Try to get slice from cache
+            let slice = {
+                let pool = self.pool.read().await;
+                pool.get_slice(self.page_size, blob_id, offset, len)
+            };
+
+            if let Some(slice) = slice {
+                let slice_len = slice.len();
+                slices.push_back(slice);
+                offset += slice_len as u64;
+                len -= slice_len;
+            } else {
+                // Cache miss - fetch the page
+                let mut buf = vec![0u8; self.page_size as usize];
+                let (page_num, _) = self.offset_to_page(offset);
+                self.read_after_page_fault(blob, blob_id, &mut buf, page_num * self.page_size)
+                    .await?;
+                // Page is now cached, retry in next iteration
+            }
+        }
+
+        Ok(CachedBuf::new(slices))
+    }
+}
+
+/// A buffer backed by cached pages for zero-copy reading.
+///
+/// This struct implements `Buf` and navigates through multiple cached page slices
+/// without copying data. Created by `PoolRef::read_buf()`.
+pub struct CachedBuf {
+    /// Slices from cached pages, consumed as data is read.
+    slices: VecDeque<Bytes>,
+    /// Total remaining bytes across all slices.
+    remaining: usize,
+}
+
+impl CachedBuf {
+    /// Creates a new CachedBuf from a collection of page slices.
+    pub(super) fn new(slices: VecDeque<Bytes>) -> Self {
+        let remaining = slices.iter().map(|s| s.len()).sum();
+        Self { slices, remaining }
+    }
+
+    /// Creates an empty CachedBuf.
+    pub(super) const fn empty() -> Self {
+        Self {
+            slices: VecDeque::new(),
+            remaining: 0,
+        }
+    }
+
+    /// Creates a CachedBuf from a single Bytes slice.
+    pub(super) fn from_bytes(bytes: Bytes) -> Self {
+        let remaining = bytes.len();
+        let mut slices = VecDeque::with_capacity(1);
+        slices.push_back(bytes);
+        Self { slices, remaining }
+    }
+
+    /// Appends a Bytes slice to the end of this buffer.
+    pub(super) fn push(&mut self, bytes: Bytes) {
+        self.remaining += bytes.len();
+        self.slices.push_back(bytes);
+    }
+}
+
+impl Buf for CachedBuf {
+    fn remaining(&self) -> usize {
+        self.remaining
+    }
+
+    fn chunk(&self) -> &[u8] {
+        self.slices.front().map(|s| s.as_ref()).unwrap_or(&[])
+    }
+
+    fn advance(&mut self, mut cnt: usize) {
+        self.remaining = self.remaining.saturating_sub(cnt);
+
+        while cnt > 0 {
+            let Some(front) = self.slices.front_mut() else {
+                break;
+            };
+
+            if cnt < front.len() {
+                front.advance(cnt);
+                return;
+            }
+
+            cnt -= front.len();
+            self.slices.pop_front();
+        }
+    }
 }
 
 impl Pool {
@@ -364,6 +474,29 @@ impl Pool {
         bytes_to_copy
     }
 
+    /// Returns a Bytes slice from cache for zero-copy access, or None on cache miss.
+    ///
+    /// Unlike `read_at`, this returns a `Bytes` slice that shares the underlying memory
+    /// with the cache entry, avoiding any copying.
+    fn get_slice(
+        &self,
+        page_size: u64,
+        blob_id: u64,
+        logical_offset: u64,
+        max_len: usize,
+    ) -> Option<Bytes> {
+        let (page_num, offset_in_page) = Self::offset_to_page(page_size, logical_offset);
+        let page_index = self.index.get(&(blob_id, page_num))?;
+        let page = &self.cache[*page_index];
+        assert_eq!(page.key, (blob_id, page_num));
+        page.referenced.store(true, Ordering::Relaxed);
+
+        let offset = offset_in_page as usize;
+        let available = page.data.len() - offset;
+        let len = max_len.min(available);
+        Some(page.data.slice(offset..offset + len))
+    }
+
     /// Put the given `page` into the buffer pool.
     fn cache(&mut self, page_size: u64, blob_id: u64, page: &[u8], page_num: u64) {
         assert_eq!(page.len(), page_size as usize);
@@ -379,7 +512,7 @@ impl Pool {
             let entry = &mut self.cache[*index_entry.get()];
             assert_eq!(entry.key, key);
             entry.referenced.store(true, Ordering::Relaxed);
-            entry.data.copy_from_slice(page);
+            entry.data = Bytes::copy_from_slice(page);
             return;
         }
 
@@ -388,7 +521,7 @@ impl Pool {
             self.cache.push(CacheEntry {
                 key,
                 referenced: AtomicBool::new(true),
-                data: page.into(),
+                data: Bytes::copy_from_slice(page),
             });
             return;
         }
@@ -407,7 +540,7 @@ impl Pool {
         assert!(self.index.remove(&entry.key).is_some());
         self.index.insert(key, self.clock);
         entry.key = key;
-        entry.data.copy_from_slice(page);
+        entry.data = Bytes::copy_from_slice(page);
 
         // Move the clock forward.
         self.clock = (self.clock + 1) % self.cache.len();

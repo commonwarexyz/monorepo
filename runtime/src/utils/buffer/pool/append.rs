@@ -580,6 +580,134 @@ impl<B: Blob> Append<B> {
             .await
     }
 
+    /// Returns a `CachedBuf` for zero-copy reading at the given offset.
+    ///
+    /// This provides a `Buf` implementation that reads directly from cached pages
+    /// without any copying. If data overlaps with the in-memory buffer (not yet
+    /// synced), that portion is copied into the result.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the requested range extends beyond the blob size or
+    /// if reading fails.
+    pub async fn read_buf(
+        &self,
+        logical_offset: u64,
+        len: usize,
+    ) -> Result<super::page_cache::CachedBuf, Error> {
+        // Ensure the read doesn't overflow.
+        let end_offset = logical_offset
+            .checked_add(len as u64)
+            .ok_or(Error::OffsetOverflow)?;
+
+        // Check bounds and extract any buffer data.
+        let buffer = self.buffer.read().await;
+        if end_offset > buffer.size() {
+            return Err(Error::BlobInsufficientLength);
+        }
+
+        // Check if any data overlaps with the in-memory buffer.
+        let buffer_result = buffer.extract_bytes(logical_offset, len);
+        drop(buffer);
+
+        match buffer_result {
+            None => {
+                // No buffer overlap - use zero-copy pool cache path.
+                let blob_guard = self.blob_state.read().await;
+                self.pool_ref
+                    .read_buf(&blob_guard.blob, self.id, logical_offset, len)
+                    .await
+            }
+            Some((buffer_bytes, 0)) => {
+                // All data is in the buffer - return it directly.
+                Ok(super::page_cache::CachedBuf::from_bytes(buffer_bytes))
+            }
+            Some((buffer_bytes, bytes_before_buffer)) => {
+                // Some data is on disk, some is in the buffer.
+                // Read the disk portion first, then append the buffer portion.
+                let blob_guard = self.blob_state.read().await;
+                let mut cached_buf = self
+                    .pool_ref
+                    .read_buf(
+                        &blob_guard.blob,
+                        self.id,
+                        logical_offset,
+                        bytes_before_buffer,
+                    )
+                    .await?;
+                cached_buf.push(buffer_bytes);
+                Ok(cached_buf)
+            }
+        }
+    }
+
+    /// Returns a `CachedBuf` for zero-copy reading at the given offset, reading up to `len` bytes.
+    ///
+    /// Unlike `read_buf`, this method returns fewer bytes if the requested range extends beyond
+    /// the blob size (instead of returning an error). This is useful for reading variable-length
+    /// prefixes (like varints) where you want to read up to a maximum number of bytes but the
+    /// actual data might be shorter.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if no bytes are available at the given offset or if reading fails.
+    pub async fn read_buf_up_to(
+        &self,
+        logical_offset: u64,
+        len: usize,
+    ) -> Result<super::page_cache::CachedBuf, Error> {
+        if len == 0 {
+            return Ok(super::page_cache::CachedBuf::empty());
+        }
+
+        // Ensure the read doesn't overflow.
+        logical_offset
+            .checked_add(len as u64)
+            .ok_or(Error::OffsetOverflow)?;
+
+        // Check bounds and calculate available bytes.
+        let buffer = self.buffer.read().await;
+        let blob_size = buffer.size();
+        let available = (blob_size.saturating_sub(logical_offset) as usize).min(len);
+        if available == 0 {
+            return Err(Error::BlobInsufficientLength);
+        }
+
+        // Check if any data overlaps with the in-memory buffer.
+        let buffer_result = buffer.extract_bytes(logical_offset, available);
+        drop(buffer);
+
+        match buffer_result {
+            None => {
+                // No buffer overlap - use zero-copy pool cache path.
+                let blob_guard = self.blob_state.read().await;
+                self.pool_ref
+                    .read_buf(&blob_guard.blob, self.id, logical_offset, available)
+                    .await
+            }
+            Some((buffer_bytes, 0)) => {
+                // All data is in the buffer - return it directly.
+                Ok(super::page_cache::CachedBuf::from_bytes(buffer_bytes))
+            }
+            Some((buffer_bytes, bytes_before_buffer)) => {
+                // Some data is on disk, some is in the buffer.
+                // Read the disk portion first, then append the buffer portion.
+                let blob_guard = self.blob_state.read().await;
+                let mut cached_buf = self
+                    .pool_ref
+                    .read_buf(
+                        &blob_guard.blob,
+                        self.id,
+                        logical_offset,
+                        bytes_before_buffer,
+                    )
+                    .await?;
+                cached_buf.push(buffer_bytes);
+                Ok(cached_buf)
+            }
+        }
+    }
+
     /// Returns the protected region info for a partial page, if any.
     ///
     /// # Returns
