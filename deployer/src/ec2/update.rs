@@ -167,7 +167,7 @@ async fn update_instance(
 
     // Download the latest binary and config from S3 via pre-signed URLs
     let download_cmd = format!(
-        "wget -q -O /home/ubuntu/binary '{}' && wget -q -O /home/ubuntu/config.conf '{}'",
+        "wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/binary '{}' && wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/config.conf '{}'",
         binary_url, config_url
     );
     ssh_execute(private_key, ip, &download_cmd).await?;

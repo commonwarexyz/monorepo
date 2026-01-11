@@ -370,28 +370,28 @@ sudo apt-get update -y
 sudo apt-get install -y unzip adduser libfontconfig1 wget tar
 
 # Download binaries from S3 via pre-signed URLs
-wget -q -O /home/ubuntu/prometheus.tar.gz '{}'
-wget -q -O /home/ubuntu/grafana.deb '{}'
-wget -q -O /home/ubuntu/loki.zip '{}'
-wget -q -O /home/ubuntu/pyroscope.tar.gz '{}'
-wget -q -O /home/ubuntu/tempo.tar.gz '{}'
-wget -q -O /home/ubuntu/node_exporter.tar.gz '{}'
+wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/prometheus.tar.gz '{}'
+wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/grafana.deb '{}'
+wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/loki.zip '{}'
+wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/pyroscope.tar.gz '{}'
+wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/tempo.tar.gz '{}'
+wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/node_exporter.tar.gz '{}'
 
 # Download config files from S3
-wget -q -O /home/ubuntu/prometheus.yml '{}'
-wget -q -O /home/ubuntu/datasources.yml '{}'
-wget -q -O /home/ubuntu/all.yml '{}'
-wget -q -O /home/ubuntu/dashboard.json '{}'
-wget -q -O /home/ubuntu/loki.yml '{}'
-wget -q -O /home/ubuntu/pyroscope.yml '{}'
-wget -q -O /home/ubuntu/tempo.yml '{}'
+wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/prometheus.yml '{}'
+wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/datasources.yml '{}'
+wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/all.yml '{}'
+wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/dashboard.json '{}'
+wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/loki.yml '{}'
+wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/pyroscope.yml '{}'
+wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/tempo.yml '{}'
 
 # Download service files from S3
-wget -q -O /home/ubuntu/prometheus.service '{}'
-wget -q -O /home/ubuntu/loki.service '{}'
-wget -q -O /home/ubuntu/pyroscope.service '{}'
-wget -q -O /home/ubuntu/tempo.service '{}'
-wget -q -O /home/ubuntu/node_exporter.service '{}'
+wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/prometheus.service '{}'
+wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/loki.service '{}'
+wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/pyroscope.service '{}'
+wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/tempo.service '{}'
+wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/node_exporter.service '{}'
 
 # Install Prometheus
 sudo mkdir -p /opt/prometheus /opt/prometheus/data
@@ -530,19 +530,19 @@ sudo apt-get update -y
 sudo apt-get install -y logrotate jq wget unzip libjemalloc2 linux-tools-common linux-tools-generic linux-tools-$(uname -r)
 
 # Download all files from S3 via pre-signed URLs
-wget -q -O /home/ubuntu/binary '{}'
-wget -q -O /home/ubuntu/config.conf '{}'
-wget -q -O /home/ubuntu/hosts.yaml '{}'
-wget -q -O /home/ubuntu/promtail.zip '{}'
-wget -q -O /home/ubuntu/promtail.yml '{}'
-wget -q -O /home/ubuntu/promtail.service '{}'
-wget -q -O /home/ubuntu/node_exporter.tar.gz '{}'
-wget -q -O /home/ubuntu/node_exporter.service '{}'
-wget -q -O /home/ubuntu/binary.service '{}'
-wget -q -O /home/ubuntu/logrotate.conf '{}'
-wget -q -O /home/ubuntu/pyroscope-agent.sh '{}'
-wget -q -O /home/ubuntu/pyroscope-agent.service '{}'
-wget -q -O /home/ubuntu/pyroscope-agent.timer '{}'
+wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/binary '{}'
+wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/config.conf '{}'
+wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/hosts.yaml '{}'
+wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/promtail.zip '{}'
+wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/promtail.yml '{}'
+wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/promtail.service '{}'
+wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/node_exporter.tar.gz '{}'
+wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/node_exporter.service '{}'
+wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/binary.service '{}'
+wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/logrotate.conf '{}'
+wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/pyroscope-agent.sh '{}'
+wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/pyroscope-agent.service '{}'
+wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/pyroscope-agent.timer '{}'
 
 # Install Promtail
 sudo mkdir -p /opt/promtail /etc/promtail

@@ -129,7 +129,10 @@ pub async fn poll_service_inactive(key_file: &str, ip: &str, service: &str) -> R
 
 /// Enables BBR on a remote instance by downloading config from S3 and applying sysctl settings.
 pub async fn enable_bbr(key_file: &str, ip: &str, bbr_conf_url: &str) -> Result<(), Error> {
-    let download_cmd = format!("wget -q -O /home/ubuntu/99-bbr.conf '{}'", bbr_conf_url);
+    let download_cmd = format!(
+        "wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/99-bbr.conf '{}'",
+        bbr_conf_url
+    );
     ssh_execute(key_file, ip, &download_cmd).await?;
     ssh_execute(
         key_file,

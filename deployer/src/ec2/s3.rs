@@ -116,6 +116,18 @@ pub async fn upload_file(
     Ok(())
 }
 
+/// Uploads a file to S3 and returns a pre-signed URL for downloading it
+pub async fn upload_and_presign(
+    client: &S3Client,
+    bucket: &str,
+    key: &str,
+    path: &Path,
+    expires_in: Duration,
+) -> Result<String, Error> {
+    upload_file(client, bucket, key, path).await?;
+    presign_url(client, bucket, key, expires_in).await
+}
+
 /// Generates a pre-signed URL for downloading an object from S3
 pub async fn presign_url(
     client: &S3Client,

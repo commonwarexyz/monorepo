@@ -210,39 +210,59 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     .await?;
     info!("generated pre-signed URLs for tools");
 
-    // Upload instance binaries and configs to S3 and generate pre-signed URLs
+    // Upload instance binaries and configs to S3 concurrently
     info!("uploading instance binaries and configs to S3");
+    struct InstanceUploadData {
+        name: String,
+        binary_path: std::path::PathBuf,
+        config_path: std::path::PathBuf,
+        binary_key: String,
+        config_key: String,
+    }
+    let instance_upload_data: Vec<_> = config
+        .instances
+        .iter()
+        .map(|instance| InstanceUploadData {
+            name: instance.name.clone(),
+            binary_path: std::path::PathBuf::from(&instance.binary),
+            config_path: std::path::PathBuf::from(&instance.config),
+            binary_key: binary_s3_key(tag, &instance.name),
+            config_key: config_s3_key(tag, &instance.name),
+        })
+        .collect();
+
+    let binary_config_futures: Vec<_> = instance_upload_data
+        .iter()
+        .flat_map(|data| {
+            vec![
+                upload_and_presign(
+                    &s3_client,
+                    S3_BUCKET_NAME,
+                    &data.binary_key,
+                    &data.binary_path,
+                    presign_duration,
+                ),
+                upload_and_presign(
+                    &s3_client,
+                    S3_BUCKET_NAME,
+                    &data.config_key,
+                    &data.config_path,
+                    presign_duration,
+                ),
+            ]
+        })
+        .collect();
+
+    let binary_config_results = try_join_all(binary_config_futures).await?;
+
     let mut instance_binary_urls: HashMap<String, String> = HashMap::new();
     let mut instance_config_urls: HashMap<String, String> = HashMap::new();
-    for instance in &config.instances {
-        let binary_key = binary_s3_key(tag, &instance.name);
-        let config_key = config_s3_key(tag, &instance.name);
-
-        upload_file(
-            &s3_client,
-            S3_BUCKET_NAME,
-            &binary_key,
-            std::path::Path::new(&instance.binary),
-        )
-        .await?;
-        upload_file(
-            &s3_client,
-            S3_BUCKET_NAME,
-            &config_key,
-            std::path::Path::new(&instance.config),
-        )
-        .await?;
-
-        let binary_url =
-            presign_url(&s3_client, S3_BUCKET_NAME, &binary_key, presign_duration).await?;
-        let config_url =
-            presign_url(&s3_client, S3_BUCKET_NAME, &config_key, presign_duration).await?;
-
-        instance_binary_urls.insert(instance.name.clone(), binary_url);
-        instance_config_urls.insert(instance.name.clone(), config_url);
-        info!(
-            instance = instance.name.as_str(),
-            "uploaded binary and config"
+    for (i, data) in instance_upload_data.iter().enumerate() {
+        let base_idx = i * 2;
+        instance_binary_urls.insert(data.name.clone(), binary_config_results[base_idx].clone());
+        instance_config_urls.insert(
+            data.name.clone(),
+            binary_config_results[base_idx + 1].clone(),
         );
     }
     info!("uploaded all instance binaries and configs");
@@ -563,17 +583,9 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     let logrotate_conf_path = tag_directory.join("logrotate.conf");
     std::fs::write(&logrotate_conf_path, LOGROTATE_CONF)?;
 
-    // Add BBR configuration file and upload to S3
+    // Add BBR configuration file
     let bbr_conf_path = tag_directory.join("99-bbr.conf");
     std::fs::write(&bbr_conf_path, BBR_CONF)?;
-    upload_file(&s3_client, S3_BUCKET_NAME, &bbr_s3_key(tag), &bbr_conf_path).await?;
-    let bbr_conf_url = presign_url(
-        &s3_client,
-        S3_BUCKET_NAME,
-        &bbr_s3_key(tag),
-        presign_duration,
-    )
-    .await?;
 
     // Configure monitoring instance
     info!("configuring monitoring instance");
@@ -591,200 +603,139 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
         })
         .collect();
 
-    // Write config files locally, upload to S3, and generate pre-signed URLs
+    // Write config files locally
     let prom_config = generate_prometheus_config(&instances);
     let prom_path = tag_directory.join("prometheus.yml");
     std::fs::write(&prom_path, &prom_config)?;
-    upload_file(
-        &s3_client,
-        S3_BUCKET_NAME,
-        &prometheus_config_s3_key(tag),
-        &prom_path,
-    )
-    .await?;
-    let prometheus_config_url = presign_url(
-        &s3_client,
-        S3_BUCKET_NAME,
-        &prometheus_config_s3_key(tag),
-        presign_duration,
-    )
-    .await?;
 
     let datasources_path = tag_directory.join("datasources.yml");
     std::fs::write(&datasources_path, DATASOURCES_YML)?;
-    upload_file(
-        &s3_client,
-        S3_BUCKET_NAME,
-        &monitoring_static_s3_key(tag, "datasources.yml"),
-        &datasources_path,
-    )
-    .await?;
-    let datasources_url = presign_url(
-        &s3_client,
-        S3_BUCKET_NAME,
-        &monitoring_static_s3_key(tag, "datasources.yml"),
-        presign_duration,
-    )
-    .await?;
 
     let all_yaml_path = tag_directory.join("all.yml");
     std::fs::write(&all_yaml_path, ALL_YML)?;
-    upload_file(
-        &s3_client,
-        S3_BUCKET_NAME,
-        &monitoring_static_s3_key(tag, "all.yml"),
-        &all_yaml_path,
-    )
-    .await?;
-    let all_yml_url = presign_url(
-        &s3_client,
-        S3_BUCKET_NAME,
-        &monitoring_static_s3_key(tag, "all.yml"),
-        presign_duration,
-    )
-    .await?;
-
-    upload_file(
-        &s3_client,
-        S3_BUCKET_NAME,
-        &dashboard_s3_key(tag),
-        std::path::Path::new(&config.monitoring.dashboard),
-    )
-    .await?;
-    let dashboard_url = presign_url(
-        &s3_client,
-        S3_BUCKET_NAME,
-        &dashboard_s3_key(tag),
-        presign_duration,
-    )
-    .await?;
 
     let loki_config_path = tag_directory.join("loki.yml");
     std::fs::write(&loki_config_path, LOKI_CONFIG)?;
-    upload_file(
-        &s3_client,
-        S3_BUCKET_NAME,
-        &monitoring_static_s3_key(tag, "loki.yml"),
-        &loki_config_path,
-    )
-    .await?;
-    let loki_yml_url = presign_url(
-        &s3_client,
-        S3_BUCKET_NAME,
-        &monitoring_static_s3_key(tag, "loki.yml"),
-        presign_duration,
-    )
-    .await?;
 
     let pyroscope_config_path = tag_directory.join("pyroscope.yml");
     std::fs::write(&pyroscope_config_path, PYROSCOPE_CONFIG)?;
-    upload_file(
-        &s3_client,
-        S3_BUCKET_NAME,
-        &monitoring_static_s3_key(tag, "pyroscope.yml"),
-        &pyroscope_config_path,
-    )
-    .await?;
-    let pyroscope_yml_url = presign_url(
-        &s3_client,
-        S3_BUCKET_NAME,
-        &monitoring_static_s3_key(tag, "pyroscope.yml"),
-        presign_duration,
-    )
-    .await?;
 
     let tempo_yml_path = tag_directory.join("tempo.yml");
     std::fs::write(&tempo_yml_path, TEMPO_CONFIG)?;
-    upload_file(
-        &s3_client,
-        S3_BUCKET_NAME,
-        &monitoring_static_s3_key(tag, "tempo.yml"),
-        &tempo_yml_path,
-    )
-    .await?;
-    let tempo_yml_url = presign_url(
-        &s3_client,
-        S3_BUCKET_NAME,
-        &monitoring_static_s3_key(tag, "tempo.yml"),
-        presign_duration,
-    )
-    .await?;
 
-    // Upload service files
-    upload_file(
-        &s3_client,
-        S3_BUCKET_NAME,
-        &monitoring_static_s3_key(tag, "prometheus.service"),
-        &prometheus_service_path,
-    )
-    .await?;
-    let prometheus_service_url = presign_url(
-        &s3_client,
-        S3_BUCKET_NAME,
-        &monitoring_static_s3_key(tag, "prometheus.service"),
-        presign_duration,
-    )
-    .await?;
-
-    upload_file(
-        &s3_client,
-        S3_BUCKET_NAME,
-        &monitoring_static_s3_key(tag, "loki.service"),
-        &loki_service_path,
-    )
-    .await?;
-    let loki_service_url = presign_url(
-        &s3_client,
-        S3_BUCKET_NAME,
-        &monitoring_static_s3_key(tag, "loki.service"),
-        presign_duration,
-    )
-    .await?;
-
-    upload_file(
-        &s3_client,
-        S3_BUCKET_NAME,
-        &monitoring_static_s3_key(tag, "pyroscope.service"),
-        &pyroscope_service_path,
-    )
-    .await?;
-    let pyroscope_service_url = presign_url(
-        &s3_client,
-        S3_BUCKET_NAME,
-        &monitoring_static_s3_key(tag, "pyroscope.service"),
-        presign_duration,
-    )
-    .await?;
-
-    upload_file(
-        &s3_client,
-        S3_BUCKET_NAME,
-        &monitoring_static_s3_key(tag, "tempo.service"),
-        &tempo_service_path,
-    )
-    .await?;
-    let tempo_service_url = presign_url(
-        &s3_client,
-        S3_BUCKET_NAME,
-        &monitoring_static_s3_key(tag, "tempo.service"),
-        presign_duration,
-    )
-    .await?;
-
-    upload_file(
-        &s3_client,
-        S3_BUCKET_NAME,
-        &monitoring_static_s3_key(tag, "node_exporter.service"),
-        &node_exporter_service_path,
-    )
-    .await?;
-    let monitoring_node_exporter_service_url = presign_url(
-        &s3_client,
-        S3_BUCKET_NAME,
-        &monitoring_static_s3_key(tag, "node_exporter.service"),
-        presign_duration,
-    )
-    .await?;
+    // Upload all monitoring config files to S3 concurrently (including BBR config)
+    let dashboard_path = std::path::PathBuf::from(&config.monitoring.dashboard);
+    let bbr_key = bbr_s3_key(tag);
+    let [
+        bbr_conf_url,
+        prometheus_config_url,
+        datasources_url,
+        all_yml_url,
+        dashboard_url,
+        loki_yml_url,
+        pyroscope_yml_url,
+        tempo_yml_url,
+        prometheus_service_url,
+        loki_service_url,
+        pyroscope_service_url,
+        tempo_service_url,
+        monitoring_node_exporter_service_url,
+    ]: [String; 13] = try_join_all([
+        upload_and_presign(
+            &s3_client,
+            S3_BUCKET_NAME,
+            &bbr_key,
+            &bbr_conf_path,
+            presign_duration,
+        ),
+        upload_and_presign(
+            &s3_client,
+            S3_BUCKET_NAME,
+            &prometheus_config_s3_key(tag),
+            &prom_path,
+            presign_duration,
+        ),
+        upload_and_presign(
+            &s3_client,
+            S3_BUCKET_NAME,
+            &monitoring_static_s3_key(tag, "datasources.yml"),
+            &datasources_path,
+            presign_duration,
+        ),
+        upload_and_presign(
+            &s3_client,
+            S3_BUCKET_NAME,
+            &monitoring_static_s3_key(tag, "all.yml"),
+            &all_yaml_path,
+            presign_duration,
+        ),
+        upload_and_presign(
+            &s3_client,
+            S3_BUCKET_NAME,
+            &dashboard_s3_key(tag),
+            &dashboard_path,
+            presign_duration,
+        ),
+        upload_and_presign(
+            &s3_client,
+            S3_BUCKET_NAME,
+            &monitoring_static_s3_key(tag, "loki.yml"),
+            &loki_config_path,
+            presign_duration,
+        ),
+        upload_and_presign(
+            &s3_client,
+            S3_BUCKET_NAME,
+            &monitoring_static_s3_key(tag, "pyroscope.yml"),
+            &pyroscope_config_path,
+            presign_duration,
+        ),
+        upload_and_presign(
+            &s3_client,
+            S3_BUCKET_NAME,
+            &monitoring_static_s3_key(tag, "tempo.yml"),
+            &tempo_yml_path,
+            presign_duration,
+        ),
+        upload_and_presign(
+            &s3_client,
+            S3_BUCKET_NAME,
+            &monitoring_static_s3_key(tag, "prometheus.service"),
+            &prometheus_service_path,
+            presign_duration,
+        ),
+        upload_and_presign(
+            &s3_client,
+            S3_BUCKET_NAME,
+            &monitoring_static_s3_key(tag, "loki.service"),
+            &loki_service_path,
+            presign_duration,
+        ),
+        upload_and_presign(
+            &s3_client,
+            S3_BUCKET_NAME,
+            &monitoring_static_s3_key(tag, "pyroscope.service"),
+            &pyroscope_service_path,
+            presign_duration,
+        ),
+        upload_and_presign(
+            &s3_client,
+            S3_BUCKET_NAME,
+            &monitoring_static_s3_key(tag, "tempo.service"),
+            &tempo_service_path,
+            presign_duration,
+        ),
+        upload_and_presign(
+            &s3_client,
+            S3_BUCKET_NAME,
+            &monitoring_static_s3_key(tag, "node_exporter.service"),
+            &node_exporter_service_path,
+            presign_duration,
+        ),
+    ])
+    .await?
+    .try_into()
+    .unwrap();
 
     info!("uploaded monitoring config files to S3");
 
@@ -841,176 +792,148 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     let hosts_path = tag_directory.join("hosts.yaml");
     std::fs::write(&hosts_path, &hosts_yaml)?;
 
-    // Upload shared static service files to S3 (once for all instances)
+    // Upload shared static service files to S3 concurrently (once for all instances)
     info!("uploading binary instance static files to S3");
-    upload_file(
-        &s3_client,
-        S3_BUCKET_NAME,
-        &instance_static_s3_key(tag, "promtail.service"),
-        &promtail_service_path,
-    )
-    .await?;
-    let promtail_service_url = presign_url(
-        &s3_client,
-        S3_BUCKET_NAME,
-        &instance_static_s3_key(tag, "promtail.service"),
-        presign_duration,
-    )
-    .await?;
+    let [
+        promtail_service_url,
+        instance_node_exporter_service_url,
+        binary_service_url,
+        logrotate_conf_url,
+        pyroscope_agent_service_url,
+        pyroscope_agent_timer_url,
+    ]: [String; 6] = try_join_all([
+        upload_and_presign(
+            &s3_client,
+            S3_BUCKET_NAME,
+            &instance_static_s3_key(tag, "promtail.service"),
+            &promtail_service_path,
+            presign_duration,
+        ),
+        upload_and_presign(
+            &s3_client,
+            S3_BUCKET_NAME,
+            &instance_static_s3_key(tag, "node_exporter.service"),
+            &node_exporter_service_path,
+            presign_duration,
+        ),
+        upload_and_presign(
+            &s3_client,
+            S3_BUCKET_NAME,
+            &instance_static_s3_key(tag, "binary.service"),
+            &binary_service_path,
+            presign_duration,
+        ),
+        upload_and_presign(
+            &s3_client,
+            S3_BUCKET_NAME,
+            &instance_static_s3_key(tag, "logrotate.conf"),
+            &logrotate_conf_path,
+            presign_duration,
+        ),
+        upload_and_presign(
+            &s3_client,
+            S3_BUCKET_NAME,
+            &instance_static_s3_key(tag, "pyroscope-agent.service"),
+            &pyroscope_agent_service_path,
+            presign_duration,
+        ),
+        upload_and_presign(
+            &s3_client,
+            S3_BUCKET_NAME,
+            &instance_static_s3_key(tag, "pyroscope-agent.timer"),
+            &pyroscope_agent_timer_path,
+            presign_duration,
+        ),
+    ])
+    .await?
+    .try_into()
+    .unwrap();
 
-    upload_file(
-        &s3_client,
-        S3_BUCKET_NAME,
-        &instance_static_s3_key(tag, "node_exporter.service"),
-        &node_exporter_service_path,
-    )
-    .await?;
-    let instance_node_exporter_service_url = presign_url(
-        &s3_client,
-        S3_BUCKET_NAME,
-        &instance_static_s3_key(tag, "node_exporter.service"),
-        presign_duration,
-    )
-    .await?;
-
-    upload_file(
-        &s3_client,
-        S3_BUCKET_NAME,
-        &instance_static_s3_key(tag, "binary.service"),
-        &binary_service_path,
-    )
-    .await?;
-    let binary_service_url = presign_url(
-        &s3_client,
-        S3_BUCKET_NAME,
-        &instance_static_s3_key(tag, "binary.service"),
-        presign_duration,
-    )
-    .await?;
-
-    upload_file(
-        &s3_client,
-        S3_BUCKET_NAME,
-        &instance_static_s3_key(tag, "logrotate.conf"),
-        &logrotate_conf_path,
-    )
-    .await?;
-    let logrotate_conf_url = presign_url(
-        &s3_client,
-        S3_BUCKET_NAME,
-        &instance_static_s3_key(tag, "logrotate.conf"),
-        presign_duration,
-    )
-    .await?;
-
-    upload_file(
-        &s3_client,
-        S3_BUCKET_NAME,
-        &instance_static_s3_key(tag, "pyroscope-agent.service"),
-        &pyroscope_agent_service_path,
-    )
-    .await?;
-    let pyroscope_agent_service_url = presign_url(
-        &s3_client,
-        S3_BUCKET_NAME,
-        &instance_static_s3_key(tag, "pyroscope-agent.service"),
-        presign_duration,
-    )
-    .await?;
-
-    upload_file(
-        &s3_client,
-        S3_BUCKET_NAME,
-        &instance_static_s3_key(tag, "pyroscope-agent.timer"),
-        &pyroscope_agent_timer_path,
-    )
-    .await?;
-    let pyroscope_agent_timer_url = presign_url(
-        &s3_client,
-        S3_BUCKET_NAME,
-        &instance_static_s3_key(tag, "pyroscope-agent.timer"),
-        presign_duration,
-    )
-    .await?;
-
-    // Upload per-instance dynamic files to S3
+    // Write per-instance config files locally and prepare S3 keys
     info!("uploading per-instance config files to S3");
-    let mut instance_urls_map: HashMap<String, InstanceUrls> = HashMap::new();
+    struct PerInstanceData {
+        name: String,
+        promtail_path: std::path::PathBuf,
+        pyroscope_path: std::path::PathBuf,
+        hosts_key: String,
+        promtail_key: String,
+        pyroscope_key: String,
+    }
+    let mut per_instance_data: Vec<PerInstanceData> = Vec::new();
     for deployment in &deployments {
         let instance = &deployment.instance;
         let ip = &deployment.ip;
 
-        // Upload hosts.yaml for this instance
-        upload_file(
-            &s3_client,
-            S3_BUCKET_NAME,
-            &hosts_s3_key(tag, &instance.name),
-            &hosts_path,
-        )
-        .await?;
-        let hosts_url = presign_url(
-            &s3_client,
-            S3_BUCKET_NAME,
-            &hosts_s3_key(tag, &instance.name),
-            presign_duration,
-        )
-        .await?;
-
-        // Generate and upload promtail config
         let promtail_cfg =
             promtail_config(&monitoring_private_ip, &instance.name, ip, &instance.region);
-        let promtail_config_path = tag_directory.join(format!("promtail_{}.yml", instance.name));
-        std::fs::write(&promtail_config_path, &promtail_cfg)?;
-        upload_file(
-            &s3_client,
-            S3_BUCKET_NAME,
-            &promtail_config_s3_key(tag, &instance.name),
-            &promtail_config_path,
-        )
-        .await?;
-        let promtail_config_url = presign_url(
-            &s3_client,
-            S3_BUCKET_NAME,
-            &promtail_config_s3_key(tag, &instance.name),
-            presign_duration,
-        )
-        .await?;
+        let promtail_path = tag_directory.join(format!("promtail_{}.yml", instance.name));
+        std::fs::write(&promtail_path, &promtail_cfg)?;
 
-        // Generate and upload pyroscope agent script
         let pyroscope_script =
             generate_pyroscope_script(&monitoring_private_ip, &instance.name, ip, &instance.region);
-        let pyroscope_script_path =
-            tag_directory.join(format!("pyroscope-agent_{}.sh", instance.name));
-        std::fs::write(&pyroscope_script_path, &pyroscope_script)?;
-        upload_file(
-            &s3_client,
-            S3_BUCKET_NAME,
-            &pyroscope_script_s3_key(tag, &instance.name),
-            &pyroscope_script_path,
-        )
-        .await?;
-        let pyroscope_script_url = presign_url(
-            &s3_client,
-            S3_BUCKET_NAME,
-            &pyroscope_script_s3_key(tag, &instance.name),
-            presign_duration,
-        )
-        .await?;
+        let pyroscope_path = tag_directory.join(format!("pyroscope-agent_{}.sh", instance.name));
+        std::fs::write(&pyroscope_path, &pyroscope_script)?;
 
+        per_instance_data.push(PerInstanceData {
+            name: instance.name.clone(),
+            promtail_path,
+            pyroscope_path,
+            hosts_key: hosts_s3_key(tag, &instance.name),
+            promtail_key: promtail_config_s3_key(tag, &instance.name),
+            pyroscope_key: pyroscope_script_s3_key(tag, &instance.name),
+        });
+    }
+
+    // Upload all per-instance files concurrently
+    let per_instance_futures: Vec<_> = per_instance_data
+        .iter()
+        .flat_map(|data| {
+            vec![
+                upload_and_presign(
+                    &s3_client,
+                    S3_BUCKET_NAME,
+                    &data.hosts_key,
+                    &hosts_path,
+                    presign_duration,
+                ),
+                upload_and_presign(
+                    &s3_client,
+                    S3_BUCKET_NAME,
+                    &data.promtail_key,
+                    &data.promtail_path,
+                    presign_duration,
+                ),
+                upload_and_presign(
+                    &s3_client,
+                    S3_BUCKET_NAME,
+                    &data.pyroscope_key,
+                    &data.pyroscope_path,
+                    presign_duration,
+                ),
+            ]
+        })
+        .collect();
+
+    let per_instance_results = try_join_all(per_instance_futures).await?;
+
+    // Build the instance URLs map from the results
+    let mut instance_urls_map: HashMap<String, InstanceUrls> = HashMap::new();
+    for (i, data) in per_instance_data.iter().enumerate() {
+        let base_idx = i * 3;
         instance_urls_map.insert(
-            instance.name.clone(),
+            data.name.clone(),
             InstanceUrls {
-                binary: instance_binary_urls[&instance.name].clone(),
-                config: instance_config_urls[&instance.name].clone(),
-                hosts: hosts_url,
+                binary: instance_binary_urls[&data.name].clone(),
+                config: instance_config_urls[&data.name].clone(),
+                hosts: per_instance_results[base_idx].clone(),
                 promtail_bin: promtail_url.clone(),
-                promtail_config: promtail_config_url,
+                promtail_config: per_instance_results[base_idx + 1].clone(),
                 promtail_service: promtail_service_url.clone(),
                 node_exporter_bin: node_exporter_url.clone(),
                 node_exporter_service: instance_node_exporter_service_url.clone(),
                 binary_service: binary_service_url.clone(),
                 logrotate_conf: logrotate_conf_url.clone(),
-                pyroscope_script: pyroscope_script_url,
+                pyroscope_script: per_instance_results[base_idx + 2].clone(),
                 pyroscope_service: pyroscope_agent_service_url.clone(),
                 pyroscope_timer: pyroscope_agent_timer_url.clone(),
             },
