@@ -281,7 +281,9 @@ cfg_if::cfg_if! {
             #[error("private key not found")]
             PrivateKeyNotFound,
             #[error("invalid IP address: {0}")]
-            InvalidIpAddress(String),
+            IpAddrParse(#[from] std::net::AddrParseError),
+            #[error("IP address is not IPv4: {0}")]
+            IpAddrNotV4(std::net::IpAddr),
             #[error("download failed: {0}")]
             DownloadFailed(String),
             #[error("S3 presigning config error: {0}")]
