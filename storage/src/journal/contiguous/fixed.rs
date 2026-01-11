@@ -61,7 +61,7 @@ use crate::{
 use bytes::Buf;
 use commonware_codec::{CodecFixed, CodecFixedShared, DecodeExt as _, ReadExt as _};
 use commonware_runtime::{
-    buffer::pool::{Append, PoolRef},
+    buffer::pool::{Append, PoolRef, Replay},
     telemetry::metrics::status::GaugeExt,
     Blob, Error as RError, Metrics, Storage,
 };
@@ -78,6 +78,14 @@ use std::{
     num::{NonZeroU64, NonZeroUsize},
 };
 use tracing::{debug, trace, warn};
+
+/// State for replaying items from a blob.
+struct ReplayState<B: Blob> {
+    replay: Replay<B>,
+    item_idx: u64,
+    skip_bytes: u64,
+    done: bool,
+}
 
 /// Configuration for `Journal` storage.
 #[derive(Clone)]
@@ -496,9 +504,14 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
             let skip_bytes = initial_item_idx * Self::CHUNK_SIZE_U64;
 
             stream::unfold(
-                (replay, initial_item_idx, skip_bytes, false),
-                move |(mut replay, mut item_idx, mut skip_bytes, mut done)| async move {
-                    if done {
+                ReplayState {
+                    replay,
+                    item_idx: initial_item_idx,
+                    skip_bytes,
+                    done: false,
+                },
+                move |mut state| async move {
+                    if state.done {
                         return None;
                     }
 
@@ -506,51 +519,52 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
 
                     loop {
                         // Ensure we have enough data for one item
-                        match replay.ensure(Self::CHUNK_SIZE).await {
+                        match state.replay.ensure(Self::CHUNK_SIZE).await {
                             Ok(true) => {}
                             Ok(false) => {
                                 // Reader exhausted - we're done with this blob
-                                done = true;
+                                state.done = true;
                                 return if batch.is_empty() {
                                     None
                                 } else {
-                                    Some((batch, (replay, item_idx, skip_bytes, done)))
+                                    Some((batch, state))
                                 };
                             }
                             Err(err) => {
                                 batch.push(Err(Error::Runtime(err)));
-                                done = true;
-                                return Some((batch, (replay, item_idx, skip_bytes, done)));
+                                state.done = true;
+                                return Some((batch, state));
                             }
                         }
 
                         // Skip bytes if needed (for start_pos within first blob)
-                        if skip_bytes > 0 {
-                            let to_skip = skip_bytes.min(replay.remaining() as u64) as usize;
-                            replay.advance(to_skip);
-                            skip_bytes -= to_skip as u64;
+                        if state.skip_bytes > 0 {
+                            let to_skip =
+                                state.skip_bytes.min(state.replay.remaining() as u64) as usize;
+                            state.replay.advance(to_skip);
+                            state.skip_bytes -= to_skip as u64;
                             continue;
                         }
 
                         // Decode items from buffer
-                        while replay.remaining() >= Self::CHUNK_SIZE {
-                            let item_pos = items_per_blob * blob_index + item_idx;
-                            match A::read(&mut replay) {
+                        while state.replay.remaining() >= Self::CHUNK_SIZE {
+                            let item_pos = items_per_blob * blob_index + state.item_idx;
+                            match A::read(&mut state.replay) {
                                 Ok(item) => {
                                     batch.push(Ok((item_pos, item)));
-                                    item_idx += 1;
+                                    state.item_idx += 1;
                                 }
                                 Err(err) => {
                                     batch.push(Err(Error::Codec(err)));
-                                    done = true;
-                                    return Some((batch, (replay, item_idx, skip_bytes, done)));
+                                    state.done = true;
+                                    return Some((batch, state));
                                 }
                             }
                         }
 
                         // Return batch if we have items
                         if !batch.is_empty() {
-                            return Some((batch, (replay, item_idx, skip_bytes, done)));
+                            return Some((batch, state));
                         }
                     }
                 },

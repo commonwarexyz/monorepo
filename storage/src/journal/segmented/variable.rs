@@ -84,7 +84,7 @@ use commonware_codec::{
     varint::UInt, Codec, CodecShared, EncodeSize, ReadExt, Write as CodecWrite,
 };
 use commonware_runtime::{
-    buffer::pool::{Append, PoolRef},
+    buffer::pool::{Append, PoolRef, Replay},
     Blob, Metrics, Storage,
 };
 use futures::stream::{self, Stream, StreamExt};
@@ -172,6 +172,19 @@ fn find_item(buf: &mut impl Buf, offset: u64) -> Result<(u64, ItemInfo), Error> 
     };
 
     Ok((next_offset, item))
+}
+
+/// State for replaying a single section's blob.
+struct ReplayState<B: Blob, C> {
+    section: u64,
+    blob: Append<B>,
+    replay: Replay<B>,
+    skip_bytes: u64,
+    offset: u64,
+    valid_offset: u64,
+    codec_config: C,
+    compressed: bool,
+    done: bool,
 }
 
 /// Decode item data with optional decompression.
@@ -311,257 +324,149 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
                 };
 
                 stream::unfold(
-                    (
+                    ReplayState {
                         section,
                         blob,
                         replay,
                         skip_bytes,
-                        0u64, // offset (logical position in blob)
-                        0u64, // valid_offset (last successfully parsed position)
+                        offset: 0,
+                        valid_offset: 0,
                         codec_config,
                         compressed,
-                        false, // done
-                    ),
-                    move |(
-                        section,
-                        blob,
-                        mut replay,
-                        mut skip_bytes,
-                        mut offset,
-                        mut valid_offset,
-                        codec_config,
-                        compressed,
-                        mut done,
-                    )| async move {
-                        if done {
+                        done: false,
+                    },
+                    move |mut state| async move {
+                        if state.done {
                             return None;
                         }
 
-                        let blob_size = replay.blob_size();
+                        let blob_size = state.replay.blob_size();
                         let mut batch: Vec<Result<(u64, u64, u32, V), Error>> = Vec::new();
 
                         loop {
                             // Ensure we have enough data for varint header.
                             // ensure() returns Ok(false) if exhausted with fewer bytes,
                             // but we still try to decode from remaining bytes.
-                            match replay.ensure(MAX_VARINT_SIZE).await {
+                            match state.replay.ensure(MAX_VARINT_SIZE).await {
                                 Ok(true) => {}
                                 Ok(false) => {
                                     // Reader exhausted - check if buffer is empty
-                                    if replay.remaining() == 0 {
-                                        done = true;
+                                    if state.replay.remaining() == 0 {
+                                        state.done = true;
                                         return if batch.is_empty() {
                                             None
                                         } else {
-                                            Some((
-                                                batch,
-                                                (
-                                                    section,
-                                                    blob,
-                                                    replay,
-                                                    skip_bytes,
-                                                    offset,
-                                                    valid_offset,
-                                                    codec_config,
-                                                    compressed,
-                                                    done,
-                                                ),
-                                            ))
+                                            Some((batch, state))
                                         };
                                     }
                                     // Buffer still has data - continue to try decoding
                                 }
                                 Err(err) => {
                                     batch.push(Err(err.into()));
-                                    done = true;
-                                    return Some((
-                                        batch,
-                                        (
-                                            section,
-                                            blob,
-                                            replay,
-                                            skip_bytes,
-                                            offset,
-                                            valid_offset,
-                                            codec_config,
-                                            compressed,
-                                            done,
-                                        ),
-                                    ));
+                                    state.done = true;
+                                    return Some((batch, state));
                                 }
                             }
 
                             // Skip bytes if needed (for start_offset)
-                            if skip_bytes > 0 {
-                                let to_skip = skip_bytes.min(replay.remaining() as u64) as usize;
-                                replay.advance(to_skip);
-                                skip_bytes -= to_skip as u64;
-                                offset += to_skip as u64;
+                            if state.skip_bytes > 0 {
+                                let to_skip =
+                                    state.skip_bytes.min(state.replay.remaining() as u64) as usize;
+                                state.replay.advance(to_skip);
+                                state.skip_bytes -= to_skip as u64;
+                                state.offset += to_skip as u64;
                                 continue;
                             }
 
                             // Try to decode length prefix
-                            let before_remaining = replay.remaining();
-                            let (item_size, varint_len) = match decode_length_prefix(&mut replay) {
-                                Ok(result) => result,
-                                Err(err) => {
-                                    // Could be incomplete varint - check if reader exhausted
-                                    if replay.is_exhausted() || before_remaining < MAX_VARINT_SIZE {
-                                        // Treat as trailing bytes
-                                        if valid_offset < blob_size && offset < blob_size {
-                                            warn!(
-                                                blob = section,
-                                                bad_offset = offset,
-                                                new_size = valid_offset,
-                                                "trailing bytes detected: truncating"
-                                            );
-                                            blob.resize(valid_offset).await.ok()?;
+                            let before_remaining = state.replay.remaining();
+                            let (item_size, varint_len) =
+                                match decode_length_prefix(&mut state.replay) {
+                                    Ok(result) => result,
+                                    Err(err) => {
+                                        // Could be incomplete varint - check if reader exhausted
+                                        if state.replay.is_exhausted()
+                                            || before_remaining < MAX_VARINT_SIZE
+                                        {
+                                            // Treat as trailing bytes
+                                            if state.valid_offset < blob_size
+                                                && state.offset < blob_size
+                                            {
+                                                warn!(
+                                                    blob = state.section,
+                                                    bad_offset = state.offset,
+                                                    new_size = state.valid_offset,
+                                                    "trailing bytes detected: truncating"
+                                                );
+                                                state.blob.resize(state.valid_offset).await.ok()?;
+                                            }
+                                            state.done = true;
+                                            return if batch.is_empty() {
+                                                None
+                                            } else {
+                                                Some((batch, state))
+                                            };
                                         }
-                                        done = true;
-                                        return if batch.is_empty() {
-                                            None
-                                        } else {
-                                            Some((
-                                                batch,
-                                                (
-                                                    section,
-                                                    blob,
-                                                    replay,
-                                                    skip_bytes,
-                                                    offset,
-                                                    valid_offset,
-                                                    codec_config,
-                                                    compressed,
-                                                    done,
-                                                ),
-                                            ))
-                                        };
+                                        batch.push(Err(err));
+                                        state.done = true;
+                                        return Some((batch, state));
                                     }
-                                    batch.push(Err(err));
-                                    done = true;
-                                    return Some((
-                                        batch,
-                                        (
-                                            section,
-                                            blob,
-                                            replay,
-                                            skip_bytes,
-                                            offset,
-                                            valid_offset,
-                                            codec_config,
-                                            compressed,
-                                            done,
-                                        ),
-                                    ));
-                                }
-                            };
+                                };
 
                             // Ensure we have enough data for item body
-                            match replay.ensure(item_size).await {
+                            match state.replay.ensure(item_size).await {
                                 Ok(true) => {}
                                 Ok(false) => {
                                     // Incomplete item at end - truncate
                                     warn!(
-                                        blob = section,
-                                        bad_offset = offset,
-                                        new_size = valid_offset,
+                                        blob = state.section,
+                                        bad_offset = state.offset,
+                                        new_size = state.valid_offset,
                                         "incomplete item at end: truncating"
                                     );
-                                    blob.resize(valid_offset).await.ok()?;
-                                    done = true;
+                                    state.blob.resize(state.valid_offset).await.ok()?;
+                                    state.done = true;
                                     return if batch.is_empty() {
                                         None
                                     } else {
-                                        Some((
-                                            batch,
-                                            (
-                                                section,
-                                                blob,
-                                                replay,
-                                                skip_bytes,
-                                                offset,
-                                                valid_offset,
-                                                codec_config,
-                                                compressed,
-                                                done,
-                                            ),
-                                        ))
+                                        Some((batch, state))
                                     };
                                 }
                                 Err(err) => {
                                     batch.push(Err(err.into()));
-                                    done = true;
-                                    return Some((
-                                        batch,
-                                        (
-                                            section,
-                                            blob,
-                                            replay,
-                                            skip_bytes,
-                                            offset,
-                                            valid_offset,
-                                            codec_config,
-                                            compressed,
-                                            done,
-                                        ),
-                                    ));
+                                    state.done = true;
+                                    return Some((batch, state));
                                 }
                             }
 
                             // Decode item - use take() to limit bytes read
-                            let item_offset = offset;
-                            let next_offset = offset + varint_len as u64 + item_size as u64;
+                            let item_offset = state.offset;
+                            let next_offset = state.offset + varint_len as u64 + item_size as u64;
                             match decode_item::<V>(
-                                (&mut replay).take(item_size),
-                                &codec_config,
-                                compressed,
+                                (&mut state.replay).take(item_size),
+                                &state.codec_config,
+                                state.compressed,
                             ) {
                                 Ok(decoded) => {
                                     batch.push(Ok((
-                                        section,
+                                        state.section,
                                         item_offset,
                                         item_size as u32,
                                         decoded,
                                     )));
-                                    valid_offset = next_offset;
-                                    offset = next_offset;
+                                    state.valid_offset = next_offset;
+                                    state.offset = next_offset;
                                 }
                                 Err(err) => {
                                     batch.push(Err(err));
-                                    done = true;
-                                    return Some((
-                                        batch,
-                                        (
-                                            section,
-                                            blob,
-                                            replay,
-                                            skip_bytes,
-                                            offset,
-                                            valid_offset,
-                                            codec_config,
-                                            compressed,
-                                            done,
-                                        ),
-                                    ));
+                                    state.done = true;
+                                    return Some((batch, state));
                                 }
                             }
 
                             // Return batch if we have items and buffer is low
-                            if !batch.is_empty() && replay.remaining() < MAX_VARINT_SIZE {
-                                return Some((
-                                    batch,
-                                    (
-                                        section,
-                                        blob,
-                                        replay,
-                                        skip_bytes,
-                                        offset,
-                                        valid_offset,
-                                        codec_config,
-                                        compressed,
-                                        done,
-                                    ),
-                                ));
+                            if !batch.is_empty() && state.replay.remaining() < MAX_VARINT_SIZE {
+                                return Some((batch, state));
                             }
                         }
                     },

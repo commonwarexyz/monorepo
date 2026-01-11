@@ -32,6 +32,14 @@ use futures::{
 use std::{marker::PhantomData, num::NonZeroUsize};
 use tracing::{trace, warn};
 
+/// State for replaying a single section's blob.
+struct ReplayState<B: Blob> {
+    section: u64,
+    replay: commonware_runtime::buffer::pool::Replay<B>,
+    position: u64,
+    done: bool,
+}
+
 /// Configuration for the fixed segmented journal.
 #[derive(Clone)]
 pub struct Config {
@@ -190,9 +198,14 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         // flattened into individual stream elements.
         Ok(stream::iter(blob_info).flat_map(move |(section, replay)| {
             stream::unfold(
-                (section, replay, 0u64, false),
-                move |(section, mut replay, mut position, mut done)| async move {
-                    if done {
+                ReplayState {
+                    section,
+                    replay,
+                    position: 0,
+                    done: false,
+                },
+                move |mut state| async move {
+                    if state.done {
                         return None;
                     }
 
@@ -200,42 +213,42 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
 
                     loop {
                         // Ensure we have enough data for one item
-                        match replay.ensure(Self::CHUNK_SIZE).await {
+                        match state.replay.ensure(Self::CHUNK_SIZE).await {
                             Ok(true) => {}
                             Ok(false) => {
                                 // Reader exhausted - we're done with this blob
-                                done = true;
+                                state.done = true;
                                 return if batch.is_empty() {
                                     None
                                 } else {
-                                    Some((batch, (section, replay, position, done)))
+                                    Some((batch, state))
                                 };
                             }
                             Err(err) => {
                                 batch.push(Err(Error::Runtime(err)));
-                                done = true;
-                                return Some((batch, (section, replay, position, done)));
+                                state.done = true;
+                                return Some((batch, state));
                             }
                         }
 
                         // Decode items from buffer
-                        while replay.remaining() >= Self::CHUNK_SIZE {
-                            match A::read(&mut replay) {
+                        while state.replay.remaining() >= Self::CHUNK_SIZE {
+                            match A::read(&mut state.replay) {
                                 Ok(item) => {
-                                    batch.push(Ok((section, position, item)));
-                                    position += 1;
+                                    batch.push(Ok((state.section, state.position, item)));
+                                    state.position += 1;
                                 }
                                 Err(err) => {
                                     batch.push(Err(Error::Codec(err)));
-                                    done = true;
-                                    return Some((batch, (section, replay, position, done)));
+                                    state.done = true;
+                                    return Some((batch, state));
                                 }
                             }
                         }
 
                         // Return batch if we have items
                         if !batch.is_empty() {
-                            return Some((batch, (section, replay, position, done)));
+                            return Some((batch, state));
                         }
                     }
                 },
