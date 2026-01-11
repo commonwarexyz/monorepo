@@ -45,42 +45,53 @@ pub async fn update(config_path: &PathBuf) -> Result<(), Error> {
         .map(|i| (i.name.clone(), i.clone()))
         .collect();
 
-    // Upload updated binaries and configs to S3 and generate pre-signed URLs
+    // Upload updated binaries and configs to S3 and generate pre-signed URLs concurrently
     info!("uploading updated binaries and configs to S3");
     let s3_client = create_s3_client(Region::new(MONITORING_REGION)).await;
     let presign_duration = Duration::from_secs(6 * 60 * 60);
+
+    let upload_results: Vec<(String, String, String)> =
+        try_join_all(config.instances.iter().map(|instance| {
+            let s3_client = s3_client.clone();
+            let tag = tag.clone();
+            let name = instance.name.clone();
+            let binary_path = instance.binary.clone();
+            let config_path = instance.config.clone();
+            async move {
+                let binary_key = binary_s3_key(&tag, &name);
+                let config_key = config_s3_key(&tag, &name);
+
+                let [binary_url, config_url]: [String; 2] = try_join_all([
+                    upload_and_presign(
+                        &s3_client,
+                        S3_BUCKET_NAME,
+                        &binary_key,
+                        std::path::Path::new(&binary_path),
+                        presign_duration,
+                    ),
+                    upload_and_presign(
+                        &s3_client,
+                        S3_BUCKET_NAME,
+                        &config_key,
+                        std::path::Path::new(&config_path),
+                        presign_duration,
+                    ),
+                ])
+                .await?
+                .try_into()
+                .unwrap();
+
+                info!(instance = name.as_str(), "uploaded binary and config");
+                Ok::<_, Error>((name, binary_url, config_url))
+            }
+        }))
+        .await?;
+
     let mut instance_binary_urls: HashMap<String, String> = HashMap::new();
     let mut instance_config_urls: HashMap<String, String> = HashMap::new();
-    for instance in &config.instances {
-        let binary_key = binary_s3_key(tag, &instance.name);
-        let config_key = config_s3_key(tag, &instance.name);
-
-        upload_file(
-            &s3_client,
-            S3_BUCKET_NAME,
-            &binary_key,
-            std::path::Path::new(&instance.binary),
-        )
-        .await?;
-        upload_file(
-            &s3_client,
-            S3_BUCKET_NAME,
-            &config_key,
-            std::path::Path::new(&instance.config),
-        )
-        .await?;
-
-        let binary_url =
-            presign_url(&s3_client, S3_BUCKET_NAME, &binary_key, presign_duration).await?;
-        let config_url =
-            presign_url(&s3_client, S3_BUCKET_NAME, &config_key, presign_duration).await?;
-
-        instance_binary_urls.insert(instance.name.clone(), binary_url);
-        instance_config_urls.insert(instance.name.clone(), config_url);
-        info!(
-            instance = instance.name.as_str(),
-            "uploaded binary and config"
-        );
+    for (name, binary_url, config_url) in upload_results {
+        instance_binary_urls.insert(name.clone(), binary_url);
+        instance_config_urls.insert(name, config_url);
     }
     info!("uploaded all updated binaries and configs");
 

@@ -284,6 +284,8 @@ cfg_if::cfg_if! {
             InvalidIpAddress(String),
             #[error("download failed: {0}")]
             DownloadFailed(String),
+            #[error("S3 operation failed: {0}")]
+            S3OperationFailed(String),
         }
     }
 }

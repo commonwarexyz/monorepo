@@ -101,7 +101,7 @@ pub async fn upload_file(
 ) -> Result<(), Error> {
     let body = ByteStream::from_path(path)
         .await
-        .map_err(|e| Error::DownloadFailed(format!("failed to read file: {e}")))?;
+        .map_err(|e| Error::S3OperationFailed(format!("failed to read file: {e}")))?;
 
     client
         .put_object()
@@ -136,7 +136,7 @@ pub async fn presign_url(
     expires_in: Duration,
 ) -> Result<String, Error> {
     let presigning_config = PresigningConfig::expires_in(expires_in)
-        .map_err(|e| Error::DownloadFailed(format!("invalid presign duration: {e}")))?;
+        .map_err(|e| Error::S3OperationFailed(format!("invalid presign duration: {e}")))?;
 
     let presigned_request = client
         .get_object()
@@ -144,7 +144,7 @@ pub async fn presign_url(
         .key(key)
         .presigned(presigning_config)
         .await
-        .map_err(|e| Error::DownloadFailed(format!("failed to presign URL: {e}")))?;
+        .map_err(|e| Error::S3OperationFailed(format!("failed to presign URL: {e}")))?;
 
     Ok(presigned_request.uri().to_string())
 }
@@ -174,7 +174,7 @@ pub async fn delete_prefix(client: &S3Client, bucket: &str, prefix: &str) -> Res
                 .map(|key| ObjectIdentifier::builder().key(key).build())
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(|e| {
-                    Error::DownloadFailed(format!("failed to build object identifier: {e}"))
+                    Error::S3OperationFailed(format!("failed to build object identifier: {e}"))
                 })?;
 
             if !identifiers.is_empty() {
@@ -183,7 +183,7 @@ pub async fn delete_prefix(client: &S3Client, bucket: &str, prefix: &str) -> Res
                     .set_objects(Some(identifiers))
                     .build()
                     .map_err(|e| {
-                        Error::DownloadFailed(format!("failed to build delete request: {e}"))
+                        Error::S3OperationFailed(format!("failed to build delete request: {e}"))
                     })?;
 
                 client
