@@ -26,6 +26,7 @@
 //! invalid. Immutable blob initialization will fail if any trailing data is detected that cannot be
 //! validated by a CRC.
 
+use super::read::{PageReader, Replay};
 use crate::{
     buffer::{
         pool::{Checksum, PoolRef, CHECKSUM_SIZE},
@@ -33,7 +34,6 @@ use crate::{
     },
     Blob, Error, RwLock, RwLockWriteGuard,
 };
-use super::read::{PageReader, Replay};
 use commonware_cryptography::Crc32;
 use commonware_utils::StableBuf;
 use std::{
