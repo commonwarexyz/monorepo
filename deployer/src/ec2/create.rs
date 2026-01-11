@@ -109,7 +109,7 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     let s3_client = create_s3_client(Region::new(MONITORING_REGION)).await;
     ensure_bucket_exists(&s3_client, S3_BUCKET_NAME, MONITORING_REGION).await?;
 
-    // Cache observability tools if not already cached
+    // Cache observability tools concurrently if not already cached
     info!("checking and caching observability tools");
     let tools_to_cache = [
         (
@@ -139,75 +139,51 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
         ),
     ];
 
-    for (s3_key, download_url) in &tools_to_cache {
-        if !object_exists(&s3_client, S3_BUCKET_NAME, s3_key).await? {
-            info!(
-                key = s3_key.as_str(),
-                "tool not cached, downloading and uploading"
-            );
-            let temp_path = tag_directory.join(s3_key.replace('/', "_"));
-            download_file(download_url, &temp_path).await?;
-            upload_file(&s3_client, S3_BUCKET_NAME, s3_key, &temp_path).await?;
-            // Clean up temp file
-            std::fs::remove_file(&temp_path)?;
-        } else {
-            info!(key = s3_key.as_str(), "tool already cached");
+    // Check which tools need caching and cache them concurrently
+    try_join_all(tools_to_cache.iter().map(|(s3_key, download_url)| {
+        let tag_directory = tag_directory.clone();
+        let s3_client = s3_client.clone();
+        async move {
+            if !object_exists(&s3_client, S3_BUCKET_NAME, s3_key).await? {
+                info!(
+                    key = s3_key.as_str(),
+                    "tool not cached, downloading and uploading"
+                );
+                let temp_path = tag_directory.join(s3_key.replace('/', "_"));
+                download_file(download_url, &temp_path).await?;
+                upload_file(&s3_client, S3_BUCKET_NAME, s3_key, &temp_path).await?;
+                std::fs::remove_file(&temp_path)?;
+            } else {
+                info!(key = s3_key.as_str(), "tool already cached");
+            }
+            Ok::<_, Error>(())
         }
-    }
+    }))
+    .await?;
     info!("observability tools cached");
 
-    // Generate pre-signed URLs for tools (valid for 6 hours)
+    // Generate pre-signed URLs for tools concurrently (valid for 6 hours)
     info!("generating pre-signed URLs for tools");
     let presign_duration = Duration::from_secs(6 * 60 * 60);
-    let prometheus_url = presign_url(
-        &s3_client,
-        S3_BUCKET_NAME,
-        &prometheus_s3_key(PROMETHEUS_VERSION),
-        presign_duration,
+    let tool_keys = [
+        prometheus_s3_key(PROMETHEUS_VERSION),
+        grafana_s3_key(GRAFANA_VERSION),
+        loki_s3_key(LOKI_VERSION),
+        pyroscope_s3_key(PYROSCOPE_VERSION),
+        tempo_s3_key(TEMPO_VERSION),
+        node_exporter_s3_key(NODE_EXPORTER_VERSION),
+        promtail_s3_key(PROMTAIL_VERSION),
+    ];
+    let tool_urls: [String; 7] = try_join_all(
+        tool_keys
+            .iter()
+            .map(|key| presign_url(&s3_client, S3_BUCKET_NAME, key, presign_duration)),
     )
-    .await?;
-    let grafana_url = presign_url(
-        &s3_client,
-        S3_BUCKET_NAME,
-        &grafana_s3_key(GRAFANA_VERSION),
-        presign_duration,
-    )
-    .await?;
-    let loki_url = presign_url(
-        &s3_client,
-        S3_BUCKET_NAME,
-        &loki_s3_key(LOKI_VERSION),
-        presign_duration,
-    )
-    .await?;
-    let pyroscope_url = presign_url(
-        &s3_client,
-        S3_BUCKET_NAME,
-        &pyroscope_s3_key(PYROSCOPE_VERSION),
-        presign_duration,
-    )
-    .await?;
-    let tempo_url = presign_url(
-        &s3_client,
-        S3_BUCKET_NAME,
-        &tempo_s3_key(TEMPO_VERSION),
-        presign_duration,
-    )
-    .await?;
-    let node_exporter_url = presign_url(
-        &s3_client,
-        S3_BUCKET_NAME,
-        &node_exporter_s3_key(NODE_EXPORTER_VERSION),
-        presign_duration,
-    )
-    .await?;
-    let promtail_url = presign_url(
-        &s3_client,
-        S3_BUCKET_NAME,
-        &promtail_s3_key(PROMTAIL_VERSION),
-        presign_duration,
-    )
-    .await?;
+    .await?
+    .try_into()
+    .unwrap();
+    let [prometheus_url, grafana_url, loki_url, pyroscope_url, tempo_url, node_exporter_url, promtail_url] =
+        tool_urls;
     info!("generated pre-signed URLs for tools");
 
     // Upload instance binaries and configs to S3 concurrently
