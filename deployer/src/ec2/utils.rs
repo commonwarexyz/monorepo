@@ -1,11 +1,14 @@
 //! Utility functions for interacting with EC2 instances
 
 use crate::ec2::Error;
+use std::path::Path;
 use tokio::{
+    fs::File,
+    io::AsyncWriteExt,
     process::Command,
     time::{sleep, Duration},
 };
-use tracing::warn;
+use tracing::{info, warn};
 
 /// Maximum number of SSH connection attempts before failing
 pub const MAX_SSH_ATTEMPTS: usize = 30;
@@ -173,4 +176,55 @@ pub async fn enable_bbr(key_file: &str, ip: &str, bbr_conf_local_path: &str) -> 
 /// Converts an IP address to a CIDR block
 pub fn exact_cidr(ip: &str) -> String {
     format!("{ip}/32")
+}
+
+/// Maximum number of download attempts before failing
+pub const MAX_DOWNLOAD_ATTEMPTS: usize = 5;
+
+/// Downloads a file from a URL to a local path with retries
+pub async fn download_file(url: &str, dest: &Path) -> Result<(), Error> {
+    for attempt in 1..=MAX_DOWNLOAD_ATTEMPTS {
+        match download_file_once(url, dest).await {
+            Ok(()) => {
+                info!(url = url, dest = ?dest, "downloaded file");
+                return Ok(());
+            }
+            Err(e) => {
+                warn!(
+                    url = url,
+                    attempt = attempt,
+                    error = ?e,
+                    "download attempt failed"
+                );
+                if attempt < MAX_DOWNLOAD_ATTEMPTS {
+                    sleep(RETRY_INTERVAL).await;
+                }
+            }
+        }
+    }
+    Err(Error::DownloadFailed(url.to_string()))
+}
+
+async fn download_file_once(url: &str, dest: &Path) -> Result<(), Error> {
+    let response = reqwest::get(url).await?;
+    if !response.status().is_success() {
+        return Err(Error::DownloadFailed(format!(
+            "HTTP {}: {}",
+            response.status(),
+            url
+        )));
+    }
+
+    let bytes = response.bytes().await?;
+
+    // Create parent directory if it doesn't exist
+    if let Some(parent) = dest.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+
+    let mut file = File::create(dest).await?;
+    file.write_all(&bytes).await?;
+    file.flush().await?;
+
+    Ok(())
 }

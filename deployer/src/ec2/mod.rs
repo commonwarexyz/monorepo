@@ -180,7 +180,10 @@ cfg_if::cfg_if! {
         pub use authorize::authorize;
         mod destroy;
         pub use destroy::destroy;
+        mod destroy_cache;
+        pub use destroy_cache::destroy_cache;
         pub mod utils;
+        pub mod s3;
 
         /// Name of the monitoring instance
         const MONITORING_NAME: &str = "monitoring";
@@ -221,6 +224,9 @@ cfg_if::cfg_if! {
         /// Destroy subcommand name
         pub const DESTROY_CMD: &str = "destroy";
 
+        /// Destroy cache subcommand name
+        pub const DESTROY_CACHE_CMD: &str = "destroy-cache";
+
         /// Directory where deployer files are stored
         fn deployer_directory(tag: &str) -> PathBuf {
             let base_dir = std::env::var("HOME").expect("$HOME is not configured");
@@ -236,6 +242,8 @@ cfg_if::cfg_if! {
             AwsSecurityGroupIngress(#[from] aws_sdk_ec2::operation::authorize_security_group_ingress::AuthorizeSecurityGroupIngressError),
             #[error("AWS describe instances error: {0}")]
             AwsDescribeInstances(#[from] aws_sdk_ec2::operation::describe_instances::DescribeInstancesError),
+            #[error("AWS S3 error: {0}")]
+            AwsS3(#[from] aws_sdk_s3::Error),
             #[error("IO error: {0}")]
             Io(#[from] std::io::Error),
             #[error("YAML error: {0}")]
@@ -264,6 +272,8 @@ cfg_if::cfg_if! {
             PrivateKeyNotFound,
             #[error("invalid IP address: {0}")]
             InvalidIpAddress(String),
+            #[error("download failed: {0}")]
+            DownloadFailed(String),
         }
     }
 }

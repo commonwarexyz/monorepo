@@ -1,8 +1,9 @@
 //! `create` subcommand for `ec2`
 
 use crate::ec2::{
-    aws::*, deployer_directory, services::*, utils::*, Config, Error, Host, Hosts, InstanceConfig,
-    CREATED_FILE_NAME, LOGS_PORT, MONITORING_NAME, MONITORING_REGION, PROFILES_PORT, TRACES_PORT,
+    aws::*, deployer_directory, s3::*, services::*, utils::*, Config, Error, Host, Hosts,
+    InstanceConfig, CREATED_FILE_NAME, LOGS_PORT, MONITORING_NAME, MONITORING_REGION,
+    PROFILES_PORT, TRACES_PORT,
 };
 use futures::future::try_join_all;
 use std::{
@@ -11,6 +12,7 @@ use std::{
     net::IpAddr,
     path::PathBuf,
     slice,
+    time::Duration,
 };
 use tokio::process::Command;
 use tracing::info;
@@ -101,6 +103,112 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
         .entry(MONITORING_REGION.to_string())
         .or_default()
         .insert(config.monitoring.instance_type.clone());
+
+    // Setup S3 bucket and cache observability tools
+    info!("setting up S3 cache bucket");
+    let s3_client = create_s3_client(Region::new(MONITORING_REGION)).await;
+    ensure_bucket_exists(&s3_client, S3_BUCKET_NAME, MONITORING_REGION).await?;
+
+    // Cache observability tools if not already cached
+    info!("checking and caching observability tools");
+    let tools_to_cache = [
+        (
+            prometheus_s3_key(PROMETHEUS_VERSION),
+            prometheus_download_url(PROMETHEUS_VERSION),
+        ),
+        (
+            grafana_s3_key(GRAFANA_VERSION),
+            grafana_download_url(GRAFANA_VERSION),
+        ),
+        (loki_s3_key(LOKI_VERSION), loki_download_url(LOKI_VERSION)),
+        (
+            pyroscope_s3_key(PYROSCOPE_VERSION),
+            pyroscope_download_url(PYROSCOPE_VERSION),
+        ),
+        (
+            tempo_s3_key(TEMPO_VERSION),
+            tempo_download_url(TEMPO_VERSION),
+        ),
+        (
+            node_exporter_s3_key(NODE_EXPORTER_VERSION),
+            node_exporter_download_url(NODE_EXPORTER_VERSION),
+        ),
+        (
+            promtail_s3_key(PROMTAIL_VERSION),
+            promtail_download_url(PROMTAIL_VERSION),
+        ),
+    ];
+
+    for (s3_key, download_url) in &tools_to_cache {
+        if !object_exists(&s3_client, S3_BUCKET_NAME, s3_key).await? {
+            info!(
+                key = s3_key.as_str(),
+                "tool not cached, downloading and uploading"
+            );
+            let temp_path = tag_directory.join(s3_key.replace('/', "_"));
+            download_file(download_url, &temp_path).await?;
+            upload_file(&s3_client, S3_BUCKET_NAME, s3_key, &temp_path).await?;
+            // Clean up temp file
+            std::fs::remove_file(&temp_path)?;
+        } else {
+            info!(key = s3_key.as_str(), "tool already cached");
+        }
+    }
+    info!("observability tools cached");
+
+    // Generate pre-signed URLs for tools (valid for 6 hours)
+    info!("generating pre-signed URLs for tools");
+    let presign_duration = Duration::from_secs(6 * 60 * 60);
+    let prometheus_url = presign_url(
+        &s3_client,
+        S3_BUCKET_NAME,
+        &prometheus_s3_key(PROMETHEUS_VERSION),
+        presign_duration,
+    )
+    .await?;
+    let grafana_url = presign_url(
+        &s3_client,
+        S3_BUCKET_NAME,
+        &grafana_s3_key(GRAFANA_VERSION),
+        presign_duration,
+    )
+    .await?;
+    let loki_url = presign_url(
+        &s3_client,
+        S3_BUCKET_NAME,
+        &loki_s3_key(LOKI_VERSION),
+        presign_duration,
+    )
+    .await?;
+    let pyroscope_url = presign_url(
+        &s3_client,
+        S3_BUCKET_NAME,
+        &pyroscope_s3_key(PYROSCOPE_VERSION),
+        presign_duration,
+    )
+    .await?;
+    let tempo_url = presign_url(
+        &s3_client,
+        S3_BUCKET_NAME,
+        &tempo_s3_key(TEMPO_VERSION),
+        presign_duration,
+    )
+    .await?;
+    let node_exporter_url = presign_url(
+        &s3_client,
+        S3_BUCKET_NAME,
+        &node_exporter_s3_key(NODE_EXPORTER_VERSION),
+        presign_duration,
+    )
+    .await?;
+    let promtail_url = presign_url(
+        &s3_client,
+        S3_BUCKET_NAME,
+        &promtail_s3_key(PROMTAIL_VERSION),
+        presign_duration,
+    )
+    .await?;
+    info!("generated pre-signed URLs");
 
     // Initialize resources for each region
     info!(?regions, "initializing resources");
@@ -306,6 +414,7 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
             1,
             MONITORING_NAME,
             tag,
+            None,
         )
         .await?[0]
             .clone();
@@ -370,6 +479,7 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
                 1,
                 &instance.name,
                 &tag,
+                None,
             )
             .await?[0]
                 .clone();
@@ -534,7 +644,7 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     ssh_execute(
         private_key,
         &monitoring_ip,
-        &setup_node_exporter_cmd(NODE_EXPORTER_VERSION),
+        &setup_node_exporter_cmd(&node_exporter_url, NODE_EXPORTER_VERSION),
     )
     .await?;
     poll_service_active(private_key, &monitoring_ip, "node_exporter").await?;
@@ -542,11 +652,12 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
         private_key,
         &monitoring_ip,
         &install_monitoring_cmd(
+            &prometheus_url,
+            &grafana_url,
+            &loki_url,
+            &pyroscope_url,
+            &tempo_url,
             PROMETHEUS_VERSION,
-            GRAFANA_VERSION,
-            LOKI_VERSION,
-            PYROSCOPE_VERSION,
-            TEMPO_VERSION,
         ),
     )
     .await?;
@@ -594,6 +705,8 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
         let binary_service_path = binary_service_path.clone();
         let pyroscope_agent_service_path = pyroscope_agent_service_path.clone();
         let pyroscope_agent_timer_path = pyroscope_agent_timer_path.clone();
+        let promtail_url = promtail_url.clone();
+        let node_exporter_url = node_exporter_url.clone();
         let future = async move {
             rsync_file(private_key, &instance.binary, &ip, "/home/ubuntu/binary").await?;
             rsync_file(
@@ -689,12 +802,12 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
             )
             .await?;
             enable_bbr(private_key, &ip, bbr_conf_path.to_str().unwrap()).await?;
-            ssh_execute(private_key, &ip, &setup_promtail_cmd(PROMTAIL_VERSION)).await?;
+            ssh_execute(private_key, &ip, &setup_promtail_cmd(&promtail_url)).await?;
             poll_service_active(private_key, &ip, "promtail").await?;
             ssh_execute(
                 private_key,
                 &ip,
-                &setup_node_exporter_cmd(NODE_EXPORTER_VERSION),
+                &setup_node_exporter_cmd(&node_exporter_url, NODE_EXPORTER_VERSION),
             )
             .await?;
             poll_service_active(private_key, &ip, "node_exporter").await?;

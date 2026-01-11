@@ -1,5 +1,7 @@
 //! Service configuration for Prometheus, Loki, Grafana, Promtail, and a caller-provided binary
 
+use crate::ec2::s3::S3_TOOLS_PREFIX;
+
 /// Version of Prometheus to download and install
 pub const PROMETHEUS_VERSION: &str = "3.2.0";
 
@@ -20,6 +22,76 @@ pub const PYROSCOPE_VERSION: &str = "1.12.0";
 
 /// Version of Grafana to download and install
 pub const GRAFANA_VERSION: &str = "11.5.2";
+
+/// Returns the S3 key for Prometheus
+pub fn prometheus_s3_key(version: &str) -> String {
+    format!("{S3_TOOLS_PREFIX}/prometheus-{version}.linux-arm64.tar.gz")
+}
+
+/// Returns the S3 key for Grafana
+pub fn grafana_s3_key(version: &str) -> String {
+    format!("{S3_TOOLS_PREFIX}/grafana_{version}_arm64.deb")
+}
+
+/// Returns the S3 key for Loki
+pub fn loki_s3_key(version: &str) -> String {
+    format!("{S3_TOOLS_PREFIX}/loki-{version}-linux-arm64.zip")
+}
+
+/// Returns the S3 key for Pyroscope
+pub fn pyroscope_s3_key(version: &str) -> String {
+    format!("{S3_TOOLS_PREFIX}/pyroscope_{version}_linux_arm64.tar.gz")
+}
+
+/// Returns the S3 key for Tempo
+pub fn tempo_s3_key(version: &str) -> String {
+    format!("{S3_TOOLS_PREFIX}/tempo_{version}_linux_arm64.tar.gz")
+}
+
+/// Returns the S3 key for Node Exporter
+pub fn node_exporter_s3_key(version: &str) -> String {
+    format!("{S3_TOOLS_PREFIX}/node_exporter-{version}.linux-arm64.tar.gz")
+}
+
+/// Returns the S3 key for Promtail
+pub fn promtail_s3_key(version: &str) -> String {
+    format!("{S3_TOOLS_PREFIX}/promtail-{version}-linux-arm64.zip")
+}
+
+/// Returns the download URL for Prometheus from GitHub
+pub fn prometheus_download_url(version: &str) -> String {
+    format!("https://github.com/prometheus/prometheus/releases/download/v{version}/prometheus-{version}.linux-arm64.tar.gz")
+}
+
+/// Returns the download URL for Grafana
+pub fn grafana_download_url(version: &str) -> String {
+    format!("https://dl.grafana.com/oss/release/grafana_{version}_arm64.deb")
+}
+
+/// Returns the download URL for Loki from GitHub
+pub fn loki_download_url(version: &str) -> String {
+    format!("https://github.com/grafana/loki/releases/download/v{version}/loki-linux-arm64.zip")
+}
+
+/// Returns the download URL for Pyroscope from GitHub
+pub fn pyroscope_download_url(version: &str) -> String {
+    format!("https://github.com/grafana/pyroscope/releases/download/v{version}/pyroscope_{version}_linux_arm64.tar.gz")
+}
+
+/// Returns the download URL for Tempo from GitHub
+pub fn tempo_download_url(version: &str) -> String {
+    format!("https://github.com/grafana/tempo/releases/download/v{version}/tempo_{version}_linux_arm64.tar.gz")
+}
+
+/// Returns the download URL for Node Exporter from GitHub
+pub fn node_exporter_download_url(version: &str) -> String {
+    format!("https://github.com/prometheus/node_exporter/releases/download/v{version}/node_exporter-{version}.linux-arm64.tar.gz")
+}
+
+/// Returns the download URL for Promtail from GitHub
+pub fn promtail_download_url(version: &str) -> String {
+    format!("https://github.com/grafana/loki/releases/download/v{version}/promtail-linux-arm64.zip")
+}
 
 /// YAML configuration for Grafana datasources (Prometheus, Loki, Tempo, and Pyroscope)
 pub const DATASOURCES_YML: &str = r#"
@@ -220,60 +292,24 @@ compactor:
 
 /// Command to install monitoring services (Prometheus, Loki, Grafana, Pyroscope, Tempo) on the monitoring instance
 pub fn install_monitoring_cmd(
+    prometheus_url: &str,
+    grafana_url: &str,
+    loki_url: &str,
+    pyroscope_url: &str,
+    tempo_url: &str,
     prometheus_version: &str,
-    grafana_version: &str,
-    loki_version: &str,
-    pyroscope_version: &str,
-    tempo_version: &str,
 ) -> String {
-    let prometheus_url = format!(
-    "https://github.com/prometheus/prometheus/releases/download/v{prometheus_version}/prometheus-{prometheus_version}.linux-arm64.tar.gz",
-);
-    let grafana_url =
-        format!("https://dl.grafana.com/oss/release/grafana_{grafana_version}_arm64.deb");
-    let loki_url = format!(
-        "https://github.com/grafana/loki/releases/download/v{loki_version}/loki-linux-arm64.zip",
-    );
-    let pyroscope_url = format!(
-        "https://github.com/grafana/pyroscope/releases/download/v{pyroscope_version}/pyroscope_{pyroscope_version}_linux_arm64.tar.gz",
-    );
-    let tempo_url = format!(
-        "https://github.com/grafana/tempo/releases/download/v{tempo_version}/tempo_{tempo_version}_linux_arm64.tar.gz",
-    );
     format!(
         r#"
 sudo apt-get update -y
-sudo apt-get install -y wget curl unzip adduser libfontconfig1
+sudo apt-get install -y unzip adduser libfontconfig1 wget
 
-# Download Prometheus with retries
-for i in {{1..5}}; do
-  wget -O /home/ubuntu/prometheus.tar.gz {prometheus_url} && break
-  sleep 10
-done
-
-# Download Grafana with retries
-for i in {{1..5}}; do
-  wget -O /home/ubuntu/grafana.deb {grafana_url} && break
-  sleep 10
-done
-
-# Download Loki with retries
-for i in {{1..5}}; do
-  wget -O /home/ubuntu/loki.zip {loki_url} && break
-  sleep 10
-done
-
-# Download Pyroscope with retries
-for i in {{1..5}}; do
-  wget -O /home/ubuntu/pyroscope.tar.gz {pyroscope_url} && break
-  sleep 10
-done
-
-# Download Tempo with retries
-for i in {{1..5}}; do
-  wget -O /home/ubuntu/tempo.tar.gz {tempo_url} && break
-  sleep 10
-done
+# Download from S3 via pre-signed URLs (faster than external sources)
+wget -q -O /home/ubuntu/prometheus.tar.gz '{prometheus_url}'
+wget -q -O /home/ubuntu/grafana.deb '{grafana_url}'
+wget -q -O /home/ubuntu/loki.zip '{loki_url}'
+wget -q -O /home/ubuntu/pyroscope.tar.gz '{pyroscope_url}'
+wget -q -O /home/ubuntu/tempo.tar.gz '{tempo_url}'
 
 # Install Prometheus
 sudo mkdir -p /opt/prometheus /opt/prometheus/data
@@ -394,20 +430,14 @@ sudo systemctl enable --now pyroscope-agent.timer
 }
 
 /// Command to set up Promtail on binary instances
-pub fn setup_promtail_cmd(promtail_version: &str) -> String {
-    let promtail_url = format!(
-        "https://github.com/grafana/loki/releases/download/v{promtail_version}/promtail-linux-arm64.zip",
-    );
+pub fn setup_promtail_cmd(promtail_url: &str) -> String {
     format!(
         r#"
 sudo apt-get update -y
-sudo apt-get install -y wget unzip
+sudo apt-get install -y unzip wget
 
-# Download Promtail with retries
-for i in {{1..5}}; do
-  wget -O /home/ubuntu/promtail.zip {promtail_url} && break
-  sleep 10
-done
+# Download Promtail from S3 via pre-signed URL
+wget -q -O /home/ubuntu/promtail.zip '{promtail_url}'
 
 # Install Promtail
 sudo mkdir -p /opt/promtail
@@ -458,20 +488,14 @@ scrape_configs:
 }
 
 /// Command to install Node Exporter on instances
-pub fn setup_node_exporter_cmd(node_exporter_version: &str) -> String {
-    let node_exporter_url = format!(
-        "https://github.com/prometheus/node_exporter/releases/download/v{node_exporter_version}/node_exporter-{node_exporter_version}.linux-arm64.tar.gz",
-    );
+pub fn setup_node_exporter_cmd(node_exporter_url: &str, node_exporter_version: &str) -> String {
     format!(
         r#"
 sudo apt-get update -y
-sudo apt-get install -y wget tar
+sudo apt-get install -y tar wget
 
-# Download Node Exporter with retries
-for i in {{1..5}}; do
-  wget -O /home/ubuntu/node_exporter.tar.gz {node_exporter_url} && break
-  sleep 10
-done
+# Download Node Exporter from S3 via pre-signed URL
+wget -q -O /home/ubuntu/node_exporter.tar.gz '{node_exporter_url}'
 
 # Install Node Exporter
 sudo mkdir -p /opt/node_exporter
