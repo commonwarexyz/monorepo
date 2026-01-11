@@ -12,9 +12,8 @@ use aws_sdk_ec2::{
     error::BuildError,
     primitives::Blob,
     types::{
-        BlockDeviceMapping, EbsBlockDevice, Filter, IamInstanceProfileSpecification,
-        InstanceStateName, ResourceType, SecurityGroup, SummaryStatus, Tag, TagSpecification,
-        VpcPeeringConnectionStateReasonCode,
+        BlockDeviceMapping, EbsBlockDevice, Filter, InstanceStateName, ResourceType, SecurityGroup,
+        SummaryStatus, Tag, TagSpecification, VpcPeeringConnectionStateReasonCode,
     },
     Client as Ec2Client, Error as Ec2Error,
 };
@@ -324,9 +323,8 @@ pub async fn launch_instances(
     count: i32,
     name: &str,
     tag: &str,
-    iam_instance_profile_arn: Option<&str>,
 ) -> Result<Vec<String>, Ec2Error> {
-    let mut builder = client
+    let builder = client
         .run_instances()
         .image_id(ami_id)
         .instance_type(instance_type)
@@ -362,14 +360,6 @@ pub async fn launch_instances(
                 )
                 .build(),
         );
-
-    if let Some(profile_arn) = iam_instance_profile_arn {
-        builder = builder.iam_instance_profile(
-            IamInstanceProfileSpecification::builder()
-                .arn(profile_arn)
-                .build(),
-        );
-    }
 
     let resp = builder.send().await?;
     Ok(resp
