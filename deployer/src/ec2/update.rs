@@ -47,7 +47,6 @@ pub async fn update(config_path: &PathBuf) -> Result<(), Error> {
 
     // Upload updated binaries and configs to S3 and generate pre-signed URLs
     // Uses hash-based deduplication to avoid re-uploading identical files
-    info!("computing hashes for binaries and configs");
     let s3_client = create_s3_client(Region::new(MONITORING_REGION)).await;
 
     // Compute hashes and build deduplication maps
@@ -65,12 +64,6 @@ pub async fn update(config_path: &PathBuf) -> Result<(), Error> {
         instance_binary_hash.insert(instance.name.clone(), binary_hash);
         instance_config_hash.insert(instance.name.clone(), config_hash);
     }
-
-    info!(
-        unique_binaries = binary_hashes.len(),
-        unique_configs = config_hashes.len(),
-        "computed hashes"
-    );
 
     // Upload unique binaries and configs (deduplicated by hash)
     info!("uploading unique binaries and configs to S3");
