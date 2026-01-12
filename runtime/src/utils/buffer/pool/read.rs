@@ -409,4 +409,56 @@ mod tests {
             assert_eq!(replay.remaining(), data.len());
         });
     }
+
+    #[test_traced("DEBUG")]
+    fn test_replay_cross_buffer_boundary() {
+        // Use prefetch_count=1 to force separate BufferStates per page.
+        // This tests navigation across multiple BufferStates in the VecDeque.
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (blob, blob_size) = context.open("test_partition", b"test_blob").await.unwrap();
+            assert_eq!(blob_size, 0);
+
+            let pool_ref = super::super::PoolRef::new(PAGE_SIZE, NZUsize!(BUFFER_PAGES));
+            let append = Append::new(blob.clone(), blob_size, BUFFER_PAGES * 115, pool_ref)
+                .await
+                .unwrap();
+
+            // Write data spanning 4 pages (4 * 103 = 412 bytes, with last page partial)
+            let data: Vec<u8> = (0u8..=255).cycle().take(400).collect();
+            append.append(&data).await.unwrap();
+            append.sync().await.unwrap();
+
+            // Create Replay with buffer size that results in prefetch_count=1.
+            // Physical page size = 103 + 12 = 115 bytes.
+            // Buffer size of 115 gives prefetch_pages = 115/115 = 1.
+            let mut replay = append.replay(NZUsize!(115)).await.unwrap();
+
+            // Ensure all data - this requires 4 separate fill() calls (one per page).
+            // Each fill() creates a new BufferState, so we'll have 4 BufferStates.
+            assert!(replay.ensure(400).await.unwrap());
+            assert_eq!(replay.remaining(), 400);
+
+            // Read all data via Buf interface, verifying navigation across BufferStates.
+            let mut collected = Vec::new();
+            let mut chunks_read = 0;
+            while replay.remaining() > 0 {
+                let chunk = replay.chunk();
+                assert!(!chunk.is_empty(), "chunk() returned empty but remaining > 0");
+                collected.extend_from_slice(chunk);
+                let len = chunk.len();
+                replay.advance(len);
+                chunks_read += 1;
+            }
+
+            assert_eq!(collected, data);
+            // With prefetch_count=1 and 4 pages, we expect at least 4 chunks
+            // (one per page, though partial reads could result in more).
+            assert!(
+                chunks_read >= 4,
+                "Expected at least 4 chunks for 4 pages, got {}",
+                chunks_read
+            );
+        });
+    }
 }
