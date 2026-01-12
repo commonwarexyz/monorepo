@@ -51,9 +51,12 @@ mod tests {
     use super::*;
     use crate::{
         simplex::{
-            actors::{batcher, resolver, resolver::MailboxMessage},
+            actors::{
+                batcher,
+                resolver::{self, MailboxMessage},
+            },
             elector::{Config as ElectorConfig, Elector, Random, RoundRobin, RoundRobinElector},
-            mocks,
+            mocks, quorum,
             scheme::{bls12381_multisig, bls12381_threshold, ed25519, secp256r1, Scheme},
             types::{Certificate, Finalization, Finalize, Notarization, Notarize, Proposal, Vote},
         },
@@ -72,7 +75,7 @@ mod tests {
     use commonware_p2p::simulated::{Config as NConfig, Network};
     use commonware_parallel::Sequential;
     use commonware_runtime::{deterministic, Clock, Metrics, Quota, Runner};
-    use commonware_utils::{Bft3f1, FaultModel, NZUsize, NZU16};
+    use commonware_utils::{NZUsize, NZU16};
     use futures::{channel::mpsc, FutureExt, StreamExt};
     use std::{
         num::{NonZeroU16, NonZeroU32},
@@ -269,7 +272,7 @@ mod tests {
         L: ElectorConfig<S>,
     {
         let n = 5;
-        let quorum = Bft3f1::quorum(n);
+        let quorum = quorum(n);
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
@@ -505,7 +508,7 @@ mod tests {
         L: ElectorConfig<S>,
     {
         let n = 5;
-        let quorum = Bft3f1::quorum(n);
+        let quorum = quorum(n);
         let namespace = b"test_prune_panic".to_vec();
         let activity_timeout = ViewDelta::new(10);
         let executor = deterministic::Runner::timed(Duration::from_secs(20));
@@ -783,7 +786,7 @@ mod tests {
         L: ElectorConfig<S>,
     {
         let n = 5;
-        let quorum = Bft3f1::quorum(n);
+        let quorum = quorum(n);
         let namespace = b"finalization_without_notarization".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
@@ -910,7 +913,7 @@ mod tests {
         L: ElectorConfig<S>,
     {
         let n = 5;
-        let quorum = Bft3f1::quorum(n);
+        let quorum = quorum(n);
         let namespace = b"certificate_conflicts_proposal_test".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
@@ -1051,7 +1054,7 @@ mod tests {
         L: ElectorConfig<S>,
     {
         let n = 5;
-        let quorum = Bft3f1::quorum(n);
+        let quorum = quorum(n);
         let namespace = b"proposal_conflicts_certificate_test".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
@@ -1180,7 +1183,7 @@ mod tests {
         L: ElectorConfig<S>,
     {
         let n = 5;
-        let quorum = Bft3f1::quorum(n);
+        let quorum = quorum(n);
         let namespace = b"certificate_conflicts_proposal_test".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
@@ -1357,7 +1360,7 @@ mod tests {
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
     {
         let n = 5;
-        let quorum = Bft3f1::quorum(n);
+        let quorum = quorum(n);
         let namespace = b"drop_our_proposal_on_conflict_test".to_vec();
         let epoch = Epoch::new(333);
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
@@ -1576,7 +1579,7 @@ mod tests {
         L: ElectorConfig<S>,
     {
         let n = 5;
-        let quorum = Bft3f1::quorum(n);
+        let quorum = quorum(n);
         let namespace = b"populate_resolver_on_restart_test".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
@@ -1805,7 +1808,7 @@ mod tests {
         // This is a regression test as the resolver didn't use to send
         // finalizations to the voter
         let n = 5;
-        let quorum = Bft3f1::quorum(n);
+        let quorum = quorum(n);
         let namespace = b"finalization_from_resolver".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
@@ -1911,7 +1914,7 @@ mod tests {
         L: ElectorConfig<S>,
     {
         let n = 5;
-        let quorum = Bft3f1::quorum(n);
+        let quorum = quorum(n);
         let namespace = b"no_resolver_boomerang".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
@@ -2029,7 +2032,7 @@ mod tests {
         L: ElectorConfig<S>,
     {
         let n = 5;
-        let quorum = Bft3f1::quorum(n);
+        let quorum = quorum(n);
         let namespace = b"consensus".to_vec();
         let activity_timeout = ViewDelta::new(10);
         let executor = deterministic::Runner::timed(Duration::from_secs(5));
@@ -2254,7 +2257,7 @@ mod tests {
         L: ElectorConfig<S>,
     {
         let n = 5;
-        let quorum = Bft3f1::quorum(n);
+        let quorum = quorum(n);
         let namespace = b"no_recertification_after_replay".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
@@ -2522,7 +2525,7 @@ mod tests {
         L: ElectorConfig<S>,
     {
         let n = 5;
-        let quorum = Bft3f1::quorum(n);
+        let quorum = quorum(n);
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(30));
         executor.start(|mut context| async move {
@@ -2716,7 +2719,7 @@ mod tests {
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
     {
         let n = 5;
-        let quorum = Bft3f1::quorum(n);
+        let quorum = quorum(n);
         let namespace = b"certification_after_timeout".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(60));
         executor.start(|mut context| async move {
@@ -2839,7 +2842,7 @@ mod tests {
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
     {
         let n = 5;
-        let quorum = Bft3f1::quorum(n);
+        let quorum = quorum(n);
         let namespace = b"certification_after_notarize_timeout_as_follower".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(60));
         executor.start(|mut context| async move {
@@ -2997,7 +3000,7 @@ mod tests {
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
     {
         let n = 5;
-        let quorum = Bft3f1::quorum(n);
+        let quorum = quorum(n);
         let namespace = b"certification_after_notarize_timeout_as_leader".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(60));
         executor.start(|mut context| async move {

@@ -283,6 +283,14 @@ pub(crate) fn interesting(
     true
 }
 
+/// Convenience alias for [`Bft3f1::quorum`].
+#[cfg(test)]
+pub(crate) fn quorum(n: u32) -> u32 {
+    use commonware_utils::{Bft3f1, FaultModel};
+
+    Bft3f1::quorum(n)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -544,7 +552,7 @@ mod tests {
     {
         // Create context
         let n = 5;
-        let quorum = Bft3f1::quorum(n) as usize;
+        let quorum = quorum(n) as usize;
         let required_containers = View::new(100);
         let activity_timeout = ViewDelta::new(10);
         let skip_timeout = ViewDelta::new(5);
@@ -1418,7 +1426,7 @@ mod tests {
     {
         // Create context
         let n = 5;
-        let quorum = Bft3f1::quorum(n) as usize;
+        let quorum = quorum(n) as usize;
         let required_containers = View::new(100);
         let activity_timeout = ViewDelta::new(10);
         let skip_timeout = ViewDelta::new(5);
@@ -4451,7 +4459,7 @@ mod tests {
 
         // Create context
         let n = 10;
-        let quorum = Bft3f1::quorum(n) as usize;
+        let quorum = quorum(n) as usize;
         assert_eq!(quorum, 7);
         let activity_timeout = ViewDelta::new(10);
         let skip_timeout = ViewDelta::new(5);

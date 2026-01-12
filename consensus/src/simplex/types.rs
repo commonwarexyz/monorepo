@@ -2494,8 +2494,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::simplex::scheme::{
-        bls12381_multisig, bls12381_threshold, ed25519, secp256r1, Scheme,
+    use crate::simplex::{
+        quorum,
+        scheme::{bls12381_multisig, bls12381_threshold, ed25519, secp256r1, Scheme},
     };
     use commonware_codec::{Decode, DecodeExt, Encode};
     use commonware_cryptography::{
@@ -3080,7 +3081,7 @@ mod tests {
     {
         let mut rng = test_rng();
         let fixture = fixture(&mut rng, NAMESPACE, 5);
-        let quorum_size = Bft3f1::quorum(fixture.schemes.len() as u32) as usize;
+        let quorum_size = quorum(fixture.schemes.len() as u32) as usize;
         assert!(quorum_size > 1, "test requires quorum larger than one");
         let round = Round::new(Epoch::new(0), View::new(10));
         let proposal = Proposal::new(round, View::new(5), sample_digest(5));
