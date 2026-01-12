@@ -819,11 +819,6 @@ impl<
     > MerkleizedNonDurableAny for Db<E, K, V, H, T, N, Merkleized<H>, NonDurable>
 {
     type Mutable = Db<E, K, V, H, T, N, Unmerkleized, NonDurable>;
-    type Durable = Db<E, K, V, H, T, N, Merkleized<H>, Durable>;
-
-    async fn commit(self, metadata: Option<V>) -> Result<(Self::Durable, Range<Location>), Error> {
-        self.commit(metadata).await
-    }
 
     fn into_mutable(self) -> Self::Mutable {
         self.into_mutable()

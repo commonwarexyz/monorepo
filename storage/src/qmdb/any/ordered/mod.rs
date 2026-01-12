@@ -984,14 +984,6 @@ where
     V::Value: Send + Sync,
 {
     type Mutable = Db<E, C, I, H, Update<K, V>, Unmerkleized, NonDurable>;
-    type Durable = Db<E, C, I, H, Update<K, V>, Merkleized<H>, Durable>;
-
-    async fn commit(
-        self,
-        metadata: Option<V::Value>,
-    ) -> Result<(Self::Durable, Range<Location>), Error> {
-        self.commit(metadata).await
-    }
 
     fn into_mutable(self) -> Self::Mutable {
         self.into_mutable()
@@ -1135,9 +1127,8 @@ mod test {
         let mut mutable_db = db.into_mutable();
         for _ in 1..100 {
             let (durable_db, _) = mutable_db.commit(None).await.unwrap();
-            let clean_db = durable_db.into_merkleized().await.unwrap();
-            assert_eq!(clean_db.op_count() - 1, clean_db.inactivity_floor_loc());
-            mutable_db = clean_db.into_mutable();
+            assert_eq!(durable_db.op_count() - 1, durable_db.inactivity_floor_loc());
+            mutable_db = durable_db.into_mutable();
         }
         mutable_db
             .commit(None)

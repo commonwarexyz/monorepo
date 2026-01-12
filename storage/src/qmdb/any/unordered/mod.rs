@@ -404,14 +404,6 @@ where
     V::Value: Send + Sync,
 {
     type Mutable = Db<E, C, I, H, Update<K, V>, Unmerkleized, NonDurable>;
-    type Durable = Db<E, C, I, H, Update<K, V>, Merkleized<H>, Durable>;
-
-    async fn commit(
-        self,
-        metadata: Option<V::Value>,
-    ) -> Result<(Self::Durable, core::ops::Range<Location>), Error> {
-        self.commit(metadata).await
-    }
 
     fn into_mutable(self) -> Self::Mutable {
         self.into_mutable()
@@ -532,18 +524,12 @@ pub(super) mod test {
         // Test calling commit on an empty db.
         let metadata = Sha256::fill(3u8);
         let db = db.into_mutable();
-        // into_merkleized() -> MerkleizedNonDurable, then commit() -> MerkleizedDurable
-        let (mut db, range) = db
-            .into_merkleized()
-            .await
-            .unwrap()
-            .commit(Some(metadata))
-            .await
-            .unwrap();
+        let (db, range) = db.commit(Some(metadata)).await.unwrap();
         assert_eq!(range.start, 1);
         assert_eq!(range.end, 2);
         assert_eq!(db.op_count(), 2); // another commit op added
         assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
+        let mut db = db.into_merkleized().await.unwrap();
         let root = db.root();
         assert!(matches!(db.prune(db.inactivity_floor_loc()).await, Ok(())));
 
@@ -559,13 +545,7 @@ pub(super) mod test {
         let mut db = db.into_mutable();
         db.update(k1, v1).await.unwrap();
         for _ in 1..100 {
-            let (clean_db, _) = db
-                .into_merkleized()
-                .await
-                .unwrap()
-                .commit(None)
-                .await
-                .unwrap();
+            let (clean_db, _) = db.commit(None).await.unwrap();
             // Distance should equal 3 after the second commit, with inactivity_floor
             // referencing the previous commit operation.
             assert!(clean_db.op_count() - clean_db.inactivity_floor_loc() <= 3);
@@ -575,16 +555,11 @@ pub(super) mod test {
 
         // Confirm the inactivity floor is raised to tip when the db becomes empty.
         db.delete(k1).await.unwrap();
-        let (db, _) = db
-            .into_merkleized()
-            .await
-            .unwrap()
-            .commit(None)
-            .await
-            .unwrap();
+        let (db, _) = db.commit(None).await.unwrap();
         assert!(db.is_empty());
         assert_eq!(db.op_count() - 1, db.inactivity_floor_loc());
 
+        let db = db.into_merkleized().await.unwrap();
         db.destroy().await.unwrap();
     }
 
