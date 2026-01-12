@@ -343,7 +343,7 @@ impl Array {
         }
 
         // Limited case: need to check limit
-        let mut result = Vec::with_capacity(min_size.min(limit));
+        let mut result = Vec::with_capacity(limit);
         let mut i = 0;
         let mut j = 0;
 
@@ -418,7 +418,7 @@ impl Array {
         }
 
         // Limited case: need to check limit
-        let mut result = Vec::with_capacity(a.len().min(limit));
+        let mut result = Vec::with_capacity(limit);
         let mut i = 0;
         let mut j = 0;
 
@@ -584,6 +584,55 @@ mod tests {
         let values: Vec<u16> = (0..MAX_CARDINALITY as u16).collect();
         let container = Array::from_sorted_vec(values);
         assert!(container.is_full());
+    }
+
+    #[test]
+    fn test_intersection() {
+        let values_a = vec![1, 3, 5, 7, 9];
+        let values_b = vec![2, 3, 4, 5, 6];
+
+        let container_a = Array::from_sorted_vec(values_a.clone());
+        let container_b = Array::from_sorted_vec(values_b.clone());
+
+        // unlimited case
+        let (result, count) = container_a.intersection(&container_b, usize::MAX);
+        assert_eq!(result.as_slice(), &[3, 5]);
+        assert_eq!(count, 2);
+
+        // limited case
+        let (result, count) = container_a.intersection(&container_b, 1);
+        assert_eq!(result.as_slice(), &[3]);
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn test_difference() {
+        let values_a = vec![1, 3, 5, 7, 9];
+        let values_b = vec![2, 3, 4, 5, 6];
+
+        let empty = Array::new();
+        let container_a = Array::from_sorted_vec(values_a.clone());
+        let container_b = Array::from_sorted_vec(values_b.clone());
+
+        // difference with empty: unlimited
+        let (result, count) = container_a.difference(&empty, usize::MAX);
+        assert_eq!(result.as_slice(), &values_a[..]);
+        assert_eq!(count, values_a.len());
+
+        // difference with empty: limited
+        let (result, count) = container_a.difference(&empty, 3);
+        assert_eq!(result.as_slice(), &[1, 3, 5]);
+        assert_eq!(count, 3);
+
+        // unlimited case
+        let (result, count) = container_a.difference(&container_b, usize::MAX);
+        assert_eq!(result.as_slice(), &[1, 7, 9]);
+        assert_eq!(count, 3);
+
+        // limited case
+        let (result, count) = container_a.difference(&container_b, 2);
+        assert_eq!(result.as_slice(), &[1, 7]);
+        assert_eq!(count, 2);
     }
 
     #[cfg(feature = "arbitrary")]
