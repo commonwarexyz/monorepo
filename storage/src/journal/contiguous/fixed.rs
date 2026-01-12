@@ -90,6 +90,11 @@ pub struct Config {
 ///
 /// This is implemented as a wrapper around [SegmentedJournal] that provides position-based access
 /// where positions are automatically mapped to (section, position_in_section) pairs.
+///
+/// # Repair
+///
+/// If a write fails at a page boundary, there's a chance the journal will contain a "partial" item
+/// at the end of the last blob. Any such items will be truncated on init.
 pub struct Journal<E: Storage + Metrics, A: CodecFixedShared> {
     inner: SegmentedJournal<E, A>,
 
@@ -797,8 +802,8 @@ mod tests {
             blob.resize(size - 1).await.expect("Failed to corrupt blob");
             blob.sync().await.expect("Failed to sync blob");
 
-            // The segmented journal only validates the TAIL section during init.
-            // Middle sections are validated lazily during read/replay.
+            // The segmented journal will trim the incomplete blob on init, resulting in the blob
+            // missing one item. This should be detected as corruption during replay.
             let journal = Journal::<_, Digest>::init(context.clone(), cfg.clone())
                 .await
                 .expect("Journal init succeeded");
