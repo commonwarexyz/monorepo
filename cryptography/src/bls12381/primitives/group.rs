@@ -800,7 +800,7 @@ impl Space<Scalar> for G1 {
         let scratch_size = unsafe { blst_p1s_mult_pippenger_scratch_sizeof(points.len()) };
         // Ensure scratch_size is a multiple of 8 to avoid truncation in division.
         assert_eq!(scratch_size % 8, 0, "scratch_size must be multiple of 8");
-        let mut scratch = vec![MaybeUninit::<u64>::uninit(); scratch_size / 8];
+        let mut scratch = Zeroizing::new(vec![MaybeUninit::<u64>::uninit(); scratch_size / 8]);
 
         // Perform multi-scalar multiplication
         let mut msm_result = blst_p1::default();
@@ -1081,7 +1081,7 @@ impl Space<Scalar> for G2 {
         let scratch_size = unsafe { blst_p2s_mult_pippenger_scratch_sizeof(points.len()) };
         // Ensure scratch_size is a multiple of 8 to avoid truncation in division.
         assert_eq!(scratch_size % 8, 0, "scratch_size must be multiple of 8");
-        let mut scratch = vec![MaybeUninit::<u64>::uninit(); scratch_size / 8];
+        let mut scratch = Zeroizing::new(vec![MaybeUninit::<u64>::uninit(); scratch_size / 8]);
 
         // Perform multi-scalar multiplication
         let mut msm_result = blst_p2::default();
