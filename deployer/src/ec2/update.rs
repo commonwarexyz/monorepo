@@ -69,46 +69,60 @@ pub async fn update(config_path: &PathBuf) -> Result<(), Error> {
     }
 
     // Upload unique binaries and configs (deduplicated by digest)
-    // Collect entries first so keys live long enough for the futures to borrow them
     info!("uploading unique binaries and configs to S3");
-    let binary_entries: Vec<_> = binary_digests
-        .iter()
-        .map(|(digest, path)| (digest.clone(), binary_s3_key(tag, digest), path.as_ref()))
-        .collect();
-    let config_entries: Vec<_> = config_digests
-        .iter()
-        .map(|(digest, path)| (digest.clone(), config_s3_key(tag, digest), path.as_ref()))
-        .collect();
-
-    let binary_uploads: Vec<_> = binary_entries
-        .iter()
-        .map(|(_, key, path)| {
-            cache_file_and_presign(&s3_client, S3_BUCKET_NAME, key, path, PRESIGN_DURATION)
-        })
-        .collect();
-    let config_uploads: Vec<_> = config_entries
-        .iter()
-        .map(|(_, key, path)| {
-            cache_file_and_presign(&s3_client, S3_BUCKET_NAME, key, path, PRESIGN_DURATION)
-        })
-        .collect();
-
-    let (binary_results, config_results): (Vec<String>, Vec<String>) =
-        tokio::try_join!(async { try_join_all(binary_uploads).await }, async {
-            try_join_all(config_uploads).await
-        },)?;
-
-    // Build digest -> URL maps
-    let binary_digest_to_url: HashMap<String, String> = binary_entries
-        .into_iter()
-        .map(|(digest, _, _)| digest)
-        .zip(binary_results)
-        .collect();
-    let config_digest_to_url: HashMap<String, String> = config_entries
-        .into_iter()
-        .map(|(digest, _, _)| digest)
-        .zip(config_results)
-        .collect();
+    let (binary_digest_to_url, config_digest_to_url): (
+        HashMap<String, String>,
+        HashMap<String, String>,
+    ) = tokio::try_join!(
+        async {
+            Ok::<_, Error>(
+                try_join_all(binary_digests.iter().map(|(digest, path)| {
+                    let s3_client = s3_client.clone();
+                    let digest = digest.clone();
+                    let key = binary_s3_key(tag, &digest);
+                    let path = path.clone();
+                    async move {
+                        let url = cache_file_and_presign(
+                            &s3_client,
+                            S3_BUCKET_NAME,
+                            &key,
+                            path.as_ref(),
+                            PRESIGN_DURATION,
+                        )
+                        .await?;
+                        Ok::<_, Error>((digest, url))
+                    }
+                }))
+                .await?
+                .into_iter()
+                .collect(),
+            )
+        },
+        async {
+            Ok::<_, Error>(
+                try_join_all(config_digests.iter().map(|(digest, path)| {
+                    let s3_client = s3_client.clone();
+                    let digest = digest.clone();
+                    let key = config_s3_key(tag, &digest);
+                    let path = path.clone();
+                    async move {
+                        let url = cache_file_and_presign(
+                            &s3_client,
+                            S3_BUCKET_NAME,
+                            &key,
+                            path.as_ref(),
+                            PRESIGN_DURATION,
+                        )
+                        .await?;
+                        Ok::<_, Error>((digest, url))
+                    }
+                }))
+                .await?
+                .into_iter()
+                .collect(),
+            )
+        },
+    )?;
 
     // Map instance names to URLs via their digests
     let mut instance_binary_urls: HashMap<String, String> = HashMap::new();
@@ -168,25 +182,22 @@ pub async fn update(config_path: &PathBuf) -> Result<(), Error> {
     }
 
     // Update each binary instance concurrently
-    let mut futures = Vec::new();
-    for (name, ip) in binary_instances {
+    let private_key = private_key_path.to_str().unwrap();
+    try_join_all(binary_instances.into_iter().filter_map(|(name, ip)| {
         if instance_map.contains_key(&name) {
-            let private_key = private_key_path.to_str().unwrap();
             let binary_url = instance_binary_urls[&name].clone();
             let config_url = instance_config_urls[&name].clone();
-            let future = async move {
+            Some(async move {
                 update_instance(private_key, &ip, &binary_url, &config_url).await?;
                 info!(name, ip, "updated instance");
                 Ok::<(), Error>(())
-            };
-            futures.push(future);
+            })
         } else {
             error!(name, "instance config not found in config file");
+            None
         }
-    }
-
-    // Await all updates and handle errors
-    try_join_all(futures).await?;
+    }))
+    .await?;
     info!("update complete");
     Ok(())
 }

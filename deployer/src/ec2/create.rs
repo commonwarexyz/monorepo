@@ -167,46 +167,60 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     }
 
     // Upload unique binaries and configs to S3 (deduplicated by digest)
-    // Collect entries first so keys live long enough for the futures to borrow them
     info!("uploading unique binaries and configs to S3");
-    let binary_entries: Vec<_> = binary_digests
-        .iter()
-        .map(|(digest, path)| (digest.clone(), binary_s3_key(tag, digest), path.as_ref()))
-        .collect();
-    let config_entries: Vec<_> = config_digests
-        .iter()
-        .map(|(digest, path)| (digest.clone(), config_s3_key(tag, digest), path.as_ref()))
-        .collect();
-
-    let binary_uploads: Vec<_> = binary_entries
-        .iter()
-        .map(|(_, key, path)| {
-            cache_file_and_presign(&s3_client, S3_BUCKET_NAME, key, path, PRESIGN_DURATION)
-        })
-        .collect();
-    let config_uploads: Vec<_> = config_entries
-        .iter()
-        .map(|(_, key, path)| {
-            cache_file_and_presign(&s3_client, S3_BUCKET_NAME, key, path, PRESIGN_DURATION)
-        })
-        .collect();
-
-    let (binary_results, config_results): (Vec<String>, Vec<String>) =
-        tokio::try_join!(async { try_join_all(binary_uploads).await }, async {
-            try_join_all(config_uploads).await
-        },)?;
-
-    // Build digest -> URL maps
-    let binary_digest_to_url: HashMap<String, String> = binary_entries
-        .into_iter()
-        .map(|(digest, _, _)| digest)
-        .zip(binary_results)
-        .collect();
-    let config_digest_to_url: HashMap<String, String> = config_entries
-        .into_iter()
-        .map(|(digest, _, _)| digest)
-        .zip(config_results)
-        .collect();
+    let (binary_digest_to_url, config_digest_to_url): (
+        HashMap<String, String>,
+        HashMap<String, String>,
+    ) = tokio::try_join!(
+        async {
+            Ok::<_, Error>(
+                try_join_all(binary_digests.iter().map(|(digest, path)| {
+                    let s3_client = s3_client.clone();
+                    let digest = digest.clone();
+                    let key = binary_s3_key(tag, &digest);
+                    let path = path.clone();
+                    async move {
+                        let url = cache_file_and_presign(
+                            &s3_client,
+                            S3_BUCKET_NAME,
+                            &key,
+                            path.as_ref(),
+                            PRESIGN_DURATION,
+                        )
+                        .await?;
+                        Ok::<_, Error>((digest, url))
+                    }
+                }))
+                .await?
+                .into_iter()
+                .collect(),
+            )
+        },
+        async {
+            Ok::<_, Error>(
+                try_join_all(config_digests.iter().map(|(digest, path)| {
+                    let s3_client = s3_client.clone();
+                    let digest = digest.clone();
+                    let key = config_s3_key(tag, &digest);
+                    let path = path.clone();
+                    async move {
+                        let url = cache_file_and_presign(
+                            &s3_client,
+                            S3_BUCKET_NAME,
+                            &key,
+                            path.as_ref(),
+                            PRESIGN_DURATION,
+                        )
+                        .await?;
+                        Ok::<_, Error>((digest, url))
+                    }
+                }))
+                .await?
+                .into_iter()
+                .collect(),
+            )
+        },
+    )?;
 
     // Map instance names to URLs via their digests
     let mut instance_binary_urls: HashMap<String, String> = HashMap::new();
@@ -483,51 +497,55 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
 
     // Launch binary instances
     info!("launching binary instances");
-    let mut launch_futures = Vec::new();
+    let mut launch_configs = Vec::new();
     for instance in &config.instances {
-        let key_name = key_name.clone();
         let region = instance.region.clone();
         let resources = region_resources.get(&region).unwrap();
         let ec2_client = ec2_clients.get(&region).unwrap();
         let ami_id = find_latest_ami(ec2_client).await?;
-        let instance_type =
-            InstanceType::try_parse(&instance.instance_type).expect("Invalid instance type");
-        let storage_class =
-            VolumeType::try_parse(&instance.storage_class).expect("Invalid storage class");
-        let binary_sg_id = resources.binary_sg_id.as_ref().unwrap();
-        let tag = tag.clone();
-        let future = async move {
-            let instance_id = launch_instances(
-                ec2_client,
-                &ami_id,
-                instance_type,
-                instance.storage_size,
-                storage_class,
-                &key_name,
-                &resources.subnet_id,
-                binary_sg_id,
-                1,
-                &instance.name,
-                &tag,
-            )
-            .await?[0]
-                .clone();
-            let ip = wait_for_instances_running(ec2_client, slice::from_ref(&instance_id)).await?
-                [0]
-            .clone();
-            info!(
-                ip = ip.as_str(),
-                instance = instance.name.as_str(),
-                "launched instance"
-            );
-            Ok::<Deployment, Error>(Deployment {
-                instance: instance.clone(),
-                id: instance_id,
-                ip,
-            })
-        };
-        launch_futures.push(future);
+        launch_configs.push((instance, ec2_client, resources, ami_id));
     }
+    let launch_futures = launch_configs
+        .iter()
+        .map(|(instance, ec2_client, resources, ami_id)| {
+            let key_name = key_name.clone();
+            let instance_type =
+                InstanceType::try_parse(&instance.instance_type).expect("Invalid instance type");
+            let storage_class =
+                VolumeType::try_parse(&instance.storage_class).expect("Invalid storage class");
+            let binary_sg_id = resources.binary_sg_id.as_ref().unwrap();
+            let tag = tag.clone();
+            async move {
+                let instance_id = launch_instances(
+                    ec2_client,
+                    ami_id,
+                    instance_type,
+                    instance.storage_size,
+                    storage_class,
+                    &key_name,
+                    &resources.subnet_id,
+                    binary_sg_id,
+                    1,
+                    &instance.name,
+                    &tag,
+                )
+                .await?[0]
+                    .clone();
+                let ip = wait_for_instances_running(ec2_client, slice::from_ref(&instance_id))
+                    .await?[0]
+                    .clone();
+                info!(
+                    ip = ip.as_str(),
+                    instance = instance.name.as_str(),
+                    "launched instance"
+                );
+                Ok::<Deployment, Error>(Deployment {
+                    instance: (*instance).clone(),
+                    id: instance_id,
+                    ip,
+                })
+            }
+        });
     let deployments: Vec<Deployment> = try_join_all(launch_futures).await?;
     info!("launched binary instances");
 
@@ -664,51 +682,59 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     }
 
     // Upload unique promtail and pyroscope configs
-    // Collect entries first so keys live long enough for the futures to borrow them
-    let promtail_entries: Vec<_> = promtail_digests
-        .iter()
-        .map(|(digest, path)| (digest.clone(), promtail_s3_key(tag, digest), path.as_path()))
-        .collect();
-    let pyroscope_entries: Vec<_> = pyroscope_digests
-        .iter()
-        .map(|(digest, path)| {
-            (
-                digest.clone(),
-                pyroscope_s3_key(tag, digest),
-                path.as_path(),
+    let (promtail_digest_to_url, pyroscope_digest_to_url): (
+        HashMap<String, String>,
+        HashMap<String, String>,
+    ) = tokio::try_join!(
+        async {
+            Ok::<_, Error>(
+                try_join_all(promtail_digests.iter().map(|(digest, path)| {
+                    let s3_client = s3_client.clone();
+                    let digest = digest.clone();
+                    let key = promtail_s3_key(tag, &digest);
+                    let path = path.clone();
+                    async move {
+                        let url = cache_file_and_presign(
+                            &s3_client,
+                            S3_BUCKET_NAME,
+                            &key,
+                            &path,
+                            PRESIGN_DURATION,
+                        )
+                        .await?;
+                        Ok::<_, Error>((digest, url))
+                    }
+                }))
+                .await?
+                .into_iter()
+                .collect(),
             )
-        })
-        .collect();
-
-    let promtail_uploads: Vec<_> = promtail_entries
-        .iter()
-        .map(|(_, key, path)| {
-            cache_file_and_presign(&s3_client, S3_BUCKET_NAME, key, path, PRESIGN_DURATION)
-        })
-        .collect();
-    let pyroscope_uploads: Vec<_> = pyroscope_entries
-        .iter()
-        .map(|(_, key, path)| {
-            cache_file_and_presign(&s3_client, S3_BUCKET_NAME, key, path, PRESIGN_DURATION)
-        })
-        .collect();
-
-    let (promtail_results, pyroscope_results): (Vec<String>, Vec<String>) =
-        tokio::try_join!(async { try_join_all(promtail_uploads).await }, async {
-            try_join_all(pyroscope_uploads).await
-        },)?;
-
-    // Build digest -> URL maps
-    let promtail_digest_to_url: HashMap<String, String> = promtail_entries
-        .into_iter()
-        .map(|(digest, _, _)| digest)
-        .zip(promtail_results)
-        .collect();
-    let pyroscope_digest_to_url: HashMap<String, String> = pyroscope_entries
-        .into_iter()
-        .map(|(digest, _, _)| digest)
-        .zip(pyroscope_results)
-        .collect();
+        },
+        async {
+            Ok::<_, Error>(
+                try_join_all(pyroscope_digests.iter().map(|(digest, path)| {
+                    let s3_client = s3_client.clone();
+                    let digest = digest.clone();
+                    let key = pyroscope_s3_key(tag, &digest);
+                    let path = path.clone();
+                    async move {
+                        let url = cache_file_and_presign(
+                            &s3_client,
+                            S3_BUCKET_NAME,
+                            &key,
+                            &path,
+                            PRESIGN_DURATION,
+                        )
+                        .await?;
+                        Ok::<_, Error>((digest, url))
+                    }
+                }))
+                .await?
+                .into_iter()
+                .collect(),
+            )
+        },
+    )?;
 
     // Build instance URLs map
     let mut instance_urls_map: HashMap<String, InstanceUrls> = HashMap::new();
@@ -762,15 +788,20 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
 
     // Prepare binary instance configuration futures
     info!("configuring monitoring and binary instances");
-    let mut binary_futures = Vec::new();
-    for deployment in &deployments {
-        let instance = deployment.instance.clone();
-        let deployment_id = deployment.id.clone();
-        let ec2_client = ec2_clients[&instance.region].clone();
-        let ip = deployment.ip.clone();
-        let bbr_url = bbr_conf_url.clone();
-        let urls = instance_urls_map.remove(&instance.name).unwrap();
-        let future = async move {
+    let binary_configs: Vec<_> = deployments
+        .iter()
+        .map(|deployment| {
+            let instance = deployment.instance.clone();
+            let deployment_id = deployment.id.clone();
+            let ec2_client = ec2_clients[&instance.region].clone();
+            let ip = deployment.ip.clone();
+            let bbr_url = bbr_conf_url.clone();
+            let urls = instance_urls_map.remove(&instance.name).unwrap();
+            (instance, deployment_id, ec2_client, ip, bbr_url, urls)
+        })
+        .collect();
+    let binary_futures = binary_configs.into_iter().map(
+        |(instance, deployment_id, ec2_client, ip, bbr_url, urls)| async move {
             wait_for_instances_ready(&ec2_client, slice::from_ref(&deployment_id)).await?;
             enable_bbr(private_key, &ip, &bbr_url).await?;
             ssh_execute(
@@ -788,9 +819,8 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
                 "configured instance"
             );
             Ok::<String, Error>(ip)
-        };
-        binary_futures.push(future);
-    }
+        },
+    );
 
     // Run monitoring and binary configuration in parallel
     let (_, all_binary_ips) = tokio::try_join!(
