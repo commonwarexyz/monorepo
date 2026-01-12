@@ -52,8 +52,8 @@ where
         &self,
         key: &K,
     ) -> Result<Option<(V::Value, Location)>, Error> {
-        let iter = self.snapshot.get(key);
-        for &loc in iter {
+        let locs: Vec<Location> = self.snapshot.get(key).copied().collect();
+        for loc in locs {
             let op = self.log.read(loc).await?;
             match &op {
                 Operation::Update(Update(k, value)) => {
@@ -73,6 +73,24 @@ where
         self.get_with_loc(key)
             .await
             .map(|op| op.map(|(value, _)| value))
+    }
+
+    /// Get the value of `key` in the db, or None if it has no value.
+    pub async fn get_owned(&self, key: K) -> Result<Option<V::Value>, Error> {
+        let locs: Vec<Location> = self.snapshot.get(&key).copied().collect();
+        for loc in locs {
+            let op = self.log.read(loc).await?;
+            match &op {
+                Operation::Update(Update(k, value)) => {
+                    if k == &key {
+                        return Ok(Some(value.clone()));
+                    }
+                }
+                _ => unreachable!("location {loc} does not reference update operation"),
+            }
+        }
+
+        Ok(None)
     }
 }
 
@@ -180,10 +198,9 @@ where
     {
         // We use a BTreeMap here to collect the updates to ensure determinism in iteration order.
         let mut updates = BTreeMap::new();
-        let mut locations = Vec::with_capacity(iter.size_hint().0);
+        let mut locations = Vec::new();
         for (key, value) in iter {
-            let iter = self.snapshot.get(&key);
-            locations.extend(iter.copied());
+            locations.extend(self.snapshot.get(&key).copied());
             updates.insert(key, value);
         }
 

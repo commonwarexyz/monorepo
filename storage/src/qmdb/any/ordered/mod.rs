@@ -1,5 +1,5 @@
 use crate::{
-    index::{Cursor as _, Ordered as Index},
+    index::Ordered as Index,
     journal::contiguous::{Contiguous, MutableContiguous},
     kv::{self, Batchable},
     mmr::Location,
@@ -78,13 +78,13 @@ where
     }
 
     /// Finds and returns the location and Update for the lexicographically-last key produced by
-    /// `iter`, skipping over locations that are beyond the log's range.
+    /// the provided locations, skipping over locations that are beyond the log's range.
     async fn last_key_in_iter(
         &self,
-        iter: impl Iterator<Item = &Location>,
+        locs: impl IntoIterator<Item = Location>,
     ) -> Result<LocatedKey<K, V>, Error> {
         let mut last_key: LocatedKey<K, V> = None;
-        for &loc in iter {
+        for loc in locs {
             if loc >= self.op_count() {
                 // Don't try to look up operations that don't yet exist in the log. This can happen
                 // when there are translated key conflicts between a created key and its
@@ -121,13 +121,13 @@ where
         false
     }
 
-    /// Find the span produced by the provided `iter` that contains `key`, if any.
+    /// Find the span produced by the provided locations that contains `key`, if any.
     async fn find_span(
         &self,
-        iter: impl Iterator<Item = &Location>,
+        locs: impl IntoIterator<Item = Location>,
         key: &K,
     ) -> Result<LocatedKey<K, V>, Error> {
-        for &loc in iter {
+        for loc in locs {
             // Iterate over conflicts in the snapshot entry to find the span.
             let data = Self::get_update_op(&self.log, loc).await?;
             if Self::span_contains(&data.key, &data.next_key, key) {
@@ -146,8 +146,8 @@ where
         }
 
         // If the translated key is in the snapshot, get a cursor to look for the key.
-        let iter = self.snapshot.get(key);
-        let span = self.find_span(iter, key).await?;
+        let locs: Vec<Location> = self.snapshot.get(key).copied().collect();
+        let span = self.find_span(locs, key).await?;
         if let Some(span) = span {
             return Ok(Some(span));
         }
@@ -157,8 +157,9 @@ where
             return Ok(None);
         };
 
+        let locs: Vec<Location> = iter.copied().collect();
         let span = self
-            .find_span(iter, key)
+            .find_span(locs, key)
             .await?
             .expect("a span that includes any given key should always exist if db is non-empty");
 
@@ -177,8 +178,8 @@ where
         &self,
         key: &K,
     ) -> Result<Option<(Update<K, V>, Location)>, Error> {
-        let iter = self.snapshot.get(key);
-        for &loc in iter {
+        let locs: Vec<Location> = self.snapshot.get(key).copied().collect();
+        for loc in locs {
             let op = self.log.read(loc).await?;
             assert!(
                 op.is_update(),
@@ -202,6 +203,26 @@ where
             .map(|op| op.map(|(data, _)| data.value))
     }
 
+    /// Get the value of `key` in the db, or None if it has no value.
+    pub async fn get_owned(&self, key: K) -> Result<Option<V::Value>, Error> {
+        let locs: Vec<Location> = self.snapshot.get(&key).copied().collect();
+        for loc in locs {
+            let op = self.log.read(loc).await?;
+            assert!(
+                op.is_update(),
+                "location does not reference update operation. loc={loc}"
+            );
+            if op.key().expect("update operation must have key") == &key {
+                let Operation::Update(data) = op else {
+                    unreachable!("expected update operation");
+                };
+                return Ok(Some(data.value));
+            }
+        }
+
+        Ok(None)
+    }
+
     /// Streams all active (key, value) pairs in the database in key order, starting from the first
     /// active key greater than or equal to `start`.
     pub async fn stream_range<'a>(
@@ -211,8 +232,8 @@ where
     where
         V: 'a,
     {
-        let start_iter = self.snapshot.get(&start);
-        let mut init_pending = self.fetch_all_updates(start_iter).await?;
+        let start_locs: Vec<Location> = self.snapshot.get(&start).copied().collect();
+        let mut init_pending = self.fetch_all_updates(start_locs).await?;
         init_pending.retain(|x| x.key >= start);
 
         Ok(stream::unfold(
@@ -232,7 +253,8 @@ where
 
                 // TODO(https://github.com/commonwarexyz/monorepo/issues/2527): concurrently
                 // fetch a much larger batch of "pending" keys.
-                match self.fetch_all_updates(iter).await {
+                let locs: Vec<Location> = iter.copied().collect();
+                match self.fetch_all_updates(locs).await {
                     Ok(mut pending) => {
                         let item = pending.pop().expect("pending is not empty");
                         let key = item.key.clone();
@@ -248,11 +270,11 @@ where
     /// reverse order of the keys.
     async fn fetch_all_updates(
         &self,
-        locs: impl IntoIterator<Item = &Location>,
+        locs: impl IntoIterator<Item = Location>,
     ) -> Result<Vec<Update<K, V>>, Error> {
         let futures = locs
             .into_iter()
-            .map(|loc| Self::get_update_op(&self.log, *loc));
+            .map(|loc| Self::get_update_op(&self.log, loc));
         let mut updates = try_join_all(futures).await?;
         updates.sort_by(|a, b| b.key.cmp(&a.key));
 
@@ -288,7 +310,8 @@ where
             unreachable!("database should not be empty");
         };
 
-        let last_key = self.last_key_in_iter(iter).await?;
+        let locs: Vec<Location> = iter.copied().collect();
+        let last_key = self.last_key_in_iter(locs).await?;
         let (loc, last_key) = last_key.expect("no last key found in non-empty snapshot");
 
         callback(Some(loc));
@@ -310,47 +333,46 @@ where
         mut callback: impl FnMut(Option<Location>),
     ) -> Result<UpdateLocResult<K, V>, Error> {
         let mut best_prev_key: LocatedKey<K, V> = None;
-        {
-            // If the translated key is not in the snapshot, insert the new location and return the
-            // previous key info.
-            let Some(mut cursor) = self.snapshot.get_mut_or_insert(key, next_loc) else {
-                callback(None);
-                return self
-                    .update_non_colliding_prev_key_loc(key, next_loc + 1, callback)
-                    .await;
-            };
+        let locs: Vec<Location> = self.snapshot.get(key).copied().collect();
 
-            // Iterate over conflicts in the snapshot entry to try and find the key, or its
-            // predecessor if it doesn't exist.
-            while let Some(&loc) = cursor.next() {
-                let data = Self::get_update_op(&self.log, loc).await?;
-                if data.key == *key {
-                    // Found the key in the snapshot.
-                    if create_only {
-                        return Ok(UpdateLocResult::Exists(data.next_key));
-                    }
-                    // Update its location and return its next-key.
-                    assert!(next_loc > loc);
-                    cursor.update(next_loc);
-                    callback(Some(loc));
+        if locs.is_empty() {
+            self.snapshot.insert(key, next_loc);
+            callback(None);
+            return self
+                .update_non_colliding_prev_key_loc(key, next_loc + 1, callback)
+                .await;
+        }
+
+        // Iterate over conflicts in the snapshot entry to try and find the key, or its
+        // predecessor if it doesn't exist.
+        for loc in locs {
+            let data = Self::get_update_op(&self.log, loc).await?;
+            if data.key == *key {
+                // Found the key in the snapshot.
+                if create_only {
                     return Ok(UpdateLocResult::Exists(data.next_key));
                 }
-                if data.key > *key {
-                    continue;
-                }
-                if let Some((_, ref key_data)) = best_prev_key {
-                    if data.key > key_data.key {
-                        best_prev_key = Some((loc, data));
-                    }
-                } else {
+                // Update its location and return its next-key.
+                assert!(next_loc > loc);
+                update_known_loc(&mut self.snapshot, key, loc, next_loc);
+                callback(Some(loc));
+                return Ok(UpdateLocResult::Exists(data.next_key));
+            }
+            if data.key > *key {
+                continue;
+            }
+            if let Some((_, ref key_data)) = best_prev_key {
+                if data.key > key_data.key {
                     best_prev_key = Some((loc, data));
                 }
+            } else {
+                best_prev_key = Some((loc, data));
             }
-
-            // If we get here, a new key is being created. Insert its location into the snapshot.
-            cursor.insert(next_loc);
-            callback(None);
         }
+
+        // If we get here, a new key is being created. Insert its location into the snapshot.
+        self.snapshot.insert(key, next_loc);
+        callback(None);
 
         // Update `next_key` for the previous key to point to the newly created key.
         let Some((loc, prev_key_data)) = best_prev_key else {
@@ -363,15 +385,7 @@ where
         };
 
         // The previous key was found within the same snapshot entry as `key`.
-        let mut cursor = self
-            .snapshot
-            .get_mut(&prev_key_data.key)
-            .expect("prev_key already known to exist");
-        assert!(
-            cursor.find(|&l| *l == loc),
-            "prev_key should have been found"
-        );
-        cursor.update(next_loc + 1);
+        update_known_loc(&mut self.snapshot, &prev_key_data.key, loc, next_loc + 1);
         callback(Some(loc));
 
         Ok(UpdateLocResult::NotExists(prev_key_data))
@@ -498,36 +512,36 @@ where
     ) -> Result<(), Error> {
         let mut prev_key = None;
         let mut next_key = None;
-        {
-            // If the translated key is in the snapshot, get a cursor to look for the key.
-            let Some(mut cursor) = self.snapshot.get_mut(&key) else {
-                // no-op
-                return Ok(());
-            };
+        let locs: Vec<Location> = self.snapshot.get(&key).copied().collect();
+        let mut delete_loc = None;
 
-            // Iterate over conflicts in the snapshot entry to delete the key if it exists, and
-            // potentially find the previous key.
-            while let Some(&loc) = cursor.next() {
-                let data = Self::get_update_op(&self.log, loc).await?;
-                if data.key == key {
-                    // The key is in the snapshot, so delete it.
-                    cursor.delete();
-                    next_key = Some(data.next_key);
-                    callback(false, Some(loc));
-                    continue;
-                }
-                if data.key > key {
-                    continue;
-                }
-                let Some((_, ref current_prev_key, _)) = prev_key else {
-                    prev_key = Some((loc, data.key.clone(), data.value));
-                    continue;
-                };
-                if data.key > *current_prev_key {
-                    prev_key = Some((loc, data.key.clone(), data.value));
-                }
+        // Iterate over conflicts in the snapshot entry to delete the key if it exists, and
+        // potentially find the previous key.
+        for loc in locs {
+            let data = Self::get_update_op(&self.log, loc).await?;
+            if data.key == key {
+                delete_loc = Some(loc);
+                next_key = Some(data.next_key);
+                continue;
+            }
+            if data.key > key {
+                continue;
+            }
+            let Some((_, ref current_prev_key, _)) = prev_key else {
+                prev_key = Some((loc, data.key.clone(), data.value));
+                continue;
+            };
+            if data.key > *current_prev_key {
+                prev_key = Some((loc, data.key.clone(), data.value));
             }
         }
+
+        let Some(delete_loc) = delete_loc else {
+            // no-op
+            return Ok(());
+        };
+        delete_known_loc(&mut self.snapshot, &key, delete_loc);
+        callback(false, Some(delete_loc));
 
         let Some(next_key) = next_key else {
             // no-op
@@ -549,7 +563,8 @@ where
             let Some((iter, _)) = self.snapshot.prev_translated_key(&key) else {
                 unreachable!("DB should not be empty");
             };
-            let last_key = self.last_key_in_iter(iter).await?;
+            let locs: Vec<Location> = iter.copied().collect();
+            let last_key = self.last_key_in_iter(locs).await?;
             prev_key = last_key.map(|(loc, data)| (loc, data.key, data.value));
         }
 
@@ -606,10 +621,9 @@ where
         // Collect all the possible matching `locations` for any referenced key, while retaining
         // each item in the batch in a `mutations` map.
         let mut mutations = BTreeMap::new();
-        let mut locations = Vec::with_capacity(iter.size_hint().0);
+        let mut locations = Vec::new();
         for (key, value) in iter {
-            let iter = self.snapshot.get(&key);
-            locations.extend(iter.copied());
+            locations.extend(self.snapshot.get(&key).copied());
             mutations.insert(key, value);
         }
 

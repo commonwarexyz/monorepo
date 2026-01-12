@@ -174,7 +174,8 @@ where
 {
     /// Get the value of `key` in the db, or None if it has no value.
     pub async fn get(&self, key: &K) -> Result<Option<V>, Error> {
-        for &loc in self.snapshot.get(key) {
+        let locs: Vec<Location> = self.snapshot.get(key).copied().collect();
+        for loc in locs {
             let Operation::Update(Update(k, v)) = self.get_op(loc).await? else {
                 unreachable!("location ({loc}) does not reference update operation");
             };
