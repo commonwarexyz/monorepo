@@ -117,8 +117,6 @@ pub enum Error {
     OffsetOverflow,
     #[error("immutable blob")]
     ImmutableBlob,
-    #[error("codec error: {0}")]
-    Codec(#[from] commonware_codec::Error),
     #[error("io error: {0}")]
     Io(#[from] IoError),
 }
