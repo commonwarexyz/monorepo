@@ -1,5 +1,12 @@
 //! Service configuration for Prometheus, Loki, Grafana, Promtail, and a caller-provided binary
 
+use crate::ec2::s3::{
+    S3_DEPLOYMENTS_PREFIX, S3_TOOLS_BINARIES_PREFIX, S3_TOOLS_CONFIGS_PREFIX, TARGET_PLATFORM,
+};
+
+/// Deployer version used to namespace static configs in S3
+const DEPLOYER_VERSION: &str = env!("CARGO_PKG_VERSION");
+
 /// Version of Prometheus to download and install
 pub const PROMETHEUS_VERSION: &str = "3.2.0";
 
@@ -20,6 +27,185 @@ pub const PYROSCOPE_VERSION: &str = "1.12.0";
 
 /// Version of Grafana to download and install
 pub const GRAFANA_VERSION: &str = "11.5.2";
+
+// S3 key functions for tool binaries
+//
+// Convention: {S3_TOOLS_BINARIES_PREFIX}/{tool}/{version}/{platform}/{filename}
+//
+// The filename matches the upstream download URL exactly. The version is placed
+// in the path (not embedded in the filename) to ensure consistent cache organization
+// across all tools, since some upstream releases include version in the filename
+// (e.g., prometheus-3.2.0.linux-arm64.tar.gz) while others do not
+// (e.g., loki-linux-arm64.zip).
+
+pub fn prometheus_bin_s3_key(version: &str) -> String {
+    format!("{S3_TOOLS_BINARIES_PREFIX}/prometheus/{version}/{TARGET_PLATFORM}/prometheus-{version}.linux-arm64.tar.gz")
+}
+
+pub fn grafana_bin_s3_key(version: &str) -> String {
+    format!("{S3_TOOLS_BINARIES_PREFIX}/grafana/{version}/{TARGET_PLATFORM}/grafana_{version}_arm64.deb")
+}
+
+pub fn loki_bin_s3_key(version: &str) -> String {
+    format!("{S3_TOOLS_BINARIES_PREFIX}/loki/{version}/{TARGET_PLATFORM}/loki-linux-arm64.zip")
+}
+
+pub fn pyroscope_bin_s3_key(version: &str) -> String {
+    format!("{S3_TOOLS_BINARIES_PREFIX}/pyroscope/{version}/{TARGET_PLATFORM}/pyroscope_{version}_linux_arm64.tar.gz")
+}
+
+pub fn tempo_bin_s3_key(version: &str) -> String {
+    format!("{S3_TOOLS_BINARIES_PREFIX}/tempo/{version}/{TARGET_PLATFORM}/tempo_{version}_linux_arm64.tar.gz")
+}
+
+pub fn node_exporter_bin_s3_key(version: &str) -> String {
+    format!("{S3_TOOLS_BINARIES_PREFIX}/node-exporter/{version}/{TARGET_PLATFORM}/node_exporter-{version}.linux-arm64.tar.gz")
+}
+
+pub fn promtail_bin_s3_key(version: &str) -> String {
+    format!(
+        "{S3_TOOLS_BINARIES_PREFIX}/promtail/{version}/{TARGET_PLATFORM}/promtail-linux-arm64.zip"
+    )
+}
+
+// S3 key functions for component configs and services (include deployer version for cache invalidation)
+//
+// Convention: {S3_TOOLS_CONFIGS_PREFIX}/{deployer_version}/{component}/{file}
+
+pub fn prometheus_service_s3_key() -> String {
+    format!("{S3_TOOLS_CONFIGS_PREFIX}/{DEPLOYER_VERSION}/prometheus/service")
+}
+
+pub fn grafana_datasources_s3_key() -> String {
+    format!("{S3_TOOLS_CONFIGS_PREFIX}/{DEPLOYER_VERSION}/grafana/datasources.yml")
+}
+
+pub fn grafana_dashboards_s3_key() -> String {
+    format!("{S3_TOOLS_CONFIGS_PREFIX}/{DEPLOYER_VERSION}/grafana/all.yml")
+}
+
+pub fn loki_config_s3_key() -> String {
+    format!("{S3_TOOLS_CONFIGS_PREFIX}/{DEPLOYER_VERSION}/loki/config.yml")
+}
+
+pub fn loki_service_s3_key() -> String {
+    format!("{S3_TOOLS_CONFIGS_PREFIX}/{DEPLOYER_VERSION}/loki/service")
+}
+
+pub fn pyroscope_config_s3_key() -> String {
+    format!("{S3_TOOLS_CONFIGS_PREFIX}/{DEPLOYER_VERSION}/pyroscope/config.yml")
+}
+
+pub fn pyroscope_service_s3_key() -> String {
+    format!("{S3_TOOLS_CONFIGS_PREFIX}/{DEPLOYER_VERSION}/pyroscope/service")
+}
+
+pub fn tempo_config_s3_key() -> String {
+    format!("{S3_TOOLS_CONFIGS_PREFIX}/{DEPLOYER_VERSION}/tempo/config.yml")
+}
+
+pub fn tempo_service_s3_key() -> String {
+    format!("{S3_TOOLS_CONFIGS_PREFIX}/{DEPLOYER_VERSION}/tempo/service")
+}
+
+pub fn node_exporter_service_s3_key() -> String {
+    format!("{S3_TOOLS_CONFIGS_PREFIX}/{DEPLOYER_VERSION}/node-exporter/service")
+}
+
+pub fn promtail_service_s3_key() -> String {
+    format!("{S3_TOOLS_CONFIGS_PREFIX}/{DEPLOYER_VERSION}/promtail/service")
+}
+
+// S3 key functions for pyroscope agent (lives with pyroscope component)
+
+pub fn pyroscope_agent_service_s3_key() -> String {
+    format!("{S3_TOOLS_CONFIGS_PREFIX}/{DEPLOYER_VERSION}/pyroscope/agent.service")
+}
+
+pub fn pyroscope_agent_timer_s3_key() -> String {
+    format!("{S3_TOOLS_CONFIGS_PREFIX}/{DEPLOYER_VERSION}/pyroscope/agent.timer")
+}
+
+// S3 key functions for system configs
+
+pub fn bbr_config_s3_key() -> String {
+    format!("{S3_TOOLS_CONFIGS_PREFIX}/{DEPLOYER_VERSION}/system/bbr.conf")
+}
+
+pub fn logrotate_config_s3_key() -> String {
+    format!("{S3_TOOLS_CONFIGS_PREFIX}/{DEPLOYER_VERSION}/system/logrotate.conf")
+}
+
+// S3 key functions for binary instance configs
+
+pub fn binary_service_s3_key() -> String {
+    format!("{S3_TOOLS_CONFIGS_PREFIX}/{DEPLOYER_VERSION}/binary/service")
+}
+
+/// Returns the S3 key for an instance's binary by digest (deduplicated within deployment)
+pub fn binary_s3_key(tag: &str, digest: &str) -> String {
+    format!("{S3_DEPLOYMENTS_PREFIX}/{tag}/binaries/{digest}")
+}
+
+/// Returns the S3 key for an instance's config by digest (deduplicated within deployment)
+pub fn config_s3_key(tag: &str, digest: &str) -> String {
+    format!("{S3_DEPLOYMENTS_PREFIX}/{tag}/configs/{digest}")
+}
+
+/// Returns the S3 key for hosts.yaml by digest (deduplicated within deployment)
+pub fn hosts_s3_key(tag: &str, digest: &str) -> String {
+    format!("{S3_DEPLOYMENTS_PREFIX}/{tag}/hosts/{digest}")
+}
+
+/// Returns the S3 key for promtail config by digest (deduplicated within deployment)
+pub fn promtail_s3_key(tag: &str, digest: &str) -> String {
+    format!("{S3_DEPLOYMENTS_PREFIX}/{tag}/promtail/{digest}")
+}
+
+/// Returns the S3 key for pyroscope agent script by digest (deduplicated within deployment)
+pub fn pyroscope_s3_key(tag: &str, digest: &str) -> String {
+    format!("{S3_DEPLOYMENTS_PREFIX}/{tag}/pyroscope/{digest}")
+}
+
+/// Returns the S3 key for monitoring config by digest (deduplicated within deployment)
+pub fn monitoring_s3_key(tag: &str, digest: &str) -> String {
+    format!("{S3_DEPLOYMENTS_PREFIX}/{tag}/monitoring/{digest}")
+}
+
+/// Returns the download URL for Prometheus from GitHub
+pub fn prometheus_download_url(version: &str) -> String {
+    format!("https://github.com/prometheus/prometheus/releases/download/v{version}/prometheus-{version}.linux-arm64.tar.gz")
+}
+
+/// Returns the download URL for Grafana
+pub fn grafana_download_url(version: &str) -> String {
+    format!("https://dl.grafana.com/oss/release/grafana_{version}_arm64.deb")
+}
+
+/// Returns the download URL for Loki from GitHub
+pub fn loki_download_url(version: &str) -> String {
+    format!("https://github.com/grafana/loki/releases/download/v{version}/loki-linux-arm64.zip")
+}
+
+/// Returns the download URL for Pyroscope from GitHub
+pub fn pyroscope_download_url(version: &str) -> String {
+    format!("https://github.com/grafana/pyroscope/releases/download/v{version}/pyroscope_{version}_linux_arm64.tar.gz")
+}
+
+/// Returns the download URL for Tempo from GitHub
+pub fn tempo_download_url(version: &str) -> String {
+    format!("https://github.com/grafana/tempo/releases/download/v{version}/tempo_{version}_linux_arm64.tar.gz")
+}
+
+/// Returns the download URL for Node Exporter from GitHub
+pub fn node_exporter_download_url(version: &str) -> String {
+    format!("https://github.com/prometheus/node_exporter/releases/download/v{version}/node_exporter-{version}.linux-arm64.tar.gz")
+}
+
+/// Returns the download URL for Promtail from GitHub
+pub fn promtail_download_url(version: &str) -> String {
+    format!("https://github.com/grafana/loki/releases/download/v{version}/promtail-linux-arm64.zip")
+}
 
 /// YAML configuration for Grafana datasources (Prometheus, Loki, Tempo, and Pyroscope)
 pub const DATASOURCES_YML: &str = r#"
@@ -218,61 +404,64 @@ compactor:
     compaction_cycle: 1h
 "#;
 
+/// URLs for monitoring service installation
+pub struct MonitoringUrls {
+    pub prometheus_bin: String,
+    pub grafana_bin: String,
+    pub loki_bin: String,
+    pub pyroscope_bin: String,
+    pub tempo_bin: String,
+    pub node_exporter_bin: String,
+    pub prometheus_config: String,
+    pub datasources_yml: String,
+    pub all_yml: String,
+    pub dashboard: String,
+    pub loki_yml: String,
+    pub pyroscope_yml: String,
+    pub tempo_yml: String,
+    pub prometheus_service: String,
+    pub loki_service: String,
+    pub pyroscope_service: String,
+    pub tempo_service: String,
+    pub node_exporter_service: String,
+}
+
 /// Command to install monitoring services (Prometheus, Loki, Grafana, Pyroscope, Tempo) on the monitoring instance
-pub fn install_monitoring_cmd(
-    prometheus_version: &str,
-    grafana_version: &str,
-    loki_version: &str,
-    pyroscope_version: &str,
-    tempo_version: &str,
-) -> String {
-    let prometheus_url = format!(
-    "https://github.com/prometheus/prometheus/releases/download/v{prometheus_version}/prometheus-{prometheus_version}.linux-arm64.tar.gz",
-);
-    let grafana_url =
-        format!("https://dl.grafana.com/oss/release/grafana_{grafana_version}_arm64.deb");
-    let loki_url = format!(
-        "https://github.com/grafana/loki/releases/download/v{loki_version}/loki-linux-arm64.zip",
-    );
-    let pyroscope_url = format!(
-        "https://github.com/grafana/pyroscope/releases/download/v{pyroscope_version}/pyroscope_{pyroscope_version}_linux_arm64.tar.gz",
-    );
-    let tempo_url = format!(
-        "https://github.com/grafana/tempo/releases/download/v{tempo_version}/tempo_{tempo_version}_linux_arm64.tar.gz",
-    );
+pub fn install_monitoring_cmd(urls: &MonitoringUrls, prometheus_version: &str) -> String {
     format!(
         r#"
 sudo apt-get update -y
-sudo apt-get install -y wget curl unzip adduser libfontconfig1
+sudo apt-get install -y unzip adduser libfontconfig1 wget tar
 
-# Download Prometheus with retries
-for i in {{1..5}}; do
-  wget -O /home/ubuntu/prometheus.tar.gz {prometheus_url} && break
-  sleep 10
-done
+# Download all files from S3 concurrently via pre-signed URLs
+wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/prometheus.tar.gz '{}' &
+wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/grafana.deb '{}' &
+wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/loki.zip '{}' &
+wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/pyroscope.tar.gz '{}' &
+wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/tempo.tar.gz '{}' &
+wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/node_exporter.tar.gz '{}' &
+wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/prometheus.yml '{}' &
+wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/datasources.yml '{}' &
+wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/all.yml '{}' &
+wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/dashboard.json '{}' &
+wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/loki.yml '{}' &
+wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/pyroscope.yml '{}' &
+wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/tempo.yml '{}' &
+wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/prometheus.service '{}' &
+wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/loki.service '{}' &
+wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/pyroscope.service '{}' &
+wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/tempo.service '{}' &
+wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/node_exporter.service '{}' &
+wait
 
-# Download Grafana with retries
-for i in {{1..5}}; do
-  wget -O /home/ubuntu/grafana.deb {grafana_url} && break
-  sleep 10
-done
-
-# Download Loki with retries
-for i in {{1..5}}; do
-  wget -O /home/ubuntu/loki.zip {loki_url} && break
-  sleep 10
-done
-
-# Download Pyroscope with retries
-for i in {{1..5}}; do
-  wget -O /home/ubuntu/pyroscope.tar.gz {pyroscope_url} && break
-  sleep 10
-done
-
-# Download Tempo with retries
-for i in {{1..5}}; do
-  wget -O /home/ubuntu/tempo.tar.gz {tempo_url} && break
-  sleep 10
+# Verify all downloads succeeded
+for f in prometheus.tar.gz grafana.deb loki.zip pyroscope.tar.gz tempo.tar.gz node_exporter.tar.gz \
+         prometheus.yml datasources.yml all.yml dashboard.json loki.yml pyroscope.yml tempo.yml \
+         prometheus.service loki.service pyroscope.service tempo.service node_exporter.service; do
+    if [ ! -f "/home/ubuntu/$f" ]; then
+        echo "ERROR: Failed to download $f" >&2
+        exit 1
+    fi
 done
 
 # Install Prometheus
@@ -289,9 +478,10 @@ sudo apt-get install -f -y
 
 # Install Loki
 sudo mkdir -p /opt/loki /loki/index /loki/index_cache /loki/chunks /loki/compactor /loki/wal
-sudo chown -R ubuntu:ubuntu /loki
+sudo chown -R ubuntu:ubuntu /opt/loki /loki
 unzip -o /home/ubuntu/loki.zip -d /home/ubuntu
 sudo mv /home/ubuntu/loki-linux-arm64 /opt/loki/loki
+sudo chmod +x /opt/loki/loki
 
 # Install Pyroscope
 sudo mkdir -p /opt/pyroscope /var/lib/pyroscope
@@ -302,10 +492,18 @@ sudo chmod +x /opt/pyroscope/pyroscope
 
 # Install Tempo
 sudo mkdir -p /opt/tempo /tempo/traces /tempo/wal
-sudo chown -R ubuntu:ubuntu /tempo
+sudo chown -R ubuntu:ubuntu /opt/tempo /tempo
 tar xvfz /home/ubuntu/tempo.tar.gz -C /home/ubuntu
 sudo mv /home/ubuntu/tempo /opt/tempo/tempo
 sudo chmod +x /opt/tempo/tempo
+
+# Install Node Exporter
+sudo mkdir -p /opt/node_exporter
+sudo chown -R ubuntu:ubuntu /opt/node_exporter
+tar xvfz /home/ubuntu/node_exporter.tar.gz -C /home/ubuntu
+sudo mv /home/ubuntu/node_exporter-*.linux-arm64 /opt/node_exporter/
+sudo ln -s /opt/node_exporter/node_exporter-*.linux-arm64/node_exporter /opt/node_exporter/node_exporter
+sudo chmod +x /opt/node_exporter/node_exporter
 
 # Configure Grafana
 sudo sed -i '/^\[auth.anonymous\]$/,/^\[/ {{ /^; *enabled = /s/.*/enabled = true/; /^; *org_role = /s/.*/org_role = Admin/ }}' /etc/grafana/grafana.ini
@@ -314,7 +512,7 @@ sudo mkdir -p /etc/grafana/provisioning/datasources /etc/grafana/provisioning/da
 # Install Pyroscope data source plugin
 sudo grafana-cli plugins install grafana-pyroscope-datasource
 
-# Move configuration files (assuming they are uploaded via SCP)
+# Install configuration files
 sudo mv /home/ubuntu/prometheus.yml /opt/prometheus/prometheus.yml
 sudo mv /home/ubuntu/datasources.yml /etc/grafana/provisioning/datasources/datasources.yml
 sudo mv /home/ubuntu/all.yml /etc/grafana/provisioning/dashboards/all.yml
@@ -329,17 +527,43 @@ sudo mkdir -p /etc/tempo
 sudo mv /home/ubuntu/tempo.yml /etc/tempo/tempo.yml
 sudo chown root:root /etc/tempo/tempo.yml
 
-# Move service files
+# Install service files
 sudo mv /home/ubuntu/prometheus.service /etc/systemd/system/prometheus.service
 sudo mv /home/ubuntu/loki.service /etc/systemd/system/loki.service
 sudo mv /home/ubuntu/pyroscope.service /etc/systemd/system/pyroscope.service
 sudo mv /home/ubuntu/tempo.service /etc/systemd/system/tempo.service
+sudo mv /home/ubuntu/node_exporter.service /etc/systemd/system/node_exporter.service
+"#,
+        urls.prometheus_bin,
+        urls.grafana_bin,
+        urls.loki_bin,
+        urls.pyroscope_bin,
+        urls.tempo_bin,
+        urls.node_exporter_bin,
+        urls.prometheus_config,
+        urls.datasources_yml,
+        urls.all_yml,
+        urls.dashboard,
+        urls.loki_yml,
+        urls.pyroscope_yml,
+        urls.tempo_yml,
+        urls.prometheus_service,
+        urls.loki_service,
+        urls.pyroscope_service,
+        urls.tempo_service,
+        urls.node_exporter_service,
+    )
+}
 
-# Set ownership
+/// Continuation of monitoring install command (services startup)
+pub const fn start_monitoring_services_cmd() -> &'static str {
+    r#"
 sudo chown -R grafana:grafana /etc/grafana /var/lib/grafana
 
 # Start services
 sudo systemctl daemon-reload
+sudo systemctl start node_exporter
+sudo systemctl enable node_exporter
 sudo systemctl start prometheus
 sudo systemctl enable prometheus
 sudo systemctl start loki
@@ -351,16 +575,77 @@ sudo systemctl enable tempo
 sudo systemctl restart grafana-server
 sudo systemctl enable grafana-server
 "#
-    )
 }
 
-/// Command to install the binary on binary instances
-pub fn install_binary_cmd(profiling: bool) -> String {
-    let mut script = String::from(
+/// URLs for binary instance installation
+pub struct InstanceUrls {
+    pub binary: String,
+    pub config: String,
+    pub hosts: String,
+    pub promtail_bin: String,
+    pub promtail_config: String,
+    pub promtail_service: String,
+    pub node_exporter_bin: String,
+    pub node_exporter_service: String,
+    pub binary_service: String,
+    pub logrotate_conf: String,
+    pub pyroscope_script: String,
+    pub pyroscope_service: String,
+    pub pyroscope_timer: String,
+}
+
+/// Command to install all services on binary instances
+pub fn install_binary_cmd(urls: &InstanceUrls, profiling: bool) -> String {
+    let mut script = format!(
         r#"
-# Install base tools and binary dependencies
+# Install base tools and dependencies
 sudo apt-get update -y
-sudo apt-get install -y logrotate jq wget libjemalloc2 linux-tools-common linux-tools-generic linux-tools-$(uname -r)
+sudo apt-get install -y logrotate jq wget unzip libjemalloc2 linux-tools-common linux-tools-generic linux-tools-$(uname -r)
+
+# Download all files from S3 concurrently via pre-signed URLs
+wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/binary '{}' &
+wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/config.conf '{}' &
+wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/hosts.yaml '{}' &
+wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/promtail.zip '{}' &
+wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/promtail.yml '{}' &
+wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/promtail.service '{}' &
+wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/node_exporter.tar.gz '{}' &
+wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/node_exporter.service '{}' &
+wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/binary.service '{}' &
+wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/logrotate.conf '{}' &
+wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/pyroscope-agent.sh '{}' &
+wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/pyroscope-agent.service '{}' &
+wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/pyroscope-agent.timer '{}' &
+wait
+
+# Verify all downloads succeeded
+for f in binary config.conf hosts.yaml promtail.zip promtail.yml promtail.service \
+         node_exporter.tar.gz node_exporter.service binary.service logrotate.conf \
+         pyroscope-agent.sh pyroscope-agent.service pyroscope-agent.timer; do
+    if [ ! -f "/home/ubuntu/$f" ]; then
+        echo "ERROR: Failed to download $f" >&2
+        exit 1
+    fi
+done
+
+# Install Promtail
+sudo mkdir -p /opt/promtail /etc/promtail
+sudo chown -R ubuntu:ubuntu /opt/promtail
+unzip -o /home/ubuntu/promtail.zip -d /home/ubuntu
+sudo mv /home/ubuntu/promtail-linux-arm64 /opt/promtail/promtail
+sudo chmod +x /opt/promtail/promtail
+sudo mv /home/ubuntu/promtail.yml /etc/promtail/promtail.yml
+sudo mv /home/ubuntu/promtail.service /etc/systemd/system/promtail.service
+sudo chown root:root /etc/promtail/promtail.yml
+
+# Install Node Exporter
+sudo mkdir -p /opt/node_exporter
+sudo chown -R ubuntu:ubuntu /opt/node_exporter
+tar xvfz /home/ubuntu/node_exporter.tar.gz -C /home/ubuntu
+sudo mv /home/ubuntu/node_exporter-*.linux-arm64 /opt/node_exporter/
+sudo ln -s /opt/node_exporter/node_exporter-*.linux-arm64/node_exporter /opt/node_exporter/node_exporter
+sudo chmod +x /opt/node_exporter/node_exporter
+sudo mv /home/ubuntu/node_exporter.service /etc/systemd/system/node_exporter.service
 
 # Setup binary
 chmod +x /home/ubuntu/binary
@@ -372,7 +657,7 @@ sudo mv /home/ubuntu/logrotate.conf /etc/logrotate.d/binary
 sudo chown root:root /etc/logrotate.d/binary
 echo "0 * * * * /usr/sbin/logrotate /etc/logrotate.d/binary" | crontab -
 
-# Setup pyroscope agent script and timer
+# Setup pyroscope agent
 sudo ln -s "$(find /usr/lib/linux-tools/*/perf | head -1)" /usr/local/bin/perf
 sudo chmod +x /home/ubuntu/pyroscope-agent.sh
 sudo mv /home/ubuntu/pyroscope-agent.service /etc/systemd/system/pyroscope-agent.service
@@ -380,8 +665,23 @@ sudo mv /home/ubuntu/pyroscope-agent.timer /etc/systemd/system/pyroscope-agent.t
 
 # Start services
 sudo systemctl daemon-reload
+sudo systemctl enable --now promtail
+sudo systemctl enable --now node_exporter
 sudo systemctl enable --now binary
 "#,
+        urls.binary,
+        urls.config,
+        urls.hosts,
+        urls.promtail_bin,
+        urls.promtail_config,
+        urls.promtail_service,
+        urls.node_exporter_bin,
+        urls.node_exporter_service,
+        urls.binary_service,
+        urls.logrotate_conf,
+        urls.pyroscope_script,
+        urls.pyroscope_service,
+        urls.pyroscope_timer,
     );
     if profiling {
         script.push_str(
@@ -391,40 +691,6 @@ sudo systemctl enable --now pyroscope-agent.timer
         );
     }
     script
-}
-
-/// Command to set up Promtail on binary instances
-pub fn setup_promtail_cmd(promtail_version: &str) -> String {
-    let promtail_url = format!(
-        "https://github.com/grafana/loki/releases/download/v{promtail_version}/promtail-linux-arm64.zip",
-    );
-    format!(
-        r#"
-sudo apt-get update -y
-sudo apt-get install -y wget unzip
-
-# Download Promtail with retries
-for i in {{1..5}}; do
-  wget -O /home/ubuntu/promtail.zip {promtail_url} && break
-  sleep 10
-done
-
-# Install Promtail
-sudo mkdir -p /opt/promtail
-unzip /home/ubuntu/promtail.zip -d /home/ubuntu
-sudo mv /home/ubuntu/promtail-linux-arm64 /opt/promtail/promtail
-sudo chmod +x /opt/promtail/promtail
-sudo mkdir -p /etc/promtail
-sudo mv /home/ubuntu/promtail.yml /etc/promtail/promtail.yml
-sudo mv /home/ubuntu/promtail.service /etc/systemd/system/promtail.service
-sudo chown root:root /etc/promtail/promtail.yml
-
-# Start service
-sudo systemctl daemon-reload
-sudo systemctl start promtail
-sudo systemctl enable promtail
-"#
-    )
 }
 
 /// Generates Promtail configuration with the monitoring instance's private IP and instance name
@@ -453,38 +719,6 @@ scrape_configs:
           deployer_ip: {ip}
           deployer_region: {region}
           __path__: /var/log/binary.log
-"#
-    )
-}
-
-/// Command to install Node Exporter on instances
-pub fn setup_node_exporter_cmd(node_exporter_version: &str) -> String {
-    let node_exporter_url = format!(
-        "https://github.com/prometheus/node_exporter/releases/download/v{node_exporter_version}/node_exporter-{node_exporter_version}.linux-arm64.tar.gz",
-    );
-    format!(
-        r#"
-sudo apt-get update -y
-sudo apt-get install -y wget tar
-
-# Download Node Exporter with retries
-for i in {{1..5}}; do
-  wget -O /home/ubuntu/node_exporter.tar.gz {node_exporter_url} && break
-  sleep 10
-done
-
-# Install Node Exporter
-sudo mkdir -p /opt/node_exporter
-tar xvfz /home/ubuntu/node_exporter.tar.gz -C /home/ubuntu
-sudo mv /home/ubuntu/node_exporter-{node_exporter_version}.linux-arm64 /opt/node_exporter/node_exporter-{node_exporter_version}.linux-arm64
-sudo ln -s /opt/node_exporter/node_exporter-{node_exporter_version}.linux-arm64/node_exporter /opt/node_exporter/node_exporter
-sudo chmod +x /opt/node_exporter/node_exporter
-sudo mv /home/ubuntu/node_exporter.service /etc/systemd/system/node_exporter.service
-
-# Start service
-sudo systemctl daemon-reload
-sudo systemctl start node_exporter
-sudo systemctl enable node_exporter
 "#
     )
 }
@@ -670,3 +904,139 @@ RandomizedDelaySec=10s
 [Install]
 WantedBy=timers.target
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_binary_s3_keys() {
+        assert_eq!(
+            prometheus_bin_s3_key("3.2.0"),
+            "tools/binaries/prometheus/3.2.0/linux-arm64/prometheus-3.2.0.linux-arm64.tar.gz"
+        );
+        assert_eq!(
+            grafana_bin_s3_key("11.5.2"),
+            "tools/binaries/grafana/11.5.2/linux-arm64/grafana_11.5.2_arm64.deb"
+        );
+        assert_eq!(
+            loki_bin_s3_key("3.4.2"),
+            "tools/binaries/loki/3.4.2/linux-arm64/loki-linux-arm64.zip"
+        );
+        assert_eq!(
+            pyroscope_bin_s3_key("1.12.0"),
+            "tools/binaries/pyroscope/1.12.0/linux-arm64/pyroscope_1.12.0_linux_arm64.tar.gz"
+        );
+        assert_eq!(
+            tempo_bin_s3_key("2.7.1"),
+            "tools/binaries/tempo/2.7.1/linux-arm64/tempo_2.7.1_linux_arm64.tar.gz"
+        );
+        assert_eq!(
+            node_exporter_bin_s3_key("1.9.0"),
+            "tools/binaries/node-exporter/1.9.0/linux-arm64/node_exporter-1.9.0.linux-arm64.tar.gz"
+        );
+        assert_eq!(
+            promtail_bin_s3_key("3.4.2"),
+            "tools/binaries/promtail/3.4.2/linux-arm64/promtail-linux-arm64.zip"
+        );
+    }
+
+    #[test]
+    fn test_config_s3_keys() {
+        let version = DEPLOYER_VERSION;
+
+        assert_eq!(
+            prometheus_service_s3_key(),
+            format!("tools/configs/{version}/prometheus/service")
+        );
+        assert_eq!(
+            grafana_datasources_s3_key(),
+            format!("tools/configs/{version}/grafana/datasources.yml")
+        );
+        assert_eq!(
+            grafana_dashboards_s3_key(),
+            format!("tools/configs/{version}/grafana/all.yml")
+        );
+        assert_eq!(
+            loki_config_s3_key(),
+            format!("tools/configs/{version}/loki/config.yml")
+        );
+        assert_eq!(
+            loki_service_s3_key(),
+            format!("tools/configs/{version}/loki/service")
+        );
+        assert_eq!(
+            pyroscope_config_s3_key(),
+            format!("tools/configs/{version}/pyroscope/config.yml")
+        );
+        assert_eq!(
+            pyroscope_service_s3_key(),
+            format!("tools/configs/{version}/pyroscope/service")
+        );
+        assert_eq!(
+            tempo_config_s3_key(),
+            format!("tools/configs/{version}/tempo/config.yml")
+        );
+        assert_eq!(
+            tempo_service_s3_key(),
+            format!("tools/configs/{version}/tempo/service")
+        );
+        assert_eq!(
+            node_exporter_service_s3_key(),
+            format!("tools/configs/{version}/node-exporter/service")
+        );
+        assert_eq!(
+            promtail_service_s3_key(),
+            format!("tools/configs/{version}/promtail/service")
+        );
+        assert_eq!(
+            pyroscope_agent_service_s3_key(),
+            format!("tools/configs/{version}/pyroscope/agent.service")
+        );
+        assert_eq!(
+            pyroscope_agent_timer_s3_key(),
+            format!("tools/configs/{version}/pyroscope/agent.timer")
+        );
+        assert_eq!(
+            bbr_config_s3_key(),
+            format!("tools/configs/{version}/system/bbr.conf")
+        );
+        assert_eq!(
+            logrotate_config_s3_key(),
+            format!("tools/configs/{version}/system/logrotate.conf")
+        );
+        assert_eq!(
+            binary_service_s3_key(),
+            format!("tools/configs/{version}/binary/service")
+        );
+    }
+
+    #[test]
+    fn test_deployment_s3_keys() {
+        let digest = "abc123def456";
+        assert_eq!(
+            binary_s3_key("my-tag", digest),
+            "deployments/my-tag/binaries/abc123def456"
+        );
+        assert_eq!(
+            config_s3_key("my-tag", digest),
+            "deployments/my-tag/configs/abc123def456"
+        );
+        assert_eq!(
+            hosts_s3_key("my-tag", digest),
+            "deployments/my-tag/hosts/abc123def456"
+        );
+        assert_eq!(
+            promtail_s3_key("my-tag", digest),
+            "deployments/my-tag/promtail/abc123def456"
+        );
+        assert_eq!(
+            pyroscope_s3_key("my-tag", digest),
+            "deployments/my-tag/pyroscope/abc123def456"
+        );
+        assert_eq!(
+            monitoring_s3_key("my-tag", digest),
+            "deployments/my-tag/monitoring/abc123def456"
+        );
+    }
+}

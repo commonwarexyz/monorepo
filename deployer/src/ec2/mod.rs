@@ -101,18 +101,23 @@
 //! ## `ec2 create`
 //!
 //! 1. Validates configuration and generates an SSH key pair, stored in `$HOME/.commonware_deployer/{tag}/id_rsa_{tag}`.
-//! 2. Creates VPCs, subnets, internet gateways, route tables, and security groups per region.
-//! 3. Establishes VPC peering between the monitoring region and binary regions.
-//! 4. Launches the monitoring instance, uploads service files, and installs Prometheus, Grafana, Loki, Pyroscope, and Tempo.
-//! 5. Launches binary instances, uploads binaries, configurations, and hosts.yaml, and installs Promtail and the binary.
-//! 6. Configures BBR on all instances and updates the monitoring security group for Loki traffic.
-//! 7. Marks completion with `$HOME/.commonware_deployer/{tag}/created`.
+//! 2. Ensures the shared S3 bucket exists and caches observability tools (Prometheus, Grafana, Loki, etc.) if not already present.
+//! 3. Uploads deployment-specific files (binaries, configs) to S3.
+//! 4. Creates VPCs, subnets, internet gateways, route tables, and security groups per region (concurrently).
+//! 5. Establishes VPC peering between the monitoring region and binary regions.
+//! 6. Launches the monitoring instance.
+//! 7. Launches binary instances.
+//! 8. Caches all static config files and uploads per-instance configs (hosts.yaml, promtail, pyroscope) to S3.
+//! 9. Configures monitoring and binary instances in parallel via SSH (BBR, service installation, service startup).
+//! 10. Updates the monitoring security group to allow telemetry traffic from binary instances.
+//! 11. Marks completion with `$HOME/.commonware_deployer/{tag}/created`.
 //!
 //! ## `ec2 update`
 //!
-//! 1. Stops the `binary` service on each binary instance.
-//! 2. Uploads the latest binary and configuration from the YAML config.
-//! 3. Restarts the `binary` service, ensuring minimal downtime.
+//! 1. Uploads the latest binary and configuration to S3.
+//! 2. Stops the `binary` service on each binary instance.
+//! 3. Instances download the updated files from S3 via pre-signed URLs.
+//! 4. Restarts the `binary` service, ensuring minimal downtime.
 //!
 //! ## `ec2 authorize`
 //!
@@ -123,12 +128,44 @@
 //!
 //! 1. Terminates all instances across regions.
 //! 2. Deletes security groups, subnets, route tables, VPC peering connections, internet gateways, key pairs, and VPCs in dependency order.
-//! 3. Marks destruction with `$HOME/.commonware_deployer/{tag}/destroyed`, retaining the directory to prevent tag reuse.
+//! 3. Deletes deployment-specific data from S3 (cached tools remain for future deployments).
+//! 4. Marks destruction with `$HOME/.commonware_deployer/{tag}/destroyed`, retaining the directory to prevent tag reuse.
+//!
+//! ## `ec2 clean`
+//!
+//! 1. Deletes the shared S3 bucket and all its contents (cached tools and any remaining deployment data).
+//! 2. Use this to fully clean up when you no longer need the deployer cache.
 //!
 //! # Persistence
 //!
-//! * A directory `$HOME/.commonware_deployer/{tag}` stores the SSH private key, service files, and status files (`created`, `destroyed`).
+//! * A directory `$HOME/.commonware_deployer/{tag}` stores the SSH private key and status files (`created`, `destroyed`).
 //! * The deployment state is tracked via these files, ensuring operations respect prior create/destroy actions.
+//!
+//! ## S3 Caching
+//!
+//! A shared S3 bucket (`commonware-deployer-cache`) is used to cache deployment artifacts. The bucket
+//! uses a fixed name intentionally so that all users within the same AWS account share the cache. This
+//! design provides two benefits:
+//!
+//! 1. **Faster deployments**: Observability tools (Prometheus, Grafana, Loki, etc.) are downloaded from
+//!    upstream sources once and cached in S3. Subsequent deployments by any user skip the download and
+//!    use pre-signed URLs to fetch directly from S3.
+//!
+//! 2. **Reduced bandwidth**: Instead of requiring the deployer to push binaries to each instance,
+//!    unique binaries are uploaded once to S3 and then pulled from there.
+//!
+//! Per-deployment data (binaries, configs, hosts files) is isolated under `deployments/{tag}/` to prevent
+//! conflicts between concurrent deployments.
+//!
+//! The bucket stores:
+//!   * `tools/binaries/{tool}/{version}/{platform}/{filename}` - Tool binaries (e.g., prometheus, grafana)
+//!   * `tools/configs/{deployer-version}/{component}/{file}` - Static configs and service files
+//!   * `deployments/{tag}/` - Deployment-specific files:
+//!     * `monitoring/` - Prometheus config, dashboard
+//!     * `instances/{name}/` - Binary, config, hosts.yaml, promtail config, pyroscope script
+//!
+//! Tool binaries are namespaced by tool version and platform. Static configs are namespaced by deployer
+//! version to ensure cache invalidation when the deployer is updated.
 //!
 //! # Example Configuration
 //!
@@ -180,7 +217,10 @@ cfg_if::cfg_if! {
         pub use authorize::authorize;
         mod destroy;
         pub use destroy::destroy;
+        mod clean;
+        pub use clean::clean;
         pub mod utils;
+        pub mod s3;
 
         /// Name of the monitoring instance
         const MONITORING_NAME: &str = "monitoring";
@@ -221,6 +261,9 @@ cfg_if::cfg_if! {
         /// Destroy subcommand name
         pub const DESTROY_CMD: &str = "destroy";
 
+        /// Clean subcommand name
+        pub const CLEAN_CMD: &str = "clean";
+
         /// Directory where deployer files are stored
         fn deployer_directory(tag: &str) -> PathBuf {
             let base_dir = std::env::var("HOME").expect("$HOME is not configured");
@@ -236,6 +279,8 @@ cfg_if::cfg_if! {
             AwsSecurityGroupIngress(#[from] aws_sdk_ec2::operation::authorize_security_group_ingress::AuthorizeSecurityGroupIngressError),
             #[error("AWS describe instances error: {0}")]
             AwsDescribeInstances(#[from] aws_sdk_ec2::operation::describe_instances::DescribeInstancesError),
+            #[error("AWS S3 error: {0}")]
+            AwsS3(Box<aws_sdk_s3::Error>),
             #[error("IO error: {0}")]
             Io(#[from] std::io::Error),
             #[error("YAML error: {0}")]
@@ -246,8 +291,6 @@ cfg_if::cfg_if! {
             InvalidInstanceName(String),
             #[error("reqwest error: {0}")]
             Reqwest(#[from] reqwest::Error),
-            #[error("SCP failed")]
-            ScpFailed,
             #[error("SSH failed")]
             SshFailed,
             #[error("keygen failed")]
@@ -263,7 +306,31 @@ cfg_if::cfg_if! {
             #[error("private key not found")]
             PrivateKeyNotFound,
             #[error("invalid IP address: {0}")]
-            InvalidIpAddress(String),
+            IpAddrParse(#[from] std::net::AddrParseError),
+            #[error("IP address is not IPv4: {0}")]
+            IpAddrNotV4(std::net::IpAddr),
+            #[error("download failed: {0}")]
+            DownloadFailed(String),
+            #[error("S3 presigning config error: {0}")]
+            S3PresigningConfig(#[from] aws_sdk_s3::presigning::PresigningConfigError),
+            #[error("S3 presigning failed: {0}")]
+            S3PresigningFailed(Box<aws_sdk_s3::error::SdkError<aws_sdk_s3::operation::get_object::GetObjectError>>),
+            #[error("S3 builder error: {0}")]
+            S3Builder(#[from] aws_sdk_s3::error::BuildError),
+            #[error("duplicate instance name: {0}")]
+            DuplicateInstanceName(String),
+        }
+
+        impl From<aws_sdk_s3::Error> for Error {
+            fn from(err: aws_sdk_s3::Error) -> Self {
+                Self::AwsS3(Box::new(err))
+            }
+        }
+
+        impl From<aws_sdk_s3::error::SdkError<aws_sdk_s3::operation::get_object::GetObjectError>> for Error {
+            fn from(err: aws_sdk_s3::error::SdkError<aws_sdk_s3::operation::get_object::GetObjectError>) -> Self {
+                Self::S3PresigningFailed(Box::new(err))
+            }
         }
     }
 }

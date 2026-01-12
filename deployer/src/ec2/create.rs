@@ -1,12 +1,13 @@
 //! `create` subcommand for `ec2`
 
 use crate::ec2::{
-    aws::*, deployer_directory, services::*, utils::*, Config, Error, Host, Hosts, InstanceConfig,
-    CREATED_FILE_NAME, LOGS_PORT, MONITORING_NAME, MONITORING_REGION, PROFILES_PORT, TRACES_PORT,
+    aws::*, deployer_directory, s3::*, services::*, utils::*, Config, Error, Host, Hosts,
+    InstanceConfig, CREATED_FILE_NAME, LOGS_PORT, MONITORING_NAME, MONITORING_REGION,
+    PROFILES_PORT, TRACES_PORT,
 };
 use futures::future::try_join_all;
 use std::{
-    collections::{BTreeSet, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fs::File,
     net::IpAddr,
     path::PathBuf,
@@ -54,10 +55,12 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     // Ensure no instance is duplicated or named MONITORING_NAME
     let mut instance_names = HashSet::new();
     for instance in &config.instances {
-        if instance_names.contains(&instance.name) || instance.name == MONITORING_NAME {
+        if !instance_names.insert(&instance.name) {
+            return Err(Error::DuplicateInstanceName(instance.name.clone()));
+        }
+        if instance.name == MONITORING_NAME {
             return Err(Error::InvalidInstanceName(instance.name.clone()));
         }
-        instance_names.insert(instance.name.clone());
     }
 
     // Get public IP address of the deployer
@@ -102,113 +105,265 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
         .or_default()
         .insert(config.monitoring.instance_type.clone());
 
-    // Initialize resources for each region
-    info!(?regions, "initializing resources");
-    let mut ec2_clients = HashMap::new();
-    let mut region_resources = HashMap::new();
-    for (idx, region) in regions.iter().enumerate() {
-        // Create client for region
-        let ec2_client = create_ec2_client(Region::new(region.clone())).await;
-        ec2_clients.insert(region.clone(), ec2_client);
-        info!(region = region.as_str(), "created EC2 client");
+    // Setup S3 bucket and cache observability tools
+    info!(bucket = S3_BUCKET_NAME, "setting up S3 bucket");
+    let s3_client = create_s3_client(Region::new(MONITORING_REGION)).await;
+    ensure_bucket_exists(&s3_client, S3_BUCKET_NAME, MONITORING_REGION).await?;
 
-        // Assert all instance types are ARM-based
-        let instance_types: Vec<String> =
-            instance_types_by_region[region].iter().cloned().collect();
-        assert_arm64_support(&ec2_clients[region], &instance_types).await?;
+    // Cache observability tools (if not already cached) and generate pre-signed URLs concurrently
+    info!("uploading observability tools to S3");
+    let cache_tool = |s3_key: String, download_url: String| {
+        let tag_directory = tag_directory.clone();
+        let s3_client = s3_client.clone();
+        async move {
+            if !object_exists(&s3_client, S3_BUCKET_NAME, &s3_key).await? {
+                info!(
+                    key = s3_key.as_str(),
+                    "tool not in S3, downloading and uploading"
+                );
+                let temp_path = tag_directory.join(s3_key.replace('/', "_"));
+                download_file(&download_url, &temp_path).await?;
+                let url = upload_and_presign(
+                    &s3_client,
+                    S3_BUCKET_NAME,
+                    &s3_key,
+                    &temp_path,
+                    PRESIGN_DURATION,
+                )
+                .await?;
+                std::fs::remove_file(&temp_path)?;
+                Ok::<_, Error>(url)
+            } else {
+                info!(key = s3_key.as_str(), "tool already in S3");
+                presign_url(&s3_client, S3_BUCKET_NAME, &s3_key, PRESIGN_DURATION).await
+            }
+        }
+    };
+    let [prometheus_url, grafana_url, loki_url, pyroscope_url, tempo_url, node_exporter_url, promtail_url]: [String; 7] =
+        try_join_all([
+            cache_tool(prometheus_bin_s3_key(PROMETHEUS_VERSION), prometheus_download_url(PROMETHEUS_VERSION)),
+            cache_tool(grafana_bin_s3_key(GRAFANA_VERSION), grafana_download_url(GRAFANA_VERSION)),
+            cache_tool(loki_bin_s3_key(LOKI_VERSION), loki_download_url(LOKI_VERSION)),
+            cache_tool(pyroscope_bin_s3_key(PYROSCOPE_VERSION), pyroscope_download_url(PYROSCOPE_VERSION)),
+            cache_tool(tempo_bin_s3_key(TEMPO_VERSION), tempo_download_url(TEMPO_VERSION)),
+            cache_tool(node_exporter_bin_s3_key(NODE_EXPORTER_VERSION), node_exporter_download_url(NODE_EXPORTER_VERSION)),
+            cache_tool(promtail_bin_s3_key(PROMTAIL_VERSION), promtail_download_url(PROMTAIL_VERSION)),
+        ])
+        .await?
+        .try_into()
+        .unwrap();
+    info!("observability tools uploaded");
 
-        // Find availability zone that supports all instance types
-        let az = find_availability_zone(&ec2_clients[region], &instance_types).await?;
-        info!(
-            az = az.as_str(),
-            region = region.as_str(),
-            "selected availability zone"
-        );
+    // Compute digests for binaries and configs, grouping by digest for deduplication
+    let mut binary_digests: BTreeMap<String, String> = BTreeMap::new(); // digest -> path
+    let mut config_digests: BTreeMap<String, String> = BTreeMap::new(); // digest -> path
+    let mut instance_binary_digest: HashMap<String, String> = HashMap::new(); // instance -> digest
+    let mut instance_config_digest: HashMap<String, String> = HashMap::new(); // instance -> digest
+    for instance in &config.instances {
+        let binary_digest = hash_file(std::path::Path::new(&instance.binary))?;
+        let config_digest = hash_file(std::path::Path::new(&instance.config))?;
+        binary_digests.insert(binary_digest.clone(), instance.binary.clone());
+        config_digests.insert(config_digest.clone(), instance.config.clone());
+        instance_binary_digest.insert(instance.name.clone(), binary_digest);
+        instance_config_digest.insert(instance.name.clone(), config_digest);
+    }
 
-        // Create VPC, IGW, route table, subnet, security groups, and key pair
-        let vpc_cidr = format!("10.{idx}.0.0/16");
-        let vpc_id = create_vpc(&ec2_clients[region], &vpc_cidr, tag).await?;
-        info!(
-            vpc = vpc_id.as_str(),
-            region = region.as_str(),
-            "created VPC"
-        );
-        let igw_id = create_and_attach_igw(&ec2_clients[region], &vpc_id, tag).await?;
-        info!(
-            igw = igw_id.as_str(),
-            vpc = vpc_id.as_str(),
-            region = region.as_str(),
-            "created and attached IGW"
-        );
-        let route_table_id =
-            create_route_table(&ec2_clients[region], &vpc_id, &igw_id, tag).await?;
-        info!(
-            route_table = route_table_id.as_str(),
-            vpc = vpc_id.as_str(),
-            region = region.as_str(),
-            "created route table"
-        );
-        let subnet_cidr = format!("10.{idx}.1.0/24");
-        let subnet_id = create_subnet(
-            &ec2_clients[region],
-            &vpc_id,
-            &route_table_id,
-            &subnet_cidr,
-            &az,
-            tag,
-        )
-        .await?;
-        info!(
-            subnet = subnet_id.as_str(),
-            vpc = vpc_id.as_str(),
-            region = region.as_str(),
-            "created subnet"
-        );
+    // Upload unique binaries and configs to S3 (deduplicated by digest)
+    info!("uploading unique binaries and configs to S3");
+    let (binary_digest_to_url, config_digest_to_url): (
+        HashMap<String, String>,
+        HashMap<String, String>,
+    ) = tokio::try_join!(
+        async {
+            Ok::<_, Error>(
+                try_join_all(binary_digests.iter().map(|(digest, path)| {
+                    let s3_client = s3_client.clone();
+                    let digest = digest.clone();
+                    let key = binary_s3_key(tag, &digest);
+                    let path = path.clone();
+                    async move {
+                        let url = cache_file_and_presign(
+                            &s3_client,
+                            S3_BUCKET_NAME,
+                            &key,
+                            path.as_ref(),
+                            PRESIGN_DURATION,
+                        )
+                        .await?;
+                        Ok::<_, Error>((digest, url))
+                    }
+                }))
+                .await?
+                .into_iter()
+                .collect(),
+            )
+        },
+        async {
+            Ok::<_, Error>(
+                try_join_all(config_digests.iter().map(|(digest, path)| {
+                    let s3_client = s3_client.clone();
+                    let digest = digest.clone();
+                    let key = config_s3_key(tag, &digest);
+                    let path = path.clone();
+                    async move {
+                        let url = cache_file_and_presign(
+                            &s3_client,
+                            S3_BUCKET_NAME,
+                            &key,
+                            path.as_ref(),
+                            PRESIGN_DURATION,
+                        )
+                        .await?;
+                        Ok::<_, Error>((digest, url))
+                    }
+                }))
+                .await?
+                .into_iter()
+                .collect(),
+            )
+        },
+    )?;
 
-        // Create monitoring security group in monitoring region
-        let monitoring_sg_id = if *region == MONITORING_REGION {
-            let sg_id =
-                create_security_group_monitoring(&ec2_clients[region], &vpc_id, &deployer_ip, tag)
-                    .await?;
-            info!(
-                sg = sg_id.as_str(),
-                vpc = vpc_id.as_str(),
-                region = region.as_str(),
-                "created monitoring security group"
-            );
-            Some(sg_id)
-        } else {
-            None
-        };
-
-        // Import key pair
-        import_key_pair(&ec2_clients[region], &key_name, &public_key).await?;
-        info!(
-            key = key_name.as_str(),
-            region = region.as_str(),
-            "imported key pair"
+    // Map instance names to URLs via their digests
+    let mut instance_binary_urls: HashMap<String, String> = HashMap::new();
+    let mut instance_config_urls: HashMap<String, String> = HashMap::new();
+    for instance in &config.instances {
+        let binary_digest = &instance_binary_digest[&instance.name];
+        let config_digest = &instance_config_digest[&instance.name];
+        instance_binary_urls.insert(
+            instance.name.clone(),
+            binary_digest_to_url[binary_digest].clone(),
         );
-
-        // Store resources for region
-        info!(
-            vpc = vpc_id.as_str(),
-            subnet = subnet_id.as_str(),
-            subnet_cidr = subnet_cidr.as_str(),
-            region = region.as_str(),
-            "initialized resources"
-        );
-        region_resources.insert(
-            region.clone(),
-            RegionResources {
-                vpc_id,
-                vpc_cidr: vpc_cidr.clone(),
-                route_table_id,
-                subnet_id,
-                binary_sg_id: None,
-                monitoring_sg_id,
-            },
+        instance_config_urls.insert(
+            instance.name.clone(),
+            config_digest_to_url[config_digest].clone(),
         );
     }
+    info!("uploaded all instance binaries and configs");
+
+    // Initialize resources for each region concurrently
+    info!(?regions, "initializing resources");
+    let region_init_futures: Vec<_> = regions
+        .iter()
+        .enumerate()
+        .map(|(idx, region)| {
+            let region = region.clone();
+            let tag = tag.clone();
+            let deployer_ip = deployer_ip.clone();
+            let key_name = key_name.clone();
+            let public_key = public_key.clone();
+            let instance_types: Vec<String> =
+                instance_types_by_region[&region].iter().cloned().collect();
+
+            async move {
+                // Create client for region
+                let ec2_client = create_ec2_client(Region::new(region.clone())).await;
+                info!(region = region.as_str(), "created EC2 client");
+
+                // Assert all instance types are ARM-based
+                assert_arm64_support(&ec2_client, &instance_types).await?;
+
+                // Find availability zone that supports all instance types
+                let az = find_availability_zone(&ec2_client, &instance_types).await?;
+                info!(
+                    az = az.as_str(),
+                    region = region.as_str(),
+                    "selected availability zone"
+                );
+
+                // Create VPC, IGW, route table, subnet, security groups, and key pair
+                let vpc_cidr = format!("10.{idx}.0.0/16");
+                let vpc_id = create_vpc(&ec2_client, &vpc_cidr, &tag).await?;
+                info!(
+                    vpc = vpc_id.as_str(),
+                    region = region.as_str(),
+                    "created VPC"
+                );
+                let igw_id = create_and_attach_igw(&ec2_client, &vpc_id, &tag).await?;
+                info!(
+                    igw = igw_id.as_str(),
+                    vpc = vpc_id.as_str(),
+                    region = region.as_str(),
+                    "created and attached IGW"
+                );
+                let route_table_id =
+                    create_route_table(&ec2_client, &vpc_id, &igw_id, &tag).await?;
+                info!(
+                    route_table = route_table_id.as_str(),
+                    vpc = vpc_id.as_str(),
+                    region = region.as_str(),
+                    "created route table"
+                );
+                let subnet_cidr = format!("10.{idx}.1.0/24");
+                let subnet_id = create_subnet(
+                    &ec2_client,
+                    &vpc_id,
+                    &route_table_id,
+                    &subnet_cidr,
+                    &az,
+                    &tag,
+                )
+                .await?;
+                info!(
+                    subnet = subnet_id.as_str(),
+                    vpc = vpc_id.as_str(),
+                    region = region.as_str(),
+                    "created subnet"
+                );
+
+                // Create monitoring security group in monitoring region
+                let monitoring_sg_id = if region == MONITORING_REGION {
+                    let sg_id =
+                        create_security_group_monitoring(&ec2_client, &vpc_id, &deployer_ip, &tag)
+                            .await?;
+                    info!(
+                        sg = sg_id.as_str(),
+                        vpc = vpc_id.as_str(),
+                        region = region.as_str(),
+                        "created monitoring security group"
+                    );
+                    Some(sg_id)
+                } else {
+                    None
+                };
+
+                // Import key pair
+                import_key_pair(&ec2_client, &key_name, &public_key).await?;
+                info!(
+                    key = key_name.as_str(),
+                    region = region.as_str(),
+                    "imported key pair"
+                );
+
+                info!(
+                    vpc = vpc_id.as_str(),
+                    subnet = subnet_id.as_str(),
+                    subnet_cidr = subnet_cidr.as_str(),
+                    region = region.as_str(),
+                    "initialized resources"
+                );
+
+                Ok::<_, Error>((
+                    region,
+                    ec2_client,
+                    RegionResources {
+                        vpc_id,
+                        vpc_cidr,
+                        route_table_id,
+                        subnet_id,
+                        binary_sg_id: None,
+                        monitoring_sg_id,
+                    },
+                ))
+            }
+        })
+        .collect();
+
+    let region_results = try_join_all(region_init_futures).await?;
+    let (ec2_clients, mut region_resources): (HashMap<_, _>, HashMap<_, _>) = region_results
+        .into_iter()
+        .map(|(region, client, resources)| ((region.clone(), client), (region, resources)))
+        .unzip();
     info!(?regions, "initialized resources");
 
     // Setup VPC peering connections
@@ -344,85 +499,101 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
 
     // Launch binary instances
     info!("launching binary instances");
-    let mut launch_futures = Vec::new();
+    let mut launch_configs = Vec::new();
     for instance in &config.instances {
-        let key_name = key_name.clone();
         let region = instance.region.clone();
         let resources = region_resources.get(&region).unwrap();
         let ec2_client = ec2_clients.get(&region).unwrap();
         let ami_id = find_latest_ami(ec2_client).await?;
-        let instance_type =
-            InstanceType::try_parse(&instance.instance_type).expect("Invalid instance type");
-        let storage_class =
-            VolumeType::try_parse(&instance.storage_class).expect("Invalid storage class");
-        let binary_sg_id = resources.binary_sg_id.as_ref().unwrap();
-        let tag = tag.clone();
-        let future = async move {
-            let instance_id = launch_instances(
-                ec2_client,
-                &ami_id,
-                instance_type,
-                instance.storage_size,
-                storage_class,
-                &key_name,
-                &resources.subnet_id,
-                binary_sg_id,
-                1,
-                &instance.name,
-                &tag,
-            )
-            .await?[0]
-                .clone();
-            let ip = wait_for_instances_running(ec2_client, slice::from_ref(&instance_id)).await?
-                [0]
-            .clone();
-            info!(
-                ip = ip.as_str(),
-                instance = instance.name.as_str(),
-                "launched instance"
-            );
-            Ok::<Deployment, Error>(Deployment {
-                instance: instance.clone(),
-                id: instance_id,
-                ip,
-            })
-        };
-        launch_futures.push(future);
+        launch_configs.push((instance, ec2_client, resources, ami_id));
     }
+    let launch_futures = launch_configs
+        .iter()
+        .map(|(instance, ec2_client, resources, ami_id)| {
+            let key_name = key_name.clone();
+            let instance_type =
+                InstanceType::try_parse(&instance.instance_type).expect("Invalid instance type");
+            let storage_class =
+                VolumeType::try_parse(&instance.storage_class).expect("Invalid storage class");
+            let binary_sg_id = resources.binary_sg_id.as_ref().unwrap();
+            let tag = tag.clone();
+            async move {
+                let instance_id = launch_instances(
+                    ec2_client,
+                    ami_id,
+                    instance_type,
+                    instance.storage_size,
+                    storage_class,
+                    &key_name,
+                    &resources.subnet_id,
+                    binary_sg_id,
+                    1,
+                    &instance.name,
+                    &tag,
+                )
+                .await?[0]
+                    .clone();
+                let ip = wait_for_instances_running(ec2_client, slice::from_ref(&instance_id))
+                    .await?[0]
+                    .clone();
+                info!(
+                    ip = ip.as_str(),
+                    instance = instance.name.as_str(),
+                    "launched instance"
+                );
+                Ok::<Deployment, Error>(Deployment {
+                    instance: (*instance).clone(),
+                    id: instance_id,
+                    ip,
+                })
+            }
+        });
     let deployments: Vec<Deployment> = try_join_all(launch_futures).await?;
     info!("launched binary instances");
 
-    // Write systemd service files
-    let prometheus_service_path = tag_directory.join("prometheus.service");
-    std::fs::write(&prometheus_service_path, PROMETHEUS_SERVICE)?;
-    let loki_service_path = tag_directory.join("loki.service");
-    std::fs::write(&loki_service_path, LOKI_SERVICE)?;
-    let pyroscope_service_path = tag_directory.join("pyroscope.service");
-    std::fs::write(&pyroscope_service_path, PYROSCOPE_SERVICE)?;
-    let tempo_service_path = tag_directory.join("tempo.service");
-    std::fs::write(&tempo_service_path, TEMPO_SERVICE)?;
-    let promtail_service_path = tag_directory.join("promtail.service");
-    std::fs::write(&promtail_service_path, PROMTAIL_SERVICE)?;
-    let node_exporter_service_path = tag_directory.join("node_exporter.service");
-    std::fs::write(&node_exporter_service_path, NODE_EXPORTER_SERVICE)?;
-    let pyroscope_agent_service_path = tag_directory.join("pyroscope-agent.service");
-    std::fs::write(&pyroscope_agent_service_path, PYROSCOPE_AGENT_SERVICE)?;
-    let pyroscope_agent_timer_path = tag_directory.join("pyroscope-agent.timer");
-    std::fs::write(&pyroscope_agent_timer_path, PYROSCOPE_AGENT_TIMER)?;
-    let binary_service_path = tag_directory.join("binary.service");
-    std::fs::write(&binary_service_path, BINARY_SERVICE)?;
+    // Cache ALL static config files globally (these don't change between deployments)
+    // This includes both monitoring and binary instance static files
+    info!("uploading config files to S3");
+    let [
+        bbr_conf_url,
+        datasources_url,
+        all_yml_url,
+        loki_yml_url,
+        pyroscope_yml_url,
+        tempo_yml_url,
+        prometheus_service_url,
+        loki_service_url,
+        pyroscope_service_url,
+        tempo_service_url,
+        monitoring_node_exporter_service_url,
+        promtail_service_url,
+        binary_service_url,
+        logrotate_conf_url,
+        pyroscope_agent_service_url,
+        pyroscope_agent_timer_url,
+    ]: [String; 16] = try_join_all([
+        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &bbr_config_s3_key(), BBR_CONF.as_bytes(), PRESIGN_DURATION),
+        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &grafana_datasources_s3_key(), DATASOURCES_YML.as_bytes(), PRESIGN_DURATION),
+        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &grafana_dashboards_s3_key(), ALL_YML.as_bytes(), PRESIGN_DURATION),
+        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &loki_config_s3_key(), LOKI_CONFIG.as_bytes(), PRESIGN_DURATION),
+        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &pyroscope_config_s3_key(), PYROSCOPE_CONFIG.as_bytes(), PRESIGN_DURATION),
+        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &tempo_config_s3_key(), TEMPO_CONFIG.as_bytes(), PRESIGN_DURATION),
+        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &prometheus_service_s3_key(), PROMETHEUS_SERVICE.as_bytes(), PRESIGN_DURATION),
+        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &loki_service_s3_key(), LOKI_SERVICE.as_bytes(), PRESIGN_DURATION),
+        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &pyroscope_service_s3_key(), PYROSCOPE_SERVICE.as_bytes(), PRESIGN_DURATION),
+        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &tempo_service_s3_key(), TEMPO_SERVICE.as_bytes(), PRESIGN_DURATION),
+        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &node_exporter_service_s3_key(), NODE_EXPORTER_SERVICE.as_bytes(), PRESIGN_DURATION),
+        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &promtail_service_s3_key(), PROMTAIL_SERVICE.as_bytes(), PRESIGN_DURATION),
+        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &binary_service_s3_key(), BINARY_SERVICE.as_bytes(), PRESIGN_DURATION),
+        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &logrotate_config_s3_key(), LOGROTATE_CONF.as_bytes(), PRESIGN_DURATION),
+        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &pyroscope_agent_service_s3_key(), PYROSCOPE_AGENT_SERVICE.as_bytes(), PRESIGN_DURATION),
+        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &pyroscope_agent_timer_s3_key(), PYROSCOPE_AGENT_TIMER.as_bytes(), PRESIGN_DURATION),
+    ])
+    .await?
+    .try_into()
+    .unwrap();
 
-    // Write logrotate configuration file
-    let logrotate_conf_path = tag_directory.join("logrotate.conf");
-    std::fs::write(&logrotate_conf_path, LOGROTATE_CONF)?;
-
-    // Add BBR configuration file
-    let bbr_conf_path = tag_directory.join("99-bbr.conf");
-    std::fs::write(&bbr_conf_path, BBR_CONF)?;
-
-    // Configure monitoring instance
-    info!("configuring monitoring instance");
-    wait_for_instances_ready(&ec2_clients[&monitoring_region], &[monitoring_instance_id]).await?;
+    // Upload deployment-specific monitoring config files (deduplicated by digest)
     let instances: Vec<(&str, &str, &str)> = deployments
         .iter()
         .map(|d| {
@@ -435,129 +606,31 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
         .collect();
     let prom_config = generate_prometheus_config(&instances);
     let prom_path = tag_directory.join("prometheus.yml");
-    std::fs::write(&prom_path, prom_config)?;
-    let datasources_path = tag_directory.join("datasources.yml");
-    std::fs::write(&datasources_path, DATASOURCES_YML)?;
-    let all_yaml_path = tag_directory.join("all.yml");
-    std::fs::write(&all_yaml_path, ALL_YML)?;
-    let loki_config_path = tag_directory.join("loki.yml");
-    std::fs::write(&loki_config_path, LOKI_CONFIG)?;
-    let pyroscope_config_path = tag_directory.join("pyroscope.yml");
-    std::fs::write(&pyroscope_config_path, PYROSCOPE_CONFIG)?;
-    let tempo_yml_path = tag_directory.join("tempo.yml");
-    std::fs::write(&tempo_yml_path, TEMPO_CONFIG)?;
-    rsync_file(
-        private_key,
-        prom_path.to_str().unwrap(),
-        &monitoring_ip,
-        "/home/ubuntu/prometheus.yml",
-    )
-    .await?;
-    rsync_file(
-        private_key,
-        datasources_path.to_str().unwrap(),
-        &monitoring_ip,
-        "/home/ubuntu/datasources.yml",
-    )
-    .await?;
-    rsync_file(
-        private_key,
-        all_yaml_path.to_str().unwrap(),
-        &monitoring_ip,
-        "/home/ubuntu/all.yml",
-    )
-    .await?;
-    rsync_file(
-        private_key,
-        &config.monitoring.dashboard,
-        &monitoring_ip,
-        "/home/ubuntu/dashboard.json",
-    )
-    .await?;
-    rsync_file(
-        private_key,
-        prometheus_service_path.to_str().unwrap(),
-        &monitoring_ip,
-        "/home/ubuntu/prometheus.service",
-    )
-    .await?;
-    rsync_file(
-        private_key,
-        loki_config_path.to_str().unwrap(),
-        &monitoring_ip,
-        "/home/ubuntu/loki.yml",
-    )
-    .await?;
-    rsync_file(
-        private_key,
-        loki_service_path.to_str().unwrap(),
-        &monitoring_ip,
-        "/home/ubuntu/loki.service",
-    )
-    .await?;
-    rsync_file(
-        private_key,
-        node_exporter_service_path.to_str().unwrap(),
-        &monitoring_ip,
-        "/home/ubuntu/node_exporter.service",
-    )
-    .await?;
-    rsync_file(
-        private_key,
-        pyroscope_config_path.to_str().unwrap(),
-        &monitoring_ip,
-        "/home/ubuntu/pyroscope.yml",
-    )
-    .await?;
-    rsync_file(
-        private_key,
-        pyroscope_service_path.to_str().unwrap(),
-        &monitoring_ip,
-        "/home/ubuntu/pyroscope.service",
-    )
-    .await?;
-    rsync_file(
-        private_key,
-        tempo_yml_path.to_str().unwrap(),
-        &monitoring_ip,
-        "/home/ubuntu/tempo.yml",
-    )
-    .await?;
-    rsync_file(
-        private_key,
-        tempo_service_path.to_str().unwrap(),
-        &monitoring_ip,
-        "/home/ubuntu/tempo.service",
-    )
-    .await?;
-    enable_bbr(private_key, &monitoring_ip, bbr_conf_path.to_str().unwrap()).await?;
-    ssh_execute(
-        private_key,
-        &monitoring_ip,
-        &setup_node_exporter_cmd(NODE_EXPORTER_VERSION),
-    )
-    .await?;
-    poll_service_active(private_key, &monitoring_ip, "node_exporter").await?;
-    ssh_execute(
-        private_key,
-        &monitoring_ip,
-        &install_monitoring_cmd(
-            PROMETHEUS_VERSION,
-            GRAFANA_VERSION,
-            LOKI_VERSION,
-            PYROSCOPE_VERSION,
-            TEMPO_VERSION,
+    std::fs::write(&prom_path, &prom_config)?;
+    let prom_digest = hash_file(&prom_path)?;
+    let dashboard_path = std::path::PathBuf::from(&config.monitoring.dashboard);
+    let dashboard_digest = hash_file(&dashboard_path)?;
+    let [prometheus_config_url, dashboard_url]: [String; 2] = try_join_all([
+        cache_file_and_presign(
+            &s3_client,
+            S3_BUCKET_NAME,
+            &monitoring_s3_key(tag, &prom_digest),
+            &prom_path,
+            PRESIGN_DURATION,
         ),
-    )
-    .await?;
-    poll_service_active(private_key, &monitoring_ip, "prometheus").await?;
-    poll_service_active(private_key, &monitoring_ip, "loki").await?;
-    poll_service_active(private_key, &monitoring_ip, "pyroscope").await?;
-    poll_service_active(private_key, &monitoring_ip, "tempo").await?;
-    poll_service_active(private_key, &monitoring_ip, "grafana-server").await?;
-    info!("configured monitoring instance");
+        cache_file_and_presign(
+            &s3_client,
+            S3_BUCKET_NAME,
+            &monitoring_s3_key(tag, &dashboard_digest),
+            &dashboard_path,
+            PRESIGN_DURATION,
+        ),
+    ])
+    .await?
+    .try_into()
+    .unwrap();
 
-    // Generate hosts.yaml
+    // Generate hosts.yaml and upload once (shared by all instances)
     let hosts = Hosts {
         monitoring: monitoring_private_ip.clone().parse::<IpAddr>().unwrap(),
         hosts: deployments
@@ -571,134 +644,175 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     };
     let hosts_yaml = serde_yaml::to_string(&hosts)?;
     let hosts_path = tag_directory.join("hosts.yaml");
-    std::fs::write(&hosts_path, hosts_yaml)?;
+    std::fs::write(&hosts_path, &hosts_yaml)?;
+    let hosts_digest = hash_file(&hosts_path)?;
+    let hosts_url = cache_file_and_presign(
+        &s3_client,
+        S3_BUCKET_NAME,
+        &hosts_s3_key(tag, &hosts_digest),
+        &hosts_path,
+        PRESIGN_DURATION,
+    )
+    .await?;
 
-    // Configure binary instances
-    info!("configuring binary instances");
-    let mut start_futures = Vec::new();
+    // Write per-instance config files locally, compute digests, and deduplicate
+    let mut promtail_digests: BTreeMap<String, std::path::PathBuf> = BTreeMap::new();
+    let mut pyroscope_digests: BTreeMap<String, std::path::PathBuf> = BTreeMap::new();
+    let mut instance_promtail_digest: HashMap<String, String> = HashMap::new();
+    let mut instance_pyroscope_digest: HashMap<String, String> = HashMap::new();
     for deployment in &deployments {
-        let tag_directory = tag_directory.clone();
-        let instance = deployment.instance.clone();
-        wait_for_instances_ready(
-            &ec2_clients[&instance.region],
-            slice::from_ref(&deployment.id),
-        )
-        .await?;
-        let ip = deployment.ip.clone();
-        let monitoring_private_ip = monitoring_private_ip.clone();
-        let hosts_path = hosts_path.clone();
-        let logrotate_conf_path = logrotate_conf_path.clone();
-        let bbr_conf_path = bbr_conf_path.clone();
-        let promtail_service_path = promtail_service_path.clone();
-        let node_exporter_service_path = node_exporter_service_path.clone();
-        let binary_service_path = binary_service_path.clone();
-        let pyroscope_agent_service_path = pyroscope_agent_service_path.clone();
-        let pyroscope_agent_timer_path = pyroscope_agent_timer_path.clone();
-        let future = async move {
-            rsync_file(private_key, &instance.binary, &ip, "/home/ubuntu/binary").await?;
-            rsync_file(
-                private_key,
-                &instance.config,
-                &ip,
-                "/home/ubuntu/config.conf",
+        let instance = &deployment.instance;
+        let ip = &deployment.ip;
+
+        let promtail_cfg =
+            promtail_config(&monitoring_private_ip, &instance.name, ip, &instance.region);
+        let promtail_path = tag_directory.join(format!("promtail_{}.yml", instance.name));
+        std::fs::write(&promtail_path, &promtail_cfg)?;
+        let promtail_digest = hash_file(&promtail_path)?;
+
+        let pyroscope_script =
+            generate_pyroscope_script(&monitoring_private_ip, &instance.name, ip, &instance.region);
+        let pyroscope_path = tag_directory.join(format!("pyroscope-agent_{}.sh", instance.name));
+        std::fs::write(&pyroscope_path, &pyroscope_script)?;
+        let pyroscope_digest = hash_file(&pyroscope_path)?;
+
+        promtail_digests.insert(promtail_digest.clone(), promtail_path);
+        pyroscope_digests.insert(pyroscope_digest.clone(), pyroscope_path);
+        instance_promtail_digest.insert(instance.name.clone(), promtail_digest);
+        instance_pyroscope_digest.insert(instance.name.clone(), pyroscope_digest);
+    }
+
+    // Upload unique promtail and pyroscope configs
+    let (promtail_digest_to_url, pyroscope_digest_to_url): (
+        HashMap<String, String>,
+        HashMap<String, String>,
+    ) = tokio::try_join!(
+        async {
+            Ok::<_, Error>(
+                try_join_all(promtail_digests.iter().map(|(digest, path)| {
+                    let s3_client = s3_client.clone();
+                    let digest = digest.clone();
+                    let key = promtail_s3_key(tag, &digest);
+                    let path = path.clone();
+                    async move {
+                        let url = cache_file_and_presign(
+                            &s3_client,
+                            S3_BUCKET_NAME,
+                            &key,
+                            &path,
+                            PRESIGN_DURATION,
+                        )
+                        .await?;
+                        Ok::<_, Error>((digest, url))
+                    }
+                }))
+                .await?
+                .into_iter()
+                .collect(),
             )
-            .await?;
-            rsync_file(
-                private_key,
-                hosts_path.to_str().unwrap(),
-                &ip,
-                "/home/ubuntu/hosts.yaml",
+        },
+        async {
+            Ok::<_, Error>(
+                try_join_all(pyroscope_digests.iter().map(|(digest, path)| {
+                    let s3_client = s3_client.clone();
+                    let digest = digest.clone();
+                    let key = pyroscope_s3_key(tag, &digest);
+                    let path = path.clone();
+                    async move {
+                        let url = cache_file_and_presign(
+                            &s3_client,
+                            S3_BUCKET_NAME,
+                            &key,
+                            &path,
+                            PRESIGN_DURATION,
+                        )
+                        .await?;
+                        Ok::<_, Error>((digest, url))
+                    }
+                }))
+                .await?
+                .into_iter()
+                .collect(),
             )
-            .await?;
-            let promtail_config_path =
-                tag_directory.join(format!("promtail_{}.yml", instance.name));
-            std::fs::write(
-                &promtail_config_path,
-                promtail_config(
-                    &monitoring_private_ip,
-                    &instance.name,
-                    ip.as_str(),
-                    instance.region.as_str(),
-                ),
-            )?;
-            rsync_file(
-                private_key,
-                promtail_config_path.to_str().unwrap(),
-                &ip,
-                "/home/ubuntu/promtail.yml",
-            )
-            .await?;
-            rsync_file(
-                private_key,
-                promtail_service_path.to_str().unwrap(),
-                &ip,
-                "/home/ubuntu/promtail.service",
-            )
-            .await?;
-            rsync_file(
-                private_key,
-                node_exporter_service_path.to_str().unwrap(),
-                &ip,
-                "/home/ubuntu/node_exporter.service",
-            )
-            .await?;
-            rsync_file(
-                private_key,
-                binary_service_path.to_str().unwrap(),
-                &ip,
-                "/home/ubuntu/binary.service",
-            )
-            .await?;
-            rsync_file(
-                private_key,
-                logrotate_conf_path.to_str().unwrap(),
-                &ip,
-                "/home/ubuntu/logrotate.conf",
-            )
-            .await?;
-            rsync_file(
-                private_key,
-                pyroscope_agent_service_path.to_str().unwrap(),
-                &ip,
-                "/home/ubuntu/pyroscope-agent.service",
-            )
-            .await?;
-            let pyroscope_agent_script_path =
-                tag_directory.join(format!("pyroscope-agent_{}.sh", instance.name));
-            std::fs::write(
-                &pyroscope_agent_script_path,
-                generate_pyroscope_script(
-                    &monitoring_private_ip,
-                    &instance.name,
-                    &ip,
-                    &instance.region,
-                ),
-            )?;
-            rsync_file(
-                private_key,
-                pyroscope_agent_script_path.to_str().unwrap(),
-                &ip,
-                "/home/ubuntu/pyroscope-agent.sh",
-            )
-            .await?;
-            rsync_file(
-                private_key,
-                pyroscope_agent_timer_path.to_str().unwrap(),
-                &ip,
-                "/home/ubuntu/pyroscope-agent.timer",
-            )
-            .await?;
-            enable_bbr(private_key, &ip, bbr_conf_path.to_str().unwrap()).await?;
-            ssh_execute(private_key, &ip, &setup_promtail_cmd(PROMTAIL_VERSION)).await?;
-            poll_service_active(private_key, &ip, "promtail").await?;
+        },
+    )?;
+
+    // Build instance URLs map
+    let mut instance_urls_map: HashMap<String, InstanceUrls> = HashMap::new();
+    for deployment in &deployments {
+        let name = &deployment.instance.name;
+        let promtail_digest = &instance_promtail_digest[name];
+        let pyroscope_digest = &instance_pyroscope_digest[name];
+
+        instance_urls_map.insert(
+            name.clone(),
+            InstanceUrls {
+                binary: instance_binary_urls[name].clone(),
+                config: instance_config_urls[name].clone(),
+                hosts: hosts_url.clone(),
+                promtail_bin: promtail_url.clone(),
+                promtail_config: promtail_digest_to_url[promtail_digest].clone(),
+                promtail_service: promtail_service_url.clone(),
+                node_exporter_bin: node_exporter_url.clone(),
+                node_exporter_service: monitoring_node_exporter_service_url.clone(),
+                binary_service: binary_service_url.clone(),
+                logrotate_conf: logrotate_conf_url.clone(),
+                pyroscope_script: pyroscope_digest_to_url[pyroscope_digest].clone(),
+                pyroscope_service: pyroscope_agent_service_url.clone(),
+                pyroscope_timer: pyroscope_agent_timer_url.clone(),
+            },
+        );
+    }
+    info!("uploaded config files to S3");
+
+    // Build monitoring URLs struct for SSH configuration
+    let monitoring_urls = MonitoringUrls {
+        prometheus_bin: prometheus_url,
+        grafana_bin: grafana_url,
+        loki_bin: loki_url,
+        pyroscope_bin: pyroscope_url,
+        tempo_bin: tempo_url,
+        node_exporter_bin: node_exporter_url.clone(),
+        prometheus_config: prometheus_config_url,
+        datasources_yml: datasources_url,
+        all_yml: all_yml_url,
+        dashboard: dashboard_url,
+        loki_yml: loki_yml_url,
+        pyroscope_yml: pyroscope_yml_url,
+        tempo_yml: tempo_yml_url,
+        prometheus_service: prometheus_service_url,
+        loki_service: loki_service_url,
+        pyroscope_service: pyroscope_service_url,
+        tempo_service: tempo_service_url,
+        node_exporter_service: monitoring_node_exporter_service_url.clone(),
+    };
+
+    // Prepare binary instance configuration futures
+    info!("configuring monitoring and binary instances");
+    let binary_configs: Vec<_> = deployments
+        .iter()
+        .map(|deployment| {
+            let instance = deployment.instance.clone();
+            let deployment_id = deployment.id.clone();
+            let ec2_client = ec2_clients[&instance.region].clone();
+            let ip = deployment.ip.clone();
+            let bbr_url = bbr_conf_url.clone();
+            let urls = instance_urls_map.remove(&instance.name).unwrap();
+            (instance, deployment_id, ec2_client, ip, bbr_url, urls)
+        })
+        .collect();
+    let binary_futures = binary_configs.into_iter().map(
+        |(instance, deployment_id, ec2_client, ip, bbr_url, urls)| async move {
+            wait_for_instances_ready(&ec2_client, slice::from_ref(&deployment_id)).await?;
+            enable_bbr(private_key, &ip, &bbr_url).await?;
             ssh_execute(
                 private_key,
                 &ip,
-                &setup_node_exporter_cmd(NODE_EXPORTER_VERSION),
+                &install_binary_cmd(&urls, instance.profiling),
             )
             .await?;
+            poll_service_active(private_key, &ip, "promtail").await?;
             poll_service_active(private_key, &ip, "node_exporter").await?;
-            ssh_execute(private_key, &ip, &install_binary_cmd(instance.profiling)).await?;
             poll_service_active(private_key, &ip, "binary").await?;
             info!(
                 ip = ip.as_str(),
@@ -706,11 +820,43 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
                 "configured instance"
             );
             Ok::<String, Error>(ip)
-        };
-        start_futures.push(future);
-    }
-    let all_binary_ips = try_join_all(start_futures).await?;
-    info!("configured binary instances");
+        },
+    );
+
+    // Run monitoring and binary configuration in parallel
+    let (_, all_binary_ips) = tokio::try_join!(
+        async {
+            // Configure monitoring instance
+            let monitoring_ec2_client = &ec2_clients[&monitoring_region];
+            wait_for_instances_ready(
+                monitoring_ec2_client,
+                slice::from_ref(&monitoring_instance_id),
+            )
+            .await?;
+            enable_bbr(private_key, &monitoring_ip, &bbr_conf_url).await?;
+            ssh_execute(
+                private_key,
+                &monitoring_ip,
+                &install_monitoring_cmd(&monitoring_urls, PROMETHEUS_VERSION),
+            )
+            .await?;
+            ssh_execute(private_key, &monitoring_ip, start_monitoring_services_cmd()).await?;
+            poll_service_active(private_key, &monitoring_ip, "node_exporter").await?;
+            poll_service_active(private_key, &monitoring_ip, "prometheus").await?;
+            poll_service_active(private_key, &monitoring_ip, "loki").await?;
+            poll_service_active(private_key, &monitoring_ip, "pyroscope").await?;
+            poll_service_active(private_key, &monitoring_ip, "tempo").await?;
+            poll_service_active(private_key, &monitoring_ip, "grafana-server").await?;
+            info!("configured monitoring instance");
+            Ok::<(), Error>(())
+        },
+        async {
+            // Configure binary instances
+            let all_binary_ips = try_join_all(binary_futures).await?;
+            info!("configured binary instances");
+            Ok::<Vec<String>, Error>(all_binary_ips)
+        }
+    )?;
 
     // Update monitoring security group to restrict Loki port (3100)
     info!("updating monitoring security group to allow traffic from binary instances");
@@ -806,7 +952,7 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
                 monitoring = monitoring_sg_id.as_str(),
                 binary = binary_cidr.as_str(),
                 region = region.as_str(),
-                "opened monitoring part to traffic from binary VPC"
+                "opened monitoring port to traffic from binary VPC"
             );
         }
     }
