@@ -7,7 +7,7 @@ use crate::ec2::{
 use aws_sdk_ec2::types::Filter;
 use futures::future::try_join_all;
 use std::{collections::HashMap, fs::File, path::PathBuf};
-use tracing::{debug, error, info};
+use tracing::{error, info};
 
 /// Updates the binary and configuration on all binary nodes
 pub async fn update(config_path: &PathBuf) -> Result<(), Error> {
@@ -153,7 +153,7 @@ pub async fn update(config_path: &PathBuf) -> Result<(), Error> {
                             if let Some(public_ip) = &instance.public_ip_address {
                                 binary_instances
                                     .push((name_tag.value.clone().unwrap(), public_ip.clone()));
-                                debug!(
+                                info!(
                                     region,
                                     name = name_tag.value.clone().unwrap(),
                                     ip = public_ip,
