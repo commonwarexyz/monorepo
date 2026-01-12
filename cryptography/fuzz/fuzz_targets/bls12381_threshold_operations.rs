@@ -9,7 +9,7 @@ use commonware_cryptography::bls12381::primitives::{
     variant::{MinPk, MinSig, PartialSignature},
 };
 use commonware_parallel::{Rayon, Sequential};
-use commonware_utils::{fault_model::Bft3f1, Participant};
+use commonware_utils::{Bft3f1, Participant};
 use libfuzzer_sys::fuzz_target;
 use rand::thread_rng;
 use std::num::NonZeroUsize;
