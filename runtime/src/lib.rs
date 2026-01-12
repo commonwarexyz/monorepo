@@ -557,13 +557,11 @@ pub trait Storage: Clone + Send + Sync + 'static {
         partition: &str,
         name: &[u8],
     ) -> impl Future<Output = Result<(Self::Blob, u64), Error>> + Send {
-        let partition = partition.to_string();
-        let name = name.to_vec();
         async move {
             let (blob, size, _) = self
                 .open_versioned(
-                    &partition,
-                    &name,
+                    partition,
+                    name,
                     DEFAULT_BLOB_VERSION..=DEFAULT_BLOB_VERSION,
                 )
                 .await?;
