@@ -181,7 +181,7 @@ pub fn hash_file(path: &Path) -> Result<String, Error> {
     Ok(hasher.finalize().to_string())
 }
 
-/// Caches a file to S3 by hash if it doesn't exist, then returns a pre-signed URL
+/// Caches a file to S3 by digest if it doesn't exist, then returns a pre-signed URL
 #[must_use = "the pre-signed URL should be used to download the file"]
 pub async fn cache_file_and_presign(
     client: &S3Client,

@@ -142,34 +142,34 @@ pub fn binary_service_s3_key() -> String {
     format!("{S3_TOOLS_CONFIGS_PREFIX}/{DEPLOYER_VERSION}/binary/service")
 }
 
-/// Returns the S3 key for an instance's binary by hash (deduplicated within deployment)
-pub fn binary_s3_key(tag: &str, hash: &str) -> String {
-    format!("{S3_DEPLOYMENTS_PREFIX}/{tag}/binaries/{hash}")
+/// Returns the S3 key for an instance's binary by digest (deduplicated within deployment)
+pub fn binary_s3_key(tag: &str, digest: &str) -> String {
+    format!("{S3_DEPLOYMENTS_PREFIX}/{tag}/binaries/{digest}")
 }
 
-/// Returns the S3 key for an instance's config by hash (deduplicated within deployment)
-pub fn config_s3_key(tag: &str, hash: &str) -> String {
-    format!("{S3_DEPLOYMENTS_PREFIX}/{tag}/configs/{hash}")
+/// Returns the S3 key for an instance's config by digest (deduplicated within deployment)
+pub fn config_s3_key(tag: &str, digest: &str) -> String {
+    format!("{S3_DEPLOYMENTS_PREFIX}/{tag}/configs/{digest}")
 }
 
-/// Returns the S3 key for hosts.yaml by hash (deduplicated within deployment)
-pub fn hosts_s3_key(tag: &str, hash: &str) -> String {
-    format!("{S3_DEPLOYMENTS_PREFIX}/{tag}/hosts/{hash}")
+/// Returns the S3 key for hosts.yaml by digest (deduplicated within deployment)
+pub fn hosts_s3_key(tag: &str, digest: &str) -> String {
+    format!("{S3_DEPLOYMENTS_PREFIX}/{tag}/hosts/{digest}")
 }
 
-/// Returns the S3 key for promtail config by hash (deduplicated within deployment)
-pub fn promtail_s3_key(tag: &str, hash: &str) -> String {
-    format!("{S3_DEPLOYMENTS_PREFIX}/{tag}/promtail/{hash}")
+/// Returns the S3 key for promtail config by digest (deduplicated within deployment)
+pub fn promtail_s3_key(tag: &str, digest: &str) -> String {
+    format!("{S3_DEPLOYMENTS_PREFIX}/{tag}/promtail/{digest}")
 }
 
-/// Returns the S3 key for pyroscope agent script by hash (deduplicated within deployment)
-pub fn pyroscope_s3_key(tag: &str, hash: &str) -> String {
-    format!("{S3_DEPLOYMENTS_PREFIX}/{tag}/pyroscope/{hash}")
+/// Returns the S3 key for pyroscope agent script by digest (deduplicated within deployment)
+pub fn pyroscope_s3_key(tag: &str, digest: &str) -> String {
+    format!("{S3_DEPLOYMENTS_PREFIX}/{tag}/pyroscope/{digest}")
 }
 
-/// Returns the S3 key for monitoring config by hash (deduplicated within deployment)
-pub fn monitoring_s3_key(tag: &str, hash: &str) -> String {
-    format!("{S3_DEPLOYMENTS_PREFIX}/{tag}/monitoring/{hash}")
+/// Returns the S3 key for monitoring config by digest (deduplicated within deployment)
+pub fn monitoring_s3_key(tag: &str, digest: &str) -> String {
+    format!("{S3_DEPLOYMENTS_PREFIX}/{tag}/monitoring/{digest}")
 }
 
 /// Returns the download URL for Prometheus from GitHub
@@ -1009,29 +1009,29 @@ mod tests {
 
     #[test]
     fn test_deployment_s3_keys() {
-        let hash = "abc123def456";
+        let digest = "abc123def456";
         assert_eq!(
-            binary_s3_key("my-tag", hash),
+            binary_s3_key("my-tag", digest),
             "deployments/my-tag/binaries/abc123def456"
         );
         assert_eq!(
-            config_s3_key("my-tag", hash),
+            config_s3_key("my-tag", digest),
             "deployments/my-tag/configs/abc123def456"
         );
         assert_eq!(
-            hosts_s3_key("my-tag", hash),
+            hosts_s3_key("my-tag", digest),
             "deployments/my-tag/hosts/abc123def456"
         );
         assert_eq!(
-            promtail_s3_key("my-tag", hash),
+            promtail_s3_key("my-tag", digest),
             "deployments/my-tag/promtail/abc123def456"
         );
         assert_eq!(
-            pyroscope_s3_key("my-tag", hash),
+            pyroscope_s3_key("my-tag", digest),
             "deployments/my-tag/pyroscope/abc123def456"
         );
         assert_eq!(
-            monitoring_s3_key("my-tag", hash),
+            monitoring_s3_key("my-tag", digest),
             "deployments/my-tag/monitoring/abc123def456"
         );
     }

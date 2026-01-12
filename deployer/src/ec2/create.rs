@@ -7,7 +7,7 @@ use crate::ec2::{
 };
 use futures::future::try_join_all;
 use std::{
-    collections::{BTreeSet, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fs::File,
     net::IpAddr,
     path::PathBuf,
@@ -152,27 +152,27 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
         .unwrap();
     info!("observability tools uploaded");
 
-    // Compute hashes for binaries and configs, grouping by hash for deduplication
-    let mut binary_hashes: HashMap<String, String> = HashMap::new(); // hash -> path
-    let mut config_hashes: HashMap<String, String> = HashMap::new(); // hash -> path
-    let mut instance_binary_hash: HashMap<String, String> = HashMap::new(); // instance -> hash
-    let mut instance_config_hash: HashMap<String, String> = HashMap::new(); // instance -> hash
+    // Compute digests for binaries and configs, grouping by digest for deduplication
+    let mut binary_digests: BTreeMap<String, String> = BTreeMap::new(); // digest -> path
+    let mut config_digests: BTreeMap<String, String> = BTreeMap::new(); // digest -> path
+    let mut instance_binary_digest: HashMap<String, String> = HashMap::new(); // instance -> digest
+    let mut instance_config_digest: HashMap<String, String> = HashMap::new(); // instance -> digest
     for instance in &config.instances {
-        let binary_hash = hash_file(std::path::Path::new(&instance.binary))?;
-        let config_hash = hash_file(std::path::Path::new(&instance.config))?;
-        binary_hashes.insert(binary_hash.clone(), instance.binary.clone());
-        config_hashes.insert(config_hash.clone(), instance.config.clone());
-        instance_binary_hash.insert(instance.name.clone(), binary_hash);
-        instance_config_hash.insert(instance.name.clone(), config_hash);
+        let binary_digest = hash_file(std::path::Path::new(&instance.binary))?;
+        let config_digest = hash_file(std::path::Path::new(&instance.config))?;
+        binary_digests.insert(binary_digest.clone(), instance.binary.clone());
+        config_digests.insert(config_digest.clone(), instance.config.clone());
+        instance_binary_digest.insert(instance.name.clone(), binary_digest);
+        instance_config_digest.insert(instance.name.clone(), config_digest);
     }
 
-    // Upload unique binaries and configs to S3 (deduplicated by hash)
+    // Upload unique binaries and configs to S3 (deduplicated by digest)
     info!("uploading unique binaries and configs to S3");
-    let binary_keys: Vec<_> = binary_hashes
+    let binary_keys: Vec<_> = binary_digests
         .keys()
-        .map(|hash| binary_s3_key(tag, hash))
+        .map(|digest| binary_s3_key(tag, digest))
         .collect();
-    let binary_paths: Vec<_> = binary_hashes.values().collect();
+    let binary_paths: Vec<_> = binary_digests.values().collect();
     let mut binary_uploads = Vec::new();
     for (key, path) in binary_keys.iter().zip(binary_paths.iter()) {
         binary_uploads.push(cache_file_and_presign(
@@ -184,11 +184,11 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
         ));
     }
 
-    let config_keys: Vec<_> = config_hashes
+    let config_keys: Vec<_> = config_digests
         .keys()
-        .map(|hash| config_s3_key(tag, hash))
+        .map(|digest| config_s3_key(tag, digest))
         .collect();
-    let config_paths: Vec<_> = config_hashes.values().collect();
+    let config_paths: Vec<_> = config_digests.values().collect();
     let mut config_uploads = Vec::new();
     for (key, path) in config_keys.iter().zip(config_paths.iter()) {
         config_uploads.push(cache_file_and_presign(
@@ -205,25 +205,25 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
             try_join_all(config_uploads).await
         },)?;
 
-    // Build hash -> URL maps
-    let binary_hash_to_url: HashMap<String, String> =
-        binary_hashes.keys().cloned().zip(binary_results).collect();
-    let config_hash_to_url: HashMap<String, String> =
-        config_hashes.keys().cloned().zip(config_results).collect();
+    // Build digest -> URL maps
+    let binary_digest_to_url: HashMap<String, String> =
+        binary_digests.keys().cloned().zip(binary_results).collect();
+    let config_digest_to_url: HashMap<String, String> =
+        config_digests.keys().cloned().zip(config_results).collect();
 
-    // Map instance names to URLs via their hashes
+    // Map instance names to URLs via their digests
     let mut instance_binary_urls: HashMap<String, String> = HashMap::new();
     let mut instance_config_urls: HashMap<String, String> = HashMap::new();
     for instance in &config.instances {
-        let binary_hash = &instance_binary_hash[&instance.name];
-        let config_hash = &instance_config_hash[&instance.name];
+        let binary_digest = &instance_binary_digest[&instance.name];
+        let config_digest = &instance_config_digest[&instance.name];
         instance_binary_urls.insert(
             instance.name.clone(),
-            binary_hash_to_url[binary_hash].clone(),
+            binary_digest_to_url[binary_digest].clone(),
         );
         instance_config_urls.insert(
             instance.name.clone(),
-            config_hash_to_url[config_hash].clone(),
+            config_digest_to_url[config_digest].clone(),
         );
     }
     info!("uploaded all instance binaries and configs");
@@ -576,7 +576,7 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     .try_into()
     .unwrap();
 
-    // Upload deployment-specific monitoring config files (deduplicated by hash)
+    // Upload deployment-specific monitoring config files (deduplicated by digest)
     let instances: Vec<(&str, &str, &str)> = deployments
         .iter()
         .map(|d| {
@@ -590,21 +590,21 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     let prom_config = generate_prometheus_config(&instances);
     let prom_path = tag_directory.join("prometheus.yml");
     std::fs::write(&prom_path, &prom_config)?;
-    let prom_hash = hash_file(&prom_path)?;
+    let prom_digest = hash_file(&prom_path)?;
     let dashboard_path = std::path::PathBuf::from(&config.monitoring.dashboard);
-    let dashboard_hash = hash_file(&dashboard_path)?;
+    let dashboard_digest = hash_file(&dashboard_path)?;
     let [prometheus_config_url, dashboard_url]: [String; 2] = try_join_all([
         cache_file_and_presign(
             &s3_client,
             S3_BUCKET_NAME,
-            &monitoring_s3_key(tag, &prom_hash),
+            &monitoring_s3_key(tag, &prom_digest),
             &prom_path,
             PRESIGN_DURATION,
         ),
         cache_file_and_presign(
             &s3_client,
             S3_BUCKET_NAME,
-            &monitoring_s3_key(tag, &dashboard_hash),
+            &monitoring_s3_key(tag, &dashboard_digest),
             &dashboard_path,
             PRESIGN_DURATION,
         ),
@@ -628,21 +628,21 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     let hosts_yaml = serde_yaml::to_string(&hosts)?;
     let hosts_path = tag_directory.join("hosts.yaml");
     std::fs::write(&hosts_path, &hosts_yaml)?;
-    let hosts_hash = hash_file(&hosts_path)?;
+    let hosts_digest = hash_file(&hosts_path)?;
     let hosts_url = cache_file_and_presign(
         &s3_client,
         S3_BUCKET_NAME,
-        &hosts_s3_key(tag, &hosts_hash),
+        &hosts_s3_key(tag, &hosts_digest),
         &hosts_path,
         PRESIGN_DURATION,
     )
     .await?;
 
-    // Write per-instance config files locally, compute hashes, and deduplicate
-    let mut promtail_hashes: HashMap<String, std::path::PathBuf> = HashMap::new();
-    let mut pyroscope_hashes: HashMap<String, std::path::PathBuf> = HashMap::new();
-    let mut instance_promtail_hash: HashMap<String, String> = HashMap::new();
-    let mut instance_pyroscope_hash: HashMap<String, String> = HashMap::new();
+    // Write per-instance config files locally, compute digests, and deduplicate
+    let mut promtail_digests: BTreeMap<String, std::path::PathBuf> = BTreeMap::new();
+    let mut pyroscope_digests: BTreeMap<String, std::path::PathBuf> = BTreeMap::new();
+    let mut instance_promtail_digest: HashMap<String, String> = HashMap::new();
+    let mut instance_pyroscope_digest: HashMap<String, String> = HashMap::new();
 
     for deployment in &deployments {
         let instance = &deployment.instance;
@@ -652,26 +652,26 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
             promtail_config(&monitoring_private_ip, &instance.name, ip, &instance.region);
         let promtail_path = tag_directory.join(format!("promtail_{}.yml", instance.name));
         std::fs::write(&promtail_path, &promtail_cfg)?;
-        let promtail_hash = hash_file(&promtail_path)?;
+        let promtail_digest = hash_file(&promtail_path)?;
 
         let pyroscope_script =
             generate_pyroscope_script(&monitoring_private_ip, &instance.name, ip, &instance.region);
         let pyroscope_path = tag_directory.join(format!("pyroscope-agent_{}.sh", instance.name));
         std::fs::write(&pyroscope_path, &pyroscope_script)?;
-        let pyroscope_hash = hash_file(&pyroscope_path)?;
+        let pyroscope_digest = hash_file(&pyroscope_path)?;
 
-        promtail_hashes.insert(promtail_hash.clone(), promtail_path);
-        pyroscope_hashes.insert(pyroscope_hash.clone(), pyroscope_path);
-        instance_promtail_hash.insert(instance.name.clone(), promtail_hash);
-        instance_pyroscope_hash.insert(instance.name.clone(), pyroscope_hash);
+        promtail_digests.insert(promtail_digest.clone(), promtail_path);
+        pyroscope_digests.insert(pyroscope_digest.clone(), pyroscope_path);
+        instance_promtail_digest.insert(instance.name.clone(), promtail_digest);
+        instance_pyroscope_digest.insert(instance.name.clone(), pyroscope_digest);
     }
 
     // Upload unique promtail and pyroscope configs
-    let promtail_keys: Vec<_> = promtail_hashes
+    let promtail_keys: Vec<_> = promtail_digests
         .keys()
-        .map(|hash| promtail_s3_key(tag, hash))
+        .map(|digest| promtail_s3_key(tag, digest))
         .collect();
-    let promtail_paths: Vec<_> = promtail_hashes.values().collect();
+    let promtail_paths: Vec<_> = promtail_digests.values().collect();
     let mut promtail_uploads = Vec::new();
     for (key, path) in promtail_keys.iter().zip(promtail_paths.iter()) {
         promtail_uploads.push(cache_file_and_presign(
@@ -683,11 +683,11 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
         ));
     }
 
-    let pyroscope_keys: Vec<_> = pyroscope_hashes
+    let pyroscope_keys: Vec<_> = pyroscope_digests
         .keys()
-        .map(|hash| pyroscope_s3_key(tag, hash))
+        .map(|digest| pyroscope_s3_key(tag, digest))
         .collect();
-    let pyroscope_paths: Vec<_> = pyroscope_hashes.values().collect();
+    let pyroscope_paths: Vec<_> = pyroscope_digests.values().collect();
     let mut pyroscope_uploads = Vec::new();
     for (key, path) in pyroscope_keys.iter().zip(pyroscope_paths.iter()) {
         pyroscope_uploads.push(cache_file_and_presign(
@@ -704,13 +704,13 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
             try_join_all(pyroscope_uploads).await
         },)?;
 
-    // Build hash -> URL maps
-    let promtail_hash_to_url: HashMap<String, String> = promtail_hashes
+    // Build digest -> URL maps
+    let promtail_digest_to_url: HashMap<String, String> = promtail_digests
         .keys()
         .cloned()
         .zip(promtail_results)
         .collect();
-    let pyroscope_hash_to_url: HashMap<String, String> = pyroscope_hashes
+    let pyroscope_digest_to_url: HashMap<String, String> = pyroscope_digests
         .keys()
         .cloned()
         .zip(pyroscope_results)
@@ -720,8 +720,8 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     let mut instance_urls_map: HashMap<String, InstanceUrls> = HashMap::new();
     for deployment in &deployments {
         let name = &deployment.instance.name;
-        let promtail_hash = &instance_promtail_hash[name];
-        let pyroscope_hash = &instance_pyroscope_hash[name];
+        let promtail_digest = &instance_promtail_digest[name];
+        let pyroscope_digest = &instance_pyroscope_digest[name];
 
         instance_urls_map.insert(
             name.clone(),
@@ -730,13 +730,13 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
                 config: instance_config_urls[name].clone(),
                 hosts: hosts_url.clone(),
                 promtail_bin: promtail_url.clone(),
-                promtail_config: promtail_hash_to_url[promtail_hash].clone(),
+                promtail_config: promtail_digest_to_url[promtail_digest].clone(),
                 promtail_service: promtail_service_url.clone(),
                 node_exporter_bin: node_exporter_url.clone(),
                 node_exporter_service: monitoring_node_exporter_service_url.clone(),
                 binary_service: binary_service_url.clone(),
                 logrotate_conf: logrotate_conf_url.clone(),
-                pyroscope_script: pyroscope_hash_to_url[pyroscope_hash].clone(),
+                pyroscope_script: pyroscope_digest_to_url[pyroscope_digest].clone(),
                 pyroscope_service: pyroscope_agent_service_url.clone(),
                 pyroscope_timer: pyroscope_agent_timer_url.clone(),
             },

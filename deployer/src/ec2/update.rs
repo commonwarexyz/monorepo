@@ -6,7 +6,11 @@ use crate::ec2::{
 };
 use aws_sdk_ec2::types::Filter;
 use futures::future::try_join_all;
-use std::{collections::HashMap, fs::File, path::PathBuf};
+use std::{
+    collections::{BTreeMap, HashMap},
+    fs::File,
+    path::PathBuf,
+};
 use tracing::{error, info};
 
 /// Updates the binary and configuration on all binary nodes
@@ -46,31 +50,31 @@ pub async fn update(config_path: &PathBuf) -> Result<(), Error> {
         .collect();
 
     // Upload updated binaries and configs to S3 and generate pre-signed URLs
-    // Uses hash-based deduplication to avoid re-uploading identical files
+    // Uses digest-based deduplication to avoid re-uploading identical files
     let s3_client = create_s3_client(Region::new(MONITORING_REGION)).await;
 
-    // Compute hashes and build deduplication maps
-    let mut binary_hashes: HashMap<String, String> = HashMap::new();
-    let mut config_hashes: HashMap<String, String> = HashMap::new();
-    let mut instance_binary_hash: HashMap<String, String> = HashMap::new();
-    let mut instance_config_hash: HashMap<String, String> = HashMap::new();
+    // Compute digests and build deduplication maps
+    let mut binary_digests: BTreeMap<String, String> = BTreeMap::new();
+    let mut config_digests: BTreeMap<String, String> = BTreeMap::new();
+    let mut instance_binary_digest: HashMap<String, String> = HashMap::new();
+    let mut instance_config_digest: HashMap<String, String> = HashMap::new();
     for instance in &config.instances {
-        let binary_hash = hash_file(std::path::Path::new(&instance.binary))?;
-        let config_hash = hash_file(std::path::Path::new(&instance.config))?;
+        let binary_digest = hash_file(std::path::Path::new(&instance.binary))?;
+        let config_digest = hash_file(std::path::Path::new(&instance.config))?;
 
-        binary_hashes.insert(binary_hash.clone(), instance.binary.clone());
-        config_hashes.insert(config_hash.clone(), instance.config.clone());
-        instance_binary_hash.insert(instance.name.clone(), binary_hash);
-        instance_config_hash.insert(instance.name.clone(), config_hash);
+        binary_digests.insert(binary_digest.clone(), instance.binary.clone());
+        config_digests.insert(config_digest.clone(), instance.config.clone());
+        instance_binary_digest.insert(instance.name.clone(), binary_digest);
+        instance_config_digest.insert(instance.name.clone(), config_digest);
     }
 
-    // Upload unique binaries and configs (deduplicated by hash)
+    // Upload unique binaries and configs (deduplicated by digest)
     info!("uploading unique binaries and configs to S3");
-    let binary_keys: Vec<_> = binary_hashes
+    let binary_keys: Vec<_> = binary_digests
         .keys()
-        .map(|hash| binary_s3_key(tag, hash))
+        .map(|digest| binary_s3_key(tag, digest))
         .collect();
-    let binary_paths: Vec<_> = binary_hashes.values().collect();
+    let binary_paths: Vec<_> = binary_digests.values().collect();
     let mut binary_uploads = Vec::new();
     for (key, path) in binary_keys.iter().zip(binary_paths.iter()) {
         binary_uploads.push(cache_file_and_presign(
@@ -82,11 +86,11 @@ pub async fn update(config_path: &PathBuf) -> Result<(), Error> {
         ));
     }
 
-    let config_keys: Vec<_> = config_hashes
+    let config_keys: Vec<_> = config_digests
         .keys()
-        .map(|hash| config_s3_key(tag, hash))
+        .map(|digest| config_s3_key(tag, digest))
         .collect();
-    let config_paths: Vec<_> = config_hashes.values().collect();
+    let config_paths: Vec<_> = config_digests.values().collect();
     let mut config_uploads = Vec::new();
     for (key, path) in config_keys.iter().zip(config_paths.iter()) {
         config_uploads.push(cache_file_and_presign(
@@ -103,25 +107,25 @@ pub async fn update(config_path: &PathBuf) -> Result<(), Error> {
             try_join_all(config_uploads).await
         },)?;
 
-    // Build hash -> URL maps
-    let binary_hash_to_url: HashMap<String, String> =
-        binary_hashes.keys().cloned().zip(binary_results).collect();
-    let config_hash_to_url: HashMap<String, String> =
-        config_hashes.keys().cloned().zip(config_results).collect();
+    // Build digest -> URL maps
+    let binary_digest_to_url: HashMap<String, String> =
+        binary_digests.keys().cloned().zip(binary_results).collect();
+    let config_digest_to_url: HashMap<String, String> =
+        config_digests.keys().cloned().zip(config_results).collect();
 
-    // Map instance names to URLs via their hashes
+    // Map instance names to URLs via their digests
     let mut instance_binary_urls: HashMap<String, String> = HashMap::new();
     let mut instance_config_urls: HashMap<String, String> = HashMap::new();
     for instance in &config.instances {
-        let binary_hash = &instance_binary_hash[&instance.name];
-        let config_hash = &instance_config_hash[&instance.name];
+        let binary_digest = &instance_binary_digest[&instance.name];
+        let config_digest = &instance_config_digest[&instance.name];
         instance_binary_urls.insert(
             instance.name.clone(),
-            binary_hash_to_url[binary_hash].clone(),
+            binary_digest_to_url[binary_digest].clone(),
         );
         instance_config_urls.insert(
             instance.name.clone(),
-            config_hash_to_url[config_hash].clone(),
+            config_digest_to_url[config_digest].clone(),
         );
     }
     info!("uploaded all updated binaries and configs");
