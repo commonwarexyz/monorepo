@@ -162,10 +162,10 @@ where
 
     let hm = hash_with_namespace::<V>(V::MESSAGE, namespace, message);
 
-    let len = entries.len();
-
     // Generate 128-bit random scalars (sufficient for batch verification security)
-    let scalars: Vec<SmallScalar> = (0..len).map(|_| SmallScalar::random(&mut *rng)).collect();
+    let scalars: Vec<SmallScalar> = (0..entries.len())
+        .map(|_| SmallScalar::random(&mut *rng))
+        .collect();
 
     // Extract pks and sigs for MSM
     let (pks, sigs) = entries.iter().cloned().collect::<(Vec<_>, Vec<_>)>();

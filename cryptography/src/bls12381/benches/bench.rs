@@ -10,7 +10,6 @@ mod dkg;
 mod evaluate_point;
 mod hash_to_curve;
 mod msm;
-mod pairing_verify;
 mod scheme_batch_verify_same_message;
 mod scheme_batch_verify_same_signer;
 mod signature_generation;
@@ -37,7 +36,6 @@ criterion_main!(
     scheme_batch_verify_same_message::benches,
     evaluate_point::benches,
     msm::benches,
-    pairing_verify::benches,
     threshold_batch_verify_same_message::benches,
     threshold_batch_verify_same_message_precomputed::benches,
     tle_encrypt::benches,
