@@ -477,7 +477,7 @@ impl Random for Scalar {
     /// Returns a random non-zero scalar.
     fn random(mut rng: impl CryptoRngCore) -> Self {
         let mut ikm = Zeroizing::new([0u8; 64]);
-        rng.fill_bytes(&mut *ikm);
+        rng.fill_bytes(ikm.as_mut());
 
         let mut sc = blst_scalar::default();
         let mut ret = blst_fr::default();

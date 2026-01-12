@@ -94,6 +94,7 @@ use commonware_codec::{EncodeSize, FixedSize, Read, ReadExt, Write};
 use commonware_math::algebra::CryptoGroup;
 use commonware_utils::sequence::FixedBytes;
 use rand_core::CryptoRngCore;
+use zeroize::Zeroizing;
 
 /// Domain separation tag for hashing the `h3` message to a scalar.
 const DST: DST = b"TLE_BLS12381_XMD:SHA-256_SSWU_RO_H3_";
@@ -277,9 +278,9 @@ pub fn encrypt<R: CryptoRngCore, V: Variant>(
     let q_id = hash_with_namespace::<V>(V::MESSAGE, namespace, target);
 
     // Generate random sigma
-    let mut sigma_array = [0u8; BLOCK_SIZE];
-    rng.fill_bytes(&mut sigma_array);
-    let sigma = Block::new(sigma_array);
+    let mut sigma_array = Zeroizing::new([0u8; BLOCK_SIZE]);
+    rng.fill_bytes(sigma_array.as_mut());
+    let sigma = Zeroizing::new(Block::new(*sigma_array));
 
     // Derive scalar r from sigma and message
     let r = hash::h3(&sigma, message.as_ref());

@@ -63,7 +63,7 @@ impl Read for PrivateKeyInner {
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let raw = Zeroizing::new(<[u8; PRIVATE_KEY_LENGTH]>::read(buf)?);
-        let key = SigningKey::from_slice(&*raw);
+        let key = SigningKey::from_slice(raw.as_ref());
         #[cfg(feature = "std")]
         let key = key.map_err(|e| CodecError::Wrapped(CURVE_NAME, e.into()))?;
         #[cfg(not(feature = "std"))]
