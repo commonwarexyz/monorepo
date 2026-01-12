@@ -1020,13 +1020,18 @@ mod tests {
             blob.sync().await.expect("failed to sync");
             drop(blob);
 
-            // Reopen journal - should recover by truncating incomplete item
+            // Reopen journal - should recover by truncating last page due to failed checksum, and
+            // end up with a correct blob size due to partial-item trimming.
             let journal = Journal::<_, Digest>::init(context.clone(), cfg.clone())
                 .await
                 .expect("failed to re-init");
 
             // Verify section now has only 2 items
             assert_eq!(journal.section_len(1).await.unwrap(), 2);
+
+            // Verify size is the expected multiple of ITEM_SIZE (this would fail if we didn't trim
+            // items and just relied on page-level checksum recovery).
+            assert_eq!(journal.size(1).await.unwrap(), 64);
 
             // Items 0 and 1 should still be readable
             let item0 = journal.get(1, 0).await.expect("failed to get item 0");
