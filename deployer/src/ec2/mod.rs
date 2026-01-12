@@ -215,24 +215,16 @@ cfg_if::cfg_if! {
         }
 
         impl Architecture {
-            /// Returns the architecture string for AMI name matching
-            pub fn ami_arch(&self) -> &'static str {
+            /// Returns the architecture string used in AMI names, download URLs, and labels
+            pub fn as_str(&self) -> &'static str {
                 match self {
                     Architecture::Arm64 => "arm64",
                     Architecture::X86_64 => "amd64",
                 }
             }
 
-            /// Returns the architecture string for download URLs
-            pub fn download_arch(&self) -> &'static str {
-                match self {
-                    Architecture::Arm64 => "arm64",
-                    Architecture::X86_64 => "amd64",
-                }
-            }
-
-            /// Returns the Linux library architecture path for jemalloc
-            pub fn linux_lib_arch(&self) -> &'static str {
+            /// Returns the Linux library path component for jemalloc
+            pub fn linux_lib(&self) -> &'static str {
                 match self {
                     Architecture::Arm64 => "aarch64-linux-gnu",
                     Architecture::X86_64 => "x86_64-linux-gnu",
@@ -242,10 +234,7 @@ cfg_if::cfg_if! {
 
         impl std::fmt::Display for Architecture {
             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                match self {
-                    Architecture::Arm64 => write!(f, "arm64"),
-                    Architecture::X86_64 => write!(f, "x86_64"),
-                }
+                f.write_str(self.as_str())
             }
         }
 

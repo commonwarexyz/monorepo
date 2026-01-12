@@ -40,40 +40,52 @@ pub const GRAFANA_VERSION: &str = "11.5.2";
 // (e.g., loki-linux-arm64.zip).
 
 pub fn prometheus_bin_s3_key(version: &str, architecture: Architecture) -> String {
-    let arch = architecture.download_arch();
-    format!("{S3_TOOLS_BINARIES_PREFIX}/prometheus/{version}/linux-{arch}/prometheus-{version}.linux-{arch}.tar.gz")
+    format!(
+        "{S3_TOOLS_BINARIES_PREFIX}/prometheus/{version}/linux-{arch}/prometheus-{version}.linux-{arch}.tar.gz",
+        arch = architecture.as_str()
+    )
 }
 
 pub fn grafana_bin_s3_key(version: &str, architecture: Architecture) -> String {
-    let arch = architecture.download_arch();
     format!(
-        "{S3_TOOLS_BINARIES_PREFIX}/grafana/{version}/linux-{arch}/grafana_{version}_{arch}.deb"
+        "{S3_TOOLS_BINARIES_PREFIX}/grafana/{version}/linux-{arch}/grafana_{version}_{arch}.deb",
+        arch = architecture.as_str()
     )
 }
 
 pub fn loki_bin_s3_key(version: &str, architecture: Architecture) -> String {
-    let arch = architecture.download_arch();
-    format!("{S3_TOOLS_BINARIES_PREFIX}/loki/{version}/linux-{arch}/loki-linux-{arch}.zip")
+    format!(
+        "{S3_TOOLS_BINARIES_PREFIX}/loki/{version}/linux-{arch}/loki-linux-{arch}.zip",
+        arch = architecture.as_str()
+    )
 }
 
 pub fn pyroscope_bin_s3_key(version: &str, architecture: Architecture) -> String {
-    let arch = architecture.download_arch();
-    format!("{S3_TOOLS_BINARIES_PREFIX}/pyroscope/{version}/linux-{arch}/pyroscope_{version}_linux_{arch}.tar.gz")
+    format!(
+        "{S3_TOOLS_BINARIES_PREFIX}/pyroscope/{version}/linux-{arch}/pyroscope_{version}_linux_{arch}.tar.gz",
+        arch = architecture.as_str()
+    )
 }
 
 pub fn tempo_bin_s3_key(version: &str, architecture: Architecture) -> String {
-    let arch = architecture.download_arch();
-    format!("{S3_TOOLS_BINARIES_PREFIX}/tempo/{version}/linux-{arch}/tempo_{version}_linux_{arch}.tar.gz")
+    format!(
+        "{S3_TOOLS_BINARIES_PREFIX}/tempo/{version}/linux-{arch}/tempo_{version}_linux_{arch}.tar.gz",
+        arch = architecture.as_str()
+    )
 }
 
 pub fn node_exporter_bin_s3_key(version: &str, architecture: Architecture) -> String {
-    let arch = architecture.download_arch();
-    format!("{S3_TOOLS_BINARIES_PREFIX}/node-exporter/{version}/linux-{arch}/node_exporter-{version}.linux-{arch}.tar.gz")
+    format!(
+        "{S3_TOOLS_BINARIES_PREFIX}/node-exporter/{version}/linux-{arch}/node_exporter-{version}.linux-{arch}.tar.gz",
+        arch = architecture.as_str()
+    )
 }
 
 pub fn promtail_bin_s3_key(version: &str, architecture: Architecture) -> String {
-    let arch = architecture.download_arch();
-    format!("{S3_TOOLS_BINARIES_PREFIX}/promtail/{version}/linux-{arch}/promtail-linux-{arch}.zip")
+    format!(
+        "{S3_TOOLS_BINARIES_PREFIX}/promtail/{version}/linux-{arch}/promtail-linux-{arch}.zip",
+        arch = architecture.as_str()
+    )
 }
 
 // S3 key functions for component configs and services (include deployer version for cache invalidation)
@@ -147,8 +159,10 @@ pub fn logrotate_config_s3_key() -> String {
 // S3 key functions for binary instance configs
 
 pub fn binary_service_s3_key_for_arch(architecture: Architecture) -> String {
-    let arch = architecture.download_arch();
-    format!("{S3_TOOLS_CONFIGS_PREFIX}/{DEPLOYER_VERSION}/binary/service-{arch}")
+    format!(
+        "{S3_TOOLS_CONFIGS_PREFIX}/{DEPLOYER_VERSION}/binary/service-{arch}",
+        arch = architecture.as_str()
+    )
 }
 
 /// Returns the S3 key for an instance's binary by digest (deduplicated within deployment)
@@ -183,45 +197,57 @@ pub fn monitoring_s3_key(tag: &str, digest: &str) -> String {
 
 /// Returns the download URL for Prometheus from GitHub
 pub fn prometheus_download_url(version: &str, architecture: Architecture) -> String {
-    let arch = architecture.download_arch();
-    format!("https://github.com/prometheus/prometheus/releases/download/v{version}/prometheus-{version}.linux-{arch}.tar.gz")
+    format!(
+        "https://github.com/prometheus/prometheus/releases/download/v{version}/prometheus-{version}.linux-{arch}.tar.gz",
+        arch = architecture.as_str()
+    )
 }
 
 /// Returns the download URL for Grafana
 pub fn grafana_download_url(version: &str, architecture: Architecture) -> String {
-    let arch = architecture.download_arch();
-    format!("https://dl.grafana.com/oss/release/grafana_{version}_{arch}.deb")
+    format!(
+        "https://dl.grafana.com/oss/release/grafana_{version}_{arch}.deb",
+        arch = architecture.as_str()
+    )
 }
 
 /// Returns the download URL for Loki from GitHub
 pub fn loki_download_url(version: &str, architecture: Architecture) -> String {
-    let arch = architecture.download_arch();
-    format!("https://github.com/grafana/loki/releases/download/v{version}/loki-linux-{arch}.zip")
+    format!(
+        "https://github.com/grafana/loki/releases/download/v{version}/loki-linux-{arch}.zip",
+        arch = architecture.as_str()
+    )
 }
 
 /// Returns the download URL for Pyroscope from GitHub
 pub fn pyroscope_download_url(version: &str, architecture: Architecture) -> String {
-    let arch = architecture.download_arch();
-    format!("https://github.com/grafana/pyroscope/releases/download/v{version}/pyroscope_{version}_linux_{arch}.tar.gz")
+    format!(
+        "https://github.com/grafana/pyroscope/releases/download/v{version}/pyroscope_{version}_linux_{arch}.tar.gz",
+        arch = architecture.as_str()
+    )
 }
 
 /// Returns the download URL for Tempo from GitHub
 pub fn tempo_download_url(version: &str, architecture: Architecture) -> String {
-    let arch = architecture.download_arch();
-    format!("https://github.com/grafana/tempo/releases/download/v{version}/tempo_{version}_linux_{arch}.tar.gz")
+    format!(
+        "https://github.com/grafana/tempo/releases/download/v{version}/tempo_{version}_linux_{arch}.tar.gz",
+        arch = architecture.as_str()
+    )
 }
 
 /// Returns the download URL for Node Exporter from GitHub
 pub fn node_exporter_download_url(version: &str, architecture: Architecture) -> String {
-    let arch = architecture.download_arch();
-    format!("https://github.com/prometheus/node_exporter/releases/download/v{version}/node_exporter-{version}.linux-{arch}.tar.gz")
+    format!(
+        "https://github.com/prometheus/node_exporter/releases/download/v{version}/node_exporter-{version}.linux-{arch}.tar.gz",
+        arch = architecture.as_str()
+    )
 }
 
 /// Returns the download URL for Promtail from GitHub
 pub fn promtail_download_url(version: &str, architecture: Architecture) -> String {
-    let arch = architecture.download_arch();
     format!(
-        "https://github.com/grafana/loki/releases/download/v{version}/promtail-linux-{arch}.zip"
+        "https://github.com/grafana/loki/releases/download/v{version}/promtail-linux-{arch}.zip",
+        arch = architecture.as_str()
     )
 }
 
@@ -264,8 +290,7 @@ providers:
 "#;
 
 /// Systemd service file content for Prometheus
-pub const PROMETHEUS_SERVICE: &str = r#"
-[Unit]
+pub const PROMETHEUS_SERVICE: &str = r#"[Unit]
 Description=Prometheus Monitoring Service
 After=network.target
 
@@ -281,8 +306,7 @@ WantedBy=multi-user.target
 "#;
 
 /// Systemd service file content for Promtail
-pub const PROMTAIL_SERVICE: &str = r#"
-[Unit]
+pub const PROMTAIL_SERVICE: &str = r#"[Unit]
 Description=Promtail Log Forwarder
 After=network.target
 
@@ -298,8 +322,7 @@ WantedBy=multi-user.target
 "#;
 
 /// Systemd service file content for Loki
-pub const LOKI_SERVICE: &str = r#"
-[Unit]
+pub const LOKI_SERVICE: &str = r#"[Unit]
 Description=Loki Log Aggregation Service
 After=network.target
 
@@ -365,8 +388,7 @@ self_profiling:
 "#;
 
 /// Systemd service file content for Pyroscope
-pub const PYROSCOPE_SERVICE: &str = r#"
-[Unit]
+pub const PYROSCOPE_SERVICE: &str = r#"[Unit]
 Description=Pyroscope Profiling Service
 After=network.target
 
@@ -382,8 +404,7 @@ WantedBy=multi-user.target
 "#;
 
 /// Systemd service file content for Tempo
-pub const TEMPO_SERVICE: &str = r#"
-[Unit]
+pub const TEMPO_SERVICE: &str = r#"[Unit]
 Description=Tempo Tracing Service
 After=network.target
 [Service]
@@ -450,7 +471,7 @@ pub fn install_monitoring_cmd(
     prometheus_version: &str,
     architecture: Architecture,
 ) -> String {
-    let arch = architecture.download_arch();
+    let arch = architecture.as_str();
     format!(
         r#"
 sudo apt-get update -y
@@ -623,7 +644,7 @@ pub fn install_binary_cmd(
     profiling: bool,
     architecture: Architecture,
 ) -> String {
-    let arch = architecture.download_arch();
+    let arch = architecture.as_str();
     let mut script = format!(
         r#"
 # Install base tools and dependencies
@@ -727,6 +748,7 @@ pub fn promtail_config(
     instance_name: &str,
     ip: &str,
     region: &str,
+    arch: &str,
 ) -> String {
     format!(
         r#"
@@ -746,14 +768,14 @@ scrape_configs:
           deployer_name: {instance_name}
           deployer_ip: {ip}
           deployer_region: {region}
+          deployer_arch: {arch}
           __path__: /var/log/binary.log
 "#
     )
 }
 
 /// Systemd service file content for Node Exporter
-pub const NODE_EXPORTER_SERVICE: &str = r#"
-[Unit]
+pub const NODE_EXPORTER_SERVICE: &str = r#"[Unit]
 Description=Node Exporter
 After=network.target
 
@@ -769,7 +791,7 @@ WantedBy=multi-user.target
 "#;
 
 /// Generates Prometheus configuration with scrape targets for all instance IPs
-pub fn generate_prometheus_config(instances: &[(&str, &str, &str)]) -> String {
+pub fn generate_prometheus_config(instances: &[(&str, &str, &str, &str)]) -> String {
     let mut config = String::from(
         r#"
 global:
@@ -780,7 +802,7 @@ scrape_configs:
       - targets: ['localhost:9100']
 "#,
     );
-    for (name, ip, region) in instances {
+    for (name, ip, region, arch) in instances {
         config.push_str(&format!(
             r#"
   - job_name: '{name}_binary'
@@ -790,6 +812,7 @@ scrape_configs:
           deployer_name: '{name}'
           deployer_ip: '{ip}'
           deployer_region: '{region}'
+          deployer_arch: '{arch}'
   - job_name: '{name}_system'
     static_configs:
       - targets: ['{ip}:9100']
@@ -797,6 +820,7 @@ scrape_configs:
           deployer_name: '{name}'
           deployer_ip: '{ip}'
           deployer_region: '{region}'
+          deployer_arch: '{arch}'
 "#
         ));
     }
@@ -818,10 +842,9 @@ pub const BBR_CONF: &str = "net.core.default_qdisc=fq\nnet.ipv4.tcp_congestion_c
 
 /// Generates systemd service file content for the deployed binary
 pub fn binary_service(architecture: Architecture) -> String {
-    let lib_arch = architecture.linux_lib_arch();
+    let lib_arch = architecture.linux_lib();
     format!(
-        r#"
-[Unit]
+        r#"[Unit]
 Description=Deployed Binary Service
 After=network.target
 
@@ -847,6 +870,7 @@ pub fn generate_pyroscope_script(
     name: &str,
     ip: &str,
     region: &str,
+    arch: &str,
 ) -> String {
     format!(
         r#"#!/bin/bash
@@ -859,7 +883,7 @@ PROFILE_DURATION=60 # seconds
 PERF_FREQ=100 # Hz
 
 # Construct the Pyroscope application name with tags
-RAW_APP_NAME="binary{{deployer_name={name},deployer_ip={ip},deployer_region={region}}}"
+RAW_APP_NAME="binary{{deployer_name={name},deployer_ip={ip},deployer_region={region},deployer_arch={arch}}}"
 APP_NAME=$(jq -nr --arg str "$RAW_APP_NAME" '$str | @uri')
 
 # Get the PID of the binary service
@@ -905,8 +929,7 @@ sudo rm -f ${{PERF_DATA_FILE}} ${{PERF_STACK_FILE}}
 }
 
 /// Systemd service file content for the Pyroscope agent script
-pub const PYROSCOPE_AGENT_SERVICE: &str = r#"
-[Unit]
+pub const PYROSCOPE_AGENT_SERVICE: &str = r#"[Unit]
 Description=Pyroscope Agent (Perf Script Runner)
 Wants=network-online.target
 After=network-online.target binary.service
@@ -921,8 +944,7 @@ WantedBy=multi-user.target
 "#;
 
 /// Systemd timer file content for the Pyroscope agent service
-pub const PYROSCOPE_AGENT_TIMER: &str = r#"
-[Unit]
+pub const PYROSCOPE_AGENT_TIMER: &str = r#"[Unit]
 Description=Run Pyroscope Agent periodically
 
 [Timer]

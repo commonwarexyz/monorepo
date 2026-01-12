@@ -84,9 +84,9 @@ pub async fn detect_architecture(
         .and_then(|p| p.supported_architectures)
         .unwrap_or_default();
 
-    if architectures.iter().any(|a| a.as_str() == "arm64") {
+    if architectures.iter().any(|a| a.as_ref() == "arm64") {
         Ok(super::Architecture::Arm64)
-    } else if architectures.iter().any(|a| a.as_str() == "x86_64") {
+    } else if architectures.iter().any(|a| a.as_ref() == "x86_64") {
         Ok(super::Architecture::X86_64)
     } else {
         Err(Ec2Error::from(BuildError::other(format!(
@@ -100,7 +100,7 @@ pub async fn find_latest_ami(
     client: &Ec2Client,
     architecture: super::Architecture,
 ) -> Result<String, Ec2Error> {
-    let arch = architecture.ami_arch();
+    let arch = architecture.as_str();
     let resp = client
         .describe_images()
         .filters(
