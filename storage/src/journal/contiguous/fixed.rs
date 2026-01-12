@@ -58,9 +58,10 @@ use crate::{
     journal::{contiguous::MutableContiguous, Error},
     Persistable,
 };
-use commonware_codec::{CodecFixed, CodecFixedShared, DecodeExt as _};
+use bytes::Buf;
+use commonware_codec::{CodecFixed, CodecFixedShared, DecodeExt as _, ReadExt as _};
 use commonware_runtime::{
-    buffer::pool::{Append, PoolRef},
+    buffer::pool::{Append, PoolRef, Replay},
     telemetry::metrics::status::GaugeExt,
     Blob, Error as RError, Metrics, Storage,
 };
@@ -77,6 +78,14 @@ use std::{
     num::{NonZeroU64, NonZeroUsize},
 };
 use tracing::{debug, trace, warn};
+
+/// State for replaying items from a blob.
+struct ReplayState<B: Blob> {
+    replay: Replay<B>,
+    item_idx: u64,
+    skip_bytes: u64,
+    done: bool,
+}
 
 /// Configuration for `Journal` storage.
 #[derive(Clone)]
@@ -97,7 +106,20 @@ pub struct Config {
     pub write_buffer: NonZeroUsize,
 }
 
-/// Implementation of `Journal` storage.
+/// A contiguous journal with fixed-size entries.
+///
+/// Items are stored sequentially across multiple blobs, with automatic blob rotation
+/// when a blob reaches `items_per_blob` items.
+///
+/// # Repair
+///
+/// Like
+/// [sqlite](https://github.com/sqlite/sqlite/blob/8658a8df59f00ec8fcfea336a2a6a4b5ef79d2ee/src/wal.c#L1504-L1505)
+/// and
+/// [rocksdb](https://github.com/facebook/rocksdb/blob/0c533e61bc6d89fdf1295e8e0bcee4edb3aef401/include/rocksdb/options.h#L441-L445),
+/// the first invalid data read will be considered the new end of the journal (and the
+/// underlying [Blob] will be truncated to the last valid item). Repair occurs during
+/// init because only the tail blob can have trailing bytes.
 pub struct Journal<E: Storage + Metrics, A: CodecFixed> {
     pub(crate) context: E,
     pub(crate) cfg: Config,
@@ -142,15 +164,6 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     ///
     /// All backing blobs are opened but not read during initialization. The `replay` method can be
     /// used to iterate over all items in the `Journal`.
-    ///
-    /// # Repair
-    ///
-    /// Like
-    /// [sqlite](https://github.com/sqlite/sqlite/blob/8658a8df59f00ec8fcfea336a2a6a4b5ef79d2ee/src/wal.c#L1504-L1505)
-    /// and
-    /// [rocksdb](https://github.com/facebook/rocksdb/blob/0c533e61bc6d89fdf1295e8e0bcee4edb3aef401/include/rocksdb/options.h#L441-L445),
-    /// the first invalid data read will be considered the new end of the journal (and the
-    /// underlying [Blob] will be truncated to the last valid item).
     pub async fn init(context: E, cfg: Config) -> Result<Self, Error> {
         // Iterate over blobs in partition
         let mut blobs = BTreeMap::new();
@@ -464,58 +477,99 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         let blobs = self.blobs.range(start_blob..).collect::<Vec<_>>();
         let mut readers = Vec::with_capacity(blobs.len() + 1);
         for (blob_index, blob) in blobs {
-            let reader = blob.as_blob_reader(buffer).await?;
-            readers.push((*blob_index, reader));
+            let replay = blob.replay(buffer).await?;
+            readers.push((*blob_index, replay));
         }
 
         // Include the tail blob.
-        let tail_reader = self.tail.as_blob_reader(buffer).await?;
-        readers.push((self.tail_index, tail_reader));
-        let start_offset = (start_pos % items_per_blob) * Self::CHUNK_SIZE_U64;
+        let tail_replay = self.tail.replay(buffer).await?;
+        readers.push((self.tail_index, tail_replay));
+        let start_item_in_blob = start_pos % items_per_blob;
 
-        // Replay all blobs in order and stream items as they are read (to avoid occupying too much
-        // memory with buffered data).
-        let stream = stream::iter(readers).flat_map(move |(blob_index, mut reader)| {
-            let buf = vec![0u8; Self::CHUNK_SIZE];
-            let initial_offset = if blob_index == start_blob {
-                // If this is the very first blob then we need to seek to the starting position.
-                reader.seek_to(start_offset).expect("invalid start_pos");
-                start_offset
+        // Stream items as they are read to avoid occupying too much memory.
+        // Each blob is processed sequentially, yielding batches of items that are then
+        // flattened into individual stream elements.
+        //
+        // Note: Unlike segmented journals, contiguous journals handle trailing byte truncation
+        // during `init` rather than during replay. This is because contiguous journals validate
+        // blob sizes at initialization time.
+        let stream = stream::iter(readers).flat_map(move |(blob_index, replay)| {
+            // Calculate starting item index within this blob
+            let initial_item_idx = if blob_index == start_blob {
+                start_item_in_blob
             } else {
                 0
             };
+            // Calculate how many bytes to skip at the start
+            let skip_bytes = initial_item_idx * Self::CHUNK_SIZE_U64;
 
             stream::unfold(
-                (buf, reader, initial_offset),
-                move |(mut buf, mut reader, offset)| async move {
-                    if offset >= reader.blob_size() {
+                ReplayState {
+                    replay,
+                    item_idx: initial_item_idx,
+                    skip_bytes,
+                    done: false,
+                },
+                move |mut state| async move {
+                    if state.done {
                         return None;
                     }
 
-                    // Even though we are reusing the buffer, `read_exact` will overwrite any
-                    // previous data, so there's no need to explicitly clear it.
-                    let item_pos = items_per_blob * blob_index + offset / Self::CHUNK_SIZE_U64;
-                    match reader.read_exact(&mut buf, Self::CHUNK_SIZE).await {
-                        Ok(()) => {
-                            let next_offset = offset + Self::CHUNK_SIZE_U64;
-                            let result = Self::decode_buf(&buf).map(|item| (item_pos, item));
-                            if result.is_err() {
-                                warn!("corrupted item at {item_pos}");
+                    let mut batch: Vec<Result<(u64, A), Error>> = Vec::new();
+
+                    loop {
+                        // Ensure we have enough data for one item
+                        match state.replay.ensure(Self::CHUNK_SIZE).await {
+                            Ok(true) => {}
+                            Ok(false) => {
+                                // Reader exhausted - we're done with this blob
+                                state.done = true;
+                                return if batch.is_empty() {
+                                    None
+                                } else {
+                                    Some((batch, state))
+                                };
                             }
-                            Some((result, (buf, reader, next_offset)))
+                            Err(err) => {
+                                batch.push(Err(Error::Runtime(err)));
+                                state.done = true;
+                                return Some((batch, state));
+                            }
                         }
-                        Err(err) => {
-                            warn!(
-                                item_pos,
-                                err = err.to_string(),
-                                "error reading item during replay"
-                            );
-                            let blob_size = reader.blob_size();
-                            Some((Err(Error::Runtime(err)), (buf, reader, blob_size)))
+
+                        // Skip bytes if needed (for start_pos within first blob)
+                        if state.skip_bytes > 0 {
+                            let to_skip =
+                                state.skip_bytes.min(state.replay.remaining() as u64) as usize;
+                            state.replay.advance(to_skip);
+                            state.skip_bytes -= to_skip as u64;
+                            continue;
+                        }
+
+                        // Decode items from buffer
+                        while state.replay.remaining() >= Self::CHUNK_SIZE {
+                            let item_pos = items_per_blob * blob_index + state.item_idx;
+                            match A::read(&mut state.replay) {
+                                Ok(item) => {
+                                    batch.push(Ok((item_pos, item)));
+                                    state.item_idx += 1;
+                                }
+                                Err(err) => {
+                                    batch.push(Err(Error::Codec(err)));
+                                    state.done = true;
+                                    return Some((batch, state));
+                                }
+                            }
+                        }
+
+                        // Return batch if we have items
+                        if !batch.is_empty() {
+                            return Some((batch, state));
                         }
                     }
                 },
             )
+            .flat_map(stream::iter)
         });
 
         Ok(stream)
@@ -928,6 +982,7 @@ mod tests {
                     assert_eq!(i as u64, *pos);
                 }
             }
+
             journal.sync().await.expect("Failed to sync journal");
             drop(journal);
 
