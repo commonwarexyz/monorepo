@@ -152,7 +152,7 @@ pub async fn cache_content_and_presign(
     expires_in: Duration,
 ) -> Result<String, Error> {
     if !object_exists(client, bucket, key).await? {
-        debug!(key = key, "static content not cached, uploading");
+        debug!(key = key, "static content not in S3, uploading");
         let body = ByteStream::from_static(content);
         client
             .put_object()
@@ -191,7 +191,7 @@ pub async fn cache_file_and_presign(
     expires_in: Duration,
 ) -> Result<String, Error> {
     if !object_exists(client, bucket, key).await? {
-        debug!(key = key, "file not cached, uploading");
+        debug!(key = key, "file not in S3, uploading");
         upload_file(client, bucket, key, path).await?;
     }
     presign_url(client, bucket, key, expires_in).await

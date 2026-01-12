@@ -104,12 +104,12 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
         .insert(config.monitoring.instance_type.clone());
 
     // Setup S3 bucket and cache observability tools
-    info!(bucket = S3_BUCKET_NAME, "setting up S3 cache");
+    info!(bucket = S3_BUCKET_NAME, "setting up S3 bucket");
     let s3_client = create_s3_client(Region::new(MONITORING_REGION)).await;
     ensure_bucket_exists(&s3_client, S3_BUCKET_NAME, MONITORING_REGION).await?;
 
     // Cache observability tools (if not already cached) and generate pre-signed URLs concurrently
-    info!("uploading observability tools to s3");
+    info!("uploading observability tools to S3");
     let cache_tool = |s3_key: String, download_url: String| {
         let tag_directory = tag_directory.clone();
         let s3_client = s3_client.clone();
@@ -117,7 +117,7 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
             if !object_exists(&s3_client, S3_BUCKET_NAME, &s3_key).await? {
                 info!(
                     key = s3_key.as_str(),
-                    "tool not cached, downloading and uploading"
+                    "tool not in S3, downloading and uploading"
                 );
                 let temp_path = tag_directory.join(s3_key.replace('/', "_"));
                 download_file(&download_url, &temp_path).await?;
@@ -132,7 +132,7 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
                 std::fs::remove_file(&temp_path)?;
                 Ok::<_, Error>(url)
             } else {
-                info!(key = s3_key.as_str(), "tool already cached");
+                info!(key = s3_key.as_str(), "tool already in S3");
                 presign_url(&s3_client, S3_BUCKET_NAME, &s3_key, PRESIGN_DURATION).await
             }
         }

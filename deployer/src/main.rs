@@ -133,7 +133,7 @@ async fn main() -> std::process::ExitCode {
             }
             Some((ec2::CLEAN_CMD, _)) => {
                 if let Err(e) = ec2::clean().await {
-                    error!(error=?e, "failed to clean S3 cache");
+                    error!(error=?e, "failed to clean S3 bucket");
                 } else {
                     return std::process::ExitCode::SUCCESS;
                 }
