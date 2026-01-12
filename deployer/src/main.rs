@@ -82,7 +82,7 @@ async fn main() -> std::process::ExitCode {
                 )
                 .subcommand(
                     Command::new(ec2::CLEAN_CMD)
-                        .about("Delete the shared S3 cache bucket and all its contents."),
+                        .about("Delete the shared S3 bucket and all its contents."),
                 ),
         )
         .get_matches();
