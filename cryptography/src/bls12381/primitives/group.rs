@@ -353,13 +353,13 @@ impl Ord for Scalar {
 
 impl Debug for Scalar {
     fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
-        write!(f, "{}", hex(self.as_slice().as_ref()))
+        write!(f, "Scalar([REDACTED])")
     }
 }
 
 impl Display for Scalar {
     fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
-        write!(f, "{}", hex(self.as_slice().as_ref()))
+        write!(f, "[REDACTED]")
     }
 }
 
