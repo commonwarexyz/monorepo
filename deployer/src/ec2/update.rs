@@ -61,7 +61,6 @@ pub async fn update(config_path: &PathBuf) -> Result<(), Error> {
     for instance in &config.instances {
         let binary_digest = hash_file(std::path::Path::new(&instance.binary))?;
         let config_digest = hash_file(std::path::Path::new(&instance.config))?;
-
         binary_digests.insert(binary_digest.clone(), instance.binary.clone());
         config_digests.insert(config_digest.clone(), instance.config.clone());
         instance_binary_digest.insert(instance.name.clone(), binary_digest);
