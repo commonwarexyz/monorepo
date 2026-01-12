@@ -63,7 +63,9 @@ pub fn node_exporter_bin_s3_key(version: &str) -> String {
 }
 
 pub fn promtail_bin_s3_key(version: &str) -> String {
-    format!("{S3_TOOLS_BINARIES_PREFIX}/promtail/{version}/{TARGET_PLATFORM}/promtail-linux-arm64.zip")
+    format!(
+        "{S3_TOOLS_BINARIES_PREFIX}/promtail/{version}/{TARGET_PLATFORM}/promtail-linux-arm64.zip"
+    )
 }
 
 // S3 key functions for component configs and services (include deployer version for cache invalidation)
@@ -903,3 +905,142 @@ RandomizedDelaySec=10s
 [Install]
 WantedBy=timers.target
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_binary_s3_keys() {
+        assert_eq!(
+            prometheus_bin_s3_key("3.2.0"),
+            "tools/binaries/prometheus/3.2.0/linux-arm64/prometheus-3.2.0.linux-arm64.tar.gz"
+        );
+        assert_eq!(
+            grafana_bin_s3_key("11.5.2"),
+            "tools/binaries/grafana/11.5.2/linux-arm64/grafana_11.5.2_arm64.deb"
+        );
+        assert_eq!(
+            loki_bin_s3_key("3.4.2"),
+            "tools/binaries/loki/3.4.2/linux-arm64/loki-linux-arm64.zip"
+        );
+        assert_eq!(
+            pyroscope_bin_s3_key("1.12.0"),
+            "tools/binaries/pyroscope/1.12.0/linux-arm64/pyroscope_1.12.0_linux_arm64.tar.gz"
+        );
+        assert_eq!(
+            tempo_bin_s3_key("2.7.1"),
+            "tools/binaries/tempo/2.7.1/linux-arm64/tempo_2.7.1_linux_arm64.tar.gz"
+        );
+        assert_eq!(
+            node_exporter_bin_s3_key("1.9.0"),
+            "tools/binaries/node-exporter/1.9.0/linux-arm64/node_exporter-1.9.0.linux-arm64.tar.gz"
+        );
+        assert_eq!(
+            promtail_bin_s3_key("3.4.2"),
+            "tools/binaries/promtail/3.4.2/linux-arm64/promtail-linux-arm64.zip"
+        );
+    }
+
+    #[test]
+    fn test_config_s3_keys() {
+        let version = DEPLOYER_VERSION;
+
+        assert_eq!(
+            prometheus_service_s3_key(),
+            format!("tools/configs/{version}/prometheus/service")
+        );
+        assert_eq!(
+            grafana_datasources_s3_key(),
+            format!("tools/configs/{version}/grafana/datasources.yml")
+        );
+        assert_eq!(
+            grafana_dashboards_s3_key(),
+            format!("tools/configs/{version}/grafana/all.yml")
+        );
+        assert_eq!(
+            loki_config_s3_key(),
+            format!("tools/configs/{version}/loki/config.yml")
+        );
+        assert_eq!(
+            loki_service_s3_key(),
+            format!("tools/configs/{version}/loki/service")
+        );
+        assert_eq!(
+            pyroscope_config_s3_key(),
+            format!("tools/configs/{version}/pyroscope/config.yml")
+        );
+        assert_eq!(
+            pyroscope_service_s3_key(),
+            format!("tools/configs/{version}/pyroscope/service")
+        );
+        assert_eq!(
+            tempo_config_s3_key(),
+            format!("tools/configs/{version}/tempo/config.yml")
+        );
+        assert_eq!(
+            tempo_service_s3_key(),
+            format!("tools/configs/{version}/tempo/service")
+        );
+        assert_eq!(
+            node_exporter_service_s3_key(),
+            format!("tools/configs/{version}/node-exporter/service")
+        );
+        assert_eq!(
+            promtail_service_s3_key(),
+            format!("tools/configs/{version}/promtail/service")
+        );
+        assert_eq!(
+            pyroscope_agent_service_s3_key(),
+            format!("tools/configs/{version}/pyroscope/agent.service")
+        );
+        assert_eq!(
+            pyroscope_agent_timer_s3_key(),
+            format!("tools/configs/{version}/pyroscope/agent.timer")
+        );
+        assert_eq!(
+            bbr_config_s3_key(),
+            format!("tools/configs/{version}/system/bbr.conf")
+        );
+        assert_eq!(
+            logrotate_config_s3_key(),
+            format!("tools/configs/{version}/system/logrotate.conf")
+        );
+        assert_eq!(
+            binary_service_s3_key(),
+            format!("tools/configs/{version}/binary/service")
+        );
+    }
+
+    #[test]
+    fn test_deployment_s3_keys() {
+        assert_eq!(
+            binary_s3_key("my-tag", "node1"),
+            "deployments/my-tag/instances/node1/binary"
+        );
+        assert_eq!(
+            config_s3_key("my-tag", "node1"),
+            "deployments/my-tag/instances/node1/config.conf"
+        );
+        assert_eq!(
+            hosts_s3_key("my-tag", "node1"),
+            "deployments/my-tag/instances/node1/hosts.yaml"
+        );
+        assert_eq!(
+            promtail_config_s3_key("my-tag", "node1"),
+            "deployments/my-tag/instances/node1/promtail.yml"
+        );
+        assert_eq!(
+            pyroscope_script_s3_key("my-tag", "node1"),
+            "deployments/my-tag/instances/node1/pyroscope-agent.sh"
+        );
+        assert_eq!(
+            prometheus_config_s3_key("my-tag"),
+            "deployments/my-tag/monitoring/prometheus.yml"
+        );
+        assert_eq!(
+            dashboard_s3_key("my-tag"),
+            "deployments/my-tag/monitoring/dashboard.json"
+        );
+    }
+}

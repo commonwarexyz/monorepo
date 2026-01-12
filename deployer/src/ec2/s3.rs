@@ -23,6 +23,7 @@ pub const S3_TOOLS_BINARIES_PREFIX: &str = "tools/binaries";
 pub const S3_TOOLS_CONFIGS_PREFIX: &str = "tools/configs";
 
 /// Target platform for prebuilt binaries
+// TODO (#2779): Add multi-architecture support
 pub const TARGET_PLATFORM: &str = "linux-arm64";
 
 /// S3 prefix for per-deployment data
