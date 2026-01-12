@@ -67,6 +67,7 @@ fuzz fuzz_dir max_time='60' max_mem='4000':
     #!/usr/bin/env bash
     for target in $(cargo {{nightly_version}} fuzz list --fuzz-dir {{fuzz_dir}}); do
         cargo {{nightly_version}} fuzz run $target --fuzz-dir {{fuzz_dir}} -- -max_total_time={{max_time}} -rss_limit_mb={{max_mem}}
+        rm -f {{fuzz_dir}}/target/*/release/$target
     done
 
 # Check for unused dependencies
