@@ -658,7 +658,6 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     let mut pyroscope_digests: BTreeMap<String, std::path::PathBuf> = BTreeMap::new();
     let mut instance_promtail_digest: HashMap<String, String> = HashMap::new();
     let mut instance_pyroscope_digest: HashMap<String, String> = HashMap::new();
-
     for deployment in &deployments {
         let instance = &deployment.instance;
         let ip = &deployment.ip;
