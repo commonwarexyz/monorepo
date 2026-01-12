@@ -47,7 +47,7 @@ use core::{
 };
 use ctutils::CtEq;
 use rand_core::CryptoRngCore;
-use zeroize::{Zeroize, ZeroizeOnDrop};
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 /// Domain separation tag used when hashing a message to a curve (G1 or G2).
 ///
@@ -301,7 +301,7 @@ impl Read for Scalar {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let bytes = <[u8; Self::SIZE]>::read(buf)?;
+        let bytes = Zeroizing::new(<[u8; Self::SIZE]>::read(buf)?);
         let mut ret = blst_fr::default();
         // SAFETY: bytes is a valid 32-byte array. blst_sk_check validates non-zero and in-range.
         // We use blst_sk_check instead of blst_scalar_fr_check because it also checks non-zero
@@ -476,8 +476,8 @@ impl Field for Scalar {
 impl Random for Scalar {
     /// Returns a random non-zero scalar.
     fn random(mut rng: impl CryptoRngCore) -> Self {
-        let mut ikm = [0u8; 64];
-        rng.fill_bytes(&mut ikm);
+        let mut ikm = Zeroizing::new([0u8; 64]);
+        rng.fill_bytes(&mut *ikm);
 
         let mut sc = blst_scalar::default();
         let mut ret = blst_fr::default();
@@ -487,9 +487,6 @@ impl Random for Scalar {
             blst_keygen(&mut sc, ikm.as_ptr(), ikm.len(), ptr::null(), 0);
             blst_fr_from_scalar(&mut ret, &sc);
         }
-
-        // Zeroize the ikm buffer
-        ikm.zeroize();
 
         Self(ret)
     }

@@ -17,6 +17,7 @@ use ed25519_consensus::{self, VerificationKey};
 use rand_core::CryptoRngCore;
 #[cfg(feature = "std")]
 use std::borrow::{Cow, ToOwned};
+use zeroize::Zeroizing;
 
 const CURVE_NAME: &str = "ed25519";
 const PRIVATE_KEY_LENGTH: usize = 32;
@@ -64,9 +65,9 @@ impl PrivateKey {
 impl Random for PrivateKey {
     fn random(rng: impl CryptoRngCore) -> Self {
         let key = ed25519_consensus::SigningKey::new(rng);
-        let raw = key.to_bytes();
+        let raw = Zeroizing::new(key.to_bytes());
         Self {
-            raw: Secret::new(raw),
+            raw: Secret::new(*raw),
             key: Secret::new(key),
         }
     }
@@ -82,10 +83,10 @@ impl Read for PrivateKey {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        let raw = <[u8; Self::SIZE]>::read(buf)?;
-        let key = ed25519_consensus::SigningKey::from(raw);
+        let raw = Zeroizing::new(<[u8; Self::SIZE]>::read(buf)?);
+        let key = ed25519_consensus::SigningKey::from(*raw);
         Ok(Self {
-            raw: Secret::new(raw),
+            raw: Secret::new(*raw),
             key: Secret::new(key),
         })
     }
@@ -105,9 +106,9 @@ impl PartialEq for PrivateKey {
 
 impl From<ed25519_consensus::SigningKey> for PrivateKey {
     fn from(key: ed25519_consensus::SigningKey) -> Self {
-        let raw = key.to_bytes();
+        let raw = Zeroizing::new(key.to_bytes());
         Self {
-            raw: Secret::new(raw),
+            raw: Secret::new(*raw),
             key: Secret::new(key),
         }
     }
