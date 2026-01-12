@@ -131,23 +131,24 @@ impl<V: Variant> SegmentTree<V> {
 /// Splits entries into chunks for parallel processing, then uses segment tree
 /// bisection within each chunk to identify invalid indices.
 ///
-/// If `root_invalid` is true and entries fit in a single chunk, the root
-/// verification is skipped (it would duplicate the caller's check).
+/// If `aggregate_prechecked` is true, aggregate verification over all entries is skipped.
+/// This enables callers to check the aggregate first (fast path when all valid)
+/// without duplicating that check here.
 fn bisect<V: Variant>(
     entries: &[(V::Public, V::Signature)],
     hm: &V::Signature,
-    root_invalid: bool,
+    aggregate_prechecked: bool,
     strategy: &impl Strategy,
 ) -> Vec<usize> {
     if entries.is_empty() {
         return Vec::new();
     }
 
-    // Single chunk: skip root verification if caller already verified aggregate is invalid.
+    // Single chunk: skip aggregate verification if caller already checked it.
     let par_hint = strategy.parallelism_hint();
     let chunk_size = entries.len().div_ceil(par_hint);
     if entries.len() <= chunk_size {
-        let mut out = SegmentTree::<V>::build(entries).verify(hm, root_invalid);
+        let mut out = SegmentTree::<V>::build(entries).verify(hm, aggregate_prechecked);
         out.sort_unstable();
         return out;
     }
