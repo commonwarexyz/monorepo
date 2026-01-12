@@ -62,13 +62,13 @@ pub trait LogStore: Send + Sync {
     fn inactivity_floor_loc(&self) -> Location;
 
     /// Get the metadata associated with the last commit.
-    fn get_metadata(&self) -> impl Future<Output = Result<Option<Self::Value>, Error>>;
+    fn get_metadata(&self) -> impl Future<Output = Result<Option<Self::Value>, Error>> + Send;
 }
 
 /// A trait for stores that can be pruned.
 pub trait PrunableStore: LogStore {
     /// Prune historical operations prior to `loc`.
-    fn prune(&mut self, loc: Location) -> impl Future<Output = Result<(), Error>>;
+    fn prune(&mut self, loc: Location) -> impl Future<Output = Result<(), Error>> + Send;
 }
 
 /// A trait for stores that support authentication through merkleization and inclusion proofs.
@@ -98,7 +98,8 @@ pub trait MerkleizedStore: LogStore {
         &self,
         start_loc: Location,
         max_ops: NonZeroU64,
-    ) -> impl Future<Output = Result<(Proof<Self::Digest>, Vec<Self::Operation>), Error>> {
+    ) -> impl Future<Output = Result<(Proof<Self::Digest>, Vec<Self::Operation>), Error>> + Send
+    {
         self.historical_proof(self.op_count(), start_loc, max_ops)
     }
 
@@ -121,5 +122,37 @@ pub trait MerkleizedStore: LogStore {
         historical_size: Location,
         start_loc: Location,
         max_ops: NonZeroU64,
-    ) -> impl Future<Output = Result<(Proof<Self::Digest>, Vec<Self::Operation>), Error>>;
+    ) -> impl Future<Output = Result<(Proof<Self::Digest>, Vec<Self::Operation>), Error>> + Send;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[allow(dead_code)]
+    fn assert_send<T: Send>(_: T) {}
+
+    /// Compile-time check that LogStore trait methods return Send futures.
+    /// This prevents regression - if the + Send bound is removed, this will fail to compile.
+    #[allow(dead_code)]
+    fn assert_logstore_methods_send<T: LogStore>(store: &T) {
+        assert_send(store.get_metadata());
+    }
+
+    /// Compile-time check that PrunableStore trait methods return Send futures.
+    #[allow(dead_code)]
+    fn assert_prunablestore_methods_send<T: PrunableStore>(store: &mut T) {
+        assert_send(store.prune(Location::new_unchecked(0)));
+    }
+
+    /// Compile-time check that MerkleizedStore trait methods return Send futures.
+    #[allow(dead_code)]
+    fn assert_merkleizedstore_methods_send<T: MerkleizedStore>(store: &T) {
+        assert_send(store.proof(Location::new_unchecked(0), NonZeroU64::new(1).unwrap()));
+        assert_send(store.historical_proof(
+            Location::new_unchecked(0),
+            Location::new_unchecked(0),
+            NonZeroU64::new(1).unwrap(),
+        ));
+    }
 }
