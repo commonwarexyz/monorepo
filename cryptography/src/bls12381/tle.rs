@@ -171,7 +171,8 @@ mod hash {
     pub fn h2(gt: &GT) -> Block {
         let mut hasher = Sha256::new();
         hasher.update(b"h2");
-        hasher.update(&gt.as_slice());
+        let gt = Zeroizing::new(gt.as_slice());
+        hasher.update(gt.as_ref());
         hasher.finalize().into()
     }
 
@@ -180,7 +181,7 @@ mod hash {
     /// Used to derive the random scalar r using RFC9380 hash-to-field.
     pub fn h3(sigma: &Block, message: &[u8]) -> Scalar {
         // Combine sigma and message
-        let mut combined = Vec::with_capacity(sigma.len() + message.len());
+        let mut combined = Zeroizing::new(Vec::with_capacity(sigma.len() + message.len()));
         combined.extend_from_slice(sigma.as_ref());
         combined.extend_from_slice(message);
 

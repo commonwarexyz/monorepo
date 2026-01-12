@@ -231,7 +231,7 @@ impl Scalar {
         // in the scalar field after modular reduction, maintaining the security
         // properties required by the hash-to-field construction.
         const L: usize = 48;
-        let mut uniform_bytes = [0u8; L];
+        let mut uniform_bytes = Zeroizing::new([0u8; L]);
         // SAFETY: All buffers are valid with correct lengths; blst handles empty inputs.
         unsafe {
             blst_expand_message_xmd(
