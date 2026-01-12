@@ -441,7 +441,18 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
 
                             // Decode item - use take() to limit bytes read
                             let item_offset = state.offset;
-                            let next_offset = state.offset + varint_len as u64 + item_size as u64;
+                            let next_offset = match state
+                                .offset
+                                .checked_add(varint_len as u64)
+                                .and_then(|o| o.checked_add(item_size as u64))
+                            {
+                                Some(o) => o,
+                                None => {
+                                    batch.push(Err(Error::OffsetOverflow));
+                                    state.done = true;
+                                    return Some((batch, state));
+                                }
+                            };
                             match decode_item::<V>(
                                 (&mut state.replay).take(item_size),
                                 &state.codec_config,
