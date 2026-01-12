@@ -15,6 +15,7 @@
 #![no_main]
 
 use arbitrary::{Arbitrary, Unstructured};
+use bytes::Buf;
 use commonware_runtime::{
     buffer::pool::{Append, PoolRef},
     deterministic, Blob, Runner, Storage,
@@ -193,13 +194,57 @@ fn fuzz(input: FuzzInput) {
                     Err(_) => continue, // Replay creation failed due to corruption, skip.
                 };
 
-                // Try to ensure - this validates CRCs
-                match replay.ensure(1).await {
-                    Ok(_) => {
-                        // Ensure succeeded - pages are valid
+                // Skip to the offset by ensuring and advancing
+                if offset > 0 {
+                    match replay.ensure(offset as usize).await {
+                        Ok(true) => replay.advance(offset as usize),
+                        Ok(false) => continue, // Not enough data, skip
+                        Err(_) => {
+                            // Error during skip - acceptable if corruption is involved
+                            assert!(
+                                read_touches_corrupted_page || offset / page_size >= corrupted_page,
+                                "Replay skip failed but didn't touch corrupted page"
+                            );
+                            continue;
+                        }
+                    }
+                }
+
+                // Ensure we have enough bytes for the read
+                match replay.ensure(len).await {
+                    Ok(true) => {
+                        // Read the data using the Buf trait
+                        let mut buf = vec![0u8; len];
+                        let mut bytes_read = 0;
+                        while bytes_read < len && replay.remaining() > 0 {
+                            let chunk = replay.chunk();
+                            let to_copy = chunk.len().min(len - bytes_read);
+                            buf[bytes_read..bytes_read + to_copy]
+                                .copy_from_slice(&chunk[..to_copy]);
+                            replay.advance(to_copy);
+                            bytes_read += to_copy;
+                        }
+
+                        // Verify data matches expected
+                        let expected_slice =
+                            &expected_data[offset as usize..offset as usize + len];
+                        assert_eq!(
+                            &buf, expected_slice,
+                            "Read via Replay returned wrong data at offset {}, len {}",
+                            offset, len
+                        );
+                    }
+                    Ok(false) => {
+                        // Not enough data available - skip
+                        continue;
                     }
                     Err(_) => {
-                        // Ensure failed due to CRC error - acceptable if we have corruption
+                        // Ensure failed due to CRC error - acceptable if we touch corrupted page
+                        assert!(
+                            read_touches_corrupted_page,
+                            "Replay ensure failed at offset {}, len {} but didn't touch corrupted page {}",
+                            offset, len, corrupted_page
+                        );
                     }
                 }
             } else {
