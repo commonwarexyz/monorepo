@@ -411,7 +411,8 @@ impl<
 
     /// Commit any pending operations to the database, ensuring their durability upon return.
     /// This transitions to the Durable state without merkleizing. Returns the committed database
-    /// and the `[start_loc, end_loc)` range of committed operations.
+    /// and the `[start_loc, end_loc)` range of committed operations. Note that even if no
+    /// operations were added since the last commit, this is a root-state changing operation.
     pub async fn commit(
         mut self,
         metadata: Option<V>,
@@ -498,22 +499,6 @@ impl<
             bitmap_metadata_partition: self.bitmap_metadata_partition,
             cached_root: None,
         }
-    }
-
-    /// Commit any pending operations to the database, ensuring their durability upon return.
-    /// Returns the committed database and the range of committed operations.
-    pub async fn commit(
-        self,
-        metadata: Option<V>,
-    ) -> Result<
-        (
-            Db<E, K, V, H, T, N, Merkleized<H>, Durable>,
-            Range<Location>,
-        ),
-        Error,
-    > {
-        let (durable, range) = self.into_mutable().commit(metadata).await?;
-        Ok((durable.into_merkleized().await?, range))
     }
 }
 

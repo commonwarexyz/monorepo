@@ -461,7 +461,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: T
 
     /// Commit any pending operations to the database, ensuring their durability upon return from
     /// this function. Caller can associate an arbitrary `metadata` value with the commit.
-    /// Returns the committed database and the range of committed locations.
+    /// Returns the committed database and the range of committed locations. Note that even if no
+    /// operations were added since the last commit, this is a root-state changing operation.
     pub async fn commit(
         mut self,
         metadata: Option<V>,

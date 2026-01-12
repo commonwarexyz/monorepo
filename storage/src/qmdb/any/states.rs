@@ -112,8 +112,9 @@ pub trait MutableAny:
             Operation = Self::Operation,
         >;
 
-    /// Commit any pending operations to the database, ensuring their durability. Returns the
-    /// durable state and the location range of committed operations.
+    /// Commit any pending operations to the database, ensuring their durability. Returns the db in
+    /// its durable state and the location range of committed operations. Note that even if no
+    /// operations were added since the last commit, this a root-state changing operation.
     fn commit(
         self,
         metadata: Option<<Self as LogStore>::Value>,
