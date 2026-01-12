@@ -499,6 +499,119 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_segmented_fixed_replay_with_start_offset() {
+        // Test that replay with a non-zero start_position correctly skips items.
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg();
+            let mut journal = Journal::init(context.clone(), cfg.clone())
+                .await
+                .expect("failed to init");
+
+            // Append 10 items to section 1
+            for i in 0u64..10 {
+                journal
+                    .append(1, test_digest(i))
+                    .await
+                    .expect("failed to append");
+            }
+            // Append 5 items to section 2
+            for i in 10u64..15 {
+                journal
+                    .append(2, test_digest(i))
+                    .await
+                    .expect("failed to append");
+            }
+            journal.sync_all().await.expect("failed to sync");
+            drop(journal);
+
+            let journal = Journal::<_, Digest>::init(context.clone(), cfg.clone())
+                .await
+                .expect("failed to re-init");
+
+            // Replay from section 1, position 5 - should get items 5-9 from section 1 and all of section 2
+            {
+                let stream = journal
+                    .replay(1, 5, NZUsize!(1024))
+                    .await
+                    .expect("failed to replay");
+                pin_mut!(stream);
+
+                let mut items = Vec::new();
+                while let Some(result) = stream.next().await {
+                    let (section, pos, item) = result.expect("replay error");
+                    items.push((section, pos, item));
+                }
+
+                assert_eq!(items.len(), 10, "Should have 5 items from section 1 + 5 from section 2");
+
+                // Check section 1 items (positions 5-9)
+                for (i, (section, pos, item)) in items.iter().enumerate().take(5) {
+                    assert_eq!(*section, 1);
+                    assert_eq!(*pos, (i + 5) as u64);
+                    assert_eq!(*item, test_digest((i + 5) as u64));
+                }
+
+                // Check section 2 items (positions 0-4)
+                for (i, (section, pos, item)) in items.iter().enumerate().skip(5) {
+                    assert_eq!(*section, 2);
+                    assert_eq!(*pos, (i - 5) as u64);
+                    assert_eq!(*item, test_digest((i + 5) as u64));
+                }
+            }
+
+            // Replay from section 1, position 9 - should get only item 9 from section 1 and all of section 2
+            {
+                let stream = journal
+                    .replay(1, 9, NZUsize!(1024))
+                    .await
+                    .expect("failed to replay");
+                pin_mut!(stream);
+
+                let mut items = Vec::new();
+                while let Some(result) = stream.next().await {
+                    let (section, pos, item) = result.expect("replay error");
+                    items.push((section, pos, item));
+                }
+
+                assert_eq!(items.len(), 6, "Should have 1 item from section 1 + 5 from section 2");
+                assert_eq!(items[0], (1, 9, test_digest(9)));
+                for (i, (section, pos, item)) in items.iter().enumerate().skip(1) {
+                    assert_eq!(*section, 2);
+                    assert_eq!(*pos, (i - 1) as u64);
+                    assert_eq!(*item, test_digest((i + 9) as u64));
+                }
+            }
+
+            // Replay from section 2, position 3 - should get only items 3-4 from section 2
+            {
+                let stream = journal
+                    .replay(2, 3, NZUsize!(1024))
+                    .await
+                    .expect("failed to replay");
+                pin_mut!(stream);
+
+                let mut items = Vec::new();
+                while let Some(result) = stream.next().await {
+                    let (section, pos, item) = result.expect("replay error");
+                    items.push((section, pos, item));
+                }
+
+                assert_eq!(items.len(), 2, "Should have 2 items from section 2");
+                assert_eq!(items[0], (2, 3, test_digest(13)));
+                assert_eq!(items[1], (2, 4, test_digest(14)));
+            }
+
+            // Replay from position past the end should return ItemOutOfRange error
+            let result = journal.replay(1, 100, NZUsize!(1024)).await;
+            assert!(matches!(result, Err(Error::ItemOutOfRange(100))));
+            drop(result);
+
+            journal.destroy().await.expect("failed to destroy");
+        });
+    }
+
+    #[test_traced]
     fn test_segmented_fixed_prune() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
