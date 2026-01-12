@@ -42,6 +42,11 @@ pub(super) struct PageReader<B: Blob> {
 
 impl<B: Blob> PageReader<B> {
     /// Creates a new PageReader.
+    ///
+    /// The `physical_blob_size` must already exclude any trailing invalid data
+    /// (e.g., junk pages from an interrupted write). With this in mind, a partial page
+    /// that is not the physical last page indicates corruption (not crash truncation)
+    /// and will cause an `Error::InvalidChecksum`.
     pub(super) const fn new(
         blob: B,
         physical_blob_size: u64,
@@ -262,7 +267,7 @@ pub struct Replay<B: Blob> {
 }
 
 impl<B: Blob> Replay<B> {
-    /// Creates a new Replay.
+    /// Creates a new Replay from a PageReader.
     pub(super) const fn new(reader: PageReader<B>) -> Self {
         let page_size = reader.page_size();
         let logical_page_size = reader.logical_page_size();
