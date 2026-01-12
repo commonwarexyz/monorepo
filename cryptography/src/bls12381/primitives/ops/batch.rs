@@ -29,74 +29,70 @@ use rand_core::CryptoRngCore;
 #[cfg(feature = "std")]
 use std::collections::{BTreeMap, BTreeSet};
 
-fn bisect<V: Variant>(entries: &[(V::Public, V::Signature)], hm: &V::Signature) -> Vec<usize> {
-    struct SumTree<V: Variant> {
-        len: usize,
-        /// This could be optimized to use a more compact data structure, but correctness
-        /// matters more
-        values: BTreeMap<(usize, usize), (V::Public, V::Signature)>,
-    }
-
-    impl<V: Variant> SumTree<V> {
-        pub fn build(leaves: &[(V::Public, V::Signature)]) -> Self {
-            let mut values = BTreeMap::new();
-            let len = leaves.len();
-            if len == 0 {
-                return Self { len, values };
-            }
-
-            // Use an explicit stack to build bottom-up with halving intervals.
-            // Phase 0 = first visit (push children), Phase 1 = second visit (compute value)
-            let mut stack: Vec<(usize, usize, u8)> = vec![(0, len, 0)];
-            while let Some((start, end, phase)) = stack.pop() {
-                if end - start == 1 {
-                    values.insert((start, end), leaves[start]);
-                } else if phase == 0 {
-                    let mid = start + (end - start) / 2;
-                    stack.push((start, end, 1)); // Come back to compute this node
-                    stack.push((mid, end, 0)); // Right child
-                    stack.push((start, mid, 0)); // Left child
-                } else {
-                    let mid = start + (end - start) / 2;
-                    let left = values.get(&(start, mid)).expect("left child should exist");
-                    let right = values.get(&(mid, end)).expect("right child should exist");
-                    values.insert((start, end), (left.0 + &right.0, left.1 + &right.1));
-                }
-            }
-
-            Self { len, values }
-        }
-
-        pub fn verify(&self, hm: &V::Signature) -> Vec<usize> {
-            let mut good = (0..self.len).collect::<BTreeSet<_>>();
-            let mut work = vec![(0, self.len)];
-            while let Some((start, end)) = work.pop() {
-                if start == end {
-                    continue;
-                }
-                let (pk, sig) = self
-                    .values
-                    .get(&(start, end))
-                    .expect("SumTree should be correctly constructed");
-                if V::verify(pk, hm, sig).is_ok() {
-                    continue;
-                }
-                if end == start + 1 {
-                    good.remove(&start);
-                    continue;
-                }
-                let mid = start + (end - start) / 2;
-                work.push((start, mid));
-                work.push((mid, end));
-            }
-            (0..self.len).filter(|x| !good.contains(x)).collect()
-        }
-    }
-
-    SumTree::<V>::build(entries).verify(hm)
+struct SumTree<V: Variant> {
+    len: usize,
+    /// This could be optimized to use a more compact data structure, but correctness
+    /// matters more.
+    values: BTreeMap<(usize, usize), (V::Public, V::Signature)>,
 }
 
-fn bisect_par<V: Variant>(
+impl<V: Variant> SumTree<V> {
+    fn build(leaves: &[(V::Public, V::Signature)]) -> Self {
+        let mut values = BTreeMap::new();
+        let len = leaves.len();
+        if len == 0 {
+            return Self { len, values };
+        }
+
+        // Use an explicit stack to build bottom-up with halving intervals.
+        // Phase 0 = first visit (push children), Phase 1 = second visit (compute value)
+        let mut stack: Vec<(usize, usize, u8)> = vec![(0, len, 0)];
+        while let Some((start, end, phase)) = stack.pop() {
+            if end - start == 1 {
+                values.insert((start, end), leaves[start]);
+            } else if phase == 0 {
+                let mid = start + (end - start) / 2;
+                stack.push((start, end, 1)); // Come back to compute this node
+                stack.push((mid, end, 0)); // Right child
+                stack.push((start, mid, 0)); // Left child
+            } else {
+                let mid = start + (end - start) / 2;
+                let left = values.get(&(start, mid)).expect("left child should exist");
+                let right = values.get(&(mid, end)).expect("right child should exist");
+                values.insert((start, end), (left.0 + &right.0, left.1 + &right.1));
+            }
+        }
+
+        Self { len, values }
+    }
+
+    fn verify(&self, hm: &V::Signature) -> Vec<usize> {
+        let mut good = (0..self.len).collect::<BTreeSet<_>>();
+        let mut work = vec![(0, self.len)];
+        while let Some((start, end)) = work.pop() {
+            if start == end {
+                continue;
+            }
+            let (pk, sig) = self
+                .values
+                .get(&(start, end))
+                .expect("SumTree should be correctly constructed");
+            if V::verify(pk, hm, sig).is_ok() {
+                continue;
+            }
+            if end == start + 1 {
+                good.remove(&start);
+                continue;
+            }
+            let mid = start + (end - start) / 2;
+            work.push((start, mid));
+            work.push((mid, end));
+        }
+        (0..self.len).filter(|x| !good.contains(x)).collect()
+    }
+}
+
+fn bisect<V: Variant>(
     entries: &[(V::Public, V::Signature)],
     hm: &V::Signature,
     strategy: &impl Strategy,
@@ -111,10 +107,14 @@ fn bisect_par<V: Variant>(
         entries.chunks(chunk_size).enumerate(),
         || Vec::with_capacity(entries.len()),
         |mut acc, (i, chunk)| {
-            // We need to correct for the fact that bisect returns indices relative
-            // to the local slice.
+            // Correct for the fact that SumTree returns indices relative to the local slice.
             let shift = i * chunk_size;
-            acc.extend(bisect::<V>(chunk, hm).into_iter().map(|j| shift + j));
+            acc.extend(
+                SumTree::<V>::build(chunk)
+                    .verify(hm)
+                    .into_iter()
+                    .map(|j| shift + j),
+            );
             acc
         },
         |mut acc_l, mut acc_r| {
@@ -122,7 +122,7 @@ fn bisect_par<V: Variant>(
             acc_l
         },
     );
-    // Just in case parallelism ends up re-ordering things.
+    // Parallelism may re-order results.
     out.sort_unstable();
     out
 }
@@ -187,7 +187,7 @@ where
         scalars.iter().zip(pks.iter().zip(sigs.iter())),
         |(s, (&pk, &sig))| (pk * s, sig * s),
     );
-    bisect_par::<V>(&weighted_entries, &hm, par)
+    bisect::<V>(&weighted_entries, &hm, par)
 }
 
 /// Verifies multiple signatures over multiple messages from a single public key,

@@ -7,10 +7,10 @@ use commonware_cryptography::{
     Signer as _,
 };
 use commonware_parallel::{Rayon, Sequential};
-use commonware_utils::{quorum, TryCollect};
+use commonware_utils::{quorum, NZUsize, TryCollect};
 use criterion::{criterion_group, BatchSize, Criterion};
 use rand::{rngs::StdRng, seq::SliceRandom, SeedableRng};
-use std::{hint::black_box, num::NonZeroUsize};
+use std::hint::black_box;
 
 fn benchmark_threshold_batch_verify_same_message_precomputed(c: &mut Criterion) {
     let namespace = b"benchmark";
@@ -20,7 +20,6 @@ fn benchmark_threshold_batch_verify_same_message_precomputed(c: &mut Criterion) 
         let f = n - t;
         for invalid in [0, f] {
             for concurrency in [1, 8] {
-                let strategy = Rayon::new(NonZeroUsize::new(concurrency).unwrap()).unwrap();
                 c.bench_function(
                     &format!(
                         "{}/n={} t={} invalid={} conc={}",
@@ -67,6 +66,7 @@ fn benchmark_threshold_batch_verify_same_message_precomputed(c: &mut Criterion) 
                                 }
 
                                 let result = if concurrency > 1 {
+                                    let strategy = Rayon::new(NZUsize!(concurrency)).unwrap();
                                     black_box(
                                         primitives::ops::threshold::batch_verify_same_message::<
                                             _,
