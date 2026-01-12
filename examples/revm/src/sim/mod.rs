@@ -53,8 +53,35 @@ pub struct SimOutcome {
     pub to_balance: U256,
 }
 
+#[cfg(unix)]
+fn raise_open_file_limit() {
+    use libc::{getrlimit, rlimit, setrlimit, RLIMIT_NOFILE};
+
+    // Best effort: avoid hitting low per-process fd limits during simulations.
+    unsafe {
+        let mut limits = rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        if getrlimit(RLIMIT_NOFILE, &mut limits) != 0 {
+            return;
+        }
+        if limits.rlim_cur < limits.rlim_max {
+            let updated = rlimit {
+                rlim_cur: limits.rlim_max,
+                rlim_max: limits.rlim_max,
+            };
+            let _ = setrlimit(RLIMIT_NOFILE, &updated);
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn raise_open_file_limit() {}
+
 /// Run the multi-node simulation and return the final outcome.
 pub fn simulate(cfg: SimConfig) -> anyhow::Result<SimOutcome> {
+    raise_open_file_limit();
     let executor = tokio::Runner::default();
     executor.start(|context| async move { run_sim(context, cfg).await })
 }

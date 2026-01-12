@@ -2413,6 +2413,7 @@ dependencies = [
  "commonware-utils",
  "futures",
  "governor",
+ "libc",
  "rand 0.8.5",
  "revm",
  "thiserror 2.0.17",

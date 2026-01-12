@@ -30,6 +30,7 @@ commonware-storage.workspace = true
 commonware-utils.workspace = true
 futures.workspace = true
 governor.workspace = true
+libc.workspace = true
 rand.workspace = true
 revm = { version = "33.1.0", default-features = false, features = ["std", "asyncdb"] }
 thiserror.workspace = true
