@@ -51,9 +51,12 @@ mod tests {
     use super::*;
     use crate::{
         simplex::{
-            actors::{batcher, resolver, resolver::MailboxMessage},
+            actors::{
+                batcher,
+                resolver::{self, MailboxMessage},
+            },
             elector::{Config as ElectorConfig, Elector, Random, RoundRobin, RoundRobinElector},
-            mocks,
+            mocks, quorum,
             scheme::{bls12381_multisig, bls12381_threshold, ed25519, secp256r1, Scheme},
             types::{Certificate, Finalization, Finalize, Notarization, Notarize, Proposal, Vote},
         },
@@ -72,7 +75,7 @@ mod tests {
     use commonware_p2p::simulated::{Config as NConfig, Network};
     use commonware_parallel::Sequential;
     use commonware_runtime::{deterministic, Clock, Metrics, Quota, Runner};
-    use commonware_utils::{quorum, NZUsize, NZU16};
+    use commonware_utils::{NZUsize, NZU16};
     use futures::{channel::mpsc, FutureExt, StreamExt};
     use std::{
         num::{NonZeroU16, NonZeroU32},

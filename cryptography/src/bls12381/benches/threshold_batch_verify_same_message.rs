@@ -6,7 +6,7 @@ use commonware_cryptography::{
     ed25519::PrivateKey,
     Signer as _,
 };
-use commonware_utils::{quorum, TryCollect};
+use commonware_utils::{Bft3f1, Faults, TryCollect};
 use criterion::{criterion_group, BatchSize, Criterion};
 use rand::{rngs::StdRng, seq::SliceRandom, SeedableRng};
 use std::hint::black_box;
@@ -15,7 +15,7 @@ fn benchmark_threshold_batch_verify_same_message(c: &mut Criterion) {
     let namespace = b"benchmark";
     let msg = b"hello";
     for &n in &[5, 10, 20, 50, 100, 250, 500] {
-        let t = quorum(n);
+        let t = Bft3f1::quorum(n);
         let f = n - t;
         for invalid in [0, f] {
             c.bench_function(
@@ -29,7 +29,7 @@ fn benchmark_threshold_batch_verify_same_message(c: &mut Criterion) {
                                 .try_collect()
                                 .unwrap();
                             let (output, shares) =
-                                deal::<MinSig, _>(&mut rng, Default::default(), players)
+                                deal::<MinSig, _, Bft3f1>(&mut rng, Default::default(), players)
                                     .expect("deal should succeed");
                             let signatures = shares
                                 .values()

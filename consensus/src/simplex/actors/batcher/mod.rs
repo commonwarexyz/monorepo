@@ -37,7 +37,7 @@ mod tests {
         simplex::{
             actors::voter,
             elector::RoundRobin,
-            mocks,
+            mocks, quorum,
             scheme::{bls12381_multisig, bls12381_threshold, ed25519, secp256r1, Scheme},
             types::{
                 Certificate, Finalization, Finalize, Notarization, Notarize, Nullification,
@@ -62,7 +62,6 @@ mod tests {
     };
     use commonware_parallel::Sequential;
     use commonware_runtime::{deterministic, Clock, Metrics, Quota, Runner};
-    use commonware_utils::quorum;
     use futures::{channel::mpsc, StreamExt};
     use std::{num::NonZeroU32, time::Duration};
 

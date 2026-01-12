@@ -70,7 +70,7 @@ use alloc::{collections::BTreeSet, sync::Arc, vec::Vec};
 use bytes::{Buf, BufMut, Bytes};
 use commonware_codec::{Codec, CodecFixed, EncodeSize, Error, Read, ReadExt, Write};
 use commonware_parallel::Strategy;
-use commonware_utils::{bitmap::BitMap, ordered::Set, Participant};
+use commonware_utils::{bitmap::BitMap, ordered::Set, Faults, Participant};
 use core::{fmt::Debug, hash::Hash};
 use rand_core::CryptoRngCore;
 #[cfg(feature = "std")]
@@ -250,21 +250,30 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
     /// Assembles attestations into a certificate, returning `None` if the threshold is not met.
     ///
     /// Callers must not include duplicate attestations from the same signer.
-    fn assemble<I>(&self, attestations: I, strategy: &impl Strategy) -> Option<Self::Certificate>
+    fn assemble<I, M>(
+        &self,
+        attestations: I,
+        strategy: &impl Strategy,
+    ) -> Option<Self::Certificate>
     where
-        I: IntoIterator<Item = Attestation<Self>>;
+        I: IntoIterator<Item = Attestation<Self>>,
+        M: Faults;
 
     /// Verifies a certificate that was recovered or received from the network.
-    fn verify_certificate<R: CryptoRngCore, D: Digest>(
+    fn verify_certificate<R, D, M>(
         &self,
         rng: &mut R,
         subject: Self::Subject<'_, D>,
         certificate: &Self::Certificate,
         strategy: &impl Strategy,
-    ) -> bool;
+    ) -> bool
+    where
+        R: CryptoRngCore,
+        D: Digest,
+        M: Faults;
 
     /// Verifies a stream of certificates, returning `false` at the first failure.
-    fn verify_certificates<'a, R, D, I>(
+    fn verify_certificates<'a, R, D, I, M>(
         &self,
         rng: &mut R,
         certificates: I,
@@ -274,9 +283,10 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
         R: CryptoRngCore,
         D: Digest,
         I: Iterator<Item = (Self::Subject<'a, D>, &'a Self::Certificate)>,
+        M: Faults,
     {
         for (subject, certificate) in certificates {
-            if !self.verify_certificate(rng, subject, certificate, strategy) {
+            if !self.verify_certificate::<_, _, M>(rng, subject, certificate, strategy) {
                 return false;
             }
         }

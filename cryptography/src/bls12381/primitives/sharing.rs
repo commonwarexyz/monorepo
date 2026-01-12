@@ -5,7 +5,7 @@ use cfg_if::cfg_if;
 use commonware_codec::{EncodeSize, FixedSize, RangeCfg, Read, ReadExt, Write};
 use commonware_math::poly::{Interpolator, Poly};
 use commonware_parallel::Sequential;
-use commonware_utils::{ordered::Set, quorum, Participant, NZU32};
+use commonware_utils::{ordered::Set, Faults, Participant, NZU32};
 use core::{iter, num::NonZeroU32};
 #[cfg(feature = "std")]
 use std::sync::{Arc, OnceLock};
@@ -167,9 +167,10 @@ impl<V: Variant> Sharing<V> {
         self.mode.all_scalars(self.total)
     }
 
-    /// Return the number of participants required to recover the secret.
-    pub fn required(&self) -> u32 {
-        quorum(self.total.get())
+    /// Return the number of participants required to recover the secret
+    /// using the given fault model.
+    pub fn required<M: Faults>(&self) -> u32 {
+        M::quorum(self.total.get())
     }
 
     /// Return the total number of participants in this sharing.
@@ -277,7 +278,7 @@ impl<V: Variant> Read for Sharing<V> {
 mod fuzz {
     use super::*;
     use arbitrary::Arbitrary;
-    use commonware_utils::NZU32;
+    use commonware_utils::{Bft3f1, NZU32};
     use rand::{rngs::StdRng, SeedableRng};
 
     impl<'a> Arbitrary<'a> for Mode {
@@ -294,7 +295,7 @@ mod fuzz {
             let total: u32 = u.int_in_range(1..=100)?;
             let mode: Mode = u.arbitrary()?;
             let seed: u64 = u.arbitrary()?;
-            let poly = Poly::new(&mut StdRng::seed_from_u64(seed), quorum(total) - 1);
+            let poly = Poly::new(&mut StdRng::seed_from_u64(seed), Bft3f1::quorum(total) - 1);
             Ok(Self::new(
                 mode,
                 NZU32!(total),
