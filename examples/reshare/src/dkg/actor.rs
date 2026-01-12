@@ -210,7 +210,7 @@ where
                 output,
                 share,
             };
-            storage.append_epoch(initial_state).await;
+            storage.set_epoch(Epoch::zero(), initial_state).await;
         }
 
         // Start a muxer for the physical channel used by DKG/reshare
@@ -499,12 +499,15 @@ where
                                 self.failed_epochs.inc();
                             }
                             storage
-                                .append_epoch(EpochState {
-                                    round: next_round,
-                                    rng_seed: Summary::random(&mut self.context),
-                                    output: next_output.clone(),
-                                    share: next_share.clone(),
-                                })
+                                .set_epoch(
+                                    epoch.next(),
+                                    EpochState {
+                                        round: next_round,
+                                        rng_seed: Summary::random(&mut self.context),
+                                        output: next_output.clone(),
+                                        share: next_share.clone(),
+                                    },
+                                )
                                 .await;
 
                             // Acknowledge block processing before callback

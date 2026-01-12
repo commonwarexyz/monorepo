@@ -168,7 +168,7 @@ mod tests {
     use commonware_macros::test_traced;
     use commonware_math::algebra::Random;
     use commonware_runtime::{buffer::PoolRef, deterministic, Runner as _, RwLock};
-    use commonware_utils::{test_rng, test_rng_seeded, NZUsize, NZU16, NZU64};
+    use commonware_utils::{test_rng_seeded, NZUsize, NZU16, NZU64};
     use futures::{channel::mpsc, SinkExt as _};
     use rand::RngCore as _;
     use rstest::rstest;
@@ -227,10 +227,19 @@ mod tests {
         ImmutableSyncTest::init(context, config).await.unwrap()
     }
 
-    /// Create n random Set operations.
-    /// create_test_ops(n') is a suffix of create_test_ops(n) for n' > n.
+    /// Create n random Set operations using the default seed (0).
+    /// create_test_ops(n) is a prefix of create_test_ops(n') for n < n'.
     fn create_test_ops(n: usize) -> Vec<Operation<sha256::Digest, sha256::Digest>> {
-        let mut rng = test_rng();
+        create_test_ops_seeded(n, 0)
+    }
+
+    /// Create n random Set operations using a specific seed.
+    /// Use different seeds when you need non-overlapping keys in the same test.
+    fn create_test_ops_seeded(
+        n: usize,
+        seed: u64,
+    ) -> Vec<Operation<sha256::Digest, sha256::Digest>> {
+        let mut rng = test_rng_seeded(seed);
         let mut ops = Vec::new();
         for _i in 0..n {
             let key = sha256::Digest::random(&mut rng);
@@ -497,8 +506,9 @@ mod tests {
             let initial_root = target_db.root();
 
             // Add more operations to create the extended target
+            // (use different seed to avoid key collisions)
             let mut target_db = target_db.into_mutable();
-            let additional_ops = create_test_ops(25);
+            let additional_ops = create_test_ops_seeded(25, 1);
             apply_ops(&mut target_db, additional_ops.clone()).await;
             let (durable_db, _) = target_db.commit(None).await.unwrap();
             let target_db = durable_db.into_merkleized();
@@ -696,8 +706,9 @@ mod tests {
             drop(sync_db);
 
             // Add one more operation and commit the target database
+            // (use different seed to avoid key collisions)
             let mut target_db = target_db.into_mutable();
-            let last_op = create_test_ops(1);
+            let last_op = create_test_ops_seeded(1, 1);
             apply_ops(&mut target_db, last_op.clone()).await;
             let (durable_db, _) = target_db.commit(None).await.unwrap();
             let target_db = durable_db.into_merkleized();
@@ -935,8 +946,9 @@ mod tests {
             let initial_root = target_db.root();
 
             // Apply more operations to the target database
+            // (use different seed to avoid key collisions)
             let mut target_db = target_db.into_mutable();
-            let more_ops = create_test_ops(5);
+            let more_ops = create_test_ops_seeded(5, 1);
             apply_ops(&mut target_db, more_ops.clone()).await;
             let (durable_db, _) = target_db.commit(None).await.unwrap();
             let mut target_db = durable_db.into_merkleized();
