@@ -2046,4 +2046,87 @@ mod tests {
             );
         });
     }
+
+    #[test_traced]
+    fn test_journal_large_item_spanning_pages() {
+        // Test that items larger than PAGE_SIZE are correctly written and read.
+        // This exercises:
+        // 1. ensure() filling multiple pages into multiple BufferStates
+        // 2. take() limiting reads to item_size across page boundaries
+        // 3. Codec decoding via Buf trait across chunk boundaries
+
+        // Use a fixed-size array larger than PAGE_SIZE (1024).
+        // 2048 bytes spans 2 full pages.
+        const LARGE_SIZE: usize = 2048;
+        type LargeItem = [u8; LARGE_SIZE];
+
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test_partition".into(),
+                compression: None,
+                codec_config: (),
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                write_buffer: NZUsize!(4096),
+            };
+            let mut journal = Journal::init(context.clone(), cfg.clone())
+                .await
+                .expect("Failed to initialize journal");
+
+            // Create a large item that spans multiple pages.
+            let mut large_data: LargeItem = [0u8; LARGE_SIZE];
+            for (i, byte) in large_data.iter_mut().enumerate() {
+                *byte = (i % 256) as u8;
+            }
+            assert!(
+                LARGE_SIZE > PAGE_SIZE.get() as usize,
+                "Item must be larger than page size"
+            );
+
+            // Append the large item
+            let (offset, size) = journal
+                .append(1, large_data)
+                .await
+                .expect("Failed to append large item");
+            assert_eq!(size as usize, LARGE_SIZE);
+            journal.sync(1).await.expect("Failed to sync");
+
+            // Read the item back via random access
+            let retrieved: LargeItem = journal
+                .get(1, offset)
+                .await
+                .expect("Failed to get large item");
+            assert_eq!(retrieved, large_data, "Random access read mismatch");
+
+            // Drop and reopen to test replay
+            drop(journal);
+            let journal = Journal::<_, LargeItem>::init(context.clone(), cfg.clone())
+                .await
+                .expect("Failed to re-initialize journal");
+
+            // Replay and verify the large item
+            {
+                let stream = journal
+                    .replay(0, 0, NZUsize!(1024))
+                    .await
+                    .expect("Failed to setup replay");
+                pin_mut!(stream);
+
+                let mut items = Vec::new();
+                while let Some(result) = stream.next().await {
+                    let (section, off, sz, item) = result.expect("Failed to replay item");
+                    items.push((section, off, sz, item));
+                }
+
+                assert_eq!(items.len(), 1, "Should have exactly one item");
+                let (section, off, sz, item) = &items[0];
+                assert_eq!(*section, 1);
+                assert_eq!(*off, offset);
+                assert_eq!(*sz as usize, LARGE_SIZE);
+                assert_eq!(*item, large_data, "Replay read mismatch");
+            }
+
+            journal.destroy().await.unwrap();
+        });
+    }
 }
