@@ -104,12 +104,12 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
         .insert(config.monitoring.instance_type.clone());
 
     // Setup S3 bucket and cache observability tools
-    info!(bucket = S3_BUCKET_NAME, "setting up S3 cache bucket");
+    info!(bucket = S3_BUCKET_NAME, "setting up S3 cache");
     let s3_client = create_s3_client(Region::new(MONITORING_REGION)).await;
     ensure_bucket_exists(&s3_client, S3_BUCKET_NAME, MONITORING_REGION).await?;
 
     // Cache observability tools (if not already cached) and generate pre-signed URLs concurrently
-    info!("checking, caching, and generating pre-signed URLs for observability tools");
+    info!("uploading observability tools to s3");
     let cache_tool = |s3_key: String, download_url: String| {
         let tag_directory = tag_directory.clone();
         let s3_client = s3_client.clone();
@@ -150,15 +150,13 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
         .await?
         .try_into()
         .unwrap();
-    info!("observability tools ready");
+    info!("observability tools uploaded");
 
     // Compute hashes for binaries and configs, grouping by hash for deduplication
-    info!("computing hashes for instance binaries and configs");
     let mut binary_hashes: HashMap<String, String> = HashMap::new(); // hash -> path
     let mut config_hashes: HashMap<String, String> = HashMap::new(); // hash -> path
     let mut instance_binary_hash: HashMap<String, String> = HashMap::new(); // instance -> hash
     let mut instance_config_hash: HashMap<String, String> = HashMap::new(); // instance -> hash
-
     for instance in &config.instances {
         let binary_hash = hash_file(std::path::Path::new(&instance.binary))?;
         let config_hash = hash_file(std::path::Path::new(&instance.config))?;
@@ -167,11 +165,6 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
         instance_binary_hash.insert(instance.name.clone(), binary_hash);
         instance_config_hash.insert(instance.name.clone(), config_hash);
     }
-    info!(
-        unique_binaries = binary_hashes.len(),
-        unique_configs = config_hashes.len(),
-        "computed hashes"
-    );
 
     // Upload unique binaries and configs to S3 (deduplicated by hash)
     info!("uploading unique binaries and configs to S3");
@@ -543,7 +536,7 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
 
     // Cache ALL static config files globally (these don't change between deployments)
     // This includes both monitoring and binary instance static files
-    info!("caching static config files");
+    info!("uploading config files to S3");
     let [
         bbr_conf_url,
         datasources_url,
@@ -584,7 +577,6 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     .unwrap();
 
     // Upload deployment-specific monitoring config files (deduplicated by hash)
-    info!("uploading deployment-specific config files");
     let instances: Vec<(&str, &str, &str)> = deployments
         .iter()
         .map(|d| {
@@ -620,10 +612,8 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     .await?
     .try_into()
     .unwrap();
-    info!("uploaded deployment-specific config files to S3");
 
     // Generate hosts.yaml and upload once (shared by all instances)
-    info!("uploading per-instance config files to S3");
     let hosts = Hosts {
         monitoring: monitoring_private_ip.clone().parse::<IpAddr>().unwrap(),
         hosts: deployments
@@ -675,12 +665,6 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
         instance_promtail_hash.insert(instance.name.clone(), promtail_hash);
         instance_pyroscope_hash.insert(instance.name.clone(), pyroscope_hash);
     }
-
-    info!(
-        unique_promtail = promtail_hashes.len(),
-        unique_pyroscope = pyroscope_hashes.len(),
-        "computed per-instance config hashes"
-    );
 
     // Upload unique promtail and pyroscope configs
     let promtail_keys: Vec<_> = promtail_hashes
@@ -758,7 +742,7 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
             },
         );
     }
-    info!("uploaded all instance config files to S3");
+    info!("uploaded config files to S3");
 
     // Build monitoring URLs struct for SSH configuration
     let monitoring_urls = MonitoringUrls {
@@ -782,10 +766,8 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
         node_exporter_service: monitoring_node_exporter_service_url.clone(),
     };
 
-    // Configure monitoring and binary instances in parallel
-    info!("configuring monitoring and binary instances");
-
     // Prepare binary instance configuration futures
+    info!("configuring monitoring and binary instances");
     let mut binary_futures = Vec::new();
     for deployment in &deployments {
         let instance = deployment.instance.clone();
