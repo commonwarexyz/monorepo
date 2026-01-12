@@ -745,4 +745,187 @@ mod tests {
             journal.destroy().await.expect("failed to destroy");
         });
     }
+
+    #[test_traced]
+    fn test_segmented_fixed_non_contiguous_sections() {
+        // Test that sections with gaps in numbering work correctly.
+        // Sections 1, 5, 10 should all be independent and accessible.
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg();
+            let mut journal = Journal::init(context.clone(), cfg.clone())
+                .await
+                .expect("failed to init");
+
+            // Create sections with gaps: 1, 5, 10
+            journal
+                .append(1, test_digest(100))
+                .await
+                .expect("failed to append");
+            journal
+                .append(5, test_digest(500))
+                .await
+                .expect("failed to append");
+            journal
+                .append(10, test_digest(1000))
+                .await
+                .expect("failed to append");
+            journal.sync_all().await.expect("failed to sync");
+
+            // Verify random access to each section
+            assert_eq!(journal.get(1, 0).await.unwrap(), test_digest(100));
+            assert_eq!(journal.get(5, 0).await.unwrap(), test_digest(500));
+            assert_eq!(journal.get(10, 0).await.unwrap(), test_digest(1000));
+
+            // Verify non-existent sections return appropriate errors
+            for missing_section in [0u64, 2, 3, 4, 6, 7, 8, 9, 11] {
+                let result = journal.get(missing_section, 0).await;
+                assert!(
+                    matches!(result, Err(Error::SectionOutOfRange(_))),
+                    "Expected SectionOutOfRange for section {}, got {:?}",
+                    missing_section,
+                    result
+                );
+            }
+
+            // Drop and reopen to test replay
+            drop(journal);
+            let journal = Journal::<_, Digest>::init(context.clone(), cfg.clone())
+                .await
+                .expect("failed to re-init");
+
+            // Replay and verify all items in order
+            {
+                let stream = journal
+                    .replay(0, NZUsize!(1024))
+                    .await
+                    .expect("failed to replay");
+                pin_mut!(stream);
+
+                let mut items = Vec::new();
+                while let Some(result) = stream.next().await {
+                    let (section, _, item) = result.expect("replay error");
+                    items.push((section, item));
+                }
+
+                assert_eq!(items.len(), 3, "Should have 3 items");
+                assert_eq!(items[0], (1, test_digest(100)));
+                assert_eq!(items[1], (5, test_digest(500)));
+                assert_eq!(items[2], (10, test_digest(1000)));
+            }
+
+            // Test replay starting from middle section (5)
+            {
+                let stream = journal
+                    .replay(5, NZUsize!(1024))
+                    .await
+                    .expect("failed to replay from section 5");
+                pin_mut!(stream);
+
+                let mut items = Vec::new();
+                while let Some(result) = stream.next().await {
+                    let (section, _, item) = result.expect("replay error");
+                    items.push((section, item));
+                }
+
+                assert_eq!(items.len(), 2, "Should have 2 items from section 5 onwards");
+                assert_eq!(items[0], (5, test_digest(500)));
+                assert_eq!(items[1], (10, test_digest(1000)));
+            }
+
+            journal.destroy().await.expect("failed to destroy");
+        });
+    }
+
+    #[test_traced]
+    fn test_segmented_fixed_empty_section_in_middle() {
+        // Test that replay correctly handles an empty section between sections with data.
+        // Section 1 has data, section 2 is empty, section 3 has data.
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg();
+            let mut journal = Journal::init(context.clone(), cfg.clone())
+                .await
+                .expect("failed to init");
+
+            // Append to section 1
+            journal
+                .append(1, test_digest(100))
+                .await
+                .expect("failed to append");
+
+            // Create section 2 but make it empty via rewind
+            journal
+                .append(2, test_digest(200))
+                .await
+                .expect("failed to append");
+            journal.sync(2).await.expect("failed to sync");
+            journal
+                .rewind_section(2, 0)
+                .await
+                .expect("failed to rewind");
+
+            // Append to section 3
+            journal
+                .append(3, test_digest(300))
+                .await
+                .expect("failed to append");
+
+            journal.sync_all().await.expect("failed to sync");
+
+            // Verify section lengths
+            assert_eq!(journal.section_len(1).await.unwrap(), 1);
+            assert_eq!(journal.section_len(2).await.unwrap(), 0);
+            assert_eq!(journal.section_len(3).await.unwrap(), 1);
+
+            // Drop and reopen to test replay
+            drop(journal);
+            let journal = Journal::<_, Digest>::init(context.clone(), cfg.clone())
+                .await
+                .expect("failed to re-init");
+
+            // Replay all - should get items from sections 1 and 3, skipping empty section 2
+            {
+                let stream = journal
+                    .replay(0, NZUsize!(1024))
+                    .await
+                    .expect("failed to replay");
+                pin_mut!(stream);
+
+                let mut items = Vec::new();
+                while let Some(result) = stream.next().await {
+                    let (section, _, item) = result.expect("replay error");
+                    items.push((section, item));
+                }
+
+                assert_eq!(
+                    items.len(),
+                    2,
+                    "Should have 2 items (skipping empty section)"
+                );
+                assert_eq!(items[0], (1, test_digest(100)));
+                assert_eq!(items[1], (3, test_digest(300)));
+            }
+
+            // Replay starting from empty section 2 - should get only section 3
+            {
+                let stream = journal
+                    .replay(2, NZUsize!(1024))
+                    .await
+                    .expect("failed to replay from section 2");
+                pin_mut!(stream);
+
+                let mut items = Vec::new();
+                while let Some(result) = stream.next().await {
+                    let (section, _, item) = result.expect("replay error");
+                    items.push((section, item));
+                }
+
+                assert_eq!(items.len(), 1, "Should have 1 item from section 3");
+                assert_eq!(items[0], (3, test_digest(300)));
+            }
+
+            journal.destroy().await.expect("failed to destroy");
+        });
+    }
 }

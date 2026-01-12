@@ -444,7 +444,10 @@ mod tests {
             let mut chunks_read = 0;
             while replay.remaining() > 0 {
                 let chunk = replay.chunk();
-                assert!(!chunk.is_empty(), "chunk() returned empty but remaining > 0");
+                assert!(
+                    !chunk.is_empty(),
+                    "chunk() returned empty but remaining > 0"
+                );
                 collected.extend_from_slice(chunk);
                 let len = chunk.len();
                 replay.advance(len);

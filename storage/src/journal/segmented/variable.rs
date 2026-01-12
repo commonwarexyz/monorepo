@@ -2273,7 +2273,10 @@ mod tests {
             // Actually, we need to append something and then rewind to make it empty
             journal.append(2, 200i32).await.expect("Failed to append");
             journal.sync(2).await.expect("Failed to sync");
-            journal.rewind_section(2, 0).await.expect("Failed to rewind");
+            journal
+                .rewind_section(2, 0)
+                .await
+                .expect("Failed to rewind");
 
             // Append to section 3
             journal.append(3, 300i32).await.expect("Failed to append");
@@ -2305,7 +2308,11 @@ mod tests {
                     items.push((section, item));
                 }
 
-                assert_eq!(items.len(), 2, "Should have 2 items (skipping empty section)");
+                assert_eq!(
+                    items.len(),
+                    2,
+                    "Should have 2 items (skipping empty section)"
+                );
                 assert_eq!(items[0], (1, 100));
                 assert_eq!(items[1], (3, 300));
             }
