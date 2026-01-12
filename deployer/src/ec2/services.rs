@@ -26,34 +26,42 @@ pub const PYROSCOPE_VERSION: &str = "1.12.0";
 /// Version of Grafana to download and install
 pub const GRAFANA_VERSION: &str = "11.5.2";
 
-// S3 key functions for tool binaries (organized by component)
+// S3 key functions for tool binaries
+//
+// Convention: {S3_TOOLS_PREFIX}/{tool}/{version}/{filename}
+//
+// The filename matches the upstream download URL exactly. The version is placed
+// in the path (not embedded in the filename) to ensure consistent cache organization
+// across all tools, since some upstream releases include version in the filename
+// (e.g., prometheus-3.2.0.linux-arm64.tar.gz) while others do not
+// (e.g., loki-linux-arm64.zip).
 
 pub fn prometheus_bin_s3_key(version: &str) -> String {
-    format!("{S3_TOOLS_PREFIX}/prometheus/prometheus-{version}.linux-arm64.tar.gz")
+    format!("{S3_TOOLS_PREFIX}/prometheus/{version}/prometheus-{version}.linux-arm64.tar.gz")
 }
 
 pub fn grafana_bin_s3_key(version: &str) -> String {
-    format!("{S3_TOOLS_PREFIX}/grafana/grafana_{version}_arm64.deb")
+    format!("{S3_TOOLS_PREFIX}/grafana/{version}/grafana_{version}_arm64.deb")
 }
 
 pub fn loki_bin_s3_key(version: &str) -> String {
-    format!("{S3_TOOLS_PREFIX}/loki/loki-{version}-linux-arm64.zip")
+    format!("{S3_TOOLS_PREFIX}/loki/{version}/loki-linux-arm64.zip")
 }
 
 pub fn pyroscope_bin_s3_key(version: &str) -> String {
-    format!("{S3_TOOLS_PREFIX}/pyroscope/pyroscope_{version}_linux_arm64.tar.gz")
+    format!("{S3_TOOLS_PREFIX}/pyroscope/{version}/pyroscope_{version}_linux_arm64.tar.gz")
 }
 
 pub fn tempo_bin_s3_key(version: &str) -> String {
-    format!("{S3_TOOLS_PREFIX}/tempo/tempo_{version}_linux_arm64.tar.gz")
+    format!("{S3_TOOLS_PREFIX}/tempo/{version}/tempo_{version}_linux_arm64.tar.gz")
 }
 
 pub fn node_exporter_bin_s3_key(version: &str) -> String {
-    format!("{S3_TOOLS_PREFIX}/node-exporter/node_exporter-{version}.linux-arm64.tar.gz")
+    format!("{S3_TOOLS_PREFIX}/node-exporter/{version}/node_exporter-{version}.linux-arm64.tar.gz")
 }
 
 pub fn promtail_bin_s3_key(version: &str) -> String {
-    format!("{S3_TOOLS_PREFIX}/promtail/promtail-{version}-linux-arm64.zip")
+    format!("{S3_TOOLS_PREFIX}/promtail/{version}/promtail-linux-arm64.zip")
 }
 
 // S3 key functions for component configs and services (include deployer version for cache invalidation)

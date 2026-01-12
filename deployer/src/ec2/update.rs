@@ -6,7 +6,7 @@ use crate::ec2::{
 };
 use aws_sdk_ec2::types::Filter;
 use futures::future::try_join_all;
-use std::{collections::HashMap, fs::File, path::PathBuf, time::Duration};
+use std::{collections::HashMap, fs::File, path::PathBuf};
 use tracing::{error, info};
 
 /// Updates the binary and configuration on all binary nodes
@@ -48,7 +48,6 @@ pub async fn update(config_path: &PathBuf) -> Result<(), Error> {
     // Upload updated binaries and configs to S3 and generate pre-signed URLs concurrently
     info!("uploading updated binaries and configs to S3");
     let s3_client = create_s3_client(Region::new(MONITORING_REGION)).await;
-    let presign_duration = Duration::from_secs(6 * 60 * 60);
 
     let upload_results: Vec<(String, String, String)> =
         try_join_all(config.instances.iter().map(|instance| {
@@ -67,14 +66,14 @@ pub async fn update(config_path: &PathBuf) -> Result<(), Error> {
                         S3_BUCKET_NAME,
                         &binary_key,
                         std::path::Path::new(&binary_path),
-                        presign_duration,
+                        PRESIGN_DURATION,
                     ),
                     upload_and_presign(
                         &s3_client,
                         S3_BUCKET_NAME,
                         &config_key,
                         std::path::Path::new(&config_path),
-                        presign_duration,
+                        PRESIGN_DURATION,
                     ),
                 ])
                 .await?

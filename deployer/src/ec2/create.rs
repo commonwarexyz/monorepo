@@ -12,7 +12,6 @@ use std::{
     net::IpAddr,
     path::PathBuf,
     slice,
-    time::Duration,
 };
 use tokio::process::Command;
 use tracing::info;
@@ -111,7 +110,6 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
 
     // Cache observability tools (if not already cached) and generate pre-signed URLs concurrently
     info!("checking, caching, and generating pre-signed URLs for observability tools");
-    let presign_duration = Duration::from_secs(6 * 60 * 60);
     let cache_tool = |s3_key: String, download_url: String| {
         let tag_directory = tag_directory.clone();
         let s3_client = s3_client.clone();
@@ -128,14 +126,14 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
                     S3_BUCKET_NAME,
                     &s3_key,
                     &temp_path,
-                    presign_duration,
+                    PRESIGN_DURATION,
                 )
                 .await?;
                 std::fs::remove_file(&temp_path)?;
                 Ok::<_, Error>(url)
             } else {
                 info!(key = s3_key.as_str(), "tool already cached");
-                presign_url(&s3_client, S3_BUCKET_NAME, &s3_key, presign_duration).await
+                presign_url(&s3_client, S3_BUCKET_NAME, &s3_key, PRESIGN_DURATION).await
             }
         }
     };
@@ -166,14 +164,14 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
                     S3_BUCKET_NAME,
                     &binary_key,
                     std::path::Path::new(&instance.binary),
-                    presign_duration,
+                    PRESIGN_DURATION,
                 ),
                 upload_and_presign(
                     &s3_client,
                     S3_BUCKET_NAME,
                     &config_key,
                     std::path::Path::new(&instance.config),
-                    presign_duration,
+                    PRESIGN_DURATION,
                 ),
             ])
             .await?
@@ -500,17 +498,17 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
         tempo_service_url,
         monitoring_node_exporter_service_url,
     ]: [String; 11] = try_join_all([
-        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &bbr_config_s3_key(), BBR_CONF.as_bytes(), presign_duration),
-        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &grafana_datasources_s3_key(), DATASOURCES_YML.as_bytes(), presign_duration),
-        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &grafana_dashboards_s3_key(), ALL_YML.as_bytes(), presign_duration),
-        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &loki_config_s3_key(), LOKI_CONFIG.as_bytes(), presign_duration),
-        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &pyroscope_config_s3_key(), PYROSCOPE_CONFIG.as_bytes(), presign_duration),
-        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &tempo_config_s3_key(), TEMPO_CONFIG.as_bytes(), presign_duration),
-        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &prometheus_service_s3_key(), PROMETHEUS_SERVICE.as_bytes(), presign_duration),
-        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &loki_service_s3_key(), LOKI_SERVICE.as_bytes(), presign_duration),
-        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &pyroscope_service_s3_key(), PYROSCOPE_SERVICE.as_bytes(), presign_duration),
-        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &tempo_service_s3_key(), TEMPO_SERVICE.as_bytes(), presign_duration),
-        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &node_exporter_service_s3_key(), NODE_EXPORTER_SERVICE.as_bytes(), presign_duration),
+        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &bbr_config_s3_key(), BBR_CONF.as_bytes(), PRESIGN_DURATION),
+        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &grafana_datasources_s3_key(), DATASOURCES_YML.as_bytes(), PRESIGN_DURATION),
+        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &grafana_dashboards_s3_key(), ALL_YML.as_bytes(), PRESIGN_DURATION),
+        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &loki_config_s3_key(), LOKI_CONFIG.as_bytes(), PRESIGN_DURATION),
+        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &pyroscope_config_s3_key(), PYROSCOPE_CONFIG.as_bytes(), PRESIGN_DURATION),
+        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &tempo_config_s3_key(), TEMPO_CONFIG.as_bytes(), PRESIGN_DURATION),
+        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &prometheus_service_s3_key(), PROMETHEUS_SERVICE.as_bytes(), PRESIGN_DURATION),
+        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &loki_service_s3_key(), LOKI_SERVICE.as_bytes(), PRESIGN_DURATION),
+        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &pyroscope_service_s3_key(), PYROSCOPE_SERVICE.as_bytes(), PRESIGN_DURATION),
+        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &tempo_service_s3_key(), TEMPO_SERVICE.as_bytes(), PRESIGN_DURATION),
+        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &node_exporter_service_s3_key(), NODE_EXPORTER_SERVICE.as_bytes(), PRESIGN_DURATION),
     ])
     .await?
     .try_into()
@@ -538,14 +536,14 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
             S3_BUCKET_NAME,
             &prometheus_config_s3_key(tag),
             &prom_path,
-            presign_duration,
+            PRESIGN_DURATION,
         ),
         upload_and_presign(
             &s3_client,
             S3_BUCKET_NAME,
             &dashboard_s3_key(tag),
             &dashboard_path,
-            presign_duration,
+            PRESIGN_DURATION,
         ),
     ])
     .await?
@@ -616,11 +614,11 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
         pyroscope_agent_service_url,
         pyroscope_agent_timer_url,
     ]: [String; 5] = try_join_all([
-        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &promtail_service_s3_key(), PROMTAIL_SERVICE.as_bytes(), presign_duration),
-        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &binary_service_s3_key(), BINARY_SERVICE.as_bytes(), presign_duration),
-        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &logrotate_config_s3_key(), LOGROTATE_CONF.as_bytes(), presign_duration),
-        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &pyroscope_agent_service_s3_key(), PYROSCOPE_AGENT_SERVICE.as_bytes(), presign_duration),
-        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &pyroscope_agent_timer_s3_key(), PYROSCOPE_AGENT_TIMER.as_bytes(), presign_duration),
+        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &promtail_service_s3_key(), PROMTAIL_SERVICE.as_bytes(), PRESIGN_DURATION),
+        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &binary_service_s3_key(), BINARY_SERVICE.as_bytes(), PRESIGN_DURATION),
+        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &logrotate_config_s3_key(), LOGROTATE_CONF.as_bytes(), PRESIGN_DURATION),
+        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &pyroscope_agent_service_s3_key(), PYROSCOPE_AGENT_SERVICE.as_bytes(), PRESIGN_DURATION),
+        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &pyroscope_agent_timer_s3_key(), PYROSCOPE_AGENT_TIMER.as_bytes(), PRESIGN_DURATION),
     ])
     .await?
     .try_into()
@@ -657,21 +655,21 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
                             S3_BUCKET_NAME,
                             &hosts_s3_key(tag, name),
                             &hosts_path,
-                            presign_duration,
+                            PRESIGN_DURATION,
                         ),
                         upload_and_presign(
                             &s3_client,
                             S3_BUCKET_NAME,
                             &promtail_config_s3_key(tag, name),
                             promtail_path,
-                            presign_duration,
+                            PRESIGN_DURATION,
                         ),
                         upload_and_presign(
                             &s3_client,
                             S3_BUCKET_NAME,
                             &pyroscope_script_s3_key(tag, name),
                             pyroscope_path,
-                            presign_duration,
+                            PRESIGN_DURATION,
                         ),
                     ])
                     .await?

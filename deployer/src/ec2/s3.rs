@@ -22,6 +22,9 @@ pub const S3_TOOLS_PREFIX: &str = "tools";
 /// S3 prefix for per-deployment data
 pub const S3_DEPLOYMENTS_PREFIX: &str = "deployments";
 
+/// Duration for pre-signed URLs (6 hours)
+pub const PRESIGN_DURATION: Duration = Duration::from_secs(6 * 60 * 60);
+
 /// Creates an S3 client for the specified AWS region
 pub async fn create_s3_client(region: Region) -> S3Client {
     let retry = aws_config::retry::RetryConfig::adaptive()
