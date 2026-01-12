@@ -627,7 +627,8 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     .unwrap();
     info!("uploaded deployment-specific config files to S3");
 
-    // Generate hosts.yaml (needed for per-instance configs)
+    // Generate hosts.yaml and upload once (shared by all instances)
+    info!("uploading per-instance config files to S3");
     let hosts = Hosts {
         monitoring: monitoring_private_ip.clone().parse::<IpAddr>().unwrap(),
         hosts: deployments
@@ -642,11 +643,22 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     let hosts_yaml = serde_yaml::to_string(&hosts)?;
     let hosts_path = tag_directory.join("hosts.yaml");
     std::fs::write(&hosts_path, &hosts_yaml)?;
+    let hosts_hash = hash_file(&hosts_path)?;
+    let hosts_url = cache_file_and_presign(
+        &s3_client,
+        S3_BUCKET_NAME,
+        &hosts_s3_key(tag, &hosts_hash),
+        &hosts_path,
+        PRESIGN_DURATION,
+    )
+    .await?;
 
-    // Write per-instance config files locally and compute hashes
-    info!("uploading per-instance config files to S3");
-    let mut per_instance_data: Vec<(String, std::path::PathBuf, String, std::path::PathBuf, String)> =
-        Vec::new();
+    // Write per-instance config files locally, compute hashes, and deduplicate
+    let mut promtail_hashes: HashMap<String, std::path::PathBuf> = HashMap::new();
+    let mut pyroscope_hashes: HashMap<String, std::path::PathBuf> = HashMap::new();
+    let mut instance_promtail_hash: HashMap<String, String> = HashMap::new();
+    let mut instance_pyroscope_hash: HashMap<String, String> = HashMap::new();
+
     for deployment in &deployments {
         let instance = &deployment.instance;
         let ip = &deployment.ip;
@@ -663,73 +675,94 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
         std::fs::write(&pyroscope_path, &pyroscope_script)?;
         let pyroscope_hash = hash_file(&pyroscope_path)?;
 
-        per_instance_data.push((
-            instance.name.clone(),
-            promtail_path,
-            promtail_hash,
-            pyroscope_path,
-            pyroscope_hash,
+        promtail_hashes.insert(promtail_hash.clone(), promtail_path);
+        pyroscope_hashes.insert(pyroscope_hash.clone(), pyroscope_path);
+        instance_promtail_hash.insert(instance.name.clone(), promtail_hash);
+        instance_pyroscope_hash.insert(instance.name.clone(), pyroscope_hash);
+    }
+
+    info!(
+        unique_promtail = promtail_hashes.len(),
+        unique_pyroscope = pyroscope_hashes.len(),
+        "computed per-instance config hashes"
+    );
+
+    // Upload unique promtail and pyroscope configs
+    let promtail_keys: Vec<_> = promtail_hashes
+        .keys()
+        .map(|hash| promtail_s3_key(tag, hash))
+        .collect();
+    let promtail_paths: Vec<_> = promtail_hashes.values().collect();
+    let mut promtail_uploads = Vec::new();
+    for (key, path) in promtail_keys.iter().zip(promtail_paths.iter()) {
+        promtail_uploads.push(cache_file_and_presign(
+            &s3_client,
+            S3_BUCKET_NAME,
+            key,
+            path,
+            PRESIGN_DURATION,
         ));
     }
 
-    // Compute hosts.yaml hash (same for all instances)
-    let hosts_hash = hash_file(&hosts_path)?;
-
-    // Upload all per-instance files concurrently and build InstanceUrls
-    let mut instance_urls_map: HashMap<String, InstanceUrls> =
-        try_join_all(per_instance_data.iter().map(
-            |(name, promtail_path, promtail_hash, pyroscope_path, pyroscope_hash)| async {
-                let [hosts_url, promtail_config_url, pyroscope_script_url]: [String; 3] =
-                    try_join_all([
-                        cache_file_and_presign(
-                            &s3_client,
-                            S3_BUCKET_NAME,
-                            &hosts_s3_key(tag, &hosts_hash),
-                            &hosts_path,
-                            PRESIGN_DURATION,
-                        ),
-                        cache_file_and_presign(
-                            &s3_client,
-                            S3_BUCKET_NAME,
-                            &promtail_s3_key(tag, promtail_hash),
-                            promtail_path,
-                            PRESIGN_DURATION,
-                        ),
-                        cache_file_and_presign(
-                            &s3_client,
-                            S3_BUCKET_NAME,
-                            &pyroscope_s3_key(tag, pyroscope_hash),
-                            pyroscope_path,
-                            PRESIGN_DURATION,
-                        ),
-                    ])
-                    .await?
-                    .try_into()
-                    .unwrap();
-
-                Ok::<_, Error>((
-                    name.clone(),
-                    InstanceUrls {
-                        binary: instance_binary_urls[name].clone(),
-                        config: instance_config_urls[name].clone(),
-                        hosts: hosts_url,
-                        promtail_bin: promtail_url.clone(),
-                        promtail_config: promtail_config_url,
-                        promtail_service: promtail_service_url.clone(),
-                        node_exporter_bin: node_exporter_url.clone(),
-                        node_exporter_service: monitoring_node_exporter_service_url.clone(),
-                        binary_service: binary_service_url.clone(),
-                        logrotate_conf: logrotate_conf_url.clone(),
-                        pyroscope_script: pyroscope_script_url,
-                        pyroscope_service: pyroscope_agent_service_url.clone(),
-                        pyroscope_timer: pyroscope_agent_timer_url.clone(),
-                    },
-                ))
-            },
-        ))
-        .await?
-        .into_iter()
+    let pyroscope_keys: Vec<_> = pyroscope_hashes
+        .keys()
+        .map(|hash| pyroscope_s3_key(tag, hash))
         .collect();
+    let pyroscope_paths: Vec<_> = pyroscope_hashes.values().collect();
+    let mut pyroscope_uploads = Vec::new();
+    for (key, path) in pyroscope_keys.iter().zip(pyroscope_paths.iter()) {
+        pyroscope_uploads.push(cache_file_and_presign(
+            &s3_client,
+            S3_BUCKET_NAME,
+            key,
+            path,
+            PRESIGN_DURATION,
+        ));
+    }
+
+    let (promtail_results, pyroscope_results): (Vec<String>, Vec<String>) = tokio::try_join!(
+        async { try_join_all(promtail_uploads).await },
+        async { try_join_all(pyroscope_uploads).await },
+    )?;
+
+    // Build hash -> URL maps
+    let promtail_hash_to_url: HashMap<String, String> = promtail_hashes
+        .keys()
+        .cloned()
+        .zip(promtail_results)
+        .collect();
+    let pyroscope_hash_to_url: HashMap<String, String> = pyroscope_hashes
+        .keys()
+        .cloned()
+        .zip(pyroscope_results)
+        .collect();
+
+    // Build instance URLs map
+    let mut instance_urls_map: HashMap<String, InstanceUrls> = HashMap::new();
+    for deployment in &deployments {
+        let name = &deployment.instance.name;
+        let promtail_hash = &instance_promtail_hash[name];
+        let pyroscope_hash = &instance_pyroscope_hash[name];
+
+        instance_urls_map.insert(
+            name.clone(),
+            InstanceUrls {
+                binary: instance_binary_urls[name].clone(),
+                config: instance_config_urls[name].clone(),
+                hosts: hosts_url.clone(),
+                promtail_bin: promtail_url.clone(),
+                promtail_config: promtail_hash_to_url[promtail_hash].clone(),
+                promtail_service: promtail_service_url.clone(),
+                node_exporter_bin: node_exporter_url.clone(),
+                node_exporter_service: monitoring_node_exporter_service_url.clone(),
+                binary_service: binary_service_url.clone(),
+                logrotate_conf: logrotate_conf_url.clone(),
+                pyroscope_script: pyroscope_hash_to_url[pyroscope_hash].clone(),
+                pyroscope_service: pyroscope_agent_service_url.clone(),
+                pyroscope_timer: pyroscope_agent_timer_url.clone(),
+            },
+        );
+    }
     info!("uploaded all instance config files to S3");
 
     // Build monitoring URLs struct for SSH configuration
