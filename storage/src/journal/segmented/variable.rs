@@ -2248,4 +2248,235 @@ mod tests {
             journal.destroy().await.unwrap();
         });
     }
+
+    #[test_traced]
+    fn test_journal_empty_section_in_middle() {
+        // Test that replay correctly handles an empty section between sections with data.
+        // Section 1 has data, section 2 is empty, section 3 has data.
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test_partition".into(),
+                compression: None,
+                codec_config: (),
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                write_buffer: NZUsize!(1024),
+            };
+            let mut journal = Journal::init(context.clone(), cfg.clone())
+                .await
+                .expect("Failed to initialize journal");
+
+            // Append to section 1
+            journal.append(1, 100i32).await.expect("Failed to append");
+
+            // Create section 2 but don't append anything - just sync to create the blob
+            // Actually, we need to append something and then rewind to make it empty
+            journal.append(2, 200i32).await.expect("Failed to append");
+            journal.sync(2).await.expect("Failed to sync");
+            journal.rewind_section(2, 0).await.expect("Failed to rewind");
+
+            // Append to section 3
+            journal.append(3, 300i32).await.expect("Failed to append");
+
+            journal.sync_all().await.expect("Failed to sync");
+
+            // Verify section sizes
+            assert!(journal.size(1).await.unwrap() > 0);
+            assert_eq!(journal.size(2).await.unwrap(), 0);
+            assert!(journal.size(3).await.unwrap() > 0);
+
+            // Drop and reopen to test replay
+            drop(journal);
+            let journal = Journal::<_, i32>::init(context.clone(), cfg.clone())
+                .await
+                .expect("Failed to re-initialize journal");
+
+            // Replay all - should get items from sections 1 and 3, skipping empty section 2
+            {
+                let stream = journal
+                    .replay(0, 0, NZUsize!(1024))
+                    .await
+                    .expect("Failed to setup replay");
+                pin_mut!(stream);
+
+                let mut items = Vec::new();
+                while let Some(result) = stream.next().await {
+                    let (section, _, _, item) = result.expect("Failed to replay item");
+                    items.push((section, item));
+                }
+
+                assert_eq!(items.len(), 2, "Should have 2 items (skipping empty section)");
+                assert_eq!(items[0], (1, 100));
+                assert_eq!(items[1], (3, 300));
+            }
+
+            // Replay starting from empty section 2 - should get only section 3
+            {
+                let stream = journal
+                    .replay(2, 0, NZUsize!(1024))
+                    .await
+                    .expect("Failed to setup replay from section 2");
+                pin_mut!(stream);
+
+                let mut items = Vec::new();
+                while let Some(result) = stream.next().await {
+                    let (section, _, _, item) = result.expect("Failed to replay item");
+                    items.push((section, item));
+                }
+
+                assert_eq!(items.len(), 1, "Should have 1 item from section 3");
+                assert_eq!(items[0], (3, 300));
+            }
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_journal_item_exactly_page_size() {
+        // Test that items exactly equal to PAGE_SIZE work correctly.
+        // This is a boundary condition where item fills exactly one page.
+        const ITEM_SIZE: usize = PAGE_SIZE.get() as usize;
+        type ExactItem = [u8; ITEM_SIZE];
+
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test_partition".into(),
+                compression: None,
+                codec_config: (),
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                write_buffer: NZUsize!(4096),
+            };
+            let mut journal = Journal::init(context.clone(), cfg.clone())
+                .await
+                .expect("Failed to initialize journal");
+
+            // Create an item exactly PAGE_SIZE bytes
+            let mut exact_data: ExactItem = [0u8; ITEM_SIZE];
+            for (i, byte) in exact_data.iter_mut().enumerate() {
+                *byte = (i % 256) as u8;
+            }
+
+            // Append the exact-size item
+            let (offset, size) = journal
+                .append(1, exact_data)
+                .await
+                .expect("Failed to append exact item");
+            assert_eq!(size as usize, ITEM_SIZE);
+            journal.sync(1).await.expect("Failed to sync");
+
+            // Read the item back via random access
+            let retrieved: ExactItem = journal
+                .get(1, offset)
+                .await
+                .expect("Failed to get exact item");
+            assert_eq!(retrieved, exact_data, "Random access read mismatch");
+
+            // Drop and reopen to test replay
+            drop(journal);
+            let journal = Journal::<_, ExactItem>::init(context.clone(), cfg.clone())
+                .await
+                .expect("Failed to re-initialize journal");
+
+            // Replay and verify
+            {
+                let stream = journal
+                    .replay(0, 0, NZUsize!(1024))
+                    .await
+                    .expect("Failed to setup replay");
+                pin_mut!(stream);
+
+                let mut items = Vec::new();
+                while let Some(result) = stream.next().await {
+                    let (section, off, sz, item) = result.expect("Failed to replay item");
+                    items.push((section, off, sz, item));
+                }
+
+                assert_eq!(items.len(), 1, "Should have exactly one item");
+                let (section, off, sz, item) = &items[0];
+                assert_eq!(*section, 1);
+                assert_eq!(*off, offset);
+                assert_eq!(*sz as usize, ITEM_SIZE);
+                assert_eq!(*item, exact_data, "Replay read mismatch");
+            }
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_journal_varint_spanning_page_boundary() {
+        // Test that items with data spanning page boundaries work correctly
+        // when using a small page size.
+        //
+        // With PAGE_SIZE=16:
+        // - Physical page = 16 + 12 = 28 bytes
+        // - Each [u8; 128] item = 2-byte varint + 128 bytes data = 130 bytes
+        // - This spans multiple 16-byte pages, testing cross-page reading
+        const SMALL_PAGE: NonZeroU16 = NZU16!(16);
+
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test_partition".into(),
+                compression: None,
+                codec_config: (),
+                buffer_pool: PoolRef::new(SMALL_PAGE, PAGE_CACHE_SIZE),
+                write_buffer: NZUsize!(1024),
+            };
+            let mut journal: Journal<_, [u8; 128]> = Journal::init(context.clone(), cfg.clone())
+                .await
+                .expect("Failed to initialize journal");
+
+            // Create items that will span many 16-byte pages
+            let item1: [u8; 128] = [1u8; 128];
+            let item2: [u8; 128] = [2u8; 128];
+            let item3: [u8; 128] = [3u8; 128];
+
+            // Append items - each is 130 bytes (2-byte varint + 128 data)
+            // spanning ceil(130/16) = 9 pages worth of logical data
+            let (offset1, _) = journal.append(1, item1).await.expect("Failed to append");
+            let (offset2, _) = journal.append(1, item2).await.expect("Failed to append");
+            let (offset3, _) = journal.append(1, item3).await.expect("Failed to append");
+
+            journal.sync(1).await.expect("Failed to sync");
+
+            // Read items back via random access
+            let retrieved1: [u8; 128] = journal.get(1, offset1).await.expect("Failed to get");
+            let retrieved2: [u8; 128] = journal.get(1, offset2).await.expect("Failed to get");
+            let retrieved3: [u8; 128] = journal.get(1, offset3).await.expect("Failed to get");
+            assert_eq!(retrieved1, item1);
+            assert_eq!(retrieved2, item2);
+            assert_eq!(retrieved3, item3);
+
+            // Drop and reopen to test replay
+            drop(journal);
+            let journal: Journal<_, [u8; 128]> = Journal::init(context.clone(), cfg.clone())
+                .await
+                .expect("Failed to re-initialize journal");
+
+            // Replay and verify all items
+            {
+                let stream = journal
+                    .replay(0, 0, NZUsize!(64))
+                    .await
+                    .expect("Failed to setup replay");
+                pin_mut!(stream);
+
+                let mut items = Vec::new();
+                while let Some(result) = stream.next().await {
+                    let (section, off, _, item) = result.expect("Failed to replay item");
+                    items.push((section, off, item));
+                }
+
+                assert_eq!(items.len(), 3, "Should have 3 items");
+                assert_eq!(items[0], (1, offset1, item1));
+                assert_eq!(items[1], (1, offset2, item2));
+                assert_eq!(items[2], (1, offset3, item3));
+            }
+
+            journal.destroy().await.unwrap();
+        });
+    }
 }
