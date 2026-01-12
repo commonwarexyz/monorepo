@@ -18,77 +18,80 @@ use super::{
     hash_with_namespace,
 };
 #[cfg(not(feature = "std"))]
-use alloc::{
-    collections::{BTreeMap, BTreeSet},
-    vec,
-    vec::Vec,
-};
+use alloc::{vec, vec::Vec};
 use commonware_math::algebra::Space;
 use commonware_parallel::Strategy;
 use rand_core::CryptoRngCore;
-#[cfg(feature = "std")]
-use std::collections::{BTreeMap, BTreeSet};
 
-struct SumTree<V: Variant> {
+/// Segment tree for efficient batch verification bisection.
+///
+/// Uses array-based segment tree layout where node at index `i` has children
+/// at `2i` and `2i+1`. This provides O(1) node access and O(n) total work
+/// for both construction and verification.
+struct SegmentTree<V: Variant> {
     len: usize,
-    /// This could be optimized to use a more compact data structure, but correctness
-    /// matters more.
-    values: BTreeMap<(usize, usize), (V::Public, V::Signature)>,
+    // 1-indexed segment tree. Node 1 is root covering [0, len).
+    // Node i covers some interval [start, end) with children at 2i and 2i+1.
+    tree: Vec<Option<(V::Public, V::Signature)>>,
 }
 
-impl<V: Variant> SumTree<V> {
+impl<V: Variant> SegmentTree<V> {
     fn build(leaves: &[(V::Public, V::Signature)]) -> Self {
-        let mut values = BTreeMap::new();
         let len = leaves.len();
         if len == 0 {
-            return Self { len, values };
+            return Self {
+                len,
+                tree: Vec::new(),
+            };
         }
 
-        // Use an explicit stack to build bottom-up with halving intervals.
-        // Phase 0 = first visit (push children), Phase 1 = second visit (compute value)
-        let mut stack: Vec<(usize, usize, u8)> = vec![(0, len, 0)];
-        while let Some((start, end, phase)) = stack.pop() {
+        // Standard segment tree allocation: 4n handles all tree sizes.
+        let mut tree = vec![None; 4 * len];
+
+        // Build bottom-up using explicit stack.
+        // Phase 0 = first visit (push children), Phase 1 = combine children.
+        let mut stack: Vec<(usize, usize, usize, u8)> = vec![(1, 0, len, 0)];
+        while let Some((node, start, end, phase)) = stack.pop() {
             if end - start == 1 {
-                values.insert((start, end), leaves[start]);
+                tree[node] = Some(leaves[start]);
             } else if phase == 0 {
                 let mid = start + (end - start) / 2;
-                stack.push((start, end, 1)); // Come back to compute this node
-                stack.push((mid, end, 0)); // Right child
-                stack.push((start, mid, 0)); // Left child
+                stack.push((node, start, end, 1));
+                stack.push((2 * node + 1, mid, end, 0));
+                stack.push((2 * node, start, mid, 0));
             } else {
-                let mid = start + (end - start) / 2;
-                let left = values.get(&(start, mid)).expect("left child should exist");
-                let right = values.get(&(mid, end)).expect("right child should exist");
-                values.insert((start, end), (left.0 + &right.0, left.1 + &right.1));
+                let left = tree[2 * node].expect("left child built");
+                let right = tree[2 * node + 1].expect("right child built");
+                tree[node] = Some((left.0 + &right.0, left.1 + &right.1));
             }
         }
 
-        Self { len, values }
+        Self { len, tree }
     }
 
     fn verify(&self, hm: &V::Signature) -> Vec<usize> {
-        let mut good = (0..self.len).collect::<BTreeSet<_>>();
-        let mut work = vec![(0, self.len)];
-        while let Some((start, end)) = work.pop() {
-            if start == end {
+        if self.len == 0 {
+            return Vec::new();
+        }
+
+        let mut invalid = Vec::new();
+        let mut stack = vec![(1usize, 0usize, self.len)];
+
+        while let Some((node, start, end)) = stack.pop() {
+            let (pk, sig) = self.tree[node].expect("node exists");
+            if V::verify(&pk, hm, &sig).is_ok() {
                 continue;
             }
-            let (pk, sig) = self
-                .values
-                .get(&(start, end))
-                .expect("SumTree should be correctly constructed");
-            if V::verify(pk, hm, sig).is_ok() {
-                continue;
-            }
-            if end == start + 1 {
-                good.remove(&start);
+            if end - start == 1 {
+                invalid.push(start);
                 continue;
             }
             let mid = start + (end - start) / 2;
-            work.push((start, mid));
-            work.push((mid, end));
+            stack.push((2 * node, start, mid));
+            stack.push((2 * node + 1, mid, end));
         }
-        (0..self.len).filter(|x| !good.contains(x)).collect()
+
+        invalid
     }
 }
 
@@ -107,10 +110,10 @@ fn bisect<V: Variant>(
         entries.chunks(chunk_size).enumerate(),
         || Vec::with_capacity(entries.len()),
         |mut acc, (i, chunk)| {
-            // Correct for the fact that SumTree returns indices relative to the local slice.
+            // Correct for the fact that SegmentTree returns indices relative to the local slice.
             let shift = i * chunk_size;
             acc.extend(
-                SumTree::<V>::build(chunk)
+                SegmentTree::<V>::build(chunk)
                     .verify(hm)
                     .into_iter()
                     .map(|j| shift + j),
