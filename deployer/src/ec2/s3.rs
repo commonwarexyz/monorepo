@@ -82,12 +82,28 @@ pub async fn ensure_bucket_exists(
         request = request.create_bucket_configuration(bucket_config);
     }
 
-    request.send().await.map_err(|e| Error::AwsS3 {
-        bucket: bucket_name.to_string(),
-        operation: super::S3Operation::CreateBucket,
-        source: Box::new(aws_sdk_s3::Error::from(e.into_service_error())),
-    })?;
-    info!(bucket = bucket_name, region = region, "created bucket");
+    match request.send().await {
+        Ok(_) => {
+            info!(bucket = bucket_name, region = region, "created bucket");
+        }
+        Err(e) => {
+            let service_err = e.into_service_error();
+            let s3_err = aws_sdk_s3::Error::from(service_err);
+            match &s3_err {
+                aws_sdk_s3::Error::BucketAlreadyExists(_)
+                | aws_sdk_s3::Error::BucketAlreadyOwnedByYou(_) => {
+                    info!(bucket = bucket_name, "bucket already exists");
+                }
+                _ => {
+                    return Err(Error::AwsS3 {
+                        bucket: bucket_name.to_string(),
+                        operation: super::S3Operation::CreateBucket,
+                        source: Box::new(s3_err),
+                    });
+                }
+            }
+        }
+    }
     Ok(())
 }
 
