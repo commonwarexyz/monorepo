@@ -543,7 +543,11 @@ mod tests {
                     items.push((section, pos, item));
                 }
 
-                assert_eq!(items.len(), 10, "Should have 5 items from section 1 + 5 from section 2");
+                assert_eq!(
+                    items.len(),
+                    10,
+                    "Should have 5 items from section 1 + 5 from section 2"
+                );
 
                 // Check section 1 items (positions 5-9)
                 for (i, (section, pos, item)) in items.iter().enumerate().take(5) {
@@ -574,7 +578,11 @@ mod tests {
                     items.push((section, pos, item));
                 }
 
-                assert_eq!(items.len(), 6, "Should have 1 item from section 1 + 5 from section 2");
+                assert_eq!(
+                    items.len(),
+                    6,
+                    "Should have 1 item from section 1 + 5 from section 2"
+                );
                 assert_eq!(items[0], (1, 9, test_digest(9)));
                 for (i, (section, pos, item)) in items.iter().enumerate().skip(1) {
                     assert_eq!(*section, 2);
@@ -1224,7 +1232,10 @@ mod tests {
             // Verify zero-filled items persisted
             for i in 0u64..5 {
                 let item = journal.get(1, i).await.expect("failed to get");
-                assert_eq!(item, zero_digest, "item {i} should still be zero-filled after restart");
+                assert_eq!(
+                    item, zero_digest,
+                    "item {i} should still be zero-filled after restart"
+                );
             }
 
             // Verify appended item persisted
