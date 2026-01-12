@@ -138,7 +138,24 @@
 //!
 //! * A directory `$HOME/.commonware_deployer/{tag}` stores the SSH private key and status files (`created`, `destroyed`).
 //! * The deployment state is tracked via these files, ensuring operations respect prior create/destroy actions.
-//! * A shared S3 bucket (`commonware-deployer-cache`) stores:
+//!
+//! ## S3 Caching
+//!
+//! A shared S3 bucket (`commonware-deployer-cache`) is used to cache deployment artifacts. The bucket
+//! uses a fixed name intentionally so that all users within the same AWS account share the cache. This
+//! design provides two benefits:
+//!
+//! 1. **Faster deployments**: Observability tools (Prometheus, Grafana, Loki, etc.) are downloaded from
+//!    upstream sources once and cached in S3. Subsequent deployments by any user skip the download and
+//!    use pre-signed URLs to fetch directly from S3.
+//!
+//! 2. **Reduced bandwidth**: Large binaries (~500MB+ total for all tools) are stored once rather than
+//!    downloaded repeatedly for each deployment.
+//!
+//! Per-deployment data (binaries, configs, hosts files) is isolated under `deployments/{tag}/` to prevent
+//! conflicts between concurrent deployments.
+//!
+//! The bucket stores:
 //!   * `tools/` - Cached observability tools organized by component (shared across all deployments):
 //!     * `prometheus/` - Prometheus binary and service file
 //!     * `grafana/` - Grafana binary, datasources.yml, and all.yml
