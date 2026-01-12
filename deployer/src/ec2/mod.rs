@@ -301,6 +301,32 @@ cfg_if::cfg_if! {
             PathBuf::from(format!("{base_dir}/.commonware_deployer/{tag}"))
         }
 
+        /// S3 operations that can fail
+        #[derive(Debug, Clone, Copy)]
+        pub enum S3Operation {
+            HeadBucket,
+            CreateBucket,
+            DeleteBucket,
+            HeadObject,
+            PutObject,
+            ListObjects,
+            DeleteObjects,
+        }
+
+        impl std::fmt::Display for S3Operation {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                match self {
+                    S3Operation::HeadBucket => write!(f, "HeadBucket"),
+                    S3Operation::CreateBucket => write!(f, "CreateBucket"),
+                    S3Operation::DeleteBucket => write!(f, "DeleteBucket"),
+                    S3Operation::HeadObject => write!(f, "HeadObject"),
+                    S3Operation::PutObject => write!(f, "PutObject"),
+                    S3Operation::ListObjects => write!(f, "ListObjects"),
+                    S3Operation::DeleteObjects => write!(f, "DeleteObjects"),
+                }
+            }
+        }
+
         /// Errors that can occur when deploying infrastructure on AWS
         #[derive(Error, Debug)]
         pub enum Error {
@@ -310,8 +336,13 @@ cfg_if::cfg_if! {
             AwsSecurityGroupIngress(#[from] aws_sdk_ec2::operation::authorize_security_group_ingress::AuthorizeSecurityGroupIngressError),
             #[error("AWS describe instances error: {0}")]
             AwsDescribeInstances(#[from] aws_sdk_ec2::operation::describe_instances::DescribeInstancesError),
-            #[error("AWS S3 error: {0}")]
-            AwsS3(Box<aws_sdk_s3::Error>),
+            #[error("S3 operation failed: {operation} on bucket '{bucket}'")]
+            AwsS3 {
+                bucket: String,
+                operation: S3Operation,
+                #[source]
+                source: Box<aws_sdk_s3::Error>,
+            },
             #[error("IO error: {0}")]
             Io(#[from] std::io::Error),
             #[error("YAML error: {0}")]
@@ -350,12 +381,6 @@ cfg_if::cfg_if! {
             S3Builder(#[from] aws_sdk_s3::error::BuildError),
             #[error("duplicate instance name: {0}")]
             DuplicateInstanceName(String),
-        }
-
-        impl From<aws_sdk_s3::Error> for Error {
-            fn from(err: aws_sdk_s3::Error) -> Self {
-                Self::AwsS3(Box::new(err))
-            }
         }
 
         impl From<aws_sdk_s3::error::SdkError<aws_sdk_s3::operation::get_object::GetObjectError>> for Error {

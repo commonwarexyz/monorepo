@@ -61,7 +61,11 @@ pub async fn ensure_bucket_exists(
             // If it's a 404, we need to create it
             let service_err = e.into_service_error();
             if !service_err.is_not_found() {
-                return Err(aws_sdk_s3::Error::from(service_err).into());
+                return Err(Error::AwsS3 {
+                    bucket: bucket_name.to_string(),
+                    operation: super::S3Operation::HeadBucket,
+                    source: Box::new(aws_sdk_s3::Error::from(service_err)),
+                });
             }
         }
     }
@@ -78,10 +82,11 @@ pub async fn ensure_bucket_exists(
         request = request.create_bucket_configuration(bucket_config);
     }
 
-    request
-        .send()
-        .await
-        .map_err(|e| aws_sdk_s3::Error::from(e.into_service_error()))?;
+    request.send().await.map_err(|e| Error::AwsS3 {
+        bucket: bucket_name.to_string(),
+        operation: super::S3Operation::CreateBucket,
+        source: Box::new(aws_sdk_s3::Error::from(e.into_service_error())),
+    })?;
     info!(bucket = bucket_name, region = region, "created bucket");
     Ok(())
 }
@@ -95,7 +100,11 @@ pub async fn object_exists(client: &S3Client, bucket: &str, key: &str) -> Result
             if matches!(service_err, HeadObjectError::NotFound(_)) {
                 Ok(false)
             } else {
-                Err(aws_sdk_s3::Error::from(service_err).into())
+                Err(Error::AwsS3 {
+                    bucket: bucket.to_string(),
+                    operation: super::S3Operation::HeadObject,
+                    source: Box::new(aws_sdk_s3::Error::from(service_err)),
+                })
             }
         }
     }
@@ -119,7 +128,11 @@ pub async fn upload_file(
         .body(body)
         .send()
         .await
-        .map_err(|e| aws_sdk_s3::Error::from(e.into_service_error()))?;
+        .map_err(|e| Error::AwsS3 {
+            bucket: bucket.to_string(),
+            operation: super::S3Operation::PutObject,
+            source: Box::new(aws_sdk_s3::Error::from(e.into_service_error())),
+        })?;
 
     debug!(bucket = bucket, key = key, "uploaded file to S3");
     Ok(())
@@ -157,7 +170,11 @@ pub async fn cache_content_and_presign(
             .body(body)
             .send()
             .await
-            .map_err(|e| aws_sdk_s3::Error::from(e.into_service_error()))?;
+            .map_err(|e| Error::AwsS3 {
+                bucket: bucket.to_string(),
+                operation: super::S3Operation::PutObject,
+                source: Box::new(aws_sdk_s3::Error::from(e.into_service_error())),
+            })?;
     }
     presign_url(client, bucket, key, expires_in).await
 }
@@ -225,10 +242,11 @@ pub async fn delete_prefix(client: &S3Client, bucket: &str, prefix: &str) -> Res
             request = request.continuation_token(token);
         }
 
-        let response = request
-            .send()
-            .await
-            .map_err(|e| aws_sdk_s3::Error::from(e.into_service_error()))?;
+        let response = request.send().await.map_err(|e| Error::AwsS3 {
+            bucket: bucket.to_string(),
+            operation: super::S3Operation::ListObjects,
+            source: Box::new(aws_sdk_s3::Error::from(e.into_service_error())),
+        })?;
 
         // Collect object identifiers for batch delete
         if let Some(objects) = response.contents {
@@ -248,7 +266,11 @@ pub async fn delete_prefix(client: &S3Client, bucket: &str, prefix: &str) -> Res
                     .delete(delete)
                     .send()
                     .await
-                    .map_err(|e| aws_sdk_s3::Error::from(e.into_service_error()))?;
+                    .map_err(|e| Error::AwsS3 {
+                        bucket: bucket.to_string(),
+                        operation: super::S3Operation::DeleteObjects,
+                        source: Box::new(aws_sdk_s3::Error::from(e.into_service_error())),
+                    })?;
 
                 deleted_count += count;
             }
@@ -277,7 +299,11 @@ pub async fn delete_bucket(client: &S3Client, bucket: &str) -> Result<(), Error>
         .bucket(bucket)
         .send()
         .await
-        .map_err(|e| aws_sdk_s3::Error::from(e.into_service_error()))?;
+        .map_err(|e| Error::AwsS3 {
+            bucket: bucket.to_string(),
+            operation: super::S3Operation::DeleteBucket,
+            source: Box::new(aws_sdk_s3::Error::from(e.into_service_error())),
+        })?;
     info!(bucket = bucket, "deleted bucket");
     Ok(())
 }
@@ -296,8 +322,8 @@ pub async fn delete_bucket_and_contents(client: &S3Client, bucket: &str) -> Resu
 /// Checks if an error is a "bucket does not exist" error
 pub fn is_no_such_bucket_error(error: &Error) -> bool {
     match error {
-        Error::AwsS3(aws_err) => {
-            matches!(aws_err.as_ref(), aws_sdk_s3::Error::NoSuchBucket(_))
+        Error::AwsS3 { source, .. } => {
+            matches!(source.as_ref(), aws_sdk_s3::Error::NoSuchBucket(_))
         }
         _ => false,
     }
