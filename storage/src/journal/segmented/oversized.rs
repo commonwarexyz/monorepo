@@ -586,7 +586,7 @@ mod tests {
 
             // Simulate crash: truncate glob to lose last 2 values
             let (blob, _) = context
-                .open(&cfg.value_partition, &1u64.to_be_bytes())
+                .open(&cfg.value_partition, &1u64.to_le_bytes())
                 .await
                 .expect("Failed to open blob");
 
@@ -761,7 +761,7 @@ mod tests {
 
             // Truncate glob to 0 bytes - ALL entries become invalid
             let (blob, _) = context
-                .open(&cfg.value_partition, &1u64.to_be_bytes())
+                .open(&cfg.value_partition, &1u64.to_le_bytes())
                 .await
                 .expect("Failed to open blob");
             blob.resize(0).await.expect("Failed to truncate");
@@ -851,7 +851,7 @@ mod tests {
 
             // Truncate section 1 glob to keep only first entry
             let (blob, _) = context
-                .open(&cfg.value_partition, &1u64.to_be_bytes())
+                .open(&cfg.value_partition, &1u64.to_le_bytes())
                 .await
                 .expect("Failed to open blob");
             let keep_size = byte_end(section1_locations[0].1, section1_locations[0].2);
@@ -861,7 +861,7 @@ mod tests {
 
             // Truncate section 2 glob to keep first 3 entries
             let (blob, _) = context
-                .open(&cfg.value_partition, &2u64.to_be_bytes())
+                .open(&cfg.value_partition, &2u64.to_le_bytes())
                 .await
                 .expect("Failed to open blob");
             let keep_size = byte_end(section2_locations[2].1, section2_locations[2].2);
@@ -934,7 +934,7 @@ mod tests {
 
             // Corrupt the last page's CRC to trigger page-level integrity failure
             let (blob, size) = context
-                .open(&cfg.index_partition, &1u64.to_be_bytes())
+                .open(&cfg.index_partition, &1u64.to_le_bytes())
                 .await
                 .expect("Failed to open blob");
 
@@ -1055,7 +1055,7 @@ mod tests {
 
             // Truncate glob to 0 - single entry becomes invalid
             let (blob, _) = context
-                .open(&cfg.value_partition, &1u64.to_be_bytes())
+                .open(&cfg.value_partition, &1u64.to_le_bytes())
                 .await
                 .expect("Failed to open blob");
             blob.resize(0).await.expect("Failed to truncate");
@@ -1102,7 +1102,7 @@ mod tests {
 
             // Truncate glob to be off by 1 byte from last entry
             let (blob, _) = context
-                .open(&cfg.value_partition, &1u64.to_be_bytes())
+                .open(&cfg.value_partition, &1u64.to_le_bytes())
                 .await
                 .expect("Failed to open blob");
 
@@ -1173,7 +1173,7 @@ mod tests {
 
             // Delete the glob file entirely
             context
-                .remove(&cfg.value_partition, Some(&1u64.to_be_bytes()))
+                .remove(&cfg.value_partition, Some(&1u64.to_le_bytes()))
                 .await
                 .expect("Failed to remove");
 
@@ -1219,7 +1219,7 @@ mod tests {
 
             // Truncate glob to keep only first 2 entries
             let (blob, _) = context
-                .open(&cfg.value_partition, &1u64.to_be_bytes())
+                .open(&cfg.value_partition, &1u64.to_le_bytes())
                 .await
                 .expect("Failed to open blob");
             let keep_size = byte_end(locations[1].1, locations[1].2);
@@ -1344,7 +1344,7 @@ mod tests {
 
             // Delete index blob for section 2 (simulate corruption/loss)
             context
-                .remove(&cfg.index_partition, Some(&2u64.to_be_bytes()))
+                .remove(&cfg.index_partition, Some(&2u64.to_le_bytes()))
                 .await
                 .expect("Failed to remove index");
 
@@ -1406,7 +1406,7 @@ mod tests {
             // Simulate crash where index was synced but glob wasn't:
             // Truncate glob back to the synced size (3 entries)
             let (blob, _) = context
-                .open(&cfg.value_partition, &1u64.to_be_bytes())
+                .open(&cfg.value_partition, &1u64.to_le_bytes())
                 .await
                 .expect("Failed to open blob");
             let synced_size = byte_end(locations[2].1, locations[2].2);
@@ -1473,7 +1473,7 @@ mod tests {
             // Simulate crash: truncate INDEX but leave GLOB intact
             // This creates orphan data in glob (glob ahead of index)
             let (blob, _size) = context
-                .open(&cfg.index_partition, &1u64.to_be_bytes())
+                .open(&cfg.index_partition, &1u64.to_le_bytes())
                 .await
                 .expect("Failed to open blob");
 
@@ -1608,7 +1608,7 @@ mod tests {
             // Each entry is TestEntry::SIZE (20) + 4 (CRC32) = 24 bytes
             // Truncate to 3 full entries + 10 bytes of partial entry
             let (blob, _) = context
-                .open(&cfg.index_partition, &1u64.to_be_bytes())
+                .open(&cfg.index_partition, &1u64.to_le_bytes())
                 .await
                 .expect("Failed to open blob");
             let partial_size = 3 * 24 + 10; // 3 full entries + partial
@@ -1676,7 +1676,7 @@ mod tests {
 
             // Truncate index to only partial data (less than one full entry)
             let (blob, _) = context
-                .open(&cfg.index_partition, &1u64.to_be_bytes())
+                .open(&cfg.index_partition, &1u64.to_le_bytes())
                 .await
                 .expect("Failed to open blob");
             blob.resize(10).await.expect("Failed to resize"); // Less than chunk size
@@ -1753,7 +1753,7 @@ mod tests {
             // Simulate crash during rewind: truncate index to 2 entries but leave glob intact
             // This simulates: rewind(index) succeeded, crash before rewind(glob)
             let (blob, _) = context
-                .open(&cfg.index_partition, &1u64.to_be_bytes())
+                .open(&cfg.index_partition, &1u64.to_le_bytes())
                 .await
                 .expect("Failed to open blob");
             // Physical page size = logical (20) + CRC record (12) = 32 bytes
@@ -1819,7 +1819,7 @@ mod tests {
             // Simulate crash during rewind: truncate glob to 2 entries but leave index intact
             // This simulates: rewind(glob) succeeded, crash before rewind(index)
             let (blob, _) = context
-                .open(&cfg.value_partition, &1u64.to_be_bytes())
+                .open(&cfg.value_partition, &1u64.to_le_bytes())
                 .await
                 .expect("Failed to open blob");
             let keep_size = byte_end(locations[1].1, locations[1].2);
@@ -2262,7 +2262,7 @@ mod tests {
 
             // Now truncate index section 1 to 0 (making it empty but still tracked)
             let (blob, _) = context
-                .open(&cfg.index_partition, &1u64.to_be_bytes())
+                .open(&cfg.index_partition, &1u64.to_le_bytes())
                 .await
                 .expect("Failed to open blob");
             blob.resize(0).await.expect("Failed to truncate");
@@ -2384,7 +2384,7 @@ mod tests {
 
             // Simulate crash: write garbage to glob (simulating partial value write)
             let (blob, size) = context
-                .open(&cfg.value_partition, &1u64.to_be_bytes())
+                .open(&cfg.value_partition, &1u64.to_le_bytes())
                 .await
                 .expect("Failed to open blob");
             assert_eq!(size, expected_next_offset);
@@ -2399,7 +2399,7 @@ mod tests {
 
             // Verify glob now has trailing garbage
             let (blob, new_size) = context
-                .open(&cfg.value_partition, &1u64.to_be_bytes())
+                .open(&cfg.value_partition, &1u64.to_le_bytes())
                 .await
                 .expect("Failed to open blob");
             assert_eq!(new_size, expected_next_offset + 100);
@@ -2475,7 +2475,7 @@ mod tests {
             // We need to write a valid page (with correct page-level CRC) containing
             // the semantically-invalid entry data.
             let (blob, _) = context
-                .open(&cfg.index_partition, &1u64.to_be_bytes())
+                .open(&cfg.index_partition, &1u64.to_le_bytes())
                 .await
                 .expect("Failed to open blob");
 
@@ -2491,10 +2491,10 @@ mod tests {
             let crc = Crc32::checksum(&entry_data);
             let len1 = TestEntry::SIZE as u16;
             let mut crc_record = Vec::new();
-            crc_record.extend_from_slice(&len1.to_be_bytes()); // len1
-            crc_record.extend_from_slice(&crc.to_be_bytes()); // crc1
-            crc_record.extend_from_slice(&0u16.to_be_bytes()); // len2 (unused)
-            crc_record.extend_from_slice(&0u32.to_be_bytes()); // crc2 (unused)
+            crc_record.extend_from_slice(&len1.to_le_bytes()); // len1
+            crc_record.extend_from_slice(&crc.to_le_bytes()); // crc1
+            crc_record.extend_from_slice(&0u16.to_le_bytes()); // len2 (unused)
+            crc_record.extend_from_slice(&0u32.to_le_bytes()); // crc2 (unused)
             assert_eq!(crc_record.len(), 12);
 
             // Write the complete physical page: entry_data + crc_record
@@ -2569,7 +2569,7 @@ mod tests {
 
             // Truncate section 1's index to 0 (making it empty)
             let (blob, _) = context
-                .open(&cfg.index_partition, &1u64.to_be_bytes())
+                .open(&cfg.index_partition, &1u64.to_le_bytes())
                 .await
                 .expect("Failed to open blob");
             blob.resize(0).await.expect("Failed to truncate");
@@ -2726,7 +2726,7 @@ mod tests {
             // Simulate crash: truncate glob for middle section
             let middle_section = large_sections[1];
             let (blob, size) = context
-                .open(&cfg.value_partition, &middle_section.to_be_bytes())
+                .open(&cfg.value_partition, &middle_section.to_le_bytes())
                 .await
                 .expect("Failed to open blob");
             blob.resize(size / 2).await.expect("Failed to truncate");
@@ -2798,7 +2798,7 @@ mod tests {
 
             // Phase 2: Simulate first crash - truncate glob to lose last 2 entries
             let (blob, _) = context
-                .open(&cfg.value_partition, &1u64.to_be_bytes())
+                .open(&cfg.value_partition, &1u64.to_le_bytes())
                 .await
                 .expect("Failed to open blob");
             let keep_size = byte_end(locations[2].1, locations[2].2);
@@ -2812,7 +2812,7 @@ mod tests {
             // (as if crash occurred mid-rewind).
             let chunk_size = FixedJournal::<deterministic::Context, TestEntry>::CHUNK_SIZE as u64;
             let (index_blob, _) = context
-                .open(&cfg.index_partition, &1u64.to_be_bytes())
+                .open(&cfg.index_partition, &1u64.to_le_bytes())
                 .await
                 .expect("Failed to open index blob");
             let partial_rewind_size = 4 * chunk_size; // 4 entries instead of 3
@@ -2909,7 +2909,7 @@ mod tests {
             // Phase 3: Simulate partial orphan cleanup (section 2 removed, 3 and 4 remain)
             // This simulates a crash during cleanup_orphan_value_sections()
             context
-                .remove(&cfg.value_partition, Some(&2u64.to_be_bytes()))
+                .remove(&cfg.value_partition, Some(&2u64.to_le_bytes()))
                 .await
                 .expect("Failed to remove section 2");
 

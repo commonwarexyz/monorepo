@@ -90,7 +90,7 @@ mod test {
     use commonware_utils::{sequence::FixedBytes, test_rng_seeded, NZUsize, NZU16, NZU64};
     use rand::{rngs::StdRng, seq::IteratorRandom, RngCore, SeedableRng};
     use std::{
-        collections::{BTreeMap, HashMap},
+        collections::HashMap,
         num::{NonZeroU16, NonZeroUsize},
     };
 
@@ -300,8 +300,8 @@ mod test {
 
             let mut map = HashMap::<Digest, Digest>::default();
             for i in 0u64..ELEMENTS {
-                let k = Sha256::hash(&i.to_be_bytes());
-                let v = Sha256::hash(&(i * 1000).to_be_bytes());
+                let k = Sha256::hash(&i.to_le_bytes());
+                let v = Sha256::hash(&(i * 1000).to_le_bytes());
                 db.update(k, v).await.unwrap();
                 map.insert(k, v);
             }
@@ -311,8 +311,8 @@ mod test {
                 if i % 3 != 0 {
                     continue;
                 }
-                let k = Sha256::hash(&i.to_be_bytes());
-                let v = Sha256::hash(&((i + 1) * 10000).to_be_bytes());
+                let k = Sha256::hash(&i.to_le_bytes());
+                let v = Sha256::hash(&((i + 1) * 10000).to_le_bytes());
                 db.update(k, v).await.unwrap();
                 map.insert(k, v);
             }
@@ -322,7 +322,7 @@ mod test {
                 if i % 7 != 1 {
                     continue;
                 }
-                let k = Sha256::hash(&i.to_be_bytes());
+                let k = Sha256::hash(&i.to_le_bytes());
                 db.delete(k).await.unwrap();
                 map.remove(&k);
             }
@@ -353,7 +353,7 @@ mod test {
 
             // Confirm the db's state matches that of the separate map we computed independently.
             for i in 0u64..1000 {
-                let k = Sha256::hash(&i.to_be_bytes());
+                let k = Sha256::hash(&i.to_le_bytes());
                 if let Some(map_value) = map.get(&k) {
                     let Some(db_value) = db.get(&k).await.unwrap() else {
                         panic!("key not found in db: {k}");
@@ -400,8 +400,8 @@ mod test {
             // Insert 1000 keys then sync.
             const ELEMENTS: u64 = 1000;
             for i in 0u64..ELEMENTS {
-                let k = Sha256::hash(&i.to_be_bytes());
-                let v = Sha256::hash(&(i * 1000).to_be_bytes());
+                let k = Sha256::hash(&i.to_le_bytes());
+                let v = Sha256::hash(&(i * 1000).to_le_bytes());
                 db.update(k, v).await.unwrap();
             }
             let (db, _) = db.commit(None).await.unwrap();
@@ -419,8 +419,8 @@ mod test {
 
             async fn apply_more_ops(db: &mut MutableAnyTest) {
                 for i in 0u64..ELEMENTS {
-                    let k = Sha256::hash(&i.to_be_bytes());
-                    let v = Sha256::hash(&((i + 1) * 10000).to_be_bytes());
+                    let k = Sha256::hash(&i.to_le_bytes());
+                    let v = Sha256::hash(&((i + 1) * 10000).to_le_bytes());
                     db.update(k, v).await.unwrap();
                 }
             }
@@ -481,8 +481,8 @@ mod test {
 
             async fn apply_ops(db: &mut MutableAnyTest) {
                 for i in 0u64..1000 {
-                    let k = Sha256::hash(&i.to_be_bytes());
-                    let v = Sha256::hash(&((i + 1) * 10000).to_be_bytes());
+                    let k = Sha256::hash(&i.to_le_bytes());
+                    let v = Sha256::hash(&((i + 1) * 10000).to_le_bytes());
                     db.update(k, v).await.unwrap();
                 }
             }
@@ -535,9 +535,9 @@ mod test {
 
             // Update the same key many times.
             const UPDATES: u64 = 100;
-            let k = Sha256::hash(&UPDATES.to_be_bytes());
+            let k = Sha256::hash(&UPDATES.to_le_bytes());
             for i in 0u64..UPDATES {
-                let v = Sha256::hash(&(i * 1000).to_be_bytes());
+                let v = Sha256::hash(&(i * 1000).to_le_bytes());
                 db.update(k, v).await.unwrap();
             }
             let (db, _) = db.commit(None).await.unwrap();
@@ -565,11 +565,11 @@ mod test {
             let mut map = HashMap::<Digest, Digest>::default();
             const ELEMENTS: u64 = 10;
             // insert & commit multiple batches to ensure repeated inactivity floor raising.
-            let metadata = Sha256::hash(&42u64.to_be_bytes());
+            let metadata = Sha256::hash(&42u64.to_le_bytes());
             for j in 0u64..ELEMENTS {
                 for i in 0u64..ELEMENTS {
-                    let k = Sha256::hash(&(j * 1000 + i).to_be_bytes());
-                    let v = Sha256::hash(&(i * 1000).to_be_bytes());
+                    let k = Sha256::hash(&(j * 1000 + i).to_le_bytes());
+                    let v = Sha256::hash(&(i * 1000).to_le_bytes());
                     db.update(k, v).await.unwrap();
                     map.insert(k, v);
                 }
@@ -577,7 +577,7 @@ mod test {
                 db = new_db.into_mutable();
             }
             assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
-            let k = Sha256::hash(&((ELEMENTS - 1) * 1000 + (ELEMENTS - 1)).to_be_bytes());
+            let k = Sha256::hash(&((ELEMENTS - 1) * 1000 + (ELEMENTS - 1)).to_le_bytes());
 
             // Do one last delete operation which will be above the inactivity
             // floor, to make sure it gets replayed on restart.
@@ -929,10 +929,11 @@ mod test {
             async fn insert_random<T: Translator>(
                 mut db: Db<Context, Digest, i32, Sha256, T, Unmerkleized, NonDurable>,
                 rng: &mut StdRng,
+                translator: T,
             ) -> Db<Context, Digest, i32, Sha256, T, Unmerkleized, NonDurable> {
-                let mut keys = BTreeMap::new();
+                let mut keys = std::collections::HashMap::new();
 
-                // Insert 1000 random keys into both the db and an ordered map.
+                // Insert 1000 random keys into both the db and a map.
                 for i in 0..1000 {
                     let key = Digest::random(&mut *rng);
                     keys.insert(key, i);
@@ -941,11 +942,21 @@ mod test {
 
                 let (db, _) = db.commit(None).await.unwrap();
 
+                // Sort keys by (transformed value, raw key) to match database ordering.
+                // The database orders collisions by raw key.
+                let mut sorted_keys: Vec<_> = keys.keys().cloned().collect();
+                sorted_keys.sort_by(|a, b| {
+                    let ta = translator.transform(a.as_ref());
+                    let tb = translator.transform(b.as_ref());
+                    ta.cmp(&tb).then_with(|| a.cmp(b))
+                });
+
                 // Make sure the db and ordered map agree on contents & key order.
-                let mut iter = keys.iter();
-                let first_key = iter.next().unwrap().0;
+                let mut iter = sorted_keys.iter();
+                let first_key = iter.next().unwrap();
                 let mut next_key = db.get_all(first_key).await.unwrap().unwrap().1;
-                for (key, value) in iter {
+                for key in iter {
+                    let value = keys.get(key).unwrap();
                     let (v, next) = db.get_all(key).await.unwrap().unwrap();
                     assert_eq!(*value, v);
                     assert_eq!(*key, next_key);
@@ -961,10 +972,19 @@ mod test {
                     db.delete(key).await.unwrap();
                 }
 
-                let mut iter = keys.iter();
-                let first_key = iter.next().unwrap().0;
+                // Re-sort remaining keys by (transformed value, raw key).
+                let mut sorted_keys: Vec<_> = keys.keys().cloned().collect();
+                sorted_keys.sort_by(|a, b| {
+                    let ta = translator.transform(a.as_ref());
+                    let tb = translator.transform(b.as_ref());
+                    ta.cmp(&tb).then_with(|| a.cmp(b))
+                });
+
+                let mut iter = sorted_keys.iter();
+                let first_key = iter.next().unwrap();
                 let mut next_key = db.get_all(first_key).await.unwrap().unwrap().1;
-                for (key, value) in iter {
+                for key in iter {
+                    let value = keys.get(key).unwrap();
                     let (v, next) = db.get_all(key).await.unwrap().unwrap();
                     assert_eq!(*value, v);
                     assert_eq!(*key, next_key);
@@ -995,7 +1015,7 @@ mod test {
             )
             .await
             .unwrap();
-            let db = insert_random(db.into_mutable(), &mut rng).await;
+            let db = insert_random(db.into_mutable(), &mut rng, OneCap).await;
             let (db, _) = db.commit(None).await.unwrap();
             db.into_merkleized().destroy().await.unwrap();
 
@@ -1007,7 +1027,7 @@ mod test {
             )
             .await
             .unwrap();
-            let db = insert_random(db.into_mutable(), &mut rng).await;
+            let db = insert_random(db.into_mutable(), &mut rng, TwoCap).await;
             let (db, _) = db.commit(None).await.unwrap();
             db.into_merkleized().destroy().await.unwrap();
         });

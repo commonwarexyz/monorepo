@@ -1645,7 +1645,8 @@ mod tests {
 
             // === Step 3: Corrupt ONLY crc2 (not len2) ===
             // crc2 is 4 bytes at offset PAGE_SIZE + 8
-            blob.write_at(vec![0xDE, 0xAD, 0xBE, 0xEF], crc2_offset)
+            // Write 0xDEADBEEF in little-endian byte order
+            blob.write_at(vec![0xEF, 0xBE, 0xAD, 0xDE], crc2_offset)
                 .await
                 .unwrap();
             blob.sync().await.unwrap();
@@ -1784,7 +1785,8 @@ mod tests {
             drop(append);
 
             // === Step 4: Corrupt page 0's primary CRC (slot 1's crc2) ===
-            blob.write_at(vec![0xDE, 0xAD, 0xBE, 0xEF], page0_crc2_offset)
+            // Write 0xDEADBEEF in little-endian byte order
+            blob.write_at(vec![0xEF, 0xBE, 0xAD, 0xDE], page0_crc2_offset)
                 .await
                 .unwrap();
             blob.sync().await.unwrap();
@@ -2061,11 +2063,11 @@ mod tests {
 
             let crc_offset = PAGE_SIZE.get() as u64;
 
-            // Both slots have len > page_size
+            // Both slots have len > page_size (values in little-endian)
             let bad_crc_record: [u8; 12] = [
-                0x01, 0x00, // len1 = 256 (> 103)
+                0x00, 0x01, // len1 = 256 (> 103)
                 0xDE, 0xAD, 0xBE, 0xEF, // crc1 (garbage)
-                0x02, 0x00, // len2 = 512 (> 103)
+                0x00, 0x02, // len2 = 512 (> 103)
                 0xCA, 0xFE, 0xBA, 0xBE, // crc2 (garbage)
             ];
             blob.write_at(bad_crc_record.to_vec(), crc_offset)

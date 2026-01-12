@@ -213,19 +213,19 @@ where
     // Insert a random value for every possible element into the db.
     let mut rng = StdRng::seed_from_u64(42);
     for i in 0u64..num_elements {
-        let k = Sha256::hash(&i.to_be_bytes());
-        let v = Sha256::hash(&rng.next_u32().to_be_bytes());
+        let k = Sha256::hash(&i.to_le_bytes());
+        let v = Sha256::hash(&rng.next_u32().to_le_bytes());
         db.update(k, v).await.unwrap();
     }
 
     // Randomly update / delete them + randomly commit.
     for _ in 0u64..num_operations {
-        let rand_key = Sha256::hash(&(rng.next_u64() % num_elements).to_be_bytes());
+        let rand_key = Sha256::hash(&(rng.next_u64() % num_elements).to_le_bytes());
         if rng.next_u32() % DELETE_FREQUENCY == 0 {
             db.delete(rand_key).await.unwrap();
             continue;
         }
-        let v = Sha256::hash(&rng.next_u32().to_be_bytes());
+        let v = Sha256::hash(&rng.next_u32().to_le_bytes());
         db.update(rand_key, v).await.unwrap();
         if let Some(freq) = commit_frequency {
             if rng.next_u32() % freq == 0 {
@@ -253,8 +253,8 @@ where
     let mut batch = db.start_batch();
 
     for i in 0u64..num_elements {
-        let k = Sha256::hash(&i.to_be_bytes());
-        let v = Sha256::hash(&rng.next_u32().to_be_bytes());
+        let k = Sha256::hash(&i.to_le_bytes());
+        let v = Sha256::hash(&rng.next_u32().to_le_bytes());
         batch.update(k, v).await.expect("update shouldn't fail");
     }
     let iter = batch.into_iter();
@@ -264,12 +264,12 @@ where
     batch = db.start_batch();
 
     for _ in 0u64..num_operations {
-        let rand_key = Sha256::hash(&(rng.next_u64() % num_elements).to_be_bytes());
+        let rand_key = Sha256::hash(&(rng.next_u64() % num_elements).to_le_bytes());
         if rng.next_u32() % DELETE_FREQUENCY == 0 {
             batch.delete(rand_key).await.expect("delete shouldn't fail");
             continue;
         }
-        let v = Sha256::hash(&rng.next_u32().to_be_bytes());
+        let v = Sha256::hash(&rng.next_u32().to_le_bytes());
         batch
             .update(rand_key, v)
             .await

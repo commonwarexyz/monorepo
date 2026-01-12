@@ -123,7 +123,7 @@ pub(super) mod test {
 
     #[inline]
     fn to_digest(i: u64) -> Digest {
-        Sha256::hash(&i.to_be_bytes())
+        Sha256::hash(&i.to_le_bytes())
     }
 
     /// Return an `Any` database initialized with a fixed config.
@@ -257,9 +257,9 @@ pub(super) mod test {
 
             // Update the same key many times.
             const UPDATES: u64 = 100;
-            let k = Sha256::hash(&UPDATES.to_be_bytes());
+            let k = Sha256::hash(&UPDATES.to_le_bytes());
             for i in 0u64..UPDATES {
-                let v = Sha256::hash(&(i * 1000).to_be_bytes());
+                let v = Sha256::hash(&(i * 1000).to_le_bytes());
                 db.update(k, v).await.unwrap();
             }
             let db = db.commit(None).await.unwrap().0.into_merkleized();

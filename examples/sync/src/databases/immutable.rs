@@ -48,8 +48,8 @@ pub fn create_test_operations(count: usize, seed: u64) -> Vec<Operation> {
 
     for i in 0..count {
         let key = {
-            hasher.update(&i.to_be_bytes());
-            hasher.update(&seed.to_be_bytes());
+            hasher.update(&i.to_le_bytes());
+            hasher.update(&seed.to_le_bytes());
             hasher.finalize()
         };
 

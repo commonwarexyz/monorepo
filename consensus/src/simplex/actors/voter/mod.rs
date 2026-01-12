@@ -228,7 +228,7 @@ mod tests {
         target: View,
     ) -> Sha256Digest {
         let prev_view = target.previous().expect("target view must be > 0");
-        let payload = Sha256::hash(prev_view.get().to_be_bytes().as_slice());
+        let payload = Sha256::hash(prev_view.get().to_le_bytes().as_slice());
         let proposal = Proposal::new(
             Round::new(Epoch::new(333), prev_view),
             prev_view.previous().unwrap_or(View::zero()),
@@ -2178,7 +2178,7 @@ mod tests {
                 prev_proposal = Proposal::new(
                     Round::new(Epoch::new(333), current_view),
                     current_view.previous().unwrap(),
-                    Sha256::hash(current_view.get().to_be_bytes().as_slice()),
+                    Sha256::hash(current_view.get().to_le_bytes().as_slice()),
                 );
             };
 
@@ -2196,7 +2196,7 @@ mod tests {
                     .previous()
                     .unwrap()
                     .get()
-                    .to_be_bytes()
+                    .to_le_bytes()
                     .as_slice(),
             );
             let contents = (proposal.round, parent_payload, 0u64).encode();

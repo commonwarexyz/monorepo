@@ -86,7 +86,7 @@ impl<H: Hasher> Builder<H> {
     /// When added, the leaf is hashed with its position.
     pub fn add(&mut self, leaf: &H::Digest) -> u32 {
         let position: u32 = self.leaves.len().try_into().expect("too many leaves");
-        self.hasher.update(&position.to_be_bytes());
+        self.hasher.update(&position.to_le_bytes());
         self.hasher.update(leaf);
         self.leaves.push(self.hasher.finalize());
         position
@@ -394,7 +394,7 @@ impl<D: Digest> RangeProof<D> {
         let mut nodes: Vec<Node<D>> = Vec::new();
         for (i, leaf) in leaves.iter().enumerate() {
             let leaf_position = position + i as u32;
-            hasher.update(&leaf_position.to_be_bytes());
+            hasher.update(&leaf_position.to_le_bytes());
             hasher.update(leaf);
             nodes.push(Node {
                 position: leaf_position as usize,
@@ -648,7 +648,7 @@ impl<D: Digest> Proof<D> {
         }
 
         // Compute the position-hashed leaf
-        hasher.update(&position.to_be_bytes());
+        hasher.update(&position.to_le_bytes());
         hasher.update(leaf);
         let mut computed = hasher.finalize();
 
@@ -729,7 +729,7 @@ impl<D: Digest> Proof<D> {
             if *position >= self.leaf_count {
                 return Err(Error::InvalidPosition(*position));
             }
-            hasher.update(&position.to_be_bytes());
+            hasher.update(&position.to_le_bytes());
             hasher.update(leaf);
             sorted.push((*position, hasher.finalize()));
         }
@@ -826,7 +826,7 @@ mod tests {
         let mut digests = Vec::with_capacity(n);
         let mut builder = Builder::<Sha256>::new(n);
         for i in 0..n {
-            let digest = Sha256::hash(&i.to_be_bytes());
+            let digest = Sha256::hash(&i.to_le_bytes());
             builder.add(&digest);
             digests.push(digest);
         }
@@ -904,204 +904,204 @@ mod tests {
     const ROOTS: [&str; 200] = [
         "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
         "50ae5b142a0f31db537ba060ba07e46fafe1ec960ebec7b6f08f03dafe774f52",
-        "fce6b9d873d5a92d828695fbddb93d0cecc76747e311035cf7b2a80532f65ea2",
-        "33635879d11892586d0735076c9d1b9d661344861d46aa96c36450b71a32300c",
-        "e5e67dc697801aea53044bc042a0e8724abf1f96512c0b4a4dd9027697fbb160",
-        "4fe4f8ada41e7d98d2344a7faec0360cf4c718318c6cce2bbfdad544288ab746",
-        "1a80d0ad0413511f1a56490d9527a5dd2f4686884c4fdc4e912221b7a67462c3",
-        "924aeecd88420edaf033e055f276823ffea95eb965f8a24bedd3b71ff7a4e00e",
-        "48b65ee4de800d7ab900781dc0257bf22675e5d921395e4392e1f1ca81095d06",
-        "846ab5f09531e4176aa66a6bd03d83f7503c16dfc494aa7cf600825bb11df9c3",
-        "bd491c9ca0678c29f61ad2affcfb313edbbd5f59c58a7c0d5ce1f0dbb7baf282",
-        "422aab7074448c8d5563ba5636f18fb46ccab9de0a12c997d82d12f0273a9477",
-        "4ee0c261ba4eb3902ac003b6789675f7a2ccb09ffd23249fdc457f436e675b18",
-        "e303776cd1f6f708659765f938dcb79ffe7878f03b67d97947ee8320c2377480",
-        "787847b8cfd106d7264ed6280c72d4e5e62294c8c4f786f486b16217b993fcbb",
-        "2d7cb674b223d2b3bf82a3d76d53b58eb542b5f9cec672f075c2cd3056a869f8",
-        "9888bb342b33693d7885e1a84fa9cd803bdbb3fdb5593f6cabdd68511fc34e3a",
-        "d491440069227e34868e75ea9c4c0946bc3084651798946916100de64b1ee2c7",
-        "b3f496525d3b4b9db0d409a954a0f29078b1c9f7b4fbc5d32e4615bfbf657ab3",
-        "3ad08b0ce43aea793560e5b093398abfdfb37310e86c8bf0cfa91e7573f80100",
-        "86229048316a1c894883a9e3a8d3c3d3e95f0b843d1f648f9e58462aff9f3148",
-        "143f71172df1ea73e59c795d0b3a7ccaff6cb9d934200ddb7fe485a02bbcb25d",
-        "688a6084995fb4d5b65592f8fac5b5347d46252ff08059d825884ed7b46a92a9",
-        "1152caa5f17fd92aa0f86b4ec07a442b176b62961e525bfe84d5b82913ab5269",
-        "71e367ea9deacf960f80370f169accf59345b77e02e780bf916e9daab0be060b",
-        "05bcda0901af59dd91b74c3f34edc6f7ba9e4b6e61b77888053a02c65f7b75a3",
-        "6c8e49673a96942fa83ff46c4f82511806d7185e7025d8b39df159b98b1394fa",
-        "a38f666a29ea9c6d084eebce18a31422234db99be0e947205e5b6fb05dc344a4",
-        "b9325d2e47b15e451928b96feadaf29ae57107e15f28f04a59f54e44b3e152a0",
-        "5e35af451db9a82e17a904e477aa48ebf678abd3527c5a7a6c1e0d0cae033196",
-        "eb1e3e7c34f35cee920cae35d779675f8f0e4a226d513ff72e67a61f1cb07bed",
-        "dfffa428315478482fb39b6cabd19b82c4abe0fdfe28a2d8b637b00934694d26",
-        "e8af2e8391e3fcec5a1a4acd0df713dd56abea1949234aeec4f999c57adc6886",
-        "9ffeaf6d1802438062656b7a8ac052287b349172abb1cd0c6102de8d782c773b",
-        "637127e22c8c5505c95637436a8c7872523bb1e05000ce3b026b2c60335a9ec6",
-        "3a5ae08c9837b67941f2096b4e806b8bf54e1d11836e3b54c2d1ddd8be81d339",
-        "b9e868d4441e850c8989ab140cb7e7107fa916a7cc9f10532460669b5d185fb9",
-        "ca4e9513943517c7756ecb1fdfcf941f8b296eb59ca344960ddf447fc811b3fe",
-        "e889aa56a848a2b283fd3fd6e134fc83450c0d6c1d01f576c2bb5eb72a87f409",
-        "7f37830b35e2eaf1c22658508a2cf8cf2c4ad138ee96bbb4dca6d466699ab09d",
-        "5f30c90f31b8a32a117579c89ef258d3621e3c4ffd0051b50fe7032e7d16024c",
-        "022e9efb9c643379420118e4553d2355eec5e3bcb3502778bc4b2e85d57b4795",
-        "daa5d97c2202a64210ec877a9075dd17fb9f6178ad6b0905809a4d79df13e3c8",
-        "5d2873958ea245ac1e8ece124ae9fe1b5cecb36034a0fa644f447026728bcabd",
-        "7744dc3b7505d01edc098edb6873e8e923d371ec777b0abe2d7fc0f5e5abfcff",
-        "52fe4af553d4bb631cc42ceabb7395fd2a234ee1431b8720571d2878e4676e4b",
-        "c46c4647b7464f67c19ec8a66815b87487070fd0aad02dd51c537af08e7036b2",
-        "004828da3fd62ee55449394a54882573d2ce5f323e45cf021e99ca0c3f4b12fd",
-        "aea7466b24c3537178dfb0e2b23254162230c36613664f546923edda8f4a9cb9",
-        "12b52d15244e3e4f01f2b69dff8b18e4d30cda39e3d87b09875fba0918c0f3c4",
-        "cb774e0aba6a497ebeefdac5237ea4b91cf02d8df761e4d5931bca06f92ba7e7",
-        "730fd826be4ae1482b88affb6e74ff3461409903a499f86170168f4634a3e36b",
-        "12ac285defa63afcc7a47541993837d2da3f81def14004a058d0b82c340f3f28",
-        "e661d6c753cf32fa26eefa5d2c1e4602386df79e96b1e0bd3a54454de6fadc1c",
-        "608587b5ae578e310be49be55fee4d950bf85cda31af2ecd0306bfc34fab61d1",
-        "a41205347e79e7b2a688422cb620caef3862c06be97c3cceb0cc6cef39fbafe8",
-        "d332d4863654ba825c0e1ddb63b9a0c1bf35aea89a28f0c7234ec104e4e9e8e8",
-        "d21f7cbce3ba334611617b73f5abf283d17ca7a7a0e460f4e4c559bb6175cadb",
-        "ec13e53573f637e38ce6f45b55e8a9967f3121ee30b52fd2b8b680512b175ee0",
-        "b137cc53ae95e87de14667d94bfc77015d29ae978c09ada78ce00061b03f7d56",
-        "f41819163d7e13359c09c50776f0da810dc39d6e15ea67f2b047dbd2a609933f",
-        "f128a3ee5cb5b6d687aaf6908445256de0099d976346ef6e5496bd51a2b7400c",
-        "94141d70b9b61b86ec050753f11a9f2d275f3d28a07d044c7f0d8736128252a9",
-        "80acd071567fcca9e8740fe47d29c1197b2df093e22197c53e6176d9b1565045",
-        "55871c3b57591746d7febac3e386dd838cf13276572daf484332811f1a62e8f4",
-        "7674ec07655fb1f00bc1c46f9f7b3847674815b4c8a05327ac6a40ac031c7616",
-        "253794e58aab5d5ad517c2e1d007566e25c8be42033c1255f4139dc014914c2f",
-        "ad0ad5f5c95c2e5ad0f78354bafb7563f0c6573a74253145373ffc24eb13debb",
-        "c322c8902b4a4c10879856222f820d8f92ffd15d25d5d461a1ac126954580626",
-        "1e1be47b4c0b321f3ac638039ff9e47ca6ebadf15a6230699c6405a3ed7044dc",
-        "225a9d06465ac4b1cf65528c799966c5a8344e484d31289c8cfd9d29202bd02f",
-        "17382a91ee6946f78cb712e53a9e58d6c0e07a26be2b47463ecbfcada335dd6e",
-        "4635742a72a250016f3c92d510d3aa64b2f7f2d8f739cace99b49ae20bfda981",
-        "0b49ac169f476f95c84e376ca86c7ac66a82df44bd6783edf238be23bffaad5e",
-        "f18d45122b929ae17a7233f60414b5626577eb00b00e106a1eb852a6c4cf7f57",
-        "3ab2fb11c3d06ca1d8228402b7f6f3ebebc2072305e015fd142c51675cfddbec",
-        "c9dcb27313895d2f7c67af4d6ae6734a22aecc49cec0b9f3cdb27eed7e4d8f03",
-        "ed4397b2d47b98848253e66d79aba7bfa2beb2a44ffc3aa6d9b4056fcfd099cb",
-        "b35074c978d512800e700adfddf0a73fbf4de49215cfdb69430aa51525ce507e",
-        "58093e52dc8e10fed83fd8f60a6ebd5980cde59667044d3eaf6dd942c3dc110a",
-        "b23225934ef6cfbfc2fd95da072a030d8a4815502bf15d14f90a64b6b6bd1a83",
-        "e66ec3aff80f8224a1012ef0fd137e685ab294c4a3d47b976553d13afcc130cf",
-        "b06ec0ecaa3d9fba83a25bb25b44ef88ba66748c7dd6ca4692fa6c3efccfb44e",
-        "0a9e7cbb5b1697e45245329a5a4bff4b2ca1a93a7f1ed1cf8a552ac6493131ce",
-        "f9f3a65472790ca66b908e0e8bddd2040aa0db36557f453df8a8d6b4604a12c5",
-        "0650349d871b9efc044110657c49eaa2dcbb27257a320d6e59a18178c237ec38",
-        "49c04edb1576b51db9fe0bd990dbf16b90418837be51c7983b32d76bbf2f9f30",
-        "1b2ece1a345f9e762235b01c8f644277408281545f063732183386bab2a09dce",
-        "182b36c2af475f3ca465b409f8a110ec6a23e0e5388730ed7920628bbe15268e",
-        "a8aecf727c29a84d4e15be02399f78b4fd0f1b45a48d30062a8c871de684b612",
-        "9e0bc42a02db1b41d4ed9a7c6fcab527085c469b37471bc20f89fbeedd5e03ce",
-        "3b89297f5235f95c35dabe6235dd89958af0b15b1868e5151cde112fa3039773",
-        "15e7c5ef9b6c731b075322897799f54ec8622a00ca90cceac3411f83b49ea237",
-        "79e2533ad3eebb44325eb5a5b93e7cbb67278b564eeeff4a029c802935527a01",
-        "3a691d7163b2ff4bf566c0bee7ccef767a5303d3a9319729d799ae12e19f4c1a",
-        "5799066961c8ca5c5b3d62e90e407fa51429488fd14c80ba8ba28529a2071c84",
-        "ae530275bf76e94083b2c8de75ad44fe7ab4d45c46fd461ca796a7a2803e7608",
-        "3f8eec5de2cc57152c9d58caa5fd4d2a3ddf22d666eae9a6ae0aee433127f9f6",
-        "00f16a9bde34a6d3c1b0c21486165cc32dfa840e3a07da864625d7a2b1d493bf",
-        "e57b868d21768ac786eca4889030c7517af93102198b0cdf15879bb12e434985",
-        "48a705b3265d0696a69c7870d05052ed0d24c9c094727408be4429f6b236db62",
-        "14e0743518594de85852563962db3b63688dda7034f86f86b903c9bec21860f2",
-        "9d1b3b67045dc6b85b3a2c5cd4c2ed14c6ad2d1f17740a6fe29387865e433c71",
-        "ca5afe197a9aeb4020a6110ac693e84b174800e4de4bd92d9a15cacf7d77f598",
-        "7f833e5072a4c8c3802613626b5afa42a69790614f4fd84ee269ce2cc8de08fb",
-        "d4f5f4d6b6c185e1d68dcac5d4e7d55828cd94c1eb6170e75d0ca474e21a14d8",
-        "eaf15269b6f147771746cf2cd7f8b6f2eab92287a8468f03127eab68b78fcfa1",
-        "f84c317503d500c03b32e2d14360a6d1877e791f5cccaccc9c0e15c71ed85705",
-        "e0e6d90287b23f7065a13537ed8353d43bcc14b80e6902938db6cf5ac43e79fb",
-        "2e244362779d657581f0a9879daba8acbe1c7234a2e27eef91c8a0a1be6c6efb",
-        "7086f9c9e40a5f576235d41dac2187001ff1c315cc94dd3a0feaf3e905be7f7a",
-        "4b9e14b2834ab37608e3ec4b85db30a4b45d0caf78dd6363e02d8802a2d51a41",
-        "e3e44f53cf473636859fc6d6eb05dc505e5a56c612216636a44c8eac8efad382",
-        "99d4638fb24b7aca63e936a60abb74abb70d7797643879be80735605a7e2a2ed",
-        "1e8401b6c65c67dc544e9a1ce21c6ce9903702ac30c93d0caa0df64b6c0e1e36",
-        "1bf14f3f0372956833770f87e9145cfc0a5b0dc985b1b694353e705961e94738",
-        "ed9b69ad2d779f82b2d1a97a5bd1e2f941b2edfdfd82db99f121561964345128",
-        "035c58d5ac8a38fc0e6dec6472f3459f47c17f76bb04eef929064482f5bfb2a9",
-        "706ff9580c8869ab68edb9e801b5c631377a10ac07617fb34d9250616231ad52",
-        "f9b815729a5cdfe9f1ebcaaca36a658464a5d49c2dad1dcae7aed2688c2209a7",
-        "8c1e7468650b0f8309c23b7fb453ce59ab989fcaa80fa32bd82d02c25fc19b68",
-        "557a00a4e6d55c60a033b23ca20975f5c774ed0fef3bc316f68fb4a6df66137e",
-        "06516e2e9e5fa3583c643209666758483e38c642757e7a452ed29d716229370b",
-        "f708b4d19acfadd56e1e4275ed1191d285c656ee045efd2b7049539a39caf5a2",
-        "00a126e14b8ec6f7e7e31d0d4b551a24fcbcad62045490feb532b0b78d15a411",
-        "c47d49034a6a7ce59fae50d10153fdd619783c39265789a7858b420cbc32b56e",
-        "c7d67122fc2b83e565ee0108e16753936f2bb62128d38237454053e60ac918a8",
-        "18db7a4c3694b83c2258a4bafdd062cf20d80d356d9d899bc429be9d732dac0e",
-        "e3e55212157e06d8745eb23eb4a391611abf0d9e98efe19b482d0d0fdd66a053",
-        "70d1830363a58704b037f018a417b7e8682f7a2bad6ed5eaefacf335b9f2de13",
-        "559e34d21bf90025d69c0401e3bfb70abfd470fcd4a64f739728f41c0fed4075",
-        "73828339c42835cd9f48291c11322d905a35e4d0cccca4095a93a1e4bb778664",
-        "7f4cba2e2e584eae771dc328099a098819a6625ea5b2c9382120a1504964841b",
-        "a1f44690445ccd1b9930f615e416aeda750601a49631b4eb536f6fd709293f0e",
-        "5de9674bc7412231cdb526dc17bfd2e0ed0635be4224d9f72c16378bba7ad8dd",
-        "7b217e77ea4175029928ba4839f6d350df9e41b67cff183b1a43ab52925193ca",
-        "53bea1bad7659ccd0feb50136fc5093878888fe0cb16dee5ed7503b01d96e4ba",
-        "084e489bf686d41db4e8f0ff1bce15a40ac24b948ddcc377a8095d99751673ea",
-        "bf67b177d3000a2ac7df34d422486cec6606c6ee82ee50aa91dd98b567957f6d",
-        "2f5777d29dcb3c78730c52fedff7d57270125f9a8a570c9d30cf0ad141803118",
-        "3c06f61c8b538beb4a557bbdde61a379a631972b3d0698fbb98c68c874744698",
-        "12d7d4f4c868b645681dc988d3a170b2f6e425c067ef89ee7a7f07c801ba226e",
-        "6f0a289c5c41336a1b5d32aecaec5aa57d1352e319820b80e84d38979ce1ea2c",
-        "a8e2f08c46aeadcf56bb10d427418174269e679af7a53c7a1fe92c3fe13f133b",
-        "e7e04233a526c7b513eb02d65b8c81b48edf95782d0fbacd0ece7d391f3a7598",
-        "d0c677a7b01abb943f00ab1dfa2d4097c4b2309566d6a9ada3cd0f0d1041b449",
-        "2cc6597dfd2903bb9e8549f2d1f6842f0e136b0aab9872bbf4b86f49b59c3678",
-        "0f230a73d7922eae8290b989014806fb9e6e3c042fa87a8adc742b31e99c4dcc",
-        "ec0ab16c9228a1671d6501189cc53dedaafe17cb3aea8119f77fd78d035ec740",
-        "f80b66f4f25c4995b19cb973dfd5be34cda67e47e359e944d7fb6ee63e4a64b4",
-        "791066ca90c59ab7729bc242be45e26f8f1343656ed63e7c597eb3618ac34036",
-        "5efea2b25d7407a8c14a9d0f232e7280a9b13b14e48635925be0703547060f3c",
-        "5bb18cd0630e2cefec9817220b3561157f893570cf8f7374eb5d4d374be7d3fc",
-        "97d1a186229ef63fd0616c3dc36777065ad201b11109b8a8b43a7326c868cd72",
-        "d715dfb79b1bca2e5464e3c2c1f7b9cd3b3962fb7a9b42ddc629efd76a5b9b0d",
-        "bb9960745bfd91f49aedda17a5151d3f2105523d637e8df3c4a19e201688e3ab",
-        "4d694f1b092b6c514f50b832d483d14cbf2d22435c1d64b0a0143b1b91a7db0e",
-        "f4aec328caed1748906126cd72f9dc032dc529e3cabc9a55f96ff7f08e136630",
-        "65d7ca2883222a70edb0acadb0d969fb3824224e3de365ca98b8d41124955640",
-        "5a7c37a041319dbc68a2aebb98d18dcf971bdd26f7679fb4c8d71023dd62e763",
-        "45c7c8a9c1a6d073df038a63c8fb3585750f2186020fc42e67388ed90d687334",
-        "76ceb2ed736c577275c47a270f13fc3f829db8f677fe52117a7916913f8e9f07",
-        "83616f52af18dfb6bca88c39905c24d1d7443b8fafcb408ba92e3357bf64826d",
-        "6184a19e674eb02c014ffd52ccfae8451d78bdd371d7f3c5d9c0b034ea75f34b",
-        "73cbf19495785c2a8822229e71ae5246cb0572f5bfc31ab0c95a6f9bdbe42880",
-        "ad417fcc01c49775fedc526cac80ed9751799f50db513d7107da4b5539e25025",
-        "fcf56dcdb68b31aa8c71404585a886cfcc978e08be8f64c6c3ce8438044013ca",
-        "f4c9a1a92630aa75afd8b8dbcaafdc212ffb2f34b69a7bdb2f40609aa332236d",
-        "b932d9bc11b9f21ab792e3b5dff181a56cc9eeab2f3ee7afe4d3c82317fe3b9e",
-        "f78f6c3055d0c1c49fe4303a4e97de9e85107d084a542e15d3a1f59d068d48cf",
-        "aed078316e0c3c4624d12b253adc31114011bdc8550b3cf9aa7a3ae3528478ae",
-        "67879ad6b94d3e536c41abcd2719df496d990e360e3cd1bf6168ad34681c9b7e",
-        "3d9c7c5590c129b3ac13384367c823d2bf4fe8b681d617b3b5d627494897753a",
-        "c5b437bb860c077c0a42eaf4574418da19681dcd8bae66f39d64c28488d73715",
-        "c3a56646dde6bef7edbd352447a84d11887f90e6c701ba3f416657c2266e7dc0",
-        "8d2540362789502dfb5a288bc65ac890265a214a0cda02f5ceaccb469b0cc137",
-        "2e45352b458f89889bada37cf933852d182a7824113b025b88b6a85cb269c6aa",
-        "6fc01506749124063a43a2120245bf3b1c5aea36f3d59bc39dc51e057e75f71f",
-        "588efc61ec42e19f898bd5d958a7365c4c3baf8038a64a1460806f3cdc21948f",
-        "808d865fc016720e9bf61a0d5eaa015f6f187d41d7633845c92c6cacdfe613c9",
-        "e6a1d190049b0c050e189d26c00f96e2235eb8bcb196aca24fdc62fd0ecb9eae",
-        "1a306d0a919c071c844e7bba1c052090637ede6b61cc4683f0f4b2c461eecdb8",
-        "4e45867c281c31ee45c7fca4a8360deba83194d8e564ee67f3bf93ed3957bec7",
-        "bf6327fddf29b861a04f968dc5774cfef7b3e10eb1f245e5efa8fd83fafa2bf1",
-        "3e45cc36fbaf609569d86d61b35149cdb76ad98f89ece8346f3a37a3c1719cf4",
-        "880158cad3643cf9a0edb91393c32054ddbc1f246e033ce487c8eb4d107c1194",
-        "bb0df4b7018c0263acab38f3b17f39b275825c0f68d4433309723398933b8da7",
-        "d7e391633d0961dd8a570346483012a0b6f63e00d246111fa34f2ccc47fb8703",
-        "8200353a6675b2cf6f8d582522f4b5a3631c7d63e1c2241f11663349e76462f3",
-        "fac2e4190f279be818ea9aa3480dc4a1e3cbcf7f0882f8e31c2157ef0508e90f",
-        "17749a05e9cae5177d8e0faba46da779823d3e8d86ef5ed79b54d78135bb7223",
-        "87028314fdab0aa49907b7ce8b8f3908907295d7e0c0b6bae2fe9b5ba5c0ceb4",
-        "167183adfd0b5e5969f45cfc8ff6540e15ead0fdcd6c9dfc298d630759d189be",
-        "537a57b808d97bd0bd43c44ed409c104453422052e55d6b5ff6c2f0e094e8be7",
-        "91f9ca4ece65c41449b62d0bfc3b3394bd748bb084b8821e4c022a7eece1c612",
-        "bbe7726fdfcf0ff06ec19af865ca1f63aa04c17ed76b61048d146a35790ad9bf",
-        "e80cd26d4b358842e76d45a4e5560ec8998fcff4675a526d940739338bf427a7",
-        "165b46546b409202ee4b213ee9cc36b4e401d90a726a9976c45b9c448df4b8ea",
-        "fdd9b0055a0d85ae21f227a875ac22cef20592fba24cebc306cf401ab8d61fab",
-        "a7df94accafd8e8cfc78996cb98b25dc2cf28b3eb4983106b50e359b81040eb5",
+        "04c85c918f4818bf72f35b6927cc548d149dc02a4c711b99da8e48cf79505d55",
+        "2a44e8d9bc4ca4019e4755d09092662b4f36114d26ad4c42ecf74f98c763d983",
+        "b08e27c42c2a4c7dfb443b7c213da0786262f1e141098870fb31efddb07fe03d",
+        "016a500919ad32b7051080df5c4a1d6fa5868d9b7fb6041a1c7b7cd02d3b1895",
+        "b2724f72d9d4bd21388f7b52368df08669d74230412664072ae22380affa19fc",
+        "6301eac41ebacd8cee5e18fe2f730344d15ac098c741470cbc753a886a761cd8",
+        "f1ccf355b396a3a9744e907535cd0003117a792b91f2b438f248df2eb0debaf0",
+        "4b6f4827029fb60a3843d7748e2c328cc7ecedd5ece97a175070ed6ba7e83062",
+        "6ec4754470486bae02f93c359441981d6bdbdae1778188e3b16c89655189e505",
+        "1f7a3e63f8b1987274d49ee77ae2c40cd0d9ca133f7df2fa84c5ca4aaff97636",
+        "aa1a2b54c8956de7de3c7c2b8c5404dd8fb624129f3e6f12a134a5dd5069dbd3",
+        "19020762586c29181dfc4f23af56d828c57205548ba7c164326eef42d95c2c19",
+        "fb7d5b162266cb1faf342f9d72fb5338123ccc37397bfc41a63b46d5b2338633",
+        "44d4230ff8b628fadbaf94a73aca30b96c841d6bdd1d6218111462645d81cdb8",
+        "81cf55581c8605d2f2b9d9878dd4e57fd0eccb057d4925dfda2f24795f28ed7f",
+        "8f5da4093e243d0a1772ce4ab1b5e8a01971e0fed3eafc62ea65381484305150",
+        "5649b1d41d913bb8dc3346e53d48fb870079989b7d7edda6a176d7425fa841f4",
+        "32206e218ba3b2d6c70908df9e190246d6b1ec7d770c04ec058f43516dca9173",
+        "c010a8b1c8f1916f2c7adc2417eebd3a1e17439fd89fc2729370d0c43974aa6b",
+        "7f47390b772e1e2afafb7faef428affc68a68731fe704c88dcc05e35110b49b9",
+        "4faa6ab37727b59e53eae23562247d8d495d93b23cc1121c85e7003adbba9f22",
+        "d217106995cde953560605ce2fc69d192115c972f5d692fafa07142852b844f8",
+        "a9c478e27064a383189b509e4f1207c65e311cf4c775e89f53fa5ec7ac528110",
+        "366f0eea43dda0d6d67f940b465cfbffca3cbf1a0c7e01482be4a976afb456bc",
+        "b7405c564d531149bcb174deefa4d008844fc650b8d5477df0c70a37e672f49f",
+        "d9a71aac3cdad138c7191e080b83c2a218ed414d602c48c20ef324c97d07b989",
+        "b689b4883a70640652640927ef8bd660aabcc414482cd5b437c78240bd70197c",
+        "80cd0ef0461edec141aa7d84e77e8867363d3cacd7fe9480082642fd28d84504",
+        "c350ea4d0acb3b79e16dbbcaeadd176067d9973423c0f868eed6e327cc53328b",
+        "ca83cccc228011ff65e934d905134b62b14ae0b2a56c09983644f2d8e366108b",
+        "4049658c4312d7d7e7c9c3e6151c7331578083aad669c5cb8a58a7d590c1c92d",
+        "89406e9215478cfa879a415dcb9341cfb007d9aa81f3b5f123f7e72e7001d9c3",
+        "e47dd01f32930c449e79155cd2bf0069bbb031fb67000d77e01048dd523bebbc",
+        "c3fcfdaa69ae852431947f759dbc91908c41d5abbfb5e4a472d55dd58a4c52c8",
+        "89070a690e5d39f0ed0c9ef24e79cbaa665902d6a0f602324ef6652a09cb1cb3",
+        "364b5a5258081acb46f8338de77ec04f53ceac28e0c523196e6bc24502306b66",
+        "0f664ecd7b42e1e74051f1a743318257b59edbcb4525e4035fb7142434049dcd",
+        "bf06c578bcf81b142f07ee04351829a4826600994f512becad9b76b65fb6fbdb",
+        "4bd0cb131234977565d185aad718a55817112ae12442b758b7482ab913720d98",
+        "d02005829cf1b57ab707bdbe72bda03d8e8bb0e891b5066f9afbb0953cd9d775",
+        "896520d85e051e1d1d5a38685a9809ee9e9ae9a5ff4403ce2957bc09ed8e4f9b",
+        "4d9ce3d4f02fd71e4a0b8ce37eed424c691d65e657e7614eb00acbb04efa07dd",
+        "8a0498c8f7be98fa04268837ba5e053cd4975f927f172884f4c8febb58675074",
+        "26efca3ad4d7519511c753722ed039856bf4dcb957afec4d32e7dd9d1a740bd4",
+        "ccfca5b4b9d085de36779a89159361733790ec91807b5d887812a7d16237b3bd",
+        "824e2f8b5305f7bf88035b005aacceb879ff552ac9b98ebceb305a6fdba91c4d",
+        "a8122f51c2993125d2a22fc93e3c5886fd000153e617608b510cc060756279d1",
+        "88ad7c4ad8ff3f3adf85642dd9c82917395d29f17a848a93fe0de9e0bdcd11f5",
+        "da37876fb8115aa456bae1e022e50cb4cdbc9473b538f45dc94ad859ce67ed31",
+        "bb0fa02219f8e0760df524a482d1fd1c717731e1fbff40592df62b985befa660",
+        "afa494fbd346939b7ff617fdcf53375aad0628f99dd185aece3b4156caf8c84c",
+        "32cfead3b72e2f1cc27024c385385d92eae5830e21304fd4be1175cea25f6a13",
+        "b6070a4b87a2445c9fae1e92bb197ff36d551d26c4aa7be0e36ca393d0ea0c54",
+        "b5ebc5d5e5a900bc8c0388329e5e484b1c66abc0c9d899b45054974f26b5a560",
+        "79eb0e82aec98fbfc1d4e972ce2d02a06e205f539fab1eaa8b1c669e35e06efd",
+        "4af858194fe4d5316807642ceddf13a7a16658481d0d2d2fa8833bcb924c2627",
+        "e121434741250aba23ae8499bc0597ea9d5ac29a472e00ba5b5331c135201863",
+        "b497c32923876bd4a0c033e94bd91a3afba8b7cd91e5d7860be64761131e8388",
+        "d17250fc0066be1d95ee3fc35d53e835c8bae19758b018c7d4286bb15a5be0c6",
+        "2e0918ac079fd3f34cd804ac5d1e69c039d91ccd6009fa0b6ad3fc895b4a6685",
+        "1fa374f6594b3081878add60ff41b62fd60a5642a2a303b3c3d1a964d9167158",
+        "784d372d0b5eff53095f65831721a1e3a0f4edaebf102a5bcc0314fb20b37802",
+        "afd2d574caad18cf00c7eb4c11752bac19114ec38be166d698e1e99705d725b5",
+        "dbef1c3a52937b9629d161f3416f517c6e1992ba8bb6a7854b3b7f1b7157c7fe",
+        "5c89e624262314e9308498a79170da3d336d97330f44c7225c172474ca333c10",
+        "bb67b550f9fbf6b8246055d7dfcb0d27d8374fb9fe568a739df512c20f9d402f",
+        "713515e07d1e6e30e949744cfccf42d13d622dc82884fde81b5b43f9648c5652",
+        "0c2c12be4308947ede78fcb8420e70940629f1bf9874f87799eb666f1fe4ed1f",
+        "b3872f89ee2e39ac75c30deaee9c817c3a864f3cde14913efc4749f945966ecc",
+        "171f0b82390e505818a1a99d1a2f7a360bdb5d702c9e8e4614462b6eaaf16034",
+        "ee210fe026bf6169370b5d156ec12b47ad3624a9273ee2dbe076d17186fb8292",
+        "fd60c7a34aab71d0296ef284dbd2dd0bce2e39599912c79097b036fff37b252c",
+        "38f6d8cb9a7e14b98ddc163b1e9ba6d45f81dbc299afc4bbdb29f433a2e7542c",
+        "a260611be98c3486fd62f6877ee9402603d9acf604300f68629a579d02af1158",
+        "351260cb9b5ad64e65cc92d2ee3578df44f5cf5ef91c40716b56b06267085fb4",
+        "9627e9d8257b5c4bd1ad1af88ec37c73f21eafa13134c3ade7fed3cc7fa878ac",
+        "58dc543329cbb4a6a4fad15923842c41a4c1f1294f7163991a04652cbaf553da",
+        "9df306d1ca936b0a27e59600e16a1c1e1e90162c9aa3485c2b2cd4390bd5e826",
+        "baf1e33f14bb31e221998710e11ccad566f6e50447cfb35a249b96e0c30a03b5",
+        "a5efae46eb3e2e2c31f51ff7206f04ba115cc9eefbd287671654d00ddeef9c6f",
+        "626089e5f98b46fc507c881eaa77bd96beb4ac75bdca4d44d7a0027a5498944b",
+        "596ed83e82c3563fb4e344cacfb9a919df22cba298637289d3bf383e0612e783",
+        "686af2027350dbe539289d591690484620726af332792168386c227b17d2d54d",
+        "7291bae290aaffce1c2004f40686b88bc6d9b1318fa953a6e229ebc10152fe46",
+        "ec54c96782da180e5cd03960c2bcdc8881adf7501f4a0cf597f8eda46b4f5aea",
+        "fc352e516fa516a5df36224c8dc414ec64e63f4b230a553208610f7075e26e7e",
+        "9247035b5ebf0bb07d1269cfaa06384381d68118d82831f2b2b535d14eff791c",
+        "1ad78bb1ac4d33c2292e78f29d21ca6215c1dd04f808734d98fbbedde50e6c14",
+        "3a47a1daad7902b622ce1a2105698ef1311859e75046b60864758e738a6794c6",
+        "ad4cb27871623418cc4fb7be3ef7d23bc24c4e160840c16d14647bff43f75cc8",
+        "2fb9df0a87bfb0da34d1a8d1827d17e45f9674470d3d83c079666cd24ee11750",
+        "16254e08376f5004cda40f0848ea4b5771b02196b6d8bc8a2f236fd0aaf7990b",
+        "c586e1fc32d6e38e202e2a2ee8934278966bbc188b66477e6bbceb178d112b3c",
+        "bc7290e2b709c1202440c47cf9cb14c8a2662167645ed7870b832948da1ba2e0",
+        "b236f9a4a7f526ae7d8625a5926f2054562dfcb08466d3c753db58bef12e59e5",
+        "8b99bacd2f789614dd1f196649d9492a8e1b5d6f05de6559f82aa9213ff07780",
+        "77425e98f8fdcf06c51d25c325fd24569597e315664e7a66eacd46271c611e0c",
+        "aac7975944d795430f5aa0d64fdc2ea548823ffbbde0ab2c332078e4e2cf7a8a",
+        "624aa042e23ae55d036d5dbfb16b0f920f19c83799589440a3ffcfca4ae507a3",
+        "ac7e3c7e94217329d882de2b1278f2019ad368f0e076f6e0185207348c2f86e3",
+        "f9675245f2819ef028840c3598690b1bd409eb95075795e824cf78cd8e0d90cd",
+        "a9f5dd4b0ab59f9922002b33c770ae976c3bd9c41b1b6ea5b07984b160858eb4",
+        "421714b0a1e2e2bae35e98d49c516c0debeabfe99ae7858a4cac850bb221e015",
+        "2df194a437908712b43f069a31b37dcdcc55c11e1af557e5524b4bb01c00a133",
+        "c0ab5cf7229bf9433bd9d12b7d5770e6742d916a37cd7e96e1025e88b29e4a86",
+        "ba4eb70573d0e013374651b975539902798a552bea9d4b390d23337546e96e06",
+        "f7676b5789cb79deb7a7570fafc44b9ca1f083eb24b10d9a2b4a7b92549da070",
+        "1d3de41dba82647e3624ef9fb1a48e9bf62fcea08dc7a4382e8463afb4d2e71c",
+        "53ee1e1a3a037ad579005f27264df226993730123fbf7520bc57bee1db55eadd",
+        "07d156bcd29fc5da32496dcb1cbeec15f7132e7df7e48a804cfe20cd6879cfd0",
+        "433fa5d91c9a46f869af09859215a4db9b5377503cc0c100ebf59ecc9a391c37",
+        "71948a9eabb4c9967009cca9804a2eb01b4fbb97a6753b8cd36d1b5b4bcd24e1",
+        "cc5bb0a38a760438a9e3bc3b01451ed64d578d2a4bd842f2fc7fd19380d038bf",
+        "744e6f0fd5364f76c7794ffd2c801a206eb34bb96c0c94d87ead9a0e677427aa",
+        "098004e07d569449fa070719528219f5939ffcf3e801f46f297d5599b831b850",
+        "73f252c8018660051b664f2c71c0104ddf8b5d4d4b8cd199876108099650a3d4",
+        "d13fbc95ce0079902c5cf8dfadf5b623f26f8205d344a13eb0f1838e6055604d",
+        "8b53750c7d4a42fe3841a5e6f444eaf8664cb629d329b369364da77375a7e44f",
+        "0657b7dfb43f5ba5fd27cbb17d87c24c8cb993bfa1accf6b2949559e346af0ee",
+        "638ade72e521bc28b40c781d4ab725d414883909e97add136328f42a9feb470e",
+        "ef9ecb878e968e53edef234d0b1122309070aa6bc76c45b0aea2c3c4c8e3bd21",
+        "92b53ed61b8a64581b803c994d6f574a14e7071c28800619849a847a693b60c2",
+        "4a3c39f149154abd2c7a328d9e8ca3eda1c19971f856a425a83b6848907daa5c",
+        "cd22c54831bf379873bd82dcc1960c042852b3fb52519e77c2ac8714c81856d1",
+        "86f24f8ba88c47dd8f12682044b92b97c97c5fc9b852ad9e1f24548c70c77e8f",
+        "617001a9c032d8a0f02acf03dfd027ad5810a4e9b5a86750a71833761846de73",
+        "3def0ff4be838296b8adee4b4eec66639d1b9420f244b8685a3fbceb7395741d",
+        "202f62232c68397cbfd358662a577f023d67302eef734c7bce6d7d1689a13574",
+        "4cc2b4e475604c604b85b487c0b143b6b9c3fd8abcbfa242bb7ec966619203ab",
+        "f7a65edc3a04cb80cef5e2bceb4734d83e7c71e6f43c7728cd579de9fb2dc530",
+        "7157907b49d5e80d5ee694d34502a9bd6f6c1bc7bec652fbf592d4406f58b37f",
+        "17024782e760d081ac02d0a6cfe7310e612c80e8d5bdca5505611b4b0dd9aa73",
+        "4e532668bf1581daf0a3126dfa175ea8da883672147a2d02a5aabfab1ccc6925",
+        "569f42e8c25892c2e338a4222c75690e0bd21f4ca8f16b1f422acc9388d15502",
+        "1b7005fe1eefefad5cfedbe4112606674c01c318ceddaf00cecb1e5b4d5dd812",
+        "067b870d1c4235307ed28c5dde575005a6984e215b5826d709c0792aeb5a4c38",
+        "17a3ac90842906f6026b8319b2f315fc542ece19ce5d2dda320f34c7856ffc69",
+        "0cc44d88ad53d1544b2879dfa2c48312c3a90bfd322d1cb730e18ac3596d1590",
+        "6a0c459f1352f556be903e3567e23774c01b3dcf21b9cf1513da5e489277ba69",
+        "2fa5058014c3561a2dbe318dca0da686c8da804ab4606536832f640a6d00c39a",
+        "6f4fbdbdd906a9911182938cfb9e7d50a007d5084dc8def8be8c9ac089534cba",
+        "057bdc4252865c81cb878b5414ba22399b976792ab82f1b7044f54fe89a8dbc8",
+        "fa64db9f47421b1fc8f1e74c2307ec635fc1b1611469e574fe89671e786fbacd",
+        "dc773f5d6f9db1cae85d59b0d72c2d677045de6c28745dbbf58b6bf1c3476b29",
+        "465075e1b7e0b4df55241fabd41451cbcf4f03fc6291300b40d9c84dd62218a3",
+        "03e7b67b6df966405519fea36e6aabdb979aa07f15e8b6af1887d441d3d99212",
+        "1e64c8358066edcc5e77de536025705eba1c0c292b6feb098ecc76a330229ba1",
+        "35f89f2155e041de8a5fafdd834e228d286b5b5e64c4a66677f3270d7406b089",
+        "7e77d52bdb94d2777206c5b8610a8a2a7dc283f06332ed4fc5a7c371b9df84e2",
+        "7aab6f5da0cc34f513996d164772a3f77636056c12e6f76833e9fae9d43dc4ba",
+        "873271b129688e944d5eae7f1e19b57605d5cff5e7379601176061fb5644d10d",
+        "de9f96e1f0f14bd84438b5e088a04ed8887648ad7e7bd64735b79afdd385020d",
+        "b9a156ab0f9e1b3550a7b7d9f9082ece31af3ede09a0210813b5a5c82bb7209c",
+        "a9d817d6f80f4f95060ca44b6f1836abef81b03e3d5466aaf1654dd69e872dfc",
+        "65c495985cdca5ebb475ba3c7ff0aca4ee2dae1fb0dfd579d4945a965ad22fb3",
+        "427ad1f38a99fc5b5eed815ee651e5cb2975c82c29cfcddfa1063086c1d0012a",
+        "05d04d7521b1c8dcda8f5ac635e48e56fc0798bff0508d137483bcf4db77b977",
+        "1a0a347e49c2de9301a1638c96c4ec19e5bedec1c076e3e777722a49d05e1069",
+        "fedb28cabfd8301797a4af20ebe0d4cf72fa8f117b18ab5a1c76b2f5426f55d3",
+        "38a23bac4ce24c6b09b3468936d74ff426ec4c4a0b6287b05393ea18a46f3051",
+        "3a125e7e5879c3b1acf9b9b4c7fbc9c241ce4f89c1fd0e69500570d739488ae4",
+        "12f2287adbf0881f25ec70ef45e654cb1e711ffb2be0796ef75a723a61c0103a",
+        "3c3c7e7f216adef9bf2f2506e6a0119b6667d7fd2895ce5962fa2222651c9bb0",
+        "bea9e7eebfa03cce6d14f552c48eea71369aaf27b6c690772d5161235f207336",
+        "d735072f5a5a2123d860f9e18434188acc102d88648a70c63e72da6baeca084e",
+        "a62bdff1cc81727d30e9ea4860da15f9b54f3f0738164221d4d1e6fc23e8e6d7",
+        "1dbaba01bb25cfa06ed8e0001343d5f442cde324dbb64b2d852b90a060d02c49",
+        "c0f93aafbead58eb1ef917c0e4f050db21c5608df1328684a8a38c74b12e7bdd",
+        "953885e1e754645ef602909834b6c4377112abc299fc0b9e2e612e096ee8e9fc",
+        "6c100a673f4c39efd99093005550fce6e545900bcf3d44b36428c311c5cd2c41",
+        "5cbf7391c4036058dd16bd6c369a4ff12852b0d59de6608af4e70764430098ec",
+        "6e9dd55611e26f118b43b7ceea876be10f94be540d8fcf00a892ffc63b8b7b07",
+        "11aafdc65480aa713bc222893bb84fd6be0f92c0d4757e8d876e8e4e9831cdef",
+        "c8d67d266f814ee3524df878f4c3f8cf32bf9c57eaf7c5b7c608b398a7bab97b",
+        "a826218ff82e67a9455084cea00ff6cbad4c3bc7edee549e31253d0d9417b3d4",
+        "1be15ca3c5dabcf35a3acb61c6a94a8faf351d281413219db1c5031a26d08fac",
+        "ffe8871395563699fb76038a4a9934a2cb12a0a70da6108906ed6524c9cf08f5",
+        "e7fafa815d564c5194366ef8ae1e2fd7231419cfa0517386ee237792cc87db16",
+        "4e060a11b691438bdf039de27e80b031551919c66fe4531607102b73022c401b",
+        "e220449764ad675f5045c7a2ed04907aadf046b47869768e2fb6152505cfd1e6",
+        "e55aabfe09d931d5902c6a94eaacf80ff6d24d1da7a1ceb8075eb3b75ad8e58c",
+        "666eec9c0eb2e614540f99e0efe9adfeb032958c7eec59a90cfdb2ac6b25016e",
+        "bbc9e3cc28161bdec33d3310f1a8e3847bccc6d5b14d0fe31422806e85632d66",
+        "56cbb28d82023cec121e30bd7d5b27eb02684966658d33bb2f99165761628990",
+        "17515485fd89d817410d7683f6a72f63751daedf219377dc11b5a1fb7ec3443c",
+        "d165b752514e32c5f26eb6dbec3e3b773accb347bf32a4f1dc54df266f6d9a7f",
+        "6b3235bb52b52b007655334b390d7b1dc9132adfd8e5ea08ff1b8e9eb29bf7a4",
+        "718f4495678a050edde9fe49eb5fbcb514dd6918409cf50a9692dd694b70e036",
+        "403c61e3166cb22641b14aa6e75c6f72e66ac5af1fd13925111e0a7eda8547e5",
+        "82b15231d83c4222e999b04b163742bad69ac1f6e78663b0d6e3b7a3fbff569f",
+        "987fa65e2944d12d635ea0c6b52511f41559d89a6471147ea1e0f2b338294b1c",
+        "89ec098b9b9232aec3f9eb22f30bd7deffdb58cf2ac9b6396583e3754dedb8e2",
+        "bcf9467d01db1036e421677df4eafb3ca4dab5ddd8a69a5f3843cbc88953b8f2",
+        "9f1cb3ac49000ddda8dc1d3da2dcadcbd15bf17b95d79b6f4d549ee19b9cd7b1",
+        "84758043514cef64af44fd5d013dcd294e5f283722552aa66d23aa3d4d1fc819",
+        "d518391bf106cb3a76b2ef980def833d82d9859be195b756f5a1f72dd6ae68a9",
+        "16f16fb875fe936f7966812add16f1800cf5b1392da4ca8d07a63030500dabe3",
+        "e00c059c990cdb168d997f09b9432f86bda043885fb80d3c35ee3414de5a8510",
     ];
 
     #[test]
@@ -1110,6 +1110,17 @@ mod tests {
             let root = test_merkle_tree(n);
             assert_eq!(hex(&root), previous);
         }
+    }
+
+    #[test]
+    #[ignore]
+    fn generate_bmt_roots() {
+        println!("const ROOTS: [&str; 200] = [");
+        for n in 0..200 {
+            let root = test_merkle_tree(n);
+            println!("    \"{}\",", hex(&root));
+        }
+        println!("];");
     }
 
     #[test]
@@ -1346,7 +1357,7 @@ mod tests {
     #[test]
     fn test_range_proof_basic() {
         // Create test data
-        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::hash(&i.to_be_bytes())).collect();
+        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::hash(&i.to_le_bytes())).collect();
 
         // Build tree
         let mut builder = Builder::<Sha256>::new(digests.len());
@@ -1376,7 +1387,7 @@ mod tests {
     #[test]
     fn test_range_proof_single_element() {
         // Create test data
-        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::hash(&i.to_be_bytes())).collect();
+        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::hash(&i.to_le_bytes())).collect();
 
         // Build tree
         let mut builder = Builder::<Sha256>::new(digests.len());
@@ -1399,7 +1410,7 @@ mod tests {
     #[test]
     fn test_range_proof_full_tree() {
         // Create test data
-        let digests: Vec<Digest> = (0..7u32).map(|i| Sha256::hash(&i.to_be_bytes())).collect();
+        let digests: Vec<Digest> = (0..7u32).map(|i| Sha256::hash(&i.to_le_bytes())).collect();
 
         // Build tree
         let mut builder = Builder::<Sha256>::new(digests.len());
@@ -1418,7 +1429,7 @@ mod tests {
     #[test]
     fn test_range_proof_edge_cases() {
         // Create test data
-        let digests: Vec<Digest> = (0..15u32).map(|i| Sha256::hash(&i.to_be_bytes())).collect();
+        let digests: Vec<Digest> = (0..15u32).map(|i| Sha256::hash(&i.to_le_bytes())).collect();
 
         // Build tree
         let mut builder = Builder::<Sha256>::new(digests.len());
@@ -1451,7 +1462,7 @@ mod tests {
     #[test]
     fn test_range_proof_invalid_range() {
         // Create test data
-        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::hash(&i.to_be_bytes())).collect();
+        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::hash(&i.to_le_bytes())).collect();
 
         // Build tree
         let mut builder = Builder::<Sha256>::new(digests.len());
@@ -1470,7 +1481,7 @@ mod tests {
     #[test]
     fn test_range_proof_tampering() {
         // Create test data
-        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::hash(&i.to_be_bytes())).collect();
+        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::hash(&i.to_le_bytes())).collect();
 
         // Build tree
         let mut builder = Builder::<Sha256>::new(digests.len());
@@ -1525,7 +1536,7 @@ mod tests {
         // Test range proofs for trees of various sizes
         for tree_size in [1, 2, 3, 4, 5, 7, 8, 15, 16, 31, 32, 63, 64] {
             let digests: Vec<Digest> = (0..tree_size as u32)
-                .map(|i| Sha256::hash(&i.to_be_bytes()))
+                .map(|i| Sha256::hash(&i.to_le_bytes()))
                 .collect();
 
             // Build tree
@@ -1558,7 +1569,7 @@ mod tests {
     #[test]
     fn test_range_proof_malicious_wrong_position() {
         // Create test data
-        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::hash(&i.to_be_bytes())).collect();
+        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::hash(&i.to_le_bytes())).collect();
 
         // Build tree
         let mut builder = Builder::<Sha256>::new(digests.len());
@@ -1585,7 +1596,7 @@ mod tests {
     #[test]
     fn test_range_proof_malicious_reordered_leaves() {
         // Create test data
-        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::hash(&i.to_be_bytes())).collect();
+        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::hash(&i.to_le_bytes())).collect();
 
         // Build tree
         let mut builder = Builder::<Sha256>::new(digests.len());
@@ -1609,7 +1620,7 @@ mod tests {
     #[test]
     fn test_range_proof_malicious_extra_siblings() {
         // Create test data
-        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::hash(&i.to_be_bytes())).collect();
+        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::hash(&i.to_le_bytes())).collect();
 
         // Build tree
         let mut builder = Builder::<Sha256>::new(digests.len());
@@ -1640,7 +1651,7 @@ mod tests {
     #[test]
     fn test_range_proof_malicious_missing_siblings() {
         // Create test data
-        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::hash(&i.to_be_bytes())).collect();
+        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::hash(&i.to_le_bytes())).collect();
 
         // Build tree
         let mut builder = Builder::<Sha256>::new(digests.len());
@@ -1670,7 +1681,7 @@ mod tests {
     #[test]
     fn test_range_proof_integer_overflow_protection() {
         // Create test data
-        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::hash(&i.to_be_bytes())).collect();
+        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::hash(&i.to_le_bytes())).collect();
 
         // Build tree
         let mut builder = Builder::<Sha256>::new(digests.len());
@@ -1688,7 +1699,7 @@ mod tests {
     #[test]
     fn test_range_proof_malicious_wrong_tree_structure() {
         // Create test data
-        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::hash(&i.to_be_bytes())).collect();
+        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::hash(&i.to_le_bytes())).collect();
 
         // Build tree
         let mut builder = Builder::<Sha256>::new(digests.len());
@@ -1726,7 +1737,7 @@ mod tests {
         // Test various power-of-2 boundary conditions
         for tree_size in [1, 2, 4, 8, 16, 32] {
             let digests: Vec<Digest> = (0..tree_size as u32)
-                .map(|i| Sha256::hash(&i.to_be_bytes()))
+                .map(|i| Sha256::hash(&i.to_le_bytes()))
                 .collect();
 
             // Build tree
@@ -1862,7 +1873,7 @@ mod tests {
     fn test_range_proof_bounds_usage(#[case] start: u32, #[case] count: u32) {
         // This test ensures that all bounds in a range proof are actually used during verification
         // and that we don't have unnecessary siblings
-        let digests: Vec<Digest> = (0..16u32).map(|i| Sha256::hash(&i.to_be_bytes())).collect();
+        let digests: Vec<Digest> = (0..16u32).map(|i| Sha256::hash(&i.to_le_bytes())).collect();
 
         // Build tree
         let mut builder = Builder::<Sha256>::new(digests.len());
@@ -1929,7 +1940,7 @@ mod tests {
         #[values(3, 5, 7, 9, 11, 13, 15)] tree_size: usize,
     ) {
         let digests: Vec<Digest> = (0..tree_size as u32)
-            .map(|i| Sha256::hash(&i.to_be_bytes()))
+            .map(|i| Sha256::hash(&i.to_le_bytes()))
             .collect();
 
         // Build tree
@@ -1954,7 +1965,7 @@ mod tests {
     #[test]
     fn test_multi_proof_basic() {
         // Create test data
-        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::hash(&i.to_be_bytes())).collect();
+        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::hash(&i.to_le_bytes())).collect();
 
         // Build tree
         let mut builder = Builder::<Sha256>::new(digests.len());
@@ -1981,7 +1992,7 @@ mod tests {
     #[test]
     fn test_multi_proof_single_element() {
         // Create test data
-        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::hash(&i.to_be_bytes())).collect();
+        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::hash(&i.to_le_bytes())).collect();
 
         // Build tree
         let mut builder = Builder::<Sha256>::new(digests.len());
@@ -2008,7 +2019,7 @@ mod tests {
     #[test]
     fn test_multi_proof_all_elements() {
         // Create test data
-        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::hash(&i.to_be_bytes())).collect();
+        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::hash(&i.to_le_bytes())).collect();
 
         // Build tree
         let mut builder = Builder::<Sha256>::new(digests.len());
@@ -2038,7 +2049,7 @@ mod tests {
     #[test]
     fn test_multi_proof_adjacent_elements() {
         // Create test data
-        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::hash(&i.to_be_bytes())).collect();
+        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::hash(&i.to_le_bytes())).collect();
 
         // Build tree
         let mut builder = Builder::<Sha256>::new(digests.len());
@@ -2065,7 +2076,7 @@ mod tests {
     #[test]
     fn test_multi_proof_sparse_positions() {
         // Create test data
-        let digests: Vec<Digest> = (0..16u32).map(|i| Sha256::hash(&i.to_be_bytes())).collect();
+        let digests: Vec<Digest> = (0..16u32).map(|i| Sha256::hash(&i.to_le_bytes())).collect();
 
         // Build tree
         let mut builder = Builder::<Sha256>::new(digests.len());
@@ -2109,7 +2120,7 @@ mod tests {
     #[test]
     fn test_multi_proof_empty_positions() {
         // Create test data
-        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::hash(&i.to_be_bytes())).collect();
+        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::hash(&i.to_le_bytes())).collect();
 
         // Build tree
         let mut builder = Builder::<Sha256>::new(digests.len());
@@ -2125,7 +2136,7 @@ mod tests {
     #[test]
     fn test_multi_proof_duplicate_positions_error() {
         // Create test data
-        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::hash(&i.to_be_bytes())).collect();
+        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::hash(&i.to_le_bytes())).collect();
 
         // Build tree
         let mut builder = Builder::<Sha256>::new(digests.len());
@@ -2148,7 +2159,7 @@ mod tests {
     #[test]
     fn test_multi_proof_unsorted_input() {
         // Create test data
-        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::hash(&i.to_be_bytes())).collect();
+        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::hash(&i.to_le_bytes())).collect();
 
         // Build tree
         let mut builder = Builder::<Sha256>::new(digests.len());
@@ -2175,7 +2186,7 @@ mod tests {
         // Test multi-proofs for trees of various sizes
         for tree_size in [1, 2, 3, 4, 5, 7, 8, 15, 16, 31, 32] {
             let digests: Vec<Digest> = (0..tree_size as u32)
-                .map(|i| Sha256::hash(&i.to_be_bytes()))
+                .map(|i| Sha256::hash(&i.to_le_bytes()))
                 .collect();
 
             // Build tree
@@ -2226,7 +2237,7 @@ mod tests {
     #[test]
     fn test_multi_proof_wrong_elements() {
         // Create test data
-        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::hash(&i.to_be_bytes())).collect();
+        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::hash(&i.to_le_bytes())).collect();
 
         // Build tree
         let mut builder = Builder::<Sha256>::new(digests.len());
@@ -2255,7 +2266,7 @@ mod tests {
     #[test]
     fn test_multi_proof_wrong_positions() {
         // Create test data
-        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::hash(&i.to_be_bytes())).collect();
+        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::hash(&i.to_le_bytes())).collect();
 
         // Build tree
         let mut builder = Builder::<Sha256>::new(digests.len());
@@ -2284,7 +2295,7 @@ mod tests {
     #[test]
     fn test_multi_proof_wrong_root() {
         // Create test data
-        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::hash(&i.to_be_bytes())).collect();
+        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::hash(&i.to_le_bytes())).collect();
 
         // Build tree
         let mut builder = Builder::<Sha256>::new(digests.len());
@@ -2313,7 +2324,7 @@ mod tests {
     #[test]
     fn test_multi_proof_tampering() {
         // Create test data
-        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::hash(&i.to_be_bytes())).collect();
+        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::hash(&i.to_le_bytes())).collect();
 
         // Build tree
         let mut builder = Builder::<Sha256>::new(digests.len());
@@ -2359,7 +2370,7 @@ mod tests {
     #[test]
     fn test_multi_proof_deduplication() {
         // Create test data
-        let digests: Vec<Digest> = (0..16u32).map(|i| Sha256::hash(&i.to_be_bytes())).collect();
+        let digests: Vec<Digest> = (0..16u32).map(|i| Sha256::hash(&i.to_le_bytes())).collect();
 
         // Build tree
         let mut builder = Builder::<Sha256>::new(digests.len());
@@ -2389,7 +2400,7 @@ mod tests {
     #[test]
     fn test_multi_proof_serialization() {
         // Create test data
-        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::hash(&i.to_be_bytes())).collect();
+        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::hash(&i.to_le_bytes())).collect();
 
         // Build tree
         let mut builder = Builder::<Sha256>::new(digests.len());
@@ -2423,7 +2434,7 @@ mod tests {
     #[test]
     fn test_multi_proof_serialization_truncated() {
         // Create test data
-        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::hash(&i.to_be_bytes())).collect();
+        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::hash(&i.to_le_bytes())).collect();
 
         // Build tree
         let mut builder = Builder::<Sha256>::new(digests.len());
@@ -2447,7 +2458,7 @@ mod tests {
     #[test]
     fn test_multi_proof_serialization_extra() {
         // Create test data
-        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::hash(&i.to_be_bytes())).collect();
+        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::hash(&i.to_le_bytes())).collect();
 
         // Build tree
         let mut builder = Builder::<Sha256>::new(digests.len());
@@ -2482,7 +2493,7 @@ mod tests {
     #[test]
     fn test_multi_proof_invalid_position() {
         // Create test data
-        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::hash(&i.to_be_bytes())).collect();
+        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::hash(&i.to_le_bytes())).collect();
 
         // Build tree
         let mut builder = Builder::<Sha256>::new(digests.len());
@@ -2505,7 +2516,7 @@ mod tests {
     #[test]
     fn test_multi_proof_verify_invalid_position() {
         // Create test data
-        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::hash(&i.to_be_bytes())).collect();
+        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::hash(&i.to_le_bytes())).collect();
 
         // Build tree
         let mut builder = Builder::<Sha256>::new(digests.len());
@@ -2532,7 +2543,7 @@ mod tests {
         // Test odd-sized trees that require node duplication
         for tree_size in [3, 5, 7, 9, 11, 13, 15] {
             let digests: Vec<Digest> = (0..tree_size as u32)
-                .map(|i| Sha256::hash(&i.to_be_bytes()))
+                .map(|i| Sha256::hash(&i.to_le_bytes()))
                 .collect();
 
             // Build tree
@@ -2564,7 +2575,7 @@ mod tests {
     #[test]
     fn test_multi_proof_verify_empty_elements() {
         // Create a valid proof and try to verify with empty elements
-        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::hash(&i.to_be_bytes())).collect();
+        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::hash(&i.to_le_bytes())).collect();
 
         let mut builder = Builder::<Sha256>::new(digests.len());
         for digest in &digests {
@@ -2666,7 +2677,7 @@ mod tests {
     #[test]
     fn test_multi_proof_malicious_leaf_count_zero() {
         // Attacker sets leaf_count = 0 but provides siblings
-        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::hash(&i.to_be_bytes())).collect();
+        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::hash(&i.to_le_bytes())).collect();
 
         let mut builder = Builder::<Sha256>::new(digests.len());
         for digest in &digests {
@@ -2695,7 +2706,7 @@ mod tests {
     #[test]
     fn test_multi_proof_malicious_leaf_count_larger() {
         // Attacker inflates leaf_count to claim proof is for larger tree
-        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::hash(&i.to_be_bytes())).collect();
+        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::hash(&i.to_le_bytes())).collect();
 
         let mut builder = Builder::<Sha256>::new(digests.len());
         for digest in &digests {
@@ -2730,7 +2741,7 @@ mod tests {
     #[test]
     fn test_multi_proof_malicious_leaf_count_smaller() {
         // Attacker deflates leaf_count to claim proof is for smaller tree
-        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::hash(&i.to_be_bytes())).collect();
+        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::hash(&i.to_le_bytes())).collect();
 
         let mut builder = Builder::<Sha256>::new(digests.len());
         for digest in &digests {
@@ -2762,7 +2773,7 @@ mod tests {
     #[test]
     fn test_multi_proof_mismatched_element_count() {
         // Provide more or fewer elements than the proof was generated for
-        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::hash(&i.to_be_bytes())).collect();
+        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::hash(&i.to_le_bytes())).collect();
 
         let mut builder = Builder::<Sha256>::new(digests.len());
         for digest in &digests {
@@ -2798,7 +2809,7 @@ mod tests {
     #[test]
     fn test_multi_proof_swapped_siblings() {
         // Swap the order of siblings in the proof
-        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::hash(&i.to_be_bytes())).collect();
+        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::hash(&i.to_le_bytes())).collect();
 
         let mut builder = Builder::<Sha256>::new(digests.len());
         for digest in &digests {
@@ -2835,7 +2846,7 @@ mod tests {
     fn test_multi_proof_dos_large_leaf_count() {
         // Attacker sets massive leaf_count trying to cause DoS via memory allocation
         // The verify function should NOT allocate proportional to leaf_count
-        let digests: Vec<Digest> = (0..4u32).map(|i| Sha256::hash(&i.to_be_bytes())).collect();
+        let digests: Vec<Digest> = (0..4u32).map(|i| Sha256::hash(&i.to_le_bytes())).collect();
 
         let mut builder = Builder::<Sha256>::new(digests.len());
         for digest in &digests {

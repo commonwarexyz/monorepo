@@ -749,7 +749,7 @@ pub(super) mod test {
             let mut db = db.into_mutable();
 
             for i in 0u64..ELEMENTS {
-                let k = Sha256::hash(&i.to_be_bytes());
+                let k = Sha256::hash(&i.to_le_bytes());
                 let v = vec![i as u8; 100];
                 db.set(k, v).await.unwrap();
             }
@@ -768,7 +768,7 @@ pub(super) mod test {
             assert_eq!(root, db.root());
             assert_eq!(db.op_count(), ELEMENTS + 2);
             for i in 0u64..ELEMENTS {
-                let k = Sha256::hash(&i.to_be_bytes());
+                let k = Sha256::hash(&i.to_le_bytes());
                 let v = vec![i as u8; 100];
                 assert_eq!(db.get(&k).await.unwrap().unwrap(), v);
             }
@@ -801,7 +801,7 @@ pub(super) mod test {
             let mut db = db.into_mutable();
 
             for i in 0u64..ELEMENTS {
-                let k = Sha256::hash(&i.to_be_bytes());
+                let k = Sha256::hash(&i.to_le_bytes());
                 let v = vec![i as u8; 100];
                 db.set(k, v).await.unwrap();
             }
@@ -815,7 +815,7 @@ pub(super) mod test {
             // Insert another 1000 keys then simulate a failed close and test recovery.
             let mut db = db.into_mutable();
             for i in 0u64..ELEMENTS {
-                let k = Sha256::hash(&i.to_be_bytes());
+                let k = Sha256::hash(&i.to_le_bytes());
                 let v = vec![i as u8; 100];
                 db.set(k, v).await.unwrap();
             }
@@ -861,7 +861,7 @@ pub(super) mod test {
 
             let mut db = db.into_mutable();
             for i in 0u64..ELEMENTS {
-                let k = Sha256::hash(&i.to_be_bytes());
+                let k = Sha256::hash(&i.to_le_bytes());
                 let v = vec![i as u8; 100];
                 db.set(k, v).await.unwrap();
             }
@@ -870,7 +870,7 @@ pub(super) mod test {
 
             // Insert another 1000 keys then simulate a failed close and test recovery.
             for i in 0u64..ELEMENTS {
-                let k = Sha256::hash(&i.to_be_bytes());
+                let k = Sha256::hash(&i.to_le_bytes());
                 let v = vec![i as u8; 100];
                 db.set(k, v).await.unwrap();
             }
@@ -898,7 +898,7 @@ pub(super) mod test {
             let mut db = db.into_mutable();
 
             for i in 1u64..ELEMENTS+1 {
-                let k = Sha256::hash(&i.to_be_bytes());
+                let k = Sha256::hash(&i.to_le_bytes());
                 let v = vec![i as u8; 100];
                 db.set(k, v).await.unwrap();
             }
@@ -922,11 +922,11 @@ pub(super) mod test {
 
             // Try to fetch a pruned key.
             let pruned_loc = oldest_retained_loc - 1;
-            let pruned_key = Sha256::hash(&pruned_loc.to_be_bytes());
+            let pruned_key = Sha256::hash(&pruned_loc.to_le_bytes());
             assert!(db.get(&pruned_key).await.unwrap().is_none());
 
             // Try to fetch unpruned key.
-            let unpruned_key = Sha256::hash(&oldest_retained_loc.to_be_bytes());
+            let unpruned_key = Sha256::hash(&oldest_retained_loc.to_le_bytes());
             assert!(db.get(&unpruned_key).await.unwrap().is_some());
 
             // Drop & reopen the db, making sure it has exactly the same state.
@@ -962,11 +962,11 @@ pub(super) mod test {
 
             // Try to fetch a pruned key.
             let pruned_loc = oldest_retained_loc - 3;
-            let pruned_key = Sha256::hash(&pruned_loc.to_be_bytes());
+            let pruned_key = Sha256::hash(&pruned_loc.to_le_bytes());
             assert!(db.get(&pruned_key).await.unwrap().is_none());
 
             // Try to fetch unpruned key.
-            let unpruned_key = Sha256::hash(&oldest_retained_loc.to_be_bytes());
+            let unpruned_key = Sha256::hash(&oldest_retained_loc.to_le_bytes());
             assert!(db.get(&unpruned_key).await.unwrap().is_some());
 
             // Confirm behavior of trying to create a proof of pruned items is as expected.

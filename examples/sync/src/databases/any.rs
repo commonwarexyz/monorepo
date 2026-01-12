@@ -54,8 +54,8 @@ where
         let mut operations = Vec::new();
         for i in 0..count {
             let key = {
-                hasher.update(&i.to_be_bytes());
-                hasher.update(&seed.to_be_bytes());
+                hasher.update(&i.to_le_bytes());
+                hasher.update(&seed.to_le_bytes());
                 hasher.finalize()
             };
 

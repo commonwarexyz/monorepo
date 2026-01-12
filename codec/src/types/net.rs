@@ -330,50 +330,77 @@ mod test {
 
     #[test]
     fn test_conformity() {
+        // IPv4 addresses encoded as u32 in little-endian
+        // Ipv4Addr::new(a, b, c, d).to_bits() = (a << 24) | (b << 16) | (c << 8) | d
         assert_eq!(Ipv4Addr::new(0, 0, 0, 0).encode(), &[0, 0, 0, 0][..]);
-        assert_eq!(Ipv4Addr::new(127, 0, 0, 1).encode(), &[127, 0, 0, 1][..]);
+        // 127.0.0.1 = 0x7F000001 -> LE: [0x01, 0x00, 0x00, 0x7F]
+        assert_eq!(
+            Ipv4Addr::new(127, 0, 0, 1).encode(),
+            &[0x01, 0x00, 0x00, 0x7F][..]
+        );
+        // 192.168.1.100 = 0xC0A80164 -> LE: [0x64, 0x01, 0xA8, 0xC0]
         assert_eq!(
             Ipv4Addr::new(192, 168, 1, 100).encode(),
-            &[192, 168, 1, 100][..]
+            &[0x64, 0x01, 0xA8, 0xC0][..]
         );
         assert_eq!(
             Ipv4Addr::new(255, 255, 255, 255).encode(),
             &[255, 255, 255, 255][..]
         );
 
+        // IPv6 addresses encoded as u128 in little-endian
         assert_eq!(Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 0).encode(), &[0; 16][..]);
+        // ::1 = 1 -> LE: [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
         assert_eq!(
             Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 1).encode(),
-            &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1][..]
+            &[1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0][..]
         );
+        // 2001:db8::ff00:42:8329 as u128 in little-endian
         let ipv6_test: Ipv6Addr = "2001:db8::ff00:42:8329".parse().unwrap();
         assert_eq!(
             ipv6_test.encode(),
-            &[0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0xff, 0x00, 0, 0x42, 0x83, 0x29][..]
+            &[0x29, 0x83, 0x42, 0x00, 0x00, 0xff, 0, 0, 0, 0, 0, 0, 0xb8, 0x0d, 0x01, 0x20][..]
         );
         assert_eq!(
             Ipv6Addr::new(0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff).encode(),
             &[0xff; 16][..]
         );
 
+        // SocketAddrV4: IP (LE u32) + port (LE u16)
+        // 10.0.0.1 = 0x0A000001 -> LE: [0x01, 0x00, 0x00, 0x0A], port 80 = 0x0050 -> LE: [0x50, 0x00]
         let sock_v4_1 = SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, 1), 80);
-        assert_eq!(sock_v4_1.encode(), &[10, 0, 0, 1, 0x00, 0x50][..]);
+        assert_eq!(
+            sock_v4_1.encode(),
+            &[0x01, 0x00, 0x00, 0x0A, 0x50, 0x00][..]
+        );
+        // 192.168.20.30 = 0xC0A8141E -> LE: [0x1E, 0x14, 0xA8, 0xC0], port 65535 -> [0xFF, 0xFF]
         let sock_v4_2 = SocketAddrV4::new(Ipv4Addr::new(192, 168, 20, 30), 65535);
-        assert_eq!(sock_v4_2.encode(), &[192, 168, 20, 30, 0xFF, 0xFF][..]);
+        assert_eq!(
+            sock_v4_2.encode(),
+            &[0x1E, 0x14, 0xA8, 0xC0, 0xFF, 0xFF][..]
+        );
 
+        // SocketAddrV6: IP (LE u128) + port (LE u16)
+        // 2001:db8::1 as u128 in little-endian + port 8080 = 0x1F90 -> LE: [0x90, 0x1F]
         let sock_v6_1 =
             SocketAddrV6::new(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1), 8080, 0, 0);
         assert_eq!(
             sock_v6_1.encode(),
-            &[0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0x1F, 0x90][..]
+            &[1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xb8, 0x0d, 0x01, 0x20, 0x90, 0x1F][..]
         );
 
+        // SocketAddr (version prefix + IP + port)
+        // V4: version=4, 127.0.0.1 in LE, port 8080 in LE
         let sa_v4 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080);
-        assert_eq!(sa_v4.encode(), &[0x04, 127, 0, 0, 1, 0x1F, 0x90][..]);
+        assert_eq!(
+            sa_v4.encode(),
+            &[0x04, 0x01, 0x00, 0x00, 0x7F, 0x90, 0x1F][..]
+        );
+        // V6: version=6, ::1 in LE, port 443 = 0x01BB -> LE: [0xBB, 0x01]
         let sa_v6 = SocketAddr::new(IpAddr::V6(Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 1)), 443);
         assert_eq!(
             sa_v6.encode(),
-            &[0x06, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0x01, 0xBB][..]
+            &[0x06, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xBB, 0x01][..]
         );
     }
 

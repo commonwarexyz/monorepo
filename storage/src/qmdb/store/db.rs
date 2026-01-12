@@ -999,7 +999,7 @@ mod test {
                 .into_dirty();
 
             for i in 0u64..ELEMENTS {
-                let k = Blake3::hash(&i.to_be_bytes());
+                let k = Blake3::hash(&i.to_le_bytes());
                 let v = vec![(i % 255) as u8; ((i % 13) + 7) as usize];
                 db.update(k, v.clone()).await.unwrap();
             }
@@ -1012,7 +1012,7 @@ mod test {
             // re-apply the updates and commit them this time.
             let mut db = db.into_dirty();
             for i in 0u64..ELEMENTS {
-                let k = Blake3::hash(&i.to_be_bytes());
+                let k = Blake3::hash(&i.to_le_bytes());
                 let v = vec![(i % 255) as u8; ((i % 13) + 7) as usize];
                 db.update(k, v.clone()).await.unwrap();
             }
@@ -1025,7 +1025,7 @@ mod test {
                 if i % 3 != 0 {
                     continue;
                 }
-                let k = Blake3::hash(&i.to_be_bytes());
+                let k = Blake3::hash(&i.to_le_bytes());
                 let v = vec![((i + 1) % 255) as u8; ((i % 13) + 8) as usize];
                 db.update(k, v.clone()).await.unwrap();
             }
@@ -1042,7 +1042,7 @@ mod test {
                 if i % 3 != 0 {
                     continue;
                 }
-                let k = Blake3::hash(&i.to_be_bytes());
+                let k = Blake3::hash(&i.to_le_bytes());
                 let v = vec![((i + 1) % 255) as u8; ((i % 13) + 8) as usize];
                 db.update(k, v.clone()).await.unwrap();
             }
@@ -1057,7 +1057,7 @@ mod test {
                 if i % 7 != 1 {
                     continue;
                 }
-                let k = Blake3::hash(&i.to_be_bytes());
+                let k = Blake3::hash(&i.to_le_bytes());
                 db.delete(k).await.unwrap();
             }
 
@@ -1080,7 +1080,7 @@ mod test {
                 if i % 7 != 1 {
                     continue;
                 }
-                let k = Blake3::hash(&i.to_be_bytes());
+                let k = Blake3::hash(&i.to_le_bytes());
                 db.delete(k).await.unwrap();
             }
             let (mut db, _) = db.commit(None).await.unwrap();

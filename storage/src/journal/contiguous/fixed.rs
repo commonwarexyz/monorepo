@@ -178,7 +178,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
                 .await
                 .map_err(Error::Runtime)?;
             let index = match name.try_into() {
-                Ok(index) => u64::from_be_bytes(index),
+                Ok(index) => u64::from_le_bytes(index),
                 Err(nm) => return Err(Error::InvalidBlobName(hex(&nm))),
             };
             debug!(blob = index, size, "loaded blob");
@@ -198,7 +198,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
             }
         } else {
             debug!("no blobs found");
-            let (blob, size) = context.open(&cfg.partition, &0u64.to_be_bytes()).await?;
+            let (blob, size) = context.open(&cfg.partition, &0u64.to_le_bytes()).await?;
             assert_eq!(size, 0);
             blobs.insert(0, (blob, size));
         }
@@ -260,7 +260,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
             blobs.push((tail_index, (tail, tail_size)));
             tail_index += 1;
             let (blob, blob_size) = context
-                .open(&cfg.partition, &tail_index.to_be_bytes())
+                .open(&cfg.partition, &tail_index.to_le_bytes())
                 .await?;
             assert_eq!(blob_size, 0);
             tail = Append::new(
@@ -341,7 +341,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
             debug!(blob = next_blob_index, "creating next blob");
             let (next_blob, size) = self
                 .context
-                .open(&self.cfg.partition, &next_blob_index.to_be_bytes())
+                .open(&self.cfg.partition, &next_blob_index.to_le_bytes())
                 .await?;
             assert_eq!(size, 0);
             let next_blob = Append::new(
@@ -613,7 +613,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     async fn remove_blob(&mut self, index: u64, blob: Append<E::Blob>) -> Result<(), Error> {
         drop(blob);
         self.context
-            .remove(&self.cfg.partition, Some(&index.to_be_bytes()))
+            .remove(&self.cfg.partition, Some(&index.to_le_bytes()))
             .await?;
         debug!(blob = index, "removed blob");
         self.tracked.dec();
@@ -627,14 +627,14 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
             drop(blob);
             debug!(blob = i, "destroyed blob");
             self.context
-                .remove(&self.cfg.partition, Some(&i.to_be_bytes()))
+                .remove(&self.cfg.partition, Some(&i.to_le_bytes()))
                 .await?;
         }
 
         drop(self.tail);
         debug!(blob = self.tail_index, "destroyed blob");
         self.context
-            .remove(&self.cfg.partition, Some(&self.tail_index.to_be_bytes()))
+            .remove(&self.cfg.partition, Some(&self.tail_index.to_le_bytes()))
             .await?;
 
         match self.context.remove(&self.cfg.partition, None).await {
@@ -726,7 +726,7 @@ mod tests {
 
     /// Generate a SHA-256 digest for the given value.
     fn test_digest(value: u64) -> Digest {
-        Sha256::hash(&value.to_be_bytes())
+        Sha256::hash(&value.to_le_bytes())
     }
 
     fn test_cfg(items_per_blob: NonZeroU64) -> Config {
@@ -988,12 +988,12 @@ mod tests {
 
             // Corrupt one of the bytes and make sure it's detected.
             let (blob, _) = context
-                .open(&cfg.partition, &40u64.to_be_bytes())
+                .open(&cfg.partition, &40u64.to_le_bytes())
                 .await
                 .expect("Failed to open blob");
             // Write junk bytes.
             let bad_bytes = 123456789u32;
-            blob.write_at(bad_bytes.to_be_bytes().to_vec(), 1)
+            blob.write_at(bad_bytes.to_le_bytes().to_vec(), 1)
                 .await
                 .expect("Failed to write bad bytes");
             blob.sync().await.expect("Failed to sync blob");
@@ -1066,7 +1066,7 @@ mod tests {
 
             // Manually truncate a non-tail blob to make sure it's detected during initialization.
             let (blob, size) = context
-                .open(&cfg.partition, &40u64.to_be_bytes())
+                .open(&cfg.partition, &40u64.to_le_bytes())
                 .await
                 .expect("Failed to open blob");
             blob.resize(size - 1).await.expect("Failed to corrupt blob");
@@ -1076,7 +1076,7 @@ mod tests {
 
             // Delete a blob and make sure the gap is detected during initialization.
             context
-                .remove(&cfg.partition, Some(&40u64.to_be_bytes()))
+                .remove(&cfg.partition, Some(&40u64.to_le_bytes()))
                 .await
                 .expect("Failed to remove blob");
             let result = Journal::<_, Digest>::init(context.clone(), cfg.clone()).await;
@@ -1113,7 +1113,7 @@ mod tests {
             // data being discarded due to an invalid checksum. This will result in one item being
             // lost.
             let (blob, size) = context
-                .open(&cfg.partition, &1u64.to_be_bytes())
+                .open(&cfg.partition, &1u64.to_le_bytes())
                 .await
                 .expect("Failed to open blob");
             blob.resize(size - 1).await.expect("Failed to corrupt blob");
@@ -1225,7 +1225,7 @@ mod tests {
 
             // Manually truncate most recent blob to simulate a partial write.
             let (blob, size) = context
-                .open(&cfg.partition, &1u64.to_be_bytes())
+                .open(&cfg.partition, &1u64.to_le_bytes())
                 .await
                 .expect("Failed to open blob");
             // truncate the most recent blob by 1 byte which corrupts the most recent item
@@ -1245,7 +1245,7 @@ mod tests {
             // Delete the tail blob to simulate a sync() that wrote the last blob at the point it
             // was entirely full, but a crash happened before the next empty blob could be created.
             context
-                .remove(&cfg.partition, Some(&1u64.to_be_bytes()))
+                .remove(&cfg.partition, Some(&1u64.to_le_bytes()))
                 .await
                 .expect("Failed to remove blob");
             let journal = Journal::<_, Digest>::init(context.clone(), cfg.clone())
@@ -1283,7 +1283,7 @@ mod tests {
 
             // Manually truncate most recent blob to simulate a partial write.
             let (blob, size) = context
-                .open(&cfg.partition, &0u64.to_be_bytes())
+                .open(&cfg.partition, &0u64.to_le_bytes())
                 .await
                 .expect("Failed to open blob");
             // Truncate the most recent blob by 1 byte which corrupts the one appended item
@@ -1332,7 +1332,7 @@ mod tests {
             // Manually extend the blob to simulate a failure where the file was extended, but no
             // bytes were written due to failure.
             let (blob, size) = context
-                .open(&cfg.partition, &0u64.to_be_bytes())
+                .open(&cfg.partition, &0u64.to_le_bytes())
                 .await
                 .expect("Failed to open blob");
             blob.write_at(vec![0u8; PAGE_SIZE.get() as usize * 3], size)
@@ -1511,7 +1511,7 @@ mod tests {
             // Physical page size = PAGE_SIZE + CHECKSUM_SIZE = 44 + 12 = 56
             let physical_page_size = PAGE_SIZE.get() as u64 + 12;
             let (blob, size) = context
-                .open(&cfg.partition, &0u64.to_be_bytes())
+                .open(&cfg.partition, &0u64.to_le_bytes())
                 .await
                 .expect("Failed to open blob");
 

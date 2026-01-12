@@ -71,7 +71,7 @@ where
                 } else {
                     buf.put_bytes(0, V::SIZE + 1);
                 }
-                buf.put_slice(&floor_loc.to_be_bytes());
+                buf.put_slice(&floor_loc.to_le_bytes());
                 buf.put_bytes(0, Self::SIZE - Self::COMMIT_OP_SIZE);
             }
         }

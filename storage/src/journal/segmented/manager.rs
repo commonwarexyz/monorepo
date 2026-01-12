@@ -129,7 +129,7 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
             let (blob, size) = context.open(&cfg.partition, &name).await?;
             let hex_name = hex(&name);
             let section = match name.try_into() {
-                Ok(section) => u64::from_be_bytes(section),
+                Ok(section) => u64::from_le_bytes(section),
                 Err(_) => return Err(Error::InvalidBlobName(hex_name)),
             };
             debug!(section, blob = hex_name, size, "loaded section");
@@ -178,7 +178,7 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
         self.prune_guard(section)?;
 
         if !self.blobs.contains_key(&section) {
-            let name = section.to_be_bytes();
+            let name = section.to_le_bytes();
             let (blob, size) = self.context.open(&self.partition, &name).await?;
             let buffer = self.factory.create(blob, size).await?;
             self.tracked.inc();
@@ -223,7 +223,7 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
 
             // Remove blob from storage
             self.context
-                .remove(&self.partition, Some(&section.to_be_bytes()))
+                .remove(&self.partition, Some(&section.to_le_bytes()))
                 .await?;
             pruned = true;
 
@@ -277,7 +277,7 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
             let size = blob.size().await;
             drop(blob);
             self.context
-                .remove(&self.partition, Some(&section.to_be_bytes()))
+                .remove(&self.partition, Some(&section.to_le_bytes()))
                 .await?;
             self.tracked.dec();
             debug!(section, size, "removed section");
@@ -294,7 +294,7 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
             drop(blob);
             debug!(section, size, "destroyed blob");
             self.context
-                .remove(&self.partition, Some(&section.to_be_bytes()))
+                .remove(&self.partition, Some(&section.to_le_bytes()))
                 .await?;
         }
         match self.context.remove(&self.partition, None).await {
@@ -324,7 +324,7 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
             let blob = self.blobs.remove(&s).unwrap();
             drop(blob);
             self.context
-                .remove(&self.partition, Some(&s.to_be_bytes()))
+                .remove(&self.partition, Some(&s.to_le_bytes()))
                 .await?;
             self.tracked.dec();
             debug!(section = s, "removed blob during rewind");

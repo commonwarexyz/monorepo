@@ -597,7 +597,7 @@ pub(super) mod test {
         let mut db = db.into_mutable();
         let mut map = HashMap::<Digest, V>::default();
         for i in 0u64..ELEMENTS {
-            let k = Sha256::hash(&i.to_be_bytes());
+            let k = Sha256::hash(&i.to_le_bytes());
             let v = make_value(i * 1000);
             db.update(k, v.clone()).await.unwrap();
             map.insert(k, v);
@@ -608,7 +608,7 @@ pub(super) mod test {
             if i % 3 != 0 {
                 continue;
             }
-            let k = Sha256::hash(&i.to_be_bytes());
+            let k = Sha256::hash(&i.to_le_bytes());
             let v = make_value((i + 1) * 10000);
             db.update(k, v.clone()).await.unwrap();
             map.insert(k, v);
@@ -619,7 +619,7 @@ pub(super) mod test {
             if i % 7 != 1 {
                 continue;
             }
-            let k = Sha256::hash(&i.to_be_bytes());
+            let k = Sha256::hash(&i.to_le_bytes());
             db.delete(k).await.unwrap();
             map.remove(&k);
         }
@@ -646,7 +646,7 @@ pub(super) mod test {
 
         // State matches reference map.
         for i in 0u64..ELEMENTS {
-            let k = Sha256::hash(&i.to_be_bytes());
+            let k = Sha256::hash(&i.to_le_bytes());
             if let Some(map_value) = map.get(&k) {
                 let Some(db_value) = db.get(&k).await.unwrap() else {
                     panic!("key not found in db: {k}");
@@ -831,7 +831,7 @@ pub(super) mod test {
 
         let mut db = db.into_mutable();
         for i in 0u64..ELEMENTS {
-            let k = Sha256::hash(&i.to_be_bytes());
+            let k = Sha256::hash(&i.to_le_bytes());
             let v = make_value(i * 1000);
             db.update(k, v).await.unwrap();
         }
@@ -855,7 +855,7 @@ pub(super) mod test {
 
         let mut db = db.into_mutable();
         for i in 0u64..ELEMENTS {
-            let k = Sha256::hash(&i.to_be_bytes());
+            let k = Sha256::hash(&i.to_le_bytes());
             let v = make_value((i + 1) * 10000);
             db.update(k, v).await.unwrap();
         }
@@ -866,7 +866,7 @@ pub(super) mod test {
 
         let mut dirty = db.into_mutable();
         for i in 0u64..ELEMENTS {
-            let k = Sha256::hash(&i.to_be_bytes());
+            let k = Sha256::hash(&i.to_le_bytes());
             let v = make_value((i + 1) * 10000);
             dirty.update(k, v).await.unwrap();
         }
@@ -877,7 +877,7 @@ pub(super) mod test {
         let mut db = db.into_mutable();
         for _ in 0..3 {
             for i in 0u64..ELEMENTS {
-                let k = Sha256::hash(&i.to_be_bytes());
+                let k = Sha256::hash(&i.to_le_bytes());
                 let v = make_value((i + 1) * 10000);
                 db.update(k, v).await.unwrap();
             }
@@ -888,7 +888,7 @@ pub(super) mod test {
 
         let mut db = db.into_mutable();
         for i in 0u64..ELEMENTS {
-            let k = Sha256::hash(&i.to_be_bytes());
+            let k = Sha256::hash(&i.to_le_bytes());
             let v = make_value((i + 1) * 10000);
             db.update(k, v).await.unwrap();
         }
@@ -916,7 +916,7 @@ pub(super) mod test {
 
         let mut db = db.into_mutable();
         for i in 0u64..1000 {
-            let k = Sha256::hash(&i.to_be_bytes());
+            let k = Sha256::hash(&i.to_le_bytes());
             let v = make_value((i + 1) * 10000);
             db.update(k, v).await.unwrap();
         }
@@ -926,7 +926,7 @@ pub(super) mod test {
 
         let mut db = db.into_mutable();
         for i in 0u64..1000 {
-            let k = Sha256::hash(&i.to_be_bytes());
+            let k = Sha256::hash(&i.to_le_bytes());
             let v = make_value((i + 1) * 10000);
             db.update(k, v).await.unwrap();
         }
@@ -938,7 +938,7 @@ pub(super) mod test {
         let mut db = db.into_mutable();
         for _ in 0..3 {
             for i in 0u64..1000 {
-                let k = Sha256::hash(&i.to_be_bytes());
+                let k = Sha256::hash(&i.to_le_bytes());
                 let v = make_value((i + 1) * 10000);
                 db.update(k, v).await.unwrap();
             }
@@ -950,7 +950,7 @@ pub(super) mod test {
 
         let mut db = db.into_mutable();
         for i in 0u64..1000 {
-            let k = Sha256::hash(&i.to_be_bytes());
+            let k = Sha256::hash(&i.to_le_bytes());
             let v = make_value((i + 1) * 10000);
             db.update(k, v).await.unwrap();
         }
@@ -983,7 +983,7 @@ pub(super) mod test {
         const ELEMENTS: u64 = 10;
         let metadata_value = make_value(42);
         let mut db = db.into_mutable();
-        let key_at = |j: u64, i: u64| Sha256::hash(&(j * 1000 + i).to_be_bytes());
+        let key_at = |j: u64, i: u64| Sha256::hash(&(j * 1000 + i).to_le_bytes());
         for j in 0u64..ELEMENTS {
             for i in 0u64..ELEMENTS {
                 let k = key_at(j, i);

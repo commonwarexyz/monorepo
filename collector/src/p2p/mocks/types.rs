@@ -11,8 +11,8 @@ pub struct Request {
 
 impl Write for Request {
     fn write(&self, buf: &mut impl BufMut) {
-        buf.put_u64(self.id);
-        buf.put_u32(self.data);
+        self.id.write(buf);
+        self.data.write(buf);
     }
 }
 
@@ -33,7 +33,7 @@ impl Committable for Request {
     type Commitment = Digest;
 
     fn commitment(&self) -> Self::Commitment {
-        Sha256::hash(&self.id.to_be_bytes())
+        Sha256::hash(&self.id.to_le_bytes())
     }
 }
 
@@ -41,8 +41,8 @@ impl Digestible for Request {
     type Digest = Digest;
     fn digest(&self) -> Self::Digest {
         let mut hasher = Sha256::new();
-        hasher.update(&self.id.to_be_bytes());
-        hasher.update(&self.data.to_be_bytes());
+        hasher.update(&self.id.to_le_bytes());
+        hasher.update(&self.data.to_le_bytes());
         hasher.finalize()
     }
 }
@@ -57,8 +57,8 @@ pub struct Response {
 
 impl Write for Response {
     fn write(&self, buf: &mut impl BufMut) {
-        buf.put_u64(self.id);
-        buf.put_u64(self.result);
+        self.id.write(buf);
+        self.result.write(buf);
     }
 }
 
@@ -79,7 +79,7 @@ impl FixedSize for Response {
 impl Committable for Response {
     type Commitment = Digest;
     fn commitment(&self) -> Self::Commitment {
-        Sha256::hash(&self.id.to_be_bytes())
+        Sha256::hash(&self.id.to_le_bytes())
     }
 }
 
@@ -88,8 +88,8 @@ impl Digestible for Response {
 
     fn digest(&self) -> Self::Digest {
         let mut hasher = Sha256::new();
-        hasher.update(&self.id.to_be_bytes());
-        hasher.update(&self.result.to_be_bytes());
+        hasher.update(&self.id.to_le_bytes());
+        hasher.update(&self.result.to_le_bytes());
         hasher.finalize()
     }
 }

@@ -28,7 +28,7 @@ impl U64 {
     pub const fn new(prefix: u8, value: u64) -> Self {
         // TODO: #![feature(const_index)]
         // https://github.com/rust-lang/rust/issues/143775
-        let [b0, b1, b2, b3, b4, b5, b6, b7] = value.to_be_bytes();
+        let [b0, b1, b2, b3, b4, b5, b6, b7] = value.to_le_bytes();
         Self([prefix, b0, b1, b2, b3, b4, b5, b6, b7])
     }
 
@@ -37,7 +37,7 @@ impl U64 {
     }
 
     pub fn value(&self) -> u64 {
-        u64::from_be_bytes(self.0[1..].try_into().unwrap())
+        u64::from_le_bytes(self.0[1..].try_into().unwrap())
     }
 }
 
@@ -88,7 +88,7 @@ impl Debug for U64 {
             f,
             "{}:{}",
             self.0[0],
-            u64::from_be_bytes(self.0[1..].try_into().unwrap())
+            u64::from_le_bytes(self.0[1..].try_into().unwrap())
         )
     }
 }

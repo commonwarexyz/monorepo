@@ -109,7 +109,7 @@ fn fuzz(input: FuzzInput) {
 
             BmtOperation::AddLeaf { value } => {
                 if let Some(ref mut b) = builder {
-                    let digest = Sha256::hash(&value.to_be_bytes());
+                    let digest = Sha256::hash(&value.to_le_bytes());
                     b.add(&digest);
                     leaf_values.push(*value);
                 }
@@ -141,7 +141,7 @@ fn fuzz(input: FuzzInput) {
             } => {
                 if let (Some(ref p), Some(ref t)) = (&proof, &tree) {
                     let mut hasher = Sha256::default();
-                    let leaf_digest = Sha256::hash(&leaf_value.to_be_bytes());
+                    let leaf_digest = Sha256::hash(&leaf_value.to_le_bytes());
                     let root = t.root();
                     let _ = p.verify_element_inclusion(&mut hasher, &leaf_digest, *position, &root);
                 }
@@ -170,7 +170,7 @@ fn fuzz(input: FuzzInput) {
                 leaf_values.clear();
 
                 for i in 0..count {
-                    let digest = Sha256::hash(&(i as u64).to_be_bytes());
+                    let digest = Sha256::hash(&(i as u64).to_le_bytes());
                     b.add(&digest);
                     leaf_values.push(i as u64);
                 }
@@ -195,7 +195,7 @@ fn fuzz(input: FuzzInput) {
                     let mut hasher = Sha256::default();
                     let leaf_digests: Vec<_> = leaf_values
                         .iter()
-                        .map(|v| Sha256::hash(&v.to_be_bytes()))
+                        .map(|v| Sha256::hash(&v.to_le_bytes()))
                         .collect();
 
                     // Verify range proof
@@ -253,7 +253,7 @@ fn fuzz(input: FuzzInput) {
                             let leaf_digests: Vec<_> = leaf_values
                                 [start_idx..start_idx + actual_count]
                                 .iter()
-                                .map(|v| Sha256::hash(&v.to_be_bytes()))
+                                .map(|v| Sha256::hash(&v.to_le_bytes()))
                                 .collect();
 
                             // Verify with wrong position (verify_start instead of proof_start)
@@ -273,7 +273,7 @@ fn fuzz(input: FuzzInput) {
                     let mut hasher = Sha256::default();
                     let tampered_digests: Vec<_> = tampered_values
                         .iter()
-                        .map(|v| Sha256::hash(&v.to_be_bytes()))
+                        .map(|v| Sha256::hash(&v.to_le_bytes()))
                         .collect();
 
                     // Verify with tampered digests
@@ -301,7 +301,7 @@ fn fuzz(input: FuzzInput) {
                     let element_digests: Vec<_> = elements
                         .iter()
                         .take(20) // Limit elements
-                        .map(|(v, pos)| (Sha256::hash(&v.to_be_bytes()), *pos))
+                        .map(|(v, pos)| (Sha256::hash(&v.to_le_bytes()), *pos))
                         .collect();
                     let root = t.root();
                     let _ = mp.verify_multi_inclusion(&mut hasher, &element_digests, &root);
@@ -333,7 +333,7 @@ fn fuzz(input: FuzzInput) {
                     let tampered_digests: Vec<_> = tampered_elements
                         .iter()
                         .take(20)
-                        .map(|(v, pos)| (Sha256::hash(&v.to_be_bytes()), *pos))
+                        .map(|(v, pos)| (Sha256::hash(&v.to_le_bytes()), *pos))
                         .collect();
                     let root = t.root();
                     let _ = mp.verify_multi_inclusion(&mut hasher, &tampered_digests, &root);
@@ -352,7 +352,7 @@ fn fuzz(input: FuzzInput) {
                             .filter_map(|&pos| {
                                 leaf_values
                                     .get(pos as usize)
-                                    .map(|v| (Sha256::hash(&v.to_be_bytes()), pos))
+                                    .map(|v| (Sha256::hash(&v.to_le_bytes()), pos))
                             })
                             .collect();
                         let root = t.root();

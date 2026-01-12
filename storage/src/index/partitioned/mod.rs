@@ -32,9 +32,9 @@ fn partition_index_and_sub_key<const P: usize>(key: &[u8]) -> (usize, &[u8]) {
     let copy_len = P.min(key.len());
 
     let mut bytes = [0u8; INDEX_INT_SIZE];
-    bytes[INDEX_INT_SIZE - copy_len..].copy_from_slice(&key[..copy_len]);
+    bytes[..copy_len].copy_from_slice(&key[..copy_len]);
 
-    (u32::from_be_bytes(bytes) as usize, &key[copy_len..])
+    (u32::from_le_bytes(bytes) as usize, &key[copy_len..])
 }
 
 #[cfg(test)]
@@ -82,17 +82,17 @@ mod tests {
 
         let key = [0x00, 0x01];
         let (index, sub_key) = partition_index_and_sub_key::<PREFIX_LENGTH>(&key);
-        assert_eq!(index, 1);
+        assert_eq!(index, 0x0100);
         assert_eq!(sub_key, b"");
 
         let key = [0x00, 0xFF, 0x01];
         let (index, sub_key) = partition_index_and_sub_key::<PREFIX_LENGTH>(&key);
-        assert_eq!(index, 0xFF);
+        assert_eq!(index, 0xFF00);
         assert_eq!(sub_key, &[0x01]);
 
         let key = [0x01, 0xFF, 0x02]; // Bytes after the prefix should be ignored.
         let (index, sub_key) = partition_index_and_sub_key::<PREFIX_LENGTH>(&key);
-        assert_eq!(index, (0x01 << 8) | (0xFF));
+        assert_eq!(index, (0xFF << 8) | 0x01);
         assert_eq!(sub_key, &[0x02]);
     }
 
@@ -112,22 +112,22 @@ mod tests {
 
         let key = [0x00, 0x01];
         let (index, sub_key) = partition_index_and_sub_key::<PREFIX_LENGTH>(&key);
-        assert_eq!(index, 1);
+        assert_eq!(index, 0x0100);
         assert_eq!(sub_key, b"");
 
         let key = [0x00, 0x01, 0x02];
         let (index, sub_key) = partition_index_and_sub_key::<PREFIX_LENGTH>(&key);
-        assert_eq!(index, (0x01 << 8) | 0x02);
+        assert_eq!(index, (0x02 << 16) | (0x01 << 8) | 0x00);
         assert_eq!(sub_key, b"");
 
         let key = [0x00, 0x01, 0x02, 0x03];
         let (index, sub_key) = partition_index_and_sub_key::<PREFIX_LENGTH>(&key);
-        assert_eq!(index, (0x01 << 8) | 0x02);
+        assert_eq!(index, (0x02 << 16) | (0x01 << 8) | 0x00);
         assert_eq!(sub_key, &[0x03]);
 
         let key = [0x01, 0xFF, 0xAB, 0xCD, 0xEF];
         let (index, sub_key) = partition_index_and_sub_key::<PREFIX_LENGTH>(&key);
-        assert_eq!(index, (0x01 << 16) | (0xFF << 8) | 0xAB);
+        assert_eq!(index, (0xAB << 16) | (0xFF << 8) | 0x01);
         assert_eq!(sub_key, &[0xCD, 0xEF]);
     }
 }

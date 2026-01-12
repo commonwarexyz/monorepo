@@ -210,7 +210,7 @@ fn fuzz(input: FuzzInput) {
                     size_factor,
                 } => {
                     if let Ok((blob, size)) =
-                        context.open(INDEX_PARTITION, &section.to_be_bytes()).await
+                        context.open(INDEX_PARTITION, &section.to_le_bytes()).await
                     {
                         let new_size = (size * (*size_factor as u64)) / 256;
                         let _ = blob.resize(new_size).await;
@@ -222,7 +222,7 @@ fn fuzz(input: FuzzInput) {
                     size_factor,
                 } => {
                     if let Ok((blob, size)) =
-                        context.open(VALUE_PARTITION, &section.to_be_bytes()).await
+                        context.open(VALUE_PARTITION, &section.to_le_bytes()).await
                     {
                         let new_size = (size * (*size_factor as u64)) / 256;
                         let _ = blob.resize(new_size).await;
@@ -235,7 +235,7 @@ fn fuzz(input: FuzzInput) {
                     data,
                 } => {
                     if let Ok((blob, size)) =
-                        context.open(INDEX_PARTITION, &section.to_be_bytes()).await
+                        context.open(INDEX_PARTITION, &section.to_le_bytes()).await
                     {
                         if size > 0 {
                             let offset = (size * (*offset_factor as u64)) / 256;
@@ -250,7 +250,7 @@ fn fuzz(input: FuzzInput) {
                     data,
                 } => {
                     if let Ok((blob, size)) =
-                        context.open(VALUE_PARTITION, &section.to_be_bytes()).await
+                        context.open(VALUE_PARTITION, &section.to_le_bytes()).await
                     {
                         if size > 0 {
                             let offset = (size * (*offset_factor as u64)) / 256;
@@ -261,17 +261,17 @@ fn fuzz(input: FuzzInput) {
                 }
                 CorruptionType::DeleteIndex { section } => {
                     let _ = context
-                        .remove(INDEX_PARTITION, Some(&section.to_be_bytes()))
+                        .remove(INDEX_PARTITION, Some(&section.to_le_bytes()))
                         .await;
                 }
                 CorruptionType::DeleteGlob { section } => {
                     let _ = context
-                        .remove(VALUE_PARTITION, Some(&section.to_be_bytes()))
+                        .remove(VALUE_PARTITION, Some(&section.to_le_bytes()))
                         .await;
                 }
                 CorruptionType::ExtendIndex { section, garbage } => {
                     if let Ok((blob, size)) =
-                        context.open(INDEX_PARTITION, &section.to_be_bytes()).await
+                        context.open(INDEX_PARTITION, &section.to_le_bytes()).await
                     {
                         let _ = blob.write_at(garbage.to_vec(), size).await;
                         let _ = blob.sync().await;
@@ -279,7 +279,7 @@ fn fuzz(input: FuzzInput) {
                 }
                 CorruptionType::ExtendGlob { section, garbage } => {
                     if let Ok((blob, size)) =
-                        context.open(VALUE_PARTITION, &section.to_be_bytes()).await
+                        context.open(VALUE_PARTITION, &section.to_le_bytes()).await
                     {
                         let _ = blob.write_at(garbage.to_vec(), size).await;
                         let _ = blob.sync().await;

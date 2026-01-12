@@ -44,10 +44,10 @@ type Message = Vec<u8>;
 /// padded to the given size.
 fn create_message(id: u32, target_size: Option<usize>) -> Message {
     target_size.map_or_else(
-        || id.to_be_bytes().to_vec(),
+        || id.to_le_bytes().to_vec(),
         |size| {
             let mut message = Vec::with_capacity(size);
-            message.extend_from_slice(&id.to_be_bytes());
+            message.extend_from_slice(&id.to_le_bytes());
             if size > 4 {
                 message.resize(size, 0);
             }
@@ -59,7 +59,7 @@ fn create_message(id: u32, target_size: Option<usize>) -> Message {
 /// Extract the ID from a message.
 fn extract_id_from_message(message: &Message) -> u32 {
     // Messages are always at least 4 bytes by construction
-    u32::from_be_bytes([message[0], message[1], message[2], message[3]])
+    u32::from_le_bytes([message[0], message[1], message[2], message[3]])
 }
 
 /// All state for a given peer
