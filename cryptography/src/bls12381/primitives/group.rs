@@ -270,8 +270,8 @@ impl Scalar {
     }
 
     /// Encodes the scalar into a byte array.
-    fn as_slice(&self) -> [u8; Self::SIZE] {
-        let mut slice = [0u8; Self::SIZE];
+    fn as_slice(&self) -> Zeroizing<[u8; Self::SIZE]> {
+        let mut slice = Zeroizing::new([0u8; Self::SIZE]);
         // SAFETY: All pointers valid; blst_bendian_from_scalar writes exactly 32 bytes.
         unsafe {
             let mut scalar = blst_scalar::default();
@@ -293,7 +293,7 @@ impl Scalar {
 impl Write for Scalar {
     fn write(&self, buf: &mut impl BufMut) {
         let slice = self.as_slice();
-        buf.put_slice(&slice);
+        buf.put_slice(slice.as_ref());
     }
 }
 
@@ -329,7 +329,7 @@ impl FixedSize for Scalar {
 impl Hash for Scalar {
     fn hash<H: Hasher>(&self, state: &mut H) {
         let slice = self.as_slice();
-        state.write(&slice);
+        state.write(slice.as_ref());
     }
 }
 
@@ -353,13 +353,13 @@ impl Ord for Scalar {
 
 impl Debug for Scalar {
     fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
-        write!(f, "{}", hex(&self.as_slice()))
+        write!(f, "{}", hex(self.as_slice().as_ref()))
     }
 }
 
 impl Display for Scalar {
     fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
-        write!(f, "{}", hex(&self.as_slice()))
+        write!(f, "{}", hex(self.as_slice().as_ref()))
     }
 }
 
