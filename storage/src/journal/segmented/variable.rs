@@ -2129,4 +2129,123 @@ mod tests {
             journal.destroy().await.unwrap();
         });
     }
+
+    #[test_traced]
+    fn test_journal_non_contiguous_sections() {
+        // Test that sections with gaps in numbering work correctly.
+        // Sections 1, 5, 10 should all be independent and accessible.
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test_partition".into(),
+                compression: None,
+                codec_config: (),
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                write_buffer: NZUsize!(1024),
+            };
+            let mut journal = Journal::init(context.clone(), cfg.clone())
+                .await
+                .expect("Failed to initialize journal");
+
+            // Create sections with gaps: 1, 5, 10
+            let sections_and_data = [(1u64, 100i32), (5u64, 500i32), (10u64, 1000i32)];
+            let mut offsets = Vec::new();
+
+            for (section, data) in &sections_and_data {
+                let (offset, _) = journal
+                    .append(*section, *data)
+                    .await
+                    .expect("Failed to append");
+                offsets.push(offset);
+            }
+            journal.sync_all().await.expect("Failed to sync");
+
+            // Verify random access to each section
+            for (i, (section, expected_data)) in sections_and_data.iter().enumerate() {
+                let retrieved: i32 = journal
+                    .get(*section, offsets[i])
+                    .await
+                    .expect("Failed to get item");
+                assert_eq!(retrieved, *expected_data);
+            }
+
+            // Verify non-existent sections return appropriate errors
+            for missing_section in [0u64, 2, 3, 4, 6, 7, 8, 9, 11] {
+                let result = journal.get(missing_section, 0).await;
+                assert!(
+                    matches!(result, Err(Error::SectionOutOfRange(_))),
+                    "Expected SectionOutOfRange for section {}, got {:?}",
+                    missing_section,
+                    result
+                );
+            }
+
+            // Drop and reopen to test replay
+            drop(journal);
+            let journal = Journal::<_, i32>::init(context.clone(), cfg.clone())
+                .await
+                .expect("Failed to re-initialize journal");
+
+            // Replay and verify all items in order
+            {
+                let stream = journal
+                    .replay(0, 0, NZUsize!(1024))
+                    .await
+                    .expect("Failed to setup replay");
+                pin_mut!(stream);
+
+                let mut items = Vec::new();
+                while let Some(result) = stream.next().await {
+                    let (section, _, _, item) = result.expect("Failed to replay item");
+                    items.push((section, item));
+                }
+
+                assert_eq!(items.len(), 3, "Should have 3 items");
+                assert_eq!(items[0], (1, 100));
+                assert_eq!(items[1], (5, 500));
+                assert_eq!(items[2], (10, 1000));
+            }
+
+            // Test replay starting from middle section (5)
+            {
+                let stream = journal
+                    .replay(5, 0, NZUsize!(1024))
+                    .await
+                    .expect("Failed to setup replay from section 5");
+                pin_mut!(stream);
+
+                let mut items = Vec::new();
+                while let Some(result) = stream.next().await {
+                    let (section, _, _, item) = result.expect("Failed to replay item");
+                    items.push((section, item));
+                }
+
+                assert_eq!(items.len(), 2, "Should have 2 items from section 5 onwards");
+                assert_eq!(items[0], (5, 500));
+                assert_eq!(items[1], (10, 1000));
+            }
+
+            // Test replay starting from non-existent section (should skip to next)
+            {
+                let stream = journal
+                    .replay(3, 0, NZUsize!(1024))
+                    .await
+                    .expect("Failed to setup replay from section 3");
+                pin_mut!(stream);
+
+                let mut items = Vec::new();
+                while let Some(result) = stream.next().await {
+                    let (section, _, _, item) = result.expect("Failed to replay item");
+                    items.push((section, item));
+                }
+
+                // Should get sections 5 and 10 (skipping non-existent 3, 4)
+                assert_eq!(items.len(), 2);
+                assert_eq!(items[0], (5, 500));
+                assert_eq!(items[1], (10, 1000));
+            }
+
+            journal.destroy().await.unwrap();
+        });
+    }
 }

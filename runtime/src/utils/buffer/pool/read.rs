@@ -461,4 +461,45 @@ mod tests {
             );
         });
     }
+
+    #[test_traced("DEBUG")]
+    fn test_replay_empty_blob() {
+        // Test that replaying an empty blob works correctly.
+        // ensure() should return Ok(false) when no data is available.
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (blob, blob_size) = context.open("test_partition", b"test_blob").await.unwrap();
+            assert_eq!(blob_size, 0);
+
+            let pool_ref = super::super::PoolRef::new(PAGE_SIZE, NZUsize!(BUFFER_PAGES));
+            let append = Append::new(blob.clone(), blob_size, BUFFER_PAGES * 115, pool_ref)
+                .await
+                .unwrap();
+
+            // Don't write any data - blob remains empty
+            assert_eq!(append.size().await, 0);
+
+            // Create Replay on empty blob
+            let mut replay = append.replay(NZUsize!(BUFFER_PAGES)).await.unwrap();
+
+            // Verify initial state - remaining is 0, but not yet marked exhausted
+            // (exhausted is set after first fill attempt)
+            assert_eq!(replay.remaining(), 0);
+
+            // ensure(0) should succeed (we have >= 0 bytes)
+            assert!(replay.ensure(0).await.unwrap());
+
+            // ensure(1) should return Ok(false) - not enough data, and marks exhausted
+            assert!(!replay.ensure(1).await.unwrap());
+
+            // Now should be marked as exhausted after the fill attempt
+            assert!(replay.is_exhausted());
+
+            // chunk() should return empty slice
+            assert!(replay.chunk().is_empty());
+
+            // remaining should still be 0
+            assert_eq!(replay.remaining(), 0);
+        });
+    }
 }
