@@ -142,39 +142,34 @@ pub fn binary_service_s3_key() -> String {
     format!("{S3_TOOLS_CONFIGS_PREFIX}/{DEPLOYER_VERSION}/binary/service")
 }
 
-/// Returns the S3 key for an instance's binary
-pub fn binary_s3_key(tag: &str, instance_name: &str) -> String {
-    format!("{S3_DEPLOYMENTS_PREFIX}/{tag}/instances/{instance_name}/binary")
+/// Returns the S3 key for an instance's binary by hash (deduplicated within deployment)
+pub fn binary_s3_key(tag: &str, hash: &str) -> String {
+    format!("{S3_DEPLOYMENTS_PREFIX}/{tag}/binaries/{hash}")
 }
 
-/// Returns the S3 key for an instance's config
-pub fn config_s3_key(tag: &str, instance_name: &str) -> String {
-    format!("{S3_DEPLOYMENTS_PREFIX}/{tag}/instances/{instance_name}/config.conf")
+/// Returns the S3 key for an instance's config by hash (deduplicated within deployment)
+pub fn config_s3_key(tag: &str, hash: &str) -> String {
+    format!("{S3_DEPLOYMENTS_PREFIX}/{tag}/configs/{hash}")
 }
 
-/// Returns the S3 key for an instance's hosts.yaml
-pub fn hosts_s3_key(tag: &str, instance_name: &str) -> String {
-    format!("{S3_DEPLOYMENTS_PREFIX}/{tag}/instances/{instance_name}/hosts.yaml")
+/// Returns the S3 key for hosts.yaml by hash (deduplicated within deployment)
+pub fn hosts_s3_key(tag: &str, hash: &str) -> String {
+    format!("{S3_DEPLOYMENTS_PREFIX}/{tag}/hosts/{hash}")
 }
 
-/// Returns the S3 key for an instance's promtail config
-pub fn promtail_config_s3_key(tag: &str, instance_name: &str) -> String {
-    format!("{S3_DEPLOYMENTS_PREFIX}/{tag}/instances/{instance_name}/promtail.yml")
+/// Returns the S3 key for promtail config by hash (deduplicated within deployment)
+pub fn promtail_s3_key(tag: &str, hash: &str) -> String {
+    format!("{S3_DEPLOYMENTS_PREFIX}/{tag}/promtail/{hash}")
 }
 
-/// Returns the S3 key for an instance's pyroscope agent script
-pub fn pyroscope_script_s3_key(tag: &str, instance_name: &str) -> String {
-    format!("{S3_DEPLOYMENTS_PREFIX}/{tag}/instances/{instance_name}/pyroscope-agent.sh")
+/// Returns the S3 key for pyroscope agent script by hash (deduplicated within deployment)
+pub fn pyroscope_s3_key(tag: &str, hash: &str) -> String {
+    format!("{S3_DEPLOYMENTS_PREFIX}/{tag}/pyroscope/{hash}")
 }
 
-/// Returns the S3 key for monitoring prometheus config
-pub fn prometheus_config_s3_key(tag: &str) -> String {
-    format!("{S3_DEPLOYMENTS_PREFIX}/{tag}/monitoring/prometheus.yml")
-}
-
-/// Returns the S3 key for monitoring dashboard
-pub fn dashboard_s3_key(tag: &str) -> String {
-    format!("{S3_DEPLOYMENTS_PREFIX}/{tag}/monitoring/dashboard.json")
+/// Returns the S3 key for monitoring config by hash (deduplicated within deployment)
+pub fn monitoring_s3_key(tag: &str, hash: &str) -> String {
+    format!("{S3_DEPLOYMENTS_PREFIX}/{tag}/monitoring/{hash}")
 }
 
 /// Returns the download URL for Prometheus from GitHub
@@ -1014,33 +1009,30 @@ mod tests {
 
     #[test]
     fn test_deployment_s3_keys() {
+        let hash = "abc123def456";
         assert_eq!(
-            binary_s3_key("my-tag", "node1"),
-            "deployments/my-tag/instances/node1/binary"
+            binary_s3_key("my-tag", hash),
+            "deployments/my-tag/binaries/abc123def456"
         );
         assert_eq!(
-            config_s3_key("my-tag", "node1"),
-            "deployments/my-tag/instances/node1/config.conf"
+            config_s3_key("my-tag", hash),
+            "deployments/my-tag/configs/abc123def456"
         );
         assert_eq!(
-            hosts_s3_key("my-tag", "node1"),
-            "deployments/my-tag/instances/node1/hosts.yaml"
+            hosts_s3_key("my-tag", hash),
+            "deployments/my-tag/hosts/abc123def456"
         );
         assert_eq!(
-            promtail_config_s3_key("my-tag", "node1"),
-            "deployments/my-tag/instances/node1/promtail.yml"
+            promtail_s3_key("my-tag", hash),
+            "deployments/my-tag/promtail/abc123def456"
         );
         assert_eq!(
-            pyroscope_script_s3_key("my-tag", "node1"),
-            "deployments/my-tag/instances/node1/pyroscope-agent.sh"
+            pyroscope_s3_key("my-tag", hash),
+            "deployments/my-tag/pyroscope/abc123def456"
         );
         assert_eq!(
-            prometheus_config_s3_key("my-tag"),
-            "deployments/my-tag/monitoring/prometheus.yml"
-        );
-        assert_eq!(
-            dashboard_s3_key("my-tag"),
-            "deployments/my-tag/monitoring/dashboard.json"
+            monitoring_s3_key("my-tag", hash),
+            "deployments/my-tag/monitoring/abc123def456"
         );
     }
 }

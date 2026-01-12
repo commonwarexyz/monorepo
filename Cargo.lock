@@ -1312,6 +1312,7 @@ dependencies = [
  "aws-sdk-s3",
  "cfg-if",
  "clap",
+ "commonware-cryptography",
  "futures",
  "reqwest",
  "serde",

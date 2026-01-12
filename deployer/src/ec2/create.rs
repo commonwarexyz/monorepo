@@ -152,40 +152,92 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
         .unwrap();
     info!("observability tools ready");
 
-    // Upload instance binaries and configs to S3 concurrently
-    info!("uploading instance binaries and configs to S3");
-    let binary_config_results: Vec<(String, [String; 2])> =
-        try_join_all(config.instances.iter().map(|instance| async {
-            let binary_key = binary_s3_key(tag, &instance.name);
-            let config_key = config_s3_key(tag, &instance.name);
-            let urls: [String; 2] = try_join_all([
-                upload_and_presign(
-                    &s3_client,
-                    S3_BUCKET_NAME,
-                    &binary_key,
-                    std::path::Path::new(&instance.binary),
-                    PRESIGN_DURATION,
-                ),
-                upload_and_presign(
-                    &s3_client,
-                    S3_BUCKET_NAME,
-                    &config_key,
-                    std::path::Path::new(&instance.config),
-                    PRESIGN_DURATION,
-                ),
-            ])
-            .await?
-            .try_into()
-            .unwrap();
-            Ok::<_, Error>((instance.name.clone(), urls))
-        }))
-        .await?;
+    // Compute hashes for binaries and configs, grouping by hash for deduplication
+    info!("computing hashes for instance binaries and configs");
+    let mut binary_hashes: HashMap<String, String> = HashMap::new(); // hash -> path
+    let mut config_hashes: HashMap<String, String> = HashMap::new(); // hash -> path
+    let mut instance_binary_hash: HashMap<String, String> = HashMap::new(); // instance -> hash
+    let mut instance_config_hash: HashMap<String, String> = HashMap::new(); // instance -> hash
 
+    for instance in &config.instances {
+        let binary_hash = hash_file(std::path::Path::new(&instance.binary))?;
+        let config_hash = hash_file(std::path::Path::new(&instance.config))?;
+        binary_hashes.insert(binary_hash.clone(), instance.binary.clone());
+        config_hashes.insert(config_hash.clone(), instance.config.clone());
+        instance_binary_hash.insert(instance.name.clone(), binary_hash);
+        instance_config_hash.insert(instance.name.clone(), config_hash);
+    }
+    info!(
+        unique_binaries = binary_hashes.len(),
+        unique_configs = config_hashes.len(),
+        "computed hashes"
+    );
+
+    // Upload unique binaries and configs to S3 (deduplicated by hash)
+    info!("uploading unique binaries and configs to S3");
+    let binary_keys: Vec<_> = binary_hashes
+        .keys()
+        .map(|hash| binary_s3_key(tag, hash))
+        .collect();
+    let binary_paths: Vec<_> = binary_hashes.values().collect();
+    let mut binary_uploads = Vec::new();
+    for (key, path) in binary_keys.iter().zip(binary_paths.iter()) {
+        binary_uploads.push(cache_file_and_presign(
+            &s3_client,
+            S3_BUCKET_NAME,
+            key,
+            std::path::Path::new(path),
+            PRESIGN_DURATION,
+        ));
+    }
+
+    let config_keys: Vec<_> = config_hashes
+        .keys()
+        .map(|hash| config_s3_key(tag, hash))
+        .collect();
+    let config_paths: Vec<_> = config_hashes.values().collect();
+    let mut config_uploads = Vec::new();
+    for (key, path) in config_keys.iter().zip(config_paths.iter()) {
+        config_uploads.push(cache_file_and_presign(
+            &s3_client,
+            S3_BUCKET_NAME,
+            key,
+            std::path::Path::new(path),
+            PRESIGN_DURATION,
+        ));
+    }
+
+    let (binary_results, config_results): (Vec<String>, Vec<String>) = tokio::try_join!(
+        async { try_join_all(binary_uploads).await },
+        async { try_join_all(config_uploads).await },
+    )?;
+
+    // Build hash -> URL maps
+    let binary_hash_to_url: HashMap<String, String> = binary_hashes
+        .keys()
+        .cloned()
+        .zip(binary_results)
+        .collect();
+    let config_hash_to_url: HashMap<String, String> = config_hashes
+        .keys()
+        .cloned()
+        .zip(config_results)
+        .collect();
+
+    // Map instance names to URLs via their hashes
     let mut instance_binary_urls: HashMap<String, String> = HashMap::new();
     let mut instance_config_urls: HashMap<String, String> = HashMap::new();
-    for (name, [binary_url, config_url]) in binary_config_results {
-        instance_binary_urls.insert(name.clone(), binary_url);
-        instance_config_urls.insert(name, config_url);
+    for instance in &config.instances {
+        let binary_hash = &instance_binary_hash[&instance.name];
+        let config_hash = &instance_config_hash[&instance.name];
+        instance_binary_urls.insert(
+            instance.name.clone(),
+            binary_hash_to_url[binary_hash].clone(),
+        );
+        instance_config_urls.insert(
+            instance.name.clone(),
+            config_hash_to_url[config_hash].clone(),
+        );
     }
     info!("uploaded all instance binaries and configs");
 
@@ -479,11 +531,8 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     let deployments: Vec<Deployment> = try_join_all(launch_futures).await?;
     info!("launched binary instances");
 
-    // Configure monitoring instance
-    info!("configuring monitoring instance");
-    wait_for_instances_ready(&ec2_clients[&monitoring_region], &[monitoring_instance_id]).await?;
-
-    // Cache static config files globally (these don't change between deployments)
+    // Cache ALL static config files globally (these don't change between deployments)
+    // This includes both monitoring and binary instance static files
     info!("caching static config files");
     let [
         bbr_conf_url,
@@ -497,7 +546,12 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
         pyroscope_service_url,
         tempo_service_url,
         monitoring_node_exporter_service_url,
-    ]: [String; 11] = try_join_all([
+        promtail_service_url,
+        binary_service_url,
+        logrotate_conf_url,
+        pyroscope_agent_service_url,
+        pyroscope_agent_timer_url,
+    ]: [String; 16] = try_join_all([
         cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &bbr_config_s3_key(), BBR_CONF.as_bytes(), PRESIGN_DURATION),
         cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &grafana_datasources_s3_key(), DATASOURCES_YML.as_bytes(), PRESIGN_DURATION),
         cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &grafana_dashboards_s3_key(), ALL_YML.as_bytes(), PRESIGN_DURATION),
@@ -509,12 +563,17 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
         cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &pyroscope_service_s3_key(), PYROSCOPE_SERVICE.as_bytes(), PRESIGN_DURATION),
         cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &tempo_service_s3_key(), TEMPO_SERVICE.as_bytes(), PRESIGN_DURATION),
         cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &node_exporter_service_s3_key(), NODE_EXPORTER_SERVICE.as_bytes(), PRESIGN_DURATION),
+        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &promtail_service_s3_key(), PROMTAIL_SERVICE.as_bytes(), PRESIGN_DURATION),
+        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &binary_service_s3_key(), BINARY_SERVICE.as_bytes(), PRESIGN_DURATION),
+        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &logrotate_config_s3_key(), LOGROTATE_CONF.as_bytes(), PRESIGN_DURATION),
+        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &pyroscope_agent_service_s3_key(), PYROSCOPE_AGENT_SERVICE.as_bytes(), PRESIGN_DURATION),
+        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &pyroscope_agent_timer_s3_key(), PYROSCOPE_AGENT_TIMER.as_bytes(), PRESIGN_DURATION),
     ])
     .await?
     .try_into()
     .unwrap();
 
-    // Upload deployment-specific config files (these contain instance IPs or user-provided content)
+    // Upload deployment-specific monitoring config files (deduplicated by hash)
     info!("uploading deployment-specific config files");
     let instances: Vec<(&str, &str, &str)> = deployments
         .iter()
@@ -529,19 +588,21 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     let prom_config = generate_prometheus_config(&instances);
     let prom_path = tag_directory.join("prometheus.yml");
     std::fs::write(&prom_path, &prom_config)?;
+    let prom_hash = hash_file(&prom_path)?;
     let dashboard_path = std::path::PathBuf::from(&config.monitoring.dashboard);
+    let dashboard_hash = hash_file(&dashboard_path)?;
     let [prometheus_config_url, dashboard_url]: [String; 2] = try_join_all([
-        upload_and_presign(
+        cache_file_and_presign(
             &s3_client,
             S3_BUCKET_NAME,
-            &prometheus_config_s3_key(tag),
+            &monitoring_s3_key(tag, &prom_hash),
             &prom_path,
             PRESIGN_DURATION,
         ),
-        upload_and_presign(
+        cache_file_and_presign(
             &s3_client,
             S3_BUCKET_NAME,
-            &dashboard_s3_key(tag),
+            &monitoring_s3_key(tag, &dashboard_hash),
             &dashboard_path,
             PRESIGN_DURATION,
         ),
@@ -551,44 +612,7 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     .unwrap();
     info!("uploaded deployment-specific config files to S3");
 
-    // Install and configure monitoring services
-    enable_bbr(private_key, &monitoring_ip, &bbr_conf_url).await?;
-    let monitoring_urls = MonitoringUrls {
-        prometheus_bin: prometheus_url,
-        grafana_bin: grafana_url,
-        loki_bin: loki_url,
-        pyroscope_bin: pyroscope_url,
-        tempo_bin: tempo_url,
-        node_exporter_bin: node_exporter_url.clone(),
-        prometheus_config: prometheus_config_url,
-        datasources_yml: datasources_url,
-        all_yml: all_yml_url,
-        dashboard: dashboard_url,
-        loki_yml: loki_yml_url,
-        pyroscope_yml: pyroscope_yml_url,
-        tempo_yml: tempo_yml_url,
-        prometheus_service: prometheus_service_url,
-        loki_service: loki_service_url,
-        pyroscope_service: pyroscope_service_url,
-        tempo_service: tempo_service_url,
-        node_exporter_service: monitoring_node_exporter_service_url.clone(),
-    };
-    ssh_execute(
-        private_key,
-        &monitoring_ip,
-        &install_monitoring_cmd(&monitoring_urls, PROMETHEUS_VERSION),
-    )
-    .await?;
-    ssh_execute(private_key, &monitoring_ip, start_monitoring_services_cmd()).await?;
-    poll_service_active(private_key, &monitoring_ip, "node_exporter").await?;
-    poll_service_active(private_key, &monitoring_ip, "prometheus").await?;
-    poll_service_active(private_key, &monitoring_ip, "loki").await?;
-    poll_service_active(private_key, &monitoring_ip, "pyroscope").await?;
-    poll_service_active(private_key, &monitoring_ip, "tempo").await?;
-    poll_service_active(private_key, &monitoring_ip, "grafana-server").await?;
-    info!("configured monitoring instance");
-
-    // Generate hosts.yaml
+    // Generate hosts.yaml (needed for per-instance configs)
     let hosts = Hosts {
         monitoring: monitoring_private_ip.clone().parse::<IpAddr>().unwrap(),
         hosts: deployments
@@ -604,28 +628,10 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     let hosts_path = tag_directory.join("hosts.yaml");
     std::fs::write(&hosts_path, &hosts_yaml)?;
 
-    // Cache static service files for binary instances (these don't change between deployments)
-    info!("caching binary instance static files");
-    let [
-        promtail_service_url,
-        binary_service_url,
-        logrotate_conf_url,
-        pyroscope_agent_service_url,
-        pyroscope_agent_timer_url,
-    ]: [String; 5] = try_join_all([
-        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &promtail_service_s3_key(), PROMTAIL_SERVICE.as_bytes(), PRESIGN_DURATION),
-        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &binary_service_s3_key(), BINARY_SERVICE.as_bytes(), PRESIGN_DURATION),
-        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &logrotate_config_s3_key(), LOGROTATE_CONF.as_bytes(), PRESIGN_DURATION),
-        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &pyroscope_agent_service_s3_key(), PYROSCOPE_AGENT_SERVICE.as_bytes(), PRESIGN_DURATION),
-        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &pyroscope_agent_timer_s3_key(), PYROSCOPE_AGENT_TIMER.as_bytes(), PRESIGN_DURATION),
-    ])
-    .await?
-    .try_into()
-    .unwrap();
-
-    // Write per-instance config files locally
+    // Write per-instance config files locally and compute hashes
     info!("uploading per-instance config files to S3");
-    let mut per_instance_paths: Vec<(String, std::path::PathBuf, std::path::PathBuf)> = Vec::new();
+    let mut per_instance_data: Vec<(String, std::path::PathBuf, String, std::path::PathBuf, String)> =
+        Vec::new();
     for deployment in &deployments {
         let instance = &deployment.instance;
         let ip = &deployment.ip;
@@ -634,39 +640,50 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
             promtail_config(&monitoring_private_ip, &instance.name, ip, &instance.region);
         let promtail_path = tag_directory.join(format!("promtail_{}.yml", instance.name));
         std::fs::write(&promtail_path, &promtail_cfg)?;
+        let promtail_hash = hash_file(&promtail_path)?;
 
         let pyroscope_script =
             generate_pyroscope_script(&monitoring_private_ip, &instance.name, ip, &instance.region);
         let pyroscope_path = tag_directory.join(format!("pyroscope-agent_{}.sh", instance.name));
         std::fs::write(&pyroscope_path, &pyroscope_script)?;
+        let pyroscope_hash = hash_file(&pyroscope_path)?;
 
-        per_instance_paths.push((instance.name.clone(), promtail_path, pyroscope_path));
+        per_instance_data.push((
+            instance.name.clone(),
+            promtail_path,
+            promtail_hash,
+            pyroscope_path,
+            pyroscope_hash,
+        ));
     }
+
+    // Compute hosts.yaml hash (same for all instances)
+    let hosts_hash = hash_file(&hosts_path)?;
 
     // Upload all per-instance files concurrently and build InstanceUrls
     let mut instance_urls_map: HashMap<String, InstanceUrls> =
-        try_join_all(per_instance_paths.iter().map(
-            |(name, promtail_path, pyroscope_path)| async {
+        try_join_all(per_instance_data.iter().map(
+            |(name, promtail_path, promtail_hash, pyroscope_path, pyroscope_hash)| async {
                 let [hosts_url, promtail_config_url, pyroscope_script_url]: [String; 3] =
                     try_join_all([
-                        upload_and_presign(
+                        cache_file_and_presign(
                             &s3_client,
                             S3_BUCKET_NAME,
-                            &hosts_s3_key(tag, name),
+                            &hosts_s3_key(tag, &hosts_hash),
                             &hosts_path,
                             PRESIGN_DURATION,
                         ),
-                        upload_and_presign(
+                        cache_file_and_presign(
                             &s3_client,
                             S3_BUCKET_NAME,
-                            &promtail_config_s3_key(tag, name),
+                            &promtail_s3_key(tag, promtail_hash),
                             promtail_path,
                             PRESIGN_DURATION,
                         ),
-                        upload_and_presign(
+                        cache_file_and_presign(
                             &s3_client,
                             S3_BUCKET_NAME,
-                            &pyroscope_script_s3_key(tag, name),
+                            &pyroscope_s3_key(tag, pyroscope_hash),
                             pyroscope_path,
                             PRESIGN_DURATION,
                         ),
@@ -700,20 +717,42 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
         .collect();
     info!("uploaded all instance config files to S3");
 
-    // Configure binary instances
-    info!("configuring binary instances");
-    let mut start_futures = Vec::new();
+    // Build monitoring URLs struct for SSH configuration
+    let monitoring_urls = MonitoringUrls {
+        prometheus_bin: prometheus_url,
+        grafana_bin: grafana_url,
+        loki_bin: loki_url,
+        pyroscope_bin: pyroscope_url,
+        tempo_bin: tempo_url,
+        node_exporter_bin: node_exporter_url.clone(),
+        prometheus_config: prometheus_config_url,
+        datasources_yml: datasources_url,
+        all_yml: all_yml_url,
+        dashboard: dashboard_url,
+        loki_yml: loki_yml_url,
+        pyroscope_yml: pyroscope_yml_url,
+        tempo_yml: tempo_yml_url,
+        prometheus_service: prometheus_service_url,
+        loki_service: loki_service_url,
+        pyroscope_service: pyroscope_service_url,
+        tempo_service: tempo_service_url,
+        node_exporter_service: monitoring_node_exporter_service_url.clone(),
+    };
+
+    // Configure monitoring and binary instances in parallel
+    info!("configuring monitoring and binary instances in parallel");
+
+    // Prepare binary instance configuration futures
+    let mut binary_futures = Vec::new();
     for deployment in &deployments {
         let instance = deployment.instance.clone();
-        wait_for_instances_ready(
-            &ec2_clients[&instance.region],
-            slice::from_ref(&deployment.id),
-        )
-        .await?;
+        let deployment_id = deployment.id.clone();
+        let ec2_client = ec2_clients[&instance.region].clone();
         let ip = deployment.ip.clone();
         let bbr_url = bbr_conf_url.clone();
         let urls = instance_urls_map.remove(&instance.name).unwrap();
         let future = async move {
+            wait_for_instances_ready(&ec2_client, slice::from_ref(&deployment_id)).await?;
             enable_bbr(private_key, &ip, &bbr_url).await?;
             ssh_execute(
                 private_key,
@@ -731,10 +770,40 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
             );
             Ok::<String, Error>(ip)
         };
-        start_futures.push(future);
+        binary_futures.push(future);
     }
-    let all_binary_ips = try_join_all(start_futures).await?;
-    info!("configured binary instances");
+
+    // Run monitoring and binary configuration in parallel
+    let (_, all_binary_ips) = tokio::try_join!(
+        async {
+            // Configure monitoring instance
+            let monitoring_ec2_client = &ec2_clients[&monitoring_region];
+            wait_for_instances_ready(monitoring_ec2_client, &[monitoring_instance_id.clone()])
+                .await?;
+            enable_bbr(private_key, &monitoring_ip, &bbr_conf_url).await?;
+            ssh_execute(
+                private_key,
+                &monitoring_ip,
+                &install_monitoring_cmd(&monitoring_urls, PROMETHEUS_VERSION),
+            )
+            .await?;
+            ssh_execute(private_key, &monitoring_ip, start_monitoring_services_cmd()).await?;
+            poll_service_active(private_key, &monitoring_ip, "node_exporter").await?;
+            poll_service_active(private_key, &monitoring_ip, "prometheus").await?;
+            poll_service_active(private_key, &monitoring_ip, "loki").await?;
+            poll_service_active(private_key, &monitoring_ip, "pyroscope").await?;
+            poll_service_active(private_key, &monitoring_ip, "tempo").await?;
+            poll_service_active(private_key, &monitoring_ip, "grafana-server").await?;
+            info!("configured monitoring instance");
+            Ok::<(), Error>(())
+        },
+        async {
+            // Configure binary instances
+            let all_binary_ips = try_join_all(binary_futures).await?;
+            info!("configured binary instances");
+            Ok::<Vec<String>, Error>(all_binary_ips)
+        }
+    )?;
 
     // Update monitoring security group to restrict Loki port (3100)
     info!("updating monitoring security group to allow traffic from binary instances");

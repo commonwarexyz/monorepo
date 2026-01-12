@@ -102,13 +102,15 @@
 //!
 //! 1. Validates configuration and generates an SSH key pair, stored in `$HOME/.commonware_deployer/{tag}/id_rsa_{tag}`.
 //! 2. Ensures the shared S3 bucket exists and caches observability tools (Prometheus, Grafana, Loki, etc.) if not already present.
-//! 3. Uploads deployment-specific files (binaries, configs, service files) to S3.
+//! 3. Uploads deployment-specific files (binaries, configs) to S3.
 //! 4. Creates VPCs, subnets, internet gateways, route tables, and security groups per region.
 //! 5. Establishes VPC peering between the monitoring region and binary regions.
-//! 6. Launches the monitoring instance, which downloads tools from S3 via pre-signed URLs.
-//! 7. Launches binary instances, which download binaries and configs from S3 via pre-signed URLs.
-//! 8. Configures BBR on all instances and updates the monitoring security group for Loki traffic.
-//! 9. Marks completion with `$HOME/.commonware_deployer/{tag}/created`.
+//! 6. Launches the monitoring instance.
+//! 7. Launches binary instances.
+//! 8. Caches all static config files and uploads per-instance configs (hosts.yaml, promtail, pyroscope) to S3.
+//! 9. Configures monitoring and binary instances in parallel via SSH (BBR, service installation, service startup).
+//! 10. Updates the monitoring security group to allow telemetry traffic from binary instances.
+//! 11. Marks completion with `$HOME/.commonware_deployer/{tag}/created`.
 //!
 //! ## `ec2 update`
 //!

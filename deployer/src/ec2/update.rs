@@ -45,52 +45,98 @@ pub async fn update(config_path: &PathBuf) -> Result<(), Error> {
         .map(|i| (i.name.clone(), i.clone()))
         .collect();
 
-    // Upload updated binaries and configs to S3 and generate pre-signed URLs concurrently
-    info!("uploading updated binaries and configs to S3");
+    // Upload updated binaries and configs to S3 and generate pre-signed URLs
+    // Uses hash-based deduplication to avoid re-uploading identical files
+    info!("computing hashes for binaries and configs");
     let s3_client = create_s3_client(Region::new(MONITORING_REGION)).await;
 
-    let upload_results: Vec<(String, String, String)> =
-        try_join_all(config.instances.iter().map(|instance| {
-            let s3_client = s3_client.clone();
-            let tag = tag.clone();
-            let name = instance.name.clone();
-            let binary_path = instance.binary.clone();
-            let config_path = instance.config.clone();
-            async move {
-                let binary_key = binary_s3_key(&tag, &name);
-                let config_key = config_s3_key(&tag, &name);
+    // Compute hashes and build deduplication maps
+    let mut binary_hashes: HashMap<String, String> = HashMap::new();
+    let mut config_hashes: HashMap<String, String> = HashMap::new();
+    let mut instance_binary_hash: HashMap<String, String> = HashMap::new();
+    let mut instance_config_hash: HashMap<String, String> = HashMap::new();
 
-                let [binary_url, config_url]: [String; 2] = try_join_all([
-                    upload_and_presign(
-                        &s3_client,
-                        S3_BUCKET_NAME,
-                        &binary_key,
-                        std::path::Path::new(&binary_path),
-                        PRESIGN_DURATION,
-                    ),
-                    upload_and_presign(
-                        &s3_client,
-                        S3_BUCKET_NAME,
-                        &config_key,
-                        std::path::Path::new(&config_path),
-                        PRESIGN_DURATION,
-                    ),
-                ])
-                .await?
-                .try_into()
-                .unwrap();
+    for instance in &config.instances {
+        let binary_hash = hash_file(std::path::Path::new(&instance.binary))?;
+        let config_hash = hash_file(std::path::Path::new(&instance.config))?;
 
-                info!(instance = name.as_str(), "uploaded binary and config");
-                Ok::<_, Error>((name, binary_url, config_url))
-            }
-        }))
-        .await?;
+        binary_hashes.insert(binary_hash.clone(), instance.binary.clone());
+        config_hashes.insert(config_hash.clone(), instance.config.clone());
+        instance_binary_hash.insert(instance.name.clone(), binary_hash);
+        instance_config_hash.insert(instance.name.clone(), config_hash);
+    }
 
+    info!(
+        unique_binaries = binary_hashes.len(),
+        unique_configs = config_hashes.len(),
+        "computed hashes"
+    );
+
+    // Upload unique binaries and configs (deduplicated by hash)
+    info!("uploading unique binaries and configs to S3");
+    let binary_keys: Vec<_> = binary_hashes
+        .keys()
+        .map(|hash| binary_s3_key(tag, hash))
+        .collect();
+    let binary_paths: Vec<_> = binary_hashes.values().collect();
+    let mut binary_uploads = Vec::new();
+    for (key, path) in binary_keys.iter().zip(binary_paths.iter()) {
+        binary_uploads.push(cache_file_and_presign(
+            &s3_client,
+            S3_BUCKET_NAME,
+            key,
+            std::path::Path::new(path),
+            PRESIGN_DURATION,
+        ));
+    }
+
+    let config_keys: Vec<_> = config_hashes
+        .keys()
+        .map(|hash| config_s3_key(tag, hash))
+        .collect();
+    let config_paths: Vec<_> = config_hashes.values().collect();
+    let mut config_uploads = Vec::new();
+    for (key, path) in config_keys.iter().zip(config_paths.iter()) {
+        config_uploads.push(cache_file_and_presign(
+            &s3_client,
+            S3_BUCKET_NAME,
+            key,
+            std::path::Path::new(path),
+            PRESIGN_DURATION,
+        ));
+    }
+
+    let (binary_results, config_results): (Vec<String>, Vec<String>) = tokio::try_join!(
+        async { try_join_all(binary_uploads).await },
+        async { try_join_all(config_uploads).await },
+    )?;
+
+    // Build hash -> URL maps
+    let binary_hash_to_url: HashMap<String, String> = binary_hashes
+        .keys()
+        .cloned()
+        .zip(binary_results)
+        .collect();
+    let config_hash_to_url: HashMap<String, String> = config_hashes
+        .keys()
+        .cloned()
+        .zip(config_results)
+        .collect();
+
+    // Map instance names to URLs via their hashes
     let mut instance_binary_urls: HashMap<String, String> = HashMap::new();
     let mut instance_config_urls: HashMap<String, String> = HashMap::new();
-    for (name, binary_url, config_url) in upload_results {
-        instance_binary_urls.insert(name.clone(), binary_url);
-        instance_config_urls.insert(name, config_url);
+    for instance in &config.instances {
+        let binary_hash = &instance_binary_hash[&instance.name];
+        let config_hash = &instance_config_hash[&instance.name];
+        instance_binary_urls.insert(
+            instance.name.clone(),
+            binary_hash_to_url[binary_hash].clone(),
+        );
+        instance_config_urls.insert(
+            instance.name.clone(),
+            config_hash_to_url[config_hash].clone(),
+        );
     }
     info!("uploaded all updated binaries and configs");
 

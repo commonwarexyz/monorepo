@@ -11,7 +11,12 @@ use aws_sdk_s3::{
     types::{BucketLocationConstraint, CreateBucketConfiguration, Delete, ObjectIdentifier},
     Client as S3Client,
 };
-use std::{path::Path, time::Duration};
+use commonware_cryptography::{Hasher, Sha256};
+use std::{
+    io::Read,
+    path::Path,
+    time::Duration,
+};
 use tracing::info;
 
 /// S3 bucket name for caching deployer artifacts
@@ -161,6 +166,37 @@ pub async fn cache_content_and_presign(
             .send()
             .await
             .map_err(|e| aws_sdk_s3::Error::from(e.into_service_error()))?;
+    }
+    presign_url(client, bucket, key, expires_in).await
+}
+
+/// Computes the SHA256 hash of a file and returns it as a hex string
+pub fn hash_file(path: &Path) -> Result<String, Error> {
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 8192];
+    loop {
+        let bytes_read = file.read(&mut buffer)?;
+        if bytes_read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..bytes_read]);
+    }
+    Ok(hasher.finalize().to_string())
+}
+
+/// Caches a file to S3 by hash if it doesn't exist, then returns a pre-signed URL
+#[must_use = "the pre-signed URL should be used to download the file"]
+pub async fn cache_file_and_presign(
+    client: &S3Client,
+    bucket: &str,
+    key: &str,
+    path: &Path,
+    expires_in: Duration,
+) -> Result<String, Error> {
+    if !object_exists(client, bucket, key).await? {
+        info!(key = key, "file not cached, uploading");
+        upload_file(client, bucket, key, path).await?;
     }
     presign_url(client, bucket, key, expires_in).await
 }
