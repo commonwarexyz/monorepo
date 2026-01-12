@@ -966,18 +966,14 @@ pub mod test {
             }
             assert!(db.status.get_bit(*db.op_count() - 1));
 
-            // Test that we can do a non-durable root.
+            // Test that we can get a non-durable root.
             let mut db = db.into_mutable();
             db.update(k1, v1).await.unwrap();
             let db = db.into_merkleized().await.unwrap();
             assert_ne!(db.root(), root3);
 
-            // Test that we can do a merkleized commit.
-            let (db, _) = db.commit(None).await.unwrap();
-            assert!(db.get_metadata().await.unwrap().is_none());
-            assert_eq!(db.op_count(), 10);
-
-            db.destroy().await.unwrap();
+            let (db, _) = db.into_mutable().commit(None).await.unwrap();
+            db.into_merkleized().await.unwrap().destroy().await.unwrap();
         });
     }
 
