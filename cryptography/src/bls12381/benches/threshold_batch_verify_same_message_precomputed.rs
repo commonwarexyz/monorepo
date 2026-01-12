@@ -20,6 +20,7 @@ fn benchmark_threshold_batch_verify_same_message_precomputed(c: &mut Criterion) 
         let f = n - t;
         for invalid in [0, f] {
             for concurrency in [1, 8] {
+                let strategy = Rayon::new(NZUsize!(concurrency)).unwrap();
                 c.bench_function(
                     &format!(
                         "{}/n={} t={} invalid={} conc={}",
@@ -66,7 +67,6 @@ fn benchmark_threshold_batch_verify_same_message_precomputed(c: &mut Criterion) 
                                 }
 
                                 let result = if concurrency > 1 {
-                                    let strategy = Rayon::new(NZUsize!(concurrency)).unwrap();
                                     black_box(
                                         primitives::ops::threshold::batch_verify_same_message::<
                                             _,

@@ -14,6 +14,7 @@ fn benchmark_batch_verify_same_signer(c: &mut Criterion) {
             msgs.push(msg);
         }
         for concurrency in [1, 8] {
+            let strategy = Rayon::new(NZUsize!(concurrency)).unwrap();
             c.bench_function(
                 &format!("{}/conc={} msgs={}", module_path!(), concurrency, n),
                 |b| {
@@ -31,7 +32,6 @@ fn benchmark_batch_verify_same_signer(c: &mut Criterion) {
                         },
                         |(public, entries)| {
                             if concurrency > 1 {
-                                let strategy = Rayon::new(NZUsize!(concurrency)).unwrap();
                                 ops::batch::verify_same_signer::<_, MinSig, _>(
                                     &mut thread_rng(),
                                     &public,

@@ -20,6 +20,7 @@ fn benchmark_hash_to_curve(c: &mut Criterion) {
         }
 
         for concurrency in [1, 8] {
+            let strategy = Rayon::new(NZUsize!(concurrency)).unwrap();
             c.bench_function(
                 &format!("{}/n={} conc={}", module_path!(), n, concurrency),
                 |b| {
@@ -27,7 +28,6 @@ fn benchmark_hash_to_curve(c: &mut Criterion) {
                         || msgs.clone(),
                         |msgs| {
                             let hms: Vec<_> = if concurrency > 1 {
-                                let strategy = Rayon::new(NZUsize!(concurrency)).unwrap();
                                 strategy.map_collect_vec(&msgs, |msg| {
                                     hash_with_namespace::<MinSig>(MinSig::MESSAGE, namespace, msg)
                                 })

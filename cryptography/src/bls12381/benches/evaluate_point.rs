@@ -10,6 +10,7 @@ fn benchmark_evaluate_point(c: &mut Criterion) {
     for &n in &[5, 10, 20, 50, 100, 250, 500] {
         let t = quorum(n);
         for concurrency in [1, 8] {
+            let strategy = Rayon::new(NZUsize!(concurrency)).unwrap();
             c.bench_function(
                 &format!("{}/n={} t={} conc={}", module_path!(), n, t, concurrency),
                 |b| {
@@ -22,7 +23,6 @@ fn benchmark_evaluate_point(c: &mut Criterion) {
                         },
                         |(scalar, polynomial)| {
                             if concurrency > 1 {
-                                let strategy = Rayon::new(NZUsize!(concurrency)).unwrap();
                                 black_box(polynomial.eval_msm(&scalar, &strategy));
                             } else {
                                 black_box(polynomial.eval_msm(&scalar, &Sequential));
