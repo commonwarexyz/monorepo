@@ -282,6 +282,7 @@
 //! ```
 //!
 //! For a complete example with resharing, see [commonware-reshare](https://docs.rs/commonware-reshare).
+
 use super::primitives::group::Share;
 use crate::{
     bls12381::primitives::{
@@ -300,7 +301,7 @@ use commonware_math::{
 use commonware_parallel::{Sequential, Strategy as ParStrategy};
 use commonware_utils::{
     ordered::{Map, Quorum, Set},
-    Faults, Participant, TryCollect, NZU32,
+    Bft3f1, Faults, Participant, TryCollect, NZU32,
 };
 use core::num::NonZeroU32;
 use rand_core::CryptoRngCore;
@@ -441,7 +442,7 @@ where
         )
         .map_err(|_| arbitrary::Error::IncorrectFormat)?;
 
-        let max_revealed = commonware_utils::Bft3f1::max_faults(total as u32) as usize;
+        let max_revealed = Bft3f1::max_faults(total) as usize;
         let revealed = Set::from_iter_dedup(
             players
                 .iter()
@@ -1758,7 +1759,7 @@ mod test_plan {
                     }
                 }
                 // Must have >= quorum(prev_players) dealers
-                let required = Bft3f1::quorum(prev_players.len() as u32);
+                let required = Bft3f1::quorum(prev_players.len());
                 if (self.dealers.len() as u32) < required {
                     return Err(anyhow!(
                         "not enough dealers: have {}, need {} (quorum of {} previous players)",
@@ -1777,7 +1778,7 @@ mod test_plan {
                 return true;
             }
             if let Some(shift) = self.shift_degrees.get(&dealer) {
-                let degree = Bft3f1::quorum(self.players.len() as u32) as i32 - 1;
+                let degree = Bft3f1::quorum(self.players.len()) as i32 - 1;
                 // We shift the degree, but saturate at 0, so it's possible
                 // that the shift isn't actually doing anything.
                 //
@@ -1797,7 +1798,7 @@ mod test_plan {
                 .chain(self.no_acks.iter().copied())
                 .filter_map(|(d, p)| if d == dealer { Some(p) } else { None })
                 .collect::<BTreeSet<_>>();
-            revealed_players.len() as u32 > Bft3f1::max_faults(self.players.len() as u32)
+            revealed_players.len() as u32 > Bft3f1::max_faults(self.players.len())
         }
 
         /// Determine if this round is expected to fail.
@@ -1810,7 +1811,7 @@ mod test_plan {
             let required = previous_successful_round
                 .map(Bft3f1::quorum)
                 .unwrap_or_default()
-                .max(Bft3f1::quorum(self.dealers.len() as u32)) as usize;
+                .max(Bft3f1::quorum(self.dealers.len())) as usize;
             good_dealer_count < required
         }
     }
@@ -2363,7 +2364,7 @@ mod test_plan {
                     indices
                         .into_iter()
                         .map(|k| {
-                            let expected = Bft3f1::quorum(players.len() as u32) as i32 - 1;
+                            let expected = Bft3f1::quorum(players.len()) as i32 - 1;
                             let shift = u.int_in_range(1..=expected.max(1))?;
                             let shift = if bool::arbitrary(u)? { -shift } else { shift };
                             Ok((k, NonZeroI32::new(shift).expect("checked to not be zero")))

@@ -793,7 +793,7 @@ mod tests {
     fn test_verify_attestations_filters_invalid() {
         let mut rng = test_rng();
         let (schemes, _) = setup_signers(&mut rng, 5);
-        let quorum = Bft3f1::quorum(schemes.len() as u32) as usize;
+        let quorum = Bft3f1::quorum(schemes.len()) as usize;
 
         let attestations: Vec<_> = schemes
             .iter()
@@ -851,7 +851,7 @@ mod tests {
     fn test_assemble_certificate() {
         let mut rng = test_rng();
         let (schemes, _) = setup_signers(&mut rng, 4);
-        let quorum = Bft3f1::quorum(schemes.len() as u32) as usize;
+        let quorum = Bft3f1::quorum(schemes.len()) as usize;
 
         let attestations: Vec<_> = schemes
             .iter()
@@ -914,7 +914,7 @@ mod tests {
     fn test_verify_certificate() {
         let mut rng = test_rng();
         let (schemes, verifier) = setup_signers(&mut rng, 4);
-        let quorum = Bft3f1::quorum(schemes.len() as u32) as usize;
+        let quorum = Bft3f1::quorum(schemes.len()) as usize;
 
         let attestations: Vec<_> = schemes
             .iter()
@@ -945,7 +945,7 @@ mod tests {
     fn test_verify_certificate_detects_corruption() {
         let mut rng = test_rng();
         let (schemes, verifier) = setup_signers(&mut rng, 4);
-        let quorum = Bft3f1::quorum(schemes.len() as u32) as usize;
+        let quorum = Bft3f1::quorum(schemes.len()) as usize;
 
         let attestations: Vec<_> = schemes
             .iter()
@@ -989,7 +989,7 @@ mod tests {
     fn test_certificate_codec_roundtrip() {
         let mut rng = test_rng();
         let (schemes, _) = setup_signers(&mut rng, 4);
-        let quorum = Bft3f1::quorum(schemes.len() as u32) as usize;
+        let quorum = Bft3f1::quorum(schemes.len()) as usize;
 
         let attestations: Vec<_> = schemes
             .iter()
@@ -1036,7 +1036,7 @@ mod tests {
     fn test_certificate_rejects_invalid_signer() {
         let mut rng = test_rng();
         let (schemes, _) = setup_signers(&mut rng, 4);
-        let quorum = Bft3f1::quorum(schemes.len() as u32) as usize;
+        let quorum = Bft3f1::quorum(schemes.len()) as usize;
 
         let mut attestations: Vec<_> = schemes
             .iter()
@@ -1131,7 +1131,7 @@ mod tests {
     fn test_verify_certificates_batch() {
         let mut rng = test_rng();
         let (schemes, verifier) = setup_signers(&mut rng, 4);
-        let quorum = Bft3f1::quorum(schemes.len() as u32) as usize;
+        let quorum = Bft3f1::quorum(schemes.len()) as usize;
 
         let messages: Vec<Bytes> = [b"msg1".as_slice(), b"msg2".as_slice(), b"msg3".as_slice()]
             .into_iter()
@@ -1177,7 +1177,7 @@ mod tests {
     fn test_verify_certificates_batch_detects_failure() {
         let mut rng = test_rng();
         let (schemes, verifier) = setup_signers(&mut rng, 4);
-        let quorum = Bft3f1::quorum(schemes.len() as u32) as usize;
+        let quorum = Bft3f1::quorum(schemes.len()) as usize;
 
         let messages: Vec<Bytes> = [b"msg1".as_slice(), b"msg2".as_slice()]
             .into_iter()

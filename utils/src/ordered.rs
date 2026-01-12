@@ -280,7 +280,7 @@ impl<T: Ord> Quorum for Set<T> {
     }
 
     fn max_faults<M: Faults>(&self) -> u32 {
-        M::max_faults(u32::try_from(self.len()).expect("too many participants"))
+        M::max_faults(self.len())
     }
 
     fn key(&self, index: Participant) -> Option<&Self::Item> {
