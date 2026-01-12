@@ -156,19 +156,16 @@
 //! conflicts between concurrent deployments.
 //!
 //! The bucket stores:
-//!   * `tools/` - Cached observability tools organized by component (shared across all deployments):
-//!     * `prometheus/` - Prometheus binary and service file
-//!     * `grafana/` - Grafana binary, datasources.yml, and all.yml
-//!     * `loki/` - Loki binary, config, and service file
-//!     * `pyroscope/` - Pyroscope binary, config, service file, and agent files
-//!     * `tempo/` - Tempo binary, config, and service file
-//!     * `node-exporter/` - Node Exporter binary and service file
-//!     * `promtail/` - Promtail binary and service file
-//!     * `system/` - BBR and logrotate configs
-//!     * `binary/` - Binary instance service file
+//!   * `tools/` - Cached observability tools (shared across all deployments):
+//!     * `{component}/{tool-version}.tar.gz` - Tool binaries (keyed by tool version)
+//!     * `{deployer-version}/{component}/` - Static configs and service files (keyed by deployer version)
 //!   * `deployments/{tag}/` - Deployment-specific files:
 //!     * `monitoring/` - Prometheus config, dashboard
 //!     * `instances/{name}/` - Binary, config, hosts.yaml, promtail config, pyroscope script
+//!
+//! Static configs and service files are namespaced by deployer version to ensure cache invalidation
+//! when the deployer is updated. Tool binaries are namespaced by their own version since they don't
+//! change with deployer updates.
 //!
 //! # Example Configuration
 //!

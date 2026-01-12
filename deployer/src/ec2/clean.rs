@@ -1,7 +1,7 @@
 //! `clean` subcommand for `ec2`
 
 use crate::ec2::{
-    s3::{create_s3_client, delete_bucket_and_contents, S3_BUCKET_NAME},
+    s3::{create_s3_client, delete_bucket_and_contents, is_no_such_bucket_error, S3_BUCKET_NAME},
     Error, MONITORING_REGION,
 };
 use aws_config::Region;
@@ -20,9 +20,7 @@ pub async fn clean() -> Result<(), Error> {
             info!(bucket = S3_BUCKET_NAME, "cleaned S3 cache bucket");
         }
         Err(e) => {
-            // Check if bucket doesn't exist
-            let err_str = format!("{:?}", e);
-            if err_str.contains("NoSuchBucket") {
+            if is_no_such_bucket_error(&e) {
                 info!(
                     bucket = S3_BUCKET_NAME,
                     "bucket does not exist, nothing to clean"

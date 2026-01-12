@@ -1,8 +1,13 @@
 //! `destroy` subcommand for `ec2`
 
 use crate::ec2::{
-    aws::*, deployer_directory, s3::*, Config, Error, DESTROYED_FILE_NAME, LOGS_PORT,
-    MONITORING_REGION, PROFILES_PORT, TRACES_PORT,
+    aws::*,
+    deployer_directory,
+    s3::{
+        create_s3_client, delete_prefix, is_no_such_bucket_error, Region, S3_BUCKET_NAME,
+        S3_DEPLOYMENTS_PREFIX,
+    },
+    Config, Error, DESTROYED_FILE_NAME, LOGS_PORT, MONITORING_REGION, PROFILES_PORT, TRACES_PORT,
 };
 use futures::future::try_join_all;
 use std::{collections::HashSet, fs::File, path::PathBuf};
@@ -44,8 +49,7 @@ pub async fn destroy(config: &PathBuf) -> Result<(), Error> {
             );
         }
         Err(e) => {
-            let err_str = format!("{:?}", e);
-            if err_str.contains("NoSuchBucket") {
+            if is_no_such_bucket_error(&e) {
                 info!(
                     bucket = S3_BUCKET_NAME,
                     "bucket does not exist, skipping S3 cleanup"

@@ -117,6 +117,7 @@ pub async fn upload_file(
 }
 
 /// Uploads a file to S3 and returns a pre-signed URL for downloading it
+#[must_use = "the pre-signed URL should be used to download the file"]
 pub async fn upload_and_presign(
     client: &S3Client,
     bucket: &str,
@@ -129,6 +130,7 @@ pub async fn upload_and_presign(
 }
 
 /// Caches content to S3 if it doesn't exist, then returns a pre-signed URL
+#[must_use = "the pre-signed URL should be used to download the content"]
 pub async fn cache_content_and_presign(
     client: &S3Client,
     bucket: &str,
@@ -152,6 +154,7 @@ pub async fn cache_content_and_presign(
 }
 
 /// Generates a pre-signed URL for downloading an object from S3
+#[must_use = "the pre-signed URL should be used to download the object"]
 pub async fn presign_url(
     client: &S3Client,
     bucket: &str,
@@ -248,4 +251,14 @@ pub async fn delete_bucket_and_contents(client: &S3Client, bucket: &str) -> Resu
     delete_bucket(client, bucket).await?;
 
     Ok(())
+}
+
+/// Checks if an error is a "bucket does not exist" error
+pub const fn is_no_such_bucket_error(error: &Error) -> bool {
+    match error {
+        Error::AwsS3(aws_err) => {
+            matches!(aws_err, aws_sdk_s3::Error::NoSuchBucket(_))
+        }
+        _ => false,
+    }
 }
