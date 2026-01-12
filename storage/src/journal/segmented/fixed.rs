@@ -1163,4 +1163,116 @@ mod tests {
             journal.destroy().await.expect("failed to destroy");
         });
     }
+
+    #[test_traced]
+    fn test_segmented_fixed_init_section_at_size() {
+        // Test that init_section_at_size correctly initializes a section with zero-filled items.
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg();
+            let mut journal = Journal::init(context.clone(), cfg.clone())
+                .await
+                .expect("failed to init");
+
+            // Initialize section 1 with 5 zero-filled items
+            journal
+                .init_section_at_size(1, 5)
+                .await
+                .expect("failed to init section at size");
+
+            // Verify section has correct length
+            assert_eq!(journal.section_len(1).await.unwrap(), 5);
+
+            // Verify size is correct (5 items * 32 bytes per Digest)
+            assert_eq!(journal.size(1).await.unwrap(), 5 * 32);
+
+            // Verify we can read the zero-filled items
+            let zero_digest = Sha256::fill(0);
+            for i in 0u64..5 {
+                let item = journal.get(1, i).await.expect("failed to get");
+                assert_eq!(item, zero_digest, "item {i} should be zero-filled");
+            }
+
+            // Verify position past the initialized range returns error
+            let err = journal.get(1, 5).await;
+            assert!(matches!(err, Err(Error::ItemOutOfRange(5))));
+
+            // Verify we can append after the initialized items
+            let pos = journal
+                .append(1, test_digest(100))
+                .await
+                .expect("failed to append");
+            assert_eq!(pos, 5, "append should return position 5");
+
+            // Verify section now has 6 items
+            assert_eq!(journal.section_len(1).await.unwrap(), 6);
+
+            // Verify the appended item is readable
+            let item = journal.get(1, 5).await.expect("failed to get");
+            assert_eq!(item, test_digest(100));
+
+            journal.sync_all().await.expect("failed to sync");
+            drop(journal);
+
+            // Test persistence - reopen and verify
+            let journal = Journal::<_, Digest>::init(context.clone(), cfg.clone())
+                .await
+                .expect("failed to re-init");
+
+            assert_eq!(journal.section_len(1).await.unwrap(), 6);
+
+            // Verify zero-filled items persisted
+            for i in 0u64..5 {
+                let item = journal.get(1, i).await.expect("failed to get");
+                assert_eq!(item, zero_digest, "item {i} should still be zero-filled after restart");
+            }
+
+            // Verify appended item persisted
+            let item = journal.get(1, 5).await.expect("failed to get");
+            assert_eq!(item, test_digest(100));
+
+            // Test replay includes zero-filled items
+            {
+                let stream = journal
+                    .replay(1, 0, NZUsize!(1024))
+                    .await
+                    .expect("failed to replay");
+                pin_mut!(stream);
+
+                let mut items = Vec::new();
+                while let Some(result) = stream.next().await {
+                    let (section, pos, item) = result.expect("replay error");
+                    items.push((section, pos, item));
+                }
+
+                assert_eq!(items.len(), 6);
+                for (i, item) in items.iter().enumerate().take(5) {
+                    assert_eq!(*item, (1, i as u64, zero_digest));
+                }
+                assert_eq!(items[5], (1, 5, test_digest(100)));
+            }
+
+            // Test replay with non-zero start offset skips zero-filled items
+            {
+                let stream = journal
+                    .replay(1, 3, NZUsize!(1024))
+                    .await
+                    .expect("failed to replay");
+                pin_mut!(stream);
+
+                let mut items = Vec::new();
+                while let Some(result) = stream.next().await {
+                    let (section, pos, item) = result.expect("replay error");
+                    items.push((section, pos, item));
+                }
+
+                assert_eq!(items.len(), 3);
+                assert_eq!(items[0], (1, 3, zero_digest));
+                assert_eq!(items[1], (1, 4, zero_digest));
+                assert_eq!(items[2], (1, 5, test_digest(100)));
+            }
+
+            journal.destroy().await.expect("failed to destroy");
+        });
+    }
 }
