@@ -17,25 +17,31 @@ use super::{
     super::{group::SmallScalar, variant::Variant, Error},
     hash_with_namespace,
 };
-#[cfg(not(feature = "std"))]
-use alloc::{vec, vec::Vec};
 use commonware_math::algebra::Space;
 use commonware_parallel::Strategy;
 use rand_core::CryptoRngCore;
 
-/// Segment tree for efficient batch verification bisection.
+/// Segment tree for batch verification bisection.
 ///
-/// Uses array-based segment tree layout where node at index `i` has children
-/// at `2i` and `2i+1`. This provides O(1) node access and O(n) total work
-/// for both construction and verification.
+/// Stores aggregated (public_key, signature) sums at each node, enabling O(log k)
+/// identification of k invalid signatures.
+///
+/// ```text
+///            [1]           <- root covers [0, 4)
+///           /   \
+///        [2]     [3]       <- cover [0, 2) and [2, 4)
+///        / \     / \
+///      [4] [5] [6] [7]     <- leaves cover [0,1), [1,2), [2,3), [3,4)
+/// ```
+///
+/// Node `i` has children at `2i` (left) and `2i+1` (right).
 struct SegmentTree<V: Variant> {
     len: usize,
-    // 1-indexed segment tree. Node 1 is root covering [0, len).
-    // Node i covers some interval [start, end) with children at 2i and 2i+1.
     tree: Vec<Option<(V::Public, V::Signature)>>,
 }
 
 impl<V: Variant> SegmentTree<V> {
+    /// Build segment tree from leaves in O(n) time.
     fn build(leaves: &[(V::Public, V::Signature)]) -> Self {
         let len = leaves.len();
         if len == 0 {
@@ -45,21 +51,23 @@ impl<V: Variant> SegmentTree<V> {
             };
         }
 
-        // Standard segment tree allocation: 4n handles all tree sizes.
+        // 4n allocation safely handles all tree sizes (non-power-of-2 included).
         let mut tree = vec![None; 4 * len];
 
-        // Build bottom-up using explicit stack.
-        // Phase 0 = first visit (push children), Phase 1 = combine children.
-        let mut stack: Vec<(usize, usize, usize, u8)> = vec![(1, 0, len, 0)];
-        while let Some((node, start, end, phase)) = stack.pop() {
+        // Iterative post-order traversal: visit children before parent.
+        // `children_built` tracks whether we've already processed children.
+        let mut stack = vec![(1usize, 0usize, len, false)];
+        while let Some((node, start, end, children_built)) = stack.pop() {
             if end - start == 1 {
                 tree[node] = Some(leaves[start]);
-            } else if phase == 0 {
+            } else if !children_built {
+                // First visit: descend into children, revisit this node after.
                 let mid = start + (end - start) / 2;
-                stack.push((node, start, end, 1));
-                stack.push((2 * node + 1, mid, end, 0));
-                stack.push((2 * node, start, mid, 0));
+                stack.push((node, start, end, true));
+                stack.push((2 * node + 1, mid, end, false));
+                stack.push((2 * node, start, mid, false));
             } else {
+                // Second visit: combine children.
                 let left = tree[2 * node].expect("left child built");
                 let right = tree[2 * node + 1].expect("right child built");
                 tree[node] = Some((left.0 + &right.0, left.1 + &right.1));
@@ -69,23 +77,44 @@ impl<V: Variant> SegmentTree<V> {
         Self { len, tree }
     }
 
-    fn verify(&self, hm: &V::Signature) -> Vec<usize> {
+    /// Returns indices of invalid leaves by bisecting into failing subtrees.
+    ///
+    /// If `root_invalid` is true, skips verifying the root node (useful when
+    /// caller has already verified the aggregate is invalid).
+    fn verify(&self, hm: &V::Signature, root_invalid: bool) -> Vec<usize> {
         if self.len == 0 {
             return Vec::new();
         }
 
+        // Initialize stack based on whether root is known invalid.
         let mut invalid = Vec::new();
-        let mut stack = vec![(1usize, 0usize, self.len)];
+        let mut stack = if root_invalid && self.len > 1 {
+            // Skip root, start with its children.
+            let mid = self.len / 2;
+            vec![(2usize, 0, mid), (3usize, mid, self.len)]
+        } else if root_invalid {
+            // Single leaf and root is invalid means this leaf is invalid.
+            invalid.push(0);
+            return invalid;
+        } else {
+            vec![(1usize, 0usize, self.len)]
+        };
 
         while let Some((node, start, end)) = stack.pop() {
             let (pk, sig) = self.tree[node].expect("node exists");
+
+            // Valid subtree - all leaves below are valid.
             if V::verify(&pk, hm, &sig).is_ok() {
                 continue;
             }
+
+            // Invalid leaf found.
             if end - start == 1 {
                 invalid.push(start);
                 continue;
             }
+
+            // Recurse into children to find invalid leaves.
             let mid = start + (end - start) / 2;
             stack.push((2 * node, start, mid));
             stack.push((2 * node + 1, mid, end));
@@ -103,20 +132,26 @@ fn bisect<V: Variant>(
     if entries.is_empty() {
         return Vec::new();
     }
+
+    // Single chunk: skip root verification (caller already verified aggregate is invalid).
     let par_hint = strategy.parallelism_hint();
     let chunk_size = entries.len().div_ceil(par_hint);
+    if entries.len() <= chunk_size {
+        return SegmentTree::<V>::build(entries).verify(hm, true);
+    }
 
+    // Multiple chunks: verify each chunk root (may be valid or invalid).
     let mut out = strategy.fold(
         entries.chunks(chunk_size).enumerate(),
         || Vec::with_capacity(entries.len()),
         |mut acc, (i, chunk)| {
-            // Correct for the fact that SegmentTree returns indices relative to the local slice.
-            let shift = i * chunk_size;
+            // Indices returned are relative to chunk, so shift by chunk offset.
+            let offset = i * chunk_size;
             acc.extend(
                 SegmentTree::<V>::build(chunk)
-                    .verify(hm)
+                    .verify(hm, false)
                     .into_iter()
-                    .map(|j| shift + j),
+                    .map(|j| offset + j),
             );
             acc
         },
