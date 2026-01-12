@@ -445,6 +445,16 @@ wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/tempo.servi
 wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/node_exporter.service '{}' &
 wait
 
+# Verify all downloads succeeded
+for f in prometheus.tar.gz grafana.deb loki.zip pyroscope.tar.gz tempo.tar.gz node_exporter.tar.gz \
+         prometheus.yml datasources.yml all.yml dashboard.json loki.yml pyroscope.yml tempo.yml \
+         prometheus.service loki.service pyroscope.service tempo.service node_exporter.service; do
+    if [ ! -f "/home/ubuntu/$f" ]; then
+        echo "ERROR: Failed to download $f" >&2
+        exit 1
+    fi
+done
+
 # Install Prometheus
 sudo mkdir -p /opt/prometheus /opt/prometheus/data
 sudo chown -R ubuntu:ubuntu /opt/prometheus
@@ -596,6 +606,16 @@ wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/pyroscope-a
 wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/pyroscope-agent.service '{}' &
 wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/pyroscope-agent.timer '{}' &
 wait
+
+# Verify all downloads succeeded
+for f in binary config.conf hosts.yaml promtail.zip promtail.yml promtail.service \
+         node_exporter.tar.gz node_exporter.service binary.service logrotate.conf \
+         pyroscope-agent.sh pyroscope-agent.service pyroscope-agent.timer; do
+    if [ ! -f "/home/ubuntu/$f" ]; then
+        echo "ERROR: Failed to download $f" >&2
+        exit 1
+    fi
+done
 
 # Install Promtail
 sudo mkdir -p /opt/promtail /etc/promtail
