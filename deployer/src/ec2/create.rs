@@ -167,38 +167,29 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     }
 
     // Upload unique binaries and configs to S3 (deduplicated by digest)
+    // Collect entries first so keys live long enough for the futures to borrow them
     info!("uploading unique binaries and configs to S3");
-    let binary_keys: Vec<_> = binary_digests
-        .keys()
-        .map(|digest| binary_s3_key(tag, digest))
+    let binary_entries: Vec<_> = binary_digests
+        .iter()
+        .map(|(digest, path)| (digest.clone(), binary_s3_key(tag, digest), path.as_ref()))
         .collect();
-    let binary_paths: Vec<_> = binary_digests.values().collect();
-    let mut binary_uploads = Vec::new();
-    for (key, path) in binary_keys.iter().zip(binary_paths.iter()) {
-        binary_uploads.push(cache_file_and_presign(
-            &s3_client,
-            S3_BUCKET_NAME,
-            key,
-            std::path::Path::new(path),
-            PRESIGN_DURATION,
-        ));
-    }
+    let config_entries: Vec<_> = config_digests
+        .iter()
+        .map(|(digest, path)| (digest.clone(), config_s3_key(tag, digest), path.as_ref()))
+        .collect();
 
-    let config_keys: Vec<_> = config_digests
-        .keys()
-        .map(|digest| config_s3_key(tag, digest))
+    let binary_uploads: Vec<_> = binary_entries
+        .iter()
+        .map(|(_, key, path)| {
+            cache_file_and_presign(&s3_client, S3_BUCKET_NAME, key, path, PRESIGN_DURATION)
+        })
         .collect();
-    let config_paths: Vec<_> = config_digests.values().collect();
-    let mut config_uploads = Vec::new();
-    for (key, path) in config_keys.iter().zip(config_paths.iter()) {
-        config_uploads.push(cache_file_and_presign(
-            &s3_client,
-            S3_BUCKET_NAME,
-            key,
-            std::path::Path::new(path),
-            PRESIGN_DURATION,
-        ));
-    }
+    let config_uploads: Vec<_> = config_entries
+        .iter()
+        .map(|(_, key, path)| {
+            cache_file_and_presign(&s3_client, S3_BUCKET_NAME, key, path, PRESIGN_DURATION)
+        })
+        .collect();
 
     let (binary_results, config_results): (Vec<String>, Vec<String>) =
         tokio::try_join!(async { try_join_all(binary_uploads).await }, async {
@@ -206,10 +197,16 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
         },)?;
 
     // Build digest -> URL maps
-    let binary_digest_to_url: HashMap<String, String> =
-        binary_digests.keys().cloned().zip(binary_results).collect();
-    let config_digest_to_url: HashMap<String, String> =
-        config_digests.keys().cloned().zip(config_results).collect();
+    let binary_digest_to_url: HashMap<String, String> = binary_entries
+        .into_iter()
+        .map(|(digest, _, _)| digest)
+        .zip(binary_results)
+        .collect();
+    let config_digest_to_url: HashMap<String, String> = config_entries
+        .into_iter()
+        .map(|(digest, _, _)| digest)
+        .zip(config_results)
+        .collect();
 
     // Map instance names to URLs via their digests
     let mut instance_binary_urls: HashMap<String, String> = HashMap::new();
@@ -667,37 +664,34 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     }
 
     // Upload unique promtail and pyroscope configs
-    let promtail_keys: Vec<_> = promtail_digests
-        .keys()
-        .map(|digest| promtail_s3_key(tag, digest))
+    // Collect entries first so keys live long enough for the futures to borrow them
+    let promtail_entries: Vec<_> = promtail_digests
+        .iter()
+        .map(|(digest, path)| (digest.clone(), promtail_s3_key(tag, digest), path.as_path()))
         .collect();
-    let promtail_paths: Vec<_> = promtail_digests.values().collect();
-    let mut promtail_uploads = Vec::new();
-    for (key, path) in promtail_keys.iter().zip(promtail_paths.iter()) {
-        promtail_uploads.push(cache_file_and_presign(
-            &s3_client,
-            S3_BUCKET_NAME,
-            key,
-            path,
-            PRESIGN_DURATION,
-        ));
-    }
+    let pyroscope_entries: Vec<_> = pyroscope_digests
+        .iter()
+        .map(|(digest, path)| {
+            (
+                digest.clone(),
+                pyroscope_s3_key(tag, digest),
+                path.as_path(),
+            )
+        })
+        .collect();
 
-    let pyroscope_keys: Vec<_> = pyroscope_digests
-        .keys()
-        .map(|digest| pyroscope_s3_key(tag, digest))
+    let promtail_uploads: Vec<_> = promtail_entries
+        .iter()
+        .map(|(_, key, path)| {
+            cache_file_and_presign(&s3_client, S3_BUCKET_NAME, key, path, PRESIGN_DURATION)
+        })
         .collect();
-    let pyroscope_paths: Vec<_> = pyroscope_digests.values().collect();
-    let mut pyroscope_uploads = Vec::new();
-    for (key, path) in pyroscope_keys.iter().zip(pyroscope_paths.iter()) {
-        pyroscope_uploads.push(cache_file_and_presign(
-            &s3_client,
-            S3_BUCKET_NAME,
-            key,
-            path,
-            PRESIGN_DURATION,
-        ));
-    }
+    let pyroscope_uploads: Vec<_> = pyroscope_entries
+        .iter()
+        .map(|(_, key, path)| {
+            cache_file_and_presign(&s3_client, S3_BUCKET_NAME, key, path, PRESIGN_DURATION)
+        })
+        .collect();
 
     let (promtail_results, pyroscope_results): (Vec<String>, Vec<String>) =
         tokio::try_join!(async { try_join_all(promtail_uploads).await }, async {
@@ -705,14 +699,14 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
         },)?;
 
     // Build digest -> URL maps
-    let promtail_digest_to_url: HashMap<String, String> = promtail_digests
-        .keys()
-        .cloned()
+    let promtail_digest_to_url: HashMap<String, String> = promtail_entries
+        .into_iter()
+        .map(|(digest, _, _)| digest)
         .zip(promtail_results)
         .collect();
-    let pyroscope_digest_to_url: HashMap<String, String> = pyroscope_digests
-        .keys()
-        .cloned()
+    let pyroscope_digest_to_url: HashMap<String, String> = pyroscope_entries
+        .into_iter()
+        .map(|(digest, _, _)| digest)
         .zip(pyroscope_results)
         .collect();
 

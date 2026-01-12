@@ -69,38 +69,29 @@ pub async fn update(config_path: &PathBuf) -> Result<(), Error> {
     }
 
     // Upload unique binaries and configs (deduplicated by digest)
+    // Collect entries first so keys live long enough for the futures to borrow them
     info!("uploading unique binaries and configs to S3");
-    let binary_keys: Vec<_> = binary_digests
-        .keys()
-        .map(|digest| binary_s3_key(tag, digest))
+    let binary_entries: Vec<_> = binary_digests
+        .iter()
+        .map(|(digest, path)| (digest.clone(), binary_s3_key(tag, digest), path.as_ref()))
         .collect();
-    let binary_paths: Vec<_> = binary_digests.values().collect();
-    let mut binary_uploads = Vec::new();
-    for (key, path) in binary_keys.iter().zip(binary_paths.iter()) {
-        binary_uploads.push(cache_file_and_presign(
-            &s3_client,
-            S3_BUCKET_NAME,
-            key,
-            std::path::Path::new(path),
-            PRESIGN_DURATION,
-        ));
-    }
+    let config_entries: Vec<_> = config_digests
+        .iter()
+        .map(|(digest, path)| (digest.clone(), config_s3_key(tag, digest), path.as_ref()))
+        .collect();
 
-    let config_keys: Vec<_> = config_digests
-        .keys()
-        .map(|digest| config_s3_key(tag, digest))
+    let binary_uploads: Vec<_> = binary_entries
+        .iter()
+        .map(|(_, key, path)| {
+            cache_file_and_presign(&s3_client, S3_BUCKET_NAME, key, path, PRESIGN_DURATION)
+        })
         .collect();
-    let config_paths: Vec<_> = config_digests.values().collect();
-    let mut config_uploads = Vec::new();
-    for (key, path) in config_keys.iter().zip(config_paths.iter()) {
-        config_uploads.push(cache_file_and_presign(
-            &s3_client,
-            S3_BUCKET_NAME,
-            key,
-            std::path::Path::new(path),
-            PRESIGN_DURATION,
-        ));
-    }
+    let config_uploads: Vec<_> = config_entries
+        .iter()
+        .map(|(_, key, path)| {
+            cache_file_and_presign(&s3_client, S3_BUCKET_NAME, key, path, PRESIGN_DURATION)
+        })
+        .collect();
 
     let (binary_results, config_results): (Vec<String>, Vec<String>) =
         tokio::try_join!(async { try_join_all(binary_uploads).await }, async {
@@ -108,10 +99,16 @@ pub async fn update(config_path: &PathBuf) -> Result<(), Error> {
         },)?;
 
     // Build digest -> URL maps
-    let binary_digest_to_url: HashMap<String, String> =
-        binary_digests.keys().cloned().zip(binary_results).collect();
-    let config_digest_to_url: HashMap<String, String> =
-        config_digests.keys().cloned().zip(config_results).collect();
+    let binary_digest_to_url: HashMap<String, String> = binary_entries
+        .into_iter()
+        .map(|(digest, _, _)| digest)
+        .zip(binary_results)
+        .collect();
+    let config_digest_to_url: HashMap<String, String> = config_entries
+        .into_iter()
+        .map(|(digest, _, _)| digest)
+        .zip(config_results)
+        .collect();
 
     // Map instance names to URLs via their digests
     let mut instance_binary_urls: HashMap<String, String> = HashMap::new();
