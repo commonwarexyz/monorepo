@@ -98,9 +98,6 @@ pub struct Journal<E: Storage + Metrics, A: CodecFixedShared> {
 
     /// Total number of items appended (not affected by pruning).
     size: u64,
-
-    /// Position before which all items have been pruned.
-    pruning_boundary: u64,
 }
 
 impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
@@ -126,7 +123,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         let mut inner = SegmentedJournal::init(context, segmented_cfg).await?;
 
         // Calculate size and pruning_boundary from the inner journal's state
-        let (size, pruning_boundary) = Self::compute_state(&inner, items_per_blob).await?;
+        let size = Self::compute_state(&inner, items_per_blob).await?;
 
         // Invariant: Tail blob must exist, even if empty. This ensures we can reconstruct size on
         // reopen even after pruning all items. The tail blob is at `size / items_per_blob` (where
@@ -138,7 +135,6 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
             inner,
             items_per_blob,
             size,
-            pruning_boundary,
         })
     }
 
@@ -182,20 +178,14 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         inner.init_section_at_size(tail_section, tail_items).await?;
         inner.sync_all().await?;
 
-        // Pruning boundary is set to the start of the tail section.
-        // This matches what we'd get if we reopened the journal normally.
-        // Positions within the tail section (but before `size`) contain dummy zeros.
-        let pruning_boundary = tail_section * items_per_blob;
-
         Ok(Self {
             inner,
             items_per_blob,
             size,
-            pruning_boundary,
         })
     }
 
-    /// Compute size and pruning_boundary from the segmented journal state.
+    /// Compute size from the segmented journal state.
     ///
     /// Since we maintain the invariant that:
     /// 1. At least one blob (the tail) always exists
@@ -205,23 +195,20 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     async fn compute_state(
         inner: &SegmentedJournal<E, A>,
         items_per_blob: u64,
-    ) -> Result<(u64, u64), Error> {
+    ) -> Result<u64, Error> {
         let oldest_section = inner.oldest_section();
         let newest_section = inner.newest_section();
 
-        let (Some(oldest), Some(newest)) = (oldest_section, newest_section) else {
+        let (Some(_), Some(newest)) = (oldest_section, newest_section) else {
             // Empty journal
-            return Ok((0, 0));
+            return Ok(0);
         };
-
-        // Compute pruning boundary from oldest section
-        let pruning_boundary = oldest * items_per_blob;
 
         // Compute size from the tail (newest) section
         let tail_len = inner.section_len(newest).await?;
         let size = newest * items_per_blob + tail_len;
 
-        Ok((size, pruning_boundary))
+        Ok(size)
     }
 
     /// Convert a global position to (section, position_in_section).
@@ -278,7 +265,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
             std::cmp::Ordering::Less => {}
         }
 
-        if size < self.pruning_boundary {
+        if size < self.pruning_boundary() {
             return Err(Error::InvalidRewind(size));
         }
 
@@ -294,16 +281,19 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     /// Return the position of the oldest item in the journal that remains readable.
     ///
     /// Note that this value could be older than the `min_item_pos` last passed to prune.
-    pub const fn oldest_retained_pos(&self) -> Option<u64> {
-        if self.pruning_boundary == self.size {
+    pub fn oldest_retained_pos(&self) -> Option<u64> {
+        if self.pruning_boundary() == self.size {
             return None;
         }
-        Some(self.pruning_boundary)
+        Some(self.pruning_boundary())
     }
 
     /// Return the location before which all items have been pruned.
-    pub const fn pruning_boundary(&self) -> u64 {
-        self.pruning_boundary
+    pub fn pruning_boundary(&self) -> u64 {
+        self.inner
+            .oldest_section()
+            .expect("journal should have at least one section")
+            * self.items_per_blob
     }
 
     /// Read the item at position `pos` in the journal.
@@ -316,7 +306,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         if pos >= self.size {
             return Err(Error::ItemOutOfRange(pos));
         }
-        if pos < self.pruning_boundary {
+        if pos < self.pruning_boundary() {
             return Err(Error::ItemPruned(pos));
         }
 
@@ -399,12 +389,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         // Cap to tail section. The tail section is guaranteed to exist by our invariant.
         let min_section = std::cmp::min(target_section, tail_section);
 
-        let pruned = self.inner.prune(min_section).await?;
-        if pruned {
-            self.pruning_boundary = min_section * self.items_per_blob;
-        }
-
-        Ok(pruned)
+        self.inner.prune(min_section).await
     }
 
     /// Remove any underlying blobs created by the journal.
