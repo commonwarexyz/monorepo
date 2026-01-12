@@ -3,8 +3,10 @@
 //! Records are encoded with `commonware_codec` and use fixed-size, big-endian
 //! representations for Ethereum integers and hashes.
 
-use alloy_evm::revm::primitives::{B256, KECCAK_EMPTY, U256};
-use alloy_evm::revm::state::AccountInfo;
+use alloy_evm::revm::{
+    primitives::{B256, KECCAK_EMPTY, U256},
+    state::AccountInfo,
+};
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt, Write};
 

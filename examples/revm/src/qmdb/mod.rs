@@ -17,7 +17,9 @@ mod model;
 mod persist;
 mod store;
 
+use crate::types::StateRoot;
 use adapter::QmdbAsyncDb;
+pub(crate) use adapter::QmdbRefDb;
 use alloy_evm::revm::{
     database::CacheDB,
     database_interface::{async_db::WrapDatabaseAsync, DBErrorMarker},
@@ -35,16 +37,12 @@ use commonware_storage::{
 };
 use commonware_utils::{NZUsize, NZU64};
 use futures::lock::Mutex;
-use std::sync::Arc;
-use thiserror::Error;
-
-use crate::types::StateRoot;
 use keys::{account_key, code_key, storage_key, AccountKey, CodeKey, StorageKey};
 use model::{AccountRecord, StorageRecord};
-use store::{apply_changes_inner, apply_genesis_inner, preview_root_inner, QmdbInner, Stores};
-
-pub(crate) use adapter::QmdbRefDb;
 pub(crate) use persist::QmdbChanges;
+use std::sync::Arc;
+use store::{apply_changes_inner, apply_genesis_inner, preview_root_inner, QmdbInner, Stores};
+use thiserror::Error;
 
 const CODE_MAX_BYTES: usize = 24_576;
 const QMDB_ROOT_NAMESPACE: &[u8] = b"_COMMONWARE_REVM_QMDB_ROOT";
@@ -175,10 +173,7 @@ impl QmdbState {
     ///
     /// The commitment is derived from the authenticated roots of the accounts,
     /// storage, and code partitions.
-    pub(crate) async fn commit_changes(
-        &self,
-        changes: QmdbChanges,
-    ) -> Result<StateRoot, Error> {
+    pub(crate) async fn commit_changes(&self, changes: QmdbChanges) -> Result<StateRoot, Error> {
         let _guard = self.gate.lock().await;
         if changes.accounts.is_empty() {
             let inner = self.inner.lock().await;
@@ -200,6 +195,7 @@ impl QmdbState {
         Ok(state_root_from_stores(inner.stores()?))
     }
 
+    #[allow(dead_code)]
     pub(crate) async fn get_account(
         &self,
         address: Address,
@@ -207,21 +203,27 @@ impl QmdbState {
         let _guard = self.gate.lock().await;
         let inner = self.inner.lock().await;
         let stores = inner.stores()?;
-        stores.accounts.get(&account_key(address)).await.map_err(Error::from)
+        stores
+            .accounts
+            .get(&account_key(address))
+            .await
+            .map_err(Error::from)
     }
 
+    #[allow(dead_code)]
     pub(crate) async fn get_code(&self, code_hash: B256) -> Result<Option<Vec<u8>>, Error> {
         let _guard = self.gate.lock().await;
         let inner = self.inner.lock().await;
         let stores = inner.stores()?;
-        stores.code.get(&code_key(code_hash)).await.map_err(Error::from)
+        stores
+            .code
+            .get(&code_key(code_hash))
+            .await
+            .map_err(Error::from)
     }
 
-    pub(crate) async fn get_storage(
-        &self,
-        address: Address,
-        index: U256,
-    ) -> Result<U256, Error> {
+    #[allow(dead_code)]
+    pub(crate) async fn get_storage(&self, address: Address, index: U256) -> Result<U256, Error> {
         let _guard = self.gate.lock().await;
         let inner = self.inner.lock().await;
         let stores = inner.stores()?;

@@ -5,10 +5,15 @@
 //! adapter is intentionally thin so the example can rely on QMDB's internal
 //! caching and batching.
 
-use super::keys::{account_key, code_key, storage_key};
-use super::{Error, QmdbInner};
+use super::{
+    keys::{account_key, code_key, storage_key},
+    Error, QmdbInner,
+};
 use alloy_evm::revm::{
-    database_interface::{async_db::DatabaseAsyncRef, async_db::WrapDatabaseAsync, DatabaseRef},
+    database_interface::{
+        async_db::{DatabaseAsyncRef, WrapDatabaseAsync},
+        DatabaseRef,
+    },
     primitives::{Address, Bytes, B256, KECCAK_EMPTY, U256},
     state::{AccountInfo, Bytecode},
 };

@@ -33,14 +33,12 @@ where
     pub async fn query_balance(&self, digest: ConsensusDigest, address: Address) -> Option<U256> {
         let state = self.state.clone();
         let spawner = self.spawner.clone();
-        match spawner
+        spawner
             .shared(true)
             .spawn(move |_| async move { state.query_balance(digest, address).await })
             .await
-        {
-            Ok(balance) => balance,
-            Err(_) => None,
-        }
+            .ok()
+            .flatten()
     }
 
     pub async fn query_state_root(&self, digest: ConsensusDigest) -> Option<StateRoot> {

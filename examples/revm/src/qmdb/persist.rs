@@ -56,7 +56,7 @@ impl QmdbChanges {
     }
 
     /// Merges updates from a later block into the current change set.
-    pub(crate) fn merge(&mut self, other: QmdbChanges) {
+    pub(crate) fn merge(&mut self, other: Self) {
         for (address, update) in other.accounts {
             match self.accounts.entry(address) {
                 std::collections::btree_map::Entry::Vacant(entry) => {

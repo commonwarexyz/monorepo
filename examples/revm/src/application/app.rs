@@ -60,8 +60,7 @@ where
 
     let env = evm_env(height, prevrandao);
     let exec = spawner.shared(true).spawn(|_| async move {
-        execute_txs(parent_snapshot.db, env, &txs)
-            .map(|(db, outcome)| (txs, db, outcome))
+        execute_txs(parent_snapshot.db, env, &txs).map(|(db, outcome)| (txs, db, outcome))
     });
     let (txs, db, outcome) = match exec.await {
         Ok(Ok(result)) => result,
@@ -82,7 +81,13 @@ where
 
     let digest = child.commitment();
     state
-        .insert_snapshot(digest, parent_digest, db, child.state_root, outcome.qmdb_changes)
+        .insert_snapshot(
+            digest,
+            parent_digest,
+            db,
+            child.state_root,
+            outcome.qmdb_changes,
+        )
         .await;
     Some(child)
 }
@@ -113,8 +118,7 @@ where
 
     let env = evm_env(block.height, block.prevrandao);
     let exec = spawner.shared(true).spawn(|_| async move {
-        execute_txs(parent_snapshot.db, env, &block.txs)
-            .map(|(db, outcome)| (block, db, outcome))
+        execute_txs(parent_snapshot.db, env, &block.txs).map(|(db, outcome)| (block, db, outcome))
     });
     let (block, db, outcome) = match exec.await {
         Ok(Ok(result)) => result,

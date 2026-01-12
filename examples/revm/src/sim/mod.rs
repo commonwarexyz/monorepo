@@ -58,6 +58,7 @@ fn raise_open_file_limit() {
     use libc::{getrlimit, rlimit, setrlimit, RLIMIT_NOFILE};
 
     // Best effort: avoid hitting low per-process fd limits during simulations.
+    // SAFETY: best-effort process limit adjustment with well-defined libc calls.
     unsafe {
         let mut limits = rlimit {
             rlim_cur: 0,
