@@ -322,13 +322,13 @@ cfg_if::cfg_if! {
 
         impl From<aws_sdk_s3::Error> for Error {
             fn from(err: aws_sdk_s3::Error) -> Self {
-                Error::AwsS3(Box::new(err))
+                Self::AwsS3(Box::new(err))
             }
         }
 
         impl From<aws_sdk_s3::error::SdkError<aws_sdk_s3::operation::get_object::GetObjectError>> for Error {
             fn from(err: aws_sdk_s3::error::SdkError<aws_sdk_s3::operation::get_object::GetObjectError>) -> Self {
-                Error::S3PresigningFailed(Box::new(err))
+                Self::S3PresigningFailed(Box::new(err))
             }
         }
     }
