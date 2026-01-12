@@ -216,18 +216,18 @@ cfg_if::cfg_if! {
 
         impl Architecture {
             /// Returns the architecture string used in AMI names, download URLs, and labels
-            pub fn as_str(&self) -> &'static str {
+            pub const fn as_str(&self) -> &'static str {
                 match self {
-                    Architecture::Arm64 => "arm64",
-                    Architecture::X86_64 => "amd64",
+                    Self::Arm64 => "arm64",
+                    Self::X86_64 => "amd64",
                 }
             }
 
             /// Returns the Linux library path component for jemalloc
-            pub fn linux_lib(&self) -> &'static str {
+            pub const fn linux_lib(&self) -> &'static str {
                 match self {
-                    Architecture::Arm64 => "aarch64-linux-gnu",
-                    Architecture::X86_64 => "x86_64-linux-gnu",
+                    Self::Arm64 => "aarch64-linux-gnu",
+                    Self::X86_64 => "x86_64-linux-gnu",
                 }
             }
         }
@@ -316,13 +316,13 @@ cfg_if::cfg_if! {
         impl std::fmt::Display for S3Operation {
             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 match self {
-                    S3Operation::HeadBucket => write!(f, "HeadBucket"),
-                    S3Operation::CreateBucket => write!(f, "CreateBucket"),
-                    S3Operation::DeleteBucket => write!(f, "DeleteBucket"),
-                    S3Operation::HeadObject => write!(f, "HeadObject"),
-                    S3Operation::PutObject => write!(f, "PutObject"),
-                    S3Operation::ListObjects => write!(f, "ListObjects"),
-                    S3Operation::DeleteObjects => write!(f, "DeleteObjects"),
+                    Self::HeadBucket => write!(f, "HeadBucket"),
+                    Self::CreateBucket => write!(f, "CreateBucket"),
+                    Self::DeleteBucket => write!(f, "DeleteBucket"),
+                    Self::HeadObject => write!(f, "HeadObject"),
+                    Self::PutObject => write!(f, "PutObject"),
+                    Self::ListObjects => write!(f, "ListObjects"),
+                    Self::DeleteObjects => write!(f, "DeleteObjects"),
                 }
             }
         }

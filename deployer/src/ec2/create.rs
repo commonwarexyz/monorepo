@@ -16,6 +16,9 @@ use std::{
 use tokio::process::Command;
 use tracing::info;
 
+/// Pre-signed URLs for observability tools (prometheus, grafana, loki, pyroscope, tempo, node_exporter, promtail)
+type ToolUrls = (String, String, String, String, String, String, String);
+
 /// Represents a deployed instance with its configuration and public IP
 #[derive(Clone)]
 pub struct Deployment {
@@ -170,10 +173,7 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     };
 
     // Cache tools for each architecture and store URLs per-architecture
-    let mut tool_urls_by_arch: HashMap<
-        Architecture,
-        (String, String, String, String, String, String, String),
-    > = HashMap::new();
+    let mut tool_urls_by_arch: HashMap<Architecture, ToolUrls> = HashMap::new();
     for arch in &architectures_needed {
         let [prometheus_url, grafana_url, loki_url, pyroscope_url, tempo_url, node_exporter_url, promtail_url]: [String; 7] =
             try_join_all([
