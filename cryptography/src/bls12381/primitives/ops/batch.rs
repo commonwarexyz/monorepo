@@ -91,9 +91,10 @@ impl<V: Variant> SegmentTree<V> {
         // Initialize stack based on whether root is known invalid.
         let mut invalid = Vec::new();
         let mut stack = if root_invalid && self.len > 1 {
-            // Skip root, start with its children.
-            let mid = self.len / 2;
-            vec![(2usize, 0, mid), (3usize, mid, self.len)]
+            // Skip root, start with its children (root covers [0, self.len)).
+            let (start, end) = (0, self.len);
+            let mid = start + (end - start) / 2;
+            vec![(2usize, start, mid), (3usize, mid, end)]
         } else if root_invalid {
             // Single leaf and root is invalid means this leaf is invalid.
             invalid.push(0);
