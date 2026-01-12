@@ -14,7 +14,7 @@ use std::{
     slice,
 };
 use tokio::process::Command;
-use tracing::info;
+use tracing::{debug, info};
 
 /// Represents a deployed instance with its configuration and public IP
 #[derive(Clone)]
@@ -115,7 +115,7 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
         let s3_client = s3_client.clone();
         async move {
             if !object_exists(&s3_client, S3_BUCKET_NAME, &s3_key).await? {
-                info!(
+                debug!(
                     key = s3_key.as_str(),
                     "tool not cached, downloading and uploading"
                 );
@@ -132,7 +132,7 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
                 std::fs::remove_file(&temp_path)?;
                 Ok::<_, Error>(url)
             } else {
-                info!(key = s3_key.as_str(), "tool already cached");
+                debug!(key = s3_key.as_str(), "tool already cached");
                 presign_url(&s3_client, S3_BUCKET_NAME, &s3_key, PRESIGN_DURATION).await
             }
         }

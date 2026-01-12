@@ -13,7 +13,7 @@ use aws_sdk_s3::{
 };
 use commonware_cryptography::{Hasher, Sha256};
 use std::{io::Read, path::Path, time::Duration};
-use tracing::info;
+use tracing::{debug, info};
 
 /// S3 bucket name for caching deployer artifacts
 pub const S3_BUCKET_NAME: &str = "commonware-deployer-cache";
@@ -125,7 +125,7 @@ pub async fn upload_file(
         .await
         .map_err(|e| aws_sdk_s3::Error::from(e.into_service_error()))?;
 
-    info!(bucket = bucket, key = key, "uploaded file to S3");
+    debug!(bucket = bucket, key = key, "uploaded file to S3");
     Ok(())
 }
 
@@ -152,7 +152,7 @@ pub async fn cache_content_and_presign(
     expires_in: Duration,
 ) -> Result<String, Error> {
     if !object_exists(client, bucket, key).await? {
-        info!(key = key, "static content not cached, uploading");
+        debug!(key = key, "static content not cached, uploading");
         let body = ByteStream::from_static(content);
         client
             .put_object()
@@ -191,7 +191,7 @@ pub async fn cache_file_and_presign(
     expires_in: Duration,
 ) -> Result<String, Error> {
     if !object_exists(client, bucket, key).await? {
-        info!(key = key, "file not cached, uploading");
+        debug!(key = key, "file not cached, uploading");
         upload_file(client, bucket, key, path).await?;
     }
     presign_url(client, bucket, key, expires_in).await
