@@ -559,11 +559,7 @@ pub trait Storage: Clone + Send + Sync + 'static {
     ) -> impl Future<Output = Result<(Self::Blob, u64), Error>> + Send {
         async move {
             let (blob, size, _) = self
-                .open_versioned(
-                    partition,
-                    name,
-                    DEFAULT_BLOB_VERSION..=DEFAULT_BLOB_VERSION,
-                )
+                .open_versioned(partition, name, DEFAULT_BLOB_VERSION..=DEFAULT_BLOB_VERSION)
                 .await?;
             Ok((blob, size))
         }
