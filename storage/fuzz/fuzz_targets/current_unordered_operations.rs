@@ -5,10 +5,7 @@ use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
 use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
 use commonware_storage::{
     mmr::Location,
-    qmdb::{
-        current::{unordered::fixed::Db as Current, FixedConfig as Config},
-        store::MerkleizedStore as _,
-    },
+    qmdb::current::{unordered::fixed::Db as Current, FixedConfig as Config},
     translator::TwoCap,
 };
 use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
