@@ -282,6 +282,7 @@
 //! ```
 //!
 //! For a complete example with resharing, see [commonware-reshare](https://docs.rs/commonware-reshare).
+
 use super::primitives::group::Share;
 use crate::{
     bls12381::primitives::{
@@ -300,7 +301,7 @@ use commonware_math::{
 use commonware_parallel::{Sequential, Strategy as ParStrategy};
 use commonware_utils::{
     ordered::{Map, Quorum, Set},
-    Faults, Participant, TryCollect, NZU32,
+    Faults, Bft3f1, Participant, TryCollect, NZU32,
 };
 use core::num::NonZeroU32;
 use rand_core::CryptoRngCore;
@@ -441,7 +442,7 @@ where
         )
         .map_err(|_| arbitrary::Error::IncorrectFormat)?;
 
-        let max_revealed = commonware_utils::Bft3f1::max_faults(total) as usize;
+        let max_revealed = Bft3f1::max_faults(total) as usize;
         let revealed = Set::from_iter_dedup(
             players
                 .iter()
