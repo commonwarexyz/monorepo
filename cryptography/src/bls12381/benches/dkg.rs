@@ -147,9 +147,9 @@ fn benchmark_dkg(c: &mut Criterion, reshare: bool) {
                         || bench.pre_finalize(),
                         |(player, logs)| {
                             if concurrency > 1 {
-                                black_box(player.finalize::<_, Bft3f1>(logs, &strategy).unwrap());
+                                black_box(player.finalize::<Bft3f1>(logs, &strategy).unwrap());
                             } else {
-                                black_box(player.finalize::<_, Bft3f1>(logs, &Sequential).unwrap());
+                                black_box(player.finalize::<Bft3f1>(logs, &Sequential).unwrap());
                             }
                         },
                         BatchSize::SmallInput,

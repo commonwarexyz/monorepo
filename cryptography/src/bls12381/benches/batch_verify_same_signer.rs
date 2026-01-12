@@ -1,8 +1,8 @@
 use commonware_cryptography::bls12381::primitives::{ops, variant::MinSig};
 use commonware_parallel::{Rayon, Sequential};
+use commonware_utils::NZUsize;
 use criterion::{criterion_group, BatchSize, Criterion};
 use rand::{thread_rng, Rng};
-use std::num::NonZeroUsize;
 
 fn benchmark_batch_verify_same_signer(c: &mut Criterion) {
     let namespace = b"namespace";
@@ -14,7 +14,7 @@ fn benchmark_batch_verify_same_signer(c: &mut Criterion) {
             msgs.push(msg);
         }
         for concurrency in [1, 8] {
-            let strategy = Rayon::new(NonZeroUsize::new(concurrency).unwrap()).unwrap();
+            let strategy = Rayon::new(NZUsize!(concurrency)).unwrap();
             c.bench_function(
                 &format!("{}/conc={} msgs={}", module_path!(), concurrency, n),
                 |b| {
@@ -32,7 +32,7 @@ fn benchmark_batch_verify_same_signer(c: &mut Criterion) {
                         },
                         |(public, entries)| {
                             if concurrency > 1 {
-                                ops::batch::verify_same_signer::<_, MinSig, _, _>(
+                                ops::batch::verify_same_signer::<_, MinSig, _>(
                                     &mut thread_rng(),
                                     &public,
                                     &entries,
@@ -40,7 +40,7 @@ fn benchmark_batch_verify_same_signer(c: &mut Criterion) {
                                 )
                                 .unwrap();
                             } else {
-                                ops::batch::verify_same_signer::<_, MinSig, _, _>(
+                                ops::batch::verify_same_signer::<_, MinSig, _>(
                                     &mut thread_rng(),
                                     &public,
                                     &entries,

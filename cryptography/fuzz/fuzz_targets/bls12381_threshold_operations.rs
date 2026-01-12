@@ -292,7 +292,7 @@ fn fuzz(op: FuzzOperation) {
                         )
                     })
                     .collect();
-                let _ = threshold::batch_verify_same_signer::<_, MinPk, _, _>(
+                let _ = threshold::batch_verify_same_signer::<_, MinPk, _>(
                     &mut thread_rng(),
                     &public,
                     index,
@@ -322,7 +322,7 @@ fn fuzz(op: FuzzOperation) {
                         )
                     })
                     .collect();
-                let _ = threshold::batch_verify_same_signer::<_, MinSig, _, _>(
+                let _ = threshold::batch_verify_same_signer::<_, MinSig, _>(
                     &mut thread_rng(),
                     &public,
                     index,
@@ -352,6 +352,7 @@ fn fuzz(op: FuzzOperation) {
                     &namespace,
                     &message,
                     &partials_evals,
+                    &Sequential,
                 );
             }
         }
@@ -376,16 +377,17 @@ fn fuzz(op: FuzzOperation) {
                     &namespace,
                     &message,
                     &partials_evals,
+                    &Sequential,
                 );
             }
         }
 
         FuzzOperation::RecoverMinPk { sharing, partials } => {
-            let _ = threshold::recover::<MinPk, _, _, Bft3f1>(&sharing, &partials, &Sequential);
+            let _ = threshold::recover::<MinPk, _, Bft3f1>(&sharing, &partials, &Sequential);
         }
 
         FuzzOperation::RecoverMinSig { sharing, partials } => {
-            let _ = threshold::recover::<MinSig, _, _, Bft3f1>(&sharing, &partials, &Sequential);
+            let _ = threshold::recover::<MinSig, _, Bft3f1>(&sharing, &partials, &Sequential);
         }
 
         FuzzOperation::RecoverMultipleMinPk {
@@ -399,7 +401,7 @@ fn fuzz(op: FuzzOperation) {
                     .map(|group| group.iter().collect())
                     .collect();
                 let strategy = Rayon::new(NonZeroUsize::new(concurrency).unwrap()).unwrap();
-                let _ = threshold::recover_multiple::<MinPk, _, _, Bft3f1>(
+                let _ = threshold::recover_multiple::<MinPk, _, Bft3f1>(
                     &sharing,
                     groups_refs,
                     &strategy,
@@ -418,7 +420,7 @@ fn fuzz(op: FuzzOperation) {
                     .map(|group| group.iter().collect())
                     .collect();
                 let strategy = Rayon::new(NonZeroUsize::new(concurrency).unwrap()).unwrap();
-                let _ = threshold::recover_multiple::<MinSig, _, _, Bft3f1>(
+                let _ = threshold::recover_multiple::<MinSig, _, Bft3f1>(
                     &sharing,
                     groups_refs,
                     &strategy,
@@ -431,7 +433,7 @@ fn fuzz(op: FuzzOperation) {
             partials_1,
             partials_2,
         } => {
-            let _ = threshold::recover_pair::<MinPk, _, _, Bft3f1>(
+            let _ = threshold::recover_pair::<MinPk, _, Bft3f1>(
                 &sharing,
                 &partials_1,
                 &partials_2,
@@ -444,7 +446,7 @@ fn fuzz(op: FuzzOperation) {
             partials_1,
             partials_2,
         } => {
-            let _ = threshold::recover_pair::<MinSig, _, _, Bft3f1>(
+            let _ = threshold::recover_pair::<MinSig, _, Bft3f1>(
                 &sharing,
                 &partials_1,
                 &partials_2,

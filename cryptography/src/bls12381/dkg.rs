@@ -262,7 +262,7 @@
 //! // Step 4: Players finalize to get their shares
 //! let mut player_shares = BTreeMap::new();
 //! for (player_pk, player) in players {
-//!     let (output, share) = player.finalize::<_, Bft3f1>(
+//!     let (output, share) = player.finalize::<Bft3f1>(
 //!       dealer_logs.clone(),
 //!       &commonware_parallel::Sequential,
 //!     )?;
@@ -271,7 +271,7 @@
 //! }
 //!
 //! // Step 5: Observer can also compute the public output
-//! let observer_output = observe::<MinSig, ed25519::PublicKey, _, Bft3f1>(
+//! let observer_output = observe::<MinSig, ed25519::PublicKey, Bft3f1>(
 //!     info,
 //!     dealer_logs,
 //!     &commonware_parallel::Sequential,
@@ -298,10 +298,12 @@ use commonware_math::{
     algebra::{Additive, CryptoGroup, Random},
     poly::{Interpolator, Poly},
 };
-use commonware_parallel::{Sequential, Strategy as ParStrategy};
+use commonware_parallel::{Sequential, Strategy};
+#[cfg(feature = "arbitrary")]
+use commonware_utils::Bft3f1;
 use commonware_utils::{
     ordered::{Map, Quorum, Set},
-    Bft3f1, Faults, Participant, TryCollect, NZU32,
+    Faults, Participant, TryCollect, NZU32,
 };
 use core::num::NonZeroU32;
 use rand_core::CryptoRngCore;
@@ -1316,10 +1318,10 @@ struct ObserveInner<V: Variant, P: PublicKey> {
 }
 
 impl<V: Variant, P: PublicKey> ObserveInner<V, P> {
-    fn reckon<S: ParStrategy, M: Faults>(
+    fn reckon<M: Faults>(
         info: Info<V, P>,
         selected: Map<P, DealerLog<V, P>>,
-        strategy: &S,
+        strategy: &impl Strategy,
     ) -> Result<Self, Error> {
         // Track players with too many reveals
         let max_faults = info.players.max_faults::<M>();
@@ -1399,13 +1401,13 @@ impl<V: Variant, P: PublicKey> ObserveInner<V, P> {
 /// From this log, we can (potentially, as the DKG can fail) compute the public output.
 ///
 /// This will only ever return [`Error::DkgFailed`].
-pub fn observe<V: Variant, P: PublicKey, S: ParStrategy, M: Faults>(
+pub fn observe<V: Variant, P: PublicKey, M: Faults>(
     info: Info<V, P>,
     logs: BTreeMap<P, DealerLog<V, P>>,
-    strategy: &S,
+    strategy: &impl Strategy,
 ) -> Result<Output<V, P>, Error> {
     let selected = select::<V, P, M>(&info, logs)?;
-    ObserveInner::<V, P>::reckon::<S, M>(info, selected, strategy).map(|x| x.output)
+    ObserveInner::<V, P>::reckon::<M>(info, selected, strategy).map(|x| x.output)
 }
 
 /// Represents a player in the DKG / reshare process.
@@ -1476,10 +1478,10 @@ impl<V: Variant, S: Signer> Player<V, S> {
     /// for finalize.
     ///
     /// This will only ever return [`Error::DkgFailed`].
-    pub fn finalize<Y: ParStrategy, M: Faults>(
+    pub fn finalize<M: Faults>(
         self,
         logs: BTreeMap<S::PublicKey, DealerLog<V, S::PublicKey>>,
-        strategy: &Y,
+        strategy: &impl Strategy,
     ) -> Result<(Output<V, S::PublicKey>, Share), Error> {
         let selected = select::<V, S::PublicKey, M>(&self.info, logs)?;
         // We are extracting the private scalars from `Secret` protection
@@ -1509,7 +1511,7 @@ impl<V: Variant, S: Signer> Player<V, S> {
             .try_collect::<Map<_, _>>()
             .expect("select produces at most one entry per dealer");
         let ObserveInner { output, weights } =
-            ObserveInner::<V, S::PublicKey>::reckon::<Y, M>(self.info, selected, strategy)?;
+            ObserveInner::<V, S::PublicKey>::reckon::<M>(self.info, selected, strategy)?;
         let private = weights.map_or_else(
             || {
                 let mut out = <Scalar as Additive>::zero();
@@ -2103,7 +2105,7 @@ mod test_plan {
                 }
                 // Run observer
                 let observe_result =
-                    observe::<_, _, _, Bft3f1>(info.clone(), dealer_logs.clone(), &Sequential);
+                    observe::<_, _, Bft3f1>(info.clone(), dealer_logs.clone(), &Sequential);
                 if round.expect_failure(previous_successful_round) {
                     assert!(
                         observe_result.is_err(),
@@ -2190,7 +2192,7 @@ mod test_plan {
                 // Finalize each player
                 for (player_pk, player) in players.into_iter() {
                     let (player_output, share) = player
-                        .finalize::<_, Bft3f1>(dealer_logs.clone(), &Sequential)
+                        .finalize::<Bft3f1>(dealer_logs.clone(), &Sequential)
                         .expect("Player finalize should succeed");
 
                     assert_eq!(
@@ -2245,7 +2247,7 @@ mod test_plan {
                 }
 
                 let threshold = observer_output.quorum::<Bft3f1>();
-                let threshold_sig = threshold::recover::<V, _, _, Bft3f1>(
+                let threshold_sig = threshold::recover::<V, _, Bft3f1>(
                     &observer_output.public,
                     &partial_sigs[0..threshold as usize],
                     &Sequential,
