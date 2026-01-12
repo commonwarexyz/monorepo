@@ -78,7 +78,7 @@ pub struct Scalar(blst_fr);
 #[cfg(feature = "arbitrary")]
 impl arbitrary::Arbitrary<'_> for Scalar {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        let ikm = u.arbitrary::<[u8; 64]>()?;
+        let ikm = u.arbitrary::<[u8; IKM_LENGTH]>()?;
         Ok(Self::from_ikm(&ikm))
     }
 }
@@ -104,6 +104,9 @@ const SMALL_SCALAR_BITS: usize = 128;
 
 /// Number of bytes for SmallScalar (16 bytes = 128 bits).
 const SMALL_SCALAR_LENGTH: usize = 16;
+
+/// Number of bytes of input key material for BLS key generation.
+const IKM_LENGTH: usize = 64;
 
 /// A 128-bit scalar for use in batch verification random challenges.
 ///
@@ -257,9 +260,9 @@ pub type Private = Scalar;
 pub const PRIVATE_KEY_LENGTH: usize = SCALAR_LENGTH;
 
 impl Scalar {
-    /// Creates a scalar from 64 bytes of input key material.
+    /// Creates a scalar from input key material.
     /// Uses IETF BLS KeyGen which loops internally until a non-zero value is produced.
-    fn from_ikm(ikm: &[u8; 64]) -> Self {
+    fn from_ikm(ikm: &[u8; IKM_LENGTH]) -> Self {
         let mut sc = blst_scalar::default();
         let mut ret = blst_fr::default();
         // SAFETY: ikm is a valid 64-byte buffer; blst_keygen handles null key_info.
@@ -531,22 +534,14 @@ impl Field for Scalar {
 impl Random for Scalar {
     /// Returns a random non-zero scalar.
     fn random(mut rng: impl CryptoRngCore) -> Self {
-        let mut ikm = [0u8; 64];
+        let mut ikm = [0u8; IKM_LENGTH];
         rng.fill_bytes(&mut ikm);
-
-        let mut sc = blst_scalar::default();
-        let mut ret = blst_fr::default();
-        // SAFETY: ikm is a valid 64-byte buffer; blst_keygen handles null key_info.
-        unsafe {
-            // blst_keygen loops until a non-zero value is produced (in accordance with IETF BLS KeyGen 4+).
-            blst_keygen(&mut sc, ikm.as_ptr(), ikm.len(), ptr::null(), 0);
-            blst_fr_from_scalar(&mut ret, &sc);
-        }
+        let result = Self::from_ikm(&ikm);
 
         // Zeroize the ikm buffer
         ikm.zeroize();
 
-        Self(ret)
+        result
     }
 }
 
