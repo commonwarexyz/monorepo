@@ -1,7 +1,9 @@
 //! Service configuration for Prometheus, Loki, Grafana, Promtail, and a caller-provided binary
 
-use crate::ec2::s3::{S3_DEPLOYMENTS_PREFIX, S3_TOOLS_BINARIES_PREFIX, S3_TOOLS_CONFIGS_PREFIX};
-use crate::ec2::Architecture;
+use crate::ec2::{
+    s3::{S3_DEPLOYMENTS_PREFIX, S3_TOOLS_BINARIES_PREFIX, S3_TOOLS_CONFIGS_PREFIX},
+    Architecture,
+};
 
 /// Deployer version used to namespace static configs in S3
 const DEPLOYER_VERSION: &str = env!("CARGO_PKG_VERSION");

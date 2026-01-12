@@ -54,7 +54,7 @@
 //!
 //! ### Monitoring
 //!
-//! * Deployed in `us-east-1` with a configurable ARM64 instance type (e.g., `t4g.small`) and storage (e.g., 10GB gp2).
+//! * Deployed in `us-east-1` with a configurable instance type (e.g., `t4g.small` for ARM64, `t3.small` for x86_64) and storage (e.g., 10GB gp2). Architecture is auto-detected from the instance type.
 //! * Runs:
 //!     * **Prometheus**: Scrapes binary metrics from all instances at `:9090` and system metrics from all instances at `:9100`.
 //!     * **Loki**: Listens at `:3100`, storing logs in `/loki/chunks` with a TSDB index at `/loki/index`.
@@ -67,7 +67,7 @@
 //!
 //! ### Binary
 //!
-//! * Deployed in user-specified regions with configurable ARM64 instance types and storage.
+//! * Deployed in user-specified regions with configurable instance types and storage. Architecture is auto-detected from the instance type.
 //! * Run:
 //!     * **Custom Binary**: Executes with `--hosts=/home/ubuntu/hosts.yaml --config=/home/ubuntu/config.conf`, exposing metrics at `:9090`.
 //!     * **Promtail**: Forwards `/var/log/binary.log` to Loki on the monitoring instance.
@@ -172,25 +172,25 @@
 //! ```yaml
 //! tag: ffa638a0-991c-442c-8ec4-aa4e418213a5
 //! monitoring:
-//!   instance_type: t4g.small
+//!   instance_type: t4g.small  # ARM64 (Graviton)
 //!   storage_size: 10
 //!   storage_class: gp2
 //!   dashboard: /path/to/dashboard.json
 //! instances:
 //!   - name: node1
 //!     region: us-east-1
-//!     instance_type: t4g.small
+//!     instance_type: t4g.small  # ARM64 (Graviton)
 //!     storage_size: 10
 //!     storage_class: gp2
-//!     binary: /path/to/binary
+//!     binary: /path/to/binary-arm64
 //!     config: /path/to/config.conf
 //!     profiling: true
 //!   - name: node2
 //!     region: us-west-2
-//!     instance_type: t4g.small
+//!     instance_type: t3.small  # x86_64 (Intel/AMD)
 //!     storage_size: 10
 //!     storage_class: gp2
-//!     binary: /path/to/binary2
+//!     binary: /path/to/binary-x86
 //!     config: /path/to/config2.conf
 //!     profiling: false
 //! ports:
@@ -425,7 +425,7 @@ pub struct InstanceConfig {
     /// AWS region where the instance is deployed
     pub region: String,
 
-    /// Instance type (only ARM-based instances are supported)
+    /// Instance type (e.g., `t4g.small` for ARM64, `t3.small` for x86_64)
     pub instance_type: String,
 
     /// Storage size in GB
@@ -447,7 +447,7 @@ pub struct InstanceConfig {
 /// Monitoring configuration
 #[derive(Serialize, Deserialize, Clone)]
 pub struct MonitoringConfig {
-    /// Instance type (only ARM-based instances are supported)
+    /// Instance type (e.g., `t4g.small` for ARM64, `t3.small` for x86_64)
     pub instance_type: String,
 
     /// Storage size in GB
