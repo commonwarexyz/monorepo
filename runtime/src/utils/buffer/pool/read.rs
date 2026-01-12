@@ -113,7 +113,6 @@ impl<B: Blob> PageReader<B> {
         // Validate CRCs and compute total logical bytes
         let mut total_logical = 0usize;
         let mut last_len = 0usize;
-
         for page_idx in 0..pages_to_read {
             let page_start = page_idx * self.page_size;
             let page_slice = &physical_buf[page_start..page_start + self.page_size];
@@ -159,14 +158,6 @@ impl<B: Blob> PageReader<B> {
 /// This accumulates `BufferState` from multiple fills and provides navigation
 /// across pages while skipping CRCs. Consumed buffers are cleaned up in
 /// `advance()`.
-///
-/// # Why VecDeque?
-///
-/// We use a VecDeque to accumulate buffers across fills because `ensure(n)` may
-/// require more bytes than a single prefetch batch provides. For example, with
-/// `prefetch_count=2` and data spanning 3 pages, two fills are needed. The
-/// VecDeque allows navigation across these buffers while consumed buffers are
-/// cleaned up in `advance()`.
 struct ReplayBuf {
     /// Physical page size (logical_page_size + CHECKSUM_SIZE).
     page_size: usize,

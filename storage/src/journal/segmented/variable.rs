@@ -1979,15 +1979,7 @@ mod tests {
 
     #[test_traced]
     fn test_journal_replay_start_offset_with_trailing_bytes() {
-        // Regression test: when replaying with start_offset > 0 and there are
-        // trailing corrupt bytes, the truncation logic must not truncate valid
-        // data before start_offset. Previously, valid_offset was initialized to 0
-        // instead of start_offset, causing valid data to be lost.
-        //
-        // The bug triggers when:
-        // 1. start_offset > 0 (we skip some bytes)
-        // 2. The first thing encountered AFTER skipping is trailing corrupt bytes
-        // 3. valid_offset is incorrectly 0 instead of start_offset
+        // Regression: valid_offset must be initialized to start_offset, not 0.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
@@ -2060,14 +2052,7 @@ mod tests {
 
     #[test_traced]
     fn test_journal_large_item_spanning_pages() {
-        // Test that items larger than PAGE_SIZE are correctly written and read.
-        // This exercises:
-        // 1. ensure() filling multiple pages into multiple BufferStates
-        // 2. take() limiting reads to item_size across page boundaries
-        // 3. Codec decoding via Buf trait across chunk boundaries
-
-        // Use a fixed-size array larger than PAGE_SIZE (1024).
-        // 2048 bytes spans 2 full pages.
+        // 2048 bytes spans 2 full pages (PAGE_SIZE = 1024).
         const LARGE_SIZE: usize = 2048;
         type LargeItem = [u8; LARGE_SIZE];
 
