@@ -549,8 +549,7 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     .await?
     .try_into()
     .unwrap();
-
-    info!("uploaded config files to S3");
+    info!("uploaded deployment-specific config files to S3");
 
     // Install and configure monitoring services
     enable_bbr(private_key, &monitoring_ip, &bbr_conf_url).await?;
