@@ -103,7 +103,7 @@
 //! 1. Validates configuration and generates an SSH key pair, stored in `$HOME/.commonware_deployer/{tag}/id_rsa_{tag}`.
 //! 2. Ensures the shared S3 bucket exists and caches observability tools (Prometheus, Grafana, Loki, etc.) if not already present.
 //! 3. Uploads deployment-specific files (binaries, configs) to S3.
-//! 4. Creates VPCs, subnets, internet gateways, route tables, and security groups per region.
+//! 4. Creates VPCs, subnets, internet gateways, route tables, and security groups per region (concurrently).
 //! 5. Establishes VPC peering between the monitoring region and binary regions.
 //! 6. Launches the monitoring instance.
 //! 7. Launches binary instances.

@@ -241,113 +241,128 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     }
     info!("uploaded all instance binaries and configs");
 
-    // Initialize resources for each region
+    // Initialize resources for each region concurrently
     info!(?regions, "initializing resources");
-    let mut ec2_clients = HashMap::new();
-    let mut region_resources = HashMap::new();
-    for (idx, region) in regions.iter().enumerate() {
-        // Create client for region
-        let ec2_client = create_ec2_client(Region::new(region.clone())).await;
-        ec2_clients.insert(region.clone(), ec2_client);
-        info!(region = region.as_str(), "created EC2 client");
+    let region_init_futures: Vec<_> = regions
+        .iter()
+        .enumerate()
+        .map(|(idx, region)| {
+            let region = region.clone();
+            let tag = tag.clone();
+            let deployer_ip = deployer_ip.clone();
+            let key_name = key_name.clone();
+            let public_key = public_key.clone();
+            let instance_types: Vec<String> =
+                instance_types_by_region[&region].iter().cloned().collect();
 
-        // Assert all instance types are ARM-based
-        let instance_types: Vec<String> =
-            instance_types_by_region[region].iter().cloned().collect();
-        assert_arm64_support(&ec2_clients[region], &instance_types).await?;
+            async move {
+                // Create client for region
+                let ec2_client = create_ec2_client(Region::new(region.clone())).await;
+                info!(region = region.as_str(), "created EC2 client");
 
-        // Find availability zone that supports all instance types
-        let az = find_availability_zone(&ec2_clients[region], &instance_types).await?;
-        info!(
-            az = az.as_str(),
-            region = region.as_str(),
-            "selected availability zone"
-        );
+                // Assert all instance types are ARM-based
+                assert_arm64_support(&ec2_client, &instance_types).await?;
 
-        // Create VPC, IGW, route table, subnet, security groups, and key pair
-        let vpc_cidr = format!("10.{idx}.0.0/16");
-        let vpc_id = create_vpc(&ec2_clients[region], &vpc_cidr, tag).await?;
-        info!(
-            vpc = vpc_id.as_str(),
-            region = region.as_str(),
-            "created VPC"
-        );
-        let igw_id = create_and_attach_igw(&ec2_clients[region], &vpc_id, tag).await?;
-        info!(
-            igw = igw_id.as_str(),
-            vpc = vpc_id.as_str(),
-            region = region.as_str(),
-            "created and attached IGW"
-        );
-        let route_table_id =
-            create_route_table(&ec2_clients[region], &vpc_id, &igw_id, tag).await?;
-        info!(
-            route_table = route_table_id.as_str(),
-            vpc = vpc_id.as_str(),
-            region = region.as_str(),
-            "created route table"
-        );
-        let subnet_cidr = format!("10.{idx}.1.0/24");
-        let subnet_id = create_subnet(
-            &ec2_clients[region],
-            &vpc_id,
-            &route_table_id,
-            &subnet_cidr,
-            &az,
-            tag,
-        )
-        .await?;
-        info!(
-            subnet = subnet_id.as_str(),
-            vpc = vpc_id.as_str(),
-            region = region.as_str(),
-            "created subnet"
-        );
+                // Find availability zone that supports all instance types
+                let az = find_availability_zone(&ec2_client, &instance_types).await?;
+                info!(
+                    az = az.as_str(),
+                    region = region.as_str(),
+                    "selected availability zone"
+                );
 
-        // Create monitoring security group in monitoring region
-        let monitoring_sg_id = if *region == MONITORING_REGION {
-            let sg_id =
-                create_security_group_monitoring(&ec2_clients[region], &vpc_id, &deployer_ip, tag)
-                    .await?;
-            info!(
-                sg = sg_id.as_str(),
-                vpc = vpc_id.as_str(),
-                region = region.as_str(),
-                "created monitoring security group"
-            );
-            Some(sg_id)
-        } else {
-            None
-        };
+                // Create VPC, IGW, route table, subnet, security groups, and key pair
+                let vpc_cidr = format!("10.{idx}.0.0/16");
+                let vpc_id = create_vpc(&ec2_client, &vpc_cidr, &tag).await?;
+                info!(
+                    vpc = vpc_id.as_str(),
+                    region = region.as_str(),
+                    "created VPC"
+                );
+                let igw_id = create_and_attach_igw(&ec2_client, &vpc_id, &tag).await?;
+                info!(
+                    igw = igw_id.as_str(),
+                    vpc = vpc_id.as_str(),
+                    region = region.as_str(),
+                    "created and attached IGW"
+                );
+                let route_table_id = create_route_table(&ec2_client, &vpc_id, &igw_id, &tag).await?;
+                info!(
+                    route_table = route_table_id.as_str(),
+                    vpc = vpc_id.as_str(),
+                    region = region.as_str(),
+                    "created route table"
+                );
+                let subnet_cidr = format!("10.{idx}.1.0/24");
+                let subnet_id = create_subnet(
+                    &ec2_client,
+                    &vpc_id,
+                    &route_table_id,
+                    &subnet_cidr,
+                    &az,
+                    &tag,
+                )
+                .await?;
+                info!(
+                    subnet = subnet_id.as_str(),
+                    vpc = vpc_id.as_str(),
+                    region = region.as_str(),
+                    "created subnet"
+                );
 
-        // Import key pair
-        import_key_pair(&ec2_clients[region], &key_name, &public_key).await?;
-        info!(
-            key = key_name.as_str(),
-            region = region.as_str(),
-            "imported key pair"
-        );
+                // Create monitoring security group in monitoring region
+                let monitoring_sg_id = if region == MONITORING_REGION {
+                    let sg_id =
+                        create_security_group_monitoring(&ec2_client, &vpc_id, &deployer_ip, &tag)
+                            .await?;
+                    info!(
+                        sg = sg_id.as_str(),
+                        vpc = vpc_id.as_str(),
+                        region = region.as_str(),
+                        "created monitoring security group"
+                    );
+                    Some(sg_id)
+                } else {
+                    None
+                };
 
-        // Store resources for region
-        info!(
-            vpc = vpc_id.as_str(),
-            subnet = subnet_id.as_str(),
-            subnet_cidr = subnet_cidr.as_str(),
-            region = region.as_str(),
-            "initialized resources"
-        );
-        region_resources.insert(
-            region.clone(),
-            RegionResources {
-                vpc_id,
-                vpc_cidr: vpc_cidr.clone(),
-                route_table_id,
-                subnet_id,
-                binary_sg_id: None,
-                monitoring_sg_id,
-            },
-        );
-    }
+                // Import key pair
+                import_key_pair(&ec2_client, &key_name, &public_key).await?;
+                info!(
+                    key = key_name.as_str(),
+                    region = region.as_str(),
+                    "imported key pair"
+                );
+
+                info!(
+                    vpc = vpc_id.as_str(),
+                    subnet = subnet_id.as_str(),
+                    subnet_cidr = subnet_cidr.as_str(),
+                    region = region.as_str(),
+                    "initialized resources"
+                );
+
+                Ok::<_, Error>((
+                    region,
+                    ec2_client,
+                    RegionResources {
+                        vpc_id,
+                        vpc_cidr,
+                        route_table_id,
+                        subnet_id,
+                        binary_sg_id: None,
+                        monitoring_sg_id,
+                    },
+                ))
+            }
+        })
+        .collect();
+
+    let region_results = try_join_all(region_init_futures).await?;
+    let (ec2_clients, mut region_resources): (HashMap<_, _>, HashMap<_, _>) = region_results
+        .into_iter()
+        .map(|(region, client, resources)| ((region.clone(), client), (region, resources)))
+        .unzip();
     info!(?regions, "initialized resources");
 
     // Setup VPC peering connections
