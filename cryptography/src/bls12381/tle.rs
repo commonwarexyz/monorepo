@@ -298,11 +298,11 @@ pub fn encrypt<R: CryptoRngCore, V: Variant>(
     let gt = V::pairing(&r_pub, &q_id);
 
     // Compute V = sigma XOR H2(e(P_pub, Q_id)^r)
-    let h2_value = hash::h2(&gt);
+    let h2_value = Zeroizing::new(hash::h2(&gt));
     let v = xor(&sigma, &h2_value);
 
     // Compute W = M XOR H4(sigma)
-    let h4_value = hash::h4(&sigma);
+    let h4_value = Zeroizing::new(hash::h4(&sigma));
     let w = xor(message, &h4_value);
 
     Ciphertext { u, v, w }
