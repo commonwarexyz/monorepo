@@ -17,6 +17,8 @@ use super::{
     super::{group::SmallScalar, variant::Variant, Error},
     hash_with_namespace,
 };
+#[cfg(not(feature = "std"))]
+use alloc::{vec, vec::Vec};
 use commonware_math::algebra::Space;
 use commonware_parallel::Strategy;
 use rand_core::CryptoRngCore;
@@ -24,7 +26,7 @@ use rand_core::CryptoRngCore;
 /// Segment tree for batch verification bisection.
 ///
 /// Stores aggregated (public_key, signature) sums at each node, enabling O(log k)
-/// identification of k invalid signatures.
+/// identification of k invalid signatures. Uses 1-indexed array layout:
 ///
 /// ```text
 ///            [1]           <- root covers [0, 4)
@@ -124,6 +126,10 @@ impl<V: Variant> SegmentTree<V> {
     }
 }
 
+/// Find invalid entries using parallel bisection.
+///
+/// Splits entries into chunks for parallel processing, then uses segment tree
+/// bisection within each chunk to identify invalid indices.
 fn bisect<V: Variant>(
     entries: &[(V::Public, V::Signature)],
     hm: &V::Signature,
@@ -137,7 +143,9 @@ fn bisect<V: Variant>(
     let par_hint = strategy.parallelism_hint();
     let chunk_size = entries.len().div_ceil(par_hint);
     if entries.len() <= chunk_size {
-        return SegmentTree::<V>::build(entries).verify(hm, true);
+        let mut out = SegmentTree::<V>::build(entries).verify(hm, true);
+        out.sort_unstable();
+        return out;
     }
 
     // Multiple chunks: verify each chunk root (may be valid or invalid).
