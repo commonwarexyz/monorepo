@@ -318,8 +318,8 @@ impl<B: Blob> Replay<B> {
 
     /// Seeks to `offset` in the blob, returning `Err(BlobInsufficientLength)` if `offset` exceeds
     /// the blob size.
-    pub async fn seek_to(&mut self, offset: usize) -> Result<(), Error> {
-        if offset as u64 > self.reader.blob_size() {
+    pub async fn seek_to(&mut self, offset: u64) -> Result<(), Error> {
+        if offset > self.reader.blob_size() {
             return Err(Error::BlobInsufficientLength);
         }
 
@@ -330,10 +330,10 @@ impl<B: Blob> Replay<B> {
         self.buffer.remaining = 0;
         self.exhausted = false;
 
-        let page_size = self.reader.logical_page_size;
-        self.reader.blob_page = (offset / page_size) as u64;
+        let page_size = self.reader.logical_page_size as u64;
+        self.reader.blob_page = offset / page_size;
 
-        let remainder = offset % page_size;
+        let remainder = (offset % page_size) as usize;
         if remainder > 0 {
             assert!(self.ensure(remainder).await?, "bounds already checked");
             self.advance(remainder);
@@ -554,7 +554,7 @@ mod tests {
             assert_eq!(replay.chunk()[0], data[0]);
 
             // Seek beyond blob size should error
-            assert!(replay.seek_to(data.len() + 1).await.is_err());
+            assert!(replay.seek_to(data.len() as u64 + 1).await.is_err());
         });
     }
 }

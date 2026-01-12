@@ -201,7 +201,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
                 if start > blob_size {
                     return Err(Error::ItemOutOfRange(start_position));
                 }
-                replay.seek_to(start as usize).await?;
+                replay.seek_to(start).await?;
                 start_position
             } else {
                 0
