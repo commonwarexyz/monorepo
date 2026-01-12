@@ -207,22 +207,16 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
         ));
     }
 
-    let (binary_results, config_results): (Vec<String>, Vec<String>) = tokio::try_join!(
-        async { try_join_all(binary_uploads).await },
-        async { try_join_all(config_uploads).await },
-    )?;
+    let (binary_results, config_results): (Vec<String>, Vec<String>) =
+        tokio::try_join!(async { try_join_all(binary_uploads).await }, async {
+            try_join_all(config_uploads).await
+        },)?;
 
     // Build hash -> URL maps
-    let binary_hash_to_url: HashMap<String, String> = binary_hashes
-        .keys()
-        .cloned()
-        .zip(binary_results)
-        .collect();
-    let config_hash_to_url: HashMap<String, String> = config_hashes
-        .keys()
-        .cloned()
-        .zip(config_results)
-        .collect();
+    let binary_hash_to_url: HashMap<String, String> =
+        binary_hashes.keys().cloned().zip(binary_results).collect();
+    let config_hash_to_url: HashMap<String, String> =
+        config_hashes.keys().cloned().zip(config_results).collect();
 
     // Map instance names to URLs via their hashes
     let mut instance_binary_urls: HashMap<String, String> = HashMap::new();
@@ -286,7 +280,8 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
                     region = region.as_str(),
                     "created and attached IGW"
                 );
-                let route_table_id = create_route_table(&ec2_client, &vpc_id, &igw_id, &tag).await?;
+                let route_table_id =
+                    create_route_table(&ec2_client, &vpc_id, &igw_id, &tag).await?;
                 info!(
                     route_table = route_table_id.as_str(),
                     vpc = vpc_id.as_str(),
@@ -720,10 +715,10 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
         ));
     }
 
-    let (promtail_results, pyroscope_results): (Vec<String>, Vec<String>) = tokio::try_join!(
-        async { try_join_all(promtail_uploads).await },
-        async { try_join_all(pyroscope_uploads).await },
-    )?;
+    let (promtail_results, pyroscope_results): (Vec<String>, Vec<String>) =
+        tokio::try_join!(async { try_join_all(promtail_uploads).await }, async {
+            try_join_all(pyroscope_uploads).await
+        },)?;
 
     // Build hash -> URL maps
     let promtail_hash_to_url: HashMap<String, String> = promtail_hashes

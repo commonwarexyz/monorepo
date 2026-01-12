@@ -106,22 +106,16 @@ pub async fn update(config_path: &PathBuf) -> Result<(), Error> {
         ));
     }
 
-    let (binary_results, config_results): (Vec<String>, Vec<String>) = tokio::try_join!(
-        async { try_join_all(binary_uploads).await },
-        async { try_join_all(config_uploads).await },
-    )?;
+    let (binary_results, config_results): (Vec<String>, Vec<String>) =
+        tokio::try_join!(async { try_join_all(binary_uploads).await }, async {
+            try_join_all(config_uploads).await
+        },)?;
 
     // Build hash -> URL maps
-    let binary_hash_to_url: HashMap<String, String> = binary_hashes
-        .keys()
-        .cloned()
-        .zip(binary_results)
-        .collect();
-    let config_hash_to_url: HashMap<String, String> = config_hashes
-        .keys()
-        .cloned()
-        .zip(config_results)
-        .collect();
+    let binary_hash_to_url: HashMap<String, String> =
+        binary_hashes.keys().cloned().zip(binary_results).collect();
+    let config_hash_to_url: HashMap<String, String> =
+        config_hashes.keys().cloned().zip(config_results).collect();
 
     // Map instance names to URLs via their hashes
     let mut instance_binary_urls: HashMap<String, String> = HashMap::new();

@@ -12,11 +12,7 @@ use aws_sdk_s3::{
     Client as S3Client,
 };
 use commonware_cryptography::{Hasher, Sha256};
-use std::{
-    io::Read,
-    path::Path,
-    time::Duration,
-};
+use std::{io::Read, path::Path, time::Duration};
 use tracing::info;
 
 /// S3 bucket name for caching deployer artifacts
