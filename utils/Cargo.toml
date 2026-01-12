@@ -38,6 +38,7 @@ commonware-conformance.workspace = true
 commonware-macros.workspace = true
 criterion.workspace = true
 num-bigint = { workspace = true, default-features = false }
+roaring = "0.10"
 rstest.workspace = true
 
 [features]
