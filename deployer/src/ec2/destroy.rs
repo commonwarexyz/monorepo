@@ -11,7 +11,7 @@ use crate::ec2::{
 };
 use futures::future::try_join_all;
 use std::{collections::HashSet, fs::File, path::PathBuf};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 /// Tears down all resources associated with the deployment tag
 pub async fn destroy(config: &PathBuf) -> Result<(), Error> {
@@ -74,7 +74,7 @@ pub async fn destroy(config: &PathBuf) -> Result<(), Error> {
         // Stage region teardown
         let job = async move {
             let ec2_client = create_ec2_client(Region::new(region.clone())).await;
-            info!(region = region.as_str(), "created EC2 client");
+            debug!(region = region.as_str(), "created EC2 client");
 
             let instance_ids = find_instances_by_tag(&ec2_client, tag).await?;
             if !instance_ids.is_empty() {
@@ -128,7 +128,7 @@ pub async fn destroy(config: &PathBuf) -> Result<(), Error> {
                 {
                     warn!(%e, "failed to revoke logs ingress rule between monitoring and binary security groups");
                 } else {
-                    info!(
+                    debug!(
                         monitoring_sg,
                         binary_sg,
                         "revoked logs ingress rule between monitoring and binary security groups"
@@ -151,7 +151,7 @@ pub async fn destroy(config: &PathBuf) -> Result<(), Error> {
                 {
                     warn!(%e, "failed to revoke profiles ingress rule between monitoring and binary security groups");
                 } else {
-                    info!(
+                    debug!(
                         monitoring_sg,
                         binary_sg,
                         "revoked profiles ingress rule between monitoring and binary security groups"
@@ -174,7 +174,7 @@ pub async fn destroy(config: &PathBuf) -> Result<(), Error> {
                 {
                     warn!(%e, "failed to revoke traces ingress rule between monitoring and binary security groups");
                 } else {
-                    info!(
+                    debug!(
                         monitoring_sg,
                         binary_sg,
                         "revoked traces ingress rule between monitoring and binary security groups"
@@ -187,7 +187,7 @@ pub async fn destroy(config: &PathBuf) -> Result<(), Error> {
             for sg in sgs {
                 let sg_id = sg.group_id().unwrap();
                 wait_for_enis_deleted(&ec2_client, sg_id).await?;
-                info!(
+                debug!(
                     region = region.as_str(),
                     sg_id, "ENIs deleted from security group"
                 );
@@ -221,7 +221,7 @@ pub async fn destroy(config: &PathBuf) -> Result<(), Error> {
             for igw_id in igw_ids {
                 let vpc_id = find_vpc_by_igw(&ec2_client, &igw_id).await?;
                 detach_igw(&ec2_client, &igw_id, &vpc_id).await?;
-                info!(
+                debug!(
                     region = region.as_str(),
                     igw_id, vpc_id, "detached internet gateway"
                 );
@@ -241,7 +241,7 @@ pub async fn destroy(config: &PathBuf) -> Result<(), Error> {
     // Second pass: Delete VPCs after dependencies are removed
     for region in &all_regions {
         let ec2_client = create_ec2_client(Region::new(region.clone())).await;
-        info!(region = region.as_str(), "created EC2 client");
+        debug!(region = region.as_str(), "created EC2 client");
         let vpc_ids = find_vpcs_by_tag(&ec2_client, tag).await?;
         for vpc_id in vpc_ids {
             delete_vpc(&ec2_client, &vpc_id).await?;

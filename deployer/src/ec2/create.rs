@@ -252,14 +252,14 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
             async move {
                 // Create client for region
                 let ec2_client = create_ec2_client(Region::new(region.clone())).await;
-                info!(region = region.as_str(), "created EC2 client");
+                debug!(region = region.as_str(), "created EC2 client");
 
                 // Assert all instance types are ARM-based
                 assert_arm64_support(&ec2_client, &instance_types).await?;
 
                 // Find availability zone that supports all instance types
                 let az = find_availability_zone(&ec2_client, &instance_types).await?;
-                info!(
+                debug!(
                     az = az.as_str(),
                     region = region.as_str(),
                     "selected availability zone"
@@ -268,13 +268,13 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
                 // Create VPC, IGW, route table, subnet, security groups, and key pair
                 let vpc_cidr = format!("10.{idx}.0.0/16");
                 let vpc_id = create_vpc(&ec2_client, &vpc_cidr, &tag).await?;
-                info!(
+                debug!(
                     vpc = vpc_id.as_str(),
                     region = region.as_str(),
                     "created VPC"
                 );
                 let igw_id = create_and_attach_igw(&ec2_client, &vpc_id, &tag).await?;
-                info!(
+                debug!(
                     igw = igw_id.as_str(),
                     vpc = vpc_id.as_str(),
                     region = region.as_str(),
@@ -282,7 +282,7 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
                 );
                 let route_table_id =
                     create_route_table(&ec2_client, &vpc_id, &igw_id, &tag).await?;
-                info!(
+                debug!(
                     route_table = route_table_id.as_str(),
                     vpc = vpc_id.as_str(),
                     region = region.as_str(),
@@ -298,7 +298,7 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
                     &tag,
                 )
                 .await?;
-                info!(
+                debug!(
                     subnet = subnet_id.as_str(),
                     vpc = vpc_id.as_str(),
                     region = region.as_str(),
@@ -310,7 +310,7 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
                     let sg_id =
                         create_security_group_monitoring(&ec2_client, &vpc_id, &deployer_ip, &tag)
                             .await?;
-                    info!(
+                    debug!(
                         sg = sg_id.as_str(),
                         vpc = vpc_id.as_str(),
                         region = region.as_str(),
@@ -323,13 +323,13 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
 
                 // Import key pair
                 import_key_pair(&ec2_client, &key_name, &public_key).await?;
-                info!(
+                debug!(
                     key = key_name.as_str(),
                     region = region.as_str(),
                     "imported key pair"
                 );
 
-                info!(
+                debug!(
                     vpc = vpc_id.as_str(),
                     subnet = subnet_id.as_str(),
                     subnet_cidr = subnet_cidr.as_str(),
@@ -381,7 +381,7 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
                 tag,
             )
             .await?;
-            info!(
+            debug!(
                 peer = peer_id.as_str(),
                 monitoring = monitoring_vpc_id.as_str(),
                 binary = binary_vpc_id.as_str(),
@@ -389,13 +389,13 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
                 "created VPC peering connection"
             );
             wait_for_vpc_peering_connection(&ec2_clients[region], &peer_id).await?;
-            info!(
+            debug!(
                 peer = peer_id.as_str(),
                 region = region.as_str(),
                 "VPC peering connection is available"
             );
             accept_vpc_peering_connection(&ec2_clients[region], &peer_id).await?;
-            info!(
+            debug!(
                 peer = peer_id.as_str(),
                 region = region.as_str(),
                 "accepted VPC peering connection"
@@ -414,7 +414,7 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
                 &peer_id,
             )
             .await?;
-            info!(
+            debug!(
                 peer = peer_id.as_str(),
                 monitoring = monitoring_vpc_id.as_str(),
                 binary = binary_vpc_id.as_str(),
@@ -481,7 +481,7 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
             &config.ports,
         )
         .await?;
-        info!(
+        debug!(
             sg = binary_sg_id.as_str(),
             vpc = resources.vpc_id.as_str(),
             region = region.as_str(),
@@ -898,7 +898,7 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
             .send()
             .await
             .map_err(|err| err.into_service_error())?;
-        info!(
+        debug!(
             monitoring = monitoring_sg_id.as_str(),
             binary = binary_sg_id.as_str(),
             region = monitoring_region.as_str(),
@@ -938,11 +938,11 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
                 .send()
                 .await
                 .map_err(|err| err.into_service_error())?;
-            info!(
+            debug!(
                 monitoring = monitoring_sg_id.as_str(),
                 binary = binary_cidr.as_str(),
                 region = region.as_str(),
-                "opened monitoring part to traffic from binary VPC"
+                "opened monitoring port to traffic from binary VPC"
             );
         }
     }
