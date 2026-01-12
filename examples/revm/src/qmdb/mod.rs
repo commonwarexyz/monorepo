@@ -6,23 +6,21 @@
 //!
 //! Design at a glance:
 //! - Accounts, storage, and code live in separate QMDB partitions.
-//! - Reads go through a synchronous `DatabaseRef` implementation that dispatches
-//!   to a dedicated QMDB actor and blocks on the response.
+//! - Reads go through `DatabaseAsyncRef` and are bridged into sync REVM calls
+//!   via `WrapDatabaseAsync` (Tokio runtime required).
 //! - Writes are staged in the REVM overlay and applied to QMDB in batches when
 //!   the example decides a block is finalized.
-//! - QMDB operations run in a dedicated actor task to avoid cross-crate RPITIT
-//!   Send bound issues (rust-lang/rust#100013).
 
-mod actor;
 mod adapter;
 mod keys;
 mod model;
 mod persist;
 mod store;
 
+use adapter::QmdbAsyncDb;
 use alloy_evm::revm::{
     database::CacheDB,
-    database_interface::DBErrorMarker,
+    database_interface::{async_db::WrapDatabaseAsync, DBErrorMarker},
     primitives::{keccak256, Address, B256, U256},
 };
 use commonware_codec::RangeCfg;
@@ -36,15 +34,15 @@ use commonware_storage::{
     translator::EightCap,
 };
 use commonware_utils::{NZUsize, NZU64};
+use futures::lock::Mutex;
+use std::sync::Arc;
 use thiserror::Error;
 
 use crate::types::StateRoot;
 use keys::{account_key, code_key, storage_key, AccountKey, CodeKey, StorageKey};
 use model::{AccountRecord, StorageRecord};
-use store::preview_root_inner;
-use store::{apply_changes_inner, apply_genesis_inner, Stores};
+use store::{apply_changes_inner, apply_genesis_inner, preview_root_inner, QmdbInner, Stores};
 
-pub(crate) use actor::QmdbHandle;
 pub(crate) use adapter::QmdbRefDb;
 pub(crate) use persist::QmdbChanges;
 
@@ -90,6 +88,8 @@ type CodeStoreDirty = any::unordered::variable::Db<
 pub(crate) enum Error {
     #[error("qmdb error: {0}")]
     Qmdb(#[from] commonware_storage::qmdb::Error),
+    #[error("missing tokio runtime for WrapDatabaseAsync")]
+    MissingRuntime,
     #[error("missing code for hash {0:?}")]
     MissingCode(B256),
     #[error("qmdb store unavailable: {0}")]
@@ -118,12 +118,11 @@ impl QmdbConfig {
 }
 
 /// Owns QMDB handles and exposes a REVM database view plus persistence hooks.
+#[derive(Clone)]
 pub(crate) struct QmdbState {
-    /// Store ownership while updates are in-flight.
-    stores: Option<Stores>,
-    /// Base context used to (re)open QMDB partitions.
+    inner: Arc<Mutex<QmdbInner>>,
+    gate: Arc<Mutex<()>>,
     context: Context,
-    /// Configuration used to (re)open QMDB partitions.
     config: QmdbConfig,
 }
 
@@ -136,98 +135,86 @@ impl QmdbState {
     ) -> Result<Self, Error> {
         let stores = open_stores(context.clone(), config.clone()).await?;
         let state = Self {
-            stores: Some(stores),
+            inner: Arc::new(Mutex::new(QmdbInner::new(stores))),
+            gate: Arc::new(Mutex::new(())),
             context,
             config,
         };
-        let mut state = state;
         state.bootstrap_genesis(genesis_alloc).await?;
         Ok(state)
     }
 
-    fn stores(&self) -> Result<&Stores, Error> {
-        self.stores
-            .as_ref()
-            .ok_or(Error::StoreUnavailable("stores unavailable"))
-    }
-
-    fn take_stores(&mut self) -> Result<Stores, Error> {
-        self.stores
-            .take()
-            .ok_or(Error::StoreUnavailable("stores unavailable"))
-    }
-
-    fn restore_stores(&mut self, stores: Stores) {
-        self.stores = Some(stores);
+    /// Creates a sync REVM database view backed by the async QMDB adapter.
+    ///
+    /// This uses REVM's `WrapDatabaseAsync` bridge and therefore requires a
+    /// Tokio runtime to be available when called.
+    pub(crate) fn database(&self) -> Result<QmdbRefDb, Error> {
+        let async_db = QmdbAsyncDb::new(self.inner.clone(), self.gate.clone());
+        let wrapped = WrapDatabaseAsync::new(async_db).ok_or(Error::MissingRuntime)?;
+        Ok(QmdbRefDb {
+            inner: Arc::new(wrapped),
+        })
     }
 
     /// Computes the state commitment that would result from applying the changes.
     ///
     /// This does not make changes durable. The commitment is derived from the authenticated roots
     /// of the accounts, storage, and code partitions.
-    ///
-    /// Runs on the QMDB actor thread, so non-Send futures are fine.
-    pub(crate) async fn preview_root(&mut self, changes: QmdbChanges) -> Result<StateRoot, Error> {
+    pub(crate) async fn preview_root(&self, changes: QmdbChanges) -> Result<StateRoot, Error> {
+        let _guard = self.gate.lock().await;
         if changes.accounts.is_empty() {
-            return Ok(state_root_from_stores(self.stores()?));
+            let inner = self.inner.lock().await;
+            return Ok(state_root_from_stores(inner.stores()?));
         }
 
-        let stores = self.take_stores()?;
-        let result = preview_root_inner(stores, changes).await;
-        let reopened = open_stores(self.context.clone(), self.config.clone()).await;
-
-        match reopened {
-            Ok(stores) => self.restore_stores(stores),
-            Err(err) => return Err(err),
-        }
-        result
+        let stores = open_stores(self.context.clone(), self.config.clone()).await?;
+        preview_root_inner(stores, changes).await
     }
 
     /// Applies state changes to QMDB and commits them to durable storage.
     ///
     /// The commitment is derived from the authenticated roots of the accounts,
     /// storage, and code partitions.
-    ///
-    /// Runs on the QMDB actor thread, so non-Send futures are fine.
     pub(crate) async fn commit_changes(
-        &mut self,
+        &self,
         changes: QmdbChanges,
     ) -> Result<StateRoot, Error> {
+        let _guard = self.gate.lock().await;
         if changes.accounts.is_empty() {
-            return Ok(state_root_from_stores(self.stores()?));
+            let inner = self.inner.lock().await;
+            return Ok(state_root_from_stores(inner.stores()?));
         }
 
-        let stores = self.take_stores()?;
-        let result = apply_changes_inner(stores, changes).await;
-        match result {
-            Ok(stores) => {
-                let root = state_root_from_stores(&stores);
-                self.restore_stores(stores);
-                Ok(root)
-            }
-            Err(err) => {
-                if let Ok(stores) = open_stores(self.context.clone(), self.config.clone()).await {
-                    self.restore_stores(stores);
-                }
-                Err(err)
-            }
-        }
+        let stores = open_stores(self.context.clone(), self.config.clone()).await?;
+        let stores = apply_changes_inner(stores, changes).await?;
+        let root = state_root_from_stores(&stores);
+        let mut inner = self.inner.lock().await;
+        inner.restore_stores(stores);
+        Ok(root)
     }
 
     /// Returns the current authenticated state commitment.
-    pub(crate) fn root(&self) -> Result<StateRoot, Error> {
-        Ok(state_root_from_stores(self.stores()?))
+    pub(crate) async fn root(&self) -> Result<StateRoot, Error> {
+        let _guard = self.gate.lock().await;
+        let inner = self.inner.lock().await;
+        Ok(state_root_from_stores(inner.stores()?))
     }
 
     pub(crate) async fn get_account(
         &self,
         address: Address,
     ) -> Result<Option<AccountRecord>, Error> {
-        self.stores()?.accounts.get(&account_key(address)).await.map_err(Error::from)
+        let _guard = self.gate.lock().await;
+        let inner = self.inner.lock().await;
+        let stores = inner.stores()?;
+        stores.accounts.get(&account_key(address)).await.map_err(Error::from)
     }
 
     pub(crate) async fn get_code(&self, code_hash: B256) -> Result<Option<Vec<u8>>, Error> {
-        self.stores()?.code.get(&code_key(code_hash)).await.map_err(Error::from)
+        let _guard = self.gate.lock().await;
+        let inner = self.inner.lock().await;
+        let stores = inner.stores()?;
+        stores.code.get(&code_key(code_hash)).await.map_err(Error::from)
     }
 
     pub(crate) async fn get_storage(
@@ -235,7 +222,9 @@ impl QmdbState {
         address: Address,
         index: U256,
     ) -> Result<U256, Error> {
-        let stores = self.stores()?;
+        let _guard = self.gate.lock().await;
+        let inner = self.inner.lock().await;
+        let stores = inner.stores()?;
         let record = stores.accounts.get(&account_key(address)).await?;
         let Some(record) = record else {
             return Ok(U256::ZERO);
@@ -249,24 +238,21 @@ impl QmdbState {
     }
 
     /// Writes genesis balances into the accounts partition.
-    async fn bootstrap_genesis(&mut self, genesis_alloc: Vec<(Address, U256)>) -> Result<(), Error> {
+    async fn bootstrap_genesis(&self, genesis_alloc: Vec<(Address, U256)>) -> Result<(), Error> {
+        let _guard = self.gate.lock().await;
         if genesis_alloc.is_empty() {
             return Ok(());
         }
 
-        let stores = self.take_stores()?;
+        let mut inner = self.inner.lock().await;
+        let stores = inner.take_stores()?;
         let result = apply_genesis_inner(stores, genesis_alloc).await;
         match result {
             Ok(stores) => {
-                self.restore_stores(stores);
+                inner.restore_stores(stores);
                 Ok(())
             }
-            Err(err) => {
-                if let Ok(stores) = open_stores(self.context.clone(), self.config.clone()).await {
-                    self.restore_stores(stores);
-                }
-                Err(err)
-            }
+            Err(err) => Err(err),
         }
     }
 }

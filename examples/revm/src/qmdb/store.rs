@@ -35,6 +35,64 @@ struct StoreBatches {
     code: Vec<(super::CodeKey, Option<Vec<u8>>)>,
 }
 
+/// Slot that temporarily yields ownership of the QMDB stores during updates.
+pub(crate) struct StoresSlot(Option<Stores>);
+
+impl StoresSlot {
+    /// Creates a new slot holding initialized stores.
+    pub(crate) const fn new(stores: Stores) -> Self {
+        Self(Some(stores))
+    }
+
+    /// Returns a shared reference to the stores, if available.
+    pub(crate) fn get(&self) -> Result<&Stores, Error> {
+        self.0
+            .as_ref()
+            .ok_or(Error::StoreUnavailable("stores unavailable"))
+    }
+
+    /// Takes ownership of the stores while an update is in progress.
+    pub(crate) fn take(&mut self) -> Result<Stores, Error> {
+        self.0
+            .take()
+            .ok_or(Error::StoreUnavailable("stores unavailable"))
+    }
+
+    /// Restores the stores after a successful update.
+    pub(crate) fn restore(&mut self, stores: Stores) {
+        self.0 = Some(stores);
+    }
+}
+
+/// Shared QMDB store state guarded by the async mutex in `QmdbState`.
+pub(crate) struct QmdbInner {
+    stores: StoresSlot,
+}
+
+impl QmdbInner {
+    /// Wraps initialized stores for shared access.
+    pub(crate) const fn new(stores: Stores) -> Self {
+        Self {
+            stores: StoresSlot::new(stores),
+        }
+    }
+
+    /// Returns a shared reference to the stores, if available.
+    pub(crate) fn stores(&self) -> Result<&Stores, Error> {
+        self.stores.get()
+    }
+
+    /// Takes ownership of the stores for an update.
+    pub(crate) fn take_stores(&mut self) -> Result<Stores, Error> {
+        self.stores.take()
+    }
+
+    /// Restores stores after a successful update.
+    pub(crate) fn restore_stores(&mut self, stores: Stores) {
+        self.stores.restore(stores);
+    }
+}
+
 impl Stores {
     /// Transitions durable stores into their non-durable update state.
     fn into_dirty(self) -> DirtyStores {

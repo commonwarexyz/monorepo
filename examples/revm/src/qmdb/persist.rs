@@ -54,6 +54,20 @@ impl QmdbChanges {
             }
         }
     }
+
+    /// Merges updates from a later block into the current change set.
+    pub(crate) fn merge(&mut self, other: QmdbChanges) {
+        for (address, update) in other.accounts {
+            match self.accounts.entry(address) {
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert(update);
+                }
+                std::collections::btree_map::Entry::Occupied(mut entry) => {
+                    entry.get_mut().merge(update);
+                }
+            }
+        }
+    }
 }
 
 impl AccountUpdate {

@@ -10,7 +10,7 @@
 //! The simulation harness queries this state through `crate::application::NodeHandle`.
 
 use crate::{
-    qmdb::{QmdbChanges, QmdbConfig, QmdbHandle, QmdbRefDb, RevmDb},
+    qmdb::{QmdbChanges, QmdbConfig, QmdbState, RevmDb},
     types::{Block, StateRoot, Tx, TxId},
     ConsensusDigest,
 };
@@ -37,11 +37,12 @@ pub(crate) struct State {
     snapshots: BTreeMap<ConsensusDigest, ExecutionSnapshot>,
     seeds: BTreeMap<ConsensusDigest, B256>,
     persisted: BTreeSet<ConsensusDigest>,
-    qmdb: QmdbHandle,
+    qmdb: QmdbState,
 }
 
 #[derive(Clone)]
 pub(crate) struct ExecutionSnapshot {
+    pub(crate) parent: Option<ConsensusDigest>,
     pub(crate) db: RevmDb,
     pub(crate) state_root: StateRoot,
     pub(crate) qmdb_changes: QmdbChanges,
@@ -54,8 +55,7 @@ impl Shared {
         partition_prefix: String,
         genesis_alloc: Vec<(Address, U256)>,
     ) -> anyhow::Result<Self> {
-        // Spawn the QMDB actor which isolates non-Send futures on a dedicated thread
-        let qmdb = QmdbHandle::spawn(
+        let qmdb = QmdbState::init(
             context.with_label("qmdb"),
             QmdbConfig::new(partition_prefix, buffer_pool),
             genesis_alloc,
@@ -71,13 +71,13 @@ impl Shared {
             txs: Vec::new(),
         };
         let genesis_digest = genesis_block.commitment();
-        // Create database adapter using the actor handle
-        let db = RevmDb::new(QmdbRefDb::new(qmdb.clone()));
+        let db = RevmDb::new(qmdb.database()?);
 
         let mut snapshots = BTreeMap::new();
         snapshots.insert(
             genesis_digest,
             ExecutionSnapshot {
+                parent: None,
                 db,
                 state_root: genesis_block.state_root,
                 qmdb_changes: QmdbChanges::default(),
@@ -158,6 +158,7 @@ impl Shared {
     pub(crate) async fn insert_snapshot(
         &self,
         digest: ConsensusDigest,
+        parent: ConsensusDigest,
         db: RevmDb,
         root: StateRoot,
         qmdb_changes: QmdbChanges,
@@ -166,6 +167,7 @@ impl Shared {
         inner.snapshots.insert(
             digest,
             ExecutionSnapshot {
+                parent: Some(parent),
                 db,
                 state_root: root,
                 qmdb_changes,
@@ -175,14 +177,15 @@ impl Shared {
 
     pub(crate) async fn preview_qmdb_root(
         &self,
+        parent: ConsensusDigest,
         changes: QmdbChanges,
     ) -> anyhow::Result<StateRoot> {
         // Get the handle and release the lock before awaiting
-        let qmdb = {
+        let (changes, qmdb) = {
             let inner = self.inner.lock().await;
-            inner.qmdb.clone()
+            let changes = inner.merged_changes_from(parent, changes)?;
+            (changes, inner.qmdb.clone())
         };
-        // The actor handles thread isolation, so we can call directly
         qmdb.preview_root(changes).await.map_err(Into::into)
     }
 
@@ -198,7 +201,6 @@ impl Shared {
                 .ok_or_else(|| anyhow::anyhow!("missing snapshot"))?;
             (snapshot.qmdb_changes.clone(), inner.qmdb.clone())
         };
-        // The actor handles thread isolation, so we can call directly
         qmdb.commit_changes(changes).await?;
         let mut inner = self.inner.lock().await;
         inner.persisted.insert(digest);
@@ -221,5 +223,33 @@ impl Shared {
             .take(max_txs)
             .map(|(_, tx)| tx.clone())
             .collect()
+    }
+}
+
+impl State {
+    fn merged_changes_from(
+        &self,
+        mut parent: ConsensusDigest,
+        changes: QmdbChanges,
+    ) -> anyhow::Result<QmdbChanges> {
+        let mut chain = Vec::new();
+        while !self.persisted.contains(&parent) {
+            let snapshot = self
+                .snapshots
+                .get(&parent)
+                .ok_or_else(|| anyhow::anyhow!("missing snapshot"))?;
+            let Some(next) = snapshot.parent else {
+                return Err(anyhow::anyhow!("missing parent snapshot"));
+            };
+            chain.push(snapshot.qmdb_changes.clone());
+            parent = next;
+        }
+
+        let mut merged = QmdbChanges::default();
+        for delta in chain.into_iter().rev() {
+            merged.merge(delta);
+        }
+        merged.merge(changes);
+        Ok(merged)
     }
 }

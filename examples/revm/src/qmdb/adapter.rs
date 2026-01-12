@@ -1,39 +1,108 @@
 //! REVM database adapter backed by QMDB.
 //!
-//! This module provides a synchronous REVM `DatabaseRef` implementation that
-//! communicates with the QMDB actor for database reads. The actor isolates
-//! non-Send QMDB futures from cross-crate trait boundaries.
-//!
-//! # Design
-//!
-//! Since `DatabaseRef` is a sync trait (required by REVM), we need to block somewhere
-//! to get results from the async actor. This implementation uses:
-//! - `try_send` on the command channel
-//! - `std::sync::mpsc::recv` for responses
-//!
-//! Callers should run these sync reads on a blocking executor.
+//! This module exposes an async database interface for QMDB and bridges it
+//! into REVM's synchronous `DatabaseRef` using `WrapDatabaseAsync`. The async
+//! adapter is intentionally thin so the example can rely on QMDB's internal
+//! caching and batching.
 
-use super::actor::QmdbHandle;
-use super::Error;
+use super::keys::{account_key, code_key, storage_key};
+use super::{Error, QmdbInner};
 use alloy_evm::revm::{
-    database_interface::DatabaseRef,
+    database_interface::{async_db::DatabaseAsyncRef, async_db::WrapDatabaseAsync, DatabaseRef},
     primitives::{Address, Bytes, B256, KECCAK_EMPTY, U256},
     state::{AccountInfo, Bytecode},
 };
+use futures::lock::Mutex;
+use std::sync::Arc;
 
-/// Sync REVM database backed by QMDB via actor.
-///
-/// Uses `try_send` for commands and blocking `recv` for responses.
+/// Async QMDB view that implements `DatabaseAsyncRef` for REVM.
 #[derive(Clone)]
-pub(crate) struct QmdbRefDb {
-    handle: QmdbHandle,
+pub(crate) struct QmdbAsyncDb {
+    inner: Arc<Mutex<QmdbInner>>,
+    gate: Arc<Mutex<()>>,
 }
 
-impl QmdbRefDb {
-    /// Creates a new sync database adapter with the actor handle.
-    pub(crate) const fn new(handle: QmdbHandle) -> Self {
-        Self { handle }
+impl QmdbAsyncDb {
+    /// Wraps shared QMDB state for the async REVM database bridge.
+    pub(super) const fn new(inner: Arc<Mutex<QmdbInner>>, gate: Arc<Mutex<()>>) -> Self {
+        Self { inner, gate }
     }
+}
+
+impl DatabaseAsyncRef for QmdbAsyncDb {
+    type Error = Error;
+
+    fn basic_async_ref(
+        &self,
+        address: Address,
+    ) -> impl std::future::Future<Output = Result<Option<AccountInfo>, Self::Error>> + Send {
+        let inner = self.inner.clone();
+        let gate = self.gate.clone();
+        async move {
+            let _guard = gate.lock().await;
+            let inner = inner.lock().await;
+            let stores = inner.stores()?;
+            let record = stores.accounts.get(&account_key(address)).await?;
+            Ok(record.and_then(|record| record.as_info()))
+        }
+    }
+
+    fn code_by_hash_async_ref(
+        &self,
+        code_hash: B256,
+    ) -> impl std::future::Future<Output = Result<Bytecode, Self::Error>> + Send {
+        let inner = self.inner.clone();
+        let gate = self.gate.clone();
+        async move {
+            if code_hash == KECCAK_EMPTY || code_hash == B256::ZERO {
+                return Ok(Bytecode::default());
+            }
+
+            let _guard = gate.lock().await;
+            let inner = inner.lock().await;
+            let stores = inner.stores()?;
+            let code = stores.code.get(&code_key(code_hash)).await?;
+            let code = code.ok_or(Error::MissingCode(code_hash))?;
+            Ok(Bytecode::new_raw(Bytes::copy_from_slice(&code)))
+        }
+    }
+
+    fn storage_async_ref(
+        &self,
+        address: Address,
+        index: U256,
+    ) -> impl std::future::Future<Output = Result<U256, Self::Error>> + Send {
+        let inner = self.inner.clone();
+        let gate = self.gate.clone();
+        async move {
+            let _guard = gate.lock().await;
+            let inner = inner.lock().await;
+            let stores = inner.stores()?;
+            let record = stores.accounts.get(&account_key(address)).await?;
+            let Some(record) = record else {
+                return Ok(U256::ZERO);
+            };
+            if !record.exists {
+                return Ok(U256::ZERO);
+            }
+            let key = storage_key(address, record.storage_generation, index);
+            let value = stores.storage.get(&key).await?;
+            Ok(value.map(|entry| entry.0).unwrap_or_default())
+        }
+    }
+
+    fn block_hash_async_ref(
+        &self,
+        _number: u64,
+    ) -> impl std::future::Future<Output = Result<B256, Self::Error>> + Send {
+        std::future::ready(Ok(B256::ZERO))
+    }
+}
+
+/// Sync REVM database wrapper for the async QMDB adapter.
+#[derive(Clone)]
+pub(crate) struct QmdbRefDb {
+    pub(crate) inner: Arc<WrapDatabaseAsync<QmdbAsyncDb>>,
 }
 
 impl std::fmt::Debug for QmdbRefDb {
@@ -46,25 +115,18 @@ impl DatabaseRef for QmdbRefDb {
     type Error = Error;
 
     fn basic_ref(&self, address: Address) -> Result<Option<AccountInfo>, Self::Error> {
-        let record = self.handle.get_account_sync(address)?;
-        Ok(record.and_then(|record| record.as_info()))
+        self.inner.basic_ref(address)
     }
 
     fn code_by_hash_ref(&self, code_hash: B256) -> Result<Bytecode, Self::Error> {
-        if code_hash == KECCAK_EMPTY || code_hash == B256::ZERO {
-            return Ok(Bytecode::default());
-        }
-
-        let code = self.handle.get_code_sync(code_hash)?;
-        let code = code.ok_or(Error::MissingCode(code_hash))?;
-        Ok(Bytecode::new_raw(Bytes::copy_from_slice(&code)))
+        self.inner.code_by_hash_ref(code_hash)
     }
 
     fn storage_ref(&self, address: Address, index: U256) -> Result<U256, Self::Error> {
-        self.handle.get_storage_sync(address, index)
+        self.inner.storage_ref(address, index)
     }
 
-    fn block_hash_ref(&self, _number: u64) -> Result<B256, Self::Error> {
-        Ok(B256::ZERO)
+    fn block_hash_ref(&self, number: u64) -> Result<B256, Self::Error> {
+        self.inner.block_hash_ref(number)
     }
 }

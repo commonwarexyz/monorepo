@@ -75,11 +75,14 @@ where
         state_root: parent.state_root,
         txs,
     };
-    child.state_root = state.preview_qmdb_root(outcome.qmdb_changes.clone()).await.ok()?;
+    child.state_root = state
+        .preview_qmdb_root(parent_digest, outcome.qmdb_changes.clone())
+        .await
+        .ok()?;
 
     let digest = child.commitment();
     state
-        .insert_snapshot(digest, db, child.state_root, outcome.qmdb_changes)
+        .insert_snapshot(digest, parent_digest, db, child.state_root, outcome.qmdb_changes)
         .await;
     Some(child)
 }
@@ -117,7 +120,10 @@ where
         Ok(Ok(result)) => result,
         _ => return false,
     };
-    let state_root = match state.preview_qmdb_root(outcome.qmdb_changes.clone()).await {
+    let state_root = match state
+        .preview_qmdb_root(parent_digest, outcome.qmdb_changes.clone())
+        .await
+    {
         Ok(root) => root,
         Err(_) => return false,
     };
@@ -127,7 +133,7 @@ where
 
     let digest = block.commitment();
     state
-        .insert_snapshot(digest, db, state_root, outcome.qmdb_changes)
+        .insert_snapshot(digest, parent_digest, db, state_root, outcome.qmdb_changes)
         .await;
     true
 }

@@ -86,12 +86,12 @@ async fn finalized_report_inner<E>(
                     .expect("execute finalized block");
                 block = next_block;
                 let state_root = state
-                    .preview_qmdb_root(outcome.qmdb_changes.clone())
+                    .preview_qmdb_root(parent_digest, outcome.qmdb_changes.clone())
                     .await
                     .expect("preview qmdb root");
                 assert_eq!(state_root, block.state_root, "state root mismatch");
                 state
-                    .insert_snapshot(digest, db, state_root, outcome.qmdb_changes)
+                    .insert_snapshot(digest, parent_digest, db, state_root, outcome.qmdb_changes)
                     .await;
             }
             state
