@@ -100,7 +100,6 @@ impl<B: Blob> PageReader<B> {
         if pages_to_read == 0 {
             return Ok(None);
         }
-
         let bytes_to_read = pages_to_read * self.page_size;
 
         // Read physical data
@@ -140,7 +139,6 @@ impl<B: Blob> PageReader<B> {
             total_logical += len;
             last_len = len;
         }
-
         self.blob_page += pages_to_read as u64;
 
         let state = BufferState {

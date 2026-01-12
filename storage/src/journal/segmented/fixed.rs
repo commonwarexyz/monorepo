@@ -213,7 +213,6 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
                     }
 
                     let mut batch: Vec<Result<(u64, u64, A), Error>> = Vec::new();
-
                     loop {
                         // Ensure we have enough data for one item
                         match state.replay.ensure(Self::CHUNK_SIZE).await {

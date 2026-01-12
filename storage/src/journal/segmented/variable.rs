@@ -342,7 +342,6 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
 
                         let blob_size = state.replay.blob_size();
                         let mut batch: Vec<Result<(u64, u64, u32, V), Error>> = Vec::new();
-
                         loop {
                             // Ensure we have enough data for varint header.
                             // ensure() returns Ok(false) if exhausted with fewer bytes,
