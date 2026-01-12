@@ -16,8 +16,14 @@ use tracing::info;
 /// S3 bucket name for caching deployer artifacts
 pub const S3_BUCKET_NAME: &str = "commonware-deployer-cache";
 
-/// S3 prefix for shared observability tools
-pub const S3_TOOLS_PREFIX: &str = "tools";
+/// S3 prefix for tool binaries: tools/binaries/{tool}/{version}/{platform}/{filename}
+pub const S3_TOOLS_BINARIES_PREFIX: &str = "tools/binaries";
+
+/// S3 prefix for tool configs: tools/configs/{deployer_version}/{component}/{file}
+pub const S3_TOOLS_CONFIGS_PREFIX: &str = "tools/configs";
+
+/// Target platform for prebuilt binaries
+pub const TARGET_PLATFORM: &str = "linux-arm64";
 
 /// S3 prefix for per-deployment data
 pub const S3_DEPLOYMENTS_PREFIX: &str = "deployments";
