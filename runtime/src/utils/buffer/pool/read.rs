@@ -88,7 +88,6 @@ impl<B: Blob> PageReader<B> {
             Some(o) => o,
             None => return Err(Error::OffsetOverflow),
         };
-
         if start_offset >= self.physical_blob_size {
             return Ok(None); // No more data
         }
