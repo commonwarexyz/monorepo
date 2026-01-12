@@ -464,7 +464,7 @@ mod tests {
         sha256::Digest as Sha256,
     };
     use commonware_parallel::Sequential;
-    use commonware_utils::{test_rng, Bft3f1, FaultModel};
+    use commonware_utils::{test_rng, Bft3f1, Faults};
     use rand::rngs::StdRng;
 
     const NAMESPACE: &[u8] = b"test";

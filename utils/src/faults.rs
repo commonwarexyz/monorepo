@@ -9,7 +9,7 @@
 //! # Example
 //!
 //! ```
-//! use commonware_utils::fault_model::{FaultModel, Bft3f1, Bft5f1};
+//! use commonware_utils::{Faults, Bft3f1, Bft5f1};
 //!
 //! // Standard BFT (n >= 3f+1)
 //! let n = 10;
@@ -26,7 +26,7 @@
 /// Different consensus protocols require different fault tolerance guarantees.
 /// This trait abstracts over those requirements, allowing protocols to be
 /// parameterized by their fault model.
-pub trait FaultModel {
+pub trait Faults {
     /// Compute the maximum number of faults that can be tolerated for `n` participants.
     ///
     /// This is the maximum integer `f` such that the protocol's safety and liveness
@@ -89,7 +89,7 @@ pub trait FaultModel {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Bft3f1;
 
-impl FaultModel for Bft3f1 {
+impl Faults for Bft3f1 {
     fn max_faults(n: u32) -> u32 {
         n.saturating_sub(1) / 3
     }
@@ -130,7 +130,7 @@ impl FaultModel for Bft3f1 {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Bft5f1;
 
-impl FaultModel for Bft5f1 {
+impl Faults for Bft5f1 {
     fn max_faults(n: u32) -> u32 {
         n.saturating_sub(1) / 5
     }

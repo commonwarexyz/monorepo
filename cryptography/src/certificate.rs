@@ -70,7 +70,7 @@ use alloc::{collections::BTreeSet, sync::Arc, vec::Vec};
 use bytes::{Buf, BufMut, Bytes};
 use commonware_codec::{Codec, CodecFixed, EncodeSize, Error, Read, ReadExt, Write};
 use commonware_parallel::Strategy;
-use commonware_utils::{bitmap::BitMap, ordered::Set, FaultModel, Participant};
+use commonware_utils::{bitmap::BitMap, ordered::Set, Faults, Participant};
 use core::{fmt::Debug, hash::Hash};
 use rand_core::CryptoRngCore;
 #[cfg(feature = "std")]
@@ -249,8 +249,6 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
 
     /// Assembles attestations into a certificate, returning `None` if the threshold is not met.
     ///
-    /// The `M` type parameter specifies the fault model used to determine quorum thresholds.
-    ///
     /// Callers must not include duplicate attestations from the same signer.
     fn assemble<I, M>(
         &self,
@@ -259,11 +257,9 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
     ) -> Option<Self::Certificate>
     where
         I: IntoIterator<Item = Attestation<Self>>,
-        M: FaultModel;
+        M: Faults;
 
     /// Verifies a certificate that was recovered or received from the network.
-    ///
-    /// The `M` type parameter specifies the fault model used to determine quorum thresholds.
     fn verify_certificate<R, D, M>(
         &self,
         rng: &mut R,
@@ -274,11 +270,9 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
     where
         R: CryptoRngCore,
         D: Digest,
-        M: FaultModel;
+        M: Faults;
 
     /// Verifies a stream of certificates, returning `false` at the first failure.
-    ///
-    /// The `M` type parameter specifies the fault model used to determine quorum thresholds.
     fn verify_certificates<'a, R, D, I, M>(
         &self,
         rng: &mut R,
@@ -289,7 +283,7 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
         R: CryptoRngCore,
         D: Digest,
         I: Iterator<Item = (Self::Subject<'a, D>, &'a Self::Certificate)>,
-        M: FaultModel,
+        M: Faults,
     {
         for (subject, certificate) in certificates {
             if !self.verify_certificate::<_, _, M>(rng, subject, certificate, strategy) {

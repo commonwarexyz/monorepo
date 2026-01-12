@@ -21,7 +21,7 @@ use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error, Read, ReadRangeExt, Write};
 use commonware_utils::{
     ordered::{Quorum, Set},
-    FaultModel, Participant,
+    Faults, Participant,
 };
 use rand_core::CryptoRngCore;
 #[cfg(feature = "std")]
@@ -210,7 +210,7 @@ impl<N: Namespace> Generic<N> {
     where
         S: Scheme<Signature = Ed25519Signature>,
         I: IntoIterator<Item = Attestation<S>>,
-        M: FaultModel,
+        M: Faults,
     {
         // Collect the signers and signatures.
         let mut entries = Vec::new();
@@ -250,7 +250,7 @@ impl<N: Namespace> Generic<N> {
         S: Scheme,
         S::Subject<'a, D>: Subject<Namespace = N>,
         D: Digest,
-        M: FaultModel,
+        M: Faults,
     {
         // If the certificate signers length does not match the participant set, return false.
         if certificate.signers.len() != self.participants.len() {
@@ -294,7 +294,7 @@ impl<N: Namespace> Generic<N> {
         S::Subject<'a, D>: Subject<Namespace = N>,
         R: CryptoRngCore,
         D: Digest,
-        M: FaultModel,
+        M: Faults,
     {
         let mut batch = Batch::new();
         if !self.batch_verify_certificate::<S, D, M>(&mut batch, subject, certificate) {
@@ -317,7 +317,7 @@ impl<N: Namespace> Generic<N> {
         S::Subject<'a, D>: Subject<Namespace = N>,
         R: CryptoRngCore,
         D: Digest,
-        M: FaultModel,
+        M: Faults,
     {
         if certificate.signers.len() != self.participants.len() {
             return false;
@@ -352,7 +352,7 @@ impl<N: Namespace> Generic<N> {
         R: CryptoRngCore,
         D: Digest,
         I: Iterator<Item = (S::Subject<'a, D>, &'a Certificate)>,
-        M: FaultModel,
+        M: Faults,
     {
         let mut batch = Batch::new();
         for (subject, certificate) in certificates {
@@ -373,7 +373,7 @@ impl<N: Namespace> Generic<N> {
         R: CryptoRngCore,
         D: Digest,
         I: Iterator<Item = (S::Subject<'a, D>, &'a Certificate)>,
-        M: FaultModel,
+        M: Faults,
     {
         for (subject, certificate) in certificates {
             if !self.verify_certificate::<S, _, D, M>(rng, subject, certificate) {
@@ -623,7 +623,7 @@ mod macros {
                 ) -> Option<Self::Certificate>
                 where
                     I: IntoIterator<Item = $crate::certificate::Attestation<Self>>,
-                    M: commonware_utils::FaultModel,
+                    M: commonware_utils::Faults,
                 {
                     self.generic.assemble::<Self, _, M>(attestations)
                 }
@@ -638,7 +638,7 @@ mod macros {
                 where
                     R: rand_core::CryptoRngCore,
                     D: $crate::Digest,
-                    M: commonware_utils::FaultModel,
+                    M: commonware_utils::Faults,
                 {
                     self.generic
                         .verify_certificate::<Self, _, D, M>(rng, subject, certificate)
@@ -654,7 +654,7 @@ mod macros {
                     R: rand::Rng + rand::CryptoRng,
                     D: $crate::Digest,
                     I: Iterator<Item = (Self::Subject<'a, D>, &'a Self::Certificate)>,
-                    M: commonware_utils::FaultModel,
+                    M: commonware_utils::Faults,
                 {
                     self.generic
                         .verify_certificates::<Self, _, D, _, M>(rng, certificates)
@@ -693,7 +693,7 @@ mod tests {
     use commonware_codec::{Decode, Encode};
     use commonware_math::algebra::Random;
     use commonware_parallel::Sequential;
-    use commonware_utils::{ordered::Set, test_rng, Bft3f1, FaultModel, Participant, TryCollect};
+    use commonware_utils::{ordered::Set, test_rng, Bft3f1, Faults, Participant, TryCollect};
 
     const NAMESPACE: &[u8] = b"test-ed25519";
     const MESSAGE: &[u8] = b"test message";

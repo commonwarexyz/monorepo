@@ -32,7 +32,7 @@ pub enum Error {
     DuplicateValue,
 }
 
-use crate::{FaultModel, Participant, TryFromIterator};
+use crate::{Faults, Participant, TryFromIterator};
 
 /// An ordered, deduplicated collection of items.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -252,14 +252,14 @@ pub trait Quorum {
     /// ## Panics
     ///
     /// Panics if the number of participants exceeds `u32::MAX`.
-    fn quorum<M: FaultModel>(&self) -> u32;
+    fn quorum<M: Faults>(&self) -> u32;
 
     /// Returns the maximum number of faults tolerated by this participant set.
     ///
     /// ## Panics
     ///
     /// Panics if the number of participants exceeds `u32::MAX`.
-    fn max_faults<M: FaultModel>(&self) -> u32;
+    fn max_faults<M: Faults>(&self) -> u32;
 
     /// Returns the participant key at the given index.
     fn key(&self, index: Participant) -> Option<&Self::Item>;
@@ -275,11 +275,11 @@ pub trait Quorum {
 impl<T: Ord> Quorum for Set<T> {
     type Item = T;
 
-    fn quorum<M: FaultModel>(&self) -> u32 {
+    fn quorum<M: Faults>(&self) -> u32 {
         M::quorum(u32::try_from(self.len()).expect("too many participants"))
     }
 
-    fn max_faults<M: FaultModel>(&self) -> u32 {
+    fn max_faults<M: Faults>(&self) -> u32 {
         M::max_faults(u32::try_from(self.len()).expect("too many participants"))
     }
 

@@ -17,7 +17,7 @@ use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error, Read, ReadRangeExt, Write};
 use commonware_utils::{
     ordered::{BiMap, Quorum, Set},
-    FaultModel, Participant,
+    Faults, Participant,
 };
 use rand::{CryptoRng, Rng};
 #[cfg(feature = "std")]
@@ -169,7 +169,7 @@ impl<P: crate::PublicKey, N: Namespace> Generic<P, N> {
     where
         S: Scheme<Signature = Secp256r1Signature>,
         I: IntoIterator<Item = Attestation<S>>,
-        M: FaultModel,
+        M: Faults,
     {
         // Collect the signers and signatures.
         let mut entries = Vec::new();
@@ -207,7 +207,7 @@ impl<P: crate::PublicKey, N: Namespace> Generic<P, N> {
         S::Subject<'a, D>: Subject<Namespace = N>,
         R: Rng + CryptoRng,
         D: Digest,
-        M: FaultModel,
+        M: Faults,
     {
         // If the certificate signers length does not match the participant set, return false.
         if certificate.signers.len() != self.participants.len() {
@@ -453,7 +453,7 @@ mod macros {
                 ) -> Option<Self::Certificate>
                 where
                     I: IntoIterator<Item = $crate::certificate::Attestation<Self>>,
-                    M: commonware_utils::FaultModel,
+                    M: commonware_utils::Faults,
                 {
                     self.generic.assemble::<Self, _, M>(attestations)
                 }
@@ -468,7 +468,7 @@ mod macros {
                 where
                     R: rand_core::CryptoRngCore,
                     D: $crate::Digest,
-                    M: commonware_utils::FaultModel,
+                    M: commonware_utils::Faults,
                 {
                     self.generic.verify_certificate::<Self, _, D, M>(
                         rng,
@@ -487,7 +487,7 @@ mod macros {
                     R: rand_core::CryptoRngCore,
                     D: $crate::Digest,
                     I: Iterator<Item = (Self::Subject<'a, D>, &'a Self::Certificate)>,
-                    M: commonware_utils::FaultModel,
+                    M: commonware_utils::Faults,
                 {
                     for (subject, certificate) in certificates {
                         if !self.generic.verify_certificate::<Self, _, D, M>(rng, subject, certificate) {
@@ -529,7 +529,7 @@ mod tests {
     use commonware_codec::{Decode, Encode};
     use commonware_math::algebra::Random;
     use commonware_parallel::Sequential;
-    use commonware_utils::{ordered::BiMap, test_rng, Bft3f1, FaultModel, TryCollect};
+    use commonware_utils::{ordered::BiMap, test_rng, Bft3f1, Faults, TryCollect};
     use rand_core::CryptoRngCore;
 
     const NAMESPACE: &[u8] = b"test-secp256r1";

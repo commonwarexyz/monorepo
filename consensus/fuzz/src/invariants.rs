@@ -3,7 +3,7 @@ use commonware_consensus::simplex::{
     elector::Config as Elector, mocks::reporter::Reporter, scheme::Scheme,
 };
 use commonware_cryptography::sha256::Digest as Sha256Digest;
-use commonware_utils::{Bft3f1, FaultModel};
+use commonware_utils::{Bft3f1, Faults};
 use rand_core::CryptoRngCore;
 use std::collections::{HashMap, HashSet};
 

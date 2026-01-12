@@ -12,7 +12,7 @@ use commonware_math::algebra::Random;
 use commonware_utils::{
     from_hex, hex,
     ordered::{Map, Set},
-    Bft3f1, FaultModel, TryCollect, NZU32,
+    Bft3f1, Faults, TryCollect, NZU32,
 };
 use rand::{
     rngs::{OsRng, StdRng},

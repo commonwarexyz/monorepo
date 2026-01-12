@@ -286,7 +286,7 @@ pub(crate) fn interesting(
 /// Convenience alias for [`Bft3f1::quorum`].
 #[cfg(test)]
 pub(crate) fn quorum(n: u32) -> u32 {
-    use commonware_utils::{Bft3f1, FaultModel};
+    use commonware_utils::{Bft3f1, Faults};
 
     Bft3f1::quorum(n)
 }
@@ -329,7 +329,7 @@ mod tests {
     use commonware_runtime::{
         buffer::PoolRef, count_running_tasks, deterministic, Clock, Metrics, Quota, Runner, Spawner,
     };
-    use commonware_utils::{test_rng, Bft3f1, FaultModel, NZUsize, NZU16};
+    use commonware_utils::{test_rng, Bft3f1, Faults, NZUsize, NZU16};
     use engine::Engine;
     use futures::{future::join_all, StreamExt};
     use rand::{rngs::StdRng, Rng as _};

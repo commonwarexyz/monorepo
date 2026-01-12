@@ -239,7 +239,7 @@ mod tests {
         sha256::Digest as Sha256Digest, Sha256,
     };
     use commonware_parallel::Sequential;
-    use commonware_utils::{test_rng, Bft3f1, FaultModel, TryFromIterator};
+    use commonware_utils::{test_rng, Bft3f1, Faults, TryFromIterator};
 
     const NAMESPACE: &[u8] = b"test";
 

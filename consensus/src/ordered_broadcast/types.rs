@@ -1148,7 +1148,7 @@ mod tests {
         Signer,
     };
     use commonware_parallel::Sequential;
-    use commonware_utils::{test_rng, Bft3f1, FaultModel};
+    use commonware_utils::{test_rng, Bft3f1, Faults};
     use rand::{rngs::StdRng, SeedableRng};
     use std::panic::catch_unwind;
 

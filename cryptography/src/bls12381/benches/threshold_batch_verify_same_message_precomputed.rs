@@ -6,7 +6,7 @@ use commonware_cryptography::{
     ed25519::PrivateKey,
     Signer as _,
 };
-use commonware_utils::{Bft3f1, FaultModel, TryCollect};
+use commonware_utils::{Bft3f1, Faults, TryCollect};
 use criterion::{criterion_group, BatchSize, Criterion};
 use rand::{rngs::StdRng, seq::SliceRandom, SeedableRng};
 use std::hint::black_box;

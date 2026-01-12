@@ -7,7 +7,7 @@ use commonware_cryptography::{
     Signer,
 };
 use commonware_parallel::Sequential;
-use commonware_utils::{Bft3f1, FaultModel, TryCollect};
+use commonware_utils::{Bft3f1, Faults, TryCollect};
 use criterion::{criterion_group, BatchSize, Criterion};
 use rand::{rngs::StdRng, SeedableRng};
 use std::hint::black_box;

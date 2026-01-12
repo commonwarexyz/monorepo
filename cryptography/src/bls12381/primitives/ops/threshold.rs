@@ -21,7 +21,7 @@ use super::{
 use alloc::{vec, vec::Vec};
 use commonware_codec::Encode;
 use commonware_parallel::Strategy;
-use commonware_utils::{ordered::Map, union_unique, FaultModel, Participant};
+use commonware_utils::{ordered::Map, union_unique, Faults, Participant};
 use rand_core::CryptoRngCore;
 
 /// Prepares partial signature evaluations for threshold recovery.
@@ -259,7 +259,7 @@ where
     I: IntoIterator<Item = &'a PartialSignature<V>>,
     V::Signature: 'a,
     S: Strategy,
-    M: FaultModel,
+    M: Faults,
 {
     let evals = prepare_evaluations::<V>(sharing.required::<M>(), partials)?;
     sharing
@@ -290,7 +290,7 @@ where
     I: IntoIterator<Item = &'a PartialSignature<V>>,
     V::Signature: 'a,
     S: Strategy,
-    M: FaultModel,
+    M: Faults,
 {
     let prepared_evals = many_evals
         .into_iter()
@@ -334,7 +334,7 @@ where
     I: IntoIterator<Item = &'a PartialSignature<V>>,
     V::Signature: 'a,
     S: Strategy,
-    M: FaultModel,
+    M: Faults,
 {
     let mut sigs = recover_multiple::<V, _, _, M>(sharing, vec![first, second], strategy)?;
     let second_sig = sigs.pop().unwrap();
@@ -360,7 +360,7 @@ mod tests {
     use commonware_codec::Encode;
     use commonware_math::algebra::{CryptoGroup, Field as _, Random, Ring, Space};
     use commonware_parallel::{Rayon, Sequential};
-    use commonware_utils::{test_rng, union_unique, Bft3f1, FaultModel, NZUsize, NZU32};
+    use commonware_utils::{test_rng, union_unique, Bft3f1, Faults, NZUsize, NZU32};
 
     fn blst_verify_proof_of_possession<V: Variant>(
         public: &V::Public,

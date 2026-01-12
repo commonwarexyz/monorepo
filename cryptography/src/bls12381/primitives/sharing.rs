@@ -5,7 +5,7 @@ use cfg_if::cfg_if;
 use commonware_codec::{EncodeSize, FixedSize, RangeCfg, Read, ReadExt, Write};
 use commonware_math::poly::{Interpolator, Poly};
 use commonware_parallel::Sequential;
-use commonware_utils::{ordered::Set, FaultModel, Participant, NZU32};
+use commonware_utils::{ordered::Set, Faults, Participant, NZU32};
 use core::{iter, num::NonZeroU32};
 #[cfg(feature = "std")]
 use std::sync::{Arc, OnceLock};
@@ -169,7 +169,7 @@ impl<V: Variant> Sharing<V> {
 
     /// Return the number of participants required to recover the secret
     /// using the given fault model.
-    pub fn required<M: FaultModel>(&self) -> u32 {
+    pub fn required<M: Faults>(&self) -> u32 {
         M::quorum(self.total.get())
     }
 

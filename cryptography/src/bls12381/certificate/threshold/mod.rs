@@ -24,7 +24,7 @@ use crate::{
 #[cfg(not(feature = "std"))]
 use alloc::{collections::BTreeSet, vec::Vec};
 use commonware_parallel::Strategy;
-use commonware_utils::{ordered::Set, FaultModel, Participant};
+use commonware_utils::{ordered::Set, Faults, Participant};
 use core::fmt::Debug;
 use rand_core::CryptoRngCore;
 #[cfg(feature = "std")]
@@ -299,7 +299,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         S: Scheme<Signature = V::Signature>,
         I: IntoIterator<Item = Attestation<S>>,
         T: Strategy,
-        M: FaultModel,
+        M: Faults,
     {
         let partials: Vec<_> = attestations
             .into_iter()
@@ -329,7 +329,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         S::Subject<'a, D>: Subject<Namespace = N>,
         R: CryptoRngCore,
         D: Digest,
-        M: FaultModel,
+        M: Faults,
     {
         ops::verify_message::<V>(
             self.identity(),
@@ -354,7 +354,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         D: Digest,
         I: Iterator<Item = (S::Subject<'a, D>, &'a V::Signature)>,
         T: Strategy,
-        M: FaultModel,
+        M: Faults,
     {
         let mut entries: Vec<_> = Vec::new();
 
@@ -571,7 +571,7 @@ mod macros {
                 ) -> Option<Self::Certificate>
                 where
                     I: IntoIterator<Item = $crate::certificate::Attestation<Self>>,
-                    M: commonware_utils::FaultModel,
+                    M: commonware_utils::Faults,
                 {
                     self.generic.assemble::<Self, _, _, M>(attestations, strategy)
                 }
@@ -586,7 +586,7 @@ mod macros {
                 where
                     R: rand_core::CryptoRngCore,
                     D: $crate::Digest,
-                    M: commonware_utils::FaultModel,
+                    M: commonware_utils::Faults,
                 {
                     self.generic
                         .verify_certificate::<Self, _, D, M>(rng, subject, certificate)
@@ -602,7 +602,7 @@ mod macros {
                     R: rand_core::CryptoRngCore,
                     D: $crate::Digest,
                     I: Iterator<Item = (Self::Subject<'a, D>, &'a Self::Certificate)>,
-                    M: commonware_utils::FaultModel,
+                    M: commonware_utils::Faults,
                 {
                     self.generic
                         .verify_certificates::<Self, _, D, _, _, M>(rng, certificates, strategy)
@@ -652,7 +652,7 @@ mod tests {
     use commonware_codec::{DecodeExt, Encode};
     use commonware_math::algebra::{Additive, Random};
     use commonware_parallel::Sequential;
-    use commonware_utils::{ordered::Set, test_rng, Bft3f1, FaultModel, TryCollect, NZU32};
+    use commonware_utils::{ordered::Set, test_rng, Bft3f1, Faults, TryCollect, NZU32};
 
     const NAMESPACE: &[u8] = b"test-bls12381-threshold";
     const MESSAGE: &[u8] = b"test message";

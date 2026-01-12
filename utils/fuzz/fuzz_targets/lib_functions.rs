@@ -2,7 +2,7 @@
 
 use arbitrary::Arbitrary;
 use commonware_utils::{
-    from_hex, from_hex_formatted, hex, modulo, union, union_unique, Bft3f1, FaultModel, NZDuration,
+    from_hex, from_hex_formatted, hex, modulo, union, union_unique, Bft3f1, Faults, NZDuration,
     NZUsize, NonZeroDuration, NZU16, NZU32, NZU64, NZU8,
 };
 use libfuzzer_sys::fuzz_target;

@@ -8,7 +8,7 @@ use commonware_cryptography::{
 };
 use commonware_math::algebra::Random;
 use commonware_parallel::{Rayon, Sequential};
-use commonware_utils::{ordered::Set, Bft3f1, FaultModel, NZUsize, TryCollect};
+use commonware_utils::{ordered::Set, Bft3f1, Faults, NZUsize, TryCollect};
 use criterion::{criterion_group, BatchSize, Criterion};
 use rand::{rngs::StdRng, SeedableRng};
 use rand_core::CryptoRngCore;

@@ -29,7 +29,7 @@ use commonware_cryptography::{
 use commonware_p2p::simulated::{Config as NetworkConfig, Link, Network};
 use commonware_parallel::Sequential;
 use commonware_runtime::{buffer::PoolRef, deterministic, Clock, Metrics, Runner, Spawner};
-use commonware_utils::{Bft3f1, FaultModel, NZUsize, NZU16};
+use commonware_utils::{Bft3f1, Faults, NZUsize, NZU16};
 use futures::{channel::mpsc::Receiver, future::join_all, StreamExt};
 use rand::{rngs::StdRng, RngCore, SeedableRng};
 use std::{

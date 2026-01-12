@@ -30,7 +30,7 @@ use commonware_storage::{
     journal::segmented::variable::{Config as SVConfig, Journal as SVJournal},
     metadata::{Config as MetadataConfig, Metadata},
 };
-use commonware_utils::{FaultModel, NZUsize, NZU16};
+use commonware_utils::{Faults, NZUsize, NZU16};
 use futures::StreamExt;
 use std::{
     collections::BTreeMap,
@@ -439,7 +439,7 @@ impl<E: Clock + RuntimeStorage + Metrics, V: Variant, P: PublicKey> Storage<E, V
 
     /// Create a Dealer for the given epoch, replaying any stored acks.
     /// Returns None if we've already submitted a log this epoch.
-    pub fn create_dealer<C: Signer<PublicKey = P>, M: FaultModel>(
+    pub fn create_dealer<C: Signer<PublicKey = P>, M: Faults>(
         &self,
         epoch: EpochNum,
         signer: C,
@@ -478,7 +478,7 @@ impl<E: Clock + RuntimeStorage + Metrics, V: Variant, P: PublicKey> Storage<E, V
     }
 
     /// Create a Player for the given epoch, replaying any stored dealer messages.
-    pub fn create_player<C: Signer<PublicKey = P>, M: FaultModel>(
+    pub fn create_player<C: Signer<PublicKey = P>, M: Faults>(
         &self,
         epoch: EpochNum,
         signer: C,
@@ -546,7 +546,7 @@ impl<V: Variant, C: Signer> Dealer<V, C> {
     }
 
     /// Finalize the dealer and produce a signed log for inclusion in a block.
-    pub fn finalize<M: FaultModel>(&mut self) {
+    pub fn finalize<M: Faults>(&mut self) {
         if self.finalized.is_some() {
             return;
         }
@@ -601,7 +601,7 @@ impl<V: Variant, C: Signer> Player<V, C> {
     /// Handle an incoming dealer message.
     ///
     /// If this is a new valid dealer message, persists it to storage before returning.
-    pub async fn handle<E: Clock + RuntimeStorage + Metrics, M: FaultModel>(
+    pub async fn handle<E: Clock + RuntimeStorage + Metrics, M: Faults>(
         &mut self,
         storage: &mut Storage<E, V, C::PublicKey>,
         epoch: EpochNum,
@@ -629,7 +629,7 @@ impl<V: Variant, C: Signer> Player<V, C> {
     }
 
     /// Replay an already-persisted dealer message (updates in-memory state only).
-    fn replay<M: FaultModel>(
+    fn replay<M: Faults>(
         &mut self,
         dealer: C::PublicKey,
         pub_msg: DealerPubMsg<V>,
@@ -647,7 +647,7 @@ impl<V: Variant, C: Signer> Player<V, C> {
     }
 
     /// Finalize the player's participation in the DKG round.
-    pub fn finalize<S: Strategy, M: FaultModel>(
+    pub fn finalize<S: Strategy, M: Faults>(
         self,
         logs: BTreeMap<C::PublicKey, DealerLog<V, C::PublicKey>>,
         strategy: &S,

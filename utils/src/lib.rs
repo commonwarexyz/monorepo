@@ -18,8 +18,8 @@ use core::{
     time::Duration,
 };
 
-pub mod fault_model;
-pub use fault_model::{Bft3f1, Bft5f1, FaultModel};
+pub mod faults;
+pub use faults::{Bft3f1, Bft5f1, Faults};
 pub mod sequence;
 pub use sequence::{Array, Span};
 #[cfg(feature = "std")]

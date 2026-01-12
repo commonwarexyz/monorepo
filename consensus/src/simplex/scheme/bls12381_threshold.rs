@@ -30,7 +30,7 @@ use commonware_cryptography::{
     Digest, PublicKey,
 };
 use commonware_parallel::Strategy;
-use commonware_utils::{ordered::Set, FaultModel};
+use commonware_utils::{ordered::Set, Faults};
 use rand_core::CryptoRngCore;
 use std::{
     collections::{BTreeSet, HashMap},
@@ -605,7 +605,7 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
     fn assemble<I, M>(&self, attestations: I, strategy: &impl Strategy) -> Option<Self::Certificate>
     where
         I: IntoIterator<Item = Attestation<Self>>,
-        M: FaultModel,
+        M: Faults,
     {
         let (vote_partials, seed_partials): (Vec<_>, Vec<_>) = attestations
             .into_iter()
@@ -652,7 +652,7 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
     where
         R: CryptoRngCore,
         D: Digest,
-        M: FaultModel,
+        M: Faults,
     {
         let identity = self.identity();
         let namespace = self.namespace();
@@ -686,7 +686,7 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
         R: CryptoRngCore,
         D: Digest,
         I: Iterator<Item = (Subject<'a, D>, &'a Self::Certificate)>,
-        M: FaultModel,
+        M: Faults,
     {
         let identity = self.identity();
         let namespace = self.namespace();
@@ -765,7 +765,7 @@ mod tests {
     };
     use commonware_math::algebra::{CryptoGroup, Random};
     use commonware_parallel::Sequential;
-    use commonware_utils::{test_rng, Bft3f1, FaultModel, NZU32};
+    use commonware_utils::{test_rng, Bft3f1, Faults, NZU32};
     use rand::{rngs::StdRng, SeedableRng};
 
     const NAMESPACE: &[u8] = b"bls-threshold-signing-scheme";

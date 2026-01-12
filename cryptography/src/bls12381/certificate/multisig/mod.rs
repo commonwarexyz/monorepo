@@ -21,7 +21,7 @@ use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error, Read, ReadExt, Write};
 use commonware_utils::{
     ordered::{BiMap, Quorum, Set},
-    FaultModel, Participant,
+    Faults, Participant,
 };
 use rand_core::CryptoRngCore;
 #[cfg(feature = "std")]
@@ -195,7 +195,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
     where
         S: Scheme<Signature = V::Signature>,
         I: IntoIterator<Item = Attestation<S>>,
-        M: FaultModel,
+        M: Faults,
     {
         // Collect the signers and signatures.
         let mut entries = Vec::new();
@@ -230,7 +230,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         S::Subject<'a, D>: Subject<Namespace = N>,
         R: CryptoRngCore,
         D: Digest,
-        M: FaultModel,
+        M: Faults,
     {
         // If the certificate signers length does not match the participant set, return false.
         if certificate.signers.len() != self.participants.len() {
@@ -271,7 +271,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         R: CryptoRngCore,
         D: Digest,
         I: Iterator<Item = (S::Subject<'a, D>, &'a Certificate<V>)>,
-        M: FaultModel,
+        M: Faults,
     {
         for (subject, certificate) in certificates {
             if !self.verify_certificate::<S, _, _, M>(rng, subject, certificate) {
@@ -508,7 +508,7 @@ mod macros {
                 ) -> Option<Self::Certificate>
                 where
                     I: IntoIterator<Item = $crate::certificate::Attestation<Self>>,
-                    M: commonware_utils::FaultModel,
+                    M: commonware_utils::Faults,
                 {
                     self.generic.assemble::<Self, _, M>(attestations)
                 }
@@ -523,7 +523,7 @@ mod macros {
                 where
                     R: rand_core::CryptoRngCore,
                     D: $crate::Digest,
-                    M: commonware_utils::FaultModel,
+                    M: commonware_utils::Faults,
                 {
                     self.generic
                         .verify_certificate::<Self, _, D, M>(rng, subject, certificate)
@@ -539,7 +539,7 @@ mod macros {
                     R: rand_core::CryptoRngCore,
                     D: $crate::Digest,
                     I: Iterator<Item = (Self::Subject<'a, D>, &'a Self::Certificate)>,
-                    M: commonware_utils::FaultModel,
+                    M: commonware_utils::Faults,
                 {
                     self.generic
                         .verify_certificates::<Self, _, D, _, M>(rng, certificates)
@@ -586,7 +586,7 @@ mod tests {
     use commonware_codec::{Decode, Encode};
     use commonware_math::algebra::{CryptoGroup, Random};
     use commonware_parallel::Sequential;
-    use commonware_utils::{ordered::BiMap, test_rng, Bft3f1, FaultModel, Participant, TryCollect};
+    use commonware_utils::{ordered::BiMap, test_rng, Bft3f1, Faults, Participant, TryCollect};
 
     const NAMESPACE: &[u8] = b"test-bls12381-multisig";
     const MESSAGE: &[u8] = b"test message";

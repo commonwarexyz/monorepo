@@ -300,7 +300,7 @@ use commonware_math::{
 use commonware_parallel::{Sequential, Strategy as ParStrategy};
 use commonware_utils::{
     ordered::{Map, Quorum, Set},
-    FaultModel, Participant, TryCollect, NZU32,
+    Faults, Participant, TryCollect, NZU32,
 };
 use core::num::NonZeroU32;
 use rand_core::CryptoRngCore;
@@ -348,7 +348,7 @@ impl<V: Variant, P: Ord> Output<V, P> {
     }
 
     /// Return the quorum, i.e. the number of players needed to reconstruct the key.
-    pub fn quorum<M: FaultModel>(&self) -> u32 {
+    pub fn quorum<M: Faults>(&self) -> u32 {
         self.players.quorum::<M>()
     }
 
@@ -504,11 +504,11 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
         NZU32!(self.players.len() as u32)
     }
 
-    fn degree<M: FaultModel>(&self) -> u32 {
+    fn degree<M: Faults>(&self) -> u32 {
         self.players.quorum::<M>().saturating_sub(1)
     }
 
-    fn required_commitments<M: FaultModel>(&self) -> u32 {
+    fn required_commitments<M: Faults>(&self) -> u32 {
         let dealer_quorum = self.dealers.quorum::<M>();
         let prev_quorum = self
             .previous
@@ -518,7 +518,7 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
         dealer_quorum.max(prev_quorum)
     }
 
-    fn max_reveals<M: FaultModel>(&self) -> u32 {
+    fn max_reveals<M: Faults>(&self) -> u32 {
         self.players.max_faults::<M>()
     }
 
@@ -540,7 +540,7 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
     }
 
     #[must_use]
-    fn check_dealer_pub_msg<M: FaultModel>(&self, dealer: &P, pub_msg: &DealerPubMsg<V>) -> bool {
+    fn check_dealer_pub_msg<M: Faults>(&self, dealer: &P, pub_msg: &DealerPubMsg<V>) -> bool {
         if self.degree::<M>() != pub_msg.commitment.degree_exact() {
             return false;
         }
@@ -582,7 +582,7 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
     /// `dealers` should be the list of public keys for the dealers. This MUST
     /// be a subset of the previous round's players.
     /// `players` should be the list of public keys for the players.
-    pub fn new<M: FaultModel>(
+    pub fn new<M: Faults>(
         namespace: &[u8],
         round: u64,
         previous: Option<Output<V, P>>,
@@ -1167,7 +1167,7 @@ impl<V: Variant, S: Signer> Dealer<V, S> {
     /// to provide both guarantees is through an authenticated channel, e.g. via
     /// [crate::handshake], or [commonware-p2p](https://docs.rs/commonware-p2p/latest/commonware_p2p/).
     #[allow(clippy::type_complexity)]
-    pub fn start<M: FaultModel>(
+    pub fn start<M: Faults>(
         mut rng: impl CryptoRngCore,
         info: Info<V, S::PublicKey>,
         me: S,
@@ -1241,7 +1241,7 @@ impl<V: Variant, S: Signer> Dealer<V, S> {
     /// Finalize the dealer, producing a signed log.
     ///
     /// This should be called at the point where no more acks will be processed.
-    pub fn finalize<M: FaultModel>(self) -> SignedDealerLog<V, S> {
+    pub fn finalize<M: Faults>(self) -> SignedDealerLog<V, S> {
         let reveals = self
             .results
             .values()
@@ -1263,7 +1263,7 @@ impl<V: Variant, S: Signer> Dealer<V, S> {
 }
 
 #[allow(clippy::type_complexity)]
-fn select<V: Variant, P: PublicKey, M: FaultModel>(
+fn select<V: Variant, P: PublicKey, M: Faults>(
     info: &Info<V, P>,
     logs: BTreeMap<P, DealerLog<V, P>>,
 ) -> Result<Map<P, DealerLog<V, P>>, Error> {
@@ -1315,7 +1315,7 @@ struct ObserveInner<V: Variant, P: PublicKey> {
 }
 
 impl<V: Variant, P: PublicKey> ObserveInner<V, P> {
-    fn reckon<S: ParStrategy, M: FaultModel>(
+    fn reckon<S: ParStrategy, M: Faults>(
         info: Info<V, P>,
         selected: Map<P, DealerLog<V, P>>,
         strategy: &S,
@@ -1398,7 +1398,7 @@ impl<V: Variant, P: PublicKey> ObserveInner<V, P> {
 /// From this log, we can (potentially, as the DKG can fail) compute the public output.
 ///
 /// This will only ever return [`Error::DkgFailed`].
-pub fn observe<V: Variant, P: PublicKey, S: ParStrategy, M: FaultModel>(
+pub fn observe<V: Variant, P: PublicKey, S: ParStrategy, M: Faults>(
     info: Info<V, P>,
     logs: BTreeMap<P, DealerLog<V, P>>,
     strategy: &S,
@@ -1443,7 +1443,7 @@ impl<V: Variant, S: Signer> Player<V, S> {
     /// private message was not exposed to anyone else. A convenient way to
     /// provide this is by using an authenticated channel, e.g. via
     /// [crate::handshake], or [commonware-p2p](https://docs.rs/commonware-p2p/latest/commonware_p2p/).
-    pub fn dealer_message<M: FaultModel>(
+    pub fn dealer_message<M: Faults>(
         &mut self,
         dealer: S::PublicKey,
         pub_msg: DealerPubMsg<V>,
@@ -1475,7 +1475,7 @@ impl<V: Variant, S: Signer> Player<V, S> {
     /// for finalize.
     ///
     /// This will only ever return [`Error::DkgFailed`].
-    pub fn finalize<Y: ParStrategy, M: FaultModel>(
+    pub fn finalize<Y: ParStrategy, M: Faults>(
         self,
         logs: BTreeMap<S::PublicKey, DealerLog<V, S::PublicKey>>,
         strategy: &Y,
@@ -1532,7 +1532,7 @@ impl<V: Variant, S: Signer> Player<V, S> {
 pub type DealResult<V, P> = Result<(Output<V, P>, Map<P, Share>), Error>;
 
 /// Simply distribute shares at random, instead of performing a distributed protocol.
-pub fn deal<V: Variant, P: Clone + Ord, M: FaultModel>(
+pub fn deal<V: Variant, P: Clone + Ord, M: Faults>(
     mut rng: impl CryptoRngCore,
     mode: Mode,
     players: Set<P>,
@@ -1574,7 +1574,7 @@ pub fn deal<V: Variant, P: Clone + Ord, M: FaultModel>(
 /// This can be more convenient for testing, where you don't want to go through
 /// the trouble of generating signing keys. The downside is that the result isn't
 /// compatible with subsequent DKGs, which need an [`Output`].
-pub fn deal_anonymous<V: Variant, M: FaultModel>(
+pub fn deal_anonymous<V: Variant, M: Faults>(
     rng: impl CryptoRngCore,
     mode: Mode,
     n: NonZeroU32,
@@ -1596,7 +1596,7 @@ mod test_plan {
     };
     use anyhow::anyhow;
     use bytes::BytesMut;
-    use commonware_utils::{Bft3f1, FaultModel, TryCollect};
+    use commonware_utils::{Bft3f1, Faults, TryCollect};
     use core::num::NonZeroI32;
     use rand::{rngs::StdRng, SeedableRng as _};
     use std::collections::BTreeSet;
