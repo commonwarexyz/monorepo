@@ -343,7 +343,6 @@ impl Array {
         }
 
         // Limited case: need to check limit
-        // let mut result = Vec::with_capacity(min_size.min(limit));
         let mut result = Vec::with_capacity(limit);
         let mut i = 0;
         let mut j = 0;
@@ -401,7 +400,7 @@ impl Array {
                         result.push(av);
                         i += 1;
                     }
-                    core::cmp::Ordering::Greater => { // possible and check for i=j
+                    core::cmp::Ordering::Greater => {
                         j += 1;
                     }
                     core::cmp::Ordering::Equal => {
