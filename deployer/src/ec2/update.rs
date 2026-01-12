@@ -54,7 +54,6 @@ pub async fn update(config_path: &PathBuf) -> Result<(), Error> {
     let mut config_hashes: HashMap<String, String> = HashMap::new();
     let mut instance_binary_hash: HashMap<String, String> = HashMap::new();
     let mut instance_config_hash: HashMap<String, String> = HashMap::new();
-
     for instance in &config.instances {
         let binary_hash = hash_file(std::path::Path::new(&instance.binary))?;
         let config_hash = hash_file(std::path::Path::new(&instance.config))?;
