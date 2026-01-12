@@ -35,8 +35,8 @@ use commonware_utils::{bitmap::Prunable as PrunableBitMap, Array};
 use core::{num::NonZeroU64, ops::Range};
 
 /// Get the grafting height for a bitmap with chunk size determined by N.
-const fn grafting_height<E: Storage + Clock + Metrics, H: Hasher, const N: usize>() -> u32 {
-    CleanBitMap::<E, H::Digest, N>::CHUNK_SIZE_BITS.trailing_zeros()
+const fn grafting_height<const N: usize>() -> u32 {
+    PrunableBitMap::<N>::CHUNK_SIZE_BITS.trailing_zeros()
 }
 
 /// A Current QMDB implementation generic over ordered/unordered keys and variable/fixed values.
@@ -108,7 +108,7 @@ where
     /// This value is log2 of the chunk size in bits. Since we assume the chunk size is a power of
     /// 2, we compute this from trailing_zeros.
     pub const fn grafting_height() -> u32 {
-        grafting_height::<E, H, N>()
+        grafting_height::<N>()
     }
 
     /// Return the number of bits that have been pruned from the status bitmap.
@@ -544,8 +544,7 @@ pub(super) async fn root<E: Storage + Clock + Metrics, H: Hasher, const N: usize
     status: &CleanBitMap<E, H::Digest, N>,
     mmr: &Mmr<E, H::Digest, Clean<DigestOf<H>>>,
 ) -> Result<H::Digest, Error> {
-    let grafted_mmr =
-        GraftingStorage::<'_, H, _, _>::new(status, mmr, grafting_height::<E, H, N>());
+    let grafted_mmr = GraftingStorage::<'_, H, _, _>::new(status, mmr, grafting_height::<N>());
     let mmr_root = grafted_mmr.root(hasher).await?;
 
     // If we are on a chunk boundary, then the mmr_root fully captures the state of the DB.
@@ -585,7 +584,7 @@ where
     E: Storage + Clock + Metrics,
     H: Hasher,
 {
-    let mut grafter = GraftingHasher::new(hasher, grafting_height::<E, H, N>());
+    let mut grafter = GraftingHasher::new(hasher, grafting_height::<N>());
     grafter
         .load_grafted_digests(&status.dirty_chunks(), mmr)
         .await?;
