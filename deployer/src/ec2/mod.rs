@@ -139,8 +139,19 @@
 //! * A directory `$HOME/.commonware_deployer/{tag}` stores the SSH private key and status files (`created`, `destroyed`).
 //! * The deployment state is tracked via these files, ensuring operations respect prior create/destroy actions.
 //! * A shared S3 bucket (`commonware-deployer-cache`) stores:
-//!   * `tools/` - Cached observability tools (shared across all deployments)
-//!   * `deployments/{tag}/` - Deployment-specific binaries, configs, and service files
+//!   * `tools/` - Cached observability tools organized by component (shared across all deployments):
+//!     * `prometheus/` - Prometheus binary and service file
+//!     * `grafana/` - Grafana binary, datasources.yml, and all.yml
+//!     * `loki/` - Loki binary, config, and service file
+//!     * `pyroscope/` - Pyroscope binary, config, service file, and agent files
+//!     * `tempo/` - Tempo binary, config, and service file
+//!     * `node-exporter/` - Node Exporter binary and service file
+//!     * `promtail/` - Promtail binary and service file
+//!     * `system/` - BBR and logrotate configs
+//!     * `binary/` - Binary instance service file
+//!   * `deployments/{tag}/` - Deployment-specific files:
+//!     * `monitoring/` - Prometheus config, dashboard
+//!     * `instances/{name}/` - Binary, config, hosts.yaml, promtail config, pyroscope script
 //!
 //! # Example Configuration
 //!

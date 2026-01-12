@@ -23,44 +23,106 @@ pub const PYROSCOPE_VERSION: &str = "1.12.0";
 /// Version of Grafana to download and install
 pub const GRAFANA_VERSION: &str = "11.5.2";
 
-/// Returns the S3 key for Prometheus
-pub fn prometheus_s3_key(version: &str) -> String {
-    format!("{S3_TOOLS_PREFIX}/prometheus-{version}.linux-arm64.tar.gz")
+// S3 key functions for tool binaries (organized by component)
+
+pub fn prometheus_bin_s3_key(version: &str) -> String {
+    format!("{S3_TOOLS_PREFIX}/prometheus/prometheus-{version}.linux-arm64.tar.gz")
 }
 
-/// Returns the S3 key for Grafana
-pub fn grafana_s3_key(version: &str) -> String {
-    format!("{S3_TOOLS_PREFIX}/grafana_{version}_arm64.deb")
+pub fn grafana_bin_s3_key(version: &str) -> String {
+    format!("{S3_TOOLS_PREFIX}/grafana/grafana_{version}_arm64.deb")
 }
 
-/// Returns the S3 key for Loki
-pub fn loki_s3_key(version: &str) -> String {
-    format!("{S3_TOOLS_PREFIX}/loki-{version}-linux-arm64.zip")
+pub fn loki_bin_s3_key(version: &str) -> String {
+    format!("{S3_TOOLS_PREFIX}/loki/loki-{version}-linux-arm64.zip")
 }
 
-/// Returns the S3 key for Pyroscope
-pub fn pyroscope_s3_key(version: &str) -> String {
-    format!("{S3_TOOLS_PREFIX}/pyroscope_{version}_linux_arm64.tar.gz")
+pub fn pyroscope_bin_s3_key(version: &str) -> String {
+    format!("{S3_TOOLS_PREFIX}/pyroscope/pyroscope_{version}_linux_arm64.tar.gz")
 }
 
-/// Returns the S3 key for Tempo
-pub fn tempo_s3_key(version: &str) -> String {
-    format!("{S3_TOOLS_PREFIX}/tempo_{version}_linux_arm64.tar.gz")
+pub fn tempo_bin_s3_key(version: &str) -> String {
+    format!("{S3_TOOLS_PREFIX}/tempo/tempo_{version}_linux_arm64.tar.gz")
 }
 
-/// Returns the S3 key for Node Exporter
-pub fn node_exporter_s3_key(version: &str) -> String {
-    format!("{S3_TOOLS_PREFIX}/node_exporter-{version}.linux-arm64.tar.gz")
+pub fn node_exporter_bin_s3_key(version: &str) -> String {
+    format!("{S3_TOOLS_PREFIX}/node-exporter/node_exporter-{version}.linux-arm64.tar.gz")
 }
 
-/// Returns the S3 key for Promtail
-pub fn promtail_s3_key(version: &str) -> String {
-    format!("{S3_TOOLS_PREFIX}/promtail-{version}-linux-arm64.zip")
+pub fn promtail_bin_s3_key(version: &str) -> String {
+    format!("{S3_TOOLS_PREFIX}/promtail/promtail-{version}-linux-arm64.zip")
 }
 
-/// Returns the S3 key for a static config file (cached globally)
-pub fn static_config_s3_key(filename: &str) -> String {
-    format!("{S3_TOOLS_PREFIX}/static/{filename}")
+// S3 key functions for component configs and services
+
+pub fn prometheus_service_s3_key() -> String {
+    format!("{S3_TOOLS_PREFIX}/prometheus/service")
+}
+
+pub fn grafana_datasources_s3_key() -> String {
+    format!("{S3_TOOLS_PREFIX}/grafana/datasources.yml")
+}
+
+pub fn grafana_dashboards_s3_key() -> String {
+    format!("{S3_TOOLS_PREFIX}/grafana/all.yml")
+}
+
+pub fn loki_config_s3_key() -> String {
+    format!("{S3_TOOLS_PREFIX}/loki/config.yml")
+}
+
+pub fn loki_service_s3_key() -> String {
+    format!("{S3_TOOLS_PREFIX}/loki/service")
+}
+
+pub fn pyroscope_config_s3_key() -> String {
+    format!("{S3_TOOLS_PREFIX}/pyroscope/config.yml")
+}
+
+pub fn pyroscope_service_s3_key() -> String {
+    format!("{S3_TOOLS_PREFIX}/pyroscope/service")
+}
+
+pub fn tempo_config_s3_key() -> String {
+    format!("{S3_TOOLS_PREFIX}/tempo/config.yml")
+}
+
+pub fn tempo_service_s3_key() -> String {
+    format!("{S3_TOOLS_PREFIX}/tempo/service")
+}
+
+pub fn node_exporter_service_s3_key() -> String {
+    format!("{S3_TOOLS_PREFIX}/node-exporter/service")
+}
+
+pub fn promtail_service_s3_key() -> String {
+    format!("{S3_TOOLS_PREFIX}/promtail/service")
+}
+
+// S3 key functions for pyroscope agent (lives with pyroscope component)
+
+pub fn pyroscope_agent_service_s3_key() -> String {
+    format!("{S3_TOOLS_PREFIX}/pyroscope/agent.service")
+}
+
+pub fn pyroscope_agent_timer_s3_key() -> String {
+    format!("{S3_TOOLS_PREFIX}/pyroscope/agent.timer")
+}
+
+// S3 key functions for system configs
+
+pub fn bbr_config_s3_key() -> String {
+    format!("{S3_TOOLS_PREFIX}/system/bbr.conf")
+}
+
+pub fn logrotate_config_s3_key() -> String {
+    format!("{S3_TOOLS_PREFIX}/system/logrotate.conf")
+}
+
+// S3 key functions for binary instance configs
+
+pub fn binary_service_s3_key() -> String {
+    format!("{S3_TOOLS_PREFIX}/binary/service")
 }
 
 /// Returns the S3 key for an instance's binary

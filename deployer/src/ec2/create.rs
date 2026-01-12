@@ -141,13 +141,13 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     };
     let [prometheus_url, grafana_url, loki_url, pyroscope_url, tempo_url, node_exporter_url, promtail_url]: [String; 7] =
         try_join_all([
-            cache_tool(prometheus_s3_key(PROMETHEUS_VERSION), prometheus_download_url(PROMETHEUS_VERSION)),
-            cache_tool(grafana_s3_key(GRAFANA_VERSION), grafana_download_url(GRAFANA_VERSION)),
-            cache_tool(loki_s3_key(LOKI_VERSION), loki_download_url(LOKI_VERSION)),
-            cache_tool(pyroscope_s3_key(PYROSCOPE_VERSION), pyroscope_download_url(PYROSCOPE_VERSION)),
-            cache_tool(tempo_s3_key(TEMPO_VERSION), tempo_download_url(TEMPO_VERSION)),
-            cache_tool(node_exporter_s3_key(NODE_EXPORTER_VERSION), node_exporter_download_url(NODE_EXPORTER_VERSION)),
-            cache_tool(promtail_s3_key(PROMTAIL_VERSION), promtail_download_url(PROMTAIL_VERSION)),
+            cache_tool(prometheus_bin_s3_key(PROMETHEUS_VERSION), prometheus_download_url(PROMETHEUS_VERSION)),
+            cache_tool(grafana_bin_s3_key(GRAFANA_VERSION), grafana_download_url(GRAFANA_VERSION)),
+            cache_tool(loki_bin_s3_key(LOKI_VERSION), loki_download_url(LOKI_VERSION)),
+            cache_tool(pyroscope_bin_s3_key(PYROSCOPE_VERSION), pyroscope_download_url(PYROSCOPE_VERSION)),
+            cache_tool(tempo_bin_s3_key(TEMPO_VERSION), tempo_download_url(TEMPO_VERSION)),
+            cache_tool(node_exporter_bin_s3_key(NODE_EXPORTER_VERSION), node_exporter_download_url(NODE_EXPORTER_VERSION)),
+            cache_tool(promtail_bin_s3_key(PROMTAIL_VERSION), promtail_download_url(PROMTAIL_VERSION)),
         ])
         .await?
         .try_into()
@@ -500,17 +500,17 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
         tempo_service_url,
         monitoring_node_exporter_service_url,
     ]: [String; 11] = try_join_all([
-        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &static_config_s3_key("99-bbr.conf"), BBR_CONF.as_bytes(), presign_duration),
-        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &static_config_s3_key("datasources.yml"), DATASOURCES_YML.as_bytes(), presign_duration),
-        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &static_config_s3_key("all.yml"), ALL_YML.as_bytes(), presign_duration),
-        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &static_config_s3_key("loki.yml"), LOKI_CONFIG.as_bytes(), presign_duration),
-        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &static_config_s3_key("pyroscope.yml"), PYROSCOPE_CONFIG.as_bytes(), presign_duration),
-        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &static_config_s3_key("tempo.yml"), TEMPO_CONFIG.as_bytes(), presign_duration),
-        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &static_config_s3_key("prometheus.service"), PROMETHEUS_SERVICE.as_bytes(), presign_duration),
-        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &static_config_s3_key("loki.service"), LOKI_SERVICE.as_bytes(), presign_duration),
-        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &static_config_s3_key("pyroscope.service"), PYROSCOPE_SERVICE.as_bytes(), presign_duration),
-        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &static_config_s3_key("tempo.service"), TEMPO_SERVICE.as_bytes(), presign_duration),
-        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &static_config_s3_key("node_exporter.service"), NODE_EXPORTER_SERVICE.as_bytes(), presign_duration),
+        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &bbr_config_s3_key(), BBR_CONF.as_bytes(), presign_duration),
+        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &grafana_datasources_s3_key(), DATASOURCES_YML.as_bytes(), presign_duration),
+        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &grafana_dashboards_s3_key(), ALL_YML.as_bytes(), presign_duration),
+        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &loki_config_s3_key(), LOKI_CONFIG.as_bytes(), presign_duration),
+        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &pyroscope_config_s3_key(), PYROSCOPE_CONFIG.as_bytes(), presign_duration),
+        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &tempo_config_s3_key(), TEMPO_CONFIG.as_bytes(), presign_duration),
+        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &prometheus_service_s3_key(), PROMETHEUS_SERVICE.as_bytes(), presign_duration),
+        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &loki_service_s3_key(), LOKI_SERVICE.as_bytes(), presign_duration),
+        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &pyroscope_service_s3_key(), PYROSCOPE_SERVICE.as_bytes(), presign_duration),
+        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &tempo_service_s3_key(), TEMPO_SERVICE.as_bytes(), presign_duration),
+        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &node_exporter_service_s3_key(), NODE_EXPORTER_SERVICE.as_bytes(), presign_duration),
     ])
     .await?
     .try_into()
@@ -574,7 +574,7 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
         loki_service: loki_service_url,
         pyroscope_service: pyroscope_service_url,
         tempo_service: tempo_service_url,
-        node_exporter_service: monitoring_node_exporter_service_url,
+        node_exporter_service: monitoring_node_exporter_service_url.clone(),
     };
     ssh_execute(
         private_key,
@@ -611,18 +611,16 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     info!("caching binary instance static files");
     let [
         promtail_service_url,
-        instance_node_exporter_service_url,
         binary_service_url,
         logrotate_conf_url,
         pyroscope_agent_service_url,
         pyroscope_agent_timer_url,
-    ]: [String; 6] = try_join_all([
-        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &static_config_s3_key("promtail.service"), PROMTAIL_SERVICE.as_bytes(), presign_duration),
-        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &static_config_s3_key("instance-node_exporter.service"), NODE_EXPORTER_SERVICE.as_bytes(), presign_duration),
-        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &static_config_s3_key("binary.service"), BINARY_SERVICE.as_bytes(), presign_duration),
-        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &static_config_s3_key("logrotate.conf"), LOGROTATE_CONF.as_bytes(), presign_duration),
-        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &static_config_s3_key("pyroscope-agent.service"), PYROSCOPE_AGENT_SERVICE.as_bytes(), presign_duration),
-        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &static_config_s3_key("pyroscope-agent.timer"), PYROSCOPE_AGENT_TIMER.as_bytes(), presign_duration),
+    ]: [String; 5] = try_join_all([
+        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &promtail_service_s3_key(), PROMTAIL_SERVICE.as_bytes(), presign_duration),
+        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &binary_service_s3_key(), BINARY_SERVICE.as_bytes(), presign_duration),
+        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &logrotate_config_s3_key(), LOGROTATE_CONF.as_bytes(), presign_duration),
+        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &pyroscope_agent_service_s3_key(), PYROSCOPE_AGENT_SERVICE.as_bytes(), presign_duration),
+        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &pyroscope_agent_timer_s3_key(), PYROSCOPE_AGENT_TIMER.as_bytes(), presign_duration),
     ])
     .await?
     .try_into()
@@ -690,7 +688,7 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
                         promtail_config: promtail_config_url,
                         promtail_service: promtail_service_url.clone(),
                         node_exporter_bin: node_exporter_url.clone(),
-                        node_exporter_service: instance_node_exporter_service_url.clone(),
+                        node_exporter_service: monitoring_node_exporter_service_url.clone(),
                         binary_service: binary_service_url.clone(),
                         logrotate_conf: logrotate_conf_url.clone(),
                         pyroscope_script: pyroscope_script_url,
