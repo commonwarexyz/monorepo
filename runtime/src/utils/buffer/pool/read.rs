@@ -118,6 +118,7 @@ impl<B: Blob> PageReader<B> {
         // Validate CRCs and compute total logical bytes
         let mut total_logical = 0usize;
         let mut last_len = 0usize;
+        let is_final_batch = pages_to_read == max_pages;
         for page_idx in 0..pages_to_read {
             let page_start = page_idx * self.page_size;
             let page_slice = &physical_buf[page_start..page_start + self.page_size];
@@ -128,10 +129,8 @@ impl<B: Blob> PageReader<B> {
             let (len, _) = record.get_crc();
             let len = len as usize;
 
-            // Check if this is the last page in the blob
-            let is_last_page_in_blob = start_offset + (page_idx + 1) as u64 * self.page_size as u64
-                >= self.physical_blob_size;
-
+            // Only the final page in the blob may have partial length
+            let is_last_page_in_blob = is_final_batch && page_idx + 1 == pages_to_read;
             if !is_last_page_in_blob && len != self.logical_page_size {
                 error!(
                     page = self.blob_page + page_idx as u64,
