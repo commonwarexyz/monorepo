@@ -10,7 +10,7 @@
 //! The simulation harness queries this state through `crate::application::NodeHandle`.
 
 use crate::{
-    qmdb::{QmdbChanges, QmdbConfig, QmdbState, RevmDb},
+    qmdb::{QmdbChanges, QmdbConfig, QmdbHandle, QmdbRefDb, RevmDb},
     types::{Block, StateRoot, Tx, TxId},
     ConsensusDigest,
 };
@@ -32,12 +32,12 @@ pub(crate) struct Shared {
     genesis_block: Block,
 }
 
-struct State {
+pub(crate) struct State {
     mempool: BTreeMap<TxId, Tx>,
     snapshots: BTreeMap<ConsensusDigest, ExecutionSnapshot>,
     seeds: BTreeMap<ConsensusDigest, B256>,
-    qmdb: QmdbState,
     persisted: BTreeSet<ConsensusDigest>,
+    qmdb: QmdbHandle,
 }
 
 #[derive(Clone)]
@@ -54,22 +54,25 @@ impl Shared {
         partition_prefix: String,
         genesis_alloc: Vec<(Address, U256)>,
     ) -> anyhow::Result<Self> {
-        let genesis_block = Block {
-            parent: crate::BlockId(B256::ZERO),
-            height: 0,
-            prevrandao: B256::ZERO,
-            state_root: StateRoot(B256::ZERO),
-            txs: Vec::new(),
-        };
-        let genesis_digest = genesis_block.commitment();
-
-        let qmdb = QmdbState::init(
+        // Spawn the QMDB actor which isolates non-Send futures on a dedicated thread
+        let qmdb = QmdbHandle::spawn(
             context.with_label("qmdb"),
             QmdbConfig::new(partition_prefix, buffer_pool),
             genesis_alloc,
         )
         .await?;
-        let db = RevmDb::new(qmdb.database()?);
+        let genesis_root = qmdb.root().await?;
+
+        let genesis_block = Block {
+            parent: crate::BlockId(B256::ZERO),
+            height: 0,
+            prevrandao: B256::ZERO,
+            state_root: genesis_root,
+            txs: Vec::new(),
+        };
+        let genesis_digest = genesis_block.commitment();
+        // Create database adapter using the actor handle
+        let db = RevmDb::new(QmdbRefDb::new(qmdb.clone()));
 
         let mut snapshots = BTreeMap::new();
         snapshots.insert(
@@ -89,8 +92,8 @@ impl Shared {
                 mempool: BTreeMap::new(),
                 snapshots,
                 seeds,
+                persisted: BTreeSet::from([genesis_digest]),
                 qmdb,
-                persisted: BTreeSet::new(),
             })),
             genesis_block,
         })
@@ -134,9 +137,9 @@ impl Shared {
         inner.seeds.get(&digest).copied()
     }
 
-    pub(crate) async fn seed_for_parent(&self, parent: &ConsensusDigest) -> Option<B256> {
+    pub(crate) async fn seed_for_parent(&self, parent: ConsensusDigest) -> Option<B256> {
         let inner = self.inner.lock().await;
-        inner.seeds.get(parent).copied()
+        inner.seeds.get(&parent).copied()
     }
 
     pub(crate) async fn set_seed(&self, digest: ConsensusDigest, seed_hash: B256) {
@@ -146,10 +149,10 @@ impl Shared {
 
     pub(crate) async fn parent_snapshot(
         &self,
-        parent: &ConsensusDigest,
+        parent: ConsensusDigest,
     ) -> Option<ExecutionSnapshot> {
         let inner = self.inner.lock().await;
-        inner.snapshots.get(parent).cloned()
+        inner.snapshots.get(&parent).cloned()
     }
 
     pub(crate) async fn insert_snapshot(
@@ -170,23 +173,33 @@ impl Shared {
         );
     }
 
-    pub(crate) async fn persist_snapshot(&self, digest: ConsensusDigest) -> anyhow::Result<()> {
-        let (qmdb, changes, already_persisted) = {
+    pub(crate) async fn preview_qmdb_root(
+        &self,
+        changes: QmdbChanges,
+    ) -> anyhow::Result<StateRoot> {
+        // Get the handle and release the lock before awaiting
+        let qmdb = {
             let inner = self.inner.lock().await;
-            let already = inner.persisted.contains(&digest);
+            inner.qmdb.clone()
+        };
+        // The actor handles thread isolation, so we can call directly
+        qmdb.preview_root(changes).await.map_err(Into::into)
+    }
+
+    pub(crate) async fn persist_snapshot(&self, digest: ConsensusDigest) -> anyhow::Result<()> {
+        let (changes, qmdb) = {
+            let inner = self.inner.lock().await;
+            if inner.persisted.contains(&digest) {
+                return Ok(());
+            }
             let snapshot = inner
                 .snapshots
                 .get(&digest)
-                .ok_or_else(|| anyhow::anyhow!("missing snapshot for digest"))?;
-            (inner.qmdb.clone(), snapshot.qmdb_changes.clone(), already)
+                .ok_or_else(|| anyhow::anyhow!("missing snapshot"))?;
+            (snapshot.qmdb_changes.clone(), inner.qmdb.clone())
         };
-
-        if already_persisted {
-            return Ok(());
-        }
-
-        qmdb.apply_changes(&changes).await?;
-
+        // The actor handles thread isolation, so we can call directly
+        qmdb.commit_changes(changes).await?;
         let mut inner = self.inner.lock().await;
         inner.persisted.insert(digest);
         Ok(())

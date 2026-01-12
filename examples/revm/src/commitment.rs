@@ -1,4 +1,4 @@
-//! Deterministic state commitment for the example chain.
+//! Deterministic state-change helpers for the example chain.
 //!
 //! This example does not implement Ethereum's Merkle-Patricia Trie. Instead it uses a rolling
 //! commitment that is easy to compute and verify without needing to iterate the whole database.

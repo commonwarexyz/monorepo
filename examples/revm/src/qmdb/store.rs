@@ -4,8 +4,9 @@
 //! public-facing API so `mod.rs` stays focused on the example entry points.
 
 use super::{
-    account_key, code_key, storage_key, AccountRecord, AccountStore, AccountStoreDirty, CodeStore,
-    CodeStoreDirty, Error, QmdbChanges, StorageRecord, StorageStore, StorageStoreDirty,
+    account_key, code_key, state_root_from_roots, storage_key, AccountRecord, AccountStore,
+    AccountStoreDirty, CodeStore, CodeStoreDirty, Error, QmdbChanges, StorageRecord, StorageStore,
+    StorageStoreDirty,
 };
 use alloy_evm::revm::primitives::{Address, KECCAK_EMPTY, U256};
 use commonware_storage::kv::{Batchable as _, Updatable as _};
@@ -38,9 +39,9 @@ impl Stores {
     /// Transitions durable stores into their non-durable update state.
     fn into_dirty(self) -> DirtyStores {
         DirtyStores {
-            accounts: self.accounts.into_dirty(),
-            storage: self.storage.into_dirty(),
-            code: self.code.into_dirty(),
+            accounts: self.accounts.into_mutable(),
+            storage: self.storage.into_mutable(),
+            code: self.code.into_mutable(),
         }
     }
 }
@@ -48,9 +49,9 @@ impl Stores {
 impl DirtyStores {
     /// Commits all dirty stores and returns them in durable form.
     async fn commit(self) -> Result<Stores, Error> {
-        let (accounts, _) = self.accounts.commit(None).await?;
-        let (storage, _) = self.storage.commit(None).await?;
-        let (code, _) = self.code.commit(None).await?;
+        let (accounts, _) = self.accounts.into_merkleized().commit(None).await?;
+        let (storage, _) = self.storage.into_merkleized().commit(None).await?;
+        let (code, _) = self.code.into_merkleized().commit(None).await?;
         Ok(Stores {
             accounts,
             storage,
@@ -59,71 +60,13 @@ impl DirtyStores {
     }
 }
 
-/// Slot that temporarily yields ownership of the QMDB stores during updates.
-pub(crate) struct StoresSlot(Option<Stores>);
-
-impl StoresSlot {
-    /// Creates a new slot holding initialized stores.
-    pub(crate) const fn new(stores: Stores) -> Self {
-        Self(Some(stores))
-    }
-
-    /// Returns a shared reference to the stores, if available.
-    pub(crate) fn get(&self) -> Result<&Stores, Error> {
-        self.0
-            .as_ref()
-            .ok_or(Error::StoreUnavailable("stores unavailable"))
-    }
-
-    /// Takes ownership of the stores while an update is in progress.
-    pub(crate) fn take(&mut self) -> Result<Stores, Error> {
-        self.0
-            .take()
-            .ok_or(Error::StoreUnavailable("stores unavailable"))
-    }
-
-    /// Restores the stores after a successful update.
-    pub(crate) fn restore(&mut self, stores: Stores) {
-        self.0 = Some(stores);
-    }
-}
-
-pub(crate) struct QmdbInner {
-    /// Store ownership state for QMDB partitions.
-    stores: StoresSlot,
-}
-
-impl QmdbInner {
-    /// Wraps initialized stores for shared access.
-    pub(crate) const fn new(stores: Stores) -> Self {
-        Self {
-            stores: StoresSlot::new(stores),
-        }
-    }
-
-    /// Returns a shared reference to the stores, if available.
-    pub(crate) fn stores(&self) -> Result<&Stores, Error> {
-        self.stores.get()
-    }
-
-    /// Takes ownership of the stores for an update.
-    pub(crate) fn take_stores(&mut self) -> Result<Stores, Error> {
-        self.stores.take()
-    }
-
-    /// Restores stores after a successful update.
-    pub(crate) fn restore_stores(&mut self, stores: Stores) {
-        self.stores.restore(stores);
-    }
-}
-
 /// Applies a finalized change set and returns updated durable stores.
 pub(crate) async fn apply_changes_inner(
     stores: Stores,
-    changes: &QmdbChanges,
+    changes: QmdbChanges,
 ) -> Result<Stores, Error> {
-    let mut dirty = stores.into_dirty();
-    let batches = build_batches(&dirty, changes).await?;
+    let dirty = stores.into_dirty();
+    let (mut dirty, batches) = build_batches(dirty, changes).await?;
     write_batches(&mut dirty, batches).await?;
     dirty.commit().await
 }
@@ -138,7 +81,7 @@ pub(crate) async fn apply_genesis_inner(
         storage,
         code,
     } = stores;
-    let mut accounts = accounts.into_dirty();
+    let mut accounts = accounts.into_mutable();
     let batch_ops = {
         let mut batch = accounts.start_batch();
         for (address, balance) in genesis_alloc {
@@ -154,7 +97,7 @@ pub(crate) async fn apply_genesis_inner(
         batch.into_iter().collect::<Vec<_>>()
     };
     accounts.write_batch(batch_ops.into_iter()).await?;
-    let (accounts, _) = accounts.commit(None).await?;
+    let (accounts, _) = accounts.into_merkleized().commit(None).await?;
     Ok(Stores {
         accounts,
         storage,
@@ -162,15 +105,63 @@ pub(crate) async fn apply_genesis_inner(
     })
 }
 
+/// Computes the state commitment after applying changes without committing durability.
+pub(crate) async fn preview_root_inner(
+    stores: Stores,
+    changes: QmdbChanges,
+) -> Result<crate::types::StateRoot, Error> {
+    let dirty = stores.into_dirty();
+    let (mut dirty, batches) = build_batches(dirty, changes).await?;
+    write_batches(&mut dirty, batches).await?;
+
+    let accounts = dirty.accounts.into_merkleized();
+    let storage = dirty.storage.into_merkleized();
+    let code = dirty.code.into_merkleized();
+    Ok(state_root_from_roots(
+        accounts.root(),
+        storage.root(),
+        code.root(),
+    ))
+}
+
 /// Builds batched QMDB operations from a finalized change set.
-async fn build_batches(stores: &DirtyStores, changes: &QmdbChanges) -> Result<StoreBatches, Error> {
+///
+/// Takes ownership of `DirtyStores` and `QmdbChanges` to avoid holding references
+/// across await points, which would trigger RPITIT cross-crate Send bound issues.
+///
+/// The function is structured to:
+/// 1. Pre-fetch all existing account data (async lookups complete before batch building)
+/// 2. Build all batch operations synchronously without await in the loop
+async fn build_batches(
+    stores: DirtyStores,
+    changes: QmdbChanges,
+) -> Result<(DirtyStores, StoreBatches), Error> {
+    // Convert changes to owned Vec to avoid holding BTreeMap iterator across await
+    let account_updates: Vec<_> = changes.accounts.into_iter().collect();
+
+    // Extract just the addresses for pre-fetching (owned, not borrowed)
+    let addresses: Vec<_> = account_updates.iter().map(|(addr, _)| *addr).collect();
+
+    // Pre-fetch all existing account records we need (complete all async ops first)
+    let mut existing_accounts = Vec::with_capacity(addresses.len());
+    for address in addresses {
+        let key = account_key(address);
+        let existing = stores.accounts.get(&key).await?;
+        existing_accounts.push(existing);
+    }
+
+    // Now build batches synchronously - no await points in this section
     let mut accounts_batch = stores.accounts.start_batch();
     let mut storage_batch = stores.storage.start_batch();
     let mut code_batch = stores.code.start_batch();
 
-    for (address, update) in changes.accounts.iter() {
-        let account_key = account_key(*address);
-        let existing = stores.accounts.get(&account_key).await?;
+    // Collect all batch operations into vecs
+    let mut account_ops = Vec::new();
+    let mut storage_ops = Vec::new();
+    let mut code_ops = Vec::new();
+
+    for ((address, update), existing) in account_updates.into_iter().zip(existing_accounts) {
+        let account_key = account_key(address);
         let base_generation = existing
             .as_ref()
             .map(|record| record.storage_generation)
@@ -193,7 +184,7 @@ async fn build_batches(stores: &DirtyStores, changes: &QmdbChanges) -> Result<St
                 storage_generation,
             }
         };
-        accounts_batch.update(account_key, record).await?;
+        account_ops.push((account_key, Some(record)));
 
         if update.selfdestructed {
             continue;
@@ -201,27 +192,47 @@ async fn build_batches(stores: &DirtyStores, changes: &QmdbChanges) -> Result<St
 
         if let Some(code) = update.code.as_ref() {
             if !code.is_empty() && update.code_hash != KECCAK_EMPTY {
-                code_batch
-                    .update(code_key(update.code_hash), code.clone())
-                    .await?;
+                code_ops.push((code_key(update.code_hash), Some(code.clone())));
             }
         }
 
-        for (slot, value) in update.storage.iter() {
-            let key = storage_key(*address, storage_generation, *slot);
+        // Convert storage iteration to owned Vec to avoid borrow
+        let storage_slots: Vec<_> = update.storage.into_iter().collect();
+        for (slot, value) in storage_slots {
+            let key = storage_key(address, storage_generation, slot);
             if value.is_zero() {
-                storage_batch.delete_unchecked(key).await?;
+                storage_ops.push((key, None));
             } else {
-                storage_batch.update(key, StorageRecord(*value)).await?;
+                storage_ops.push((key, Some(StorageRecord(value))));
             }
         }
     }
 
-    Ok(StoreBatches {
+    // Apply all batch operations (these may await but don't hold iterator borrows)
+    for (key, value) in account_ops {
+        if let Some(v) = value {
+            accounts_batch.update(key, v).await?;
+        }
+    }
+    for (key, value) in storage_ops {
+        if let Some(v) = value {
+            storage_batch.update(key, v).await?;
+        } else {
+            storage_batch.delete_unchecked(key).await?;
+        }
+    }
+    for (key, value) in code_ops {
+        if let Some(v) = value {
+            code_batch.update(key, v).await?;
+        }
+    }
+
+    let batches = StoreBatches {
         accounts: accounts_batch.into_iter().collect(),
         storage: storage_batch.into_iter().collect(),
         code: code_batch.into_iter().collect(),
-    })
+    };
+    Ok((stores, batches))
 }
 
 /// Writes batches to the dirty stores before commit.

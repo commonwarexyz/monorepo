@@ -4,7 +4,7 @@
 //!
 //! - `BlockId` is `keccak256(Encode(Block))`.
 //! - Consensus orders `ConsensusDigest = sha256(BlockId)` (the block's `Committable`).
-//! - `StateRoot` is a 32-byte rolling commitment (see `crate::commitment`).
+//! - `StateRoot` is a 32-byte commitment over QMDB partition roots.
 
 use alloy_evm::revm::primitives::{keccak256, Address, Bytes, B256, U256};
 use bytes::{Buf, BufMut};

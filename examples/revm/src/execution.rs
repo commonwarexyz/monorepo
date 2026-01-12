@@ -7,9 +7,9 @@
 //! is sourced from the threshold-simplex seed.
 
 use crate::{
-    commitment::{commit_state_root, AccountChange, StateChanges},
+    commitment::{AccountChange, StateChanges},
     qmdb::QmdbChanges,
-    types::{StateRoot, Tx},
+    types::Tx,
 };
 use alloy_evm::{
     eth::EthEvmBuilder,
@@ -52,9 +52,7 @@ pub fn evm_env(height: u64, prevrandao: B256) -> EvmEnv {
 #[derive(Debug, Clone)]
 /// Result of executing a batch of transactions.
 pub struct ExecutionOutcome {
-    /// Rolling state commitment after applying the batch.
-    pub state_root: StateRoot,
-    /// Canonical per-transaction state deltas used to compute `state_root`.
+    /// Canonical per-transaction state deltas observed during execution.
     pub tx_changes: Vec<StateChanges>,
     /// Per-account changes used to persist finalized blocks to QMDB.
     pub(crate) qmdb_changes: QmdbChanges,
@@ -63,15 +61,9 @@ pub struct ExecutionOutcome {
 /// Execute a batch of transactions and commit them to the provided DB.
 ///
 /// Notes:
-/// - Uses `transact_raw` so the state diff is available to compute the rolling `state_root`
-///   *before* committing the changes.
-/// - Commits the diff into the DB after updating the rolling root.
-pub fn execute_txs<DB>(
-    db: DB,
-    env: EvmEnv,
-    prev_root: StateRoot,
-    txs: &[Tx],
-) -> anyhow::Result<(DB, ExecutionOutcome)>
+/// - Uses `transact_raw` so the state diff is available for downstream processing.
+/// - Commits the diff into the DB after each transaction.
+pub fn execute_txs<DB>(db: DB, env: EvmEnv, txs: &[Tx]) -> anyhow::Result<(DB, ExecutionOutcome)>
 where
     DB: AlloyDatabase + DatabaseCommit,
 {
@@ -80,7 +72,6 @@ where
     let mut evm = EthEvmBuilder::new(db, env).precompiles(precompiles).build();
     let chain_id = evm.chain_id();
 
-    let mut state_root = prev_root;
     let mut tx_changes = Vec::with_capacity(txs.len());
     let mut qmdb_changes = QmdbChanges::default();
 
@@ -91,8 +82,6 @@ where
 
         let changes = state_changes_from_evm_state(&state);
         qmdb_changes.apply_evm_state(&state);
-        state_root = commit_state_root(state_root, &changes);
-
         evm.db_mut().commit(state);
         tx_changes.push(changes);
     }
@@ -101,7 +90,6 @@ where
     Ok((
         db,
         ExecutionOutcome {
-            state_root,
             tx_changes,
             qmdb_changes,
         },
@@ -191,7 +179,6 @@ fn account_change_from_evm_account(account: &Account) -> AccountChange {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commitment::commit_state_root;
     use alloy_evm::revm::{
         database::InMemoryDB,
         primitives::{Address, Bytes, B256, U256},
@@ -228,7 +215,6 @@ mod tests {
         let recipient = addr(0x22);
         let seed = B256::from([7u8; 32]);
         let height = 1;
-        let prev_root = StateRoot(B256::ZERO);
         let mut db = InMemoryDB::default();
         fund(
             &mut db,
@@ -245,15 +231,11 @@ mod tests {
         };
 
         // Execute
-        let (mut db, outcome) = execute_txs(db, evm_env(height, seed), prev_root, &[tx]).unwrap();
+        let (mut db, outcome) = execute_txs(db, evm_env(height, seed), &[tx]).unwrap();
 
         // Assert (outcome)
         assert_eq!(outcome.tx_changes.len(), 1);
         assert!(!outcome.tx_changes[0].is_empty());
-        assert_eq!(
-            outcome.state_root,
-            commit_state_root(prev_root, &outcome.tx_changes[0])
-        );
 
         // Assert (state)
         let sender_info = db.basic(sender).unwrap().unwrap();
