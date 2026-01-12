@@ -303,7 +303,7 @@ use commonware_parallel::{Sequential, Strategy};
 use commonware_utils::Bft3f1;
 use commonware_utils::{
     ordered::{Map, Quorum, Set},
-    Bft3f1, Faults, Participant, TryCollect, NZU32,
+    Faults, Participant, TryCollect, NZU32,
 };
 use core::num::NonZeroU32;
 use rand_core::CryptoRngCore;
