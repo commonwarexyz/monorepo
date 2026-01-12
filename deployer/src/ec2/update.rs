@@ -217,13 +217,23 @@ async fn update_instance(
 
     // Download the latest binary and config from S3 concurrently via pre-signed URLs
     let download_cmd = format!(
-        "wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/binary '{}' & wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/config.conf '{}' & wait",
+        r#"wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/binary '{}' &
+wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/config.conf '{}' &
+wait
+
+# Verify all downloads succeeded
+for f in binary config.conf; do
+    if [ ! -f "/home/ubuntu/$f" ]; then
+        echo "ERROR: Failed to download $f" >&2
+        exit 1
+    fi
+done
+
+# Ensure the binary is executable
+chmod +x /home/ubuntu/binary"#,
         binary_url, config_url
     );
     ssh_execute(private_key, ip, &download_cmd).await?;
-
-    // Ensure the binary is executable
-    ssh_execute(private_key, ip, "chmod +x /home/ubuntu/binary").await?;
 
     // Restart the binary service
     ssh_execute(private_key, ip, "sudo systemctl start binary").await?;
