@@ -783,7 +783,7 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     };
 
     // Configure monitoring and binary instances in parallel
-    info!("configuring monitoring and binary instances in parallel");
+    info!("configuring monitoring and binary instances");
 
     // Prepare binary instance configuration futures
     let mut binary_futures = Vec::new();
