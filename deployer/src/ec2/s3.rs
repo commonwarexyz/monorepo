@@ -298,10 +298,10 @@ pub async fn delete_bucket_and_contents(client: &S3Client, bucket: &str) -> Resu
 }
 
 /// Checks if an error is a "bucket does not exist" error
-pub const fn is_no_such_bucket_error(error: &Error) -> bool {
+pub fn is_no_such_bucket_error(error: &Error) -> bool {
     match error {
         Error::AwsS3(aws_err) => {
-            matches!(aws_err, aws_sdk_s3::Error::NoSuchBucket(_))
+            matches!(aws_err.as_ref(), aws_sdk_s3::Error::NoSuchBucket(_))
         }
         _ => false,
     }

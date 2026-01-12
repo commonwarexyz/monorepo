@@ -821,7 +821,7 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
         async {
             // Configure monitoring instance
             let monitoring_ec2_client = &ec2_clients[&monitoring_region];
-            wait_for_instances_ready(monitoring_ec2_client, &[monitoring_instance_id.clone()])
+            wait_for_instances_ready(monitoring_ec2_client, slice::from_ref(&monitoring_instance_id))
                 .await?;
             enable_bbr(private_key, &monitoring_ip, &bbr_conf_url).await?;
             ssh_execute(

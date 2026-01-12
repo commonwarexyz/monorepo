@@ -273,7 +273,6 @@ cfg_if::cfg_if! {
 
         /// Errors that can occur when deploying infrastructure on AWS
         #[derive(Error, Debug)]
-        #[allow(clippy::large_enum_variant)]
         pub enum Error {
             #[error("AWS EC2 error: {0}")]
             AwsEc2(#[from] aws_sdk_ec2::Error),
@@ -282,7 +281,7 @@ cfg_if::cfg_if! {
             #[error("AWS describe instances error: {0}")]
             AwsDescribeInstances(#[from] aws_sdk_ec2::operation::describe_instances::DescribeInstancesError),
             #[error("AWS S3 error: {0}")]
-            AwsS3(#[from] aws_sdk_s3::Error),
+            AwsS3(Box<aws_sdk_s3::Error>),
             #[error("IO error: {0}")]
             Io(#[from] std::io::Error),
             #[error("YAML error: {0}")]
@@ -316,9 +315,21 @@ cfg_if::cfg_if! {
             #[error("S3 presigning config error: {0}")]
             S3PresigningConfig(#[from] aws_sdk_s3::presigning::PresigningConfigError),
             #[error("S3 presigning failed: {0}")]
-            S3PresigningFailed(#[from] aws_sdk_s3::error::SdkError<aws_sdk_s3::operation::get_object::GetObjectError>),
+            S3PresigningFailed(Box<aws_sdk_s3::error::SdkError<aws_sdk_s3::operation::get_object::GetObjectError>>),
             #[error("S3 builder error: {0}")]
             S3Builder(#[from] aws_sdk_s3::error::BuildError),
+        }
+
+        impl From<aws_sdk_s3::Error> for Error {
+            fn from(err: aws_sdk_s3::Error) -> Self {
+                Error::AwsS3(Box::new(err))
+            }
+        }
+
+        impl From<aws_sdk_s3::error::SdkError<aws_sdk_s3::operation::get_object::GetObjectError>> for Error {
+            fn from(err: aws_sdk_s3::error::SdkError<aws_sdk_s3::operation::get_object::GetObjectError>) -> Self {
+                Error::S3PresigningFailed(Box::new(err))
+            }
         }
     }
 }
