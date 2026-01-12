@@ -4,6 +4,7 @@ use crate::ec2::Error;
 use aws_config::BehaviorVersion;
 pub use aws_config::Region;
 use aws_sdk_s3::{
+    config::retry::ReconnectMode,
     operation::head_object::HeadObjectError,
     presigning::PresigningConfig,
     primitives::ByteStream,
@@ -35,9 +36,10 @@ pub const PRESIGN_DURATION: Duration = Duration::from_secs(6 * 60 * 60);
 /// Creates an S3 client for the specified AWS region
 pub async fn create_s3_client(region: Region) -> S3Client {
     let retry = aws_config::retry::RetryConfig::adaptive()
-        .with_max_attempts(10)
+        .with_max_attempts(u32::MAX)
         .with_initial_backoff(Duration::from_millis(500))
-        .with_max_backoff(Duration::from_secs(30));
+        .with_max_backoff(Duration::from_secs(30))
+        .with_reconnect_mode(ReconnectMode::ReconnectOnTransientError);
     let config = aws_config::defaults(BehaviorVersion::v2025_08_07())
         .region(region)
         .retry_config(retry)
