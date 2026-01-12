@@ -4,7 +4,8 @@
 use crate::fixed::{
     gen_random_kv, gen_random_kv_batched, get_any_ordered_fixed, get_any_ordered_variable,
     get_any_unordered_fixed, get_any_unordered_variable, get_current_ordered_fixed,
-    get_current_unordered_fixed, Digest, Variant, VARIANTS,
+    get_current_ordered_variable, get_current_unordered_fixed, get_current_unordered_variable,
+    Digest, Variant, VARIANTS,
 };
 use commonware_runtime::{
     benchmarks::{context, tokio},
@@ -108,6 +109,32 @@ fn bench_fixed_generate(c: &mut Criterion) {
                                         }
                                         Variant::CurrentOrderedFixed => {
                                             let db = get_current_ordered_fixed(ctx.clone()).await;
+                                            test_db(
+                                                db,
+                                                use_batch,
+                                                elements,
+                                                operations,
+                                                commit_frequency,
+                                            )
+                                            .await
+                                            .unwrap()
+                                        }
+                                        Variant::CurrentUnorderedVariable => {
+                                            let db =
+                                                get_current_unordered_variable(ctx.clone()).await;
+                                            test_db(
+                                                db,
+                                                use_batch,
+                                                elements,
+                                                operations,
+                                                commit_frequency,
+                                            )
+                                            .await
+                                            .unwrap()
+                                        }
+                                        Variant::CurrentOrderedVariable => {
+                                            let db =
+                                                get_current_ordered_variable(ctx.clone()).await;
                                             test_db(
                                                 db,
                                                 use_batch,
