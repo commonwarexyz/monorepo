@@ -316,6 +316,15 @@ impl<B: Blob> Replay<B> {
         Ok(self.buffer.remaining >= n)
     }
 
+    /// Clears the buffer state, emptying it and resetting the reader to the beginning of the blob.
+    pub fn clear(&mut self) {
+        self.buffer.buffers.clear();
+        self.buffer.current_page = 0;
+        self.buffer.offset_in_page = 0;
+        self.buffer.remaining = 0;
+        self.exhausted = false;
+    }
+
     /// Seeks to `offset` in the blob, returning `Err(BlobInsufficientLength)` if `offset` exceeds
     /// the blob size.
     pub async fn seek_to(&mut self, offset: u64) -> Result<(), Error> {
@@ -323,21 +332,14 @@ impl<B: Blob> Replay<B> {
             return Err(Error::BlobInsufficientLength);
         }
 
-        // Clear existing buffer state
-        self.buffer.buffers.clear();
-        self.buffer.current_page = 0;
-        self.buffer.offset_in_page = 0;
-        self.buffer.remaining = 0;
-        self.exhausted = false;
+        self.clear();
 
         let page_size = self.reader.logical_page_size as u64;
         self.reader.blob_page = offset / page_size;
 
         let remainder = (offset % page_size) as usize;
-        if remainder > 0 {
-            assert!(self.ensure(remainder).await?, "bounds already checked");
-            self.advance(remainder);
-        }
+        assert!(self.ensure(remainder).await?, "bounds already checked");
+        self.advance(remainder);
         Ok(())
     }
 }
