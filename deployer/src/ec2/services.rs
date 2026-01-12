@@ -478,9 +478,10 @@ sudo apt-get install -f -y
 
 # Install Loki
 sudo mkdir -p /opt/loki /loki/index /loki/index_cache /loki/chunks /loki/compactor /loki/wal
-sudo chown -R ubuntu:ubuntu /loki
+sudo chown -R ubuntu:ubuntu /opt/loki /loki
 unzip -o /home/ubuntu/loki.zip -d /home/ubuntu
 sudo mv /home/ubuntu/loki-linux-arm64 /opt/loki/loki
+sudo chmod +x /opt/loki/loki
 
 # Install Pyroscope
 sudo mkdir -p /opt/pyroscope /var/lib/pyroscope
@@ -491,13 +492,14 @@ sudo chmod +x /opt/pyroscope/pyroscope
 
 # Install Tempo
 sudo mkdir -p /opt/tempo /tempo/traces /tempo/wal
-sudo chown -R ubuntu:ubuntu /tempo
+sudo chown -R ubuntu:ubuntu /opt/tempo /tempo
 tar xvfz /home/ubuntu/tempo.tar.gz -C /home/ubuntu
 sudo mv /home/ubuntu/tempo /opt/tempo/tempo
 sudo chmod +x /opt/tempo/tempo
 
 # Install Node Exporter
 sudo mkdir -p /opt/node_exporter
+sudo chown -R ubuntu:ubuntu /opt/node_exporter
 tar xvfz /home/ubuntu/node_exporter.tar.gz -C /home/ubuntu
 sudo mv /home/ubuntu/node_exporter-*.linux-arm64 /opt/node_exporter/
 sudo ln -s /opt/node_exporter/node_exporter-*.linux-arm64/node_exporter /opt/node_exporter/node_exporter
@@ -628,6 +630,7 @@ done
 
 # Install Promtail
 sudo mkdir -p /opt/promtail /etc/promtail
+sudo chown -R ubuntu:ubuntu /opt/promtail
 unzip -o /home/ubuntu/promtail.zip -d /home/ubuntu
 sudo mv /home/ubuntu/promtail-linux-arm64 /opt/promtail/promtail
 sudo chmod +x /opt/promtail/promtail
@@ -637,6 +640,7 @@ sudo chown root:root /etc/promtail/promtail.yml
 
 # Install Node Exporter
 sudo mkdir -p /opt/node_exporter
+sudo chown -R ubuntu:ubuntu /opt/node_exporter
 tar xvfz /home/ubuntu/node_exporter.tar.gz -C /home/ubuntu
 sudo mv /home/ubuntu/node_exporter-*.linux-arm64 /opt/node_exporter/
 sudo ln -s /opt/node_exporter/node_exporter-*.linux-arm64/node_exporter /opt/node_exporter/node_exporter
