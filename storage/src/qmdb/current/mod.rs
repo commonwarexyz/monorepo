@@ -4,7 +4,10 @@
 //! authenticated [crate::bitmap::CleanBitMap] over the activity status of each operation. The two
 //! structures are "grafted" together to minimize proof sizes.
 
-use crate::{qmdb::any::FixedConfig as AnyFixedConfig, translator::Translator};
+use crate::{
+    qmdb::any::{FixedConfig as AnyFixedConfig, VariableConfig as AnyVariableConfig},
+    translator::Translator,
+};
 use commonware_parallel::ThreadPool;
 use commonware_runtime::buffer::PoolRef;
 use std::num::{NonZeroU64, NonZeroUsize};
@@ -62,6 +65,68 @@ impl<T: Translator> FixedConfig<T> {
             log_journal_partition: self.log_journal_partition,
             log_items_per_blob: self.log_items_per_blob,
             log_write_buffer: self.log_write_buffer,
+            translator: self.translator,
+            thread_pool: self.thread_pool,
+            buffer_pool: self.buffer_pool,
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct VariableConfig<T: Translator, C> {
+    /// The name of the storage partition used for the MMR's backing journal.
+    pub mmr_journal_partition: String,
+
+    /// The items per blob configuration value used by the MMR journal.
+    pub mmr_items_per_blob: NonZeroU64,
+
+    /// The size of the write buffer to use for each blob in the MMR journal.
+    pub mmr_write_buffer: NonZeroUsize,
+
+    /// The name of the storage partition used for the MMR's metadata.
+    pub mmr_metadata_partition: String,
+
+    /// The name of the storage partition used to persist the log of operations.
+    pub log_partition: String,
+
+    /// The size of the write buffer to use for each blob in the log journal.
+    pub log_write_buffer: NonZeroUsize,
+
+    /// Optional compression level (using `zstd`) to apply to log data before storing.
+    pub log_compression: Option<u8>,
+
+    /// The codec configuration to use for the log.
+    pub log_codec_config: C,
+
+    /// The items per blob configuration value used by the log journal.
+    pub log_items_per_blob: NonZeroU64,
+
+    /// The name of the storage partition used for the bitmap metadata.
+    pub bitmap_metadata_partition: String,
+
+    /// The translator used by the compressed index.
+    pub translator: T,
+
+    /// An optional thread pool to use for parallelizing batch operations.
+    pub thread_pool: Option<ThreadPool>,
+
+    /// The buffer pool to use for caching data.
+    pub buffer_pool: PoolRef,
+}
+
+impl<T: Translator, C> VariableConfig<T, C> {
+    /// Convert this config to an [AnyVariableConfig] used to initialize the authenticated log.
+    pub fn to_any_config(self) -> AnyVariableConfig<T, C> {
+        AnyVariableConfig {
+            mmr_journal_partition: self.mmr_journal_partition,
+            mmr_metadata_partition: self.mmr_metadata_partition,
+            mmr_items_per_blob: self.mmr_items_per_blob,
+            mmr_write_buffer: self.mmr_write_buffer,
+            log_items_per_blob: self.log_items_per_blob,
+            log_partition: self.log_partition,
+            log_write_buffer: self.log_write_buffer,
+            log_compression: self.log_compression,
+            log_codec_config: self.log_codec_config,
             translator: self.translator,
             thread_pool: self.thread_pool,
             buffer_pool: self.buffer_pool,
