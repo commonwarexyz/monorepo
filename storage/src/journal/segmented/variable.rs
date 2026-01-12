@@ -330,7 +330,7 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
                         replay,
                         skip_bytes,
                         offset: 0,
-                        valid_offset: 0,
+                        valid_offset: skip_bytes,
                         codec_config,
                         compressed,
                         done: false,
@@ -1963,6 +1963,87 @@ mod tests {
             }
 
             journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_journal_replay_start_offset_with_trailing_bytes() {
+        // Regression test: when replaying with start_offset > 0 and there are
+        // trailing corrupt bytes, the truncation logic must not truncate valid
+        // data before start_offset. Previously, valid_offset was initialized to 0
+        // instead of start_offset, causing valid data to be lost.
+        //
+        // The bug triggers when:
+        // 1. start_offset > 0 (we skip some bytes)
+        // 2. The first thing encountered AFTER skipping is trailing corrupt bytes
+        // 3. valid_offset is incorrectly 0 instead of start_offset
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test_partition".into(),
+                compression: None,
+                codec_config: (),
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                write_buffer: NZUsize!(1024),
+            };
+            let mut journal = Journal::init(context.clone(), cfg.clone())
+                .await
+                .expect("Failed to initialize journal");
+
+            // Append several items to build up valid data
+            for i in 0..5i32 {
+                journal.append(1, i).await.unwrap();
+            }
+            journal.sync(1).await.unwrap();
+            let valid_logical_size = journal.size(1).await.unwrap();
+            drop(journal);
+
+            // Get the physical blob size before corruption
+            let (blob, physical_size_before) = context
+                .open(&cfg.partition, &1u64.to_be_bytes())
+                .await
+                .unwrap();
+
+            // Write incomplete varint: 0xFF has continuation bit set, needs more bytes
+            // This creates 2 trailing bytes that cannot form a valid item
+            blob.write_at(vec![0xFF, 0xFF], physical_size_before)
+                .await
+                .unwrap();
+            blob.sync().await.unwrap();
+
+            // Reopen journal and replay starting PAST all valid items
+            // (start_offset = valid_logical_size means we skip all valid data)
+            // The first thing encountered will be the trailing corrupt bytes
+            let start_offset = valid_logical_size;
+            {
+                let journal = Journal::<_, i32>::init(context.clone(), cfg.clone())
+                    .await
+                    .unwrap();
+
+                let stream = journal
+                    .replay(1, start_offset, NZUsize!(1024))
+                    .await
+                    .unwrap();
+                pin_mut!(stream);
+
+                // Consume the stream - should detect trailing bytes and truncate
+                while let Some(_result) = stream.next().await {}
+            }
+
+            // Verify that valid data before start_offset was NOT lost
+            let (_, physical_size_after) = context
+                .open(&cfg.partition, &1u64.to_be_bytes())
+                .await
+                .unwrap();
+
+            // The blob should have been truncated back to the valid physical size
+            // (removing the trailing corrupt bytes) but NOT to 0
+            assert!(
+                physical_size_after >= physical_size_before,
+                "Valid data was lost! Physical blob truncated from {physical_size_before} to \
+                 {physical_size_after}. Logical valid size was {valid_logical_size}. \
+                 This indicates valid_offset was incorrectly initialized to 0 instead of start_offset."
+            );
         });
     }
 }
