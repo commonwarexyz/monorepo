@@ -44,9 +44,11 @@ impl<B: Blob> PageReader<B> {
     /// Creates a new PageReader.
     ///
     /// The `physical_blob_size` must already exclude any trailing invalid data
-    /// (e.g., junk pages from an interrupted write). With this in mind, a partial page
-    /// that is not the physical last page indicates corruption (not crash truncation)
-    /// and will cause an `Error::InvalidChecksum`.
+    /// (e.g., junk pages from an interrupted write). Each physical page is the same
+    /// size on disk, but the CRC record indicates how much logical data it contains.
+    /// The last page may be logically partial (CRC length < logical page size), but
+    /// all preceding pages must be logically full. A logically partial non-last page
+    /// indicates corruption and will cause an `Error::InvalidChecksum`.
     pub(super) const fn new(
         blob: B,
         physical_blob_size: u64,
