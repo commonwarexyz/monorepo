@@ -151,8 +151,8 @@
 //!    upstream sources once and cached in S3. Subsequent deployments by any user skip the download and
 //!    use pre-signed URLs to fetch directly from S3.
 //!
-//! 2. **Reduced bandwidth**: Large binaries (~500MB+ total for all tools) are stored once rather than
-//!    downloaded repeatedly for each deployment.
+//! 2. **Reduced bandwidth**: Instead of requiring the deployer to push binaries to each instance,
+//!    unique binaries are uploaded once to S3 and then pulled from there.
 //!
 //! Per-deployment data (binaries, configs, hosts files) is isolated under `deployments/{tag}/` to prevent
 //! conflicts between concurrent deployments.
@@ -164,9 +164,8 @@
 //!     * `monitoring/` - Prometheus config, dashboard
 //!     * `instances/{name}/` - Binary, config, hosts.yaml, promtail config, pyroscope script
 //!
-//! Tool binaries are namespaced by tool version and platform for cache efficiency and
-//! multi-architecture support. Static configs are namespaced by deployer version to ensure
-//! cache invalidation when the deployer is updated.
+//! Tool binaries are namespaced by tool version and platform. Static configs are namespaced by deployer
+//! version to ensure cache invalidation when the deployer is updated.
 //!
 //! # Example Configuration
 //!
