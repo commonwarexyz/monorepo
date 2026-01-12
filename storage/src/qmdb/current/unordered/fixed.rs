@@ -411,7 +411,8 @@ impl<
 
     /// Commit any pending operations to the database, ensuring their durability upon return.
     /// This transitions to the Durable state without merkleizing. Returns the committed database
-    /// and the `[start_loc, end_loc)` range of committed operations.
+    /// and the `[start_loc, end_loc)` range of committed operations. Note that even if no
+    /// operations were added since the last commit, this is a root-state changing operation.
     pub async fn commit(
         mut self,
         metadata: Option<V>,
@@ -498,22 +499,6 @@ impl<
             bitmap_metadata_partition: self.bitmap_metadata_partition,
             cached_root: None,
         }
-    }
-
-    /// Commit any pending operations to the database, ensuring their durability upon return.
-    /// Returns the committed database and the range of committed operations.
-    pub async fn commit(
-        self,
-        metadata: Option<V>,
-    ) -> Result<
-        (
-            Db<E, K, V, H, T, N, Merkleized<H>, Durable>,
-            Range<Location>,
-        ),
-        Error,
-    > {
-        let (durable, range) = self.into_mutable().commit(metadata).await?;
-        Ok((durable.into_merkleized().await?, range))
     }
 }
 
@@ -819,11 +804,6 @@ impl<
     > MerkleizedNonDurableAny for Db<E, K, V, H, T, N, Merkleized<H>, NonDurable>
 {
     type Mutable = Db<E, K, V, H, T, N, Unmerkleized, NonDurable>;
-    type Durable = Db<E, K, V, H, T, N, Merkleized<H>, Durable>;
-
-    async fn commit(self, metadata: Option<V>) -> Result<(Self::Durable, Range<Location>), Error> {
-        self.commit(metadata).await
-    }
 
     fn into_mutable(self) -> Self::Mutable {
         self.into_mutable()
@@ -986,18 +966,14 @@ pub mod test {
             }
             assert!(db.status.get_bit(*db.op_count() - 1));
 
-            // Test that we can do a non-durable root.
+            // Test that we can get a non-durable root.
             let mut db = db.into_mutable();
             db.update(k1, v1).await.unwrap();
             let db = db.into_merkleized().await.unwrap();
             assert_ne!(db.root(), root3);
 
-            // Test that we can do a merkleized commit.
-            let (db, _) = db.commit(None).await.unwrap();
-            assert!(db.get_metadata().await.unwrap().is_none());
-            assert_eq!(db.op_count(), 10);
-
-            db.destroy().await.unwrap();
+            let (db, _) = db.into_mutable().commit(None).await.unwrap();
+            db.into_merkleized().await.unwrap().destroy().await.unwrap();
         });
     }
 

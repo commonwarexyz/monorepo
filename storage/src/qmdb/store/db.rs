@@ -411,6 +411,9 @@ where
     /// `(start_loc, end_loc]` location range of committed operations. The end of the returned range
     /// includes the commit operation itself, and hence will always be equal to `op_count`.
     ///
+    /// Note that even if no operations were added since the last commit, this is a root-state
+    /// changing operation.
+    ///
     /// Failures after commit (but before `sync` or `close`) may still require reprocessing to
     /// recover the database on restart.
     ///
