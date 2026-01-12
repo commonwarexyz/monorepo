@@ -52,8 +52,9 @@ where
         &self,
         key: &K,
     ) -> Result<Option<(V::Value, Location)>, Error> {
-        let iter = self.snapshot.get(key);
-        for &loc in iter {
+        // Collect to avoid holding a borrow across await points (rust-lang/rust#100013).
+        let locs: Vec<Location> = self.snapshot.get(key).copied().collect();
+        for loc in locs {
             let op = self.log.read(loc).await?;
             match &op {
                 Operation::Update(Update(k, value)) => {

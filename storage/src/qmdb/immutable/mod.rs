@@ -1032,4 +1032,18 @@ pub(super) mod test {
             db.destroy().await.unwrap();
         });
     }
+
+    fn assert_send<T: Send>(_: T) {}
+
+    #[test_traced]
+    fn test_immutable_futures_are_send() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let db = open_db(context.clone()).await;
+            let key = Sha256::hash(&9u64.to_be_bytes());
+
+            assert_send(db.get(&key));
+            assert_send(db.get_metadata());
+        });
+    }
 }

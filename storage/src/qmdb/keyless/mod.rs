@@ -1131,4 +1131,17 @@ mod test {
             db.destroy().await.unwrap();
         });
     }
+
+    fn assert_send<T: Send>(_: T) {}
+
+    #[test_traced]
+    fn test_keyless_futures_are_send() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let db = open_db(context.clone()).await;
+            let loc = Location::new_unchecked(0);
+
+            assert_send(db.get(loc));
+        });
+    }
 }

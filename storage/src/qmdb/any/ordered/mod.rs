@@ -147,6 +147,7 @@ where
         }
 
         // If the translated key is in the snapshot, get a cursor to look for the key.
+        // Collect to avoid holding a borrow across await points (rust-lang/rust#100013).
         let locs: Vec<Location> = self.snapshot.get(key).copied().collect();
         let span = self.find_span(locs, key).await?;
         if let Some(span) = span {
@@ -158,6 +159,7 @@ where
             return Ok(None);
         };
 
+        // Collect to avoid holding a borrow across await points (rust-lang/rust#100013).
         let locs: Vec<Location> = iter.copied().collect();
         let span = self
             .find_span(locs, key)
@@ -179,6 +181,7 @@ where
         &self,
         key: &K,
     ) -> Result<Option<(Update<K, V>, Location)>, Error> {
+        // Collect to avoid holding a borrow across await points (rust-lang/rust#100013).
         let locs: Vec<Location> = self.snapshot.get(key).copied().collect();
         for loc in locs {
             let op = self.log.read(loc).await?;
@@ -292,6 +295,7 @@ where
             unreachable!("database should not be empty");
         };
 
+        // Collect to avoid holding a borrow across await points (rust-lang/rust#100013).
         let locs: Vec<Location> = iter.copied().collect();
         let last_key = self.last_key_in_iter(locs).await?;
         let (loc, last_key) = last_key.expect("no last key found in non-empty snapshot");
@@ -554,6 +558,7 @@ where
             let Some((iter, _)) = self.snapshot.prev_translated_key(&key) else {
                 unreachable!("DB should not be empty");
             };
+            // Collect to avoid holding a borrow across await points (rust-lang/rust#100013).
             let locs: Vec<Location> = iter.copied().collect();
             let last_key = self.last_key_in_iter(locs).await?;
             prev_key = last_key.map(|(loc, data)| (loc, data.key, data.value));
@@ -1167,7 +1172,7 @@ mod test {
     fn assert_send<T: Send>(_: T) {}
 
     #[test_traced]
-    fn ordered_any_futures_are_send() {
+    fn test_ordered_any_futures_are_send() {
         let runner = Runner::default();
         runner.start(|context| async move {
             let mut db = open_fixed_db(context.clone()).await.into_mutable();

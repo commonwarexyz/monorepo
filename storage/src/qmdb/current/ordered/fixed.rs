@@ -1995,4 +1995,35 @@ pub mod test {
             open_db(ctx, &partition).await.into_mutable()
         });
     }
+
+    /// Helper to assert a future is Send at compile time.
+    fn assert_send<T: Send>(_: T) {}
+
+    /// Test that futures returned by Clean (Merkleized, Durable) Db methods are Send.
+    #[allow(dead_code)]
+    fn test_clean_futures_are_send(db: &mut CleanCurrentTest, key: Digest) {
+        // Read operations
+        assert_send(db.get(&key));
+        assert_send(db.get_metadata());
+
+        // Durable-specific operations
+        assert_send(db.sync());
+        assert_send(db.prune(Location::new_unchecked(0)));
+    }
+
+    /// Test that futures returned by Mutable (Unmerkleized, NonDurable) Db methods are Send.
+    #[allow(dead_code)]
+    fn test_mutable_futures_are_send(mut db: MutableCurrentTest, key: Digest) {
+        // Read operations (inherited)
+        assert_send(db.get(&key));
+        assert_send(db.get_metadata());
+
+        // Mutation operations
+        assert_send(db.update(key, key));
+        assert_send(db.create(key, key));
+        assert_send(db.delete(key));
+
+        // Commit (consumes self)
+        assert_send(db.commit(None));
+    }
 }
