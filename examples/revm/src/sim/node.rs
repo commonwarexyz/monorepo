@@ -85,7 +85,7 @@ struct MarshalStart<M> {
     block_codec_config: crate::types::BlockCfg,
     blocks: (ChannelSender, ChannelReceiver),
     backfill: (ChannelSender, ChannelReceiver),
-    application: application::FinalizedReporter,
+    application: application::FinalizedReporter<tokio::Context>,
 }
 
 /// Spawn all nodes (application + consensus) for a simulation run.
@@ -96,7 +96,7 @@ pub(super) async fn start_all_nodes(
     schemes: &[ThresholdScheme],
     demo: &demo::DemoTransfer,
 ) -> anyhow::Result<(
-    Vec<application::NodeHandle>,
+    Vec<application::NodeHandle<tokio::Context>>,
     mpsc::UnboundedReceiver<FinalizationEvent>,
 )> {
     // Per-channel rate limit used by the simulated P2P transport in this example.
@@ -131,7 +131,7 @@ async fn start_node(
     context: &tokio::Context,
     oracle: &mut simulated::Oracle<Peer, tokio::Context>,
     init: NodeInit<'_>,
-) -> anyhow::Result<application::NodeHandle> {
+) -> anyhow::Result<application::NodeHandle<tokio::Context>> {
     let NodeInit {
         index,
         public_key,
@@ -163,12 +163,16 @@ async fn start_node(
     .await
     .context("init qmdb")?;
 
-    let handle = application::NodeHandle::new(state.clone());
+    let handle = application::NodeHandle::new(state.clone(), context.clone());
     let app =
         application::RevmApplication::<ThresholdScheme>::new(BLOCK_CODEC_MAX_TXS, state.clone());
 
-    let finalized_reporter =
-        application::FinalizedReporter::new(index as u32, state.clone(), finalized_tx);
+    let finalized_reporter = application::FinalizedReporter::new(
+        index as u32,
+        state.clone(),
+        finalized_tx,
+        context.clone(),
+    );
 
     let marshal_mailbox = start_marshal(
         context,

@@ -6,9 +6,12 @@
 //! - the expected balances for the injected transfer.
 
 use super::{demo, ConsensusDigest};
-use crate::{application::NodeHandle, FinalizationEvent};
+use crate::FinalizationEvent;
 use alloy_evm::revm::primitives::B256;
+use commonware_runtime::tokio;
 use futures::{channel::mpsc, StreamExt as _};
+
+type NodeHandle = crate::application::NodeHandle<tokio::Context>;
 
 /// Wait until each node has observed `blocks` finalizations and return the common head digest.
 pub(super) async fn wait_for_finalized_head(

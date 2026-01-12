@@ -10,15 +10,20 @@ use crate::{
     ConsensusDigest,
 };
 use alloy_evm::revm::primitives::{Address, B256, U256};
+use commonware_runtime::Spawner;
 
 #[derive(Clone)]
-pub struct NodeHandle {
+pub struct NodeHandle<E> {
     state: Shared,
+    spawner: E,
 }
 
-impl NodeHandle {
-    pub(crate) const fn new(state: Shared) -> Self {
-        Self { state }
+impl<E> NodeHandle<E>
+where
+    E: Spawner,
+{
+    pub(crate) const fn new(state: Shared, spawner: E) -> Self {
+        Self { state, spawner }
     }
 
     pub async fn submit_tx(&self, tx: Tx) -> bool {
@@ -26,7 +31,16 @@ impl NodeHandle {
     }
 
     pub async fn query_balance(&self, digest: ConsensusDigest, address: Address) -> Option<U256> {
-        self.state.query_balance(digest, address).await
+        let state = self.state.clone();
+        let spawner = self.spawner.clone();
+        match spawner
+            .shared(true)
+            .spawn(move |_| async move { state.query_balance(digest, address).await })
+            .await
+        {
+            Ok(balance) => balance,
+            Err(_) => None,
+        }
     }
 
     pub async fn query_state_root(&self, digest: ConsensusDigest) -> Option<StateRoot> {

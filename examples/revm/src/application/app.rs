@@ -19,11 +19,118 @@ use commonware_consensus::{
     simplex::{scheme::Scheme, types::Context},
     Application, VerifyingApplication,
 };
-use commonware_cryptography::Committable as _;
+use commonware_cryptography::{certificate::Scheme as CertScheme, Committable as _};
 use commonware_runtime::{Clock, Metrics, Spawner};
 use futures::StreamExt as _;
 use rand::Rng;
 use std::{collections::BTreeSet, marker::PhantomData};
+
+/// Helper function for propose that owns all its inputs
+async fn propose_inner<S, E>(
+    state: Shared,
+    max_txs: usize,
+    spawner: E,
+    mut ancestry: AncestorStream<S, Block>,
+) -> Option<Block>
+where
+    S: CertScheme,
+    E: Spawner,
+{
+    let parent = ancestry.next().await?;
+
+    // Transactions remain in the mempool until the block that includes them finalizes. Walk
+    // back over pending ancestors so we do not propose a block that re-includes in-flight txs.
+    let mut included = BTreeSet::<TxId>::new();
+    for tx in parent.txs.iter() {
+        included.insert(tx.id());
+    }
+    while let Some(block) = ancestry.next().await {
+        for tx in block.txs.iter() {
+            included.insert(tx.id());
+        }
+    }
+
+    let parent_digest = parent.commitment();
+    let parent_snapshot = state.parent_snapshot(parent_digest).await?;
+    let seed_hash = state.seed_for_parent(parent_digest).await;
+    let prevrandao = seed_hash.unwrap_or_else(|| B256::from(parent_digest.0));
+    let height = parent.height + 1;
+
+    let txs = state.build_txs(max_txs, &included).await;
+
+    let env = evm_env(height, prevrandao);
+    let exec = spawner.shared(true).spawn(|_| async move {
+        execute_txs(parent_snapshot.db, env, &txs)
+            .map(|(db, outcome)| (txs, db, outcome))
+    });
+    let (txs, db, outcome) = match exec.await {
+        Ok(Ok(result)) => result,
+        _ => return None,
+    };
+
+    let mut child = Block {
+        parent: parent.id(),
+        height,
+        prevrandao,
+        state_root: parent.state_root,
+        txs,
+    };
+    child.state_root = state.preview_qmdb_root(outcome.qmdb_changes.clone()).await.ok()?;
+
+    let digest = child.commitment();
+    state
+        .insert_snapshot(digest, db, child.state_root, outcome.qmdb_changes)
+        .await;
+    Some(child)
+}
+
+/// Helper function for verify that owns all its inputs
+async fn verify_inner<S, E>(
+    state: Shared,
+    spawner: E,
+    mut ancestry: AncestorStream<S, Block>,
+) -> bool
+where
+    S: CertScheme,
+    E: Spawner,
+{
+    let block = match ancestry.next().await {
+        Some(block) => block,
+        None => return false,
+    };
+    let parent = match ancestry.next().await {
+        Some(block) => block,
+        None => return false,
+    };
+
+    let parent_digest = parent.commitment();
+    let Some(parent_snapshot) = state.parent_snapshot(parent_digest).await else {
+        return false;
+    };
+
+    let env = evm_env(block.height, block.prevrandao);
+    let exec = spawner.shared(true).spawn(|_| async move {
+        execute_txs(parent_snapshot.db, env, &block.txs)
+            .map(|(db, outcome)| (block, db, outcome))
+    });
+    let (block, db, outcome) = match exec.await {
+        Ok(Ok(result)) => result,
+        _ => return false,
+    };
+    let state_root = match state.preview_qmdb_root(outcome.qmdb_changes.clone()).await {
+        Ok(root) => root,
+        Err(_) => return false,
+    };
+    if state_root != block.state_root {
+        return false;
+    }
+
+    let digest = block.commitment();
+    state
+        .insert_snapshot(digest, db, state_root, outcome.qmdb_changes)
+        .await;
+    true
+}
 
 #[derive(Clone)]
 pub(crate) struct RevmApplication<S> {
@@ -52,58 +159,20 @@ where
     type Context = Context<ConsensusDigest, PublicKey>;
     type Block = Block;
 
-    async fn genesis(&mut self) -> Self::Block {
-        self.state.genesis_block()
+    fn genesis(&mut self) -> impl std::future::Future<Output = Self::Block> + Send {
+        let block = self.state.genesis_block();
+        async move { block }
     }
 
-    async fn propose(
+    fn propose(
         &mut self,
-        _context: (E, Self::Context),
-        mut ancestry: AncestorStream<Self::SigningScheme, Self::Block>,
-    ) -> Option<Self::Block> {
-        let parent = ancestry.next().await?;
-
-        // Transactions remain in the mempool until the block that includes them finalizes. Walk
-        // back over pending ancestors so we do not propose a block that re-includes in-flight txs.
-        let mut included = BTreeSet::<TxId>::new();
-        for tx in parent.txs.iter() {
-            included.insert(tx.id());
-        }
-        while let Some(block) = ancestry.next().await {
-            for tx in block.txs.iter() {
-                included.insert(tx.id());
-            }
-        }
-
-        let parent_digest = parent.commitment();
-        let parent_snapshot = self.state.parent_snapshot(&parent_digest).await?;
-        let seed_hash = self.state.seed_for_parent(&parent_digest).await;
-        let prevrandao = seed_hash.unwrap_or_else(|| B256::from(parent_digest.0));
-
-        let txs = self.state.build_txs(self.max_txs, &included).await;
-
-        let mut child = Block {
-            parent: parent.id(),
-            height: parent.height + 1,
-            prevrandao,
-            state_root: parent.state_root,
-            txs,
-        };
-
-        let (db, outcome) = execute_txs(
-            parent_snapshot.db,
-            evm_env(child.height, child.prevrandao),
-            parent.state_root,
-            &child.txs,
-        )
-        .ok()?;
-        child.state_root = outcome.state_root;
-
-        let digest = child.commitment();
-        self.state
-            .insert_snapshot(digest, db, child.state_root, outcome.qmdb_changes)
-            .await;
-        Some(child)
+        context: (E, Self::Context),
+        ancestry: AncestorStream<Self::SigningScheme, Self::Block>,
+    ) -> impl std::future::Future<Output = Option<Self::Block>> + Send {
+        let state = self.state.clone();
+        let max_txs = self.max_txs;
+        let spawner = context.0;
+        async move { propose_inner(state, max_txs, spawner, ancestry).await }
     }
 }
 
@@ -113,42 +182,13 @@ where
     S: Scheme<ConsensusDigest>
         + commonware_cryptography::certificate::Scheme<PublicKey = PublicKey>,
 {
-    async fn verify(
+    fn verify(
         &mut self,
-        _context: (E, Self::Context),
-        mut ancestry: AncestorStream<Self::SigningScheme, Self::Block>,
-    ) -> bool {
-        let block = match ancestry.next().await {
-            Some(block) => block,
-            None => return false,
-        };
-        let parent = match ancestry.next().await {
-            Some(block) => block,
-            None => return false,
-        };
-
-        let parent_digest = parent.commitment();
-        let Some(parent_snapshot) = self.state.parent_snapshot(&parent_digest).await else {
-            return false;
-        };
-
-        let (db, outcome) = match execute_txs(
-            parent_snapshot.db,
-            evm_env(block.height, block.prevrandao),
-            parent.state_root,
-            &block.txs,
-        ) {
-            Ok(result) => result,
-            Err(_) => return false,
-        };
-        if outcome.state_root != block.state_root {
-            return false;
-        }
-
-        let digest = block.commitment();
-        self.state
-            .insert_snapshot(digest, db, block.state_root, outcome.qmdb_changes)
-            .await;
-        true
+        context: (E, Self::Context),
+        ancestry: AncestorStream<Self::SigningScheme, Self::Block>,
+    ) -> impl std::future::Future<Output = bool> + Send {
+        let state = self.state.clone();
+        let spawner = context.0;
+        async move { verify_inner(state, spawner, ancestry).await }
     }
 }
