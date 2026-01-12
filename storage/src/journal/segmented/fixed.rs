@@ -1098,17 +1098,17 @@ mod tests {
 
     #[test_traced]
     fn test_segmented_fixed_truncation_recovery_across_page_boundary() {
-        // Test that truncating a single byte from a blob that has items straddling
-        // a page boundary correctly recovers by removing the incomplete item.
+        // Test that truncating a single byte from a blob that has items straddling a page boundary
+        // correctly recovers by removing the incomplete item.
         //
         // With PAGE_SIZE=44 and ITEM_SIZE=32:
         // - Item 0: bytes 0-31
         // - Item 1: bytes 32-63 (straddles page boundary at 44)
         // - Item 2: bytes 64-95 (straddles page boundary at 88)
         //
-        // After 3 items we have 96 bytes = 2 full pages + 8 bytes.
-        // Truncating 1 byte leaves 95 bytes, which is not a multiple of 32.
-        // Recovery should truncate to 64 bytes (2 complete items).
+        // After 3 items we have 96 bytes = 2 full pages + 8 bytes. Truncating 1 byte leaves 95
+        // bytes, which is not a multiple of 32. Recovery should truncate to 64 bytes (2 complete
+        // items).
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg();
