@@ -732,14 +732,24 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
         let ip = &deployment.ip;
         let arch = instance_architectures[&instance.name].as_str();
 
-        let promtail_cfg =
-            promtail_config(&monitoring_private_ip, &instance.name, ip, &instance.region, arch);
+        let promtail_cfg = promtail_config(
+            &monitoring_private_ip,
+            &instance.name,
+            ip,
+            &instance.region,
+            arch,
+        );
         let promtail_path = tag_directory.join(format!("promtail_{}.yml", instance.name));
         std::fs::write(&promtail_path, &promtail_cfg)?;
         let promtail_digest = hash_file(&promtail_path)?;
 
-        let pyroscope_script =
-            generate_pyroscope_script(&monitoring_private_ip, &instance.name, ip, &instance.region, arch);
+        let pyroscope_script = generate_pyroscope_script(
+            &monitoring_private_ip,
+            &instance.name,
+            ip,
+            &instance.region,
+            arch,
+        );
         let pyroscope_path = tag_directory.join(format!("pyroscope-agent_{}.sh", instance.name));
         std::fs::write(&pyroscope_path, &pyroscope_script)?;
         let pyroscope_digest = hash_file(&pyroscope_path)?;
