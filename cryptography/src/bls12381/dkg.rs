@@ -297,7 +297,7 @@ use commonware_math::{
     algebra::{Additive, CryptoGroup, Random},
     poly::{Interpolator, Poly},
 };
-use commonware_parallel::{Sequential, Strategy as ParStrategy};
+use commonware_parallel::{Sequential, Strategy};
 use commonware_utils::{
     ordered::{Map, Quorum, Set},
     Participant, TryCollect, NZU32,
@@ -1318,7 +1318,7 @@ impl<V: Variant, P: PublicKey> ObserveInner<V, P> {
     fn reckon(
         info: Info<V, P>,
         selected: Map<P, DealerLog<V, P>>,
-        strategy: &impl ParStrategy,
+        strategy: &impl Strategy,
     ) -> Result<Self, Error> {
         // Track players with too many reveals
         let max_faults = info.players.max_faults();
@@ -1401,7 +1401,7 @@ impl<V: Variant, P: PublicKey> ObserveInner<V, P> {
 pub fn observe<V: Variant, P: PublicKey>(
     info: Info<V, P>,
     logs: BTreeMap<P, DealerLog<V, P>>,
-    strategy: &impl ParStrategy,
+    strategy: &impl Strategy,
 ) -> Result<Output<V, P>, Error> {
     let selected = select(&info, logs)?;
     ObserveInner::<V, P>::reckon(info, selected, strategy).map(|x| x.output)
@@ -1475,10 +1475,10 @@ impl<V: Variant, S: Signer> Player<V, S> {
     /// for finalize.
     ///
     /// This will only ever return [`Error::DkgFailed`].
-    pub fn finalize<Y: ParStrategy>(
+    pub fn finalize(
         self,
         logs: BTreeMap<S::PublicKey, DealerLog<V, S::PublicKey>>,
-        strategy: &Y,
+        strategy: &impl Strategy,
     ) -> Result<(Output<V, S::PublicKey>, Share), Error> {
         let selected = select(&self.info, logs)?;
         // We are extracting the private scalars from `Secret` protection
