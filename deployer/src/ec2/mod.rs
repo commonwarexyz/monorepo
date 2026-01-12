@@ -318,6 +318,8 @@ cfg_if::cfg_if! {
             S3PresigningFailed(Box<aws_sdk_s3::error::SdkError<aws_sdk_s3::operation::get_object::GetObjectError>>),
             #[error("S3 builder error: {0}")]
             S3Builder(#[from] aws_sdk_s3::error::BuildError),
+            #[error("duplicate instance name: {0}")]
+            DuplicateInstanceName(String),
         }
 
         impl From<aws_sdk_s3::Error> for Error {

@@ -55,10 +55,12 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     // Ensure no instance is duplicated or named MONITORING_NAME
     let mut instance_names = HashSet::new();
     for instance in &config.instances {
-        if instance_names.contains(&instance.name) || instance.name == MONITORING_NAME {
+        if !instance_names.insert(&instance.name) {
+            return Err(Error::DuplicateInstanceName(instance.name.clone()));
+        }
+        if instance.name == MONITORING_NAME {
             return Err(Error::InvalidInstanceName(instance.name.clone()));
         }
-        instance_names.insert(instance.name.clone());
     }
 
     // Get public IP address of the deployer
