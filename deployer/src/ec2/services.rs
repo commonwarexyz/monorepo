@@ -1,8 +1,7 @@
 //! Service configuration for Prometheus, Loki, Grafana, Promtail, and a caller-provided binary
 
-use crate::ec2::s3::{
-    S3_DEPLOYMENTS_PREFIX, S3_TOOLS_BINARIES_PREFIX, S3_TOOLS_CONFIGS_PREFIX, TARGET_PLATFORM,
-};
+use crate::ec2::s3::{S3_DEPLOYMENTS_PREFIX, S3_TOOLS_BINARIES_PREFIX, S3_TOOLS_CONFIGS_PREFIX};
+use crate::ec2::Architecture;
 
 /// Deployer version used to namespace static configs in S3
 const DEPLOYER_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -38,34 +37,41 @@ pub const GRAFANA_VERSION: &str = "11.5.2";
 // (e.g., prometheus-3.2.0.linux-arm64.tar.gz) while others do not
 // (e.g., loki-linux-arm64.zip).
 
-pub fn prometheus_bin_s3_key(version: &str) -> String {
-    format!("{S3_TOOLS_BINARIES_PREFIX}/prometheus/{version}/{TARGET_PLATFORM}/prometheus-{version}.linux-arm64.tar.gz")
+pub fn prometheus_bin_s3_key(version: &str, architecture: Architecture) -> String {
+    let arch = architecture.download_arch();
+    format!("{S3_TOOLS_BINARIES_PREFIX}/prometheus/{version}/linux-{arch}/prometheus-{version}.linux-{arch}.tar.gz")
 }
 
-pub fn grafana_bin_s3_key(version: &str) -> String {
-    format!("{S3_TOOLS_BINARIES_PREFIX}/grafana/{version}/{TARGET_PLATFORM}/grafana_{version}_arm64.deb")
-}
-
-pub fn loki_bin_s3_key(version: &str) -> String {
-    format!("{S3_TOOLS_BINARIES_PREFIX}/loki/{version}/{TARGET_PLATFORM}/loki-linux-arm64.zip")
-}
-
-pub fn pyroscope_bin_s3_key(version: &str) -> String {
-    format!("{S3_TOOLS_BINARIES_PREFIX}/pyroscope/{version}/{TARGET_PLATFORM}/pyroscope_{version}_linux_arm64.tar.gz")
-}
-
-pub fn tempo_bin_s3_key(version: &str) -> String {
-    format!("{S3_TOOLS_BINARIES_PREFIX}/tempo/{version}/{TARGET_PLATFORM}/tempo_{version}_linux_arm64.tar.gz")
-}
-
-pub fn node_exporter_bin_s3_key(version: &str) -> String {
-    format!("{S3_TOOLS_BINARIES_PREFIX}/node-exporter/{version}/{TARGET_PLATFORM}/node_exporter-{version}.linux-arm64.tar.gz")
-}
-
-pub fn promtail_bin_s3_key(version: &str) -> String {
+pub fn grafana_bin_s3_key(version: &str, architecture: Architecture) -> String {
+    let arch = architecture.download_arch();
     format!(
-        "{S3_TOOLS_BINARIES_PREFIX}/promtail/{version}/{TARGET_PLATFORM}/promtail-linux-arm64.zip"
+        "{S3_TOOLS_BINARIES_PREFIX}/grafana/{version}/linux-{arch}/grafana_{version}_{arch}.deb"
     )
+}
+
+pub fn loki_bin_s3_key(version: &str, architecture: Architecture) -> String {
+    let arch = architecture.download_arch();
+    format!("{S3_TOOLS_BINARIES_PREFIX}/loki/{version}/linux-{arch}/loki-linux-{arch}.zip")
+}
+
+pub fn pyroscope_bin_s3_key(version: &str, architecture: Architecture) -> String {
+    let arch = architecture.download_arch();
+    format!("{S3_TOOLS_BINARIES_PREFIX}/pyroscope/{version}/linux-{arch}/pyroscope_{version}_linux_{arch}.tar.gz")
+}
+
+pub fn tempo_bin_s3_key(version: &str, architecture: Architecture) -> String {
+    let arch = architecture.download_arch();
+    format!("{S3_TOOLS_BINARIES_PREFIX}/tempo/{version}/linux-{arch}/tempo_{version}_linux_{arch}.tar.gz")
+}
+
+pub fn node_exporter_bin_s3_key(version: &str, architecture: Architecture) -> String {
+    let arch = architecture.download_arch();
+    format!("{S3_TOOLS_BINARIES_PREFIX}/node-exporter/{version}/linux-{arch}/node_exporter-{version}.linux-{arch}.tar.gz")
+}
+
+pub fn promtail_bin_s3_key(version: &str, architecture: Architecture) -> String {
+    let arch = architecture.download_arch();
+    format!("{S3_TOOLS_BINARIES_PREFIX}/promtail/{version}/linux-{arch}/promtail-linux-{arch}.zip")
 }
 
 // S3 key functions for component configs and services (include deployer version for cache invalidation)
@@ -138,8 +144,9 @@ pub fn logrotate_config_s3_key() -> String {
 
 // S3 key functions for binary instance configs
 
-pub fn binary_service_s3_key() -> String {
-    format!("{S3_TOOLS_CONFIGS_PREFIX}/{DEPLOYER_VERSION}/binary/service")
+pub fn binary_service_s3_key_for_arch(architecture: Architecture) -> String {
+    let arch = architecture.download_arch();
+    format!("{S3_TOOLS_CONFIGS_PREFIX}/{DEPLOYER_VERSION}/binary/service-{arch}")
 }
 
 /// Returns the S3 key for an instance's binary by digest (deduplicated within deployment)
@@ -173,38 +180,47 @@ pub fn monitoring_s3_key(tag: &str, digest: &str) -> String {
 }
 
 /// Returns the download URL for Prometheus from GitHub
-pub fn prometheus_download_url(version: &str) -> String {
-    format!("https://github.com/prometheus/prometheus/releases/download/v{version}/prometheus-{version}.linux-arm64.tar.gz")
+pub fn prometheus_download_url(version: &str, architecture: Architecture) -> String {
+    let arch = architecture.download_arch();
+    format!("https://github.com/prometheus/prometheus/releases/download/v{version}/prometheus-{version}.linux-{arch}.tar.gz")
 }
 
 /// Returns the download URL for Grafana
-pub fn grafana_download_url(version: &str) -> String {
-    format!("https://dl.grafana.com/oss/release/grafana_{version}_arm64.deb")
+pub fn grafana_download_url(version: &str, architecture: Architecture) -> String {
+    let arch = architecture.download_arch();
+    format!("https://dl.grafana.com/oss/release/grafana_{version}_{arch}.deb")
 }
 
 /// Returns the download URL for Loki from GitHub
-pub fn loki_download_url(version: &str) -> String {
-    format!("https://github.com/grafana/loki/releases/download/v{version}/loki-linux-arm64.zip")
+pub fn loki_download_url(version: &str, architecture: Architecture) -> String {
+    let arch = architecture.download_arch();
+    format!("https://github.com/grafana/loki/releases/download/v{version}/loki-linux-{arch}.zip")
 }
 
 /// Returns the download URL for Pyroscope from GitHub
-pub fn pyroscope_download_url(version: &str) -> String {
-    format!("https://github.com/grafana/pyroscope/releases/download/v{version}/pyroscope_{version}_linux_arm64.tar.gz")
+pub fn pyroscope_download_url(version: &str, architecture: Architecture) -> String {
+    let arch = architecture.download_arch();
+    format!("https://github.com/grafana/pyroscope/releases/download/v{version}/pyroscope_{version}_linux_{arch}.tar.gz")
 }
 
 /// Returns the download URL for Tempo from GitHub
-pub fn tempo_download_url(version: &str) -> String {
-    format!("https://github.com/grafana/tempo/releases/download/v{version}/tempo_{version}_linux_arm64.tar.gz")
+pub fn tempo_download_url(version: &str, architecture: Architecture) -> String {
+    let arch = architecture.download_arch();
+    format!("https://github.com/grafana/tempo/releases/download/v{version}/tempo_{version}_linux_{arch}.tar.gz")
 }
 
 /// Returns the download URL for Node Exporter from GitHub
-pub fn node_exporter_download_url(version: &str) -> String {
-    format!("https://github.com/prometheus/node_exporter/releases/download/v{version}/node_exporter-{version}.linux-arm64.tar.gz")
+pub fn node_exporter_download_url(version: &str, architecture: Architecture) -> String {
+    let arch = architecture.download_arch();
+    format!("https://github.com/prometheus/node_exporter/releases/download/v{version}/node_exporter-{version}.linux-{arch}.tar.gz")
 }
 
 /// Returns the download URL for Promtail from GitHub
-pub fn promtail_download_url(version: &str) -> String {
-    format!("https://github.com/grafana/loki/releases/download/v{version}/promtail-linux-arm64.zip")
+pub fn promtail_download_url(version: &str, architecture: Architecture) -> String {
+    let arch = architecture.download_arch();
+    format!(
+        "https://github.com/grafana/loki/releases/download/v{version}/promtail-linux-{arch}.zip"
+    )
 }
 
 /// YAML configuration for Grafana datasources (Prometheus, Loki, Tempo, and Pyroscope)
@@ -427,7 +443,12 @@ pub struct MonitoringUrls {
 }
 
 /// Command to install monitoring services (Prometheus, Loki, Grafana, Pyroscope, Tempo) on the monitoring instance
-pub fn install_monitoring_cmd(urls: &MonitoringUrls, prometheus_version: &str) -> String {
+pub fn install_monitoring_cmd(
+    urls: &MonitoringUrls,
+    prometheus_version: &str,
+    architecture: Architecture,
+) -> String {
+    let arch = architecture.download_arch();
     format!(
         r#"
 sudo apt-get update -y
@@ -468,8 +489,8 @@ done
 sudo mkdir -p /opt/prometheus /opt/prometheus/data
 sudo chown -R ubuntu:ubuntu /opt/prometheus
 tar xvfz /home/ubuntu/prometheus.tar.gz -C /home/ubuntu
-sudo mv /home/ubuntu/prometheus-{prometheus_version}.linux-arm64 /opt/prometheus/prometheus-{prometheus_version}.linux-arm64
-sudo ln -s /opt/prometheus/prometheus-{prometheus_version}.linux-arm64/prometheus /opt/prometheus/prometheus
+sudo mv /home/ubuntu/prometheus-{prometheus_version}.linux-{arch} /opt/prometheus/prometheus-{prometheus_version}.linux-{arch}
+sudo ln -s /opt/prometheus/prometheus-{prometheus_version}.linux-{arch}/prometheus /opt/prometheus/prometheus
 sudo chmod +x /opt/prometheus/prometheus
 
 # Install Grafana
@@ -480,7 +501,7 @@ sudo apt-get install -f -y
 sudo mkdir -p /opt/loki /loki/index /loki/index_cache /loki/chunks /loki/compactor /loki/wal
 sudo chown -R ubuntu:ubuntu /opt/loki /loki
 unzip -o /home/ubuntu/loki.zip -d /home/ubuntu
-sudo mv /home/ubuntu/loki-linux-arm64 /opt/loki/loki
+sudo mv /home/ubuntu/loki-linux-{arch} /opt/loki/loki
 sudo chmod +x /opt/loki/loki
 
 # Install Pyroscope
@@ -501,8 +522,8 @@ sudo chmod +x /opt/tempo/tempo
 sudo mkdir -p /opt/node_exporter
 sudo chown -R ubuntu:ubuntu /opt/node_exporter
 tar xvfz /home/ubuntu/node_exporter.tar.gz -C /home/ubuntu
-sudo mv /home/ubuntu/node_exporter-*.linux-arm64 /opt/node_exporter/
-sudo ln -s /opt/node_exporter/node_exporter-*.linux-arm64/node_exporter /opt/node_exporter/node_exporter
+sudo mv /home/ubuntu/node_exporter-*.linux-{arch} /opt/node_exporter/
+sudo ln -s /opt/node_exporter/node_exporter-*.linux-{arch}/node_exporter /opt/node_exporter/node_exporter
 sudo chmod +x /opt/node_exporter/node_exporter
 
 # Configure Grafana
@@ -595,7 +616,12 @@ pub struct InstanceUrls {
 }
 
 /// Command to install all services on binary instances
-pub fn install_binary_cmd(urls: &InstanceUrls, profiling: bool) -> String {
+pub fn install_binary_cmd(
+    urls: &InstanceUrls,
+    profiling: bool,
+    architecture: Architecture,
+) -> String {
+    let arch = architecture.download_arch();
     let mut script = format!(
         r#"
 # Install base tools and dependencies
@@ -632,7 +658,7 @@ done
 sudo mkdir -p /opt/promtail /etc/promtail
 sudo chown -R ubuntu:ubuntu /opt/promtail
 unzip -o /home/ubuntu/promtail.zip -d /home/ubuntu
-sudo mv /home/ubuntu/promtail-linux-arm64 /opt/promtail/promtail
+sudo mv /home/ubuntu/promtail-linux-{arch} /opt/promtail/promtail
 sudo chmod +x /opt/promtail/promtail
 sudo mv /home/ubuntu/promtail.yml /etc/promtail/promtail.yml
 sudo mv /home/ubuntu/promtail.service /etc/systemd/system/promtail.service
@@ -642,8 +668,8 @@ sudo chown root:root /etc/promtail/promtail.yml
 sudo mkdir -p /opt/node_exporter
 sudo chown -R ubuntu:ubuntu /opt/node_exporter
 tar xvfz /home/ubuntu/node_exporter.tar.gz -C /home/ubuntu
-sudo mv /home/ubuntu/node_exporter-*.linux-arm64 /opt/node_exporter/
-sudo ln -s /opt/node_exporter/node_exporter-*.linux-arm64/node_exporter /opt/node_exporter/node_exporter
+sudo mv /home/ubuntu/node_exporter-*.linux-{arch} /opt/node_exporter/
+sudo ln -s /opt/node_exporter/node_exporter-*.linux-{arch}/node_exporter /opt/node_exporter/node_exporter
 sudo chmod +x /opt/node_exporter/node_exporter
 sudo mv /home/ubuntu/node_exporter.service /etc/systemd/system/node_exporter.service
 
@@ -788,14 +814,17 @@ pub const LOGROTATE_CONF: &str = r#"
 /// Configuration for BBR sysctl settings
 pub const BBR_CONF: &str = "net.core.default_qdisc=fq\nnet.ipv4.tcp_congestion_control=bbr\n";
 
-/// Systemd service file content for the deployed binary
-pub const BINARY_SERVICE: &str = r#"
+/// Generates systemd service file content for the deployed binary
+pub fn binary_service(architecture: Architecture) -> String {
+    let lib_arch = architecture.linux_lib_arch();
+    format!(
+        r#"
 [Unit]
 Description=Deployed Binary Service
 After=network.target
 
 [Service]
-Environment="LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2"
+Environment="LD_PRELOAD=/usr/lib/{lib_arch}/libjemalloc.so.2"
 ExecStart=/home/ubuntu/binary --hosts=/home/ubuntu/hosts.yaml --config=/home/ubuntu/config.conf
 TimeoutStopSec=60
 Restart=always
@@ -806,7 +835,9 @@ StandardError=append:/var/log/binary.log
 
 [Install]
 WantedBy=multi-user.target
-"#;
+"#
+    )
+}
 
 /// Shell script content for the Pyroscope agent (perf + wget)
 pub fn generate_pyroscope_script(
@@ -910,34 +941,68 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_binary_s3_keys() {
+    fn test_binary_s3_keys_arm64() {
+        let arch = Architecture::Arm64;
         assert_eq!(
-            prometheus_bin_s3_key("3.2.0"),
+            prometheus_bin_s3_key("3.2.0", arch),
             "tools/binaries/prometheus/3.2.0/linux-arm64/prometheus-3.2.0.linux-arm64.tar.gz"
         );
         assert_eq!(
-            grafana_bin_s3_key("11.5.2"),
+            grafana_bin_s3_key("11.5.2", arch),
             "tools/binaries/grafana/11.5.2/linux-arm64/grafana_11.5.2_arm64.deb"
         );
         assert_eq!(
-            loki_bin_s3_key("3.4.2"),
+            loki_bin_s3_key("3.4.2", arch),
             "tools/binaries/loki/3.4.2/linux-arm64/loki-linux-arm64.zip"
         );
         assert_eq!(
-            pyroscope_bin_s3_key("1.12.0"),
+            pyroscope_bin_s3_key("1.12.0", arch),
             "tools/binaries/pyroscope/1.12.0/linux-arm64/pyroscope_1.12.0_linux_arm64.tar.gz"
         );
         assert_eq!(
-            tempo_bin_s3_key("2.7.1"),
+            tempo_bin_s3_key("2.7.1", arch),
             "tools/binaries/tempo/2.7.1/linux-arm64/tempo_2.7.1_linux_arm64.tar.gz"
         );
         assert_eq!(
-            node_exporter_bin_s3_key("1.9.0"),
+            node_exporter_bin_s3_key("1.9.0", arch),
             "tools/binaries/node-exporter/1.9.0/linux-arm64/node_exporter-1.9.0.linux-arm64.tar.gz"
         );
         assert_eq!(
-            promtail_bin_s3_key("3.4.2"),
+            promtail_bin_s3_key("3.4.2", arch),
             "tools/binaries/promtail/3.4.2/linux-arm64/promtail-linux-arm64.zip"
+        );
+    }
+
+    #[test]
+    fn test_binary_s3_keys_x86_64() {
+        let arch = Architecture::X86_64;
+        assert_eq!(
+            prometheus_bin_s3_key("3.2.0", arch),
+            "tools/binaries/prometheus/3.2.0/linux-amd64/prometheus-3.2.0.linux-amd64.tar.gz"
+        );
+        assert_eq!(
+            grafana_bin_s3_key("11.5.2", arch),
+            "tools/binaries/grafana/11.5.2/linux-amd64/grafana_11.5.2_amd64.deb"
+        );
+        assert_eq!(
+            loki_bin_s3_key("3.4.2", arch),
+            "tools/binaries/loki/3.4.2/linux-amd64/loki-linux-amd64.zip"
+        );
+        assert_eq!(
+            pyroscope_bin_s3_key("1.12.0", arch),
+            "tools/binaries/pyroscope/1.12.0/linux-amd64/pyroscope_1.12.0_linux_amd64.tar.gz"
+        );
+        assert_eq!(
+            tempo_bin_s3_key("2.7.1", arch),
+            "tools/binaries/tempo/2.7.1/linux-amd64/tempo_2.7.1_linux_amd64.tar.gz"
+        );
+        assert_eq!(
+            node_exporter_bin_s3_key("1.9.0", arch),
+            "tools/binaries/node-exporter/1.9.0/linux-amd64/node_exporter-1.9.0.linux-amd64.tar.gz"
+        );
+        assert_eq!(
+            promtail_bin_s3_key("3.4.2", arch),
+            "tools/binaries/promtail/3.4.2/linux-amd64/promtail-linux-amd64.zip"
         );
     }
 
@@ -1006,8 +1071,12 @@ mod tests {
             format!("tools/configs/{version}/system/logrotate.conf")
         );
         assert_eq!(
-            binary_service_s3_key(),
-            format!("tools/configs/{version}/binary/service")
+            binary_service_s3_key_for_arch(Architecture::Arm64),
+            format!("tools/configs/{version}/binary/service-arm64")
+        );
+        assert_eq!(
+            binary_service_s3_key_for_arch(Architecture::X86_64),
+            format!("tools/configs/{version}/binary/service-amd64")
         );
     }
 

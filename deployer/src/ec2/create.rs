@@ -1,8 +1,8 @@
 //! `create` subcommand for `ec2`
 
 use crate::ec2::{
-    aws::*, deployer_directory, s3::*, services::*, utils::*, Config, Error, Host, Hosts,
-    InstanceConfig, CREATED_FILE_NAME, LOGS_PORT, MONITORING_NAME, MONITORING_REGION,
+    aws::*, deployer_directory, s3::*, services::*, utils::*, Architecture, Config, Error, Host,
+    Hosts, InstanceConfig, CREATED_FILE_NAME, LOGS_PORT, MONITORING_NAME, MONITORING_REGION,
     PROFILES_PORT, TRACES_PORT,
 };
 use futures::future::try_join_all;
@@ -105,12 +105,41 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
         .or_default()
         .insert(config.monitoring.instance_type.clone());
 
+    // Detect architectures for all instance types
+    info!("detecting architectures for instance types");
+    let monitoring_ec2_client = create_ec2_client(Region::new(MONITORING_REGION)).await;
+    let monitoring_architecture =
+        detect_architecture(&monitoring_ec2_client, &config.monitoring.instance_type).await?;
+    info!(
+        architecture = %monitoring_architecture,
+        instance_type = config.monitoring.instance_type.as_str(),
+        "detected monitoring architecture"
+    );
+
+    // Detect architectures for all binary instances
+    let mut instance_architectures: HashMap<String, Architecture> = HashMap::new();
+    let mut architectures_needed: HashSet<Architecture> = HashSet::new();
+    architectures_needed.insert(monitoring_architecture);
+
+    for instance in &config.instances {
+        let ec2_client = create_ec2_client(Region::new(instance.region.clone())).await;
+        let arch = detect_architecture(&ec2_client, &instance.instance_type).await?;
+        info!(
+            architecture = %arch,
+            instance = instance.name.as_str(),
+            instance_type = instance.instance_type.as_str(),
+            "detected instance architecture"
+        );
+        instance_architectures.insert(instance.name.clone(), arch);
+        architectures_needed.insert(arch);
+    }
+
     // Setup S3 bucket and cache observability tools
     info!(bucket = S3_BUCKET_NAME, "setting up S3 bucket");
     let s3_client = create_s3_client(Region::new(MONITORING_REGION)).await;
     ensure_bucket_exists(&s3_client, S3_BUCKET_NAME, MONITORING_REGION).await?;
 
-    // Cache observability tools (if not already cached) and generate pre-signed URLs concurrently
+    // Cache observability tools for each architecture needed
     info!("uploading observability tools to S3");
     let cache_tool = |s3_key: String, download_url: String| {
         let tag_directory = tag_directory.clone();
@@ -139,19 +168,39 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
             }
         }
     };
-    let [prometheus_url, grafana_url, loki_url, pyroscope_url, tempo_url, node_exporter_url, promtail_url]: [String; 7] =
-        try_join_all([
-            cache_tool(prometheus_bin_s3_key(PROMETHEUS_VERSION), prometheus_download_url(PROMETHEUS_VERSION)),
-            cache_tool(grafana_bin_s3_key(GRAFANA_VERSION), grafana_download_url(GRAFANA_VERSION)),
-            cache_tool(loki_bin_s3_key(LOKI_VERSION), loki_download_url(LOKI_VERSION)),
-            cache_tool(pyroscope_bin_s3_key(PYROSCOPE_VERSION), pyroscope_download_url(PYROSCOPE_VERSION)),
-            cache_tool(tempo_bin_s3_key(TEMPO_VERSION), tempo_download_url(TEMPO_VERSION)),
-            cache_tool(node_exporter_bin_s3_key(NODE_EXPORTER_VERSION), node_exporter_download_url(NODE_EXPORTER_VERSION)),
-            cache_tool(promtail_bin_s3_key(PROMTAIL_VERSION), promtail_download_url(PROMTAIL_VERSION)),
-        ])
-        .await?
-        .try_into()
-        .unwrap();
+
+    // Cache tools for each architecture and store URLs per-architecture
+    let mut tool_urls_by_arch: HashMap<
+        Architecture,
+        (String, String, String, String, String, String, String),
+    > = HashMap::new();
+    for arch in &architectures_needed {
+        let [prometheus_url, grafana_url, loki_url, pyroscope_url, tempo_url, node_exporter_url, promtail_url]: [String; 7] =
+            try_join_all([
+                cache_tool(prometheus_bin_s3_key(PROMETHEUS_VERSION, *arch), prometheus_download_url(PROMETHEUS_VERSION, *arch)),
+                cache_tool(grafana_bin_s3_key(GRAFANA_VERSION, *arch), grafana_download_url(GRAFANA_VERSION, *arch)),
+                cache_tool(loki_bin_s3_key(LOKI_VERSION, *arch), loki_download_url(LOKI_VERSION, *arch)),
+                cache_tool(pyroscope_bin_s3_key(PYROSCOPE_VERSION, *arch), pyroscope_download_url(PYROSCOPE_VERSION, *arch)),
+                cache_tool(tempo_bin_s3_key(TEMPO_VERSION, *arch), tempo_download_url(TEMPO_VERSION, *arch)),
+                cache_tool(node_exporter_bin_s3_key(NODE_EXPORTER_VERSION, *arch), node_exporter_download_url(NODE_EXPORTER_VERSION, *arch)),
+                cache_tool(promtail_bin_s3_key(PROMTAIL_VERSION, *arch), promtail_download_url(PROMTAIL_VERSION, *arch)),
+            ])
+            .await?
+            .try_into()
+            .unwrap();
+        tool_urls_by_arch.insert(
+            *arch,
+            (
+                prometheus_url,
+                grafana_url,
+                loki_url,
+                pyroscope_url,
+                tempo_url,
+                node_exporter_url,
+                promtail_url,
+            ),
+        );
+    }
     info!("observability tools uploaded");
 
     // Compute digests for binaries and configs, grouping by digest for deduplication
@@ -259,9 +308,6 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
                 // Create client for region
                 let ec2_client = create_ec2_client(Region::new(region.clone())).await;
                 info!(region = region.as_str(), "created EC2 client");
-
-                // Assert all instance types are ARM-based
-                assert_arm64_support(&ec2_client, &instance_types).await?;
 
                 // Find availability zone that supports all instance types
                 let az = find_availability_zone(&ec2_client, &instance_types).await?;
@@ -439,7 +485,7 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     let monitoring_sg_id;
     {
         let monitoring_ec2_client = &ec2_clients[&monitoring_region];
-        let ami_id = find_latest_ami(monitoring_ec2_client).await?;
+        let ami_id = find_latest_ami(monitoring_ec2_client, monitoring_architecture).await?;
         let monitoring_instance_type = InstanceType::try_parse(&config.monitoring.instance_type)
             .expect("Invalid instance type");
         let monitoring_storage_class =
@@ -504,55 +550,58 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
         let region = instance.region.clone();
         let resources = region_resources.get(&region).unwrap();
         let ec2_client = ec2_clients.get(&region).unwrap();
-        let ami_id = find_latest_ami(ec2_client).await?;
-        launch_configs.push((instance, ec2_client, resources, ami_id));
+        let arch = instance_architectures[&instance.name];
+        let ami_id = find_latest_ami(ec2_client, arch).await?;
+        launch_configs.push((instance, ec2_client, resources, ami_id, arch));
     }
-    let launch_futures = launch_configs
-        .iter()
-        .map(|(instance, ec2_client, resources, ami_id)| {
-            let key_name = key_name.clone();
-            let instance_type =
-                InstanceType::try_parse(&instance.instance_type).expect("Invalid instance type");
-            let storage_class =
-                VolumeType::try_parse(&instance.storage_class).expect("Invalid storage class");
-            let binary_sg_id = resources.binary_sg_id.as_ref().unwrap();
-            let tag = tag.clone();
-            async move {
-                let instance_id = launch_instances(
-                    ec2_client,
-                    ami_id,
-                    instance_type,
-                    instance.storage_size,
-                    storage_class,
-                    &key_name,
-                    &resources.subnet_id,
-                    binary_sg_id,
-                    1,
-                    &instance.name,
-                    &tag,
-                )
-                .await?[0]
-                    .clone();
-                let ip = wait_for_instances_running(ec2_client, slice::from_ref(&instance_id))
+    let launch_futures =
+        launch_configs
+            .iter()
+            .map(|(instance, ec2_client, resources, ami_id, _arch)| {
+                let key_name = key_name.clone();
+                let instance_type = InstanceType::try_parse(&instance.instance_type)
+                    .expect("Invalid instance type");
+                let storage_class =
+                    VolumeType::try_parse(&instance.storage_class).expect("Invalid storage class");
+                let binary_sg_id = resources.binary_sg_id.as_ref().unwrap();
+                let tag = tag.clone();
+                async move {
+                    let instance_id = launch_instances(
+                        ec2_client,
+                        ami_id,
+                        instance_type,
+                        instance.storage_size,
+                        storage_class,
+                        &key_name,
+                        &resources.subnet_id,
+                        binary_sg_id,
+                        1,
+                        &instance.name,
+                        &tag,
+                    )
                     .await?[0]
-                    .clone();
-                info!(
-                    ip = ip.as_str(),
-                    instance = instance.name.as_str(),
-                    "launched instance"
-                );
-                Ok::<Deployment, Error>(Deployment {
-                    instance: (*instance).clone(),
-                    id: instance_id,
-                    ip,
-                })
-            }
-        });
+                        .clone();
+                    let ip = wait_for_instances_running(ec2_client, slice::from_ref(&instance_id))
+                        .await?[0]
+                        .clone();
+                    info!(
+                        ip = ip.as_str(),
+                        instance = instance.name.as_str(),
+                        "launched instance"
+                    );
+                    Ok::<Deployment, Error>(Deployment {
+                        instance: (*instance).clone(),
+                        id: instance_id,
+                        ip,
+                    })
+                }
+            });
     let deployments: Vec<Deployment> = try_join_all(launch_futures).await?;
     info!("launched binary instances");
 
     // Cache ALL static config files globally (these don't change between deployments)
     // This includes both monitoring and binary instance static files
+    // Note: binary_service is architecture-dependent and cached per-architecture
     info!("uploading config files to S3");
     let [
         bbr_conf_url,
@@ -567,11 +616,10 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
         tempo_service_url,
         monitoring_node_exporter_service_url,
         promtail_service_url,
-        binary_service_url,
         logrotate_conf_url,
         pyroscope_agent_service_url,
         pyroscope_agent_timer_url,
-    ]: [String; 16] = try_join_all([
+    ]: [String; 15] = try_join_all([
         cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &bbr_config_s3_key(), BBR_CONF.as_bytes(), PRESIGN_DURATION),
         cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &grafana_datasources_s3_key(), DATASOURCES_YML.as_bytes(), PRESIGN_DURATION),
         cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &grafana_dashboards_s3_key(), ALL_YML.as_bytes(), PRESIGN_DURATION),
@@ -584,7 +632,6 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
         cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &tempo_service_s3_key(), TEMPO_SERVICE.as_bytes(), PRESIGN_DURATION),
         cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &node_exporter_service_s3_key(), NODE_EXPORTER_SERVICE.as_bytes(), PRESIGN_DURATION),
         cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &promtail_service_s3_key(), PROMTAIL_SERVICE.as_bytes(), PRESIGN_DURATION),
-        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &binary_service_s3_key(), BINARY_SERVICE.as_bytes(), PRESIGN_DURATION),
         cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &logrotate_config_s3_key(), LOGROTATE_CONF.as_bytes(), PRESIGN_DURATION),
         cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &pyroscope_agent_service_s3_key(), PYROSCOPE_AGENT_SERVICE.as_bytes(), PRESIGN_DURATION),
         cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &pyroscope_agent_timer_s3_key(), PYROSCOPE_AGENT_TIMER.as_bytes(), PRESIGN_DURATION),
@@ -592,6 +639,24 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     .await?
     .try_into()
     .unwrap();
+
+    // Cache binary_service per architecture (write to temp file since content is dynamic)
+    let mut binary_service_urls_by_arch: HashMap<Architecture, String> = HashMap::new();
+    for arch in &architectures_needed {
+        let binary_service_content = binary_service(*arch);
+        let temp_path = tag_directory.join(format!("binary-{}.service", arch.download_arch()));
+        std::fs::write(&temp_path, &binary_service_content)?;
+        let binary_service_url = cache_file_and_presign(
+            &s3_client,
+            S3_BUCKET_NAME,
+            &binary_service_s3_key_for_arch(*arch),
+            &temp_path,
+            PRESIGN_DURATION,
+        )
+        .await?;
+        std::fs::remove_file(&temp_path)?;
+        binary_service_urls_by_arch.insert(*arch, binary_service_url);
+    }
 
     // Upload deployment-specific monitoring config files (deduplicated by digest)
     let instances: Vec<(&str, &str, &str)> = deployments
@@ -737,41 +802,48 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
         },
     )?;
 
-    // Build instance URLs map
-    let mut instance_urls_map: HashMap<String, InstanceUrls> = HashMap::new();
+    // Build instance URLs map (using architecture-specific tool URLs)
+    let mut instance_urls_map: HashMap<String, (InstanceUrls, Architecture)> = HashMap::new();
     for deployment in &deployments {
         let name = &deployment.instance.name;
+        let arch = instance_architectures[name];
         let promtail_digest = &instance_promtail_digest[name];
         let pyroscope_digest = &instance_pyroscope_digest[name];
+        let (_, _, _, _, _, node_exporter_url, promtail_url) = &tool_urls_by_arch[&arch];
 
         instance_urls_map.insert(
             name.clone(),
-            InstanceUrls {
-                binary: instance_binary_urls[name].clone(),
-                config: instance_config_urls[name].clone(),
-                hosts: hosts_url.clone(),
-                promtail_bin: promtail_url.clone(),
-                promtail_config: promtail_digest_to_url[promtail_digest].clone(),
-                promtail_service: promtail_service_url.clone(),
-                node_exporter_bin: node_exporter_url.clone(),
-                node_exporter_service: monitoring_node_exporter_service_url.clone(),
-                binary_service: binary_service_url.clone(),
-                logrotate_conf: logrotate_conf_url.clone(),
-                pyroscope_script: pyroscope_digest_to_url[pyroscope_digest].clone(),
-                pyroscope_service: pyroscope_agent_service_url.clone(),
-                pyroscope_timer: pyroscope_agent_timer_url.clone(),
-            },
+            (
+                InstanceUrls {
+                    binary: instance_binary_urls[name].clone(),
+                    config: instance_config_urls[name].clone(),
+                    hosts: hosts_url.clone(),
+                    promtail_bin: promtail_url.clone(),
+                    promtail_config: promtail_digest_to_url[promtail_digest].clone(),
+                    promtail_service: promtail_service_url.clone(),
+                    node_exporter_bin: node_exporter_url.clone(),
+                    node_exporter_service: monitoring_node_exporter_service_url.clone(),
+                    binary_service: binary_service_urls_by_arch[&arch].clone(),
+                    logrotate_conf: logrotate_conf_url.clone(),
+                    pyroscope_script: pyroscope_digest_to_url[pyroscope_digest].clone(),
+                    pyroscope_service: pyroscope_agent_service_url.clone(),
+                    pyroscope_timer: pyroscope_agent_timer_url.clone(),
+                },
+                arch,
+            ),
         );
     }
     info!("uploaded config files to S3");
 
-    // Build monitoring URLs struct for SSH configuration
+    // Build monitoring URLs struct for SSH configuration (using monitoring architecture)
+    let (prometheus_url, grafana_url, loki_url, pyroscope_url, tempo_url, node_exporter_url, _) =
+        &tool_urls_by_arch[&monitoring_architecture];
     let monitoring_urls = MonitoringUrls {
-        prometheus_bin: prometheus_url,
-        grafana_bin: grafana_url,
-        loki_bin: loki_url,
-        pyroscope_bin: pyroscope_url,
-        tempo_bin: tempo_url,
+        prometheus_bin: prometheus_url.clone(),
+        grafana_bin: grafana_url.clone(),
+        loki_bin: loki_url.clone(),
+        pyroscope_bin: pyroscope_url.clone(),
+        tempo_bin: tempo_url.clone(),
         node_exporter_bin: node_exporter_url.clone(),
         prometheus_config: prometheus_config_url,
         datasources_yml: datasources_url,
@@ -797,18 +869,18 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
             let ec2_client = ec2_clients[&instance.region].clone();
             let ip = deployment.ip.clone();
             let bbr_url = bbr_conf_url.clone();
-            let urls = instance_urls_map.remove(&instance.name).unwrap();
-            (instance, deployment_id, ec2_client, ip, bbr_url, urls)
+            let (urls, arch) = instance_urls_map.remove(&instance.name).unwrap();
+            (instance, deployment_id, ec2_client, ip, bbr_url, urls, arch)
         })
         .collect();
     let binary_futures = binary_configs.into_iter().map(
-        |(instance, deployment_id, ec2_client, ip, bbr_url, urls)| async move {
+        |(instance, deployment_id, ec2_client, ip, bbr_url, urls, arch)| async move {
             wait_for_instances_ready(&ec2_client, slice::from_ref(&deployment_id)).await?;
             enable_bbr(private_key, &ip, &bbr_url).await?;
             ssh_execute(
                 private_key,
                 &ip,
-                &install_binary_cmd(&urls, instance.profiling),
+                &install_binary_cmd(&urls, instance.profiling, arch),
             )
             .await?;
             poll_service_active(private_key, &ip, "promtail").await?;
@@ -837,7 +909,11 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
             ssh_execute(
                 private_key,
                 &monitoring_ip,
-                &install_monitoring_cmd(&monitoring_urls, PROMETHEUS_VERSION),
+                &install_monitoring_cmd(
+                    &monitoring_urls,
+                    PROMETHEUS_VERSION,
+                    monitoring_architecture,
+                ),
             )
             .await?;
             ssh_execute(private_key, &monitoring_ip, start_monitoring_services_cmd()).await?;

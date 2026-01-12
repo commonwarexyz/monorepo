@@ -207,6 +207,48 @@ cfg_if::cfg_if! {
         use thiserror::Error;
         use std::path::PathBuf;
 
+        /// CPU architecture for EC2 instances
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+        pub enum Architecture {
+            Arm64,
+            X86_64,
+        }
+
+        impl Architecture {
+            /// Returns the architecture string for AMI name matching
+            pub fn ami_arch(&self) -> &'static str {
+                match self {
+                    Architecture::Arm64 => "arm64",
+                    Architecture::X86_64 => "amd64",
+                }
+            }
+
+            /// Returns the architecture string for download URLs
+            pub fn download_arch(&self) -> &'static str {
+                match self {
+                    Architecture::Arm64 => "arm64",
+                    Architecture::X86_64 => "amd64",
+                }
+            }
+
+            /// Returns the Linux library architecture path for jemalloc
+            pub fn linux_lib_arch(&self) -> &'static str {
+                match self {
+                    Architecture::Arm64 => "aarch64-linux-gnu",
+                    Architecture::X86_64 => "x86_64-linux-gnu",
+                }
+            }
+        }
+
+        impl std::fmt::Display for Architecture {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                match self {
+                    Architecture::Arm64 => write!(f, "arm64"),
+                    Architecture::X86_64 => write!(f, "x86_64"),
+                }
+            }
+        }
+
         pub mod aws;
         mod create;
         pub mod services;
