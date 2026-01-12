@@ -262,7 +262,7 @@
 //! // Step 4: Players finalize to get their shares
 //! let mut player_shares = BTreeMap::new();
 //! for (player_pk, player) in players {
-//!     let (output, share) = player.finalize::<_, Bft3f1>(
+//!     let (output, share) = player.finalize::<Bft3f1>(
 //!       dealer_logs.clone(),
 //!       &commonware_parallel::Sequential,
 //!     )?;
@@ -298,7 +298,9 @@ use commonware_math::{
     algebra::{Additive, CryptoGroup, Random},
     poly::{Interpolator, Poly},
 };
-use commonware_parallel::{Sequential, Strategy as ParStrategy};
+use commonware_parallel::{Sequential, Strategy};
+#[cfg(feature = "arbitrary")]
+use commonware_utils::Bft3f1;
 use commonware_utils::{
     ordered::{Map, Quorum, Set},
     Bft3f1, Faults, Participant, TryCollect, NZU32,
@@ -1319,7 +1321,7 @@ impl<V: Variant, P: PublicKey> ObserveInner<V, P> {
     fn reckon<M: Faults>(
         info: Info<V, P>,
         selected: Map<P, DealerLog<V, P>>,
-        strategy: &impl ParStrategy,
+        strategy: &impl Strategy,
     ) -> Result<Self, Error> {
         // Track players with too many reveals
         let max_faults = info.players.max_faults::<M>();
@@ -1402,7 +1404,7 @@ impl<V: Variant, P: PublicKey> ObserveInner<V, P> {
 pub fn observe<V: Variant, P: PublicKey, M: Faults>(
     info: Info<V, P>,
     logs: BTreeMap<P, DealerLog<V, P>>,
-    strategy: &impl ParStrategy,
+    strategy: &impl Strategy,
 ) -> Result<Output<V, P>, Error> {
     let selected = select::<V, P, M>(&info, logs)?;
     ObserveInner::<V, P>::reckon::<M>(info, selected, strategy).map(|x| x.output)
@@ -1476,10 +1478,10 @@ impl<V: Variant, S: Signer> Player<V, S> {
     /// for finalize.
     ///
     /// This will only ever return [`Error::DkgFailed`].
-    pub fn finalize<Y: ParStrategy, M: Faults>(
+    pub fn finalize<M: Faults>(
         self,
         logs: BTreeMap<S::PublicKey, DealerLog<V, S::PublicKey>>,
-        strategy: &Y,
+        strategy: &impl Strategy,
     ) -> Result<(Output<V, S::PublicKey>, Share), Error> {
         let selected = select::<V, S::PublicKey, M>(&self.info, logs)?;
         // We are extracting the private scalars from `Secret` protection
@@ -2190,7 +2192,7 @@ mod test_plan {
                 // Finalize each player
                 for (player_pk, player) in players.into_iter() {
                     let (player_output, share) = player
-                        .finalize::<_, Bft3f1>(dealer_logs.clone(), &Sequential)
+                        .finalize::<Bft3f1>(dealer_logs.clone(), &Sequential)
                         .expect("Player finalize should succeed");
 
                     assert_eq!(

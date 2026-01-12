@@ -598,7 +598,6 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
                 }
             },
         );
-
         // Merge invalid sets
         let invalid: BTreeSet<_> = vote_invalid.union(&seed_invalid).copied().collect();
 

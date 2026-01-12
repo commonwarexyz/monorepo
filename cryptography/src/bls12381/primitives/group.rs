@@ -134,10 +134,11 @@ pub struct SmallScalar {
 impl SmallScalar {
     /// Generates a random 128-bit scalar.
     pub fn random(mut rng: impl CryptoRngCore) -> Self {
-        let mut bytes = [0u8; 32]; // blst_scalar is 32 bytes
-                                   // Fill the last 16 bytes (128 bits) with entropy.
-                                   // In big-endian, bytes[16..32] are the least significant.
-                                   // Leaving bytes[0..16] as zero ensures the scalar is < 2^128.
+        // blst_scalar is 32 bytes
+        let mut bytes = [0u8; 32];
+        // Fill the last 16 bytes (128 bits) with entropy.
+        // In big-endian, bytes[16..32] are the least significant.
+        // Leaving bytes[0..16] as zero ensures the scalar is < 2^128.
         rng.fill_bytes(&mut bytes[SMALL_SCALAR_LENGTH..]);
 
         let mut scalar = blst_scalar::default();
@@ -690,7 +691,8 @@ impl G1 {
     #[must_use]
     pub(crate) fn multi_pairing_check(p1: &[Self], p2: &[G2], t1: &Self, t2: &G2) -> bool {
         assert_eq!(p1.len(), p2.len());
-
+        // We deal with group elements directly, so there's no need for hashing,
+        // or a domain separation tag, hence `false`, `&[]`.
         let mut pairing = Pairing::new(false, &[]);
         let p1_affine = Self::batch_to_affine(p1);
         let p2_affine = G2::batch_to_affine(p2);
@@ -699,6 +701,7 @@ impl G1 {
         {
             pairing.raw_aggregate(p2, p1);
         }
+
         // These final two steps check that the sum of the pairings is equal to 0.
         pairing.commit();
         // Passing `None` here indicates that our target is 0.

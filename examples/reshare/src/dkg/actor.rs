@@ -460,7 +460,7 @@ where
                             let logs = storage.logs(epoch);
                             let (success, next_round, next_output, next_share) =
                                 if let Some(ps) = player_state.take() {
-                                    match ps.finalize::<_, Bft3f1>(logs, &Sequential) {
+                                    match ps.finalize::<Bft3f1>(logs, &Sequential) {
                                         Ok((new_output, new_share)) => (
                                             true,
                                             epoch_state.round + 1,
