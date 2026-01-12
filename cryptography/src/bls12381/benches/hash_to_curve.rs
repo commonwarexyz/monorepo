@@ -3,9 +3,10 @@ use commonware_cryptography::bls12381::primitives::{
     variant::{MinSig, Variant},
 };
 use commonware_parallel::{Rayon, Sequential, Strategy};
+use commonware_utils::NZUsize;
 use criterion::{criterion_group, BatchSize, Criterion};
 use rand::{thread_rng, Rng};
-use std::{hint::black_box, num::NonZeroUsize};
+use std::hint::black_box;
 
 fn benchmark_hash_to_curve(c: &mut Criterion) {
     let namespace = b"namespace";
@@ -19,7 +20,7 @@ fn benchmark_hash_to_curve(c: &mut Criterion) {
         }
 
         for concurrency in [1, 8] {
-            let strategy = Rayon::new(NonZeroUsize::new(concurrency).unwrap()).unwrap();
+            let strategy = Rayon::new(NZUsize!(concurrency)).unwrap();
             c.bench_function(
                 &format!("{}/n={} conc={}", module_path!(), n, concurrency),
                 |b| {
