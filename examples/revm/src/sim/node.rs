@@ -8,7 +8,7 @@ use super::{
     demo, simplex, ThresholdScheme, BLOCK_CODEC_MAX_CALLDATA, BLOCK_CODEC_MAX_TXS,
     CHANNEL_BACKFILL, CHANNEL_BLOCKS, CHANNEL_CERTS, CHANNEL_RESOLVER, CHANNEL_VOTES, MAILBOX_SIZE,
 };
-use crate::{application, FinalizationEvent};
+use crate::{application::{self, DomainEvent}, FinalizationEvent};
 use anyhow::Context as _;
 use commonware_broadcast::buffered;
 use commonware_consensus::{
@@ -21,10 +21,10 @@ use commonware_consensus::{
 use commonware_cryptography::{bls12381::primitives::variant::MinSig, ed25519};
 use commonware_p2p::simulated;
 use commonware_parallel::Sequential;
-use commonware_runtime::{buffer::PoolRef, tokio, Metrics as _};
+use commonware_runtime::{buffer::PoolRef, tokio, Metrics as _, Spawner};
 use commonware_storage::archive::immutable;
 use commonware_utils::{NZUsize, NZU16, NZU32, NZU64};
-use futures::channel::mpsc;
+use futures::{channel::mpsc, StreamExt as _};
 use governor::Quota;
 use std::{sync::Arc, time::Duration};
 
@@ -188,16 +188,23 @@ async fn start_node(
     .context("init qmdb")?;
 
     let ledger = application::LedgerService::new(state.clone());
+    let mut domain_events = ledger.subscribe();
+    let finalized_tx_clone = finalized_tx.clone();
+    let node_id = index as u32;
+    let event_context = context.clone();
+    event_context.spawn(move |_| async move {
+        while let Some(event) = domain_events.next().await {
+            if let DomainEvent::SnapshotPersisted(digest) = event {
+                let _ = finalized_tx_clone.unbounded_send((node_id, digest));
+            }
+        }
+    });
     let handle = application::NodeHandle::new(ledger.clone(), context.clone());
     let app =
         application::RevmApplication::<ThresholdScheme>::new(BLOCK_CODEC_MAX_TXS, state.clone());
 
-    let finalized_reporter = application::FinalizedReporter::new(
-        index as u32,
-        ledger.clone(),
-        finalized_tx,
-        context.clone(),
-    );
+    let finalized_reporter =
+        application::FinalizedReporter::new(ledger.clone(), context.clone());
 
     let marshal_mailbox = start_marshal(
         context,

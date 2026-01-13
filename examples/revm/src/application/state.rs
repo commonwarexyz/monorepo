@@ -20,11 +20,26 @@ use alloy_evm::revm::{
 };
 use commonware_cryptography::Committable as _;
 use commonware_runtime::{buffer::PoolRef, tokio, Metrics};
-use futures::lock::Mutex;
+use futures::{
+    channel::mpsc::{unbounded, UnboundedReceiver, UnboundedSender},
+    lock::Mutex,
+};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    sync::Arc,
+    sync::{Arc, Mutex as StdMutex},
 };
+
+/// Events published by the ledger aggregate when domain actions occur.
+#[allow(dead_code)]
+#[derive(Clone, Debug)]
+pub(crate) enum DomainEvent {
+    #[allow(dead_code)]
+    TransactionSubmitted(TxId),
+    #[allow(dead_code)]
+    SnapshotPersisted(ConsensusDigest),
+    #[allow(dead_code)]
+    SeedUpdated(ConsensusDigest, B256),
+}
 
 #[derive(Clone)]
 /// Ledger view that owns the mutexed execution state.
@@ -348,11 +363,27 @@ impl LedgerState {
 /// Domain service that exposes high-level ledger commands.
 pub(crate) struct LedgerService {
     view: LedgerView,
+    listeners: Arc<StdMutex<Vec<UnboundedSender<DomainEvent>>>>,
 }
 
 impl LedgerService {
-    pub(crate) const fn new(view: LedgerView) -> Self {
-        Self { view }
+    pub(crate) fn new(view: LedgerView) -> Self {
+        Self {
+            view,
+            listeners: Arc::new(StdMutex::new(Vec::new())),
+        }
+    }
+
+    fn publish(&self, event: DomainEvent) {
+        let mut guard = self.listeners.lock().unwrap();
+        guard.retain(|sender| sender.unbounded_send(event.clone()).is_ok());
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn subscribe(&self) -> UnboundedReceiver<DomainEvent> {
+        let (sender, receiver) = unbounded();
+        self.listeners.lock().unwrap().push(sender);
+        receiver
     }
 
     pub(crate) fn genesis_block(&self) -> Block {
@@ -360,7 +391,12 @@ impl LedgerService {
     }
 
     pub(crate) async fn submit_tx(&self, tx: Tx) -> bool {
-        self.view.submit_tx(tx).await
+        let tx_id = tx.id();
+        let inserted = self.view.submit_tx(tx).await;
+        if inserted {
+            self.publish(DomainEvent::TransactionSubmitted(tx_id));
+        }
+        inserted
     }
 
     pub(crate) async fn query_balance(
@@ -385,6 +421,7 @@ impl LedgerService {
 
     pub(crate) async fn set_seed(&self, digest: ConsensusDigest, seed_hash: B256) {
         self.view.set_seed(digest, seed_hash).await;
+        self.publish(DomainEvent::SeedUpdated(digest, seed_hash));
     }
 
     pub(crate) async fn parent_snapshot(&self, parent: ConsensusDigest) -> Option<LedgerSnapshot> {
@@ -413,7 +450,9 @@ impl LedgerService {
     }
 
     pub(crate) async fn persist_snapshot(&self, digest: ConsensusDigest) -> anyhow::Result<()> {
-        self.view.persist_snapshot(digest).await
+        let result = self.view.persist_snapshot(digest).await;
+        self.publish(DomainEvent::SnapshotPersisted(digest));
+        result
     }
 
     pub(crate) async fn prune_mempool(&self, txs: &[Tx]) {

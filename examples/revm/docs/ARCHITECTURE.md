@@ -71,6 +71,16 @@ This document walks through the REVM simulation example with a top-down view tha
 - **SeedCache**: keeps per-digest seed hashes so the deterministic `prevrandao` values are pulled from a shared source.
 - **LedgerService**: domain service that wraps `LedgerView` and exposes high-level commands (`submit_tx`, `build_txs`, `parent_snapshot`, `preview_root`, `insert_snapshot`, `persist_snapshot`, `prune_mempool`, `seed_for_parent`, `set_seed`, `query_state_root`). The application and reporters talk to `LedgerService` instead of mutating the aggregates directly.
 
+
+### Domain Events
+
+`LedgerService` publishes `DomainEvent`s through a broadcast channel whenever meaningful operations occur:
+1. `TransactionSubmitted(TxId)` when the mempool accepts a new transaction.
+2. `SnapshotPersisted(ConsensusDigest)` when QMDB commits a finalized digest.
+3. `SeedUpdated(ConsensusDigest, B256)` when the per-digest seed cache is refreshed.
+
+Consumers can call `LedgerService::subscribe()` to obtain a listener and react to these events (e.g., instrumentation, metrics, or simulation probes) without touching the aggregates directly.
+
 ## 4. Flows Illustrated
 
 1. **Proposal Flow**:
@@ -100,4 +110,4 @@ The architecture description above already hints at a domain-driven mindset. To 
 3. **Entities/Aggregates & Value Objects** – Model mutable, identity-bearing state as entities/aggregates such as `LedgerView` (mempool, snapshots, persisted digests) and `LedgerSnapshot` (parent digest, `RevmDb`, state root, `QmdbChanges`). Keep blocks, transactions, and state roots as value objects with deterministic encodings.
 4. **Domain services & events** – Capture behaviors that span aggregates in services (e.g., `FinalizedReporter`’s replay-and-persist routine) and surface domain events (`Finalized events` channel) so other contexts (simulation harness) can react without tight coupling.
 
-Following these steps before refactoring helps ensure any future API or module split feels natural, uses shared vocabulary, and keeps the executable flows (proposal/finalization/seed) grounded in the domain model outlined above.
+Following these steps before refactoring helps ensure any future API or module split feels natural, uses shared vocabulary, and keeps the executable flows (proposal/finalization/seed) grounded in the domain model outlined above. For a compact reference that maps this vocabulary directly to the code (entities, aggregates, services, events, and flows), see `examples/revm/docs/DOMAIN_MODEL.md`.

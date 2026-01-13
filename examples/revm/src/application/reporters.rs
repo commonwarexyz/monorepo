@@ -11,7 +11,7 @@ use super::state::LedgerService;
 use crate::{
     execution::{evm_env, execute_txs},
     types::Block,
-    ConsensusDigest, FinalizationEvent,
+    ConsensusDigest,
 };
 use alloy_evm::revm::primitives::{keccak256, B256};
 use commonware_consensus::{
@@ -25,7 +25,6 @@ use commonware_consensus::{
 use commonware_cryptography::{bls12381::primitives::variant::Variant, Committable as _};
 use commonware_runtime::Spawner;
 use commonware_utils::acknowledgement::Acknowledgement as _;
-use futures::channel::mpsc;
 use std::marker::PhantomData;
 
 /// Helper function for SeedReporter::report that owns all its inputs
@@ -55,13 +54,8 @@ async fn seed_report_inner<V: Variant>(
 }
 
 /// Helper function for FinalizedReporter::report that owns all its inputs
-async fn finalized_report_inner<E>(
-    state: LedgerService,
-    finalized: mpsc::UnboundedSender<FinalizationEvent>,
-    node: u32,
-    spawner: E,
-    update: Update<Block>,
-) where
+async fn finalized_report_inner<E>(state: LedgerService, spawner: E, update: Update<Block>)
+where
     E: Spawner,
 {
     match update {
@@ -99,7 +93,6 @@ async fn finalized_report_inner<E>(
                 .await
                 .expect("persist finalized block");
             state.prune_mempool(&block.txs).await;
-            let _ = finalized.unbounded_send((node, digest));
             // Marshal waits for the application to acknowledge processing before advancing the
             // delivery floor. Without this, the node can stall on finalized block delivery.
             ack.acknowledge();
@@ -144,14 +137,10 @@ where
 }
 
 #[derive(Clone)]
-/// Persists finalized blocks and emits events back to the simulation harness.
+/// Persists finalized blocks.
 pub(crate) struct FinalizedReporter<E> {
-    /// Index of the node that owns this reporter.
-    node: u32,
     /// Ledger service used to verify blocks and persist snapshots.
     state: LedgerService,
-    /// Channel used to relay finalized block notifications.
-    finalized: mpsc::UnboundedSender<FinalizationEvent>,
     /// Runtime spawner used for executing block replay tasks.
     spawner: E,
 }
@@ -160,18 +149,8 @@ impl<E> FinalizedReporter<E>
 where
     E: Spawner,
 {
-    pub(crate) const fn new(
-        node: u32,
-        state: LedgerService,
-        finalized: mpsc::UnboundedSender<FinalizationEvent>,
-        spawner: E,
-    ) -> Self {
-        Self {
-            node,
-            state,
-            finalized,
-            spawner,
-        }
+    pub(crate) const fn new(state: LedgerService, spawner: E) -> Self {
+        Self { state, spawner }
     }
 }
 
@@ -183,11 +162,9 @@ where
 
     fn report(&mut self, update: Self::Activity) -> impl std::future::Future<Output = ()> + Send {
         let state = self.state.clone();
-        let finalized = self.finalized.clone();
-        let node = self.node;
         let spawner = self.spawner.clone();
         async move {
-            finalized_report_inner(state, finalized, node, spawner, update).await;
+            finalized_report_inner(state, spawner, update).await;
         }
     }
 }

@@ -156,7 +156,7 @@ pub(crate) struct RevmApplication<S> {
 
 impl<S> RevmApplication<S> {
     /// Create a REVM application with the shared state handle.
-    pub(crate) const fn new(max_txs: usize, state: LedgerView) -> Self {
+    pub(crate) fn new(max_txs: usize, state: LedgerView) -> Self {
         Self {
             max_txs,
             state: LedgerService::new(state),
