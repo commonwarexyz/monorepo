@@ -27,7 +27,7 @@ use std::{collections::BTreeSet, marker::PhantomData};
 
 /// Helper function for propose that owns all its inputs.
 async fn propose_inner<S, E>(
-    /// Ledger view used to store snapshots, mempool, and seeds.
+    // Ledger view used to store snapshots, mempool, and seeds.
     state: LedgerView,
     max_txs: usize,
     spawner: E,
@@ -95,7 +95,7 @@ where
 
 /// Helper function for verify that owns all its inputs.
 async fn verify_inner<S, E>(
-        state: LedgerView,
+    state: LedgerView,
     spawner: E,
     mut ancestry: AncestorStream<S, Block>,
 ) -> bool
@@ -148,7 +148,7 @@ where
 pub(crate) struct RevmApplication<S> {
     /// Maximum number of transactions to include when proposing new blocks.
     max_txs: usize,
-    /// Ledger view holding snapshots, mempool, and seeds.
+    // Ledger view holding snapshots, mempool, and seeds.
     state: LedgerView,
     /// Marker tracking the signing scheme used by this application instance.
     _scheme: PhantomData<S>,
