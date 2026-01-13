@@ -24,10 +24,6 @@ pub const S3_TOOLS_BINARIES_PREFIX: &str = "tools/binaries";
 /// S3 prefix for tool configs: tools/configs/{deployer_version}/{component}/{file}
 pub const S3_TOOLS_CONFIGS_PREFIX: &str = "tools/configs";
 
-/// Target platform for prebuilt binaries
-// TODO (#2779): Add multi-architecture support
-pub const TARGET_PLATFORM: &str = "linux-arm64";
-
 /// S3 prefix for per-deployment data
 pub const S3_DEPLOYMENTS_PREFIX: &str = "deployments";
 
@@ -62,31 +58,67 @@ pub async fn ensure_bucket_exists(
             return Ok(());
         }
         Err(e) => {
-            // If it's a 404, we need to create it
+            // Check for region header before consuming the error
+            let bucket_region = e
+                .raw_response()
+                .and_then(|r| r.headers().get("x-amz-bucket-region"))
+                .map(|s| s.to_string());
+
             let service_err = e.into_service_error();
-            if !service_err.is_not_found() {
-                return Err(aws_sdk_s3::Error::from(service_err).into());
+            if service_err.is_not_found() {
+                // 404: bucket doesn't exist, we need to create it
+                debug!(bucket = bucket_name, "bucket not found, will create");
+            } else if let Some(bucket_region) = bucket_region {
+                // Bucket exists in a different region - proceed with cross-region access
+                info!(
+                    bucket = bucket_name,
+                    bucket_region = bucket_region.as_str(),
+                    client_region = region,
+                    "bucket exists in different region, using cross-region access"
+                );
+                return Ok(());
+            } else {
+                // 403 or other error without region header: access denied
+                return Err(Error::S3BucketForbidden {
+                    bucket: bucket_name.to_string(),
+                    reason: super::BucketForbiddenReason::AccessDenied,
+                });
             }
         }
     }
 
-    // Create the bucket
-    let location_constraint = BucketLocationConstraint::from(region);
-    let bucket_config = CreateBucketConfiguration::builder()
-        .location_constraint(location_constraint)
-        .build();
-
-    // Note: us-east-1 doesn't require location constraint
+    // Create the bucket (us-east-1 must not have a location constraint)
     let mut request = client.create_bucket().bucket(bucket_name);
     if region != "us-east-1" {
+        let location_constraint = BucketLocationConstraint::from(region);
+        let bucket_config = CreateBucketConfiguration::builder()
+            .location_constraint(location_constraint)
+            .build();
         request = request.create_bucket_configuration(bucket_config);
     }
 
-    request
-        .send()
-        .await
-        .map_err(|e| aws_sdk_s3::Error::from(e.into_service_error()))?;
-    info!(bucket = bucket_name, region = region, "created bucket");
+    match request.send().await {
+        Ok(_) => {
+            info!(bucket = bucket_name, region = region, "created bucket");
+        }
+        Err(e) => {
+            let service_err = e.into_service_error();
+            let s3_err = aws_sdk_s3::Error::from(service_err);
+            match &s3_err {
+                aws_sdk_s3::Error::BucketAlreadyExists(_)
+                | aws_sdk_s3::Error::BucketAlreadyOwnedByYou(_) => {
+                    info!(bucket = bucket_name, "bucket already exists");
+                }
+                _ => {
+                    return Err(Error::AwsS3 {
+                        bucket: bucket_name.to_string(),
+                        operation: super::S3Operation::CreateBucket,
+                        source: Box::new(s3_err),
+                    });
+                }
+            }
+        }
+    }
     Ok(())
 }
 
@@ -99,7 +131,11 @@ pub async fn object_exists(client: &S3Client, bucket: &str, key: &str) -> Result
             if matches!(service_err, HeadObjectError::NotFound(_)) {
                 Ok(false)
             } else {
-                Err(aws_sdk_s3::Error::from(service_err).into())
+                Err(Error::AwsS3 {
+                    bucket: bucket.to_string(),
+                    operation: super::S3Operation::HeadObject,
+                    source: Box::new(aws_sdk_s3::Error::from(service_err)),
+                })
             }
         }
     }
@@ -123,7 +159,11 @@ pub async fn upload_file(
         .body(body)
         .send()
         .await
-        .map_err(|e| aws_sdk_s3::Error::from(e.into_service_error()))?;
+        .map_err(|e| Error::AwsS3 {
+            bucket: bucket.to_string(),
+            operation: super::S3Operation::PutObject,
+            source: Box::new(aws_sdk_s3::Error::from(e.into_service_error())),
+        })?;
 
     debug!(bucket = bucket, key = key, "uploaded file to S3");
     Ok(())
@@ -161,7 +201,11 @@ pub async fn cache_content_and_presign(
             .body(body)
             .send()
             .await
-            .map_err(|e| aws_sdk_s3::Error::from(e.into_service_error()))?;
+            .map_err(|e| Error::AwsS3 {
+                bucket: bucket.to_string(),
+                operation: super::S3Operation::PutObject,
+                source: Box::new(aws_sdk_s3::Error::from(e.into_service_error())),
+            })?;
     }
     presign_url(client, bucket, key, expires_in).await
 }
@@ -229,10 +273,11 @@ pub async fn delete_prefix(client: &S3Client, bucket: &str, prefix: &str) -> Res
             request = request.continuation_token(token);
         }
 
-        let response = request
-            .send()
-            .await
-            .map_err(|e| aws_sdk_s3::Error::from(e.into_service_error()))?;
+        let response = request.send().await.map_err(|e| Error::AwsS3 {
+            bucket: bucket.to_string(),
+            operation: super::S3Operation::ListObjects,
+            source: Box::new(aws_sdk_s3::Error::from(e.into_service_error())),
+        })?;
 
         // Collect object identifiers for batch delete
         if let Some(objects) = response.contents {
@@ -252,7 +297,11 @@ pub async fn delete_prefix(client: &S3Client, bucket: &str, prefix: &str) -> Res
                     .delete(delete)
                     .send()
                     .await
-                    .map_err(|e| aws_sdk_s3::Error::from(e.into_service_error()))?;
+                    .map_err(|e| Error::AwsS3 {
+                        bucket: bucket.to_string(),
+                        operation: super::S3Operation::DeleteObjects,
+                        source: Box::new(aws_sdk_s3::Error::from(e.into_service_error())),
+                    })?;
 
                 deleted_count += count;
             }
@@ -281,7 +330,11 @@ pub async fn delete_bucket(client: &S3Client, bucket: &str) -> Result<(), Error>
         .bucket(bucket)
         .send()
         .await
-        .map_err(|e| aws_sdk_s3::Error::from(e.into_service_error()))?;
+        .map_err(|e| Error::AwsS3 {
+            bucket: bucket.to_string(),
+            operation: super::S3Operation::DeleteBucket,
+            source: Box::new(aws_sdk_s3::Error::from(e.into_service_error())),
+        })?;
     info!(bucket = bucket, "deleted bucket");
     Ok(())
 }
@@ -300,8 +353,8 @@ pub async fn delete_bucket_and_contents(client: &S3Client, bucket: &str) -> Resu
 /// Checks if an error is a "bucket does not exist" error
 pub fn is_no_such_bucket_error(error: &Error) -> bool {
     match error {
-        Error::AwsS3(aws_err) => {
-            matches!(aws_err.as_ref(), aws_sdk_s3::Error::NoSuchBucket(_))
+        Error::AwsS3 { source, .. } => {
+            matches!(source.as_ref(), aws_sdk_s3::Error::NoSuchBucket(_))
         }
         _ => false,
     }
