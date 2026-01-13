@@ -95,44 +95,43 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     let mut regions: BTreeSet<String> = config.instances.iter().map(|i| i.region.clone()).collect();
     regions.insert(MONITORING_REGION.to_string());
 
-    // Determine instance types by region
+    // Collect instance types by region (for availability zone selection) and unique types (for architecture detection)
     let mut instance_types_by_region: HashMap<String, HashSet<String>> = HashMap::new();
+    let mut unique_instance_types: HashSet<String> = HashSet::new();
+    instance_types_by_region
+        .entry(MONITORING_REGION.to_string())
+        .or_default()
+        .insert(config.monitoring.instance_type.clone());
+    unique_instance_types.insert(config.monitoring.instance_type.clone());
     for instance in &config.instances {
         instance_types_by_region
             .entry(instance.region.clone())
             .or_default()
             .insert(instance.instance_type.clone());
+        unique_instance_types.insert(instance.instance_type.clone());
     }
-    instance_types_by_region
-        .entry(MONITORING_REGION.to_string())
-        .or_default()
-        .insert(config.monitoring.instance_type.clone());
 
-    // Detect architectures for all instance types
+    // Detect architecture for each unique instance type (architecture is global, not region-specific)
     info!("detecting architectures for instance types");
-    let monitoring_ec2_client = create_ec2_client(Region::new(MONITORING_REGION)).await;
-    let monitoring_architecture =
-        detect_architecture(&monitoring_ec2_client, &config.monitoring.instance_type).await?;
-    info!(
-        architecture = %monitoring_architecture,
-        instance_type = config.monitoring.instance_type.as_str(),
-        "detected monitoring architecture"
-    );
+    let ec2_client = create_ec2_client(Region::new(MONITORING_REGION)).await;
+    let mut arch_by_instance_type: HashMap<String, Architecture> = HashMap::new();
+    for instance_type in &unique_instance_types {
+        let arch = detect_architecture(&ec2_client, instance_type).await?;
+        info!(
+            architecture = %arch,
+            instance_type = instance_type.as_str(),
+            "detected architecture"
+        );
+        arch_by_instance_type.insert(instance_type.clone(), arch);
+    }
 
-    // Detect architectures for all binary instances
+    // Build per-instance architecture map and collect architectures needed
+    let monitoring_architecture = arch_by_instance_type[&config.monitoring.instance_type];
     let mut instance_architectures: HashMap<String, Architecture> = HashMap::new();
     let mut architectures_needed: HashSet<Architecture> = HashSet::new();
     architectures_needed.insert(monitoring_architecture);
-
     for instance in &config.instances {
-        let ec2_client = create_ec2_client(Region::new(instance.region.clone())).await;
-        let arch = detect_architecture(&ec2_client, &instance.instance_type).await?;
-        info!(
-            architecture = %arch,
-            instance = instance.name.as_str(),
-            instance_type = instance.instance_type.as_str(),
-            "detected instance architecture"
-        );
+        let arch = arch_by_instance_type[&instance.instance_type];
         instance_architectures.insert(instance.name.clone(), arch);
         architectures_needed.insert(arch);
     }
