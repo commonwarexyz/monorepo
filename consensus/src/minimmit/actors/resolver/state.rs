@@ -247,7 +247,8 @@ mod tests {
             .iter()
             .map(|scheme| Notarize::sign(scheme, proposal.clone()).expect("sign"))
             .collect();
-        Notarization::from_notarizes(verifier, votes.iter(), &Sequential).expect("notarization quorum")
+        Notarization::from_notarizes(verifier, votes.iter(), &Sequential)
+            .expect("notarization quorum")
     }
 
     #[test_async]

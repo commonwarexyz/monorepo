@@ -216,9 +216,8 @@ mod integration_tests {
         engine::Engine,
         l_quorum, m_quorum, mocks, scheme,
     };
-    use crate::minimmit::types::Activity;
     use crate::{
-        minimmit::scheme::Scheme,
+        minimmit::{scheme::Scheme, types::Activity},
         types::{Epoch, View, ViewDelta},
         Monitor,
     };
@@ -541,14 +540,20 @@ mod integration_tests {
 
     #[test_traced]
     fn test_all_online_ed25519() {
-        all_online::<_, _, RoundRobin>(|ctx, n| scheme::ed25519::fixture(ctx, b"minimmit_consensus", n));
+        all_online::<_, _, RoundRobin>(|ctx, n| {
+            scheme::ed25519::fixture(ctx, b"minimmit_consensus", n)
+        });
     }
 
     #[test_traced]
     fn test_all_online_bls12381_multisig() {
         use commonware_cryptography::bls12381::primitives::variant::{MinPk, MinSig};
-        all_online::<_, _, RoundRobin>(|ctx, n| scheme::bls12381_multisig::fixture::<MinPk, _>(ctx, b"minimmit_consensus", n));
-        all_online::<_, _, RoundRobin>(|ctx, n| scheme::bls12381_multisig::fixture::<MinSig, _>(ctx, b"minimmit_consensus", n));
+        all_online::<_, _, RoundRobin>(|ctx, n| {
+            scheme::bls12381_multisig::fixture::<MinPk, _>(ctx, b"minimmit_consensus", n)
+        });
+        all_online::<_, _, RoundRobin>(|ctx, n| {
+            scheme::bls12381_multisig::fixture::<MinSig, _>(ctx, b"minimmit_consensus", n)
+        });
     }
 
     // Note: These tests are expected to fail/timeout until the minimmit engine
@@ -806,14 +811,20 @@ mod integration_tests {
 
     #[test_traced]
     fn test_one_offline_ed25519() {
-        one_offline::<_, _, RoundRobin>(|ctx, n| scheme::ed25519::fixture(ctx, b"minimmit_consensus", n));
+        one_offline::<_, _, RoundRobin>(|ctx, n| {
+            scheme::ed25519::fixture(ctx, b"minimmit_consensus", n)
+        });
     }
 
     #[test_traced]
     fn test_one_offline_bls12381_multisig() {
         use commonware_cryptography::bls12381::primitives::variant::{MinPk, MinSig};
-        one_offline::<_, _, RoundRobin>(|ctx, n| scheme::bls12381_multisig::fixture::<MinPk, _>(ctx, b"minimmit_consensus", n));
-        one_offline::<_, _, RoundRobin>(|ctx, n| scheme::bls12381_multisig::fixture::<MinSig, _>(ctx, b"minimmit_consensus", n));
+        one_offline::<_, _, RoundRobin>(|ctx, n| {
+            scheme::bls12381_multisig::fixture::<MinPk, _>(ctx, b"minimmit_consensus", n)
+        });
+        one_offline::<_, _, RoundRobin>(|ctx, n| {
+            scheme::bls12381_multisig::fixture::<MinSig, _>(ctx, b"minimmit_consensus", n)
+        });
     }
 
     fn slow_validator<S, F, L>(mut fixture: F)
@@ -986,14 +997,20 @@ mod integration_tests {
 
     #[test_traced]
     fn test_slow_validator_ed25519() {
-        slow_validator::<_, _, RoundRobin>(|ctx, n| scheme::ed25519::fixture(ctx, b"minimmit_consensus", n));
+        slow_validator::<_, _, RoundRobin>(|ctx, n| {
+            scheme::ed25519::fixture(ctx, b"minimmit_consensus", n)
+        });
     }
 
     #[test_traced]
     fn test_slow_validator_bls12381_multisig() {
         use commonware_cryptography::bls12381::primitives::variant::{MinPk, MinSig};
-        slow_validator::<_, _, RoundRobin>(|ctx, n| scheme::bls12381_multisig::fixture::<MinPk, _>(ctx, b"minimmit_consensus", n));
-        slow_validator::<_, _, RoundRobin>(|ctx, n| scheme::bls12381_multisig::fixture::<MinSig, _>(ctx, b"minimmit_consensus", n));
+        slow_validator::<_, _, RoundRobin>(|ctx, n| {
+            scheme::bls12381_multisig::fixture::<MinPk, _>(ctx, b"minimmit_consensus", n)
+        });
+        slow_validator::<_, _, RoundRobin>(|ctx, n| {
+            scheme::bls12381_multisig::fixture::<MinSig, _>(ctx, b"minimmit_consensus", n)
+        });
     }
 
     fn slow_and_lossy_links<S, F, L>(seed: u64, mut fixture: F) -> String
@@ -1149,17 +1166,20 @@ mod integration_tests {
 
     #[test_traced]
     fn test_slow_and_lossy_links_ed25519() {
-        slow_and_lossy_links::<_, _, RoundRobin>(0, |ctx, n| scheme::ed25519::fixture(ctx, b"minimmit_consensus", n));
+        slow_and_lossy_links::<_, _, RoundRobin>(0, |ctx, n| {
+            scheme::ed25519::fixture(ctx, b"minimmit_consensus", n)
+        });
     }
 
     #[test_traced]
     fn test_slow_and_lossy_links_bls12381_multisig() {
         use commonware_cryptography::bls12381::primitives::variant::{MinPk, MinSig};
-        slow_and_lossy_links::<_, _, RoundRobin>(0, |ctx, n| scheme::bls12381_multisig::fixture::<MinPk, _>(ctx, b"minimmit_consensus", n));
-        slow_and_lossy_links::<_, _, RoundRobin>(
-            0,
-            |ctx, n| scheme::bls12381_multisig::fixture::<MinSig, _>(ctx, b"minimmit_consensus", n),
-        );
+        slow_and_lossy_links::<_, _, RoundRobin>(0, |ctx, n| {
+            scheme::bls12381_multisig::fixture::<MinPk, _>(ctx, b"minimmit_consensus", n)
+        });
+        slow_and_lossy_links::<_, _, RoundRobin>(0, |ctx, n| {
+            scheme::bls12381_multisig::fixture::<MinSig, _>(ctx, b"minimmit_consensus", n)
+        });
     }
 
     fn conflicter<S, F, L>(seed: u64, mut fixture: F)
@@ -1234,7 +1254,7 @@ mod integration_tests {
                 if idx == 0 {
                     // Byzantine conflicter
                     let cfg = mocks::conflicter::Config {
-                            scheme: schemes[idx].clone(),
+                        scheme: schemes[idx].clone(),
                     };
                     let engine: mocks::conflicter::Conflicter<_, _, Sha256> =
                         mocks::conflicter::Conflicter::new(
@@ -1338,7 +1358,9 @@ mod integration_tests {
     #[test_traced]
     fn test_conflicter_ed25519() {
         for seed in 0..5 {
-            conflicter::<_, _, RoundRobin>(seed, |ctx, n| scheme::ed25519::fixture(ctx, b"minimmit_consensus", n));
+            conflicter::<_, _, RoundRobin>(seed, |ctx, n| {
+                scheme::ed25519::fixture(ctx, b"minimmit_consensus", n)
+            });
         }
     }
 
@@ -1346,8 +1368,12 @@ mod integration_tests {
     fn test_conflicter_bls12381_multisig() {
         use commonware_cryptography::bls12381::primitives::variant::{MinPk, MinSig};
         for seed in 0..5 {
-            conflicter::<_, _, RoundRobin>(seed, |ctx, n| scheme::bls12381_multisig::fixture::<MinPk, _>(ctx, b"minimmit_consensus", n));
-            conflicter::<_, _, RoundRobin>(seed, |ctx, n| scheme::bls12381_multisig::fixture::<MinSig, _>(ctx, b"minimmit_consensus", n));
+            conflicter::<_, _, RoundRobin>(seed, |ctx, n| {
+                scheme::bls12381_multisig::fixture::<MinPk, _>(ctx, b"minimmit_consensus", n)
+            });
+            conflicter::<_, _, RoundRobin>(seed, |ctx, n| {
+                scheme::bls12381_multisig::fixture::<MinSig, _>(ctx, b"minimmit_consensus", n)
+            });
         }
     }
 
@@ -1356,48 +1382,46 @@ mod integration_tests {
         // We use slow and lossy links as the deterministic test
         // because it is the most complex test.
         for seed in 1..6 {
-            let ms_pk_state_1 = slow_and_lossy_links::<_, _, RoundRobin>(
-                seed,
-                |ctx, n| scheme::bls12381_multisig::fixture::<
+            let ms_pk_state_1 = slow_and_lossy_links::<_, _, RoundRobin>(seed, |ctx, n| {
+                scheme::bls12381_multisig::fixture::<
                     commonware_cryptography::bls12381::primitives::variant::MinPk,
                     _,
-                >(ctx, b"minimmit_consensus", n),
-            );
-            let ms_pk_state_2 = slow_and_lossy_links::<_, _, RoundRobin>(
-                seed,
-                |ctx, n| scheme::bls12381_multisig::fixture::<
+                >(ctx, b"minimmit_consensus", n)
+            });
+            let ms_pk_state_2 = slow_and_lossy_links::<_, _, RoundRobin>(seed, |ctx, n| {
+                scheme::bls12381_multisig::fixture::<
                     commonware_cryptography::bls12381::primitives::variant::MinPk,
                     _,
-                >(ctx, b"minimmit_consensus", n),
-            );
+                >(ctx, b"minimmit_consensus", n)
+            });
             assert_eq!(
                 ms_pk_state_1, ms_pk_state_2,
                 "determinism failed for seed {seed}"
             );
 
-            let ms_sig_state_1 = slow_and_lossy_links::<_, _, RoundRobin>(
-                seed,
-                |ctx, n| scheme::bls12381_multisig::fixture::<
+            let ms_sig_state_1 = slow_and_lossy_links::<_, _, RoundRobin>(seed, |ctx, n| {
+                scheme::bls12381_multisig::fixture::<
                     commonware_cryptography::bls12381::primitives::variant::MinSig,
                     _,
-                >(ctx, b"minimmit_consensus", n),
-            );
-            let ms_sig_state_2 = slow_and_lossy_links::<_, _, RoundRobin>(
-                seed,
-                |ctx, n| scheme::bls12381_multisig::fixture::<
+                >(ctx, b"minimmit_consensus", n)
+            });
+            let ms_sig_state_2 = slow_and_lossy_links::<_, _, RoundRobin>(seed, |ctx, n| {
+                scheme::bls12381_multisig::fixture::<
                     commonware_cryptography::bls12381::primitives::variant::MinSig,
                     _,
-                >(ctx, b"minimmit_consensus", n),
-            );
+                >(ctx, b"minimmit_consensus", n)
+            });
             assert_eq!(
                 ms_sig_state_1, ms_sig_state_2,
                 "determinism failed for seed {seed}"
             );
 
-            let ed_state_1 =
-                slow_and_lossy_links::<_, _, RoundRobin>(seed, |ctx, n| scheme::ed25519::fixture(ctx, b"minimmit_consensus", n));
-            let ed_state_2 =
-                slow_and_lossy_links::<_, _, RoundRobin>(seed, |ctx, n| scheme::ed25519::fixture(ctx, b"minimmit_consensus", n));
+            let ed_state_1 = slow_and_lossy_links::<_, _, RoundRobin>(seed, |ctx, n| {
+                scheme::ed25519::fixture(ctx, b"minimmit_consensus", n)
+            });
+            let ed_state_2 = slow_and_lossy_links::<_, _, RoundRobin>(seed, |ctx, n| {
+                scheme::ed25519::fixture(ctx, b"minimmit_consensus", n)
+            });
             assert_eq!(ed_state_1, ed_state_2, "determinism failed for seed {seed}");
 
             let states = [

@@ -39,7 +39,13 @@ pub struct Config<S: Scheme, L: ElectorConfig<S>, T: Strategy = Sequential> {
 }
 
 #[derive(Clone)]
-pub struct Reporter<E: CryptoRngCore, S: Scheme, L: ElectorConfig<S>, D: Digest, T: Strategy = Sequential> {
+pub struct Reporter<
+    E: CryptoRngCore,
+    S: Scheme,
+    L: ElectorConfig<S>,
+    D: Digest,
+    T: Strategy = Sequential,
+> {
     context: E,
     pub participants: Set<S::PublicKey>,
     scheme: S,

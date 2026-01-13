@@ -375,7 +375,9 @@ mod tests {
                 .expect("signing failed")
             })
             .collect();
-        let certificate = schemes[0].assemble(votes, &Sequential).expect("assemble failed");
+        let certificate = schemes[0]
+            .assemble(votes, &Sequential)
+            .expect("assemble failed");
         let notarization_activity: Activity<ed25519::Scheme, Sha256Digest> =
             Activity::Notarization(Notarization {
                 proposal,

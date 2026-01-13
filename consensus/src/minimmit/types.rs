@@ -858,8 +858,13 @@ impl<S: Scheme, D: Digest> Notarization<S, D> {
         strategy: &impl commonware_parallel::Strategy,
     ) -> Option<Self> {
         // Filter to only include votes for the specified proposal
-        let certificate =
-            scheme.assemble(notarizes.into_iter().filter(|n| n.proposal == proposal).map(|n| n.attestation.clone()), strategy)?;
+        let certificate = scheme.assemble(
+            notarizes
+                .into_iter()
+                .filter(|n| n.proposal == proposal)
+                .map(|n| n.attestation.clone()),
+            strategy,
+        )?;
 
         Some(Self {
             proposal,

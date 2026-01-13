@@ -17,13 +17,12 @@
 
 // Re-export the core types from the simplex implementation since the cryptographic
 // primitives are identical. Only the Subject type (which has no Finalize variant) differs.
+use crate::minimmit::types::Notarization;
 #[cfg(feature = "mocks")]
 pub use crate::simplex::scheme::bls12381_threshold::fixture;
 pub use crate::simplex::scheme::bls12381_threshold::{
     decrypt, encrypt, Scheme, Seed, Seedable, Signature,
 };
-
-use crate::minimmit::types::Notarization;
 use commonware_cryptography::{bls12381::primitives::variant::Variant, Digest, PublicKey};
 
 // Implement Seedable for minimmit's Notarization type

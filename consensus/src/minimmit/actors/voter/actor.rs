@@ -33,11 +33,11 @@ use crate::{
 use commonware_codec::Read;
 use commonware_cryptography::Digest;
 use commonware_macros::select;
-use commonware_parallel::Strategy;
 use commonware_p2p::{
     utils::codec::{WrappedReceiver, WrappedSender},
     Blocker, Receiver, Recipients, Sender,
 };
+use commonware_parallel::Strategy;
 use commonware_runtime::{
     buffer::PoolRef, spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner, Storage,
 };
@@ -572,7 +572,11 @@ impl<
                     .await;
             }
             Certificate::Nullification(nullification) => {
-                if !nullification.verify::<_, D>(&mut self.context, self.state.scheme(), &self.strategy) {
+                if !nullification.verify::<_, D>(
+                    &mut self.context,
+                    self.state.scheme(),
+                    &self.strategy,
+                ) {
                     warn!(?sender, %view, "blocking peer for invalid nullification");
                     self.blocker.block(sender).await;
                     return;
@@ -596,7 +600,10 @@ impl<
         view: View,
     ) {
         // Check for M threshold (notarization certificate)
-        if let Some(notarization) = self.state.try_assemble_notarization(view, self.m_quorum, &self.strategy) {
+        if let Some(notarization) =
+            self.state
+                .try_assemble_notarization(view, self.m_quorum, &self.strategy)
+        {
             // Record latency for leader
             if let Some(elapsed) = self.leader_elapsed(view) {
                 self.notarization_latency.observe(elapsed);
@@ -626,7 +633,10 @@ impl<
         }
 
         // Check for M threshold (nullification certificate)
-        if let Some(nullification) = self.state.try_assemble_nullification(view, self.m_quorum, &self.strategy) {
+        if let Some(nullification) =
+            self.state
+                .try_assemble_nullification(view, self.m_quorum, &self.strategy)
+        {
             // Notify resolver
             resolver
                 .updated(Certificate::Nullification(nullification.clone()))

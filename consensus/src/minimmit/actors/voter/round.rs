@@ -156,7 +156,9 @@ impl<S: Scheme, D: Digest> Round<S, D> {
 
     /// Returns true when the local participant controls `signer`.
     pub fn is_signer(&self, signer: u32) -> bool {
-        self.scheme.me().is_some_and(|me| me == commonware_utils::Participant::new(signer))
+        self.scheme
+            .me()
+            .is_some_and(|me| me == commonware_utils::Participant::new(signer))
     }
 
     /// Removes the leader deadline so timeouts stop firing.
@@ -282,10 +284,11 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         let our_signer = self.scheme.me()?;
         // Check if we have M conflicting votes from OTHER replicas
         let our_payload = self.proposal.proposal().map(|p| &p.payload)?;
-        if !self
-            .votes
-            .should_nullify_by_contradiction(Some(our_payload), our_signer.get(), m_threshold)
-        {
+        if !self.votes.should_nullify_by_contradiction(
+            Some(our_payload),
+            our_signer.get(),
+            m_threshold,
+        ) {
             return None;
         }
         self.contradiction_nullify_sent = true;
@@ -499,7 +502,8 @@ mod tests {
             .map(|scheme| Notarize::sign(scheme, proposal_b.clone()).expect("sign"))
             .collect();
         let certificate =
-            Notarization::from_notarizes(&verifier, notarization_votes.iter(), &Sequential).expect("assemble");
+            Notarization::from_notarizes(&verifier, notarization_votes.iter(), &Sequential)
+                .expect("assemble");
         let (accepted, equivocator) = round.add_notarization(certificate.clone());
         assert!(accepted);
         assert!(equivocator.is_some());
@@ -534,7 +538,8 @@ mod tests {
             .map(|scheme| Notarize::sign(scheme, proposal.clone()).expect("sign"))
             .collect();
         let certificate =
-            Notarization::from_notarizes(&verifier, notarization_votes.iter(), &Sequential).expect("assemble");
+            Notarization::from_notarizes(&verifier, notarization_votes.iter(), &Sequential)
+                .expect("assemble");
         let (accepted, equivocator) = round.add_notarization(certificate);
         assert!(accepted);
         assert!(equivocator.is_none());
@@ -561,7 +566,8 @@ mod tests {
             .map(|scheme| Notarize::sign(scheme, proposal.clone()).expect("sign"))
             .collect();
         let notarization =
-            Notarization::from_notarizes(&verifier, notarize_votes.iter(), &Sequential).expect("notarization");
+            Notarization::from_notarizes(&verifier, notarize_votes.iter(), &Sequential)
+                .expect("notarization");
 
         // Create nullification
         let nullify_local =
@@ -570,8 +576,8 @@ mod tests {
             .iter()
             .map(|scheme| Nullify::sign::<Sha256Digest>(scheme, round_id).expect("nullify"))
             .collect();
-        let nullification =
-            Nullification::from_nullifies(&verifier, &nullify_votes, &Sequential).expect("nullification");
+        let nullification = Nullification::from_nullifies(&verifier, &nullify_votes, &Sequential)
+            .expect("nullification");
 
         // Replay messages and verify broadcast flags
         let mut round = Round::new(local_scheme, round_id, now, 4);
@@ -711,8 +717,7 @@ mod tests {
         let m_threshold = 3; // For n=6, f=1, M=3
 
         // Add our own nullify vote (simulating what happens after a timeout)
-        let our_nullify =
-            Nullify::sign::<Sha256Digest>(&local_scheme, round_id).expect("sign");
+        let our_nullify = Nullify::sign::<Sha256Digest>(&local_scheme, round_id).expect("sign");
         assert!(round.votes_mut().insert_nullify(our_nullify));
 
         // Add exactly 2 conflicting notarizes (M-1)
@@ -723,7 +728,9 @@ mod tests {
 
         // Should NOT trigger - we have 1 own nullify (excluded) + 2 conflicting notarizes = 2 < M
         assert!(
-            round.construct_nullify_by_contradiction(m_threshold).is_none(),
+            round
+                .construct_nullify_by_contradiction(m_threshold)
+                .is_none(),
             "should not trigger when own nullify is the only third vote"
         );
 
@@ -733,7 +740,9 @@ mod tests {
 
         // Now should trigger - 3 conflicting votes from OTHER replicas
         assert!(
-            round.construct_nullify_by_contradiction(m_threshold).is_some(),
+            round
+                .construct_nullify_by_contradiction(m_threshold)
+                .is_some(),
             "should trigger when M external conflicting votes observed"
         );
     }
@@ -767,7 +776,9 @@ mod tests {
         }
 
         // 2 nullifies < M, should not trigger yet
-        assert!(round.construct_nullify_by_contradiction(m_threshold).is_none());
+        assert!(round
+            .construct_nullify_by_contradiction(m_threshold)
+            .is_none());
 
         // Add 1 conflicting notarize from another replica
         let vote = Notarize::sign(&schemes[3], proposal_b).expect("sign");
@@ -775,7 +786,9 @@ mod tests {
 
         // Now we have 2 nullifies + 1 conflicting notarize = 3 >= M
         assert!(
-            round.construct_nullify_by_contradiction(m_threshold).is_some(),
+            round
+                .construct_nullify_by_contradiction(m_threshold)
+                .is_some(),
             "should trigger when 2 external nullifies + 1 conflicting notarize = M"
         );
     }

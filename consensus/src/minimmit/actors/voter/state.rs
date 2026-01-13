@@ -183,7 +183,9 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
 
     /// Returns true when the local signer is the participant with index `idx`.
     pub fn is_me(&self, idx: u32) -> bool {
-        self.scheme.me().is_some_and(|me| me == commonware_utils::Participant::new(idx))
+        self.scheme
+            .me()
+            .is_some_and(|me| me == commonware_utils::Participant::new(idx))
     }
 
     /// Advances the view and updates timeouts.
@@ -574,11 +576,19 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         &mut self,
         view: View,
         vote: Notarize<S, D>,
-    ) -> (bool, Option<S::PublicKey>, Option<ConflictingNotarize<S, D>>) {
+    ) -> (
+        bool,
+        Option<S::PublicKey>,
+        Option<ConflictingNotarize<S, D>>,
+    ) {
         let signer = vote.signer();
 
         // Get equivocator key upfront to avoid borrow conflicts
-        let equivocator_key = self.scheme.participants().key(commonware_utils::Participant::new(signer)).cloned();
+        let equivocator_key = self
+            .scheme
+            .participants()
+            .key(commonware_utils::Participant::new(signer))
+            .cloned();
 
         let round = self.create_round(view);
 
@@ -688,7 +698,8 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         }
 
         // Assemble the nullification
-        let nullification = Nullification::from_nullifies(&self.scheme, round.votes().nullifies(), strategy)?;
+        let nullification =
+            Nullification::from_nullifies(&self.scheme, round.votes().nullifies(), strategy)?;
         Some(nullification)
     }
 
@@ -831,7 +842,7 @@ mod tests {
             let mut state = State::new(
                 context,
                 Config {
-                        scheme: verifier.clone(),
+                    scheme: verifier.clone(),
                     elector: <RoundRobin>::default(),
                     epoch: Epoch::new(11),
                     activity_timeout: ViewDelta::new(6),
@@ -850,8 +861,9 @@ mod tests {
                 .iter()
                 .map(|scheme| Notarize::sign(scheme, notarize_proposal.clone()).expect("sign"))
                 .collect();
-            let notarization = Notarization::from_notarizes(&verifier, notarize_votes.iter(), &Sequential)
-                .expect("notarization");
+            let notarization =
+                Notarization::from_notarizes(&verifier, notarize_votes.iter(), &Sequential)
+                    .expect("notarization");
             state.add_notarization(notarization);
 
             // Produce candidate once
@@ -869,7 +881,8 @@ mod tests {
                 })
                 .collect();
             let nullification =
-                Nullification::from_nullifies(&verifier, &nullify_votes, &Sequential).expect("nullification");
+                Nullification::from_nullifies(&verifier, &nullify_votes, &Sequential)
+                    .expect("nullification");
             state.add_nullification(nullification);
 
             // Produce candidate once
@@ -967,8 +980,9 @@ mod tests {
                 .iter()
                 .map(|scheme| Notarize::sign(scheme, proposal_a.clone()).expect("sign"))
                 .collect();
-            let notarization = Notarization::from_notarizes(&verifier, notarization_votes.iter(), &Sequential)
-                .expect("notarization");
+            let notarization =
+                Notarization::from_notarizes(&verifier, notarization_votes.iter(), &Sequential)
+                    .expect("notarization");
             state.add_notarization(notarization);
 
             // Finalize view 20
