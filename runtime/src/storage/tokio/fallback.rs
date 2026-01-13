@@ -5,7 +5,7 @@ use commonware_utils::hex;
 use std::{io::SeekFrom, sync::Arc};
 use tokio::{
     fs,
-    io::{AsyncBufReadExt, AsyncSeekExt, AsyncWriteExt},
+    io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
     sync::Mutex,
 };
 
