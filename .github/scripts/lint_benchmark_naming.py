@@ -38,7 +38,6 @@ How it works
 ------------
 This script runs `cargo bench --workspace -- --list` to extract actual
 registered benchmark names from the compiled binaries, then validates them.
-This is more reliable than parsing source code.
 
 Usage
 -----
