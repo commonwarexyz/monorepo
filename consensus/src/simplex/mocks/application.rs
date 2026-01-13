@@ -132,6 +132,10 @@ pub enum Certifier<D: Digest> {
     Sometimes,
     /// A custom predicate function.
     Custom(Box<dyn Fn(D) -> bool + Send + 'static>),
+    /// Drop the sender without responding, causing the receiver to be cancelled.
+    /// This simulates scenarios where the automaton cannot determine certification
+    /// (e.g., missing verification context in Marshaled).
+    Cancel,
 }
 
 pub struct Config<H: Hasher, P: PublicKey> {
@@ -289,7 +293,7 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
         true
     }
 
-    async fn certify(&mut self, payload: H::Digest, _contents: Bytes) -> bool {
+    async fn certify(&mut self, payload: H::Digest, _contents: Bytes) -> Option<bool> {
         // Simulate the certify latency
         let duration = self.certify_latency.sample(&mut self.context);
         self.context
@@ -298,9 +302,10 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
 
         // Use configured predicate to determine certification
         match &self.should_certify {
-            Certifier::Always => true,
-            Certifier::Sometimes => (payload.as_ref().last().copied().unwrap_or(0) % 11) < 9,
-            Certifier::Custom(func) => func(payload),
+            Certifier::Always => Some(true),
+            Certifier::Sometimes => Some((payload.as_ref().last().copied().unwrap_or(0) % 11) < 9),
+            Certifier::Custom(func) => Some(func(payload)),
+            Certifier::Cancel => None,
         }
     }
 
@@ -355,8 +360,11 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
                     }
                     Message::Certify { payload, response } => {
                         let contents = seen.get(&payload).cloned().unwrap_or_default();
-                        let certified = self.certify(payload, contents).await;
-                        response.send_lossy(certified);
+                        // If certify returns None (Cancel mode), drop the sender without
+                        // responding, causing the receiver to return Err(Canceled).
+                        if let Some(certified) = self.certify(payload, contents).await {
+                            response.send_lossy(certified);
+                        }
                     }
                     Message::Broadcast { payload } => {
                         self.broadcast(payload).await;
