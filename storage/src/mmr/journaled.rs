@@ -24,7 +24,6 @@ use crate::{
         Error::{self, *},
         Proof,
     },
-    qmdb::any::unordered::fixed::sync::init_journal,
 };
 use commonware_codec::DecodeExt;
 use commonware_cryptography::Digest;
@@ -370,7 +369,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
         cfg: SyncConfig<D>,
         hasher: &mut impl Hasher<D>,
     ) -> Result<Self, crate::qmdb::Error> {
-        let journal = init_journal(
+        let journal: Journal<E, D> = Journal::init_sync(
             context.with_label("mmr_journal"),
             JConfig {
                 partition: cfg.config.journal_partition,

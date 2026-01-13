@@ -189,10 +189,25 @@ impl ReplayBuf {
         }
     }
 
+    /// Clears the buffer and resets the read offset to 0.
+    fn clear(&mut self) {
+        self.buffers.clear();
+        self.current_page = 0;
+        self.offset_in_page = 0;
+        self.remaining = 0;
+    }
+
     /// Adds a buffer from a fill operation.
     fn push(&mut self, state: BufferState, logical_bytes: usize) {
+        // If buffers is empty, this is the first fill after a seek.
+        // Skip bytes before the seek offset (offset_in_page).
+        let skip = if self.buffers.is_empty() {
+            self.offset_in_page
+        } else {
+            0
+        };
         self.buffers.push_back(state);
-        self.remaining += logical_bytes;
+        self.remaining += logical_bytes.saturating_sub(skip);
     }
 
     /// Returns the logical length of the given page in the given buffer.
@@ -314,6 +329,24 @@ impl<B: Blob> Replay<B> {
             }
         }
         Ok(self.buffer.remaining >= n)
+    }
+
+    /// Seeks to `offset` in the blob, returning `Err(BlobInsufficientLength)` if `offset` exceeds
+    /// the blob size.
+    pub async fn seek_to(&mut self, offset: u64) -> Result<(), Error> {
+        if offset > self.reader.blob_size() {
+            return Err(Error::BlobInsufficientLength);
+        }
+
+        self.buffer.clear();
+        self.exhausted = false;
+
+        let page_size = self.reader.logical_page_size as u64;
+        self.reader.blob_page = offset / page_size;
+        self.buffer.current_page = 0;
+        self.buffer.offset_in_page = (offset % page_size) as usize;
+
+        Ok(())
     }
 }
 
@@ -497,6 +530,68 @@ mod tests {
 
             // remaining should still be 0
             assert_eq!(replay.remaining(), 0);
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_replay_seek_to() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (blob, blob_size) = context.open("test_partition", b"test_blob").await.unwrap();
+
+            let pool_ref = super::super::PoolRef::new(PAGE_SIZE, NZUsize!(BUFFER_PAGES));
+            let append = Append::new(blob.clone(), blob_size, BUFFER_PAGES * 115, pool_ref)
+                .await
+                .unwrap();
+
+            // Write data spanning multiple pages
+            let data: Vec<u8> = (0u8..=255).cycle().take(300).collect();
+            append.append(&data).await.unwrap();
+            append.sync().await.unwrap();
+
+            let mut replay = append.replay(NZUsize!(BUFFER_PAGES)).await.unwrap();
+
+            // Seek forward, read, then seek backward
+            replay.seek_to(150).await.unwrap();
+            replay.ensure(50).await.unwrap();
+            assert_eq!(replay.chunk()[0], data[150]);
+
+            // Seek back to start
+            replay.seek_to(0).await.unwrap();
+            replay.ensure(1).await.unwrap();
+            assert_eq!(replay.chunk()[0], data[0]);
+
+            // Seek beyond blob size should error
+            assert!(replay.seek_to(data.len() as u64 + 1).await.is_err());
+
+            // Test that remaining() is correct after seek by reading all data.
+            let seek_offset = 150usize;
+            replay.seek_to(seek_offset as u64).await.unwrap();
+            let expected_remaining = data.len() - seek_offset;
+            // Read all bytes and verify content
+            let mut collected = Vec::new();
+            loop {
+                // Load more data if needed
+                if !replay.ensure(1).await.unwrap() {
+                    break; // No more data available
+                }
+                let chunk = replay.chunk();
+                if chunk.is_empty() {
+                    break;
+                }
+                collected.extend_from_slice(chunk);
+                let len = chunk.len();
+                replay.advance(len);
+            }
+            assert_eq!(
+                collected.len(),
+                expected_remaining,
+                "After seeking to {}, should read {} bytes but got {}",
+                seek_offset,
+                expected_remaining,
+                collected.len()
+            );
+            assert_eq!(collected, &data[seek_offset..]);
         });
     }
 }
