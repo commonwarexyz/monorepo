@@ -56,17 +56,26 @@ impl Namespace {
     }
 }
 
+impl certificate::Namespace for Namespace {
+    fn derive(namespace: &[u8]) -> Self {
+        Self::new(namespace)
+    }
+}
+
 impl<'a, D: Digest> certificate::Subject for Subject<'a, D> {
-    fn namespace_and_message(&self, namespace: &[u8]) -> (Bytes, Bytes) {
+    type Namespace = Namespace;
+
+    fn namespace<'b>(&self, derived: &'b Self::Namespace) -> &'b [u8] {
         match self {
-            Self::Notarize { proposal } => {
-                let ns = notarize_namespace(namespace);
-                (ns.into(), proposal.encode().freeze())
-            }
-            Self::Nullify { round } => {
-                let ns = nullify_namespace(namespace);
-                (ns.into(), round.encode().freeze())
-            }
+            Self::Notarize { .. } => &derived.notarize,
+            Self::Nullify { .. } => &derived.nullify,
+        }
+    }
+
+    fn message(&self) -> Bytes {
+        match self {
+            Self::Notarize { proposal } => proposal.encode(),
+            Self::Nullify { round } => round.encode(),
         }
     }
 }

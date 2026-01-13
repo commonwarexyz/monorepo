@@ -163,7 +163,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
 
     /// Returns true when the local participant controls `signer`.
     pub fn is_signer(&self, signer: u32) -> bool {
-        self.scheme.me().is_some_and(|me| me == signer)
+        self.scheme.me().is_some_and(|me| me == commonware_utils::Participant::new(signer))
     }
 
     /// Removes the leader deadline so timeouts stop firing.
@@ -176,7 +176,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         let key = self
             .scheme
             .participants()
-            .key(leader)
+            .key(commonware_utils::Participant::new(leader))
             .cloned()
             .expect("leader index comes from elector, must be within bounds");
         debug!(round=?self.round, ?leader, ?key, "leader elected");
@@ -291,7 +291,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         let our_payload = self.proposal.proposal().map(|p| &p.payload)?;
         if !self
             .votes
-            .should_nullify_by_contradiction(Some(our_payload), our_signer, m_threshold)
+            .should_nullify_by_contradiction(Some(our_payload), our_signer.get(), m_threshold)
         {
             return None;
         }
@@ -469,6 +469,7 @@ mod tests {
         types::{Epoch, View},
     };
     use commonware_cryptography::{certificate::mocks::Fixture, sha256::Digest as Sha256Digest};
+    use commonware_parallel::Sequential;
     use rand::{rngs::StdRng, SeedableRng};
 
     const NAMESPACE: &[u8] = b"_COMMONWARE_MINIMMIT_TEST";
@@ -481,7 +482,7 @@ mod tests {
             participants,
             verifier,
             ..
-        } = ed25519::fixture(&mut rng, 4);
+        } = ed25519::fixture(&mut rng, NAMESPACE, 4);
         let proposal_a = Proposal::new(
             Rnd::new(Epoch::new(1), View::new(1)),
             View::new(0),
@@ -507,10 +508,10 @@ mod tests {
         let notarization_votes: Vec<_> = schemes
             .iter()
             .skip(1)
-            .map(|scheme| Notarize::sign(NAMESPACE, scheme, proposal_b.clone()).expect("sign"))
+            .map(|scheme| Notarize::sign(scheme, proposal_b.clone()).expect("sign"))
             .collect();
         let certificate =
-            Notarization::from_notarizes(&verifier, notarization_votes.iter()).expect("assemble");
+            Notarization::from_notarizes(&verifier, notarization_votes.iter(), &Sequential).expect("assemble");
         let (accepted, equivocator) = round.add_notarization(certificate.clone());
         assert!(accepted);
         assert!(equivocator.is_some());
@@ -526,7 +527,7 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(42);
         let Fixture {
             schemes, verifier, ..
-        } = ed25519::fixture(&mut rng, 4);
+        } = ed25519::fixture(&mut rng, NAMESPACE, 4);
         let proposal = Proposal::new(
             Rnd::new(Epoch::new(1), View::new(1)),
             View::new(0),
@@ -542,10 +543,10 @@ mod tests {
         // Add matching notarization certificate
         let notarization_votes: Vec<_> = schemes
             .iter()
-            .map(|scheme| Notarize::sign(NAMESPACE, scheme, proposal.clone()).expect("sign"))
+            .map(|scheme| Notarize::sign(scheme, proposal.clone()).expect("sign"))
             .collect();
         let certificate =
-            Notarization::from_notarizes(&verifier, notarization_votes.iter()).expect("assemble");
+            Notarization::from_notarizes(&verifier, notarization_votes.iter(), &Sequential).expect("assemble");
         let (accepted, equivocator) = round.add_notarization(certificate);
         assert!(accepted);
         assert!(equivocator.is_none());
@@ -556,7 +557,7 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(2029);
         let Fixture {
             schemes, verifier, ..
-        } = ed25519::fixture(&mut rng, 4);
+        } = ed25519::fixture(&mut rng, NAMESPACE, 4);
         let local_scheme = schemes[0].clone();
 
         // Setup round and proposal
@@ -566,23 +567,23 @@ mod tests {
         let proposal = Proposal::new(round_id, View::new(0), Sha256Digest::from([40u8; 32]));
 
         // Create notarization
-        let notarize_local = Notarize::sign(NAMESPACE, &local_scheme, proposal.clone()).expect("notarize");
+        let notarize_local = Notarize::sign(&local_scheme, proposal.clone()).expect("notarize");
         let notarize_votes: Vec<_> = schemes
             .iter()
-            .map(|scheme| Notarize::sign(NAMESPACE, scheme, proposal.clone()).expect("sign"))
+            .map(|scheme| Notarize::sign(scheme, proposal.clone()).expect("sign"))
             .collect();
         let notarization =
-            Notarization::from_notarizes(&verifier, notarize_votes.iter()).expect("notarization");
+            Notarization::from_notarizes(&verifier, notarize_votes.iter(), &Sequential).expect("notarization");
 
         // Create nullification
         let nullify_local =
-            Nullify::sign::<Sha256Digest>(NAMESPACE, &local_scheme, round_id).expect("nullify");
+            Nullify::sign::<Sha256Digest>(&local_scheme, round_id).expect("nullify");
         let nullify_votes: Vec<_> = schemes
             .iter()
-            .map(|scheme| Nullify::sign::<Sha256Digest>(NAMESPACE, scheme, round_id).expect("nullify"))
+            .map(|scheme| Nullify::sign::<Sha256Digest>(scheme, round_id).expect("nullify"))
             .collect();
         let nullification =
-            Nullification::from_nullifies(&verifier, &nullify_votes).expect("nullification");
+            Nullification::from_nullifies(&verifier, &nullify_votes, &Sequential).expect("nullification");
 
         // Replay messages and verify broadcast flags
         let mut round = Round::new(local_scheme, round_id, now, 4);
@@ -606,7 +607,7 @@ mod tests {
     #[test]
     fn nullify_by_contradiction_triggers_correctly() {
         let mut rng = StdRng::seed_from_u64(42);
-        let Fixture { schemes, .. } = ed25519::fixture(&mut rng, 6);
+        let Fixture { schemes, .. } = ed25519::fixture(&mut rng, NAMESPACE, 6);
         let local_scheme = schemes[0].clone();
 
         // Setup round and proposal
@@ -627,7 +628,7 @@ mod tests {
         let m_threshold = 3;
 
         // Add our own notarize vote
-        let our_vote = Notarize::sign(NAMESPACE, &local_scheme, proposal_a.clone()).expect("sign");
+        let our_vote = Notarize::sign(&local_scheme, proposal_a.clone()).expect("sign");
         assert!(round.votes_mut().insert_notarize(our_vote));
 
         // Should not trigger yet (only 1 vote)
@@ -637,7 +638,7 @@ mod tests {
 
         // Add conflicting votes from others
         for scheme in schemes.iter().skip(1).take(2) {
-            let vote = Notarize::sign(NAMESPACE, scheme, proposal_b.clone()).expect("sign");
+            let vote = Notarize::sign(scheme, proposal_b.clone()).expect("sign");
             assert!(round.votes_mut().insert_notarize(vote));
         }
 
@@ -648,7 +649,7 @@ mod tests {
             .is_none());
 
         // Add one more conflicting vote
-        let vote = Notarize::sign(NAMESPACE, &schemes[3], proposal_b.clone()).expect("sign");
+        let vote = Notarize::sign(&schemes[3], proposal_b.clone()).expect("sign");
         assert!(round.votes_mut().insert_notarize(vote));
 
         // Now we have 3 conflicting votes, should trigger
@@ -666,7 +667,7 @@ mod tests {
     #[test]
     fn nullify_by_contradiction_requires_prior_notarize() {
         let mut rng = StdRng::seed_from_u64(42);
-        let Fixture { schemes, .. } = ed25519::fixture(&mut rng, 6);
+        let Fixture { schemes, .. } = ed25519::fixture(&mut rng, NAMESPACE, 6);
         let local_scheme = schemes[0].clone();
 
         let now = SystemTime::UNIX_EPOCH;
@@ -683,7 +684,7 @@ mod tests {
         // Add conflicting votes
         let proposal_b = Proposal::new(round_id, View::new(0), Sha256Digest::from([2u8; 32]));
         for scheme in schemes.iter().skip(1).take(3) {
-            let vote = Notarize::sign(NAMESPACE, scheme, proposal_b.clone()).expect("sign");
+            let vote = Notarize::sign(scheme, proposal_b.clone()).expect("sign");
             assert!(round.votes_mut().insert_notarize(vote));
         }
 
@@ -704,7 +705,7 @@ mod tests {
         // This ensures we don't trigger at M-1 external conflicts when we've also
         // sent a timeout nullify.
         let mut rng = StdRng::seed_from_u64(42);
-        let Fixture { schemes, .. } = ed25519::fixture(&mut rng, 6);
+        let Fixture { schemes, .. } = ed25519::fixture(&mut rng, NAMESPACE, 6);
         let local_scheme = schemes[0].clone();
 
         let now = SystemTime::UNIX_EPOCH;
@@ -724,12 +725,12 @@ mod tests {
 
         // Add our own nullify vote (simulating what happens after a timeout)
         let our_nullify =
-            Nullify::sign::<Sha256Digest>(NAMESPACE, &local_scheme, round_id).expect("sign");
+            Nullify::sign::<Sha256Digest>(&local_scheme, round_id).expect("sign");
         assert!(round.votes_mut().insert_nullify(our_nullify));
 
         // Add exactly 2 conflicting notarizes (M-1)
         for scheme in schemes.iter().skip(1).take(2) {
-            let vote = Notarize::sign(NAMESPACE, scheme, proposal_b.clone()).expect("sign");
+            let vote = Notarize::sign(scheme, proposal_b.clone()).expect("sign");
             assert!(round.votes_mut().insert_notarize(vote));
         }
 
@@ -740,7 +741,7 @@ mod tests {
         );
 
         // Add one more conflicting notarize from another replica
-        let vote = Notarize::sign(NAMESPACE, &schemes[3], proposal_b.clone()).expect("sign");
+        let vote = Notarize::sign(&schemes[3], proposal_b.clone()).expect("sign");
         assert!(round.votes_mut().insert_notarize(vote));
 
         // Now should trigger - 3 conflicting votes from OTHER replicas
@@ -754,7 +755,7 @@ mod tests {
     fn nullify_by_contradiction_counts_other_nullifies() {
         // Tests that nullify votes from OTHER replicas are correctly counted as conflicts.
         let mut rng = StdRng::seed_from_u64(42);
-        let Fixture { schemes, .. } = ed25519::fixture(&mut rng, 6);
+        let Fixture { schemes, .. } = ed25519::fixture(&mut rng, NAMESPACE, 6);
         let local_scheme = schemes[0].clone();
 
         let now = SystemTime::UNIX_EPOCH;
@@ -774,7 +775,7 @@ mod tests {
 
         // Add 2 nullify votes from OTHER replicas
         for scheme in schemes.iter().skip(1).take(2) {
-            let vote = Nullify::sign::<Sha256Digest>(NAMESPACE, scheme, round_id).expect("sign");
+            let vote = Nullify::sign::<Sha256Digest>(scheme, round_id).expect("sign");
             assert!(round.votes_mut().insert_nullify(vote));
         }
 
@@ -782,7 +783,7 @@ mod tests {
         assert!(round.construct_nullify_by_contradiction(m_threshold).is_none());
 
         // Add 1 conflicting notarize from another replica
-        let vote = Notarize::sign(NAMESPACE, &schemes[3], proposal_b.clone()).expect("sign");
+        let vote = Notarize::sign(&schemes[3], proposal_b.clone()).expect("sign");
         assert!(round.votes_mut().insert_notarize(vote));
 
         // Now we have 2 nullifies + 1 conflicting notarize = 3 >= M

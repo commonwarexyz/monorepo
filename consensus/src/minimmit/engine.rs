@@ -13,6 +13,7 @@ use crate::{minimmit::scheme::Scheme, Automaton, Relay, Reporter};
 use commonware_cryptography::Digest;
 use commonware_macros::select;
 use commonware_p2p::{Blocker, Receiver, Sender};
+use commonware_parallel::Strategy;
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner, Storage};
 use rand_core::CryptoRngCore;
 use tracing::debug;
@@ -31,13 +32,14 @@ pub struct Engine<
     A: Automaton<Context = Context<D, S::PublicKey>, Digest = D>,
     R: Relay<Digest = D>,
     F: Reporter<Activity = Activity<S, D>>,
+    T: Strategy,
 > {
     context: ContextCell<E>,
 
-    voter: voter::Actor<E, S, L, B, D, A, R, F>,
+    voter: voter::Actor<E, S, L, B, D, A, R, F, T>,
     voter_mailbox: voter::Mailbox<S, D>,
 
-    resolver: resolver::Actor<E, S, B, D>,
+    resolver: resolver::Actor<E, S, B, D, T>,
     resolver_mailbox: resolver::Mailbox<S, D>,
 }
 
@@ -50,10 +52,11 @@ impl<
         A: Automaton<Context = Context<D, S::PublicKey>, Digest = D>,
         R: Relay<Digest = D>,
         F: Reporter<Activity = Activity<S, D>>,
-    > Engine<E, S, L, B, D, A, R, F>
+        T: Strategy,
+    > Engine<E, S, L, B, D, A, R, F, T>
 {
     /// Create a new `minimmit` consensus engine.
-    pub fn new(context: E, cfg: Config<S, L, B, D, A, R, F>) -> Self {
+    pub fn new(context: E, cfg: Config<S, L, B, D, A, R, F, T>) -> Self {
         // Ensure configuration is valid
         cfg.assert();
 
@@ -72,6 +75,7 @@ impl<
                 automaton: cfg.automaton,
                 relay: cfg.relay,
                 reporter: cfg.reporter,
+                strategy: cfg.strategy.clone(),
                 partition: cfg.partition,
                 mailbox_size: cfg.mailbox_size,
                 epoch: cfg.epoch,
@@ -93,6 +97,7 @@ impl<
                 namespace: cfg.namespace,
                 blocker: cfg.blocker,
                 scheme: cfg.scheme,
+                strategy: cfg.strategy,
                 mailbox_size: cfg.mailbox_size,
                 epoch: cfg.epoch,
                 fetch_concurrent: cfg.fetch_concurrent,

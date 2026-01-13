@@ -7,7 +7,7 @@ use crate::{
         scheme,
         types::{
             Activity, Attributable, ConflictingNotarize, Notarization, Notarize, Nullification,
-            Nullify, NullifyNotarize, Subject,
+            Nullify, NullifyNotarize,
         },
     },
     types::{Round, View},
@@ -15,6 +15,7 @@ use crate::{
 };
 use commonware_codec::{Decode, DecodeExt, Encode};
 use commonware_cryptography::{certificate::Scheme, Digest};
+use commonware_parallel::{Sequential, Strategy};
 use commonware_utils::ordered::{Quorum, Set};
 use futures::channel::mpsc::{Receiver, Sender};
 use rand_core::CryptoRngCore;
@@ -30,20 +31,22 @@ type Faults<S, D> = HashMap<<S as Scheme>::PublicKey, HashMap<View, HashSet<Acti
 
 /// Reporter configuration used in tests.
 #[derive(Clone, Debug)]
-pub struct Config<S: Scheme, L: ElectorConfig<S>> {
+pub struct Config<S: Scheme, L: ElectorConfig<S>, T: Strategy = Sequential> {
     pub namespace: Vec<u8>,
     pub participants: Set<S::PublicKey>,
     pub scheme: S,
     pub elector: L,
+    pub strategy: T,
 }
 
 #[derive(Clone)]
-pub struct Reporter<E: CryptoRngCore, S: Scheme, L: ElectorConfig<S>, D: Digest> {
+pub struct Reporter<E: CryptoRngCore, S: Scheme, L: ElectorConfig<S>, D: Digest, T: Strategy = Sequential> {
     context: E,
     namespace: Vec<u8>,
     pub participants: Set<S::PublicKey>,
     scheme: S,
     elector: L::Elector,
+    strategy: T,
 
     pub leaders: Arc<Mutex<HashMap<View, S::PublicKey>>>,
     pub notarizes: Arc<Mutex<Participation<S::PublicKey, D>>>,
@@ -58,14 +61,15 @@ pub struct Reporter<E: CryptoRngCore, S: Scheme, L: ElectorConfig<S>, D: Digest>
     subscribers: Arc<Mutex<Vec<Sender<View>>>>,
 }
 
-impl<E, S, L, D> Reporter<E, S, L, D>
+impl<E, S, L, D, T> Reporter<E, S, L, D, T>
 where
     E: CryptoRngCore,
     S: Scheme,
     L: ElectorConfig<S>,
     D: Digest + Eq + Hash + Clone,
+    T: Strategy,
 {
-    pub fn new(context: E, cfg: Config<S, L>) -> Self {
+    pub fn new(context: E, cfg: Config<S, L, T>) -> Self {
         // Build elector with participants
         let elector = cfg.elector.build(&cfg.participants);
 
@@ -75,6 +79,7 @@ where
             participants: cfg.participants,
             scheme: cfg.scheme,
             elector,
+            strategy: cfg.strategy,
             leaders: Arc::new(Mutex::new(HashMap::new())),
             notarizes: Arc::new(Mutex::new(HashMap::new())),
             notarizations: Arc::new(Mutex::new(HashMap::new())),
@@ -94,19 +99,20 @@ where
         leaders.entry(next_round.view()).or_insert_with(|| {
             let leader = self.elector.elect(next_round, Some(certificate));
             self.participants
-                .key(leader)
+                .key(commonware_utils::Participant::new(leader))
                 .cloned()
                 .expect("leader not found in participants")
         });
     }
 }
 
-impl<E, S, L, D> crate::Reporter for Reporter<E, S, L, D>
+impl<E, S, L, D, T> crate::Reporter for Reporter<E, S, L, D, T>
 where
     E: Clone + CryptoRngCore + Send + Sync + 'static,
     S: scheme::Scheme<D>,
     L: ElectorConfig<S>,
     D: Digest + Eq + Hash + Clone,
+    T: Strategy,
 {
     type Activity = Activity<S, D>;
 
@@ -117,7 +123,7 @@ where
         let verified = activity.verified();
         match &activity {
             Activity::Notarize(notarize) => {
-                if !notarize.verify(&self.namespace, &self.scheme) {
+                if !notarize.verify(&mut self.context, &self.scheme, &self.strategy) {
                     assert!(!verified);
                     *self.invalid.lock().expect("invalid lock poisoned") += 1;
                     return;
@@ -137,15 +143,8 @@ where
             Activity::Notarization(notarization) => {
                 // Verify notarization
                 let view = notarization.view();
-                if !self.scheme.verify_certificate::<_, D>(
-                    &mut self.context,
-                    &self.namespace,
-                    Subject::Notarize {
-                        proposal: &notarization.proposal,
-                    },
-                    &notarization.certificate,
-                ) {
-                    assert!(verified);
+                if !notarization.verify(&mut self.context, &self.scheme, &self.strategy) {
+                    assert!(!verified);
                     *self.invalid.lock().expect("invalid lock poisoned") += 1;
                     return;
                 }
@@ -171,7 +170,7 @@ where
                 }
             }
             Activity::Nullify(nullify) => {
-                if !nullify.verify::<D>(&self.namespace, &self.scheme) {
+                if !nullify.verify::<_, D>(&mut self.context, &self.scheme, &self.strategy) {
                     assert!(!verified);
                     *self.invalid.lock().expect("invalid lock poisoned") += 1;
                     return;
@@ -189,15 +188,8 @@ where
             Activity::Nullification(nullification) => {
                 // Verify nullification
                 let view = nullification.view();
-                if !self.scheme.verify_certificate::<_, D>(
-                    &mut self.context,
-                    &self.namespace,
-                    Subject::Nullify {
-                        round: nullification.round,
-                    },
-                    &nullification.certificate,
-                ) {
-                    assert!(verified);
+                if !nullification.verify::<_, D>(&mut self.context, &self.scheme, &self.strategy) {
+                    assert!(!verified);
                     *self.invalid.lock().expect("invalid lock poisoned") += 1;
                     return;
                 }
@@ -212,7 +204,7 @@ where
             }
             Activity::ConflictingNotarize(conflicting) => {
                 let view = conflicting.view();
-                if !conflicting.verify(&self.namespace, &self.scheme) {
+                if !conflicting.verify(&mut self.context, &self.scheme, &self.strategy) {
                     assert!(!verified);
                     *self.invalid.lock().expect("invalid lock poisoned") += 1;
                     return;
@@ -232,7 +224,7 @@ where
             }
             Activity::NullifyNotarize(conflicting) => {
                 let view = conflicting.view();
-                if !conflicting.verify(&self.namespace, &self.scheme) {
+                if !conflicting.verify(&mut self.context, &self.scheme, &self.strategy) {
                     assert!(!verified);
                     *self.invalid.lock().expect("invalid lock poisoned") += 1;
                     return;
@@ -253,12 +245,13 @@ where
     }
 }
 
-impl<E, S, L, D> Monitor for Reporter<E, S, L, D>
+impl<E, S, L, D, T> Monitor for Reporter<E, S, L, D, T>
 where
     E: Clone + CryptoRngCore + Send + Sync + 'static,
     S: Scheme,
     L: ElectorConfig<S>,
     D: Digest + Eq + Hash + Clone,
+    T: Strategy,
 {
     type Index = View;
 

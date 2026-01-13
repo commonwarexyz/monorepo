@@ -11,6 +11,7 @@ use commonware_cryptography::{
     certificate::{Attestation, Scheme},
     Digest, PublicKey,
 };
+use commonware_parallel::Strategy;
 use rand_core::CryptoRngCore;
 use std::{collections::HashMap, fmt::Debug, hash::Hash};
 
@@ -717,16 +718,13 @@ pub struct Notarize<S: Scheme, D: Digest> {
 
 impl<S: Scheme, D: Digest> Notarize<S, D> {
     /// Signs a notarize vote for the provided proposal.
-    pub fn sign(namespace: &[u8], scheme: &S, proposal: Proposal<D>) -> Option<Self>
+    pub fn sign(scheme: &S, proposal: Proposal<D>) -> Option<Self>
     where
         S: scheme::Scheme<D>,
     {
-        let attestation = scheme.sign::<D>(
-            namespace,
-            Subject::Notarize {
-                proposal: &proposal,
-            },
-        )?;
+        let attestation = scheme.sign::<D>(Subject::Notarize {
+            proposal: &proposal,
+        })?;
 
         Some(Self {
             proposal,
@@ -737,16 +735,18 @@ impl<S: Scheme, D: Digest> Notarize<S, D> {
     /// Verifies the notarize vote against the provided signing scheme.
     ///
     /// This ensures that the notarize signature is valid for the claimed proposal.
-    pub fn verify(&self, namespace: &[u8], scheme: &S) -> bool
+    pub fn verify<R>(&self, rng: &mut R, scheme: &S, strategy: &impl Strategy) -> bool
     where
+        R: CryptoRngCore,
         S: scheme::Scheme<D>,
     {
-        scheme.verify_attestation::<D>(
-            namespace,
+        scheme.verify_attestation::<_, D>(
+            rng,
             Subject::Notarize {
                 proposal: &self.proposal,
             },
             &self.attestation,
+            strategy,
         )
     }
 
@@ -800,7 +800,7 @@ impl<S: Scheme, D: Digest> Read for Notarize<S, D> {
 
 impl<S: Scheme, D: Digest> Attributable for Notarize<S, D> {
     fn signer(&self) -> u32 {
-        self.attestation.signer
+        self.attestation.signer.get()
     }
 }
 
@@ -855,10 +855,11 @@ impl<S: Scheme, D: Digest> Notarization<S, D> {
         scheme: &S,
         proposal: Proposal<D>,
         notarizes: impl IntoIterator<Item = &'a Notarize<S, D>>,
+        strategy: &impl commonware_parallel::Strategy,
     ) -> Option<Self> {
         // Filter to only include votes for the specified proposal
         let certificate =
-            scheme.assemble(notarizes.into_iter().filter(|n| n.proposal == proposal).map(|n| n.attestation.clone()))?;
+            scheme.assemble(notarizes.into_iter().filter(|n| n.proposal == proposal).map(|n| n.attestation.clone()), strategy)?;
 
         Some(Self {
             proposal,
@@ -873,26 +874,32 @@ impl<S: Scheme, D: Digest> Notarization<S, D> {
     pub fn from_notarizes<'a>(
         scheme: &S,
         notarizes: impl IntoIterator<Item = &'a Notarize<S, D>>,
+        strategy: &impl commonware_parallel::Strategy,
     ) -> Option<Self> {
         let mut iter = notarizes.into_iter().peekable();
         let proposal = iter.peek()?.proposal.clone();
-        Self::from_notarizes_for_proposal(scheme, proposal, iter)
+        Self::from_notarizes_for_proposal(scheme, proposal, iter, strategy)
     }
 
     /// Verifies the notarization certificate against the provided signing scheme.
     ///
     /// This ensures that the certificate is valid for the claimed proposal.
-    pub fn verify<R: CryptoRngCore>(&self, rng: &mut R, namespace: &[u8], scheme: &S) -> bool
+    pub fn verify<R: CryptoRngCore>(
+        &self,
+        rng: &mut R,
+        scheme: &S,
+        strategy: &impl Strategy,
+    ) -> bool
     where
         S: scheme::Scheme<D>,
     {
         scheme.verify_certificate::<_, D>(
             rng,
-            namespace,
             Subject::Notarize {
                 proposal: &self.proposal,
             },
             &self.certificate,
+            strategy,
         )
     }
 
@@ -1000,11 +1007,11 @@ impl<S: Scheme> Hash for Nullify<S> {
 
 impl<S: Scheme> Nullify<S> {
     /// Signs a nullify vote for the given round.
-    pub fn sign<D: Digest>(namespace: &[u8], scheme: &S, round: Round) -> Option<Self>
+    pub fn sign<D: Digest>(scheme: &S, round: Round) -> Option<Self>
     where
         S: scheme::Scheme<D>,
     {
-        let attestation = scheme.sign::<D>(namespace, Subject::Nullify { round })?;
+        let attestation = scheme.sign::<D>(Subject::Nullify { round })?;
 
         Some(Self { round, attestation })
     }
@@ -1012,14 +1019,16 @@ impl<S: Scheme> Nullify<S> {
     /// Verifies the nullify vote against the provided signing scheme.
     ///
     /// This ensures that the nullify signature is valid for the given round.
-    pub fn verify<D: Digest>(&self, namespace: &[u8], scheme: &S) -> bool
+    pub fn verify<R, D: Digest>(&self, rng: &mut R, scheme: &S, strategy: &impl Strategy) -> bool
     where
+        R: CryptoRngCore,
         S: scheme::Scheme<D>,
     {
-        scheme.verify_attestation::<D>(
-            namespace,
+        scheme.verify_attestation::<_, D>(
+            rng,
             Subject::Nullify { round: self.round },
             &self.attestation,
+            strategy,
         )
     }
 
@@ -1055,7 +1064,7 @@ impl<S: Scheme> Read for Nullify<S> {
 
 impl<S: Scheme> Attributable for Nullify<S> {
     fn signer(&self) -> u32 {
-        self.attestation.signer
+        self.attestation.signer.get()
     }
 }
 
@@ -1098,10 +1107,11 @@ impl<S: Scheme> Nullification<S> {
     pub fn from_nullifies<'a>(
         scheme: &S,
         nullifies: impl IntoIterator<Item = &'a Nullify<S>>,
+        strategy: &impl commonware_parallel::Strategy,
     ) -> Option<Self> {
         let mut iter = nullifies.into_iter().peekable();
         let round = iter.peek()?.round;
-        let certificate = scheme.assemble(iter.map(|n| n.attestation.clone()))?;
+        let certificate = scheme.assemble(iter.map(|n| n.attestation.clone()), strategy)?;
 
         Some(Self { round, certificate })
     }
@@ -1112,17 +1122,17 @@ impl<S: Scheme> Nullification<S> {
     pub fn verify<R: CryptoRngCore, D: Digest>(
         &self,
         rng: &mut R,
-        namespace: &[u8],
         scheme: &S,
+        strategy: &impl Strategy,
     ) -> bool
     where
         S: scheme::Scheme<D>,
     {
         scheme.verify_certificate::<_, D>(
             rng,
-            namespace,
             Subject::Nullify { round: self.round },
             &self.certificate,
+            strategy,
         )
     }
 
@@ -1366,21 +1376,24 @@ impl<S: Scheme, D: Digest> Read for NullifyNotarize<S, D> {
 
 impl<S: Scheme, D: Digest> ConflictingNotarize<S, D> {
     /// Verifies both notarize votes.
-    pub fn verify(&self, namespace: &[u8], scheme: &S) -> bool
+    pub fn verify<R>(&self, rng: &mut R, scheme: &S, strategy: &impl Strategy) -> bool
     where
+        R: CryptoRngCore,
         S: scheme::Scheme<D>,
     {
-        self.first.verify(namespace, scheme) && self.second.verify(namespace, scheme)
+        self.first.verify(rng, scheme, strategy) && self.second.verify(rng, scheme, strategy)
     }
 }
 
 impl<S: Scheme, D: Digest> NullifyNotarize<S, D> {
     /// Verifies both the notarize and nullify votes.
-    pub fn verify(&self, namespace: &[u8], scheme: &S) -> bool
+    pub fn verify<R>(&self, rng: &mut R, scheme: &S, strategy: &impl Strategy) -> bool
     where
+        R: CryptoRngCore,
         S: scheme::Scheme<D>,
     {
-        self.notarize.verify(namespace, scheme) && self.nullify.verify::<D>(namespace, scheme)
+        self.notarize.verify(rng, scheme, strategy)
+            && self.nullify.verify::<_, D>(rng, scheme, strategy)
     }
 }
 
@@ -1406,17 +1419,22 @@ impl<S: Scheme, D: Digest> Activity<S, D> {
     /// This method **always** performs verification regardless of whether the activity has been
     /// previously verified. Callers can use [`Activity::verified`] to check if verification is
     /// necessary before calling this method.
-    pub fn verify<R: CryptoRngCore>(&self, rng: &mut R, namespace: &[u8], scheme: &S) -> bool
+    pub fn verify<R: CryptoRngCore>(
+        &self,
+        rng: &mut R,
+        scheme: &S,
+        strategy: &impl Strategy,
+    ) -> bool
     where
         S: scheme::Scheme<D>,
     {
         match self {
-            Self::Notarize(n) => n.verify(namespace, scheme),
-            Self::Notarization(n) => n.verify(rng, namespace, scheme),
-            Self::Nullify(n) => n.verify::<D>(namespace, scheme),
-            Self::Nullification(n) => n.verify::<_, D>(rng, namespace, scheme),
-            Self::ConflictingNotarize(c) => c.verify(namespace, scheme),
-            Self::NullifyNotarize(c) => c.verify(namespace, scheme),
+            Self::Notarize(n) => n.verify(rng, scheme, strategy),
+            Self::Notarization(n) => n.verify(rng, scheme, strategy),
+            Self::Nullify(n) => n.verify::<_, D>(rng, scheme, strategy),
+            Self::Nullification(n) => n.verify::<_, D>(rng, scheme, strategy),
+            Self::ConflictingNotarize(c) => c.verify(rng, scheme, strategy),
+            Self::NullifyNotarize(c) => c.verify(rng, scheme, strategy),
         }
     }
 }

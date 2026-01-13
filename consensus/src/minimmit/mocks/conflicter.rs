@@ -66,15 +66,13 @@ where
                     let payload = H::Digest::random(&mut self.context);
                     let proposal =
                         Proposal::new(notarize.round(), notarize.proposal.parent, payload);
-                    let n = Notarize::<S, _>::sign(&self.namespace, &self.scheme, proposal).unwrap();
-                    let msg = Vote::Notarize(n).encode().into();
+                    let n = Notarize::<S, _>::sign(&self.scheme, proposal).unwrap();
+                    let msg = Vote::Notarize(n).encode();
                     sender.send(Recipients::All, msg, true).await.unwrap();
 
                     // Notarize received digest
-                    let n =
-                        Notarize::<S, _>::sign(&self.namespace, &self.scheme, notarize.proposal)
-                            .unwrap();
-                    let msg = Vote::Notarize(n).encode().into();
+                    let n = Notarize::<S, _>::sign(&self.scheme, notarize.proposal).unwrap();
+                    let msg = Vote::Notarize(n).encode();
                     sender.send(Recipients::All, msg, true).await.unwrap();
                 }
                 Vote::Nullify(_) => continue,

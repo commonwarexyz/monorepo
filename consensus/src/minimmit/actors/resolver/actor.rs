@@ -18,6 +18,7 @@ use commonware_codec::{Decode, Encode};
 use commonware_cryptography::Digest;
 use commonware_macros::select_loop;
 use commonware_p2p::{utils::StaticManager, Blocker, Receiver, Sender};
+use commonware_parallel::Strategy;
 use commonware_resolver::p2p;
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner};
 use commonware_utils::{ordered::Quorum, sequence::U64};
@@ -30,6 +31,7 @@ use tracing::debug;
 pub struct Config<
     S: commonware_cryptography::certificate::Scheme,
     B: Blocker<PublicKey = S::PublicKey>,
+    T: Strategy,
 > {
     /// Namespace for domain separation in signatures.
     pub namespace: Vec<u8>,
@@ -37,6 +39,8 @@ pub struct Config<
     pub scheme: S,
     /// Network blocker.
     pub blocker: B,
+    /// Verification strategy.
+    pub strategy: T,
     /// Current epoch.
     pub epoch: Epoch,
     /// Mailbox size.
@@ -55,11 +59,13 @@ pub struct Actor<
     S: Scheme<D>,
     B: Blocker<PublicKey = S::PublicKey>,
     D: Digest,
+    T: Strategy,
 > {
     context: ContextCell<E>,
     namespace: Vec<u8>,
     scheme: S,
     blocker: Option<B>,
+    strategy: T,
 
     epoch: Epoch,
     mailbox_size: usize,
@@ -75,10 +81,11 @@ impl<
         S: Scheme<D>,
         B: Blocker<PublicKey = S::PublicKey>,
         D: Digest,
-    > Actor<E, S, B, D>
+        T: Strategy,
+    > Actor<E, S, B, D, T>
 {
     /// Creates a new resolver actor and returns the actor and its mailbox.
-    pub fn new(context: E, cfg: Config<S, B>) -> (Self, Mailbox<S, D>) {
+    pub fn new(context: E, cfg: Config<S, B, T>) -> (Self, Mailbox<S, D>) {
         let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
         (
             Self {
@@ -86,6 +93,7 @@ impl<
                 namespace: cfg.namespace,
                 scheme: cfg.scheme,
                 blocker: Some(cfg.blocker),
+                strategy: cfg.strategy,
 
                 epoch: cfg.epoch,
                 mailbox_size: cfg.mailbox_size,
@@ -194,7 +202,7 @@ impl<
                     );
                     return None;
                 }
-                if !notarization.verify(&mut self.context, &self.namespace, &self.scheme) {
+                if !notarization.verify(&mut self.context, &self.scheme, &self.strategy) {
                     debug!(%view, "notarization failed verification");
                     return None;
                 }
@@ -214,7 +222,7 @@ impl<
                     );
                     return None;
                 }
-                if !nullification.verify::<_, D>(&mut self.context, &self.namespace, &self.scheme) {
+                if !nullification.verify::<_, D>(&mut self.context, &self.scheme, &self.strategy) {
                     debug!(%view, "nullification failed verification");
                     return None;
                 }

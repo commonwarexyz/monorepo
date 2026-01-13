@@ -8,7 +8,7 @@
 //! This scheme produces compact aggregate signatures, reducing certificate size compared to
 //! schemes that store individual signatures.
 
-use crate::minimmit::types::Subject;
+use crate::minimmit::{scheme::Namespace, types::Subject};
 use commonware_cryptography::impl_certificate_bls12381_multisig;
 
-impl_certificate_bls12381_multisig!(Subject<'a, D>);
+impl_certificate_bls12381_multisig!(Subject<'a, D>, Namespace);

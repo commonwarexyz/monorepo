@@ -206,9 +206,15 @@ dependencies = [
 
 [[package]]
 name = "aws-lc-rs"
+<<<<<<< HEAD
 version = "1.15.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e84ce723ab67259cfeb9877c6a639ee9eb7a27b28123abd71db7f0d5d0cc9d86"
+=======
+version = "1.15.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6a88aab2464f1f25453baa7a07c84c5b7684e274054ba06817f382357f77a288"
+>>>>>>> 1651ced79 (Fix merge conflicts. tests pass.)
 dependencies = [
  "aws-lc-sys",
  "untrusted 0.7.1",
@@ -217,9 +223,15 @@ dependencies = [
 
 [[package]]
 name = "aws-lc-sys"
+<<<<<<< HEAD
 version = "0.36.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "43a442ece363113bd4bd4c8b18977a7798dd4d3c3383f34fb61936960e8f4ad8"
+=======
+version = "0.35.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b45afffdee1e7c9126814751f88dddc747f41d91da16c9551a0f1e8a11e788a1"
+>>>>>>> 1651ced79 (Fix merge conflicts. tests pass.)
 dependencies = [
  "cc",
  "cmake",
@@ -1267,7 +1279,11 @@ dependencies = [
  "crc-fast",
  "criterion",
  "ctutils",
+<<<<<<< HEAD
  "ecdsa 0.16.9",
+=======
+ "ecdsa",
+>>>>>>> 1651ced79 (Fix merge conflicts. tests pass.)
  "ed25519-consensus",
  "getrandom 0.2.16",
  "num-rational",
@@ -1473,7 +1489,11 @@ dependencies = [
 
 [[package]]
 name = "commonware-parallel"
+<<<<<<< HEAD
 version = "0.0.65"
+=======
+version = "0.0.64"
+>>>>>>> 1651ced79 (Fix merge conflicts. tests pass.)
 dependencies = [
  "cfg-if",
  "proptest",
@@ -4551,6 +4571,7 @@ checksum = "da046153aa2352493d6cb7da4b6e5c0c057d8a1d0a9aa8560baffdd945acd414"
 dependencies = [
  "ring",
  "untrusted 0.9.0",
+<<<<<<< HEAD
 ]
 
 [[package]]
@@ -4565,6 +4586,8 @@ dependencies = [
  "pkcs8 0.9.0",
  "subtle",
  "zeroize",
+=======
+>>>>>>> 1651ced79 (Fix merge conflicts. tests pass.)
 ]
 
 [[package]]

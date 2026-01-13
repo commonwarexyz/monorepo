@@ -8,6 +8,7 @@ use crate::{
 };
 use commonware_cryptography::{certificate::Scheme, Digest};
 use commonware_p2p::Blocker;
+use commonware_parallel::Strategy;
 use commonware_runtime::buffer::PoolRef;
 use std::{num::NonZeroUsize, time::Duration};
 
@@ -23,6 +24,7 @@ pub struct Config<
     A: Automaton<Context = Context<D, S::PublicKey>, Digest = D>,
     R: Relay,
     F: Reporter<Activity = Activity<S, D>>,
+    T: Strategy,
 > {
     /// Namespace for domain separation in signatures.
     ///
@@ -67,6 +69,9 @@ pub struct Config<
     ///
     /// All activity is exported for downstream applications that benefit from total observability.
     pub reporter: F,
+
+    /// Verification strategy.
+    pub strategy: T,
 
     /// Partition for the consensus engine.
     pub partition: String,
@@ -123,7 +128,8 @@ impl<
         A: Automaton<Context = Context<D, S::PublicKey>, Digest = D>,
         R: Relay,
         F: Reporter<Activity = Activity<S, D>>,
-    > Config<S, L, B, D, A, R, F>
+        T: Strategy,
+    > Config<S, L, B, D, A, R, F, T>
 {
     /// Assert enforces that all configuration values are valid.
     ///

@@ -108,7 +108,6 @@
 //! `minimmit` supports the same signing schemes as `simplex`:
 //!
 //! * [`scheme::ed25519`]: Attributable, no trusted setup
-//! * `secp256r1`: Attributable, HSM support, no trusted setup (not yet implemented)
 //! * [`scheme::bls12381_multisig`]: Attributable, compact certificates
 //! * [`scheme::bls12381_threshold`]: Non-attributable, constant-size certificates, requires DKG
 //!
@@ -228,6 +227,7 @@ mod integration_tests {
     };
     use commonware_macros::test_traced;
     use commonware_p2p::simulated::{Config, Link, Network, Oracle, Receiver, Sender};
+    use commonware_parallel::Sequential;
     use commonware_runtime::{
         buffer::PoolRef, deterministic, Metrics, Quota, Runner as _, Spawner,
     };
@@ -235,14 +235,14 @@ mod integration_tests {
     use futures::{future::join_all, StreamExt};
     use std::{
         collections::HashMap,
-        num::{NonZeroU32, NonZeroUsize},
+        num::{NonZeroU16, NonZeroU32, NonZeroUsize},
         sync::Arc,
         time::Duration,
     };
     use tracing::warn;
 
     const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
-    const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
+    const PAGE_CACHE_SIZE: NonZeroU16 = unsafe { NonZeroU16::new_unchecked(10) };
     const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
 
     /// Register a validator with the oracle for three network channels.
@@ -416,6 +416,7 @@ mod integration_tests {
                     participants: participants.clone().try_into().unwrap(),
                     scheme: schemes[idx].clone(),
                     elector: elector.clone(),
+                    strategy: Sequential,
                 };
                 let reporter =
                     mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
@@ -441,6 +442,7 @@ mod integration_tests {
                     automaton: application.clone(),
                     relay: application.clone(),
                     reporter: reporter.clone(),
+                    strategy: Sequential,
                     partition: validator.to_string(),
                     mailbox_size: 1024,
                     epoch: Epoch::new(333),
@@ -452,7 +454,7 @@ mod integration_tests {
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                    buffer_pool: PoolRef::new(PAGE_CACHE_SIZE, PAGE_SIZE),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -540,14 +542,14 @@ mod integration_tests {
 
     #[test_traced]
     fn test_all_online_ed25519() {
-        all_online::<_, _, RoundRobin>(scheme::ed25519::fixture);
+        all_online::<_, _, RoundRobin>(|ctx, n| scheme::ed25519::fixture(ctx, b"minimmit_consensus", n));
     }
 
     #[test_traced]
     fn test_all_online_bls12381_multisig() {
         use commonware_cryptography::bls12381::primitives::variant::{MinPk, MinSig};
-        all_online::<_, _, RoundRobin>(scheme::bls12381_multisig::fixture::<MinPk, _>);
-        all_online::<_, _, RoundRobin>(scheme::bls12381_multisig::fixture::<MinSig, _>);
+        all_online::<_, _, RoundRobin>(|ctx, n| scheme::bls12381_multisig::fixture::<MinPk, _>(ctx, b"minimmit_consensus", n));
+        all_online::<_, _, RoundRobin>(|ctx, n| scheme::bls12381_multisig::fixture::<MinSig, _>(ctx, b"minimmit_consensus", n));
     }
 
     // Note: These tests are expected to fail/timeout until the minimmit engine
@@ -626,6 +628,7 @@ mod integration_tests {
                     participants: participants.clone().try_into().unwrap(),
                     scheme: schemes[idx].clone(),
                     elector: elector.clone(),
+                    strategy: Sequential,
                 };
                 let reporter =
                     mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
@@ -651,6 +654,7 @@ mod integration_tests {
                     automaton: application.clone(),
                     relay: application.clone(),
                     reporter: reporter.clone(),
+                    strategy: Sequential,
                     partition: validator.to_string(),
                     mailbox_size: 1024,
                     epoch: Epoch::new(333),
@@ -662,7 +666,7 @@ mod integration_tests {
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                    buffer_pool: PoolRef::new(PAGE_CACHE_SIZE, PAGE_SIZE),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -804,14 +808,14 @@ mod integration_tests {
 
     #[test_traced]
     fn test_one_offline_ed25519() {
-        one_offline::<_, _, RoundRobin>(scheme::ed25519::fixture);
+        one_offline::<_, _, RoundRobin>(|ctx, n| scheme::ed25519::fixture(ctx, b"minimmit_consensus", n));
     }
 
     #[test_traced]
     fn test_one_offline_bls12381_multisig() {
         use commonware_cryptography::bls12381::primitives::variant::{MinPk, MinSig};
-        one_offline::<_, _, RoundRobin>(scheme::bls12381_multisig::fixture::<MinPk, _>);
-        one_offline::<_, _, RoundRobin>(scheme::bls12381_multisig::fixture::<MinSig, _>);
+        one_offline::<_, _, RoundRobin>(|ctx, n| scheme::bls12381_multisig::fixture::<MinPk, _>(ctx, b"minimmit_consensus", n));
+        one_offline::<_, _, RoundRobin>(|ctx, n| scheme::bls12381_multisig::fixture::<MinSig, _>(ctx, b"minimmit_consensus", n));
     }
 
     fn slow_validator<S, F, L>(mut fixture: F)
@@ -873,6 +877,7 @@ mod integration_tests {
                     participants: participants.clone().try_into().unwrap(),
                     scheme: schemes[idx].clone(),
                     elector: elector.clone(),
+                    strategy: Sequential,
                 };
                 let reporter =
                     mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
@@ -910,6 +915,7 @@ mod integration_tests {
                     automaton: application.clone(),
                     relay: application.clone(),
                     reporter: reporter.clone(),
+                    strategy: Sequential,
                     partition: validator.to_string(),
                     mailbox_size: 1024,
                     epoch: Epoch::new(333),
@@ -921,7 +927,7 @@ mod integration_tests {
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                    buffer_pool: PoolRef::new(PAGE_CACHE_SIZE, PAGE_SIZE),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -983,14 +989,14 @@ mod integration_tests {
 
     #[test_traced]
     fn test_slow_validator_ed25519() {
-        slow_validator::<_, _, RoundRobin>(scheme::ed25519::fixture);
+        slow_validator::<_, _, RoundRobin>(|ctx, n| scheme::ed25519::fixture(ctx, b"minimmit_consensus", n));
     }
 
     #[test_traced]
     fn test_slow_validator_bls12381_multisig() {
         use commonware_cryptography::bls12381::primitives::variant::{MinPk, MinSig};
-        slow_validator::<_, _, RoundRobin>(scheme::bls12381_multisig::fixture::<MinPk, _>);
-        slow_validator::<_, _, RoundRobin>(scheme::bls12381_multisig::fixture::<MinSig, _>);
+        slow_validator::<_, _, RoundRobin>(|ctx, n| scheme::bls12381_multisig::fixture::<MinPk, _>(ctx, b"minimmit_consensus", n));
+        slow_validator::<_, _, RoundRobin>(|ctx, n| scheme::bls12381_multisig::fixture::<MinSig, _>(ctx, b"minimmit_consensus", n));
     }
 
     fn slow_and_lossy_links<S, F, L>(seed: u64, mut fixture: F) -> String
@@ -1061,6 +1067,7 @@ mod integration_tests {
                     participants: participants.clone().try_into().unwrap(),
                     scheme: schemes[idx].clone(),
                     elector: elector.clone(),
+                    strategy: Sequential,
                 };
                 let reporter =
                     mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
@@ -1086,6 +1093,7 @@ mod integration_tests {
                     automaton: application.clone(),
                     relay: application.clone(),
                     reporter: reporter.clone(),
+                    strategy: Sequential,
                     partition: validator.to_string(),
                     mailbox_size: 1024,
                     epoch: Epoch::new(333),
@@ -1097,7 +1105,7 @@ mod integration_tests {
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                    buffer_pool: PoolRef::new(PAGE_CACHE_SIZE, PAGE_SIZE),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -1145,14 +1153,17 @@ mod integration_tests {
 
     #[test_traced]
     fn test_slow_and_lossy_links_ed25519() {
-        slow_and_lossy_links::<_, _, RoundRobin>(0, scheme::ed25519::fixture);
+        slow_and_lossy_links::<_, _, RoundRobin>(0, |ctx, n| scheme::ed25519::fixture(ctx, b"minimmit_consensus", n));
     }
 
     #[test_traced]
     fn test_slow_and_lossy_links_bls12381_multisig() {
         use commonware_cryptography::bls12381::primitives::variant::{MinPk, MinSig};
-        slow_and_lossy_links::<_, _, RoundRobin>(0, scheme::bls12381_multisig::fixture::<MinPk, _>);
-        slow_and_lossy_links::<_, _, RoundRobin>(0, scheme::bls12381_multisig::fixture::<MinSig, _>);
+        slow_and_lossy_links::<_, _, RoundRobin>(0, |ctx, n| scheme::bls12381_multisig::fixture::<MinPk, _>(ctx, b"minimmit_consensus", n));
+        slow_and_lossy_links::<_, _, RoundRobin>(
+            0,
+            |ctx, n| scheme::bls12381_multisig::fixture::<MinSig, _>(ctx, b"minimmit_consensus", n),
+        );
     }
 
     fn conflicter<S, F, L>(seed: u64, mut fixture: F)
@@ -1217,6 +1228,7 @@ mod integration_tests {
                     participants: participants.clone().try_into().unwrap(),
                     scheme: schemes[idx].clone(),
                     elector: elector.clone(),
+                    strategy: Sequential,
                 };
                 let reporter =
                     mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
@@ -1259,6 +1271,7 @@ mod integration_tests {
                         automaton: application.clone(),
                         relay: application.clone(),
                         reporter: reporter.clone(),
+                        strategy: Sequential,
                         partition: validator.to_string(),
                         mailbox_size: 1024,
                         epoch: Epoch::new(333),
@@ -1270,7 +1283,7 @@ mod integration_tests {
                         fetch_concurrent: 4,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
-                        buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                        buffer_pool: PoolRef::new(PAGE_CACHE_SIZE, PAGE_SIZE),
                     };
                     let engine = Engine::new(context.with_label("engine"), cfg);
                     engine.start(vote, certificate, resolver);
@@ -1331,7 +1344,7 @@ mod integration_tests {
     #[test_traced]
     fn test_conflicter_ed25519() {
         for seed in 0..5 {
-            conflicter::<_, _, RoundRobin>(seed, scheme::ed25519::fixture);
+            conflicter::<_, _, RoundRobin>(seed, |ctx, n| scheme::ed25519::fixture(ctx, b"minimmit_consensus", n));
         }
     }
 
@@ -1339,8 +1352,8 @@ mod integration_tests {
     fn test_conflicter_bls12381_multisig() {
         use commonware_cryptography::bls12381::primitives::variant::{MinPk, MinSig};
         for seed in 0..5 {
-            conflicter::<_, _, RoundRobin>(seed, scheme::bls12381_multisig::fixture::<MinPk, _>);
-            conflicter::<_, _, RoundRobin>(seed, scheme::bls12381_multisig::fixture::<MinSig, _>);
+            conflicter::<_, _, RoundRobin>(seed, |ctx, n| scheme::bls12381_multisig::fixture::<MinPk, _>(ctx, b"minimmit_consensus", n));
+            conflicter::<_, _, RoundRobin>(seed, |ctx, n| scheme::bls12381_multisig::fixture::<MinSig, _>(ctx, b"minimmit_consensus", n));
         }
     }
 
@@ -1351,38 +1364,46 @@ mod integration_tests {
         for seed in 1..6 {
             let ms_pk_state_1 = slow_and_lossy_links::<_, _, RoundRobin>(
                 seed,
-                scheme::bls12381_multisig::fixture::<
+                |ctx, n| scheme::bls12381_multisig::fixture::<
                     commonware_cryptography::bls12381::primitives::variant::MinPk,
                     _,
-                >,
+                >(ctx, b"minimmit_consensus", n),
             );
             let ms_pk_state_2 = slow_and_lossy_links::<_, _, RoundRobin>(
                 seed,
-                scheme::bls12381_multisig::fixture::<
+                |ctx, n| scheme::bls12381_multisig::fixture::<
                     commonware_cryptography::bls12381::primitives::variant::MinPk,
                     _,
-                >,
+                >(ctx, b"minimmit_consensus", n),
             );
-            assert_eq!(ms_pk_state_1, ms_pk_state_2, "determinism failed for seed {seed}");
+            assert_eq!(
+                ms_pk_state_1, ms_pk_state_2,
+                "determinism failed for seed {seed}"
+            );
 
             let ms_sig_state_1 = slow_and_lossy_links::<_, _, RoundRobin>(
                 seed,
-                scheme::bls12381_multisig::fixture::<
+                |ctx, n| scheme::bls12381_multisig::fixture::<
                     commonware_cryptography::bls12381::primitives::variant::MinSig,
                     _,
-                >,
+                >(ctx, b"minimmit_consensus", n),
             );
             let ms_sig_state_2 = slow_and_lossy_links::<_, _, RoundRobin>(
                 seed,
-                scheme::bls12381_multisig::fixture::<
+                |ctx, n| scheme::bls12381_multisig::fixture::<
                     commonware_cryptography::bls12381::primitives::variant::MinSig,
                     _,
-                >,
+                >(ctx, b"minimmit_consensus", n),
             );
-            assert_eq!(ms_sig_state_1, ms_sig_state_2, "determinism failed for seed {seed}");
+            assert_eq!(
+                ms_sig_state_1, ms_sig_state_2,
+                "determinism failed for seed {seed}"
+            );
 
-            let ed_state_1 = slow_and_lossy_links::<_, _, RoundRobin>(seed, scheme::ed25519::fixture);
-            let ed_state_2 = slow_and_lossy_links::<_, _, RoundRobin>(seed, scheme::ed25519::fixture);
+            let ed_state_1 =
+                slow_and_lossy_links::<_, _, RoundRobin>(seed, |ctx, n| scheme::ed25519::fixture(ctx, b"minimmit_consensus", n));
+            let ed_state_2 =
+                slow_and_lossy_links::<_, _, RoundRobin>(seed, |ctx, n| scheme::ed25519::fixture(ctx, b"minimmit_consensus", n));
             assert_eq!(ed_state_1, ed_state_2, "determinism failed for seed {seed}");
 
             let states = [

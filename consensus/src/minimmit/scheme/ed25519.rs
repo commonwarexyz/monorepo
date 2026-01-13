@@ -5,7 +5,7 @@
 //! contain signer indices alongside individual signatures, enabling secure
 //! per-validator activity tracking and fault detection.
 
-use crate::minimmit::types::Subject;
+use crate::minimmit::{scheme::Namespace, types::Subject};
 use commonware_cryptography::impl_certificate_ed25519;
 
-impl_certificate_ed25519!(Subject<'a, D>);
+impl_certificate_ed25519!(Subject<'a, D>, Namespace);

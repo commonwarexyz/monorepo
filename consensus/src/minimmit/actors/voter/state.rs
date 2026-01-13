@@ -186,7 +186,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
 
     /// Returns true when the local signer is the participant with index `idx`.
     pub fn is_me(&self, idx: u32) -> bool {
-        self.scheme.me().is_some_and(|me| me == idx)
+        self.scheme.me().is_some_and(|me| me == commonware_utils::Participant::new(idx))
     }
 
     /// Advances the view and updates timeouts.
@@ -251,7 +251,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         let Some(retry) = self.create_round(view).construct_nullify() else {
             return (false, None, None);
         };
-        let nullify = Nullify::sign::<D>(&self.namespace, &self.scheme, Rnd::new(self.epoch, view));
+        let nullify = Nullify::sign::<D>(&self.scheme, Rnd::new(self.epoch, view));
 
         // If was retry, we need to get entry certificate for the previous view
         let entry_view = view.previous().unwrap_or(GENESIS_VIEW);
@@ -317,7 +317,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
 
         // Signing can only fail if we are a verifier, so we don't need to worry about
         // unwinding our broadcast toggle.
-        Notarize::sign(&self.namespace, &self.scheme, candidate)
+        Notarize::sign(&self.scheme, candidate)
     }
 
     /// Construct a nullify vote for contradiction if conditions are met.
@@ -331,7 +331,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         self.views
             .get_mut(&view)?
             .construct_nullify_by_contradiction(m_threshold)?;
-        Nullify::sign::<D>(&self.namespace, &self.scheme, Rnd::new(self.epoch, view))
+        Nullify::sign::<D>(&self.scheme, Rnd::new(self.epoch, view))
     }
 
     /// Construct a notarization certificate once the round has quorum.
@@ -594,7 +594,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         let signer = vote.signer();
 
         // Get equivocator key upfront to avoid borrow conflicts
-        let equivocator_key = self.scheme.participants().key(signer).cloned();
+        let equivocator_key = self.scheme.participants().key(commonware_utils::Participant::new(signer)).cloned();
 
         let round = self.create_round(view);
 
@@ -654,6 +654,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         &mut self,
         view: View,
         m_quorum: usize,
+        strategy: &impl commonware_parallel::Strategy,
     ) -> Option<Notarization<S, D>> {
         let round = self.views.get_mut(&view)?;
 
@@ -673,9 +674,10 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
                 &self.scheme,
                 proposal.clone(),
                 round.votes().notarizes(),
+                strategy,
             )
         } else {
-            Notarization::from_notarizes(&self.scheme, round.votes().notarizes())
+            Notarization::from_notarizes(&self.scheme, round.votes().notarizes(), strategy)
         }?;
         Some(notarization)
     }
@@ -687,6 +689,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         &mut self,
         view: View,
         m_quorum: usize,
+        strategy: &impl commonware_parallel::Strategy,
     ) -> Option<Nullification<S>> {
         let round = self.views.get_mut(&view)?;
 
@@ -701,7 +704,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         }
 
         // Assemble the nullification
-        let nullification = Nullification::from_nullifies(&self.scheme, round.votes().nullifies())?;
+        let nullification = Nullification::from_nullifies(&self.scheme, round.votes().nullifies(), strategy)?;
         Some(nullification)
     }
 
@@ -740,6 +743,7 @@ mod tests {
         types::{Notarization, Notarize, Nullification, Nullify, Proposal},
     };
     use commonware_cryptography::{certificate::mocks::Fixture, sha256::Digest as Sha256Digest};
+    use commonware_parallel::Sequential;
     use commonware_runtime::{deterministic, Runner};
 
     const NAMESPACE: &[u8] = b"_COMMONWARE_MINIMMIT_TEST";
@@ -839,7 +843,7 @@ mod tests {
         runtime.start(|mut context| async move {
             let Fixture {
                 schemes, verifier, ..
-            } = ed25519::fixture(&mut context, 4);
+            } = ed25519::fixture(&mut context, NAMESPACE, 4);
             let mut state = State::new(
                 context,
                 Config {
@@ -861,9 +865,9 @@ mod tests {
                 Proposal::new(notarize_round, GENESIS_VIEW, Sha256Digest::from([50u8; 32]));
             let notarize_votes: Vec<_> = schemes
                 .iter()
-                .map(|scheme| Notarize::sign(NAMESPACE, scheme, notarize_proposal.clone()).expect("sign"))
+                .map(|scheme| Notarize::sign(scheme, notarize_proposal.clone()).expect("sign"))
                 .collect();
-            let notarization = Notarization::from_notarizes(&verifier, notarize_votes.iter())
+            let notarization = Notarization::from_notarizes(&verifier, notarize_votes.iter(), &Sequential)
                 .expect("notarization");
             state.add_notarization(notarization);
 
@@ -878,11 +882,11 @@ mod tests {
             let nullify_votes: Vec<_> = schemes
                 .iter()
                 .map(|scheme| {
-                    Nullify::sign::<Sha256Digest>(NAMESPACE, scheme, nullify_round).expect("nullify")
+                    Nullify::sign::<Sha256Digest>(scheme, nullify_round).expect("nullify")
                 })
                 .collect();
             let nullification =
-                Nullification::from_nullifies(&verifier, &nullify_votes).expect("nullification");
+                Nullification::from_nullifies(&verifier, &nullify_votes, &Sequential).expect("nullification");
             state.add_nullification(nullification);
 
             // Produce candidate once
@@ -896,7 +900,7 @@ mod tests {
     fn timeout_helpers_reuse_and_reset_deadlines() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
-            let Fixture { schemes, .. } = ed25519::fixture(&mut context, 4);
+            let Fixture { schemes, .. } = ed25519::fixture(&mut context, NAMESPACE, 4);
             let local_scheme = schemes[0].clone(); // leader of view 1
             let retry = Duration::from_secs(3);
             let cfg = Config {
@@ -954,7 +958,7 @@ mod tests {
         runtime.start(|mut context| async move {
             let Fixture {
                 schemes, verifier, ..
-            } = ed25519::fixture(&mut context, 4);
+            } = ed25519::fixture(&mut context, NAMESPACE, 4);
             let cfg = Config {
                 namespace: NAMESPACE.to_vec(),
                 scheme: schemes[0].clone(),
@@ -980,9 +984,9 @@ mod tests {
             );
             let notarization_votes: Vec<_> = schemes
                 .iter()
-                .map(|scheme| Notarize::sign(NAMESPACE, scheme, proposal_a.clone()).expect("sign"))
+                .map(|scheme| Notarize::sign(scheme, proposal_a.clone()).expect("sign"))
                 .collect();
-            let notarization = Notarization::from_notarizes(&verifier, notarization_votes.iter())
+            let notarization = Notarization::from_notarizes(&verifier, notarization_votes.iter(), &Sequential)
                 .expect("notarization");
             state.add_notarization(notarization);
 
@@ -1009,7 +1013,7 @@ mod tests {
     fn only_notarize_before_nullify() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
-            let Fixture { schemes, .. } = ed25519::fixture(&mut context, 4);
+            let Fixture { schemes, .. } = ed25519::fixture(&mut context, NAMESPACE, 4);
             let cfg = Config {
                 namespace: NAMESPACE.to_vec(),
                 scheme: schemes[0].clone(),

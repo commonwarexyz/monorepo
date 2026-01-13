@@ -23,6 +23,7 @@ use crate::{
     Reporter,
 };
 use commonware_cryptography::{certificate, Digest};
+use commonware_parallel::{Sequential, Strategy};
 use rand_core::CryptoRngCore;
 
 /// Reporter wrapper that filters and verifies activities based on scheme attributability.
@@ -35,16 +36,17 @@ pub struct AttributableReporter<
     E: Clone + CryptoRngCore + Send + 'static,
     S: certificate::Scheme,
     D: Digest,
+    T: Strategy,
     R: Reporter<Activity = Activity<S, D>>,
 > {
     /// RNG for certificate verification
     rng: E,
-    /// Namespace for domain separation in signatures
-    namespace: Vec<u8>,
     /// Signing scheme for verification
     scheme: S,
     /// Inner reporter that receives filtered activities
     reporter: R,
+    /// Strategy for parallel operations.
+    strategy: T,
     /// Whether to always verify peer activities
     verify: bool,
 }
@@ -53,16 +55,17 @@ impl<
         E: Clone + CryptoRngCore + Send + 'static,
         S: certificate::Scheme,
         D: Digest,
+        T: Strategy,
         R: Reporter<Activity = Activity<S, D>>,
-    > AttributableReporter<E, S, D, R>
+    > AttributableReporter<E, S, D, T, R>
 {
     /// Creates a new `AttributableReporter` that wraps an inner reporter.
-    pub fn new(rng: E, namespace: Vec<u8>, scheme: S, reporter: R, verify: bool) -> Self {
+    pub const fn new(rng: E, scheme: S, reporter: R, strategy: T, verify: bool) -> Self {
         Self {
             rng,
-            namespace,
             scheme,
             reporter,
+            strategy,
             verify,
         }
     }
@@ -72,20 +75,24 @@ impl<
         E: Clone + CryptoRngCore + Send + 'static,
         S: Scheme<D>,
         D: Digest,
+        T: Strategy,
         R: Reporter<Activity = Activity<S, D>>,
-    > Reporter for AttributableReporter<E, S, D, R>
+    > Reporter for AttributableReporter<E, S, D, T, R>
 {
     type Activity = Activity<S, D>;
 
     async fn report(&mut self, activity: Self::Activity) {
         // Verify peer activities if verification is enabled
-        if self.verify && !activity.verified() && !activity.verify(&mut self.rng, &self.namespace, &self.scheme) {
+        if self.verify
+            && !activity.verified()
+            && !activity.verify(&mut self.rng, &self.scheme, &self.strategy)
+        {
             // Drop unverified peer activity
             return;
         }
 
         // Filter based on scheme attributability
-        if !self.scheme.is_attributable() {
+        if !S::is_attributable() {
             match activity {
                 Activity::Notarize(_)
                 | Activity::Nullify(_)
@@ -166,26 +173,29 @@ mod tests {
     fn test_invalid_peer_activity_dropped() {
         // Invalid peer activities should be dropped when verification is enabled
         let mut rng = StdRng::seed_from_u64(42);
-        let Fixture { verifier, .. } = ed25519::fixture(&mut rng, 4);
+        let namespace = b"minimmit_consensus";
+        let Fixture { verifier, .. } = ed25519::fixture(&mut rng, namespace, 4);
 
         // Create a scheme with wrong namespace to generate invalid signatures
+        let wrong_namespace = b"wrong_namespace";
         let Fixture {
             schemes: wrong_schemes,
             ..
-        } = ed25519::fixture(&mut rng, 4);
+        } = ed25519::fixture(&mut rng, wrong_namespace, 4);
 
         assert!(
-            verifier.is_attributable(),
+            ed25519::Scheme::is_attributable(),
             "Ed25519 must be attributable"
         );
 
         let mock = MockReporter::new();
-        let mut reporter = AttributableReporter::new(rng, NAMESPACE.to_vec(), verifier, mock.clone(), true);
+        let strategy = Sequential;
+        let mut reporter = AttributableReporter::new(rng, verifier, mock.clone(), strategy, true);
 
         // Create an invalid activity (signed with wrong namespace scheme)
         let proposal = create_proposal(0, 1);
         let attestation = wrong_schemes[1]
-            .sign::<Sha256Digest>(b"wrong-namespace", Subject::Notarize {
+            .sign::<Sha256Digest>(Subject::Notarize {
                 proposal: &proposal,
             })
             .expect("signing failed");
@@ -205,32 +215,35 @@ mod tests {
     fn test_skip_verification() {
         // When verification is disabled, invalid activities pass through
         let mut rng = StdRng::seed_from_u64(42);
-        let Fixture { verifier, .. } = ed25519::fixture(&mut rng, 4);
+        let namespace = b"minimmit_consensus";
+        let Fixture { verifier, .. } = ed25519::fixture(&mut rng, namespace, 4);
 
         // Create a scheme with wrong namespace to generate invalid signatures
+        let wrong_namespace = b"wrong_namespace";
         let Fixture {
             schemes: wrong_schemes,
             ..
-        } = ed25519::fixture(&mut rng, 4);
+        } = ed25519::fixture(&mut rng, wrong_namespace, 4);
 
         assert!(
-            verifier.is_attributable(),
+            ed25519::Scheme::is_attributable(),
             "Ed25519 must be attributable"
         );
 
         let mock = MockReporter::new();
+        let strategy = Sequential;
         let mut reporter = AttributableReporter::new(
             rng,
-            NAMESPACE.to_vec(),
             verifier,
             mock.clone(),
+            strategy,
             false, // Disable verification
         );
 
         // Create an invalid activity (signed with wrong namespace scheme)
         let proposal = create_proposal(0, 1);
         let attestation = wrong_schemes[1]
-            .sign::<Sha256Digest>(b"wrong-namespace", Subject::Notarize {
+            .sign::<Sha256Digest>(Subject::Notarize {
                 proposal: &proposal,
             })
             .expect("signing failed");
@@ -250,17 +263,19 @@ mod tests {
     fn test_certificates_always_reported_for_attributable() {
         // Certificates should always be reported
         let mut rng = StdRng::seed_from_u64(42);
+        let namespace = b"minimmit_consensus";
         let Fixture {
             schemes, verifier, ..
-        } = ed25519::fixture(&mut rng, 4);
+        } = ed25519::fixture(&mut rng, namespace, 4);
 
         assert!(
-            verifier.is_attributable(),
+            ed25519::Scheme::is_attributable(),
             "Ed25519 must be attributable"
         );
 
         let mock = MockReporter::new();
-        let mut reporter = AttributableReporter::new(rng, NAMESPACE.to_vec(), verifier, mock.clone(), true);
+        let strategy = Sequential;
+        let mut reporter = AttributableReporter::new(rng, verifier, mock.clone(), strategy, true);
 
         // Create a certificate from multiple validators
         let proposal = create_proposal(0, 1);
@@ -268,7 +283,7 @@ mod tests {
             .iter()
             .map(|scheme| {
                 scheme
-                    .sign::<Sha256Digest>(NAMESPACE, Subject::Notarize {
+                    .sign::<Sha256Digest>(Subject::Notarize {
                         proposal: &proposal,
                     })
                     .expect("signing failed")
@@ -276,7 +291,7 @@ mod tests {
             .collect();
 
         let certificate = schemes[0]
-            .assemble(votes)
+            .assemble(votes, &Sequential)
             .expect("failed to assemble certificate");
 
         let notarization = Notarization {
@@ -295,22 +310,24 @@ mod tests {
     fn test_attributable_scheme_reports_peer_activities() {
         // Ed25519 (attributable) should report peer per-validator activities
         let mut rng = StdRng::seed_from_u64(42);
+        let namespace = b"minimmit_consensus";
         let Fixture {
             schemes, verifier, ..
-        } = ed25519::fixture(&mut rng, 4);
+        } = ed25519::fixture(&mut rng, namespace, 4);
 
         assert!(
-            verifier.is_attributable(),
+            ed25519::Scheme::is_attributable(),
             "Ed25519 must be attributable"
         );
 
         let mock = MockReporter::new();
-        let mut reporter = AttributableReporter::new(rng, NAMESPACE.to_vec(), verifier, mock.clone(), true);
+        let strategy = Sequential;
+        let mut reporter = AttributableReporter::new(rng, verifier, mock.clone(), strategy, true);
 
         // Create a peer activity (from validator 1)
         let proposal = create_proposal(0, 1);
         let attestation = schemes[1]
-            .sign::<Sha256Digest>(NAMESPACE, Subject::Notarize {
+            .sign::<Sha256Digest>(Subject::Notarize {
                 proposal: &proposal,
             })
             .expect("signing failed");
@@ -331,13 +348,14 @@ mod tests {
     fn test_verified_returns_correct_values() {
         // Test that verified() returns correct values for different activity types
         let mut rng = StdRng::seed_from_u64(42);
-        let Fixture { schemes, .. } = ed25519::fixture(&mut rng, 4);
+        let namespace = b"minimmit_consensus";
+        let Fixture { schemes, .. } = ed25519::fixture(&mut rng, namespace, 4);
 
         let proposal = create_proposal(0, 1);
 
         // Individual vote - should not be pre-verified
         let attestation = schemes[0]
-            .sign::<Sha256Digest>(NAMESPACE, Subject::Notarize {
+            .sign::<Sha256Digest>(Subject::Notarize {
                 proposal: &proposal,
             })
             .expect("signing failed");
@@ -352,13 +370,13 @@ mod tests {
         let votes: Vec<_> = schemes
             .iter()
             .map(|s| {
-                s.sign::<Sha256Digest>(NAMESPACE, Subject::Notarize {
+                s.sign::<Sha256Digest>(Subject::Notarize {
                     proposal: &proposal,
                 })
                 .expect("signing failed")
             })
             .collect();
-        let certificate = schemes[0].assemble(votes).expect("assemble failed");
+        let certificate = schemes[0].assemble(votes, &Sequential).expect("assemble failed");
         let notarization_activity: Activity<ed25519::Scheme, Sha256Digest> =
             Activity::Notarization(Notarization {
                 proposal,

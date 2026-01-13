@@ -33,6 +33,7 @@ use crate::{
 use commonware_codec::Read;
 use commonware_cryptography::Digest;
 use commonware_macros::select;
+use commonware_parallel::Strategy;
 use commonware_p2p::{
     utils::codec::{WrappedReceiver, WrappedSender},
     Blocker, Receiver, Recipients, Sender,
@@ -111,6 +112,7 @@ pub struct Config<
     A: Automaton<Context = Context<D, S::PublicKey>, Digest = D>,
     R: Relay,
     F: Reporter<Activity = Activity<S, D>>,
+    T: Strategy,
 > {
     /// Namespace for domain separation in signatures.
     pub namespace: Vec<u8>,
@@ -126,6 +128,8 @@ pub struct Config<
     pub relay: R,
     /// Activity reporter.
     pub reporter: F,
+    /// Verification strategy.
+    pub strategy: T,
     /// Storage partition.
     pub partition: String,
     /// Current epoch.
@@ -160,6 +164,7 @@ pub struct Actor<
     A: Automaton<Context = Context<D, S::PublicKey>, Digest = D>,
     R: Relay,
     F: Reporter<Activity = Activity<S, D>>,
+    T: Strategy,
 > {
     context: ContextCell<E>,
     state: State<E, S, L, D>,
@@ -167,6 +172,7 @@ pub struct Actor<
     automaton: A,
     relay: R,
     reporter: F,
+    strategy: T,
 
     namespace: Vec<u8>,
     epoch: Epoch,
@@ -196,10 +202,11 @@ impl<
         A: Automaton<Context = Context<D, S::PublicKey>, Digest = D>,
         R: Relay<Digest = D>,
         F: Reporter<Activity = Activity<S, D>>,
-    > Actor<E, S, L, B, D, A, R, F>
+        T: Strategy,
+    > Actor<E, S, L, B, D, A, R, F, T>
 {
     /// Creates a new voter actor and returns the actor and its mailbox.
-    pub fn new(context: E, cfg: Config<S, L, B, D, A, R, F>) -> (Self, Mailbox<S, D>) {
+    pub fn new(context: E, cfg: Config<S, L, B, D, A, R, F, T>) -> (Self, Mailbox<S, D>) {
         // Initialize metrics
         let inbound_messages = Family::<Inbound, Counter>::default();
         let outbound_messages = Family::<Outbound, Counter>::default();
@@ -249,6 +256,7 @@ impl<
                 automaton: cfg.automaton,
                 relay: cfg.relay,
                 reporter: cfg.reporter,
+                strategy: cfg.strategy,
 
                 namespace: cfg.namespace,
                 epoch,
@@ -324,9 +332,9 @@ impl<
     }
 
     /// Send a vote to every peer.
-    async fn broadcast_vote<T: Sender>(
+    async fn broadcast_vote<Sp: Sender>(
         &mut self,
-        sender: &mut WrappedSender<T, Vote<S, D>>,
+        sender: &mut WrappedSender<Sp, Vote<S, D>>,
         vote: Vote<S, D>,
     ) {
         // Update outbound metrics
@@ -341,9 +349,9 @@ impl<
     }
 
     /// Send a certificate to every peer.
-    async fn broadcast_certificate<T: Sender>(
+    async fn broadcast_certificate<Sp: Sender>(
         &mut self,
-        sender: &mut WrappedSender<T, Certificate<S, D>>,
+        sender: &mut WrappedSender<Sp, Certificate<S, D>>,
         certificate: Certificate<S, D>,
     ) {
         // Update outbound metrics
@@ -484,7 +492,7 @@ impl<
         match vote {
             Vote::Notarize(notarize) => {
                 // Verify signature
-                if !notarize.verify(&self.namespace, self.state.scheme()) {
+                if !notarize.verify(&mut self.context, self.state.scheme(), &self.strategy) {
                     warn!(?sender, %view, "blocking peer for invalid notarize signature");
                     self.blocker.block(sender).await;
                     return;
@@ -521,7 +529,7 @@ impl<
             }
             Vote::Nullify(nullify) => {
                 // Verify signature
-                if !nullify.verify::<D>(&self.namespace, self.state.scheme()) {
+                if !nullify.verify::<_, D>(&mut self.context, self.state.scheme(), &self.strategy) {
                     warn!(?sender, %view, "blocking peer for invalid nullify signature");
                     self.blocker.block(sender).await;
                     return;
@@ -558,7 +566,7 @@ impl<
         // Verify the certificate signature
         match &certificate {
             Certificate::Notarization(notarization) => {
-                if !notarization.verify(&mut self.context, &self.namespace, self.state.scheme()) {
+                if !notarization.verify(&mut self.context, self.state.scheme(), &self.strategy) {
                     warn!(?sender, %view, "blocking peer for invalid notarization");
                     self.blocker.block(sender).await;
                     return;
@@ -571,7 +579,7 @@ impl<
                     .await;
             }
             Certificate::Nullification(nullification) => {
-                if !nullification.verify::<_, D>(&mut self.context, &self.namespace, self.state.scheme()) {
+                if !nullification.verify::<_, D>(&mut self.context, self.state.scheme(), &self.strategy) {
                     warn!(?sender, %view, "blocking peer for invalid nullification");
                     self.blocker.block(sender).await;
                     return;
@@ -595,7 +603,7 @@ impl<
         view: View,
     ) {
         // Check for M threshold (notarization certificate)
-        if let Some(notarization) = self.state.try_assemble_notarization(view, self.m_quorum) {
+        if let Some(notarization) = self.state.try_assemble_notarization(view, self.m_quorum, &self.strategy) {
             // Record latency for leader
             if let Some(elapsed) = self.leader_elapsed(view) {
                 self.notarization_latency.observe(elapsed);
@@ -625,7 +633,7 @@ impl<
         }
 
         // Check for M threshold (nullification certificate)
-        if let Some(nullification) = self.state.try_assemble_nullification(view, self.m_quorum) {
+        if let Some(nullification) = self.state.try_assemble_nullification(view, self.m_quorum, &self.strategy) {
             // Notify resolver
             resolver
                 .updated(Certificate::Nullification(nullification.clone()))
@@ -989,8 +997,10 @@ impl<
                 _ = &mut shutdown => {
                     debug!("context shutdown, stopping voter");
 
-                    // Sync and close journal
-                    self.journal.take().unwrap().close().await.expect("unable to close journal");
+                    // Sync journal before dropping
+                    let journal = self.journal.take().unwrap();
+                    journal.sync_all().await.expect("unable to sync journal");
+                    drop(journal);
 
                     // Only drop shutdown once journal is synced
                     drop(shutdown);

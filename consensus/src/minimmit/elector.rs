@@ -33,6 +33,7 @@ use commonware_codec::Encode;
 use commonware_cryptography::{
     bls12381::primitives::variant::Variant, certificate::Scheme, Hasher, PublicKey, Sha256,
 };
+use commonware_parallel::Sequential;
 use commonware_utils::{modulo, ordered::Set};
 use std::marker::PhantomData;
 
@@ -240,7 +241,7 @@ mod tests {
     #[test]
     fn round_robin_rotates_through_participants() {
         let mut rng = StdRng::seed_from_u64(42);
-        let Fixture { participants, .. } = ed25519::fixture(&mut rng, 6);
+        let Fixture { participants, .. } = ed25519::fixture(&mut rng, b"test", 6);
         let participants = Set::try_from_iter(participants).unwrap();
         let n = participants.len();
         let elector: RoundRobinElector<ed25519::Scheme> =
@@ -263,7 +264,7 @@ mod tests {
     #[test]
     fn round_robin_same_seed_is_deterministic() {
         let mut rng = StdRng::seed_from_u64(42);
-        let Fixture { participants, .. } = ed25519::fixture(&mut rng, 6);
+        let Fixture { participants, .. } = ed25519::fixture(&mut rng, b"test", 6);
         let participants = Set::try_from_iter(participants).unwrap();
 
         let elector1: RoundRobinElector<ed25519::Scheme> =
@@ -290,7 +291,7 @@ mod tests {
     fn random_falls_back_to_round_robin_for_view_1() {
         let mut rng = StdRng::seed_from_u64(42);
         let Fixture { participants, .. } =
-            bls12381_threshold::fixture::<MinPk, _>(&mut rng, 6);
+            bls12381_threshold::fixture::<MinPk, _>(&mut rng, b"test", 6);
         let participants = Set::try_from_iter(participants).unwrap();
         let n = participants.len();
         let elector: RandomElector<ThresholdScheme> = Random.build(&participants);
@@ -319,7 +320,7 @@ mod tests {
             participants,
             schemes,
             ..
-        } = bls12381_threshold::fixture::<MinPk, _>(&mut rng, 6);
+        } = bls12381_threshold::fixture::<MinPk, _>(&mut rng, b"test", 6);
         let participants = Set::try_from_iter(participants).unwrap();
         let elector: RandomElector<ThresholdScheme> = Random.build(&participants);
         let quorum = quorum_from_slice(&schemes) as usize;
@@ -330,11 +331,11 @@ mod tests {
             .iter()
             .take(quorum)
             .map(|s| {
-                s.sign::<Sha256Digest>(NAMESPACE, Subject::Nullify { round: round1 })
+                s.sign::<Sha256Digest>(Subject::Nullify { round: round1 })
                     .unwrap()
             })
             .collect();
-        let cert1 = schemes[0].assemble(attestations1).unwrap();
+        let cert1 = schemes[0].assemble(attestations1, &Sequential).unwrap();
 
         // Create certificate for round (1, 3) (different round -> different seed signature)
         let round2 = Round::new(Epoch::new(1), View::new(3));
@@ -342,11 +343,11 @@ mod tests {
             .iter()
             .take(quorum)
             .map(|s| {
-                s.sign::<Sha256Digest>(NAMESPACE, Subject::Nullify { round: round2 })
+                s.sign::<Sha256Digest>(Subject::Nullify { round: round2 })
                     .unwrap()
             })
             .collect();
-        let cert2 = schemes[0].assemble(attestations2).unwrap();
+        let cert2 = schemes[0].assemble(attestations2, &Sequential).unwrap();
 
         // Same certificate always gives same leader
         let leader1a = elector.elect(round1, Some(&cert1));
@@ -374,7 +375,7 @@ mod tests {
     fn random_panics_on_none_certificate_after_view_1() {
         let mut rng = StdRng::seed_from_u64(42);
         let Fixture { participants, .. } =
-            bls12381_threshold::fixture::<MinPk, _>(&mut rng, 6);
+            bls12381_threshold::fixture::<MinPk, _>(&mut rng, b"test", 6);
         let participants = Set::try_from_iter(participants).unwrap();
         let elector: RandomElector<ThresholdScheme> = Random.build(&participants);
 
