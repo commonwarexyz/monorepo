@@ -256,7 +256,7 @@ impl GT {
 /// The private key type.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Private {
-    pub(crate) scalar: Secret<Scalar>,
+    scalar: Secret<Scalar>,
 }
 
 impl Private {
@@ -266,11 +266,25 @@ impl Private {
             scalar: Secret::new(private),
         }
     }
+
+    /// Temporarily exposes the inner scalar to a closure.
+    ///
+    /// See [`Secret::expose`](crate::Secret::expose) for more details.
+    pub fn expose<R>(&self, f: impl for<'a> FnOnce(&'a Scalar) -> R) -> R {
+        self.scalar.expose(f)
+    }
+
+    /// Consumes the private key and returns the inner scalar.
+    ///
+    /// See [`Secret::expose_unwrap`](crate::Secret::expose_unwrap) for more details.
+    pub fn expose_unwrap(self) -> Scalar {
+        self.scalar.expose_unwrap()
+    }
 }
 
 impl Write for Private {
     fn write(&self, buf: &mut impl BufMut) {
-        self.scalar.expose(|scalar| scalar.write(buf));
+        self.expose(|scalar| scalar.write(buf));
     }
 }
 
@@ -604,7 +618,6 @@ impl Share {
     /// This can be verified against the public polynomial.
     pub fn public<V: Variant>(&self) -> V::Public {
         self.private
-            .scalar
             .expose(|private| V::Public::generator() * private)
     }
 }
@@ -612,7 +625,7 @@ impl Share {
 impl Write for Share {
     fn write(&self, buf: &mut impl BufMut) {
         self.index.write(buf);
-        self.private.scalar.expose(|private| private.write(buf));
+        self.private.expose(|private| private.write(buf));
     }
 }
 
@@ -628,7 +641,7 @@ impl Read for Share {
 
 impl EncodeSize for Share {
     fn encode_size(&self) -> usize {
-        self.index.encode_size() + self.private.scalar.expose(|private| private.encode_size())
+        self.index.encode_size() + self.private.expose(|private| private.encode_size())
     }
 }
 

@@ -91,7 +91,7 @@ impl FixedSize for PrivateKey {
 
 impl From<Private> for PrivateKey {
     fn from(key: Private) -> Self {
-        let raw = Zeroizing::new(key.scalar.expose(|s| s.encode_fixed()));
+        let raw = Zeroizing::new(key.expose(|s| s.encode_fixed()));
         Self {
             raw: Secret::new(*raw),
             key,
