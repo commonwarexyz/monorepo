@@ -1709,7 +1709,6 @@ dependencies = [
  "pin-project",
  "proptest",
  "rand 0.8.5",
- "regex-lite",
  "rstest",
  "thiserror 2.0.17",
  "zeroize",
