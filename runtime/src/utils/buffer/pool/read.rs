@@ -565,7 +565,6 @@ mod tests {
             assert!(replay.seek_to(data.len() as u64 + 1).await.is_err());
 
             // Test that remaining() is correct after seek by reading all data.
-            // This verifies that the first_fill_skip adjustment works correctly.
             let seek_offset = 150usize;
             replay.seek_to(seek_offset as u64).await.unwrap();
             let expected_remaining = data.len() - seek_offset;
