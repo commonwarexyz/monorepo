@@ -1657,27 +1657,62 @@ pub mod test {
 
     fn assert_send<T: Send>(_: T) {}
 
-    #[test_traced]
+    use crate::{
+        kv::{Deletable, Gettable, Updatable},
+        qmdb::store::{LogStore, MerkleizedStore, PrunableStore},
+    };
+
+    #[allow(dead_code)]
+    fn assert_gettable_futures_are_send<T: Gettable + Send>(db: &T, key: &T::Key) {
+        assert_send(db.get(key));
+    }
+
+    #[allow(dead_code)]
+    fn assert_log_store_futures_are_send<T: LogStore>(db: &T) {
+        assert_send(db.get_metadata());
+    }
+
+    #[allow(dead_code)]
+    fn assert_prunable_store_futures_are_send<T: PrunableStore>(db: &mut T, loc: Location) {
+        assert_send(db.prune(loc));
+    }
+
+    #[allow(dead_code)]
+    fn assert_merkleized_store_futures_are_send<T: MerkleizedStore>(db: &T, loc: Location) {
+        assert_send(db.proof(loc, NZU64!(1)));
+    }
+
+    #[allow(dead_code)]
+    fn assert_updatable_futures_are_send<T: Updatable + Send>(
+        db: &mut T,
+        key: T::Key,
+        value: T::Value,
+    ) where
+        T::Key: Clone,
+        T::Value: Clone,
+    {
+        assert_send(db.update(key.clone(), value.clone()));
+        assert_send(db.create(key, value));
+    }
+
+    #[allow(dead_code)]
+    fn assert_deletable_futures_are_send<T: Deletable + Send>(db: &mut T, key: T::Key) {
+        assert_send(db.delete(key));
+    }
+
+    #[test]
     fn test_futures_are_send() {
-        let runner = deterministic::Runner::default();
-        runner.start(|context| async move {
-            let mut db = open_db(context.clone(), "send_test").await;
-            let key = Sha256::hash(&9u64.to_be_bytes());
-            let loc = Location::new_unchecked(0);
-
-            assert_send(db.get(&key));
-            assert_send(db.get_metadata());
-            assert_send(db.sync());
-            assert_send(db.prune(loc));
-            assert_send(db.proof(loc, NZU64!(1)));
-
-            let mut db = db.into_mutable();
-            assert_send(db.get(&key));
-            assert_send(db.get_metadata());
-            assert_send(db.update(key, key));
-            assert_send(db.create(key, key));
-            assert_send(db.delete(key));
-            assert_send(db.commit(None));
-        });
+        fn _check_clean(db: &mut CleanCurrentTest, key: Digest, loc: Location) {
+            assert_gettable_futures_are_send(db, &key);
+            assert_log_store_futures_are_send(db);
+            assert_prunable_store_futures_are_send(db, loc);
+            assert_merkleized_store_futures_are_send(db, loc);
+        }
+        fn _check_dirty(db: &mut DirtyCurrentTest, key: Digest, value: Digest) {
+            assert_gettable_futures_are_send(db, &key);
+            assert_log_store_futures_are_send(db);
+            assert_updatable_futures_are_send(db, key, value);
+            assert_deletable_futures_are_send(db, key);
+        }
     }
 }
