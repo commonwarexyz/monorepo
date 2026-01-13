@@ -174,6 +174,8 @@ struct ReplayBuf {
     offset_in_page: usize,
     /// Total remaining logical bytes across all buffers.
     remaining: usize,
+    /// Bytes to skip from the first fill after a seek (to account for mid-page offset).
+    first_fill_skip: usize,
 }
 
 impl ReplayBuf {
@@ -186,6 +188,7 @@ impl ReplayBuf {
             current_page: 0,
             offset_in_page: 0,
             remaining: 0,
+            first_fill_skip: 0,
         }
     }
 
@@ -195,12 +198,16 @@ impl ReplayBuf {
         self.current_page = 0;
         self.offset_in_page = 0;
         self.remaining = 0;
+        self.first_fill_skip = 0;
     }
 
     /// Adds a buffer from a fill operation.
     fn push(&mut self, state: BufferState, logical_bytes: usize) {
         self.buffers.push_back(state);
-        self.remaining += logical_bytes;
+        // After a seek, the first fill needs to skip bytes before the seek offset
+        let adjusted = logical_bytes.saturating_sub(self.first_fill_skip);
+        self.first_fill_skip = 0;
+        self.remaining += adjusted;
     }
 
     /// Returns the logical length of the given page in the given buffer.
@@ -337,7 +344,10 @@ impl<B: Blob> Replay<B> {
         let page_size = self.reader.logical_page_size as u64;
         self.reader.blob_page = offset / page_size;
         self.buffer.current_page = 0;
-        self.buffer.offset_in_page = (offset % page_size) as usize;
+        let offset_in_page = (offset % page_size) as usize;
+        self.buffer.offset_in_page = offset_in_page;
+        // When the first fill happens, we need to subtract bytes before the offset
+        self.buffer.first_fill_skip = offset_in_page;
 
         Ok(())
     }
@@ -556,6 +566,35 @@ mod tests {
 
             // Seek beyond blob size should error
             assert!(replay.seek_to(data.len() as u64 + 1).await.is_err());
+
+            // Test that remaining() is correct after seek by reading all data.
+            // This verifies that the first_fill_skip adjustment works correctly.
+            let seek_offset = 150usize;
+            replay.seek_to(seek_offset as u64).await.unwrap();
+            // Load all remaining data
+            while !replay.is_exhausted() {
+                replay.ensure(1).await.unwrap();
+            }
+            // Verify remaining count matches expected bytes from seek offset to end
+            let expected_remaining = data.len() - seek_offset;
+            assert_eq!(
+                replay.remaining(),
+                expected_remaining,
+                "After seeking to {}, remaining() should be {} but got {}",
+                seek_offset,
+                expected_remaining,
+                replay.remaining()
+            );
+            // Read all bytes and verify content
+            let mut collected = Vec::new();
+            while replay.remaining() > 0 {
+                let chunk = replay.chunk();
+                collected.extend_from_slice(chunk);
+                let len = chunk.len();
+                replay.advance(len);
+            }
+            assert_eq!(collected.len(), expected_remaining);
+            assert_eq!(collected, &data[seek_offset..]);
         });
     }
 }
