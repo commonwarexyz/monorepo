@@ -511,6 +511,7 @@ pub(super) mod test {
 
     #[test]
     fn test_futures_are_send() {
+        #[allow(dead_code)]
         type MutableDb =
             Db<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap, Unmerkleized, NonDurable>;
 

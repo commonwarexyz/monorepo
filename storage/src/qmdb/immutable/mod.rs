@@ -1061,8 +1061,10 @@ pub(super) mod test {
 
     #[test]
     fn test_futures_are_send() {
+        #[allow(dead_code)]
         type MerkleizedDb =
             Immutable<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap, Merkleized<Sha256>>;
+        #[allow(dead_code)]
         type MutableDb = Immutable<
             deterministic::Context,
             Digest,

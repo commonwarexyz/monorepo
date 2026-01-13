@@ -593,7 +593,7 @@ where
 mod test {
     use super::*;
     use crate::{
-        kv::{Deletable, Gettable, Gettable as _, Updatable},
+        kv::{Deletable, Gettable, Updatable},
         translator::TwoCap,
     };
     use commonware_cryptography::{

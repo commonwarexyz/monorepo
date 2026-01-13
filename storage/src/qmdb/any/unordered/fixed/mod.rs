@@ -76,7 +76,6 @@ pub(super) mod test {
     use super::*;
     use crate::{
         index::Unordered as _,
-        kv::Batchable as _,
         mmr::{Position, StandardHasher},
         qmdb::{
             any::unordered::{fixed::Operation, Update},

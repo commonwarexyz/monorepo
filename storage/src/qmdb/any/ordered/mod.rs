@@ -1028,10 +1028,9 @@ where
 mod test {
     use super::*;
     use crate::{
-        kv::{Deletable as _, Gettable as _, Updatable as _},
         qmdb::{
             any::test::{fixed_db_config, variable_db_config},
-            store::{LogStore as _, MerkleizedStore},
+            store::MerkleizedStore,
         },
         translator::TwoCap,
     };
@@ -1169,6 +1168,7 @@ mod test {
         qmdb::store::{LogStore, PrunableStore},
     };
 
+    #[allow(dead_code)]
     type MutableFixedDb =
         fixed::Db<Context, FixedBytes<4>, Digest, Sha256, TwoCap, Unmerkleized, NonDurable>;
 
