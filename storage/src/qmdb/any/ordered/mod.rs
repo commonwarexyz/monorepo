@@ -1,5 +1,5 @@
 use crate::{
-    index::{Cursor as _, Ordered as Index},
+    index::Ordered as Index,
     journal::{
         authenticated,
         contiguous::{Contiguous, MutableContiguous, PersistableContiguous},
@@ -168,13 +168,13 @@ where
     }
 
     /// Finds and returns the location and KeyData for the lexicographically-last key produced by
-    /// `iter`, skipping over locations that are beyond the log's range.
+    /// the provided locations, skipping over locations that are beyond the log's range.
     async fn last_key_in_iter(
         &self,
-        iter: impl Iterator<Item = &Location>,
+        locs: impl IntoIterator<Item = Location>,
     ) -> Result<LocatedKey<K, V::Value>, Error> {
         let mut last_key: LocatedKey<K, V::Value> = None;
-        for &loc in iter {
+        for loc in locs {
             if loc >= self.op_count() {
                 // Don't try to look up operations that don't yet exist in the log. This can happen
                 // when there are translated key conflicts between a created key and its
@@ -211,13 +211,13 @@ where
         false
     }
 
-    /// Find the span produced by the provided `iter` that contains `key`, if any.
+    /// Find the span produced by the provided locations that contains `key`, if any.
     async fn find_span(
         &self,
-        iter: impl Iterator<Item = &Location>,
+        locs: impl IntoIterator<Item = Location>,
         key: &K,
     ) -> Result<LocatedKey<K, V::Value>, Error> {
-        for &loc in iter {
+        for loc in locs {
             // Iterate over conflicts in the snapshot entry to find the span.
             let data = Self::get_update_op(&self.log, loc).await?;
             if Self::span_contains(&data.key, &data.next_key, key) {
@@ -236,8 +236,8 @@ where
         }
 
         // If the translated key is in the snapshot, get a cursor to look for the key.
-        let iter = self.snapshot.get(key);
-        let span = self.find_span(iter, key).await?;
+        let locs: Vec<Location> = self.snapshot.get(key).copied().collect();
+        let span = self.find_span(locs, key).await?;
         if let Some(span) = span {
             return Ok(Some(span));
         }
@@ -247,8 +247,9 @@ where
             return Ok(None);
         };
 
+        let locs: Vec<Location> = iter.copied().collect();
         let span = self
-            .find_span(iter, key)
+            .find_span(locs, key)
             .await?
             .expect("a span that includes any given key should always exist if db is non-empty");
 
@@ -267,8 +268,8 @@ where
         &self,
         key: &K,
     ) -> Result<Option<(KeyData<K, V::Value>, Location)>, Error> {
-        let iter = self.snapshot.get(key);
-        for &loc in iter {
+        let locs: Vec<Location> = self.snapshot.get(key).copied().collect();
+        for loc in locs {
             let op = self.log.read(loc).await?;
             assert!(
                 op.is_update(),
