@@ -687,6 +687,7 @@ pub(super) mod test {
         assert_log_store_futures_are_send(db);
         assert_prunable_store_futures_are_send(db, loc);
         assert_merkleized_store_futures_are_send(db, loc);
+        assert_send(db.sync());
     }
 
     #[allow(dead_code)]
@@ -696,6 +697,12 @@ pub(super) mod test {
         assert_updatable_futures_are_send(db, key, value);
         assert_deletable_futures_are_send(db, key);
         assert_batchable_futures_are_send(db, key, value);
+        assert_send(db.get_with_loc(&key));
+    }
+
+    #[allow(dead_code)]
+    fn assert_mutable_db_commit_is_send(db: DirtyAnyTest) {
+        assert_send(db.commit(None));
     }
 
     // FromSyncTestable implementation for from_sync_result tests

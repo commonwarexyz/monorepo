@@ -1217,6 +1217,7 @@ mod test {
         assert_log_store_futures_are_send(db);
         assert_prunable_store_futures_are_send(db, loc);
         assert_gettable_futures_are_send(db, &key);
+        assert_send(db.sync());
     }
 
     #[allow(dead_code)]
@@ -1229,5 +1230,12 @@ mod test {
         assert_gettable_futures_are_send(db, &key);
         assert_updatable_futures_are_send(db, key, value);
         assert_deletable_futures_are_send(db, key);
+    }
+
+    #[allow(dead_code)]
+    fn assert_dirty_commit_is_send(
+        db: Db<deterministic::Context, Digest, Vec<u8>, TwoCap, NonDurable>,
+    ) {
+        assert_send(db.commit(None));
     }
 }

@@ -1706,6 +1706,7 @@ pub mod test {
         assert_log_store_futures_are_send(db);
         assert_prunable_store_futures_are_send(db, loc);
         assert_merkleized_store_futures_are_send(db, loc);
+        assert_send(db.sync());
     }
 
     #[allow(dead_code)]
@@ -1714,5 +1715,10 @@ pub mod test {
         assert_log_store_futures_are_send(db);
         assert_updatable_futures_are_send(db, key, value);
         assert_deletable_futures_are_send(db, key);
+    }
+
+    #[allow(dead_code)]
+    fn assert_dirty_db_commit_is_send(db: DirtyCurrentTest) {
+        assert_send(db.commit(None));
     }
 }

@@ -751,6 +751,11 @@ mod tests {
     }
 
     #[allow(dead_code)]
+    fn assert_archive_destroy_is_send<T: super::Archive>(archive: T) {
+        assert_send(archive.destroy());
+    }
+
+    #[allow(dead_code)]
     fn assert_prunable_archive_futures_are_send(
         archive: &mut prunable::Archive<TwoCap, Context, FixedBytes<64>, i32>,
         key: FixedBytes<64>,

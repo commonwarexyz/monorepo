@@ -1225,6 +1225,7 @@ mod test {
         assert_log_store_futures_are_send(db);
         assert_prunable_store_futures_are_send(db, loc);
         assert_merkleized_store_futures_are_send(db, loc);
+        assert_send(db.sync());
     }
 
     #[allow(dead_code)]
@@ -1233,7 +1234,15 @@ mod test {
         assert_log_store_futures_are_send(db);
         assert_updatable_futures_are_send(db, key.clone(), value);
         assert_deletable_futures_are_send(db, key.clone());
-        assert_batchable_futures_are_send(db, key, value);
+        assert_batchable_futures_are_send(db, key.clone(), value);
+        assert_send(db.get_all(&key));
+        assert_send(db.get_with_loc(&key));
+        assert_send(db.get_span(&key));
+    }
+
+    #[allow(dead_code)]
+    fn assert_mutable_db_commit_is_send(db: MutableFixedDb) {
+        assert_send(db.commit(None));
     }
 
     async fn test_ordered_any_db_basic<D: TestableAnyDb<Digest>>(

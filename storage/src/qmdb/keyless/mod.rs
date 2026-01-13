@@ -1156,10 +1156,19 @@ mod test {
         assert_log_store_futures_are_send(db);
         assert_prunable_store_futures_are_send(db, loc);
         assert_merkleized_store_futures_are_send(db, loc);
+        assert_send(db.sync());
+        assert_send(db.get(loc));
     }
 
     #[allow(dead_code)]
-    fn assert_mutable_db_futures_are_send(db: &mut MutableDb) {
+    fn assert_mutable_db_futures_are_send(db: &mut MutableDb, loc: Location, value: Vec<u8>) {
         assert_log_store_futures_are_send(db);
+        assert_send(db.get(loc));
+        assert_send(db.append(value));
+    }
+
+    #[allow(dead_code)]
+    fn assert_mutable_db_commit_is_send(db: MutableDb) {
+        assert_send(db.commit(None));
     }
 }

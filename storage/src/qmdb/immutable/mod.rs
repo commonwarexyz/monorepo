@@ -1077,11 +1077,18 @@ pub(super) mod test {
         assert_log_store_futures_are_send(db);
         assert_prunable_store_futures_are_send(db, loc);
         assert_merkleized_store_futures_are_send(db, loc);
+        assert_send(db.sync());
     }
 
     #[allow(dead_code)]
-    fn assert_mutable_db_futures_are_send(db: &mut MutableDb, key: Digest) {
+    fn assert_mutable_db_futures_are_send(db: &mut MutableDb, key: Digest, value: Vec<u8>) {
         assert_gettable_futures_are_send(db, &key);
         assert_log_store_futures_are_send(db);
+        assert_send(db.set(key, value));
+    }
+
+    #[allow(dead_code)]
+    fn assert_mutable_db_commit_is_send(db: MutableDb) {
+        assert_send(db.commit(None));
     }
 }
