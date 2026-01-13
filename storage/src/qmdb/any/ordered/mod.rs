@@ -1,5 +1,5 @@
 use crate::{
-    index::Ordered as Index,
+    index::{Cursor as _, Ordered as Index},
     journal::{
         authenticated,
         contiguous::{Contiguous, MutableContiguous, PersistableContiguous},
@@ -345,7 +345,8 @@ where
             unreachable!("database should not be empty");
         };
 
-        let last_key = self.last_key_in_iter(iter).await?;
+        let locs: Vec<Location> = iter.copied().collect();
+        let last_key = self.last_key_in_iter(locs).await?;
         let (loc, last_key) = last_key.expect("no last key found in non-empty snapshot");
 
         callback(Some(loc));
@@ -606,7 +607,8 @@ where
             let Some(iter) = self.snapshot.prev_translated_key(&key) else {
                 unreachable!("DB should not be empty");
             };
-            let last_key = self.last_key_in_iter(iter).await?;
+            let locs: Vec<Location> = iter.copied().collect();
+            let last_key = self.last_key_in_iter(locs).await?;
             prev_key = last_key.map(|(loc, data)| (loc, data.key, data.value));
         }
 
@@ -1424,10 +1426,10 @@ mod test {
     use commonware_runtime::{
         deterministic::{Context, Runner},
         Runner as _,
+        Spawner,
     };
     use commonware_utils::sequence::FixedBytes;
     use core::{future::Future, pin::Pin};
-
     /// A type alias for the concrete [Any] type used in these unit tests.
     type FixedDb = fixed::Any<Context, FixedBytes<4>, Digest, Sha256, TwoCap>;
 
@@ -1515,6 +1517,27 @@ mod test {
         executor.start(|context| async move {
             let db = open_variable_db(context.clone()).await;
             test_ordered_any_db_empty(context, db, |ctx| Box::pin(open_variable_db(ctx))).await;
+        });
+    }
+
+    fn assert_send<T: Send>(_: T) {}
+
+    #[test_traced]
+    fn ordered_any_futures_are_send() {
+        let runner = Runner::default();
+        runner.start(|context| async move {
+            let mut db = open_fixed_db(context.clone()).await;
+            let key = FixedBytes::from([9u8; 4]);
+            let value = Sha256::fill(5u8);
+
+            assert_send(db.get(&key));
+            assert_send(db.get_all(&key));
+            assert_send(db.get_with_loc(&key));
+            assert_send(db.get_span(&key));
+            assert_send(db.write_batch(vec![(key.clone(), Some(value.clone()))].into_iter()));
+            assert_send(db.update(key.clone(), value.clone()));
+            assert_send(db.create(key.clone(), value.clone()));
+            assert_send(db.delete(key.clone()));
         });
     }
 
