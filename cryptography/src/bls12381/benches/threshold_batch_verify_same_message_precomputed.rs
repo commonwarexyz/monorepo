@@ -7,7 +7,7 @@ use commonware_cryptography::{
     Signer as _,
 };
 use commonware_parallel::{Rayon, Sequential};
-use commonware_utils::{Bft3f1, Faults, NZUsize, TryCollect};
+use commonware_utils::{Faults, N3f1, NZUsize, TryCollect};
 use criterion::{criterion_group, BatchSize, Criterion};
 use rand::{rngs::StdRng, seq::SliceRandom, SeedableRng};
 use std::hint::black_box;
@@ -16,7 +16,7 @@ fn benchmark_threshold_batch_verify_same_message_precomputed(c: &mut Criterion) 
     let namespace = b"benchmark";
     let msg = b"hello";
     for &n in &[5, 10, 20, 50, 100, 250, 500] {
-        let t = Bft3f1::quorum(n);
+        let t = N3f1::quorum(n);
         let f = n - t;
         for invalid in [0, f] {
             for concurrency in [1, 8] {
@@ -38,12 +38,9 @@ fn benchmark_threshold_batch_verify_same_message_precomputed(c: &mut Criterion) 
                                     .map(|i| PrivateKey::from_seed(i as u64).public_key())
                                     .try_collect()
                                     .unwrap();
-                                let (output, shares) = deal::<MinSig, _, Bft3f1>(
-                                    &mut rng,
-                                    Default::default(),
-                                    players,
-                                )
-                                .expect("deal should succeed");
+                                let (output, shares) =
+                                    deal::<MinSig, _, N3f1>(&mut rng, Default::default(), players)
+                                        .expect("deal should succeed");
                                 let polynomial = output.public().clone();
                                 polynomial.precompute_partial_publics();
                                 let signatures = shares

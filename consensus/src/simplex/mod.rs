@@ -283,12 +283,12 @@ pub(crate) fn interesting(
     true
 }
 
-/// Convenience alias for [`Bft3f1::quorum`].
+/// Convenience alias for [`N3f1::quorum`].
 #[cfg(test)]
 pub(crate) fn quorum(n: u32) -> u32 {
-    use commonware_utils::{Bft3f1, Faults};
+    use commonware_utils::{Faults, N3f1};
 
-    Bft3f1::quorum(n)
+    N3f1::quorum(n)
 }
 
 #[cfg(test)]
@@ -329,7 +329,7 @@ mod tests {
     use commonware_runtime::{
         buffer::PoolRef, count_running_tasks, deterministic, Clock, Metrics, Quota, Runner, Spawner,
     };
-    use commonware_utils::{test_rng, Bft3f1, Faults, NZUsize, NZU16};
+    use commonware_utils::{test_rng, Faults, N3f1, NZUsize, NZU16};
     use engine::Engine;
     use futures::{future::join_all, StreamExt};
     use rand::{rngs::StdRng, Rng as _};
@@ -5362,7 +5362,7 @@ mod tests {
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: Elector<S>,
     {
-        let faults = Bft3f1::max_faults(n);
+        let faults = N3f1::max_faults(n);
         let required_containers = View::new(100);
         let activity_timeout = ViewDelta::new(10);
         let skip_timeout = ViewDelta::new(5);

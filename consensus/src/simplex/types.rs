@@ -12,7 +12,7 @@ use commonware_cryptography::{
     Digest, PublicKey,
 };
 use commonware_parallel::Strategy;
-use commonware_utils::Bft3f1;
+use commonware_utils::N3f1;
 use rand_core::CryptoRngCore;
 use std::{collections::HashSet, fmt::Debug, hash::Hash};
 
@@ -909,7 +909,7 @@ impl<S: Scheme, D: Digest> Notarization<S, D> {
         let mut iter = notarizes.into_iter().peekable();
         let proposal = iter.peek()?.proposal.clone();
         let certificate =
-            scheme.assemble::<_, Bft3f1>(iter.map(|n| n.attestation.clone()), strategy)?;
+            scheme.assemble::<_, N3f1>(iter.map(|n| n.attestation.clone()), strategy)?;
 
         Some(Self {
             proposal,
@@ -929,7 +929,7 @@ impl<S: Scheme, D: Digest> Notarization<S, D> {
     where
         S: scheme::Scheme<D>,
     {
-        scheme.verify_certificate::<_, D, Bft3f1>(
+        scheme.verify_certificate::<_, D, N3f1>(
             rng,
             Subject::Notarize {
                 proposal: &self.proposal,
@@ -1147,7 +1147,7 @@ impl<S: Scheme> Nullification<S> {
         let mut iter = nullifies.into_iter().peekable();
         let round = iter.peek()?.round;
         let certificate =
-            scheme.assemble::<_, Bft3f1>(iter.map(|n| n.attestation.clone()), strategy)?;
+            scheme.assemble::<_, N3f1>(iter.map(|n| n.attestation.clone()), strategy)?;
 
         Some(Self { round, certificate })
     }
@@ -1164,7 +1164,7 @@ impl<S: Scheme> Nullification<S> {
     where
         S: scheme::Scheme<D>,
     {
-        scheme.verify_certificate::<_, D, Bft3f1>(
+        scheme.verify_certificate::<_, D, N3f1>(
             rng,
             Subject::Nullify { round: self.round },
             &self.certificate,
@@ -1392,7 +1392,7 @@ impl<S: Scheme, D: Digest> Finalization<S, D> {
         let mut iter = finalizes.into_iter().peekable();
         let proposal = iter.peek()?.proposal.clone();
         let certificate =
-            scheme.assemble::<_, Bft3f1>(iter.map(|f| f.attestation.clone()), strategy)?;
+            scheme.assemble::<_, N3f1>(iter.map(|f| f.attestation.clone()), strategy)?;
 
         Some(Self {
             proposal,
@@ -1412,7 +1412,7 @@ impl<S: Scheme, D: Digest> Finalization<S, D> {
     where
         S: scheme::Scheme<D>,
     {
-        scheme.verify_certificate::<_, D, Bft3f1>(
+        scheme.verify_certificate::<_, D, N3f1>(
             rng,
             Subject::Finalize {
                 proposal: &self.proposal,
@@ -1708,7 +1708,7 @@ impl<S: Scheme, D: Digest> Response<S, D> {
             (context, &nullification.certificate)
         });
 
-        scheme.verify_certificates::<_, D, _, Bft3f1>(
+        scheme.verify_certificates::<_, D, _, N3f1>(
             rng,
             notarizations.chain(nullifications),
             strategy,
@@ -2505,7 +2505,7 @@ mod tests {
         sha256::Digest as Sha256,
     };
     use commonware_parallel::Sequential;
-    use commonware_utils::{test_rng, Bft3f1, Faults};
+    use commonware_utils::{test_rng, Faults, N3f1};
     use rand::{rngs::StdRng, SeedableRng};
 
     const NAMESPACE: &[u8] = b"test";
@@ -3012,7 +3012,7 @@ mod tests {
         let wrong_fixture = setup_seeded(5, 1, &f);
         let round = Round::new(Epoch::new(0), View::new(10));
         let proposal = Proposal::new(round, View::new(5), sample_digest(3));
-        let quorum = Bft3f1::quorum_from_slice(&fixture.schemes) as usize;
+        let quorum = N3f1::quorum_from_slice(&fixture.schemes) as usize;
         let notarizes: Vec<_> = fixture
             .schemes
             .iter()
@@ -3048,7 +3048,7 @@ mod tests {
         let mut rng = test_rng();
         let round = Round::new(Epoch::new(0), View::new(10));
         let proposal = Proposal::new(round, View::new(5), sample_digest(4));
-        let quorum = Bft3f1::quorum_from_slice(&fixture.schemes) as usize;
+        let quorum = N3f1::quorum_from_slice(&fixture.schemes) as usize;
         let notarizes: Vec<_> = fixture
             .schemes
             .iter()
@@ -3183,7 +3183,7 @@ mod tests {
         let wrong_fixture = setup_seeded(5, 1, &f);
         let round = Round::new(Epoch::new(0), View::new(10));
         let proposal = Proposal::new(round, View::new(5), sample_digest(9));
-        let quorum = Bft3f1::quorum_from_slice(&fixture.schemes) as usize;
+        let quorum = N3f1::quorum_from_slice(&fixture.schemes) as usize;
         let finalizes: Vec<_> = fixture
             .schemes
             .iter()

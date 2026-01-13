@@ -239,7 +239,7 @@ mod tests {
         sha256::Digest as Sha256Digest, Sha256,
     };
     use commonware_parallel::Sequential;
-    use commonware_utils::{test_rng, Bft3f1, Faults, TryFromIterator};
+    use commonware_utils::{test_rng, Faults, N3f1, TryFromIterator};
 
     const NAMESPACE: &[u8] = b"test";
 
@@ -416,7 +416,7 @@ mod tests {
         } = bls12381_threshold::fixture::<MinPk, _>(&mut rng, NAMESPACE, 5);
         let participants = Set::try_from_iter(participants).unwrap();
         let elector: RandomElector<ThresholdScheme> = Random.build(&participants);
-        let quorum = Bft3f1::quorum_from_slice(&schemes) as usize;
+        let quorum = N3f1::quorum_from_slice(&schemes) as usize;
 
         // Create certificate for round (1, 2)
         let round1 = Round::new(Epoch::new(1), View::new(2));
@@ -429,7 +429,7 @@ mod tests {
             })
             .collect();
         let cert1 = schemes[0]
-            .assemble::<_, Bft3f1>(attestations1, &Sequential)
+            .assemble::<_, N3f1>(attestations1, &Sequential)
             .unwrap();
 
         // Create certificate for round (1, 3) (different round -> different seed signature)
@@ -443,7 +443,7 @@ mod tests {
             })
             .collect();
         let cert2 = schemes[0]
-            .assemble::<_, Bft3f1>(attestations2, &Sequential)
+            .assemble::<_, N3f1>(attestations2, &Sequential)
             .unwrap();
 
         // Same certificate always gives same leader
@@ -537,7 +537,7 @@ mod tests {
                 } = bls12381_threshold::fixture::<MinPk, _>(&mut rng, NAMESPACE, n);
                 let participants = Set::try_from_iter(participants).unwrap();
                 let elector: RandomElector<ThresholdScheme> = Random.build(&participants);
-                let quorum = Bft3f1::quorum_from_slice(&schemes) as usize;
+                let quorum = N3f1::quorum_from_slice(&schemes) as usize;
 
                 // Generate deterministic round parameters
                 let epoch = rng.gen_range(0..1000);
@@ -552,7 +552,7 @@ mod tests {
                     .map(|s| s.sign::<Sha256Digest>(Subject::Nullify { round }).unwrap())
                     .collect();
                 let cert = schemes[0]
-                    .assemble::<_, Bft3f1>(attestations, &Sequential)
+                    .assemble::<_, N3f1>(attestations, &Sequential)
                     .unwrap();
 
                 // Elect leader using the certificate

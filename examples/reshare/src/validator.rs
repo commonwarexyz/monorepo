@@ -181,7 +181,7 @@ mod test {
         deterministic::{self, Runner},
         Clock, Handle, Quota, Runner as _, Spawner,
     };
-    use commonware_utils::{union, Bft3f1, TryCollect};
+    use commonware_utils::{union, N3f1, TryCollect};
     use futures::{
         channel::{mpsc, oneshot},
         SinkExt, StreamExt,
@@ -286,7 +286,7 @@ mod test {
                 participants: participants.keys().cloned().try_collect().unwrap(),
             };
             let (output, shares) =
-                deal::<MinSig, _, Bft3f1>(&mut rng, Default::default(), peer_config.dealers(0))
+                deal::<MinSig, _, N3f1>(&mut rng, Default::default(), peer_config.dealers(0))
                     .expect("deal should succeed");
             for (key, share) in shares.into_iter() {
                 if let Some((_, maybe_share)) = participants.get_mut(&key) {

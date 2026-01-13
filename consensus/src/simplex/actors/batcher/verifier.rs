@@ -464,7 +464,7 @@ mod tests {
         sha256::Digest as Sha256,
     };
     use commonware_parallel::Sequential;
-    use commonware_utils::{test_rng, Bft3f1, Faults};
+    use commonware_utils::{test_rng, Faults, N3f1};
     use rand::rngs::StdRng;
 
     const NAMESPACE: &[u8] = b"test";
@@ -508,7 +508,7 @@ mod tests {
     {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 5);
-        let quorum = Bft3f1::quorum_from_slice(&schemes);
+        let quorum = N3f1::quorum_from_slice(&schemes);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
 
         let round = Round::new(Epoch::new(0), View::new(1));
@@ -574,7 +574,7 @@ mod tests {
     {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 5);
-        let quorum = Bft3f1::quorum_from_slice(&schemes);
+        let quorum = N3f1::quorum_from_slice(&schemes);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
 
         let round = Round::new(Epoch::new(0), View::new(1));
@@ -616,7 +616,7 @@ mod tests {
     {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 5);
-        let quorum = Bft3f1::quorum_from_slice(&schemes);
+        let quorum = N3f1::quorum_from_slice(&schemes);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let round = Round::new(Epoch::new(0), View::new(1));
         let notarizes: Vec<_> = schemes
@@ -688,7 +688,7 @@ mod tests {
     {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 5);
-        let quorum = Bft3f1::quorum_from_slice(&schemes);
+        let quorum = N3f1::quorum_from_slice(&schemes);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let round = Round::new(Epoch::new(0), View::new(1));
         let nullify = create_nullify(&schemes[0], round);
@@ -719,7 +719,7 @@ mod tests {
     {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 5);
-        let quorum = Bft3f1::quorum_from_slice(&schemes);
+        let quorum = N3f1::quorum_from_slice(&schemes);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let round = Round::new(Epoch::new(0), View::new(1));
         let nullifies: Vec<_> = schemes
@@ -764,7 +764,7 @@ mod tests {
     {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 5);
-        let quorum = Bft3f1::quorum_from_slice(&schemes);
+        let quorum = N3f1::quorum_from_slice(&schemes);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let round = Round::new(Epoch::new(0), View::new(1));
         let finalize_a = create_finalize(&schemes[0], round, View::new(0), 1);
@@ -810,7 +810,7 @@ mod tests {
     {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 5);
-        let quorum = Bft3f1::quorum_from_slice(&schemes);
+        let quorum = N3f1::quorum_from_slice(&schemes);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let round = Round::new(Epoch::new(0), View::new(1));
         let finalizes: Vec<_> = schemes
@@ -860,7 +860,7 @@ mod tests {
     {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 3);
-        let quorum = Bft3f1::quorum_from_slice(&schemes);
+        let quorum = N3f1::quorum_from_slice(&schemes);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let round = Round::new(Epoch::new(0), View::new(1));
         let proposal_a = Proposal::new(round, View::new(0), sample_digest(10));
@@ -952,7 +952,7 @@ mod tests {
     {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 5);
-        let quorum = Bft3f1::quorum_from_slice(&schemes);
+        let quorum = N3f1::quorum_from_slice(&schemes);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let round = Round::new(Epoch::new(0), View::new(1));
         let leader_vote = create_notarize(&schemes[0], round, View::new(0), 1);
@@ -996,7 +996,7 @@ mod tests {
     {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 3);
-        let quorum = Bft3f1::quorum_from_slice(&schemes);
+        let quorum = N3f1::quorum_from_slice(&schemes);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let round = Round::new(Epoch::new(0), View::new(1));
 
@@ -1039,7 +1039,7 @@ mod tests {
     {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 3);
-        let quorum = Bft3f1::quorum_from_slice(&schemes);
+        let quorum = N3f1::quorum_from_slice(&schemes);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let round = Round::new(Epoch::new(0), View::new(1));
         let finalizes: Vec<_> = schemes
@@ -1081,7 +1081,7 @@ mod tests {
     {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 3);
-        let quorum = Bft3f1::quorum_from_slice(&schemes);
+        let quorum = N3f1::quorum_from_slice(&schemes);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let round = Round::new(Epoch::new(0), View::new(1));
         let leader_proposal = Proposal::new(round, View::new(0), sample_digest(1));
@@ -1107,7 +1107,7 @@ mod tests {
     {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 3);
-        let quorum = Bft3f1::quorum_from_slice(&schemes);
+        let quorum = N3f1::quorum_from_slice(&schemes);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         assert!(verifier.nullifies.is_empty());
         assert!(!verifier.ready_nullifies());
@@ -1134,7 +1134,7 @@ mod tests {
     {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 3);
-        let quorum = Bft3f1::quorum_from_slice(&schemes);
+        let quorum = N3f1::quorum_from_slice(&schemes);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         verifier.set_leader(Participant::new(0));
         assert!(verifier.finalizes.is_empty());
@@ -1162,7 +1162,7 @@ mod tests {
     {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 5);
-        let quorum = Bft3f1::quorum_from_slice(&schemes);
+        let quorum = N3f1::quorum_from_slice(&schemes);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let round = Round::new(Epoch::new(0), View::new(1));
 
@@ -1215,7 +1215,7 @@ mod tests {
     {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 5);
-        let quorum = Bft3f1::quorum_from_slice(&schemes);
+        let quorum = N3f1::quorum_from_slice(&schemes);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let round = Round::new(Epoch::new(0), View::new(1));
 
@@ -1255,7 +1255,7 @@ mod tests {
     {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 5);
-        let quorum = Bft3f1::quorum_from_slice(&schemes);
+        let quorum = N3f1::quorum_from_slice(&schemes);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let round = Round::new(Epoch::new(0), View::new(1));
         let leader_finalize = create_finalize(&schemes[0], round, View::new(0), 1);
@@ -1300,7 +1300,7 @@ mod tests {
     {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 5);
-        let quorum = Bft3f1::quorum_from_slice(&schemes);
+        let quorum = N3f1::quorum_from_slice(&schemes);
         assert!(
             schemes.len() > quorum as usize,
             "test requires more validators than the quorum"
@@ -1352,7 +1352,7 @@ mod tests {
     {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 5);
-        let quorum = Bft3f1::quorum_from_slice(&schemes);
+        let quorum = N3f1::quorum_from_slice(&schemes);
         assert!(
             schemes.len() > quorum as usize,
             "test requires more validators than the quorum"
@@ -1396,7 +1396,7 @@ mod tests {
     {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 5);
-        let quorum = Bft3f1::quorum_from_slice(&schemes);
+        let quorum = N3f1::quorum_from_slice(&schemes);
         assert!(
             schemes.len() > quorum as usize,
             "test requires more validators than the quorum"

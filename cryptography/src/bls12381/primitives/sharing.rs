@@ -278,7 +278,7 @@ impl<V: Variant> Read for Sharing<V> {
 mod fuzz {
     use super::*;
     use arbitrary::Arbitrary;
-    use commonware_utils::{Bft3f1, NZU32};
+    use commonware_utils::{N3f1, NZU32};
     use rand::{rngs::StdRng, SeedableRng};
 
     impl<'a> Arbitrary<'a> for Mode {
@@ -295,7 +295,7 @@ mod fuzz {
             let total: u32 = u.int_in_range(1..=100)?;
             let mode: Mode = u.arbitrary()?;
             let seed: u64 = u.arbitrary()?;
-            let poly = Poly::new(&mut StdRng::seed_from_u64(seed), Bft3f1::quorum(total) - 1);
+            let poly = Poly::new(&mut StdRng::seed_from_u64(seed), N3f1::quorum(total) - 1);
             Ok(Self::new(
                 mode,
                 NZU32!(total),

@@ -5,7 +5,7 @@ use commonware_cryptography::{
     Digest, PublicKey,
 };
 use commonware_parallel::Strategy;
-use commonware_utils::Bft3f1;
+use commonware_utils::N3f1;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// A struct representing a set of votes for a payload digest.
@@ -91,7 +91,7 @@ impl<P: PublicKey, S: Scheme, D: Digest> AckManager<P, S, D> {
 
                 // Try to assemble certificate
                 let certificate =
-                    scheme.assemble::<_, Bft3f1>(attestations.iter().cloned(), strategy)?;
+                    scheme.assemble::<_, N3f1>(attestations.iter().cloned(), strategy)?;
 
                 // Take ownership of the votes, which must exist
                 p.attestations.remove(&ack.chunk.payload);

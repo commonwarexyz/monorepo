@@ -19,7 +19,7 @@ use core::{
 };
 
 pub mod faults;
-pub use faults::{Bft3f1, Bft5f1, Faults};
+pub use faults::{Faults, N3f1, N5f1};
 pub mod sequence;
 pub use sequence::{Array, Span};
 #[cfg(feature = "std")]
