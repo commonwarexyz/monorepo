@@ -67,7 +67,7 @@ enum FuzzOperation {
     // Key operations
     KeypairGeneration,
     ComputePublicKey {
-        private: Scalar,
+        private: Private,
     },
     SharePublicKey {
         share: Share,
@@ -87,12 +87,12 @@ enum FuzzOperation {
 
     // Single signature operations (MinPk)
     SignMinPk {
-        private: Scalar,
+        private: Private,
         namespace: Vec<u8>,
         message: Vec<u8>,
     },
     SignMinPkLowLevel {
-        private: Scalar,
+        private: Private,
         message: Vec<u8>,
     },
     VerifyMinPk {
@@ -109,12 +109,12 @@ enum FuzzOperation {
 
     // Single signature operations (MinSig)
     SignMinSig {
-        private: Scalar,
+        private: Private,
         namespace: Vec<u8>,
         message: Vec<u8>,
     },
     SignMinSigLowLevel {
-        private: Scalar,
+        private: Private,
         message: Vec<u8>,
     },
     VerifyMinSig {

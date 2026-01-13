@@ -283,7 +283,7 @@
 //!
 //! For a complete example with resharing, see [commonware-reshare](https://docs.rs/commonware-reshare).
 
-use super::primitives::group::Share;
+use super::primitives::group::{Private, Share};
 use crate::{
     bls12381::primitives::{
         group::Scalar,
@@ -1184,7 +1184,7 @@ impl<V: Variant, S: Signer> Dealer<V, S> {
             // `Poly::new_with_constant` requires an owned value. The extracted scalar is
             // scoped to this function and will be zeroized on drop (i.e. the secret is
             // only exposed for the duration of this function).
-            share.map(|x| x.private.expose_unwrap()),
+            share.map(|x| x.private.scalar.expose_unwrap()),
         )?;
         let my_poly = Poly::new_with_constant(&mut rng, info.degree::<M>(), share);
         let priv_msgs = info
@@ -1526,7 +1526,7 @@ impl<V: Variant, S: Signer> Player<V, S> {
                     .expect("select ensures that we can recover")
             },
         );
-        let share = Share::new(self.index, private);
+        let share = Share::new(self.index, Private::new(private));
         Ok((output, share))
     }
 }
@@ -1557,7 +1557,7 @@ pub fn deal<V: Variant, P: Clone + Ord, M: Faults>(
                     .expect("player index should be valid"),
                 &Sequential,
             );
-            let share = Share::new(participant, eval);
+            let share = Share::new(participant, Private::new(eval));
             (p.clone(), share)
         })
         .try_collect()
@@ -1942,7 +1942,7 @@ mod test_plan {
                         (Some(s), false) => Some(s.clone()),
                         (Some(_), true) => Some(Share::new(
                             Participant::new(i_dealer),
-                            Scalar::random(&mut rng),
+                            Private::random(&mut rng),
                         )),
                     };
 
@@ -1957,7 +1957,7 @@ mod test_plan {
                             let share = info
                                 .unwrap_or_random_share(
                                     &mut rng,
-                                    share.map(|s| s.private.expose_unwrap()),
+                                    share.map(|s| s.private.scalar.expose_unwrap()),
                                 )
                                 .expect("Failed to generate dealer share");
 

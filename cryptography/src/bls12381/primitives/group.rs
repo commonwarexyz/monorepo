@@ -254,7 +254,51 @@ impl GT {
 }
 
 /// The private key type.
-pub type Private = Scalar;
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Private {
+    pub(crate) scalar: Secret<Scalar>,
+}
+
+impl Private {
+    /// Creates a new private key from a scalar.
+    pub const fn new(private: Scalar) -> Self {
+        Self {
+            scalar: Secret::new(private),
+        }
+    }
+}
+
+impl Write for Private {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.scalar.expose(|scalar| scalar.write(buf));
+    }
+}
+
+impl Read for Private {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
+        let scalar = Scalar::read(buf)?;
+        Ok(Self::new(scalar))
+    }
+}
+
+impl FixedSize for Private {
+    const SIZE: usize = PRIVATE_KEY_LENGTH;
+}
+
+impl Random for Private {
+    fn random(rng: impl CryptoRngCore) -> Self {
+        Self::new(Scalar::random(rng))
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl arbitrary::Arbitrary<'_> for Private {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(Self::new(u.arbitrary::<Scalar>()?))
+    }
+}
 
 /// The private key length.
 pub const PRIVATE_KEY_LENGTH: usize = SCALAR_LENGTH;
@@ -546,16 +590,13 @@ pub struct Share {
     /// The share's index in the polynomial.
     pub index: Participant,
     /// The scalar corresponding to the share's secret.
-    pub private: Secret<Private>,
+    pub private: Private,
 }
 
 impl Share {
     /// Creates a new `Share` with the given index and private key.
     pub const fn new(index: Participant, private: Private) -> Self {
-        Self {
-            index,
-            private: Secret::new(private),
-        }
+        Self { index, private }
     }
 
     /// Returns the public key corresponding to the share.
@@ -563,6 +604,7 @@ impl Share {
     /// This can be verified against the public polynomial.
     pub fn public<V: Variant>(&self) -> V::Public {
         self.private
+            .scalar
             .expose(|private| V::Public::generator() * private)
     }
 }
@@ -570,7 +612,7 @@ impl Share {
 impl Write for Share {
     fn write(&self, buf: &mut impl BufMut) {
         self.index.write(buf);
-        self.private.expose(|private| private.write(buf));
+        self.private.scalar.expose(|private| private.write(buf));
     }
 }
 
@@ -580,16 +622,13 @@ impl Read for Share {
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let index = Participant::read(buf)?;
         let private = Private::read(buf)?;
-        Ok(Self {
-            index,
-            private: Secret::new(private),
-        })
+        Ok(Self { index, private })
     }
 }
 
 impl EncodeSize for Share {
     fn encode_size(&self) -> usize {
-        self.index.encode_size() + self.private.expose(|private| private.encode_size())
+        self.index.encode_size() + self.private.scalar.expose(|private| private.encode_size())
     }
 }
 
@@ -603,11 +642,8 @@ impl Display for Share {
 impl arbitrary::Arbitrary<'_> for Share {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let index = u.arbitrary()?;
-        let private = Private::arbitrary(u)?;
-        Ok(Self {
-            index,
-            private: Secret::new(private),
-        })
+        let private = u.arbitrary::<Private>()?;
+        Ok(Self { index, private })
     }
 }
 
@@ -1741,7 +1777,7 @@ mod tests {
     #[test]
     fn test_share_redacted() {
         let mut rng = test_rng();
-        let share = Share::new(Participant::new(1), Scalar::random(&mut rng));
+        let share = Share::new(Participant::new(1), Private::random(&mut rng));
         let debug = format!("{:?}", share);
         let display = format!("{}", share);
         assert!(debug.contains("REDACTED"));
