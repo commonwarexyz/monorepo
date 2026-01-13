@@ -431,14 +431,6 @@ impl<E: Storage + Metrics + Clock, V: CodecFixedShared> kv::Updatable for Ordina
     async fn update(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
         self.put(key, value).await
     }
-
-    async fn create(&mut self, key: Self::Key, value: Self::Value) -> Result<bool, Self::Error> {
-        if self.has(key) {
-            return Ok(false);
-        }
-        self.put(key, value).await?;
-        Ok(true)
-    }
 }
 
 impl<E: Storage + Metrics + Clock, V: CodecFixedShared> Persistable for Ordinal<E, V> {

@@ -82,27 +82,6 @@ where
 
         Ok(())
     }
-
-    /// Creates a new key-value pair in the batch. Returns true if the key was created, false if it
-    /// already existed.
-    async fn create(&mut self, key: K, value: V) -> Result<bool, Error> {
-        if let Some(value_opt) = self.diff.get_mut(&key) {
-            match value_opt {
-                Some(_) => return Ok(false),
-                None => {
-                    *value_opt = Some(value);
-                    return Ok(true);
-                }
-            }
-        }
-
-        if self.db.get(&key).await?.is_some() {
-            return Ok(false);
-        }
-
-        self.diff.insert(key, Some(value));
-        Ok(true)
-    }
 }
 
 impl<'b, K, V, D> Deletable for Batch<'b, K, V, D>

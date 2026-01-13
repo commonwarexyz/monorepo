@@ -32,7 +32,18 @@ pub trait Updatable: Gettable {
         &'a mut self,
         key: Self::Key,
         value: Self::Value,
-    ) -> impl Future<Output = Result<bool, Self::Error>> + Send + use<'a, Self>;
+    ) -> impl Future<Output = Result<bool, Self::Error>> + Send + use<'a, Self>
+    where
+        Self: Send + Sync,
+    {
+        async {
+            if self.get(&key).await?.is_some() {
+                return Ok(false);
+            }
+            self.update(key, value).await?;
+            Ok(true)
+        }
+    }
 
     /// Updates the value associated with the given key in the store, inserting a default value if
     /// the key does not already exist.
