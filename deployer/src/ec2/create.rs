@@ -503,8 +503,8 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     info!("launching instances");
     let monitoring_ec2_client = &ec2_clients[&monitoring_region];
     let monitoring_ami_id = find_latest_ami(monitoring_ec2_client, monitoring_architecture).await?;
-    let monitoring_instance_type = InstanceType::try_parse(&config.monitoring.instance_type)
-        .expect("Invalid instance type");
+    let monitoring_instance_type =
+        InstanceType::try_parse(&config.monitoring.instance_type).expect("Invalid instance type");
     let monitoring_storage_class =
         VolumeType::try_parse(&config.monitoring.storage_class).expect("Invalid storage class");
     let monitoring_sg_id = monitoring_resources
@@ -545,12 +545,10 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
             )
             .await?[0]
                 .clone();
-            let ip = wait_for_instances_running(
-                monitoring_ec2_client,
-                slice::from_ref(&instance_id),
-            )
-            .await?[0]
-                .clone();
+            let ip =
+                wait_for_instances_running(monitoring_ec2_client, slice::from_ref(&instance_id))
+                    .await?[0]
+                    .clone();
             let private_ip = get_private_ip(monitoring_ec2_client, &instance_id).await?;
             info!(ip = ip.as_str(), "launched monitoring instance");
             Ok::<(String, String, String), Error>((instance_id, ip, private_ip))
@@ -954,7 +952,10 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
             poll_service_active(private_key, &monitoring_ip, "pyroscope").await?;
             poll_service_active(private_key, &monitoring_ip, "tempo").await?;
             poll_service_active(private_key, &monitoring_ip, "grafana-server").await?;
-            info!(ip = monitoring_ip.as_str(), "configured monitoring instance");
+            info!(
+                ip = monitoring_ip.as_str(),
+                "configured monitoring instance"
+            );
             Ok::<(), Error>(())
         },
         async {
