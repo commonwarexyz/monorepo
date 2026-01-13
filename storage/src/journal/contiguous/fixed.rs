@@ -209,8 +209,8 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
             return Ok(0);
         };
 
+        // Detect missing historical blobs on init; contiguous journals must be gap-free.
         {
-            // Detect missing historical blobs on init; contiguous journals must be gap-free.
             let mut sections = inner.sections();
             let mut prev = sections
                 .next()
