@@ -187,13 +187,14 @@ async fn start_node(
     .await
     .context("init qmdb")?;
 
-    let handle = application::NodeHandle::new(state.clone(), context.clone());
+    let ledger = application::LedgerService::new(state.clone());
+    let handle = application::NodeHandle::new(ledger.clone(), context.clone());
     let app =
         application::RevmApplication::<ThresholdScheme>::new(BLOCK_CODEC_MAX_TXS, state.clone());
 
     let finalized_reporter = application::FinalizedReporter::new(
         index as u32,
-        state.clone(),
+        ledger.clone(),
         finalized_tx,
         context.clone(),
     );
@@ -224,7 +225,7 @@ async fn start_node(
         epocher,
     );
 
-    let seed_reporter = application::SeedReporter::<MinSig>::new(state.clone());
+    let seed_reporter = application::SeedReporter::<MinSig>::new(ledger.clone());
     // Feed both the application-specific reporter (seed hashing) and marshal itself with simplex
     // activity (notarizations/finalizations).
     let reporter = Reporters::from((seed_reporter, marshal_mailbox.clone()));

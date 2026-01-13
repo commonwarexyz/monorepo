@@ -4,7 +4,7 @@
 //! - submit transactions into the node-local mempool, and
 //! - query state at a finalized digest for assertions.
 
-use super::state::LedgerView;
+use super::state::LedgerService;
 use crate::{
     types::{StateRoot, Tx},
     ConsensusDigest,
@@ -15,8 +15,8 @@ use commonware_runtime::Spawner;
 #[derive(Clone)]
 /// Handle that exposes application queries and submissions to the simulation harness.
 pub struct NodeHandle<E> {
-    /// Ledger view that backs the application state.
-    state: LedgerView,
+    /// Ledger service used by the simulation harness.
+    state: LedgerService,
     /// Spawner used to execute queries that interact with runtime traits.
     spawner: E,
 }
@@ -25,7 +25,7 @@ impl<E> NodeHandle<E>
 where
     E: Spawner,
 {
-    pub(crate) const fn new(state: LedgerView, spawner: E) -> Self {
+    pub(crate) const fn new(state: LedgerService, spawner: E) -> Self {
         Self { state, spawner }
     }
 

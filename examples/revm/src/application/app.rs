@@ -7,7 +7,7 @@
 //!
 //! The node wiring that wraps this application lives in `examples/revm/src/sim/node.rs`.
 
-use super::state::LedgerView;
+use super::state::{LedgerService, LedgerView};
 use crate::{
     execution::{evm_env, execute_txs},
     types::{Block, TxId},
@@ -27,8 +27,8 @@ use std::{collections::BTreeSet, marker::PhantomData};
 
 /// Helper function for propose that owns all its inputs.
 async fn propose_inner<S, E>(
-    // Ledger view used to store snapshots, mempool, and seeds.
-    state: LedgerView,
+    // Ledger service commands for proposal preparation.
+    state: LedgerService,
     max_txs: usize,
     spawner: E,
     mut ancestry: AncestorStream<S, Block>,
@@ -76,7 +76,7 @@ where
         txs,
     };
     child.state_root = state
-        .preview_qmdb_root(parent_digest, outcome.qmdb_changes.clone())
+        .preview_root(parent_digest, outcome.qmdb_changes.clone())
         .await
         .ok()?;
 
@@ -95,7 +95,7 @@ where
 
 /// Helper function for verify that owns all its inputs.
 async fn verify_inner<S, E>(
-    state: LedgerView,
+    state: LedgerService,
     spawner: E,
     mut ancestry: AncestorStream<S, Block>,
 ) -> bool
@@ -126,7 +126,7 @@ where
         _ => return false,
     };
     let state_root = match state
-        .preview_qmdb_root(parent_digest, outcome.qmdb_changes.clone())
+        .preview_root(parent_digest, outcome.qmdb_changes.clone())
         .await
     {
         Ok(root) => root,
@@ -148,8 +148,8 @@ where
 pub(crate) struct RevmApplication<S> {
     /// Maximum number of transactions to include when proposing new blocks.
     max_txs: usize,
-    // Ledger view holding snapshots, mempool, and seeds.
-    state: LedgerView,
+    /// Ledger service used to orchestrate ledger commands.
+    state: LedgerService,
     /// Marker tracking the signing scheme used by this application instance.
     _scheme: PhantomData<S>,
 }
@@ -159,7 +159,7 @@ impl<S> RevmApplication<S> {
     pub(crate) const fn new(max_txs: usize, state: LedgerView) -> Self {
         Self {
             max_txs,
-            state,
+            state: LedgerService::new(state),
             _scheme: PhantomData,
         }
     }

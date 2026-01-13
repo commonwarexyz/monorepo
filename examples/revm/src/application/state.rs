@@ -38,13 +38,11 @@ pub(crate) struct LedgerView {
 /// Internal ledger state guarded by the mutex inside `LedgerView`.
 pub(crate) struct LedgerState {
     /// Pending transactions that are not yet included in finalized blocks.
-    mempool: BTreeMap<TxId, Tx>,
+    mempool: Mempool,
     /// Execution snapshots indexed by digest so we can replay ancestors.
-    snapshots: BTreeMap<ConsensusDigest, LedgerSnapshot>,
+    snapshots: SnapshotStore,
     /// Cached seeds for each digest used to compute prevrandao.
-    seeds: BTreeMap<ConsensusDigest, B256>,
-    /// Finalized digests that have been persisted to QMDB.
-    persisted: BTreeSet<ConsensusDigest>,
+    seeds: SeedCache,
     /// Underlying QMDB tracker for persistence.
     qmdb: QmdbState,
 }
@@ -60,6 +58,120 @@ pub(crate) struct LedgerSnapshot {
     pub(crate) state_root: StateRoot,
     /// QMDB changes captured during the execution that produced this snapshot.
     pub(crate) qmdb_changes: QmdbChanges,
+}
+
+/// Minimal mempool helper that avoids duplicating logics across services.
+#[derive(Default, Clone)]
+struct Mempool(BTreeMap<TxId, Tx>);
+
+impl Mempool {
+    const fn new() -> Self {
+        Self(BTreeMap::new())
+    }
+
+    fn insert(&mut self, tx: Tx) -> bool {
+        self.0.insert(tx.id(), tx).is_none()
+    }
+
+    fn build(&self, max_txs: usize, excluded: &BTreeSet<TxId>) -> Vec<Tx> {
+        self.0
+            .iter()
+            .filter(|(tx_id, _)| !excluded.contains(tx_id))
+            .take(max_txs)
+            .map(|(_, tx)| tx.clone())
+            .collect()
+    }
+
+    fn prune(&mut self, txs: &[Tx]) {
+        for tx in txs {
+            self.0.remove(&tx.id());
+        }
+    }
+}
+
+/// Storage for cached snapshots and the set of persisted digests.
+#[derive(Clone)]
+struct SnapshotStore {
+    snapshots: BTreeMap<ConsensusDigest, LedgerSnapshot>,
+    persisted: BTreeSet<ConsensusDigest>,
+}
+
+impl SnapshotStore {
+    fn new(genesis_digest: ConsensusDigest, genesis_snapshot: LedgerSnapshot) -> Self {
+        let mut snapshots = BTreeMap::new();
+        snapshots.insert(genesis_digest, genesis_snapshot);
+        let persisted = BTreeSet::from([genesis_digest]);
+        Self {
+            snapshots,
+            persisted,
+        }
+    }
+
+    fn get(&self, digest: &ConsensusDigest) -> Option<&LedgerSnapshot> {
+        self.snapshots.get(digest)
+    }
+
+    fn get_mut(&mut self, digest: &ConsensusDigest) -> Option<&mut LedgerSnapshot> {
+        self.snapshots.get_mut(digest)
+    }
+
+    fn insert(&mut self, digest: ConsensusDigest, snapshot: LedgerSnapshot) {
+        self.snapshots.insert(digest, snapshot);
+    }
+
+    fn mark_persisted(&mut self, digest: ConsensusDigest) {
+        self.persisted.insert(digest);
+    }
+
+    fn is_persisted(&self, digest: &ConsensusDigest) -> bool {
+        self.persisted.contains(digest)
+    }
+
+    fn merged_changes_from(
+        &self,
+        mut parent: ConsensusDigest,
+        changes: QmdbChanges,
+    ) -> anyhow::Result<QmdbChanges> {
+        let mut chain = Vec::new();
+        while !self.persisted.contains(&parent) {
+            let snapshot = self
+                .snapshots
+                .get(&parent)
+                .ok_or_else(|| anyhow::anyhow!("missing snapshot"))?;
+            let Some(next) = snapshot.parent else {
+                return Err(anyhow::anyhow!("missing parent snapshot"));
+            };
+            chain.push(snapshot.qmdb_changes.clone());
+            parent = next;
+        }
+
+        let mut merged = QmdbChanges::default();
+        for delta in chain.into_iter().rev() {
+            merged.merge(delta);
+        }
+        merged.merge(changes);
+        Ok(merged)
+    }
+}
+
+/// Small cache for per-digest seed hashes.
+#[derive(Clone)]
+struct SeedCache(BTreeMap<ConsensusDigest, B256>);
+
+impl SeedCache {
+    fn new(genesis_digest: ConsensusDigest) -> Self {
+        let mut seeds = BTreeMap::new();
+        seeds.insert(genesis_digest, B256::ZERO);
+        Self(seeds)
+    }
+
+    fn get(&self, digest: &ConsensusDigest) -> Option<B256> {
+        self.0.get(digest).copied()
+    }
+
+    fn insert(&mut self, digest: ConsensusDigest, seed: B256) {
+        self.0.insert(digest, seed);
+    }
 }
 
 impl LedgerView {
@@ -87,26 +199,19 @@ impl LedgerView {
         let genesis_digest = genesis_block.commitment();
         let db = RevmDb::new(qmdb.database()?);
 
-        let mut snapshots = BTreeMap::new();
-        snapshots.insert(
-            genesis_digest,
-            LedgerSnapshot {
-                parent: None,
-                db,
-                state_root: genesis_block.state_root,
-                qmdb_changes: QmdbChanges::default(),
-            },
-        );
-
-        let mut seeds = BTreeMap::new();
-        seeds.insert(genesis_digest, B256::ZERO);
-
         Ok(Self {
             inner: Arc::new(Mutex::new(LedgerState {
-                mempool: BTreeMap::new(),
-                snapshots,
-                seeds,
-                persisted: BTreeSet::from([genesis_digest]),
+                mempool: Mempool::new(),
+                snapshots: SnapshotStore::new(
+                    genesis_digest,
+                    LedgerSnapshot {
+                        parent: None,
+                        db,
+                        state_root: genesis_block.state_root,
+                        qmdb_changes: QmdbChanges::default(),
+                    },
+                ),
+                seeds: SeedCache::new(genesis_digest),
                 qmdb,
             })),
             genesis_block,
@@ -119,7 +224,7 @@ impl LedgerView {
 
     pub(crate) async fn submit_tx(&self, tx: Tx) -> bool {
         let mut inner = self.inner.lock().await;
-        inner.mempool.insert(tx.id(), tx).is_none()
+        inner.mempool.insert(tx)
     }
 
     pub(crate) async fn query_balance(
@@ -148,12 +253,12 @@ impl LedgerView {
 
     pub(crate) async fn query_seed(&self, digest: ConsensusDigest) -> Option<B256> {
         let inner = self.inner.lock().await;
-        inner.seeds.get(&digest).copied()
+        inner.seeds.get(&digest)
     }
 
     pub(crate) async fn seed_for_parent(&self, parent: ConsensusDigest) -> Option<B256> {
         let inner = self.inner.lock().await;
-        inner.seeds.get(&parent).copied()
+        inner.seeds.get(&parent)
     }
 
     pub(crate) async fn set_seed(&self, digest: ConsensusDigest, seed_hash: B256) {
@@ -161,10 +266,7 @@ impl LedgerView {
         inner.seeds.insert(digest, seed_hash);
     }
 
-    pub(crate) async fn parent_snapshot(
-        &self,
-        parent: ConsensusDigest,
-    ) -> Option<LedgerSnapshot> {
+    pub(crate) async fn parent_snapshot(&self, parent: ConsensusDigest) -> Option<LedgerSnapshot> {
         let inner = self.inner.lock().await;
         inner.snapshots.get(&parent).cloned()
     }
@@ -206,7 +308,7 @@ impl LedgerView {
     pub(crate) async fn persist_snapshot(&self, digest: ConsensusDigest) -> anyhow::Result<()> {
         let (changes, qmdb) = {
             let inner = self.inner.lock().await;
-            if inner.persisted.contains(&digest) {
+            if inner.snapshots.is_persisted(&digest) {
                 return Ok(());
             }
             let snapshot = inner
@@ -217,53 +319,108 @@ impl LedgerView {
         };
         qmdb.commit_changes(changes).await?;
         let mut inner = self.inner.lock().await;
-        inner.persisted.insert(digest);
+        inner.snapshots.mark_persisted(digest);
         Ok(())
     }
 
     pub(crate) async fn prune_mempool(&self, txs: &[Tx]) {
         let mut inner = self.inner.lock().await;
-        for tx in txs {
-            inner.mempool.remove(&tx.id());
-        }
+        inner.mempool.prune(txs);
     }
 
     pub(crate) async fn build_txs(&self, max_txs: usize, excluded: &BTreeSet<TxId>) -> Vec<Tx> {
         let inner = self.inner.lock().await;
-        inner
-            .mempool
-            .iter()
-            .filter(|(tx_id, _)| !excluded.contains(tx_id))
-            .take(max_txs)
-            .map(|(_, tx)| tx.clone())
-            .collect()
+        inner.mempool.build(max_txs, excluded)
     }
 }
 
 impl LedgerState {
     fn merged_changes_from(
         &self,
-        mut parent: ConsensusDigest,
+        parent: ConsensusDigest,
         changes: QmdbChanges,
     ) -> anyhow::Result<QmdbChanges> {
-        let mut chain = Vec::new();
-        while !self.persisted.contains(&parent) {
-            let snapshot = self
-                .snapshots
-                .get(&parent)
-                .ok_or_else(|| anyhow::anyhow!("missing snapshot"))?;
-            let Some(next) = snapshot.parent else {
-                return Err(anyhow::anyhow!("missing parent snapshot"));
-            };
-            chain.push(snapshot.qmdb_changes.clone());
-            parent = next;
-        }
+        self.snapshots.merged_changes_from(parent, changes)
+    }
+}
 
-        let mut merged = QmdbChanges::default();
-        for delta in chain.into_iter().rev() {
-            merged.merge(delta);
-        }
-        merged.merge(changes);
-        Ok(merged)
+#[derive(Clone)]
+/// Domain service that exposes high-level ledger commands.
+pub(crate) struct LedgerService {
+    view: LedgerView,
+}
+
+impl LedgerService {
+    pub(crate) const fn new(view: LedgerView) -> Self {
+        Self { view }
+    }
+
+    pub(crate) fn genesis_block(&self) -> Block {
+        self.view.genesis_block()
+    }
+
+    pub(crate) async fn submit_tx(&self, tx: Tx) -> bool {
+        self.view.submit_tx(tx).await
+    }
+
+    pub(crate) async fn query_balance(
+        &self,
+        digest: ConsensusDigest,
+        address: Address,
+    ) -> Option<U256> {
+        self.view.query_balance(digest, address).await
+    }
+
+    pub(crate) async fn query_state_root(&self, digest: ConsensusDigest) -> Option<StateRoot> {
+        self.view.query_state_root(digest).await
+    }
+
+    pub(crate) async fn query_seed(&self, digest: ConsensusDigest) -> Option<B256> {
+        self.view.query_seed(digest).await
+    }
+
+    pub(crate) async fn seed_for_parent(&self, parent: ConsensusDigest) -> Option<B256> {
+        self.view.seed_for_parent(parent).await
+    }
+
+    pub(crate) async fn set_seed(&self, digest: ConsensusDigest, seed_hash: B256) {
+        self.view.set_seed(digest, seed_hash).await;
+    }
+
+    pub(crate) async fn parent_snapshot(&self, parent: ConsensusDigest) -> Option<LedgerSnapshot> {
+        self.view.parent_snapshot(parent).await
+    }
+
+    pub(crate) async fn insert_snapshot(
+        &self,
+        digest: ConsensusDigest,
+        parent: ConsensusDigest,
+        db: RevmDb,
+        root: StateRoot,
+        changes: QmdbChanges,
+    ) {
+        self.view
+            .insert_snapshot(digest, parent, db, root, changes)
+            .await;
+    }
+
+    pub(crate) async fn preview_root(
+        &self,
+        parent: ConsensusDigest,
+        changes: QmdbChanges,
+    ) -> anyhow::Result<StateRoot> {
+        self.view.preview_qmdb_root(parent, changes).await
+    }
+
+    pub(crate) async fn persist_snapshot(&self, digest: ConsensusDigest) -> anyhow::Result<()> {
+        self.view.persist_snapshot(digest).await
+    }
+
+    pub(crate) async fn prune_mempool(&self, txs: &[Tx]) {
+        self.view.prune_mempool(txs).await;
+    }
+
+    pub(crate) async fn build_txs(&self, max_txs: usize, excluded: &BTreeSet<TxId>) -> Vec<Tx> {
+        self.view.build_txs(max_txs, excluded).await
     }
 }

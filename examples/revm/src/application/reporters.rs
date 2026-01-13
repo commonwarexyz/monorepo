@@ -7,7 +7,7 @@
 //! - `FinalizedReporter`: listens to `commonware_consensus::marshal::Update` and reacts to
 //!   finalized blocks (prunes the mempool and forwards a finalization event to the simulation).
 
-use super::state::LedgerView;
+use super::state::LedgerService;
 use crate::{
     execution::{evm_env, execute_txs},
     types::Block,
@@ -30,7 +30,7 @@ use std::marker::PhantomData;
 
 /// Helper function for SeedReporter::report that owns all its inputs
 async fn seed_report_inner<V: Variant>(
-    state: LedgerView,
+    state: LedgerService,
     activity: Activity<bls12381_threshold::Scheme<crate::PublicKey, V>, ConsensusDigest>,
 ) {
     match activity {
@@ -56,7 +56,7 @@ async fn seed_report_inner<V: Variant>(
 
 /// Helper function for FinalizedReporter::report that owns all its inputs
 async fn finalized_report_inner<E>(
-    state: LedgerView,
+    state: LedgerService,
     finalized: mpsc::UnboundedSender<FinalizationEvent>,
     node: u32,
     spawner: E,
@@ -86,7 +86,7 @@ async fn finalized_report_inner<E>(
                     .expect("execute finalized block");
                 block = next_block;
                 let state_root = state
-                    .preview_qmdb_root(parent_digest, outcome.qmdb_changes.clone())
+                    .preview_root(parent_digest, outcome.qmdb_changes.clone())
                     .await
                     .expect("preview qmdb root");
                 assert_eq!(state_root, block.state_root, "state root mismatch");
@@ -110,14 +110,14 @@ async fn finalized_report_inner<E>(
 #[derive(Clone)]
 /// Tracks simplex activity to store seed hashes for future proposals.
 pub(crate) struct SeedReporter<V> {
-    /// Ledger view that keeps per-digest seeds and snapshots.
-    state: LedgerView,
+    /// Ledger service that keeps per-digest seeds and snapshots.
+    state: LedgerService,
     /// Marker indicating the variant for the threshold scheme in use.
     _variant: PhantomData<V>,
 }
 
 impl<V> SeedReporter<V> {
-    pub(crate) const fn new(state: LedgerView) -> Self {
+    pub(crate) const fn new(state: LedgerService) -> Self {
         Self {
             state,
             _variant: PhantomData,
@@ -148,8 +148,8 @@ where
 pub(crate) struct FinalizedReporter<E> {
     /// Index of the node that owns this reporter.
     node: u32,
-    /// Ledger view used to verify blocks and persist snapshots.
-    state: LedgerView,
+    /// Ledger service used to verify blocks and persist snapshots.
+    state: LedgerService,
     /// Channel used to relay finalized block notifications.
     finalized: mpsc::UnboundedSender<FinalizationEvent>,
     /// Runtime spawner used for executing block replay tasks.
@@ -162,7 +162,7 @@ where
 {
     pub(crate) const fn new(
         node: u32,
-        state: LedgerView,
+        state: LedgerService,
         finalized: mpsc::UnboundedSender<FinalizationEvent>,
         spawner: E,
     ) -> Self {

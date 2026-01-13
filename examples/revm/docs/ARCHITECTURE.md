@@ -64,21 +64,28 @@ This document walks through the REVM simulation example with a top-down view tha
   3. Persists the snapshot through `QmdbState`.
   4. Prunes the mempool, acknowledges Marshal, and emits finalized events to the simulation harness.
 
+### Ledger Aggregates & Services (`examples/revm/src/application/state.rs`)
+
+- **Mempool**: owns pending transactions and exposes insert/build/prune commands so proposals and finalizers work against a consistent queue.
+- **SnapshotStore**: maintains `LedgerSnapshot`s plus the persisted digest set, handles ancestor lookups, merges pending `QmdbChanges`, and tracks which digests have been committed.
+- **SeedCache**: keeps per-digest seed hashes so the deterministic `prevrandao` values are pulled from a shared source.
+- **LedgerService**: domain service that wraps `LedgerView` and exposes high-level commands (`submit_tx`, `build_txs`, `parent_snapshot`, `preview_root`, `insert_snapshot`, `persist_snapshot`, `prune_mempool`, `seed_for_parent`, `set_seed`, `query_state_root`). The application and reporters talk to `LedgerService` instead of mutating the aggregates directly.
+
 ## 4. Flows Illustrated
 
 1. **Proposal Flow**:
-   - CLI invokes simulation → nodes propose via `RevmApplication`.
-   - Execution hits `execute_txs`, generating `QmdbChanges`.
-   - `LedgerView` saves the snapshot and previews the root for the block commitment.
+   - CLI invokes simulation → `LedgerService` ingests submitted transactions and keeps them in the `Mempool`.
+   - `RevmApplication` asks the service for the parent snapshot, builds a proposal batch, executes it, previews the root via `SnapshotStore`, and records a new `LedgerSnapshot`.
+   - The computed state root travels with the proposed block, while the snapshot remains available for replay and persistence.
 
 2. **Finalization Flow**:
    - Marshal delivers a finalized block to `FinalizedReporter`.
-   - Reporter replays, checks roots, and asks `QmdbState::commit_changes` to persist the authenticated updates.
-   - Mempool is pruned and the simulation harness is notified via the `finalized` channel.
+   - The reporter replays the block, validates the root, and commands `LedgerService` to persist the authenticated updates (marking the digest in `SnapshotStore` and committing via `QMDBState`).
+   - `LedgerService` prunes the `Mempool`, and the simulation harness observes the `finalized` domain event so other nodes can progress.
 
 3. **Seed Flow**:
--   - `SeedReporter` listens to simplex notaries/finalizations, hashes the received seed, and stores it in the ledger view.
-   - The stored seed is reused by `RevmApplication` when building future proposals.
+   - `SeedReporter` listens to simplex notarizations/finalizations, hashes each seed, and stores it in the `SeedCache` through `LedgerService`.
+   - `RevmApplication` reuses the cached seed when computing `prevrandao` for future proposals.
 
 ## 5. Diagram
 
