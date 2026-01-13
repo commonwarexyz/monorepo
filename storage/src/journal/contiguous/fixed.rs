@@ -44,11 +44,11 @@
 //!
 //! # State Sync
 //!
-//! `Journal::init_sync` allows for initializing a journal for use in state sync. When opened in
-//! this mode, we attempt to populate the journal within the given range with persisted data. If the
-//! journal is empty, we create a fresh journal at the specified position. If the journal is not
-//! empty, we prune the journal to the specified lower bound and rewind to the specified upper
-//! bound.
+//! `Journal::init_sync` initializes a journal for state sync, handling existing data appropriately:
+//! - If no data exists, creates a journal at the sync range start
+//! - If data exists within range, prunes to the lower bound
+//! - If data exceeds the range, returns an error
+//! - If data is stale (before range), destroys and recreates
 //!
 //! # Replay
 //!
@@ -60,12 +60,17 @@ use crate::{
         segmented::fixed::{Config as SegmentedConfig, Journal as SegmentedJournal},
         Error,
     },
+    mmr::Location,
     Persistable,
 };
 use commonware_codec::CodecFixedShared;
 use commonware_runtime::{buffer::PoolRef, Metrics, Storage};
 use futures::{stream::Stream, StreamExt};
-use std::num::{NonZeroU64, NonZeroUsize};
+use std::{
+    num::{NonZeroU64, NonZeroUsize},
+    ops::Range,
+};
+use tracing::debug;
 
 /// Configuration for `Journal` storage.
 #[derive(Clone)]
@@ -190,13 +195,85 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         })
     }
 
-    /// Compute size from the segmented journal state.
+    /// Initialize a journal for synchronization, reusing existing data if possible.
     ///
-    /// Since we maintain the invariant that:
-    /// 1. At least one blob (the tail) always exists
-    /// 2. All blobs before the tail are full and synced
+    /// Handles sync scenarios based on existing journal data vs. the given sync range:
     ///
-    /// We only need to look at the tail blob to compute size.
+    /// 1. **No existing data**: Creates journal at `range.start` (or empty if `range.start == 0`)
+    /// 2. **Data within range**: Prunes to `range.start` and reuses existing data
+    /// 3. **Data exceeds range**: Returns error
+    /// 4. **Stale data**: Destroys and recreates at `range.start`
+    pub(crate) async fn init_sync(
+        context: E,
+        cfg: Config,
+        range: Range<u64>,
+    ) -> Result<Self, crate::qmdb::Error> {
+        assert!(!range.is_empty(), "range must not be empty");
+
+        debug!(
+            range.start,
+            range.end,
+            items_per_blob = cfg.items_per_blob.get(),
+            "initializing contiguous fixed journal for sync"
+        );
+
+        let mut journal = Self::init(context.with_label("journal"), cfg.clone()).await?;
+        let size = journal.size();
+
+        // No existing data - initialize at the start of the sync range if needed
+        if size == 0 {
+            if range.start == 0 {
+                debug!("no existing journal data, returning empty journal");
+                return Ok(journal);
+            } else {
+                debug!(
+                    range.start,
+                    "no existing journal data, initializing at sync range start"
+                );
+                journal.destroy().await?;
+                return Ok(Self::init_at_size(context, cfg, range.start).await?);
+            }
+        }
+
+        // Check if data exceeds the sync range
+        if size > range.end {
+            return Err(crate::qmdb::Error::UnexpectedData(Location::new_unchecked(
+                size,
+            )));
+        }
+
+        // If all existing data is before our sync range, destroy and recreate fresh
+        if size <= range.start {
+            debug!(
+                size,
+                range.start, "existing journal data is stale, re-initializing at start position"
+            );
+            journal.destroy().await?;
+            return Ok(Self::init_at_size(context, cfg, range.start).await?);
+        }
+
+        // Prune to lower bound if needed
+        let oldest = journal.oldest_retained_pos();
+        if let Some(oldest_pos) = oldest {
+            if oldest_pos < range.start {
+                debug!(
+                    oldest_pos,
+                    range.start, "pruning journal to sync range start"
+                );
+                journal.prune(range.start).await?;
+            }
+        }
+
+        Ok(journal)
+    }
+
+    /// Validate the segmented journal state and compute size.
+    ///
+    /// Validates that:
+    /// 1. Sections are contiguous (no gaps)
+    /// 2. All non-tail sections are full (have exactly `items_per_blob` items)
+    ///
+    /// Then computes size from the tail blob.
     async fn compute_state(
         inner: &SegmentedJournal<E, A>,
         items_per_blob: u64,
