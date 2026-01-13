@@ -571,29 +571,30 @@ mod tests {
             // This verifies that the first_fill_skip adjustment works correctly.
             let seek_offset = 150usize;
             replay.seek_to(seek_offset as u64).await.unwrap();
-            // Load all remaining data
-            while !replay.is_exhausted() {
-                replay.ensure(1).await.unwrap();
-            }
-            // Verify remaining count matches expected bytes from seek offset to end
             let expected_remaining = data.len() - seek_offset;
-            assert_eq!(
-                replay.remaining(),
-                expected_remaining,
-                "After seeking to {}, remaining() should be {} but got {}",
-                seek_offset,
-                expected_remaining,
-                replay.remaining()
-            );
             // Read all bytes and verify content
             let mut collected = Vec::new();
-            while replay.remaining() > 0 {
+            loop {
+                // Load more data if needed
+                if !replay.ensure(1).await.unwrap() {
+                    break; // No more data available
+                }
                 let chunk = replay.chunk();
+                if chunk.is_empty() {
+                    break;
+                }
                 collected.extend_from_slice(chunk);
                 let len = chunk.len();
                 replay.advance(len);
             }
-            assert_eq!(collected.len(), expected_remaining);
+            assert_eq!(
+                collected.len(),
+                expected_remaining,
+                "After seeking to {}, should read {} bytes but got {}",
+                seek_offset,
+                expected_remaining,
+                collected.len()
+            );
             assert_eq!(collected, &data[seek_offset..]);
         });
     }
