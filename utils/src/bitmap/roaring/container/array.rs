@@ -267,7 +267,7 @@ impl Array {
         }
 
         // Limited case: need to check limit
-        let mut result = Vec::with_capacity(max_size.min(limit));
+        let mut result = Vec::with_capacity(limit);
         let mut i = 0;
         let mut j = 0;
 
@@ -587,12 +587,45 @@ mod tests {
     }
 
     #[test]
+    fn test_union() {
+        let values_a = vec![1, 3, 5, 7, 9];
+        let values_b = vec![2, 3, 4, 6, 8];
+
+        let empty = Array::new();
+        let container_a = Array::from_sorted_vec(values_a);
+        let container_b = Array::from_sorted_vec(values_b);
+
+        // union with empty: unlimited
+        let (result, count) = container_a.union(&empty, usize::MAX);
+        assert_eq!(result.as_slice(), &[1, 3, 5, 7, 9]);
+        assert_eq!(count, 5);
+
+        // unlimited case
+        let (result, count) = container_a.union(&container_b, usize::MAX);
+        assert_eq!(result.as_slice(), &[1, 2, 3, 4, 5, 6, 7, 8, 9]);
+        assert_eq!(count, 9);
+
+        // limited case
+        let (result, count) = container_a.union(&container_b, 5);
+        assert_eq!(result.as_slice(), &[1, 2, 3, 4, 5]);
+        assert_eq!(count, 5);
+
+        let small = Array::from_sorted_vec(vec![1, 2]);
+        let large = Array::from_sorted_vec(vec![3, 4, 5, 6, 7, 8, 9]);
+
+        // limited case: small.len() < limit < large.len()
+        let (result, count) = small.union(&large, 5);
+        assert_eq!(result.as_slice(), &[1, 2, 3, 4, 5]);
+        assert_eq!(count, 5);
+    }
+
+    #[test]
     fn test_intersection() {
         let values_a = vec![1, 3, 5, 7, 9];
         let values_b = vec![2, 3, 4, 5, 6];
 
-        let container_a = Array::from_sorted_vec(values_a.clone());
-        let container_b = Array::from_sorted_vec(values_b.clone());
+        let container_a = Array::from_sorted_vec(values_a);
+        let container_b = Array::from_sorted_vec(values_b);
 
         // unlimited case
         let (result, count) = container_a.intersection(&container_b, usize::MAX);
@@ -612,7 +645,7 @@ mod tests {
 
         let empty = Array::new();
         let container_a = Array::from_sorted_vec(values_a.clone());
-        let container_b = Array::from_sorted_vec(values_b.clone());
+        let container_b = Array::from_sorted_vec(values_b);
 
         // difference with empty: unlimited
         let (result, count) = container_a.difference(&empty, usize::MAX);

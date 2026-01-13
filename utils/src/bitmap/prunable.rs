@@ -187,7 +187,7 @@ impl<const N: usize> Prunable<N> {
     ///
     /// # Warning
     ///
-    /// Panics if self.next_bit is not byte aligned.
+    /// Panics if length of self.bitmap is not byte aligned.
     pub fn push_byte(&mut self, byte: u8) {
         self.bitmap.push_byte(byte);
     }
@@ -196,7 +196,7 @@ impl<const N: usize> Prunable<N> {
     ///
     /// # Warning
     ///
-    /// Panics if self.next_bit is not chunk aligned.
+    /// Panics if length of self.bitmap is not chunk aligned.
     pub fn push_chunk(&mut self, chunk: &[u8; N]) {
         self.bitmap.push_chunk(chunk);
     }
