@@ -1169,7 +1169,8 @@ mod test {
         qmdb::store::{LogStore, PrunableStore},
     };
 
-    type MutableFixedDb = fixed::Db<Context, FixedBytes<4>, Digest, Sha256, TwoCap, Unmerkleized, NonDurable>;
+    type MutableFixedDb =
+        fixed::Db<Context, FixedBytes<4>, Digest, Sha256, TwoCap, Unmerkleized, NonDurable>;
 
     #[allow(dead_code)]
     fn assert_gettable_futures_are_send<T: Gettable + Send>(db: &T, key: &T::Key) {

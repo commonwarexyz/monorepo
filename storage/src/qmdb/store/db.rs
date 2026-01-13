@@ -1184,10 +1184,7 @@ mod test {
     }
 
     #[allow(dead_code)]
-    fn assert_prunable_store_futures_are_send<T: super::PrunableStore>(
-        db: &mut T,
-        loc: Location,
-    ) {
+    fn assert_prunable_store_futures_are_send<T: super::PrunableStore>(db: &mut T, loc: Location) {
         assert_send(db.prune(loc));
     }
 
