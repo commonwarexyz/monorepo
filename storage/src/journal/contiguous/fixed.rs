@@ -98,8 +98,13 @@ pub struct Config {
 ///
 /// # Repair
 ///
-/// If a write fails at a page boundary, there's a chance the journal will contain a "partial" item
-/// at the end of the last blob. Any such items will be truncated on init.
+/// Like
+/// [sqlite](https://github.com/sqlite/sqlite/blob/8658a8df59f00ec8fcfea336a2a6a4b5ef79d2ee/src/wal.c#L1504-L1505)
+/// and
+/// [rocksdb](https://github.com/facebook/rocksdb/blob/0c533e61bc6d89fdf1295e8e0bcee4edb3aef401/include/rocksdb/options.h#L441-L445),
+/// the first invalid data read will be considered the new end of the journal (and the
+/// underlying [Blob] will be truncated to the last valid item). Repair is performed
+/// by the underlying [SegmentedJournal] during init.
 pub struct Journal<E: Storage + Metrics, A: CodecFixedShared> {
     inner: SegmentedJournal<E, A>,
 
