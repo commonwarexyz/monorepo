@@ -45,8 +45,8 @@ registered benchmark names from the compiled binaries, then validates them.
 
 Usage
 -----
-  ./lint_benchmark_naming.py           # lint from repo root
-  ./lint_benchmark_naming.py /path/to/repo
+  ./lint_benchmark_names.py           # lint from repo root
+  ./lint_benchmark_names.py /path/to/repo
 """
 
 import re
