@@ -1201,6 +1201,7 @@ mod test {
             assert_send(db.get_metadata());
             assert_send(db.update(key, vec![]));
             assert_send(db.create(key, vec![]));
+            assert_send(db.upsert(key, |_| {}));
             assert_send(db.delete(key));
             assert_send(db.commit(None));
         });
