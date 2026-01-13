@@ -35,8 +35,11 @@ pub(super) const SIMPLEX_NAMESPACE: &[u8] = b"_COMMONWARE_REVM_SIMPLEX";
 #[derive(Clone, Copy, Debug)]
 /// Configuration for a simulation run.
 pub struct SimConfig {
+    /// Number of nodes participating in the simulation.
     pub nodes: usize,
+    /// Number of blocks to finalize before stopping.
     pub blocks: u64,
+    /// Seed used for deterministic randomness.
     pub seed: u64,
 }
 
@@ -49,7 +52,9 @@ pub struct SimOutcome {
     pub state_root: crate::StateRoot,
     /// Latest tracked threshold-simplex seed hash (used as `prevrandao`).
     pub seed: B256,
+    /// Final balance of the sender account after the demo transfer.
     pub from_balance: U256,
+    /// Final balance of the receiver account after the demo transfer.
     pub to_balance: U256,
 }
 
