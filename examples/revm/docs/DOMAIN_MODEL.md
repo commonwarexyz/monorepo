@@ -72,6 +72,7 @@ DDD thrives when contexts are explicit:
 | `SeedReporter` / `FinalizedReporter` | `examples/revm/src/application/reporters` | React to simplex/marshal events to refresh seeds and persist snapshots while delegating the heavy work to `LedgerService`. |
 | `NodeHandle` | `examples/revm/src/application/handle.rs` | Exposes submission/query helpers and the `DomainEvent` subscription used by the simulation harness. |
 | Simulation harness | `examples/revm/src/sim/node.rs` | Boots nodes, listens for `SnapshotPersisted`, and emits `FinalizationEvent`s into the harness once persistence is confirmed. |
+| `LedgerObservers` | `examples/revm/src/application/observers.rs` | Subscribes to `DomainEvent`s and surfaces telemetry/logging for transaction submissions, seed updates, and persistence. |
 
 ### Context Flow Map
 

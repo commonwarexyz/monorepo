@@ -9,7 +9,7 @@ use super::{
     CHANNEL_BACKFILL, CHANNEL_BLOCKS, CHANNEL_CERTS, CHANNEL_RESOLVER, CHANNEL_VOTES, MAILBOX_SIZE,
 };
 use crate::{
-    application::{self, DomainEvent},
+    application::{self, DomainEvent, LedgerObservers},
     FinalizationEvent,
 };
 use anyhow::Context as _;
@@ -191,6 +191,7 @@ async fn start_node(
     .context("init qmdb")?;
 
     let ledger = application::LedgerService::new(state.clone());
+    LedgerObservers::spawn(ledger.clone(), context.clone());
     let mut domain_events = ledger.subscribe();
     let finalized_tx_clone = finalized_tx.clone();
     let node_id = index as u32;

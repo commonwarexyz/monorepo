@@ -111,3 +111,6 @@ The architecture description above already hints at a domain-driven mindset. To 
 4. **Domain services & events** – Capture behaviors that span aggregates in services (e.g., `FinalizedReporter`’s replay-and-persist routine) and surface domain events (`Finalized events` channel) so other contexts (simulation harness) can react without tight coupling.
 
 Following these steps before refactoring helps ensure any future API or module split feels natural, uses shared vocabulary, and keeps the executable flows (proposal/finalization/seed) grounded in the domain model outlined above. For a compact reference that maps this vocabulary directly to the code (entities, aggregates, services, events, and flows), see `examples/revm/docs/DOMAIN_MODEL.md`.
+### Ledger Observers (`examples/revm/src/application/observers.rs`)
+
+Ledger observers subscribe to domain events, emit telemetry/log output for seed refreshes and transaction submissions, and keep the observation context decoupled from the aggregates.
