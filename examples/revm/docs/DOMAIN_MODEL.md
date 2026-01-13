@@ -61,6 +61,25 @@ DDD thrives when contexts are explicit:
 - **Persistence / QMDB** (`examples/revm/src/qmdb`): exposes `QmdbState`, `RevmDb`, and atomic commit/preview helpers.
 - **Simulation Harness** (`examples/revm/src/sim`): orchestrates nodes, deterministically steps the runtime, and interprets domain events for logging/termination.
 
+### Aggregate Reference
+
+| Aggregate | Primary File | Responsibilities |
+|-----------|--------------|------------------|
+| `LedgerView` | `examples/revm/src/application/state.rs` | Hosts mutexed mempool, snapshot store, seed cache, and `QmdbState`, and exposes `preview_root`, `insert_snapshot`, and `persist_snapshot`. |
+| `SnapshotStore` | `examples/revm/src/application/state.rs` | Stores cached `LedgerSnapshot`s, tracks persisted digests, and rebuilds `QmdbChanges` chains when replaying missed ancestors. |
+| `LedgerService` | `examples/revm/src/application/state.rs` | Orchestrates ledger commands, publishes `DomainEvent`s, and keeps observer listeners synchronized. |
+| `RevmApplication` | `examples/revm/src/application/app.rs` | Implements `Application`/`VerifyingApplication`, using `LedgerService` for proposal/verification logic and deterministic execution. |
+| `SeedReporter` / `FinalizedReporter` | `examples/revm/src/application/reporters.rs` | React to simplex/marshal events to refresh seeds and persist snapshots while delegating the heavy work to `LedgerService`. |
+| `NodeHandle` | `examples/revm/src/application/handle.rs` | Exposes submission/query helpers and the `DomainEvent` subscription used by the simulation harness. |
+| Simulation harness | `examples/revm/src/sim/node.rs` | Boots nodes, listens for `SnapshotPersisted`, and emits `FinalizationEvent`s into the harness once persistence is confirmed. |
+
+### Context Flow Map
+
+1. **Proposal context** (`simulate` → `RevmApplication` → `LedgerService`): gathers txs, executes them via `execute_txs`, previews the root, and registers snapshots for future replays.  
+2. **Verification context** (`marshal` + `RevmApplication` → `LedgerService`): replays ancestor blocks using cached snapshots to verify incoming digests before acceptance.  
+3. **Persistence context** (`FinalizedReporter` → `LedgerService` → `QmdbState`): commits finalized snapshots, triggers `DomainEvent::SnapshotPersisted`, and lets other contexts react.  
+4. **Observation context** (`NodeHandle`/`Simulation harness`): subscribes to the domain event stream and converts `TransactionSubmitted`/`SnapshotPersisted` into instrumentation or the `FinalizationEvent` channel.
+
 ## 8. Flows Revisited
 Each major flow maps cleanly to the domain model:
 
