@@ -8,7 +8,7 @@ use criterion::{criterion_group, BatchSize, Criterion};
 use rand::{thread_rng, Rng};
 use std::hint::black_box;
 
-fn benchmark_hash_to_curve(c: &mut Criterion) {
+fn bench_hash_to_curve(c: &mut Criterion) {
     let namespace = b"namespace";
     for n in [10, 50, 100, 200] {
         // Generate random messages
@@ -49,5 +49,5 @@ fn benchmark_hash_to_curve(c: &mut Criterion) {
 criterion_group! {
     name = benches;
     config = Criterion::default().sample_size(10);
-    targets = benchmark_hash_to_curve
+    targets = bench_hash_to_curve
 }

@@ -120,7 +120,7 @@ cfg_if::cfg_if! {
     }
 }
 
-fn benchmark_dkg(c: &mut Criterion, reshare: bool) {
+fn bench_dkg(c: &mut Criterion, reshare: bool) {
     let suffix = if reshare {
         "_reshare_recovery"
     } else {
@@ -159,16 +159,16 @@ fn benchmark_dkg(c: &mut Criterion, reshare: bool) {
     }
 }
 
-fn benchmark_dkg_recovery(c: &mut Criterion) {
-    benchmark_dkg(c, false);
+fn bench_dkg_recovery(c: &mut Criterion) {
+    bench_dkg(c, false);
 }
 
-fn benchmark_dkg_reshare_recovery(c: &mut Criterion) {
-    benchmark_dkg(c, true);
+fn bench_dkg_reshare_recovery(c: &mut Criterion) {
+    bench_dkg(c, true);
 }
 
 criterion_group! {
     name = benches;
     config = Criterion::default().sample_size(10);
-    targets = benchmark_dkg_recovery, benchmark_dkg_reshare_recovery
+    targets = bench_dkg_recovery, bench_dkg_reshare_recovery
 }
