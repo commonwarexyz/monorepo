@@ -78,7 +78,7 @@ pub trait Deletable: Updatable {
 
 #[cfg(test)]
 mod tests {
-    use super::Updatable as _;
+    use super::{Batchable as _, Updatable as _};
     use crate::{qmdb::store::db::Db, translator::TwoCap};
     use commonware_cryptography::{
         blake3::{Blake3, Digest},
@@ -123,6 +123,7 @@ mod tests {
             assert_send(db.create(key, vec![]));
             assert_send(db.upsert(key, |_| {}));
             assert_send(db.delete(key));
+            assert_send(db.write_batch(vec![(key, Some(vec![1u8]))].into_iter()));
         });
     }
 }

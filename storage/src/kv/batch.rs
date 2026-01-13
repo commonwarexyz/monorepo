@@ -143,11 +143,15 @@ pub trait Batchable:
     }
 
     /// Writes a batch of changes to the store.
-    fn write_batch(
-        &mut self,
-        iter: impl Iterator<Item = (Self::Key, Option<Self::Value>)> + Send,
-    ) -> impl Future<Output = Result<(), Error>> {
-        async {
+    fn write_batch<'a, Iter>(
+        &'a mut self,
+        iter: Iter,
+    ) -> impl Future<Output = Result<(), Error>> + Send + use<'a, Self, Iter>
+    where
+        Self: Send,
+        Iter: Iterator<Item = (Self::Key, Option<Self::Value>)> + Send + 'a,
+    {
+        async move {
             for (key, value) in iter {
                 if let Some(value) = value {
                     self.update(key, value).await?;

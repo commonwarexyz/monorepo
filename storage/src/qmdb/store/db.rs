@@ -574,10 +574,10 @@ where
     V: VariableValue,
     T: Translator,
 {
-    async fn write_batch(
-        &mut self,
-        iter: impl Iterator<Item = (Self::Key, Option<Self::Value>)>,
-    ) -> Result<(), Self::Error> {
+    async fn write_batch<'a, Iter>(&'a mut self, iter: Iter) -> Result<(), Self::Error>
+    where
+        Iter: Iterator<Item = (Self::Key, Option<Self::Value>)> + Send + 'a,
+    {
         for (key, value) in iter {
             if let Some(value) = value {
                 self.update(key, value).await?;

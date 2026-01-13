@@ -40,12 +40,12 @@ pub enum Error {
 }
 
 /// A write-once key-value store where each key is associated with a unique index.
-pub trait Archive {
+pub trait Archive: Send {
     /// The type of the key.
     type Key: Array;
 
     /// The type of the value.
-    type Value: Codec;
+    type Value: Codec + Send;
 
     /// Store an item in [Archive]. Both indices and keys are assumed to both be globally unique.
     ///
@@ -56,7 +56,7 @@ pub trait Archive {
         index: u64,
         key: Self::Key,
         value: Self::Value,
-    ) -> impl Future<Output = Result<(), Error>>;
+    ) -> impl Future<Output = Result<(), Error>> + Send;
 
     /// Perform a [Archive::put] and [Archive::sync] in a single operation.
     fn put_sync(
@@ -64,7 +64,7 @@ pub trait Archive {
         index: u64,
         key: Self::Key,
         value: Self::Value,
-    ) -> impl Future<Output = Result<(), Error>> {
+    ) -> impl Future<Output = Result<(), Error>> + Send {
         async move {
             self.put(index, key, value).await?;
             self.sync().await
@@ -72,16 +72,16 @@ pub trait Archive {
     }
 
     /// Retrieve an item from [Archive].
-    fn get(
-        &self,
-        identifier: Identifier<'_, Self::Key>,
-    ) -> impl Future<Output = Result<Option<Self::Value>, Error>>;
+    fn get<'a>(
+        &'a self,
+        identifier: Identifier<'a, Self::Key>,
+    ) -> impl Future<Output = Result<Option<Self::Value>, Error>> + Send + use<'a, Self>;
 
     /// Check if an item exists in [Archive].
-    fn has(
-        &self,
-        identifier: Identifier<'_, Self::Key>,
-    ) -> impl Future<Output = Result<bool, Error>>;
+    fn has<'a>(
+        &'a self,
+        identifier: Identifier<'a, Self::Key>,
+    ) -> impl Future<Output = Result<bool, Error>> + Send + use<'a, Self>;
 
     /// Retrieve the end of the current range including `index` (inclusive) and
     /// the start of the next range after `index` (if it exists).
@@ -105,10 +105,10 @@ pub trait Archive {
     fn last_index(&self) -> Option<u64>;
 
     /// Sync all pending writes.
-    fn sync(&mut self) -> impl Future<Output = Result<(), Error>>;
+    fn sync(&mut self) -> impl Future<Output = Result<(), Error>> + Send;
 
     /// Remove all persistent data created by this [Archive].
-    fn destroy(self) -> impl Future<Output = Result<(), Error>>;
+    fn destroy(self) -> impl Future<Output = Result<(), Error>> + Send;
 }
 
 #[cfg(test)]
@@ -728,5 +728,34 @@ mod tests {
     #[test_traced]
     fn test_many_keys_immutable_large() {
         test_many_keys_determinism(create_immutable, None, 50_000);
+    }
+
+    fn assert_send<T: Send>(_: T) {}
+
+    #[test_traced]
+    fn test_archive_futures_are_send() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut archive = create_prunable(context.clone(), None).await;
+            let key = test_key("send_test");
+
+            assert_send(archive.put(1, key.clone(), 42));
+            assert_send(archive.put_sync(2, key.clone(), 43));
+            assert_send(archive.get(Identifier::Index(1)));
+            assert_send(archive.get(Identifier::Key(&key)));
+            assert_send(archive.has(Identifier::Index(1)));
+            assert_send(archive.has(Identifier::Key(&key)));
+            assert_send(archive.sync());
+
+            let mut archive2 = create_immutable(context.clone(), None).await;
+            assert_send(archive2.put(1, key.clone(), 42));
+            assert_send(archive2.put_sync(2, key.clone(), 43));
+            assert_send(archive2.get(Identifier::Index(1)));
+            assert_send(archive2.get(Identifier::Key(&key)));
+            assert_send(archive2.has(Identifier::Index(1)));
+            assert_send(archive2.has(Identifier::Key(&key)));
+            assert_send(archive2.sync());
+            assert_send(archive2.destroy());
+        });
     }
 }

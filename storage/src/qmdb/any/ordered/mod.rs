@@ -917,10 +917,10 @@ where
     Operation<K, V>: Codec,
     V::Value: Send + Sync,
 {
-    async fn write_batch(
-        &mut self,
-        iter: impl Iterator<Item = (K, Option<V::Value>)>,
-    ) -> Result<(), Error> {
+    async fn write_batch<'a, Iter>(&'a mut self, iter: Iter) -> Result<(), Error>
+    where
+        Iter: Iterator<Item = (K, Option<V::Value>)> + Send + 'a,
+    {
         self.write_batch_with_callback(iter, |_, _| {}).await
     }
 }

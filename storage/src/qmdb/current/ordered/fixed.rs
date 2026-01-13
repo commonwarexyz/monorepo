@@ -776,10 +776,10 @@ where
     T: Translator,
     H: Hasher,
 {
-    async fn write_batch(
-        &mut self,
-        iter: impl Iterator<Item = (K, Option<V>)>,
-    ) -> Result<(), Error> {
+    async fn write_batch<'a, Iter>(&'a mut self, iter: Iter) -> Result<(), Error>
+    where
+        Iter: Iterator<Item = (K, Option<V>)> + Send + 'a,
+    {
         let status = &mut self.status;
         self.any
             .write_batch_with_callback(iter, move |append: bool, loc: Option<Location>| {
