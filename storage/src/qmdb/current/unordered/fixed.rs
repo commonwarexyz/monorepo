@@ -1655,8 +1655,10 @@ pub mod test {
         });
     }
 
-    use crate::kv::tests::{assert_deletable, assert_gettable, assert_send};
-    use crate::qmdb::store::tests::{assert_log_store, assert_merkleized_store, assert_prunable_store};
+    use crate::{
+        kv::tests::{assert_deletable, assert_gettable, assert_send},
+        qmdb::store::tests::{assert_log_store, assert_merkleized_store, assert_prunable_store},
+    };
 
     #[allow(dead_code)]
     fn assert_clean_db_futures_are_send(db: &mut CleanCurrentTest, key: Digest, loc: Location) {

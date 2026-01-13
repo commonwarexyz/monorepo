@@ -1173,8 +1173,10 @@ mod test {
         });
     }
 
-    use crate::kv::tests::{assert_deletable, assert_gettable, assert_send, assert_updatable};
-    use crate::qmdb::store::tests::{assert_log_store, assert_prunable_store};
+    use crate::{
+        kv::tests::{assert_deletable, assert_gettable, assert_send, assert_updatable},
+        qmdb::store::tests::{assert_log_store, assert_prunable_store},
+    };
 
     #[allow(dead_code)]
     fn assert_durable_futures_are_send(db: &mut TestStore, key: Digest, loc: Location) {

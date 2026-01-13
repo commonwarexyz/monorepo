@@ -627,8 +627,10 @@ pub(super) mod test {
         batch_tests::test_batch(|ctx| async move { create_test_db(ctx).await.into_mutable() });
     }
 
-    use crate::kv::tests::{assert_batchable, assert_deletable, assert_gettable, assert_send};
-    use crate::qmdb::store::tests::{assert_log_store, assert_merkleized_store, assert_prunable_store};
+    use crate::{
+        kv::tests::{assert_batchable, assert_deletable, assert_gettable, assert_send},
+        qmdb::store::tests::{assert_log_store, assert_merkleized_store, assert_prunable_store},
+    };
 
     #[allow(dead_code)]
     fn assert_merkleized_db_futures_are_send(db: &mut AnyTest, key: Digest, loc: Location) {

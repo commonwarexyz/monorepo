@@ -1032,8 +1032,10 @@ pub(super) mod test {
         });
     }
 
-    use crate::kv::tests::{assert_gettable, assert_send};
-    use crate::qmdb::store::tests::{assert_log_store, assert_merkleized_store, assert_prunable_store};
+    use crate::{
+        kv::tests::{assert_gettable, assert_send},
+        qmdb::store::tests::{assert_log_store, assert_merkleized_store, assert_prunable_store},
+    };
 
     type MerkleizedDb =
         Immutable<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap, Merkleized<Sha256>>;

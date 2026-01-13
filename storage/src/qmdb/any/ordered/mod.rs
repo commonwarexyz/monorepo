@@ -1162,8 +1162,10 @@ mod test {
         });
     }
 
-    use crate::kv::tests::{assert_batchable, assert_deletable, assert_gettable, assert_send};
-    use crate::qmdb::store::tests::{assert_log_store, assert_merkleized_store, assert_prunable_store};
+    use crate::{
+        kv::tests::{assert_batchable, assert_deletable, assert_gettable, assert_send},
+        qmdb::store::tests::{assert_log_store, assert_merkleized_store, assert_prunable_store},
+    };
 
     #[allow(dead_code)]
     type MutableFixedDb =
@@ -1179,7 +1181,11 @@ mod test {
     }
 
     #[allow(dead_code)]
-    fn assert_mutable_db_futures_are_send(db: &mut MutableFixedDb, key: FixedBytes<4>, value: Digest) {
+    fn assert_mutable_db_futures_are_send(
+        db: &mut MutableFixedDb,
+        key: FixedBytes<4>,
+        value: Digest,
+    ) {
         assert_gettable(db, &key);
         assert_log_store(db);
         assert_send(db.update(key.clone(), value));
