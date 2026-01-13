@@ -133,7 +133,17 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         let mut inner = SegmentedJournal::init(context, segmented_cfg).await?;
 
         // Calculate size and pruning_boundary from the inner journal's state
-        let size = Self::compute_state(&inner, items_per_blob).await?;
+        let oldest_section = inner.oldest_section();
+        let newest_section = inner.newest_section();
+
+        let size = match (oldest_section, newest_section) {
+            (Some(_), Some(newest)) => {
+                // Compute size from the tail (newest) section
+                let tail_len = inner.section_len(newest).await?;
+                newest * items_per_blob + tail_len
+            }
+            _ => 0,
+        };
 
         // Invariant: Tail blob must exist, even if empty. This ensures we can reconstruct size on
         // reopen even after pruning all items. The tail blob is at `size / items_per_blob` (where
@@ -265,32 +275,6 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         }
 
         Ok(journal)
-    }
-
-    /// Compute size from the segmented journal state.
-    ///
-    /// Since we maintain the invariant that:
-    /// 1. At least one blob (the tail) always exists
-    /// 2. All blobs before the tail are full and synced
-    ///
-    /// We only need to look at the tail blob to compute size.
-    async fn compute_state(
-        inner: &SegmentedJournal<E, A>,
-        items_per_blob: u64,
-    ) -> Result<u64, Error> {
-        let oldest_section = inner.oldest_section();
-        let newest_section = inner.newest_section();
-
-        let (Some(_), Some(newest)) = (oldest_section, newest_section) else {
-            // Empty journal
-            return Ok(0);
-        };
-
-        // Compute size from the tail (newest) section
-        let tail_len = inner.section_len(newest).await?;
-        let size = newest * items_per_blob + tail_len;
-
-        Ok(size)
     }
 
     /// Convert a global position to (section, position_in_section).
