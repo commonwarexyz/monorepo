@@ -411,8 +411,7 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
         .unzip();
     info!(?regions, "initialized resources");
 
-    // Create binary security groups first (without monitoring IP - added later for parallel launch)
-    // This must happen before accessing monitoring_resources to avoid borrow conflicts
+    // Create binary security groups (without monitoring IP - added later for parallel launch)
     info!("creating binary security groups");
     for (region, resources) in region_resources.iter_mut() {
         let binary_sg_id = create_security_group_binary(
@@ -617,9 +616,7 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     }
     info!("added monitoring ingress rules");
 
-    // Cache ALL static config files globally (these don't change between deployments)
-    // This includes both monitoring and binary instance static files
-    // Note: binary_service is architecture-dependent and cached per-architecture
+    // Cache static config files globally (these don't change between deployments)
     info!("uploading config files to S3");
     let [
         bbr_conf_url,
@@ -658,7 +655,7 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     .try_into()
     .unwrap();
 
-    // Cache binary_service per architecture (write to temp file since content is dynamic)
+    // Cache binary_service per architecture
     let mut binary_service_urls_by_arch: HashMap<Architecture, String> = HashMap::new();
     for arch in &architectures_needed {
         let binary_service_content = binary_service(*arch);

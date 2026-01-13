@@ -87,15 +87,13 @@ pub async fn ensure_bucket_exists(
         }
     }
 
-    // Create the bucket
-    let location_constraint = BucketLocationConstraint::from(region);
-    let bucket_config = CreateBucketConfiguration::builder()
-        .location_constraint(location_constraint)
-        .build();
-
-    // Note: us-east-1 doesn't require location constraint
+    // Create the bucket (us-east-1 must not have a location constraint)
     let mut request = client.create_bucket().bucket(bucket_name);
     if region != "us-east-1" {
+        let location_constraint = BucketLocationConstraint::from(region);
+        let bucket_config = CreateBucketConfiguration::builder()
+            .location_constraint(location_constraint)
+            .build();
         request = request.create_bucket_configuration(bucket_config);
     }
 
