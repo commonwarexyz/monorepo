@@ -25,7 +25,7 @@ use futures::StreamExt as _;
 use rand::Rng;
 use std::{collections::BTreeSet, marker::PhantomData};
 
-/// Helper function for propose that owns all its inputs
+/// Helper function for propose that owns all its inputs.
 async fn propose_inner<S, E>(
     state: Shared,
     max_txs: usize,
@@ -92,7 +92,7 @@ where
     Some(child)
 }
 
-/// Helper function for verify that owns all its inputs
+/// Helper function for verify that owns all its inputs.
 async fn verify_inner<S, E>(
     state: Shared,
     spawner: E,
@@ -143,13 +143,18 @@ where
 }
 
 #[derive(Clone)]
+/// Consensus-facing REVM application that bridges marshal and REVM state.
 pub(crate) struct RevmApplication<S> {
+    /// Maximum number of transactions to include when proposing new blocks.
     max_txs: usize,
+    /// Shared application state, including snapshots and mempool data.
     state: Shared,
+    /// Marker tracking the signing scheme used by this application instance.
     _scheme: PhantomData<S>,
 }
 
 impl<S> RevmApplication<S> {
+    /// Create a REVM application with the shared state handle.
     pub(crate) const fn new(max_txs: usize, state: Shared) -> Self {
         Self {
             max_txs,

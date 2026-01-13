@@ -108,8 +108,11 @@ async fn finalized_report_inner<E>(
 }
 
 #[derive(Clone)]
+/// Tracks simplex activity to store seed hashes for future proposals.
 pub(crate) struct SeedReporter<V> {
+    /// Shared state that keeps per-digest seeds and snapshots.
     state: Shared,
+    /// Marker indicating the variant for the threshold scheme in use.
     _variant: PhantomData<V>,
 }
 
@@ -141,10 +144,15 @@ where
 }
 
 #[derive(Clone)]
+/// Persists finalized blocks and emits events back to the simulation harness.
 pub(crate) struct FinalizedReporter<E> {
+    /// Index of the node that owns this reporter.
     node: u32,
+    /// Shared state used to verify blocks and persist snapshots.
     state: Shared,
+    /// Channel used to relay finalized block notifications.
     finalized: mpsc::UnboundedSender<FinalizationEvent>,
+    /// Runtime spawner used for executing block replay tasks.
     spawner: E,
 }
 

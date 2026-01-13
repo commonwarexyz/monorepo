@@ -93,7 +93,9 @@ impl Read for StateRoot {
 }
 
 #[derive(Clone, Copy, Debug)]
+/// Configuration used when decoding transactions from bytes.
 pub struct TxCfg {
+    /// Maximum calldata size accepted by the codec.
     pub max_calldata_bytes: usize,
 }
 
@@ -103,10 +105,15 @@ pub struct TxCfg {
 /// This is not a signed Ethereum transaction. It is just enough information to build a `TxEnv`
 /// for REVM execution in the simulation.
 pub struct Tx {
+    /// Sender address.
     pub from: Address,
+    /// Recipient address.
     pub to: Address,
+    /// Amount transferred (Wei).
     pub value: U256,
+    /// Gas limit supplied for execution.
     pub gas_limit: u64,
+    /// Calldata passed to the contract.
     pub data: Bytes,
 }
 
@@ -158,18 +165,26 @@ impl Read for Tx {
 }
 
 #[derive(Clone, Copy, Debug)]
+/// Configuration used when decoding blocks and their transactions.
 pub struct BlockCfg {
+    /// Maximum number of transactions that can be encoded in a block.
     pub max_txs: usize,
+    /// Per-transaction codec configuration.
     pub tx: TxCfg,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 /// Example block type agreed on by consensus (via its digest).
 pub struct Block {
+    /// Identifier of the parent block.
     pub parent: BlockId,
+    /// Block height (number of committed ancestors).
     pub height: u64,
+    /// Seed-derived randomness used for future prevrandao.
     pub prevrandao: B256,
+    /// State commitment resulting from this block.
     pub state_root: StateRoot,
+    /// Transactions included in the block.
     pub txs: Vec<Tx>,
 }
 

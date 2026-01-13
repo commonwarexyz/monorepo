@@ -16,8 +16,11 @@ use commonware_codec::{Encode, EncodeSize, Error as CodecError, RangeCfg, Read, 
 use std::collections::BTreeMap;
 
 #[derive(Clone, Copy, Debug)]
+/// Limits used when decoding deterministic state changes.
 pub struct StateChangesCfg {
+    /// Maximum number of touched accounts allowed in a delta.
     pub max_accounts: usize,
+    /// Maximum number of storage slots that can be decoded per account.
     pub max_storage_slots: usize,
 }
 

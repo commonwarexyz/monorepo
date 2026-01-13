@@ -27,24 +27,38 @@ use std::{
 };
 
 #[derive(Clone)]
+/// Shared handle for the application state, wrapping the mutex and genesis block.
 pub(crate) struct Shared {
+    /// Mutex-protected running state.
     inner: Arc<Mutex<State>>,
+    /// Genesis block stored so the automaton can replay from height 0.
     genesis_block: Block,
 }
 
+/// Internal state guarded by the mutex inside `Shared`.
 pub(crate) struct State {
+    /// Pending transactions that are not yet included in finalized blocks.
     mempool: BTreeMap<TxId, Tx>,
+    /// Execution snapshots indexed by digest so we can replay ancestors.
     snapshots: BTreeMap<ConsensusDigest, ExecutionSnapshot>,
+    /// Cached seeds for each digest used to compute prevrandao.
     seeds: BTreeMap<ConsensusDigest, B256>,
+    /// Finalized digests that have been persisted to QMDB.
     persisted: BTreeSet<ConsensusDigest>,
+    /// Underlying QMDB tracker for persistence.
     qmdb: QmdbState,
 }
 
 #[derive(Clone)]
+/// Captures a REVM execution result tied to a consensus digest.
 pub(crate) struct ExecutionSnapshot {
+    /// Parent digest that produced this snapshot (if any).
     pub(crate) parent: Option<ConsensusDigest>,
+    /// REVM execution database representing this snapshot.
     pub(crate) db: RevmDb,
+    /// Corresponding state root for the snapshot.
     pub(crate) state_root: StateRoot,
+    /// QMDB changes captured during the execution that produced this snapshot.
     pub(crate) qmdb_changes: QmdbChanges,
 }
 

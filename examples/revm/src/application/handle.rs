@@ -13,8 +13,11 @@ use alloy_evm::revm::primitives::{Address, B256, U256};
 use commonware_runtime::Spawner;
 
 #[derive(Clone)]
+/// Handle that exposes application queries and submissions to the simulation harness.
 pub struct NodeHandle<E> {
+    /// Shared application state backstopped by QMDB.
     state: Shared,
+    /// Spawner used to execute queries that interact with runtime traits.
     spawner: E,
 }
 
