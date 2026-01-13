@@ -7,13 +7,39 @@
 """
 Lint benchmark files for naming convention violations.
 
-Rules:
-1. Use `bench_` prefix for benchmark functions (not `benchmark_`)
-2. Use `key=value` format in benchmark names (e.g., `group=g1`, not just `g1`)
-3. Separate parameters with spaces, not commas
-4. Use `/` instead of `:` as value separators for ratios
+Background
+----------
+Benchmark names are parsed by docs/benchmarks.html for display. The parsing
+expects the format: `module::function/params`
 
-Usage:
+    const parts = bench.name.split("::");
+    const moduleName = parts[0];
+    const functionPart = parts.slice(1).join("::");
+    let [funcName, params] = functionPart.split("/", 2);
+
+The `params` string becomes the chart title and is displayed as-is without
+further parsing. These rules ensure consistent, readable chart titles.
+
+Rules
+-----
+1. Use `bench_` prefix for benchmark functions (not `benchmark_`)
+   - Shorter and consistent with Rust's `#[bench]` attribute convention
+   - The majority of existing benchmarks already use this prefix
+
+2. Use `key=value` format in benchmark names (e.g., `group=g1`, not just `g1`)
+   - Chart titles should be self-documenting
+   - `n=5 t=4` is clearer than `5 4` when viewed in isolation
+
+3. Separate parameters with spaces, not commas
+   - Params are displayed as-is; commas add visual noise
+   - `n=5 t=4` reads better than `n=5, t=4`
+
+4. Use `/` instead of `:` as value separators for ratios
+   - Colons could be confused with the `::` module separator
+   - `value=1/2` is unambiguous; `value=1:2` could look like `value=1::2`
+
+Usage
+-----
   ./lint_benchmark_naming.py           # lint from repo root
   ./lint_benchmark_naming.py /path/to/repo
 """
