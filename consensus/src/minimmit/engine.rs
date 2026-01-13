@@ -68,7 +68,6 @@ impl<
         let (voter, voter_mailbox) = voter::Actor::new(
             context.with_label("voter"),
             voter::Config {
-                namespace: cfg.namespace.clone(),
                 scheme: cfg.scheme.clone(),
                 elector: cfg.elector,
                 blocker: cfg.blocker.clone(),
@@ -94,7 +93,6 @@ impl<
         let (resolver, resolver_mailbox) = resolver::Actor::new(
             context.with_label("resolver"),
             resolver::Config {
-                namespace: cfg.namespace,
                 blocker: cfg.blocker,
                 scheme: cfg.scheme,
                 strategy: cfg.strategy,

@@ -23,7 +23,7 @@ use crate::{
     Reporter,
 };
 use commonware_cryptography::{certificate, Digest};
-use commonware_parallel::{Sequential, Strategy};
+use commonware_parallel::Strategy;
 use rand_core::CryptoRngCore;
 
 /// Reporter wrapper that filters and verifies activities based on scheme attributability.
@@ -126,11 +126,10 @@ mod tests {
         sha256::Digest as Sha256Digest,
         Hasher, Sha256,
     };
+    use commonware_parallel::Sequential;
     use futures::executor::block_on;
     use rand::{rngs::StdRng, SeedableRng};
     use std::sync::{Arc, Mutex};
-
-    const NAMESPACE: &[u8] = b"test-reporter";
 
     #[derive(Clone)]
     struct MockReporter<S: certificate::Scheme, D: Digest> {

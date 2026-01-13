@@ -33,7 +33,6 @@ use commonware_codec::Encode;
 use commonware_cryptography::{
     bls12381::primitives::variant::Variant, certificate::Scheme, Hasher, PublicKey, Sha256,
 };
-use commonware_parallel::Sequential;
 use commonware_utils::{modulo, ordered::Set};
 use std::marker::PhantomData;
 
@@ -230,10 +229,9 @@ mod tests {
         bls12381::primitives::variant::MinPk, certificate::mocks::Fixture,
         sha256::Digest as Sha256Digest, Sha256,
     };
+    use commonware_parallel::Sequential;
     use commonware_utils::{quorum_from_slice, TryFromIterator};
     use rand::{rngs::StdRng, SeedableRng};
-
-    const NAMESPACE: &[u8] = b"_COMMONWARE_MINIMMIT";
 
     type ThresholdScheme =
         bls12381_threshold::Scheme<commonware_cryptography::ed25519::PublicKey, MinPk>;

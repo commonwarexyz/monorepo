@@ -30,7 +30,7 @@ pub struct State<S: Scheme, D: Digest> {
 
 impl<S: Scheme, D: Digest> State<S, D> {
     /// Create a new instance of [State].
-    pub fn new(fetch_concurrent: usize) -> Self {
+    pub const fn new(fetch_concurrent: usize) -> Self {
         Self {
             current_view: View::zero(),
             floor: None,
@@ -83,11 +83,6 @@ impl<S: Scheme, D: Digest> State<S, D> {
 
         // Otherwise, return the nullification for the view if it exists
         self.nullifications.get(&view).cloned()
-    }
-
-    /// Returns the floor notarization, if any.
-    pub fn floor(&self) -> Option<&Notarization<S, D>> {
-        self.floor.as_ref()
     }
 
     /// Updates the current view if the new view is greater.

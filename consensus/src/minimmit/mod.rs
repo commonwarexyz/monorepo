@@ -242,7 +242,7 @@ mod integration_tests {
     use tracing::warn;
 
     const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
-    const PAGE_CACHE_SIZE: NonZeroU16 = unsafe { NonZeroU16::new_unchecked(10) };
+    const PAGE_CACHE_SIZE: NonZeroU16 = NonZeroU16::new(10).unwrap();
     const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
 
     /// Register a validator with the oracle for three network channels.
@@ -263,7 +263,7 @@ mod integration_tests {
             Receiver<PublicKey>,
         ),
     ) {
-        let mut control = oracle.control(validator.clone());
+        let control = oracle.control(validator.clone());
         let (vote_sender, vote_receiver) = control.register(0, TEST_QUOTA).await.unwrap();
         let (certificate_sender, certificate_receiver) =
             control.register(1, TEST_QUOTA).await.unwrap();
@@ -365,7 +365,7 @@ mod integration_tests {
         // Create context
         // n = 6 gives f = 1, M = 3, L = 5
         let n: u32 = 6;
-        let l_quorum = l_quorum(n as usize) as usize;
+        let l_quorum = l_quorum(n as usize);
         let required_containers = View::new(50);
         let activity_timeout = ViewDelta::new(10);
         let skip_timeout = ViewDelta::new(5);
@@ -412,7 +412,6 @@ mod integration_tests {
 
                 // Configure engine
                 let reporter_config = mocks::reporter::Config {
-                    namespace: namespace.clone(),
                     participants: participants.clone().try_into().unwrap(),
                     scheme: schemes[idx].clone(),
                     elector: elector.clone(),
@@ -624,7 +623,6 @@ mod integration_tests {
 
                 // Configure engine
                 let reporter_config = mocks::reporter::Config {
-                    namespace: namespace.clone(),
                     participants: participants.clone().try_into().unwrap(),
                     scheme: schemes[idx].clone(),
                     elector: elector.clone(),
@@ -873,7 +871,6 @@ mod integration_tests {
 
                 // Configure engine
                 let reporter_config = mocks::reporter::Config {
-                    namespace: namespace.clone(),
                     participants: participants.clone().try_into().unwrap(),
                     scheme: schemes[idx].clone(),
                     elector: elector.clone(),
@@ -1063,7 +1060,6 @@ mod integration_tests {
 
                 // Configure engine
                 let reporter_config = mocks::reporter::Config {
-                    namespace: namespace.clone(),
                     participants: participants.clone().try_into().unwrap(),
                     scheme: schemes[idx].clone(),
                     elector: elector.clone(),
@@ -1224,7 +1220,6 @@ mod integration_tests {
 
                 // Start engine
                 let reporter_config = mocks::reporter::Config {
-                    namespace: namespace.clone(),
                     participants: participants.clone().try_into().unwrap(),
                     scheme: schemes[idx].clone(),
                     elector: elector.clone(),
@@ -1239,8 +1234,7 @@ mod integration_tests {
                 if idx == 0 {
                     // Byzantine conflicter
                     let cfg = mocks::conflicter::Config {
-                        namespace: namespace.clone(),
-                        scheme: schemes[idx].clone(),
+                            scheme: schemes[idx].clone(),
                     };
                     let engine: mocks::conflicter::Conflicter<_, _, Sha256> =
                         mocks::conflicter::Conflicter::new(

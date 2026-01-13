@@ -218,7 +218,7 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
         self.verified.insert(digest);
 
         // Store pending payload
-        self.pending.insert(digest, payload.into());
+        self.pending.insert(digest, payload);
         digest
     }
 

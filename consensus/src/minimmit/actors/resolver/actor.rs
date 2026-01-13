@@ -33,8 +33,6 @@ pub struct Config<
     B: Blocker<PublicKey = S::PublicKey>,
     T: Strategy,
 > {
-    /// Namespace for domain separation in signatures.
-    pub namespace: Vec<u8>,
     /// Signing scheme.
     pub scheme: S,
     /// Network blocker.
@@ -62,7 +60,6 @@ pub struct Actor<
     T: Strategy,
 > {
     context: ContextCell<E>,
-    namespace: Vec<u8>,
     scheme: S,
     blocker: Option<B>,
     strategy: T,
@@ -90,7 +87,6 @@ impl<
         (
             Self {
                 context: ContextCell::new(context),
-                namespace: cfg.namespace,
                 scheme: cfg.scheme,
                 blocker: Some(cfg.blocker),
                 strategy: cfg.strategy,
@@ -268,7 +264,7 @@ impl<
                     // the full timeout)
                     return;
                 };
-                let _ = response.send(certificate.encode().into());
+                let _ = response.send(certificate.encode());
             }
         }
     }

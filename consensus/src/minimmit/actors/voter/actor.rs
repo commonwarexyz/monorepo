@@ -114,8 +114,6 @@ pub struct Config<
     F: Reporter<Activity = Activity<S, D>>,
     T: Strategy,
 > {
-    /// Namespace for domain separation in signatures.
-    pub namespace: Vec<u8>,
     /// Signing scheme.
     pub scheme: S,
     /// Leader elector configuration.
@@ -174,9 +172,7 @@ pub struct Actor<
     reporter: F,
     strategy: T,
 
-    namespace: Vec<u8>,
     epoch: Epoch,
-    activity_timeout: ViewDelta,
     m_quorum: usize,
     l_quorum: usize,
     certificate_config: <S::Certificate as Read>::Cfg,
@@ -238,7 +234,6 @@ impl<
         let state = State::new(
             context.with_label("state"),
             StateConfig {
-                namespace: cfg.namespace.clone(),
                 scheme: cfg.scheme,
                 elector: cfg.elector,
                 epoch,
@@ -258,9 +253,7 @@ impl<
                 reporter: cfg.reporter,
                 strategy: cfg.strategy,
 
-                namespace: cfg.namespace,
                 epoch,
-                activity_timeout,
                 m_quorum: cfg.m_quorum,
                 l_quorum: cfg.l_quorum,
                 certificate_config,

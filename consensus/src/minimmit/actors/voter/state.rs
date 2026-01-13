@@ -66,7 +66,6 @@ pub(crate) fn interesting(
 
 /// Configuration for initializing [`State`].
 pub struct Config<S: certificate::Scheme, L: ElectorConfig<S>> {
-    pub namespace: Vec<u8>,
     pub scheme: S,
     pub elector: L,
     pub epoch: Epoch,
@@ -86,7 +85,6 @@ pub struct Config<S: certificate::Scheme, L: ElectorConfig<S>> {
 /// - Only tracks notarization and nullification certificates
 pub struct State<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: Digest> {
     context: E,
-    namespace: Vec<u8>,
     scheme: S,
     elector: L::Elector,
     epoch: Epoch,
@@ -129,7 +127,6 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
 
         Self {
             context,
-            namespace: cfg.namespace,
             scheme: cfg.scheme,
             elector,
             epoch: cfg.epoch,
@@ -562,19 +559,6 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         self.is_notarized(parent).copied()
     }
 
-    /// Returns the certificate for the parent of the proposal at the given view.
-    pub fn parent_certificate(&mut self, view: View) -> Option<Certificate<S, D>> {
-        let parent = {
-            let view = self.views.get(&view)?.proposal()?.parent;
-            self.views.get(&view)?
-        };
-
-        if let Some(n) = parent.notarization().cloned() {
-            return Some(Certificate::Notarization(n));
-        }
-        None
-    }
-
     /// Returns a reference to the signing scheme.
     pub const fn scheme(&self) -> &S {
         &self.scheme
@@ -847,8 +831,7 @@ mod tests {
             let mut state = State::new(
                 context,
                 Config {
-                    namespace: NAMESPACE.to_vec(),
-                    scheme: verifier.clone(),
+                        scheme: verifier.clone(),
                     elector: <RoundRobin>::default(),
                     epoch: Epoch::new(11),
                     activity_timeout: ViewDelta::new(6),
@@ -904,7 +887,6 @@ mod tests {
             let local_scheme = schemes[0].clone(); // leader of view 1
             let retry = Duration::from_secs(3);
             let cfg = Config {
-                namespace: NAMESPACE.to_vec(),
                 scheme: local_scheme.clone(),
                 elector: <RoundRobin>::default(),
                 epoch: Epoch::new(4),
@@ -960,7 +942,6 @@ mod tests {
                 schemes, verifier, ..
             } = ed25519::fixture(&mut context, NAMESPACE, 4);
             let cfg = Config {
-                namespace: NAMESPACE.to_vec(),
                 scheme: schemes[0].clone(),
                 elector: <RoundRobin>::default(),
                 epoch: Epoch::new(7),
@@ -1015,7 +996,6 @@ mod tests {
         runtime.start(|mut context| async move {
             let Fixture { schemes, .. } = ed25519::fixture(&mut context, NAMESPACE, 4);
             let cfg = Config {
-                namespace: NAMESPACE.to_vec(),
                 scheme: schemes[0].clone(),
                 elector: <RoundRobin>::default(),
                 epoch: Epoch::new(1),

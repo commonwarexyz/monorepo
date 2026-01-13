@@ -18,13 +18,11 @@ use tracing::debug;
 
 pub struct Config<S: Scheme> {
     pub scheme: S,
-    pub namespace: Vec<u8>,
 }
 
 pub struct Conflicter<E: Clock + Rng + CryptoRng + Spawner, S: Scheme, H: Hasher> {
     context: ContextCell<E>,
     scheme: S,
-    namespace: Vec<u8>,
     _hasher: PhantomData<H>,
 }
 
@@ -38,7 +36,6 @@ where
         Self {
             context: ContextCell::new(context),
             scheme: cfg.scheme,
-            namespace: cfg.namespace,
             _hasher: PhantomData,
         }
     }

@@ -32,7 +32,6 @@ type Faults<S, D> = HashMap<<S as Scheme>::PublicKey, HashMap<View, HashSet<Acti
 /// Reporter configuration used in tests.
 #[derive(Clone, Debug)]
 pub struct Config<S: Scheme, L: ElectorConfig<S>, T: Strategy = Sequential> {
-    pub namespace: Vec<u8>,
     pub participants: Set<S::PublicKey>,
     pub scheme: S,
     pub elector: L,
@@ -42,7 +41,6 @@ pub struct Config<S: Scheme, L: ElectorConfig<S>, T: Strategy = Sequential> {
 #[derive(Clone)]
 pub struct Reporter<E: CryptoRngCore, S: Scheme, L: ElectorConfig<S>, D: Digest, T: Strategy = Sequential> {
     context: E,
-    namespace: Vec<u8>,
     pub participants: Set<S::PublicKey>,
     scheme: S,
     elector: L::Elector,
@@ -75,7 +73,6 @@ where
 
         Self {
             context,
-            namespace: cfg.namespace,
             participants: cfg.participants,
             scheme: cfg.scheme,
             elector,

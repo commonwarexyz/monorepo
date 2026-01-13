@@ -34,7 +34,6 @@ pub struct Round<S: Scheme, D: Digest> {
     start: SystemTime,
     scheme: S,
     round: Rnd,
-    participants: usize,
 
     // Leader is set as soon as we know the seed for the view (if any).
     leader: Option<Leader<S::PublicKey>>,
@@ -68,7 +67,6 @@ impl<S: Scheme, D: Digest> Round<S, D> {
             start,
             scheme,
             round,
-            participants,
             leader: None,
             proposal: ProposalSlot::new(),
             leader_deadline: None,
@@ -83,11 +81,6 @@ impl<S: Scheme, D: Digest> Round<S, D> {
             contradiction_nullify_sent: false,
             finalized: false,
         }
-    }
-
-    /// Returns the round identifier.
-    pub const fn round(&self) -> Rnd {
-        self.round
     }
 
     /// Returns whether this round has been finalized.
@@ -106,7 +99,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     }
 
     /// Returns a mutable reference to the vote tracker.
-    pub fn votes_mut(&mut self) -> &mut VoteTracker<S, D> {
+    pub const fn votes_mut(&mut self) -> &mut VoteTracker<S, D> {
         &mut self.votes
     }
 
@@ -263,7 +256,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     /// should not timeout.
     ///
     /// In minimmit, we can always nullify (no finalize phase to block it).
-    pub fn construct_nullify(&mut self) -> Option<bool> {
+    pub const fn construct_nullify(&mut self) -> Option<bool> {
         let retry = replace(&mut self.broadcast_nullify, true);
         self.clear_deadlines();
         self.set_nullify_retry(None);
@@ -298,11 +291,6 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         self.contradiction_nullify_sent = true;
         self.broadcast_nullify = true;
         Some(())
-    }
-
-    /// Returns true if we have sent a nullify due to contradiction.
-    pub const fn has_contradiction_nullify(&self) -> bool {
-        self.contradiction_nullify_sent
     }
 
     /// Returns the next timeout deadline for the round.
@@ -628,7 +616,7 @@ mod tests {
         let m_threshold = 3;
 
         // Add our own notarize vote
-        let our_vote = Notarize::sign(&local_scheme, proposal_a.clone()).expect("sign");
+        let our_vote = Notarize::sign(&local_scheme, proposal_a).expect("sign");
         assert!(round.votes_mut().insert_notarize(our_vote));
 
         // Should not trigger yet (only 1 vote)
@@ -649,14 +637,13 @@ mod tests {
             .is_none());
 
         // Add one more conflicting vote
-        let vote = Notarize::sign(&schemes[3], proposal_b.clone()).expect("sign");
+        let vote = Notarize::sign(&schemes[3], proposal_b).expect("sign");
         assert!(round.votes_mut().insert_notarize(vote));
 
         // Now we have 3 conflicting votes, should trigger
         assert!(round
             .construct_nullify_by_contradiction(m_threshold)
             .is_some());
-        assert!(round.has_contradiction_nullify());
 
         // Should not trigger again
         assert!(round
@@ -678,7 +665,7 @@ mod tests {
         round.set_leader(0);
 
         // Set proposal but don't call construct_notarize yet
-        assert!(round.set_proposal(proposal.clone()));
+        assert!(round.set_proposal(proposal));
         assert!(round.verified());
 
         // Add conflicting votes
@@ -717,7 +704,7 @@ mod tests {
         round.set_leader(0);
 
         // Notarize proposal_a
-        assert!(round.set_proposal(proposal_a.clone()));
+        assert!(round.set_proposal(proposal_a));
         assert!(round.verified());
         assert!(round.construct_notarize().is_some());
 
@@ -741,7 +728,7 @@ mod tests {
         );
 
         // Add one more conflicting notarize from another replica
-        let vote = Notarize::sign(&schemes[3], proposal_b.clone()).expect("sign");
+        let vote = Notarize::sign(&schemes[3], proposal_b).expect("sign");
         assert!(round.votes_mut().insert_notarize(vote));
 
         // Now should trigger - 3 conflicting votes from OTHER replicas
@@ -763,11 +750,11 @@ mod tests {
         let proposal_a = Proposal::new(round_id, View::new(0), Sha256Digest::from([1u8; 32]));
         let proposal_b = Proposal::new(round_id, View::new(0), Sha256Digest::from([2u8; 32]));
 
-        let mut round = Round::new(local_scheme.clone(), round_id, now, 6);
+        let mut round = Round::new(local_scheme, round_id, now, 6);
         round.set_leader(0);
 
         // Notarize proposal_a
-        assert!(round.set_proposal(proposal_a.clone()));
+        assert!(round.set_proposal(proposal_a));
         assert!(round.verified());
         assert!(round.construct_notarize().is_some());
 
@@ -783,7 +770,7 @@ mod tests {
         assert!(round.construct_nullify_by_contradiction(m_threshold).is_none());
 
         // Add 1 conflicting notarize from another replica
-        let vote = Notarize::sign(&schemes[3], proposal_b.clone()).expect("sign");
+        let vote = Notarize::sign(&schemes[3], proposal_b).expect("sign");
         assert!(round.votes_mut().insert_notarize(vote));
 
         // Now we have 2 nullifies + 1 conflicting notarize = 3 >= M
