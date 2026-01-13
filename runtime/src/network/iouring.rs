@@ -22,8 +22,8 @@
 //!
 //! This implementation is only available on Linux systems that support io_uring.
 
-use crate::iouring::{self, should_retry};
-use bytes::{Buf, BufMut, BytesMut};
+use crate::iouring::{self, should_retry, IoVecBuf, OpBuf};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 use commonware_utils::StableBuf;
 use futures::{
     channel::{mpsc, oneshot},
@@ -42,6 +42,72 @@ use tracing::warn;
 
 /// Default read buffer size (64 KB).
 const DEFAULT_READ_BUFFER_SIZE: usize = 64 * 1024;
+
+/// Thresholds for send strategy selection.
+const TINY: usize = 1024; // 1 KB
+const SMALL: usize = 8 * 1024; // 8 KB
+const IOV_SMALL: usize = 2; // Max iovecs for small payloads
+const IOV_MSG_MAX: usize = 16; // Max iovecs before consolidation
+
+/// Strategy for sending data over io_uring.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SendStrategy {
+    /// Nothing to send.
+    Noop,
+    /// Copy to single buffer + Send opcode (for tiny/fragmented payloads).
+    CopySend,
+    /// Vectored send using SendMsg.
+    SendMsg,
+}
+
+/// Choose the optimal send strategy based on payload size and fragmentation.
+const fn choose_strategy(total: usize, n: usize) -> SendStrategy {
+    if n == 0 || total == 0 {
+        return SendStrategy::Noop;
+    }
+
+    // Tiny payloads: fastest possible path
+    if total < TINY {
+        return SendStrategy::CopySend;
+    }
+
+    // Small/medium payloads
+    if total < SMALL {
+        if n <= IOV_SMALL {
+            return SendStrategy::SendMsg;
+        }
+        return SendStrategy::CopySend;
+    }
+
+    // Large payloads with few chunks: use vectored send
+    if n <= IOV_MSG_MAX {
+        return SendStrategy::SendMsg;
+    }
+
+    // Pathological fragmentation: consolidate to single buffer
+    SendStrategy::CopySend
+}
+
+/// Extracts buffer chunks into owned Bytes for stable memory during io_uring ops.
+/// For Bytes-backed buffers, this is cheap (Arc clone). For others, copies each chunk.
+fn extract_chunks(mut buf: impl Buf) -> Vec<Bytes> {
+    let mut chunks = Vec::new();
+    while buf.has_remaining() {
+        let chunk_len = buf.chunk().len();
+        chunks.push(buf.copy_to_bytes(chunk_len));
+    }
+    chunks
+}
+
+/// Consolidates multiple chunks into a single Bytes buffer.
+fn consolidate_chunks(chunks: Vec<Bytes>) -> Bytes {
+    let total: usize = chunks.iter().map(|c| c.len()).sum();
+    let mut buf = BytesMut::with_capacity(total);
+    for chunk in chunks {
+        buf.extend_from_slice(&chunk);
+    }
+    buf.freeze()
+}
 
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -238,25 +304,23 @@ impl Sink {
     fn as_raw_fd(&self) -> Fd {
         Fd(self.fd.as_raw_fd())
     }
-}
 
-impl crate::Sink for Sink {
-    async fn send(&mut self, mut msg: impl Buf + Send) -> Result<(), crate::Error> {
-        // TODO(#2705): Use writev to avoid this copy.
-        let mut msg: StableBuf = {
-            let buf = msg.copy_to_bytes(msg.remaining());
-            BytesMut::from(buf).into()
-        };
+    /// Copy chunks to a single buffer and send using Send opcode.
+    /// Used for tiny payloads or pathologically fragmented buffers.
+    async fn send_copy(&mut self, chunks: Vec<Bytes>) -> Result<(), crate::Error> {
+        let buf = consolidate_chunks(chunks);
+        self.send_single_buf(buf).await
+    }
+
+    /// Send a single buffer using the Send opcode.
+    async fn send_single_buf(&mut self, buf: Bytes) -> Result<(), crate::Error> {
+        let mut msg: StableBuf = BytesMut::from(buf).into();
         let mut bytes_sent = 0;
         let msg_len = msg.len();
 
         while bytes_sent < msg_len {
-            // Figure out how much is left to send and where to send from.
-            //
             // SAFETY: `msg` is a `StableBuf` guaranteeing the memory won't move.
-            // `bytes_sent` is always < `msg_len` due to the loop condition, so
-            // `add(bytes_sent)` stays within bounds and `msg_len - bytes_sent`
-            // correctly represents the remaining valid bytes.
+            // `bytes_sent` is always < `msg_len` due to the loop condition.
             let remaining = unsafe {
                 std::slice::from_raw_parts(
                     msg.as_mut_ptr().add(bytes_sent) as *const u8,
@@ -264,7 +328,6 @@ impl crate::Sink for Sink {
                 )
             };
 
-            // Create the io_uring send operation
             let op = io_uring::opcode::Send::new(
                 self.as_raw_fd(),
                 remaining.as_ptr(),
@@ -272,33 +335,82 @@ impl crate::Sink for Sink {
             )
             .build();
 
-            // Submit the operation to the io_uring event loop
             let (tx, rx) = oneshot::channel();
             self.submitter
                 .send(crate::iouring::Op {
                     work: op,
                     sender: tx,
-                    buffer: Some(msg),
+                    buffers: Some(OpBuf::Single(msg)),
                 })
                 .await
                 .map_err(|_| crate::Error::SendFailed)?;
 
-            // Wait for the operation to complete
-            let (result, got_msg) = rx.await.map_err(|_| crate::Error::SendFailed)?;
-            msg = got_msg.unwrap();
+            let (result, got_buffers) = rx.await.map_err(|_| crate::Error::SendFailed)?;
+            msg = got_buffers.unwrap().into_single().unwrap();
             if should_retry(result) {
                 continue;
             }
 
-            // Non-positive result indicates an error or EOF.
             if result <= 0 {
                 return Err(crate::Error::SendFailed);
             }
 
-            // Mark bytes as sent.
             bytes_sent += result as usize;
         }
         Ok(())
+    }
+
+    /// Vectored send using SendMsg opcode.
+    async fn send_msg(&mut self, chunks: Vec<Bytes>) -> Result<(), crate::Error> {
+        let mut iov_buf = IoVecBuf::new(chunks);
+
+        loop {
+            if iov_buf.is_complete() {
+                return Ok(());
+            }
+
+            let op = io_uring::opcode::SendMsg::new(self.as_raw_fd(), iov_buf.msghdr_ptr()).build();
+
+            let (tx, rx) = oneshot::channel();
+            self.submitter
+                .send(crate::iouring::Op {
+                    work: op,
+                    sender: tx,
+                    buffers: Some(OpBuf::Vectored(iov_buf)),
+                })
+                .await
+                .map_err(|_| crate::Error::SendFailed)?;
+
+            let (result, got_buffers) = rx.await.map_err(|_| crate::Error::SendFailed)?;
+            iov_buf = got_buffers.unwrap().into_vectored().unwrap();
+
+            if should_retry(result) {
+                continue;
+            }
+
+            if result <= 0 {
+                return Err(crate::Error::SendFailed);
+            }
+
+            // Advance past sent bytes
+            iov_buf.advance(result as usize);
+        }
+    }
+}
+
+impl crate::Sink for Sink {
+    async fn send(&mut self, msg: impl Buf + Send) -> Result<(), crate::Error> {
+        // Extract chunks from the buffer
+        let chunks = extract_chunks(msg);
+        let total: usize = chunks.iter().map(|c| c.len()).sum();
+        let n = chunks.len();
+
+        // Choose the optimal send strategy
+        match choose_strategy(total, n) {
+            SendStrategy::Noop => Ok(()),
+            SendStrategy::CopySend => self.send_copy(chunks).await,
+            SendStrategy::SendMsg => self.send_msg(chunks).await,
+        }
     }
 }
 
@@ -359,7 +471,7 @@ impl Stream {
                 .send(crate::iouring::Op {
                     work: op,
                     sender: tx,
-                    buffer: Some(buffer),
+                    buffers: Some(OpBuf::Single(buffer)),
                 })
                 .await
                 .is_err()
@@ -368,11 +480,11 @@ impl Stream {
                 return (StableBuf::default(), Err(crate::Error::RecvFailed));
             }
 
-            let Ok((result, buf)) = rx.await else {
+            let Ok((result, got_buffers)) = rx.await else {
                 // Channel closed - io_uring thread died, buffer is lost
                 return (StableBuf::default(), Err(crate::Error::RecvFailed));
             };
-            buffer = buf.unwrap();
+            buffer = got_buffers.unwrap().into_single().unwrap();
 
             if should_retry(result) {
                 continue;

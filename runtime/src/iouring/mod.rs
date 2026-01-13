@@ -57,6 +57,7 @@
 //! 3. If `shutdown_timeout` is configured, abandons remaining operations after the timeout
 //! 4. Cleans up and exits
 
+use bytes::Bytes;
 use commonware_utils::StableBuf;
 use futures::{
     channel::{mpsc, oneshot},
@@ -72,19 +73,192 @@ use io_uring::{
 use prometheus_client::{metrics::gauge::Gauge, registry::Registry};
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
+/// Buffer(s) kept alive during io_uring operations.
+///
+/// The io_uring kernel interface requires buffer pointers to remain valid until
+/// the operation completes. This enum allows the event loop to store different
+/// buffer types while maintaining their lifetime.
+#[derive(Debug)]
+pub enum OpBuf {
+    /// Single contiguous buffer (used by storage and simple network ops).
+    Single(StableBuf),
+    /// Vectored buffer containing multiple chunks and their iovec metadata.
+    /// Used for scatter-gather I/O operations.
+    Vectored(IoVecBuf),
+}
+
+impl OpBuf {
+    /// Extracts the inner `StableBuf` if this is a `Single` variant.
+    pub fn into_single(self) -> Option<StableBuf> {
+        match self {
+            Self::Single(buf) => Some(buf),
+            Self::Vectored(_) => None,
+        }
+    }
+
+    /// Extracts the inner `IoVecBuf` if this is a `Vectored` variant.
+    pub fn into_vectored(self) -> Option<IoVecBuf> {
+        match self {
+            Self::Single(_) => None,
+            Self::Vectored(v) => Some(v),
+        }
+    }
+}
+
+/// Owns buffer chunks and their iovec metadata for vectored I/O operations.
+///
+/// All fields must remain at stable memory addresses while io_uring uses them.
+/// When `msghdr` is present, it references `iovecs`, and `iovecs` reference `chunks`.
+pub struct IoVecBuf {
+    /// Buffer chunks kept alive for pointer validity.
+    /// For Bytes-backed buffers, this is cheap (Arc clone).
+    pub chunks: Vec<Bytes>,
+    /// iovec array pointing into chunks. Must not move.
+    pub iovecs: Box<[libc::iovec]>,
+    /// msghdr pointing to iovecs. Must not move.
+    /// Only used by network SendMsg operations; None for storage vectored I/O.
+    pub msghdr: Option<Box<libc::msghdr>>,
+    /// Index of first chunk with remaining data (for partial I/O retries).
+    pub first_chunk_idx: usize,
+    /// Offset into first partially-sent chunk (for partial I/O retries).
+    pub first_chunk_offset: usize,
+    /// Total bytes remaining.
+    pub remaining: usize,
+}
+
+// SAFETY: IoVecBuf owns all data it references. The raw pointers in iovecs
+// point into the owned `chunks` Vec, which is Send/Sync. The struct is only
+// accessed by a single io_uring thread at a time, and the kernel only reads
+// from the pointers during the operation.
+unsafe impl Send for IoVecBuf {}
+
+// SAFETY: Same reasoning as Send - all referenced data is owned and the
+// pointers are only dereferenced by the kernel during io_uring operations.
+unsafe impl Sync for IoVecBuf {}
+
+impl std::fmt::Debug for IoVecBuf {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IoVecBuf")
+            .field("chunks", &self.chunks.len())
+            .field("iovecs", &self.iovecs.len())
+            .field("first_chunk_idx", &self.first_chunk_idx)
+            .field("first_chunk_offset", &self.first_chunk_offset)
+            .field("remaining", &self.remaining)
+            .finish()
+    }
+}
+
+impl IoVecBuf {
+    /// Creates a new IoVecBuf from buffer chunks for network SendMsg operations.
+    /// Initializes the msghdr for use with io_uring SendMsg.
+    pub fn new(chunks: Vec<Bytes>) -> Self {
+        let remaining: usize = chunks.iter().map(|c| c.len()).sum();
+
+        let iovecs: Box<[libc::iovec]> = chunks
+            .iter()
+            .map(|c| libc::iovec {
+                iov_base: c.as_ptr() as *mut libc::c_void,
+                iov_len: c.len(),
+            })
+            .collect();
+
+        // SAFETY: msghdr is a POD type with no invalid bit patterns. All fields
+        // are initialized to zero, which is valid. We immediately set msg_iov
+        // and msg_iovlen to valid values below.
+        let mut msghdr = Box::new(unsafe { std::mem::zeroed::<libc::msghdr>() });
+        msghdr.msg_iov = iovecs.as_ptr() as *mut libc::iovec;
+        msghdr.msg_iovlen = iovecs.len();
+
+        Self {
+            chunks,
+            iovecs,
+            msghdr: Some(msghdr),
+            first_chunk_idx: 0,
+            first_chunk_offset: 0,
+            remaining,
+        }
+    }
+
+    /// Returns a pointer to the msghdr for use with SendMsg.
+    /// Panics if msghdr was not initialized (e.g., for storage-only IoVecBuf).
+    pub fn msghdr_ptr(&self) -> *const libc::msghdr {
+        self.msghdr
+            .as_ref()
+            .map(|m| &**m as *const _)
+            .expect("msghdr not initialized")
+    }
+
+    /// Returns true if all data has been processed.
+    pub const fn is_complete(&self) -> bool {
+        self.remaining == 0
+    }
+
+    /// Advance past processed bytes, rebuilding iovecs for remaining data.
+    pub fn advance(&mut self, mut bytes_done: usize) {
+        self.remaining = self.remaining.saturating_sub(bytes_done);
+
+        // Skip fully-processed chunks
+        while bytes_done > 0 && self.first_chunk_idx < self.chunks.len() {
+            let chunk = &self.chunks[self.first_chunk_idx];
+            let chunk_remaining = chunk.len() - self.first_chunk_offset;
+
+            if bytes_done >= chunk_remaining {
+                // Fully processed this chunk
+                bytes_done -= chunk_remaining;
+                self.first_chunk_idx += 1;
+                self.first_chunk_offset = 0;
+            } else {
+                // Partially processed this chunk
+                self.first_chunk_offset += bytes_done;
+                bytes_done = 0;
+            }
+        }
+
+        // Rebuild iovecs for remaining chunks
+        self.rebuild_iovecs();
+    }
+
+    /// Rebuilds iovecs starting from current position.
+    fn rebuild_iovecs(&mut self) {
+        let new_iovecs: Box<[libc::iovec]> = self.chunks[self.first_chunk_idx..]
+            .iter()
+            .enumerate()
+            .map(|(i, c)| {
+                let offset = if i == 0 { self.first_chunk_offset } else { 0 };
+                libc::iovec {
+                    // SAFETY: offset is always <= c.len() because:
+                    // - first_chunk_offset is only incremented by bytes_done which never
+                    //   exceeds the chunk's remaining length
+                    // - For i > 0, offset is 0
+                    iov_base: unsafe { c.as_ptr().add(offset) as *mut libc::c_void },
+                    iov_len: c.len() - offset,
+                }
+            })
+            .collect();
+
+        self.iovecs = new_iovecs;
+
+        // Update msghdr if present (only for network SendMsg operations)
+        if let Some(ref mut msghdr) = self.msghdr {
+            msghdr.msg_iov = self.iovecs.as_ptr() as *mut libc::iovec;
+            msghdr.msg_iovlen = self.iovecs.len();
+        }
+    }
+}
+
 /// Reserved ID for a CQE that indicates an operation timed out.
 const TIMEOUT_WORK_ID: u64 = u64::MAX;
 
 /// Active operations keyed by their work id.
 ///
-/// Each entry keeps the caller's oneshot sender, the `StableBuf` that must stay
-/// alive until the kernel finishes touching it, and when op_timeout is enabled,
+/// Each entry keeps the caller's oneshot sender, the buffer(s) that must stay
+/// alive until the kernel finishes touching them, and when op_timeout is enabled,
 /// the boxed `Timespec` used when we link in an IOSQE_IO_LINK timeout.
 type Waiters = HashMap<
     u64,
     (
-        oneshot::Sender<(i32, Option<StableBuf>)>,
-        Option<StableBuf>,
+        oneshot::Sender<(i32, Option<OpBuf>)>,
+        Option<OpBuf>,
         Option<Box<Timespec>>,
     ),
 >;
@@ -205,14 +379,15 @@ pub struct Op {
     /// The submission queue entry to be submitted to the ring.
     /// Its user data field will be overwritten. Users shouldn't rely on it.
     pub work: SqueueEntry,
-    /// Sends the result of the operation and `buffer`.
-    pub sender: oneshot::Sender<(i32, Option<StableBuf>)>,
-    /// The buffer used for the operation, if any.
+    /// Sends the result of the operation and `buffers`.
+    pub sender: oneshot::Sender<(i32, Option<OpBuf>)>,
+    /// The buffer(s) used for the operation, if any.
     /// E.g. For read, this is the buffer being read into.
+    /// For vectored sends, this holds the chunks and iovecs.
     /// If None, the operation doesn't use a buffer (e.g. a sync operation).
     /// We hold the buffer here so it's guaranteed to live until the operation
     /// completes, preventing write-after-free issues.
-    pub buffer: Option<StableBuf>,
+    pub buffers: Option<OpBuf>,
 }
 
 // Returns false iff we received a shutdown timeout
@@ -235,8 +410,8 @@ fn handle_cqe(waiters: &mut Waiters, cqe: CqueueEntry, cfg: &Config) {
                 result
             };
 
-            let (result_sender, buffer, _) = waiters.remove(&work_id).expect("missing sender");
-            let _ = result_sender.send((result, buffer));
+            let (result_sender, buffers, _) = waiters.remove(&work_id).expect("missing sender");
+            let _ = result_sender.send((result, buffers));
         }
     }
 }
@@ -295,7 +470,7 @@ pub(crate) async fn run(cfg: Config, metrics: Arc<Metrics>, mut receiver: mpsc::
             let Op {
                 mut work,
                 sender,
-                buffer,
+                buffers,
             } = op;
 
             // Assign a unique id
@@ -328,7 +503,7 @@ pub(crate) async fn run(cfg: Config, metrics: Arc<Metrics>, mut receiver: mpsc::
 
                 // Submit the op and timeout.
                 //
-                // SAFETY: Both `buffer` and `timespec` are stored in `waiters`
+                // SAFETY: Both `buffers` and `timespec` are stored in `waiters`
                 // until the CQE is processed, ensuring memory referenced by the
                 // SQEs remains valid. The ring was doubled in size for timeout
                 // support, and `waiters.len() < cfg.size` guarantees space for
@@ -343,7 +518,7 @@ pub(crate) async fn run(cfg: Config, metrics: Arc<Metrics>, mut receiver: mpsc::
             } else {
                 // No timeout, submit the operation normally.
                 //
-                // SAFETY: The `buffer` is stored in `waiters` until the CQE is
+                // SAFETY: The `buffers` are stored in `waiters` until the CQE is
                 // processed, ensuring memory referenced by the SQE remains valid.
                 // The loop condition `waiters.len() < cfg.size` guarantees space
                 // in the submission queue.
@@ -357,7 +532,7 @@ pub(crate) async fn run(cfg: Config, metrics: Arc<Metrics>, mut receiver: mpsc::
             };
 
             // We'll send the result of this operation to `sender`.
-            waiters.insert(work_id, (sender, buffer, timespec));
+            waiters.insert(work_id, (sender, buffers, timespec));
         }
 
         // Submit and wait for at least 1 item to be in the completion queue.
@@ -441,7 +616,7 @@ pub const fn should_retry(return_value: i32) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use crate::iouring::{Config, Op};
+    use crate::iouring::{Config, Op, OpBuf};
     use futures::{
         channel::{
             mpsc::channel,
@@ -479,7 +654,7 @@ mod tests {
             .send(crate::iouring::Op {
                 work: recv,
                 sender: recv_tx,
-                buffer: Some(buf.into()),
+                buffers: Some(OpBuf::Single(buf.into())),
             })
             .await
             .expect("failed to send work");
@@ -497,7 +672,7 @@ mod tests {
             .send(crate::iouring::Op {
                 work: write,
                 sender: write_tx,
-                buffer: Some(msg.into()),
+                buffers: Some(OpBuf::Single(msg.into())),
             })
             .await
             .expect("failed to send work");
@@ -566,7 +741,7 @@ mod tests {
             .send(crate::iouring::Op {
                 work,
                 sender: tx,
-                buffer: Some(buf.into()),
+                buffers: Some(OpBuf::Single(buf.into())),
             })
             .await
             .expect("failed to send work");
@@ -596,7 +771,7 @@ mod tests {
             .send(Op {
                 work: timeout,
                 sender: tx,
-                buffer: None,
+                buffers: None,
             })
             .await
             .unwrap();
@@ -629,7 +804,7 @@ mod tests {
             .send(Op {
                 work: timeout,
                 sender: tx,
-                buffer: None,
+                buffers: None,
             })
             .await
             .unwrap();
@@ -672,7 +847,7 @@ mod tests {
                 .send(Op {
                     work: nop,
                     sender: tx,
-                    buffer: None,
+                    buffers: None,
                 })
                 .await
                 .unwrap();
@@ -710,7 +885,7 @@ mod tests {
             .send(Op {
                 work: opcode::Nop::new().build(),
                 sender: tx,
-                buffer: None,
+                buffers: None,
             })
             .await
             .unwrap();
