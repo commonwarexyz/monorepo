@@ -267,13 +267,13 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         Ok(journal)
     }
 
-    /// Validate the segmented journal state and compute size.
+    /// Compute size from the segmented journal state.
     ///
-    /// Validates that:
-    /// 1. Sections are contiguous (no gaps)
-    /// 2. All non-tail sections are full (have exactly `items_per_blob` items)
+    /// Since we maintain the invariant that:
+    /// 1. At least one blob (the tail) always exists
+    /// 2. All blobs before the tail are full and synced
     ///
-    /// Then computes size from the tail blob.
+    /// We only need to look at the tail blob to compute size.
     async fn compute_state(
         inner: &SegmentedJournal<E, A>,
         items_per_blob: u64,
@@ -281,33 +281,10 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         let oldest_section = inner.oldest_section();
         let newest_section = inner.newest_section();
 
-        let (Some(oldest), Some(newest)) = (oldest_section, newest_section) else {
+        let (Some(_), Some(newest)) = (oldest_section, newest_section) else {
             // Empty journal
             return Ok(0);
         };
-
-        // Validate sections on init: must be gap-free and all non-tail sections must be full.
-        {
-            let mut sections = inner.sections();
-            let mut prev = sections
-                .next()
-                .ok_or_else(|| Error::Corruption("missing journal sections".to_string()))?;
-            if prev != oldest {
-                return Err(Error::MissingBlob(oldest));
-            }
-            for section in sections {
-                let expected = prev.checked_add(1).ok_or(Error::OffsetOverflow)?;
-                if section != expected {
-                    return Err(Error::MissingBlob(expected));
-                }
-                // Verify non-tail section is full (has exactly items_per_blob items)
-                let len = inner.section_len(prev).await?;
-                if len != items_per_blob {
-                    return Err(Error::InvalidBlobSize(prev, len * Self::CHUNK_SIZE_U64));
-                }
-                prev = section;
-            }
-        }
 
         // Compute size from the tail (newest) section
         let tail_len = inner.section_len(newest).await?;
@@ -905,17 +882,33 @@ mod tests {
             blob.resize(size - 1).await.expect("Failed to corrupt blob");
             blob.sync().await.expect("Failed to sync blob");
 
-            // Init should fail due to corrupted historical blob (not full)
-            match Journal::<_, Digest>::init(context.clone(), cfg.clone()).await {
-                Err(Error::InvalidBlobSize(40, _)) => {}
-                Err(e) => panic!("Expected InvalidBlobSize for section 40, got: {e:?}"),
-                Ok(_) => panic!("Expected InvalidBlobSize for section 40, got Ok"),
-            }
+            // The segmented journal will trim the incomplete blob on init, resulting in the blob
+            // missing one item. This should be detected as corruption during replay.
+            let journal = Journal::<_, Digest>::init(context.clone(), cfg.clone())
+                .await
+                .expect("failed to initialize journal");
+
+            // Journal size is computed from the tail section, so it's unchanged
+            // despite the corruption in section 40.
+            let expected_size = ITEMS_PER_BLOB.get() * 100 + ITEMS_PER_BLOB.get() / 2;
+            assert_eq!(journal.size(), expected_size);
+
+            // Replay should detect corruption (incomplete section) in section 40
+            match journal.replay(NZUsize!(1024), 0).await {
+                Err(Error::Corruption(msg)) => {
+                    assert!(
+                        msg.contains("section 40"),
+                        "Error should mention section 40, got: {msg}"
+                    );
+                }
+                Err(e) => panic!("Expected Corruption error for section 40, got: {:?}", e),
+                Ok(_) => panic!("Expected replay to fail with corruption"),
+            };
         });
     }
 
     #[test_traced]
-    fn test_fixed_journal_init_with_missing_historical_blob() {
+    fn test_fixed_journal_replay_with_missing_historical_blob() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(NZU64!(2));
@@ -937,12 +930,24 @@ mod tests {
                 .await
                 .expect("failed to remove blob");
 
-            let result = Journal::<_, Digest>::init(context.clone(), cfg.clone()).await;
-            match result {
-                Err(Error::MissingBlob(1)) => {}
-                Err(err) => panic!("expected MissingBlob(1), got: {err}"),
-                Ok(_) => panic!("expected MissingBlob(1), got ok"),
-            }
+            // Init won't detect the corruption.
+            let result = Journal::<_, Digest>::init(context.clone(), cfg.clone())
+                .await
+                .expect("init shouldn't fail");
+
+            // But replay will.
+            match result.replay(NZUsize!(1024), 0).await {
+                Err(Error::Corruption(_)) => {}
+                Err(err) => panic!("expected Corruption, got: {err}"),
+                Ok(_) => panic!("expected Corruption, got ok"),
+            };
+
+            // As will trying to read an item that was in the deleted blob.
+            match result.read(2).await {
+                Err(Error::Corruption(_)) => {}
+                Err(err) => panic!("expected Corruption, got: {err}"),
+                Ok(_) => panic!("expected Corruption, got ok"),
+            };
         });
     }
 
