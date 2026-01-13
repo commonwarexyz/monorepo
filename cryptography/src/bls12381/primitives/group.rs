@@ -1805,6 +1805,7 @@ mod tests {
         commonware_conformance::conformance_tests! {
             CodecConformance<G1>,
             CodecConformance<G2>,
+            CodecConformance<Private>,
             CodecConformance<Scalar>,
             CodecConformance<Share>
         }
