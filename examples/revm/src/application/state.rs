@@ -27,20 +27,20 @@ use std::{
 };
 
 #[derive(Clone)]
-/// Shared handle for the application state, wrapping the mutex and genesis block.
-pub(crate) struct Shared {
+/// Ledger view that owns the mutexed execution state.
+pub(crate) struct LedgerView {
     /// Mutex-protected running state.
-    inner: Arc<Mutex<State>>,
+    inner: Arc<Mutex<LedgerState>>,
     /// Genesis block stored so the automaton can replay from height 0.
     genesis_block: Block,
 }
 
-/// Internal state guarded by the mutex inside `Shared`.
-pub(crate) struct State {
+/// Internal ledger state guarded by the mutex inside `LedgerView`.
+pub(crate) struct LedgerState {
     /// Pending transactions that are not yet included in finalized blocks.
     mempool: BTreeMap<TxId, Tx>,
     /// Execution snapshots indexed by digest so we can replay ancestors.
-    snapshots: BTreeMap<ConsensusDigest, ExecutionSnapshot>,
+    snapshots: BTreeMap<ConsensusDigest, LedgerSnapshot>,
     /// Cached seeds for each digest used to compute prevrandao.
     seeds: BTreeMap<ConsensusDigest, B256>,
     /// Finalized digests that have been persisted to QMDB.
@@ -51,7 +51,7 @@ pub(crate) struct State {
 
 #[derive(Clone)]
 /// Captures a REVM execution result tied to a consensus digest.
-pub(crate) struct ExecutionSnapshot {
+pub(crate) struct LedgerSnapshot {
     /// Parent digest that produced this snapshot (if any).
     pub(crate) parent: Option<ConsensusDigest>,
     /// REVM execution database representing this snapshot.
@@ -62,7 +62,7 @@ pub(crate) struct ExecutionSnapshot {
     pub(crate) qmdb_changes: QmdbChanges,
 }
 
-impl Shared {
+impl LedgerView {
     pub(crate) async fn init(
         context: tokio::Context,
         buffer_pool: PoolRef,
@@ -90,7 +90,7 @@ impl Shared {
         let mut snapshots = BTreeMap::new();
         snapshots.insert(
             genesis_digest,
-            ExecutionSnapshot {
+            LedgerSnapshot {
                 parent: None,
                 db,
                 state_root: genesis_block.state_root,
@@ -102,7 +102,7 @@ impl Shared {
         seeds.insert(genesis_digest, B256::ZERO);
 
         Ok(Self {
-            inner: Arc::new(Mutex::new(State {
+            inner: Arc::new(Mutex::new(LedgerState {
                 mempool: BTreeMap::new(),
                 snapshots,
                 seeds,
@@ -164,7 +164,7 @@ impl Shared {
     pub(crate) async fn parent_snapshot(
         &self,
         parent: ConsensusDigest,
-    ) -> Option<ExecutionSnapshot> {
+    ) -> Option<LedgerSnapshot> {
         let inner = self.inner.lock().await;
         inner.snapshots.get(&parent).cloned()
     }
@@ -180,7 +180,7 @@ impl Shared {
         let mut inner = self.inner.lock().await;
         inner.snapshots.insert(
             digest,
-            ExecutionSnapshot {
+            LedgerSnapshot {
                 parent: Some(parent),
                 db,
                 state_root: root,
@@ -240,7 +240,7 @@ impl Shared {
     }
 }
 
-impl State {
+impl LedgerState {
     fn merged_changes_from(
         &self,
         mut parent: ConsensusDigest,

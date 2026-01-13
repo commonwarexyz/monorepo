@@ -7,7 +7,7 @@
 //!
 //! The node wiring that wraps this application lives in `examples/revm/src/sim/node.rs`.
 
-use super::state::Shared;
+use super::state::LedgerView;
 use crate::{
     execution::{evm_env, execute_txs},
     types::{Block, TxId},
@@ -27,7 +27,8 @@ use std::{collections::BTreeSet, marker::PhantomData};
 
 /// Helper function for propose that owns all its inputs.
 async fn propose_inner<S, E>(
-    state: Shared,
+    /// Ledger view used to store snapshots, mempool, and seeds.
+    state: LedgerView,
     max_txs: usize,
     spawner: E,
     mut ancestry: AncestorStream<S, Block>,
@@ -94,7 +95,7 @@ where
 
 /// Helper function for verify that owns all its inputs.
 async fn verify_inner<S, E>(
-    state: Shared,
+        state: LedgerView,
     spawner: E,
     mut ancestry: AncestorStream<S, Block>,
 ) -> bool
@@ -147,15 +148,15 @@ where
 pub(crate) struct RevmApplication<S> {
     /// Maximum number of transactions to include when proposing new blocks.
     max_txs: usize,
-    /// Shared application state, including snapshots and mempool data.
-    state: Shared,
+    /// Ledger view holding snapshots, mempool, and seeds.
+    state: LedgerView,
     /// Marker tracking the signing scheme used by this application instance.
     _scheme: PhantomData<S>,
 }
 
 impl<S> RevmApplication<S> {
     /// Create a REVM application with the shared state handle.
-    pub(crate) const fn new(max_txs: usize, state: Shared) -> Self {
+    pub(crate) const fn new(max_txs: usize, state: LedgerView) -> Self {
         Self {
             max_txs,
             state,

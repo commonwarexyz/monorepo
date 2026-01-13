@@ -23,10 +23,10 @@ This document walks through the REVM simulation example with a top-down view tha
 
 ## 3. Core Components
 
-### Shared State (`examples/revm/src/application/state.rs`)
+### Ledger View (`examples/revm/src/application/state.rs`)
 
 - Holds the mempool, per-digest snapshots, seed cache, and persisted digest set.
-- Stores snapshots as `ExecutionSnapshot` (parent digest, `RevmDb`, `StateRoot`, `QmdbChanges`).
+- Stores snapshots as `LedgerSnapshot` (parent digest, `RevmDb`, `StateRoot`, `QmdbChanges`).
 - Provides helpers to preview roots (without durably writing) and to persist snapshots via `QmdbState`.
 
 ### QMDB Adapter & Persistence
@@ -52,12 +52,12 @@ This document walks through the REVM simulation example with a top-down view tha
 - On `propose`, it:
   1. Collects mempool transactions while avoiding duplicates via ancestor scanning.
   2. Executes the transactions using the shared `RevmDb`.
-  3. Previews the resulting QMDB root and updates the shared state with the snapshot.
+  3. Previews the resulting QMDB root and updates the ledger view with the snapshot.
 - On `verify`, it replays the block to recompute the root and ensures it matches the declared `state_root`.
 
 ### Reporters (`examples/revm/src/application/reporters.rs`)
 
-- `SeedReporter` watches simplex activity and writes hashed seeds into the shared state so `RevmApplication` can populate future `prevrandao`.
+- `SeedReporter` watches simplex activity and writes hashed seeds into the ledger view so `RevmApplication` can populate future `prevrandao`.
 - `FinalizedReporter` reacts to `marshal::Update::Block`:
   1. Replays the block via `execute_txs` if it's not already finalized.
   2. Validates the computed root against the block.
@@ -69,7 +69,7 @@ This document walks through the REVM simulation example with a top-down view tha
 1. **Proposal Flow**:
    - CLI invokes simulation → nodes propose via `RevmApplication`.
    - Execution hits `execute_txs`, generating `QmdbChanges`.
-   - Shared state saves the snapshot and previews the root for the block commitment.
+   - `LedgerView` saves the snapshot and previews the root for the block commitment.
 
 2. **Finalization Flow**:
    - Marshal delivers a finalized block to `FinalizedReporter`.
@@ -77,9 +77,20 @@ This document walks through the REVM simulation example with a top-down view tha
    - Mempool is pruned and the simulation harness is notified via the `finalized` channel.
 
 3. **Seed Flow**:
-   - `SeedReporter` listens to simplex notaries/finalizations, hashes the received seed, and stores it in shared state.
+-   - `SeedReporter` listens to simplex notaries/finalizations, hashes the received seed, and stores it in the ledger view.
    - The stored seed is reused by `RevmApplication` when building future proposals.
 
 ## 5. Diagram
 
 See `examples/revm/docs/revm_architecture.png` for the visual layout of these components. The diagram mirrors the textual flows above (CLI → Simulation → Nodes → Reporters → QMDB).
+
+## 6. Applying DDD to the Example
+
+The architecture description above already hints at a domain-driven mindset. To make the terminology and structure easier to reason about in future refactors, here is the lightweight DDD methodology we can follow for the REVM example:
+
+1. **Ubiquitous language** – Keep using the nouns introduced earlier (`Node`, `LedgerSnapshot`, `LedgerView`, `QmdbLedger`, `BlockBundle`, `SeedReporter`, `FinalizedReporter`) across documentation and code so every contributor thinks in the same terms.
+2. **Bounded contexts** – Treat the simulation harness, consensus/marshal delivery, application execution, and QMDB persistence as separate languages. Within each context, group related types and services (`simulate`/`FastRunner`, `node::start_all_nodes` + reporters, `RevmApplication` + `execute_txs`, `QmdbState` + persist helpers) and avoid leaking implementation details between them.
+3. **Entities/Aggregates & Value Objects** – Model mutable, identity-bearing state as entities/aggregates such as `LedgerView` (mempool, snapshots, persisted digests) and `LedgerSnapshot` (parent digest, `RevmDb`, state root, `QmdbChanges`). Keep blocks, transactions, and state roots as value objects with deterministic encodings.
+4. **Domain services & events** – Capture behaviors that span aggregates in services (e.g., `FinalizedReporter`’s replay-and-persist routine) and surface domain events (`Finalized events` channel) so other contexts (simulation harness) can react without tight coupling.
+
+Following these steps before refactoring helps ensure any future API or module split feels natural, uses shared vocabulary, and keeps the executable flows (proposal/finalization/seed) grounded in the domain model outlined above.

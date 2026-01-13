@@ -178,7 +178,7 @@ async fn start_node(
     } = register_channels(&mut control, quota).await?;
 
     let block_cfg = block_codec_cfg();
-    let state = application::Shared::init(
+    let state = application::LedgerView::init(
         context.with_label(&format!("state_{index}")),
         buffer_pool.clone(),
         format!("revm-qmdb-{index}"),

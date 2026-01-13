@@ -7,7 +7,7 @@
 //! - `FinalizedReporter`: listens to `commonware_consensus::marshal::Update` and reacts to
 //!   finalized blocks (prunes the mempool and forwards a finalization event to the simulation).
 
-use super::state::Shared;
+use super::state::LedgerView;
 use crate::{
     execution::{evm_env, execute_txs},
     types::Block,
@@ -30,7 +30,7 @@ use std::marker::PhantomData;
 
 /// Helper function for SeedReporter::report that owns all its inputs
 async fn seed_report_inner<V: Variant>(
-    state: Shared,
+    state: LedgerView,
     activity: Activity<bls12381_threshold::Scheme<crate::PublicKey, V>, ConsensusDigest>,
 ) {
     match activity {
@@ -56,7 +56,7 @@ async fn seed_report_inner<V: Variant>(
 
 /// Helper function for FinalizedReporter::report that owns all its inputs
 async fn finalized_report_inner<E>(
-    state: Shared,
+    state: LedgerView,
     finalized: mpsc::UnboundedSender<FinalizationEvent>,
     node: u32,
     spawner: E,
@@ -110,14 +110,14 @@ async fn finalized_report_inner<E>(
 #[derive(Clone)]
 /// Tracks simplex activity to store seed hashes for future proposals.
 pub(crate) struct SeedReporter<V> {
-    /// Shared state that keeps per-digest seeds and snapshots.
-    state: Shared,
+    /// Ledger view that keeps per-digest seeds and snapshots.
+    state: LedgerView,
     /// Marker indicating the variant for the threshold scheme in use.
     _variant: PhantomData<V>,
 }
 
 impl<V> SeedReporter<V> {
-    pub(crate) const fn new(state: Shared) -> Self {
+    pub(crate) const fn new(state: LedgerView) -> Self {
         Self {
             state,
             _variant: PhantomData,
@@ -148,8 +148,8 @@ where
 pub(crate) struct FinalizedReporter<E> {
     /// Index of the node that owns this reporter.
     node: u32,
-    /// Shared state used to verify blocks and persist snapshots.
-    state: Shared,
+    /// Ledger view used to verify blocks and persist snapshots.
+    state: LedgerView,
     /// Channel used to relay finalized block notifications.
     finalized: mpsc::UnboundedSender<FinalizationEvent>,
     /// Runtime spawner used for executing block replay tasks.
@@ -162,7 +162,7 @@ where
 {
     pub(crate) const fn new(
         node: u32,
-        state: Shared,
+        state: LedgerView,
         finalized: mpsc::UnboundedSender<FinalizationEvent>,
         spawner: E,
     ) -> Self {

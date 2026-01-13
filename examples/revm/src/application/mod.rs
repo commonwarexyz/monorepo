@@ -8,4 +8,4 @@ mod state;
 pub(crate) use app::RevmApplication;
 pub use handle::NodeHandle;
 pub(crate) use reporters::{FinalizedReporter, SeedReporter};
-pub(crate) use state::Shared;
+pub(crate) use state::LedgerView;
