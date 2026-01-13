@@ -447,7 +447,7 @@ pub(super) mod test {
             TwoCap,
         >,
         key: Digest,
-    ) -> impl std::future::Future<Output = ()> + Send + use<'_> {
+    ) -> impl std::future::Future<Output = ()> + Send + '_ {
         async move {
             let _ = db.get(&key).await;
         }

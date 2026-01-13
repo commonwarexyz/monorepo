@@ -14,25 +14,21 @@ pub trait Gettable {
     fn get<'a>(
         &'a self,
         key: &'a Self::Key,
-    ) -> impl Future<Output = Result<Option<Self::Value>, Self::Error>> + Send + use<'a, Self>;
+    ) -> impl Future<Output = Result<Option<Self::Value>, Self::Error>> + Send + 'a;
 }
 
 /// A mutable key-value store.
 pub trait Updatable: Gettable {
     /// Update the value of a key.
-    fn update<'a>(
-        &'a mut self,
+    fn update(
+        &mut self,
         key: Self::Key,
         value: Self::Value,
-    ) -> impl Future<Output = Result<(), Self::Error>> + Send + use<'a, Self>;
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send + '_;
 
     /// Creates a new key-value pair in the db. Returns true if the key was created, false if it
     /// already existed. The key is not modified if it already existed.
-    fn create<'a>(
-        &'a mut self,
-        key: Self::Key,
-        value: Self::Value,
-    ) -> impl Future<Output = Result<bool, Self::Error>> + Send + use<'a, Self>
+    fn create(&mut self, key: Self::Key, value: Self::Value) -> impl Future<Output = Result<bool, Self::Error>> + Send + '_
     where
         Self: Send,
     {
@@ -51,7 +47,7 @@ pub trait Updatable: Gettable {
         &'a mut self,
         key: Self::Key,
         update: F,
-    ) -> impl Future<Output = Result<(), Self::Error>> + Send + use<'a, Self, F>
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'a
     where
         Self: Send,
         Self::Value: Default,
@@ -70,10 +66,7 @@ pub trait Deletable: Updatable {
     /// Delete the value of a key.
     ///
     /// Returns `true` if the key existed and was deleted, `false` if it did not exist.
-    fn delete<'a>(
-        &'a mut self,
-        key: Self::Key,
-    ) -> impl Future<Output = Result<bool, Self::Error>> + Send + use<'a, Self>;
+    fn delete(&mut self, key: Self::Key) -> impl Future<Output = Result<bool, Self::Error>> + Send + '_;
 }
 
 #[cfg(test)]

@@ -49,7 +49,7 @@ where
     }
 }
 
-impl<'b, K, V, D> Gettable for Batch<'b, K, V, D>
+impl<'a, K, V, D> Gettable for Batch<'a, K, V, D>
 where
     K: Array,
     V: CodecShared + Clone,
@@ -70,7 +70,7 @@ where
     }
 }
 
-impl<'b, K, V, D> Updatable for Batch<'b, K, V, D>
+impl<'a, K, V, D> Updatable for Batch<'a, K, V, D>
 where
     K: Array,
     V: CodecShared + Clone,
@@ -84,7 +84,7 @@ where
     }
 }
 
-impl<'b, K, V, D> Deletable for Batch<'b, K, V, D>
+impl<'a, K, V, D> Deletable for Batch<'a, K, V, D>
 where
     K: Array,
     V: CodecShared + Clone,
