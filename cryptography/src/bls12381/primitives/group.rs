@@ -84,10 +84,10 @@ impl arbitrary::Arbitrary<'_> for Scalar {
 }
 
 /// Number of bytes required to encode a scalar in its canonical
-/// little‑endian form (`32 × 8 = 256 bits`).
+/// big-endian form (`32 × 8 = 256 bits`).
 ///
-/// Because `r` is only 255 bits wide, the most‑significant byte is always in
-/// the range `0x00‥=0x7f`, leaving the top bit clear.
+/// Because `r` is only 255 bits wide, the most-significant byte is always in
+/// the range `0x00..=0x7f`, leaving the top bit clear.
 pub const SCALAR_LENGTH: usize = 32;
 
 /// Effective bit-length of the field modulus `r` (`ceil(log_2 r) = 255`).
