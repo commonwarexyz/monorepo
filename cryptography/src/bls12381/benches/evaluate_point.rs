@@ -6,7 +6,7 @@ use criterion::{criterion_group, BatchSize, Criterion};
 use rand::{rngs::StdRng, SeedableRng};
 use std::hint::black_box;
 
-fn benchmark_evaluate_point(c: &mut Criterion) {
+fn bench_evaluate_point(c: &mut Criterion) {
     for &n in &[5, 10, 20, 50, 100, 250, 500] {
         let t = N3f1::quorum(n);
         for concurrency in [1, 8] {
@@ -39,5 +39,5 @@ fn benchmark_evaluate_point(c: &mut Criterion) {
 criterion_group! {
     name = benches;
     config = Criterion::default().sample_size(10);
-    targets = benchmark_evaluate_point
+    targets = bench_evaluate_point
 }

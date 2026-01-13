@@ -3,7 +3,7 @@ use criterion::{criterion_group, BatchSize, Criterion};
 use rand::{thread_rng, Rng};
 use std::hint::black_box;
 
-fn benchmark_combine_signatures(c: &mut Criterion) {
+fn bench_combine_signatures(c: &mut Criterion) {
     let namespace = b"namespace";
     for n in [10, 100, 1000, 10000].into_iter() {
         let mut msgs = Vec::with_capacity(n);
@@ -35,5 +35,5 @@ fn benchmark_combine_signatures(c: &mut Criterion) {
 criterion_group! {
     name = benches;
     config = Criterion::default().sample_size(10);
-    targets = benchmark_combine_signatures
+    targets = bench_combine_signatures
 }

@@ -90,7 +90,7 @@ fn bench_fixed_init(c: &mut Criterion) {
                 let runner = tokio::Runner::new(cfg.clone());
                 c.bench_function(
                     &format!(
-                        "{}/variant={}, elements={} operations={}",
+                        "{}/variant={} elements={} operations={}",
                         module_path!(),
                         variant.name(),
                         elements,
