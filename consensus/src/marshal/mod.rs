@@ -72,7 +72,10 @@ pub use ingress::mailbox::Mailbox;
 pub mod resolver;
 pub mod store;
 
-use crate::{types::Height, Block};
+use crate::{
+    types::{Height, Round},
+    Block,
+};
 use commonware_utils::{acknowledgement::Exact, Acknowledgement};
 
 /// An update reported to the application, either a new finalized tip or a finalized block.
@@ -81,8 +84,8 @@ use commonware_utils::{acknowledgement::Exact, Acknowledgement};
 /// Finalized blocks are reported to the application in monotonically increasing order (no gaps permitted).
 #[derive(Clone, Debug)]
 pub enum Update<B: Block, A: Acknowledgement = Exact> {
-    /// A new finalized tip.
-    Tip(Height, B::Commitment),
+    /// A new finalized tip and the finalization round.
+    Tip(Height, B::Commitment, Round),
     /// A new finalized block and an [Acknowledgement] for the application to signal once processed.
     ///
     /// To ensure all blocks are delivered at least once, marshal waits to mark a block as delivered

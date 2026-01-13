@@ -106,6 +106,7 @@ where
     last_built: Arc<Mutex<Option<(Round, B)>>>,
     verification_contexts: Arc<Mutex<VerificationContexts<E, B, S>>>,
     certification_txs: Arc<Mutex<Vec<oneshot::Sender<bool>>>>,
+    last_finalized_round: Arc<Mutex<Option<Round>>>,
 
     build_duration: Gauge,
 }
@@ -145,7 +146,7 @@ where
         let verification_contexts = Metadata::init(
             context.with_label("verification_contexts_metadata"),
             metadata::Config {
-                partition: format!("{partition_prefix}_verification_contexts"),
+                partition: format!("{partition_prefix}-verification-contexts"),
                 codec_config: (RangeCfg::from(..), ((), ())),
             },
         )
@@ -160,6 +161,7 @@ where
             last_built: Arc::new(Mutex::new(None)),
             verification_contexts: Arc::new(Mutex::new(verification_contexts)),
             certification_txs: Arc::new(Mutex::new(Vec::new())),
+            last_finalized_round: Arc::new(Mutex::new(None)),
 
             build_duration,
         }
@@ -185,7 +187,6 @@ where
         let mut marshal = self.marshal.clone();
         let mut application = self.application.clone();
         let epocher = self.epocher.clone();
-        let verification_contexts = self.verification_contexts.clone();
 
         let (mut tx, rx) = oneshot::channel();
         self.context
@@ -195,24 +196,6 @@ where
                 // us to cancel work early.
                 let tx_closed = tx.closed();
                 pin_mut!(tx_closed);
-
-                // Helper to clean up verification context for this round
-                let cleanup = || async {
-                    let mut contexts_guard = verification_contexts.lock().await;
-                    if let Some(map) = contexts_guard.get_mut(&digest) {
-                        map.remove(&context.round);
-
-                        // Retain context maps for digests that relate to future rounds only.
-                        contexts_guard.retain(|_, map| {
-                            map.iter().any(|(m_round, _)| m_round > &context.round)
-                        });
-
-                        contexts_guard
-                            .sync()
-                            .await
-                            .expect("must persist verification context cleanup");
-                    }
-                };
 
                 let (parent_view, parent_commitment) = context.parent;
                 let parent_request = fetch_parent(
@@ -254,7 +237,6 @@ where
                     if is_valid {
                         marshal.verified(context.round, block).await;
                     }
-                    cleanup().await;
                     let _ = tx.send(is_valid);
                     return;
                 }
@@ -266,12 +248,10 @@ where
                         height = %block.height(),
                         "block height not covered by epoch strategy"
                     );
-                    cleanup().await;
                     tx.send_lossy(false);
                     return;
                 };
                 if block_bounds.epoch() != context.epoch() {
-                    cleanup().await;
                     tx.send_lossy(false);
                     return;
                 }
@@ -283,7 +263,6 @@ where
                         expected_parent = %parent.commitment(),
                         "block parent commitment does not match expected parent"
                     );
-                    cleanup().await;
                     tx.send_lossy(false);
                     return;
                 }
@@ -295,7 +274,6 @@ where
                         block_height = %block.height(),
                         "block height is not contiguous with parent height"
                     );
-                    cleanup().await;
                     tx.send_lossy(false);
                     return;
                 }
@@ -322,7 +300,6 @@ where
                 if application_valid {
                     marshal.verified(context.round, block).await;
                 }
-                cleanup().await;
                 tx.send_lossy(application_valid);
             });
 
@@ -336,11 +313,27 @@ where
     /// Panics if the verification context cannot be persisted.
     #[inline]
     async fn store_verification_context(
-        lock: &Arc<Mutex<VerificationContexts<E, B, S>>>,
+        contexts_lock: &Arc<Mutex<VerificationContexts<E, B, S>>>,
+        finalized_round: Option<Round>,
         context: <Self as Automaton>::Context,
         digest: B::Commitment,
     ) {
-        let mut contexts_guard = lock.lock().await;
+        let mut contexts_guard = contexts_lock.lock().await;
+
+        // Clean up contexts for rounds <= the last finalized round (if any)
+        if let Some(round) = finalized_round {
+            let keys: Vec<_> = contexts_guard.keys().cloned().collect();
+            for key in keys {
+                if let Some(map) = contexts_guard.get_mut(&key) {
+                    map.retain(|ctx_round, _| ctx_round > &round);
+                    if map.is_empty() {
+                        contexts_guard.remove(&key);
+                    }
+                }
+            }
+        }
+
+        // Store the new context
         contexts_guard
             .upsert_sync(digest, |map| {
                 map.insert(context.round, context);
@@ -413,6 +406,7 @@ where
         let last_built = self.last_built.clone();
         let epocher = self.epocher.clone();
         let verification_contexts = self.verification_contexts.clone();
+        let last_finalized_round = self.last_finalized_round.clone();
 
         // Metrics
         let build_duration = self.build_duration.clone();
@@ -465,8 +459,10 @@ where
                         *lock = Some((consensus_context.round, parent));
                     }
 
+                    let finalized_round = last_finalized_round.lock().await.take();
                     Self::store_verification_context(
                         &verification_contexts,
+                        finalized_round,
                         consensus_context.clone(),
                         digest,
                     )
@@ -516,8 +512,10 @@ where
                     *lock = Some((consensus_context.round, built_block));
                 }
 
+                let finalized_round = last_finalized_round.lock().await.take();
                 Self::store_verification_context(
                     &verification_contexts,
+                    finalized_round,
                     consensus_context.clone(),
                     digest,
                 )
@@ -539,7 +537,14 @@ where
         context: Context<Self::Digest, S::PublicKey>,
         digest: Self::Digest,
     ) -> oneshot::Receiver<bool> {
-        Self::store_verification_context(&self.verification_contexts, context, digest).await;
+        let finalized_round = self.last_finalized_round.lock().await.take();
+        Self::store_verification_context(
+            &self.verification_contexts,
+            finalized_round,
+            context,
+            digest,
+        )
+        .await;
 
         let (tx, rx) = oneshot::channel();
         let _ = tx.send(true);
@@ -645,8 +650,12 @@ where
 {
     type Activity = A::Activity;
 
-    /// Relays a report to the underlying [`Application`].
+    /// Relays a report to the underlying [`Application`] and tracks finalized round for cleanup.
     async fn report(&mut self, update: Self::Activity) {
+        // Track the finalized round for cleanup during next store_verification_context call
+        if let Update::Tip(_, _, round) = &update {
+            *self.last_finalized_round.lock().await = Some(*round);
+        }
         self.application.report(update).await
     }
 }

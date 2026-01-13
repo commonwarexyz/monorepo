@@ -43,7 +43,7 @@ impl<B: Block> Reporter for Application<B> {
                 self.blocks.lock().unwrap().insert(block.height(), block);
                 ack_tx.acknowledge();
             }
-            Update::Tip(height, commitment) => {
+            Update::Tip(height, commitment, _) => {
                 *self.tip.lock().unwrap() = Some((height, commitment));
             }
         }
