@@ -204,10 +204,29 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         let oldest_section = inner.oldest_section();
         let newest_section = inner.newest_section();
 
-        let (Some(_), Some(newest)) = (oldest_section, newest_section) else {
+        let (Some(oldest), Some(newest)) = (oldest_section, newest_section) else {
             // Empty journal
             return Ok(0);
         };
+
+        {
+            let mut sections = inner.sections();
+            let mut prev = sections
+                .next()
+                .ok_or_else(|| Error::Corruption("missing journal sections".to_string()))?;
+            if prev != oldest {
+                return Err(Error::MissingBlob(oldest));
+            }
+            for section in sections {
+                let expected = prev
+                    .checked_add(1)
+                    .ok_or(Error::OffsetOverflow)?;
+                if section != expected {
+                    return Err(Error::MissingBlob(expected));
+                }
+                prev = section;
+            }
+        }
 
         // Compute size from the tail (newest) section
         let tail_len = inner.section_len(newest).await?;
@@ -824,6 +843,38 @@ mod tests {
                 Err(e) => panic!("Expected Corruption error for section 40, got: {:?}", e),
                 Ok(_) => panic!("Expected replay to fail with corruption"),
             };
+        });
+    }
+
+    #[test_traced]
+    fn test_fixed_journal_init_with_missing_historical_blob() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(NZU64!(2));
+            let mut journal = Journal::init(context.clone(), cfg.clone())
+                .await
+                .expect("failed to initialize journal");
+
+            for i in 0u64..5 {
+                journal
+                    .append(test_digest(i))
+                    .await
+                    .expect("failed to append data");
+            }
+            journal.sync().await.expect("failed to sync journal");
+            drop(journal);
+
+            context
+                .remove(&cfg.partition, Some(&1u64.to_be_bytes()))
+                .await
+                .expect("failed to remove blob");
+
+            let result = Journal::<_, Digest>::init(context.clone(), cfg.clone()).await;
+            match result {
+                Err(Error::MissingBlob(1)) => {}
+                Err(err) => panic!("expected MissingBlob(1), got: {err}"),
+                Ok(_) => panic!("expected MissingBlob(1), got ok"),
+            }
         });
     }
 
