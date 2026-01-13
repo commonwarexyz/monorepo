@@ -926,10 +926,8 @@ where
             panic!("failed to finalize: {e}");
         }
 
-        // Update metrics and send tip update to application.
-        // The tip must have a direct finalization (see get_latest() comment).
-        if height > self.tip {
-            let round = round.expect("tip must have finalization");
+        // Update metrics and send tip update to application
+        if let Some(round) = round.filter(|_| height > self.tip) {
             application
                 .report(Update::Tip(height, commitment, round))
                 .await;

@@ -105,8 +105,6 @@ where
     epocher: ES,
     last_built: Arc<Mutex<Option<(Round, B)>>>,
     verification_contexts: Arc<Mutex<VerificationContexts<E, B, S>>>,
-    certification_txs: Arc<Mutex<Vec<oneshot::Sender<bool>>>>,
-    last_finalized_round: Arc<Mutex<Option<Round>>>,
 
     build_duration: Gauge,
 }
@@ -160,8 +158,6 @@ where
             epocher,
             last_built: Arc::new(Mutex::new(None)),
             verification_contexts: Arc::new(Mutex::new(verification_contexts)),
-            certification_txs: Arc::new(Mutex::new(Vec::new())),
-            last_finalized_round: Arc::new(Mutex::new(None)),
 
             build_duration,
         }
@@ -314,27 +310,12 @@ where
     #[inline]
     async fn store_verification_context(
         contexts_lock: &Arc<Mutex<VerificationContexts<E, B, S>>>,
-        finalized_round: Option<Round>,
         context: <Self as Automaton>::Context,
         digest: B::Commitment,
     ) {
-        let mut contexts_guard = contexts_lock.lock().await;
-
-        // Clean up contexts for rounds <= the last finalized round (if any)
-        if let Some(round) = finalized_round {
-            let keys: Vec<_> = contexts_guard.keys().cloned().collect();
-            for key in keys {
-                if let Some(map) = contexts_guard.get_mut(&key) {
-                    map.retain(|ctx_round, _| ctx_round > &round);
-                    if map.is_empty() {
-                        contexts_guard.remove(&key);
-                    }
-                }
-            }
-        }
-
-        // Store the new context
-        contexts_guard
+        contexts_lock
+            .lock()
+            .await
             .upsert_sync(digest, |map| {
                 map.insert(context.round, context);
             })
@@ -406,7 +387,6 @@ where
         let last_built = self.last_built.clone();
         let epocher = self.epocher.clone();
         let verification_contexts = self.verification_contexts.clone();
-        let last_finalized_round = self.last_finalized_round.clone();
 
         // Metrics
         let build_duration = self.build_duration.clone();
@@ -459,10 +439,8 @@ where
                         *lock = Some((consensus_context.round, parent));
                     }
 
-                    let finalized_round = last_finalized_round.lock().await.take();
                     Self::store_verification_context(
                         &verification_contexts,
-                        finalized_round,
                         consensus_context.clone(),
                         digest,
                     )
@@ -512,10 +490,8 @@ where
                     *lock = Some((consensus_context.round, built_block));
                 }
 
-                let finalized_round = last_finalized_round.lock().await.take();
                 Self::store_verification_context(
                     &verification_contexts,
-                    finalized_round,
                     consensus_context.clone(),
                     digest,
                 )
@@ -537,14 +513,7 @@ where
         context: Context<Self::Digest, S::PublicKey>,
         digest: Self::Digest,
     ) -> oneshot::Receiver<bool> {
-        let finalized_round = self.last_finalized_round.lock().await.take();
-        Self::store_verification_context(
-            &self.verification_contexts,
-            finalized_round,
-            context,
-            digest,
-        )
-        .await;
+        Self::store_verification_context(&self.verification_contexts, context, digest).await;
 
         let (tx, rx) = oneshot::channel();
         let _ = tx.send(true);
@@ -582,18 +551,11 @@ where
         if let Some(context) = context {
             self.verify(context, payload).await
         } else {
-            // Acquire the lock on the certification transactions and store the sender.
-            // While we're here, we can also clean up any senders from previous views
-            // that consensus is no longer waiting on.
-            let (tx, rx) = oneshot::channel();
-            let mut txs_guard = self.certification_txs.lock().await;
-            txs_guard.retain(|tx| !tx.is_canceled());
-            txs_guard.push(tx);
-            drop(txs_guard);
-
-            // If we don't have a verification context, we cannot verify the block.
-            // In this event, we return a receiver that will never resolve to signal
-            // to consensus that we should time out the view and vote to nullify.
+            // Verify is always called before certify for a given proposal, so if we
+            // don't have a verification context here, it means this proposal was never
+            // verified. Return a receiver that never resolves to signal to consensus
+            // that we should time out the view and vote to nullify.
+            let (_tx, rx) = oneshot::channel();
             rx
         }
     }
@@ -650,11 +612,21 @@ where
 {
     type Activity = A::Activity;
 
-    /// Relays a report to the underlying [`Application`] and tracks finalized round for cleanup.
+    /// Relays a report to the underlying [`Application`] and cleans up old verification contexts.
     async fn report(&mut self, update: Self::Activity) {
-        // Track the finalized round for cleanup during next store_verification_context call
+        // Clean up verification contexts for rounds <= the finalized round.
+        // This only modifies in-memory state; sync is called later when a new context is added.
         if let Update::Tip(_, _, round) = &update {
-            *self.last_finalized_round.lock().await = Some(*round);
+            let mut contexts_guard = self.verification_contexts.lock().await;
+            let keys: Vec<_> = contexts_guard.keys().cloned().collect();
+            for key in keys {
+                if let Some(map) = contexts_guard.get_mut(&key) {
+                    map.retain(|ctx_round, _| ctx_round > round);
+                    if map.is_empty() {
+                        contexts_guard.remove(&key);
+                    }
+                }
+            }
         }
         self.application.report(update).await
     }
