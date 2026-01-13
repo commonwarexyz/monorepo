@@ -77,7 +77,7 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 /// Returns the maximum number of iovecs per sendmsg call.
 /// Queries the kernel via sysconf(_SC_IOV_MAX), falling back to 1024 (Linux default).
 #[cfg(feature = "iouring-network")]
-fn iov_max() -> usize {
+pub fn iov_max() -> usize {
     static IOV_MAX: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *IOV_MAX.get_or_init(|| {
         // SAFETY: sysconf is safe to call with _SC_IOV_MAX
@@ -141,9 +141,12 @@ pub struct IoVecBuf {
     /// Buffer chunks kept alive for pointer validity.
     /// For Bytes-backed buffers, this is cheap (Arc clone).
     chunks: Vec<Bytes>,
-    /// iovec array pointing into chunks. Must not move.
-    /// Capped at `iov_max()` entries to respect kernel limits.
-    iovecs: Box<[libc::iovec]>,
+    /// iovec array pointing into chunks.
+    /// Pre-allocated to `min(chunks.len(), iov_max())` and reused across advances.
+    /// Only `iovecs[..iovec_count]` contains valid data.
+    iovecs: Vec<libc::iovec>,
+    /// Number of valid iovecs in the current batch.
+    iovec_count: usize,
     /// msghdr pointing to iovecs. Must not move.
     /// Only used by network SendMsg operations; None for storage vectored I/O.
     msghdr: Option<Box<libc::msghdr>>,
@@ -156,10 +159,14 @@ pub struct IoVecBuf {
 }
 
 #[cfg(feature = "iouring-network")]
-// SAFETY: IoVecBuf owns all data it references. The raw pointers in iovecs
-// point into the owned `chunks` Vec, which is Send/Sync. The struct is only
-// accessed by a single io_uring thread at a time, and the kernel only reads
-// from the pointers during the operation.
+// SAFETY: IoVecBuf owns all data it references through the `chunks` field.
+// The raw pointers in `iovecs` are derived from `Bytes` objects in `chunks`.
+// Since `Bytes` is `Send + Sync` (it uses Arc internally), and `IoVecBuf`
+// maintains exclusive ownership of the iovec array, the struct is safe to
+// send between threads. The kernel only reads from these pointers during
+// the io_uring operation, and we ensure the pointers remain valid by:
+// 1. Keeping `chunks` alive for the lifetime of the struct
+// 2. Only calling `advance()` after the CQE is received (kernel is done)
 unsafe impl Send for IoVecBuf {}
 
 #[cfg(feature = "iouring-network")]
@@ -167,7 +174,7 @@ impl std::fmt::Debug for IoVecBuf {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("IoVecBuf")
             .field("chunks", &self.chunks.len())
-            .field("iovecs", &self.iovecs.len())
+            .field("iovec_count", &self.iovec_count)
             .field("first_chunk_idx", &self.first_chunk_idx)
             .field("first_chunk_offset", &self.first_chunk_offset)
             .field("remaining", &self.remaining)
@@ -186,14 +193,18 @@ impl IoVecBuf {
         let remaining: usize = chunks.iter().map(|c| c.len()).sum();
 
         // Cap iovecs at iov_max to avoid EINVAL from kernel
+        // Pre-allocate the full capacity we'll ever need for reuse
+        let max_iovecs = chunks.len().min(iov_max());
+        let mut iovecs: Vec<libc::iovec> = Vec::with_capacity(max_iovecs);
+
+        // Initialize iovecs for the first batch
         let iov_count = chunks.len().min(iov_max());
-        let iovecs: Box<[libc::iovec]> = chunks[..iov_count]
-            .iter()
-            .map(|c| libc::iovec {
-                iov_base: c.as_ptr() as *mut libc::c_void,
-                iov_len: c.len(),
-            })
-            .collect();
+        for chunk in chunks.iter().take(iov_count) {
+            iovecs.push(libc::iovec {
+                iov_base: chunk.as_ptr() as *mut libc::c_void,
+                iov_len: chunk.len(),
+            });
+        }
 
         // SAFETY: msghdr is a POD type with no invalid bit patterns. All fields
         // are initialized to zero, which is valid. We immediately set msg_iov
@@ -205,6 +216,7 @@ impl IoVecBuf {
         Self {
             chunks,
             iovecs,
+            iovec_count: iov_count,
             msghdr: Some(msghdr),
             first_chunk_idx: 0,
             first_chunk_offset: 0,
@@ -246,8 +258,8 @@ impl IoVecBuf {
 
     /// Returns the number of iovecs in the current batch.
     #[cfg(test)]
-    pub fn iovec_count(&self) -> usize {
-        self.iovecs.len()
+    pub const fn iovec_count(&self) -> usize {
+        self.iovec_count
     }
 
     /// Advance past processed bytes, rebuilding iovecs for remaining data.
@@ -282,40 +294,45 @@ impl IoVecBuf {
     }
 
     /// Rebuilds iovecs starting from current position, capped at iov_max.
+    /// Reuses the existing Vec allocation to avoid per-advance heap allocations.
     fn rebuild_iovecs(&mut self) {
         let remaining_chunks = &self.chunks[self.first_chunk_idx..];
-        let iov_count = remaining_chunks.len().min(iov_max());
+        let new_iov_count = remaining_chunks.len().min(iov_max());
 
-        let new_iovecs: Box<[libc::iovec]> = remaining_chunks[..iov_count]
-            .iter()
-            .enumerate()
-            .map(|(i, c)| {
-                let offset = if i == 0 { self.first_chunk_offset } else { 0 };
-                // Defensive check: offset must not exceed chunk length
-                debug_assert!(
-                    offset <= c.len(),
-                    "offset {} exceeds chunk length {}",
-                    offset,
-                    c.len()
-                );
-                libc::iovec {
-                    // SAFETY: offset is always <= c.len() because:
-                    // - first_chunk_offset is only incremented by bytes_done which never
-                    //   exceeds the chunk's remaining length
-                    // - For i > 0, offset is 0
-                    // The debug_assert above catches violations in debug builds.
-                    iov_base: unsafe { c.as_ptr().add(offset) as *mut libc::c_void },
-                    iov_len: c.len() - offset,
-                }
-            })
-            .collect();
+        // Clear and reuse the existing Vec allocation
+        self.iovecs.clear();
 
-        self.iovecs = new_iovecs;
+        for (i, chunk) in remaining_chunks.iter().take(new_iov_count).enumerate() {
+            let offset = if i == 0 { self.first_chunk_offset } else { 0 };
+
+            // Defensive check: offset must not exceed chunk length
+            debug_assert!(
+                offset <= chunk.len(),
+                "offset {} exceeds chunk length {}",
+                offset,
+                chunk.len()
+            );
+
+            // SAFETY: offset is always <= chunk.len() because:
+            // - first_chunk_offset is only incremented by bytes_done which never
+            //   exceeds the chunk's remaining length
+            // - For i > 0, offset is 0
+            // The debug_assert above catches violations in debug builds.
+            let iov_base =
+                // SAFETY: as documented above, offset <= chunk.len()
+                unsafe { chunk.as_ptr().add(offset) as *mut libc::c_void };
+            self.iovecs.push(libc::iovec {
+                iov_base,
+                iov_len: chunk.len() - offset,
+            });
+        }
+
+        self.iovec_count = new_iov_count;
 
         // Update msghdr if present (only for network SendMsg operations)
         if let Some(ref mut msghdr) = self.msghdr {
             msghdr.msg_iov = self.iovecs.as_ptr() as *mut libc::iovec;
-            msghdr.msg_iovlen = self.iovecs.len();
+            msghdr.msg_iovlen = self.iovec_count;
         }
     }
 }
