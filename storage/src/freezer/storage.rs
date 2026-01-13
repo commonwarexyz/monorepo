@@ -426,10 +426,10 @@ impl<E: Storage + Metrics + Clock, K: Array, V: CodecShared> Freezer<E, K, V> {
     /// Read entries from the table blob.
     async fn read_table(blob: &E::Blob, table_index: u32) -> Result<(Entry, Entry), Error> {
         let offset = Self::table_offset(table_index);
-        let buf = vec![0u8; Entry::FULL_SIZE];
-        let read_buf = blob.read_at(buf, offset).await?;
+        let mut buf = [0u8; Entry::FULL_SIZE];
+        blob.read_at(&mut buf[..], offset).await?;
 
-        Self::parse_entries(read_buf.as_ref())
+        Self::parse_entries(&buf[..])
     }
 
     /// Recover a single table entry and update tracking.
@@ -454,8 +454,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: CodecShared> Freezer<E, K, V> {
                 "found invalid table entry"
             );
             *entry = Entry::new(0, 0, 0, 0);
-            let zero_buf = vec![0u8; Entry::SIZE];
-            blob.write_at(zero_buf, entry_offset).await?;
+            blob.write_at(&[0u8; Entry::SIZE][..], entry_offset).await?;
             Ok(true)
         } else if max_valid_epoch.is_none() && entry.epoch > *max_epoch {
             // Only track max epoch if we're discovering it (not validating against a known epoch)
@@ -588,8 +587,9 @@ impl<E: Storage + Metrics + Clock, K: Array, V: CodecShared> Freezer<E, K, V> {
         let start = Self::compute_write_offset(entry1, entry2, update.epoch);
 
         // Write the new entry
+        let encoded = update.encode_mut();
         table
-            .write_at(update.encode_mut(), table_offset + start)
+            .write_at(&encoded[..], table_offset + start)
             .await
             .map_err(Error::Runtime)
     }
@@ -991,8 +991,8 @@ impl<E: Storage + Metrics + Clock, K: Array, V: CodecShared> Freezer<E, K, V> {
         // Read the entire chunk
         let chunk_bytes = chunk_size as usize * Entry::FULL_SIZE;
         let read_offset = Self::table_offset(current_index);
-        let read_buf = vec![0u8; chunk_bytes];
-        let read_buf: Vec<u8> = self.table.read_at(read_buf, read_offset).await?.into();
+        let mut read_buf = vec![0u8; chunk_bytes];
+        self.table.read_at(&mut read_buf[..], read_offset).await?;
 
         // Process each entry in the chunk
         let mut writes = Vec::with_capacity(chunk_bytes);
@@ -1019,10 +1019,10 @@ impl<E: Storage + Metrics + Clock, K: Array, V: CodecShared> Freezer<E, K, V> {
             Self::rewrite_entries(&mut writes, &entry1, &entry2, &reset_entry);
         }
 
-        // Put the writes into the table
-        let old_write = self.table.write_at(writes.clone(), read_offset);
+        // Put the writes into the table (both old and new locations)
         let new_offset = (old_size as usize * Entry::FULL_SIZE) as u64 + read_offset;
-        let new_write = self.table.write_at(writes, new_offset);
+        let old_write = self.table.write_at(&writes[..], read_offset);
+        let new_write = self.table.write_at(&writes[..], new_offset);
         try_join(old_write, new_write).await?;
 
         // Update progress

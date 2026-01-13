@@ -442,8 +442,9 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
             self.blobs.get(&blob_index).ok_or(Error::ItemPruned(pos))?
         };
 
-        let read = blob.read_at(vec![0u8; Self::CHUNK_SIZE], offset).await?;
-        Self::decode_buf(read.as_ref())
+        let mut read = vec![0u8; Self::CHUNK_SIZE];
+        blob.read_at(&mut read[..], offset).await?;
+        Self::decode_buf(&read[..])
     }
 
     /// Decode the array from `buf`, returning:
@@ -993,7 +994,7 @@ mod tests {
                 .expect("Failed to open blob");
             // Write junk bytes.
             let bad_bytes = 123456789u32;
-            blob.write_at(bad_bytes.to_be_bytes().to_vec(), 1)
+            blob.write_at(&bad_bytes.to_be_bytes()[..], 1)
                 .await
                 .expect("Failed to write bad bytes");
             blob.sync().await.expect("Failed to sync blob");
@@ -1335,7 +1336,7 @@ mod tests {
                 .open(&cfg.partition, &0u64.to_be_bytes())
                 .await
                 .expect("Failed to open blob");
-            blob.write_at(vec![0u8; PAGE_SIZE.get() as usize * 3], size)
+            blob.write_at(&vec![0u8; PAGE_SIZE.get() as usize * 3][..], size)
                 .await
                 .expect("Failed to extend blob");
             blob.sync().await.expect("Failed to sync blob");

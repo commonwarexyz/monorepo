@@ -252,9 +252,9 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
         offset: u64,
     ) -> Result<(u64, u32, V), Error> {
         // Read varint header (max 5 bytes for u32)
-        let buf = vec![0u8; MAX_VARINT_SIZE];
-        let (stable_buf, available) = blob.read_up_to(buf, offset).await?;
-        let buf = Bytes::from(stable_buf);
+        let mut buf = vec![0u8; MAX_VARINT_SIZE];
+        let available = blob.read_up_to(&mut buf[..], offset).await?;
+        let buf = Bytes::from(buf);
         let mut cursor = Cursor::new(buf.slice(..available));
         let (next_offset, item_info) = find_item(&mut cursor, offset)?;
 
@@ -1114,7 +1114,7 @@ mod tests {
             let mut incomplete_data = Vec::new();
             UInt(u32::MAX).write(&mut incomplete_data);
             incomplete_data.truncate(1);
-            blob.write_at(incomplete_data, 0)
+            blob.write_at(&incomplete_data[..], 0)
                 .await
                 .expect("Failed to write incomplete data");
             blob.sync().await.expect("Failed to sync blob");
@@ -1171,7 +1171,7 @@ mod tests {
             UInt(item_size).write(&mut buf); // Varint encoding
             let data = [2u8; 5];
             BufMut::put_slice(&mut buf, &data);
-            blob.write_at(buf, 0)
+            blob.write_at(&buf[..], 0)
                 .await
                 .expect("Failed to write incomplete item");
             blob.sync().await.expect("Failed to sync blob");
@@ -1230,7 +1230,7 @@ mod tests {
             let mut buf = Vec::new();
             UInt(item_size).write(&mut buf);
             BufMut::put_slice(&mut buf, item_data);
-            blob.write_at(buf, 0)
+            blob.write_at(&buf[..], 0)
                 .await
                 .expect("Failed to write item without checksum");
 
@@ -1294,7 +1294,7 @@ mod tests {
             UInt(item_size).write(&mut buf);
             BufMut::put_slice(&mut buf, item_data);
             buf.put_u32(incorrect_checksum);
-            blob.write_at(buf, 0)
+            blob.write_at(&buf[..], 0)
                 .await
                 .expect("Failed to write item with bad checksum");
 
@@ -1524,7 +1524,7 @@ mod tests {
                 .open(&cfg.partition, &2u64.to_be_bytes())
                 .await
                 .expect("Failed to open blob");
-            blob.write_at(vec![0u8; 16], blob_size)
+            blob.write_at(&[0u8; 16][..], blob_size)
                 .await
                 .expect("Failed to add extra data");
             blob.sync().await.expect("Failed to sync blob");
@@ -2008,7 +2008,7 @@ mod tests {
 
             // Write incomplete varint: 0xFF has continuation bit set, needs more bytes
             // This creates 2 trailing bytes that cannot form a valid item
-            blob.write_at(vec![0xFF, 0xFF], physical_size_before)
+            blob.write_at(&[0xFF, 0xFF][..], physical_size_before)
                 .await
                 .unwrap();
             blob.sync().await.unwrap();

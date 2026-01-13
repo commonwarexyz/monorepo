@@ -1,5 +1,5 @@
 use super::{Config, Error};
-use bytes::BufMut;
+use bytes::{BufMut, Bytes};
 use commonware_codec::{Codec, FixedSize, ReadExt};
 use commonware_cryptography::{crc32, Crc32};
 use commonware_runtime::{
@@ -148,12 +148,13 @@ impl<E: Clock + Storage + Metrics, K: Span, V: Codec> Metadata<E, K, V> {
 
         // Read blob
         let len = len.try_into().map_err(|_| Error::BlobTooLarge(len))?;
-        let buf = blob.read_at(vec![0u8; len], 0).await?;
+        let mut buf = vec![0u8; len];
+        blob.read_at(&mut buf[..], 0).await?;
 
         // Verify integrity.
         //
         // 8 bytes for version + 4 bytes for checksum.
-        if buf.len() < 8 + crc32::Digest::SIZE {
+        if len < 8 + crc32::Digest::SIZE {
             // Truncate and return none
             warn!(
                 blob = index,
@@ -166,10 +167,9 @@ impl<E: Clock + Storage + Metrics, K: Span, V: Codec> Metadata<E, K, V> {
         }
 
         // Extract checksum
-        let checksum_index = buf.len() - crc32::Digest::SIZE;
-        let stored_checksum =
-            u32::from_be_bytes(buf.as_ref()[checksum_index..].try_into().unwrap());
-        let computed_checksum = Crc32::checksum(&buf.as_ref()[..checksum_index]);
+        let checksum_index = len - crc32::Digest::SIZE;
+        let stored_checksum = u32::from_be_bytes(buf[checksum_index..].try_into().unwrap());
+        let computed_checksum = Crc32::checksum(&buf[..checksum_index]);
         if stored_checksum != computed_checksum {
             // Truncate and return none
             warn!(
@@ -184,7 +184,7 @@ impl<E: Clock + Storage + Metrics, K: Span, V: Codec> Metadata<E, K, V> {
         }
 
         // Get parent
-        let version = u64::from_be_bytes(buf.as_ref()[..8].try_into().unwrap());
+        let version = u64::from_be_bytes(buf[..8].try_into().unwrap());
 
         // Extract data
         //
@@ -195,12 +195,11 @@ impl<E: Clock + Storage + Metrics, K: Span, V: Codec> Metadata<E, K, V> {
         let mut cursor = u64::SIZE;
         while cursor < checksum_index {
             // Read key
-            let key = K::read(&mut buf.as_ref()[cursor..].as_ref())
-                .expect("unable to read key from blob");
+            let key = K::read(&mut &buf[cursor..]).expect("unable to read key from blob");
             cursor += key.encode_size();
 
             // Read value
-            let value = V::read_cfg(&mut buf.as_ref()[cursor..].as_ref(), codec_config)
+            let value = V::read_cfg(&mut &buf[cursor..], codec_config)
                 .expect("unable to read value from blob");
             lengths.insert(key.clone(), Info::new(cursor, value.encode_size()));
             cursor += value.encode_size();
@@ -208,7 +207,7 @@ impl<E: Clock + Storage + Metrics, K: Span, V: Codec> Metadata<E, K, V> {
         }
 
         // Return info
-        Ok((data, Wrapper::new(blob, version, lengths, buf.into())))
+        Ok((data, Wrapper::new(blob, version, lengths, buf)))
     }
 
     /// Get a value from [Metadata] (if it exists).
@@ -349,7 +348,7 @@ impl<E: Clock + Storage + Metrics, K: Span, V: Codec> Metadata<E, K, V> {
                 let new_value = self.map.get(key).expect("key must exist");
                 if info.length == new_value.encode_size() {
                     // Overwrite existing value
-                    let encoded = new_value.encode_mut();
+                    let encoded = new_value.encode();
                     target.data[info.start..info.start + info.length].copy_from_slice(&encoded);
                     writes.push(target.blob.write_at(encoded, info.start as u64));
                 } else {
@@ -371,7 +370,7 @@ impl<E: Clock + Storage + Metrics, K: Span, V: Codec> Metadata<E, K, V> {
             // Update version
             let version = self.next_version.to_be_bytes();
             target.data[0..8].copy_from_slice(&version);
-            writes.push(target.blob.write_at(version.as_slice().into(), 0));
+            writes.push(target.blob.write_at(Bytes::copy_from_slice(&version), 0));
 
             // Update checksum
             let checksum_index = target.data.len() - crc32::Digest::SIZE;
@@ -380,7 +379,7 @@ impl<E: Clock + Storage + Metrics, K: Span, V: Codec> Metadata<E, K, V> {
             writes.push(
                 target
                     .blob
-                    .write_at(checksum.as_slice().into(), checksum_index as u64),
+                    .write_at(Bytes::copy_from_slice(&checksum), checksum_index as u64),
             );
 
             // Persist changes
@@ -408,7 +407,7 @@ impl<E: Clock + Storage + Metrics, K: Span, V: Codec> Metadata<E, K, V> {
         next_data.put_u32(Crc32::checksum(&next_data[..]));
 
         // Persist changes
-        target.blob.write_at(next_data.clone(), 0).await?;
+        target.blob.write_at(&next_data[..], 0).await?;
         if next_data.len() < target.data.len() {
             target.blob.resize(next_data.len() as u64).await?;
         }
