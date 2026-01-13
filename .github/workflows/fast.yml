@@ -267,8 +267,8 @@ jobs:
     - name: Check Cargo.toml formatting
       run: just fix-toml-fmt && git diff --exit-code
 
-  lint-benchmarks:
-    name: Lint benchmarks
+  lint-benchmark-names:
+    name: Lint benchmark names
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -279,10 +279,10 @@ jobs:
     - name: Run setup
       uses: ./.github/actions/setup
     - name: Check benchmark naming conventions
-      run: python3 .github/scripts/lint_benchmarks.py
+      run: python3 .github/scripts/lint_benchmark_names.py
 
   zepter:
-    name: Feature Propagation
+    name: Feature propagation
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
