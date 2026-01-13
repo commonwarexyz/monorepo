@@ -15,7 +15,7 @@ use commonware_p2p::Blocker;
 use commonware_parallel::Strategy;
 use commonware_utils::{
     ordered::{Quorum, Set},
-    Bft3f1,
+    N3f1,
 };
 use rand_core::CryptoRngCore;
 use tracing::warn;
@@ -60,7 +60,7 @@ impl<
     > Round<S, B, D, R>
 {
     pub fn new(participants: Set<S::PublicKey>, scheme: S, blocker: B, reporter: R) -> Self {
-        let quorum = participants.quorum::<Bft3f1>();
+        let quorum = participants.quorum::<N3f1>();
         let len = participants.len();
         Self {
             participants,
@@ -395,7 +395,7 @@ impl<
         if self.has_notarization() {
             return None;
         }
-        if self.verified_votes.len_notarizes() < self.participants.quorum::<Bft3f1>() {
+        if self.verified_votes.len_notarizes() < self.participants.quorum::<N3f1>() {
             return None;
         }
         let notarization =
@@ -415,7 +415,7 @@ impl<
         if self.has_nullification() {
             return None;
         }
-        if self.verified_votes.len_nullifies() < self.participants.quorum::<Bft3f1>() {
+        if self.verified_votes.len_nullifies() < self.participants.quorum::<N3f1>() {
             return None;
         }
         let nullification =
@@ -435,7 +435,7 @@ impl<
         if self.has_finalization() {
             return None;
         }
-        if self.verified_votes.len_finalizes() < self.participants.quorum::<Bft3f1>() {
+        if self.verified_votes.len_finalizes() < self.participants.quorum::<N3f1>() {
             return None;
         }
         let finalization =

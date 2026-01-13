@@ -2,7 +2,7 @@ use crate::types::Height;
 use commonware_cryptography::PublicKey;
 use commonware_utils::{
     ordered::{Quorum, Set},
-    Bft3f1,
+    N3f1,
 };
 use std::collections::{btree_map, BTreeMap, HashMap};
 
@@ -47,7 +47,7 @@ impl<P: PublicKey> SafeTip<P> {
 
         // Get the number of validators and the maximum number of faults
         let n = validators.len();
-        let f = validators.max_faults::<Bft3f1>() as usize;
+        let f = validators.max_faults::<N3f1>() as usize;
 
         // Initialize the tips map
         let mut tips = HashMap::with_capacity(n);

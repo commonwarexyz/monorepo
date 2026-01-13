@@ -12,7 +12,7 @@ use commonware_cryptography::{
     Digest, PublicKey, Signer,
 };
 use commonware_parallel::Strategy;
-use commonware_utils::{ordered::Set, union, Bft3f1};
+use commonware_utils::{ordered::Set, union, N3f1};
 use futures::channel::oneshot;
 use rand_core::CryptoRngCore;
 use std::{
@@ -664,12 +664,8 @@ impl<P: PublicKey, S: Scheme, D: Digest> Node<P, S, D> {
             chunk: &parent_chunk,
             epoch: parent.epoch,
         };
-        if !parent_scheme.verify_certificate::<R, D, Bft3f1>(
-            rng,
-            ctx,
-            &parent.certificate,
-            strategy,
-        ) {
+        if !parent_scheme.verify_certificate::<R, D, N3f1>(rng, ctx, &parent.certificate, strategy)
+        {
             return Err(Error::InvalidCertificate);
         }
         Ok(Some(parent_chunk))
@@ -1080,7 +1076,7 @@ impl<P: PublicKey, S: Scheme, D: Digest> Lock<P, S, D> {
             chunk: &self.chunk,
             epoch: self.epoch,
         };
-        scheme.verify_certificate::<R, D, Bft3f1>(rng, ctx, &self.certificate, strategy)
+        scheme.verify_certificate::<R, D, N3f1>(rng, ctx, &self.certificate, strategy)
     }
 }
 
@@ -1148,7 +1144,7 @@ mod tests {
         Signer,
     };
     use commonware_parallel::Sequential;
-    use commonware_utils::{test_rng, Bft3f1, Faults};
+    use commonware_utils::{test_rng, Faults, N3f1};
     use rand::{rngs::StdRng, SeedableRng};
     use std::panic::catch_unwind;
 
@@ -1203,7 +1199,7 @@ mod tests {
             sample_digest(1),
         );
         let epoch = Epoch::new(5);
-        let quorum = Bft3f1::quorum(fixture.schemes.len() as u32) as usize;
+        let quorum = N3f1::quorum(fixture.schemes.len() as u32) as usize;
 
         // Generate acks from quorum validators
         let ctx = AckSubject {
@@ -1217,7 +1213,7 @@ mod tests {
 
         // Assemble certificate
         let certificate = fixture.schemes[0]
-            .assemble::<_, Bft3f1>(attestations, &Sequential)
+            .assemble::<_, N3f1>(attestations, &Sequential)
             .expect("Should assemble certificate");
 
         // Create and test parent
@@ -1247,7 +1243,7 @@ mod tests {
         let ed_scheme = sample_scheme(0);
         let public_key = ed_scheme.public_key();
         let chunk_namespace = chunk_namespace(NAMESPACE);
-        let quorum = Bft3f1::quorum(fixture.schemes.len() as u32) as usize;
+        let quorum = N3f1::quorum(fixture.schemes.len() as u32) as usize;
         let cfg = fixture.schemes[0].certificate_codec_config();
 
         // Test with no parent (genesis)
@@ -1278,7 +1274,7 @@ mod tests {
             .collect();
 
         let parent_certificate = fixture.schemes[0]
-            .assemble::<_, Bft3f1>(parent_attestations, &Sequential)
+            .assemble::<_, N3f1>(parent_attestations, &Sequential)
             .expect("Should assemble certificate");
 
         // Create proper parent with valid certificate
@@ -1355,12 +1351,12 @@ mod tests {
         };
 
         // Collect signatures from a quorum of validators to form the parent certificate.
-        let parent_attestations: Vec<_> = fixture.schemes[..Bft3f1::quorum(4) as usize]
+        let parent_attestations: Vec<_> = fixture.schemes[..N3f1::quorum(4) as usize]
             .iter()
             .map(|scheme| scheme.sign::<Sha256Digest>(parent_ctx.clone()).unwrap())
             .collect();
         let parent_certificate = fixture.schemes[0]
-            .assemble::<_, Bft3f1>(parent_attestations, &Sequential)
+            .assemble::<_, N3f1>(parent_attestations, &Sequential)
             .expect("Should assemble certificate");
 
         let parent =
@@ -1466,7 +1462,7 @@ mod tests {
         let scheme = sample_scheme(0);
         let public_key = scheme.public_key();
         let chunk_namespace = chunk_namespace(NAMESPACE);
-        let quorum = Bft3f1::quorum(fixture.schemes.len() as u32) as usize;
+        let quorum = N3f1::quorum(fixture.schemes.len() as u32) as usize;
         let cfg = fixture.schemes[0].certificate_codec_config();
 
         // Test Proposal
@@ -1502,7 +1498,7 @@ mod tests {
 
         // Assemble certificate
         let certificate = fixture.schemes[0]
-            .assemble::<_, Bft3f1>(attestations, &Sequential)
+            .assemble::<_, N3f1>(attestations, &Sequential)
             .expect("Should assemble certificate");
 
         // Create lock
@@ -1570,7 +1566,7 @@ mod tests {
         let public_key = sample_scheme(0).public_key();
         let chunk = Chunk::new(public_key, Height::new(42), sample_digest(1));
         let epoch = Epoch::new(5);
-        let quorum = Bft3f1::quorum(fixture.schemes.len() as u32) as usize;
+        let quorum = N3f1::quorum(fixture.schemes.len() as u32) as usize;
 
         // Generate votes from quorum validators
         let ctx = AckSubject {
@@ -1584,7 +1580,7 @@ mod tests {
 
         // Assemble certificate
         let certificate = fixture.schemes[0]
-            .assemble::<_, Bft3f1>(attestations, &Sequential)
+            .assemble::<_, N3f1>(attestations, &Sequential)
             .expect("Should assemble certificate");
 
         // Create lock, encode and decode
@@ -1622,7 +1618,7 @@ mod tests {
         let public_key = scheme.public_key();
         let mut signer = chunk_signer(scheme);
         let verifier = chunk_verifier();
-        let quorum = Bft3f1::quorum(fixture.schemes.len() as u32) as usize;
+        let quorum = N3f1::quorum(fixture.schemes.len() as u32) as usize;
 
         // Test genesis node (no parent)
         let node: Node<PublicKey, S, Sha256Digest> =
@@ -1646,7 +1642,7 @@ mod tests {
             .map(|scheme| scheme.sign::<Sha256Digest>(parent_ctx.clone()).unwrap())
             .collect();
         let parent_certificate = fixture.schemes[0]
-            .assemble::<_, Bft3f1>(parent_attestations, &Sequential)
+            .assemble::<_, N3f1>(parent_attestations, &Sequential)
             .expect("Should assemble certificate");
 
         let parent = Some(Parent::<S, Sha256Digest>::new(
@@ -1707,7 +1703,7 @@ mod tests {
         let public_key = sample_scheme(0).public_key();
         let chunk = Chunk::new(public_key, Height::new(42), sample_digest(1));
         let epoch = Epoch::new(5);
-        let quorum = Bft3f1::quorum(fixture.schemes.len() as u32) as usize;
+        let quorum = N3f1::quorum(fixture.schemes.len() as u32) as usize;
 
         // Create quorum votes
         let ctx = AckSubject {
@@ -1721,7 +1717,7 @@ mod tests {
 
         // Assemble certificate
         let certificate = fixture.schemes[0]
-            .assemble::<_, Bft3f1>(attestations, &Sequential)
+            .assemble::<_, N3f1>(attestations, &Sequential)
             .expect("Should assemble certificate");
 
         // Create lock with certificate
@@ -1751,7 +1747,7 @@ mod tests {
         let public_key = sample_scheme(0).public_key();
         let chunk = Chunk::new(public_key, Height::new(42), sample_digest(1));
         let epoch = Epoch::new(5);
-        let quorum = Bft3f1::quorum(fixture.schemes.len() as u32) as usize;
+        let quorum = N3f1::quorum(fixture.schemes.len() as u32) as usize;
 
         // Create certificate
         let ctx = AckSubject {
@@ -1763,7 +1759,7 @@ mod tests {
             .map(|scheme| scheme.sign::<Sha256Digest>(ctx.clone()).unwrap())
             .collect();
         let certificate = fixture.schemes[0]
-            .assemble::<_, Bft3f1>(attestations, &Sequential)
+            .assemble::<_, N3f1>(attestations, &Sequential)
             .expect("Should assemble certificate");
 
         // Create lock
@@ -1861,7 +1857,7 @@ mod tests {
         let fixture = fixture(&mut rng, NAMESPACE, 4);
         let scheme = sample_scheme(0);
         let public_key = scheme.public_key();
-        let quorum = Bft3f1::quorum(fixture.schemes.len() as u32) as usize;
+        let quorum = N3f1::quorum(fixture.schemes.len() as u32) as usize;
 
         // Create parent and child chunks
         let parent_chunk = Chunk::new(public_key.clone(), Height::zero(), sample_digest(0));
@@ -1878,7 +1874,7 @@ mod tests {
             .map(|scheme| scheme.sign::<Sha256Digest>(parent_ctx.clone()).unwrap())
             .collect();
         let certificate = fixture.schemes[0]
-            .assemble::<_, Bft3f1>(parent_attestations, &Sequential)
+            .assemble::<_, N3f1>(parent_attestations, &Sequential)
             .expect("Should assemble certificate");
 
         // Create parent with valid certificate
@@ -1912,7 +1908,7 @@ mod tests {
             .map(|scheme| scheme.sign::<Sha256Digest>(wrong_ctx.clone()).unwrap())
             .collect();
         let wrong_certificate = fixture.schemes[0]
-            .assemble::<_, Bft3f1>(wrong_attestations, &Sequential)
+            .assemble::<_, N3f1>(wrong_attestations, &Sequential)
             .expect("Should assemble certificate");
 
         // Create parent with certificate signed for wrong context (wrong epoch)
@@ -2035,7 +2031,7 @@ mod tests {
         let public_key = sample_scheme(0).public_key();
         let chunk = Chunk::new(public_key, Height::new(42), sample_digest(1));
         let epoch = Epoch::new(5);
-        let quorum_size = Bft3f1::quorum(fixture.schemes.len() as u32) as usize;
+        let quorum_size = N3f1::quorum(fixture.schemes.len() as u32) as usize;
 
         // Generate certificate
         let ctx = AckSubject {
@@ -2047,7 +2043,7 @@ mod tests {
             .map(|scheme| scheme.sign::<Sha256Digest>(ctx.clone()).unwrap())
             .collect();
         let certificate = fixture.schemes[0]
-            .assemble::<_, Bft3f1>(attestations, &Sequential)
+            .assemble::<_, N3f1>(attestations, &Sequential)
             .expect("Should assemble certificate");
 
         // Create lock
@@ -2062,7 +2058,7 @@ mod tests {
             .map(|scheme| scheme.sign::<Sha256Digest>(ctx.clone()).unwrap())
             .collect();
         let wrong_certificate = wrong_fixture.schemes[0]
-            .assemble::<_, Bft3f1>(wrong_attestations, &Sequential)
+            .assemble::<_, N3f1>(wrong_attestations, &Sequential)
             .expect("Should assemble certificate");
 
         // Create lock with wrong signature
@@ -2137,7 +2133,7 @@ mod tests {
         let chunk_namespace = chunk_namespace(NAMESPACE);
         let message = chunk.encode();
         let signature = sample_scheme(0).sign(chunk_namespace.as_ref(), &message);
-        let quorum_size = Bft3f1::quorum(fixture.schemes.len() as u32) as usize;
+        let quorum_size = N3f1::quorum(fixture.schemes.len() as u32) as usize;
 
         // Create a parent with a dummy certificate (content doesn't matter for this test)
         let dummy_chunk = Chunk::new(public_key, Height::zero(), sample_digest(0));
@@ -2151,7 +2147,7 @@ mod tests {
             .map(|scheme| scheme.sign::<Sha256Digest>(ctx.clone()).unwrap())
             .collect();
         let certificate = fixture.schemes[0]
-            .assemble::<_, Bft3f1>(attestations, &Sequential)
+            .assemble::<_, N3f1>(attestations, &Sequential)
             .expect("Should assemble certificate");
 
         let parent = Parent::<S, Sha256Digest>::new(sample_digest(0), Epoch::new(5), certificate);
@@ -2231,12 +2227,12 @@ mod tests {
             chunk: &parent_chunk,
             epoch: parent_epoch,
         };
-        let parent_attestations: Vec<_> = fixture.schemes[..Bft3f1::quorum(4) as usize]
+        let parent_attestations: Vec<_> = fixture.schemes[..N3f1::quorum(4) as usize]
             .iter()
             .map(|scheme| scheme.sign::<Sha256Digest>(parent_ctx.clone()).unwrap())
             .collect();
         let parent_certificate = fixture.schemes[0]
-            .assemble::<_, Bft3f1>(parent_attestations, &Sequential)
+            .assemble::<_, N3f1>(parent_attestations, &Sequential)
             .expect("Should assemble certificate");
 
         let parent =

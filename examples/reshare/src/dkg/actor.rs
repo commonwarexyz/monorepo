@@ -26,7 +26,7 @@ use commonware_parallel::Sequential;
 use commonware_runtime::{
     spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner, Storage as RuntimeStorage,
 };
-use commonware_utils::{ordered::Set, Acknowledgement as _, Bft3f1, NZU32};
+use commonware_utils::{ordered::Set, Acknowledgement as _, N3f1, NZU32};
 use futures::{channel::mpsc, StreamExt};
 use prometheus_client::metrics::counter::Counter;
 use rand_core::CryptoRngCore;
@@ -297,7 +297,7 @@ where
                 .expect("should be able to create channel");
 
             // Prepare round info
-            let round = Info::new::<Bft3f1>(
+            let round = Info::new::<N3f1>(
                 namespace::APPLICATION,
                 epoch.get(),
                 epoch_state.output.clone(),
@@ -310,7 +310,7 @@ where
             // Initialize dealer state if we are a dealer (factory handles log submission check)
             let mut dealer_state: Option<Dealer<V, C>> = am_dealer
                 .then(|| {
-                    storage.create_dealer::<C, Bft3f1>(
+                    storage.create_dealer::<C, N3f1>(
                         epoch,
                         self.signer.clone(),
                         round.clone(),
@@ -323,7 +323,7 @@ where
             // Initialize player state if we are a player
             let mut player_state: Option<Player<V, C>> = am_player
                 .then(|| {
-                    storage.create_player::<C, Bft3f1>(epoch, self.signer.clone(), round.clone())
+                    storage.create_player::<C, N3f1>(epoch, self.signer.clone(), round.clone())
                 })
                 .flatten();
 
@@ -350,7 +350,7 @@ where
                                 Message::Dealer(pub_msg, priv_msg) => {
                                     if let Some(ref mut ps) = player_state {
                                         let response = ps
-                                            .handle::<_, Bft3f1>(
+                                            .handle::<_, N3f1>(
                                                 &mut storage,
                                                 epoch,
                                                 sender_pk.clone(),
@@ -445,7 +445,7 @@ where
                             // At or past the midpoint, finalize dealer if not already done.
                             if matches!(phase, EpochPhase::Midpoint | EpochPhase::Late) {
                                 if let Some(ref mut ds) = dealer_state {
-                                    ds.finalize::<Bft3f1>();
+                                    ds.finalize::<N3f1>();
                                 }
                             }
 
@@ -460,7 +460,7 @@ where
                             let logs = storage.logs(epoch);
                             let (success, next_round, next_output, next_share) =
                                 if let Some(ps) = player_state.take() {
-                                    match ps.finalize::<Bft3f1>(logs, &Sequential) {
+                                    match ps.finalize::<N3f1>(logs, &Sequential) {
                                         Ok((new_output, new_share)) => (
                                             true,
                                             epoch_state.round + 1,
@@ -475,7 +475,7 @@ where
                                         ),
                                     }
                                 } else {
-                                    match observe::<_, _, Bft3f1>(round.clone(), logs, &Sequential) {
+                                    match observe::<_, _, N3f1>(round.clone(), logs, &Sequential) {
                                         Ok(output) => (true, epoch_state.round + 1, Some(output), None),
                                         Err(_) => (
                                             false,
@@ -564,7 +564,7 @@ where
                 if let Some(ref mut ps) = player_state {
                     // Handle as player
                     let ack = match ps
-                        .handle::<_, Bft3f1>(storage, epoch, self_pk.clone(), pub_msg, priv_msg)
+                        .handle::<_, N3f1>(storage, epoch, self_pk.clone(), pub_msg, priv_msg)
                         .await
                     {
                         Some(ack) => ack,

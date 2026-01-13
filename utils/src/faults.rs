@@ -3,27 +3,30 @@
 //! This module provides abstractions over quorum calculations for different BFT
 //! fault models. The two primary models are:
 //!
-//! - [`Bft3f1`]: Standard BFT model requiring `n >= 3f + 1` participants
-//! - [`Bft5f1`]: Two-round finality model requiring `n >= 5f + 1` participants
+//! - [`N3f1`]: Fault model requiring `n >= 3f + 1` participants
+//! - [`N5f1`]: Fault model requiring `n >= 5f + 1` participants
+//!
+//! Note: "Faults" in this module refers to Byzantine faults (arbitrary malicious
+//! behavior), not crash faults.
 //!
 //! # Example
 //!
 //! ```
-//! use commonware_utils::{Faults, Bft3f1, Bft5f1};
+//! use commonware_utils::{Faults, N3f1, N5f1};
 //!
-//! // Standard BFT (n >= 3f+1)
+//! // n >= 3f+1
 //! let n = 10;
-//! assert_eq!(Bft3f1::max_faults(n), 3);  // f = (n-1)/3 = 3
-//! assert_eq!(Bft3f1::quorum(n), 7);       // q = n - f = 7
+//! assert_eq!(N3f1::max_faults(n), 3);  // f = (n-1)/3 = 3
+//! assert_eq!(N3f1::quorum(n), 7);       // q = n - f = 7
 //!
-//! // Two-round finality BFT (n >= 5f+1)
-//! assert_eq!(Bft5f1::max_faults(n), 1);  // f = (n-1)/5 = 1
-//! assert_eq!(Bft5f1::quorum(n), 9);       // q = n - f = 9
+//! // n >= 5f+1
+//! assert_eq!(N5f1::max_faults(n), 1);  // f = (n-1)/5 = 1
+//! assert_eq!(N5f1::quorum(n), 9);       // q = n - f = 9
 //!
 //! // Works with any integer type
 //! let n_i32: i32 = 10;
-//! assert_eq!(Bft3f1::max_faults(n_i32), 3);
-//! assert_eq!(Bft3f1::quorum(n_i32), 7);
+//! assert_eq!(N3f1::max_faults(n_i32), 3);
+//! assert_eq!(N3f1::quorum(n_i32), 7);
 //! ```
 
 use num_traits::ToPrimitive;
@@ -80,16 +83,9 @@ pub trait Faults {
     }
 }
 
-/// Standard BFT fault model requiring `n >= 3f + 1` participants.
+/// Fault model requiring `n >= 3f + 1` participants.
 ///
-/// This is the classic Byzantine fault tolerance model used by protocols like
-/// Simplex, PBFT, Tendermint, and HotStuff. It can tolerate up to `f = (n-1)/3`
-/// faulty participants while maintaining safety and liveness.
-///
-/// # Quorum Properties
-///
-/// - **max_faults(n)** = `(n - 1) / 3`
-/// - **quorum(n)** = `n - f = n - (n-1)/3`
+/// Tolerates up to `f = (n-1)/3` faults with quorum size `q = n - f`.
 ///
 /// For any two quorums Q1 and Q2, there exists at least one honest participant
 /// in their intersection (since `|Q1| + |Q2| > n + f`).
@@ -103,9 +99,9 @@ pub trait Faults {
 /// | 10 | 3  | 7      |
 /// | 13 | 4  | 9      |
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct Bft3f1;
+pub struct N3f1;
 
-impl Faults for Bft3f1 {
+impl Faults for N3f1 {
     fn max_faults(n: impl ToPrimitive) -> u32 {
         let n = n
             .to_u32()
@@ -115,29 +111,11 @@ impl Faults for Bft3f1 {
     }
 }
 
-/// Two-round finality BFT fault model requiring `n >= 5f + 1` participants.
+/// Fault model requiring `n >= 5f + 1` participants.
 ///
-/// This fault model is used by consensus protocols that achieve finality in
-/// two communication rounds under optimistic conditions, such as Minimmit.
-/// It can tolerate up to `f = (n-1)/5` faulty participants.
+/// Tolerates up to `f = (n-1)/5` faults with quorum size `q = n - f`.
 ///
-/// # Quorum Properties
-///
-/// - **max_faults(n)** = `(n - 1) / 5`
-/// - **quorum(n)** = `n - f = n - (n-1)/5`
-///
-/// The tighter fault tolerance bound (`5f + 1` vs `3f + 1`) enables faster
-/// finality by allowing the protocol to finalize when `n - f` votes are
-/// collected, without requiring an additional round.
-///
-/// # Minimmit Quorums
-///
-/// Minimmit uses two different quorum thresholds:
-///
-/// - **M-notarization** (2f+1): Allows view advancement
-///   - Use `2 * Bft5f1::max_faults(n) + 1`
-/// - **L-notarization** (n-f): Allows finalization
-///   - Use `Bft5f1::quorum(n)`
+/// Also provides [`m_quorum`](Self::m_quorum) which computes `2f + 1`.
 ///
 /// # Example
 ///
@@ -148,9 +126,9 @@ impl Faults for Bft3f1 {
 /// | 16 | 3  | 13           | 7               |
 /// | 21 | 4  | 17           | 9               |
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct Bft5f1;
+pub struct N5f1;
 
-impl Faults for Bft5f1 {
+impl Faults for N5f1 {
     fn max_faults(n: impl ToPrimitive) -> u32 {
         let n = n
             .to_u32()
@@ -160,12 +138,8 @@ impl Faults for Bft5f1 {
     }
 }
 
-impl Bft5f1 {
-    /// Compute the M-notarization quorum (2f + 1) for Minimmit.
-    ///
-    /// This is the threshold for view advancement in Minimmit. When 2f+1
-    /// validators have voted for the same proposal, an M-notarization can
-    /// be formed, allowing the protocol to advance to the next view.
+impl N5f1 {
+    /// Compute `2f + 1`.
     ///
     /// # Panics
     ///
@@ -178,11 +152,7 @@ impl Bft5f1 {
         2 * Self::max_faults(n) + 1
     }
 
-    /// Compute the L-notarization quorum (n - f) for Minimmit.
-    ///
-    /// This is the threshold for finalization in Minimmit. When n-f validators
-    /// have voted for the same proposal, an L-notarization can be formed,
-    /// allowing the block to be finalized.
+    /// Compute `n - f`.
     ///
     /// This is equivalent to [`Self::quorum`].
     ///
@@ -203,13 +173,13 @@ mod tests {
     #[test]
     #[should_panic(expected = "n must not be zero")]
     fn test_bft3f1_max_faults_zero_panics() {
-        Bft3f1::max_faults(0);
+        N3f1::max_faults(0);
     }
 
     #[test]
     #[should_panic(expected = "n must not be zero")]
     fn test_bft3f1_quorum_zero_panics() {
-        Bft3f1::quorum(0);
+        N3f1::quorum(0);
     }
 
     #[rstest]
@@ -239,8 +209,8 @@ mod tests {
         #[case] expected_f: u32,
         #[case] expected_q: u32,
     ) {
-        assert_eq!(Bft3f1::max_faults(n), expected_f);
-        assert_eq!(Bft3f1::quorum(n), expected_q);
+        assert_eq!(N3f1::max_faults(n), expected_f);
+        assert_eq!(N3f1::quorum(n), expected_q);
         // Verify the invariant: n = f + q
         assert_eq!(n, expected_f + expected_q);
     }
@@ -248,25 +218,25 @@ mod tests {
     #[test]
     #[should_panic(expected = "n must not be zero")]
     fn test_bft5f1_max_faults_zero_panics() {
-        Bft5f1::max_faults(0);
+        N5f1::max_faults(0);
     }
 
     #[test]
     #[should_panic(expected = "n must not be zero")]
     fn test_bft5f1_quorum_zero_panics() {
-        Bft5f1::quorum(0);
+        N5f1::quorum(0);
     }
 
     #[test]
     #[should_panic(expected = "n must not be zero")]
     fn test_bft5f1_m_quorum_zero_panics() {
-        Bft5f1::m_quorum(0);
+        N5f1::m_quorum(0);
     }
 
     #[test]
     #[should_panic(expected = "n must not be zero")]
     fn test_bft5f1_l_quorum_zero_panics() {
-        Bft5f1::l_quorum(0);
+        N5f1::l_quorum(0);
     }
 
     #[rstest]
@@ -302,10 +272,10 @@ mod tests {
         #[case] expected_l_quorum: u32,
         #[case] expected_m_quorum: u32,
     ) {
-        assert_eq!(Bft5f1::max_faults(n), expected_f);
-        assert_eq!(Bft5f1::quorum(n), expected_l_quorum);
-        assert_eq!(Bft5f1::l_quorum(n), expected_l_quorum);
-        assert_eq!(Bft5f1::m_quorum(n), expected_m_quorum);
+        assert_eq!(N5f1::max_faults(n), expected_f);
+        assert_eq!(N5f1::quorum(n), expected_l_quorum);
+        assert_eq!(N5f1::l_quorum(n), expected_l_quorum);
+        assert_eq!(N5f1::m_quorum(n), expected_m_quorum);
 
         // Verify invariants
         assert_eq!(n, expected_f + expected_l_quorum); // n = f + q
@@ -315,75 +285,75 @@ mod tests {
     #[test]
     fn test_quorum_from_slice() {
         let items = vec![1, 2, 3, 4, 5, 6, 7];
-        assert_eq!(Bft3f1::quorum_from_slice(&items), 5); // n=7, f=2, q=5
-        assert_eq!(Bft5f1::quorum_from_slice(&items), 6); // n=7, f=1, q=6
+        assert_eq!(N3f1::quorum_from_slice(&items), 5); // n=7, f=2, q=5
+        assert_eq!(N5f1::quorum_from_slice(&items), 6); // n=7, f=1, q=6
     }
 
     #[test]
     #[should_panic(expected = "n must not be zero")]
     fn test_quorum_from_empty_slice_panics() {
         let items: Vec<u8> = vec![];
-        Bft3f1::quorum_from_slice(&items);
+        N3f1::quorum_from_slice(&items);
     }
 
     #[test]
     fn test_generic_integer_types() {
         // Test with various integer types
-        assert_eq!(Bft3f1::max_faults(10u8), 3);
-        assert_eq!(Bft3f1::max_faults(10u16), 3);
-        assert_eq!(Bft3f1::max_faults(10u32), 3);
-        assert_eq!(Bft3f1::max_faults(10u64), 3);
-        assert_eq!(Bft3f1::max_faults(10usize), 3);
-        assert_eq!(Bft3f1::max_faults(10i32), 3);
-        assert_eq!(Bft3f1::max_faults(10i64), 3);
+        assert_eq!(N3f1::max_faults(10u8), 3);
+        assert_eq!(N3f1::max_faults(10u16), 3);
+        assert_eq!(N3f1::max_faults(10u32), 3);
+        assert_eq!(N3f1::max_faults(10u64), 3);
+        assert_eq!(N3f1::max_faults(10usize), 3);
+        assert_eq!(N3f1::max_faults(10i32), 3);
+        assert_eq!(N3f1::max_faults(10i64), 3);
 
-        assert_eq!(Bft3f1::quorum(10u8), 7);
-        assert_eq!(Bft3f1::quorum(10u16), 7);
-        assert_eq!(Bft3f1::quorum(10u64), 7);
-        assert_eq!(Bft3f1::quorum(10usize), 7);
-        assert_eq!(Bft3f1::quorum(10i32), 7);
-        assert_eq!(Bft3f1::quorum(10i64), 7);
+        assert_eq!(N3f1::quorum(10u8), 7);
+        assert_eq!(N3f1::quorum(10u16), 7);
+        assert_eq!(N3f1::quorum(10u64), 7);
+        assert_eq!(N3f1::quorum(10usize), 7);
+        assert_eq!(N3f1::quorum(10i32), 7);
+        assert_eq!(N3f1::quorum(10i64), 7);
 
-        assert_eq!(Bft5f1::max_faults(10u64), 1);
-        assert_eq!(Bft5f1::quorum(10usize), 9);
-        assert_eq!(Bft5f1::m_quorum(10i32), 3);
-        assert_eq!(Bft5f1::l_quorum(10i64), 9);
+        assert_eq!(N5f1::max_faults(10u64), 1);
+        assert_eq!(N5f1::quorum(10usize), 9);
+        assert_eq!(N5f1::m_quorum(10i32), 3);
+        assert_eq!(N5f1::l_quorum(10i64), 9);
     }
 
     #[test]
     #[should_panic(expected = "n must be a non-negative integer that fits in u32")]
     fn test_max_faults_negative_panics() {
-        Bft3f1::max_faults(-1i32);
+        N3f1::max_faults(-1i32);
     }
 
     #[test]
     #[should_panic(expected = "n must be a non-negative integer that fits in u32")]
     fn test_max_faults_overflow_panics() {
-        Bft3f1::max_faults(u64::MAX);
+        N3f1::max_faults(u64::MAX);
     }
 
     #[test]
     #[should_panic(expected = "n must be a non-negative integer that fits in u32")]
     fn test_quorum_negative_panics() {
-        Bft3f1::quorum(-1i32);
+        N3f1::quorum(-1i32);
     }
 
     #[test]
     #[should_panic(expected = "n must be a non-negative integer that fits in u32")]
     fn test_quorum_overflow_panics() {
-        Bft3f1::quorum(u64::MAX);
+        N3f1::quorum(u64::MAX);
     }
 
     proptest! {
-        /// Minimmit quorum relationships must hold for all valid participant counts.
+        /// N5f1 quorum relationships must hold for all valid participant counts.
         ///
         /// For n >= 6 (where f >= 1):
         /// - M-quorum (2f+1) < L-quorum (n-f)
         /// - Both quorums must be achievable (<= n)
         #[test]
-        fn test_minimmit_quorum_relationships(n in 6u32..10_000) {
-            let m = Bft5f1::m_quorum(n);
-            let l = Bft5f1::l_quorum(n);
+        fn test_n5f1_quorum_relationships(n in 6u32..10_000) {
+            let m = N5f1::m_quorum(n);
+            let l = N5f1::l_quorum(n);
 
             // M-quorum must be strictly less than L-quorum
             prop_assert!(
@@ -405,21 +375,21 @@ mod tests {
         /// which is fundamental for BFT consensus safety.
         #[test]
         fn test_bft_model_safety_property(n in 1u32..10_000) {
-            // Bft3f1 safety
-            let f_3f1 = Bft3f1::max_faults(n);
-            let q_3f1 = Bft3f1::quorum(n);
+            // N3f1 safety
+            let f_3f1 = N3f1::max_faults(n);
+            let q_3f1 = N3f1::quorum(n);
             prop_assert!(
                 2 * q_3f1 > n + f_3f1,
-                "Bft3f1 safety violated for n={}: 2*{} <= {} + {}",
+                "N3f1 safety violated for n={}: 2*{} <= {} + {}",
                 n, q_3f1, n, f_3f1
             );
 
-            // Bft5f1 safety
-            let f_5f1 = Bft5f1::max_faults(n);
-            let q_5f1 = Bft5f1::quorum(n);
+            // N5f1 safety
+            let f_5f1 = N5f1::max_faults(n);
+            let q_5f1 = N5f1::quorum(n);
             prop_assert!(
                 2 * q_5f1 > n + f_5f1,
-                "Bft5f1 safety violated for n={}: 2*{} <= {} + {}",
+                "N5f1 safety violated for n={}: 2*{} <= {} + {}",
                 n, q_5f1, n, f_5f1
             );
         }

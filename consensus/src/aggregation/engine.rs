@@ -31,7 +31,7 @@ use commonware_runtime::{
     Clock, ContextCell, Handle, Metrics, Spawner, Storage,
 };
 use commonware_storage::journal::segmented::variable::{Config as JConfig, Journal};
-use commonware_utils::{futures::Pool as FuturesPool, ordered::Quorum, Bft3f1, PrioritySet};
+use commonware_utils::{futures::Pool as FuturesPool, ordered::Quorum, N3f1, PrioritySet};
 use futures::{
     future::{self, Either},
     pin_mut, StreamExt,
@@ -492,7 +492,7 @@ impl<
     async fn handle_ack(&mut self, ack: &Ack<P::Scheme, D>) -> Result<(), Error> {
         // Get the quorum (from scheme participants for the ack's epoch)
         let scheme = self.scheme(ack.epoch)?;
-        let quorum = scheme.participants().quorum::<Bft3f1>();
+        let quorum = scheme.participants().quorum::<N3f1>();
 
         // Get the acks and check digest consistency
         let acks_by_epoch = match self.pending.get_mut(&ack.item.height) {

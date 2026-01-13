@@ -365,7 +365,7 @@ mod tests {
     use commonware_codec::Encode;
     use commonware_math::algebra::{CryptoGroup, Field as _, Random, Ring, Space};
     use commonware_parallel::{Rayon, Sequential};
-    use commonware_utils::{test_rng, union_unique, Bft3f1, Faults, NZUsize, NZU32};
+    use commonware_utils::{test_rng, union_unique, Faults, N3f1, NZUsize, NZU32};
 
     fn blst_verify_proof_of_possession<V: Variant>(
         public: &V::Public,
@@ -399,7 +399,7 @@ mod tests {
         let mut rng = test_rng();
         let namespace = b"test";
         let (sharing, shares) =
-            dkg::deal_anonymous::<V, Bft3f1>(&mut rng, Default::default(), NZU32!(n));
+            dkg::deal_anonymous::<V, N3f1>(&mut rng, Default::default(), NZU32!(n));
         let partials: Vec<_> = shares
             .iter()
             .map(|s| sign_proof_of_possession::<V>(&sharing, s, namespace))
@@ -408,7 +408,7 @@ mod tests {
             verify_proof_of_possession::<V>(&sharing, namespace, p)
                 .expect("signature should be valid");
         }
-        let threshold_sig = recover::<V, _, Bft3f1>(&sharing, &partials, &Sequential).unwrap();
+        let threshold_sig = recover::<V, _, N3f1>(&sharing, &partials, &Sequential).unwrap();
         let threshold_pub = sharing.public();
 
         ops::verify_proof_of_possession::<V>(threshold_pub, namespace, &threshold_sig)
@@ -454,7 +454,7 @@ mod tests {
         let n = 5;
         let mut rng = test_rng();
         let (sharing, shares) =
-            dkg::deal_anonymous::<V, Bft3f1>(&mut rng, Default::default(), NZU32!(n));
+            dkg::deal_anonymous::<V, N3f1>(&mut rng, Default::default(), NZU32!(n));
         let msg = &[1, 9, 6, 9];
         let namespace = b"test";
         let partials: Vec<_> = shares
@@ -464,7 +464,7 @@ mod tests {
         for p in &partials {
             verify_message::<V>(&sharing, namespace, msg, p).expect("signature should be valid");
         }
-        let threshold_sig = recover::<V, _, Bft3f1>(&sharing, &partials, &Sequential).unwrap();
+        let threshold_sig = recover::<V, _, N3f1>(&sharing, &partials, &Sequential).unwrap();
         let threshold_pub = sharing.public();
 
         ops::verify_message::<V>(threshold_pub, namespace, msg, &threshold_sig)
@@ -485,7 +485,7 @@ mod tests {
         let mut rng = test_rng();
         let n = 5;
         let (public, shares) =
-            dkg::deal_anonymous::<V, Bft3f1>(&mut rng, Default::default(), NZU32!(n));
+            dkg::deal_anonymous::<V, N3f1>(&mut rng, Default::default(), NZU32!(n));
 
         let signer = &shares[0];
 
@@ -582,9 +582,9 @@ mod tests {
 
     fn recover_with_weights_correct<V: Variant>() {
         let mut rng = test_rng();
-        let (n, t) = (6, Bft3f1::quorum(6));
+        let (n, t) = (6, N3f1::quorum(6));
         let (sharing, shares) =
-            dkg::deal_anonymous::<V, Bft3f1>(&mut rng, Default::default(), NZU32!(n));
+            dkg::deal_anonymous::<V, N3f1>(&mut rng, Default::default(), NZU32!(n));
 
         let partials: Vec<_> = shares
             .iter()
@@ -592,7 +592,7 @@ mod tests {
             .map(|s| sign_message::<V>(s, b"test", b"payload"))
             .collect();
 
-        let sig1 = recover::<V, _, Bft3f1>(&sharing, &partials, &Sequential).unwrap();
+        let sig1 = recover::<V, _, N3f1>(&sharing, &partials, &Sequential).unwrap();
 
         ops::verify_message::<V>(sharing.public(), b"test", b"payload", &sig1).unwrap();
     }
@@ -605,9 +605,9 @@ mod tests {
 
     fn recover_multiple_test<V: Variant>() {
         let mut rng = test_rng();
-        let (n, t) = (6, Bft3f1::quorum(6));
+        let (n, t) = (6, N3f1::quorum(6));
         let (sharing, shares) =
-            dkg::deal_anonymous::<V, Bft3f1>(&mut rng, Default::default(), NZU32!(n));
+            dkg::deal_anonymous::<V, N3f1>(&mut rng, Default::default(), NZU32!(n));
 
         let partials_1: Vec<_> = shares
             .iter()
@@ -621,14 +621,14 @@ mod tests {
             .collect();
 
         let (sig_1, sig_2) =
-            recover_pair::<V, _, Bft3f1>(&sharing, &partials_1, &partials_2, &Sequential).unwrap();
+            recover_pair::<V, _, N3f1>(&sharing, &partials_1, &partials_2, &Sequential).unwrap();
 
         ops::verify_message::<V>(sharing.public(), b"test", b"payload1", &sig_1).unwrap();
         ops::verify_message::<V>(sharing.public(), b"test", b"payload2", &sig_2).unwrap();
 
         let parallel = Rayon::new(NZUsize!(4)).unwrap();
         let (sig_1_par, sig_2_par) =
-            recover_pair::<V, _, Bft3f1>(&sharing, &partials_1, &partials_2, &parallel).unwrap();
+            recover_pair::<V, _, N3f1>(&sharing, &partials_1, &partials_2, &parallel).unwrap();
 
         assert_eq!(sig_1, sig_1_par);
         assert_eq!(sig_2, sig_2_par);
@@ -645,7 +645,7 @@ mod tests {
         let mut rng = test_rng();
 
         let (sharing, shares) =
-            dkg::deal_anonymous::<V, Bft3f1>(&mut rng, Default::default(), NZU32!(n));
+            dkg::deal_anonymous::<V, N3f1>(&mut rng, Default::default(), NZU32!(n));
 
         let namespace = b"test";
         let msg = b"hello";
@@ -658,7 +658,7 @@ mod tests {
             verify_message::<V>(&sharing, namespace, msg, partial).unwrap();
         });
 
-        let threshold_sig = recover::<V, _, Bft3f1>(&sharing, &partials, &Sequential).unwrap();
+        let threshold_sig = recover::<V, _, N3f1>(&sharing, &partials, &Sequential).unwrap();
         ops::verify_message::<V>(sharing.public(), namespace, msg, &threshold_sig).unwrap();
     }
 
@@ -673,7 +673,7 @@ mod tests {
         let mut rng = test_rng();
 
         let (sharing, shares) =
-            dkg::deal_anonymous::<V, Bft3f1>(&mut rng, Default::default(), NZU32!(n));
+            dkg::deal_anonymous::<V, N3f1>(&mut rng, Default::default(), NZU32!(n));
 
         let namespace = b"test";
         let msg = b"hello";
@@ -690,7 +690,7 @@ mod tests {
             ));
         });
 
-        let threshold_sig = recover::<V, _, Bft3f1>(&sharing, &partials, &Sequential).unwrap();
+        let threshold_sig = recover::<V, _, N3f1>(&sharing, &partials, &Sequential).unwrap();
         assert!(matches!(
             ops::verify_message::<V>(sharing.public(), namespace, msg, &threshold_sig).unwrap_err(),
             Error::InvalidSignature
@@ -708,7 +708,7 @@ mod tests {
         let mut rng = test_rng();
 
         let (group, shares) =
-            dkg::deal_anonymous::<V, Bft3f1>(&mut rng, Default::default(), NZU32!(n));
+            dkg::deal_anonymous::<V, N3f1>(&mut rng, Default::default(), NZU32!(n));
 
         let shares = shares.into_iter().take(t as usize - 1).collect::<Vec<_>>();
 
@@ -724,7 +724,7 @@ mod tests {
         });
 
         assert!(matches!(
-            recover::<V, _, Bft3f1>(&group, &partials, &Sequential).unwrap_err(),
+            recover::<V, _, N3f1>(&group, &partials, &Sequential).unwrap_err(),
             Error::NotEnoughPartialSignatures(4, 3)
         ));
     }
@@ -740,7 +740,7 @@ mod tests {
         let mut rng = test_rng();
 
         let (sharing, mut shares) =
-            dkg::deal_anonymous::<V, Bft3f1>(&mut rng, Default::default(), NZU32!(n));
+            dkg::deal_anonymous::<V, N3f1>(&mut rng, Default::default(), NZU32!(n));
 
         let share = shares.get_mut(3).unwrap();
         share.private = Secret::new(Private::random(&mut rng));
@@ -756,7 +756,7 @@ mod tests {
             verify_message::<V>(&sharing, namespace, msg, partial).unwrap();
         });
 
-        let threshold_sig = recover::<V, _, Bft3f1>(&sharing, &partials, &Sequential).unwrap();
+        let threshold_sig = recover::<V, _, N3f1>(&sharing, &partials, &Sequential).unwrap();
         ops::verify_message::<V>(sharing.public(), namespace, msg, &threshold_sig).unwrap();
     }
 
@@ -772,7 +772,7 @@ mod tests {
         let mut rng = test_rng();
         let n = 5;
         let (sharing, shares) =
-            dkg::deal_anonymous::<MinSig, Bft3f1>(&mut rng, Default::default(), NZU32!(n));
+            dkg::deal_anonymous::<MinSig, N3f1>(&mut rng, Default::default(), NZU32!(n));
         let namespace = b"test";
         let msg = b"hello";
 
@@ -798,7 +798,7 @@ mod tests {
         let mut rng = test_rng();
         let n = 5;
         let (sharing, mut shares) =
-            dkg::deal_anonymous::<MinSig, Bft3f1>(&mut rng, Default::default(), NZU32!(n));
+            dkg::deal_anonymous::<MinSig, N3f1>(&mut rng, Default::default(), NZU32!(n));
         let namespace = b"test";
         let msg = b"hello";
 
@@ -841,7 +841,7 @@ mod tests {
         let mut rng = test_rng();
         let n = 6;
         let (sharing, mut shares) =
-            dkg::deal_anonymous::<MinSig, Bft3f1>(&mut rng, Default::default(), NZU32!(n));
+            dkg::deal_anonymous::<MinSig, N3f1>(&mut rng, Default::default(), NZU32!(n));
         let namespace = b"test";
         let msg = b"hello";
 
@@ -891,7 +891,7 @@ mod tests {
         let mut rng = test_rng();
         let n = 5;
         let (sharing, shares) =
-            dkg::deal_anonymous::<MinSig, Bft3f1>(&mut rng, Default::default(), NZU32!(n));
+            dkg::deal_anonymous::<MinSig, N3f1>(&mut rng, Default::default(), NZU32!(n));
         let namespace = b"test";
         let msg = b"hello";
 
@@ -932,7 +932,7 @@ mod tests {
     fn test_batch_verify_same_message_single() {
         let mut rng = test_rng();
         let (sharing, shares) =
-            dkg::deal_anonymous::<MinSig, Bft3f1>(&mut rng, Default::default(), NZU32!(1));
+            dkg::deal_anonymous::<MinSig, N3f1>(&mut rng, Default::default(), NZU32!(1));
         let namespace = b"test";
         let msg = b"hello";
 
@@ -956,7 +956,7 @@ mod tests {
     fn test_batch_verify_same_message_single_invalid() {
         let mut rng = test_rng();
         let (sharing, mut shares) =
-            dkg::deal_anonymous::<MinSig, Bft3f1>(&mut rng, Default::default(), NZU32!(1));
+            dkg::deal_anonymous::<MinSig, N3f1>(&mut rng, Default::default(), NZU32!(1));
         let namespace = b"test";
         let msg = b"hello";
 
@@ -989,7 +989,7 @@ mod tests {
         let mut rng = test_rng();
         let n = 5;
         let (sharing, mut shares) =
-            dkg::deal_anonymous::<MinSig, Bft3f1>(&mut rng, Default::default(), NZU32!(n));
+            dkg::deal_anonymous::<MinSig, N3f1>(&mut rng, Default::default(), NZU32!(n));
         let namespace = b"test";
         let msg = b"hello";
 
@@ -1052,8 +1052,8 @@ mod tests {
         }
 
         let mut rng = test_rng();
-        let (n, t) = (NZU32!(5), Bft3f1::quorum(5));
-        let (public, shares) = dkg::deal_anonymous::<V, Bft3f1>(&mut rng, Default::default(), n);
+        let (n, t) = (NZU32!(5), N3f1::quorum(5));
+        let (public, shares) = dkg::deal_anonymous::<V, N3f1>(&mut rng, Default::default(), n);
         let scalars = public.mode().all_scalars(n).collect::<Vec<_>>();
 
         let namespace = b"test";
@@ -1103,7 +1103,7 @@ mod tests {
         let mut rng = test_rng();
         let n = 5;
         let (sharing, shares) =
-            dkg::deal_anonymous::<V, Bft3f1>(&mut rng, Default::default(), NZU32!(n));
+            dkg::deal_anonymous::<V, N3f1>(&mut rng, Default::default(), NZU32!(n));
         let namespace = b"test";
         let msg = b"message";
 
@@ -1183,7 +1183,7 @@ mod tests {
         let mut rng = test_rng();
         let n = 5;
         let (sharing, shares) =
-            dkg::deal_anonymous::<V, Bft3f1>(&mut rng, Default::default(), NZU32!(n));
+            dkg::deal_anonymous::<V, N3f1>(&mut rng, Default::default(), NZU32!(n));
         let namespace: &[u8] = b"test";
         let msg1: &[u8] = b"message 1";
         let msg2: &[u8] = b"message 2";
