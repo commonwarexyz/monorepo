@@ -158,7 +158,7 @@ impl<E: Spawner, S: Sender, R: Receiver> Muxer<E, S, R> {
                 let Some(sender) = self.routes.get_mut(&subchannel) else {
                     // Attempt to use the backup channel if available.
                     if let Some(backup) = &mut self.backup {
-                        if let Err(e) = backup.send((subchannel, (pk, bytes))).await {
+                        if let Err(e) = backup.try_send((subchannel, (pk, bytes))) {
                             debug!(?subchannel, ?e, "failed to send message to backup channel");
                         }
                     }
@@ -168,16 +168,18 @@ impl<E: Spawner, S: Sender, R: Receiver> Muxer<E, S, R> {
                     continue;
                 };
 
-                // Send the message to the subchannel, blocking if the queue is full.
-                if let Err(e) = sender.send((pk, bytes)).await {
-                    // Remove the route for the subchannel.
-                    self.routes.remove(&subchannel);
-
-                    // Failure, drop the sender since the receiver is no longer interested.
-                    debug!(?subchannel, ?e, "failed to send message to subchannel");
-
-                    // NOTE: The channel is deregistered, but it wasn't when the message was received.
-                    // The backup channel is not used in this case.
+                // Send the message to the subchannel using non-blocking try_send
+                // to avoid head-of-line blocking when one subchannel is slow.
+                if let Err(e) = sender.try_send((pk, bytes)) {
+                    // Check if the channel is disconnected (receiver dropped)
+                    if e.is_disconnected() {
+                        // Remove the route for the subchannel.
+                        self.routes.remove(&subchannel);
+                        debug!(?subchannel, "subchannel receiver dropped, removing route");
+                    } else {
+                        // Channel is full, drop the message
+                        debug!(?subchannel, "subchannel full, dropping message");
+                    }
                 }
             }
         }
@@ -731,8 +733,9 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_mailbox_capacity_blocks() {
-        // If a single subchannel is full, messages are blocked for all subchannels.
+    fn test_mailbox_capacity_drops_when_full() {
+        // Messages are dropped (not blocked) when a subchannel buffer is full.
+        // This prevents head-of-line blocking where one slow subchannel blocks all others.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut oracle = start_network(context.clone());
@@ -748,22 +751,19 @@ mod tests {
             let (_, mut rx2) = handle2.register(100).await.unwrap();
 
             // Send 10 messages to each subchannel from pk1 to pk2.
+            // With buffer size of CAPACITY=5, messages beyond that are dropped.
             send_burst(&mut [tx1, tx2], CAPACITY * 2).await;
 
-            // Try receiving all messages from the second subchannel.
-            expect_n_messages(&mut rx2, CAPACITY).await;
-
-            // Try receiving from the first subchannel.
-            expect_n_messages(&mut rx1, CAPACITY * 2).await;
-
-            // The second subchannel should be unblocked and receive the rest of the messages.
+            // Each subchannel should receive up to CAPACITY messages (the rest are dropped).
+            expect_n_messages(&mut rx1, CAPACITY).await;
             expect_n_messages(&mut rx2, CAPACITY).await;
         });
     }
 
     #[test]
-    fn test_drop_a_full_subchannel() {
-        // Drops the subchannel receiver while the sender is blocked.
+    fn test_drop_subchannel_receiver_deregisters_route() {
+        // Dropping a subchannel receiver deregisters the route, and subsequent
+        // messages to that subchannel are dropped.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut oracle = start_network(context.clone());
@@ -778,16 +778,14 @@ mod tests {
             let (_, rx1) = handle2.register(99).await.unwrap();
             let (_, mut rx2) = handle2.register(100).await.unwrap();
 
-            // Send 10 messages to each subchannel from pk1 to pk2.
-            send_burst(&mut [tx1, tx2], CAPACITY * 2).await;
-
-            // Try receiving all messages from the second subchannel.
-            expect_n_messages(&mut rx2, CAPACITY).await;
-
-            // Drop the first subchannel, erroring the sender and dropping it.
+            // Drop rx1 before any messages are sent - its route is now deregistered.
             drop(rx1);
 
-            // The second subchannel should be unblocked and receive the rest of the messages.
+            // Send messages to both subchannels. Messages to subchannel 99 will be dropped
+            // since its receiver was dropped.
+            send_burst(&mut [tx1, tx2], CAPACITY).await;
+
+            // rx2 should receive all CAPACITY messages sent to subchannel 100.
             expect_n_messages(&mut rx2, CAPACITY).await;
         });
     }
@@ -795,6 +793,7 @@ mod tests {
     #[test]
     fn test_drop_messages_for_unregistered_subchannel() {
         // Messages are dropped if the subchannel they are for is not registered.
+        // The unregistered subchannel does not affect the registered one.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut oracle = start_network(context.clone());
@@ -809,11 +808,13 @@ mod tests {
             // Do not register the first subchannel on the second peer.
             let (_, mut rx2) = handle2.register(2).await.unwrap();
 
-            // Send 10 messages to each subchannel from pk1 to pk2.
-            send_burst(&mut [tx1, tx2], CAPACITY * 2).await;
+            // Send CAPACITY messages to each subchannel.
+            // Messages to subchannel 1 are dropped (unregistered).
+            // Messages to subchannel 2 fill the buffer.
+            send_burst(&mut [tx1, tx2], CAPACITY).await;
 
-            // Try receiving all messages from the second subchannel.
-            expect_n_messages(&mut rx2, CAPACITY * 2).await;
+            // Receive messages from subchannel 2.
+            expect_n_messages(&mut rx2, CAPACITY).await;
         });
     }
 
@@ -836,12 +837,12 @@ mod tests {
             // Do not register the first subchannel on the second peer.
             let (_, mut rx2) = handle2.register(2).await.unwrap();
 
-            // Send 10 messages to each subchannel from pk1 to pk2.
-            send_burst(&mut [tx1, tx2], CAPACITY * 2).await;
+            // Send CAPACITY messages to each subchannel.
+            // Subchannel 1 messages go to backup, subchannel 2 messages go to rx2.
+            send_burst(&mut [tx1, tx2], CAPACITY).await;
 
-            // Try receiving all messages from the second subchannel and backup channel.
-            // All 20 messages sent should be received.
-            expect_n_messages_with_backup(&mut rx2, &mut backup2, CAPACITY * 2, CAPACITY * 2).await;
+            // Both channels should receive CAPACITY messages each.
+            expect_n_messages_with_backup(&mut rx2, &mut backup2, CAPACITY, CAPACITY).await;
         });
     }
 
@@ -901,31 +902,30 @@ mod tests {
             let (_, mut rx1) = handle2.register(1).await.unwrap();
             let (_, mut rx2) = handle2.register(2).await.unwrap();
 
-            // Send 10 messages to subchannel 1 from pk1 to pk2.
-            send_burst(&mut [tx1.clone()], CAPACITY * 2).await;
+            // Send CAPACITY messages to subchannel 1, then drain them.
+            send_burst(&mut [tx1.clone()], CAPACITY).await;
+            expect_n_messages(&mut rx1, CAPACITY).await;
 
-            // Try receiving all messages from the first subchannel.
-            expect_n_messages(&mut rx1, CAPACITY * 2).await;
-
-            // Send 10 messages to subchannel 2 from pk1 to pk2.
-            send_burst(&mut [tx2.clone()], CAPACITY * 2).await;
-
-            // Try receiving all messages from the first subchannel.
-            expect_n_messages(&mut rx2, CAPACITY * 2).await;
+            // Send CAPACITY messages to subchannel 2, then drain them.
+            send_burst(&mut [tx2.clone()], CAPACITY).await;
+            expect_n_messages(&mut rx2, CAPACITY).await;
 
             // Explicitly close the underlying receiver for the first subchannel.
             rx1.receiver.close();
 
-            // Send 10 messages to each subchannel from pk1 to pk2.
-            send_burst(&mut [tx1, tx2], CAPACITY * 2).await;
+            // Send CAPACITY messages to each subchannel.
+            // Messages to subchannel 1 are dropped (receiver closed).
+            send_burst(&mut [tx1, tx2], CAPACITY).await;
 
-            // Try receiving all messages from the second subchannel.
-            expect_n_messages(&mut rx2, CAPACITY * 2).await;
+            // Subchannel 2 should receive CAPACITY messages.
+            expect_n_messages(&mut rx2, CAPACITY).await;
         });
     }
 
     #[test]
     fn test_dropped_backup_channel_doesnt_block() {
+        // Dropping the backup receiver doesn't block message processing.
+        // Messages to unregistered subchannels are simply dropped.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut oracle = start_network(context.clone());
@@ -944,11 +944,13 @@ mod tests {
             // Do not register the first subchannel on the second peer.
             let (_, mut rx2) = handle2.register(2).await.unwrap();
 
-            // Send 10 messages to each subchannel from pk1 to pk2.
-            send_burst(&mut [tx1, tx2], CAPACITY * 2).await;
+            // Send CAPACITY messages to each subchannel.
+            // Subchannel 1 messages are dropped (backup is closed).
+            // Subchannel 2 messages go to rx2.
+            send_burst(&mut [tx1, tx2], CAPACITY).await;
 
-            // Try receiving all messages from the second subchannel.
-            expect_n_messages(&mut rx2, CAPACITY * 2).await;
+            // rx2 should receive all CAPACITY messages.
+            expect_n_messages(&mut rx2, CAPACITY).await;
         });
     }
 

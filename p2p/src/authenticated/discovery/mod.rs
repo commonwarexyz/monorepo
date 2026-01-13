@@ -119,6 +119,13 @@
 //! _Users should consider these rate limits as best-effort protection against moderate abuse. Targeted abuse (e.g. DDoS)
 //! must be mitigated with an external proxy (that limits inbound connection attempts to authorized IPs)._
 //!
+//! ## Message Delivery
+//!
+//! Outgoing messages are dropped when a peer's send buffer is full, preventing slow peers
+//! from blocking sends to other peers. Incoming messages are dropped when the application's
+//! receive buffer is full, ensuring protocol messages (BitVec, Peers) continue to flow and
+//! connections remain healthy.
+//!
 //! # Example
 //!
 //! ```rust
@@ -225,7 +232,14 @@ pub use network::Network;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Blocker, Ingress, Manager, Receiver, Recipients, Sender};
+    use crate::{
+        authenticated::{
+            discovery::actors::router::{Actor as RouterActor, Config as RouterConfig},
+            relay::Relay,
+        },
+        Blocker, Ingress, Manager, Receiver, Recipients, Sender,
+    };
+    use bytes::Bytes;
     use commonware_cryptography::{ed25519, Signer as _};
     use commonware_macros::{select, select_loop, test_group, test_traced};
     use commonware_runtime::{
@@ -2280,5 +2294,68 @@ mod tests {
         for seed in 0..25 {
             clean_shutdown(seed);
         }
+    }
+
+    #[test]
+    fn test_broadcast_slow_peer_no_blocking() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(5));
+        executor.start(|context| async move {
+            // Create router
+            let cfg = RouterConfig { mailbox_size: 10 };
+            let (router, mut mailbox, messenger) =
+                RouterActor::<_, ed25519::PublicKey>::new(context.clone(), cfg);
+
+            // Create channels for the router
+            let channels = channels::Channels::new(messenger.clone(), MAX_MESSAGE_SIZE);
+            let _handle = router.start(channels);
+
+            // Register peer 1 with small buffer (will fill up after 10 messages)
+            // Must keep receivers alive to prevent channel from closing
+            let slow_peer = ed25519::PrivateKey::from_seed(0).public_key();
+            let (slow_low, _slow_low_rx) = mpsc::channel(10);
+            let (slow_high, _slow_high_rx) = mpsc::channel(10);
+            assert!(
+                mailbox
+                    .ready(slow_peer.clone(), Relay::new(slow_low, slow_high))
+                    .await
+                    .is_some(),
+                "Failed to register slow peer"
+            );
+
+            // Register peer 2 with large buffer
+            let fast_peer = ed25519::PrivateKey::from_seed(1).public_key();
+            let (fast_low, mut fast_receiver) = mpsc::channel(100);
+            let (fast_high, _fast_high_rx) = mpsc::channel(100);
+            assert!(
+                mailbox
+                    .ready(fast_peer.clone(), Relay::new(fast_low, fast_high))
+                    .await
+                    .is_some(),
+                "Failed to register fast peer"
+            );
+
+            let message = Bytes::from(vec![0u8; 100]);
+            let mut messenger = messenger;
+
+            // Send 10 messages to fill slow_peer's buffer
+            for i in 0..10 {
+                let sent = messenger
+                    .content(Recipients::All, 0, message.clone(), false)
+                    .await;
+                assert_eq!(sent.len(), 2, "Broadcast {i} should reach both peers");
+            }
+
+            // 11th broadcast: slow_peer's buffer is full, so its message is dropped
+            let sent = messenger.content(Recipients::All, 0, message, false).await;
+            assert!(
+                sent.contains(&fast_peer),
+                "Fast peer should receive message"
+            );
+
+            // Verify fast_peer received all 11 messages
+            for _ in 0..11 {
+                assert!(fast_receiver.try_next().is_ok());
+            }
+        });
     }
 }

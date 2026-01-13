@@ -61,6 +61,13 @@
 //! _Users should consider these rate limits as best-effort protection against moderate abuse. Targeted abuse (e.g. DDoS)
 //! must be mitigated with an external proxy (that limits inbound connection attempts to authorized IPs)._
 //!
+//! ## Message Delivery
+//!
+//! Outgoing messages are dropped when a peer's send buffer is full, preventing slow peers
+//! from blocking sends to other peers. Incoming messages are dropped when the application's
+//! receive buffer is full, ensuring ping messages continue to flow and connections remain
+//! healthy.
+//!
 //! # Example
 //!
 //! ```rust
