@@ -286,8 +286,12 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     }
 
     /// Sync any pending updates to disk.
+    ///
+    /// Only the tail section can have pending updates since historical sections are synced
+    /// when they become full.
     pub async fn sync(&mut self) -> Result<(), Error> {
-        self.inner.sync_all().await
+        let tail_section = self.size / self.items_per_blob;
+        self.inner.sync(tail_section).await
     }
 
     /// Return the total number of items in the journal, irrespective of pruning. The next value
