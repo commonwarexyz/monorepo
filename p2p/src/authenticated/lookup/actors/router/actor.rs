@@ -62,7 +62,7 @@ impl<E: Spawner + Metrics, P: PublicKey> Actor<E, P> {
     }
 
     /// Sends a message to the given `recipient`.
-    async fn send(
+    fn send(
         &mut self,
         recipient: P,
         channel: Channel,
@@ -71,11 +71,7 @@ impl<E: Spawner + Metrics, P: PublicKey> Actor<E, P> {
         sent: &mut Vec<P>,
     ) {
         if let Some(messenger) = self.connections.get_mut(&recipient) {
-            if messenger
-                .send(Data { channel, message }, priority)
-                .await
-                .is_ok()
-            {
+            if messenger.send(Data { channel, message }, priority).is_ok() {
                 sent.push(recipient);
             } else {
                 self.messages_dropped
@@ -136,13 +132,17 @@ impl<E: Spawner + Metrics, P: PublicKey> Actor<E, P> {
                         let mut sent = Vec::new();
                         match recipients {
                             Recipients::One(recipient) => {
-                                self.send(recipient, channel, message, priority, &mut sent)
-                                    .await;
+                                self.send(recipient, channel, message, priority, &mut sent);
                             }
                             Recipients::Some(recipients) => {
                                 for recipient in recipients {
-                                    self.send(recipient, channel, message.clone(), priority, &mut sent)
-                                        .await;
+                                    self.send(
+                                        recipient,
+                                        channel,
+                                        message.clone(),
+                                        priority,
+                                        &mut sent,
+                                    );
                                 }
                             }
                             Recipients::All => {
@@ -156,7 +156,6 @@ impl<E: Spawner + Metrics, P: PublicKey> Actor<E, P> {
                                             },
                                             priority,
                                         )
-                                        .await
                                         .is_ok()
                                     {
                                         sent.push(recipient.clone());

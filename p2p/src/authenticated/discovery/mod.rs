@@ -2281,4 +2281,133 @@ mod tests {
             clean_shutdown(seed);
         }
     }
+
+    #[test]
+    fn test_broadcast_slow_peer_no_blocking() {
+        use crate::authenticated::{
+            discovery::actors::router::{Actor, Config as RouterConfig},
+            relay::Relay,
+        };
+        use bytes::Bytes;
+
+        let executor = deterministic::Runner::timed(Duration::from_secs(5));
+        executor.start(|context| async move {
+            // Create router
+            let cfg = RouterConfig { mailbox_size: 10 };
+            let (router, mut mailbox, messenger) =
+                Actor::<_, ed25519::PublicKey>::new(context.clone(), cfg);
+
+            // Create channels for the router
+            let channels = channels::Channels::new(messenger.clone(), MAX_MESSAGE_SIZE);
+            let _handle = router.start(channels);
+
+            // Register peer 1 with small buffer (will fill up after 10 messages)
+            // Must keep receivers alive to prevent channel from closing
+            let slow_peer = ed25519::PrivateKey::from_seed(0).public_key();
+            let (slow_low, _slow_low_rx) = mpsc::channel(10);
+            let (slow_high, _slow_high_rx) = mpsc::channel(10);
+            assert!(
+                mailbox
+                    .ready(slow_peer.clone(), Relay::new(slow_low, slow_high))
+                    .await
+                    .is_some(),
+                "Failed to register slow peer"
+            );
+
+            // Register peer 2 with large buffer
+            let fast_peer = ed25519::PrivateKey::from_seed(1).public_key();
+            let (fast_low, mut fast_receiver) = mpsc::channel(100);
+            let (fast_high, _fast_high_rx) = mpsc::channel(100);
+            assert!(
+                mailbox
+                    .ready(fast_peer.clone(), Relay::new(fast_low, fast_high))
+                    .await
+                    .is_some(),
+                "Failed to register fast peer"
+            );
+
+            let message = Bytes::from(vec![0u8; 100]);
+            let mut messenger = messenger;
+
+            // Send 10 messages to fill slow_peer's buffer
+            for i in 0..10 {
+                let sent = messenger
+                    .content(Recipients::All, 0, message.clone(), false)
+                    .await;
+                assert_eq!(sent.len(), 2, "Broadcast {i} should reach both peers");
+            }
+
+            // 11th broadcast: slow_peer's buffer is full
+            // With try_send: drops slow_peer's message, succeeds for fast_peer
+            // With send().await: would block forever waiting for slow_peer
+            let sent = messenger.content(Recipients::All, 0, message, false).await;
+
+            // With the fix, fast_peer still receives (slow_peer's message dropped)
+            assert!(
+                sent.contains(&fast_peer),
+                "Fast peer should receive message"
+            );
+            // slow_peer may or may not be in sent depending on the fix
+
+            // Verify fast_peer actually received 11 messages
+            for _ in 0..11 {
+                assert!(fast_receiver.try_next().is_ok());
+            }
+        });
+    }
+
+    #[test]
+    fn test_broadcast_performance_1024_peers() {
+        use crate::authenticated::{
+            discovery::actors::router::{Actor, Config as RouterConfig},
+            relay::Relay,
+        };
+        use bytes::Bytes;
+
+        let executor = deterministic::Runner::timed(Duration::from_secs(60));
+        executor.start(|context| async move {
+            // Create router with large mailbox (matching reported config)
+            let cfg = RouterConfig { mailbox_size: 4096 };
+            let (router, mut mailbox, messenger) =
+                Actor::<_, ed25519::PublicKey>::new(context.clone(), cfg);
+
+            let channels = channels::Channels::new(messenger.clone(), MAX_MESSAGE_SIZE);
+            let _handle = router.start(channels);
+
+            // Register 1024 peers with large buffers (matching reported config)
+            let peer_count = 1024;
+            let mut receivers = Vec::with_capacity(peer_count);
+            for i in 0..peer_count {
+                let peer = ed25519::PrivateKey::from_seed(i as u64).public_key();
+                let (low, low_rx) = mpsc::channel(4096);
+                let (high, _high_rx) = mpsc::channel(4096);
+                assert!(mailbox.ready(peer, Relay::new(low, high)).await.is_some());
+                receivers.push(low_rx);
+            }
+
+            // Send 16KB message to all peers
+            let message = Bytes::from(vec![0u8; 16 * 1024]);
+            let mut messenger = messenger;
+
+            let start = std::time::Instant::now();
+            let sent = messenger.content(Recipients::All, 0, message, false).await;
+            let elapsed = start.elapsed();
+
+            println!(
+                "Sent 16KB to {} peers in {:?} ({} successful)",
+                peer_count,
+                elapsed,
+                sent.len()
+            );
+            assert_eq!(sent.len(), peer_count);
+
+            // With try_send, this should complete quickly
+            // (no async overhead per peer, just synchronous try_send calls)
+            assert!(
+                elapsed.as_millis() < 1000,
+                "Broadcast took {:?}, expected < 1s",
+                elapsed
+            );
+        });
+    }
 }
