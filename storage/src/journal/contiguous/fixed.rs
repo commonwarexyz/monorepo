@@ -229,6 +229,14 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
             }
         }
 
+        // Verify all non-tail sections are full (have exactly items_per_blob items)
+        for section in oldest..newest {
+            let len = inner.section_len(section).await?;
+            if len != items_per_blob {
+                return Err(Error::InvalidBlobSize(section, len * Self::CHUNK_SIZE_U64));
+            }
+        }
+
         // Compute size from the tail (newest) section
         let tail_len = inner.section_len(newest).await?;
         let size = newest * items_per_blob + tail_len;
@@ -814,7 +822,10 @@ mod tests {
             journal.sync().await.expect("Failed to sync journal");
             drop(journal);
 
-            // Manually truncate a non-tail blob to make sure it's detected during replay.
+            // Manually truncate a non-tail blob to make sure it's detected during initialization.
+            // The segmented journal will trim the incomplete blob on init, resulting in the blob
+            // missing one item. This should be detected during init because all non-tail blobs
+            // must be full.
             let (blob, size) = context
                 .open(&cfg.partition, &40u64.to_be_bytes())
                 .await
@@ -822,28 +833,12 @@ mod tests {
             blob.resize(size - 1).await.expect("Failed to corrupt blob");
             blob.sync().await.expect("Failed to sync blob");
 
-            // The segmented journal will trim the incomplete blob on init, resulting in the blob
-            // missing one item. This should be detected as corruption during replay.
-            let journal = Journal::<_, Digest>::init(context.clone(), cfg.clone())
-                .await
-                .expect("Journal init succeeded");
-
-            // Journal size is computed from the tail section, so it's unchanged
-            // despite the corruption in section 40.
-            let expected_size = ITEMS_PER_BLOB.get() * 100 + ITEMS_PER_BLOB.get() / 2;
-            assert_eq!(journal.size(), expected_size);
-
-            // Replay should detect corruption (incomplete section) in section 40
-            match journal.replay(NZUsize!(1024), 0).await {
-                Err(Error::Corruption(msg)) => {
-                    assert!(
-                        msg.contains("section 40"),
-                        "Error should mention section 40, got: {msg}"
-                    );
-                }
-                Err(e) => panic!("Expected Corruption error for section 40, got: {:?}", e),
-                Ok(_) => panic!("Expected replay to fail with corruption"),
-            };
+            // Init should fail due to corrupted historical blob (not full)
+            match Journal::<_, Digest>::init(context.clone(), cfg.clone()).await {
+                Err(Error::InvalidBlobSize(40, _)) => {}
+                Err(e) => panic!("Expected InvalidBlobSize for section 40, got: {e:?}"),
+                Ok(_) => panic!("Expected InvalidBlobSize for section 40, got Ok"),
+            }
         });
     }
 
