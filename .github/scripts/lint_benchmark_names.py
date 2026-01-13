@@ -79,7 +79,7 @@ def get_benchmark_names(root: Path) -> list[str]:
     for line in result.stdout.splitlines():
         line = line.strip()
         if line.endswith(": benchmark"):
-            name = line[:-12]  # Remove ": benchmark" suffix
+            name = line[:-11]  # Remove ": benchmark" suffix
             benchmarks.append(name)
 
     return benchmarks
