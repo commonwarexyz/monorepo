@@ -500,7 +500,7 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     info!("initialized VPC peering connections");
 
     // Prepare launch configurations for all instances
-    info!("launching all instances in parallel");
+    info!("launching instances");
     let monitoring_ec2_client = &ec2_clients[&monitoring_region];
     let monitoring_ami_id = find_latest_ami(monitoring_ec2_client, monitoring_architecture).await?;
     let monitoring_instance_type = InstanceType::try_parse(&config.monitoring.instance_type)
@@ -607,10 +607,10 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
         try_join_all(binary_launch_futures)
     )?;
     let (monitoring_instance_id, monitoring_ip, monitoring_private_ip) = monitoring_result;
-    info!("launched all instances");
+    info!("launched instances");
 
     // Add monitoring IP rules to binary security groups (for Prometheus scraping)
-    info!("adding monitoring ingress rules to binary security groups");
+    info!("adding monitoring ingress rules");
     for (region, resources) in region_resources.iter() {
         let binary_sg_id = resources.binary_sg_id.as_ref().unwrap();
         add_monitoring_ingress(&ec2_clients[region], binary_sg_id, &monitoring_ip).await?;
@@ -954,7 +954,7 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
             poll_service_active(private_key, &monitoring_ip, "pyroscope").await?;
             poll_service_active(private_key, &monitoring_ip, "tempo").await?;
             poll_service_active(private_key, &monitoring_ip, "grafana-server").await?;
-            info!("configured monitoring instance");
+            info!(ip = monitoring_ip.as_str(), "configured monitoring instance");
             Ok::<(), Error>(())
         },
         async {
