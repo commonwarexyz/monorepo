@@ -34,7 +34,7 @@ pub trait Updatable: Gettable {
         value: Self::Value,
     ) -> impl Future<Output = Result<bool, Self::Error>> + Send + use<'a, Self>
     where
-        Self: Send + Sync,
+        Self: Send,
     {
         async {
             if self.get(&key).await?.is_some() {
@@ -53,7 +53,7 @@ pub trait Updatable: Gettable {
         update: F,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send + use<'a, Self, F>
     where
-        Self: Send + Sync,
+        Self: Send,
         Self::Value: Default,
         F: FnOnce(&mut Self::Value) + Send + 'a,
     {
