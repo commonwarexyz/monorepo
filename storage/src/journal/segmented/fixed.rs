@@ -338,7 +338,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     /// # Arguments
     /// * `section` - The section number to initialize
     /// * `item_count` - Number of zero-filled items to write
-    pub async fn init_section_at_size(
+    pub(crate) async fn init_section_at_size(
         &mut self,
         section: u64,
         item_count: u64,
@@ -359,7 +359,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     ///
     /// This is used to maintain the invariant that at least one blob always exists
     /// (the "tail" blob), which allows reconstructing journal size on reopen.
-    pub async fn ensure_section_exists(&mut self, section: u64) -> Result<(), Error> {
+    pub(crate) async fn ensure_section_exists(&mut self, section: u64) -> Result<(), Error> {
         self.manager.get_or_create(section).await?;
         Ok(())
     }
