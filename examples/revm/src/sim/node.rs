@@ -150,6 +150,7 @@ pub(super) async fn start_all_nodes(
     Ok((nodes, finalized_rx))
 }
 
+/// Initialize and run a single node (QMDB/state + marshal + simplex engine).
 async fn start_node(
     context: &tokio::Context,
     oracle: &mut simulated::Oracle<Peer, tokio::Context>,
@@ -262,6 +263,7 @@ async fn start_node(
     Ok(handle)
 }
 
+/// Register the simulated transport channels for a node with the oracle.
 async fn register_channels(
     control: &mut simulated::Control<Peer, tokio::Context>,
     quota: Quota,
@@ -296,6 +298,7 @@ async fn register_channels(
     })
 }
 
+/// Default block codec configuration for REVM transactions.
 const fn block_codec_cfg() -> crate::types::BlockCfg {
     crate::types::BlockCfg {
         max_txs: BLOCK_CODEC_MAX_TXS,
@@ -305,6 +308,7 @@ const fn block_codec_cfg() -> crate::types::BlockCfg {
     }
 }
 
+/// Wire up the marshal actor for block dissemination/backfill and finalized reporting.
 async fn start_marshal<M>(
     context: &tokio::Context,
     start: MarshalStart<M>,
