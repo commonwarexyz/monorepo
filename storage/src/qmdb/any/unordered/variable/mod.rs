@@ -509,24 +509,23 @@ pub(super) mod test {
         assert_send(db.write_batch(vec![(key, Some(value))].into_iter()));
     }
 
-    #[test]
-    fn test_futures_are_send() {
-        #[allow(dead_code)]
-        type MutableDb =
-            Db<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap, Unmerkleized, NonDurable>;
+    type MutableDb =
+        Db<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap, Unmerkleized, NonDurable>;
 
-        fn _check_merkleized(db: &mut AnyTest, key: Digest, loc: Location) {
-            assert_gettable_futures_are_send(db, &key);
-            assert_log_store_futures_are_send(db);
-            assert_prunable_store_futures_are_send(db, loc);
-            assert_merkleized_store_futures_are_send(db, loc);
-        }
-        fn _check_mutable(db: &mut MutableDb, key: Digest, value: Vec<u8>) {
-            assert_gettable_futures_are_send(db, &key);
-            assert_log_store_futures_are_send(db);
-            assert_updatable_futures_are_send(db, key, value.clone());
-            assert_deletable_futures_are_send(db, key);
-            assert_batchable_futures_are_send(db, key, value);
-        }
+    #[allow(dead_code)]
+    fn assert_merkleized_db_futures_are_send(db: &mut AnyTest, key: Digest, loc: Location) {
+        assert_gettable_futures_are_send(db, &key);
+        assert_log_store_futures_are_send(db);
+        assert_prunable_store_futures_are_send(db, loc);
+        assert_merkleized_store_futures_are_send(db, loc);
+    }
+
+    #[allow(dead_code)]
+    fn assert_mutable_db_futures_are_send(db: &mut MutableDb, key: Digest, value: Vec<u8>) {
+        assert_gettable_futures_are_send(db, &key);
+        assert_log_store_futures_are_send(db);
+        assert_updatable_futures_are_send(db, key, value.clone());
+        assert_deletable_futures_are_send(db, key);
+        assert_batchable_futures_are_send(db, key, value);
     }
 }

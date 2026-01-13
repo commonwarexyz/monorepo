@@ -1219,21 +1219,21 @@ mod test {
         assert_send(db.write_batch(vec![(key, Some(value))].into_iter()));
     }
 
-    #[test]
-    fn test_futures_are_send() {
-        fn _check_merkleized(db: &mut FixedDb, key: FixedBytes<4>, loc: Location) {
-            assert_gettable_futures_are_send(db, &key);
-            assert_log_store_futures_are_send(db);
-            assert_prunable_store_futures_are_send(db, loc);
-            assert_merkleized_store_futures_are_send(db, loc);
-        }
-        fn _check_mutable(db: &mut MutableFixedDb, key: FixedBytes<4>, value: Digest) {
-            assert_gettable_futures_are_send(db, &key);
-            assert_log_store_futures_are_send(db);
-            assert_updatable_futures_are_send(db, key.clone(), value);
-            assert_deletable_futures_are_send(db, key.clone());
-            assert_batchable_futures_are_send(db, key, value);
-        }
+    #[allow(dead_code)]
+    fn assert_merkleized_db_futures_are_send(db: &mut FixedDb, key: FixedBytes<4>, loc: Location) {
+        assert_gettable_futures_are_send(db, &key);
+        assert_log_store_futures_are_send(db);
+        assert_prunable_store_futures_are_send(db, loc);
+        assert_merkleized_store_futures_are_send(db, loc);
+    }
+
+    #[allow(dead_code)]
+    fn assert_mutable_db_futures_are_send(db: &mut MutableFixedDb, key: FixedBytes<4>, value: Digest) {
+        assert_gettable_futures_are_send(db, &key);
+        assert_log_store_futures_are_send(db);
+        assert_updatable_futures_are_send(db, key.clone(), value);
+        assert_deletable_futures_are_send(db, key.clone());
+        assert_batchable_futures_are_send(db, key, value);
     }
 
     async fn test_ordered_any_db_basic<D: TestableAnyDb<Digest>>(

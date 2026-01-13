@@ -1212,22 +1212,22 @@ mod test {
         assert_send(db.delete(key));
     }
 
-    #[test]
-    fn test_futures_are_send() {
-        fn _check_durable(db: &mut TestStore, key: Digest, loc: Location) {
-            assert_log_store_futures_are_send(db);
-            assert_prunable_store_futures_are_send(db, loc);
-            assert_gettable_futures_are_send(db, &key);
-        }
-        fn _check_dirty(
-            db: &mut Db<deterministic::Context, Digest, Vec<u8>, TwoCap, NonDurable>,
-            key: Digest,
-            value: Vec<u8>,
-        ) {
-            assert_log_store_futures_are_send(db);
-            assert_gettable_futures_are_send(db, &key);
-            assert_updatable_futures_are_send(db, key, value);
-            assert_deletable_futures_are_send(db, key);
-        }
+    #[allow(dead_code)]
+    fn assert_durable_futures_are_send(db: &mut TestStore, key: Digest, loc: Location) {
+        assert_log_store_futures_are_send(db);
+        assert_prunable_store_futures_are_send(db, loc);
+        assert_gettable_futures_are_send(db, &key);
+    }
+
+    #[allow(dead_code)]
+    fn assert_dirty_futures_are_send(
+        db: &mut Db<deterministic::Context, Digest, Vec<u8>, TwoCap, NonDurable>,
+        key: Digest,
+        value: Vec<u8>,
+    ) {
+        assert_log_store_futures_are_send(db);
+        assert_gettable_futures_are_send(db, &key);
+        assert_updatable_futures_are_send(db, key, value);
+        assert_deletable_futures_are_send(db, key);
     }
 }

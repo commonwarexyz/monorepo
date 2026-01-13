@@ -1059,31 +1059,29 @@ pub(super) mod test {
         assert_send(db.proof(loc, NZU64!(1)));
     }
 
-    #[test]
-    fn test_futures_are_send() {
-        #[allow(dead_code)]
-        type MerkleizedDb =
-            Immutable<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap, Merkleized<Sha256>>;
-        #[allow(dead_code)]
-        type MutableDb = Immutable<
-            deterministic::Context,
-            Digest,
-            Vec<u8>,
-            Sha256,
-            TwoCap,
-            Unmerkleized,
-            NonDurable,
-        >;
+    type MerkleizedDb =
+        Immutable<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap, Merkleized<Sha256>>;
+    type MutableDb = Immutable<
+        deterministic::Context,
+        Digest,
+        Vec<u8>,
+        Sha256,
+        TwoCap,
+        Unmerkleized,
+        NonDurable,
+    >;
 
-        fn _check_merkleized(db: &mut MerkleizedDb, key: Digest, loc: Location) {
-            assert_gettable_futures_are_send(db, &key);
-            assert_log_store_futures_are_send(db);
-            assert_prunable_store_futures_are_send(db, loc);
-            assert_merkleized_store_futures_are_send(db, loc);
-        }
-        fn _check_mutable(db: &mut MutableDb, key: Digest) {
-            assert_gettable_futures_are_send(db, &key);
-            assert_log_store_futures_are_send(db);
-        }
+    #[allow(dead_code)]
+    fn assert_merkleized_db_futures_are_send(db: &mut MerkleizedDb, key: Digest, loc: Location) {
+        assert_gettable_futures_are_send(db, &key);
+        assert_log_store_futures_are_send(db);
+        assert_prunable_store_futures_are_send(db, loc);
+        assert_merkleized_store_futures_are_send(db, loc);
+    }
+
+    #[allow(dead_code)]
+    fn assert_mutable_db_futures_are_send(db: &mut MutableDb, key: Digest) {
+        assert_gettable_futures_are_send(db, &key);
+        assert_log_store_futures_are_send(db);
     }
 }

@@ -750,21 +750,21 @@ mod tests {
         assert_send(archive.sync());
     }
 
-    #[test]
-    fn test_archive_futures_are_send() {
-        fn _check_prunable(
-            archive: &mut prunable::Archive<TwoCap, Context, FixedBytes<64>, i32>,
-            key: FixedBytes<64>,
-            value: i32,
-        ) {
-            assert_archive_futures_are_send(archive, key, value);
-        }
-        fn _check_immutable(
-            archive: &mut immutable::Archive<Context, FixedBytes<64>, i32>,
-            key: FixedBytes<64>,
-            value: i32,
-        ) {
-            assert_archive_futures_are_send(archive, key, value);
-        }
+    #[allow(dead_code)]
+    fn assert_prunable_archive_futures_are_send(
+        archive: &mut prunable::Archive<TwoCap, Context, FixedBytes<64>, i32>,
+        key: FixedBytes<64>,
+        value: i32,
+    ) {
+        assert_archive_futures_are_send(archive, key, value);
+    }
+
+    #[allow(dead_code)]
+    fn assert_immutable_archive_futures_are_send(
+        archive: &mut immutable::Archive<Context, FixedBytes<64>, i32>,
+        key: FixedBytes<64>,
+        value: i32,
+    ) {
+        assert_archive_futures_are_send(archive, key, value);
     }
 }
