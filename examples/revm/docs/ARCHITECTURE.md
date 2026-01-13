@@ -55,7 +55,7 @@ This document walks through the REVM simulation example with a top-down view tha
   3. Previews the resulting QMDB root and updates the ledger view with the snapshot.
 - On `verify`, it replays the block to recompute the root and ensures it matches the declared `state_root`.
 
-### Reporters (`examples/revm/src/application/reporters.rs`)
+### Reporters (`examples/revm/src/application/reporters/seed.rs`, `examples/revm/src/application/reporters/finalized.rs`)
 
 - `SeedReporter` watches simplex activity and writes hashed seeds into the ledger view so `RevmApplication` can populate future `prevrandao`.
 - `FinalizedReporter` reacts to `marshal::Update::Block`:

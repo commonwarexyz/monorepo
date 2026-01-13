@@ -7,11 +7,11 @@ core entities, aggregates, services, and events before diving into the concrete 
 - **Node** – a simulated participant that wires consensus, marshal, and application logic (`examples/revm/src/sim/node.rs`).
 - **LedgerSnapshot** – a captured execution result (parent digest, `RevmDb`, `StateRoot`, `QmdbChanges`) tied to a digest (`examples/revm/src/application/state.rs`).
 - **LedgerView** – the aggregate that owns the mempool, snapshot store, seed cache, and persistence driver.
-- **LedgerService** – the domain service that exposes high-level ledger commands and emits `DomainEvent`s (`examples/revm/src/application/state.rs`).
+- **LedgerService** – the domain service that exposes high-level ledger commands and emits `DomainEvent`s (`examples/revm/src/application/domain.rs`).
 - **Block** – a value object with parent pointer, height, `prevrandao`, `state_root`, and transactions (`examples/revm/src/types.rs`).
 - **Transaction (Tx)** – the value object placed in the mempool and executed inside the REVM (`examples/revm/src/types.rs`).
 - **StateRoot / ConsensusDigest** – authenticated identifiers derived from `QmdbChanges` and the block commitment.
-- **SeedReporter / FinalizedReporter** – services that react to consensus events and interact with the ledger (`examples/revm/src/application/reporters.rs`).
+- **SeedReporter / FinalizedReporter** – services that react to consensus events and interact with the ledger (`examples/revm/src/application/reporters/seed.rs`, `examples/revm/src/application/reporters/finalized.rs`).
 - **Simulation Harness** – the orchestrator that runs deterministic exec/exam loops (`examples/revm/src/sim/mod.rs`).
 
 ## 2. Entities
@@ -41,11 +41,11 @@ Domain services express operations that span aggregates:
 
 - **LedgerService** (`examples/revm/src/application/state.rs`): exposes commands such as `submit_tx`, `parent_snapshot`, `preview_root`, `persist_snapshot`, and `set_seed`. It holds an observer list for domain events, keeping proposals, verifications, and reporters synchronized.
 - **RevmApplication** (`examples/revm/src/application/app.rs`): offers the `Application`/`VerifyingApplication` implementation that consensus calls during propose/verify. It relies on `LedgerService` for ledger commands and ensures blocks only advance after `QmdbChanges` are committed.
-- **SeedReporter / FinalizedReporter** (`examples/revm/src/application/reporters.rs`): respond to marshal events, update the ledger, persist snapshots, refresh seeds, and emit `finalized` signals to the harness.
+- **SeedReporter / FinalizedReporter** (`examples/revm/src/application/reporters/seed.rs`, `examples/revm/src/application/reporters/finalized.rs`): respond to marshal events, update the ledger, persist snapshots, refresh seeds, and emit `finalized` signals to the harness.
 - **Simulation Harness** (`examples/revm/src/sim/mod.rs`): while not a domain service in the classic sense, it orchestrates DKG, node startup, and aggregates domain events for observation.
 
 ## 6. Domain Events
-`LedgerService` emits `DomainEvent`s (`examples/revm/src/application/state.rs`) so other services can react without tightly coupling to the aggregates:
+`LedgerService` emits `DomainEvent`s (`examples/revm/src/application/domain.rs`) so other services can react without tightly coupling to the aggregates:
 
 1. `TransactionSubmitted(TxId)` – emitted when the mempool admits a new transaction.
 2. `SnapshotPersisted(ConsensusDigest)` – emitted after a snapshot is successfully persisted via `QmdbState`.
@@ -69,7 +69,7 @@ DDD thrives when contexts are explicit:
 | `SnapshotStore` | `examples/revm/src/application/state.rs` | Stores cached `LedgerSnapshot`s, tracks persisted digests, and rebuilds `QmdbChanges` chains when replaying missed ancestors. |
 | `LedgerService` | `examples/revm/src/application/state.rs` | Orchestrates ledger commands, publishes `DomainEvent`s, and keeps observer listeners synchronized. |
 | `RevmApplication` | `examples/revm/src/application/app.rs` | Implements `Application`/`VerifyingApplication`, using `LedgerService` for proposal/verification logic and deterministic execution. |
-| `SeedReporter` / `FinalizedReporter` | `examples/revm/src/application/reporters.rs` | React to simplex/marshal events to refresh seeds and persist snapshots while delegating the heavy work to `LedgerService`. |
+| `SeedReporter` / `FinalizedReporter` | `examples/revm/src/application/reporters` | React to simplex/marshal events to refresh seeds and persist snapshots while delegating the heavy work to `LedgerService`. |
 | `NodeHandle` | `examples/revm/src/application/handle.rs` | Exposes submission/query helpers and the `DomainEvent` subscription used by the simulation harness. |
 | Simulation harness | `examples/revm/src/sim/node.rs` | Boots nodes, listens for `SnapshotPersisted`, and emits `FinalizationEvent`s into the harness once persistence is confirmed. |
 

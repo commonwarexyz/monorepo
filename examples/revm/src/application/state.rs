@@ -10,6 +10,7 @@
 //! The simulation harness queries this state through `crate::application::NodeHandle`.
 
 use crate::{
+    application::domain::{DomainEvent, DomainEvents},
     qmdb::{QmdbChanges, QmdbConfig, QmdbState, RevmDb},
     types::{Block, StateRoot, Tx, TxId},
     ConsensusDigest,
@@ -20,26 +21,11 @@ use alloy_evm::revm::{
 };
 use commonware_cryptography::Committable as _;
 use commonware_runtime::{buffer::PoolRef, tokio, Metrics};
-use futures::{
-    channel::mpsc::{unbounded, UnboundedReceiver, UnboundedSender},
-    lock::Mutex,
-};
+use futures::{channel::mpsc::UnboundedReceiver, lock::Mutex};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    sync::{Arc, Mutex as StdMutex},
+    sync::Arc,
 };
-
-/// Events published by the ledger aggregate when domain actions occur.
-#[allow(dead_code)]
-#[derive(Clone, Debug)]
-pub(crate) enum DomainEvent {
-    #[allow(dead_code)]
-    TransactionSubmitted(TxId),
-    #[allow(dead_code)]
-    SnapshotPersisted(ConsensusDigest),
-    #[allow(dead_code)]
-    SeedUpdated(ConsensusDigest, B256),
-}
 
 #[derive(Clone)]
 /// Ledger view that owns the mutexed execution state.
@@ -363,27 +349,24 @@ impl LedgerState {
 /// Domain service that exposes high-level ledger commands.
 pub(crate) struct LedgerService {
     view: LedgerView,
-    listeners: Arc<StdMutex<Vec<UnboundedSender<DomainEvent>>>>,
+    events: DomainEvents,
 }
 
 impl LedgerService {
     pub(crate) fn new(view: LedgerView) -> Self {
         Self {
             view,
-            listeners: Arc::new(StdMutex::new(Vec::new())),
+            events: DomainEvents::new(),
         }
     }
 
     fn publish(&self, event: DomainEvent) {
-        let mut guard = self.listeners.lock().unwrap();
-        guard.retain(|sender| sender.unbounded_send(event.clone()).is_ok());
+        self.events.publish(event);
     }
 
     #[allow(dead_code)]
     pub(crate) fn subscribe(&self) -> UnboundedReceiver<DomainEvent> {
-        let (sender, receiver) = unbounded();
-        self.listeners.lock().unwrap().push(sender);
-        receiver
+        self.events.subscribe()
     }
 
     pub(crate) fn genesis_block(&self) -> Block {

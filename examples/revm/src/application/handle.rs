@@ -4,7 +4,7 @@
 //! - submit transactions into the node-local mempool, and
 //! - query state at a finalized digest for assertions.
 
-use super::state::{DomainEvent, LedgerService};
+use super::{domain::DomainEvent, state::LedgerService};
 use crate::{
     types::{StateRoot, Tx},
     ConsensusDigest,
