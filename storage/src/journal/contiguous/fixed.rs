@@ -219,9 +219,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
                 return Err(Error::MissingBlob(oldest));
             }
             for section in sections {
-                let expected = prev
-                    .checked_add(1)
-                    .ok_or(Error::OffsetOverflow)?;
+                let expected = prev.checked_add(1).ok_or(Error::OffsetOverflow)?;
                 if section != expected {
                     return Err(Error::MissingBlob(expected));
                 }
