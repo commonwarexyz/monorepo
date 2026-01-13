@@ -534,18 +534,16 @@ where
     B: Block,
     ES: Epocher,
 {
-    async fn certify(&mut self, payload: Self::Digest) -> oneshot::Receiver<bool> {
-        // Look up context by block digest and pop the oldest (by round) context from the map.
-        // Using pop_first ensures each concurrent certification for the same digest gets a
-        // unique context, which is critical when a block is re-proposed across multiple views.
-        //
-        // This works because the voter certifies views in ascending order: when the same block
-        // appears in multiple views (e.g., re-proposals at epoch boundaries), certify is called
-        // for the lower view first.
-        let mut contexts_guard = self.verification_contexts.lock().await;
+    async fn certify(&mut self, round: Round, payload: Self::Digest) -> oneshot::Receiver<bool> {
+        // Look up context by (payload, round) to get the exact verification context.
+        // This is necessary because the same block may be proposed in multiple rounds
+        // (e.g., re-proposals at epoch boundaries), and each round has its own context.
+        // We clone rather than remove so the context remains available for crash recovery.
+        // Contexts are cleaned up when finalization advances past them (see report()).
+        let contexts_guard = self.verification_contexts.lock().await;
         let context = contexts_guard
-            .get_mut(&payload)
-            .and_then(|map| map.pop_first().map(|(_, ctx)| ctx));
+            .get(&payload)
+            .and_then(|map| map.get(&round).cloned());
         drop(contexts_guard);
 
         if let Some(context) = context {

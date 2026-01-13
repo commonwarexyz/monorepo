@@ -1634,8 +1634,9 @@ mod tests {
 
             // Consensus determines parent should be block at height 21
             // and calls verify on the Marshaled automaton with a block at height 35
+            let byzantine_round = Round::new(Epoch::new(1), View::new(35));
             let byzantine_context = Context {
-                round: Round::new(Epoch::new(1), View::new(35)),
+                round: byzantine_round,
                 leader: me.clone(),
                 parent: (View::new(21), parent_commitment), // Consensus says parent is at height 21
             };
@@ -1650,7 +1651,7 @@ mod tests {
                 .verify(byzantine_context, malicious_commitment)
                 .await
                 .await;
-            let verify = marshaled.certify(malicious_commitment).await;
+            let verify = marshaled.certify(byzantine_round, malicious_commitment).await;
 
             assert!(
                 !verify.await.unwrap(),
@@ -1679,8 +1680,9 @@ mod tests {
 
             // Consensus determines parent should be block at height 21
             // and calls verify on the Marshaled automaton with a block at height 22
+            let byzantine_round = Round::new(Epoch::new(1), View::new(22));
             let byzantine_context = Context {
-                round: Round::new(Epoch::new(1), View::new(22)),
+                round: byzantine_round,
                 leader: me.clone(),
                 parent: (View::new(21), parent_commitment), // Consensus says parent is at height 21
             };
@@ -1696,7 +1698,7 @@ mod tests {
                 .verify(byzantine_context, malicious_commitment)
                 .await
                 .await;
-            let verify = marshaled.certify(malicious_commitment).await;
+            let verify = marshaled.certify(byzantine_round, malicious_commitment).await;
 
             assert!(
                 !verify.await.unwrap(),
@@ -2015,8 +2017,9 @@ mod tests {
 
             context.sleep(Duration::from_millis(10)).await;
 
+            let unsupported_round = Round::new(Epoch::new(1), View::new(20));
             let unsupported_context = Context {
-                round: Round::new(Epoch::new(1), View::new(20)),
+                round: unsupported_round,
                 leader: me.clone(),
                 parent: (View::new(19), parent_commitment),
             };
@@ -2025,7 +2028,7 @@ mod tests {
                 .verify(unsupported_context, block_commitment)
                 .await
                 .await;
-            let verify = marshaled.certify(block_commitment).await;
+            let verify = marshaled.certify(unsupported_round, block_commitment).await;
 
             assert!(
                 !verify.await.unwrap(),
