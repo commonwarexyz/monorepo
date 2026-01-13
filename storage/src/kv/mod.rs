@@ -94,7 +94,7 @@ pub(crate) mod tests {
         T::Value: Default + Clone,
     {
         assert_send(db.update(key.clone(), value.clone()));
-        assert_send(db.create(key.clone(), value.clone()));
+        assert_send(db.create(key.clone(), value));
         assert_send(db.upsert(key, |_| {}));
     }
 

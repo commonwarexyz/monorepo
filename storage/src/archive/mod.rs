@@ -765,11 +765,25 @@ mod tests {
     }
 
     #[allow(dead_code)]
+    fn assert_prunable_archive_destroy_is_send(
+        archive: prunable::Archive<TwoCap, Context, FixedBytes<64>, i32>,
+    ) {
+        assert_archive_destroy_is_send(archive);
+    }
+
+    #[allow(dead_code)]
     fn assert_immutable_archive_futures_are_send(
         archive: &mut immutable::Archive<Context, FixedBytes<64>, i32>,
         key: FixedBytes<64>,
         value: i32,
     ) {
         assert_archive_futures_are_send(archive, key, value);
+    }
+
+    #[allow(dead_code)]
+    fn assert_immutable_archive_destroy_is_send(
+        archive: immutable::Archive<Context, FixedBytes<64>, i32>,
+    ) {
+        assert_archive_destroy_is_send(archive);
     }
 }

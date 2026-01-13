@@ -1028,10 +1028,16 @@ where
 mod test {
     use super::*;
     use crate::{
-        kv::{Deletable as _, Gettable as _, Updatable as _},
+        kv::{
+            tests::{assert_batchable, assert_deletable, assert_gettable, assert_send},
+            Deletable as _, Gettable as _, Updatable as _,
+        },
         qmdb::{
             any::test::{fixed_db_config, variable_db_config},
-            store::{LogStore as _, MerkleizedStore},
+            store::{
+                tests::{assert_log_store, assert_merkleized_store, assert_prunable_store},
+                LogStore as _, MerkleizedStore,
+            },
         },
         translator::TwoCap,
     };
@@ -1161,11 +1167,6 @@ mod test {
             test_ordered_any_db_empty(context, db, |ctx| Box::pin(open_variable_db(ctx))).await;
         });
     }
-
-    use crate::{
-        kv::tests::{assert_batchable, assert_deletable, assert_gettable, assert_send},
-        qmdb::store::tests::{assert_log_store, assert_merkleized_store, assert_prunable_store},
-    };
 
     #[allow(dead_code)]
     type MutableFixedDb =

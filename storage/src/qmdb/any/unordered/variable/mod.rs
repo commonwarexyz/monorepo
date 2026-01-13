@@ -91,7 +91,19 @@ impl<E: Storage + Clock + Metrics, K: Array, V: VariableValue, H: Hasher, T: Tra
 #[cfg(test)]
 pub(super) mod test {
     use super::*;
-    use crate::{index::Unordered as _, qmdb::store::batch_tests, translator::TwoCap};
+    use crate::{
+        index::Unordered as _,
+        kv::tests::{assert_batchable, assert_deletable, assert_gettable, assert_send},
+        mmr::Location,
+        qmdb::{
+            store::{
+                batch_tests,
+                tests::{assert_log_store, assert_merkleized_store, assert_prunable_store},
+            },
+            NonDurable, Unmerkleized,
+        },
+        translator::TwoCap,
+    };
     use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
     use commonware_macros::test_traced;
     use commonware_math::algebra::Random;
@@ -448,15 +460,6 @@ pub(super) mod test {
             let _ = db.get(&key).await;
         }
     }
-
-    use crate::{
-        kv::tests::{assert_batchable, assert_deletable, assert_gettable, assert_send},
-        mmr::Location,
-        qmdb::{
-            store::tests::{assert_log_store, assert_merkleized_store, assert_prunable_store},
-            NonDurable, Unmerkleized,
-        },
-    };
 
     type MutableDb =
         Db<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap, Unmerkleized, NonDurable>;

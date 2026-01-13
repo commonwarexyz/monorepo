@@ -76,10 +76,14 @@ pub(super) mod test {
     use super::*;
     use crate::{
         index::Unordered as _,
-        mmr::{Position, StandardHasher},
+        kv::tests::{assert_batchable, assert_deletable, assert_gettable, assert_send},
+        mmr::{Location, Position, StandardHasher},
         qmdb::{
             any::unordered::{fixed::Operation, Update},
-            store::batch_tests,
+            store::{
+                batch_tests,
+                tests::{assert_log_store, assert_merkleized_store, assert_prunable_store},
+            },
             verify_proof, NonDurable, Unmerkleized,
         },
         translator::TwoCap,
@@ -626,11 +630,6 @@ pub(super) mod test {
     fn test_any_unordered_fixed_batch() {
         batch_tests::test_batch(|ctx| async move { create_test_db(ctx).await.into_mutable() });
     }
-
-    use crate::{
-        kv::tests::{assert_batchable, assert_deletable, assert_gettable, assert_send},
-        qmdb::store::tests::{assert_log_store, assert_merkleized_store, assert_prunable_store},
-    };
 
     #[allow(dead_code)]
     fn assert_merkleized_db_futures_are_send(db: &mut AnyTest, key: Digest, loc: Location) {
