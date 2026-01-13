@@ -1132,37 +1132,21 @@ mod test {
         });
     }
 
-    fn assert_send<T: Send>(_: T) {}
-
-    use crate::qmdb::store::{LogStore, MerkleizedStore, PrunableStore};
-
-    #[allow(dead_code)]
-    fn assert_log_store_futures_are_send<T: LogStore>(db: &T) {
-        assert_send(db.get_metadata());
-    }
-
-    #[allow(dead_code)]
-    fn assert_prunable_store_futures_are_send<T: PrunableStore>(db: &mut T, loc: Location) {
-        assert_send(db.prune(loc));
-    }
-
-    #[allow(dead_code)]
-    fn assert_merkleized_store_futures_are_send<T: MerkleizedStore>(db: &T, loc: Location) {
-        assert_send(db.proof(loc, NZU64!(1)));
-    }
+    use crate::kv::tests::assert_send;
+    use crate::qmdb::store::tests::{assert_log_store, assert_merkleized_store, assert_prunable_store};
 
     #[allow(dead_code)]
     fn assert_clean_db_futures_are_send(db: &mut CleanDb, loc: Location) {
-        assert_log_store_futures_are_send(db);
-        assert_prunable_store_futures_are_send(db, loc);
-        assert_merkleized_store_futures_are_send(db, loc);
+        assert_log_store(db);
+        assert_prunable_store(db, loc);
+        assert_merkleized_store(db, loc);
         assert_send(db.sync());
         assert_send(db.get(loc));
     }
 
     #[allow(dead_code)]
     fn assert_mutable_db_futures_are_send(db: &mut MutableDb, loc: Location, value: Vec<u8>) {
-        assert_log_store_futures_are_send(db);
+        assert_log_store(db);
         assert_send(db.get(loc));
         assert_send(db.append(value));
     }

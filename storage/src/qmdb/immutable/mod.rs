@@ -1032,32 +1032,8 @@ pub(super) mod test {
         });
     }
 
-    fn assert_send<T: Send>(_: T) {}
-
-    use crate::{
-        kv::Gettable,
-        qmdb::store::{LogStore, MerkleizedStore, PrunableStore},
-    };
-
-    #[allow(dead_code)]
-    fn assert_gettable_futures_are_send<T: Gettable + Send>(db: &T, key: &T::Key) {
-        assert_send(db.get(key));
-    }
-
-    #[allow(dead_code)]
-    fn assert_log_store_futures_are_send<T: LogStore>(db: &T) {
-        assert_send(db.get_metadata());
-    }
-
-    #[allow(dead_code)]
-    fn assert_prunable_store_futures_are_send<T: PrunableStore>(db: &mut T, loc: Location) {
-        assert_send(db.prune(loc));
-    }
-
-    #[allow(dead_code)]
-    fn assert_merkleized_store_futures_are_send<T: MerkleizedStore>(db: &T, loc: Location) {
-        assert_send(db.proof(loc, NZU64!(1)));
-    }
+    use crate::kv::tests::{assert_gettable, assert_send};
+    use crate::qmdb::store::tests::{assert_log_store, assert_merkleized_store, assert_prunable_store};
 
     type MerkleizedDb =
         Immutable<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap, Merkleized<Sha256>>;
@@ -1073,17 +1049,17 @@ pub(super) mod test {
 
     #[allow(dead_code)]
     fn assert_merkleized_db_futures_are_send(db: &mut MerkleizedDb, key: Digest, loc: Location) {
-        assert_gettable_futures_are_send(db, &key);
-        assert_log_store_futures_are_send(db);
-        assert_prunable_store_futures_are_send(db, loc);
-        assert_merkleized_store_futures_are_send(db, loc);
+        assert_gettable(db, &key);
+        assert_log_store(db);
+        assert_prunable_store(db, loc);
+        assert_merkleized_store(db, loc);
         assert_send(db.sync());
     }
 
     #[allow(dead_code)]
     fn assert_mutable_db_futures_are_send(db: &mut MutableDb, key: Digest, value: Vec<u8>) {
-        assert_gettable_futures_are_send(db, &key);
-        assert_log_store_futures_are_send(db);
+        assert_gettable(db, &key);
+        assert_log_store(db);
         assert_send(db.set(key, value));
     }
 

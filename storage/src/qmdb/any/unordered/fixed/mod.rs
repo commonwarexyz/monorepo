@@ -627,76 +627,26 @@ pub(super) mod test {
         batch_tests::test_batch(|ctx| async move { create_test_db(ctx).await.into_mutable() });
     }
 
-    fn assert_send<T: Send>(_: T) {}
-
-    use crate::{
-        kv::{Batchable, Deletable, Gettable, Updatable},
-        qmdb::store::{LogStore, MerkleizedStore, PrunableStore},
-    };
-
-    #[allow(dead_code)]
-    fn assert_gettable_futures_are_send<T: Gettable + Send>(db: &T, key: &T::Key) {
-        assert_send(db.get(key));
-    }
-
-    #[allow(dead_code)]
-    fn assert_log_store_futures_are_send<T: LogStore>(db: &T) {
-        assert_send(db.get_metadata());
-    }
-
-    #[allow(dead_code)]
-    fn assert_prunable_store_futures_are_send<T: PrunableStore>(db: &mut T, loc: Location) {
-        assert_send(db.prune(loc));
-    }
-
-    #[allow(dead_code)]
-    fn assert_merkleized_store_futures_are_send<T: MerkleizedStore>(db: &T, loc: Location) {
-        assert_send(db.proof(loc, NZU64!(1)));
-    }
-
-    #[allow(dead_code)]
-    fn assert_updatable_futures_are_send<T: Updatable + Send>(
-        db: &mut T,
-        key: T::Key,
-        value: T::Value,
-    ) where
-        T::Key: Clone,
-        T::Value: Clone,
-    {
-        assert_send(db.update(key.clone(), value.clone()));
-        assert_send(db.create(key, value));
-    }
-
-    #[allow(dead_code)]
-    fn assert_deletable_futures_are_send<T: Deletable + Send>(db: &mut T, key: T::Key) {
-        assert_send(db.delete(key));
-    }
-
-    #[allow(dead_code)]
-    fn assert_batchable_futures_are_send<T: Batchable + Send>(
-        db: &mut T,
-        key: T::Key,
-        value: T::Value,
-    ) {
-        assert_send(db.write_batch(vec![(key, Some(value))].into_iter()));
-    }
+    use crate::kv::tests::{assert_batchable, assert_deletable, assert_gettable, assert_send};
+    use crate::qmdb::store::tests::{assert_log_store, assert_merkleized_store, assert_prunable_store};
 
     #[allow(dead_code)]
     fn assert_merkleized_db_futures_are_send(db: &mut AnyTest, key: Digest, loc: Location) {
-        assert_gettable_futures_are_send(db, &key);
-        assert_log_store_futures_are_send(db);
-        assert_prunable_store_futures_are_send(db, loc);
-        assert_merkleized_store_futures_are_send(db, loc);
+        assert_gettable(db, &key);
+        assert_log_store(db);
+        assert_prunable_store(db, loc);
+        assert_merkleized_store(db, loc);
         assert_send(db.sync());
     }
 
     #[allow(dead_code)]
     fn assert_mutable_db_futures_are_send(db: &mut DirtyAnyTest, key: Digest, value: Digest) {
-        assert_gettable_futures_are_send(db, &key);
-        assert_log_store_futures_are_send(db);
-        assert_updatable_futures_are_send(db, key, value);
-        assert_deletable_futures_are_send(db, key);
-        assert_batchable_futures_are_send(db, key, value);
+        assert_gettable(db, &key);
+        assert_log_store(db);
+        assert_send(db.update(key, value));
+        assert_send(db.create(key, value));
+        assert_deletable(db, key);
+        assert_batchable(db, key, value);
         assert_send(db.get_with_loc(&key));
     }
 

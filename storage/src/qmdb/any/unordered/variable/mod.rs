@@ -92,7 +92,7 @@ impl<E: Storage + Clock + Metrics, K: Array, V: VariableValue, H: Hasher, T: Tra
 pub(super) mod test {
     use super::*;
     use crate::{
-        index::Unordered as _, kv::Batchable, qmdb::store::batch_tests, translator::TwoCap,
+        index::Unordered as _, qmdb::store::batch_tests, translator::TwoCap,
     };
     use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
     use commonware_macros::test_traced;
@@ -434,8 +434,6 @@ pub(super) mod test {
         }
     }
 
-    fn assert_send<T: Send>(_: T) {}
-
     /// Regression test for https://github.com/commonwarexyz/monorepo/issues/2787
     #[allow(dead_code, clippy::manual_async_fn)]
     fn issue_2787_regression(
@@ -453,81 +451,31 @@ pub(super) mod test {
         }
     }
 
-    use crate::{
-        kv::{Deletable, Gettable, Updatable},
-        mmr::Location,
-        qmdb::{
-            store::{LogStore, MerkleizedStore, PrunableStore},
-            NonDurable, Unmerkleized,
-        },
-    };
-
-    #[allow(dead_code)]
-    fn assert_gettable_futures_are_send<T: Gettable + Send>(db: &T, key: &T::Key) {
-        assert_send(db.get(key));
-    }
-
-    #[allow(dead_code)]
-    fn assert_log_store_futures_are_send<T: LogStore>(db: &T) {
-        assert_send(db.get_metadata());
-    }
-
-    #[allow(dead_code)]
-    fn assert_prunable_store_futures_are_send<T: PrunableStore>(db: &mut T, loc: Location) {
-        assert_send(db.prune(loc));
-    }
-
-    #[allow(dead_code)]
-    fn assert_merkleized_store_futures_are_send<T: MerkleizedStore>(db: &T, loc: Location) {
-        assert_send(db.proof(loc, NZU64!(1)));
-    }
-
-    #[allow(dead_code)]
-    fn assert_updatable_futures_are_send<T: Updatable + Send>(
-        db: &mut T,
-        key: T::Key,
-        value: T::Value,
-    ) where
-        T::Key: Clone,
-        T::Value: Clone,
-    {
-        assert_send(db.update(key.clone(), value.clone()));
-        assert_send(db.create(key, value));
-    }
-
-    #[allow(dead_code)]
-    fn assert_deletable_futures_are_send<T: Deletable + Send>(db: &mut T, key: T::Key) {
-        assert_send(db.delete(key));
-    }
-
-    #[allow(dead_code)]
-    fn assert_batchable_futures_are_send<T: Batchable + Send>(
-        db: &mut T,
-        key: T::Key,
-        value: T::Value,
-    ) {
-        assert_send(db.write_batch(vec![(key, Some(value))].into_iter()));
-    }
+    use crate::kv::tests::{assert_batchable, assert_deletable, assert_gettable, assert_send};
+    use crate::mmr::Location;
+    use crate::qmdb::store::tests::{assert_log_store, assert_merkleized_store, assert_prunable_store};
+    use crate::qmdb::{NonDurable, Unmerkleized};
 
     type MutableDb =
         Db<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap, Unmerkleized, NonDurable>;
 
     #[allow(dead_code)]
     fn assert_merkleized_db_futures_are_send(db: &mut AnyTest, key: Digest, loc: Location) {
-        assert_gettable_futures_are_send(db, &key);
-        assert_log_store_futures_are_send(db);
-        assert_prunable_store_futures_are_send(db, loc);
-        assert_merkleized_store_futures_are_send(db, loc);
+        assert_gettable(db, &key);
+        assert_log_store(db);
+        assert_prunable_store(db, loc);
+        assert_merkleized_store(db, loc);
         assert_send(db.sync());
     }
 
     #[allow(dead_code)]
     fn assert_mutable_db_futures_are_send(db: &mut MutableDb, key: Digest, value: Vec<u8>) {
-        assert_gettable_futures_are_send(db, &key);
-        assert_log_store_futures_are_send(db);
-        assert_updatable_futures_are_send(db, key, value.clone());
-        assert_deletable_futures_are_send(db, key);
-        assert_batchable_futures_are_send(db, key, value);
+        assert_gettable(db, &key);
+        assert_log_store(db);
+        assert_send(db.update(key, value.clone()));
+        assert_send(db.create(key, value.clone()));
+        assert_deletable(db, key);
+        assert_batchable(db, key, value);
         assert_send(db.get_with_loc(&key));
     }
 

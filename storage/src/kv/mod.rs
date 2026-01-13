@@ -77,25 +77,34 @@ pub trait Deletable: Updatable {
 }
 
 #[cfg(test)]
-mod tests {
-    fn assert_send<T: Send>(_: T) {}
+pub(crate) mod tests {
+    use super::{Batchable, Deletable, Gettable, Updatable};
 
-    /// Compile-time check that all kv trait methods return Send futures.
-    /// Batchable: Deletable: Updatable: Gettable, so this covers all traits.
+    pub fn assert_send<T: Send>(_: T) {}
+
     #[allow(dead_code)]
-    fn assert_kv_futures_are_send<T: super::Batchable + Send>(
-        db: &mut T,
-        key: T::Key,
-        value: T::Value,
-    ) where
+    pub fn assert_gettable<T: Gettable + Send>(db: &T, key: &T::Key) {
+        assert_send(db.get(key));
+    }
+
+    #[allow(dead_code)]
+    pub fn assert_updatable<T: Updatable + Send>(db: &mut T, key: T::Key, value: T::Value)
+    where
         T::Key: Clone,
         T::Value: Default + Clone,
     {
-        assert_send(db.get(&key));
         assert_send(db.update(key.clone(), value.clone()));
         assert_send(db.create(key.clone(), value.clone()));
-        assert_send(db.upsert(key.clone(), |_| {}));
-        assert_send(db.delete(key.clone()));
+        assert_send(db.upsert(key, |_| {}));
+    }
+
+    #[allow(dead_code)]
+    pub fn assert_deletable<T: Deletable + Send>(db: &mut T, key: T::Key) {
+        assert_send(db.delete(key));
+    }
+
+    #[allow(dead_code)]
+    pub fn assert_batchable<T: Batchable + Send>(db: &mut T, key: T::Key, value: T::Value) {
         assert_send(db.write_batch(vec![(key, Some(value))].into_iter()));
     }
 }

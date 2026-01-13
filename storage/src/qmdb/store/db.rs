@@ -592,10 +592,7 @@ where
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::{
-        kv::{Deletable, Gettable, Updatable},
-        translator::TwoCap,
-    };
+    use crate::{kv::Gettable as _, translator::TwoCap};
     use commonware_cryptography::{
         blake3::{Blake3, Digest},
         Hasher as _,
@@ -1176,47 +1173,14 @@ mod test {
         });
     }
 
-    fn assert_send<T: Send>(_: T) {}
-
-    #[allow(dead_code)]
-    fn assert_log_store_futures_are_send<T: super::LogStore>(db: &T) {
-        assert_send(db.get_metadata());
-    }
-
-    #[allow(dead_code)]
-    fn assert_prunable_store_futures_are_send<T: super::PrunableStore>(db: &mut T, loc: Location) {
-        assert_send(db.prune(loc));
-    }
-
-    #[allow(dead_code)]
-    fn assert_gettable_futures_are_send<T: Gettable + Send>(db: &T, key: &T::Key) {
-        assert_send(db.get(key));
-    }
-
-    #[allow(dead_code)]
-    fn assert_updatable_futures_are_send<T: Updatable + Send>(
-        db: &mut T,
-        key: T::Key,
-        value: T::Value,
-    ) where
-        T::Key: Clone,
-        T::Value: Default + Clone,
-    {
-        assert_send(db.update(key.clone(), value.clone()));
-        assert_send(db.create(key.clone(), value.clone()));
-        assert_send(db.upsert(key, |_| {}));
-    }
-
-    #[allow(dead_code)]
-    fn assert_deletable_futures_are_send<T: Deletable + Send>(db: &mut T, key: T::Key) {
-        assert_send(db.delete(key));
-    }
+    use crate::kv::tests::{assert_deletable, assert_gettable, assert_send, assert_updatable};
+    use crate::qmdb::store::tests::{assert_log_store, assert_prunable_store};
 
     #[allow(dead_code)]
     fn assert_durable_futures_are_send(db: &mut TestStore, key: Digest, loc: Location) {
-        assert_log_store_futures_are_send(db);
-        assert_prunable_store_futures_are_send(db, loc);
-        assert_gettable_futures_are_send(db, &key);
+        assert_log_store(db);
+        assert_prunable_store(db, loc);
+        assert_gettable(db, &key);
         assert_send(db.sync());
     }
 
@@ -1226,10 +1190,10 @@ mod test {
         key: Digest,
         value: Vec<u8>,
     ) {
-        assert_log_store_futures_are_send(db);
-        assert_gettable_futures_are_send(db, &key);
-        assert_updatable_futures_are_send(db, key, value);
-        assert_deletable_futures_are_send(db, key);
+        assert_log_store(db);
+        assert_gettable(db, &key);
+        assert_updatable(db, key, value);
+        assert_deletable(db, key);
     }
 
     #[allow(dead_code)]
