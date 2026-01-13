@@ -59,33 +59,55 @@ impl From<ThresholdScheme> for ConstantSchemeProvider {
 }
 
 struct NodeChannels {
+    /// Channel pair used for voting traffic.
     votes: (ChannelSender, ChannelReceiver),
+    /// Channel pair used for certificate gossip.
     certs: (ChannelSender, ChannelReceiver),
+    /// Channel pair used for resolver/backfill control requests.
     resolver: (ChannelSender, ChannelReceiver),
+    /// Channel pair used for full block broadcast.
     blocks: (ChannelSender, ChannelReceiver),
+    /// Channel pair used for marshal backfill responses.
     backfill: (ChannelSender, ChannelReceiver),
 }
 
 struct NodeInit<'a> {
+    /// Position of the node within the simulated committee.
     index: usize,
+    /// Validator identity key for network registrations.
     public_key: Peer,
+    /// Threshold signing scheme assigned to this node.
     scheme: ThresholdScheme,
+    /// Per-channel rate limit quota.
     quota: Quota,
+    /// Buffer pool used for all storage/journal operations.
     buffer_pool: PoolRef,
+    /// Channel to drive finalization reporting back to the harness.
     finalized_tx: mpsc::UnboundedSender<FinalizationEvent>,
+    /// Shared demo transfer configuration/state.
     demo: &'a demo::DemoTransfer,
 }
 
 struct MarshalStart<M> {
+    /// Node index used for naming partitions/metrics.
     index: usize,
+    /// Node identity key used for network links.
     public_key: Peer,
+    /// Control channel used to register and rate-limit transport channels.
     control: simulated::Control<Peer, tokio::Context>,
+    /// P2P manager holding the oracle/peering state.
     manager: M,
+    /// Threshold signing scheme for this node.
     scheme: ThresholdScheme,
+    /// Buffer pool that backs all storage archives.
     buffer_pool: PoolRef,
+    /// Codec settings for block serialization.
     block_codec_config: crate::types::BlockCfg,
+    /// Channels used for block broadcasts.
     blocks: (ChannelSender, ChannelReceiver),
+    /// Channels used for marshal backfill requests/responses.
     backfill: (ChannelSender, ChannelReceiver),
+    /// Application-level reporter that observes finalized blocks.
     application: application::FinalizedReporter<tokio::Context>,
 }
 
