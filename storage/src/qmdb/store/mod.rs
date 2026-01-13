@@ -62,13 +62,13 @@ pub trait LogStore: Send + Sync {
     fn inactivity_floor_loc(&self) -> Location;
 
     /// Get the metadata associated with the last commit.
-    fn get_metadata(&self) -> impl Future<Output = Result<Option<Self::Value>, Error>>;
+    fn get_metadata(&self) -> impl Future<Output = Result<Option<Self::Value>, Error>> + Send;
 }
 
 /// A trait for stores that can be pruned.
 pub trait PrunableStore: LogStore {
     /// Prune historical operations prior to `loc`.
-    fn prune(&mut self, loc: Location) -> impl Future<Output = Result<(), Error>>;
+    fn prune(&mut self, loc: Location) -> impl Future<Output = Result<(), Error>> + Send;
 }
 
 /// A trait for stores that support authentication through merkleization and inclusion proofs.
@@ -98,7 +98,8 @@ pub trait MerkleizedStore: LogStore {
         &self,
         start_loc: Location,
         max_ops: NonZeroU64,
-    ) -> impl Future<Output = Result<(Proof<Self::Digest>, Vec<Self::Operation>), Error>> {
+    ) -> impl Future<Output = Result<(Proof<Self::Digest>, Vec<Self::Operation>), Error>> + Send
+    {
         self.historical_proof(self.op_count(), start_loc, max_ops)
     }
 
@@ -121,5 +122,5 @@ pub trait MerkleizedStore: LogStore {
         historical_size: Location,
         start_loc: Location,
         max_ops: NonZeroU64,
-    ) -> impl Future<Output = Result<(Proof<Self::Digest>, Vec<Self::Operation>), Error>>;
+    ) -> impl Future<Output = Result<(Proof<Self::Digest>, Vec<Self::Operation>), Error>> + Send;
 }

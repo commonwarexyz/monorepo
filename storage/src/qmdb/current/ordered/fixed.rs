@@ -1996,34 +1996,29 @@ pub mod test {
         });
     }
 
-    /// Helper to assert a future is Send at compile time.
     fn assert_send<T: Send>(_: T) {}
 
-    /// Test that futures returned by Clean (Merkleized, Durable) Db methods are Send.
-    #[allow(dead_code)]
-    fn test_clean_futures_are_send(db: &mut CleanCurrentTest, key: Digest) {
-        // Read operations
-        assert_send(db.get(&key));
-        assert_send(db.get_metadata());
+    #[test_traced]
+    fn test_futures_are_send() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let mut db = open_db(context.clone(), "send_test").await;
+            let key = Sha256::hash(&9u64.to_be_bytes());
+            let loc = Location::new_unchecked(0);
 
-        // Durable-specific operations
-        assert_send(db.sync());
-        assert_send(db.prune(Location::new_unchecked(0)));
-    }
+            assert_send(db.get(&key));
+            assert_send(db.get_metadata());
+            assert_send(db.sync());
+            assert_send(db.prune(loc));
+            assert_send(db.proof(loc, NZU64!(1)));
 
-    /// Test that futures returned by Mutable (Unmerkleized, NonDurable) Db methods are Send.
-    #[allow(dead_code)]
-    fn test_mutable_futures_are_send(mut db: MutableCurrentTest, key: Digest) {
-        // Read operations (inherited)
-        assert_send(db.get(&key));
-        assert_send(db.get_metadata());
-
-        // Mutation operations
-        assert_send(db.update(key, key));
-        assert_send(db.create(key, key));
-        assert_send(db.delete(key));
-
-        // Commit (consumes self)
-        assert_send(db.commit(None));
+            let mut db = db.into_mutable();
+            assert_send(db.get(&key));
+            assert_send(db.get_metadata());
+            assert_send(db.update(key, key));
+            assert_send(db.create(key, key));
+            assert_send(db.delete(key));
+            assert_send(db.commit(None));
+        });
     }
 }

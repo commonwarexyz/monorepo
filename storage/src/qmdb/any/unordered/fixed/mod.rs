@@ -631,13 +631,21 @@ pub(super) mod test {
     fn assert_send<T: Send>(_: T) {}
 
     #[test_traced]
-    fn test_unordered_any_futures_are_send() {
+    fn test_futures_are_send() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut db = open_db(context.clone()).await.into_mutable();
+            let mut db = open_db(context.clone()).await;
             let key = to_digest(9);
             let value = to_digest(5);
+            let loc = Location::new_unchecked(0);
 
+            assert_send(db.get(&key));
+            assert_send(db.get_metadata());
+            assert_send(db.sync());
+            assert_send(db.prune(loc));
+            assert_send(db.proof(loc, NZU64!(1)));
+
+            let mut db = db.into_mutable();
             assert_send(db.get(&key));
             assert_send(db.get_metadata());
             assert_send(db.get_with_loc(&key));
@@ -645,6 +653,7 @@ pub(super) mod test {
             assert_send(db.update(key, value));
             assert_send(db.create(key, value));
             assert_send(db.delete(key));
+            assert_send(db.commit(None));
         });
     }
 
