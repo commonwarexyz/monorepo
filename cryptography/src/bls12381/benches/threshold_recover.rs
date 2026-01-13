@@ -7,7 +7,7 @@ use commonware_cryptography::{
     Signer,
 };
 use commonware_parallel::Sequential;
-use commonware_utils::{quorum, TryCollect};
+use commonware_utils::{Bft3f1, Faults, TryCollect};
 use criterion::{criterion_group, BatchSize, Criterion};
 use rand::{rngs::StdRng, SeedableRng};
 use std::hint::black_box;
@@ -17,7 +17,7 @@ fn benchmark_threshold_recover(c: &mut Criterion) {
     let namespace = b"benchmark";
     let msg = b"hello";
     for &n in &[5, 10, 20, 50, 100, 250, 500] {
-        let t = quorum(n);
+        let t = Bft3f1::quorum(n);
         c.bench_function(&format!("{}/n={} t={}", module_path!(), n, t), |b| {
             b.iter_batched(
                 || {
@@ -25,8 +25,9 @@ fn benchmark_threshold_recover(c: &mut Criterion) {
                         .map(|i| PrivateKey::from_seed(i as u64).public_key())
                         .try_collect()
                         .unwrap();
-                    let (public, shares) = deal::<MinSig, _>(&mut rng, Default::default(), players)
-                        .expect("deal should succeed");
+                    let (public, shares) =
+                        deal::<MinSig, _, Bft3f1>(&mut rng, Default::default(), players)
+                            .expect("deal should succeed");
                     (
                         public,
                         shares
@@ -42,7 +43,7 @@ fn benchmark_threshold_recover(c: &mut Criterion) {
                 },
                 |(public, partials)| {
                     black_box(
-                        primitives::ops::threshold::recover::<MinSig, _, _>(
+                        primitives::ops::threshold::recover::<MinSig, _, Bft3f1>(
                             public.public(),
                             &partials,
                             &Sequential,

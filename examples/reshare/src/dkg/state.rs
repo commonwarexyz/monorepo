@@ -30,7 +30,7 @@ use commonware_storage::{
     journal::segmented::variable::{Config as SVConfig, Journal as SVJournal},
     metadata::{Config as MetadataConfig, Metadata},
 };
-use commonware_utils::{NZUsize, NZU16};
+use commonware_utils::{Faults, NZUsize, NZU16};
 use futures::StreamExt;
 use std::{
     collections::BTreeMap,
@@ -439,7 +439,7 @@ impl<E: Clock + RuntimeStorage + Metrics, V: Variant, P: PublicKey> Storage<E, V
 
     /// Create a Dealer for the given epoch, replaying any stored acks.
     /// Returns None if we've already submitted a log this epoch.
-    pub fn create_dealer<C: Signer<PublicKey = P>>(
+    pub fn create_dealer<C: Signer<PublicKey = P>, M: Faults>(
         &self,
         epoch: EpochNum,
         signer: C,
@@ -453,7 +453,7 @@ impl<E: Clock + RuntimeStorage + Metrics, V: Variant, P: PublicKey> Storage<E, V
         }
 
         // Start a new dealer
-        let (mut crypto_dealer, pub_msg, priv_msgs) = CryptoDealer::start(
+        let (mut crypto_dealer, pub_msg, priv_msgs) = CryptoDealer::start::<M>(
             Transcript::resume(rng_seed).noise(b"dealer-rng"),
             round_info,
             signer,
@@ -478,7 +478,7 @@ impl<E: Clock + RuntimeStorage + Metrics, V: Variant, P: PublicKey> Storage<E, V
     }
 
     /// Create a Player for the given epoch, replaying any stored dealer messages.
-    pub fn create_player<C: Signer<PublicKey = P>>(
+    pub fn create_player<C: Signer<PublicKey = P>, M: Faults>(
         &self,
         epoch: EpochNum,
         signer: C,
@@ -490,7 +490,7 @@ impl<E: Clock + RuntimeStorage + Metrics, V: Variant, P: PublicKey> Storage<E, V
 
         // Replay persisted dealer messages
         for (dealer, pub_msg, priv_msg) in self.dealings(epoch) {
-            player.replay(dealer.clone(), pub_msg, priv_msg);
+            player.replay::<M>(dealer.clone(), pub_msg, priv_msg);
             debug!(?epoch, ?dealer, "replayed committed dealer message");
         }
 
@@ -546,7 +546,7 @@ impl<V: Variant, C: Signer> Dealer<V, C> {
     }
 
     /// Finalize the dealer and produce a signed log for inclusion in a block.
-    pub fn finalize(&mut self) {
+    pub fn finalize<M: Faults>(&mut self) {
         if self.finalized.is_some() {
             return;
         }
@@ -554,7 +554,7 @@ impl<V: Variant, C: Signer> Dealer<V, C> {
         // Even after the finalized_log is taken, we won't attempt to finalize again
         // because the dealer will be None.
         if let Some(dealer) = self.dealer.take() {
-            let log = dealer.finalize();
+            let log = dealer.finalize::<M>();
             self.finalized = Some(log);
         }
     }
@@ -601,7 +601,7 @@ impl<V: Variant, C: Signer> Player<V, C> {
     /// Handle an incoming dealer message.
     ///
     /// If this is a new valid dealer message, persists it to storage before returning.
-    pub async fn handle<E: Clock + RuntimeStorage + Metrics>(
+    pub async fn handle<E: Clock + RuntimeStorage + Metrics, M: Faults>(
         &mut self,
         storage: &mut Storage<E, V, C::PublicKey>,
         epoch: EpochNum,
@@ -617,7 +617,7 @@ impl<V: Variant, C: Signer> Player<V, C> {
         // Otherwise generate a new ack
         if let Some(ack) =
             self.player
-                .dealer_message(dealer.clone(), pub_msg.clone(), priv_msg.clone())
+                .dealer_message::<M>(dealer.clone(), pub_msg.clone(), priv_msg.clone())
         {
             storage
                 .append_dealing(epoch, dealer.clone(), pub_msg, priv_msg)
@@ -629,25 +629,30 @@ impl<V: Variant, C: Signer> Player<V, C> {
     }
 
     /// Replay an already-persisted dealer message (updates in-memory state only).
-    fn replay(&mut self, dealer: C::PublicKey, pub_msg: DealerPubMsg<V>, priv_msg: DealerPrivMsg) {
+    fn replay<M: Faults>(
+        &mut self,
+        dealer: C::PublicKey,
+        pub_msg: DealerPubMsg<V>,
+        priv_msg: DealerPrivMsg,
+    ) {
         if self.acks.contains_key(&dealer) {
             return;
         }
         if let Some(ack) = self
             .player
-            .dealer_message(dealer.clone(), pub_msg, priv_msg)
+            .dealer_message::<M>(dealer.clone(), pub_msg, priv_msg)
         {
             self.acks.insert(dealer, ack);
         }
     }
 
     /// Finalize the player's participation in the DKG round.
-    pub fn finalize(
+    pub fn finalize<M: Faults>(
         self,
         logs: BTreeMap<C::PublicKey, DealerLog<V, C::PublicKey>>,
         strategy: &impl Strategy,
     ) -> Result<(Output<V, C::PublicKey>, Share), commonware_cryptography::bls12381::dkg::Error>
     {
-        self.player.finalize(logs, strategy)
+        self.player.finalize::<M>(logs, strategy)
     }
 }

@@ -29,7 +29,7 @@ use commonware_cryptography::{
 use commonware_p2p::simulated::{Config as NetworkConfig, Link, Network};
 use commonware_parallel::Sequential;
 use commonware_runtime::{buffer::PoolRef, deterministic, Clock, Metrics, Runner, Spawner};
-use commonware_utils::{max_faults, NZUsize, NZU16};
+use commonware_utils::{Bft3f1, Faults, NZUsize, NZU16};
 use futures::{channel::mpsc::Receiver, future::join_all, StreamExt};
 use rand::{rngs::StdRng, RngCore, SeedableRng};
 use std::{
@@ -269,7 +269,7 @@ fn run<P: Simplex>(input: FuzzInput) {
             engine.start(pending, recovered, resolver);
         }
 
-        if input.partition == Partition::Connected && max_faults(n) == f {
+        if input.partition == Partition::Connected && Bft3f1::max_faults(n) == f {
             let mut finalizers = Vec::new();
             for reporter in reporters.iter_mut() {
                 let (mut latest, mut monitor): (View, Receiver<View>) = reporter.subscribe().await;
