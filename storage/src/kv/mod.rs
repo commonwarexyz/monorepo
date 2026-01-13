@@ -83,7 +83,7 @@ mod tests {
     /// Compile-time check that all kv trait methods return Send futures.
     /// Batchable: Deletable: Updatable: Gettable, so this covers all traits.
     #[allow(dead_code)]
-    fn _assert_kv_futures_are_send<T: super::Batchable + Send>(
+    fn assert_kv_futures_are_send<T: super::Batchable + Send>(
         db: &mut T,
         key: T::Key,
         value: T::Value,
