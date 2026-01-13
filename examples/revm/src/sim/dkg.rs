@@ -15,6 +15,7 @@ use commonware_cryptography::{
 use commonware_utils::{ordered::Set, N3f1, TryCollect as _};
 use rand::{rngs::StdRng, SeedableRng as _};
 
+/// Ensure the provided round-robin identity list is unique for the simulation.
 pub(super) fn participants_set(
     participants: &[ed25519::PublicKey],
 ) -> anyhow::Result<Set<ed25519::PublicKey>> {

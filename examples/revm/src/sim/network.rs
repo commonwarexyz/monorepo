@@ -13,6 +13,7 @@ use std::{
     time::Duration,
 };
 
+/// Boot the simulated p2p network and register the participant set.
 pub(super) async fn start_network(
     context: &tokio::Context,
     participants: Set<ed25519::PublicKey>,
@@ -34,6 +35,7 @@ pub(super) async fn start_network(
 }
 
 /// Connect all peers in a full mesh with fixed links.
+/// Connect every registered peer to every other peer (full mesh).
 pub(super) async fn connect_all_peers(
     oracle: &mut simulated::Oracle<ed25519::PublicKey, tokio::Context>,
     peers: &[ed25519::PublicKey],
