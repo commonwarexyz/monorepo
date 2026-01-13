@@ -283,7 +283,7 @@
 //!
 //! For a complete example with resharing, see [commonware-reshare](https://docs.rs/commonware-reshare).
 
-use super::primitives::group::Share;
+use super::primitives::group::{Private, Share};
 use crate::{
     bls12381::primitives::{
         group::Scalar,
@@ -1526,7 +1526,7 @@ impl<V: Variant, S: Signer> Player<V, S> {
                     .expect("select ensures that we can recover")
             },
         );
-        let share = Share::new(self.index, private);
+        let share = Share::new(self.index, Private::new(private));
         Ok((output, share))
     }
 }
@@ -1557,7 +1557,7 @@ pub fn deal<V: Variant, P: Clone + Ord, M: Faults>(
                     .expect("player index should be valid"),
                 &Sequential,
             );
-            let share = Share::new(participant, eval);
+            let share = Share::new(participant, Private::new(eval));
             (p.clone(), share)
         })
         .try_collect()
@@ -1942,7 +1942,7 @@ mod test_plan {
                         (Some(s), false) => Some(s.clone()),
                         (Some(_), true) => Some(Share::new(
                             Participant::new(i_dealer),
-                            Scalar::random(&mut rng),
+                            Private::random(&mut rng),
                         )),
                     };
 

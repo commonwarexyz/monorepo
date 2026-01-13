@@ -40,17 +40,15 @@ fn prepare_evaluations<'a, V: Variant>(
 
 /// Signs the provided message with the key share.
 pub fn sign_message<V: Variant>(
-    private: &Share,
+    share: &Share,
     namespace: &[u8],
     message: &[u8],
 ) -> PartialSignature<V> {
-    let sig = private
-        .private
-        .expose(|private| super::sign_message::<V>(private, namespace, message));
+    let sig = super::sign_message::<V>(&share.private, namespace, message);
 
     PartialSignature {
         value: sig,
-        index: private.index,
+        index: share.index,
     }
 }
 
@@ -61,20 +59,18 @@ pub fn sign_message<V: Variant>(
 /// verifiable with `ops::verify_proof_of_possession`.
 pub fn sign_proof_of_possession<V: Variant>(
     sharing: &Sharing<V>,
-    private: &Share,
+    share: &Share,
     namespace: &[u8],
 ) -> PartialSignature<V> {
-    let sig = private.private.expose(|private| {
-        super::sign::<V>(
-            private,
-            V::PROOF_OF_POSSESSION,
-            &union_unique(namespace, &sharing.public().encode()),
-        )
-    });
+    let sig = super::sign::<V>(
+        &share.private,
+        V::PROOF_OF_POSSESSION,
+        &union_unique(namespace, &sharing.public().encode()),
+    );
 
     PartialSignature {
         value: sig,
-        index: private.index,
+        index: share.index,
     }
 }
 
@@ -350,16 +346,13 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        bls12381::{
-            dkg,
-            primitives::{
-                group::{Private, Scalar, G1_MESSAGE, G2_MESSAGE},
-                ops::{self, hash_with_namespace},
-                variant::{MinPk, MinSig},
-            },
+    use crate::bls12381::{
+        dkg,
+        primitives::{
+            group::{Private, Scalar, G1_MESSAGE, G2_MESSAGE},
+            ops::{self, hash_with_namespace},
+            variant::{MinPk, MinSig},
         },
-        Secret,
     };
     use blst::BLST_ERROR;
     use commonware_codec::Encode;
@@ -743,7 +736,7 @@ mod tests {
             dkg::deal_anonymous::<V, N3f1>(&mut rng, Default::default(), NZU32!(n));
 
         let share = shares.get_mut(3).unwrap();
-        share.private = Secret::new(Private::random(&mut rng));
+        share.private = Private::random(&mut rng);
 
         let namespace = b"test";
         let msg = b"hello";
@@ -803,7 +796,7 @@ mod tests {
         let msg = b"hello";
 
         let corrupted_index = 1;
-        shares[corrupted_index].private = Secret::new(Private::random(&mut rng));
+        shares[corrupted_index].private = Private::random(&mut rng);
 
         let partials: Vec<_> = shares
             .iter()
@@ -847,7 +840,7 @@ mod tests {
 
         let corrupted_indices = vec![1, 3];
         for &idx in &corrupted_indices {
-            shares[idx].private = Secret::new(Private::random(&mut rng));
+            shares[idx].private = Private::random(&mut rng);
         }
 
         let partials: Vec<_> = shares
@@ -960,7 +953,7 @@ mod tests {
         let namespace = b"test";
         let msg = b"hello";
 
-        shares[0].private = Secret::new(Private::random(&mut rng));
+        shares[0].private = Private::random(&mut rng);
 
         let partials: Vec<_> = shares
             .iter()
@@ -994,7 +987,7 @@ mod tests {
         let msg = b"hello";
 
         let corrupted_index = n - 1;
-        shares[corrupted_index as usize].private = Secret::new(Private::random(&mut rng));
+        shares[corrupted_index as usize].private = Private::random(&mut rng);
 
         let partials: Vec<_> = shares
             .iter()

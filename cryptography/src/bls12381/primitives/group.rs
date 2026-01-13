@@ -254,7 +254,65 @@ impl GT {
 }
 
 /// The private key type.
-pub type Private = Scalar;
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Private {
+    scalar: Secret<Scalar>,
+}
+
+impl Private {
+    /// Creates a new private key from a scalar.
+    pub const fn new(private: Scalar) -> Self {
+        Self {
+            scalar: Secret::new(private),
+        }
+    }
+
+    /// Temporarily exposes the inner scalar to a closure.
+    ///
+    /// See [`Secret::expose`](crate::Secret::expose) for more details.
+    pub fn expose<R>(&self, f: impl for<'a> FnOnce(&'a Scalar) -> R) -> R {
+        self.scalar.expose(f)
+    }
+
+    /// Consumes the private key and returns the inner scalar.
+    ///
+    /// See [`Secret::expose_unwrap`](crate::Secret::expose_unwrap) for more details.
+    pub fn expose_unwrap(self) -> Scalar {
+        self.scalar.expose_unwrap()
+    }
+}
+
+impl Write for Private {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.expose(|scalar| scalar.write(buf));
+    }
+}
+
+impl Read for Private {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
+        let scalar = Scalar::read(buf)?;
+        Ok(Self::new(scalar))
+    }
+}
+
+impl FixedSize for Private {
+    const SIZE: usize = PRIVATE_KEY_LENGTH;
+}
+
+impl Random for Private {
+    fn random(rng: impl CryptoRngCore) -> Self {
+        Self::new(Scalar::random(rng))
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl arbitrary::Arbitrary<'_> for Private {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(Self::new(u.arbitrary::<Scalar>()?))
+    }
+}
 
 /// The private key length.
 pub const PRIVATE_KEY_LENGTH: usize = SCALAR_LENGTH;
@@ -546,16 +604,13 @@ pub struct Share {
     /// The share's index in the polynomial.
     pub index: Participant,
     /// The scalar corresponding to the share's secret.
-    pub private: Secret<Private>,
+    pub private: Private,
 }
 
 impl Share {
     /// Creates a new `Share` with the given index and private key.
     pub const fn new(index: Participant, private: Private) -> Self {
-        Self {
-            index,
-            private: Secret::new(private),
-        }
+        Self { index, private }
     }
 
     /// Returns the public key corresponding to the share.
@@ -580,10 +635,7 @@ impl Read for Share {
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let index = Participant::read(buf)?;
         let private = Private::read(buf)?;
-        Ok(Self {
-            index,
-            private: Secret::new(private),
-        })
+        Ok(Self { index, private })
     }
 }
 
@@ -603,11 +655,8 @@ impl Display for Share {
 impl arbitrary::Arbitrary<'_> for Share {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let index = u.arbitrary()?;
-        let private = Private::arbitrary(u)?;
-        Ok(Self {
-            index,
-            private: Secret::new(private),
-        })
+        let private = u.arbitrary::<Private>()?;
+        Ok(Self { index, private })
     }
 }
 
@@ -1741,7 +1790,7 @@ mod tests {
     #[test]
     fn test_share_redacted() {
         let mut rng = test_rng();
-        let share = Share::new(Participant::new(1), Scalar::random(&mut rng));
+        let share = Share::new(Participant::new(1), Private::random(&mut rng));
         let debug = format!("{:?}", share);
         let display = format!("{}", share);
         assert!(debug.contains("REDACTED"));
@@ -1756,6 +1805,7 @@ mod tests {
         commonware_conformance::conformance_tests! {
             CodecConformance<G1>,
             CodecConformance<G2>,
+            CodecConformance<Private>,
             CodecConformance<Scalar>,
             CodecConformance<Share>
         }

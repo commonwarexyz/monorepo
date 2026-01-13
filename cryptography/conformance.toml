@@ -50,6 +50,10 @@ hash = "ba2d888e6d1050e6a361aa79430c1bb03d90eb8e74b9715b1d7d01c35a495e1d"
 n_cases = 65536
 hash = "683a309d5fefb8e0ab6778c22e66bd43e139c5f56204df932fd81052792adf4b"
 
+["commonware_cryptography::bls12381::primitives::group::tests::conformance::CodecConformance<Private>"]
+n_cases = 65536
+hash = "2d443ed310b383cab74abec888d0637ab81435779e274ed7be84adc7b10e2f86"
+
 ["commonware_cryptography::bls12381::primitives::group::tests::conformance::CodecConformance<Scalar>"]
 n_cases = 65536
 hash = "2d443ed310b383cab74abec888d0637ab81435779e274ed7be84adc7b10e2f86"
