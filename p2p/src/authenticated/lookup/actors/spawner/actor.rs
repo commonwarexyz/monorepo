@@ -26,8 +26,8 @@ pub struct Actor<E: Spawner + Clock + CryptoRngCore + Metrics, Si: Sink, St: Str
     connections: Gauge,
     sent_messages: Family<metrics::Message, Counter>,
     received_messages: Family<metrics::Message, Counter>,
+    dropped_messages: Family<metrics::Message, Counter>,
     rate_limited: Family<metrics::Message, Counter>,
-    app_dropped: Family<metrics::Message, Counter>,
 }
 
 impl<E: Spawner + Clock + CryptoRngCore + Metrics, Si: Sink, St: Stream, C: PublicKey>
@@ -37,8 +37,8 @@ impl<E: Spawner + Clock + CryptoRngCore + Metrics, Si: Sink, St: Stream, C: Publ
         let connections = Gauge::default();
         let sent_messages = Family::<metrics::Message, Counter>::default();
         let received_messages = Family::<metrics::Message, Counter>::default();
+        let dropped_messages = Family::<metrics::Message, Counter>::default();
         let rate_limited = Family::<metrics::Message, Counter>::default();
-        let app_dropped = Family::<metrics::Message, Counter>::default();
         context.register(
             "connections",
             "number of connected peers",
@@ -51,14 +51,14 @@ impl<E: Spawner + Clock + CryptoRngCore + Metrics, Si: Sink, St: Stream, C: Publ
             received_messages.clone(),
         );
         context.register(
+            "messages_dropped",
+            "messages dropped due to full application buffer",
+            dropped_messages.clone(),
+        );
+        context.register(
             "messages_rate_limited",
             "messages rate limited",
             rate_limited.clone(),
-        );
-        context.register(
-            "messages_app_dropped",
-            "messages dropped due to full application buffer",
-            app_dropped.clone(),
         );
         let (sender, receiver) = Mailbox::new(cfg.mailbox_size);
 
@@ -71,8 +71,8 @@ impl<E: Spawner + Clock + CryptoRngCore + Metrics, Si: Sink, St: Stream, C: Publ
                 connections,
                 sent_messages,
                 received_messages,
+                dropped_messages,
                 rate_limited,
-                app_dropped,
             },
             sender,
         )
@@ -114,8 +114,8 @@ impl<E: Spawner + Clock + CryptoRngCore + Metrics, Si: Sink, St: Stream, C: Publ
                         let connections = self.connections.clone();
                         let sent_messages = self.sent_messages.clone();
                         let received_messages = self.received_messages.clone();
+                        let dropped_messages = self.dropped_messages.clone();
                         let rate_limited = self.rate_limited.clone();
-                        let app_dropped = self.app_dropped.clone();
                         let mut tracker = tracker.clone();
                         let mut router = router.clone();
 
@@ -131,8 +131,8 @@ impl<E: Spawner + Clock + CryptoRngCore + Metrics, Si: Sink, St: Stream, C: Publ
                                         ping_frequency: self.ping_frequency,
                                         sent_messages,
                                         received_messages,
+                                        dropped_messages,
                                         rate_limited,
-                                        app_dropped,
                                         mailbox_size: self.mailbox_size,
                                     },
                                 );

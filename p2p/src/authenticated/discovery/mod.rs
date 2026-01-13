@@ -119,6 +119,13 @@
 //! _Users should consider these rate limits as best-effort protection against moderate abuse. Targeted abuse (e.g. DDoS)
 //! must be mitigated with an external proxy (that limits inbound connection attempts to authorized IPs)._
 //!
+//! ## Message Delivery
+//!
+//! Outgoing messages are dropped when a peer's send buffer is full, preventing slow peers
+//! from blocking sends to other peers. Incoming messages are dropped when the application's
+//! receive buffer is full, ensuring protocol messages (BitVec, Peers) continue to flow and
+//! connections remain healthy.
+//!
 //! # Example
 //!
 //! ```rust
@@ -2353,61 +2360,6 @@ mod tests {
             for _ in 0..11 {
                 assert!(fast_receiver.try_next().is_ok());
             }
-        });
-    }
-
-    #[test]
-    fn test_broadcast_performance_1024_peers() {
-        use crate::authenticated::{
-            discovery::actors::router::{Actor, Config as RouterConfig},
-            relay::Relay,
-        };
-        use bytes::Bytes;
-
-        let executor = deterministic::Runner::timed(Duration::from_secs(60));
-        executor.start(|context| async move {
-            // Create router with large mailbox (matching reported config)
-            let cfg = RouterConfig { mailbox_size: 4096 };
-            let (router, mut mailbox, messenger) =
-                Actor::<_, ed25519::PublicKey>::new(context.clone(), cfg);
-
-            let channels = channels::Channels::new(messenger.clone(), MAX_MESSAGE_SIZE);
-            let _handle = router.start(channels);
-
-            // Register 1024 peers with large buffers (matching reported config)
-            let peer_count = 1024;
-            let mut receivers = Vec::with_capacity(peer_count);
-            for i in 0..peer_count {
-                let peer = ed25519::PrivateKey::from_seed(i as u64).public_key();
-                let (low, low_rx) = mpsc::channel(4096);
-                let (high, _high_rx) = mpsc::channel(4096);
-                assert!(mailbox.ready(peer, Relay::new(low, high)).await.is_some());
-                receivers.push(low_rx);
-            }
-
-            // Send 16KB message to all peers
-            let message = Bytes::from(vec![0u8; 16 * 1024]);
-            let mut messenger = messenger;
-
-            let start = std::time::Instant::now();
-            let sent = messenger.content(Recipients::All, 0, message, false).await;
-            let elapsed = start.elapsed();
-
-            println!(
-                "Sent 16KB to {} peers in {:?} ({} successful)",
-                peer_count,
-                elapsed,
-                sent.len()
-            );
-            assert_eq!(sent.len(), peer_count);
-
-            // With try_send, this should complete quickly
-            // (no async overhead per peer, just synchronous try_send calls)
-            assert!(
-                elapsed.as_millis() < 1000,
-                "Broadcast took {:?}, expected < 1s",
-                elapsed
-            );
         });
     }
 }

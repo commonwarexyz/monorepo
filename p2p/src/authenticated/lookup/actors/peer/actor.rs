@@ -28,8 +28,8 @@ pub struct Actor<E: Spawner + Clock + Metrics, C: PublicKey> {
 
     sent_messages: Family<metrics::Message, Counter>,
     received_messages: Family<metrics::Message, Counter>,
+    dropped_messages: Family<metrics::Message, Counter>,
     rate_limited: Family<metrics::Message, Counter>,
-    app_dropped: Family<metrics::Message, Counter>,
     _phantom: std::marker::PhantomData<C>,
 }
 
@@ -47,8 +47,8 @@ impl<E: Spawner + Clock + CryptoRngCore + Metrics, C: PublicKey> Actor<E, C> {
                 low: low_receiver,
                 sent_messages: cfg.sent_messages,
                 received_messages: cfg.received_messages,
+                dropped_messages: cfg.dropped_messages,
                 rate_limited: cfg.rate_limited,
-                app_dropped: cfg.app_dropped,
                 _phantom: std::marker::PhantomData,
             },
             control_sender,
@@ -216,12 +216,10 @@ impl<E: Spawner + Clock + CryptoRngCore + Metrics, C: PublicKey> Actor<E, C> {
                             // full rather than blocking. Blocking here would also block
                             // processing of Ping messages, causing the peer connection to
                             // stall and potentially disconnect.
-                            //
-                            // Dropped messages are tracked via the app_dropped metric.
                             let sender = senders.get_mut(&data.channel).unwrap();
                             if let Err(e) = sender.try_send((peer.clone(), data.message)) {
                                 if e.is_full() {
-                                    self.app_dropped
+                                    self.dropped_messages
                                         .get_or_create(&metrics::Message::new_data(&peer, data.channel))
                                         .inc();
                                 }

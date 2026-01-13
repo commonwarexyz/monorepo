@@ -39,8 +39,8 @@ pub struct Actor<E: Spawner + Clock + Metrics, C: PublicKey> {
 
     sent_messages: Family<metrics::Message, Counter>,
     received_messages: Family<metrics::Message, Counter>,
+    dropped_messages: Family<metrics::Message, Counter>,
     rate_limited: Family<metrics::Message, Counter>,
-    app_dropped: Family<metrics::Message, Counter>,
 }
 
 impl<E: Spawner + Clock + CryptoRngCore + Metrics, C: PublicKey> Actor<E, C> {
@@ -61,8 +61,8 @@ impl<E: Spawner + Clock + CryptoRngCore + Metrics, C: PublicKey> Actor<E, C> {
                 low: low_receiver,
                 sent_messages: cfg.sent_messages,
                 received_messages: cfg.received_messages,
+                dropped_messages: cfg.dropped_messages,
                 rate_limited: cfg.rate_limited,
-                app_dropped: cfg.app_dropped,
             },
             Relay::new(low_sender, high_sender),
         )
@@ -300,12 +300,10 @@ impl<E: Spawner + Clock + CryptoRngCore + Metrics, C: PublicKey> Actor<E, C> {
                             // full rather than blocking. Blocking here would also block
                             // processing of gossip messages (BitVec, Peers), causing the
                             // peer connection to stall and potentially disconnect.
-                            //
-                            // Dropped messages are tracked via the app_dropped metric.
                             let sender = senders.get_mut(&data.channel).unwrap();
                             if let Err(e) = sender.try_send((peer.clone(), data.message)) {
                                 if e.is_full() {
-                                    self.app_dropped
+                                    self.dropped_messages
                                         .get_or_create(&metrics::Message::new_data(&peer, data.channel))
                                         .inc();
                                 }
@@ -395,8 +393,8 @@ mod tests {
             ),
             sent_messages: Family::<metrics::Message, Counter>::default(),
             received_messages: Family::<metrics::Message, Counter>::default(),
+            dropped_messages: Family::<metrics::Message, Counter>::default(),
             rate_limited: Family::<metrics::Message, Counter>::default(),
-            app_dropped: Family::<metrics::Message, Counter>::default(),
         }
     }
 
@@ -725,7 +723,7 @@ mod tests {
     }
 
     #[test]
-    fn test_app_dropped_metric_on_full_buffer() {
+    fn test_dropped_messages_metric_on_full_buffer() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
             let local_key = PrivateKey::from_seed(1);
@@ -774,8 +772,8 @@ mod tests {
                 .expect("listen failed")
                 .expect("listen result failed");
 
-            // Create app_dropped metric to track drops
-            let app_dropped = Family::<metrics::Message, Counter>::default();
+            // Create dropped_messages metric to track drops
+            let dropped_messages = Family::<metrics::Message, Counter>::default();
 
             // Create peer config with our metric
             let config = Config {
@@ -791,8 +789,8 @@ mod tests {
                 ),
                 sent_messages: Family::<metrics::Message, Counter>::default(),
                 received_messages: Family::<metrics::Message, Counter>::default(),
+                dropped_messages: dropped_messages.clone(),
                 rate_limited: Family::<metrics::Message, Counter>::default(),
-                app_dropped: app_dropped.clone(),
             };
 
             let (peer_actor, _messenger) =
@@ -859,12 +857,12 @@ mod tests {
                 )
                 .await;
 
-            // Check that app_dropped was incremented
+            // Check that dropped_messages was incremented
             let metric_label = metrics::Message::new_data(&local_pk_clone, channel_id);
-            let dropped_count = app_dropped.get_or_create(&metric_label).get();
+            let dropped_count = dropped_messages.get_or_create(&metric_label).get();
             assert!(
                 dropped_count > 0,
-                "Expected app_dropped to be incremented when buffer is full, got {dropped_count}"
+                "Expected dropped_messages to be incremented when buffer is full, got {dropped_count}"
             );
         });
     }
