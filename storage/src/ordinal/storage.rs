@@ -270,7 +270,8 @@ impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
         let blob = self.blobs.get(&section).unwrap();
         let offset = (index % items_per_blob) * Record::<V>::SIZE as u64;
         let record = Record::new(value);
-        blob.write_at(record.encode_mut(), offset).await?;
+        let encoded = record.encode_mut();
+        blob.write_at(&encoded[..], offset).await?;
         self.pending.insert(section);
 
         // Add to intervals
@@ -293,9 +294,9 @@ impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
         let section = index / items_per_blob;
         let blob = self.blobs.get(&section).unwrap();
         let offset = (index % items_per_blob) * Record::<V>::SIZE as u64;
-        let read_buf = vec![0u8; Record::<V>::SIZE];
-        let read_buf = blob.read_at(read_buf, offset).await?;
-        let record = Record::<V>::read(&mut read_buf.as_ref())?;
+        let mut read_buf = vec![0u8; Record::<V>::SIZE];
+        blob.read_at(&mut read_buf[..], offset).await?;
+        let record = Record::<V>::read(&mut read_buf.as_slice())?;
 
         // If record is valid, return it
         if record.is_valid() {

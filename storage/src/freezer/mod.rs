@@ -752,7 +752,7 @@ mod tests {
             {
                 let (blob, _) = context.open(&cfg.table_partition, b"table").await.unwrap();
                 // Write incomplete table entry (only 10 bytes instead of 24)
-                blob.write_at(vec![0xFF; 10], 0).await.unwrap();
+                blob.write_at(&[0xFF; 10][..], 0).await.unwrap();
                 blob.sync().await.unwrap();
             }
 
@@ -814,11 +814,11 @@ mod tests {
             {
                 let (blob, _) = context.open(&cfg.table_partition, b"table").await.unwrap();
                 // Read the first entry
-                let entry_data = blob.read_at(vec![0u8; 24], 0).await.unwrap();
-                let mut corrupted = entry_data.as_ref().to_vec();
+                let mut entry_data = [0u8; 24];
+                blob.read_at(&mut entry_data[..], 0).await.unwrap();
                 // Corrupt the CRC (last 4 bytes of the entry)
-                corrupted[20] ^= 0xFF;
-                blob.write_at(corrupted, 0).await.unwrap();
+                entry_data[20] ^= 0xFF;
+                blob.write_at(&entry_data[..], 0).await.unwrap();
                 blob.sync().await.unwrap();
             }
 
@@ -880,9 +880,7 @@ mod tests {
             {
                 let (blob, size) = context.open(&cfg.table_partition, b"table").await.unwrap();
                 // Append garbage data
-                blob.write_at(hex!("0xdeadbeef").to_vec(), size)
-                    .await
-                    .unwrap();
+                blob.write_at(&hex!("0xdeadbeef")[..], size).await.unwrap();
                 blob.sync().await.unwrap();
             }
 

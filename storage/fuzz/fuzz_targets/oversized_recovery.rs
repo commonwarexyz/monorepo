@@ -239,7 +239,7 @@ fn fuzz(input: FuzzInput) {
                     {
                         if size > 0 {
                             let offset = (size * (*offset_factor as u64)) / 256;
-                            let _ = blob.write_at(data.to_vec(), offset).await;
+                            let _ = blob.write_at(&data[..], offset).await;
                             let _ = blob.sync().await;
                         }
                     }
@@ -254,7 +254,7 @@ fn fuzz(input: FuzzInput) {
                     {
                         if size > 0 {
                             let offset = (size * (*offset_factor as u64)) / 256;
-                            let _ = blob.write_at(data.to_vec(), offset).await;
+                            let _ = blob.write_at(&data[..], offset).await;
                             let _ = blob.sync().await;
                         }
                     }
@@ -273,7 +273,7 @@ fn fuzz(input: FuzzInput) {
                     if let Ok((blob, size)) =
                         context.open(INDEX_PARTITION, &section.to_be_bytes()).await
                     {
-                        let _ = blob.write_at(garbage.to_vec(), size).await;
+                        let _ = blob.write_at(&garbage[..], size).await;
                         let _ = blob.sync().await;
                     }
                 }
@@ -281,7 +281,7 @@ fn fuzz(input: FuzzInput) {
                     if let Ok((blob, size)) =
                         context.open(VALUE_PARTITION, &section.to_be_bytes()).await
                     {
-                        let _ = blob.write_at(garbage.to_vec(), size).await;
+                        let _ = blob.write_at(&garbage[..], size).await;
                         let _ = blob.sync().await;
                     }
                 }

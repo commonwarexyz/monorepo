@@ -100,7 +100,7 @@ fn fuzz(input: FuzzInput) {
         let prefill = (input.seed as usize) & 0x0FFF;
         if prefill > 0 && initial_size == 0 {
             let initial_data: Vec<u8> = (0..prefill).map(|i| i as u8).collect();
-            let _ = blob.write_at(initial_data, 0).await;
+            let _ = blob.write_at(&initial_data[..], 0).await;
         }
 
         let mut read_buffer = None;
@@ -126,7 +126,7 @@ fn fuzz(input: FuzzInput) {
                     if size == 0 && blob_size > 0 {
                         let data: Vec<u8> = (0..blob_size).map(|i| i as u8).collect();
                         if (0u64).checked_add(data.len() as u64).is_some() {
-                            blob.write_at(data, 0).await.expect("cannot write");
+                            blob.write_at(&data[..], 0).await.expect("cannot write");
                         }
                     }
 
@@ -219,7 +219,7 @@ fn fuzz(input: FuzzInput) {
                         };
                         let offset = offset as u64;
                         if offset.checked_add(data.len() as u64).is_some() {
-                            let _ = writer.write_at(data.to_vec(), offset).await;
+                            let _ = writer.write_at(data, offset).await;
                         }
                     }
                 }

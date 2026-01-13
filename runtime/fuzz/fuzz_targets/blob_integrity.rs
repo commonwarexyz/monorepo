@@ -135,12 +135,12 @@ fn fuzz(input: FuzzInput) {
         let corrupt_bit = input.corrupt_bit;
 
         // Read the byte, flip the bit, write it back.
-        let byte_buf = blob
-            .read_at(vec![0u8; 1], corrupt_offset)
+        let mut byte_buf = [0u8; 1];
+        blob.read_at(&mut byte_buf[..], corrupt_offset)
             .await
             .expect("cannot read byte to corrupt");
-        let corrupted_byte = byte_buf.as_ref()[0] ^ (1 << corrupt_bit);
-        blob.write_at(vec![corrupted_byte], corrupt_offset)
+        let corrupted_byte = byte_buf[0] ^ (1 << corrupt_bit);
+        blob.write_at(&[corrupted_byte][..], corrupt_offset)
             .await
             .expect("cannot write corrupted byte");
         blob.sync().await.expect("cannot sync corruption");
@@ -249,13 +249,12 @@ fn fuzz(input: FuzzInput) {
                 }
             } else {
                 // Use Append.read_at directly.
-                let buf = vec![0u8; len];
-                let read_result = append.read_at(buf, offset).await;
+                let mut buf = vec![0u8; len];
+                let read_result = append.read_at(&mut buf[..], offset).await;
 
                 match read_result {
-                    Ok(buf) => {
+                    Ok(()) => {
                         // Read succeeded - data must match expected.
-                        let buf: Vec<u8> = buf.into();
                         let expected_slice = &expected_data[offset as usize..offset as usize + len];
                         assert_eq!(
                             &buf, expected_slice,

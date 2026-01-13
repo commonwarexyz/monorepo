@@ -108,12 +108,12 @@ impl<B: Blob> PageReader<B> {
         }
         let bytes_to_read = pages_to_read * self.page_size;
 
-        // Read physical data
-        let physical_buf: Vec<u8> = self
-            .blob
-            .read_at(vec![0u8; bytes_to_read], start_offset)
-            .await?
-            .into();
+        // Read physical data. Using vec![0u8; N] ensures remaining_mut() returns the
+        // actual size (slices have bounded remaining_mut).
+        let mut physical_buf = vec![0u8; bytes_to_read];
+        self.blob
+            .read_at(&mut physical_buf[..], start_offset)
+            .await?;
 
         // Validate CRCs and compute total logical bytes
         let mut total_logical = 0usize;

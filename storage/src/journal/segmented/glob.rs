@@ -113,7 +113,10 @@ impl<E: Storage + Metrics, V: CodecShared> Glob<E, V> {
         let entry_size = u32::try_from(buf.len()).map_err(|_| Error::ValueTooLarge)?;
         let writer = self.manager.get_or_create(section).await?;
         let offset = writer.size().await;
-        writer.write_at(buf, offset).await.map_err(Error::Runtime)?;
+        writer
+            .write_at(&buf[..], offset)
+            .await
+            .map_err(Error::Runtime)?;
 
         Ok((offset, entry_size))
     }
@@ -131,8 +134,8 @@ impl<E: Storage + Metrics, V: CodecShared> Glob<E, V> {
         let size_usize = size as usize;
 
         // Read via buffered writer (handles read-through for buffered data)
-        let buf = writer.read_at(vec![0u8; size_usize], offset).await?;
-        let buf = buf.as_ref();
+        let mut buf = vec![0u8; size_usize];
+        writer.read_at(&mut buf[..], offset).await?;
 
         // Entry format: [compressed_data] [crc32 (4 bytes)]
         if buf.len() < crc32::Digest::SIZE {
@@ -373,7 +376,7 @@ mod tests {
             // Corrupt the data by writing directly to the underlying blob
             let writer = glob.manager.blobs.get(&1).unwrap();
             writer
-                .write_at(vec![0xFF, 0xFF, 0xFF, 0xFF], offset)
+                .write_at(&[0xFF, 0xFF, 0xFF, 0xFF][..], offset)
                 .await
                 .expect("Failed to corrupt");
             writer.sync().await.expect("Failed to sync");

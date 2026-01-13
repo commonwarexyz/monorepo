@@ -24,7 +24,6 @@
 
 use crate::iouring::{self, should_retry};
 use bytes::{Buf, BufMut, BytesMut};
-use commonware_utils::StableBuf;
 use futures::{
     channel::{mpsc, oneshot},
     executor::block_on,
@@ -243,9 +242,9 @@ impl Sink {
 impl crate::Sink for Sink {
     async fn send(&mut self, mut msg: impl Buf + Send) -> Result<(), crate::Error> {
         // TODO(#2705): Use writev to avoid this copy.
-        let mut msg: StableBuf = {
+        let mut msg: BytesMut = {
             let buf = msg.copy_to_bytes(msg.remaining());
-            BytesMut::from(buf).into()
+            BytesMut::from(buf)
         };
         let mut bytes_sent = 0;
         let msg_len = msg.len();
@@ -253,10 +252,10 @@ impl crate::Sink for Sink {
         while bytes_sent < msg_len {
             // Figure out how much is left to send and where to send from.
             //
-            // SAFETY: `msg` is a `StableBuf` guaranteeing the memory won't move.
-            // `bytes_sent` is always < `msg_len` due to the loop condition, so
-            // `add(bytes_sent)` stays within bounds and `msg_len - bytes_sent`
-            // correctly represents the remaining valid bytes.
+            // SAFETY: `msg` is a `BytesMut` and we don't reallocate it, so the
+            // memory won't move. `bytes_sent` is always < `msg_len` due to the
+            // loop condition, so `add(bytes_sent)` stays within bounds and
+            // `msg_len - bytes_sent` correctly represents the remaining valid bytes.
             let remaining = unsafe {
                 std::slice::from_raw_parts(
                     msg.as_mut_ptr().add(bytes_sent) as *const u8,
@@ -311,7 +310,7 @@ pub struct Stream {
     /// Used to submit recv operations to the io_uring event loop.
     submitter: mpsc::Sender<iouring::Op>,
     /// Internal read buffer.
-    buffer: Vec<u8>,
+    buffer: BytesMut,
     /// Current read position in the buffer.
     buffer_pos: usize,
     /// Number of valid bytes in the buffer.
@@ -323,7 +322,7 @@ impl Stream {
         Self {
             fd,
             submitter,
-            buffer: vec![0u8; buffer_capacity],
+            buffer: BytesMut::zeroed(buffer_capacity),
             buffer_pos: 0,
             buffer_len: 0,
         }
@@ -344,10 +343,10 @@ impl Stream {
     /// The buffer and either bytes received or an error.
     async fn submit_recv(
         &mut self,
-        mut buffer: StableBuf,
+        mut buffer: BytesMut,
         offset: usize,
         len: usize,
-    ) -> (StableBuf, Result<usize, crate::Error>) {
+    ) -> (BytesMut, Result<usize, crate::Error>) {
         loop {
             // SAFETY: offset + len <= buffer.len() as guaranteed by callers.
             let ptr = unsafe { buffer.as_mut_ptr().add(offset) };
@@ -365,12 +364,12 @@ impl Stream {
                 .is_err()
             {
                 // Channel closed - io_uring thread died, buffer is lost
-                return (StableBuf::default(), Err(crate::Error::RecvFailed));
+                return (BytesMut::new(), Err(crate::Error::RecvFailed));
             }
 
             let Ok((result, buf)) = rx.await else {
                 // Channel closed - io_uring thread died, buffer is lost
-                return (StableBuf::default(), Err(crate::Error::RecvFailed));
+                return (BytesMut::new(), Err(crate::Error::RecvFailed));
             };
             buffer = buf.unwrap();
 
@@ -396,13 +395,13 @@ impl Stream {
         self.buffer_pos = 0;
         self.buffer_len = 0;
 
-        let buffer: StableBuf = std::mem::take(&mut self.buffer).into();
+        let buffer: BytesMut = std::mem::take(&mut self.buffer);
         let len = buffer.len();
 
         // If the buffer is lost due to a channel error, we don't restore it.
         // Channel errors mean the io_uring thread died, so the stream is unusable anyway.
         let (buffer, result) = self.submit_recv(buffer, 0, len).await;
-        self.buffer = buffer.into();
+        self.buffer = buffer;
         self.buffer_len = result?;
         Ok(self.buffer_len)
     }
@@ -410,7 +409,7 @@ impl Stream {
 
 impl crate::Stream for Stream {
     async fn recv(&mut self, mut buf: impl BufMut + Send) -> Result<(), crate::Error> {
-        let mut owned_buf: StableBuf = BytesMut::zeroed(buf.remaining_mut()).into();
+        let mut owned_buf: BytesMut = BytesMut::zeroed(buf.remaining_mut());
         let mut bytes_received = 0;
         let buf_len = owned_buf.len();
 
@@ -419,7 +418,7 @@ impl crate::Stream for Stream {
             let buffered = self.buffer_len - self.buffer_pos;
             if buffered > 0 {
                 let to_copy = std::cmp::min(buffered, buf_len - bytes_received);
-                owned_buf.as_mut()[bytes_received..bytes_received + to_copy]
+                owned_buf[bytes_received..bytes_received + to_copy]
                     .copy_from_slice(&self.buffer[self.buffer_pos..self.buffer_pos + to_copy]);
                 self.buffer_pos += to_copy;
                 bytes_received += to_copy;
@@ -442,7 +441,7 @@ impl crate::Stream for Stream {
             }
         }
 
-        buf.put_slice(owned_buf.as_ref());
+        buf.put_slice(&owned_buf[..]);
         Ok(())
     }
 }

@@ -159,8 +159,9 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
             return Err(Error::ItemOutOfRange(position));
         }
 
-        let buf = blob.read_at(vec![0u8; Self::CHUNK_SIZE], offset).await?;
-        A::decode(buf.as_ref()).map_err(Error::Codec)
+        let mut buf = vec![0u8; Self::CHUNK_SIZE];
+        blob.read_at(&mut buf[..], offset).await?;
+        A::decode(&buf[..]).map_err(Error::Codec)
     }
 
     /// Read the last item in a section, if any.
@@ -177,8 +178,9 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
 
         let last_position = (size / Self::CHUNK_SIZE_U64) - 1;
         let offset = last_position * Self::CHUNK_SIZE_U64;
-        let buf = blob.read_at(vec![0u8; Self::CHUNK_SIZE], offset).await?;
-        A::decode(buf.as_ref()).map_err(Error::Codec).map(Some)
+        let mut buf = vec![0u8; Self::CHUNK_SIZE];
+        blob.read_at(&mut buf[..], offset).await?;
+        A::decode(&buf[..]).map_err(Error::Codec).map(Some)
     }
 
     /// Returns a stream of all items starting from the given section.
