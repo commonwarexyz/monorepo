@@ -1183,10 +1183,10 @@ mod test {
             assert_send(db.get_all(&key));
             assert_send(db.get_with_loc(&key));
             assert_send(db.get_span(&key));
-            assert_send(db.write_batch(vec![(key.clone(), Some(value.clone()))].into_iter()));
-            assert_send(db.update(key.clone(), value.clone()));
-            assert_send(db.create(key.clone(), value.clone()));
-            assert_send(db.delete(key.clone()));
+            assert_send(db.write_batch(vec![(key.clone(), Some(value))].into_iter()));
+            assert_send(db.update(key.clone(), value));
+            assert_send(db.create(key.clone(), value));
+            assert_send(db.delete(key));
         });
     }
 
