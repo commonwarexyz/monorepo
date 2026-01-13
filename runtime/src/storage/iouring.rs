@@ -539,7 +539,7 @@ mod tests {
 
         let (blob2, size2) = storage.open("partition", b"test").await.unwrap();
         assert_eq!(size2, 9, "reopened blob should have logical size 9");
-        let mut read_buf = vec![0u8; 9];
+        let mut read_buf = [0u8; 9];
         blob2.read_at(&mut read_buf[..], 0).await.unwrap();
         assert_eq!(&read_buf[..], b"test data");
         drop(blob2);
