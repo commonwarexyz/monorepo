@@ -2,8 +2,8 @@ use crate::{buffer::tip::Buffer, Blob, Error, RwLock};
 use commonware_utils::StableBuf;
 use std::{num::NonZeroUsize, sync::Arc};
 
-/// A writer that buffers content to a [Blob] to optimize the performance
-/// of appending or updating data.
+/// A writer that buffers the raw content of a [Blob] to optimize the performance of appending or
+/// updating data.
 ///
 /// # Example
 ///
@@ -54,7 +54,7 @@ impl<B: Blob> Write<B> {
     pub fn new(blob: B, size: u64, capacity: NonZeroUsize) -> Self {
         Self {
             blob,
-            buffer: Arc::new(RwLock::new(Buffer::new(size, capacity))),
+            buffer: Arc::new(RwLock::new(Buffer::new(size, capacity.get()))),
         }
     }
 

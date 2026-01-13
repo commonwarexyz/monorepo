@@ -1,6 +1,7 @@
 use crate::Config;
 use commonware_codec::{EncodeSize, RangeCfg, Read, Write};
 use commonware_cryptography::Hasher;
+use commonware_parallel::Strategy;
 use std::marker::PhantomData;
 use thiserror::Error;
 
@@ -28,6 +29,7 @@ impl<H> std::fmt::Debug for NoCoding<H> {
 }
 
 #[derive(Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub struct Shard(Vec<u8>);
 
 impl EncodeSize for Shard {
@@ -54,6 +56,7 @@ impl Read for Shard {
 }
 
 #[derive(Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub struct ReShard(());
 
 impl EncodeSize for ReShard {
@@ -93,7 +96,7 @@ impl<H: Hasher> crate::Scheme for NoCoding<H> {
     fn encode(
         config: &crate::Config,
         mut data: impl bytes::Buf,
-        _concurrency: usize,
+        _strategy: &impl Strategy,
     ) -> Result<(Self::Commitment, Vec<Self::Shard>), Self::Error> {
         let data: Vec<u8> = data.copy_to_bytes(data.remaining()).to_vec();
         let commitment = H::new().update(&data).finalize();
@@ -131,10 +134,21 @@ impl<H: Hasher> crate::Scheme for NoCoding<H> {
         _commitment: &Self::Commitment,
         checking_data: Self::CheckingData,
         _shards: &[Self::CheckedShard],
-        _concurrency: usize,
+        _strategy: &impl Strategy,
     ) -> Result<Vec<u8>, Self::Error> {
         Ok(checking_data)
     }
 }
 
 impl<H: Hasher> crate::ValidatingScheme for NoCoding<H> {}
+
+#[cfg(all(test, feature = "arbitrary"))]
+mod conformance {
+    use super::*;
+    use commonware_codec::conformance::CodecConformance;
+
+    commonware_conformance::conformance_tests! {
+        CodecConformance<Shard>,
+        CodecConformance<ReShard>
+    }
+}

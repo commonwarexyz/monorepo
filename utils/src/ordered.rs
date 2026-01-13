@@ -32,7 +32,7 @@ pub enum Error {
     DuplicateValue,
 }
 
-use crate::TryFromIterator;
+use crate::{Faults, Participant, TryFromIterator};
 
 /// An ordered, deduplicated collection of items.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -231,54 +231,64 @@ impl<T> From<Set<T>> for Vec<T> {
     }
 }
 
+#[cfg(feature = "arbitrary")]
+impl<T> arbitrary::Arbitrary<'_> for Set<T>
+where
+    T: for<'a> arbitrary::Arbitrary<'a> + Ord,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let vec = Vec::<T>::arbitrary(u)?;
+        Ok(Self::from_iter_dedup(vec))
+    }
+}
+
 /// Extension trait for [`Set`] participant sets providing quorum and index utilities.
 pub trait Quorum {
     /// The type of items in this set.
     type Item: Ord;
 
-    /// Returns the quorum value (2f+1) for this participant set.
+    /// Returns the quorum value for this participant set using the given fault model.
     ///
     /// ## Panics
     ///
     /// Panics if the number of participants exceeds `u32::MAX`.
-    fn quorum(&self) -> u32;
+    fn quorum<M: Faults>(&self) -> u32;
 
-    /// Returns the maximum number of faults (f) tolerated by this participant set.
+    /// Returns the maximum number of faults tolerated by this participant set.
     ///
     /// ## Panics
     ///
     /// Panics if the number of participants exceeds `u32::MAX`.
-    fn max_faults(&self) -> u32;
+    fn max_faults<M: Faults>(&self) -> u32;
 
     /// Returns the participant key at the given index.
-    fn key(&self, index: u32) -> Option<&Self::Item>;
+    fn key(&self, index: Participant) -> Option<&Self::Item>;
 
     /// Returns the index for the given participant key, if present.
     ///
     /// ## Panics
     ///
     /// Panics if the participant index exceeds `u32::MAX`.
-    fn index(&self, key: &Self::Item) -> Option<u32>;
+    fn index(&self, key: &Self::Item) -> Option<Participant>;
 }
 
 impl<T: Ord> Quorum for Set<T> {
     type Item = T;
 
-    fn quorum(&self) -> u32 {
-        crate::quorum(u32::try_from(self.len()).expect("too many participants"))
+    fn quorum<M: Faults>(&self) -> u32 {
+        M::quorum(u32::try_from(self.len()).expect("too many participants"))
     }
 
-    fn max_faults(&self) -> u32 {
-        crate::max_faults(u32::try_from(self.len()).expect("too many participants"))
+    fn max_faults<M: Faults>(&self) -> u32 {
+        M::max_faults(self.len())
     }
 
-    fn key(&self, index: u32) -> Option<&Self::Item> {
-        self.get(index as usize)
+    fn key(&self, index: Participant) -> Option<&Self::Item> {
+        self.get(index.into())
     }
 
-    fn index(&self, key: &Self::Item) -> Option<u32> {
-        self.position(key)
-            .map(|position| u32::try_from(position).expect("too many participants"))
+    fn index(&self, key: &Self::Item) -> Option<Participant> {
+        self.position(key).map(Participant::from_usize)
     }
 }
 
@@ -386,6 +396,12 @@ impl<K, V> Map<K, V> {
     /// Returns a mutable reference to the associated values
     pub fn values_mut(&mut self) -> &mut [V] {
         &mut self.values
+    }
+
+    /// Truncates the map to at most `len` entries.
+    pub fn truncate(&mut self, len: usize) {
+        self.keys.0.truncate(len);
+        self.values.truncate(len);
     }
 
     /// Returns a zipped iterator over keys and values.
@@ -579,6 +595,18 @@ impl<K, V> DoubleEndedIterator for MapIntoIter<K, V> {
         let key = self.keys.next_back()?;
         let value = self.values.next_back()?;
         Some((key, value))
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl<K, V> arbitrary::Arbitrary<'_> for Map<K, V>
+where
+    K: for<'a> arbitrary::Arbitrary<'a> + Ord,
+    V: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let vec = Vec::<(K, V)>::arbitrary(u)?;
+        Ok(Self::from_iter_dedup(vec))
     }
 }
 
@@ -819,6 +847,22 @@ impl<'a, K, V> IntoIterator for &'a BiMap<K, V> {
 
     fn into_iter(self) -> Self::IntoIter {
         self.inner.iter().zip(self.inner.values().iter())
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl<K, V> arbitrary::Arbitrary<'_> for BiMap<K, V>
+where
+    K: for<'a> arbitrary::Arbitrary<'a> + Ord,
+    V: for<'a> arbitrary::Arbitrary<'a> + Ord + Eq + Hash,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let mut vec = Vec::<(K, V)>::arbitrary(u)?;
+        vec.sort_by(|(lk, _), (rk, _)| lk.cmp(rk));
+        vec.dedup_by(|l, r| l.0 == r.0);
+        vec.sort_by(|(_, lv), (_, rv)| lv.cmp(rv));
+        vec.dedup_by(|l, r| l.1 == r.1);
+        Self::try_from_iter(vec).map_err(|_| arbitrary::Error::IncorrectFormat)
     }
 }
 
@@ -1103,5 +1147,17 @@ mod test {
         let map = result.unwrap();
         assert_eq!(map.keys().iter().copied().collect::<Vec<_>>(), keys);
         assert_eq!(map.values(), values.as_slice());
+    }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::*;
+        use commonware_codec::conformance::CodecConformance;
+
+        commonware_conformance::conformance_tests! {
+            CodecConformance<Set<u32>>,
+            CodecConformance<Map<u32, u32>>,
+            CodecConformance<BiMap<u32, u32>>,
+        }
     }
 }

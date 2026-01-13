@@ -21,12 +21,12 @@ commonware-consensus.workspace = true
 commonware-cryptography.workspace = true
 commonware-macros.workspace = true
 commonware-p2p.workspace = true
+commonware-parallel.workspace = true
 commonware-runtime.workspace = true
 commonware-storage = { workspace = true, features = ["std"] }
 commonware-utils.workspace = true
 crossterm.workspace = true
 futures.workspace = true
-governor.workspace = true
 prometheus-client.workspace = true
 rand.workspace = true
 ratatui.workspace = true

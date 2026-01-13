@@ -4,9 +4,11 @@ use commonware_cryptography::{
         primitives::variant::MinSig,
     },
     ed25519::{PrivateKey, PublicKey},
-    PrivateKeyExt as _, Signer as _,
+    Signer as _,
 };
-use commonware_utils::{ordered::Set, quorum, TryCollect};
+use commonware_math::algebra::Random;
+use commonware_parallel::{Rayon, Sequential};
+use commonware_utils::{ordered::Set, Bft3f1, Faults, NZUsize, TryCollect};
 use criterion::{criterion_group, BatchSize, Criterion};
 use rand::{rngs::StdRng, SeedableRng};
 use rand_core::CryptoRngCore;
@@ -23,7 +25,7 @@ struct Bench {
 impl Bench {
     fn new(mut rng: impl CryptoRngCore, reshare: bool, n: u32) -> Self {
         let private_keys = (0..n)
-            .map(|_| PrivateKey::from_rng(&mut rng))
+            .map(|_| PrivateKey::random(&mut rng))
             .collect::<Vec<_>>();
         let me = private_keys.first().unwrap().clone();
         let me_pk = me.public_key();
@@ -34,13 +36,23 @@ impl Bench {
             .unwrap();
 
         let (output, shares) = if reshare {
-            let (o, s) = deal::<V, PublicKey>(&mut rng, dealers.clone()).unwrap();
+            let (o, s) =
+                deal::<V, PublicKey, Bft3f1>(&mut rng, Default::default(), dealers.clone())
+                    .unwrap();
             (Some(o), Some(s))
         } else {
             (None, None)
         };
         let players = dealers.clone();
-        let info = Info::new(&[], 0, output, dealers, players).unwrap();
+        let info = Info::new::<Bft3f1>(
+            b"_COMMONWARE_CRYPTOGRAPHY_BLS12381_DKG_BENCH",
+            0,
+            output,
+            Default::default(),
+            dealers,
+            players,
+        )
+        .unwrap();
 
         // Create player state for every participant
         let mut player_states = private_keys
@@ -60,7 +72,7 @@ impl Bench {
         let mut logs = BTreeMap::new();
         for sk in private_keys {
             let pk = sk.public_key();
-            let (mut dealer, pub_msg, priv_msgs) = Dealer::start(
+            let (mut dealer, pub_msg, priv_msgs) = Dealer::start::<Bft3f1>(
                 &mut rng,
                 info.clone(),
                 sk,
@@ -72,13 +84,14 @@ impl Bench {
             for (target_pk, priv_msg) in priv_msgs {
                 // The only missing player should be ourselves.
                 if let Some(player) = player_states.get_mut(&target_pk) {
-                    if let Some(ack) = player.dealer_message(pk.clone(), pub_msg.clone(), priv_msg)
+                    if let Some(ack) =
+                        player.dealer_message::<Bft3f1>(pk.clone(), pub_msg.clone(), priv_msg)
                     {
                         dealer.receive_player_ack(target_pk.clone(), ack).unwrap();
                     }
                 }
             }
-            logs.insert(pk, dealer.finalize().check(&info).unwrap().1);
+            logs.insert(pk, dealer.finalize::<Bft3f1>().check(&info).unwrap().1);
         }
 
         Self { info, me, logs }
@@ -116,9 +129,10 @@ fn benchmark_dkg(c: &mut Criterion, reshare: bool) {
     };
     let mut rng = StdRng::seed_from_u64(0);
     for &n in CONTRIBUTORS {
-        let t = quorum(n);
+        let t = Bft3f1::quorum(n);
         let bench = Bench::new(&mut rng, reshare, n);
         for &concurrency in CONCURRENCY {
+            let strategy = Rayon::new(NZUsize!(concurrency)).unwrap();
             c.bench_function(
                 &format!(
                     "{}{}/n={} t={} conc={}",
@@ -126,13 +140,17 @@ fn benchmark_dkg(c: &mut Criterion, reshare: bool) {
                     suffix,
                     n,
                     t,
-                    concurrency
+                    concurrency,
                 ),
                 |b| {
                     b.iter_batched(
                         || bench.pre_finalize(),
                         |(player, logs)| {
-                            black_box(player.finalize(logs, concurrency).unwrap());
+                            if concurrency > 1 {
+                                black_box(player.finalize::<Bft3f1>(logs, &strategy).unwrap());
+                            } else {
+                                black_box(player.finalize::<Bft3f1>(logs, &Sequential).unwrap());
+                            }
                         },
                         BatchSize::SmallInput,
                     );

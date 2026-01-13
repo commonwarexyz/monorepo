@@ -13,39 +13,39 @@
 //!
 //! ```rust
 //! use commonware_cryptography::bls12381::{
-//!     primitives::{ops::{partial_sign_message, partial_verify_message, threshold_signature_recover, verify_message}, poly::public, variant::MinSig},
+//!     primitives::{ops::{self, threshold}, variant::MinSig, sharing::Mode},
 //!     dkg,
 //! };
-//! use commonware_utils::NZU32;
+//! use commonware_utils::{NZU32, Bft3f1};
 //! use rand::rngs::OsRng;
 //!
-//! // Configure threshold
-//! let (n, t) = (5, 4);
+//! // Configure number of players
+//! let n = NZU32!(5);
 //!
 //! // Generate commitment and shares
-//! let (commitment, shares) = dkg::deal_anonymous::<MinSig>(&mut OsRng, NZU32!(n));
+//! let (sharing, shares) = dkg::deal_anonymous::<MinSig, Bft3f1>(&mut OsRng, Mode::default(), n);
 //!
 //! // Generate partial signatures from shares
-//! let namespace = Some(&b"demo"[..]);
+//! let namespace = b"demo";
 //! let message = b"hello world";
-//! let partials: Vec<_> = shares.iter().map(|s| partial_sign_message::<MinSig>(s, namespace, message)).collect();
+//! let partials: Vec<_> = shares.iter().map(|s| threshold::sign_message::<MinSig>(s, namespace, message)).collect();
 //!
 //! // Verify partial signatures
 //! for p in &partials {
-//!     partial_verify_message::<MinSig>(&commitment, namespace, message, p).expect("signature should be valid");
+//!     threshold::verify_message::<MinSig>(&sharing, namespace, message, p).expect("signature should be valid");
 //! }
 //!
 //! // Aggregate partial signatures
-//! let threshold_sig = threshold_signature_recover::<MinSig, _>(t, &partials).unwrap();
+//! let threshold_sig = threshold::recover::<MinSig, _, Bft3f1>(&sharing, &partials, &commonware_parallel::Sequential).unwrap();
 //!
 //! // Verify threshold signature
-//! let threshold_pub = public::<MinSig>(&commitment);
-//! verify_message::<MinSig>(&threshold_pub, namespace, message, &threshold_sig).expect("signature should be valid");
+//! let threshold_pub = sharing.public();
+//! ops::verify_message::<MinSig>(threshold_pub, namespace, message, &threshold_sig).expect("signature should be valid");
 //! ```
 
 pub mod group;
 pub mod ops;
-pub mod poly;
+pub mod sharing;
 pub mod variant;
 
 use thiserror::Error;

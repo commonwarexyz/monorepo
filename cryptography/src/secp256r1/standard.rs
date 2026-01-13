@@ -9,6 +9,8 @@ use super::common::{
     impl_private_key_wrapper, impl_public_key_wrapper, PrivateKeyInner, PublicKeyInner, CURVE_NAME,
     PRIVATE_KEY_LENGTH, PUBLIC_KEY_LENGTH,
 };
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+use aws_lc_rs::signature::{UnparsedPublicKey, ECDSA_P256_SHA256_FIXED};
 use bytes::{Buf, BufMut};
 use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
 use commonware_utils::{hex, union_unique, Array, Span};
@@ -17,10 +19,9 @@ use core::{
     hash::{Hash, Hasher},
     ops::Deref,
 };
-use p256::{
-    ecdsa::signature::{Signer, Verifier},
-    elliptic_curve::scalar::IsHigh,
-};
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+use p256::ecdsa::signature::Verifier;
+use p256::{ecdsa::signature::Signer, elliptic_curve::scalar::IsHigh};
 
 const SIGNATURE_LENGTH: usize = 64; // R || S
 
@@ -49,7 +50,7 @@ impl PrivateKey {
         let payload = namespace.map_or(Cow::Borrowed(msg), |namespace| {
             Cow::Owned(union_unique(namespace, msg))
         });
-        let signature: p256::ecdsa::Signature = self.0.key.sign(&payload);
+        let signature: p256::ecdsa::Signature = self.0.key.expose(|key| key.sign(&payload));
         let signature = signature.normalize_s().unwrap_or(signature);
         Signature::from(signature)
     }
@@ -63,6 +64,7 @@ impl From<PrivateKey> for PublicKey {
 
 /// Secp256r1 Public Key.
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub struct PublicKey(PublicKeyInner);
 
 impl_public_key_wrapper!(PublicKey);
@@ -76,12 +78,24 @@ impl crate::Verifier for PublicKey {
 }
 
 impl PublicKey {
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     #[inline(always)]
     fn verify_inner(&self, namespace: Option<&[u8]>, msg: &[u8], sig: &Signature) -> bool {
         let payload = namespace.map_or(Cow::Borrowed(msg), |namespace| {
             Cow::Owned(union_unique(namespace, msg))
         });
         self.0.key.verify(&payload, &sig.signature).is_ok()
+    }
+
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    #[inline(always)]
+    fn verify_inner(&self, namespace: Option<&[u8]>, msg: &[u8], sig: &Signature) -> bool {
+        let payload = namespace.map_or(Cow::Borrowed(msg), |namespace| {
+            Cow::Owned(union_unique(namespace, msg))
+        });
+        let uncompressed = self.0.to_uncompressed();
+        let public_key = UnparsedPublicKey::new(&ECDSA_P256_SHA256_FIXED, &uncompressed);
+        public_key.verify(&payload, &sig.raw).is_ok()
     }
 }
 
@@ -181,10 +195,11 @@ impl Display for Signature {
 impl arbitrary::Arbitrary<'_> for Signature {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         use crate::Signer;
+        use commonware_math::algebra::Random;
         use rand::{rngs::StdRng, SeedableRng};
 
         let mut rand = StdRng::from_seed(u.arbitrary::<[u8; 32]>()?);
-        let private_key = PrivateKey(PrivateKeyInner::from_rng(&mut rand));
+        let private_key = PrivateKey(PrivateKeyInner::random(&mut rand));
         let len = u.arbitrary::<usize>()? % 256;
         let message = u
             .arbitrary_iter()?

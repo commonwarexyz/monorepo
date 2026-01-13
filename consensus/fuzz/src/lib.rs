@@ -12,25 +12,37 @@ use commonware_codec::Read;
 use commonware_consensus::{
     simplex::{
         config,
-        mocks::{application, fixtures::Fixture, relay, reporter},
-        signing_scheme::Scheme as SimplexScheme,
+        elector::Config as Elector,
+        mocks::{application, relay, reporter},
+        scheme::Scheme,
         Engine,
     },
     types::{Delta, Epoch, View},
     Monitor,
 };
-use commonware_cryptography::{ed25519::PublicKey as Ed25519PublicKey, Sha256};
+use commonware_cryptography::{
+    certificate::{self, mocks::Fixture},
+    ed25519::PublicKey as Ed25519PublicKey,
+    sha256::Digest as Sha256Digest,
+    Sha256,
+};
 use commonware_p2p::simulated::{Config as NetworkConfig, Link, Network};
+use commonware_parallel::Sequential;
 use commonware_runtime::{buffer::PoolRef, deterministic, Clock, Metrics, Runner, Spawner};
-use commonware_utils::{max_faults, NZUsize, NZU32};
+use commonware_utils::{Bft3f1, Faults, NZUsize, NZU16};
 use futures::{channel::mpsc::Receiver, future::join_all, StreamExt};
-use governor::Quota;
 use rand::{rngs::StdRng, RngCore, SeedableRng};
-use std::{cell::RefCell, num::NonZeroUsize, panic, sync::Arc, time::Duration};
+use std::{
+    cell::RefCell,
+    num::{NonZeroU16, NonZeroUsize},
+    panic,
+    sync::Arc,
+    time::Duration,
+};
 
 pub const EPOCH: u64 = 333;
 
-const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
+const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
 const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
 const MIN_REQUIRED_CONTAINERS: u64 = 10;
 const MAX_REQUIRED_CONTAINERS: u64 = 50;
@@ -46,10 +58,15 @@ const EXPECTED_PANICS: [&str; 3] = [
 
 pub trait Simplex: 'static
 where
-    <<Self::Scheme as SimplexScheme>::Certificate as Read>::Cfg: Default,
+    <<Self::Scheme as certificate::Scheme>::Certificate as Read>::Cfg: Default,
 {
-    type Scheme: SimplexScheme<PublicKey = Ed25519PublicKey>;
-    fn fixture(context: &mut deterministic::Context, n: u32) -> Fixture<Self::Scheme>;
+    type Scheme: Scheme<Sha256Digest, PublicKey = Ed25519PublicKey>;
+    type Elector: Elector<Self::Scheme>;
+    fn fixture(
+        context: &mut deterministic::Context,
+        namespace: &[u8],
+        n: u32,
+    ) -> Fixture<Self::Scheme>;
 }
 
 #[derive(Debug, Clone)]
@@ -137,7 +154,6 @@ impl Arbitrary<'_> for FuzzInput {
 fn run<P: Simplex>(input: FuzzInput) {
     let (n, _, f) = input.configuration;
     let containers = input.containers;
-    let namespace = NAMESPACE.to_vec();
     let cfg = deterministic::Config::new().with_seed(input.seed);
     let executor = deterministic::Runner::new(cfg);
 
@@ -156,7 +172,8 @@ fn run<P: Simplex>(input: FuzzInput) {
             participants,
             schemes,
             verifier: _,
-        } = P::fixture(&mut context, n);
+            ..
+        } = P::fixture(&mut context, NAMESPACE, n);
 
         let mut registrations = register(&mut oracle, &participants).await;
 
@@ -179,7 +196,7 @@ fn run<P: Simplex>(input: FuzzInput) {
         for i in 0..f as usize {
             let scheme = schemes[i].clone();
             let validator = participants[i].clone();
-            let context = context.with_label(&format!("validator-{validator}"));
+            let context = context.with_label(&format!("validator_{validator}"));
 
             let (vote_network, certificate_network, _) = registrations.remove(&validator).unwrap();
             let disrupter = Disrupter::<_, _>::new(
@@ -190,7 +207,6 @@ fn run<P: Simplex>(input: FuzzInput) {
                     .clone()
                     .try_into()
                     .expect("public keys are unique"),
-                namespace.clone(),
                 input.clone(),
             );
             disrupter.start(vote_network, certificate_network);
@@ -198,14 +214,15 @@ fn run<P: Simplex>(input: FuzzInput) {
 
         for i in (f as usize)..(n as usize) {
             let validator = participants[i].clone();
-            let context = context.with_label(&format!("validator-{validator}"));
+            let context = context.with_label(&format!("validator_{validator}"));
+            let elector = P::Elector::default();
             let reporter_cfg = reporter::Config {
-                namespace: namespace.clone(),
                 participants: participants
                     .clone()
                     .try_into()
                     .expect("public keys are unique"),
                 scheme: schemes[i].clone(),
+                elector: elector.clone(),
             };
             let reporter = reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
             reporters.push(reporter.clone());
@@ -218,6 +235,8 @@ fn run<P: Simplex>(input: FuzzInput) {
                 me: validator.clone(),
                 propose_latency: (10.0, 5.0),
                 verify_latency: (10.0, 5.0),
+                certify_latency: (10.0, 5.0),
+                should_certify: application::Certifier::Sometimes,
             };
             let (actor, application) =
                 application::Application::new(context.with_label("application"), app_cfg);
@@ -227,30 +246,30 @@ fn run<P: Simplex>(input: FuzzInput) {
             let engine_cfg = config::Config {
                 blocker,
                 scheme: schemes[i].clone(),
+                elector,
                 automaton: application.clone(),
                 relay: application.clone(),
                 reporter: reporter.clone(),
                 partition: validator.to_string(),
                 mailbox_size: 1024,
                 epoch: Epoch::new(EPOCH),
-                namespace: namespace.clone(),
                 leader_timeout: Duration::from_secs(1),
                 notarization_timeout: Duration::from_secs(2),
                 nullify_retry: Duration::from_secs(10),
                 fetch_timeout: Duration::from_secs(1),
                 activity_timeout: Delta::new(10),
                 skip_timeout: Delta::new(5),
-                fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                 fetch_concurrent: 1,
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                strategy: Sequential,
             };
             let engine = Engine::new(context.with_label("engine"), engine_cfg);
             engine.start(pending, recovered, resolver);
         }
 
-        if input.partition == Partition::Connected && max_faults(n) == f {
+        if input.partition == Partition::Connected && Bft3f1::max_faults(n) == f {
             let mut finalizers = Vec::new();
             for reporter in reporters.iter_mut() {
                 let (mut latest, mut monitor): (View, Receiver<View>) = reporter.subscribe().await;

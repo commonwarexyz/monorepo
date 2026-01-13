@@ -20,18 +20,21 @@ cfg-if.workspace = true
 commonware-broadcast.workspace = true
 commonware-codec.workspace = true
 commonware-cryptography.workspace = true
+commonware-math = { workspace = true, optional = true }
+commonware-parallel.workspace = true
 commonware-resolver.workspace = true
 commonware-utils.workspace = true
 futures.workspace = true
 rand.workspace = true
+rand_core.workspace = true
 thiserror.workspace = true
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 commonware-macros.workspace = true
 commonware-p2p.workspace = true
+commonware-parallel = { workspace = true, features = ["std"] }
 commonware-runtime.workspace = true
 commonware-storage = { workspace = true, features = ["std"] }
-governor.workspace = true
 pin-project.workspace = true
 prometheus-client.workspace = true
 rand_distr.workspace = true
@@ -39,18 +42,32 @@ tracing.workspace = true
 
 [dev-dependencies]
 commonware-conformance.workspace = true
+commonware-consensus = { path = ".", features = ["mocks"] }
+commonware-math.workspace = true
 commonware-resolver = { workspace = true, features = ["mocks"] }
+commonware-runtime = { workspace = true, features = ["test-utils"] }
+rand_chacha.workspace = true
 rstest.workspace = true
 tracing-subscriber.workspace = true
+
+[package.metadata.cargo-udeps.ignore]
+development = ["commonware-consensus"]
 
 [lib]
 bench = false
 crate-type = ["rlib", "cdylib"]
 
 [features]
-fuzz = []
+mocks = [ "commonware-cryptography/mocks" ]
+fuzz = [ "dep:commonware-math", "mocks" ]
 arbitrary = [
 	"commonware-codec/arbitrary",
 	"commonware-cryptography/arbitrary",
+	"commonware-math/arbitrary",
+	"commonware-p2p/arbitrary",
+	"commonware-resolver/arbitrary",
+	"commonware-runtime/arbitrary",
+	"commonware-storage/arbitrary",
+	"commonware-utils/arbitrary",
 	"dep:arbitrary",
 ]

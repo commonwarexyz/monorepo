@@ -22,19 +22,25 @@ bytes.workspace = true
 cfg-if.workspace = true
 chacha20poly1305 = { workspace = true, default-features = false, features = ["alloc"] }
 commonware-codec.workspace = true
-commonware-macros = { workspace = true, optional = true }
+commonware-math.workspace = true
+commonware-parallel.workspace = true
 commonware-utils.workspace = true
+crc-fast = { workspace = true, features = ["panic-handler"] }
+ctutils.workspace = true
 ecdsa.workspace = true
 ed25519-consensus = { workspace = true, default-features = false }
 p256 = { workspace = true, features = ["ecdsa"] }
 rand.workspace = true
 rand_chacha.workspace = true
 rand_core.workspace = true
-rayon = { workspace = true, optional = true }
 sha2.workspace = true
 thiserror.workspace = true
 x25519-dalek = { workspace = true, features = ["zeroize"] }
 zeroize = { workspace = true, features = ["zeroize_derive"] }
+
+[target.'cfg(any(target_arch = "x86_64", target_arch = "aarch64"))'.dependencies]
+# aws-lc-rs provides optimized P-256 verification on x86_64 and aarch64.
+aws-lc-rs.workspace = true
 
 [target.'cfg(target_arch = "wasm32")'.dependencies.getrandom]
 # Enable "js" feature when WASM is target
@@ -44,7 +50,11 @@ features = ["js"]
 [dev-dependencies]
 anyhow.workspace = true
 commonware-conformance.workspace = true
+commonware-math = { workspace = true, features = ["test_strategies"] }
+crc.workspace = true
 criterion.workspace = true
+proptest.workspace = true
+rayon.workspace = true
 rstest.workspace = true
 
 [lib]
@@ -53,12 +63,14 @@ crate-type = ["rlib", "cdylib"]
 
 [features]
 default = [ "std" ]
-parallel = [ "blake3/rayon", "rayon", "std" ]
+parallel = [ "blake3/rayon", "commonware-parallel/std", "std" ]
+mocks = [ "std" ]
 arbitrary = [
 	"commonware-codec/arbitrary",
+	"commonware-math/arbitrary",
+	"commonware-utils/arbitrary",
 	"dep:anyhow",
 	"dep:arbitrary",
-	"dep:commonware-macros",
 	"std",
 ]
 std = [
@@ -68,7 +80,10 @@ std = [
 	"chacha20poly1305/getrandom",
 	"chacha20poly1305/std",
 	"commonware-codec/std",
+	"commonware-math/std",
+	"commonware-parallel/std",
 	"commonware-utils/std",
+	"crc-fast/std",
 	"ecdsa/std",
 	"ed25519-consensus/std",
 	"getrandom/std",
@@ -77,7 +92,6 @@ std = [
 	"rand/std_rng",
 	"rand_chacha/std",
 	"rand_core/std",
-	"rayon",
 	"sha2/std",
 	"thiserror/std",
 	"zeroize/std",

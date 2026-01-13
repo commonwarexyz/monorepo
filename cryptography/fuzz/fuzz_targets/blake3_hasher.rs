@@ -88,9 +88,6 @@ fn fuzz_diff_hash(data: &[u8]) {
 }
 
 fn fuzz_digest_operations(data: &[u8]) {
-    let empty_digest = OurBlake3::EMPTY;
-    assert_eq!(empty_digest.len(), 32);
-
     let hash_result = OurBlake3::hash(data);
     let digest_from_hash = hash_result;
 

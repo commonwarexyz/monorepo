@@ -18,7 +18,9 @@ default = [ "aws" ]
 aws = [
 	"aws-config",
 	"aws-sdk-ec2",
+	"aws-sdk-s3",
 	"clap",
+	"commonware-cryptography",
 	"futures",
 	"reqwest",
 	"thiserror",
@@ -31,8 +33,10 @@ aws = [
 [dependencies]
 aws-config = { workspace = true, optional = true }
 aws-sdk-ec2 = { workspace = true, optional = true }
+aws-sdk-s3 = { workspace = true, optional = true }
 cfg-if.workspace = true
 clap = { workspace = true, optional = true }
+commonware-cryptography = { workspace = true, optional = true }
 futures = { workspace = true, optional = true }
 reqwest = { workspace = true, optional = true }
 serde = { workspace = true, features = ["derive"] }

@@ -8,17 +8,21 @@ use commonware_storage::{
     qmdb::{
         self,
         any::{
-            unordered::{fixed::Any, FixedOperation},
+            unordered::{
+                fixed::{Db, Operation as FixedOperation},
+                Update,
+            },
             FixedConfig as Config,
         },
-        store::CleanStore,
+        operation::Committable,
     },
 };
-use commonware_utils::{NZUsize, NZU64};
+use commonware_utils::{NZUsize, NZU16, NZU64};
 use std::{future::Future, num::NonZeroU64};
+use tracing::error;
 
-/// Database type alias.
-pub type Database<E> = Any<E, Key, Value, Hasher, Translator>;
+/// Database type alias for the Clean state.
+pub type Database<E> = Db<E, Key, Value, Hasher, Translator>;
 
 /// Operation type alias.
 pub type Operation = FixedOperation<Key, Value>;
@@ -35,7 +39,7 @@ pub fn create_config() -> Config<Translator> {
         log_write_buffer: NZUsize!(1024),
         translator: Translator::default(),
         thread_pool: None,
-        buffer_pool: buffer::PoolRef::new(NZUsize!(1024), NZUsize!(10)),
+        buffer_pool: buffer::PoolRef::new(NZU16!(1024), NZUsize!(10)),
     }
 }
 
@@ -61,7 +65,7 @@ where
                 hasher.finalize()
             };
 
-            operations.push(Operation::Update(key, value));
+            operations.push(Operation::Update(Update(key, value)));
 
             if (i + 1) % 10 == 0 {
                 operations.push(Operation::CommitFloor(None, Location::from(i + 1)));
@@ -74,32 +78,41 @@ where
     }
 
     async fn add_operations(
-        database: &mut Self,
+        self,
         operations: Vec<Self::Operation>,
-    ) -> Result<(), commonware_storage::qmdb::Error> {
-        for operation in operations {
+    ) -> Result<Self, commonware_storage::qmdb::Error> {
+        if operations.last().is_none() || !operations.last().unwrap().is_commit() {
+            // Ignore bad inputs rather than return errors.
+            error!("operations must end with a commit");
+            return Ok(self);
+        }
+        let mut db = self.into_mutable();
+        let num_ops = operations.len();
+
+        for (i, operation) in operations.into_iter().enumerate() {
             match operation {
-                Operation::Update(key, value) => {
-                    database.update(key, value).await?;
+                Operation::Update(Update(key, value)) => {
+                    db.update(key, value).await?;
                 }
                 Operation::Delete(key) => {
-                    database.delete(key).await?;
+                    db.delete(key).await?;
                 }
                 Operation::CommitFloor(metadata, _) => {
-                    database.commit(metadata).await?;
+                    let (durable_db, _) = db.commit(metadata).await?;
+                    if i == num_ops - 1 {
+                        // Last operation - return the clean database
+                        return Ok(durable_db.into_merkleized());
+                    }
+                    // Not the last operation - continue in mutable state
+                    db = durable_db.into_mutable();
                 }
             }
         }
-        Ok(())
-    }
-
-    async fn commit(&mut self) -> Result<(), commonware_storage::qmdb::Error> {
-        self.commit(None).await?;
-        Ok(())
+        panic!("operations should end with a commit");
     }
 
     fn root(&self) -> Key {
-        CleanStore::root(self)
+        self.root()
     }
 
     fn op_count(&self) -> Location {
@@ -116,7 +129,7 @@ where
         start_loc: Location,
         max_ops: NonZeroU64,
     ) -> impl Future<Output = Result<(Proof<Key>, Vec<Self::Operation>), qmdb::Error>> + Send {
-        CleanStore::historical_proof(self, op_count, start_loc, max_ops)
+        self.historical_proof(op_count, start_loc, max_ops)
     }
 
     fn name() -> &'static str {

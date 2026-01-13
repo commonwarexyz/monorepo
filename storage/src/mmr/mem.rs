@@ -15,7 +15,7 @@ use commonware_cryptography::Digest;
 use core::{mem, ops::Range};
 cfg_if::cfg_if! {
     if #[cfg(feature = "std")] {
-        use commonware_runtime::ThreadPool;
+        use commonware_parallel::ThreadPool;
         use rayon::prelude::*;
     } else {
         struct ThreadPool;
@@ -38,7 +38,7 @@ mod private {
 }
 
 /// Trait for valid MMR state types.
-pub trait State<D: Digest>: private::Sealed + Sized {
+pub trait State<D: Digest>: private::Sealed + Sized + Send + Sync {
     /// Add the given leaf digest to the MMR, returning its position.
     fn add_leaf_digest<H: Hasher<D>>(mmr: &mut Mmr<D, Self>, hasher: &mut H, digest: D)
         -> Position;
@@ -69,8 +69,12 @@ pub struct Dirty {
 
 impl private::Sealed for Dirty {}
 impl<D: Digest> State<D> for Dirty {
-    fn add_leaf_digest<H: Hasher<D>>(mmr: &mut DirtyMmr<D>, hasher: &mut H, digest: D) -> Position {
-        mmr.add_leaf_digest(hasher, digest)
+    fn add_leaf_digest<H: Hasher<D>>(
+        mmr: &mut DirtyMmr<D>,
+        _hasher: &mut H,
+        digest: D,
+    ) -> Position {
+        mmr.add_leaf_digest(digest)
     }
 }
 
@@ -196,6 +200,11 @@ impl<D: Digest, S: State<D>> Mmr<D, S> {
     /// Return the requested node if it is either retained or present in the pinned_nodes map, and
     /// panic otherwise. Use `get_node` instead if you require a non-panicking getter.
     ///
+    /// # Warning
+    ///
+    /// If the requested digest is for an unmerkleized node (only possible in the Dirty state) a
+    /// dummy digest will be returned.
+    ///
     /// # Panics
     ///
     /// Panics if the requested node does not exist for any reason such as the node is pruned or
@@ -315,7 +324,7 @@ impl<D: Digest> CleanMmr<D> {
     /// MMR's structure.
     pub(super) fn add_leaf_digest(&mut self, hasher: &mut impl Hasher<D>, digest: D) -> Position {
         let mut dirty_mmr = mem::replace(self, Self::new(hasher)).into_dirty();
-        let leaf_pos = dirty_mmr.add_leaf_digest(hasher, digest);
+        let leaf_pos = dirty_mmr.add_leaf_digest(digest);
         *self = dirty_mmr.merkleize(hasher, None);
         leaf_pos
     }
@@ -494,8 +503,7 @@ impl<D: Digest> DirtyMmr<D> {
     }
 
     /// Add `digest` as a new leaf in the MMR, returning its position.
-    // TODO(#2318): Remove _hasher which is only used to create dummy digests.
-    pub(super) fn add_leaf_digest<H: Hasher<D>>(&mut self, _hasher: &mut H, digest: D) -> Position {
+    pub(super) fn add_leaf_digest(&mut self, digest: D) -> Position {
         // Compute the new parent nodes, if any.
         let nodes_needing_parents = nodes_needing_parents(self.peak_iterator())
             .into_iter()
@@ -506,8 +514,7 @@ impl<D: Digest> DirtyMmr<D> {
         let mut height = 1;
         for _ in nodes_needing_parents {
             let new_node_pos = self.size();
-            self.nodes
-                .push_back(<H::Inner as commonware_cryptography::Hasher>::EMPTY);
+            self.nodes.push_back(D::EMPTY);
             self.state.dirty_nodes.insert((new_node_pos, height));
             height += 1;
         }
@@ -801,8 +808,8 @@ mod tests {
         stability::ROOTS,
     };
     use commonware_cryptography::{sha256, Hasher, Sha256};
-    use commonware_runtime::{create_pool, deterministic, tokio, Runner};
-    use commonware_utils::hex;
+    use commonware_runtime::{deterministic, tokio, RayonPoolSpawner, Runner};
+    use commonware_utils::{hex, NZUsize};
 
     /// Build the MMR corresponding to the stability test `ROOTS` and confirm the roots match.
     fn build_and_check_test_roots_mmr(mmr: &mut CleanMmr<sha256::Digest>) {
@@ -1064,7 +1071,7 @@ mod tests {
     fn test_mem_mmr_root_stability_parallel() {
         let executor = tokio::Runner::default();
         executor.start(|context| async move {
-            let pool = commonware_runtime::create_pool(context, 4).unwrap();
+            let pool = context.create_pool(NZUsize!(4)).unwrap();
             let mut hasher: Standard<Sha256> = Standard::new();
 
             let mmr = Mmr::init(
@@ -1236,14 +1243,14 @@ mod tests {
         });
     }
 
-    #[test]
     /// Same test as above only using a thread pool to trigger parallelization. This requires we use
     /// tokio runtime instead of the deterministic one.
+    #[test]
     fn test_mem_mmr_batch_parallel_update_leaf() {
         let mut hasher: Standard<Sha256> = Standard::new();
         let executor = tokio::Runner::default();
         executor.start(|ctx| async move {
-            let pool = create_pool(ctx, 4).unwrap();
+            let pool = ctx.create_pool(NZUsize!(4)).unwrap();
             let mmr = Mmr::init(
                 Config {
                     nodes: Vec::new(),

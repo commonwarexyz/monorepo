@@ -18,11 +18,11 @@ clap.workspace = true
 commonware-codec.workspace = true
 commonware-cryptography.workspace = true
 commonware-deployer.workspace = true
+commonware-math.workspace = true
 commonware-p2p.workspace = true
 commonware-runtime.workspace = true
 commonware-utils.workspace = true
 futures.workspace = true
-governor.workspace = true
 prometheus-client.workspace = true
 rand.workspace = true
 serde = { workspace = true, features = ["derive"] }

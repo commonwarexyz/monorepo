@@ -2,12 +2,12 @@
 
 use crate::Manager;
 use commonware_cryptography::PublicKey;
-use commonware_utils::ordered::Set;
+use commonware_utils::{channels::fallible::FallibleExt, ordered::Set};
 use futures::channel::mpsc::{unbounded, UnboundedReceiver, UnboundedSender};
 
 pub mod codec;
+pub mod limited;
 pub mod mux;
-pub mod requester;
 
 /// A [Manager] over a static set of peers.
 #[derive(Debug, Clone)]
@@ -44,7 +44,7 @@ impl<P: PublicKey> Manager for StaticManager<P> {
 
     async fn subscribe(&mut self) -> UnboundedReceiver<(u64, Set<P>, Set<P>)> {
         let (sender, receiver) = unbounded();
-        let _ = sender.unbounded_send((self.id, self.peers.clone(), self.peers.clone()));
+        sender.send_lossy((self.id, self.peers.clone(), self.peers.clone()));
         self.senders.push(sender); // prevent the receiver from closing
         receiver
     }

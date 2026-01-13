@@ -1,7 +1,10 @@
 use super::{Config, Error};
-use crate::rmap::RMap;
+use crate::{kv, rmap::RMap, Persistable};
 use bytes::{Buf, BufMut};
-use commonware_codec::{CodecFixed, Encode, FixedSize, Read, ReadExt, Write as CodecWrite};
+use commonware_codec::{
+    CodecFixed, CodecFixedShared, Encode, FixedSize, Read, ReadExt, Write as CodecWrite,
+};
+use commonware_cryptography::{crc32, Crc32};
 use commonware_runtime::{
     buffer::{Read as ReadBuffer, Write},
     Blob, Clock, Error as RError, Metrics, Storage,
@@ -12,7 +15,6 @@ use prometheus_client::metrics::counter::Counter;
 use std::{
     collections::{btree_map::Entry, BTreeMap, BTreeSet},
     marker::PhantomData,
-    mem::take,
 };
 use tracing::{debug, warn};
 
@@ -25,17 +27,17 @@ struct Record<V: CodecFixed<Cfg = ()>> {
 
 impl<V: CodecFixed<Cfg = ()>> Record<V> {
     fn new(value: V) -> Self {
-        let crc = crc32fast::hash(&value.encode());
+        let crc = Crc32::checksum(&value.encode());
         Self { value, crc }
     }
 
     fn is_valid(&self) -> bool {
-        self.crc == crc32fast::hash(&self.value.encode())
+        self.crc == Crc32::checksum(&self.value.encode())
     }
 }
 
 impl<V: CodecFixed<Cfg = ()>> FixedSize for Record<V> {
-    const SIZE: usize = V::SIZE + u32::SIZE;
+    const SIZE: usize = V::SIZE + crc32::Digest::SIZE;
 }
 
 impl<V: CodecFixed<Cfg = ()>> CodecWrite for Record<V> {
@@ -53,6 +55,17 @@ impl<V: CodecFixed<Cfg = ()>> Read for Record<V> {
         let crc = u32::read(buf)?;
 
         Ok(Self { value, crc })
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl<V: CodecFixed<Cfg = ()>> arbitrary::Arbitrary<'_> for Record<V>
+where
+    V: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let value = V::arbitrary(u)?;
+        Ok(Self::new(value))
     }
 }
 
@@ -257,7 +270,7 @@ impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
         let blob = self.blobs.get(&section).unwrap();
         let offset = (index % items_per_blob) * Record::<V>::SIZE as u64;
         let record = Record::new(value);
-        blob.write_at(record.encode(), offset).await?;
+        blob.write_at(record.encode_mut(), offset).await?;
         self.pending.insert(section);
 
         // Add to intervals
@@ -384,15 +397,6 @@ impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
         Ok(())
     }
 
-    /// Sync all pending entries and [Blob]s.
-    pub async fn close(mut self) -> Result<(), Error> {
-        self.sync().await?;
-        for (_, blob) in take(&mut self.blobs) {
-            blob.sync().await?;
-        }
-        Ok(())
-    }
-
     /// Destroy [Ordinal] and remove all data.
     pub async fn destroy(self) -> Result<(), Error> {
         for (i, blob) in self.blobs.into_iter() {
@@ -413,7 +417,7 @@ impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
     }
 }
 
-impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> crate::store::Store for Ordinal<E, V> {
+impl<E: Storage + Metrics + Clock, V: CodecFixedShared> kv::Gettable for Ordinal<E, V> {
     type Key = u64;
     type Value = V;
     type Error = Error;
@@ -423,22 +427,34 @@ impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> crate::store::Store 
     }
 }
 
-impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> crate::store::StoreMut
-    for Ordinal<E, V>
-{
+impl<E: Storage + Metrics + Clock, V: CodecFixedShared> kv::Updatable for Ordinal<E, V> {
     async fn update(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
         self.put(key, value).await
     }
 }
 
-impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> crate::store::StorePersistable
-    for Ordinal<E, V>
-{
+impl<E: Storage + Metrics + Clock, V: CodecFixedShared> Persistable for Ordinal<E, V> {
+    type Error = Error;
+
     async fn commit(&mut self) -> Result<(), Self::Error> {
+        self.sync().await
+    }
+
+    async fn sync(&mut self) -> Result<(), Self::Error> {
         self.sync().await
     }
 
     async fn destroy(self) -> Result<(), Self::Error> {
         self.destroy().await
+    }
+}
+
+#[cfg(all(test, feature = "arbitrary"))]
+mod conformance {
+    use super::*;
+    use commonware_codec::conformance::CodecConformance;
+
+    commonware_conformance::conformance_tests! {
+        CodecConformance<Record<u32>>
     }
 }

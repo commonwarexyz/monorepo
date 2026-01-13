@@ -36,11 +36,9 @@ pub async fn authorize(config_path: &PathBuf, ip: Option<String>) -> Result<(), 
     // Determine new IP
     let new_ip = if let Some(ip_str) = ip {
         // Validate provided IP as IPv4
-        let ip_addr: std::net::IpAddr = ip_str
-            .parse()
-            .map_err(|_| Error::InvalidIpAddress(ip_str.clone()))?;
+        let ip_addr: std::net::IpAddr = ip_str.parse()?;
         let std::net::IpAddr::V4(ipv4) = ip_addr else {
-            return Err(Error::InvalidIpAddress(ip_str));
+            return Err(Error::IpAddrNotV4(ip_addr));
         };
         ipv4.to_string()
     } else {

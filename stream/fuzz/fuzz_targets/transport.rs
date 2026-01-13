@@ -1,13 +1,13 @@
 #![no_main]
 
-use commonware_cryptography::{ed25519::PrivateKey, PrivateKeyExt as _, Signer};
+use commonware_cryptography::{ed25519::PrivateKey, Signer};
 use commonware_runtime::{deterministic, mocks, Runner, Spawner};
 use commonware_stream::{dial, listen, Config};
 use libfuzzer_sys::fuzz_target;
 use std::time::Duration;
 
 static NAMESPACE: &[u8] = b"fuzz_transport";
-const MAX_MESSAGE_SIZE: usize = 64 * 1024; // 64KB buffer
+const MAX_MESSAGE_SIZE: u32 = 64 * 1024; // 64KB buffer
 
 fn fuzz(data: &[u8]) {
     let executor = deterministic::Runner::default();

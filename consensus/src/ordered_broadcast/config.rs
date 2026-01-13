@@ -1,37 +1,44 @@
-use super::types::{Activity, Context};
+use super::types::{Activity, ChunkSigner, ChunkVerifier, Context, SequencersProvider};
 use crate::{
-    types::{Epoch, EpochDelta},
-    Automaton, Monitor, Relay, Reporter, Supervisor, ThresholdSupervisor,
+    types::{Epoch, EpochDelta, HeightDelta},
+    Automaton, Monitor, Relay, Reporter,
 };
-use commonware_cryptography::{bls12381::primitives::variant::Variant, Digest, Signer};
+use commonware_cryptography::{certificate::Provider, Digest, Signer};
+use commonware_parallel::Strategy;
 use commonware_runtime::buffer::PoolRef;
-use std::{num::NonZeroUsize, time::Duration};
+use std::{
+    num::{NonZeroU64, NonZeroUsize},
+    time::Duration,
+};
 
 /// Configuration for the [super::Engine].
 pub struct Config<
     C: Signer,
-    V: Variant,
+    S: SequencersProvider,
+    P: Provider<Scope = Epoch>,
     D: Digest,
     A: Automaton<Context = Context<C::PublicKey>, Digest = D>,
     R: Relay<Digest = D>,
-    Z: Reporter<Activity = Activity<C::PublicKey, V, D>>,
+    Z: Reporter<Activity = Activity<C::PublicKey, P::Scheme, D>>,
     M: Monitor<Index = Epoch>,
-    Su: Supervisor<Index = Epoch, PublicKey = C::PublicKey>,
-    TSu: ThresholdSupervisor<Index = Epoch, PublicKey = C::PublicKey>,
+    T: Strategy,
 > {
-    /// The cryptographic scheme used if the engine is a sequencer.
-    pub crypto: C,
+    /// The signer used when this engine acts as a sequencer.
+    ///
+    /// Create with `ChunkSigner::new(namespace, signer)`.
+    pub sequencer_signer: Option<ChunkSigner<C>>,
 
-    /// Tracks the current state of consensus (to determine which participants should
-    /// be involved in the current broadcast attempt).
-    pub monitor: M,
+    /// Verifier for node signatures.
+    ///
+    /// Create with `ChunkVerifier::new(namespace)` using the same namespace
+    /// as the `ChunkSigner`.
+    pub chunk_verifier: ChunkVerifier,
 
-    /// Manages the set of validators and the group polynomial.
-    /// Also manages the cryptographic partial share if the engine is a validator.
-    pub validators: TSu,
+    /// Provider for epoch-specific sequencers set.
+    pub sequencers_provider: S,
 
-    /// Manages the set of sequencers.
-    pub sequencers: Su,
+    /// Provider for epoch-specific validator signing schemes.
+    pub validators_provider: P,
 
     /// Proposes and verifies digests.
     pub automaton: A,
@@ -39,12 +46,12 @@ pub struct Config<
     /// Broadcasts the raw payload.
     pub relay: R,
 
-    /// Notified when a chunk receives a threshold of acks.
+    /// Notified when a chunk receives a quorum of acks.
     pub reporter: Z,
 
-    /// The application namespace used to sign over different types of messages.
-    /// Used to prevent replay attacks on other applications.
-    pub namespace: Vec<u8>,
+    /// Tracks the current state of consensus (to determine which participants should
+    /// be involved in the current broadcast attempt).
+    pub monitor: M,
 
     /// Whether proposals are sent as priority.
     pub priority_proposals: bool,
@@ -52,7 +59,7 @@ pub struct Config<
     /// Whether acks are sent as priority.
     pub priority_acks: bool,
 
-    /// How often a proposal is rebroadcast to all validators if no threshold is reached.
+    /// How often a proposal is rebroadcast to all validators if no quorum is reached.
     pub rebroadcast_timeout: Duration,
 
     /// A tuple representing the epochs to keep in memory.
@@ -69,14 +76,14 @@ pub struct Config<
     ///
     /// For example, if the current tip for a sequencer is at height 100,
     /// and the height_bound is 10, then acks for heights 100-110 are accepted.
-    pub height_bound: u64,
+    pub height_bound: HeightDelta,
 
     /// A prefix for the journal names.
     /// The rest of the name is the hex-encoded public keys of the relevant sequencer.
     pub journal_name_prefix: String,
 
     /// The number of entries to keep per journal section.
-    pub journal_heights_per_section: u64,
+    pub journal_heights_per_section: NonZeroU64,
 
     /// The number of bytes to buffer when replaying a journal.
     pub journal_replay_buffer: NonZeroUsize,
@@ -89,4 +96,7 @@ pub struct Config<
 
     /// Buffer pool for the journal.
     pub journal_buffer_pool: PoolRef,
+
+    /// Strategy for parallel operations.
+    pub strategy: T,
 }

@@ -3,12 +3,13 @@
 use arbitrary::Arbitrary;
 use commonware_consensus::{
     simplex::{
-        signing_scheme::ed25519,
-        types::{AttributableMap, Nullify, Signature},
+        scheme::ed25519,
+        types::{AttributableMap, Nullify},
     },
-    types::{Epoch, Round, View},
+    types::{Epoch, Participant, Round, View},
 };
-use commonware_cryptography::{ed25519::PrivateKey, PrivateKeyExt, Signer};
+use commonware_cryptography::{certificate::Attestation, ed25519::PrivateKey, Signer};
+use commonware_math::algebra::Random;
 use libfuzzer_sys::fuzz_target;
 use rand::{rngs::StdRng, SeedableRng};
 
@@ -16,15 +17,15 @@ const MAX_OPERATIONS: usize = 64;
 
 #[derive(Arbitrary, Debug, Clone)]
 struct VoteData {
-    signer: u32,
-    epoch: u64,
-    view: u64,
+    signer: Participant,
+    epoch: Epoch,
+    view: View,
 }
 
 #[derive(Arbitrary, Debug, Clone)]
 enum Operation {
     Insert(VoteData),
-    Get(u32),
+    Get(Participant),
     Clear,
 }
 
@@ -40,8 +41,8 @@ fn make_vote(
     sig: commonware_cryptography::ed25519::Signature,
 ) -> Nullify<ed25519::Scheme> {
     Nullify {
-        round: Round::new(Epoch::new(data.epoch), View::new(data.view)),
-        signature: Signature {
+        round: Round::new(data.epoch, data.view),
+        attestation: Attestation {
             signer: data.signer,
             signature: sig,
         },
@@ -50,7 +51,7 @@ fn make_vote(
 
 fn fuzz(input: FuzzInput) {
     let mut rng = StdRng::seed_from_u64(input.seed);
-    let signer = PrivateKey::from_rng(&mut rng);
+    let signer = PrivateKey::random(&mut rng);
     let dummy_sig = signer.sign(b"fuzz", b"dummy");
 
     let mut map: AttributableMap<Nullify<ed25519::Scheme>> =
@@ -64,7 +65,7 @@ fn fuzz(input: FuzzInput) {
                 let nullify = make_vote(&data, dummy_sig.clone());
                 let result = map.insert(nullify);
 
-                let in_bounds = (signer_idx as usize) < (input.participants as usize);
+                let in_bounds = signer_idx.get() < u32::from(input.participants);
                 let already_inserted = inserted_signers.contains(&signer_idx);
 
                 if in_bounds && !already_inserted {

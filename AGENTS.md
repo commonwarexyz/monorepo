@@ -215,6 +215,23 @@ loop {
 }
 ```
 
+#### Deterministic RNG
+Use `commonware_utils::test_rng()` for random number generation in tests:
+```rust
+let mut rng = test_rng();
+let key = PrivateKey::random(&mut rng);
+```
+
+When you need multiple independent RNG streams in the same test (e.g., to generate
+non-overlapping keys), use `test_rng_seeded(seed)`:
+```rust
+let mut rng1 = test_rng();           // Stream 1: seed 0
+let mut rng2 = test_rng_seeded(1);   // Stream 2: seed 1
+```
+
+Avoid `OsRng`, `StdRng::from_entropy()`, or raw `StdRng::seed_from_u64()`.
+Exceptions: fuzz tests deriving seed from input, or loops testing multiple seeds.
+
 ### Simulated Network Testing
 To simulate network operations, use the simulated network (`p2p/src/simulated`):
 ```rust
@@ -358,8 +375,9 @@ fn test_crash_recovery() {
         // Append data
         journal.append(1, data).await.expect("Failed to append");
 
-        // Close to simulate clean shutdown
-        journal.close().await.expect("Failed to close");
+        // Sync and drop to simulate clean shutdown
+        journal.sync(1).await.expect("Failed to close");
+        drop(journal);
 
         // Re-initialize to simulate restart
         let journal = Journal::init(context.with_label("journal"), cfg)
@@ -382,7 +400,8 @@ fn test_corruption_recovery() {
         // Write valid data
         let mut journal = Journal::init(context.with_label("journal"), cfg).await.unwrap();
         journal.append(1, valid_data).await.unwrap();
-        journal.close().await.unwrap();
+        journal.sync(1).await.unwrap();
+        drop(journal);
 
         // Manually corrupt data
         let (blob, size) = context
@@ -447,7 +466,8 @@ fn test_storage_conformance() {
         for i in 0..100 {
             journal.append(1, i).await.unwrap();
         }
-        journal.close().await.unwrap();
+        journal.sync(1).await.unwrap();
+        drop(journal);
 
         // Hash blob contents to verify format
         let (blob, size) = context.open(&partition, &name).await.unwrap();
@@ -484,8 +504,14 @@ Conformance tests verify that implementations maintain backward compatibility by
 # Run all conformance tests
 just test-conformance
 
+# Run conformance tests for specific crates
+just test-conformance -p commonware-codec -p commonware-cryptography
+
 # Regenerate fixtures (use only for INTENTIONAL format changes)
 just regenerate-conformance
+
+# Regenerate fixtures for specific crates only
+just regenerate-conformance -p commonware-codec -p commonware-storage
 ```
 
 **WARNING**: Running `just regenerate-conformance` is effectively a manual approval of a breaking change. Only use this when you have intentionally changed the format and have verified that the change is correct. This will update the hash values in `conformance.toml` files throughout the repository.
@@ -576,6 +602,7 @@ pub enum Error {
 - Include `# Examples` sections for public APIs
 - Document `# Safety` for any unsafe code usage
 - Only use characters that can be easily typed. For example, don't use em dashes (—) or arrows (→).
+- Do not describe trait implementations on the trait definition (e.g., "For production runtimes, this does X. For deterministic testing, this does Y."). These comments become stale as implementations change. Document what the trait does, not how specific implementations behave.
 
 ### Naming Conventions
 - **Types**: `PascalCase` (e.g., `PublicKey`, `SignatureSet`)
@@ -584,6 +611,19 @@ pub enum Error {
 - **Traits**: Action-oriented names (`Signer`, `Verifier`) or `-able` suffix (`Viewable`)
 
 _Generally, we try to minimize the length of functions and variables._
+
+### Namespace Conventions
+Namespaces (used for domain separation in transcripts, hashing, etc.) must follow the pattern:
+```
+_COMMONWARE_<CRATE>_<OPERATION>
+```
+
+Examples:
+- `_COMMONWARE_CODING_ZODA` - ZODA encoding in the coding crate
+- `_COMMONWARE_STREAM_HANDSHAKE` - Handshake protocol in the stream crate
+- `_COMMONWARE_CRYPTOGRAPHY_BLS12381_DKG` - BLS12-381 DKG in the cryptography crate
+
+This ensures namespaces are globally unique and clearly identify both the crate and the specific operation. Changing a namespace is a breaking change that affects transcript randomness and derived values.
 
 ### Trait Patterns
 ```rust

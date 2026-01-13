@@ -1,22 +1,22 @@
 use super::{Error, Receiver, Sender};
-use crate::Channel;
+use crate::{authenticated::UnboundedMailbox, Address, Channel};
 use commonware_cryptography::PublicKey;
-use commonware_utils::ordered::{Map, Set};
-use futures::{
-    channel::{mpsc, oneshot},
-    SinkExt,
+use commonware_runtime::{Clock, Quota};
+use commonware_utils::{
+    channels::{fallible::FallibleExt, ring},
+    ordered::{Map, Set},
 };
-use governor::Quota;
+use futures::channel::{mpsc, oneshot};
 use rand_distr::Normal;
-use std::{net::SocketAddr, time::Duration};
+use std::time::Duration;
 
-pub enum Message<P: PublicKey> {
+pub enum Message<P: PublicKey, E: Clock> {
     Register {
         channel: Channel,
         public_key: P,
         quota: Quota,
         #[allow(clippy::type_complexity)]
-        result: oneshot::Sender<Result<(Sender<P>, Receiver<P>), Error>>,
+        result: oneshot::Sender<Result<(Sender<P, E>, Receiver<P>), Error>>,
     },
     Update {
         id: u64,
@@ -28,6 +28,9 @@ pub enum Message<P: PublicKey> {
     },
     Subscribe {
         sender: mpsc::UnboundedSender<(u64, Set<P>, Set<P>)>,
+    },
+    SubscribeConnected {
+        response: oneshot::Sender<ring::Receiver<Vec<P>>>,
     },
     LimitBandwidth {
         public_key: P,
@@ -58,6 +61,35 @@ pub enum Message<P: PublicKey> {
     },
 }
 
+impl<P: PublicKey, E: Clock> std::fmt::Debug for Message<P, E> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Register { .. } => f.debug_struct("Register").finish_non_exhaustive(),
+            Self::Update { id, .. } => f
+                .debug_struct("Update")
+                .field("id", id)
+                .finish_non_exhaustive(),
+            Self::PeerSet { id, .. } => f
+                .debug_struct("PeerSet")
+                .field("id", id)
+                .finish_non_exhaustive(),
+            Self::Subscribe { .. } => f.debug_struct("Subscribe").finish_non_exhaustive(),
+            Self::SubscribeConnected { .. } => {
+                f.debug_struct("SubscribeConnected").finish_non_exhaustive()
+            }
+            Self::LimitBandwidth { .. } => f.debug_struct("LimitBandwidth").finish_non_exhaustive(),
+            Self::AddLink { .. } => f.debug_struct("AddLink").finish_non_exhaustive(),
+            Self::RemoveLink { .. } => f.debug_struct("RemoveLink").finish_non_exhaustive(),
+            Self::Block { from, to } => f
+                .debug_struct("Block")
+                .field("from", from)
+                .field("to", to)
+                .finish(),
+            Self::Blocked { .. } => f.debug_struct("Blocked").finish_non_exhaustive(),
+        }
+    }
+}
+
 /// Describes a connection between two peers.
 ///
 /// Links are unidirectional (and must be set up in both directions
@@ -78,19 +110,27 @@ pub struct Link {
 ///
 /// At any point, peers can be added/removed and links
 /// between said peers can be modified.
-#[derive(Debug, Clone)]
-pub struct Oracle<P: PublicKey> {
-    sender: mpsc::UnboundedSender<Message<P>>,
+#[derive(Debug)]
+pub struct Oracle<P: PublicKey, E: Clock> {
+    sender: UnboundedMailbox<Message<P, E>>,
 }
 
-impl<P: PublicKey> Oracle<P> {
+impl<P: PublicKey, E: Clock> Clone for Oracle<P, E> {
+    fn clone(&self) -> Self {
+        Self {
+            sender: self.sender.clone(),
+        }
+    }
+}
+
+impl<P: PublicKey, E: Clock> Oracle<P, E> {
     /// Create a new instance of the oracle.
-    pub(crate) const fn new(sender: mpsc::UnboundedSender<Message<P>>) -> Self {
+    pub(crate) const fn new(sender: UnboundedMailbox<Message<P, E>>) -> Self {
         Self { sender }
     }
 
     /// Create a new [Control] interface for some peer.
-    pub fn control(&self, me: P) -> Control<P> {
+    pub fn control(&self, me: P) -> Control<P, E> {
         Control {
             me,
             sender: self.sender.clone(),
@@ -100,7 +140,7 @@ impl<P: PublicKey> Oracle<P> {
     /// Create a new [Manager].
     ///
     /// Useful for mocking [crate::authenticated::discovery].
-    pub fn manager(&self) -> Manager<P> {
+    pub fn manager(&self) -> Manager<P, E> {
         Manager {
             oracle: self.clone(),
         }
@@ -109,20 +149,19 @@ impl<P: PublicKey> Oracle<P> {
     /// Create a new [SocketManager].
     ///
     /// Useful for mocking [crate::authenticated::lookup].
-    pub fn socket_manager(&self) -> SocketManager<P> {
+    pub fn socket_manager(&self) -> SocketManager<P, E> {
         SocketManager {
             oracle: self.clone(),
         }
     }
 
     /// Return a list of all blocked peers.
-    pub async fn blocked(&mut self) -> Result<Vec<(P, P)>, Error> {
-        let (s, r) = oneshot::channel();
+    pub async fn blocked(&self) -> Result<Vec<(P, P)>, Error> {
         self.sender
-            .send(Message::Blocked { result: s })
+            .0
+            .request(|result| Message::Blocked { result })
             .await
-            .map_err(|_| Error::NetworkClosed)?;
-        r.await.map_err(|_| Error::NetworkClosed)?
+            .ok_or(Error::NetworkClosed)?
     }
 
     /// Set bandwidth limits for a peer.
@@ -132,22 +171,21 @@ impl<P: PublicKey> Oracle<P> {
     ///
     /// Bandwidth can be specified before a peer is registered or linked.
     pub async fn limit_bandwidth(
-        &mut self,
+        &self,
         public_key: P,
         egress_cap: Option<usize>,
         ingress_cap: Option<usize>,
     ) -> Result<(), Error> {
-        let (sender, receiver) = oneshot::channel();
         self.sender
-            .send(Message::LimitBandwidth {
+            .0
+            .request(|result| Message::LimitBandwidth {
                 public_key,
                 egress_cap,
                 ingress_cap,
-                result: sender,
+                result,
             })
             .await
-            .map_err(|_| Error::NetworkClosed)?;
-        receiver.await.map_err(|_| Error::NetworkClosed)
+            .ok_or(Error::NetworkClosed)
     }
 
     /// Create a unidirectional link between two peers.
@@ -156,7 +194,7 @@ impl<P: PublicKey> Oracle<P> {
     /// setting will be used.
     ///
     /// Link can be called before a peer is registered or bandwidth is specified.
-    pub async fn add_link(&mut self, sender: P, receiver: P, config: Link) -> Result<(), Error> {
+    pub async fn add_link(&self, sender: P, receiver: P, config: Link) -> Result<(), Error> {
         // Sanity checks
         if sender == receiver {
             return Err(Error::LinkingSelf);
@@ -172,65 +210,57 @@ impl<P: PublicKey> Oracle<P> {
         // Create distribution
         let sampler = Normal::new(latency_ms, jitter_ms).unwrap();
 
-        // Wait for update to complete
-        let (s, r) = oneshot::channel();
         self.sender
-            .send(Message::AddLink {
+            .0
+            .request(|result| Message::AddLink {
                 sender,
                 receiver,
                 sampler,
                 success_rate: config.success_rate,
-                result: s,
+                result,
             })
             .await
-            .map_err(|_| Error::NetworkClosed)?;
-        r.await.map_err(|_| Error::NetworkClosed)?
+            .ok_or(Error::NetworkClosed)?
     }
 
     /// Remove a unidirectional link between two peers.
     ///
     /// If no link exists, this will return an error.
-    pub async fn remove_link(&mut self, sender: P, receiver: P) -> Result<(), Error> {
+    pub async fn remove_link(&self, sender: P, receiver: P) -> Result<(), Error> {
         // Sanity checks
         if sender == receiver {
             return Err(Error::LinkingSelf);
         }
 
-        // Wait for update to complete
-        let (s, r) = oneshot::channel();
         self.sender
-            .send(Message::RemoveLink {
+            .0
+            .request(|result| Message::RemoveLink {
                 sender,
                 receiver,
-                result: s,
+                result,
             })
             .await
-            .map_err(|_| Error::NetworkClosed)?;
-        r.await.map_err(|_| Error::NetworkClosed)?
+            .ok_or(Error::NetworkClosed)?
     }
 
     /// Set the peers for a given id.
-    async fn update(&mut self, id: u64, peers: Set<P>) {
-        let _ = self.sender.send(Message::Update { id, peers }).await;
+    async fn update(&self, id: u64, peers: Set<P>) {
+        self.sender.0.send_lossy(Message::Update { id, peers });
     }
 
     /// Get the peers for a given id.
-    async fn peer_set(&mut self, id: u64) -> Option<Set<P>> {
-        let (sender, receiver) = oneshot::channel();
+    async fn peer_set(&self, id: u64) -> Option<Set<P>> {
         self.sender
-            .send(Message::PeerSet {
-                id,
-                response: sender,
-            })
+            .0
+            .request(|response| Message::PeerSet { id, response })
             .await
-            .ok()?;
-        receiver.await.ok().flatten()
+            .flatten()
     }
 
     /// Subscribe to notifications when new peer sets are added.
-    async fn subscribe(&mut self) -> mpsc::UnboundedReceiver<(u64, Set<P>, Set<P>)> {
+    async fn subscribe(&self) -> mpsc::UnboundedReceiver<(u64, Set<P>, Set<P>)> {
         let (sender, receiver) = mpsc::unbounded();
-        let _ = self.sender.send(Message::Subscribe { sender }).await;
+        self.sender.0.send_lossy(Message::Subscribe { sender });
         receiver
     }
 }
@@ -238,13 +268,26 @@ impl<P: PublicKey> Oracle<P> {
 /// Implementation of [crate::Manager] for peers.
 ///
 /// Useful for mocking [crate::authenticated::discovery].
-#[derive(Clone, Debug)]
-pub struct Manager<P: PublicKey> {
+pub struct Manager<P: PublicKey, E: Clock> {
     /// The oracle to send messages to.
-    oracle: Oracle<P>,
+    oracle: Oracle<P, E>,
 }
 
-impl<P: PublicKey> crate::Manager for Manager<P> {
+impl<P: PublicKey, E: Clock> std::fmt::Debug for Manager<P, E> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Manager").finish_non_exhaustive()
+    }
+}
+
+impl<P: PublicKey, E: Clock> Clone for Manager<P, E> {
+    fn clone(&self) -> Self {
+        Self {
+            oracle: self.oracle.clone(),
+        }
+    }
+}
+
+impl<P: PublicKey, E: Clock> crate::Manager for Manager<P, E> {
     type PublicKey = P;
     type Peers = Set<Self::PublicKey>;
 
@@ -263,27 +306,40 @@ impl<P: PublicKey> crate::Manager for Manager<P> {
     }
 }
 
-/// Implementation of [crate::Manager] for peers with [SocketAddr]s.
+/// Implementation of [crate::Manager] for peers with [Address]es.
 ///
 /// Useful for mocking [crate::authenticated::lookup].
 ///
-/// # Note on [SocketAddr]
+/// # Note on [Address]
 ///
-/// Because [SocketAddr]s are never exposed in [crate::simulated],
+/// Because addresses are never exposed in [crate::simulated],
 /// there is nothing to assert submitted data against. We thus consider
-/// all [SocketAddr]s to be valid.
-#[derive(Clone, Debug)]
-pub struct SocketManager<P: PublicKey> {
+/// all addresses to be valid.
+pub struct SocketManager<P: PublicKey, E: Clock> {
     /// The oracle to send messages to.
-    oracle: Oracle<P>,
+    oracle: Oracle<P, E>,
 }
 
-impl<P: PublicKey> crate::Manager for SocketManager<P> {
+impl<P: PublicKey, E: Clock> std::fmt::Debug for SocketManager<P, E> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SocketManager").finish_non_exhaustive()
+    }
+}
+
+impl<P: PublicKey, E: Clock> Clone for SocketManager<P, E> {
+    fn clone(&self) -> Self {
+        Self {
+            oracle: self.oracle.clone(),
+        }
+    }
+}
+
+impl<P: PublicKey, E: Clock> crate::Manager for SocketManager<P, E> {
     type PublicKey = P;
-    type Peers = Map<Self::PublicKey, SocketAddr>;
+    type Peers = Map<Self::PublicKey, Address>;
 
     async fn update(&mut self, id: u64, peers: Self::Peers) {
-        // Ignore all SocketAddrs
+        // Ignore all addresses (simulated network doesn't use them)
         self.oracle.update(id, peers.into_keys()).await;
     }
 
@@ -299,16 +355,25 @@ impl<P: PublicKey> crate::Manager for SocketManager<P> {
 }
 
 /// Individual control interface for a peer in the simulated network.
-#[derive(Debug, Clone)]
-pub struct Control<P: PublicKey> {
+#[derive(Debug)]
+pub struct Control<P: PublicKey, E: Clock> {
     /// The public key of the peer this control interface is for.
     me: P,
 
     /// Sender for messages to the oracle.
-    sender: mpsc::UnboundedSender<Message<P>>,
+    sender: UnboundedMailbox<Message<P, E>>,
 }
 
-impl<P: PublicKey> Control<P> {
+impl<P: PublicKey, E: Clock> Clone for Control<P, E> {
+    fn clone(&self) -> Self {
+        Self {
+            me: self.me.clone(),
+            sender: self.sender.clone(),
+        }
+    }
+}
+
+impl<P: PublicKey, E: Clock> Control<P, E> {
     /// Register the communication interfaces for the peer over a given [Channel].
     ///
     /// # Rate Limiting
@@ -316,34 +381,31 @@ impl<P: PublicKey> Control<P> {
     /// The `quota` parameter specifies the rate limit for outbound messages to each peer.
     /// Recipients that exceed their rate limit will be skipped when sending.
     pub async fn register(
-        &mut self,
+        &self,
         channel: Channel,
         quota: Quota,
-    ) -> Result<(Sender<P>, Receiver<P>), Error> {
-        let (tx, rx) = oneshot::channel();
+    ) -> Result<(Sender<P, E>, Receiver<P>), Error> {
+        let public_key = self.me.clone();
         self.sender
-            .send(Message::Register {
+            .0
+            .request(|result| Message::Register {
                 channel,
-                public_key: self.me.clone(),
+                public_key,
                 quota,
-                result: tx,
+                result,
             })
             .await
-            .map_err(|_| Error::NetworkClosed)?;
-        rx.await.map_err(|_| Error::NetworkClosed)?
+            .ok_or(Error::NetworkClosed)?
     }
 }
 
-impl<P: PublicKey> crate::Blocker for Control<P> {
+impl<P: PublicKey, E: Clock> crate::Blocker for Control<P, E> {
     type PublicKey = P;
 
     async fn block(&mut self, public_key: P) {
-        let _ = self
-            .sender
-            .send(Message::Block {
-                from: self.me.clone(),
-                to: public_key,
-            })
-            .await;
+        self.sender.0.send_lossy(Message::Block {
+            from: self.me.clone(),
+            to: public_key,
+        });
     }
 }

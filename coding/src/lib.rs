@@ -12,10 +12,8 @@
 
 use bytes::Buf;
 use commonware_codec::{Codec, FixedSize, Read, Write};
+use commonware_parallel::Strategy;
 use std::fmt::Debug;
-
-mod field;
-mod poly;
 
 mod reed_solomon;
 use commonware_cryptography::Digest;
@@ -29,6 +27,7 @@ pub use zoda::{Error as ZodaError, Zoda};
 
 /// Configuration common to all encoding schemes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub struct Config {
     /// The minimum number of shards needed to encode the data.
     pub minimum_shards: u16,
@@ -85,8 +84,9 @@ pub struct CodecConfig {
 /// ```
 /// use commonware_coding::{Config, ReedSolomon, Scheme as _};
 /// use commonware_cryptography::Sha256;
+/// use commonware_parallel::Sequential;
 ///
-/// const CONCURRENCY: usize = 1;
+/// const STRATEGY: Sequential = Sequential;
 ///
 /// type RS = ReedSolomon<Sha256>;
 ///
@@ -94,7 +94,7 @@ pub struct CodecConfig {
 /// let data = b"Hello!";
 /// // Turn the data into shards, and a commitment to those shards.
 /// let (commitment, shards) =
-///      RS::encode(&config, data.as_slice(), CONCURRENCY).unwrap();
+///      RS::encode(&config, data.as_slice(), &STRATEGY).unwrap();
 ///
 /// // Each person produces reshards, their own checked shard, and checking data
 /// // to check other peoples reshards.
@@ -115,11 +115,11 @@ pub struct CodecConfig {
 ///   checked_shards.push(RS::check(&config, &commitment, &checking_data, i as u16, reshard).unwrap())
 /// }
 ///
-/// let data2 = RS::decode(&config, &commitment, checking_data, &checked_shards[..2], CONCURRENCY).unwrap();
+/// let data2 = RS::decode(&config, &commitment, checking_data, &checked_shards[..2], &STRATEGY).unwrap();
 /// assert_eq!(&data[..], &data2[..]);
 ///
 /// // Decoding works with different shards, with a guarantee to get the same result.
-/// let data3 = RS::decode(&config, &commitment, checking_data, &checked_shards[1..], CONCURRENCY).unwrap();
+/// let data3 = RS::decode(&config, &commitment, checking_data, &checked_shards[1..], &STRATEGY).unwrap();
 /// assert_eq!(&data[..], &data3[..]);
 /// ```
 pub trait Scheme: Debug + Clone + Send + Sync + 'static {
@@ -150,7 +150,7 @@ pub trait Scheme: Debug + Clone + Send + Sync + 'static {
     fn encode(
         config: &Config,
         data: impl Buf,
-        concurrency: usize,
+        strategy: &impl Strategy,
     ) -> Result<(Self::Commitment, Vec<Self::Shard>), Self::Error>;
 
     /// Take your own shard, check it, and produce a [Scheme::ReShard] to forward to others.
@@ -199,7 +199,7 @@ pub trait Scheme: Debug + Clone + Send + Sync + 'static {
         commitment: &Self::Commitment,
         checking_data: Self::CheckingData,
         shards: &[Self::CheckedShard],
-        concurrency: usize,
+        strategy: &impl Strategy,
     ) -> Result<Vec<u8>, Self::Error>;
 }
 
@@ -216,9 +216,9 @@ mod test {
     use crate::reed_solomon::ReedSolomon;
     use commonware_codec::Encode;
     use commonware_cryptography::Sha256;
+    use commonware_parallel::Sequential;
     use std::cmp::Reverse;
 
-    const CONCURRENCY: usize = 1;
     const MAX_DATA_BYTES: usize = 1 << 31;
 
     fn general_test<S: Scheme>(
@@ -251,7 +251,7 @@ mod test {
         let read_cfg = CodecConfig {
             maximum_shard_size: MAX_DATA_BYTES,
         };
-        let (commitment, shards) = S::encode(&config, data, CONCURRENCY).unwrap();
+        let (commitment, shards) = S::encode(&config, data, &Sequential).unwrap();
         // Pick out the packets we want, in reverse order.
         let ((_, _, checking_data, my_checked_shard, _), other_packets) = {
             let mut out = shards
@@ -285,7 +285,7 @@ mod test {
             &commitment,
             checking_data,
             &checked_shards,
-            CONCURRENCY,
+            &Sequential,
         )
         .unwrap();
         assert_eq!(&decoded, data, "{name} failed");
@@ -378,5 +378,15 @@ mod test {
     #[test]
     fn test_suite_zoda() {
         test_suite::<Zoda<Sha256>>();
+    }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::*;
+        use commonware_codec::conformance::CodecConformance;
+
+        commonware_conformance::conformance_tests! {
+            CodecConformance<Config>,
+        }
     }
 }

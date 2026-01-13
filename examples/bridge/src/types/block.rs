@@ -63,28 +63,29 @@ mod tests {
     use super::*;
     use commonware_codec::{DecodeExt, Encode, FixedSize};
     use commonware_consensus::{
-        simplex::{signing_scheme::bls12381_threshold, types::Proposal},
+        simplex::{scheme::bls12381_threshold, types::Proposal},
         types::{Epoch, Round, View},
     };
     use commonware_cryptography::{
         bls12381::primitives::{
-            group::{self, Element},
+            group::{self},
             variant::{MinSig, Variant},
         },
         sha256::Digest as Sha256Digest,
     };
-    use rand::thread_rng;
+    use commonware_math::algebra::{CryptoGroup, Random as _};
+    use commonware_utils::test_rng;
 
     fn new_digest() -> Sha256Digest {
         Sha256Digest::decode(&[123u8; Sha256Digest::SIZE][..]).unwrap()
     }
 
     fn new_finalization() -> Finalization<Scheme, Sha256Digest> {
-        let scalar = group::Scalar::from_rand(&mut thread_rng());
-        let mut proposal_signature = <MinSig as Variant>::Signature::one();
-        proposal_signature.mul(&scalar);
-        let mut seed_signature = <MinSig as Variant>::Signature::one();
-        seed_signature.mul(&scalar);
+        let scalar = group::Scalar::random(&mut test_rng());
+        let mut proposal_signature = <MinSig as Variant>::Signature::generator();
+        proposal_signature *= &scalar;
+        let mut seed_signature = <MinSig as Variant>::Signature::generator();
+        seed_signature *= &scalar;
         Finalization {
             proposal: Proposal {
                 round: Round::new(Epoch::new(333), View::new(12345)),

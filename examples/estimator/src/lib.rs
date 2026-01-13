@@ -7,7 +7,7 @@
 
 use commonware_cryptography::{
     ed25519::{self, PublicKey},
-    PrivateKeyExt, Signer,
+    Signer,
 };
 use commonware_p2p::Recipients;
 use reqwest::blocking::Client;
@@ -70,8 +70,8 @@ pub enum Command {
     Reply(u32, Option<usize>),     // id, size in bytes
     Collect(u32, Threshold, Option<(Duration, Duration)>),
     Wait(u32, Threshold, Option<(Duration, Duration)>),
-    Or(Box<Command>, Box<Command>),
-    And(Box<Command>, Box<Command>),
+    Or(Box<Self>, Box<Self>),
+    And(Box<Self>, Box<Self>),
 }
 
 #[derive(Clone)]

@@ -60,10 +60,9 @@
 //!
 //! ```rust
 //! use commonware_p2p::{Manager, simulated::{Config, Link, Network}};
-//! use commonware_cryptography::{ed25519, PrivateKey, Signer as _, PublicKey as _, PrivateKeyExt as _};
-//! use commonware_runtime::{deterministic, Spawner, Runner, Metrics};
+//! use commonware_cryptography::{ed25519, PrivateKey, Signer as _, PublicKey as _, };
+//! use commonware_runtime::{deterministic, Metrics, Quota, Runner, Spawner};
 //! use commonware_utils::NZU32;
-//! use governor::Quota;
 //! use std::time::Duration;
 //!
 //! // Generate peers
@@ -88,7 +87,7 @@
 //! let executor = deterministic::Runner::seeded(0);
 //! executor.start(|context| async move {
 //!     // Initialize network
-//!     let (network, mut oracle) = Network::new(context.with_label("network"), p2p_cfg);
+//!     let (network, oracle) = Network::new(context.with_label("network"), p2p_cfg);
 //!
 //!     // Start network
 //!     let network_handler = network.start();
@@ -180,24 +179,25 @@ pub enum Error {
 
 pub use ingress::{Control, Link, Manager, Oracle, SocketManager};
 pub use network::{
-    Config, Network, Receiver, Sender, SplitForwarder, SplitOrigin, SplitRouter, SplitSender,
-    SplitTarget,
+    Config, ConnectedPeerProvider, Network, Receiver, Sender, SplitForwarder, SplitOrigin,
+    SplitRouter, SplitSender, SplitTarget, UnlimitedSender,
 };
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Manager, Receiver, Recipients, Sender};
+    use crate::{Address, Ingress, Manager, Receiver, Recipients, Sender};
     use bytes::Bytes;
     use commonware_cryptography::{
         ed25519::{self, PrivateKey, PublicKey},
-        PrivateKeyExt as _, Signer as _,
+        Signer as _,
     };
     use commonware_macros::select;
-    use commonware_runtime::{deterministic, Clock, Metrics, Runner, Spawner};
-    use commonware_utils::{ordered::Map, NZU32};
+    use commonware_runtime::{
+        count_running_tasks, deterministic, Clock, Metrics, Quota, Runner, Spawner,
+    };
+    use commonware_utils::{hostname, ordered::Map, NZU32};
     use futures::{channel::mpsc, SinkExt, StreamExt};
-    use governor::Quota;
     use rand::Rng;
     use std::{
         collections::{BTreeMap, HashMap, HashSet},
@@ -213,7 +213,7 @@ mod tests {
         let executor = deterministic::Runner::seeded(seed);
         executor.start(|context| async move {
             // Create simulated network
-            let (network, mut oracle) = Network::new(
+            let (network, oracle) = Network::new(
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
@@ -367,7 +367,7 @@ mod tests {
             let mut msg = vec![0u8; 1024 * 1024 + 1];
             context.fill(&mut msg[..]);
             let result = message_sender
-                .send(Recipients::All, msg.into(), false)
+                .send(Recipients::All, &msg[..], false)
                 .await
                 .unwrap_err();
 
@@ -381,7 +381,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Create simulated network
-            let (network, mut oracle) = Network::new(
+            let (network, oracle) = Network::new(
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
@@ -424,7 +424,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Create simulated network
-            let (network, mut oracle) = Network::new(
+            let (network, oracle) = Network::new(
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
@@ -523,13 +523,11 @@ mod tests {
                 Err(Error::NetworkClosed)
             ));
 
-            // Send on original
-            assert!(matches!(
-                my_sender
-                    .send(Recipients::One(other_pk.clone()), msg.clone(), false)
-                    .await,
-                Err(Error::NetworkClosed)
-            ));
+            // Send on original (gracefully handles closed channel)
+            assert!(my_sender
+                .send(Recipients::One(other_pk.clone()), msg.clone(), false)
+                .await
+                .is_ok());
         });
     }
 
@@ -538,7 +536,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Create simulated network
-            let (network, mut oracle) = Network::new(
+            let (network, oracle) = Network::new(
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
@@ -587,7 +585,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Create simulated network
-            let (network, mut oracle) = Network::new(
+            let (network, oracle) = Network::new(
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
@@ -650,7 +648,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Create simulated network
-            let (network, mut oracle) = Network::new(
+            let (network, oracle) = Network::new(
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
@@ -741,7 +739,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Create simulated network
-            let (network, mut oracle) = Network::new(
+            let (network, oracle) = Network::new(
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
@@ -803,7 +801,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Create simulated network
-            let (network, mut oracle) = Network::new(
+            let (network, oracle) = Network::new(
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
@@ -882,7 +880,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Create simulated network
-            let (network, mut oracle) = Network::new(
+            let (network, oracle) = Network::new(
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
@@ -1012,7 +1010,7 @@ mod tests {
 
     async fn test_bandwidth_between_peers(
         context: &mut deterministic::Context,
-        oracle: &mut Oracle<PublicKey>,
+        oracle: &Oracle<PublicKey, deterministic::Context>,
         sender_bps: Option<usize>,
         receiver_bps: Option<usize>,
         message_size: usize,
@@ -1085,7 +1083,7 @@ mod tests {
     fn test_bandwidth() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
-            let (network, mut oracle) = Network::new(
+            let (network, oracle) = Network::new(
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
@@ -1099,7 +1097,7 @@ mod tests {
             // 500 bytes at 1000 B/s = 0.5 seconds
             test_bandwidth_between_peers(
                 &mut context,
-                &mut oracle,
+                &oracle,
                 Some(1000), // sender egress
                 Some(1000), // receiver ingress
                 500,        // message size
@@ -1112,7 +1110,7 @@ mod tests {
             // 250 bytes at 500 B/s = 0.5 seconds
             test_bandwidth_between_peers(
                 &mut context,
-                &mut oracle,
+                &oracle,
                 Some(500),  // sender egress
                 Some(2000), // receiver ingress
                 250,        // message size
@@ -1125,7 +1123,7 @@ mod tests {
             // 250 bytes at 500 B/s = 0.5 seconds
             test_bandwidth_between_peers(
                 &mut context,
-                &mut oracle,
+                &oracle,
                 Some(2000), // sender egress
                 Some(500),  // receiver ingress
                 250,        // message size
@@ -1138,7 +1136,7 @@ mod tests {
             // 500 bytes at 1000 B/s = 0.5 seconds
             test_bandwidth_between_peers(
                 &mut context,
-                &mut oracle,
+                &oracle,
                 None,       // sender egress (unlimited)
                 Some(1000), // receiver ingress
                 500,        // message size
@@ -1151,7 +1149,7 @@ mod tests {
             // 500 bytes at 1000 B/s = 0.5 seconds
             test_bandwidth_between_peers(
                 &mut context,
-                &mut oracle,
+                &oracle,
                 Some(1000), // sender egress
                 None,       // receiver ingress (unlimited)
                 500,        // message size
@@ -1163,7 +1161,7 @@ mod tests {
             // Delivery should be (almost) instant
             test_bandwidth_between_peers(
                 &mut context,
-                &mut oracle,
+                &oracle,
                 None, // sender egress (unlimited)
                 None, // receiver ingress (unlimited)
                 500,  // message size
@@ -1178,7 +1176,7 @@ mod tests {
         // Test bandwidth contention with many peers (one-to-many and many-to-one scenarios)
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let (network, mut oracle) = Network::new(
+            let (network, oracle) = Network::new(
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
@@ -1333,7 +1331,7 @@ mod tests {
         // Test that messages arrive in order even with variable latency
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let (network, mut oracle) = Network::new(
+            let (network, oracle) = Network::new(
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
@@ -1400,7 +1398,7 @@ mod tests {
     fn test_high_latency_message_blocks_followup() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let (network, mut oracle) = Network::new(
+            let (network, oracle) = Network::new(
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
@@ -1507,7 +1505,7 @@ mod tests {
     fn test_many_to_one_bandwidth_sharing() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let (network, mut oracle) = Network::new(
+            let (network, oracle) = Network::new(
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
@@ -1599,7 +1597,7 @@ mod tests {
         // should complete all sends in ~1s and all messages received in ~1s
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let (network, mut oracle) = Network::new(
+            let (network, oracle) = Network::new(
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
@@ -1692,7 +1690,7 @@ mod tests {
         // should complete all transfers in ~1s
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let (network, mut oracle) = Network::new(
+            let (network, oracle) = Network::new(
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
@@ -1791,7 +1789,7 @@ mod tests {
         // Receiver has 30KB/s, senders each have 30KB/s
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let (network, mut oracle) = Network::new(
+            let (network, oracle) = Network::new(
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
@@ -1940,7 +1938,7 @@ mod tests {
         // This tests that smaller messages complete first when bandwidth is shared
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let (network, mut oracle) = Network::new(
+            let (network, oracle) = Network::new(
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
@@ -2044,7 +2042,7 @@ mod tests {
         // This means new messages can start transmitting while others are still in flight
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let (network, mut oracle) = Network::new(
+            let (network, oracle) = Network::new(
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
@@ -2150,7 +2148,7 @@ mod tests {
         // not transfers already in progress (which have their reservations locked in)
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let (network, mut oracle) = Network::new(
+            let (network, oracle) = Network::new(
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
@@ -2245,7 +2243,7 @@ mod tests {
     fn test_zero_receiver_ingress_bandwidth() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let (network, mut oracle) = Network::new(
+            let (network, oracle) = Network::new(
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
@@ -2325,7 +2323,7 @@ mod tests {
     fn test_zero_sender_egress_bandwidth() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let (network, mut oracle) = Network::new(
+            let (network, oracle) = Network::new(
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
@@ -2447,11 +2445,11 @@ mod tests {
 
             let pk1 = PrivateKey::from_seed(1).public_key();
             let pk2 = PrivateKey::from_seed(2).public_key();
-            let addr1 = SocketAddr::from(([127, 0, 0, 1], 4000));
-            let addr2 = SocketAddr::from(([127, 0, 0, 1], 4001));
+            let addr1: Address = SocketAddr::from(([127, 0, 0, 1], 4000)).into();
+            let addr2: Address = SocketAddr::from(([127, 0, 0, 1], 4001)).into();
 
             let mut manager = oracle.socket_manager();
-            let peers: Map<_, _> = [(pk1.clone(), addr1), (pk2.clone(), addr2)]
+            let peers: Map<_, _> = [(pk1.clone(), addr1.clone()), (pk2.clone(), addr2.clone())]
                 .try_into()
                 .unwrap();
             manager.update(1, peers).await;
@@ -2481,10 +2479,60 @@ mod tests {
     }
 
     #[test]
+    fn test_socket_manager_with_asymmetric_addresses() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (network, oracle) = Network::new(
+                context.with_label("network"),
+                Config {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: true,
+                    tracked_peer_sets: Some(3),
+                },
+            );
+            network.start();
+
+            let pk1 = PrivateKey::from_seed(1).public_key();
+            let pk2 = PrivateKey::from_seed(2).public_key();
+
+            // Use asymmetric addresses where ingress (dial) differs from egress (filter)
+            let addr1 = Address::Asymmetric {
+                ingress: Ingress::Socket(SocketAddr::from(([10, 0, 0, 1], 8080))),
+                egress: SocketAddr::from(([192, 168, 1, 1], 9090)),
+            };
+            let addr2 = Address::Asymmetric {
+                ingress: Ingress::Dns {
+                    host: hostname!("node2.example.com"),
+                    port: 8080,
+                },
+                egress: SocketAddr::from(([192, 168, 1, 2], 9090)),
+            };
+
+            let mut manager = oracle.socket_manager();
+            let peers: Map<_, _> = [(pk1.clone(), addr1), (pk2.clone(), addr2)]
+                .try_into()
+                .unwrap();
+            manager.update(1, peers).await;
+
+            // Verify peer set contains expected keys (addresses are ignored by simulated network)
+            let peer_set = manager.peer_set(1).await.expect("peer set missing");
+            let keys: Vec<_> = Vec::from(peer_set);
+            assert_eq!(keys, vec![pk1.clone(), pk2.clone()]);
+
+            // Verify subscription works
+            let mut subscription = manager.subscribe().await;
+            let (id, latest, _all) = subscription.next().await.unwrap();
+            assert_eq!(id, 1);
+            let latest_keys: Vec<_> = Vec::from(latest);
+            assert_eq!(latest_keys, vec![pk1, pk2]);
+        });
+    }
+
+    #[test]
     fn test_peer_set_window_management() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let (network, mut oracle) = Network::new(
+            let (network, oracle) = Network::new(
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
@@ -2620,7 +2668,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Create a simulated network
-            let (network, mut oracle) = Network::new(
+            let (network, oracle) = Network::new(
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
@@ -2981,7 +3029,7 @@ mod tests {
                 tracked_peer_sets: Some(3),
             };
             let network_context = context.with_label("network");
-            let (network, mut oracle) = Network::new(network_context.clone(), cfg);
+            let (network, oracle) = Network::new(network_context.clone(), cfg);
             network.start();
 
             // Create two public keys
@@ -2996,9 +3044,9 @@ mod tests {
 
             // Register with a very restrictive quota: 1 message per second
             let restrictive_quota = Quota::per_second(NZU32!(1));
-            let mut control1 = oracle.control(pk1.clone());
+            let control1 = oracle.control(pk1.clone());
             let (mut sender, _) = control1.register(0, restrictive_quota).await.unwrap();
-            let mut control2 = oracle.control(pk2.clone());
+            let control2 = oracle.control(pk2.clone());
             let (_, mut receiver) = control2.register(0, TEST_QUOTA).await.unwrap();
 
             // Add bidirectional links
@@ -3052,5 +3100,164 @@ mod tests {
             let (_, received3) = receiver.recv().await.unwrap();
             assert_eq!(received3, msg3);
         });
+    }
+
+    #[test]
+    fn test_operations_after_shutdown_do_not_panic() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                max_size: 1024 * 1024,
+                disconnect_on_block: true,
+                tracked_peer_sets: Some(3),
+            };
+            let network_context = context.with_label("network");
+            let (network, oracle) = Network::new(network_context.clone(), cfg);
+            let handle = network.start();
+
+            // Create peers
+            let pk1 = ed25519::PrivateKey::from_seed(1).public_key();
+            let pk2 = ed25519::PrivateKey::from_seed(2).public_key();
+
+            // Register peer set
+            let mut manager = oracle.manager();
+            manager
+                .update(0, [pk1.clone(), pk2.clone()].try_into().unwrap())
+                .await;
+
+            // Register channels
+            let control1 = oracle.control(pk1.clone());
+            let (mut sender, _receiver) = control1.register(0, TEST_QUOTA).await.unwrap();
+
+            // Add link
+            let link = ingress::Link {
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(0),
+                success_rate: 1.0,
+            };
+            oracle
+                .add_link(pk1.clone(), pk2.clone(), link.clone())
+                .await
+                .unwrap();
+
+            // Abort the network
+            handle.abort();
+            context.sleep(Duration::from_millis(100)).await;
+
+            // All of these operations should not panic after shutdown
+
+            // Sending messages should not panic (returns empty or error)
+            let msg = Bytes::from_static(b"test");
+            let result = sender.send(Recipients::One(pk2.clone()), msg, false).await;
+            assert!(
+                result.is_err() || result.unwrap().is_empty(),
+                "send after shutdown should fail or return empty"
+            );
+
+            // Manager operations should not panic
+            manager.update(1, [pk1.clone()].try_into().unwrap()).await;
+            let _ = manager.peer_set(0).await;
+            let _ = manager.subscribe().await;
+
+            // Oracle operations should not panic
+            let _ = oracle
+                .add_link(pk1.clone(), pk2.clone(), link.clone())
+                .await;
+            let _ = oracle.remove_link(pk1.clone(), pk2.clone()).await;
+            let _ = oracle.blocked().await;
+
+            // Control operations should not panic
+            let _ = control1.register(1, TEST_QUOTA).await;
+        });
+    }
+
+    fn clean_shutdown(seed: u64) {
+        let cfg = deterministic::Config::default()
+            .with_seed(seed)
+            .with_timeout(Some(Duration::from_secs(30)));
+        let executor = deterministic::Runner::new(cfg);
+        executor.start(|context| async move {
+            let cfg = Config {
+                max_size: 1024 * 1024,
+                disconnect_on_block: true,
+                tracked_peer_sets: Some(3),
+            };
+            let network_context = context.with_label("network");
+            let (network, oracle) = Network::new(network_context, cfg);
+            let handle = network.start();
+
+            // Create peers
+            let pk1 = ed25519::PrivateKey::from_seed(1).public_key();
+            let pk2 = ed25519::PrivateKey::from_seed(2).public_key();
+
+            // Register peer set
+            let mut manager = oracle.manager();
+            manager
+                .update(0, [pk1.clone(), pk2.clone()].try_into().unwrap())
+                .await;
+
+            // Register channels
+            let control1 = oracle.control(pk1.clone());
+            let control2 = oracle.control(pk2.clone());
+            let (mut sender, _) = control1.register(0, TEST_QUOTA).await.unwrap();
+            let (_, mut receiver) = control2.register(0, TEST_QUOTA).await.unwrap();
+
+            // Add bidirectional links
+            let link = ingress::Link {
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(0),
+                success_rate: 1.0,
+            };
+            oracle
+                .add_link(pk1.clone(), pk2.clone(), link.clone())
+                .await
+                .unwrap();
+            oracle
+                .add_link(pk2.clone(), pk1.clone(), link)
+                .await
+                .unwrap();
+
+            // Allow tasks to start
+            context.sleep(Duration::from_millis(100)).await;
+
+            // Count running tasks under the network prefix
+            let running_before = count_running_tasks(&context, "network");
+            assert!(
+                running_before > 0,
+                "at least one network task should be running"
+            );
+
+            // Send and receive a message to verify network is functional
+            let msg = Bytes::from_static(b"test_message");
+            let result = sender
+                .send(Recipients::One(pk2.clone()), msg.clone(), false)
+                .await
+                .unwrap();
+            assert_eq!(result.len(), 1, "message should be sent");
+
+            let (_, received) = receiver.recv().await.unwrap();
+            assert_eq!(received, msg, "message should be received");
+
+            // Abort the network
+            handle.abort();
+            let _ = handle.await;
+
+            // Give the runtime a tick to process aborts
+            context.sleep(Duration::from_millis(100)).await;
+
+            // Verify all network tasks are stopped
+            let running_after = count_running_tasks(&context, "network");
+            assert_eq!(
+                running_after, 0,
+                "all network tasks should be stopped, but {running_after} still running"
+            );
+        });
+    }
+
+    #[test]
+    fn test_clean_shutdown() {
+        for seed in 0..25 {
+            clean_shutdown(seed);
+        }
     }
 }

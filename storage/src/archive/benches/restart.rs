@@ -8,17 +8,22 @@ use commonware_storage::archive::Archive as _;
 use criterion::{criterion_group, Criterion};
 use std::time::{Duration, Instant};
 
+#[cfg(not(full_bench))]
+const ITEMS: [u64; 1] = [10_000];
+#[cfg(full_bench)]
+const ITEMS: [u64; 4] = [10_000, 50_000, 100_000, 500_000];
+
 fn bench_restart(c: &mut Criterion) {
     // Create a config we can use across all benchmarks (with a fixed `storage_directory`).
     let cfg = Config::default();
     for variant in [Variant::Prunable, Variant::Immutable] {
         for compression in [None, Some(3)] {
-            for items in [10_000, 50_000, 100_000, 500_000] {
+            for items in ITEMS {
                 let builder = commonware_runtime::tokio::Runner::new(cfg.clone());
                 builder.start(|ctx| async move {
                     let mut a = Archive::init(ctx, variant, compression).await;
                     append_random(&mut a, items).await;
-                    a.close().await.unwrap();
+                    a.sync().await.unwrap();
                 });
 
                 // Run the benchmarks
@@ -39,9 +44,8 @@ fn bench_restart(c: &mut Criterion) {
                             let mut total = Duration::ZERO;
                             for _ in 0..iters {
                                 let start = Instant::now();
-                                let a = Archive::init(ctx.clone(), variant, compression).await; // replay happens inside init
+                                let _a = Archive::init(ctx.clone(), variant, compression).await; // replay happens inside init
                                 total += start.elapsed();
-                                a.close().await.unwrap();
                             }
                             total
                         });

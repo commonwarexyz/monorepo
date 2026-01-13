@@ -16,6 +16,7 @@ pub struct Relay<D: Digest, P: PublicKey> {
 }
 
 impl<D: Digest, P: PublicKey> Relay<D, P> {
+    /// Creates a new relay.
     #[allow(clippy::new_without_default)]
     pub const fn new() -> Self {
         Self {
@@ -23,6 +24,13 @@ impl<D: Digest, P: PublicKey> Relay<D, P> {
         }
     }
 
+    /// Deregisters all recipients without clearing the payloads.
+    pub fn deregister_all(&self) {
+        let mut recipients = self.recipients.lock().unwrap();
+        recipients.clear();
+    }
+
+    /// Registers a new recipient that receives all broadcasts.
     pub fn register(&self, public_key: P) -> mpsc::UnboundedReceiver<(D, Bytes)> {
         let (sender, receiver) = mpsc::unbounded();
         {
@@ -40,7 +48,9 @@ impl<D: Digest, P: PublicKey> Relay<D, P> {
         receiver
     }
 
-    pub async fn broadcast(&self, sender: &P, payload: (D, Bytes)) {
+    /// Broadcasts a payload to all registered recipients.
+    pub async fn broadcast(&self, sender: &P, (payload, data): (D, Bytes)) {
+        // Send to all recipients
         let channels = {
             let mut channels = Vec::new();
             let recipients = self.recipients.lock().unwrap();
@@ -54,7 +64,7 @@ impl<D: Digest, P: PublicKey> Relay<D, P> {
         };
         for (recipient, listeners) in channels {
             for mut listener in listeners {
-                if let Err(e) = listener.send((payload.0, payload.1.clone())).await {
+                if let Err(e) = listener.send((payload, data.clone())).await {
                     error!(?e, ?recipient, "failed to send message to recipient");
                 }
             }

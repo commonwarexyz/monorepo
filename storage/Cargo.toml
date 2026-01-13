@@ -15,14 +15,15 @@ workspace = true
 
 [dependencies]
 anyhow.workspace = true
+arbitrary = { workspace = true, optional = true, features = ["derive"] }
 bytes = { workspace = true, default-features = false }
 cfg-if.workspace = true
 commonware-codec = { workspace = true, default-features = false }
 commonware-cryptography = { workspace = true, default-features = false }
 commonware-macros.workspace = true
+commonware-parallel = { workspace = true, optional = true, features = ["std"] }
 commonware-runtime = { workspace = true, optional = true }
 commonware-utils = { workspace = true, default-features = false }
-crc32fast = { workspace = true, optional = true }
 futures = { workspace = true, optional = true }
 futures-util = { workspace = true, optional = true }
 prometheus-client = { workspace = true, optional = true }
@@ -32,6 +33,8 @@ tracing = { workspace = true, optional = true }
 zstd = { workspace = true, optional = true }
 
 [dev-dependencies]
+commonware-conformance.workspace = true
+commonware-math.workspace = true
 commonware-storage = { path = ".", features = ["std"] }
 criterion.workspace = true
 rand.workspace = true
@@ -45,9 +48,10 @@ std = [
 	"bytes/std",
 	"commonware-codec/std",
 	"commonware-cryptography/std",
+	"commonware-parallel",
+	"commonware-parallel?/std",
 	"commonware-runtime",
 	"commonware-utils/std",
-	"crc32fast/std",
 	"futures",
 	"futures-util",
 	"prometheus-client",
@@ -56,7 +60,15 @@ std = [
 	"tracing",
 	"zstd",
 ]
+arbitrary = [
+	"commonware-codec/arbitrary",
+	"commonware-cryptography/arbitrary",
+	"commonware-runtime?/arbitrary",
+	"commonware-utils/arbitrary",
+	"dep:arbitrary",
+]
 fuzzing = []
+test-traits = []
 
 [lib]
 bench = false
@@ -66,6 +78,7 @@ crate-type = ["rlib", "cdylib"]
 name = "qmdb"
 harness = false
 path = "src/qmdb/benches/bench.rs"
+required-features = ["test-traits"]
 
 [[bench]]
 name="archive"

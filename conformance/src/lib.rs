@@ -41,16 +41,12 @@
 //! RUSTFLAGS="--cfg generate_conformance_tests" cargo test
 //! ```
 
-// Re-export commonware_macros for use in macros
+pub use commonware_conformance_macros::conformance_tests;
 #[doc(hidden)]
 pub use commonware_macros;
 use core::future::Future;
-// Re-export futures for use in macros
 #[doc(hidden)]
 pub use futures;
-// Re-export paste for use in macros
-#[doc(hidden)]
-pub use paste;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, fs, path::Path};
@@ -334,79 +330,6 @@ async fn regenerate_conformance<C: Conformance>(type_name: &str, n_cases: usize,
         .expect("failed to seek conformance file");
     lock.write_all(toml_str.as_bytes())
         .expect("failed to write conformance file");
-}
-
-/// Define conformance tests for [`Conformance`] types.
-///
-/// This macro generates test functions that verify encodings match expected
-/// hash values stored in `conformance.toml`.
-///
-/// # Usage
-///
-/// ```ignore
-/// conformance_tests! {
-///     Vec<u8>,                       // Uses default (65536 cases)
-///     Vec<u16> => 100,               // Explicit case count
-///     BTreeMap<u32, String> => 100,
-/// }
-/// ```
-///
-/// Test names are auto-generated. The type name is used as the key in the TOML file.
-///
-/// # Regeneration Mode
-///
-/// When `cfg(generate_conformance_tests)` is set, tests regenerate their
-/// expected values in the TOML file (useful for intentional format changes):
-///
-/// ```bash
-/// RUSTFLAGS="--cfg generate_conformance_tests" cargo test -p my_crate conformance
-/// ```
-#[macro_export]
-macro_rules! conformance_tests {
-    // Helper to emit a single test
-    (@emit [$($counter:tt)*] $type:ty, $n_cases:expr) => {
-        $crate::paste::paste! {
-            #[$crate::commonware_macros::test_group("conformance")]
-            #[test]
-            fn [<test_conformance_ $($counter)* x>]() {
-                $crate::futures::executor::block_on($crate::run_conformance_test::<$type>(
-                    concat!(module_path!(), "::", stringify!($type)),
-                    $n_cases,
-                    std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/conformance.toml")),
-                ));
-            }
-        }
-    };
-
-    // Base case: nothing left
-    (@internal [$($counter:tt)*]) => {};
-
-    // Case: Type => n_cases, rest...
-    (@internal [$($counter:tt)*] $type:ty => $n_cases:expr, $($rest:tt)*) => {
-        $crate::conformance_tests!(@emit [$($counter)*] $type, $n_cases);
-        $crate::conformance_tests!(@internal [$($counter)* x] $($rest)*);
-    };
-
-    // Case: Type => n_cases (no trailing comma, last item)
-    (@internal [$($counter:tt)*] $type:ty => $n_cases:expr) => {
-        $crate::conformance_tests!(@emit [$($counter)*] $type, $n_cases);
-    };
-
-    // Case: Type, rest...
-    (@internal [$($counter:tt)*] $type:ty, $($rest:tt)*) => {
-        $crate::conformance_tests!(@emit [$($counter)*] $type, $crate::DEFAULT_CASES);
-        $crate::conformance_tests!(@internal [$($counter)* x] $($rest)*);
-    };
-
-    // Case: Type (no trailing comma, last item with default)
-    (@internal [$($counter:tt)*] $type:ty) => {
-        $crate::conformance_tests!(@emit [$($counter)*] $type, $crate::DEFAULT_CASES);
-    };
-
-    // Entrypoint
-    ($($input:tt)*) => {
-        $crate::conformance_tests!(@internal [] $($input)*);
-    };
 }
 
 #[cfg(test)]

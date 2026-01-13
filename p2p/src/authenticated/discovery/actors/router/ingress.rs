@@ -1,10 +1,14 @@
 use crate::{
     authenticated::{data::Data, discovery::channels::Channels, relay::Relay, Mailbox},
+    utils::limited::Connected,
     Channel, Recipients,
 };
-use bytes::Bytes;
+use bytes::{Buf, Bytes};
 use commonware_cryptography::PublicKey;
-use commonware_utils::channels::ring;
+use commonware_utils::{
+    channels::{fallible::AsyncFallibleExt, ring},
+    NZUsize,
+};
 use futures::channel::oneshot;
 
 /// Messages that can be processed by the router.
@@ -34,16 +38,16 @@ pub enum Message<P: PublicKey> {
 
 impl<P: PublicKey> Mailbox<Message<P>> {
     /// Notify the router that a peer is ready to communicate.
-    pub async fn ready(&mut self, peer: P, relay: Relay<Data>) -> Channels<P> {
-        let (response, receiver) = oneshot::channel();
-        self.send(Message::Ready {
-            peer,
-            relay,
-            channels: response,
-        })
-        .await
-        .unwrap();
-        receiver.await.unwrap()
+    ///
+    /// Returns `None` if the router has shut down.
+    pub async fn ready(&mut self, peer: P, relay: Relay<Data>) -> Option<Channels<P>> {
+        self.0
+            .request(|channels| Message::Ready {
+                peer,
+                relay,
+                channels,
+            })
+            .await
     }
 
     /// Notify the router that a peer is no longer available.
@@ -51,12 +55,12 @@ impl<P: PublicKey> Mailbox<Message<P>> {
     /// This may fail during shutdown if the router has already exited,
     /// which is harmless since the router no longer tracks any peers.
     pub async fn release(&mut self, peer: P) {
-        let _ = self.send(Message::Release { peer }).await;
+        self.0.send_lossy(Message::Release { peer }).await;
     }
 }
 
-#[derive(Clone, Debug)]
 /// Sends messages containing content to the router to send to peers.
+#[derive(Clone, Debug)]
 pub struct Messenger<P: PublicKey> {
     sender: Mailbox<Message<P>>,
 }
@@ -69,34 +73,40 @@ impl<P: PublicKey> Messenger<P> {
     }
 
     /// Sends a message to the given `recipients`.
+    ///
+    /// Returns an empty list if the router has shut down.
     pub async fn content(
         &mut self,
         recipients: Recipients<P>,
         channel: Channel,
-        message: Bytes,
+        mut message: impl Buf + Send,
         priority: bool,
     ) -> Vec<P> {
-        let (sender, receiver) = oneshot::channel();
+        let message = message.copy_to_bytes(message.remaining());
         self.sender
-            .send(Message::Content {
+            .0
+            .request_or_default(|success| Message::Content {
                 recipients,
                 channel,
                 message,
                 priority,
-                success: sender,
+                success,
             })
             .await
-            .unwrap();
-        receiver.await.unwrap()
     }
+}
 
-    /// Returns a subscription channel for the peers known to the router.
-    pub async fn subscribe_peers(&mut self) -> ring::Receiver<Vec<P>> {
-        let (sender, receiver) = oneshot::channel();
+impl<P: PublicKey> Connected for Messenger<P> {
+    type PublicKey = P;
+
+    async fn subscribe(&mut self) -> ring::Receiver<Vec<Self::PublicKey>> {
         self.sender
-            .send(Message::SubscribePeers { response: sender })
+            .0
+            .request(|response| Message::SubscribePeers { response })
             .await
-            .unwrap();
-        receiver.await.unwrap()
+            .unwrap_or_else(|| {
+                let (_, rx) = ring::channel(NZUsize!(1));
+                rx
+            })
     }
 }

@@ -1,4 +1,7 @@
-use crate::{aggregation::types::Index, types::Epoch, Automaton as A};
+use crate::{
+    types::{Epoch, Height},
+    Automaton as A,
+};
 use commonware_cryptography::{Hasher, Sha256};
 use futures::channel::oneshot;
 use tracing::trace;
@@ -7,7 +10,7 @@ use tracing::trace;
 pub enum Strategy {
     Correct,
     Incorrect,
-    Skip { index: u64 },
+    Skip { height: Height },
 }
 
 #[derive(Clone)]
@@ -20,14 +23,14 @@ impl Application {
         Self { strategy }
     }
 
-    fn correct_message(context: Index) -> <Sha256 as Hasher>::Digest {
-        let payload = format!("data for index {context}");
+    fn correct_message(context: Height) -> <Sha256 as Hasher>::Digest {
+        let payload = format!("data for height {context}");
         Sha256::hash(payload.as_bytes())
     }
 }
 
 impl A for Application {
-    type Context = Index;
+    type Context = Height;
     type Digest = <Sha256 as Hasher>::Digest;
 
     async fn genesis(&mut self, _epoch: Epoch) -> Self::Digest {
@@ -42,11 +45,11 @@ impl A for Application {
         let digest = match &self.strategy {
             Strategy::Correct => Self::correct_message(context),
             Strategy::Incorrect => {
-                let conflicting_payload = format!("conflicting_data for index {context}");
+                let conflicting_payload = format!("conflicting_data for height {context}");
                 Sha256::hash(conflicting_payload.as_bytes())
             }
-            Strategy::Skip { index } => {
-                if context == *index {
+            Strategy::Skip { height } => {
+                if context == *height {
                     // Receiver will be canceled (sender dropped)
                     return receiver;
                 }
@@ -63,7 +66,7 @@ impl A for Application {
         context: Self::Context,
         payload: Self::Digest,
     ) -> oneshot::Receiver<bool> {
-        trace!(?context, ?payload, "verify");
+        trace!(%context, ?payload, "verify");
         let (sender, receiver) = oneshot::channel();
 
         // Return true only if the payload matches the expected digest

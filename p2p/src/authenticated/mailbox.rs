@@ -1,8 +1,8 @@
-use futures::{channel::mpsc, SinkExt as _};
+use futures::channel::mpsc;
 
 /// A mailbox wraps a sender for messages of type `T`.
 #[derive(Debug)]
-pub struct Mailbox<T>(mpsc::Sender<T>);
+pub struct Mailbox<T>(pub(crate) mpsc::Sender<T>);
 
 impl<T> Mailbox<T> {
     /// Returns a new mailbox with the given sender.
@@ -18,21 +18,9 @@ impl<T> Clone for Mailbox<T> {
     }
 }
 
-impl<T> Mailbox<T> {
-    /// Sends a message to the corresponding receiver.
-    pub async fn send(&mut self, message: T) -> Result<(), mpsc::SendError> {
-        self.0.send(message).await
-    }
-
-    /// Returns true if the mailbox is closed.
-    pub fn is_closed(&self) -> bool {
-        self.0.is_closed()
-    }
-}
-
 /// A mailbox wraps an unbounded sender for messages of type `T`.
 #[derive(Debug)]
-pub struct UnboundedMailbox<T>(mpsc::UnboundedSender<T>);
+pub struct UnboundedMailbox<T>(pub(crate) mpsc::UnboundedSender<T>);
 
 impl<T> UnboundedMailbox<T> {
     /// Returns a new mailbox with the given sender.
@@ -45,12 +33,5 @@ impl<T> UnboundedMailbox<T> {
 impl<T> Clone for UnboundedMailbox<T> {
     fn clone(&self) -> Self {
         Self(self.0.clone())
-    }
-}
-
-impl<T> UnboundedMailbox<T> {
-    /// Sends a message to the corresponding receiver.
-    pub fn send(&mut self, message: T) -> Result<(), mpsc::TrySendError<T>> {
-        self.0.unbounded_send(message)
     }
 }

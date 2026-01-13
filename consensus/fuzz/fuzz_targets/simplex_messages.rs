@@ -3,7 +3,7 @@
 use arbitrary::Arbitrary;
 use commonware_codec::{Decode, DecodeExt, Encode, Read};
 use commonware_consensus::simplex::{
-    signing_scheme::{
+    scheme::{
         bls12381_multisig,
         bls12381_threshold::{self},
         ed25519, Scheme,
@@ -46,15 +46,17 @@ enum FuzzInput {
     ThresholdMinSigCertificate(Vec<u8>),
 }
 
-fn roundtrip_vote<S: Scheme>(data: &[u8]) {
+fn roundtrip_vote<S: Scheme<sha256::Digest>>(data: &[u8]) {
     if let Ok(vote) = Vote::<S, sha256::Digest>::decode(data) {
         let encoded = vote.encode();
         assert_eq!(data, encoded.as_ref());
     }
 }
 
-fn roundtrip_certificate<S: Scheme>(data: &[u8], cfg: &<S::Certificate as Read>::Cfg)
-where
+fn roundtrip_certificate<S: Scheme<sha256::Digest>>(
+    data: &[u8],
+    cfg: &<S::Certificate as Read>::Cfg,
+) where
     S::Certificate: Read,
 {
     if let Ok(cert) = Certificate::<S, sha256::Digest>::decode_cfg(data, cfg) {

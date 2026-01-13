@@ -14,6 +14,14 @@ pub const MAX_POSITION: Position = Position::new(0x7FFFFFFFFFFFFFFE); // (1 << 6
 #[derive(Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash, Default, Debug)]
 pub struct Position(u64);
 
+#[cfg(feature = "arbitrary")]
+impl arbitrary::Arbitrary<'_> for Position {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let value = u.int_in_range(0..=MAX_POSITION.0)?;
+        Ok(Self(value))
+    }
+}
+
 impl Position {
     /// Return a new [Position] from a raw `u64`.
     #[inline]
@@ -163,7 +171,7 @@ impl From<Position> for u64 {
 /// let pos = Position::try_from(loc).unwrap();
 /// assert_eq!(pos, Position::new(8));
 ///
-/// // Invalid locations return error  
+/// // Invalid locations return error
 /// assert!(Location::new(MAX_LOCATION + 1).is_none());
 /// ```
 impl TryFrom<Location> for Position {

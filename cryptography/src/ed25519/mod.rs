@@ -7,14 +7,15 @@
 //!
 //! # Example
 //! ```rust
-//! use commonware_cryptography::{ed25519, PrivateKey, PublicKey, Signature, PrivateKeyExt as _, Verifier as _, Signer as _};
+//! use commonware_cryptography::{ed25519, PrivateKey, PublicKey, Signature, Verifier as _, Signer as _};
+//! use commonware_math::algebra::Random;
 //! use rand::rngs::OsRng;
 //!
 //! // Generate a new private key
-//! let mut signer = ed25519::PrivateKey::from_rng(&mut OsRng);
+//! let mut signer = ed25519::PrivateKey::random(&mut OsRng);
 //!
 //! // Create a message to sign
-//! let namespace = &b"demo"[..];
+//! let namespace = b"demo";
 //! let msg = b"hello, world!";
 //!
 //! // Sign the message
@@ -24,6 +25,7 @@
 //! assert!(signer.public_key().verify(namespace, msg, &signature));
 //! ```
 
+pub mod certificate;
 mod scheme;
 
 #[cfg(feature = "std")]

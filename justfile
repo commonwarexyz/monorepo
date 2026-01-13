@@ -67,6 +67,7 @@ fuzz fuzz_dir max_time='60' max_mem='4000':
     #!/usr/bin/env bash
     for target in $(cargo {{nightly_version}} fuzz list --fuzz-dir {{fuzz_dir}}); do
         cargo {{nightly_version}} fuzz run $target --fuzz-dir {{fuzz_dir}} -- -max_total_time={{max_time}} -rss_limit_mb={{max_mem}}
+        rm -f {{fuzz_dir}}/target/*/release/$target
     done
 
 # Check for unused dependencies
@@ -85,10 +86,10 @@ check-features:
 fix-features:
     zepter && zepter format features --fix
 
-# Test conformance
-test-conformance:
-    just test --features arbitrary --profile conformance
+# Test conformance (optionally for specific crates: just test-conformance -p commonware-codec)
+test-conformance *args='':
+    just test --features arbitrary --profile conformance {{ args }}
 
-# Regenerate conformance fixtures
-regenerate-conformance:
-    RUSTFLAGS="--cfg generate_conformance_tests" just test --features arbitrary --profile conformance
+# Regenerate conformance fixtures (optionally for specific crates: just regenerate-conformance -p commonware-codec)
+regenerate-conformance *args='':
+    RUSTFLAGS="--cfg generate_conformance_tests" just test --features arbitrary --profile conformance {{ args }}

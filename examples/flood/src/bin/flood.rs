@@ -7,10 +7,9 @@ use commonware_cryptography::{
 use commonware_deployer::ec2::{Hosts, METRICS_PORT};
 use commonware_flood::Config;
 use commonware_p2p::{authenticated::discovery, Manager, Receiver, Recipients, Sender};
-use commonware_runtime::{tokio, Metrics, Runner, Spawner};
+use commonware_runtime::{tokio, Metrics, Quota, Runner, Spawner};
 use commonware_utils::{from_hex_formatted, ordered::Set, union, TryCollect, NZU32};
 use futures::future::try_join_all;
-use governor::Quota;
 use prometheus_client::metrics::counter::Counter;
 use rand::{rngs::StdRng, RngCore, SeedableRng};
 use std::{
@@ -21,7 +20,7 @@ use std::{
 };
 use tracing::{error, info, Level};
 
-const FLOOD_NAMESPACE: &[u8] = b"_COMMONWARE_FLOOD";
+const FLOOD_NAMESPACE: &[u8] = b"_COMMONWARE_EXAMPLES_FLOOD";
 
 fn main() {
     // Parse arguments
@@ -109,7 +108,7 @@ fn main() {
             let bootstrapper_socket = format!("{}:{}", ip, config.port);
             let bootstrapper_socket = SocketAddr::from_str(&bootstrapper_socket)
                 .expect("Could not parse bootstrapper socket");
-            bootstrappers.push((key, bootstrapper_socket));
+            bootstrappers.push((key, bootstrapper_socket.into()));
         }
 
         // Configure network
@@ -149,11 +148,11 @@ fn main() {
                 context.register("messages", "Sent messages", messages.clone());
                 loop {
                     // Create message
-                    let mut msg = vec![0; config.message_size];
+                    let mut msg = vec![0; config.message_size as usize];
                     rng.fill_bytes(&mut msg);
 
                     // Send to all peers
-                    if let Err(e) = flood_sender.send(Recipients::All, msg.into(), true).await {
+                    if let Err(e) = flood_sender.send(Recipients::All, &msg[..], true).await {
                         error!(?e, "could not send flood message");
                     }
                     messages.inc();
