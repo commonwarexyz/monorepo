@@ -22,17 +22,21 @@ further parsing. These rules ensure consistent, readable chart titles.
 
 Rules
 -----
-1. Use `key=value` format in benchmark params (e.g., `group=g1`, not just `g1`)
+1. Include module separator `::` (use `module_path!()` macro)
+   - Required for the benchmarks site to parse and group benchmarks correctly
+   - Example: `crate_name::bench_foo/n=10` not `bench_foo/n=10`
+
+2. Use `key=value` format in benchmark params (e.g., `group=g1`, not just `g1`)
    - Chart titles should be self-documenting
    - `n=5 t=4` is clearer than `5 4` when viewed in isolation
 
-2. Separate parameters with spaces, not commas
+3. Separate parameters with spaces, not commas
    - Params are displayed as-is; commas add visual noise
    - `n=5 t=4` reads better than `n=5, t=4`
 
-3. Use `/` instead of `:` as value separators for ratios
-   - Colons could be confused with the `::` module separator
-   - `value=1/2` is unambiguous; `value=1:2` could look like `value=1::2`
+4. Use only one `/` separator (between function name and params)
+   - The params string is extracted via `split("/", 2)` so only the first `/` matters
+   - Multiple `/` in params may indicate unclear parameter formatting
 
 How it works
 ------------
@@ -52,23 +56,33 @@ from pathlib import Path
 
 
 def get_benchmark_names(root: Path) -> list[str]:
-    """Run cargo bench --list to get all benchmark names."""
+    """
+    Run cargo bench --list to get all benchmark names.
+
+    Returns list of benchmark names.
+    """
+    # Exclude fuzz crates which aren't criterion benchmarks
     result = subprocess.run(
-        ["cargo", "bench", "--workspace", "--", "--list"],
+        [
+            "cargo", "bench", "--workspace",
+            "--exclude", "commonware-runtime-fuzz",
+            "--exclude", "commonware-consensus-fuzz",
+            "--", "--list"
+        ],
         cwd=root,
         capture_output=True,
         text=True,
     )
 
-    # Parse output - benchmark names end with ": benchmark"
-    names = []
+    # Parse benchmark names from stdout
+    benchmarks = []
     for line in result.stdout.splitlines():
         line = line.strip()
         if line.endswith(": benchmark"):
             name = line[:-12]  # Remove ": benchmark" suffix
-            names.append(name)
+            benchmarks.append(name)
 
-    return names
+    return benchmarks
 
 
 def validate_benchmark_name(name: str) -> list[str]:
@@ -81,25 +95,24 @@ def validate_benchmark_name(name: str) -> list[str]:
         return violations
 
     parts = name.split("::")
-    module = parts[0]
     rest = "::".join(parts[1:])
 
-    if "/" in rest:
-        func, params = rest.split("/", 1)
-    else:
+    if "/" not in rest:
         # No params is fine
         return violations
+
+    # Check for multiple / separators (should only have one)
+    if rest.count("/") > 1:
+        violations.append(
+            f"`{name}`: Multiple `/` separators found; use `key=value` pairs instead"
+        )
+
+    _, params = rest.split("/", 1)
 
     # Check for comma-separated parameters
     if re.search(r"=\w+,\s*\w+=", params):
         violations.append(
             f"`{name}`: Parameters should be space-separated, not comma-separated"
-        )
-
-    # Check for colon in value position (like value=1:2)
-    if re.search(r"=\d+:\d+", params):
-        violations.append(
-            f"`{name}`: Use `/` instead of `:` as value separator (e.g., `1/2` not `1:2`)"
         )
 
     # Check for bare values (word without = followed by word with =)
@@ -132,26 +145,27 @@ def main() -> int:
             root = root.parent
 
     print("Compiling benchmarks and extracting names...", file=sys.stderr)
-    benchmark_names = get_benchmark_names(root)
+    benchmarks = get_benchmark_names(root)
 
-    if not benchmark_names:
+    if not benchmarks:
         print("ERROR: No benchmark names found. Is this the right directory?")
         return 1
 
     all_violations = []
-    for name in benchmark_names:
+    for name in benchmarks:
         all_violations.extend(validate_benchmark_name(name))
 
     if all_violations:
         print(f"Benchmark naming violations found ({len(all_violations)} total):\n")
         print("\n".join(all_violations))
         print("\n\nRules:")
-        print("1. Use `key=value` format in benchmark params (e.g., `group=g1`)")
-        print("2. Separate parameters with spaces, not commas")
-        print("3. Use `/` instead of `:` as value separators for ratios")
+        print("1. Include module separator `::` (use `module_path!()` macro)")
+        print("2. Use `key=value` format in benchmark params (e.g., `group=g1`)")
+        print("3. Separate parameters with spaces, not commas")
+        print("4. Use only one `/` separator (between function name and params)")
         return 1
 
-    print(f"Checked {len(benchmark_names)} benchmarks, all naming conventions followed.")
+    print(f"Checked {len(benchmarks)} benchmarks, all naming conventions followed.")
     return 0
 
 

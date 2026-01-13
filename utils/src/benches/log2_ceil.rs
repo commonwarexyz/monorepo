@@ -18,7 +18,7 @@ fn bench_log2_ceil(c: &mut Criterion) {
         for precision in [4, 8, 12] {
             c.bench_function(
                 &format!(
-                    "{}/value={}/{} precision={}",
+                    "{}/value={}:{} precision={}",
                     module_path!(),
                     value.numer(),
                     value.denom(),
