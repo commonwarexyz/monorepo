@@ -12,8 +12,7 @@ use commonware_cryptography::{
     },
     ed25519, Signer as _,
 };
-use commonware_parallel::Sequential;
-use commonware_utils::{ordered::Set, TryCollect as _};
+use commonware_utils::{ordered::Set, N3f1, TryCollect as _};
 use rand::{rngs::StdRng, SeedableRng as _};
 
 pub(super) fn participants_set(
@@ -37,8 +36,9 @@ pub(super) fn threshold_schemes(
         .expect("participant public keys are unique");
 
     let mut rng = StdRng::seed_from_u64(seed);
-    let (output, shares) = dkg::deal::<MinSig, _>(&mut rng, Mode::default(), participants.clone())
-        .map_err(|e| anyhow::anyhow!("dkg deal failed: {e:?}"))?;
+    let (output, shares) =
+        dkg::deal::<MinSig, _, N3f1>(&mut rng, Mode::default(), participants.clone())
+            .map_err(|e| anyhow::anyhow!("dkg deal failed: {e:?}"))?;
 
     let mut schemes = Vec::with_capacity(n);
     for pk in participants.iter() {
@@ -48,7 +48,6 @@ pub(super) fn threshold_schemes(
             participants.clone(),
             output.public().clone(),
             share,
-            Sequential,
         )
         .expect("signer should exist");
         schemes.push(scheme);

@@ -20,9 +20,10 @@ use commonware_consensus::{
 };
 use commonware_cryptography::{bls12381::primitives::variant::MinSig, ed25519};
 use commonware_p2p::simulated;
+use commonware_parallel::Sequential;
 use commonware_runtime::{buffer::PoolRef, tokio, Metrics as _};
 use commonware_storage::archive::immutable;
-use commonware_utils::{NZUsize, NZU32, NZU64};
+use commonware_utils::{NZUsize, NZU16, NZU32, NZU64};
 use futures::channel::mpsc;
 use governor::Quota;
 use std::{sync::Arc, time::Duration};
@@ -101,7 +102,7 @@ pub(super) async fn start_all_nodes(
 )> {
     // Per-channel rate limit used by the simulated P2P transport in this example.
     let quota = Quota::per_second(NZU32!(1_000));
-    let buffer_pool = PoolRef::new(NZUsize!(16_384), NZUsize!(10_000));
+    let buffer_pool = PoolRef::new(NZU16!(16_384), NZUsize!(10_000));
 
     let (finalized_tx, finalized_rx) = mpsc::unbounded::<FinalizationEvent>();
     let mut nodes = Vec::with_capacity(participants.len());
@@ -218,6 +219,7 @@ async fn start_node(
             automaton: marshaled.clone(),
             relay: marshaled,
             reporter,
+            strategy: Sequential,
             partition: format!("revm-{index}"),
             mailbox_size: MAILBOX_SIZE,
             epoch: Epoch::zero(),
@@ -341,15 +343,18 @@ where
             freezer_table_initial_size: 64,
             freezer_table_resize_frequency: 10,
             freezer_table_resize_chunk_size: 10,
-            freezer_journal_partition: format!("{partition_prefix}-finalizations-by-height-freezer-journal"),
-            freezer_journal_target_size: 1024,
-            freezer_journal_compression: None,
-            freezer_journal_buffer_pool: buffer_pool.clone(),
+            freezer_key_partition: format!("{partition_prefix}-finalizations-by-height-freezer-key"),
+            freezer_key_buffer_pool: buffer_pool.clone(),
+            freezer_value_partition: format!("{partition_prefix}-finalizations-by-height-freezer-value"),
+            freezer_value_target_size: 1024,
+            freezer_value_compression: None,
             ordinal_partition: format!("{partition_prefix}-finalizations-by-height-ordinal"),
             items_per_section: NZU64!(10),
-            codec_config: <ThresholdScheme as commonware_cryptography::certificate::Scheme>::certificate_codec_config_unbounded(),
+            freezer_key_write_buffer: NZUsize!(1024 * 1024),
+            freezer_value_write_buffer: NZUsize!(1024 * 1024),
+            ordinal_write_buffer: NZUsize!(1024 * 1024),
             replay_buffer: NZUsize!(1024 * 1024),
-            write_buffer: NZUsize!(1024 * 1024),
+            codec_config: <ThresholdScheme as commonware_cryptography::certificate::Scheme>::certificate_codec_config_unbounded(),
         },
     )
     .await
@@ -363,17 +368,18 @@ where
             freezer_table_initial_size: 64,
             freezer_table_resize_frequency: 10,
             freezer_table_resize_chunk_size: 10,
-            freezer_journal_partition: format!(
-                "{partition_prefix}-finalized-blocks-freezer-journal"
-            ),
-            freezer_journal_target_size: 1024,
-            freezer_journal_compression: None,
-            freezer_journal_buffer_pool: buffer_pool.clone(),
+            freezer_key_partition: format!("{partition_prefix}-finalized-blocks-freezer-key"),
+            freezer_key_buffer_pool: buffer_pool.clone(),
+            freezer_value_partition: format!("{partition_prefix}-finalized-blocks-freezer-value"),
+            freezer_value_target_size: 1024,
+            freezer_value_compression: None,
             ordinal_partition: format!("{partition_prefix}-finalized-blocks-ordinal"),
             items_per_section: NZU64!(10),
-            codec_config: block_codec_config,
+            freezer_key_write_buffer: NZUsize!(1024 * 1024),
+            freezer_value_write_buffer: NZUsize!(1024 * 1024),
+            ordinal_write_buffer: NZUsize!(1024 * 1024),
             replay_buffer: NZUsize!(1024 * 1024),
-            write_buffer: NZUsize!(1024 * 1024),
+            codec_config: block_codec_config,
         },
     )
     .await
@@ -393,9 +399,11 @@ where
             prunable_items_per_section: NZU64!(10),
             buffer_pool,
             replay_buffer: NZUsize!(1024 * 1024),
-            write_buffer: NZUsize!(1024 * 1024),
+            key_write_buffer: NZUsize!(1024 * 1024),
+            value_write_buffer: NZUsize!(1024 * 1024),
             block_codec_config,
             max_repair: NZUsize!(16),
+            strategy: Sequential,
         },
     )
     .await;
