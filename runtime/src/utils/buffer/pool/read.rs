@@ -174,8 +174,6 @@ struct ReplayBuf {
     offset_in_page: usize,
     /// Total remaining logical bytes across all buffers.
     remaining: usize,
-    /// Bytes to skip from the first fill after a seek (to account for mid-page offset).
-    first_fill_skip: usize,
 }
 
 impl ReplayBuf {
@@ -188,7 +186,6 @@ impl ReplayBuf {
             current_page: 0,
             offset_in_page: 0,
             remaining: 0,
-            first_fill_skip: 0,
         }
     }
 
@@ -198,16 +195,15 @@ impl ReplayBuf {
         self.current_page = 0;
         self.offset_in_page = 0;
         self.remaining = 0;
-        self.first_fill_skip = 0;
     }
 
     /// Adds a buffer from a fill operation.
     fn push(&mut self, state: BufferState, logical_bytes: usize) {
+        // If buffers is empty, this is the first fill after a seek.
+        // Skip bytes before the seek offset (offset_in_page).
+        let skip = if self.buffers.is_empty() { self.offset_in_page } else { 0 };
         self.buffers.push_back(state);
-        // After a seek, the first fill needs to skip bytes before the seek offset
-        let adjusted = logical_bytes.saturating_sub(self.first_fill_skip);
-        self.first_fill_skip = 0;
-        self.remaining += adjusted;
+        self.remaining += logical_bytes.saturating_sub(skip);
     }
 
     /// Returns the logical length of the given page in the given buffer.
@@ -344,10 +340,7 @@ impl<B: Blob> Replay<B> {
         let page_size = self.reader.logical_page_size as u64;
         self.reader.blob_page = offset / page_size;
         self.buffer.current_page = 0;
-        let offset_in_page = (offset % page_size) as usize;
-        self.buffer.offset_in_page = offset_in_page;
-        // When the first fill happens, we need to subtract bytes before the offset
-        self.buffer.first_fill_skip = offset_in_page;
+        self.buffer.offset_in_page = (offset % page_size) as usize;
 
         Ok(())
     }
