@@ -209,7 +209,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
             return Ok(0);
         };
 
-        // Detect missing historical blobs on init; contiguous journals must be gap-free.
+        // Validate sections on init: must be gap-free and all non-tail sections must be full.
         {
             let mut sections = inner.sections();
             let mut prev = sections
@@ -223,15 +223,12 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
                 if section != expected {
                     return Err(Error::MissingBlob(expected));
                 }
+                // Verify non-tail section is full (has exactly items_per_blob items)
+                let len = inner.section_len(prev).await?;
+                if len != items_per_blob {
+                    return Err(Error::InvalidBlobSize(prev, len * Self::CHUNK_SIZE_U64));
+                }
                 prev = section;
-            }
-        }
-
-        // Verify all non-tail sections are full (have exactly items_per_blob items)
-        for section in oldest..newest {
-            let len = inner.section_len(section).await?;
-            if len != items_per_blob {
-                return Err(Error::InvalidBlobSize(section, len * Self::CHUNK_SIZE_U64));
             }
         }
 
