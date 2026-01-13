@@ -4,13 +4,14 @@
 //! - submit transactions into the node-local mempool, and
 //! - query state at a finalized digest for assertions.
 
-use super::state::LedgerService;
+use super::state::{DomainEvent, LedgerService};
 use crate::{
     types::{StateRoot, Tx},
     ConsensusDigest,
 };
 use alloy_evm::revm::primitives::{Address, B256, U256};
 use commonware_runtime::Spawner;
+use futures::channel::mpsc::UnboundedReceiver;
 
 #[derive(Clone)]
 /// Handle that exposes application queries and submissions to the simulation harness.
@@ -27,6 +28,12 @@ where
 {
     pub(crate) const fn new(state: LedgerService, spawner: E) -> Self {
         Self { state, spawner }
+    }
+
+    /// Subscribe to the ledger domain event stream.
+    #[allow(dead_code)]
+    pub fn subscribe_events(&self) -> UnboundedReceiver<DomainEvent> {
+        self.state.subscribe()
     }
 
     pub async fn submit_tx(&self, tx: Tx) -> bool {

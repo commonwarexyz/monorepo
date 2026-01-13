@@ -8,7 +8,10 @@ use super::{
     demo, simplex, ThresholdScheme, BLOCK_CODEC_MAX_CALLDATA, BLOCK_CODEC_MAX_TXS,
     CHANNEL_BACKFILL, CHANNEL_BLOCKS, CHANNEL_CERTS, CHANNEL_RESOLVER, CHANNEL_VOTES, MAILBOX_SIZE,
 };
-use crate::{application::{self, DomainEvent}, FinalizationEvent};
+use crate::{
+    application::{self, DomainEvent},
+    FinalizationEvent,
+};
 use anyhow::Context as _;
 use commonware_broadcast::buffered;
 use commonware_consensus::{
@@ -203,8 +206,7 @@ async fn start_node(
     let app =
         application::RevmApplication::<ThresholdScheme>::new(BLOCK_CODEC_MAX_TXS, state.clone());
 
-    let finalized_reporter =
-        application::FinalizedReporter::new(ledger.clone(), context.clone());
+    let finalized_reporter = application::FinalizedReporter::new(ledger.clone(), context.clone());
 
     let marshal_mailbox = start_marshal(
         context,
