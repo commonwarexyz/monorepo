@@ -78,13 +78,13 @@ where
         }
     }
 
-    /// Finds and returns the location and KeyData for the lexicographically-last key produced by
+    /// Finds and returns the location and Update for the lexicographically-last key produced by
     /// the provided locations, skipping over locations that are beyond the log's range.
     async fn last_key_in_iter(
         &self,
         locs: impl IntoIterator<Item = Location>,
-    ) -> Result<LocatedKey<K, V::Value>, Error> {
-        let mut last_key: LocatedKey<K, V::Value> = None;
+    ) -> Result<LocatedKey<K, V>, Error> {
+        let mut last_key: LocatedKey<K, V> = None;
         for loc in locs {
             if loc >= self.op_count() {
                 // Don't try to look up operations that don't yet exist in the log. This can happen
@@ -122,7 +122,12 @@ where
         false
     }
 
-    ) -> Result<LocatedKey<K, V::Value>, Error> {
+    /// Find the span produced by the provided locations that contains `key`, if any.
+    async fn find_span(
+        &self,
+        locs: impl IntoIterator<Item = Location>,
+        key: &K,
+    ) -> Result<LocatedKey<K, V>, Error> {
         for loc in locs {
             // Iterate over conflicts in the snapshot entry to find the span.
             let data = Self::get_update_op(&self.log, loc).await?;
@@ -169,7 +174,11 @@ where
             .map(|res| res.map(|(data, _)| (data.value, data.next_key)))
     }
 
-    ) -> Result<Option<(KeyData<K, V::Value>, Location)>, Error> {
+    /// Returns the key data for `key` with its location, or None if the key is not active.
+    pub(crate) async fn get_with_loc(
+        &self,
+        key: &K,
+    ) -> Result<Option<(Update<K, V>, Location)>, Error> {
         let locs: Vec<Location> = self.snapshot.get(key).copied().collect();
         for loc in locs {
             let op = self.log.read(loc).await?;
@@ -1033,7 +1042,6 @@ mod test {
     use commonware_runtime::{
         deterministic::{Context, Runner},
         Runner as _,
-        Spawner,
     };
     use commonware_utils::sequence::FixedBytes;
     use core::{future::Future, pin::Pin};
@@ -1162,7 +1170,7 @@ mod test {
     fn ordered_any_futures_are_send() {
         let runner = Runner::default();
         runner.start(|context| async move {
-            let mut db = open_fixed_db(context.clone()).await;
+            let mut db = open_fixed_db(context.clone()).await.into_mutable();
             let key = FixedBytes::from([9u8; 4]);
             let value = Sha256::fill(5u8);
 
