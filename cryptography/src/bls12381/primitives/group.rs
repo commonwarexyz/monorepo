@@ -48,7 +48,7 @@ use core::{
 };
 use ctutils::{Choice, CtEq};
 use rand_core::CryptoRngCore;
-use zeroize::{Zeroize, ZeroizeOnDrop};
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 fn all_zero(bytes: &[u8]) -> Choice {
     bytes
@@ -289,7 +289,7 @@ impl Scalar {
         // in the scalar field after modular reduction, maintaining the security
         // properties required by the hash-to-field construction.
         const L: usize = 48;
-        let mut uniform_bytes = [0u8; L];
+        let mut uniform_bytes = Zeroizing::new([0u8; L]);
         // SAFETY: All buffers are valid with correct lengths; blst handles empty inputs.
         unsafe {
             blst_expand_message_xmd(
@@ -328,8 +328,8 @@ impl Scalar {
     }
 
     /// Encodes the scalar into a byte array.
-    fn as_slice(&self) -> [u8; Self::SIZE] {
-        let mut slice = [0u8; Self::SIZE];
+    fn as_slice(&self) -> Zeroizing<[u8; Self::SIZE]> {
+        let mut slice = Zeroizing::new([0u8; Self::SIZE]);
         // SAFETY: All pointers valid; blst_bendian_from_scalar writes exactly 32 bytes.
         unsafe {
             let mut scalar = blst_scalar::default();
@@ -351,7 +351,7 @@ impl Scalar {
 impl Write for Scalar {
     fn write(&self, buf: &mut impl BufMut) {
         let slice = self.as_slice();
-        buf.put_slice(&slice);
+        buf.put_slice(slice.as_ref());
     }
 }
 
@@ -359,7 +359,7 @@ impl Read for Scalar {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let bytes = <[u8; Self::SIZE]>::read(buf)?;
+        let bytes = Zeroizing::new(<[u8; Self::SIZE]>::read(buf)?);
         let mut ret = blst_fr::default();
         // SAFETY: bytes is a valid 32-byte array. blst_sk_check validates non-zero and in-range.
         // We use blst_sk_check instead of blst_scalar_fr_check because it also checks non-zero
@@ -387,7 +387,7 @@ impl FixedSize for Scalar {
 impl Hash for Scalar {
     fn hash<H: Hasher>(&self, state: &mut H) {
         let slice = self.as_slice();
-        state.write(&slice);
+        state.write(slice.as_ref());
     }
 }
 
@@ -411,13 +411,13 @@ impl Ord for Scalar {
 
 impl Debug for Scalar {
     fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
-        write!(f, "{}", hex(&self.as_slice()))
+        write!(f, "Scalar([REDACTED])")
     }
 }
 
 impl Display for Scalar {
     fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
-        write!(f, "{}", hex(&self.as_slice()))
+        write!(f, "[REDACTED]")
     }
 }
 
@@ -534,14 +534,9 @@ impl Field for Scalar {
 impl Random for Scalar {
     /// Returns a random non-zero scalar.
     fn random(mut rng: impl CryptoRngCore) -> Self {
-        let mut ikm = [0u8; IKM_LENGTH];
-        rng.fill_bytes(&mut ikm);
-        let result = Self::from_ikm(&ikm);
-
-        // Zeroize the ikm buffer
-        ikm.zeroize();
-
-        result
+        let mut ikm = Zeroizing::new([0u8; IKM_LENGTH]);
+        rng.fill_bytes(ikm.as_mut());
+        Self::from_ikm(&ikm)
     }
 }
 

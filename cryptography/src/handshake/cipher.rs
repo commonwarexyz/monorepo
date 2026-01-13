@@ -7,6 +7,7 @@ use chacha20poly1305::{
 };
 use rand_core::CryptoRngCore;
 use std::vec::Vec;
+use zeroize::Zeroizing;
 
 /// The amount of overhead in a ciphertext, compared to the plain message.
 pub const CIPHERTEXT_OVERHEAD: usize = <ChaCha20Poly1305 as AeadCore>::TagSize::USIZE;
@@ -44,11 +45,10 @@ pub struct SendCipher {
 impl SendCipher {
     /// Creates a new sending cipher with a random key.
     pub fn new(mut rng: impl CryptoRngCore) -> Self {
+        let key = Zeroizing::new(ChaCha20Poly1305::generate_key(&mut rng));
         Self {
             nonce: CounterNonce::new(),
-            inner: Secret::new(ChaCha20Poly1305::new(&ChaCha20Poly1305::generate_key(
-                &mut rng,
-            ))),
+            inner: Secret::new(ChaCha20Poly1305::new(&key)),
         }
     }
 
@@ -69,11 +69,10 @@ pub struct RecvCipher {
 impl RecvCipher {
     /// Creates a new receiving cipher with a random key.
     pub fn new(mut rng: impl CryptoRngCore) -> Self {
+        let key = Zeroizing::new(ChaCha20Poly1305::generate_key(&mut rng));
         Self {
             nonce: CounterNonce::new(),
-            inner: Secret::new(ChaCha20Poly1305::new(&ChaCha20Poly1305::generate_key(
-                &mut rng,
-            ))),
+            inner: Secret::new(ChaCha20Poly1305::new(&key)),
         }
     }
 

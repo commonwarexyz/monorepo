@@ -46,6 +46,7 @@ use core::{
     ops::Deref,
 };
 use rand_core::CryptoRngCore;
+use zeroize::Zeroizing;
 
 const CURVE_NAME: &str = "bls12381";
 
@@ -74,11 +75,11 @@ impl Read for PrivateKey {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        let raw = <[u8; Self::SIZE]>::read(buf)?;
+        let raw = Zeroizing::new(<[u8; Self::SIZE]>::read(buf)?);
         let key = group::Private::decode(raw.as_ref())
             .map_err(|e| CodecError::Wrapped(CURVE_NAME, e.into()))?;
         Ok(Self {
-            raw: Secret::new(raw),
+            raw: Secret::new(*raw),
             key: Secret::new(key),
         })
     }
@@ -90,9 +91,9 @@ impl FixedSize for PrivateKey {
 
 impl From<Scalar> for PrivateKey {
     fn from(key: Scalar) -> Self {
-        let raw = key.encode_fixed();
+        let raw = Zeroizing::new(key.encode_fixed());
         Self {
-            raw: Secret::new(raw),
+            raw: Secret::new(*raw),
             key: Secret::new(key),
         }
     }
@@ -124,9 +125,9 @@ impl crate::Signer for PrivateKey {
 impl Random for PrivateKey {
     fn random(mut rng: impl CryptoRngCore) -> Self {
         let (private, _) = ops::keypair::<_, MinPk>(&mut rng);
-        let raw = private.encode_fixed();
+        let raw = Zeroizing::new(private.encode_fixed());
         Self {
-            raw: Secret::new(raw),
+            raw: Secret::new(*raw),
             key: Secret::new(private),
         }
     }

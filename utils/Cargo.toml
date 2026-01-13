@@ -27,6 +27,7 @@ num-traits.workspace = true
 pin-project.workspace = true
 rand.workspace = true
 thiserror.workspace = true
+zeroize.workspace = true
 
 [target.'cfg(target_arch = "wasm32")'.dependencies.getrandom]
 # Enable "js" feature when WASM is target
@@ -56,6 +57,7 @@ std = [
 	"rand/std",
 	"rand/std_rng",
 	"thiserror/std",
+	"zeroize/std",
 ]
 arbitrary = [
 	"commonware-codec/arbitrary",
