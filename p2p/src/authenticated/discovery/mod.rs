@@ -232,7 +232,14 @@ pub use network::Network;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Blocker, Ingress, Manager, Receiver, Recipients, Sender};
+    use crate::{
+        authenticated::{
+            discovery::actors::router::{Actor as RouterActor, Config as RouterConfig},
+            relay::Relay,
+        },
+        Blocker, Ingress, Manager, Receiver, Recipients, Sender,
+    };
+    use bytes::Bytes;
     use commonware_cryptography::{ed25519, Signer as _};
     use commonware_macros::{select, select_loop, test_group, test_traced};
     use commonware_runtime::{
@@ -2291,18 +2298,12 @@ mod tests {
 
     #[test]
     fn test_broadcast_slow_peer_no_blocking() {
-        use crate::authenticated::{
-            discovery::actors::router::{Actor, Config as RouterConfig},
-            relay::Relay,
-        };
-        use bytes::Bytes;
-
         let executor = deterministic::Runner::timed(Duration::from_secs(5));
         executor.start(|context| async move {
             // Create router
             let cfg = RouterConfig { mailbox_size: 10 };
             let (router, mut mailbox, messenger) =
-                Actor::<_, ed25519::PublicKey>::new(context.clone(), cfg);
+                RouterActor::<_, ed25519::PublicKey>::new(context.clone(), cfg);
 
             // Create channels for the router
             let channels = channels::Channels::new(messenger.clone(), MAX_MESSAGE_SIZE);
@@ -2344,19 +2345,14 @@ mod tests {
                 assert_eq!(sent.len(), 2, "Broadcast {i} should reach both peers");
             }
 
-            // 11th broadcast: slow_peer's buffer is full
-            // With try_send: drops slow_peer's message, succeeds for fast_peer
-            // With send().await: would block forever waiting for slow_peer
+            // 11th broadcast: slow_peer's buffer is full, so its message is dropped
             let sent = messenger.content(Recipients::All, 0, message, false).await;
-
-            // With the fix, fast_peer still receives (slow_peer's message dropped)
             assert!(
                 sent.contains(&fast_peer),
                 "Fast peer should receive message"
             );
-            // slow_peer may or may not be in sent depending on the fix
 
-            // Verify fast_peer actually received 11 messages
+            // Verify fast_peer received all 11 messages
             for _ in 0..11 {
                 assert!(fast_receiver.try_next().is_ok());
             }
