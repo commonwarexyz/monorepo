@@ -57,6 +57,7 @@
 //! 3. If `shutdown_timeout` is configured, abandons remaining operations after the timeout
 //! 4. Cleans up and exits
 
+#[cfg(feature = "iouring-network")]
 use bytes::Bytes;
 use commonware_utils::StableBuf;
 use futures::{
@@ -75,6 +76,7 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 
 /// Returns the maximum number of iovecs per sendmsg call.
 /// Queries the kernel via sysconf(_SC_IOV_MAX), falling back to 1024 (Linux default).
+#[cfg(feature = "iouring-network")]
 fn iov_max() -> usize {
     static IOV_MAX: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *IOV_MAX.get_or_init(|| {
@@ -98,7 +100,8 @@ pub enum OpBuf {
     /// Single contiguous buffer (used by storage and simple network ops).
     Single(StableBuf),
     /// Vectored buffer containing multiple chunks and their iovec metadata.
-    /// Used for scatter-gather I/O operations.
+    /// Used for scatter-gather I/O operations (network only).
+    #[cfg(feature = "iouring-network")]
     Vectored(IoVecBuf),
 }
 
@@ -107,11 +110,13 @@ impl OpBuf {
     pub fn into_single(self) -> Option<StableBuf> {
         match self {
             Self::Single(buf) => Some(buf),
+            #[cfg(feature = "iouring-network")]
             Self::Vectored(_) => None,
         }
     }
 
     /// Extracts the inner `IoVecBuf` if this is a `Vectored` variant.
+    #[cfg(feature = "iouring-network")]
     pub fn into_vectored(self) -> Option<IoVecBuf> {
         match self {
             Self::Single(_) => None,
@@ -131,6 +136,7 @@ impl OpBuf {
 /// The fields must NOT be modified while an io_uring operation using this buffer
 /// is in flight. Only call [`advance`](Self::advance) after the corresponding CQE
 /// has been received, indicating the kernel is done with the previous pointers.
+#[cfg(feature = "iouring-network")]
 pub struct IoVecBuf {
     /// Buffer chunks kept alive for pointer validity.
     /// For Bytes-backed buffers, this is cheap (Arc clone).
@@ -149,12 +155,14 @@ pub struct IoVecBuf {
     remaining: usize,
 }
 
+#[cfg(feature = "iouring-network")]
 // SAFETY: IoVecBuf owns all data it references. The raw pointers in iovecs
 // point into the owned `chunks` Vec, which is Send/Sync. The struct is only
 // accessed by a single io_uring thread at a time, and the kernel only reads
 // from the pointers during the operation.
 unsafe impl Send for IoVecBuf {}
 
+#[cfg(feature = "iouring-network")]
 impl std::fmt::Debug for IoVecBuf {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("IoVecBuf")
@@ -167,6 +175,7 @@ impl std::fmt::Debug for IoVecBuf {
     }
 }
 
+#[cfg(feature = "iouring-network")]
 impl IoVecBuf {
     /// Creates a new IoVecBuf from buffer chunks for network SendMsg operations.
     /// Initializes the msghdr for use with io_uring SendMsg.
@@ -964,6 +973,7 @@ mod tests {
         uring_thread.join().unwrap();
     }
 
+    #[cfg(feature = "iouring-network")]
     mod iovec_buf_tests {
         use super::super::IoVecBuf;
         use bytes::Bytes;
