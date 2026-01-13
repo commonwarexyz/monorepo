@@ -201,7 +201,11 @@ impl ReplayBuf {
     fn push(&mut self, state: BufferState, logical_bytes: usize) {
         // If buffers is empty, this is the first fill after a seek.
         // Skip bytes before the seek offset (offset_in_page).
-        let skip = if self.buffers.is_empty() { self.offset_in_page } else { 0 };
+        let skip = if self.buffers.is_empty() {
+            self.offset_in_page
+        } else {
+            0
+        };
         self.buffers.push_back(state);
         self.remaining += logical_bytes.saturating_sub(skip);
     }
