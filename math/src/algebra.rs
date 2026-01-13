@@ -22,7 +22,7 @@ fn yield_bits_le_until_zeroes(x: u64) -> impl Iterator<Item = bool> {
 }
 
 /// Yield all of the bits in an array of u64s, in little endian order.
-fn yield_bits_le_arr(xs: &[u64]) -> impl Iterator<Item = bool> + use<'_> {
+fn yield_bits_le_arr(xs: &[u64]) -> impl Iterator<Item = bool> + '_ {
     let (&last, start) = xs.split_last().unwrap_or((&0, &[]));
     start
         .iter()
