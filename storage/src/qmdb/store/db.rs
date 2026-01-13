@@ -553,6 +553,14 @@ where
     async fn update(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
         self.update(key, value).await
     }
+
+    async fn create(&mut self, key: Self::Key, value: Self::Value) -> Result<bool, Self::Error> {
+        if self.get(&key).await?.is_some() {
+            return Ok(false);
+        }
+        self.update(key, value).await?;
+        Ok(true)
+    }
 }
 
 impl<E, K, V, T> Deletable for Db<E, K, V, T, NonDurable>
@@ -778,15 +786,17 @@ mod test {
             assert_eq!(db.get(&k1).await.unwrap().unwrap(), v1);
             assert_eq!(db.get(&k2).await.unwrap().unwrap(), v2);
 
-            // Ensure upsert works for existing key.
-            db.upsert(k1, |v| v.push(7)).await.unwrap();
+            // Update existing key with modified value.
+            let mut v1_updated = db.get(&k1).await.unwrap().unwrap();
+            v1_updated.push(7);
+            db.update(k1, v1_updated).await.unwrap();
             let (db, _) = db.commit(None).await.unwrap();
             assert_eq!(db.get(&k1).await.unwrap().unwrap(), vec![2, 3, 4, 5, 6, 7]);
 
-            // Ensure upsert works for new key.
+            // Create new key.
             let mut db = db.into_dirty();
             let k3 = Digest::random(&mut ctx);
-            db.upsert(k3, |v| v.push(8)).await.unwrap();
+            db.update(k3, vec![8]).await.unwrap();
             let (db, _) = db.commit(None).await.unwrap();
             assert_eq!(db.get(&k3).await.unwrap().unwrap(), vec![8]);
 

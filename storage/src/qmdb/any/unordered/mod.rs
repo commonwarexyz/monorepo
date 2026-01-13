@@ -310,6 +310,14 @@ where
     async fn update(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
         self.update(key, value).await
     }
+
+    async fn create(&mut self, key: Self::Key, value: Self::Value) -> Result<bool, Self::Error> {
+        if self.get(&key).await?.is_some() {
+            return Ok(false);
+        }
+        self.update(key, value).await?;
+        Ok(true)
+    }
 }
 
 impl<

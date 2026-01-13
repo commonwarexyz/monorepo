@@ -846,12 +846,16 @@ impl<
 where
     Operation<K, V>: CodecShared,
 {
-    fn update(
-        &mut self,
-        key: Self::Key,
-        value: Self::Value,
-    ) -> impl std::future::Future<Output = Result<(), Self::Error>> {
-        self.update(key, value)
+    async fn update(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
+        self.update(key, value).await
+    }
+
+    async fn create(&mut self, key: Self::Key, value: Self::Value) -> Result<bool, Self::Error> {
+        if self.get(&key).await?.is_some() {
+            return Ok(false);
+        }
+        self.update(key, value).await?;
+        Ok(true)
     }
 }
 
@@ -867,11 +871,8 @@ where
     Operation<K, V>: Codec,
     V::Value: Send + Sync,
 {
-    fn delete(
-        &mut self,
-        key: Self::Key,
-    ) -> impl std::future::Future<Output = Result<bool, Self::Error>> {
-        self.delete(key)
+    async fn delete(&mut self, key: Self::Key) -> Result<bool, Self::Error> {
+        self.delete(key).await
     }
 }
 

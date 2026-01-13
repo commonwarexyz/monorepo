@@ -1146,6 +1146,14 @@ impl<E: Storage + Metrics + Clock, K: Array, V: CodecShared> kv::Updatable for F
         self.put(key, value).await?;
         Ok(())
     }
+
+    async fn create(&mut self, key: Self::Key, value: Self::Value) -> Result<bool, Self::Error> {
+        if self.get(Identifier::Key(&key)).await?.is_some() {
+            return Ok(false);
+        }
+        self.put(key, value).await?;
+        Ok(true)
+    }
 }
 
 impl<E: Storage + Metrics + Clock, K: Array, V: CodecShared> Persistable for Freezer<E, K, V> {

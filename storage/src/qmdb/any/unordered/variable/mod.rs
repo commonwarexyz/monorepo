@@ -436,6 +436,18 @@ pub(super) mod test {
 
     fn assert_send<T: Send>(_: T) {}
 
+    /// Regression test for issue #2787: verifies that QMDB async methods can be used
+    /// in functions that return `impl Future + Send`.
+    #[allow(clippy::manual_async_fn)]
+    fn _issue_2787_repro(
+        db: &AnyTest,
+        key: Digest,
+    ) -> impl std::future::Future<Output = ()> + Send + use<'_> {
+        async move {
+            let _ = db.get(&key).await;
+        }
+    }
+
     #[test_traced]
     fn test_futures_are_send() {
         use crate::mmr::Location;

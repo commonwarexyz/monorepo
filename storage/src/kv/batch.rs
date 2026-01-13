@@ -49,7 +49,7 @@ where
     }
 }
 
-impl<'a, K, V, D> Gettable for Batch<'a, K, V, D>
+impl<'b, K, V, D> Gettable for Batch<'b, K, V, D>
 where
     K: Array,
     V: CodecShared + Clone,
@@ -70,7 +70,7 @@ where
     }
 }
 
-impl<'a, K, V, D> Updatable for Batch<'a, K, V, D>
+impl<'b, K, V, D> Updatable for Batch<'b, K, V, D>
 where
     K: Array,
     V: CodecShared + Clone,
@@ -83,8 +83,8 @@ where
         Ok(())
     }
 
-    /// Creates a new key-value pair in the batch if it isn't present in the batch or store.
-    /// Returns true if the key was created, false if it already existed.
+    /// Creates a new key-value pair in the batch. Returns true if the key was created, false if it
+    /// already existed.
     async fn create(&mut self, key: K, value: V) -> Result<bool, Error> {
         if let Some(value_opt) = self.diff.get_mut(&key) {
             match value_opt {
@@ -105,7 +105,7 @@ where
     }
 }
 
-impl<'a, K, V, D> Deletable for Batch<'a, K, V, D>
+impl<'b, K, V, D> Deletable for Batch<'b, K, V, D>
 where
     K: Array,
     V: CodecShared + Clone,
