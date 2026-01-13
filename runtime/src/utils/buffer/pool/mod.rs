@@ -24,10 +24,9 @@
 //! it's only to add more bytes after the existing ones.
 
 use crate::{Blob, Error};
-use bytes::{Buf, BufMut};
+use bytes::{Buf, BufMut, BytesMut};
 use commonware_codec::{EncodeFixed, FixedSize, Read as CodecRead, ReadExt, Write};
 use commonware_cryptography::{crc32, Crc32};
-use commonware_utils::StableBuf;
 
 mod append;
 mod page_cache;
@@ -48,22 +47,23 @@ async fn get_page_from_blob(
     blob: &impl Blob,
     page_num: u64,
     logical_page_size: u64,
-) -> Result<StableBuf, Error> {
+) -> Result<BytesMut, Error> {
     let physical_page_size = logical_page_size + CHECKSUM_SIZE;
     let physical_page_start = page_num * physical_page_size;
 
-    let mut page = blob
-        .read_at(vec![0; physical_page_size as usize], physical_page_start)
-        .await?;
+    let mut page = vec![0u8; physical_page_size as usize];
+    blob.read_at(&mut page[..], physical_page_start).await?;
 
-    let Some(record) = Checksum::validate_page(page.as_ref()) else {
+    let Some(record) = Checksum::validate_page(&page) else {
         return Err(Error::InvalidChecksum);
     };
     let (len, _) = record.get_crc();
 
-    page.truncate(len as usize);
+    // Convert to BytesMut and truncate to actual data length
+    let mut result = BytesMut::from(&page[..]);
+    result.truncate(len as usize);
 
-    Ok(page)
+    Ok(result)
 }
 
 /// Describes a CRC record stored at the end of a page.

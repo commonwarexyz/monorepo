@@ -283,7 +283,7 @@ mod tests {
 
         // Test 2: Logical offset handling - write at offset 0 stores at raw offset 8
         let data = b"hello world";
-        blob.write_at(data.to_vec(), 0).await.unwrap();
+        blob.write_at(&data[..], 0).await.unwrap();
         blob.sync().await.unwrap();
 
         // Verify raw file size
@@ -302,8 +302,9 @@ mod tests {
         assert_eq!(&raw_content[Header::SIZE..], data);
 
         // Test 3: Read at logical offset 0 returns data from raw offset 8
-        let read_buf = blob.read_at(vec![0u8; data.len()], 0).await.unwrap();
-        assert_eq!(read_buf.as_ref(), data);
+        let mut read_buf = vec![0u8; data.len()];
+        blob.read_at(&mut read_buf[..], 0).await.unwrap();
+        assert_eq!(&read_buf[..], &data[..]);
 
         // Test 4: Resize with logical length
         blob.resize(5).await.unwrap();
@@ -326,14 +327,15 @@ mod tests {
         );
 
         // Test 5: Reopen existing blob preserves header and returns correct logical size
-        blob.write_at(b"test data".to_vec(), 0).await.unwrap();
+        blob.write_at(&b"test data"[..], 0).await.unwrap();
         blob.sync().await.unwrap();
         drop(blob);
 
         let (blob2, size2) = storage.open("partition", b"test").await.unwrap();
         assert_eq!(size2, 9, "reopened blob should have logical size 9");
-        let read_buf = blob2.read_at(vec![0u8; 9], 0).await.unwrap();
-        assert_eq!(read_buf.as_ref(), b"test data");
+        let mut read_buf2 = [0u8; 9];
+        blob2.read_at(&mut read_buf2[..], 0).await.unwrap();
+        assert_eq!(&read_buf2[..], b"test data");
         drop(blob2);
 
         // Test 6: Corrupted blob recovery (0 < raw_size < 8)

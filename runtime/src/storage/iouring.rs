@@ -25,8 +25,9 @@ use crate::{
     iouring::{self, should_retry},
     Error,
 };
+use bytes::{Buf, BufMut, BytesMut};
 use commonware_codec::Encode;
-use commonware_utils::{from_hex, hex, StableBuf};
+use commonware_utils::{from_hex, hex};
 use futures::{
     channel::{mpsc, oneshot},
     executor::block_on,
@@ -258,15 +259,12 @@ impl Blob {
 }
 
 impl crate::Blob for Blob {
-    async fn read_at(
-        &self,
-        buf: impl Into<StableBuf> + Send,
-        offset: u64,
-    ) -> Result<StableBuf, Error> {
-        let mut buf = buf.into();
+    async fn read_at(&self, mut buf: impl BufMut + Send, offset: u64) -> Result<(), Error> {
+        let buf_len = buf.remaining_mut();
+        // io_uring requires stable pointers, so we use an owned BytesMut and copy at the end
+        let mut owned = BytesMut::zeroed(buf_len);
         let fd = types::Fd(self.file.as_raw_fd());
         let mut bytes_read = 0;
-        let buf_len = buf.len();
         let mut io_sender = self.io_sender.clone();
         let offset = offset
             .checked_add(Header::SIZE_U64)
@@ -274,13 +272,13 @@ impl crate::Blob for Blob {
         while bytes_read < buf_len {
             // Figure out how much is left to read and where to read into.
             //
-            // SAFETY: `buf` is a `StableBuf` guaranteeing the memory won't move.
+            // SAFETY: `owned` is a `BytesMut` guaranteeing the memory won't move.
             // `bytes_read` is always < `buf_len` due to the loop condition, so
             // `add(bytes_read)` stays within bounds and `buf_len - bytes_read`
             // correctly represents the remaining valid bytes.
             let remaining = unsafe {
                 std::slice::from_raw_parts_mut(
-                    buf.as_mut_ptr().add(bytes_read),
+                    owned.as_mut_ptr().add(bytes_read),
                     buf_len - bytes_read,
                 )
             };
@@ -297,14 +295,14 @@ impl crate::Blob for Blob {
                 .send(iouring::Op {
                     work: op,
                     sender,
-                    buffer: Some(buf),
+                    buffer: Some(owned),
                 })
                 .await
                 .map_err(|_| Error::ReadFailed)?;
 
             // Wait for the result
             let (result, got_buf) = receiver.await.map_err(|_| Error::ReadFailed)?;
-            buf = got_buf.unwrap();
+            owned = got_buf.unwrap();
             if should_retry(result) {
                 continue;
             }
@@ -318,14 +316,18 @@ impl crate::Blob for Blob {
             }
             bytes_read += op_bytes_read;
         }
-        Ok(buf)
+        // Copy result to caller's buffer
+        buf.put_slice(&owned);
+        Ok(())
     }
 
-    async fn write_at(&self, buf: impl Into<StableBuf> + Send, offset: u64) -> Result<(), Error> {
-        let mut buf = buf.into();
+    async fn write_at(&self, mut buf: impl Buf + Send, offset: u64) -> Result<(), Error> {
+        // io_uring requires stable pointers, so copy from caller's buffer
+        // (zero-copy if caller passes Bytes)
+        let mut owned = buf.copy_to_bytes(buf.remaining());
         let fd = types::Fd(self.file.as_raw_fd());
         let mut bytes_written = 0;
-        let buf_len = buf.len();
+        let buf_len = owned.len();
         let mut io_sender = self.io_sender.clone();
         let offset = offset
             .checked_add(Header::SIZE_U64)
@@ -333,13 +335,13 @@ impl crate::Blob for Blob {
         while bytes_written < buf_len {
             // Figure out how much is left to write and where to write from.
             //
-            // SAFETY: `buf` is a `StableBuf` guaranteeing the memory won't move.
+            // SAFETY: `owned` is a `Bytes` guaranteeing the memory won't move.
             // `bytes_written` is always < `buf_len` due to the loop condition, so
             // `add(bytes_written)` stays within bounds and `buf_len - bytes_written`
             // correctly represents the remaining valid bytes.
             let remaining = unsafe {
                 std::slice::from_raw_parts(
-                    buf.as_mut_ptr().add(bytes_written) as *const u8,
+                    owned.as_ptr().add(bytes_written),
                     buf_len - bytes_written,
                 )
             };
@@ -350,20 +352,22 @@ impl crate::Blob for Blob {
                 .offset(offset as _)
                 .build();
 
-            // Submit the operation
+            // Submit the operation - we convert Bytes to BytesMut via into_iter().collect()
+            // since the Op struct holds BytesMut. This is a bit wasteful but maintains safety.
             let (sender, receiver) = oneshot::channel();
             io_sender
                 .send(iouring::Op {
                     work: op,
                     sender,
-                    buffer: Some(buf),
+                    buffer: Some(BytesMut::from(owned.as_ref())),
                 })
                 .await
                 .map_err(|_| Error::WriteFailed)?;
 
             // Wait for the result
             let (return_value, got_buf) = receiver.await.map_err(|_| Error::WriteFailed)?;
-            buf = got_buf.unwrap();
+            // Restore owned from the returned buffer to maintain the stable pointer
+            owned = got_buf.unwrap().freeze();
             if should_retry(return_value) {
                 continue;
             }
@@ -485,7 +489,7 @@ mod tests {
 
         // Test 2: Logical offset handling - write at offset 0 stores at raw offset 8
         let data = b"hello world";
-        blob.write_at(data.to_vec(), 0).await.unwrap();
+        blob.write_at(&data[..], 0).await.unwrap();
         blob.sync().await.unwrap();
 
         // Verify raw file size
@@ -504,8 +508,9 @@ mod tests {
         assert_eq!(&raw_content[Header::SIZE..], data);
 
         // Test 3: Read at logical offset 0 returns data from raw offset 8
-        let read_buf = blob.read_at(vec![0u8; data.len()], 0).await.unwrap();
-        assert_eq!(read_buf.as_ref(), data);
+        let mut read_buf = vec![0u8; data.len()];
+        blob.read_at(&mut read_buf[..], 0).await.unwrap();
+        assert_eq!(&read_buf[..], data);
 
         // Test 4: Resize with logical length
         blob.resize(5).await.unwrap();
@@ -528,14 +533,15 @@ mod tests {
         );
 
         // Test 5: Reopen existing blob preserves header and returns correct logical size
-        blob.write_at(b"test data".to_vec(), 0).await.unwrap();
+        blob.write_at(&b"test data"[..], 0).await.unwrap();
         blob.sync().await.unwrap();
         drop(blob);
 
         let (blob2, size2) = storage.open("partition", b"test").await.unwrap();
         assert_eq!(size2, 9, "reopened blob should have logical size 9");
-        let read_buf = blob2.read_at(vec![0u8; 9], 0).await.unwrap();
-        assert_eq!(read_buf.as_ref(), b"test data");
+        let mut read_buf = vec![0u8; 9];
+        blob2.read_at(&mut read_buf[..], 0).await.unwrap();
+        assert_eq!(&read_buf[..], b"test data");
         drop(blob2);
 
         // Test 6: Corrupted blob recovery (0 < raw_size < 8)

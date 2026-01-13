@@ -57,7 +57,7 @@
 //! 3. If `shutdown_timeout` is configured, abandons remaining operations after the timeout
 //! 4. Cleans up and exits
 
-use commonware_utils::StableBuf;
+use bytes::BytesMut;
 use futures::{
     channel::{mpsc, oneshot},
     StreamExt as _,
@@ -77,14 +77,14 @@ const TIMEOUT_WORK_ID: u64 = u64::MAX;
 
 /// Active operations keyed by their work id.
 ///
-/// Each entry keeps the caller's oneshot sender, the `StableBuf` that must stay
+/// Each entry keeps the caller's oneshot sender, the `BytesMut` that must stay
 /// alive until the kernel finishes touching it, and when op_timeout is enabled,
 /// the boxed `Timespec` used when we link in an IOSQE_IO_LINK timeout.
 type Waiters = HashMap<
     u64,
     (
-        oneshot::Sender<(i32, Option<StableBuf>)>,
-        Option<StableBuf>,
+        oneshot::Sender<(i32, Option<BytesMut>)>,
+        Option<BytesMut>,
         Option<Box<Timespec>>,
     ),
 >;
@@ -206,13 +206,13 @@ pub struct Op {
     /// Its user data field will be overwritten. Users shouldn't rely on it.
     pub work: SqueueEntry,
     /// Sends the result of the operation and `buffer`.
-    pub sender: oneshot::Sender<(i32, Option<StableBuf>)>,
+    pub sender: oneshot::Sender<(i32, Option<BytesMut>)>,
     /// The buffer used for the operation, if any.
     /// E.g. For read, this is the buffer being read into.
     /// If None, the operation doesn't use a buffer (e.g. a sync operation).
     /// We hold the buffer here so it's guaranteed to live until the operation
     /// completes, preventing write-after-free issues.
-    pub buffer: Option<StableBuf>,
+    pub buffer: Option<BytesMut>,
 }
 
 // Returns false iff we received a shutdown timeout
@@ -441,6 +441,7 @@ pub const fn should_retry(return_value: i32) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::BytesMut;
     use crate::iouring::{Config, Op};
     use futures::{
         channel::{
@@ -471,7 +472,7 @@ mod tests {
 
         // Submit a read
         let msg = b"hello".to_vec();
-        let mut buf = vec![0; msg.len()];
+        let mut buf = BytesMut::zeroed(msg.len());
         let recv =
             opcode::Recv::new(Fd(left_pipe.as_raw_fd()), buf.as_mut_ptr(), buf.len() as _).build();
         let (recv_tx, recv_rx) = oneshot::channel();
@@ -479,7 +480,7 @@ mod tests {
             .send(crate::iouring::Op {
                 work: recv,
                 sender: recv_tx,
-                buffer: Some(buf.into()),
+                buffer: Some(buf),
             })
             .await
             .expect("failed to send work");
@@ -497,7 +498,7 @@ mod tests {
             .send(crate::iouring::Op {
                 work: write,
                 sender: write_tx,
-                buffer: Some(msg.into()),
+                buffer: Some(BytesMut::from(&msg[..])),
             })
             .await
             .expect("failed to send work");
@@ -558,7 +559,7 @@ mod tests {
 
         // Submit a work item that will time out (because we don't write to the pipe)
         let (pipe_left, _pipe_right) = UnixStream::pair().unwrap();
-        let mut buf = vec![0; 8];
+        let mut buf = BytesMut::zeroed(8);
         let work =
             opcode::Recv::new(Fd(pipe_left.as_raw_fd()), buf.as_mut_ptr(), buf.len() as _).build();
         let (tx, rx) = oneshot::channel();
@@ -566,7 +567,7 @@ mod tests {
             .send(crate::iouring::Op {
                 work,
                 sender: tx,
-                buffer: Some(buf.into()),
+                buffer: Some(buf),
             })
             .await
             .expect("failed to send work");

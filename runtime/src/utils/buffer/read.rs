@@ -1,5 +1,5 @@
 use crate::{Blob, Error};
-use commonware_utils::StableBuf;
+use bytes::BytesMut;
 use std::num::NonZeroUsize;
 
 /// A reader that buffers content from a [Blob] to optimize the performance
@@ -15,9 +15,9 @@ use std::num::NonZeroUsize;
 /// executor.start(|context| async move {
 ///     // Open a blob and add some data (e.g., a journal file)
 ///     let (blob, size) = context.open("my_partition", b"my_data").await.expect("unable to open blob");
-///     let data = b"Hello, world! This is a test.".to_vec();
+///     let data = b"Hello, world! This is a test.";
 ///     let size = data.len() as u64;
-///     blob.write_at(data, 0).await.expect("unable to write data");
+///     blob.write_at(&data[..], 0).await.expect("unable to write data");
 ///
 ///     // Create a buffer
 ///     let buffer = 64 * 1024;
@@ -36,7 +36,7 @@ pub struct Read<B: Blob> {
     /// The underlying blob to read from.
     blob: B,
     /// The buffer storing the data read from the blob.
-    buffer: StableBuf,
+    buffer: BytesMut,
     /// The current position in the blob from where the buffer was filled.
     blob_position: u64,
     /// The size of the blob.
@@ -58,7 +58,7 @@ impl<B: Blob> Read<B> {
     pub fn new(blob: B, blob_size: u64, buffer_size: NonZeroUsize) -> Self {
         Self {
             blob,
-            buffer: vec![0; buffer_size.get()].into(),
+            buffer: BytesMut::with_capacity(buffer_size.get()),
             blob_position: 0,
             blob_size,
             buffer_position: 0,
@@ -100,22 +100,15 @@ impl<B: Blob> Read<B> {
         // Calculate how much to read (minimum of buffer size and remaining bytes)
         let bytes_to_read = std::cmp::min(self.buffer_size as u64, blob_remaining) as usize;
 
-        // Read the data - we only need a single read operation since we know exactly how much data is available.
-        if bytes_to_read < self.buffer_size {
-            // Read into a temp buffer for the end-of-blob case to avoid truncating underlying buffer.
-            let mut tmp_buffer = vec![0u8; bytes_to_read];
-            tmp_buffer = self
-                .blob
-                .read_at(tmp_buffer, self.blob_position)
-                .await?
-                .into();
-            self.buffer.as_mut()[0..bytes_to_read].copy_from_slice(&tmp_buffer[0..bytes_to_read]);
-        } else {
-            self.buffer = self
-                .blob
-                .read_at(std::mem::take(&mut self.buffer), self.blob_position)
-                .await?;
-        }
+        // Read into a fixed-size buffer. Using vec![0u8; N] ensures remaining_mut()
+        // returns the actual size (slices have bounded remaining_mut), avoiding the
+        // issue where BytesMut::remaining_mut() returns usize::MAX.
+        let mut tmp_buffer = vec![0u8; bytes_to_read];
+        self.blob
+            .read_at(&mut tmp_buffer[..], self.blob_position)
+            .await?;
+        self.buffer.clear();
+        self.buffer.extend_from_slice(&tmp_buffer);
         self.buffer_valid_len = bytes_to_read;
 
         Ok(bytes_to_read)
@@ -151,7 +144,7 @@ impl<B: Blob> Read<B> {
 
             // Copy bytes from buffer to output
             buf[bytes_read..(bytes_read + bytes_to_copy)].copy_from_slice(
-                &self.buffer.as_ref()[self.buffer_position..(self.buffer_position + bytes_to_copy)],
+                &self.buffer[self.buffer_position..(self.buffer_position + bytes_to_copy)],
             );
 
             self.buffer_position += bytes_to_copy;

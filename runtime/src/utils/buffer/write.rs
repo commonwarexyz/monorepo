@@ -1,5 +1,5 @@
 use crate::{buffer::tip::Buffer, Blob, Error, RwLock};
-use commonware_utils::StableBuf;
+use bytes::{Buf, BufMut, Bytes};
 use std::{num::NonZeroUsize, sync::Arc};
 
 /// A writer that buffers the raw content of a [Blob] to optimize the performance of appending or
@@ -19,12 +19,12 @@ use std::{num::NonZeroUsize, sync::Arc};
 ///
 ///     // Create a buffered writer with 16-byte buffer
 ///     let mut blob = Write::new(blob, 0, NZUsize!(16));
-///     blob.write_at(b"hello".to_vec(), 0).await.expect("write failed");
+///     blob.write_at(&b"hello"[..], 0).await.expect("write failed");
 ///     blob.sync().await.expect("sync failed");
 ///
 ///     // Write more data in multiple flushes
-///     blob.write_at(b" world".to_vec(), 5).await.expect("write failed");
-///     blob.write_at(b"!".to_vec(), 11).await.expect("write failed");
+///     blob.write_at(&b" world"[..], 5).await.expect("write failed");
+///     blob.write_at(&b"!"[..], 11).await.expect("write failed");
 ///     blob.sync().await.expect("sync failed");
 ///
 ///     // Read back the data to verify
@@ -69,14 +69,8 @@ impl<B: Blob> Write<B> {
 }
 
 impl<B: Blob> Blob for Write<B> {
-    async fn read_at(
-        &self,
-        buf: impl Into<StableBuf> + Send,
-        offset: u64,
-    ) -> Result<StableBuf, Error> {
-        // Prepare `buf` to capture the read data.
-        let mut buf = buf.into();
-        let buf_len = buf.len(); // number of bytes to read
+    async fn read_at(&self, mut buf: impl BufMut + Send, offset: u64) -> Result<(), Error> {
+        let buf_len = buf.remaining_mut();
 
         // Ensure the read doesn't overflow.
         let end_offset = offset
@@ -91,35 +85,44 @@ impl<B: Blob> Blob for Write<B> {
             return Err(Error::BlobInsufficientLength);
         }
 
+        // We need a temporary buffer to work with since we need to extract from tip buffer
+        // and potentially read from blob. The tip buffer's extract method expects a mutable slice.
+        let mut temp_buf = vec![0u8; buf_len];
+
         // Extract any bytes from the buffer that overlap with the requested range.
-        let remaining = buffer.extract(buf.as_mut(), offset);
-        if remaining == 0 {
-            return Ok(buf);
+        let remaining = buffer.extract(&mut temp_buf, offset);
+
+        if remaining > 0 {
+            // If bytes remain, read directly from the blob. Any remaining bytes reside at the beginning
+            // of the range. We read directly into temp_buf since it's already a slice with bounded
+            // remaining_mut().
+            self.blob
+                .read_at(&mut temp_buf[..remaining], offset)
+                .await?;
         }
 
-        // If bytes remain, read directly from the blob. Any remaining bytes reside at the beginning
-        // of the range.
-        let blob_part = self.blob.read_at(vec![0u8; remaining], offset).await?;
-        buf.as_mut()[..remaining].copy_from_slice(blob_part.as_ref());
-
-        Ok(buf)
+        // Copy the result to the caller's buffer
+        buf.put_slice(&temp_buf);
+        Ok(())
     }
 
-    async fn write_at(&self, buf: impl Into<StableBuf> + Send, offset: u64) -> Result<(), Error> {
-        // Prepare `buf` to be written.
-        let buf = buf.into();
-        let buf_len = buf.len(); // number of bytes to write
+    async fn write_at(&self, mut buf: impl Buf + Send, offset: u64) -> Result<(), Error> {
+        let buf_len = buf.remaining();
 
         // Ensure the write doesn't overflow.
         let end_offset = offset
             .checked_add(buf_len as u64)
             .ok_or(Error::OffsetOverflow)?;
 
+        // Copy buf to a Vec since we need to potentially pass it to merge() multiple times
+        // and also to the underlying blob
+        let data = buf.copy_to_bytes(buf_len);
+
         // Acquire a write lock on the buffer.
         let mut buffer = self.buffer.write().await;
 
         // Write falls entirely within the buffer's current range and can be merged.
-        if buffer.merge(buf.as_ref(), offset) {
+        if buffer.merge(&data, offset) {
             return Ok(());
         }
 
@@ -127,8 +130,8 @@ impl<B: Blob> Blob for Write<B> {
         // possible after.
         if buffer.offset < end_offset {
             if let Some((old_buf, old_offset)) = buffer.take() {
-                self.blob.write_at(old_buf, old_offset).await?;
-                if buffer.merge(buf.as_ref(), offset) {
+                self.blob.write_at(Bytes::from(old_buf), old_offset).await?;
+                if buffer.merge(&data, offset) {
                     return Ok(());
                 }
             }
@@ -138,7 +141,7 @@ impl<B: Blob> Blob for Write<B> {
         // directly. Note that we end up writing an intersecting range twice: once when the buffer
         // is flushed above, then again when we write the `buf` below. Removing this inefficiency
         // may not be worth the additional complexity.
-        self.blob.write_at(buf, offset).await?;
+        self.blob.write_at(data, offset).await?;
 
         // Maintain the "buffer at tip" invariant by advancing offset to the end of this write if it
         // extended the underlying blob.
@@ -155,7 +158,7 @@ impl<B: Blob> Blob for Write<B> {
         //
         // This can only happen if the new size is greater than the current size.
         if let Some((buf, offset)) = buffer.resize(len) {
-            self.blob.write_at(buf, offset).await?;
+            self.blob.write_at(Bytes::from(buf), offset).await?;
         }
 
         // Resize the underlying blob.
@@ -167,7 +170,7 @@ impl<B: Blob> Blob for Write<B> {
     async fn sync(&self) -> Result<(), Error> {
         let mut buffer = self.buffer.write().await;
         if let Some((buf, offset)) = buffer.take() {
-            self.blob.write_at(buf, offset).await?;
+            self.blob.write_at(Bytes::from(buf), offset).await?;
         }
         self.blob.sync().await
     }
