@@ -336,10 +336,9 @@ impl<B: Blob> Replay<B> {
 
         let page_size = self.reader.logical_page_size as u64;
         self.reader.blob_page = offset / page_size;
+        self.buffer.current_page = 0;
+        self.buffer.offset_in_page = (offset % page_size) as usize;
 
-        let remainder = (offset % page_size) as usize;
-        assert!(self.ensure(remainder).await?, "bounds already checked");
-        self.advance(remainder);
         Ok(())
     }
 }
