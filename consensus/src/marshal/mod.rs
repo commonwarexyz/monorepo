@@ -1651,7 +1651,9 @@ mod tests {
                 .verify(byzantine_context, malicious_commitment)
                 .await
                 .await;
-            let verify = marshaled.certify(byzantine_round, malicious_commitment).await;
+            let verify = marshaled
+                .certify(byzantine_round, malicious_commitment)
+                .await;
 
             assert!(
                 !verify.await.unwrap(),
@@ -1698,7 +1700,9 @@ mod tests {
                 .verify(byzantine_context, malicious_commitment)
                 .await
                 .await;
-            let verify = marshaled.certify(byzantine_round, malicious_commitment).await;
+            let verify = marshaled
+                .certify(byzantine_round, malicious_commitment)
+                .await;
 
             assert!(
                 !verify.await.unwrap(),
