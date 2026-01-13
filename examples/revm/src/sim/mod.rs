@@ -18,18 +18,29 @@ mod dkg;
 mod network;
 mod node;
 
+/// Maximum size (bytes) of a single simulated network message.
 pub(super) const MAX_MSG_SIZE: usize = 1024 * 1024;
+/// Mailbox depth for each simulated transport channel.
 pub(super) const MAILBOX_SIZE: usize = 1024;
+/// Channel id used for voting traffic.
 pub(super) const CHANNEL_VOTES: u64 = 0;
+/// Channel id used for certificate gossip delivery.
 pub(super) const CHANNEL_CERTS: u64 = 1;
+/// Channel id used for resolver/backfill requests.
 pub(super) const CHANNEL_RESOLVER: u64 = 2;
+/// Channel id used for full-block broadcast traffic.
 pub(super) const CHANNEL_BLOCKS: u64 = 3;
 // Marshal backfill requests/responses use a resolver protocol and are kept separate from the
 // best-effort broadcast channel used for full blocks.
+/// Channel id used for marshal backfill replies.
 pub(super) const CHANNEL_BACKFILL: u64 = 4;
+/// Maximum transactions per block encoded by the REVM codec.
 pub(super) const BLOCK_CODEC_MAX_TXS: usize = 64;
+/// Maximum calldata bytes per transaction admitted by the block codec.
 pub(super) const BLOCK_CODEC_MAX_CALLDATA: usize = 1024;
+/// Fixed latency (milliseconds) for simulated P2P links.
 pub(super) const P2P_LINK_LATENCY_MS: u64 = 5;
+/// Namespace used by simplex votes in this example.
 pub(super) const SIMPLEX_NAMESPACE: &[u8] = b"_COMMONWARE_REVM_SIMPLEX";
 
 #[derive(Clone, Copy, Debug)]
