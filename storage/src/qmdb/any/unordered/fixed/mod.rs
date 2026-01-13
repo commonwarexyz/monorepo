@@ -76,6 +76,7 @@ pub(super) mod test {
     use super::*;
     use crate::{
         index::Unordered as _,
+        kv::Batchable as _,
         mmr::{Position, StandardHasher},
         qmdb::{
             any::unordered::{fixed::Operation, Update},
@@ -625,6 +626,35 @@ pub(super) mod test {
     #[test_traced("DEBUG")]
     fn test_any_unordered_fixed_batch() {
         batch_tests::test_batch(|ctx| async move { create_test_db(ctx).await.into_mutable() });
+    }
+
+    fn assert_send<T: Send>(_: T) {}
+
+    #[test_traced]
+    fn test_futures_are_send() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let mut db = open_db(context.clone()).await;
+            let key = to_digest(9);
+            let value = to_digest(5);
+            let loc = Location::new_unchecked(0);
+
+            assert_send(db.get(&key));
+            assert_send(db.get_metadata());
+            assert_send(db.sync());
+            assert_send(db.prune(loc));
+            assert_send(db.proof(loc, NZU64!(1)));
+
+            let mut db = db.into_mutable();
+            assert_send(db.get(&key));
+            assert_send(db.get_metadata());
+            assert_send(db.get_with_loc(&key));
+            assert_send(db.write_batch(vec![(key, Some(value))].into_iter()));
+            assert_send(db.update(key, value));
+            assert_send(db.create(key, value));
+            assert_send(db.delete(key));
+            assert_send(db.commit(None));
+        });
     }
 
     // FromSyncTestable implementation for from_sync_result tests

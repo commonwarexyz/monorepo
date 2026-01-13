@@ -52,8 +52,9 @@ where
         &self,
         key: &K,
     ) -> Result<Option<(V::Value, Location)>, Error> {
-        let iter = self.snapshot.get(key);
-        for &loc in iter {
+        // Collect to avoid holding a borrow across await points (rust-lang/rust#100013).
+        let locs: Vec<Location> = self.snapshot.get(key).copied().collect();
+        for loc in locs {
             let op = self.log.read(loc).await?;
             match &op {
                 Operation::Update(Update(k, value)) => {
@@ -337,10 +338,10 @@ where
     H: Hasher,
     Operation<K, V>: CodecShared,
 {
-    async fn write_batch(
-        &mut self,
-        iter: impl Iterator<Item = (K, Option<V::Value>)>,
-    ) -> Result<(), Error> {
+    async fn write_batch<'a, Iter>(&'a mut self, iter: Iter) -> Result<(), Error>
+    where
+        Iter: Iterator<Item = (K, Option<V::Value>)> + Send + 'a,
+    {
         self.write_batch_with_callback(iter, |_, _| {}).await
     }
 }

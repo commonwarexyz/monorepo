@@ -776,10 +776,10 @@ where
     T: Translator,
     H: Hasher,
 {
-    async fn write_batch(
-        &mut self,
-        iter: impl Iterator<Item = (K, Option<V>)>,
-    ) -> Result<(), Error> {
+    async fn write_batch<'a, Iter>(&'a mut self, iter: Iter) -> Result<(), Error>
+    where
+        Iter: Iterator<Item = (K, Option<V>)> + Send + 'a,
+    {
         let status = &mut self.status;
         self.any
             .write_batch_with_callback(iter, move |append: bool, loc: Option<Location>| {
@@ -1993,6 +1993,32 @@ pub mod test {
             let seed = ctx.next_u64();
             let partition = format!("current_ordered_batch_{seed}");
             open_db(ctx, &partition).await.into_mutable()
+        });
+    }
+
+    fn assert_send<T: Send>(_: T) {}
+
+    #[test_traced]
+    fn test_futures_are_send() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let mut db = open_db(context.clone(), "send_test").await;
+            let key = Sha256::hash(&9u64.to_be_bytes());
+            let loc = Location::new_unchecked(0);
+
+            assert_send(db.get(&key));
+            assert_send(db.get_metadata());
+            assert_send(db.sync());
+            assert_send(db.prune(loc));
+            assert_send(db.proof(loc, NZU64!(1)));
+
+            let mut db = db.into_mutable();
+            assert_send(db.get(&key));
+            assert_send(db.get_metadata());
+            assert_send(db.update(key, key));
+            assert_send(db.create(key, key));
+            assert_send(db.delete(key));
+            assert_send(db.commit(None));
         });
     }
 }

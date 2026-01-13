@@ -91,7 +91,9 @@ impl<E: Storage + Clock + Metrics, K: Array, V: VariableValue, H: Hasher, T: Tra
 #[cfg(test)]
 pub(super) mod test {
     use super::*;
-    use crate::{index::Unordered as _, qmdb::store::batch_tests, translator::TwoCap};
+    use crate::{
+        index::Unordered as _, kv::Batchable, qmdb::store::batch_tests, translator::TwoCap,
+    };
     use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
     use commonware_macros::test_traced;
     use commonware_math::algebra::Random;
@@ -432,61 +434,50 @@ pub(super) mod test {
         }
     }
 
-    /// Compile-time check that Db is Send + Sync when its type parameters are.
-    const _: () = {
-        use crate::qmdb::NonDurable;
-        const fn assert_send_sync<T: Send + Sync>() {}
-        assert_send_sync::<AnyTest>();
-        assert_send_sync::<
-            Db<
-                deterministic::Context,
-                Digest,
-                Vec<u8>,
-                Sha256,
-                TwoCap,
-                Merkleized<Sha256>,
-                NonDurable,
-            >,
-        >();
-    };
-
-    /// Helper to assert a future is Send at compile time.
     fn assert_send<T: Send>(_: T) {}
 
-    /// Test that futures returned by Durable Db methods are Send.
-    #[allow(dead_code)]
-    fn test_durable_futures_are_send(db: &mut AnyTest) {
-        use crate::mmr::Location;
-        use std::num::NonZeroU64;
-
-        // Durable-specific operations
-        assert_send(db.sync());
-        assert_send(db.prune(Location::new_unchecked(0)));
-
-        // Proof operations (Merkleized)
-        assert_send(db.proof(Location::new_unchecked(0), NonZeroU64::new(1).unwrap()));
-    }
-
-    /// Test that futures returned by Mutable (Dirty, NonDurable) Db methods are Send.
-    #[allow(dead_code)]
-    fn test_mutable_futures_are_send(
-        mut db: Db<
+    /// Regression test for https://github.com/commonwarexyz/monorepo/issues/2787
+    #[allow(dead_code, clippy::manual_async_fn)]
+    fn issue_2787_regression(
+        db: &crate::qmdb::immutable::Immutable<
             deterministic::Context,
             Digest,
             Vec<u8>,
             Sha256,
             TwoCap,
-            crate::qmdb::Unmerkleized,
-            crate::qmdb::NonDurable,
         >,
         key: Digest,
-    ) {
-        // Mutation operations
-        assert_send(db.update(key, vec![]));
-        assert_send(db.create(key, vec![]));
-        assert_send(db.delete(key));
+    ) -> impl std::future::Future<Output = ()> + Send + use<'_> {
+        async move {
+            let _ = db.get(&key).await;
+        }
+    }
 
-        // Commit (consumes self)
-        assert_send(db.commit(None));
+    #[test_traced]
+    fn test_futures_are_send() {
+        use crate::mmr::Location;
+
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let mut db = open_db(context.clone()).await;
+            let key = Sha256::hash(&9u64.to_be_bytes());
+            let loc = Location::new_unchecked(0);
+
+            assert_send(db.get(&key));
+            assert_send(db.get_metadata());
+            assert_send(db.sync());
+            assert_send(db.prune(loc));
+            assert_send(db.proof(loc, NZU64!(1)));
+
+            let mut db = db.into_mutable();
+            assert_send(db.get(&key));
+            assert_send(db.get_metadata());
+            assert_send(db.get_with_loc(&key));
+            assert_send(db.write_batch(vec![(key, Some(vec![1u8]))].into_iter()));
+            assert_send(db.update(key, vec![]));
+            assert_send(db.create(key, vec![]));
+            assert_send(db.delete(key));
+            assert_send(db.commit(None));
+        });
     }
 }

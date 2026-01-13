@@ -651,10 +651,10 @@ where
     T: Translator,
     H: Hasher,
 {
-    async fn write_batch(
-        &mut self,
-        iter: impl Iterator<Item = (K, Option<V>)>,
-    ) -> Result<(), Error> {
+    async fn write_batch<'a, Iter>(&'a mut self, iter: Iter) -> Result<(), Error>
+    where
+        Iter: Iterator<Item = (K, Option<V>)> + Send + 'a,
+    {
         let status = &mut self.status;
         self.any
             .write_batch_with_callback(iter, move |append: bool, loc: Option<Location>| {
@@ -1655,35 +1655,29 @@ pub mod test {
         });
     }
 
-    /// Compile-time check that Db is Send + Sync when its type parameters are.
-    const _: () = {
-        const fn assert_send_sync<T: Send + Sync>() {}
-        assert_send_sync::<CleanCurrentTest>();
-        assert_send_sync::<DirtyCurrentTest>();
-    };
-
-    /// Helper to assert a future is Send at compile time.
     fn assert_send<T: Send>(_: T) {}
 
-    /// Test that futures returned by Clean (Merkleized, Durable) Db methods are Send.
-    #[allow(dead_code)]
-    fn test_clean_futures_are_send(db: &mut CleanCurrentTest) {
-        use crate::mmr::Location;
+    #[test_traced]
+    fn test_futures_are_send() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let mut db = open_db(context.clone(), "send_test").await;
+            let key = Sha256::hash(&9u64.to_be_bytes());
+            let loc = Location::new_unchecked(0);
 
-        // Durable-specific operations
-        assert_send(db.sync());
-        assert_send(db.prune(Location::new_unchecked(0)));
-    }
+            assert_send(db.get(&key));
+            assert_send(db.get_metadata());
+            assert_send(db.sync());
+            assert_send(db.prune(loc));
+            assert_send(db.proof(loc, NZU64!(1)));
 
-    /// Test that futures returned by Dirty (Unmerkleized, NonDurable) Db methods are Send.
-    #[allow(dead_code)]
-    fn test_dirty_futures_are_send(mut db: DirtyCurrentTest, key: Digest) {
-        // Mutation operations
-        assert_send(db.update(key, key));
-        assert_send(db.create(key, key));
-        assert_send(db.delete(key));
-
-        // Commit (consumes self)
-        assert_send(db.commit(None));
+            let mut db = db.into_mutable();
+            assert_send(db.get(&key));
+            assert_send(db.get_metadata());
+            assert_send(db.update(key, key));
+            assert_send(db.create(key, key));
+            assert_send(db.delete(key));
+            assert_send(db.commit(None));
+        });
     }
 }

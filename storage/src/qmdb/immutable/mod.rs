@@ -625,12 +625,11 @@ pub(super) mod test {
         }
     }
 
-    /// A type alias for the concrete [Immutable] type used in these unit tests.
-    type ImmutableTest = Immutable<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap>;
-
     /// Return an [Immutable] database initialized with a fixed config.
-    async fn open_db(context: deterministic::Context) -> ImmutableTest {
-        ImmutableTest::init(context, db_config("partition"))
+    async fn open_db(
+        context: deterministic::Context,
+    ) -> Immutable<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap> {
+        Immutable::init(context, db_config("partition"))
             .await
             .unwrap()
     }
@@ -1030,6 +1029,30 @@ pub(super) mod test {
             );
 
             db.destroy().await.unwrap();
+        });
+    }
+
+    fn assert_send<T: Send>(_: T) {}
+
+    #[test_traced]
+    fn test_futures_are_send() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let mut db = open_db(context.clone()).await;
+            let key = Sha256::hash(&9u64.to_be_bytes());
+            let loc = Location::new_unchecked(0);
+
+            assert_send(db.get(&key));
+            assert_send(db.get_metadata());
+            assert_send(db.sync());
+            assert_send(db.prune(loc));
+            assert_send(db.proof(loc, NZU64!(1)));
+
+            let mut db = db.into_mutable();
+            assert_send(db.get(&key));
+            assert_send(db.get_metadata());
+            assert_send(db.set(key, vec![1u8]));
+            assert_send(db.commit(None));
         });
     }
 }

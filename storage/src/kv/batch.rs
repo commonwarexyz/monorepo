@@ -82,27 +82,6 @@ where
 
         Ok(())
     }
-
-    /// Creates a new key-value pair in the batch if it isn't present in the batch or store.
-    /// Returns true if the key was created, false if it already existed.
-    async fn create(&mut self, key: K, value: V) -> Result<bool, Error> {
-        if let Some(value_opt) = self.diff.get_mut(&key) {
-            match value_opt {
-                Some(_) => return Ok(false),
-                None => {
-                    *value_opt = Some(value);
-                    return Ok(true);
-                }
-            }
-        }
-
-        if self.db.get(&key).await?.is_some() {
-            return Ok(false);
-        }
-
-        self.diff.insert(key, Some(value));
-        Ok(true)
-    }
 }
 
 impl<'a, K, V, D> Deletable for Batch<'a, K, V, D>
@@ -164,11 +143,15 @@ pub trait Batchable:
     }
 
     /// Writes a batch of changes to the store.
-    fn write_batch(
-        &mut self,
-        iter: impl Iterator<Item = (Self::Key, Option<Self::Value>)> + Send,
-    ) -> impl Future<Output = Result<(), Error>> {
-        async {
+    fn write_batch<'a, Iter>(
+        &'a mut self,
+        iter: Iter,
+    ) -> impl Future<Output = Result<(), Error>> + Send + use<'a, Self, Iter>
+    where
+        Self: Send,
+        Iter: Iterator<Item = (Self::Key, Option<Self::Value>)> + Send + 'a,
+    {
+        async move {
             for (key, value) in iter {
                 if let Some(value) = value {
                     self.update(key, value).await?;

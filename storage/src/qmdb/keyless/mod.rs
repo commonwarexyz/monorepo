@@ -1131,4 +1131,27 @@ mod test {
             db.destroy().await.unwrap();
         });
     }
+
+    fn assert_send<T: Send>(_: T) {}
+
+    #[test_traced]
+    fn test_futures_are_send() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let mut db = open_db(context.clone()).await;
+            let loc = Location::new_unchecked(0);
+
+            assert_send(db.get(loc));
+            assert_send(db.get_metadata());
+            assert_send(db.sync());
+            assert_send(db.prune(loc));
+            assert_send(db.proof(loc, NZU64!(1)));
+
+            let mut db = db.into_mutable();
+            assert_send(db.get(loc));
+            assert_send(db.get_metadata());
+            assert_send(db.append(vec![1u8]));
+            assert_send(db.commit(None));
+        });
+    }
 }
