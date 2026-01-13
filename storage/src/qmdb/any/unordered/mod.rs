@@ -19,7 +19,7 @@ use crate::{
     qmdb::any::states::{CleanAny, MerkleizedNonDurableAny, MutableAny, UnmerkleizedDurableAny},
     Persistable,
 };
-use commonware_codec::Codec;
+use commonware_codec::{Codec, CodecShared};
 use commonware_cryptography::{DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
@@ -41,7 +41,7 @@ impl<
         C: Contiguous<Item = Operation<K, V>>,
         I: Index<Value = Location>,
         H: Hasher,
-        M: MerkleizationState<DigestOf<H>>,
+        M: MerkleizationState<DigestOf<H>> + Send + Sync,
         D: DurabilityState,
     > Db<E, C, I, H, Update<K, V>, M, D>
 where
@@ -52,6 +52,7 @@ where
         &self,
         key: &K,
     ) -> Result<Option<(V::Value, Location)>, Error> {
+        // Collect to avoid holding a borrow across await points (rust-lang/rust#100013).
         let locs: Vec<Location> = self.snapshot.get(key).copied().collect();
         for loc in locs {
             let op = self.log.read(loc).await?;
@@ -74,24 +75,6 @@ where
             .await
             .map(|op| op.map(|(value, _)| value))
     }
-
-    /// Get the value of `key` in the db, or None if it has no value.
-    pub async fn get_owned(&self, key: K) -> Result<Option<V::Value>, Error> {
-        let locs: Vec<Location> = self.snapshot.get(&key).copied().collect();
-        for loc in locs {
-            let op = self.log.read(loc).await?;
-            match &op {
-                Operation::Update(Update(k, value)) => {
-                    if k == &key {
-                        return Ok(Some(value.clone()));
-                    }
-                }
-                _ => unreachable!("location {loc} does not reference update operation"),
-            }
-        }
-
-        Ok(None)
-    }
 }
 
 impl<
@@ -104,6 +87,7 @@ impl<
     > Db<E, C, I, H, Update<K, V>, Unmerkleized, NonDurable>
 where
     Operation<K, V>: Codec,
+    V::Value: Send + Sync,
 {
     /// Appends the given delete operation to the log, updating the snapshot and other state to
     /// reflect the deletion.
@@ -198,9 +182,10 @@ where
     {
         // We use a BTreeMap here to collect the updates to ensure determinism in iteration order.
         let mut updates = BTreeMap::new();
-        let mut locations = Vec::new();
+        let mut locations = Vec::with_capacity(iter.size_hint().0);
         for (key, value) in iter {
-            locations.extend(self.snapshot.get(&key).copied());
+            let iter = self.snapshot.get(&key);
+            locations.extend(iter.copied());
             updates.insert(key, value);
         }
 
@@ -260,6 +245,7 @@ impl<
     > Db<E, C, I, H, Update<K, V>, Merkleized<H>, Durable>
 where
     Operation<K, V>: Codec,
+    V::Value: Send + Sync,
 {
     /// Returns an [Db] initialized directly from the given components. The log is
     /// replayed from `inactivity_floor_loc` to build the snapshot, and that value is used as the
@@ -291,13 +277,14 @@ impl<
         K: Array,
         V: ValueEncoding,
         C: Contiguous<Item = Operation<K, V>>,
-        I: Index<Value = Location>,
+        I: Index<Value = Location> + Send + Sync + 'static,
         H: Hasher,
-        M: MerkleizationState<DigestOf<H>>,
+        M: MerkleizationState<DigestOf<H>> + Send + Sync,
         D: DurabilityState,
     > kv::Gettable for Db<E, C, I, H, Update<K, V>, M, D>
 where
     Operation<K, V>: Codec,
+    V::Value: Send + Sync,
 {
     type Key = K;
     type Value = V::Value;
@@ -313,11 +300,12 @@ impl<
         K: Array,
         V: ValueEncoding,
         C: MutableContiguous<Item = Operation<K, V>>,
-        I: Index<Value = Location>,
+        I: Index<Value = Location> + Send + Sync + 'static,
         H: Hasher,
     > kv::Updatable for Db<E, C, I, H, Update<K, V>, Unmerkleized, NonDurable>
 where
     Operation<K, V>: Codec,
+    V::Value: Send + Sync,
 {
     async fn update(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
         self.update(key, value).await
@@ -329,11 +317,11 @@ impl<
         K: Array,
         V: ValueEncoding,
         C: MutableContiguous<Item = Operation<K, V>>,
-        I: Index<Value = Location>,
+        I: Index<Value = Location> + Send + Sync + 'static,
         H: Hasher,
     > kv::Deletable for Db<E, C, I, H, Update<K, V>, Unmerkleized, NonDurable>
 where
-    Operation<K, V>: Codec,
+    Operation<K, V>: CodecShared,
 {
     async fn delete(&mut self, key: Self::Key) -> Result<bool, Self::Error> {
         self.delete(key).await
@@ -346,14 +334,14 @@ where
     K: Array,
     V: ValueEncoding,
     C: MutableContiguous<Item = Operation<K, V>>,
-    I: Index<Value = Location>,
+    I: Index<Value = Location> + Send + Sync + 'static,
     H: Hasher,
-    Operation<K, V>: Codec,
+    Operation<K, V>: CodecShared,
 {
-    async fn write_batch(
-        &mut self,
-        iter: impl Iterator<Item = (K, Option<V::Value>)>,
-    ) -> Result<(), Error> {
+    async fn write_batch<'a, Iter>(&'a mut self, iter: Iter) -> Result<(), Error>
+    where
+        Iter: Iterator<Item = (K, Option<V::Value>)> + Send + 'a,
+    {
         self.write_batch_with_callback(iter, |_, _| {}).await
     }
 }
@@ -365,9 +353,9 @@ where
     K: Array,
     V: ValueEncoding,
     C: MutableContiguous<Item = Operation<K, V>> + Persistable<Error = crate::journal::Error>,
-    I: Index<Value = Location>,
+    I: Index<Value = Location> + Send + Sync + 'static,
     H: Hasher,
-    Operation<K, V>: Codec,
+    Operation<K, V>: CodecShared,
 {
     type Mutable = Db<E, C, I, H, Update<K, V>, Unmerkleized, NonDurable>;
 
@@ -384,9 +372,10 @@ where
     K: Array,
     V: ValueEncoding,
     C: MutableContiguous<Item = Operation<K, V>> + Persistable<Error = crate::journal::Error>,
-    I: Index<Value = Location>,
+    I: Index<Value = Location> + Send + Sync + 'static,
     H: Hasher,
     Operation<K, V>: Codec,
+    V::Value: Send + Sync,
 {
     type Digest = H::Digest;
     type Operation = Operation<K, V>;
@@ -410,19 +399,12 @@ where
     K: Array,
     V: ValueEncoding,
     C: MutableContiguous<Item = Operation<K, V>> + Persistable<Error = crate::journal::Error>,
-    I: Index<Value = Location>,
+    I: Index<Value = Location> + Send + Sync + 'static,
     H: Hasher,
     Operation<K, V>: Codec,
+    V::Value: Send + Sync,
 {
     type Mutable = Db<E, C, I, H, Update<K, V>, Unmerkleized, NonDurable>;
-    type Durable = Db<E, C, I, H, Update<K, V>, Merkleized<H>, Durable>;
-
-    async fn commit(
-        self,
-        metadata: Option<V::Value>,
-    ) -> Result<(Self::Durable, core::ops::Range<Location>), Error> {
-        self.commit(metadata).await
-    }
 
     fn into_mutable(self) -> Self::Mutable {
         self.into_mutable()
@@ -436,9 +418,10 @@ where
     K: Array,
     V: ValueEncoding,
     C: MutableContiguous<Item = Operation<K, V>> + Persistable<Error = crate::journal::Error>,
-    I: Index<Value = Location>,
+    I: Index<Value = Location> + Send + Sync + 'static,
     H: Hasher,
     Operation<K, V>: Codec,
+    V::Value: Send + Sync,
 {
     type Digest = H::Digest;
     type Operation = Operation<K, V>;
@@ -542,18 +525,12 @@ pub(super) mod test {
         // Test calling commit on an empty db.
         let metadata = Sha256::fill(3u8);
         let db = db.into_mutable();
-        // into_merkleized() -> MerkleizedNonDurable, then commit() -> MerkleizedDurable
-        let (mut db, range) = db
-            .into_merkleized()
-            .await
-            .unwrap()
-            .commit(Some(metadata))
-            .await
-            .unwrap();
+        let (db, range) = db.commit(Some(metadata)).await.unwrap();
         assert_eq!(range.start, 1);
         assert_eq!(range.end, 2);
         assert_eq!(db.op_count(), 2); // another commit op added
         assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
+        let mut db = db.into_merkleized().await.unwrap();
         let root = db.root();
         assert!(matches!(db.prune(db.inactivity_floor_loc()).await, Ok(())));
 
@@ -569,13 +546,7 @@ pub(super) mod test {
         let mut db = db.into_mutable();
         db.update(k1, v1).await.unwrap();
         for _ in 1..100 {
-            let (clean_db, _) = db
-                .into_merkleized()
-                .await
-                .unwrap()
-                .commit(None)
-                .await
-                .unwrap();
+            let (clean_db, _) = db.commit(None).await.unwrap();
             // Distance should equal 3 after the second commit, with inactivity_floor
             // referencing the previous commit operation.
             assert!(clean_db.op_count() - clean_db.inactivity_floor_loc() <= 3);
@@ -585,16 +556,11 @@ pub(super) mod test {
 
         // Confirm the inactivity floor is raised to tip when the db becomes empty.
         db.delete(k1).await.unwrap();
-        let (db, _) = db
-            .into_merkleized()
-            .await
-            .unwrap()
-            .commit(None)
-            .await
-            .unwrap();
+        let (db, _) = db.commit(None).await.unwrap();
         assert!(db.is_empty());
         assert_eq!(db.op_count() - 1, db.inactivity_floor_loc());
 
+        let db = db.into_merkleized().await.unwrap();
         db.destroy().await.unwrap();
     }
 

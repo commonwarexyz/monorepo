@@ -87,8 +87,12 @@ pub(crate) trait SyncTestHarness: Sized + 'static {
     /// Clone a config
     fn clone_config(config: &ConfigOf<Self>) -> ConfigOf<Self>;
 
-    /// Generate n test operations
+    /// Generate n test operations using the default seed (0)
     fn create_ops(n: usize) -> Vec<OpOf<Self>>;
+
+    /// Generate n test operations using a specific seed.
+    /// Use different seeds when you need non-overlapping keys in the same test.
+    fn create_ops_seeded(n: usize, seed: u64) -> Vec<OpOf<Self>>;
 
     /// Initialize a database
     fn init_db(ctx: deterministic::Context) -> impl std::future::Future<Output = Self::Db> + Send;
@@ -337,7 +341,8 @@ where
         drop(sync_db);
 
         // Add more operations and commit the target database
-        let more_ops = H::create_ops(1);
+        // (use different seed to avoid key collisions)
+        let more_ops = H::create_ops_seeded(1, 1);
         target_db = H::apply_ops(target_db, more_ops.clone()).await;
         // commit already done in apply_ops
 
@@ -629,7 +634,8 @@ where
         let initial_root = target_db.root();
 
         // Apply more operations to the target database
-        let additional_ops = H::create_ops(1);
+        // (use different seed to avoid key collisions)
+        let additional_ops = H::create_ops_seeded(1, 1);
         let new_root = {
             target_db = H::apply_ops(target_db, additional_ops).await;
             // commit already done in apply_ops
@@ -874,7 +880,8 @@ pub(crate) fn test_target_update_during_sync<H: SyncTestHarness>(
         };
 
         // Modify the target database by adding more operations
-        let additional_ops_data = H::create_ops(additional_ops);
+        // (use different seed to avoid key collisions)
+        let additional_ops_data = H::create_ops_seeded(additional_ops, 1);
         let new_root = {
             let mut db_guard = target_db.write().await;
             let db = db_guard.take().unwrap();
@@ -1077,7 +1084,8 @@ where
         drop(sync_db);
 
         // Add more operations to the target db
-        let more_ops = H::create_ops(NUM_ADDITIONAL_OPS);
+        // (use different seed to avoid key collisions)
+        let more_ops = H::create_ops_seeded(NUM_ADDITIONAL_OPS, 1);
         target_db = H::apply_ops(target_db, more_ops).await;
         // commit already done in apply_ops
 

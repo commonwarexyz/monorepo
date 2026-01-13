@@ -27,15 +27,22 @@ use commonware_cryptography::{
     Sha256,
 };
 use commonware_p2p::simulated::{Config as NetworkConfig, Link, Network};
+use commonware_parallel::Sequential;
 use commonware_runtime::{buffer::PoolRef, deterministic, Clock, Metrics, Runner, Spawner};
-use commonware_utils::{max_faults, NZUsize};
+use commonware_utils::{Faults, N3f1, NZUsize, NZU16};
 use futures::{channel::mpsc::Receiver, future::join_all, StreamExt};
 use rand::{rngs::StdRng, RngCore, SeedableRng};
-use std::{cell::RefCell, num::NonZeroUsize, panic, sync::Arc, time::Duration};
+use std::{
+    cell::RefCell,
+    num::{NonZeroU16, NonZeroUsize},
+    panic,
+    sync::Arc,
+    time::Duration,
+};
 
 pub const EPOCH: u64 = 333;
 
-const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
+const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
 const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
 const MIN_REQUIRED_CONTAINERS: u64 = 10;
 const MAX_REQUIRED_CONTAINERS: u64 = 50;
@@ -256,12 +263,13 @@ fn run<P: Simplex>(input: FuzzInput) {
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                strategy: Sequential,
             };
             let engine = Engine::new(context.with_label("engine"), engine_cfg);
             engine.start(pending, recovered, resolver);
         }
 
-        if input.partition == Partition::Connected && max_faults(n) == f {
+        if input.partition == Partition::Connected && N3f1::max_faults(n) == f {
             let mut finalizers = Vec::new();
             for reporter in reporters.iter_mut() {
                 let (mut latest, mut monitor): (View, Receiver<View>) = reporter.subscribe().await;

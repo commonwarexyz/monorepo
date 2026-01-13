@@ -24,7 +24,6 @@ commonware-macros.workspace = true
 commonware-parallel = { workspace = true, optional = true, features = ["std"] }
 commonware-runtime = { workspace = true, optional = true }
 commonware-utils = { workspace = true, default-features = false }
-crc32fast = { workspace = true, optional = true }
 futures = { workspace = true, optional = true }
 futures-util = { workspace = true, optional = true }
 prometheus-client = { workspace = true, optional = true }
@@ -53,7 +52,6 @@ std = [
 	"commonware-parallel?/std",
 	"commonware-runtime",
 	"commonware-utils/std",
-	"crc32fast/std",
 	"futures",
 	"futures-util",
 	"prometheus-client",

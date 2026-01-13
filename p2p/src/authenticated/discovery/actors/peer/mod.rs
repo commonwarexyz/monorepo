@@ -25,6 +25,7 @@ pub struct Config<C: PublicKey> {
 
     pub sent_messages: Family<metrics::Message, Counter>,
     pub received_messages: Family<metrics::Message, Counter>,
+    pub dropped_messages: Family<metrics::Message, Counter>,
     pub rate_limited: Family<metrics::Message, Counter>,
 }
 

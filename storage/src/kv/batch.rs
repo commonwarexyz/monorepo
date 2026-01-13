@@ -2,7 +2,7 @@
 
 use super::{Deletable, Gettable, Updatable};
 use crate::qmdb::Error;
-use commonware_codec::Codec;
+use commonware_codec::CodecShared;
 use commonware_utils::Array;
 use core::future::Future;
 use std::collections::BTreeMap;
@@ -13,8 +13,8 @@ use std::collections::BTreeMap;
 pub struct Batch<'a, K, V, D>
 where
     K: Array,
-    V: Codec + Clone,
-    D: Gettable<Key = K, Value = V, Error = Error>,
+    V: CodecShared + Clone,
+    D: Gettable<Key = K, Value = V, Error = Error> + Sync,
 {
     /// The underlying k/v store.
     db: &'a D,
@@ -30,8 +30,8 @@ where
 impl<'a, K, V, D> Batch<'a, K, V, D>
 where
     K: Array,
-    V: Codec + Clone,
-    D: Gettable<Key = K, Value = V, Error = Error>,
+    V: CodecShared + Clone,
+    D: Gettable<Key = K, Value = V, Error = Error> + Sync,
 {
     /// Returns a new batch of changes that may be written to the store.
     pub const fn new(db: &'a D) -> Self {
@@ -52,8 +52,8 @@ where
 impl<'a, K, V, D> Gettable for Batch<'a, K, V, D>
 where
     K: Array,
-    V: Codec + Clone,
-    D: Gettable<Key = K, Value = V, Error = Error>,
+    V: CodecShared + Clone,
+    D: Gettable<Key = K, Value = V, Error = Error> + Sync,
 {
     type Key = K;
     type Value = V;
@@ -73,8 +73,8 @@ where
 impl<'a, K, V, D> Updatable for Batch<'a, K, V, D>
 where
     K: Array,
-    V: Codec + Clone,
-    D: Gettable<Key = K, Value = V, Error = Error>,
+    V: CodecShared + Clone,
+    D: Gettable<Key = K, Value = V, Error = Error> + Sync,
 {
     /// Updates the value of `key` to `value` in the batch.
     async fn update(&mut self, key: K, value: V) -> Result<(), Error> {
@@ -82,34 +82,13 @@ where
 
         Ok(())
     }
-
-    /// Creates a new key-value pair in the batch if it isn't present in the batch or store.
-    /// Returns true if the key was created, false if it already existed.
-    async fn create(&mut self, key: K, value: V) -> Result<bool, Error> {
-        if let Some(value_opt) = self.diff.get_mut(&key) {
-            match value_opt {
-                Some(_) => return Ok(false),
-                None => {
-                    *value_opt = Some(value);
-                    return Ok(true);
-                }
-            }
-        }
-
-        if self.db.get(&key).await?.is_some() {
-            return Ok(false);
-        }
-
-        self.diff.insert(key, Some(value));
-        Ok(true)
-    }
 }
 
 impl<'a, K, V, D> Deletable for Batch<'a, K, V, D>
 where
     K: Array,
-    V: Codec + Clone,
-    D: Gettable<Key = K, Value = V, Error = Error>,
+    V: CodecShared + Clone,
+    D: Gettable<Key = K, Value = V, Error = Error> + Sync,
 {
     /// Deletes `key` from the batch.
     /// Returns true if the key was in the batch or store, false otherwise.
@@ -136,8 +115,8 @@ where
 impl<'a, K, V, D> IntoIterator for Batch<'a, K, V, D>
 where
     K: Array,
-    V: Codec + Clone,
-    D: Gettable<Key = K, Value = V, Error = Error>,
+    V: CodecShared + Clone,
+    D: Gettable<Key = K, Value = V, Error = Error> + Sync,
 {
     type Item = (K, Option<V>);
     type IntoIter = std::collections::btree_map::IntoIter<K, Option<V>>;
@@ -149,12 +128,13 @@ where
 
 /// A k/v store that supports making batched changes.
 pub trait Batchable:
-    Gettable<Key: Array, Value: Codec + Clone, Error = Error> + Updatable + Deletable
+    Gettable<Key: Array, Value: CodecShared + Clone, Error = Error> + Updatable + Deletable
 {
     /// Returns a new empty batch of changes.
     fn start_batch(&self) -> Batch<'_, Self::Key, Self::Value, Self>
     where
-        Self: Sized,
+        Self: Sized + Sync,
+        Self::Value: Send + Sync,
     {
         Batch {
             db: self,
@@ -163,11 +143,15 @@ pub trait Batchable:
     }
 
     /// Writes a batch of changes to the store.
-    fn write_batch(
-        &mut self,
-        iter: impl Iterator<Item = (Self::Key, Option<Self::Value>)>,
-    ) -> impl Future<Output = Result<(), Error>> {
-        async {
+    fn write_batch<'a, Iter>(
+        &'a mut self,
+        iter: Iter,
+    ) -> impl Future<Output = Result<(), Error>> + Send + use<'a, Self, Iter>
+    where
+        Self: Send,
+        Iter: Iterator<Item = (Self::Key, Option<Self::Value>)> + Send + 'a,
+    {
+        async move {
             for (key, value) in iter {
                 if let Some(value) = value {
                     self.update(key, value).await?;

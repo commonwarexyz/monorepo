@@ -93,9 +93,18 @@ impl Hasher for Blake3 {
 
 /// Digest of a BLAKE3 hashing operation.
 #[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash)]
-#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[repr(transparent)]
 pub struct Digest(pub [u8; DIGEST_LENGTH]);
+
+#[cfg(feature = "arbitrary")]
+impl<'a> arbitrary::Arbitrary<'a> for Digest {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
+        // Generate random bytes and compute their Blake3 hash
+        let len = u.int_in_range(0..=256)?;
+        let data = u.bytes(len)?;
+        Ok(Blake3::hash(data))
+    }
+}
 
 impl Write for Digest {
     fn write(&self, buf: &mut impl BufMut) {

@@ -1,5 +1,3 @@
-use std::num::NonZeroUsize;
-
 /// A buffer for caching data written to the tip of a blob.
 ///
 /// The buffer always represents data at the "tip" of the logical blob, starting at `offset` and
@@ -16,15 +14,20 @@ pub(super) struct Buffer {
 
     /// The maximum size of the buffer.
     pub(super) capacity: usize,
+
+    /// Whether this buffer should allow new data.
+    // TODO(#2371): Use a distinct state-type for immutable vs immutable.
+    pub(super) immutable: bool,
 }
 
 impl Buffer {
-    /// Creates a new buffer with the provided `size` and `capacity`.
-    pub(super) fn new(size: u64, capacity: NonZeroUsize) -> Self {
+    /// Creates a new buffer with the provided `offset` and `capacity`.
+    pub(super) fn new(offset: u64, capacity: usize) -> Self {
         Self {
-            data: Vec::with_capacity(capacity.get()),
-            offset: size,
-            capacity: capacity.get(),
+            data: Vec::with_capacity(capacity),
+            offset,
+            capacity,
+            immutable: false,
         }
     }
 
@@ -75,11 +78,11 @@ impl Buffer {
         }
     }
 
-    /// Returns the buffered data and its blob offset, or returns `None` if the buffer is
-    /// already empty.
+    /// Returns the buffered data and its blob offset, or returns `None` if the buffer is already
+    /// empty.
     ///
-    /// The buffer is reset to the empty state with an updated offset positioned at
-    /// the end of the logical blob.
+    /// The buffer is reset to the empty state with an updated offset positioned at the end of the
+    /// logical blob.
     pub(super) fn take(&mut self) -> Option<(Vec<u8>, u64)> {
         if self.is_empty() {
             return None;
@@ -153,11 +156,19 @@ impl Buffer {
         true
     }
 
-    /// Appends the provided `data` to the buffer, and returns `true` if the buffer is now above
-    /// capacity. If above capacity, the caller is responsible for using `take` to bring it back
-    /// under.
+    /// Appends the provided `data` to the buffer, and returns `true` if the buffer is over capacity
+    /// after the append.
+    ///
+    /// If the buffer is above capacity, the caller is responsible for using `take` to bring it back
+    /// under. Further appends are safe, but will continue growing the buffer beyond its capacity.
     pub(super) fn append(&mut self, data: &[u8]) -> bool {
         self.data.extend_from_slice(data);
+
+        self.over_capacity()
+    }
+
+    /// Whether the buffer is over capacity and should be taken & flushed to the underlying blob.
+    const fn over_capacity(&self) -> bool {
         self.data.len() > self.capacity
     }
 }
@@ -165,11 +176,10 @@ impl Buffer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_utils::NZUsize;
 
     #[test]
     fn test_tip_append() {
-        let mut buffer = Buffer::new(50, NZUsize!(100));
+        let mut buffer = Buffer::new(50, 100);
         assert_eq!(buffer.size(), 50);
         assert!(buffer.is_empty());
         assert_eq!(buffer.take(), None);
@@ -198,7 +208,7 @@ mod tests {
 
     #[test]
     fn test_tip_resize() {
-        let mut buffer = Buffer::new(50, NZUsize!(100));
+        let mut buffer = Buffer::new(50, 100);
         buffer.append(&[1, 2, 3]);
         assert_eq!(buffer.size(), 53);
 

@@ -17,6 +17,7 @@ use ed25519_consensus::{self, VerificationKey};
 use rand_core::CryptoRngCore;
 #[cfg(feature = "std")]
 use std::borrow::{Cow, ToOwned};
+use zeroize::Zeroizing;
 
 const CURVE_NAME: &str = "ed25519";
 const PRIVATE_KEY_LENGTH: usize = 32;
@@ -64,9 +65,9 @@ impl PrivateKey {
 impl Random for PrivateKey {
     fn random(rng: impl CryptoRngCore) -> Self {
         let key = ed25519_consensus::SigningKey::new(rng);
-        let raw = key.to_bytes();
+        let raw = Zeroizing::new(key.to_bytes());
         Self {
-            raw: Secret::new(raw),
+            raw: Secret::new(*raw),
             key: Secret::new(key),
         }
     }
@@ -82,10 +83,10 @@ impl Read for PrivateKey {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        let raw = <[u8; Self::SIZE]>::read(buf)?;
-        let key = ed25519_consensus::SigningKey::from(raw);
+        let raw = Zeroizing::new(<[u8; Self::SIZE]>::read(buf)?);
+        let key = ed25519_consensus::SigningKey::from(*raw);
         Ok(Self {
-            raw: Secret::new(raw),
+            raw: Secret::new(*raw),
             key: Secret::new(key),
         })
     }
@@ -105,9 +106,9 @@ impl PartialEq for PrivateKey {
 
 impl From<ed25519_consensus::SigningKey> for PrivateKey {
     fn from(key: ed25519_consensus::SigningKey) -> Self {
-        let raw = key.to_bytes();
+        let raw = Zeroizing::new(key.to_bytes());
         Self {
-            raw: Secret::new(raw),
+            raw: Secret::new(*raw),
             key: Secret::new(key),
         }
     }
@@ -408,7 +409,6 @@ mod tests {
     use commonware_codec::{DecodeExt, Encode};
     use commonware_math::algebra::Random;
     use commonware_utils::test_rng;
-    use rand::rngs::OsRng;
 
     fn test_sign_and_verify(
         private_key: PrivateKey,
@@ -563,7 +563,7 @@ mod tests {
     #[should_panic]
     fn bad_signature() {
         let (private_key, public_key, message, _) = vector_1();
-        let private_key_2 = PrivateKey::random(&mut OsRng);
+        let private_key_2 = PrivateKey::random(&mut test_rng());
         let bad_signature = private_key_2.sign_inner(None, &message);
         test_sign_and_verify(private_key, public_key, &message, bad_signature);
     }
@@ -802,7 +802,7 @@ mod tests {
 
     #[test]
     fn test_from_signing_key() {
-        let signing_key = ed25519_consensus::SigningKey::new(OsRng);
+        let signing_key = ed25519_consensus::SigningKey::new(test_rng());
         let expected_public = signing_key.verification_key();
         let private_key = PrivateKey::from(signing_key);
         assert_eq!(private_key.public_key().key, expected_public);
@@ -810,7 +810,7 @@ mod tests {
 
     #[test]
     fn test_private_key_redacted() {
-        let private_key = PrivateKey::random(&mut OsRng);
+        let private_key = PrivateKey::random(&mut test_rng());
         let debug = format!("{:?}", private_key);
         let display = format!("{}", private_key);
         assert!(debug.contains("REDACTED"));
@@ -819,7 +819,7 @@ mod tests {
 
     #[test]
     fn test_from_private_key_to_public_key() {
-        let private_key = PrivateKey::random(&mut OsRng);
+        let private_key = PrivateKey::random(&mut test_rng());
         assert_eq!(private_key.public_key(), PublicKey::from(private_key));
     }
 

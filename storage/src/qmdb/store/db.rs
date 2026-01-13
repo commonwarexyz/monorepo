@@ -18,12 +18,13 @@
 //!     qmdb::store::db::{Config, Db},
 //!     translator::TwoCap,
 //! };
-//! use commonware_utils::{NZUsize, NZU64};
+//! use commonware_utils::{NZUsize, NZU16, NZU64};
 //! use commonware_cryptography::{blake3::Digest, Digest as _};
 //! use commonware_math::algebra::Random;
 //! use commonware_runtime::{buffer::PoolRef, deterministic::Runner, Metrics, Runner as _};
 //!
-//! const PAGE_SIZE: usize = 8192;
+//! use std::num::NonZeroU16;
+//! const PAGE_SIZE: NonZeroU16 = NZU16!(8192);
 //! const PAGE_CACHE_SIZE: usize = 100;
 //!
 //! let executor = Runner::default();
@@ -35,7 +36,7 @@
 //!         log_codec_config: (),
 //!         log_items_per_section: NZU64!(4),
 //!         translator: TwoCap,
-//!         buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+//!         buffer_pool: PoolRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
 //!     };
 //!     let db =
 //!         Db::<_, Digest, Digest, TwoCap>::init(ctx.with_label("store"), config)
@@ -411,6 +412,9 @@ where
     /// `(start_loc, end_loc]` location range of committed operations. The end of the returned range
     /// includes the commit operation itself, and hence will always be equal to `op_count`.
     ///
+    /// Note that even if no operations were added since the last commit, this is a root-state
+    /// changing operation.
+    ///
     /// Failures after commit (but before `sync` or `close`) may still require reprocessing to
     /// recover the database on restart.
     ///
@@ -571,10 +575,10 @@ where
     V: VariableValue,
     T: Translator,
 {
-    async fn write_batch(
-        &mut self,
-        iter: impl Iterator<Item = (Self::Key, Option<Self::Value>)>,
-    ) -> Result<(), Self::Error> {
+    async fn write_batch<'a, Iter>(&'a mut self, iter: Iter) -> Result<(), Self::Error>
+    where
+        Iter: Iterator<Item = (Self::Key, Option<Self::Value>)> + Send + 'a,
+    {
         for (key, value) in iter {
             if let Some(value) = value {
                 self.update(key, value).await?;
@@ -597,10 +601,11 @@ mod test {
     use commonware_macros::test_traced;
     use commonware_math::algebra::Random;
     use commonware_runtime::{deterministic, Runner};
-    use commonware_utils::{NZUsize, NZU64};
+    use commonware_utils::{NZUsize, NZU16, NZU64};
+    use std::num::NonZeroU16;
 
-    const PAGE_SIZE: usize = 77;
-    const PAGE_CACHE_SIZE: usize = 9;
+    const PAGE_SIZE: NonZeroU16 = NZU16!(77);
+    const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(9);
 
     /// The type of the store used in tests.
     type TestStore = Db<deterministic::Context, Digest, Vec<u8>, TwoCap, Durable>;
@@ -613,7 +618,7 @@ mod test {
             log_codec_config: ((0..=10000).into(), ()),
             log_items_per_section: NZU64!(7),
             translator: TwoCap,
-            buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+            buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
         };
         TestStore::init(context, cfg).await.unwrap()
     }
@@ -774,15 +779,17 @@ mod test {
             assert_eq!(db.get(&k1).await.unwrap().unwrap(), v1);
             assert_eq!(db.get(&k2).await.unwrap().unwrap(), v2);
 
-            // Ensure upsert works for existing key.
-            db.upsert(k1, |v| v.push(7)).await.unwrap();
+            // Update existing key with modified value.
+            let mut v1_updated = db.get(&k1).await.unwrap().unwrap();
+            v1_updated.push(7);
+            db.update(k1, v1_updated).await.unwrap();
             let (db, _) = db.commit(None).await.unwrap();
             assert_eq!(db.get(&k1).await.unwrap().unwrap(), vec![2, 3, 4, 5, 6, 7]);
 
-            // Ensure upsert works for new key.
+            // Create new key.
             let mut db = db.into_dirty();
             let k3 = Digest::random(&mut ctx);
-            db.upsert(k3, |v| v.push(8)).await.unwrap();
+            db.update(k3, vec![8]).await.unwrap();
             let (db, _) = db.commit(None).await.unwrap();
             assert_eq!(db.get(&k3).await.unwrap().unwrap(), vec![8]);
 
@@ -1164,6 +1171,32 @@ mod test {
 
             // Destroy the store
             db.destroy().await.unwrap();
+        });
+    }
+
+    fn assert_send<T: Send>(_: T) {}
+
+    #[test_traced]
+    fn test_futures_are_send() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut db = create_test_store(context.with_label("store")).await;
+            let key = Blake3::hash(&[1, 2, 3]);
+            let loc = Location::new_unchecked(0);
+
+            assert_send(db.get(&key));
+            assert_send(db.get_metadata());
+            assert_send(db.sync());
+            assert_send(db.prune(loc));
+
+            let mut db = db.into_dirty();
+            assert_send(db.get(&key));
+            assert_send(db.get_metadata());
+            assert_send(db.update(key, vec![]));
+            assert_send(db.create(key, vec![]));
+            assert_send(db.upsert(key, |_| {}));
+            assert_send(db.delete(key));
+            assert_send(db.commit(None));
         });
     }
 }

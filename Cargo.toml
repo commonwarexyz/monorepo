@@ -71,6 +71,7 @@ async-lock = "3.4.0"
 aws-config = "1.8.10"
 aws-lc-rs = "1.15.2"
 aws-sdk-ec2 = "1.187.0"
+aws-sdk-s3 = "1.91.0"
 axum = "0.8.1"
 blake3 = { version = "1.8.2", default-features = false }
 blst = { version = "0.3.13", default-features = false }
@@ -99,7 +100,8 @@ commonware-storage = { version = "0.0.64", path = "storage", default-features = 
 commonware-stream = { version = "0.0.64", path = "stream" }
 commonware-utils = { version = "0.0.64", path = "utils", default-features = false }
 console-subscriber = "0.5.0"
-crc32fast = "1.5.0"
+crc = "3.4.0"
+crc-fast = { version = "1.10.0", default-features = false }
 criterion = "0.7.0"
 crossterm = "0.29.0"
 ctutils = "0.3.1"
@@ -118,7 +120,7 @@ libfuzzer-sys = "0.4.9"
 num-bigint = { version = "0.4.6", default-features = false }
 num-integer = "0.1.46"
 num-rational = { version = "0.4.2", features = ["num-bigint"] }
-num-traits = "0.2.19"
+num-traits = { version = "0.2.19", default-features = false }
 opentelemetry = "0.31.0"
 opentelemetry-otlp = "0.31.0"
 opentelemetry_sdk = "0.31.0"

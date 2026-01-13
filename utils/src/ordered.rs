@@ -32,7 +32,7 @@ pub enum Error {
     DuplicateValue,
 }
 
-use crate::TryFromIterator;
+use crate::{Faults, Participant, TryFromIterator};
 
 /// An ordered, deduplicated collection of items.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -247,49 +247,48 @@ pub trait Quorum {
     /// The type of items in this set.
     type Item: Ord;
 
-    /// Returns the quorum value (2f+1) for this participant set.
+    /// Returns the quorum value for this participant set using the given fault model.
     ///
     /// ## Panics
     ///
     /// Panics if the number of participants exceeds `u32::MAX`.
-    fn quorum(&self) -> u32;
+    fn quorum<M: Faults>(&self) -> u32;
 
-    /// Returns the maximum number of faults (f) tolerated by this participant set.
+    /// Returns the maximum number of faults tolerated by this participant set.
     ///
     /// ## Panics
     ///
     /// Panics if the number of participants exceeds `u32::MAX`.
-    fn max_faults(&self) -> u32;
+    fn max_faults<M: Faults>(&self) -> u32;
 
     /// Returns the participant key at the given index.
-    fn key(&self, index: u32) -> Option<&Self::Item>;
+    fn key(&self, index: Participant) -> Option<&Self::Item>;
 
     /// Returns the index for the given participant key, if present.
     ///
     /// ## Panics
     ///
     /// Panics if the participant index exceeds `u32::MAX`.
-    fn index(&self, key: &Self::Item) -> Option<u32>;
+    fn index(&self, key: &Self::Item) -> Option<Participant>;
 }
 
 impl<T: Ord> Quorum for Set<T> {
     type Item = T;
 
-    fn quorum(&self) -> u32 {
-        crate::quorum(u32::try_from(self.len()).expect("too many participants"))
+    fn quorum<M: Faults>(&self) -> u32 {
+        M::quorum(u32::try_from(self.len()).expect("too many participants"))
     }
 
-    fn max_faults(&self) -> u32 {
-        crate::max_faults(u32::try_from(self.len()).expect("too many participants"))
+    fn max_faults<M: Faults>(&self) -> u32 {
+        M::max_faults(self.len())
     }
 
-    fn key(&self, index: u32) -> Option<&Self::Item> {
-        self.get(index as usize)
+    fn key(&self, index: Participant) -> Option<&Self::Item> {
+        self.get(index.into())
     }
 
-    fn index(&self, key: &Self::Item) -> Option<u32> {
-        self.position(key)
-            .map(|position| u32::try_from(position).expect("too many participants"))
+    fn index(&self, key: &Self::Item) -> Option<Participant> {
+        self.position(key).map(Participant::from_usize)
     }
 }
 

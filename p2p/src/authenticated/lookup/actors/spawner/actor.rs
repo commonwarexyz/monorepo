@@ -26,6 +26,7 @@ pub struct Actor<E: Spawner + Clock + CryptoRngCore + Metrics, Si: Sink, St: Str
     connections: Gauge,
     sent_messages: Family<metrics::Message, Counter>,
     received_messages: Family<metrics::Message, Counter>,
+    dropped_messages: Family<metrics::Message, Counter>,
     rate_limited: Family<metrics::Message, Counter>,
 }
 
@@ -36,6 +37,7 @@ impl<E: Spawner + Clock + CryptoRngCore + Metrics, Si: Sink, St: Stream, C: Publ
         let connections = Gauge::default();
         let sent_messages = Family::<metrics::Message, Counter>::default();
         let received_messages = Family::<metrics::Message, Counter>::default();
+        let dropped_messages = Family::<metrics::Message, Counter>::default();
         let rate_limited = Family::<metrics::Message, Counter>::default();
         context.register(
             "connections",
@@ -47,6 +49,11 @@ impl<E: Spawner + Clock + CryptoRngCore + Metrics, Si: Sink, St: Stream, C: Publ
             "messages_received",
             "messages received",
             received_messages.clone(),
+        );
+        context.register(
+            "messages_dropped",
+            "messages dropped due to full application buffer",
+            dropped_messages.clone(),
         );
         context.register(
             "messages_rate_limited",
@@ -64,6 +71,7 @@ impl<E: Spawner + Clock + CryptoRngCore + Metrics, Si: Sink, St: Stream, C: Publ
                 connections,
                 sent_messages,
                 received_messages,
+                dropped_messages,
                 rate_limited,
             },
             sender,
@@ -106,6 +114,7 @@ impl<E: Spawner + Clock + CryptoRngCore + Metrics, Si: Sink, St: Stream, C: Publ
                         let connections = self.connections.clone();
                         let sent_messages = self.sent_messages.clone();
                         let received_messages = self.received_messages.clone();
+                        let dropped_messages = self.dropped_messages.clone();
                         let rate_limited = self.rate_limited.clone();
                         let mut tracker = tracker.clone();
                         let mut router = router.clone();
@@ -122,13 +131,18 @@ impl<E: Spawner + Clock + CryptoRngCore + Metrics, Si: Sink, St: Stream, C: Publ
                                         ping_frequency: self.ping_frequency,
                                         sent_messages,
                                         received_messages,
+                                        dropped_messages,
                                         rate_limited,
                                         mailbox_size: self.mailbox_size,
                                     },
                                 );
 
-                                // Register peer with the router
-                                let channels = router.ready(peer.clone(), messenger).await;
+                                // Register peer with the router (may fail during shutdown)
+                                let Some(channels) = router.ready(peer.clone(), messenger).await else {
+                                    debug!(?peer, "router shut down during peer setup");
+                                    connections.dec();
+                                    return;
+                                };
 
                                 // Register peer with tracker
                                 tracker.connect(peer.clone(), peer_mailbox);

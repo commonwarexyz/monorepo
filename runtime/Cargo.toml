@@ -20,6 +20,7 @@ bytes.workspace = true
 cfg-if.workspace = true
 commonware-codec.workspace = true
 commonware-conformance = { workspace = true, optional = true }
+commonware-cryptography = { workspace = true, features = ["std"] }
 commonware-macros.workspace = true
 commonware-parallel = { workspace = true, features = ["std"] }
 commonware-utils = { workspace = true, features = ["std"] }
@@ -57,6 +58,7 @@ tokio = { workspace = true, features = ["full"] }
 default = []
 arbitrary = [
 	"commonware-codec/arbitrary",
+	"commonware-cryptography/arbitrary",
 	"commonware-utils/arbitrary",
 	"dep:arbitrary",
 	"dep:commonware-conformance",

@@ -51,13 +51,16 @@ mod tests {
     use super::*;
     use crate::{
         simplex::{
-            actors::{batcher, resolver, resolver::MailboxMessage},
+            actors::{
+                batcher,
+                resolver::{self, MailboxMessage},
+            },
             elector::{Config as ElectorConfig, Elector, Random, RoundRobin, RoundRobinElector},
-            mocks,
+            mocks, quorum,
             scheme::{bls12381_multisig, bls12381_threshold, ed25519, secp256r1, Scheme},
             types::{Certificate, Finalization, Finalize, Notarization, Notarize, Proposal, Vote},
         },
-        types::{Round, View},
+        types::{Participant, Round, View},
         Viewable,
     };
     use commonware_codec::Encode;
@@ -70,16 +73,17 @@ mod tests {
     };
     use commonware_macros::{select, test_traced};
     use commonware_p2p::simulated::{Config as NConfig, Network};
+    use commonware_parallel::Sequential;
     use commonware_runtime::{deterministic, Clock, Metrics, Quota, Runner};
-    use commonware_utils::{quorum, NZUsize};
+    use commonware_utils::{NZUsize, NZU16};
     use futures::{channel::mpsc, FutureExt, StreamExt};
     use std::{
-        num::NonZeroU32,
+        num::{NonZeroU16, NonZeroU32},
         sync::{Arc, Mutex},
         time::Duration,
     };
 
-    const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
+    const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
     const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
 
@@ -96,7 +100,7 @@ mod tests {
             .take(count as usize)
             .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
             .collect();
-        let certificate = Notarization::from_notarizes(&schemes[0], &votes)
+        let certificate = Notarization::from_notarizes(&schemes[0], &votes, &Sequential)
             .expect("notarization requires a quorum of votes");
         (votes, certificate)
     }
@@ -114,7 +118,7 @@ mod tests {
             .take(count as usize)
             .map(|scheme| Finalize::sign(scheme, proposal.clone()).unwrap())
             .collect();
-        let certificate = Finalization::from_finalizes(&schemes[0], &votes)
+        let certificate = Finalization::from_finalizes(&schemes[0], &votes, &Sequential)
             .expect("finalization requires a quorum of votes");
         (votes, certificate)
     }
@@ -1386,10 +1390,10 @@ mod tests {
             let temp_elector: RoundRobinElector<S> =
                 elector_config.clone().build(schemes[0].participants());
             let leader_idx = temp_elector.elect(view2_round, None);
-            let leader = participants[leader_idx as usize].clone();
+            let leader = participants[usize::from(leader_idx)].clone();
 
             // Create a voter with the leader's identity
-            let leader_scheme = schemes[leader_idx as usize].clone();
+            let leader_scheme = schemes[usize::from(leader_idx)].clone();
 
             // Setup application mock with some latency so we can inject peer
             // message before automaton completes
@@ -2166,8 +2170,8 @@ mod tests {
                 current_view = new_view;
 
                 // Check if we're NOT the leader for this view
-                if leader != 0 {
-                    break (current_view, participants[leader as usize].clone());
+                if leader != Participant::new(0) {
+                    break (current_view, participants[usize::from(leader)].clone());
                 }
 
                 // We're the leader, advance to next view
@@ -2769,7 +2773,7 @@ mod tests {
             .await;
             assert_ne!(
                 built_elector.elect(Round::new(Epoch::new(333), target_view), None),
-                0,
+                Participant::new(0),
                 "we should not be leader at view 3"
             );
 
@@ -2892,7 +2896,7 @@ mod tests {
             .await;
             assert_ne!(
                 built_elector.elect(Round::new(Epoch::new(333), target_view), None),
-                0,
+                Participant::new(0),
                 "we should not be leader at view 3"
             );
 
@@ -3050,7 +3054,7 @@ mod tests {
             .await;
             assert_eq!(
                 built_elector.elect(Round::new(Epoch::new(333), target_view), None),
-                0,
+                Participant::new(0),
                 "we should be leader at view 2"
             );
 

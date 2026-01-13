@@ -3,15 +3,14 @@ use commonware_cryptography::Digest;
 use std::{future::Future, ops::Range};
 
 /// A database that can be synced
-pub trait Database: Sized {
-    type Op;
+pub trait Database: Sized + Send {
+    type Op: Send;
     type Journal: Journal<Op = Self::Op>;
     type Config;
     type Digest: Digest;
     type Context: commonware_runtime::Storage
         + commonware_runtime::Clock
-        + commonware_runtime::Metrics
-        + Clone;
+        + commonware_runtime::Metrics;
     type Hasher: commonware_cryptography::Hasher<Digest = Self::Digest>;
 
     /// Create/open a journal for syncing the given range.
@@ -24,7 +23,7 @@ pub trait Database: Sized {
         context: Self::Context,
         config: &Self::Config,
         range: Range<Location>,
-    ) -> impl Future<Output = Result<Self::Journal, crate::qmdb::Error>>;
+    ) -> impl Future<Output = Result<Self::Journal, crate::qmdb::Error>> + Send;
 
     /// Build a database from the journal and pinned nodes populated by the sync engine.
     fn from_sync_result(
@@ -34,7 +33,7 @@ pub trait Database: Sized {
         pinned_nodes: Option<Vec<Self::Digest>>,
         range: Range<Location>,
         apply_batch_size: usize,
-    ) -> impl Future<Output = Result<Self, crate::qmdb::Error>>;
+    ) -> impl Future<Output = Result<Self, crate::qmdb::Error>> + Send;
 
     /// Get the root digest of the database for verification
     fn root(&self) -> Self::Digest;
@@ -51,5 +50,5 @@ pub trait Database: Sized {
         context: Self::Context,
         config: &Self::Config,
         range: Range<Location>,
-    ) -> impl Future<Output = Result<Self::Journal, crate::qmdb::Error>>;
+    ) -> impl Future<Output = Result<Self::Journal, crate::qmdb::Error>> + Send;
 }

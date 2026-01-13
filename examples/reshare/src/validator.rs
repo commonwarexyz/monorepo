@@ -14,7 +14,6 @@ use commonware_cryptography::{
     bls12381::primitives::variant::MinSig, ed25519, Hasher, Sha256, Signer,
 };
 use commonware_p2p::authenticated::discovery;
-use commonware_parallel::Rayon;
 use commonware_runtime::{tokio, Metrics, Quota, RayonPoolSpawner};
 use commonware_utils::{union, union_unique, NZUsize, NZU32};
 use futures::future::try_join_all;
@@ -43,12 +42,8 @@ pub async fn run<S, L>(
 ) where
     S: Scheme<<Sha256 as Hasher>::Digest, PublicKey = ed25519::PublicKey>,
     L: Elector<S>,
-    Provider<S, ed25519::PrivateKey, Rayon>: EpochProvider<
-        Variant = MinSig,
-        PublicKey = ed25519::PublicKey,
-        Scheme = S,
-        Strategy = Rayon,
-    >,
+    Provider<S, ed25519::PrivateKey>:
+        EpochProvider<Variant = MinSig, PublicKey = ed25519::PublicKey, Scheme = S>,
 {
     // Load the participant configuration.
     let config_str = std::fs::read_to_string(&args.config_path)
@@ -186,7 +181,7 @@ mod test {
         deterministic::{self, Runner},
         Clock, Handle, Quota, Runner as _, Spawner,
     };
-    use commonware_utils::{union, TryCollect};
+    use commonware_utils::{union, N3f1, TryCollect};
     use futures::{
         channel::{mpsc, oneshot},
         SinkExt, StreamExt,
@@ -290,8 +285,9 @@ mod test {
                 num_participants_per_round: per_round.to_vec(),
                 participants: participants.keys().cloned().try_collect().unwrap(),
             };
-            let (output, shares) = deal(&mut rng, Default::default(), peer_config.dealers(0))
-                .expect("deal should succeed");
+            let (output, shares) =
+                deal::<MinSig, _, N3f1>(&mut rng, Default::default(), peer_config.dealers(0))
+                    .expect("deal should succeed");
             for (key, share) in shares.into_iter() {
                 if let Some((_, maybe_share)) = participants.get_mut(&key) {
                     *maybe_share = Some(share);
@@ -335,12 +331,8 @@ mod test {
         ) where
             S: Scheme<<Sha256 as Hasher>::Digest, PublicKey = PublicKey>,
             L: Elector<S>,
-            Provider<S, PrivateKey, Sequential>: EpochProvider<
-                Variant = MinSig,
-                PublicKey = PublicKey,
-                Scheme = S,
-                Strategy = Sequential,
-            >,
+            Provider<S, PrivateKey>:
+                EpochProvider<Variant = MinSig, PublicKey = PublicKey, Scheme = S>,
         {
             if let Some(handle) = self.handles.remove(&pk) {
                 handle.abort();
@@ -349,7 +341,7 @@ mod test {
                 return;
             };
 
-            let mut control = oracle.control(pk.clone());
+            let control = oracle.control(pk.clone());
             let votes = control.register(VOTE_CHANNEL, TEST_QUOTA).await.unwrap();
             let certificates = control
                 .register(CERTIFICATE_CHANNEL, TEST_QUOTA)
@@ -428,10 +420,8 @@ mod test {
                 self.start_one::<EdScheme, RoundRobin>(ctx, oracle, updates, pk)
                     .await;
             } else {
-                self.start_one::<ThresholdScheme<MinSig, Sequential>, Random>(
-                    ctx, oracle, updates, pk,
-                )
-                .await;
+                self.start_one::<ThresholdScheme<MinSig>, Random>(ctx, oracle, updates, pk)
+                    .await;
             }
         }
 
@@ -725,7 +715,7 @@ mod test {
                         if team.output.is_none() {
                             team.start_one::<EdScheme, RoundRobin>(&ctx, &mut oracle, updates_in.clone(), pk).await;
                         } else {
-                            team.start_one::<ThresholdScheme<MinSig, Sequential>, Random>(&ctx, &mut oracle, updates_in.clone(), pk).await;
+                            team.start_one::<ThresholdScheme<MinSig>, Random>(&ctx, &mut oracle, updates_in.clone(), pk).await;
                         }
                     },
                     _ = crash_receiver.next() => {

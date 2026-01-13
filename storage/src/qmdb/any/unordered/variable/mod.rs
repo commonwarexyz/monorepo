@@ -91,16 +91,19 @@ impl<E: Storage + Clock + Metrics, K: Array, V: VariableValue, H: Hasher, T: Tra
 #[cfg(test)]
 pub(super) mod test {
     use super::*;
-    use crate::{index::Unordered as _, qmdb::store::batch_tests, translator::TwoCap};
+    use crate::{
+        index::Unordered as _, kv::Batchable, qmdb::store::batch_tests, translator::TwoCap,
+    };
     use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
     use commonware_macros::test_traced;
     use commonware_math::algebra::Random;
     use commonware_runtime::{buffer::PoolRef, deterministic, Runner as _};
-    use commonware_utils::{NZUsize, NZU64};
+    use commonware_utils::{NZUsize, NZU16, NZU64};
     use rand::RngCore;
+    use std::num::{NonZeroU16, NonZeroUsize};
 
-    const PAGE_SIZE: usize = 77;
-    const PAGE_CACHE_SIZE: usize = 9;
+    const PAGE_SIZE: NonZeroU16 = NZU16!(77);
+    const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(9);
 
     fn db_config(suffix: &str) -> VariableConfig<TwoCap, (commonware_codec::RangeCfg<usize>, ())> {
         VariableConfig {
@@ -115,7 +118,7 @@ pub(super) mod test {
             log_codec_config: ((0..=10000).into(), ()),
             translator: TwoCap,
             thread_pool: None,
-            buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+            buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
 
@@ -429,5 +432,52 @@ pub(super) mod test {
                 nodes_to_pin(pos).map(|p| *map.get(&p).unwrap()).collect()
             }
         }
+    }
+
+    fn assert_send<T: Send>(_: T) {}
+
+    /// Regression test for https://github.com/commonwarexyz/monorepo/issues/2787
+    #[allow(dead_code, clippy::manual_async_fn)]
+    fn issue_2787_regression(
+        db: &crate::qmdb::immutable::Immutable<
+            deterministic::Context,
+            Digest,
+            Vec<u8>,
+            Sha256,
+            TwoCap,
+        >,
+        key: Digest,
+    ) -> impl std::future::Future<Output = ()> + Send + use<'_> {
+        async move {
+            let _ = db.get(&key).await;
+        }
+    }
+
+    #[test_traced]
+    fn test_futures_are_send() {
+        use crate::mmr::Location;
+
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let mut db = open_db(context.clone()).await;
+            let key = Sha256::hash(&9u64.to_be_bytes());
+            let loc = Location::new_unchecked(0);
+
+            assert_send(db.get(&key));
+            assert_send(db.get_metadata());
+            assert_send(db.sync());
+            assert_send(db.prune(loc));
+            assert_send(db.proof(loc, NZU64!(1)));
+
+            let mut db = db.into_mutable();
+            assert_send(db.get(&key));
+            assert_send(db.get_metadata());
+            assert_send(db.get_with_loc(&key));
+            assert_send(db.write_batch(vec![(key, Some(vec![1u8]))].into_iter()));
+            assert_send(db.update(key, vec![]));
+            assert_send(db.create(key, vec![]));
+            assert_send(db.delete(key));
+            assert_send(db.commit(None));
+        });
     }
 }

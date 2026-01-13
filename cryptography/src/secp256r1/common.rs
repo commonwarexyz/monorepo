@@ -10,6 +10,7 @@ use core::{
 };
 use p256::ecdsa::{SigningKey, VerifyingKey};
 use rand_core::CryptoRngCore;
+use zeroize::Zeroizing;
 
 pub const CURVE_NAME: &str = "secp256r1";
 pub const PRIVATE_KEY_LENGTH: usize = 32;
@@ -32,9 +33,9 @@ impl Eq for PrivateKeyInner {}
 
 impl PrivateKeyInner {
     pub fn new(key: SigningKey) -> Self {
-        let raw: [u8; PRIVATE_KEY_LENGTH] = key.to_bytes().into();
+        let raw = Zeroizing::new(key.to_bytes().into());
         Self {
-            raw: Secret::new(raw),
+            raw: Secret::new(*raw),
             key: Secret::new(key),
         }
     }
@@ -61,8 +62,8 @@ impl Read for PrivateKeyInner {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        let raw = <[u8; PRIVATE_KEY_LENGTH]>::read(buf)?;
-        let key = SigningKey::from_slice(&raw);
+        let raw = Zeroizing::new(<[u8; PRIVATE_KEY_LENGTH]>::read(buf)?);
+        let key = SigningKey::from_slice(raw.as_ref());
         #[cfg(feature = "std")]
         let key = key.map_err(|e| CodecError::Wrapped(CURVE_NAME, e.into()))?;
         #[cfg(not(feature = "std"))]

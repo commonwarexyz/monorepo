@@ -536,7 +536,8 @@ impl<
 
     /// Commit any pending operations to the database, ensuring their durability upon return.
     /// This transitions to the Durable state without merkleizing. Returns the committed database
-    /// and the `[start_loc, end_loc)` range of committed operations.
+    /// and the `[start_loc, end_loc)` range of committed operations. Note that even if no
+    /// operations were added since the last commit, this is a root-state changing operation.
     pub async fn commit(
         mut self,
         metadata: Option<V>,
@@ -623,22 +624,6 @@ impl<
             bitmap_metadata_partition: self.bitmap_metadata_partition,
             cached_root: None,
         }
-    }
-
-    /// Commit any pending operations to the database, ensuring their durability upon return.
-    /// Returns the committed database and the range of committed operations.
-    pub async fn commit(
-        self,
-        metadata: Option<V>,
-    ) -> Result<
-        (
-            Db<E, K, V, H, T, N, Merkleized<H>, Durable>,
-            Range<Location>,
-        ),
-        Error,
-    > {
-        let (durable, range) = self.into_mutable().commit(metadata).await?;
-        Ok((durable.into_merkleized().await?, range))
     }
 }
 
@@ -791,10 +776,10 @@ where
     T: Translator,
     H: Hasher,
 {
-    async fn write_batch(
-        &mut self,
-        iter: impl Iterator<Item = (K, Option<V>)>,
-    ) -> Result<(), Error> {
+    async fn write_batch<'a, Iter>(&'a mut self, iter: Iter) -> Result<(), Error>
+    where
+        Iter: Iterator<Item = (K, Option<V>)> + Send + 'a,
+    {
         let status = &mut self.status;
         self.any
             .write_batch_with_callback(iter, move |append: bool, loc: Option<Location>| {
@@ -938,11 +923,6 @@ impl<
     > MerkleizedNonDurableAny for Db<E, K, V, H, T, N, Merkleized<H>, NonDurable>
 {
     type Mutable = Db<E, K, V, H, T, N, Unmerkleized, NonDurable>;
-    type Durable = Db<E, K, V, H, T, N, Merkleized<H>, Durable>;
-
-    async fn commit(self, metadata: Option<V>) -> Result<(Self::Durable, Range<Location>), Error> {
-        self.commit(metadata).await
-    }
 
     fn into_mutable(self) -> Self::Mutable {
         self.into_mutable()
@@ -988,13 +968,16 @@ pub mod test {
     use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{buffer::PoolRef, deterministic, Runner as _};
-    use commonware_utils::{NZUsize, NZU64};
+    use commonware_utils::{NZUsize, NZU16, NZU64};
     use rand::{rngs::StdRng, RngCore, SeedableRng};
-    use std::collections::HashMap;
+    use std::{
+        collections::HashMap,
+        num::{NonZeroU16, NonZeroUsize},
+    };
     use tracing::warn;
 
-    const PAGE_SIZE: usize = 88;
-    const PAGE_CACHE_SIZE: usize = 8;
+    const PAGE_SIZE: NonZeroU16 = NZU16!(88);
+    const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(8);
 
     fn current_db_config(partition_prefix: &str) -> Config<OneCap> {
         Config {
@@ -1008,7 +991,7 @@ pub mod test {
             bitmap_metadata_partition: format!("{partition_prefix}_bitmap_metadata_partition"),
             translator: OneCap,
             thread_pool: None,
-            buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+            buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
 
@@ -2010,6 +1993,32 @@ pub mod test {
             let seed = ctx.next_u64();
             let partition = format!("current_ordered_batch_{seed}");
             open_db(ctx, &partition).await.into_mutable()
+        });
+    }
+
+    fn assert_send<T: Send>(_: T) {}
+
+    #[test_traced]
+    fn test_futures_are_send() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let mut db = open_db(context.clone(), "send_test").await;
+            let key = Sha256::hash(&9u64.to_be_bytes());
+            let loc = Location::new_unchecked(0);
+
+            assert_send(db.get(&key));
+            assert_send(db.get_metadata());
+            assert_send(db.sync());
+            assert_send(db.prune(loc));
+            assert_send(db.proof(loc, NZU64!(1)));
+
+            let mut db = db.into_mutable();
+            assert_send(db.get(&key));
+            assert_send(db.get_metadata());
+            assert_send(db.update(key, key));
+            assert_send(db.create(key, key));
+            assert_send(db.delete(key));
+            assert_send(db.commit(None));
         });
     }
 }

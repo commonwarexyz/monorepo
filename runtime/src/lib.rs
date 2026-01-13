@@ -52,7 +52,7 @@ mod network;
 mod process;
 mod storage;
 pub mod telemetry;
-mod utils;
+pub mod utils;
 pub use utils::*;
 #[cfg(any(feature = "iouring-storage", feature = "iouring-network"))]
 mod iouring;
@@ -111,8 +111,12 @@ pub enum Error {
         expected: std::ops::RangeInclusive<u16>,
         found: u16,
     },
+    #[error("invalid or missing checksum")]
+    InvalidChecksum,
     #[error("offset overflow")]
     OffsetOverflow,
+    #[error("immutable blob")]
+    ImmutableBlob,
     #[error("io error: {0}")]
     Io(#[from] IoError),
 }
@@ -553,15 +557,9 @@ pub trait Storage: Clone + Send + Sync + 'static {
         partition: &str,
         name: &[u8],
     ) -> impl Future<Output = Result<(Self::Blob, u64), Error>> + Send {
-        let partition = partition.to_string();
-        let name = name.to_vec();
         async move {
             let (blob, size, _) = self
-                .open_versioned(
-                    &partition,
-                    &name,
-                    DEFAULT_BLOB_VERSION..=DEFAULT_BLOB_VERSION,
-                )
+                .open_versioned(partition, name, DEFAULT_BLOB_VERSION..=DEFAULT_BLOB_VERSION)
                 .await?;
             Ok((blob, size))
         }

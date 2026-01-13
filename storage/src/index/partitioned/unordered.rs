@@ -13,11 +13,11 @@ use commonware_runtime::Metrics;
 /// (untranslated) key are used to determine the partition, and the translator is used by the
 /// partition-specific indices on the key after stripping this prefix. The value of `P` should be
 /// small, typically 1 or 2. Anything larger than 3 will fail to compile.
-pub struct Index<T: Translator, V: Eq, const P: usize> {
+pub struct Index<T: Translator, V: Eq + Send + Sync, const P: usize> {
     partitions: Vec<UnorderedIndex<T, V>>,
 }
 
-impl<T: Translator, V: Eq, const P: usize> Index<T, V, P> {
+impl<T: Translator, V: Eq + Send + Sync, const P: usize> Index<T, V, P> {
     /// Create a new [Index] with the given translator and metrics registry.
     pub fn new(ctx: impl Metrics, translator: T) -> Self {
         let partition_count = 1 << (P * 8);
@@ -48,7 +48,7 @@ impl<T: Translator, V: Eq, const P: usize> Index<T, V, P> {
     }
 }
 
-impl<T: Translator, V: Eq, const P: usize> UnorderedTrait for Index<T, V, P> {
+impl<T: Translator, V: Eq + Send + Sync, const P: usize> UnorderedTrait for Index<T, V, P> {
     type Value = V;
     type Cursor<'a>
         = <UnorderedIndex<T, V> as UnorderedTrait>::Cursor<'a>

@@ -76,6 +76,7 @@ pub(super) mod test {
     use super::*;
     use crate::{
         index::Unordered as _,
+        kv::Batchable as _,
         mmr::{Position, StandardHasher},
         qmdb::{
             any::unordered::{fixed::Operation, Update},
@@ -92,12 +93,13 @@ pub(super) mod test {
         deterministic::{self, Context},
         Runner as _,
     };
-    use commonware_utils::{NZUsize, NZU64};
-    use rand::{rngs::StdRng, RngCore, SeedableRng};
+    use commonware_utils::{test_rng_seeded, NZUsize, NZU16, NZU64};
+    use rand::RngCore;
+    use std::num::{NonZeroU16, NonZeroUsize};
 
     // Janky page & cache sizes to exercise boundary conditions.
-    const PAGE_SIZE: usize = 101;
-    const PAGE_CACHE_SIZE: usize = 11;
+    const PAGE_SIZE: NonZeroU16 = NZU16!(101);
+    const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(11);
 
     pub(crate) fn any_db_config(suffix: &str) -> Config<TwoCap> {
         Config {
@@ -110,7 +112,7 @@ pub(super) mod test {
             log_write_buffer: NZUsize!(1024),
             translator: TwoCap,
             thread_pool: None,
-            buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+            buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
 
@@ -143,7 +145,7 @@ pub(super) mod test {
             log_write_buffer: NZUsize!(64),
             translator: TwoCap,
             thread_pool: None,
-            buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+            buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
 
@@ -154,10 +156,17 @@ pub(super) mod test {
         AnyTest::init(context, config).await.unwrap()
     }
 
-    /// Create n random operations. Some portion of the updates are deletes.
-    /// create_test_ops(n') is a suffix of create_test_ops(n) for n' > n.
+    /// Create n random operations using the default seed (0). Some portion of
+    /// the updates are deletes. create_test_ops(n) is a prefix of
+    /// create_test_ops(n') for n < n'.
     pub(crate) fn create_test_ops(n: usize) -> Vec<Operation<Digest, Digest>> {
-        let mut rng = StdRng::seed_from_u64(1337);
+        create_test_ops_seeded(n, 0)
+    }
+
+    /// Create n random operations using a specific seed.
+    /// Use different seeds when you need non-overlapping keys in the same test.
+    pub(crate) fn create_test_ops_seeded(n: usize, seed: u64) -> Vec<Operation<Digest, Digest>> {
+        let mut rng = test_rng_seeded(seed);
         let mut prev_key = Digest::random(&mut rng);
         let mut ops = Vec::new();
         for i in 0..n {
@@ -327,8 +336,9 @@ pub(super) mod test {
             ));
 
             // Add more operations to the database
+            // (use different seed to avoid key collisions)
             let mut db = db.into_mutable();
-            let more_ops = create_test_ops(5);
+            let more_ops = create_test_ops_seeded(5, 1);
             apply_ops(&mut db, more_ops.clone()).await;
             let db = db.commit(None).await.unwrap().0.into_merkleized();
 
@@ -616,6 +626,35 @@ pub(super) mod test {
     #[test_traced("DEBUG")]
     fn test_any_unordered_fixed_batch() {
         batch_tests::test_batch(|ctx| async move { create_test_db(ctx).await.into_mutable() });
+    }
+
+    fn assert_send<T: Send>(_: T) {}
+
+    #[test_traced]
+    fn test_futures_are_send() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let mut db = open_db(context.clone()).await;
+            let key = to_digest(9);
+            let value = to_digest(5);
+            let loc = Location::new_unchecked(0);
+
+            assert_send(db.get(&key));
+            assert_send(db.get_metadata());
+            assert_send(db.sync());
+            assert_send(db.prune(loc));
+            assert_send(db.proof(loc, NZU64!(1)));
+
+            let mut db = db.into_mutable();
+            assert_send(db.get(&key));
+            assert_send(db.get_metadata());
+            assert_send(db.get_with_loc(&key));
+            assert_send(db.write_batch(vec![(key, Some(value))].into_iter()));
+            assert_send(db.update(key, value));
+            assert_send(db.create(key, value));
+            assert_send(db.delete(key));
+            assert_send(db.commit(None));
+        });
     }
 
     // FromSyncTestable implementation for from_sync_result tests

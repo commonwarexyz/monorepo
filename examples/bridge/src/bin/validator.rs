@@ -20,7 +20,7 @@ use commonware_runtime::{
     buffer::PoolRef, tokio, Metrics, Network, Quota, RayonPoolSpawner, Runner,
 };
 use commonware_stream::{dial, Config as StreamConfig};
-use commonware_utils::{from_hex, ordered::Set, union, NZUsize, TryCollect, NZU32};
+use commonware_utils::{from_hex, ordered::Set, union, NZUsize, TryCollect, NZU16, NZU32};
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     str::FromStr,
@@ -221,16 +221,10 @@ fn main() {
         // Initialize application
         let strategy = context.clone().create_strategy(NZUsize!(2)).unwrap();
         let consensus_namespace = union(APPLICATION_NAMESPACE, CONSENSUS_SUFFIX);
-        let this_network = Scheme::signer(
-            &consensus_namespace,
-            validators.clone(),
-            identity,
-            share,
-            strategy.clone(),
-        )
-        .expect("share must be in participants");
-        let other_network =
-            Scheme::certificate_verifier(&consensus_namespace, other_public, strategy);
+        let this_network =
+            Scheme::signer(&consensus_namespace, validators.clone(), identity, share)
+                .expect("share must be in participants");
+        let other_network = Scheme::certificate_verifier(&consensus_namespace, other_public);
         let (application, scheme, mailbox) = application::Application::new(
             context.with_label("application"),
             application::Config {
@@ -264,7 +258,8 @@ fn main() {
                 activity_timeout: ViewDelta::new(10),
                 skip_timeout: ViewDelta::new(5),
                 fetch_concurrent: 32,
-                buffer_pool: PoolRef::new(NZUsize!(16_384), NZUsize!(10_000)),
+                buffer_pool: PoolRef::new(NZU16!(16_384), NZUsize!(10_000)),
+                strategy,
             },
         );
 

@@ -80,6 +80,10 @@ async fn main() -> std::process::ExitCode {
                                 .value_parser(clap::value_parser!(PathBuf)),
                         ),
                 )
+                .subcommand(
+                    Command::new(ec2::CLEAN_CMD)
+                        .about("Delete the shared S3 bucket and all its contents."),
+                ),
         )
         .get_matches();
 
@@ -123,6 +127,13 @@ async fn main() -> std::process::ExitCode {
                 let config_path = matches.get_one::<PathBuf>("config").unwrap();
                 if let Err(e) = ec2::destroy(config_path).await {
                     error!(error=?e, "failed to destroy EC2 deployment");
+                } else {
+                    return std::process::ExitCode::SUCCESS;
+                }
+            }
+            Some((ec2::CLEAN_CMD, _)) => {
+                if let Err(e) = ec2::clean().await {
+                    error!(error=?e, "failed to clean S3 bucket");
                 } else {
                     return std::process::ExitCode::SUCCESS;
                 }

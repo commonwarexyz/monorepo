@@ -941,6 +941,11 @@ impl Context {
         self.executor().auditor.clone()
     }
 
+    /// Compute a [Sha256] digest of all storage contents.
+    pub fn storage_audit(&self) -> Digest {
+        self.storage.inner().inner().audit()
+    }
+
     /// Register a DNS mapping for a hostname.
     ///
     /// If `addrs` is `None`, the mapping is removed.

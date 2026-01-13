@@ -21,7 +21,7 @@ use crate::{
     },
     AuthenticatedBitMap, Persistable,
 };
-use commonware_codec::Codec;
+use commonware_codec::{Codec, CodecShared};
 use commonware_cryptography::{Digest, DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
@@ -39,15 +39,13 @@ pub(crate) type AuthenticatedLog<E, C, H, M = Merkleized<H>> = authenticated::Jo
 /// - [crate::qmdb::any::unordered::variable::Db]
 pub struct Db<
     E: Storage + Clock + Metrics,
-    C: Contiguous,
-    I,
+    C: Contiguous<Item: CodecShared>,
+    I: UnorderedIndex<Value = Location>,
     H: Hasher,
-    U,
+    U: Send + Sync,
     M: MerkleizationState<DigestOf<H>> = Merkleized<H>,
     D: DurabilityState = Durable,
-> where
-    C::Item: Codec,
-{
+> {
     /// A (pruned) log of all operations in order of their application. The index of each
     /// operation in the log is called its _location_, which is a stable identifier.
     ///

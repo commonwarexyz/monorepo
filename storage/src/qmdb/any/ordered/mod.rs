@@ -1,5 +1,5 @@
 use crate::{
-    index::Ordered as Index,
+    index::{Cursor as _, Ordered as Index},
     journal::contiguous::{Contiguous, MutableContiguous},
     kv::{self, Batchable},
     mmr::Location,
@@ -21,7 +21,7 @@ use crate::{
     },
     Persistable,
 };
-use commonware_codec::Codec;
+use commonware_codec::{Codec, CodecShared};
 use commonware_cryptography::{DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
@@ -61,11 +61,12 @@ impl<
         C: Contiguous<Item = Operation<K, V>>,
         I: Index<Value = Location>,
         H: Hasher,
-        M: MerkleizationState<DigestOf<H>>,
+        M: MerkleizationState<DigestOf<H>> + Send + Sync,
         D: DurabilityState,
     > Db<E, C, I, H, Update<K, V>, M, D>
 where
     Operation<K, V>: Codec,
+    V::Value: Send + Sync,
 {
     async fn get_update_op(
         log: &AuthenticatedLog<E, C, H, M>,
@@ -146,6 +147,7 @@ where
         }
 
         // If the translated key is in the snapshot, get a cursor to look for the key.
+        // Collect to avoid holding a borrow across await points (rust-lang/rust#100013).
         let locs: Vec<Location> = self.snapshot.get(key).copied().collect();
         let span = self.find_span(locs, key).await?;
         if let Some(span) = span {
@@ -157,6 +159,7 @@ where
             return Ok(None);
         };
 
+        // Collect to avoid holding a borrow across await points (rust-lang/rust#100013).
         let locs: Vec<Location> = iter.copied().collect();
         let span = self
             .find_span(locs, key)
@@ -178,6 +181,7 @@ where
         &self,
         key: &K,
     ) -> Result<Option<(Update<K, V>, Location)>, Error> {
+        // Collect to avoid holding a borrow across await points (rust-lang/rust#100013).
         let locs: Vec<Location> = self.snapshot.get(key).copied().collect();
         for loc in locs {
             let op = self.log.read(loc).await?;
@@ -203,26 +207,6 @@ where
             .map(|op| op.map(|(data, _)| data.value))
     }
 
-    /// Get the value of `key` in the db, or None if it has no value.
-    pub async fn get_owned(&self, key: K) -> Result<Option<V::Value>, Error> {
-        let locs: Vec<Location> = self.snapshot.get(&key).copied().collect();
-        for loc in locs {
-            let op = self.log.read(loc).await?;
-            assert!(
-                op.is_update(),
-                "location does not reference update operation. loc={loc}"
-            );
-            if op.key().expect("update operation must have key") == &key {
-                let Operation::Update(data) = op else {
-                    unreachable!("expected update operation");
-                };
-                return Ok(Some(data.value));
-            }
-        }
-
-        Ok(None)
-    }
-
     /// Streams all active (key, value) pairs in the database in key order, starting from the first
     /// active key greater than or equal to `start`.
     pub async fn stream_range<'a>(
@@ -231,9 +215,10 @@ where
     ) -> Result<impl Stream<Item = Result<(K, V::Value), Error>> + 'a, Error>
     where
         V: 'a,
+        V::Value: Send + Sync,
     {
-        let start_locs: Vec<Location> = self.snapshot.get(&start).copied().collect();
-        let mut init_pending = self.fetch_all_updates(start_locs).await?;
+        let start_iter = self.snapshot.get(&start);
+        let mut init_pending = self.fetch_all_updates(start_iter).await?;
         init_pending.retain(|x| x.key >= start);
 
         Ok(stream::unfold(
@@ -253,8 +238,7 @@ where
 
                 // TODO(https://github.com/commonwarexyz/monorepo/issues/2527): concurrently
                 // fetch a much larger batch of "pending" keys.
-                let locs: Vec<Location> = iter.copied().collect();
-                match self.fetch_all_updates(locs).await {
+                match self.fetch_all_updates(iter).await {
                     Ok(mut pending) => {
                         let item = pending.pop().expect("pending is not empty");
                         let key = item.key.clone();
@@ -270,11 +254,11 @@ where
     /// reverse order of the keys.
     async fn fetch_all_updates(
         &self,
-        locs: impl IntoIterator<Item = Location>,
+        locs: impl IntoIterator<Item = &Location>,
     ) -> Result<Vec<Update<K, V>>, Error> {
         let futures = locs
             .into_iter()
-            .map(|loc| Self::get_update_op(&self.log, loc));
+            .map(|loc| Self::get_update_op(&self.log, *loc));
         let mut updates = try_join_all(futures).await?;
         updates.sort_by(|a, b| b.key.cmp(&a.key));
 
@@ -292,6 +276,7 @@ impl<
     > Db<E, C, I, H, Update<K, V>, Unmerkleized, NonDurable>
 where
     Operation<K, V>: Codec,
+    V::Value: Send + Sync,
 {
     /// Finds and updates the location of the previous key to `key` in the snapshot for cases where
     /// the previous key does not share the same translated key, returning an UpdateLocResult
@@ -310,6 +295,7 @@ where
             unreachable!("database should not be empty");
         };
 
+        // Collect to avoid holding a borrow across await points (rust-lang/rust#100013).
         let locs: Vec<Location> = iter.copied().collect();
         let last_key = self.last_key_in_iter(locs).await?;
         let (loc, last_key) = last_key.expect("no last key found in non-empty snapshot");
@@ -333,46 +319,47 @@ where
         mut callback: impl FnMut(Option<Location>),
     ) -> Result<UpdateLocResult<K, V>, Error> {
         let mut best_prev_key: LocatedKey<K, V> = None;
-        let locs: Vec<Location> = self.snapshot.get(key).copied().collect();
+        {
+            // If the translated key is not in the snapshot, insert the new location and return the
+            // previous key info.
+            let Some(mut cursor) = self.snapshot.get_mut_or_insert(key, next_loc) else {
+                callback(None);
+                return self
+                    .update_non_colliding_prev_key_loc(key, next_loc + 1, callback)
+                    .await;
+            };
 
-        if locs.is_empty() {
-            self.snapshot.insert(key, next_loc);
-            callback(None);
-            return self
-                .update_non_colliding_prev_key_loc(key, next_loc + 1, callback)
-                .await;
-        }
-
-        // Iterate over conflicts in the snapshot entry to try and find the key, or its
-        // predecessor if it doesn't exist.
-        for loc in locs {
-            let data = Self::get_update_op(&self.log, loc).await?;
-            if data.key == *key {
-                // Found the key in the snapshot.
-                if create_only {
+            // Iterate over conflicts in the snapshot entry to try and find the key, or its
+            // predecessor if it doesn't exist.
+            while let Some(&loc) = cursor.next() {
+                let data = Self::get_update_op(&self.log, loc).await?;
+                if data.key == *key {
+                    // Found the key in the snapshot.
+                    if create_only {
+                        return Ok(UpdateLocResult::Exists(data.next_key));
+                    }
+                    // Update its location and return its next-key.
+                    assert!(next_loc > loc);
+                    cursor.update(next_loc);
+                    callback(Some(loc));
                     return Ok(UpdateLocResult::Exists(data.next_key));
                 }
-                // Update its location and return its next-key.
-                assert!(next_loc > loc);
-                update_known_loc(&mut self.snapshot, key, loc, next_loc);
-                callback(Some(loc));
-                return Ok(UpdateLocResult::Exists(data.next_key));
-            }
-            if data.key > *key {
-                continue;
-            }
-            if let Some((_, ref key_data)) = best_prev_key {
-                if data.key > key_data.key {
+                if data.key > *key {
+                    continue;
+                }
+                if let Some((_, ref key_data)) = best_prev_key {
+                    if data.key > key_data.key {
+                        best_prev_key = Some((loc, data));
+                    }
+                } else {
                     best_prev_key = Some((loc, data));
                 }
-            } else {
-                best_prev_key = Some((loc, data));
             }
-        }
 
-        // If we get here, a new key is being created. Insert its location into the snapshot.
-        self.snapshot.insert(key, next_loc);
-        callback(None);
+            // If we get here, a new key is being created. Insert its location into the snapshot.
+            cursor.insert(next_loc);
+            callback(None);
+        }
 
         // Update `next_key` for the previous key to point to the newly created key.
         let Some((loc, prev_key_data)) = best_prev_key else {
@@ -385,7 +372,15 @@ where
         };
 
         // The previous key was found within the same snapshot entry as `key`.
-        update_known_loc(&mut self.snapshot, &prev_key_data.key, loc, next_loc + 1);
+        let mut cursor = self
+            .snapshot
+            .get_mut(&prev_key_data.key)
+            .expect("prev_key already known to exist");
+        assert!(
+            cursor.find(|&l| *l == loc),
+            "prev_key should have been found"
+        );
+        cursor.update(next_loc + 1);
         callback(Some(loc));
 
         Ok(UpdateLocResult::NotExists(prev_key_data))
@@ -512,36 +507,36 @@ where
     ) -> Result<(), Error> {
         let mut prev_key = None;
         let mut next_key = None;
-        let locs: Vec<Location> = self.snapshot.get(&key).copied().collect();
-        let mut delete_loc = None;
-
-        // Iterate over conflicts in the snapshot entry to delete the key if it exists, and
-        // potentially find the previous key.
-        for loc in locs {
-            let data = Self::get_update_op(&self.log, loc).await?;
-            if data.key == key {
-                delete_loc = Some(loc);
-                next_key = Some(data.next_key);
-                continue;
-            }
-            if data.key > key {
-                continue;
-            }
-            let Some((_, ref current_prev_key, _)) = prev_key else {
-                prev_key = Some((loc, data.key.clone(), data.value));
-                continue;
+        {
+            // If the translated key is in the snapshot, get a cursor to look for the key.
+            let Some(mut cursor) = self.snapshot.get_mut(&key) else {
+                // no-op
+                return Ok(());
             };
-            if data.key > *current_prev_key {
-                prev_key = Some((loc, data.key.clone(), data.value));
+
+            // Iterate over conflicts in the snapshot entry to delete the key if it exists, and
+            // potentially find the previous key.
+            while let Some(&loc) = cursor.next() {
+                let data = Self::get_update_op(&self.log, loc).await?;
+                if data.key == key {
+                    // The key is in the snapshot, so delete it.
+                    cursor.delete();
+                    next_key = Some(data.next_key);
+                    callback(false, Some(loc));
+                    continue;
+                }
+                if data.key > key {
+                    continue;
+                }
+                let Some((_, ref current_prev_key, _)) = prev_key else {
+                    prev_key = Some((loc, data.key.clone(), data.value));
+                    continue;
+                };
+                if data.key > *current_prev_key {
+                    prev_key = Some((loc, data.key.clone(), data.value));
+                }
             }
         }
-
-        let Some(delete_loc) = delete_loc else {
-            // no-op
-            return Ok(());
-        };
-        delete_known_loc(&mut self.snapshot, &key, delete_loc);
-        callback(false, Some(delete_loc));
 
         let Some(next_key) = next_key else {
             // no-op
@@ -563,6 +558,7 @@ where
             let Some((iter, _)) = self.snapshot.prev_translated_key(&key) else {
                 unreachable!("DB should not be empty");
             };
+            // Collect to avoid holding a borrow across await points (rust-lang/rust#100013).
             let locs: Vec<Location> = iter.copied().collect();
             let last_key = self.last_key_in_iter(locs).await?;
             prev_key = last_key.map(|(loc, data)| (loc, data.key, data.value));
@@ -621,9 +617,10 @@ where
         // Collect all the possible matching `locations` for any referenced key, while retaining
         // each item in the batch in a `mutations` map.
         let mut mutations = BTreeMap::new();
-        let mut locations = Vec::new();
+        let mut locations = Vec::with_capacity(iter.size_hint().0);
         for (key, value) in iter {
-            locations.extend(self.snapshot.get(&key).copied());
+            let iter = self.snapshot.get(&key);
+            locations.extend(iter.copied());
             mutations.insert(key, value);
         }
 
@@ -818,20 +815,23 @@ impl<
         K: Array,
         V: ValueEncoding,
         C: Contiguous<Item = Operation<K, V>>,
-        I: Index<Value = Location>,
+        I: Index<Value = Location> + Send + Sync + 'static,
         H: Hasher,
-        M: MerkleizationState<DigestOf<H>>,
+        M: MerkleizationState<DigestOf<H>> + Send + Sync,
         D: DurabilityState,
     > kv::Gettable for Db<E, C, I, H, Update<K, V>, M, D>
 where
-    Operation<K, V>: Codec,
+    Operation<K, V>: CodecShared,
 {
     type Key = K;
     type Value = V::Value;
     type Error = Error;
 
-    async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
-        self.get(key).await
+    fn get(
+        &self,
+        key: &Self::Key,
+    ) -> impl std::future::Future<Output = Result<Option<Self::Value>, Self::Error>> {
+        self.get(key)
     }
 }
 
@@ -840,11 +840,11 @@ impl<
         K: Array,
         V: ValueEncoding,
         C: MutableContiguous<Item = Operation<K, V>>,
-        I: Index<Value = Location>,
+        I: Index<Value = Location> + 'static,
         H: Hasher,
     > kv::Updatable for Db<E, C, I, H, Update<K, V>, Unmerkleized, NonDurable>
 where
-    Operation<K, V>: Codec,
+    Operation<K, V>: CodecShared,
 {
     async fn update(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
         self.update(key, value).await
@@ -856,11 +856,12 @@ impl<
         K: Array,
         V: ValueEncoding,
         C: MutableContiguous<Item = Operation<K, V>>,
-        I: Index<Value = Location>,
+        I: Index<Value = Location> + 'static,
         H: Hasher,
     > kv::Deletable for Db<E, C, I, H, Update<K, V>, Unmerkleized, NonDurable>
 where
     Operation<K, V>: Codec,
+    V::Value: Send + Sync,
 {
     async fn delete(&mut self, key: Self::Key) -> Result<bool, Self::Error> {
         self.delete(key).await
@@ -911,14 +912,15 @@ where
     K: Array,
     V: ValueEncoding,
     C: MutableContiguous<Item = Operation<K, V>>,
-    I: Index<Value = Location>,
+    I: Index<Value = Location> + 'static,
     H: Hasher,
     Operation<K, V>: Codec,
+    V::Value: Send + Sync,
 {
-    async fn write_batch(
-        &mut self,
-        iter: impl Iterator<Item = (K, Option<V::Value>)>,
-    ) -> Result<(), Error> {
+    async fn write_batch<'a, Iter>(&'a mut self, iter: Iter) -> Result<(), Error>
+    where
+        Iter: Iterator<Item = (K, Option<V::Value>)> + Send + 'a,
+    {
         self.write_batch_with_callback(iter, |_, _| {}).await
     }
 }
@@ -930,9 +932,10 @@ where
     K: Array,
     V: ValueEncoding,
     C: MutableContiguous<Item = Operation<K, V>> + Persistable<Error = crate::journal::Error>,
-    I: Index<Value = Location>,
+    I: Index<Value = Location> + 'static,
     H: Hasher,
     Operation<K, V>: Codec,
+    V::Value: Send + Sync,
 {
     type Mutable = Db<E, C, I, H, Update<K, V>, Unmerkleized, NonDurable>;
 
@@ -949,9 +952,10 @@ where
     K: Array,
     V: ValueEncoding,
     C: MutableContiguous<Item = Operation<K, V>> + Persistable<Error = crate::journal::Error>,
-    I: Index<Value = Location>,
+    I: Index<Value = Location> + 'static,
     H: Hasher,
     Operation<K, V>: Codec,
+    V::Value: Send + Sync,
 {
     type Digest = H::Digest;
     type Operation = Operation<K, V>;
@@ -975,19 +979,12 @@ where
     K: Array,
     V: ValueEncoding,
     C: MutableContiguous<Item = Operation<K, V>> + Persistable<Error = crate::journal::Error>,
-    I: Index<Value = Location>,
+    I: Index<Value = Location> + 'static,
     H: Hasher,
     Operation<K, V>: Codec,
+    V::Value: Send + Sync,
 {
     type Mutable = Db<E, C, I, H, Update<K, V>, Unmerkleized, NonDurable>;
-    type Durable = Db<E, C, I, H, Update<K, V>, Merkleized<H>, Durable>;
-
-    async fn commit(
-        self,
-        metadata: Option<V::Value>,
-    ) -> Result<(Self::Durable, Range<Location>), Error> {
-        self.commit(metadata).await
-    }
 
     fn into_mutable(self) -> Self::Mutable {
         self.into_mutable()
@@ -1001,9 +998,10 @@ where
     K: Array,
     V: ValueEncoding,
     C: MutableContiguous<Item = Operation<K, V>> + Persistable<Error = crate::journal::Error>,
-    I: Index<Value = Location>,
+    I: Index<Value = Location> + 'static,
     H: Hasher,
     Operation<K, V>: Codec,
+    V::Value: Send + Sync,
 {
     type Digest = H::Digest;
     type Operation = Operation<K, V>;
@@ -1043,7 +1041,7 @@ mod test {
         deterministic::{Context, Runner},
         Runner as _,
     };
-    use commonware_utils::sequence::FixedBytes;
+    use commonware_utils::{sequence::FixedBytes, NZU64};
     use core::{future::Future, pin::Pin};
     use futures::StreamExt as _;
 
@@ -1127,15 +1125,14 @@ mod test {
         assert_eq!(db.root(), root);
 
         // Confirm the inactivity floor doesn't fall endlessly behind with multiple commits.
-        let mut db = db.into_mutable();
+        let mut mutable_db = db.into_mutable();
         for _ in 1..100 {
-            let (durable_db, _) = db.commit(None).await.unwrap();
-            let clean_db = durable_db.into_merkleized().await.unwrap();
-            assert_eq!(clean_db.op_count() - 1, clean_db.inactivity_floor_loc());
-            db = clean_db.into_mutable();
+            let (durable_db, _) = mutable_db.commit(None).await.unwrap();
+            assert_eq!(durable_db.op_count() - 1, durable_db.inactivity_floor_loc());
+            mutable_db = durable_db.into_mutable();
         }
-
-        db.commit(None)
+        mutable_db
+            .commit(None)
             .await
             .unwrap()
             .0
@@ -1162,6 +1159,36 @@ mod test {
         executor.start(|context| async move {
             let db = open_variable_db(context.clone()).await;
             test_ordered_any_db_empty(context, db, |ctx| Box::pin(open_variable_db(ctx))).await;
+        });
+    }
+
+    fn assert_send<T: Send>(_: T) {}
+
+    #[test_traced]
+    fn test_futures_are_send() {
+        let runner = Runner::default();
+        runner.start(|context| async move {
+            let mut db = open_fixed_db(context.clone()).await;
+            let key = FixedBytes::from([9u8; 4]);
+            let value = Sha256::fill(5u8);
+            let loc = Location::new_unchecked(0);
+
+            assert_send(db.get(&key));
+            assert_send(db.get_metadata());
+            assert_send(db.sync());
+            assert_send(db.prune(loc));
+            assert_send(db.proof(loc, NZU64!(1)));
+
+            let mut db = db.into_mutable();
+            assert_send(db.get(&key));
+            assert_send(db.get_all(&key));
+            assert_send(db.get_with_loc(&key));
+            assert_send(db.get_span(&key));
+            assert_send(db.write_batch(vec![(key.clone(), Some(value))].into_iter()));
+            assert_send(db.update(key.clone(), value));
+            assert_send(db.create(key.clone(), value));
+            assert_send(db.delete(key));
+            assert_send(db.commit(None));
         });
     }
 

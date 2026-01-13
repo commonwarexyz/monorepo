@@ -12,7 +12,7 @@ use crate::{
     mmr::Location,
     Persistable,
 };
-use commonware_codec::Codec;
+use commonware_codec::{Codec, CodecShared};
 use commonware_runtime::{buffer::PoolRef, Metrics, Storage};
 use commonware_utils::NZUsize;
 use core::ops::Range;
@@ -90,10 +90,20 @@ impl<C> Config<C> {
     }
 }
 
-/// A position-based journal for variable-length items.
+/// A contiguous journal with variable-size entries.
 ///
 /// This journal manages section assignment automatically, allowing callers to append items
 /// sequentially without manually tracking section numbers.
+///
+/// # Repair
+///
+/// Like
+/// [sqlite](https://github.com/sqlite/sqlite/blob/8658a8df59f00ec8fcfea336a2a6a4b5ef79d2ee/src/wal.c#L1504-L1505)
+/// and
+/// [rocksdb](https://github.com/facebook/rocksdb/blob/0c533e61bc6d89fdf1295e8e0bcee4edb3aef401/include/rocksdb/options.h#L441-L445),
+/// the first invalid data read will be considered the new end of the journal (and the
+/// underlying [Blob](commonware_runtime::Blob) will be truncated to the last valid item). Repair occurs during
+/// init via the underlying segmented journals.
 ///
 /// # Invariants
 ///
@@ -119,11 +129,11 @@ impl<C> Config<C> {
 /// before the offsets journal.
 pub struct Journal<E: Storage + Metrics, V: Codec> {
     /// The underlying variable-length data journal.
-    pub(crate) data: variable::Journal<E, V>,
+    data: variable::Journal<E, V>,
 
     /// Index mapping positions to byte offsets within the data journal.
     /// The section can be calculated from the position using items_per_section.
-    pub(crate) offsets: fixed::Journal<E, u32>,
+    offsets: fixed::Journal<E, u64>,
 
     /// The number of items per section.
     ///
@@ -149,7 +159,7 @@ pub struct Journal<E: Storage + Metrics, V: Codec> {
     oldest_retained_pos: u64,
 }
 
-impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
+impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
     /// Initialize a contiguous variable journal.
     ///
     /// # Crash Recovery
@@ -597,13 +607,13 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
     /// Returns `(oldest_retained_pos, size)` for the contiguous journal.
     async fn align_journals(
         data: &mut variable::Journal<E, V>,
-        offsets: &mut fixed::Journal<E, u32>,
+        offsets: &mut fixed::Journal<E, u64>,
         items_per_section: u64,
     ) -> Result<(u64, u64), Error> {
         // === Handle empty data journal case ===
-        let items_in_last_section = match data.blobs.last_key_value() {
-            Some((last_section, _)) => {
-                let stream = data.replay(*last_section, 0, REPLAY_BUFFER_SIZE).await?;
+        let items_in_last_section = match data.newest_section() {
+            Some(last_section) => {
+                let stream = data.replay(last_section, 0, REPLAY_BUFFER_SIZE).await?;
                 futures::pin_mut!(stream);
                 let mut count = 0u64;
                 while let Some(result) = stream.next().await {
@@ -619,16 +629,17 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         // The latter should only occur if a crash occured after opening a data journal blob but
         // before writing to it.
         let data_empty =
-            data.blobs.is_empty() || (data.blobs.len() == 1 && items_in_last_section == 0);
+            data.is_empty() || (data.num_sections() == 1 && items_in_last_section == 0);
         if data_empty {
             let size = offsets.size();
 
-            if !data.blobs.is_empty() {
+            if !data.is_empty() {
                 // A section exists but contains 0 items. This can happen in two cases:
                 // 1. Rewind crash: we rewound the data journal but crashed before rewinding offsets
                 // 2. First append crash: we opened the first section blob but crashed before writing to it
                 // In both cases, calculate target position from the first remaining section
-                let first_section = *data.blobs.first_key_value().unwrap().0;
+                // SAFETY: data is non-empty (checked above)
+                let first_section = data.oldest_section().unwrap();
                 let target_pos = first_section * items_per_section;
 
                 info!("crash repair: rewinding offsets from {size} to {target_pos}");
@@ -655,9 +666,9 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
 
         // === Handle non-empty data journal case ===
         let (data_oldest_pos, data_size) = {
-            // Data exists -- count items
-            let first_section = *data.blobs.first_key_value().unwrap().0;
-            let last_section = *data.blobs.last_key_value().unwrap().0;
+            // SAFETY: data is non-empty (empty case returns early above)
+            let first_section = data.oldest_section().unwrap();
+            let last_section = data.newest_section().unwrap();
 
             let oldest_pos = first_section * items_per_section;
 
@@ -733,16 +744,16 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
     ///
     /// # Warning
     ///
-    /// - Panics if `data.blobs` is empty
+    /// - Panics if data journal is empty
     /// - Panics if `offsets_size` >= `data.size()`
     async fn add_missing_offsets(
         data: &variable::Journal<E, V>,
-        offsets: &mut fixed::Journal<E, u32>,
+        offsets: &mut fixed::Journal<E, u64>,
         offsets_size: u64,
         items_per_section: u64,
     ) -> Result<(), Error> {
         assert!(
-            !data.blobs.is_empty(),
+            !data.is_empty(),
             "rebuild_offsets called with empty data journal"
         );
 
@@ -756,14 +767,14 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
                     (last_section, last_offset, true)
                 } else {
                     // Offsets fully pruned but data has items -- start from first data section
-                    // SAFETY: data.blobs is non-empty (checked above)
-                    let first_section = *data.blobs.first_key_value().unwrap().0;
+                    // SAFETY: data is non-empty (checked above)
+                    let first_section = data.oldest_section().unwrap();
                     (first_section, 0, false)
                 }
             } else {
                 // Offsets empty -- start from first data section
-                // SAFETY: data.blobs is non-empty (checked above)
-                let first_section = *data.blobs.first_key_value().unwrap().0;
+                // SAFETY: data is non-empty (checked above)
+                let first_section = data.oldest_section().unwrap();
                 (first_section, 0, false)
             };
 
@@ -793,7 +804,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
 }
 
 // Implement Contiguous trait for variable-length items
-impl<E: Storage + Metrics, V: Codec> Contiguous for Journal<E, V> {
+impl<E: Storage + Metrics, V: CodecShared> Contiguous for Journal<E, V> {
     type Item = V;
 
     fn size(&self) -> u64 {
@@ -821,7 +832,7 @@ impl<E: Storage + Metrics, V: Codec> Contiguous for Journal<E, V> {
     }
 }
 
-impl<E: Storage + Metrics, V: Codec> MutableContiguous for Journal<E, V> {
+impl<E: Storage + Metrics, V: CodecShared> MutableContiguous for Journal<E, V> {
     async fn append(&mut self, item: Self::Item) -> Result<u64, Error> {
         Self::append(self, item).await
     }
@@ -835,7 +846,7 @@ impl<E: Storage + Metrics, V: Codec> MutableContiguous for Journal<E, V> {
     }
 }
 
-impl<E: Storage + Metrics, V: Codec> Persistable for Journal<E, V> {
+impl<E: Storage + Metrics, V: CodecShared> Persistable for Journal<E, V> {
     type Error = Error;
 
     async fn commit(&mut self) -> Result<(), Error> {
@@ -855,13 +866,17 @@ mod tests {
     use super::*;
     use crate::journal::contiguous::tests::run_contiguous_tests;
     use commonware_macros::test_traced;
-    use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
-    use commonware_utils::{NZUsize, NZU64};
+    use commonware_runtime::{buffer::pool::PoolRef, deterministic, Runner};
+    use commonware_utils::{NZUsize, NZU16, NZU64};
     use futures::FutureExt as _;
+    use std::num::NonZeroU16;
 
     // Use some jank sizes to exercise boundary conditions.
-    const PAGE_SIZE: usize = 101;
+    const PAGE_SIZE: NonZeroU16 = NZU16!(101);
     const PAGE_CACHE_SIZE: usize = 2;
+    // Larger page sizes for tests that need more buffer space.
+    const LARGE_PAGE_SIZE: NonZeroU16 = NZU16!(1024);
+    const SMALL_PAGE_SIZE: NonZeroU16 = NZU16!(512);
 
     /// Test that complete offsets partition loss after pruning is detected as unrecoverable.
     ///
@@ -877,7 +892,7 @@ mod tests {
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
-                buffer_pool: PoolRef::new(NZUsize!(1024), NZUsize!(10)),
+                buffer_pool: PoolRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -927,7 +942,7 @@ mod tests {
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
-                buffer_pool: PoolRef::new(NZUsize!(1024), NZUsize!(10)),
+                buffer_pool: PoolRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -992,7 +1007,7 @@ mod tests {
                             items_per_section: NZU64!(10),
                             compression: None,
                             codec_config: (),
-                            buffer_pool: PoolRef::new(NZUsize!(1024), NZUsize!(10)),
+                            buffer_pool: PoolRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
                             write_buffer: NZUsize!(1024),
                         },
                     )
@@ -1014,7 +1029,7 @@ mod tests {
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
-                buffer_pool: PoolRef::new(NZUsize!(1024), NZUsize!(10)),
+                buffer_pool: PoolRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -1102,7 +1117,7 @@ mod tests {
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
-                buffer_pool: PoolRef::new(NZUsize!(1024), NZUsize!(10)),
+                buffer_pool: PoolRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -1185,7 +1200,7 @@ mod tests {
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
-                buffer_pool: PoolRef::new(NZUsize!(1024), NZUsize!(10)),
+                buffer_pool: PoolRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -1247,7 +1262,7 @@ mod tests {
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
-                buffer_pool: PoolRef::new(NZUsize!(1024), NZUsize!(10)),
+                buffer_pool: PoolRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -1284,7 +1299,7 @@ mod tests {
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
-                buffer_pool: PoolRef::new(NZUsize!(1024), NZUsize!(10)),
+                buffer_pool: PoolRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -1340,7 +1355,7 @@ mod tests {
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
-                buffer_pool: PoolRef::new(NZUsize!(1024), NZUsize!(10)),
+                buffer_pool: PoolRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -1408,7 +1423,7 @@ mod tests {
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
-                buffer_pool: PoolRef::new(NZUsize!(1024), NZUsize!(10)),
+                buffer_pool: PoolRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -1468,7 +1483,7 @@ mod tests {
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
-                buffer_pool: PoolRef::new(NZUsize!(1024), NZUsize!(10)),
+                buffer_pool: PoolRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -1535,7 +1550,7 @@ mod tests {
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
-                buffer_pool: PoolRef::new(NZUsize!(1024), NZUsize!(10)),
+                buffer_pool: PoolRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -1577,7 +1592,7 @@ mod tests {
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
-                buffer_pool: PoolRef::new(NZUsize!(512), NZUsize!(2)),
+                buffer_pool: PoolRef::new(SMALL_PAGE_SIZE, NZUsize!(2)),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -1610,7 +1625,7 @@ mod tests {
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
-                buffer_pool: PoolRef::new(NZUsize!(512), NZUsize!(2)),
+                buffer_pool: PoolRef::new(SMALL_PAGE_SIZE, NZUsize!(2)),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -1649,7 +1664,7 @@ mod tests {
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
-                buffer_pool: PoolRef::new(NZUsize!(512), NZUsize!(2)),
+                buffer_pool: PoolRef::new(SMALL_PAGE_SIZE, NZUsize!(2)),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -1683,7 +1698,7 @@ mod tests {
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
-                buffer_pool: PoolRef::new(NZUsize!(512), NZUsize!(2)),
+                buffer_pool: PoolRef::new(SMALL_PAGE_SIZE, NZUsize!(2)),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -1735,7 +1750,7 @@ mod tests {
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
-                buffer_pool: PoolRef::new(NZUsize!(512), NZUsize!(2)),
+                buffer_pool: PoolRef::new(SMALL_PAGE_SIZE, NZUsize!(2)),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -1766,7 +1781,7 @@ mod tests {
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
-                buffer_pool: PoolRef::new(NZUsize!(512), NZUsize!(2)),
+                buffer_pool: PoolRef::new(SMALL_PAGE_SIZE, NZUsize!(2)),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -1812,7 +1827,7 @@ mod tests {
                 compression: None,
                 codec_config: (),
                 write_buffer: NZUsize!(1024),
-                buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+                buffer_pool: PoolRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
             };
 
             // Initialize journal with sync boundaries when no existing data exists
@@ -1850,7 +1865,7 @@ mod tests {
                 compression: None,
                 codec_config: (),
                 write_buffer: NZUsize!(1024),
-                buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+                buffer_pool: PoolRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
             };
 
             // Create initial journal with data in multiple sections
@@ -1920,7 +1935,7 @@ mod tests {
                 compression: None,
                 codec_config: (),
                 write_buffer: NZUsize!(1024),
-                buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+                buffer_pool: PoolRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
             };
 
             #[allow(clippy::reversed_empty_ranges)]
@@ -1945,7 +1960,7 @@ mod tests {
                 compression: None,
                 codec_config: (),
                 write_buffer: NZUsize!(1024),
-                buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+                buffer_pool: PoolRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
             };
 
             // Create initial journal with data exactly matching sync range
@@ -2015,7 +2030,7 @@ mod tests {
                 compression: None,
                 codec_config: (),
                 write_buffer: NZUsize!(1024),
-                buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+                buffer_pool: PoolRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
             };
 
             // Create initial journal with data beyond sync range
@@ -2059,7 +2074,7 @@ mod tests {
                 compression: None,
                 codec_config: (),
                 write_buffer: NZUsize!(1024),
-                buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+                buffer_pool: PoolRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
             };
 
             // Create initial journal with stale data
@@ -2112,7 +2127,7 @@ mod tests {
                 compression: None,
                 codec_config: (),
                 write_buffer: NZUsize!(1024),
-                buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+                buffer_pool: PoolRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
             };
 
             // Create journal with data at section boundaries
@@ -2181,7 +2196,7 @@ mod tests {
                 compression: None,
                 codec_config: (),
                 write_buffer: NZUsize!(1024),
-                buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+                buffer_pool: PoolRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
             };
 
             // Create journal with data in multiple sections
@@ -2234,6 +2249,195 @@ mod tests {
             let pos = journal.append(999).await.unwrap();
             assert_eq!(pos, 15);
             assert_eq!(journal.read(15).await.unwrap(), 999);
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// Test contiguous variable journal with items_per_section=1.
+    ///
+    /// This is a regression test for a bug where reading from size()-1 fails
+    /// when using items_per_section=1, particularly after pruning and restart.
+    #[test_traced]
+    fn test_single_item_per_section() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "single_item_per_section".to_string(),
+                items_per_section: NZU64!(1),
+                compression: None,
+                codec_config: (),
+                buffer_pool: PoolRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
+                write_buffer: NZUsize!(1024),
+            };
+
+            // === Test 1: Basic single item operation ===
+            let mut journal = Journal::<_, u64>::init(context.clone(), cfg.clone())
+                .await
+                .unwrap();
+
+            // Verify empty state
+            assert_eq!(journal.size(), 0);
+            assert_eq!(journal.oldest_retained_pos(), None);
+
+            // Append 1 item (value = position * 100, so position 0 has value 0)
+            let pos = journal.append(0).await.unwrap();
+            assert_eq!(pos, 0);
+            assert_eq!(journal.size(), 1);
+
+            // Sync
+            journal.sync().await.unwrap();
+
+            // Read from size() - 1
+            let value = journal.read(journal.size() - 1).await.unwrap();
+            assert_eq!(value, 0);
+
+            // === Test 2: Multiple items with single item per section ===
+            for i in 1..10u64 {
+                let pos = journal.append(i * 100).await.unwrap();
+                assert_eq!(pos, i);
+                assert_eq!(journal.size(), i + 1);
+
+                // Verify we can read the just-appended item at size() - 1
+                let value = journal.read(journal.size() - 1).await.unwrap();
+                assert_eq!(value, i * 100);
+            }
+
+            // Verify all items can be read
+            for i in 0..10u64 {
+                assert_eq!(journal.read(i).await.unwrap(), i * 100);
+            }
+
+            journal.sync().await.unwrap();
+
+            // === Test 3: Pruning with single item per section ===
+            // Prune to position 5 (removes positions 0-4)
+            let pruned = journal.prune(5).await.unwrap();
+            assert!(pruned);
+
+            // Size should still be 10
+            assert_eq!(journal.size(), 10);
+
+            // oldest_retained_pos should be 5
+            assert_eq!(journal.oldest_retained_pos(), Some(5));
+
+            // Reading from size() - 1 (position 9) should still work
+            let value = journal.read(journal.size() - 1).await.unwrap();
+            assert_eq!(value, 900);
+
+            // Reading from pruned positions should return ItemPruned
+            for i in 0..5 {
+                assert!(matches!(
+                    journal.read(i).await,
+                    Err(crate::journal::Error::ItemPruned(_))
+                ));
+            }
+
+            // Reading from retained positions should work
+            for i in 5..10u64 {
+                assert_eq!(journal.read(i).await.unwrap(), i * 100);
+            }
+
+            // Append more items after pruning
+            for i in 10..15u64 {
+                let pos = journal.append(i * 100).await.unwrap();
+                assert_eq!(pos, i);
+
+                // Verify we can read from size() - 1
+                let value = journal.read(journal.size() - 1).await.unwrap();
+                assert_eq!(value, i * 100);
+            }
+
+            journal.sync().await.unwrap();
+            drop(journal);
+
+            // === Test 4: Restart persistence with single item per section ===
+            let journal = Journal::<_, u64>::init(context.clone(), cfg.clone())
+                .await
+                .unwrap();
+
+            // Verify size is preserved
+            assert_eq!(journal.size(), 15);
+
+            // Verify oldest_retained_pos is preserved
+            assert_eq!(journal.oldest_retained_pos(), Some(5));
+
+            // Reading from size() - 1 should work after restart
+            let value = journal.read(journal.size() - 1).await.unwrap();
+            assert_eq!(value, 1400);
+
+            // Reading all retained positions should work
+            for i in 5..15u64 {
+                assert_eq!(journal.read(i).await.unwrap(), i * 100);
+            }
+
+            journal.destroy().await.unwrap();
+
+            // === Test 5: Restart after pruning with non-zero index (KEY SCENARIO) ===
+            // Fresh journal for this test
+            let mut journal = Journal::<_, u64>::init(context.clone(), cfg.clone())
+                .await
+                .unwrap();
+
+            // Append 10 items (positions 0-9)
+            for i in 0..10u64 {
+                journal.append(i * 1000).await.unwrap();
+            }
+
+            // Prune to position 5 (removes positions 0-4)
+            journal.prune(5).await.unwrap();
+            assert_eq!(journal.size(), 10);
+            assert_eq!(journal.oldest_retained_pos(), Some(5));
+
+            // Sync and restart
+            journal.sync().await.unwrap();
+            drop(journal);
+
+            // Re-open journal
+            let journal = Journal::<_, u64>::init(context.clone(), cfg.clone())
+                .await
+                .unwrap();
+
+            // Verify state after restart
+            assert_eq!(journal.size(), 10);
+            assert_eq!(journal.oldest_retained_pos(), Some(5));
+
+            // KEY TEST: Reading from size() - 1 (position 9) should work
+            let value = journal.read(journal.size() - 1).await.unwrap();
+            assert_eq!(value, 9000);
+
+            // Verify all retained positions (5-9) work
+            for i in 5..10u64 {
+                assert_eq!(journal.read(i).await.unwrap(), i * 1000);
+            }
+
+            journal.destroy().await.unwrap();
+
+            // === Test 6: Prune all items (edge case) ===
+            // This tests the scenario where prune removes everything.
+            // Callers must check oldest_retained_pos() before reading.
+            let mut journal = Journal::<_, u64>::init(context.clone(), cfg.clone())
+                .await
+                .unwrap();
+
+            for i in 0..5u64 {
+                journal.append(i * 100).await.unwrap();
+            }
+            journal.sync().await.unwrap();
+
+            // Prune all items
+            journal.prune(5).await.unwrap();
+            assert_eq!(journal.size(), 5); // Size unchanged
+            assert_eq!(journal.oldest_retained_pos(), None); // All pruned
+
+            // size() - 1 = 4, but position 4 is pruned
+            let result = journal.read(journal.size() - 1).await;
+            assert!(matches!(result, Err(crate::journal::Error::ItemPruned(4))));
+
+            // After appending, reading works again
+            journal.append(500).await.unwrap();
+            assert_eq!(journal.oldest_retained_pos(), Some(5));
+            assert_eq!(journal.read(journal.size() - 1).await.unwrap(), 500);
 
             journal.destroy().await.unwrap();
         });

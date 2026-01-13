@@ -10,15 +10,19 @@ use crate::{
 pub use actor::Actor;
 use commonware_cryptography::certificate::Scheme;
 use commonware_p2p::Blocker;
+use commonware_parallel::Strategy;
 pub use ingress::{Mailbox, Message};
 pub use round::Round;
 pub use verifier::Verifier;
 
-pub struct Config<S: Scheme, B: Blocker, R: Reporter> {
+pub struct Config<S: Scheme, B: Blocker, R: Reporter, T: Strategy> {
     pub scheme: S,
 
     pub blocker: B,
     pub reporter: R,
+
+    /// Strategy for parallel operations.
+    pub strategy: T,
 
     pub activity_timeout: ViewDelta,
     pub skip_timeout: ViewDelta,
@@ -33,14 +37,14 @@ mod tests {
         simplex::{
             actors::voter,
             elector::RoundRobin,
-            mocks,
+            mocks, quorum,
             scheme::{bls12381_multisig, bls12381_threshold, ed25519, secp256r1, Scheme},
             types::{
                 Certificate, Finalization, Finalize, Notarization, Notarize, Nullification,
                 Nullify, Proposal, Vote,
             },
         },
-        types::{Round, View},
+        types::{Participant, Round, View},
         Viewable,
     };
     use commonware_codec::Encode;
@@ -56,8 +60,8 @@ mod tests {
         simulated::{Config as NConfig, Link, Network},
         Recipients, Sender as _,
     };
+    use commonware_parallel::Sequential;
     use commonware_runtime::{deterministic, Clock, Metrics, Quota, Runner};
-    use commonware_utils::quorum;
     use futures::{channel::mpsc, StreamExt};
     use std::{num::NonZeroU32, time::Duration};
 
@@ -74,7 +78,7 @@ mod tests {
             .take(count)
             .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
             .collect();
-        Notarization::from_notarizes(&schemes[0], &votes)
+        Notarization::from_notarizes(&schemes[0], &votes, &Sequential)
             .expect("notarization requires a quorum of votes")
     }
 
@@ -88,7 +92,7 @@ mod tests {
             .take(count)
             .map(|scheme| Nullify::sign::<Sha256Digest>(scheme, round).unwrap())
             .collect();
-        Nullification::from_nullifies(&schemes[0], &votes)
+        Nullification::from_nullifies(&schemes[0], &votes, &Sequential)
             .expect("nullification requires a quorum of votes")
     }
 
@@ -102,7 +106,7 @@ mod tests {
             .take(count)
             .map(|scheme| Finalize::sign(scheme, proposal.clone()).unwrap())
             .collect();
-        Finalization::from_finalizes(&schemes[0], &votes)
+        Finalization::from_finalizes(&schemes[0], &votes, &Sequential)
             .expect("finalization requires a quorum of votes")
     }
 
@@ -118,7 +122,7 @@ mod tests {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
             // Create simulated network
-            let (network, mut oracle) = Network::new(
+            let (network, oracle) = Network::new(
                 context.with_label("network"),
                 NConfig {
                     max_size: 1024 * 1024,
@@ -150,6 +154,7 @@ mod tests {
                 scheme: schemes[0].clone(),
                 blocker: oracle.control(me.clone()),
                 reporter: reporter.clone(),
+                strategy: Sequential,
                 activity_timeout: ViewDelta::new(10),
                 skip_timeout: ViewDelta::new(5),
                 epoch,
@@ -191,7 +196,7 @@ mod tests {
 
             // Initialize batcher
             let view = View::new(1);
-            let active = batcher_mailbox.update(view, 0, View::zero()).await;
+            let active = batcher_mailbox.update(view, Participant::new(0), View::zero()).await;
             assert!(active);
 
             // Build certificates
@@ -278,7 +283,7 @@ mod tests {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
             // Create simulated network
-            let (network, mut oracle) = Network::new(
+            let (network, oracle) = Network::new(
                 context.with_label("network"),
                 NConfig {
                     max_size: 1024 * 1024,
@@ -310,6 +315,7 @@ mod tests {
                 scheme: schemes[0].clone(),
                 blocker: oracle.control(me.clone()),
                 reporter: reporter.clone(),
+                strategy: Sequential,
                 activity_timeout: ViewDelta::new(10),
                 skip_timeout: ViewDelta::new(5),
                 epoch,
@@ -354,7 +360,7 @@ mod tests {
             // Initialize batcher with view 1, participant 1 as leader
             // (so we can test leader proposal forwarding when vote arrives from network)
             let view = View::new(1);
-            let leader = 1u32;
+            let leader = Participant::new(1);
             let active = batcher_mailbox.update(view, leader, View::zero()).await;
             assert!(active);
 
@@ -423,7 +429,7 @@ mod tests {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
             // Create simulated network
-            let (network, mut oracle) = Network::new(
+            let (network, oracle) = Network::new(
                 context.with_label("network"),
                 NConfig {
                     max_size: 1024 * 1024,
@@ -455,6 +461,7 @@ mod tests {
                 scheme: schemes[0].clone(),
                 blocker: oracle.control(me.clone()),
                 reporter: reporter.clone(),
+                strategy: Sequential,
                 activity_timeout: ViewDelta::new(10),
                 skip_timeout: ViewDelta::new(5),
                 epoch,
@@ -509,7 +516,7 @@ mod tests {
 
             // Initialize batcher with view 1, participant 1 as leader
             let view = View::new(1);
-            let leader = 1u32;
+            let leader = Participant::new(1);
             let active = batcher_mailbox.update(view, leader, View::zero()).await;
             assert!(active);
 
@@ -613,7 +620,7 @@ mod tests {
         let executor = deterministic::Runner::timed(Duration::from_secs(30));
         executor.start(|mut context| async move {
             // Create simulated network
-            let (network, mut oracle) = Network::new(
+            let (network, oracle) = Network::new(
                 context.with_label("network"),
                 NConfig {
                     max_size: 1024 * 1024,
@@ -645,6 +652,7 @@ mod tests {
                 scheme: schemes[0].clone(),
                 blocker: oracle.control(me.clone()),
                 reporter: reporter.clone(),
+                strategy: Sequential,
                 activity_timeout: ViewDelta::new(10),
                 skip_timeout: ViewDelta::new(5),
                 epoch,
@@ -688,7 +696,7 @@ mod tests {
 
             // Initialize batcher with view 1, participant 1 as leader
             let view = View::new(1);
-            let leader = 1u32;
+            let leader = Participant::new(1);
             let active = batcher_mailbox.update(view, leader, View::zero()).await;
             assert!(active);
 
@@ -816,7 +824,7 @@ mod tests {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
             // Create simulated network
-            let (network, mut oracle) = Network::new(
+            let (network, oracle) = Network::new(
                 context.with_label("network"),
                 NConfig {
                     max_size: 1024 * 1024,
@@ -848,6 +856,7 @@ mod tests {
                 scheme: schemes[0].clone(),
                 blocker: oracle.control(me.clone()),
                 reporter: reporter.clone(),
+                strategy: Sequential,
                 activity_timeout: ViewDelta::new(10),
                 skip_timeout: ViewDelta::new(5),
                 epoch,
@@ -885,7 +894,7 @@ mod tests {
             // Initialize batcher with view 1, participant 1 as leader
             // We (participant 0) are NOT the leader
             let view = View::new(1);
-            let leader = 1u32;
+            let leader = Participant::new(1);
             let active = batcher_mailbox.update(view, leader, View::zero()).await;
             assert!(active);
 
@@ -942,7 +951,7 @@ mod tests {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
             // Create simulated network
-            let (network, mut oracle) = Network::new(
+            let (network, oracle) = Network::new(
                 context.with_label("network"),
                 NConfig {
                     max_size: 1024 * 1024,
@@ -974,6 +983,7 @@ mod tests {
                 scheme: schemes[0].clone(),
                 blocker: oracle.control(me.clone()),
                 reporter: reporter.clone(),
+                strategy: Sequential,
                 activity_timeout: ViewDelta::new(10),
                 skip_timeout: ViewDelta::new(5),
                 epoch,
@@ -1028,7 +1038,7 @@ mod tests {
             context.sleep(Duration::from_millis(50)).await;
 
             // Now set the leader - this should cause the proposal to be forwarded
-            let leader = 1u32;
+            let leader = Participant::new(1);
             let active = batcher_mailbox.update(view, leader, View::zero()).await;
             assert!(active);
 
@@ -1070,7 +1080,7 @@ mod tests {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
             // Create simulated network
-            let (network, mut oracle) = Network::new(
+            let (network, oracle) = Network::new(
                 context.with_label("network"),
                 NConfig {
                     max_size: 1024 * 1024,
@@ -1102,6 +1112,7 @@ mod tests {
                 scheme: schemes[0].clone(),
                 blocker: oracle.control(me.clone()),
                 reporter: reporter.clone(),
+                strategy: Sequential,
                 activity_timeout: ViewDelta::new(10),
                 skip_timeout: ViewDelta::new(skip_timeout),
                 epoch,
@@ -1138,7 +1149,7 @@ mod tests {
 
             // Test 1: Early views (before skip_timeout) should always return active
             // Views 1 through skip_timeout-1 are before the threshold
-            let leader = 1u32;
+            let leader = Participant::new(1);
             for v in 1..skip_timeout {
                 let view = View::new(v);
                 let active = batcher_mailbox.update(view, leader, View::zero()).await;
@@ -1218,7 +1229,7 @@ mod tests {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
             // Create simulated network
-            let (network, mut oracle) = Network::new(
+            let (network, oracle) = Network::new(
                 context.with_label("network"),
                 NConfig {
                     max_size: 1024 * 1024,
@@ -1250,6 +1261,7 @@ mod tests {
                 scheme: schemes[0].clone(),
                 blocker: oracle.control(me.clone()),
                 reporter: reporter.clone(),
+                strategy: Sequential,
                 activity_timeout: ViewDelta::new(10),
                 skip_timeout: ViewDelta::new(5),
                 epoch,
@@ -1303,7 +1315,7 @@ mod tests {
             // Start with finalized=0, current=1 (view 1 is above finalized)
             let view1 = View::new(1);
             let view2 = View::new(2);
-            let leader = 1u32;
+            let leader = Participant::new(1);
 
             let active = batcher_mailbox.update(view1, leader, View::zero()).await;
             assert!(active);
@@ -1415,7 +1427,7 @@ mod tests {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
             // Create simulated network
-            let (network, mut oracle) = Network::new(
+            let (network, oracle) = Network::new(
                 context.with_label("network"),
                 NConfig {
                     max_size: 1024 * 1024,
@@ -1448,6 +1460,7 @@ mod tests {
                 scheme: schemes[0].clone(),
                 blocker: oracle.control(me.clone()),
                 reporter: reporter.clone(),
+                strategy: Sequential,
                 activity_timeout: ViewDelta::new(10),
                 skip_timeout: ViewDelta::new(5),
                 epoch,
@@ -1512,7 +1525,7 @@ mod tests {
 
             // Initialize batcher with view 5, participant 1 as leader
             let view = View::new(5);
-            let leader = 1u32;
+            let leader = Participant::new(1);
             let active = batcher_mailbox.update(view, leader, View::zero()).await;
             assert!(active);
 

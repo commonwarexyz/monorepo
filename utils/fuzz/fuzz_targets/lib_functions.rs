@@ -2,8 +2,8 @@
 
 use arbitrary::Arbitrary;
 use commonware_utils::{
-    from_hex, from_hex_formatted, hex, max_faults, modulo, quorum, quorum_from_slice, union,
-    union_unique, NZDuration, NZUsize, NonZeroDuration, NZU16, NZU32, NZU64, NZU8,
+    from_hex, from_hex_formatted, hex, modulo, union, union_unique, Faults, N3f1, NZDuration,
+    NZUsize, NonZeroDuration, NZU16, NZU32, NZU64, NZU8,
 };
 use libfuzzer_sys::fuzz_target;
 use std::time::Duration;
@@ -115,10 +115,10 @@ fn fuzz(input: FuzzInput) {
             if n == 0 {
                 return;
             }
-            let faults = max_faults(n);
+            let faults = N3f1::max_faults(n);
             assert_eq!(faults, (n.saturating_sub(1)) / 3);
 
-            let q = quorum(n);
+            let q = N3f1::quorum(n);
             assert_eq!(q + faults, n);
         }
 
@@ -126,8 +126,8 @@ fn fuzz(input: FuzzInput) {
             if n == 0 {
                 return;
             }
-            let q = quorum(n);
-            let faults = max_faults(n);
+            let q = N3f1::quorum(n);
+            let faults = N3f1::max_faults(n);
 
             assert_eq!(q, n - faults);
         }
@@ -137,8 +137,8 @@ fn fuzz(input: FuzzInput) {
             if l == 0 {
                 return;
             }
-            let q = quorum_from_slice(a.as_slice());
-            assert_eq!(q, quorum(l));
+            let q = N3f1::quorum_from_slice(a.as_slice());
+            assert_eq!(q, N3f1::quorum(l));
         }
 
         FuzzInput::Union { a, b } => {

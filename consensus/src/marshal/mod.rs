@@ -128,9 +128,10 @@ mod tests {
         simulated::{self, Link, Network, Oracle},
         Manager,
     };
+    use commonware_parallel::Sequential;
     use commonware_runtime::{buffer::PoolRef, deterministic, Clock, Metrics, Quota, Runner};
     use commonware_storage::archive::immutable;
-    use commonware_utils::{vec::NonEmptyVec, NZUsize, NZU64};
+    use commonware_utils::{vec::NonEmptyVec, NZUsize, NZU16, NZU64};
     use futures::StreamExt;
     use rand::{
         seq::{IteratorRandom, SliceRandom},
@@ -138,7 +139,7 @@ mod tests {
     };
     use std::{
         collections::BTreeMap,
-        num::{NonZeroU32, NonZeroU64, NonZeroUsize},
+        num::{NonZeroU16, NonZeroU32, NonZeroU64, NonZeroUsize},
         time::{Duration, Instant},
     };
     use tracing::info;
@@ -150,7 +151,7 @@ mod tests {
     type S = bls12381_threshold::Scheme<K, V>;
     type P = ConstantProvider<S, Epoch>;
 
-    const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
+    const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
     const NAMESPACE: &[u8] = b"test";
     const NUM_VALIDATORS: u32 = 4;
@@ -189,12 +190,14 @@ mod tests {
             partition_prefix: format!("validator-{}", validator.clone()),
             prunable_items_per_section: NZU64!(10),
             replay_buffer: NZUsize!(1024),
-            write_buffer: NZUsize!(1024),
+            key_write_buffer: NZUsize!(1024),
+            value_write_buffer: NZUsize!(1024),
             buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            strategy: Sequential,
         };
 
         // Create the resolver
-        let mut control = oracle.control(validator.clone());
+        let control = oracle.control(validator.clone());
         let backfill = control.register(1, TEST_QUOTA).await.unwrap();
         let resolver_cfg = resolver::Config {
             public_key: validator.clone(),
@@ -237,13 +240,17 @@ mod tests {
                 freezer_table_initial_size: 64,
                 freezer_table_resize_frequency: 10,
                 freezer_table_resize_chunk_size: 10,
-                freezer_journal_partition: format!(
-                    "{}-finalizations-by-height-freezer-journal",
+                freezer_key_partition: format!(
+                    "{}-finalizations-by-height-freezer-key",
                     config.partition_prefix
                 ),
-                freezer_journal_target_size: 1024,
-                freezer_journal_compression: None,
-                freezer_journal_buffer_pool: config.buffer_pool.clone(),
+                freezer_key_buffer_pool: config.buffer_pool.clone(),
+                freezer_value_partition: format!(
+                    "{}-finalizations-by-height-freezer-value",
+                    config.partition_prefix
+                ),
+                freezer_value_target_size: 1024,
+                freezer_value_compression: None,
                 ordinal_partition: format!(
                     "{}-finalizations-by-height-ordinal",
                     config.partition_prefix
@@ -251,7 +258,9 @@ mod tests {
                 items_per_section: NZU64!(10),
                 codec_config: S::certificate_codec_config_unbounded(),
                 replay_buffer: config.replay_buffer,
-                write_buffer: config.write_buffer,
+                freezer_key_write_buffer: config.key_write_buffer,
+                freezer_value_write_buffer: config.value_write_buffer,
+                ordinal_write_buffer: config.key_write_buffer,
             },
         )
         .await
@@ -274,18 +283,24 @@ mod tests {
                 freezer_table_initial_size: 64,
                 freezer_table_resize_frequency: 10,
                 freezer_table_resize_chunk_size: 10,
-                freezer_journal_partition: format!(
-                    "{}-finalized_blocks-freezer-journal",
+                freezer_key_partition: format!(
+                    "{}-finalized_blocks-freezer-key",
                     config.partition_prefix
                 ),
-                freezer_journal_target_size: 1024,
-                freezer_journal_compression: None,
-                freezer_journal_buffer_pool: config.buffer_pool.clone(),
+                freezer_key_buffer_pool: config.buffer_pool.clone(),
+                freezer_value_partition: format!(
+                    "{}-finalized_blocks-freezer-value",
+                    config.partition_prefix
+                ),
+                freezer_value_target_size: 1024,
+                freezer_value_compression: None,
                 ordinal_partition: format!("{}-finalized_blocks-ordinal", config.partition_prefix),
                 items_per_section: NZU64!(10),
                 codec_config: config.block_codec_config,
                 replay_buffer: config.replay_buffer,
-                write_buffer: config.write_buffer,
+                freezer_key_write_buffer: config.key_write_buffer,
+                freezer_value_write_buffer: config.value_write_buffer,
+                ordinal_write_buffer: config.key_write_buffer,
             },
         )
         .await
@@ -316,7 +331,7 @@ mod tests {
             .collect();
 
         // Generate certificate signatures
-        Finalization::from_finalizes(&schemes[0], &finalizes).unwrap()
+        Finalization::from_finalizes(&schemes[0], &finalizes, &Sequential).unwrap()
     }
 
     fn make_notarization(proposal: Proposal<D>, schemes: &[S], quorum: u32) -> Notarization<S, D> {
@@ -328,7 +343,7 @@ mod tests {
             .collect();
 
         // Generate certificate signatures
-        Notarization::from_notarizes(&schemes[0], &notarizes).unwrap()
+        Notarization::from_notarizes(&schemes[0], &notarizes, &Sequential).unwrap()
     }
 
     fn setup_network(

@@ -11,7 +11,7 @@ use commonware_macros::{select, select_loop};
 use commonware_runtime::{Clock, Handle, Metrics, Quota, RateLimiter, Sink, Spawner, Stream};
 use commonware_stream::{Receiver, Sender};
 use commonware_utils::time::SYSTEM_TIME_PRECISION;
-use futures::{channel::mpsc, SinkExt, StreamExt};
+use futures::{channel::mpsc, StreamExt};
 use prometheus_client::metrics::{counter::Counter, family::Family};
 use rand_core::CryptoRngCore;
 use std::{collections::HashMap, sync::Arc, time::Duration};
@@ -28,6 +28,7 @@ pub struct Actor<E: Spawner + Clock + Metrics, C: PublicKey> {
 
     sent_messages: Family<metrics::Message, Counter>,
     received_messages: Family<metrics::Message, Counter>,
+    dropped_messages: Family<metrics::Message, Counter>,
     rate_limited: Family<metrics::Message, Counter>,
     _phantom: std::marker::PhantomData<C>,
 }
@@ -46,6 +47,7 @@ impl<E: Spawner + Clock + CryptoRngCore + Metrics, C: PublicKey> Actor<E, C> {
                 low: low_receiver,
                 sent_messages: cfg.sent_messages,
                 received_messages: cfg.received_messages,
+                dropped_messages: cfg.dropped_messages,
                 rate_limited: cfg.rate_limited,
                 _phantom: std::marker::PhantomData,
             },
@@ -208,14 +210,21 @@ impl<E: Spawner + Clock + CryptoRngCore + Metrics, C: PublicKey> Actor<E, C> {
 
                     match msg {
                         types::Message::Data(data) => {
-                            // Send message to client
+                            // Send message to application using non-blocking try_send.
                             //
-                            // If the channel handler is closed, we log an error but don't
-                            // close the peer (as other channels may still be open).
+                            // We intentionally drop messages when the application buffer is
+                            // full rather than blocking. Blocking here would also block
+                            // processing of Ping messages, causing the peer connection to
+                            // stall and potentially disconnect.
                             let sender = senders.get_mut(&data.channel).unwrap();
-                            let _ = sender.send((peer.clone(), data.message)).await.inspect_err(
-                                |e| debug!(err=?e, channel=data.channel, "failed to send message to client"),
-                            );
+                            if let Err(e) = sender.try_send((peer.clone(), data.message)) {
+                                if e.is_full() {
+                                    self.dropped_messages
+                                        .get_or_create(&metrics::Message::new_data(&peer, data.channel))
+                                        .inc();
+                                }
+                                debug!(err=?e, channel=data.channel, "failed to send message to client");
+                            }
                         }
                         types::Message::Ping => {
                             // We ignore ping messages, they are only used to keep

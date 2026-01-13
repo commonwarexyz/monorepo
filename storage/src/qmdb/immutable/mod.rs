@@ -85,7 +85,7 @@ pub struct Immutable<
     V: VariableValue,
     H: CHasher,
     T: Translator,
-    M: MerkleizationState<DigestOf<H>> = Merkleized<H>,
+    M: MerkleizationState<DigestOf<H>> + Send + Sync = Merkleized<H>,
     D: DurabilityState = Durable,
 > {
     /// Authenticated journal of operations.
@@ -112,7 +112,7 @@ impl<
         V: VariableValue,
         H: CHasher,
         T: Translator,
-        M: MerkleizationState<DigestOf<H>>,
+        M: MerkleizationState<DigestOf<H>> + Send + Sync,
         D: DurabilityState,
     > Immutable<E, K, V, H, T, M, D>
 {
@@ -461,7 +461,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: T
 
     /// Commit any pending operations to the database, ensuring their durability upon return from
     /// this function. Caller can associate an arbitrary `metadata` value with the commit.
-    /// Returns the committed database and the range of committed locations.
+    /// Returns the committed database and the range of committed locations. Note that even if no
+    /// operations were added since the last commit, this is a root-state changing operation.
     pub async fn commit(
         mut self,
         metadata: Option<V>,
@@ -504,7 +505,7 @@ impl<
         V: VariableValue,
         H: CHasher,
         T: Translator,
-        M: MerkleizationState<DigestOf<H>>,
+        M: MerkleizationState<DigestOf<H>> + Send + Sync,
         D: DurabilityState,
     > kv::Gettable for Immutable<E, K, V, H, T, M, D>
 {
@@ -523,7 +524,7 @@ impl<
         V: VariableValue,
         H: CHasher,
         T: Translator,
-        M: MerkleizationState<DigestOf<H>>,
+        M: MerkleizationState<DigestOf<H>> + Send + Sync,
         D: DurabilityState,
     > crate::qmdb::store::LogStore for Immutable<E, K, V, H, T, M, D>
 {
@@ -598,10 +599,11 @@ pub(super) mod test {
         deterministic::{self},
         Runner as _,
     };
-    use commonware_utils::{NZUsize, NZU64};
+    use commonware_utils::{NZUsize, NZU16, NZU64};
+    use std::num::NonZeroU16;
 
-    const PAGE_SIZE: usize = 77;
-    const PAGE_CACHE_SIZE: usize = 9;
+    const PAGE_SIZE: NonZeroU16 = NZU16!(77);
+    const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(9);
     const ITEMS_PER_SECTION: u64 = 5;
 
     pub(crate) fn db_config(
@@ -619,16 +621,15 @@ pub(super) mod test {
             log_write_buffer: NZUsize!(1024),
             translator: TwoCap,
             thread_pool: None,
-            buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+            buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
 
-    /// A type alias for the concrete [Immutable] type used in these unit tests.
-    type ImmutableTest = Immutable<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap>;
-
     /// Return an [Immutable] database initialized with a fixed config.
-    async fn open_db(context: deterministic::Context) -> ImmutableTest {
-        ImmutableTest::init(context, db_config("partition"))
+    async fn open_db(
+        context: deterministic::Context,
+    ) -> Immutable<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap> {
+        Immutable::init(context, db_config("partition"))
             .await
             .unwrap()
     }
@@ -1028,6 +1029,30 @@ pub(super) mod test {
             );
 
             db.destroy().await.unwrap();
+        });
+    }
+
+    fn assert_send<T: Send>(_: T) {}
+
+    #[test_traced]
+    fn test_futures_are_send() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let mut db = open_db(context.clone()).await;
+            let key = Sha256::hash(&9u64.to_be_bytes());
+            let loc = Location::new_unchecked(0);
+
+            assert_send(db.get(&key));
+            assert_send(db.get_metadata());
+            assert_send(db.sync());
+            assert_send(db.prune(loc));
+            assert_send(db.proof(loc, NZU64!(1)));
+
+            let mut db = db.into_mutable();
+            assert_send(db.get(&key));
+            assert_send(db.get_metadata());
+            assert_send(db.set(key, vec![1u8]));
+            assert_send(db.commit(None));
         });
     }
 }
