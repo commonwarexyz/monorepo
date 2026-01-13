@@ -5,7 +5,7 @@
 # dependencies = []
 # ///
 """
-Lint benchmark files for naming convention violations.
+Lint benchmark names for naming convention violations.
 
 Background
 ----------
@@ -22,21 +22,23 @@ further parsing. These rules ensure consistent, readable chart titles.
 
 Rules
 -----
-1. Use `bench_` prefix for benchmark functions (not `benchmark_`)
-   - Shorter and consistent with Rust's `#[bench]` attribute convention
-   - The majority of existing benchmarks already use this prefix
-
-2. Use `key=value` format in benchmark names (e.g., `group=g1`, not just `g1`)
+1. Use `key=value` format in benchmark params (e.g., `group=g1`, not just `g1`)
    - Chart titles should be self-documenting
    - `n=5 t=4` is clearer than `5 4` when viewed in isolation
 
-3. Separate parameters with spaces, not commas
+2. Separate parameters with spaces, not commas
    - Params are displayed as-is; commas add visual noise
    - `n=5 t=4` reads better than `n=5, t=4`
 
-4. Use `/` instead of `:` as value separators for ratios
+3. Use `/` instead of `:` as value separators for ratios
    - Colons could be confused with the `::` module separator
    - `value=1/2` is unambiguous; `value=1:2` could look like `value=1::2`
+
+How it works
+------------
+This script runs `cargo bench --workspace -- --list` to extract actual
+registered benchmark names from the compiled binaries, then validates them.
+This is more reliable than parsing source code.
 
 Usage
 -----
@@ -45,82 +47,77 @@ Usage
 """
 
 import re
+import subprocess
 import sys
 from pathlib import Path
 
 
-def find_benchmark_files(root: Path) -> list[Path]:
-    """Find all benchmark files in the repository."""
-    results = []
-    for benches_dir in root.rglob("benches"):
-        if benches_dir.is_dir():
-            # Skip target directory
-            if "target" in benches_dir.parts:
-                continue
-            for rs_file in benches_dir.glob("*.rs"):
-                results.append(rs_file)
-    return sorted(results)
+def get_benchmark_names(root: Path) -> list[str]:
+    """Run cargo bench --list to get all benchmark names."""
+    result = subprocess.run(
+        ["cargo", "bench", "--workspace", "--", "--list"],
+        cwd=root,
+        capture_output=True,
+        text=True,
+    )
+
+    # Parse output - benchmark names end with ": benchmark"
+    names = []
+    for line in result.stdout.splitlines():
+        line = line.strip()
+        if line.endswith(": benchmark"):
+            name = line[:-12]  # Remove ": benchmark" suffix
+            names.append(name)
+
+    return names
 
 
-def check_function_names(path: Path, content: str) -> list[str]:
-    """Check for `fn benchmark_` patterns that should be `fn bench_`."""
+def validate_benchmark_name(name: str) -> list[str]:
+    """Validate a single benchmark name and return any violations."""
     violations = []
-    for line_num, line in enumerate(content.splitlines(), start=1):
-        trimmed = line.strip()
-        if trimmed.startswith("fn benchmark_") or trimmed.startswith(
-            "pub fn benchmark_"
-        ):
-            violations.append(
-                f"{path}:{line_num}: Function should use `bench_` prefix, "
-                f"not `benchmark_`\n    {trimmed}"
-            )
-    return violations
 
+    # Parse the name: module::function/params
+    if "::" not in name:
+        violations.append(f"`{name}`: Missing module separator `::`")
+        return violations
 
-def check_format_strings(path: Path, content: str) -> list[str]:
-    """Check for format string issues in benchmark names."""
-    violations = []
-    for line_num, line in enumerate(content.splitlines(), start=1):
-        trimmed = line.strip()
-        if trimmed.startswith("//"):
-            continue
+    parts = name.split("::")
+    module = parts[0]
+    rest = "::".join(parts[1:])
 
-        # Check for format strings with module_path!()
-        if "module_path!()" in line and "format!" in line:
-            # Check for comma between parameters
-            if "={}," in line or "={} ," in line:
+    if "/" in rest:
+        func, params = rest.split("/", 1)
+    else:
+        # No params is fine
+        return violations
+
+    # Check for comma-separated parameters
+    if re.search(r"=\w+,\s*\w+=", params):
+        violations.append(
+            f"`{name}`: Parameters should be space-separated, not comma-separated"
+        )
+
+    # Check for colon in value position (like value=1:2)
+    if re.search(r"=\d+:\d+", params):
+        violations.append(
+            f"`{name}`: Use `/` instead of `:` as value separator (e.g., `1/2` not `1:2`)"
+        )
+
+    # Check for bare values (word without = followed by word with =)
+    # Pattern: "word word=" where first word has no =
+    param_parts = params.split()
+    for i, part in enumerate(param_parts):
+        if i + 1 < len(param_parts):
+            next_part = param_parts[i + 1]
+            if (
+                "=" not in part
+                and "=" in next_part
+                and re.match(r"^[\w-]+$", part)
+            ):
                 violations.append(
-                    f"{path}:{line_num}: Parameters should be space-separated, "
-                    f"not comma-separated\n    {trimmed}"
+                    f"`{name}`: Bare value `{part}` should use key=value format "
+                    f"(e.g., `type={part}`)"
                 )
-
-            # Check for colon in value position
-            if "={}:{}" in line:
-                violations.append(
-                    f"{path}:{line_num}: Consider using `/` instead of `:` "
-                    f"as value separator for readability\n    {trimmed}"
-                )
-
-            # Check for space before parameter name without key= prefix
-            # Pattern: "/word space word=" where first word has no =
-            match = re.search(r'"/([^"]*)"', line)
-            if match:
-                inner = match.group(1)
-                for segment in inner.split("/")[1:]:
-                    parts = segment.split()
-                    if len(parts) >= 2:
-                        first, second = parts[0], parts[1]
-                        if (
-                            "=" not in first
-                            and "{" not in first
-                            and "=" in second
-                            and re.match(r"^[\w-]+$", first)
-                        ):
-                            violations.append(
-                                f"{path}:{line_num}: Bare value `{first}` should "
-                                f"use key=value format (e.g., `type={first}`)\n"
-                                f"    {trimmed}"
-                            )
 
     return violations
 
@@ -129,37 +126,33 @@ def main() -> int:
     if len(sys.argv) > 1:
         root = Path(sys.argv[1])
     else:
-        # Find repo root by looking for Cargo.toml
         root = Path.cwd()
         while root != root.parent:
             if (root / "Cargo.toml").exists() and (root / ".github").exists():
                 break
             root = root.parent
 
-    benchmark_files = find_benchmark_files(root)
+    print("Compiling benchmarks and extracting names...", file=sys.stderr)
+    benchmark_names = get_benchmark_names(root)
+
+    if not benchmark_names:
+        print("ERROR: No benchmark names found. Is this the right directory?")
+        return 1
+
     all_violations = []
-
-    for path in benchmark_files:
-        try:
-            content = path.read_text()
-        except OSError as e:
-            all_violations.append(f"{path}: Failed to read file: {e}")
-            continue
-
-        all_violations.extend(check_function_names(path, content))
-        all_violations.extend(check_format_strings(path, content))
+    for name in benchmark_names:
+        all_violations.extend(validate_benchmark_name(name))
 
     if all_violations:
         print(f"Benchmark naming violations found ({len(all_violations)} total):\n")
-        print("\n\n".join(all_violations))
+        print("\n".join(all_violations))
         print("\n\nRules:")
-        print("1. Use `bench_` prefix for benchmark functions (not `benchmark_`)")
-        print("2. Use `key=value` format in benchmark names (e.g., `group=g1`)")
-        print("3. Separate parameters with spaces, not commas")
-        print("4. Use `/` instead of `:` as value separators for ratios")
+        print("1. Use `key=value` format in benchmark params (e.g., `group=g1`)")
+        print("2. Separate parameters with spaces, not commas")
+        print("3. Use `/` instead of `:` as value separators for ratios")
         return 1
 
-    print(f"Checked {len(benchmark_files)} benchmark files, all naming conventions followed.")
+    print(f"Checked {len(benchmark_names)} benchmarks, all naming conventions followed.")
     return 0
 
 
