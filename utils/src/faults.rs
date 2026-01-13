@@ -6,8 +6,7 @@
 //! - [`N3f1`]: Fault model requiring `n >= 3f + 1` participants
 //! - [`N5f1`]: Fault model requiring `n >= 5f + 1` participants
 //!
-//! Note: "Faults" in this module refers to Byzantine faults (arbitrary malicious
-//! behavior), not crash faults.
+//! _`f` denotes the maximum number of faults that can be tolerated._
 //!
 //! # Example
 //!
@@ -113,7 +112,8 @@ impl Faults for N3f1 {
 
 /// Fault model requiring `n >= 5f + 1` participants.
 ///
-/// Tolerates up to `f = (n-1)/5` faults with quorum size `q = n - f`.
+/// Tolerates up to `f = (n-1)/5` faults with quorum size `q = n - f` (also
+/// provided as [`l_quorum`](Self::l_quorum)).
 ///
 /// Also provides [`m_quorum`](Self::m_quorum) which computes `2f + 1`.
 ///
