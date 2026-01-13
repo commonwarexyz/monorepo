@@ -73,6 +73,21 @@ use io_uring::{
 use prometheus_client::{metrics::gauge::Gauge, registry::Registry};
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
+/// Returns the maximum number of iovecs per sendmsg call.
+/// Queries the kernel via sysconf(_SC_IOV_MAX), falling back to 1024 (Linux default).
+fn iov_max() -> usize {
+    static IOV_MAX: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *IOV_MAX.get_or_init(|| {
+        // SAFETY: sysconf is safe to call with _SC_IOV_MAX
+        let result = unsafe { libc::sysconf(libc::_SC_IOV_MAX) };
+        if result > 0 {
+            result as usize
+        } else {
+            1024 // Fallback to Linux default (UIO_MAXIOV)
+        }
+    })
+}
+
 /// Buffer(s) kept alive during io_uring operations.
 ///
 /// The io_uring kernel interface requires buffer pointers to remain valid until
@@ -109,21 +124,29 @@ impl OpBuf {
 ///
 /// All fields must remain at stable memory addresses while io_uring uses them.
 /// When `msghdr` is present, it references `iovecs`, and `iovecs` reference `chunks`.
+///
+/// # Safety Invariant
+///
+/// This type contains raw pointers that are passed to the kernel via io_uring.
+/// The fields must NOT be modified while an io_uring operation using this buffer
+/// is in flight. Only call [`advance`](Self::advance) after the corresponding CQE
+/// has been received, indicating the kernel is done with the previous pointers.
 pub struct IoVecBuf {
     /// Buffer chunks kept alive for pointer validity.
     /// For Bytes-backed buffers, this is cheap (Arc clone).
-    pub chunks: Vec<Bytes>,
+    chunks: Vec<Bytes>,
     /// iovec array pointing into chunks. Must not move.
-    pub iovecs: Box<[libc::iovec]>,
+    /// Capped at `iov_max()` entries to respect kernel limits.
+    iovecs: Box<[libc::iovec]>,
     /// msghdr pointing to iovecs. Must not move.
     /// Only used by network SendMsg operations; None for storage vectored I/O.
-    pub msghdr: Option<Box<libc::msghdr>>,
+    msghdr: Option<Box<libc::msghdr>>,
     /// Index of first chunk with remaining data (for partial I/O retries).
-    pub first_chunk_idx: usize,
+    first_chunk_idx: usize,
     /// Offset into first partially-sent chunk (for partial I/O retries).
-    pub first_chunk_offset: usize,
+    first_chunk_offset: usize,
     /// Total bytes remaining.
-    pub remaining: usize,
+    remaining: usize,
 }
 
 // SAFETY: IoVecBuf owns all data it references. The raw pointers in iovecs
@@ -131,10 +154,6 @@ pub struct IoVecBuf {
 // accessed by a single io_uring thread at a time, and the kernel only reads
 // from the pointers during the operation.
 unsafe impl Send for IoVecBuf {}
-
-// SAFETY: Same reasoning as Send - all referenced data is owned and the
-// pointers are only dereferenced by the kernel during io_uring operations.
-unsafe impl Sync for IoVecBuf {}
 
 impl std::fmt::Debug for IoVecBuf {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -151,10 +170,15 @@ impl std::fmt::Debug for IoVecBuf {
 impl IoVecBuf {
     /// Creates a new IoVecBuf from buffer chunks for network SendMsg operations.
     /// Initializes the msghdr for use with io_uring SendMsg.
+    ///
+    /// The iovec array is capped at `IOV_MAX` entries to respect kernel limits.
+    /// If there are more chunks, subsequent batches are handled via `advance()`.
     pub fn new(chunks: Vec<Bytes>) -> Self {
         let remaining: usize = chunks.iter().map(|c| c.len()).sum();
 
-        let iovecs: Box<[libc::iovec]> = chunks
+        // Cap iovecs at iov_max to avoid EINVAL from kernel
+        let iov_count = chunks.len().min(iov_max());
+        let iovecs: Box<[libc::iovec]> = chunks[..iov_count]
             .iter()
             .map(|c| libc::iovec {
                 iov_base: c.as_ptr() as *mut libc::c_void,
@@ -193,7 +217,37 @@ impl IoVecBuf {
         self.remaining == 0
     }
 
+    /// Returns the number of bytes remaining to be sent.
+    #[cfg(test)]
+    pub const fn remaining(&self) -> usize {
+        self.remaining
+    }
+
+    /// Returns the index of the first chunk with remaining data.
+    #[cfg(test)]
+    pub const fn first_chunk_idx(&self) -> usize {
+        self.first_chunk_idx
+    }
+
+    /// Returns the offset into the first chunk.
+    #[cfg(test)]
+    pub const fn first_chunk_offset(&self) -> usize {
+        self.first_chunk_offset
+    }
+
+    /// Returns the number of iovecs in the current batch.
+    #[cfg(test)]
+    pub fn iovec_count(&self) -> usize {
+        self.iovecs.len()
+    }
+
     /// Advance past processed bytes, rebuilding iovecs for remaining data.
+    ///
+    /// # Safety Requirement
+    ///
+    /// This method must only be called after the io_uring CQE for the previous
+    /// operation has been received. The kernel must be done reading from the
+    /// previous iovec pointers before they are invalidated by this call.
     pub fn advance(&mut self, mut bytes_done: usize) {
         self.remaining = self.remaining.saturating_sub(bytes_done);
 
@@ -218,18 +272,29 @@ impl IoVecBuf {
         self.rebuild_iovecs();
     }
 
-    /// Rebuilds iovecs starting from current position.
+    /// Rebuilds iovecs starting from current position, capped at iov_max.
     fn rebuild_iovecs(&mut self) {
-        let new_iovecs: Box<[libc::iovec]> = self.chunks[self.first_chunk_idx..]
+        let remaining_chunks = &self.chunks[self.first_chunk_idx..];
+        let iov_count = remaining_chunks.len().min(iov_max());
+
+        let new_iovecs: Box<[libc::iovec]> = remaining_chunks[..iov_count]
             .iter()
             .enumerate()
             .map(|(i, c)| {
                 let offset = if i == 0 { self.first_chunk_offset } else { 0 };
+                // Defensive check: offset must not exceed chunk length
+                debug_assert!(
+                    offset <= c.len(),
+                    "offset {} exceeds chunk length {}",
+                    offset,
+                    c.len()
+                );
                 libc::iovec {
                     // SAFETY: offset is always <= c.len() because:
                     // - first_chunk_offset is only incremented by bytes_done which never
                     //   exceeds the chunk's remaining length
                     // - For i > 0, offset is 0
+                    // The debug_assert above catches violations in debug builds.
                     iov_base: unsafe { c.as_ptr().add(offset) as *mut libc::c_void },
                     iov_len: c.len() - offset,
                 }
@@ -897,5 +962,218 @@ mod tests {
         // Clean shutdown
         drop(sender);
         uring_thread.join().unwrap();
+    }
+
+    mod iovec_buf_tests {
+        use super::super::IoVecBuf;
+        use bytes::Bytes;
+
+        #[test]
+        fn test_new_initializes_correctly() {
+            let chunks = vec![Bytes::from_static(b"hello"), Bytes::from_static(b"world")];
+            let buf = IoVecBuf::new(chunks);
+
+            assert_eq!(buf.remaining(), 10);
+            assert!(!buf.is_complete());
+        }
+
+        #[test]
+        fn test_advance_partial_first_chunk() {
+            let chunks = vec![Bytes::from_static(b"hello"), Bytes::from_static(b"world")];
+            let mut buf = IoVecBuf::new(chunks);
+
+            // Advance 3 bytes into first chunk
+            buf.advance(3);
+
+            assert_eq!(buf.remaining(), 7);
+            assert_eq!(buf.first_chunk_idx(), 0);
+            assert_eq!(buf.first_chunk_offset(), 3);
+            assert!(!buf.is_complete());
+        }
+
+        #[test]
+        fn test_advance_exactly_first_chunk() {
+            let chunks = vec![Bytes::from_static(b"hello"), Bytes::from_static(b"world")];
+            let mut buf = IoVecBuf::new(chunks);
+
+            // Advance exactly first chunk length
+            buf.advance(5);
+
+            assert_eq!(buf.remaining(), 5);
+            assert_eq!(buf.first_chunk_idx(), 1);
+            assert_eq!(buf.first_chunk_offset(), 0);
+            assert!(!buf.is_complete());
+        }
+
+        #[test]
+        fn test_advance_across_chunk_boundary() {
+            let chunks = vec![Bytes::from_static(b"hello"), Bytes::from_static(b"world")];
+            let mut buf = IoVecBuf::new(chunks);
+
+            // Advance past first chunk into second
+            buf.advance(7);
+
+            assert_eq!(buf.remaining(), 3);
+            assert_eq!(buf.first_chunk_idx(), 1);
+            assert_eq!(buf.first_chunk_offset(), 2);
+            assert!(!buf.is_complete());
+        }
+
+        #[test]
+        fn test_advance_complete() {
+            let chunks = vec![Bytes::from_static(b"hello"), Bytes::from_static(b"world")];
+            let mut buf = IoVecBuf::new(chunks);
+
+            // Advance all bytes
+            buf.advance(10);
+
+            assert_eq!(buf.remaining(), 0);
+            assert!(buf.is_complete());
+        }
+
+        #[test]
+        fn test_advance_multiple_times() {
+            let chunks = vec![
+                Bytes::from_static(b"aaa"),
+                Bytes::from_static(b"bbb"),
+                Bytes::from_static(b"ccc"),
+            ];
+            let mut buf = IoVecBuf::new(chunks);
+
+            // Simulate partial sends
+            buf.advance(2); // 2 bytes into first chunk
+            assert_eq!(buf.remaining(), 7);
+            assert_eq!(buf.first_chunk_idx(), 0);
+            assert_eq!(buf.first_chunk_offset(), 2);
+
+            buf.advance(3); // Finish first chunk, 2 bytes into second
+            assert_eq!(buf.remaining(), 4);
+            assert_eq!(buf.first_chunk_idx(), 1);
+            assert_eq!(buf.first_chunk_offset(), 2);
+
+            buf.advance(4); // Finish all
+            assert_eq!(buf.remaining(), 0);
+            assert!(buf.is_complete());
+        }
+
+        #[test]
+        fn test_advance_zero_bytes() {
+            let chunks = vec![Bytes::from_static(b"hello")];
+            let mut buf = IoVecBuf::new(chunks);
+
+            buf.advance(0);
+
+            assert_eq!(buf.remaining(), 5);
+            assert_eq!(buf.first_chunk_idx(), 0);
+            assert_eq!(buf.first_chunk_offset(), 0);
+        }
+
+        #[test]
+        fn test_advance_saturates_on_overflow() {
+            let chunks = vec![Bytes::from_static(b"hello")];
+            let mut buf = IoVecBuf::new(chunks);
+
+            // Advance more than available (should saturate)
+            buf.advance(100);
+
+            assert_eq!(buf.remaining(), 0);
+            assert!(buf.is_complete());
+        }
+
+        #[test]
+        fn test_empty_chunks() {
+            let chunks: Vec<Bytes> = vec![];
+            let buf = IoVecBuf::new(chunks);
+
+            assert_eq!(buf.remaining(), 0);
+            assert!(buf.is_complete());
+        }
+
+        #[test]
+        fn test_msghdr_ptr_valid() {
+            let chunks = vec![Bytes::from_static(b"test")];
+            let buf = IoVecBuf::new(chunks);
+
+            // Should not panic
+            let ptr = buf.msghdr_ptr();
+            assert!(!ptr.is_null());
+        }
+
+        #[test]
+        fn test_iov_max_capping() {
+            use super::super::iov_max;
+
+            let max = iov_max();
+            // Create more chunks than iov_max
+            let chunk_count = max + 100;
+            let chunks: Vec<Bytes> = (0..chunk_count)
+                .map(|i| Bytes::from(vec![i as u8; 10]))
+                .collect();
+            let total_bytes = chunk_count * 10;
+
+            let buf = IoVecBuf::new(chunks);
+
+            // Should cap iovecs at iov_max
+            assert_eq!(buf.iovec_count(), max);
+            // But remaining should reflect total bytes
+            assert_eq!(buf.remaining(), total_bytes);
+        }
+
+        #[test]
+        fn test_iov_max_batching_across_advance() {
+            use super::super::iov_max;
+
+            let max = iov_max();
+            // Create exactly 2 * iov_max chunks (2 batches)
+            let chunk_count = max * 2;
+            let chunk_size = 10;
+            let chunks: Vec<Bytes> = (0..chunk_count)
+                .map(|i| Bytes::from(vec![i as u8; chunk_size]))
+                .collect();
+
+            let mut buf = IoVecBuf::new(chunks);
+
+            // First batch: iov_max iovecs
+            assert_eq!(buf.iovec_count(), max);
+
+            // Advance through first batch completely
+            let first_batch_bytes = max * chunk_size;
+            buf.advance(first_batch_bytes);
+
+            // Now should have second batch: iov_max iovecs
+            assert_eq!(buf.iovec_count(), max);
+            assert_eq!(buf.first_chunk_idx(), max);
+            assert_eq!(buf.remaining(), first_batch_bytes); // Half remaining
+
+            // Advance through second batch
+            buf.advance(first_batch_bytes);
+            assert!(buf.is_complete());
+        }
+
+        #[test]
+        fn test_iov_max_partial_final_batch() {
+            use super::super::iov_max;
+
+            let max = iov_max();
+            // Create iov_max + 50 chunks (full batch + partial)
+            let extra_chunks = 50;
+            let chunk_count = max + extra_chunks;
+            let chunk_size = 10;
+            let chunks: Vec<Bytes> = (0..chunk_count)
+                .map(|i| Bytes::from(vec![i as u8; chunk_size]))
+                .collect();
+
+            let mut buf = IoVecBuf::new(chunks);
+
+            // First batch: iov_max iovecs
+            assert_eq!(buf.iovec_count(), max);
+
+            // Advance through first batch
+            buf.advance(max * chunk_size);
+
+            // Second batch should be the remaining 50 chunks
+            assert_eq!(buf.iovec_count(), extra_chunks);
+            assert_eq!(buf.remaining(), extra_chunks * chunk_size);
+        }
     }
 }

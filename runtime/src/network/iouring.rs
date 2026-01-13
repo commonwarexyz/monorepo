@@ -48,6 +48,7 @@ const TINY: usize = 1024; // 1 KB
 const SMALL: usize = 8 * 1024; // 8 KB
 const IOV_SMALL: usize = 2; // Max iovecs for small payloads
 const IOV_MSG_MAX: usize = 16; // Max iovecs before consolidation
+const COALESCE_MAX: usize = 64 * 1024; // 64 KB - max size to coalesce
 
 /// Strategy for sending data over io_uring.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,12 +62,27 @@ enum SendStrategy {
 }
 
 /// Choose the optimal send strategy based on payload size and fragmentation.
+///
+/// Decision tree:
+/// 1. Empty payload -> Noop
+/// 2. Single chunk -> CopySend (Send opcode is fastest for contiguous data)
+/// 3. Tiny payload (<1KB) -> CopySend (copy overhead is negligible)
+/// 4. Small payload (<8KB) with few chunks (<=2) -> SendMsg
+/// 5. Small payload with many chunks -> CopySend
+/// 6. Large payload with few chunks (<=16) -> SendMsg
+/// 7. Pathologically fragmented large payload (<=64KB) -> CopySend
+/// 8. Pathologically fragmented huge payload (>64KB) -> SendMsg (avoid huge copy)
 const fn choose_strategy(total: usize, n: usize) -> SendStrategy {
     if n == 0 || total == 0 {
         return SendStrategy::Noop;
     }
 
-    // Tiny payloads: fastest possible path
+    // Single chunk: use Send directly (fastest path for contiguous data)
+    if n == 1 {
+        return SendStrategy::CopySend;
+    }
+
+    // Tiny payloads: copy overhead is negligible
     if total < TINY {
         return SendStrategy::CopySend;
     }
@@ -84,8 +100,13 @@ const fn choose_strategy(total: usize, n: usize) -> SendStrategy {
         return SendStrategy::SendMsg;
     }
 
-    // Pathological fragmentation: consolidate to single buffer
-    SendStrategy::CopySend
+    // Pathological fragmentation: consolidate only if size is reasonable
+    if total <= COALESCE_MAX {
+        return SendStrategy::CopySend;
+    }
+
+    // Huge payload with pathological fragmentation: use SendMsg to avoid massive copy
+    SendStrategy::SendMsg
 }
 
 /// Extracts buffer chunks into owned Bytes for stable memory during io_uring ops.
@@ -307,8 +328,14 @@ impl Sink {
 
     /// Copy chunks to a single buffer and send using Send opcode.
     /// Used for tiny payloads or pathologically fragmented buffers.
-    async fn send_copy(&mut self, chunks: Vec<Bytes>) -> Result<(), crate::Error> {
-        let buf = consolidate_chunks(chunks);
+    /// For single-chunk payloads, skips consolidation to avoid redundant copy.
+    async fn send_copy(&mut self, mut chunks: Vec<Bytes>) -> Result<(), crate::Error> {
+        let buf = if chunks.len() == 1 {
+            // Single chunk: use directly without consolidation
+            chunks.pop().unwrap()
+        } else {
+            consolidate_chunks(chunks)
+        };
         self.send_single_buf(buf).await
     }
 
@@ -747,5 +774,140 @@ mod tests {
         // Verify we got the right data
         assert_eq!(buf1.as_slice(), &[1u8, 2, 3, 4, 5]);
         assert_eq!(buf2.as_slice(), &[6u8, 7, 8, 9, 10]);
+    }
+
+    mod strategy_tests {
+        use super::super::{
+            choose_strategy, SendStrategy, COALESCE_MAX, IOV_MSG_MAX, IOV_SMALL, SMALL, TINY,
+        };
+
+        #[test]
+        fn test_noop_cases() {
+            // Empty buffer
+            assert_eq!(choose_strategy(0, 0), SendStrategy::Noop);
+            assert_eq!(choose_strategy(0, 1), SendStrategy::Noop);
+            assert_eq!(choose_strategy(100, 0), SendStrategy::Noop);
+        }
+
+        #[test]
+        fn test_single_chunk_always_copy_send() {
+            // Single chunk should always use CopySend regardless of size
+            assert_eq!(choose_strategy(1, 1), SendStrategy::CopySend);
+            assert_eq!(choose_strategy(TINY, 1), SendStrategy::CopySend);
+            assert_eq!(choose_strategy(SMALL, 1), SendStrategy::CopySend);
+            assert_eq!(choose_strategy(COALESCE_MAX, 1), SendStrategy::CopySend);
+            assert_eq!(choose_strategy(COALESCE_MAX + 1, 1), SendStrategy::CopySend);
+        }
+
+        #[test]
+        fn test_tiny_payloads() {
+            // Tiny payloads (<1KB) should always copy
+            assert_eq!(choose_strategy(TINY - 1, 2), SendStrategy::CopySend);
+            assert_eq!(choose_strategy(TINY - 1, 10), SendStrategy::CopySend);
+            assert_eq!(choose_strategy(TINY - 1, 100), SendStrategy::CopySend);
+        }
+
+        #[test]
+        fn test_small_payloads() {
+            // Small payloads (1KB to 8KB)
+            // With few chunks: SendMsg
+            assert_eq!(choose_strategy(TINY, IOV_SMALL), SendStrategy::SendMsg);
+            assert_eq!(choose_strategy(SMALL - 1, IOV_SMALL), SendStrategy::SendMsg);
+            // With many chunks: CopySend
+            assert_eq!(choose_strategy(TINY, IOV_SMALL + 1), SendStrategy::CopySend);
+            assert_eq!(
+                choose_strategy(SMALL - 1, IOV_SMALL + 1),
+                SendStrategy::CopySend
+            );
+        }
+
+        #[test]
+        fn test_large_payloads_few_chunks() {
+            // Large payloads with few chunks use SendMsg
+            assert_eq!(choose_strategy(SMALL, IOV_MSG_MAX), SendStrategy::SendMsg);
+            assert_eq!(
+                choose_strategy(COALESCE_MAX, IOV_MSG_MAX),
+                SendStrategy::SendMsg
+            );
+            assert_eq!(
+                choose_strategy(COALESCE_MAX + 1, IOV_MSG_MAX),
+                SendStrategy::SendMsg
+            );
+        }
+
+        #[test]
+        fn test_pathological_fragmentation() {
+            // Pathologically fragmented payloads
+            // <= COALESCE_MAX: copy to single buffer
+            assert_eq!(
+                choose_strategy(SMALL, IOV_MSG_MAX + 1),
+                SendStrategy::CopySend
+            );
+            assert_eq!(
+                choose_strategy(COALESCE_MAX, IOV_MSG_MAX + 1),
+                SendStrategy::CopySend
+            );
+            // > COALESCE_MAX: use SendMsg to avoid massive copy
+            assert_eq!(
+                choose_strategy(COALESCE_MAX + 1, IOV_MSG_MAX + 1),
+                SendStrategy::SendMsg
+            );
+        }
+
+        #[test]
+        fn test_boundary_conditions() {
+            // Test exact boundary values
+            assert_eq!(choose_strategy(TINY - 1, 2), SendStrategy::CopySend); // Just under TINY
+            assert_eq!(choose_strategy(TINY, 2), SendStrategy::SendMsg); // Exactly TINY
+            assert_eq!(choose_strategy(SMALL - 1, 2), SendStrategy::SendMsg); // Just under SMALL
+            assert_eq!(choose_strategy(SMALL, 2), SendStrategy::SendMsg); // Exactly SMALL (large)
+        }
+    }
+
+    #[tokio::test]
+    async fn test_multi_chunk_sendmsg() {
+        use crate::{Listener as _, Network as _, Sink as _, Stream as _};
+        use bytes::Bytes;
+
+        // This test forces SendMsg by using a payload size >= TINY with few chunks
+        let network = Network::start(
+            Config {
+                iouring_config: iouring::Config {
+                    force_poll: Duration::from_millis(100),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            &mut Registry::default(),
+        )
+        .expect("Failed to start io_uring");
+
+        let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        // Create two chunks that together are >= TINY (1KB) to trigger SendMsg
+        let chunk1 = Bytes::from(vec![0xAA; 600]);
+        let chunk2 = Bytes::from(vec![0xBB; 600]);
+        let total_len = chunk1.len() + chunk2.len();
+
+        let reader = tokio::spawn(async move {
+            let (_addr, _sink, mut stream) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; total_len];
+            stream.recv(&mut buf[..]).await.unwrap();
+            buf
+        });
+
+        let (mut sink, _stream) = network.dial(addr).await.unwrap();
+
+        // Use bytes::Buf::chain to create a multi-chunk buffer
+        use bytes::Buf;
+        let chained = chunk1.chain(chunk2);
+        sink.send(chained).await.unwrap();
+
+        let received = reader.await.unwrap();
+
+        // Verify byte ordering is preserved
+        assert_eq!(&received[..600], &[0xAA; 600]);
+        assert_eq!(&received[600..], &[0xBB; 600]);
     }
 }
