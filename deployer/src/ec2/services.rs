@@ -39,49 +39,49 @@ pub const GRAFANA_VERSION: &str = "11.5.2";
 // (e.g., prometheus-3.2.0.linux-arm64.tar.gz) while others do not
 // (e.g., loki-linux-arm64.zip).
 
-pub fn prometheus_bin_s3_key(version: &str, architecture: Architecture) -> String {
+pub(crate) fn prometheus_bin_s3_key(version: &str, architecture: Architecture) -> String {
     format!(
         "{S3_TOOLS_BINARIES_PREFIX}/prometheus/{version}/linux-{arch}/prometheus-{version}.linux-{arch}.tar.gz",
         arch = architecture.as_str()
     )
 }
 
-pub fn grafana_bin_s3_key(version: &str, architecture: Architecture) -> String {
+pub(crate) fn grafana_bin_s3_key(version: &str, architecture: Architecture) -> String {
     format!(
         "{S3_TOOLS_BINARIES_PREFIX}/grafana/{version}/linux-{arch}/grafana_{version}_{arch}.deb",
         arch = architecture.as_str()
     )
 }
 
-pub fn loki_bin_s3_key(version: &str, architecture: Architecture) -> String {
+pub(crate) fn loki_bin_s3_key(version: &str, architecture: Architecture) -> String {
     format!(
         "{S3_TOOLS_BINARIES_PREFIX}/loki/{version}/linux-{arch}/loki-linux-{arch}.zip",
         arch = architecture.as_str()
     )
 }
 
-pub fn pyroscope_bin_s3_key(version: &str, architecture: Architecture) -> String {
+pub(crate) fn pyroscope_bin_s3_key(version: &str, architecture: Architecture) -> String {
     format!(
         "{S3_TOOLS_BINARIES_PREFIX}/pyroscope/{version}/linux-{arch}/pyroscope_{version}_linux_{arch}.tar.gz",
         arch = architecture.as_str()
     )
 }
 
-pub fn tempo_bin_s3_key(version: &str, architecture: Architecture) -> String {
+pub(crate) fn tempo_bin_s3_key(version: &str, architecture: Architecture) -> String {
     format!(
         "{S3_TOOLS_BINARIES_PREFIX}/tempo/{version}/linux-{arch}/tempo_{version}_linux_{arch}.tar.gz",
         arch = architecture.as_str()
     )
 }
 
-pub fn node_exporter_bin_s3_key(version: &str, architecture: Architecture) -> String {
+pub(crate) fn node_exporter_bin_s3_key(version: &str, architecture: Architecture) -> String {
     format!(
         "{S3_TOOLS_BINARIES_PREFIX}/node-exporter/{version}/linux-{arch}/node_exporter-{version}.linux-{arch}.tar.gz",
         arch = architecture.as_str()
     )
 }
 
-pub fn promtail_bin_s3_key(version: &str, architecture: Architecture) -> String {
+pub(crate) fn promtail_bin_s3_key(version: &str, architecture: Architecture) -> String {
     format!(
         "{S3_TOOLS_BINARIES_PREFIX}/promtail/{version}/linux-{arch}/promtail-linux-{arch}.zip",
         arch = architecture.as_str()
@@ -158,7 +158,7 @@ pub fn logrotate_config_s3_key() -> String {
 
 // S3 key functions for binary instance configs
 
-pub fn binary_service_s3_key_for_arch(architecture: Architecture) -> String {
+pub(crate) fn binary_service_s3_key_for_arch(architecture: Architecture) -> String {
     format!(
         "{S3_TOOLS_CONFIGS_PREFIX}/{DEPLOYER_VERSION}/binary/service-{arch}",
         arch = architecture.as_str()
@@ -196,7 +196,7 @@ pub fn monitoring_s3_key(tag: &str, digest: &str) -> String {
 }
 
 /// Returns the download URL for Prometheus from GitHub
-pub fn prometheus_download_url(version: &str, architecture: Architecture) -> String {
+pub(crate) fn prometheus_download_url(version: &str, architecture: Architecture) -> String {
     format!(
         "https://github.com/prometheus/prometheus/releases/download/v{version}/prometheus-{version}.linux-{arch}.tar.gz",
         arch = architecture.as_str()
@@ -204,7 +204,7 @@ pub fn prometheus_download_url(version: &str, architecture: Architecture) -> Str
 }
 
 /// Returns the download URL for Grafana
-pub fn grafana_download_url(version: &str, architecture: Architecture) -> String {
+pub(crate) fn grafana_download_url(version: &str, architecture: Architecture) -> String {
     format!(
         "https://dl.grafana.com/oss/release/grafana_{version}_{arch}.deb",
         arch = architecture.as_str()
@@ -212,7 +212,7 @@ pub fn grafana_download_url(version: &str, architecture: Architecture) -> String
 }
 
 /// Returns the download URL for Loki from GitHub
-pub fn loki_download_url(version: &str, architecture: Architecture) -> String {
+pub(crate) fn loki_download_url(version: &str, architecture: Architecture) -> String {
     format!(
         "https://github.com/grafana/loki/releases/download/v{version}/loki-linux-{arch}.zip",
         arch = architecture.as_str()
@@ -220,7 +220,7 @@ pub fn loki_download_url(version: &str, architecture: Architecture) -> String {
 }
 
 /// Returns the download URL for Pyroscope from GitHub
-pub fn pyroscope_download_url(version: &str, architecture: Architecture) -> String {
+pub(crate) fn pyroscope_download_url(version: &str, architecture: Architecture) -> String {
     format!(
         "https://github.com/grafana/pyroscope/releases/download/v{version}/pyroscope_{version}_linux_{arch}.tar.gz",
         arch = architecture.as_str()
@@ -228,7 +228,7 @@ pub fn pyroscope_download_url(version: &str, architecture: Architecture) -> Stri
 }
 
 /// Returns the download URL for Tempo from GitHub
-pub fn tempo_download_url(version: &str, architecture: Architecture) -> String {
+pub(crate) fn tempo_download_url(version: &str, architecture: Architecture) -> String {
     format!(
         "https://github.com/grafana/tempo/releases/download/v{version}/tempo_{version}_linux_{arch}.tar.gz",
         arch = architecture.as_str()
@@ -236,7 +236,7 @@ pub fn tempo_download_url(version: &str, architecture: Architecture) -> String {
 }
 
 /// Returns the download URL for Node Exporter from GitHub
-pub fn node_exporter_download_url(version: &str, architecture: Architecture) -> String {
+pub(crate) fn node_exporter_download_url(version: &str, architecture: Architecture) -> String {
     format!(
         "https://github.com/prometheus/node_exporter/releases/download/v{version}/node_exporter-{version}.linux-{arch}.tar.gz",
         arch = architecture.as_str()
@@ -244,7 +244,7 @@ pub fn node_exporter_download_url(version: &str, architecture: Architecture) -> 
 }
 
 /// Returns the download URL for Promtail from GitHub
-pub fn promtail_download_url(version: &str, architecture: Architecture) -> String {
+pub(crate) fn promtail_download_url(version: &str, architecture: Architecture) -> String {
     format!(
         "https://github.com/grafana/loki/releases/download/v{version}/promtail-linux-{arch}.zip",
         arch = architecture.as_str()
@@ -466,7 +466,7 @@ pub struct MonitoringUrls {
 }
 
 /// Command to install monitoring services (Prometheus, Loki, Grafana, Pyroscope, Tempo) on the monitoring instance
-pub fn install_monitoring_cmd(
+pub(crate) fn install_monitoring_cmd(
     urls: &MonitoringUrls,
     prometheus_version: &str,
     architecture: Architecture,
@@ -639,7 +639,7 @@ pub struct InstanceUrls {
 }
 
 /// Command to install all services on binary instances
-pub fn install_binary_cmd(
+pub(crate) fn install_binary_cmd(
     urls: &InstanceUrls,
     profiling: bool,
     architecture: Architecture,
@@ -841,7 +841,7 @@ pub const LOGROTATE_CONF: &str = r#"
 pub const BBR_CONF: &str = "net.core.default_qdisc=fq\nnet.ipv4.tcp_congestion_control=bbr\n";
 
 /// Generates systemd service file content for the deployed binary
-pub fn binary_service(architecture: Architecture) -> String {
+pub(crate) fn binary_service(architecture: Architecture) -> String {
     let lib_arch = architecture.linux_lib();
     format!(
         r#"[Unit]

@@ -209,14 +209,14 @@ cfg_if::cfg_if! {
 
         /// CPU architecture for EC2 instances
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-        pub enum Architecture {
+        pub(crate) enum Architecture {
             Arm64,
             X86_64,
         }
 
         impl Architecture {
             /// Returns the architecture string used in AMI names, download URLs, and labels
-            pub const fn as_str(&self) -> &'static str {
+            pub(crate) const fn as_str(&self) -> &'static str {
                 match self {
                     Self::Arm64 => "arm64",
                     Self::X86_64 => "amd64",
@@ -224,7 +224,7 @@ cfg_if::cfg_if! {
             }
 
             /// Returns the Linux library path component for jemalloc
-            pub const fn linux_lib(&self) -> &'static str {
+            pub(crate) const fn linux_lib(&self) -> &'static str {
                 match self {
                     Self::Arm64 => "aarch64-linux-gnu",
                     Self::X86_64 => "x86_64-linux-gnu",

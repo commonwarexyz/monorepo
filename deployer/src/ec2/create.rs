@@ -607,7 +607,9 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     let (monitoring_instance_id, monitoring_ip, monitoring_private_ip) = monitoring_result;
     info!("launched instances");
 
-    // Add monitoring IP rules to binary security groups (for Prometheus scraping)
+    // Add monitoring IP rules to binary security groups (for Prometheus scraping).
+    // This happens after instance launch but before instance configuration, so there's
+    // no window where Prometheus would try to scrape unconfigured instances.
     info!("adding monitoring ingress rules");
     for (region, resources) in region_resources.iter() {
         let binary_sg_id = resources.binary_sg_id.as_ref().unwrap();

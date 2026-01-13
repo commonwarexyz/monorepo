@@ -60,7 +60,7 @@ pub async fn delete_key_pair(client: &Ec2Client, key_name: &str) -> Result<(), E
 }
 
 /// Detects the architecture of an instance type using the AWS API
-pub async fn detect_architecture(
+pub(crate) async fn detect_architecture(
     client: &Ec2Client,
     instance_type: &str,
 ) -> Result<super::Architecture, Ec2Error> {
@@ -84,6 +84,8 @@ pub async fn detect_architecture(
         .and_then(|p| p.supported_architectures)
         .unwrap_or_default();
 
+    // EC2 instance types only support one architecture (e.g., t4g.* = arm64, t3.* = x86_64),
+    // so the check order here doesn't matter in practice.
     if architectures.iter().any(|a| a.as_ref() == "arm64") {
         Ok(super::Architecture::Arm64)
     } else if architectures.iter().any(|a| a.as_ref() == "x86_64") {
@@ -96,7 +98,7 @@ pub async fn detect_architecture(
 }
 
 /// Finds the latest Ubuntu 24.04 AMI for the given architecture in the region
-pub async fn find_latest_ami(
+pub(crate) async fn find_latest_ami(
     client: &Ec2Client,
     architecture: super::Architecture,
 ) -> Result<String, Ec2Error> {
