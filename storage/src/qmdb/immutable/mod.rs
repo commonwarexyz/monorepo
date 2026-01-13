@@ -625,12 +625,11 @@ pub(super) mod test {
         }
     }
 
-    /// A type alias for the Clean (Merkleized, Durable) [Immutable] type used in tests.
-    type CleanDb = Immutable<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap>;
-
     /// Return an [Immutable] database initialized with a fixed config.
-    async fn open_db(context: deterministic::Context) -> CleanDb {
-        CleanDb::init(context, db_config("partition"))
+    async fn open_db(
+        context: deterministic::Context,
+    ) -> Immutable<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap> {
+        Immutable::init(context, db_config("partition"))
             .await
             .unwrap()
     }

@@ -439,7 +439,13 @@ pub(super) mod test {
     /// Regression test for https://github.com/commonwarexyz/monorepo/issues/2787
     #[allow(dead_code, clippy::manual_async_fn)]
     fn issue_2787_regression(
-        db: &AnyTest,
+        db: &crate::qmdb::immutable::Immutable<
+            deterministic::Context,
+            Digest,
+            Vec<u8>,
+            Sha256,
+            TwoCap,
+        >,
         key: Digest,
     ) -> impl std::future::Future<Output = ()> + Send + use<'_> {
         async move {
