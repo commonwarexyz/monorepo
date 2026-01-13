@@ -279,12 +279,12 @@ pub async fn create_security_group_monitoring(
     Ok(sg_id)
 }
 
-/// Creates a security group for binary instances with access from deployer, monitoring, and custom ports
+/// Creates a security group for binary instances with access from deployer and custom ports
+/// Note: monitoring IP rules are added separately via `add_monitoring_ingress` after monitoring instance launches
 pub async fn create_security_group_binary(
     client: &Ec2Client,
     vpc_id: &str,
     deployer_ip: &str,
-    monitoring_ip: &str,
     tag: &str,
     ports: &[PortConfig],
 ) -> Result<String, Ec2Error> {
@@ -312,7 +312,30 @@ pub async fn create_security_group_binary(
                 .to_port(DEPLOYER_MAX_PORT)
                 .ip_ranges(IpRange::builder().cidr_ip(exact_cidr(deployer_ip)).build())
                 .build(),
-        )
+        );
+    for port in ports {
+        builder = builder.ip_permissions(
+            IpPermission::builder()
+                .ip_protocol(&port.protocol)
+                .from_port(port.port as i32)
+                .to_port(port.port as i32)
+                .ip_ranges(IpRange::builder().cidr_ip(&port.cidr).build())
+                .build(),
+        );
+    }
+    builder.send().await?;
+    Ok(sg_id)
+}
+
+/// Adds monitoring IP ingress rules to a binary security group for Prometheus scraping
+pub async fn add_monitoring_ingress(
+    client: &Ec2Client,
+    sg_id: &str,
+    monitoring_ip: &str,
+) -> Result<(), Ec2Error> {
+    client
+        .authorize_security_group_ingress()
+        .group_id(sg_id)
         .ip_permissions(
             IpPermission::builder()
                 .ip_protocol("tcp")
@@ -336,19 +359,10 @@ pub async fn create_security_group_binary(
                         .build(),
                 )
                 .build(),
-        );
-    for port in ports {
-        builder = builder.ip_permissions(
-            IpPermission::builder()
-                .ip_protocol(&port.protocol)
-                .from_port(port.port as i32)
-                .to_port(port.port as i32)
-                .ip_ranges(IpRange::builder().cidr_ip(&port.cidr).build())
-                .build(),
-        );
-    }
-    builder.send().await?;
-    Ok(sg_id)
+        )
+        .send()
+        .await?;
+    Ok(())
 }
 
 /// Launches EC2 instances with specified configurations

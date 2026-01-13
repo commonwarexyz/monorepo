@@ -411,12 +411,35 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
         .unzip();
     info!(?regions, "initialized resources");
 
+    // Create binary security groups first (without monitoring IP - added later for parallel launch)
+    // This must happen before accessing monitoring_resources to avoid borrow conflicts
+    info!("creating binary security groups");
+    for (region, resources) in region_resources.iter_mut() {
+        let binary_sg_id = create_security_group_binary(
+            &ec2_clients[region],
+            &resources.vpc_id,
+            &deployer_ip,
+            tag,
+            &config.ports,
+        )
+        .await?;
+        info!(
+            sg = binary_sg_id.as_str(),
+            vpc = resources.vpc_id.as_str(),
+            region = region.as_str(),
+            "created binary security group"
+        );
+        resources.binary_sg_id = Some(binary_sg_id);
+    }
+    info!("created binary security groups");
+
     // Setup VPC peering connections
     info!("initializing VPC peering connections");
     let monitoring_region = MONITORING_REGION.to_string();
     let monitoring_resources = region_resources.get(&monitoring_region).unwrap();
     let monitoring_vpc_id = &monitoring_resources.vpc_id;
     let monitoring_cidr = &monitoring_resources.vpc_cidr;
+    let monitoring_route_table_id = &monitoring_resources.route_table_id;
     let binary_regions: HashSet<String> =
         config.instances.iter().map(|i| i.region.clone()).collect();
     for region in &regions {
@@ -453,7 +476,7 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
             );
             add_route(
                 &ec2_clients[&monitoring_region],
-                &monitoring_resources.route_table_id,
+                monitoring_route_table_id,
                 binary_cidr,
                 &peer_id,
             )
@@ -476,85 +499,67 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     }
     info!("initialized VPC peering connections");
 
-    // Launch monitoring instance
-    info!("launching monitoring instance");
-    let monitoring_instance_id;
-    let monitoring_ip;
-    let monitoring_private_ip;
-    let monitoring_sg_id;
-    {
-        let monitoring_ec2_client = &ec2_clients[&monitoring_region];
-        let ami_id = find_latest_ami(monitoring_ec2_client, monitoring_architecture).await?;
-        let monitoring_instance_type = InstanceType::try_parse(&config.monitoring.instance_type)
-            .expect("Invalid instance type");
-        let monitoring_storage_class =
-            VolumeType::try_parse(&config.monitoring.storage_class).expect("Invalid storage class");
-        monitoring_sg_id = monitoring_resources
-            .monitoring_sg_id
-            .as_ref()
-            .unwrap()
-            .clone();
-        monitoring_instance_id = launch_instances(
-            monitoring_ec2_client,
-            &ami_id,
-            monitoring_instance_type,
-            config.monitoring.storage_size,
-            monitoring_storage_class,
-            &key_name,
-            &monitoring_resources.subnet_id,
-            &monitoring_sg_id,
-            1,
-            MONITORING_NAME,
-            tag,
-        )
-        .await?[0]
-            .clone();
-        monitoring_ip = wait_for_instances_running(
-            monitoring_ec2_client,
-            slice::from_ref(&monitoring_instance_id),
-        )
-        .await?[0]
-            .clone();
-        monitoring_private_ip =
-            get_private_ip(monitoring_ec2_client, &monitoring_instance_id).await?;
-    }
-    info!(ip = monitoring_ip.as_str(), "launched monitoring instance");
+    // Prepare launch configurations for all instances
+    info!("launching all instances in parallel");
+    let monitoring_ec2_client = &ec2_clients[&monitoring_region];
+    let monitoring_ami_id = find_latest_ami(monitoring_ec2_client, monitoring_architecture).await?;
+    let monitoring_instance_type = InstanceType::try_parse(&config.monitoring.instance_type)
+        .expect("Invalid instance type");
+    let monitoring_storage_class =
+        VolumeType::try_parse(&config.monitoring.storage_class).expect("Invalid storage class");
+    let monitoring_sg_id = monitoring_resources
+        .monitoring_sg_id
+        .as_ref()
+        .unwrap()
+        .clone();
+    let monitoring_subnet_id = monitoring_resources.subnet_id.clone();
 
-    // Create binary security groups
-    info!("creating security groups");
-    for (region, resources) in region_resources.iter_mut() {
-        let binary_sg_id = create_security_group_binary(
-            &ec2_clients[region],
-            &resources.vpc_id,
-            &deployer_ip,
-            &monitoring_ip,
-            tag,
-            &config.ports,
-        )
-        .await?;
-        info!(
-            sg = binary_sg_id.as_str(),
-            vpc = resources.vpc_id.as_str(),
-            region = region.as_str(),
-            "created binary security group"
-        );
-        resources.binary_sg_id = Some(binary_sg_id);
-    }
-    info!("created security groups");
-
-    // Launch binary instances
-    info!("launching binary instances");
-    let mut launch_configs = Vec::new();
+    let mut binary_launch_configs = Vec::new();
     for instance in &config.instances {
         let region = instance.region.clone();
         let resources = region_resources.get(&region).unwrap();
         let ec2_client = ec2_clients.get(&region).unwrap();
         let arch = instance_architectures[&instance.name];
         let ami_id = find_latest_ami(ec2_client, arch).await?;
-        launch_configs.push((instance, ec2_client, resources, ami_id, arch));
+        binary_launch_configs.push((instance, ec2_client, resources, ami_id, arch));
     }
-    let launch_futures =
-        launch_configs
+
+    // Launch monitoring instance (don't wait yet)
+    let monitoring_launch_future = {
+        let key_name = key_name.clone();
+        let tag = tag.clone();
+        let sg_id = monitoring_sg_id.clone();
+        async move {
+            let instance_id = launch_instances(
+                monitoring_ec2_client,
+                &monitoring_ami_id,
+                monitoring_instance_type,
+                config.monitoring.storage_size,
+                monitoring_storage_class,
+                &key_name,
+                &monitoring_subnet_id,
+                &sg_id,
+                1,
+                MONITORING_NAME,
+                &tag,
+            )
+            .await?[0]
+                .clone();
+            let ip = wait_for_instances_running(
+                monitoring_ec2_client,
+                slice::from_ref(&instance_id),
+            )
+            .await?[0]
+                .clone();
+            let private_ip = get_private_ip(monitoring_ec2_client, &instance_id).await?;
+            info!(ip = ip.as_str(), "launched monitoring instance");
+            Ok::<(String, String, String), Error>((instance_id, ip, private_ip))
+        }
+    };
+
+    // Launch binary instances (don't wait yet)
+    let binary_launch_futures =
+        binary_launch_configs
             .iter()
             .map(|(instance, ec2_client, resources, ami_id, _arch)| {
                 let key_name = key_name.clone();
@@ -595,8 +600,22 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
                     })
                 }
             });
-    let deployments: Vec<Deployment> = try_join_all(launch_futures).await?;
-    info!("launched binary instances");
+
+    // Wait for all instances in parallel
+    let (monitoring_result, deployments) = tokio::try_join!(
+        monitoring_launch_future,
+        try_join_all(binary_launch_futures)
+    )?;
+    let (monitoring_instance_id, monitoring_ip, monitoring_private_ip) = monitoring_result;
+    info!("launched all instances");
+
+    // Add monitoring IP rules to binary security groups (for Prometheus scraping)
+    info!("adding monitoring ingress rules to binary security groups");
+    for (region, resources) in region_resources.iter() {
+        let binary_sg_id = resources.binary_sg_id.as_ref().unwrap();
+        add_monitoring_ingress(&ec2_clients[region], binary_sg_id, &monitoring_ip).await?;
+    }
+    info!("added monitoring ingress rules");
 
     // Cache ALL static config files globally (these don't change between deployments)
     // This includes both monitoring and binary instance static files

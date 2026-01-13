@@ -304,7 +304,6 @@ cfg_if::cfg_if! {
         /// S3 operations that can fail
         #[derive(Debug, Clone, Copy)]
         pub enum S3Operation {
-            HeadBucket,
             CreateBucket,
             DeleteBucket,
             HeadObject,
@@ -313,10 +312,24 @@ cfg_if::cfg_if! {
             DeleteObjects,
         }
 
+        /// Reasons why accessing a bucket may be forbidden
+        #[derive(Debug, Clone, Copy)]
+        pub enum BucketForbiddenReason {
+            /// Access denied (missing s3:ListBucket permission or bucket owned by another account)
+            AccessDenied,
+        }
+
+        impl std::fmt::Display for BucketForbiddenReason {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                match self {
+                    Self::AccessDenied => write!(f, "access denied (check IAM permissions or bucket ownership)"),
+                }
+            }
+        }
+
         impl std::fmt::Display for S3Operation {
             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 match self {
-                    Self::HeadBucket => write!(f, "HeadBucket"),
                     Self::CreateBucket => write!(f, "CreateBucket"),
                     Self::DeleteBucket => write!(f, "DeleteBucket"),
                     Self::HeadObject => write!(f, "HeadObject"),
@@ -342,6 +355,11 @@ cfg_if::cfg_if! {
                 operation: S3Operation,
                 #[source]
                 source: Box<aws_sdk_s3::Error>,
+            },
+            #[error("S3 bucket '{bucket}' forbidden: {reason}")]
+            S3BucketForbidden {
+                bucket: String,
+                reason: BucketForbiddenReason,
             },
             #[error("IO error: {0}")]
             Io(#[from] std::io::Error),

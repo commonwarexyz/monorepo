@@ -58,13 +58,30 @@ pub async fn ensure_bucket_exists(
             return Ok(());
         }
         Err(e) => {
-            // If it's a 404, we need to create it
+            // Check for region header before consuming the error
+            let bucket_region = e
+                .raw_response()
+                .and_then(|r| r.headers().get("x-amz-bucket-region"))
+                .map(|s| s.to_string());
+
             let service_err = e.into_service_error();
-            if !service_err.is_not_found() {
-                return Err(Error::AwsS3 {
+            if service_err.is_not_found() {
+                // 404: bucket doesn't exist, we need to create it
+                debug!(bucket = bucket_name, "bucket not found, will create");
+            } else if let Some(bucket_region) = bucket_region {
+                // Bucket exists in a different region - proceed with cross-region access
+                info!(
+                    bucket = bucket_name,
+                    bucket_region = bucket_region.as_str(),
+                    client_region = region,
+                    "bucket exists in different region, using cross-region access"
+                );
+                return Ok(());
+            } else {
+                // 403 or other error without region header: access denied
+                return Err(Error::S3BucketForbidden {
                     bucket: bucket_name.to_string(),
-                    operation: super::S3Operation::HeadBucket,
-                    source: Box::new(aws_sdk_s3::Error::from(service_err)),
+                    reason: super::BucketForbiddenReason::AccessDenied,
                 });
             }
         }
