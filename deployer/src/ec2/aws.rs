@@ -7,6 +7,7 @@ use crate::ec2::{
 };
 use aws_config::BehaviorVersion;
 pub use aws_config::Region;
+pub use aws_sdk_ec2::Client as Ec2Client;
 pub use aws_sdk_ec2::types::{InstanceType, IpPermission, IpRange, UserIdGroupPair, VolumeType};
 use aws_sdk_ec2::{
     error::BuildError,
@@ -15,7 +16,7 @@ use aws_sdk_ec2::{
         BlockDeviceMapping, EbsBlockDevice, Filter, InstanceStateName, ResourceType, SecurityGroup,
         SummaryStatus, Tag, TagSpecification, VpcPeeringConnectionStateReasonCode,
     },
-    Client as Ec2Client, Error as Ec2Error,
+    Error as Ec2Error,
 };
 use std::{
     collections::{HashMap, HashSet},
