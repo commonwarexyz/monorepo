@@ -29,9 +29,10 @@ use tokio::time::sleep;
 /// Creates an EC2 client for the specified AWS region
 pub async fn create_ec2_client(region: Region) -> Ec2Client {
     let retry = aws_config::retry::RetryConfig::adaptive()
-        .with_max_attempts(10)
+        .with_max_attempts(u32::MAX)
         .with_initial_backoff(Duration::from_millis(500))
-        .with_max_backoff(Duration::from_secs(30));
+        .with_max_backoff(Duration::from_secs(30))
+        .with_reconnect_mode(aws_sdk_ec2::config::retry::ReconnectMode::ReconnectOnTransientError);
     let config = aws_config::defaults(BehaviorVersion::v2025_08_07())
         .region(region)
         .retry_config(retry)
