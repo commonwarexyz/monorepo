@@ -569,8 +569,8 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
                 MONITORING_NAME,
                 &tag,
             )
-            .await[0]
-                .clone();
+            .await?
+            .remove(0);
             info!(
                 instance_id = instance_id.as_str(),
                 "launched monitoring instance"
@@ -607,8 +607,8 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
                         &instance.name,
                         &tag,
                     )
-                    .await[0]
-                        .clone();
+                    .await?
+                    .remove(0);
                     info!(
                         instance_id = instance_id.as_str(),
                         instance = instance_name.as_str(),

@@ -433,8 +433,24 @@ async fn try_launch_instances(
         .collect())
 }
 
+/// Checks if an EC2 error is fatal and should not be retried.
+fn is_fatal_ec2_error(e: &Ec2Error) -> bool {
+    let error_str = e.to_string();
+    error_str.contains("VcpuLimitExceeded")
+        || error_str.contains("InstanceLimitExceeded")
+        || error_str.contains("InsufficientInstanceCapacity")
+        || error_str.contains("MaxSpotInstanceCountExceeded")
+        || error_str.contains("VolumeLimitExceeded")
+        || error_str.contains("InsufficientFreeAddressesInSubnet")
+        || error_str.contains("InvalidParameterValue")
+        || error_str.contains("InvalidAMIID")
+        || error_str.contains("InvalidSubnetID")
+        || error_str.contains("InvalidGroup")
+        || error_str.contains("InvalidKeyPair")
+}
+
 /// Launches EC2 instances with specified configurations.
-/// Retries indefinitely on transient failures and rate limits.
+/// Retries on transient failures but exits on fatal errors like limit exceeded.
 #[allow(clippy::too_many_arguments)]
 pub async fn launch_instances(
     client: &Ec2Client,
@@ -448,7 +464,7 @@ pub async fn launch_instances(
     count: i32,
     name: &str,
     tag: &str,
-) -> Vec<String> {
+) -> Result<Vec<String>, Ec2Error> {
     let mut attempt = 0u32;
     loop {
         match try_launch_instances(
@@ -466,8 +482,11 @@ pub async fn launch_instances(
         )
         .await
         {
-            Ok(ids) => return ids,
+            Ok(ids) => return Ok(ids),
             Err(e) => {
+                if is_fatal_ec2_error(&e) {
+                    return Err(e);
+                }
                 debug!(
                     name = name,
                     attempt = attempt + 1,
