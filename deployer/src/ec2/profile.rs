@@ -1,8 +1,9 @@
 //! `profile` subcommand for `ec2`
 
 use crate::ec2::{
-    aws::*, deployer_directory, s3::*, services::*, utils::*, Config, Error, CREATED_FILE_NAME,
-    DESTROYED_FILE_NAME, MONITORING_REGION,
+    aws::*, deployer_directory, s3::*, services::*,
+    utils::{download_file, scp_download, ssh_execute},
+    Config, Error, CREATED_FILE_NAME, DESTROYED_FILE_NAME, MONITORING_REGION,
 };
 use aws_sdk_ec2::types::Filter;
 use std::{
@@ -160,7 +161,7 @@ set -e
 
 # Download samply if not present
 if [ ! -f /home/ubuntu/samply ]; then
-    wget -q -O /home/ubuntu/samply '{samply_url}'
+    wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/samply '{samply_url}'
     chmod +x /home/ubuntu/samply
 fi
 
@@ -196,22 +197,7 @@ echo "Profile captured successfully"
         .unwrap()
         .as_secs();
     let local_path = format!("/tmp/profile-{}-{}.json", instance_name, timestamp);
-
-    let scp_output = Command::new("scp")
-        .arg("-i")
-        .arg(private_key)
-        .arg("-o")
-        .arg("IdentitiesOnly=yes")
-        .arg("-o")
-        .arg("StrictHostKeyChecking=no")
-        .arg(format!("ubuntu@{}:/tmp/profile.json", instance_ip))
-        .arg(&local_path)
-        .output()
-        .await?;
-
-    if !scp_output.status.success() {
-        return Err(Error::SshFailed);
-    }
+    scp_download(private_key, &instance_ip, "/tmp/profile.json", &local_path).await?;
 
     info!(path = local_path.as_str(), "profile saved locally");
 
