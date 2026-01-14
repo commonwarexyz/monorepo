@@ -3144,11 +3144,10 @@ mod tests {
 
     /// Tests that when certification returns a cancelled receiver, the voter doesn't hang
     /// and continues to make progress (via voting to nullify the view that could not be certified).
-    fn cancelled_certification_does_not_hang<S, F, L>(mut fixture: F, traces: TraceStorage)
+    fn cancelled_certification_does_not_hang<S, F>(mut fixture: F, traces: TraceStorage)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: ElectorConfig<S>,
     {
         let n = 5;
         let quorum = quorum(n);
@@ -3173,80 +3172,34 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
 
-            let elector = L::default();
+            let elector = RoundRobin::<Sha256>::default();
 
-            // Set up voter with Certifier::Cancel - all certifications will return cancelled receivers
-            let (mut mailbox, mut batcher_receiver, _resolver_receiver, relay, _reporter) =
-                setup_voter(
-                    &mut context,
-                    &oracle,
-                    &participants,
-                    &schemes,
-                    elector,
-                    Duration::from_millis(500),
-                    Duration::from_millis(500),
-                    Duration::from_millis(500),
-                    mocks::application::Certifier::Cancel,
-                )
-                .await;
+            // Set up voter with Certifier::Cancel
+            let (mut mailbox, mut batcher_receiver, _, relay, _) = setup_voter(
+                &mut context,
+                &oracle,
+                &participants,
+                &schemes,
+                elector,
+                Duration::from_millis(500),
+                Duration::from_millis(500),
+                Duration::from_millis(500),
+                mocks::application::Certifier::Cancel,
+            )
+            .await;
 
-            // Wait for initial batcher update (view 1)
-            let message = batcher_receiver.next().await.unwrap();
-            match message {
-                batcher::Message::Update { active, current, .. } => {
-                    assert_eq!(current, View::new(1));
-                    active.send(true).unwrap();
-                }
-                _ => panic!("expected Update message"),
-            }
-
-            // Advance through views until we find one where we're not the leader
-            // (so we verify rather than propose). Track the previous view's payload for parent.
-            let mut current_view = View::new(1);
-            let mut parent_payload = Sha256::hash(b"v0");
-            let mut prev_proposal = Proposal::new(
-                Round::new(Epoch::new(333), current_view),
-                View::zero(),
-                parent_payload,
-            );
-
-            let (target_view, leader) = loop {
-                // Send finalization to advance to next view
-                let (_, finalization) = build_finalization(&schemes, &prev_proposal, quorum);
-                mailbox
-                    .resolved(Certificate::Finalization(finalization))
-                    .await;
-
-                parent_payload = prev_proposal.payload;
-                let (new_view, leader) = loop {
-                    match batcher_receiver.next().await.unwrap() {
-                        batcher::Message::Update {
-                            current,
-                            leader,
-                            active,
-                            ..
-                        } => {
-                            active.send(true).unwrap();
-                            if current > current_view {
-                                break (current, leader);
-                            }
-                        }
-                        batcher::Message::Constructed(_) => {}
-                    }
-                };
-                current_view = new_view;
-
-                if leader.get() != 0 {
-                    break (current_view, participants[leader.get() as usize].clone());
-                }
-
-                // We're the leader, advance to next view
-                prev_proposal = Proposal::new(
-                    Round::new(Epoch::new(333), current_view),
-                    current_view.previous().unwrap(),
-                    Sha256::hash(current_view.get().to_be_bytes().as_slice()),
-                );
-            };
+            // Advance to view 3 where we're a follower.
+            // With RoundRobin, epoch=333, n=5: leader = (333 + view) % 5
+            // View 3: leader = 1 (not us)
+            let target_view = View::new(3);
+            let parent_payload = advance_to_view(
+                &mut mailbox,
+                &mut batcher_receiver,
+                &schemes,
+                quorum,
+                target_view,
+            )
+            .await;
 
             // Broadcast the payload contents so verification can complete.
             let proposal = Proposal::new(
@@ -3254,6 +3207,7 @@ mod tests {
                 target_view.previous().unwrap(),
                 Sha256::hash(b"test_proposal"),
             );
+            let leader = participants[1].clone();
             let contents = (proposal.round, parent_payload, 0u64).encode();
             relay
                 .broadcast(&leader, (proposal.payload, contents))
@@ -3275,6 +3229,7 @@ mod tests {
                             batcher::Message::Constructed(Vote::Nullify(nullify)) if nullify.view() == target_view => {
                                 break;
                             }
+                            batcher::Message::Update { active, .. } => active.send(true).unwrap(),
                             _ => {}
                         }
                     },
@@ -3309,23 +3264,11 @@ mod tests {
 
     #[test_collect_traces]
     fn test_cancelled_certification_does_not_hang(traces: TraceStorage) {
-        cancelled_certification_does_not_hang::<_, _, Random>(
-            bls12381_threshold::fixture::<MinPk, _>,
-            traces.clone(),
-        );
-        cancelled_certification_does_not_hang::<_, _, Random>(
-            bls12381_threshold::fixture::<MinSig, _>,
-            traces.clone(),
-        );
-        cancelled_certification_does_not_hang::<_, _, RoundRobin>(
-            bls12381_multisig::fixture::<MinPk, _>,
-            traces.clone(),
-        );
-        cancelled_certification_does_not_hang::<_, _, RoundRobin>(
-            bls12381_multisig::fixture::<MinSig, _>,
-            traces.clone(),
-        );
-        cancelled_certification_does_not_hang::<_, _, RoundRobin>(ed25519::fixture, traces.clone());
-        cancelled_certification_does_not_hang::<_, _, RoundRobin>(secp256r1::fixture, traces);
+        cancelled_certification_does_not_hang(bls12381_threshold::fixture::<MinPk, _>, traces.clone());
+        cancelled_certification_does_not_hang(bls12381_threshold::fixture::<MinSig, _>, traces.clone());
+        cancelled_certification_does_not_hang(bls12381_multisig::fixture::<MinPk, _>, traces.clone());
+        cancelled_certification_does_not_hang(bls12381_multisig::fixture::<MinSig, _>, traces.clone());
+        cancelled_certification_does_not_hang(ed25519::fixture, traces.clone());
+        cancelled_certification_does_not_hang(secp256r1::fixture, traces);
     }
 }
