@@ -140,15 +140,23 @@ fn build_output(workspace: &Workspace) -> ReadinessOutput {
     for crate_name in crate_names {
         let krate = &workspace.crates[crate_name];
 
-        let (modules, module_count, level_counts) =
+        let (submodules, module_count, mut level_counts) =
             collect_modules(&krate.modules, krate.root_readiness);
 
-        // Skip crates with no public modules
-        if modules.is_empty() {
-            continue;
-        }
+        // Add the crate root entry (represents items defined directly in lib.rs)
+        let root_module = ModuleOutput {
+            path: "crate::".to_string(),
+            readiness: krate.root_readiness,
+            is_explicit: krate.root_is_explicit,
+            visibility: Visibility::Public,
+            submodules,
+        };
 
-        total_modules += module_count;
+        // Count the root module
+        *level_counts.entry(krate.root_readiness).or_insert(0) += 1;
+        let total_count = module_count + 1;
+
+        total_modules += total_count;
         for (level, count) in &level_counts {
             *by_level.entry(*level).or_insert(0) += count;
         }
@@ -156,7 +164,7 @@ fn build_output(workspace: &Workspace) -> ReadinessOutput {
         crates.push(CrateOutput {
             name: crate_name.clone(),
             module_counts: level_counts,
-            modules,
+            modules: vec![root_module],
         });
     }
 
