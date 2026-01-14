@@ -1,8 +1,8 @@
 //! `profile` subcommand for `ec2`
 
 use crate::ec2::{
-    aws::*, deployer_directory, s3::*, services::*, utils::*, Config, Error,
-    CREATED_FILE_NAME, DESTROYED_FILE_NAME, MONITORING_REGION,
+    aws::*, deployer_directory, s3::*, services::*, utils::*, Config, Error, CREATED_FILE_NAME,
+    DESTROYED_FILE_NAME, MONITORING_REGION,
 };
 use aws_sdk_ec2::types::Filter;
 use std::{
@@ -18,7 +18,11 @@ use tokio::{
 use tracing::info;
 
 /// Captures a CPU profile from a running instance using samply
-pub async fn profile(config_path: &PathBuf, instance_name: &str, duration: u64) -> Result<(), Error> {
+pub async fn profile(
+    config_path: &PathBuf,
+    instance_name: &str,
+    duration: u64,
+) -> Result<(), Error> {
     // Load config
     let config: Config = {
         let config_file = File::open(config_path)?;
@@ -61,8 +65,18 @@ pub async fn profile(config_path: &PathBuf, instance_name: &str, duration: u64) 
     let resp = ec2_client
         .describe_instances()
         .filters(Filter::builder().name("tag:deployer").values(tag).build())
-        .filters(Filter::builder().name("tag:name").values(instance_name).build())
-        .filters(Filter::builder().name("instance-state-name").values("running").build())
+        .filters(
+            Filter::builder()
+                .name("tag:name")
+                .values(instance_name)
+                .build(),
+        )
+        .filters(
+            Filter::builder()
+                .name("instance-state-name")
+                .values("running")
+                .build(),
+        )
         .send()
         .await
         .map_err(|err| err.into_service_error())?;
@@ -95,7 +109,10 @@ pub async fn profile(config_path: &PathBuf, instance_name: &str, duration: u64) 
         info!(key = samply_s3_key.as_str(), "samply already in S3");
         presign_url(&s3_client, S3_BUCKET_NAME, &samply_s3_key, PRESIGN_DURATION).await?
     } else {
-        info!(key = samply_s3_key.as_str(), "samply not in S3, downloading and uploading");
+        info!(
+            key = samply_s3_key.as_str(),
+            "samply not in S3, downloading and uploading"
+        );
         let download_url = samply_download_url(SAMPLY_VERSION, arch);
         let temp_archive = tag_directory.join("samply.tar.xz");
         let temp_binary = tag_directory.join("samply");
@@ -238,9 +255,8 @@ echo "Profile captured successfully"
 
         if request.starts_with("OPTIONS") {
             // Preflight request
-            let response = format!(
-                "HTTP/1.1 204 No Content\r\n{cors_headers}Content-Length: 0\r\n\r\n"
-            );
+            let response =
+                format!("HTTP/1.1 204 No Content\r\n{cors_headers}Content-Length: 0\r\n\r\n");
             socket.write_all(response.as_bytes()).await?;
         } else if request.starts_with("GET") {
             // Serve the profile
