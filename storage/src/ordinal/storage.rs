@@ -458,3 +458,23 @@ mod conformance {
         CodecConformance<Record<u32>>
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::kv::tests::{assert_gettable, assert_send, assert_updatable};
+    use commonware_runtime::deterministic::Context;
+
+    type TestOrdinal = Ordinal<Context, u64>;
+
+    #[allow(dead_code)]
+    fn assert_ordinal_futures_are_send(ordinal: &mut TestOrdinal, key: u64) {
+        assert_gettable(ordinal, &key);
+        assert_updatable(ordinal, key, 0u64);
+    }
+
+    #[allow(dead_code)]
+    fn assert_ordinal_destroy_is_send(ordinal: TestOrdinal) {
+        assert_send(ordinal.destroy());
+    }
+}

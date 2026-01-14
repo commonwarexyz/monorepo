@@ -963,7 +963,7 @@ pub mod test {
     use super::*;
     use crate::{
         index::Unordered as _,
-        kv::tests::{assert_deletable, assert_gettable, assert_send},
+        kv::tests::{assert_batchable, assert_deletable, assert_gettable, assert_send},
         mmr::{hasher::Hasher as _, Location},
         qmdb::store::{
             batch_tests,
@@ -2022,6 +2022,7 @@ pub mod test {
         assert_send(db.update(key, value));
         assert_send(db.create(key, value));
         assert_deletable(db, key);
+        assert_batchable(db, key, value);
     }
 
     #[allow(dead_code)]

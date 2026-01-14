@@ -592,7 +592,16 @@ where
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::{kv::Gettable as _, translator::TwoCap};
+    use crate::{
+        kv::{
+            tests::{
+                assert_batchable, assert_deletable, assert_gettable, assert_send, assert_updatable,
+            },
+            Gettable as _,
+        },
+        qmdb::store::tests::{assert_log_store, assert_prunable_store},
+        translator::TwoCap,
+    };
     use commonware_cryptography::{
         blake3::{Blake3, Digest},
         Hasher as _,
@@ -1173,11 +1182,6 @@ mod test {
         });
     }
 
-    use crate::{
-        kv::tests::{assert_deletable, assert_gettable, assert_send, assert_updatable},
-        qmdb::store::tests::{assert_log_store, assert_prunable_store},
-    };
-
     #[allow(dead_code)]
     fn assert_durable_futures_are_send(db: &mut TestStore, key: Digest, loc: Location) {
         assert_log_store(db);
@@ -1194,8 +1198,9 @@ mod test {
     ) {
         assert_log_store(db);
         assert_gettable(db, &key);
-        assert_updatable(db, key, value);
+        assert_updatable(db, key, value.clone());
         assert_deletable(db, key);
+        assert_batchable(db, key, value);
     }
 
     #[allow(dead_code)]

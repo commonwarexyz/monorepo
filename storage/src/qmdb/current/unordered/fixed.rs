@@ -843,7 +843,13 @@ impl<
 pub mod test {
     use super::*;
     use crate::{
-        index::Unordered as _, mmr::hasher::Hasher as _, qmdb::store::batch_tests,
+        index::Unordered as _,
+        kv::tests::{assert_batchable, assert_deletable, assert_gettable, assert_send},
+        mmr::{hasher::Hasher as _, Location},
+        qmdb::store::{
+            batch_tests,
+            tests::{assert_log_store, assert_merkleized_store, assert_prunable_store},
+        },
         translator::TwoCap,
     };
     use commonware_cryptography::{sha256::Digest, Sha256};
@@ -1655,11 +1661,6 @@ pub mod test {
         });
     }
 
-    use crate::{
-        kv::tests::{assert_deletable, assert_gettable, assert_send},
-        qmdb::store::tests::{assert_log_store, assert_merkleized_store, assert_prunable_store},
-    };
-
     #[allow(dead_code)]
     fn assert_clean_db_futures_are_send(db: &mut CleanCurrentTest, key: Digest, loc: Location) {
         assert_gettable(db, &key);
@@ -1676,6 +1677,7 @@ pub mod test {
         assert_send(db.update(key, value));
         assert_send(db.create(key, value));
         assert_deletable(db, key);
+        assert_batchable(db, key, value);
     }
 
     #[allow(dead_code)]
