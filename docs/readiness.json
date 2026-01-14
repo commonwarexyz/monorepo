@@ -1,10 +1,14 @@
 {
   "version": "0.0.65",
-  "generated": "2026-01-14T23:10:29.912753+00:00",
+  "generated": "2026-01-14T23:15:30.575940+00:00",
   "crates": [
     {
       "name": "commonware-broadcast",
       "readiness": {
+        "0": [
+          "buffered::engine",
+          "buffered::ingress"
+        ],
         "2": [
           "buffered",
           "{Broadcaster}"
@@ -14,6 +18,19 @@
     {
       "name": "commonware-codec",
       "readiness": {
+        "0": [
+          "codec",
+          "extensions",
+          "types::btree_map",
+          "types::btree_set",
+          "types::bytes",
+          "types::hash_map",
+          "types::hash_set",
+          "types::net",
+          "types::primitives",
+          "types::tuple",
+          "types::vec"
+        ],
         "2": [
           "error::{Error}",
           "util",
@@ -22,8 +39,47 @@
       }
     },
     {
+      "name": "commonware-coding",
+      "readiness": {
+        "0": [
+          "reed_solomon",
+          "zoda"
+        ]
+      }
+    },
+    {
+      "name": "commonware-collector",
+      "readiness": {
+        "0": [
+          "p2p::engine",
+          "p2p::ingress"
+        ]
+      }
+    },
+    {
       "name": "commonware-consensus",
       "readiness": {
+        "0": [
+          "aggregation::scheme",
+          "aggregation::types",
+          "application::marshaled",
+          "marshal::actor",
+          "marshal::cache",
+          "marshal::ingress::handler",
+          "marshal::ingress::mailbox",
+          "marshal::resolver::p2p",
+          "marshal::store",
+          "ordered_broadcast::scheme",
+          "ordered_broadcast::types",
+          "simplex::elector",
+          "simplex::scheme::bls12381_multisig",
+          "simplex::scheme::bls12381_threshold",
+          "simplex::scheme::ed25519",
+          "simplex::scheme::reporter",
+          "simplex::scheme::secp256r1",
+          "simplex::types",
+          "types"
+        ],
         "2": [
           "marshal",
           "simplex"
@@ -33,6 +89,29 @@
     {
       "name": "commonware-cryptography",
       "readiness": {
+        "0": [
+          "blake3",
+          "bloomfilter",
+          "bls12381::certificate::multisig",
+          "bls12381::certificate::threshold",
+          "bls12381::dkg",
+          "bls12381::primitives::group",
+          "bls12381::primitives::ops::aggregate",
+          "bls12381::primitives::ops::batch",
+          "bls12381::primitives::ops::threshold",
+          "bls12381::primitives::sharing",
+          "bls12381::primitives::variant",
+          "bls12381::scheme",
+          "ed25519::certificate",
+          "ed25519::scheme",
+          "handshake",
+          "lthash",
+          "secp256r1::certificate",
+          "secp256r1::recoverable",
+          "secp256r1::standard",
+          "secret",
+          "transcript"
+        ],
         "1": [
           "bls12381::tle"
         ],
@@ -47,8 +126,23 @@
       }
     },
     {
+      "name": "commonware-deployer",
+      "readiness": {
+        "0": [
+          "ec2::aws",
+          "ec2::s3",
+          "ec2::services",
+          "ec2::utils"
+        ]
+      }
+    },
+    {
       "name": "commonware-math",
       "readiness": {
+        "0": [
+          "fields",
+          "ntt"
+        ],
         "2": [
           "algebra",
           "poly"
@@ -58,6 +152,43 @@
     {
       "name": "commonware-p2p",
       "readiness": {
+        "0": [
+          "authenticated::discovery::actors::dialer",
+          "authenticated::discovery::actors::listener",
+          "authenticated::discovery::actors::peer::actor",
+          "authenticated::discovery::actors::peer::ingress",
+          "authenticated::discovery::actors::router::actor",
+          "authenticated::discovery::actors::router::ingress",
+          "authenticated::discovery::actors::spawner::actor",
+          "authenticated::discovery::actors::spawner::ingress",
+          "authenticated::discovery::actors::tracker::actor",
+          "authenticated::discovery::actors::tracker::ingress",
+          "authenticated::discovery::actors::tracker::metadata",
+          "authenticated::discovery::actors::tracker::reservation",
+          "authenticated::discovery::channels",
+          "authenticated::discovery::network",
+          "authenticated::lookup::actors::dialer",
+          "authenticated::lookup::actors::listener",
+          "authenticated::lookup::actors::peer::actor",
+          "authenticated::lookup::actors::peer::ingress",
+          "authenticated::lookup::actors::router::actor",
+          "authenticated::lookup::actors::router::ingress",
+          "authenticated::lookup::actors::spawner::actor",
+          "authenticated::lookup::actors::spawner::ingress",
+          "authenticated::lookup::actors::tracker::actor",
+          "authenticated::lookup::actors::tracker::ingress",
+          "authenticated::lookup::actors::tracker::metadata",
+          "authenticated::lookup::actors::tracker::reservation",
+          "authenticated::lookup::channels",
+          "authenticated::lookup::network",
+          "authenticated::mailbox",
+          "simulated::ingress",
+          "simulated::network",
+          "types",
+          "utils::codec",
+          "utils::limited",
+          "utils::mux"
+        ],
         "2": [
           "authenticated::discovery",
           "authenticated::lookup",
@@ -77,6 +208,10 @@
     {
       "name": "commonware-resolver",
       "readiness": {
+        "0": [
+          "p2p::engine",
+          "p2p::ingress"
+        ],
         "2": [
           "p2p",
           "{Consumer, Resolver}"
@@ -86,6 +221,24 @@
     {
       "name": "commonware-runtime",
       "readiness": {
+        "0": [
+          "deterministic",
+          "telemetry::metrics::histogram",
+          "telemetry::metrics::status",
+          "telemetry::traces::collector",
+          "telemetry::traces::status",
+          "tokio::runtime",
+          "tokio::telemetry",
+          "tokio::tracing",
+          "utils::buffer::pool::append",
+          "utils::buffer::pool::page_cache",
+          "utils::buffer::pool::read",
+          "utils::buffer::read",
+          "utils::buffer::write",
+          "utils::cell",
+          "utils::handle",
+          "utils::signal"
+        ],
         "2": [
           "telemetry",
           "utils",
@@ -96,6 +249,58 @@
     {
       "name": "commonware-storage",
       "readiness": {
+        "0": [
+          "archive::immutable::storage",
+          "archive::prunable::storage",
+          "bmt",
+          "cache::storage",
+          "freezer::storage",
+          "index::ordered",
+          "index::partitioned::ordered",
+          "index::partitioned::unordered",
+          "index::unordered",
+          "journal::authenticated",
+          "journal::contiguous::fixed",
+          "journal::contiguous::variable",
+          "journal::segmented::fixed",
+          "journal::segmented::glob",
+          "journal::segmented::oversized",
+          "journal::segmented::variable",
+          "kv::batch",
+          "metadata::storage",
+          "mmr::grafting",
+          "mmr::hasher",
+          "mmr::iterator",
+          "mmr::journaled",
+          "mmr::location",
+          "mmr::mem",
+          "mmr::position",
+          "mmr::proof",
+          "mmr::stability",
+          "mmr::storage",
+          "mmr::verification",
+          "ordinal::storage",
+          "qmdb::any::ordered::fixed",
+          "qmdb::any::ordered::variable",
+          "qmdb::any::states",
+          "qmdb::any::unordered::fixed::sync",
+          "qmdb::any::unordered::variable::sync",
+          "qmdb::current::ordered::fixed",
+          "qmdb::current::proof",
+          "qmdb::current::unordered::fixed",
+          "qmdb::immutable::operation",
+          "qmdb::immutable::sync",
+          "qmdb::keyless::operation",
+          "qmdb::operation",
+          "qmdb::store::batch",
+          "qmdb::store::db",
+          "qmdb::sync::engine",
+          "qmdb::sync::error",
+          "qmdb::sync::resolver",
+          "qmdb::sync::target",
+          "qmdb::verify",
+          "rmap"
+        ],
         "2": [
           "archive",
           "journal",
@@ -107,6 +312,9 @@
     {
       "name": "commonware-stream",
       "readiness": {
+        "0": [
+          "utils::codec"
+        ],
         "2": [
           "{Config, Error, Receiver, Sender, dial, listen}"
         ]
@@ -115,6 +323,23 @@
     {
       "name": "commonware-utils",
       "readiness": {
+        "0": [
+          "bitmap::historical::batch",
+          "bitmap::historical::bitmap",
+          "bitmap::historical::error",
+          "bitmap::prunable",
+          "channels::fallible",
+          "channels::ring",
+          "channels::tracked",
+          "hex_literal",
+          "hostname",
+          "rational",
+          "sequence::fixed_bytes",
+          "sequence::prefixed_u64",
+          "sequence::u32",
+          "sequence::u64",
+          "sequence::unit"
+        ],
         "2": [
           "acknowledgement",
           "bitmap",
@@ -134,9 +359,10 @@
     }
   ],
   "summary": {
-    "total_modules": 34,
+    "total_modules": 216,
     "total_items": 47,
     "modules_by_level": {
+      "0": 182,
       "1": 1,
       "2": 33
     },

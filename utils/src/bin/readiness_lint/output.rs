@@ -104,8 +104,8 @@ fn build_output(workspace: &Workspace) -> ReadinessOutput {
             by_level.entry(level).or_default().push(formatted);
         }
 
-        // Collect modules with explicit readiness!(N)
-        collect_explicit_modules(
+        // Collect all modules
+        collect_modules(
             &krate.modules,
             &mut by_level,
             &mut total_modules,
@@ -143,8 +143,8 @@ fn build_output(workspace: &Workspace) -> ReadinessOutput {
     }
 }
 
-/// Recursively collect modules that have explicit readiness!(N) annotations.
-fn collect_explicit_modules(
+/// Recursively collect modules and their readiness levels.
+fn collect_modules(
     modules: &HashMap<String, Module>,
     by_level: &mut BTreeMap<u8, Vec<String>>,
     total_modules: &mut usize,
@@ -153,37 +153,41 @@ fn collect_explicit_modules(
     items_by_level: &mut BTreeMap<u8, usize>,
 ) {
     for module in modules.values() {
-        // Only include modules with explicit readiness!(N)
         if module.is_explicit {
+            // Module has explicit readiness!(N) - show it at that level
             *total_modules += 1;
             *modules_by_level.entry(module.readiness).or_insert(0) += 1;
             by_level
                 .entry(module.readiness)
                 .or_default()
                 .push(module.path.clone());
-        } else {
-            // Module doesn't have explicit readiness, but check for items with #[ready(N)]
-            if !module.items.is_empty() {
-                let mut items_at_level: BTreeMap<u8, Vec<String>> = BTreeMap::new();
-                for (item_name, &readiness) in &module.items {
-                    items_at_level
-                        .entry(readiness)
-                        .or_default()
-                        .push(item_name.clone());
-                }
-
-                for (level, mut items) in items_at_level {
-                    items.sort();
-                    *total_items += items.len();
-                    *items_by_level.entry(level).or_insert(0) += items.len();
-                    let formatted = format_items_with_module(&module.path, &items);
-                    by_level.entry(level).or_default().push(formatted);
-                }
+        } else if !module.items.is_empty() {
+            // Module has no explicit readiness, but has items with #[ready(N)]
+            // Show those items, and show the module itself at level 0
+            let mut items_at_level: BTreeMap<u8, Vec<String>> = BTreeMap::new();
+            for (item_name, &readiness) in &module.items {
+                items_at_level
+                    .entry(readiness)
+                    .or_default()
+                    .push(item_name.clone());
             }
+
+            for (level, mut items) in items_at_level {
+                items.sort();
+                *total_items += items.len();
+                *items_by_level.entry(level).or_insert(0) += items.len();
+                let formatted = format_items_with_module(&module.path, &items);
+                by_level.entry(level).or_default().push(formatted);
+            }
+        } else if module.submodules.is_empty() {
+            // Leaf module with no explicit readiness and no annotated items - show at level 0
+            *total_modules += 1;
+            *modules_by_level.entry(0).or_insert(0) += 1;
+            by_level.entry(0).or_default().push(module.path.clone());
         }
 
         // Recurse into submodules
-        collect_explicit_modules(
+        collect_modules(
             &module.submodules,
             by_level,
             total_modules,
