@@ -233,6 +233,7 @@ where
     }
 
     // The key wasn't in the snapshot, so add it to the cursor.
+    cursor.next();
     cursor.insert(new_loc);
 
     Ok(None)
@@ -262,6 +263,7 @@ where
     }
 
     // The key doesn't exist, so add it to the cursor.
+    cursor.next();
     cursor.insert(new_loc);
 
     Ok(true)

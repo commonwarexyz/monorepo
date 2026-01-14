@@ -96,7 +96,7 @@ pub(super) mod test {
         deterministic::{self, Context},
         Runner as _,
     };
-    use commonware_utils::{test_rng_seeded, NZUsize, NZU16, NZU64};
+    use commonware_utils::{sequence::FixedBytes, test_rng_seeded, NZUsize, NZU16, NZU64};
     use rand::RngCore;
     use std::num::{NonZeroU16, NonZeroUsize};
 
@@ -629,6 +629,25 @@ pub(super) mod test {
     #[test_traced("DEBUG")]
     fn test_any_unordered_fixed_batch() {
         batch_tests::test_batch(|ctx| async move { create_test_db(ctx).await.into_mutable() });
+    }
+
+    #[test_traced]
+    fn test_update_handles_translator_collisions() {
+        type CollisionDb =
+            Db<Context, FixedBytes<8>, Digest, Sha256, TwoCap, Merkleized<Sha256>, Durable>;
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let db = CollisionDb::init(context, any_db_config("collision"))
+                .await
+                .unwrap();
+            let mut db = db.into_mutable();
+            let value = Sha256::hash(b"value");
+            let key1 = FixedBytes::new([0xAB, 0xCD, 0, 0, 0, 0, 0, 0]);
+            let key2 = FixedBytes::new([0xAB, 0xCD, 0, 0, 0, 0, 0, 1]);
+
+            db.update(key1, value).await.unwrap();
+            db.update(key2, value).await.unwrap();
+        });
     }
 
     #[allow(dead_code)]
