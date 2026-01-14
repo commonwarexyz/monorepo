@@ -17,6 +17,8 @@ workspace = true
 arbitrary = { workspace = true, optional = true, features = ["derive"] }
 bytes.workspace = true
 cfg-if.workspace = true
+chrono = { workspace = true, optional = true }
+clap = { workspace = true, optional = true, features = ["derive"] }
 commonware-codec = { workspace = true, default-features = false }
 futures = { workspace = true, optional = true }
 hashbrown.workspace = true
@@ -26,17 +28,13 @@ num-rational = { workspace = true, optional = true }
 num-traits.workspace = true
 pin-project.workspace = true
 rand.workspace = true
-thiserror.workspace = true
-zeroize.workspace = true
-
-# Lint feature dependencies
-chrono = { workspace = true, optional = true }
-clap = { workspace = true, optional = true, features = ["derive"] }
 serde = { workspace = true, optional = true, features = ["derive"] }
 serde_json = { workspace = true, optional = true }
 syn = { workspace = true, optional = true, features = ["full", "parsing", "visit"] }
+thiserror.workspace = true
 toml = { workspace = true, optional = true }
 walkdir = { workspace = true, optional = true }
+zeroize.workspace = true
 
 [target.'cfg(target_arch = "wasm32")'.dependencies.getrandom]
 # Enable "js" feature when WASM is target
@@ -69,6 +67,7 @@ std = [
 	"zeroize/std",
 ]
 arbitrary = [
+	"chrono?/arbitrary",
 	"commonware-codec/arbitrary",
 	"dep:arbitrary",
 	"num-bigint?/arbitrary",

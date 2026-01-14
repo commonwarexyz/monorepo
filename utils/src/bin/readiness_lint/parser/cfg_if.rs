@@ -124,10 +124,22 @@ mod tests {
 
     #[test]
     fn test_parse_mod_declaration() {
-        assert_eq!(parse_mod_declaration("pub mod journal;"), Some("journal".to_string()));
-        assert_eq!(parse_mod_declaration("mod helpers;"), Some("helpers".to_string()));
-        assert_eq!(parse_mod_declaration("pub(crate) mod internal;"), Some("internal".to_string()));
-        assert_eq!(parse_mod_declaration("pub mod inline {"), Some("inline".to_string()));
+        assert_eq!(
+            parse_mod_declaration("pub mod journal;"),
+            Some("journal".to_string())
+        );
+        assert_eq!(
+            parse_mod_declaration("mod helpers;"),
+            Some("helpers".to_string())
+        );
+        assert_eq!(
+            parse_mod_declaration("pub(crate) mod internal;"),
+            Some("internal".to_string())
+        );
+        assert_eq!(
+            parse_mod_declaration("pub mod inline {"),
+            Some("inline".to_string())
+        );
         assert_eq!(parse_mod_declaration("let x = 1;"), None);
     }
 

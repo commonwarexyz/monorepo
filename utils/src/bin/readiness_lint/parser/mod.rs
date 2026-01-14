@@ -3,9 +3,11 @@
 mod cfg_if;
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::{
+    collections::HashMap,
+    fs,
+    path::{Path, PathBuf},
+};
 use thiserror::Error;
 use toml::Value;
 
@@ -72,9 +74,9 @@ pub fn parse_workspace(root: &Path) -> Result<Workspace, ParseError> {
     let mut crates = HashMap::new();
 
     for member in members {
-        let member_path = member.as_str().ok_or_else(|| {
-            ParseError::InvalidWorkspace("Invalid member path".to_string())
-        })?;
+        let member_path = member
+            .as_str()
+            .ok_or_else(|| ParseError::InvalidWorkspace("Invalid member path".to_string()))?;
 
         // Skip fuzz crates and examples
         if member_path.contains("/fuzz") || member_path.starts_with("examples/") {

@@ -1,10 +1,11 @@
 //! Validate readiness constraints.
 
 use crate::parser::{Module, Workspace};
-use std::collections::{HashMap, HashSet};
-use std::fmt;
-use std::fs;
-use std::path::Path;
+use std::{
+    collections::{HashMap, HashSet},
+    fmt, fs,
+    path::Path,
+};
 use syn::visit::Visit;
 
 /// A readiness constraint violation.
@@ -74,7 +75,7 @@ fn collect_all_module_readiness(
     inherited_readiness: u8,
     map: &mut HashMap<String, u8>,
 ) {
-    for (mod_name, module) in modules {
+    for (_mod_name, module) in modules {
         let effective = if module.is_explicit {
             module.readiness
         } else {
@@ -84,10 +85,6 @@ fn collect_all_module_readiness(
         // Store with full path: crate_name::module::path
         let full_path = format!("{crate_name}::{}", module.path);
         map.insert(full_path, effective);
-
-        // Also store just the module name for simpler lookups
-        let simple_path = format!("{crate_name}::{mod_name}");
-        map.insert(simple_path, effective);
 
         collect_all_module_readiness(&module.submodules, crate_name, effective, map);
     }
@@ -222,7 +219,11 @@ fn check_modules(
 
 /// Check if a module name indicates test code.
 fn is_test_module(name: &str) -> bool {
-    name == "tests" || name == "test" || name == "conformance" || name == "benches" || name == "mocks"
+    name == "tests"
+        || name == "test"
+        || name == "conformance"
+        || name == "benches"
+        || name == "mocks"
 }
 
 /// Visitor that collects all commonware module paths from the AST.

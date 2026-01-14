@@ -2,9 +2,11 @@
 
 use crate::parser::{Module, Workspace};
 use serde::Serialize;
-use std::collections::{BTreeMap, HashMap};
-use std::fs;
-use std::path::Path;
+use std::{
+    collections::{BTreeMap, HashMap},
+    fs,
+    path::Path,
+};
 use thiserror::Error;
 
 #[derive(Error, Debug)]

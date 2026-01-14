@@ -8,8 +8,7 @@ mod parser;
 mod validator;
 
 use clap::Parser;
-use std::path::PathBuf;
-use std::process::ExitCode;
+use std::{path::PathBuf, process::ExitCode};
 
 #[derive(Parser, Debug)]
 #[command(name = "readiness-lint")]
