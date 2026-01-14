@@ -66,22 +66,14 @@ where
     } = register_channels(&mut control, quota).await?;
 
     let block_cfg = block_codec_cfg();
-    let state_handle = context
-        .clone()
-        .with_label(&format!("state_{index}"))
-        .shared(true)
-        .spawn({
-            let buffer_pool = buffer_pool.clone();
-            let partition = format!("{partition_prefix}-qmdb-{index}");
-            let genesis_alloc = bootstrap.genesis_alloc.clone();
-            move |context| async move {
-                LedgerView::init(context, buffer_pool, partition, genesis_alloc).await
-            }
-        });
-    let state = state_handle
-        .await
-        .context("init state task")?
-        .context("init qmdb")?;
+    let state = LedgerView::init(
+        context.with_label(&format!("state_{index}")),
+        buffer_pool.clone(),
+        format!("{partition_prefix}-qmdb-{index}"),
+        bootstrap.genesis_alloc.clone(),
+    )
+    .await
+    .context("init qmdb")?;
 
     let ledger = LedgerService::new(state.clone());
     LedgerObservers::spawn(ledger.clone(), context.clone());
