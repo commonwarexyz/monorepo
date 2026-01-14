@@ -58,6 +58,19 @@ pub struct SimOutcome {
 type NodeHandle = crate::application::NodeHandle<tokio::Context>;
 type SimTransport = simulated::Oracle<ed25519::PublicKey, tokio::Context>;
 
+fn transport_control(
+    transport: &SimTransport,
+    me: ed25519::PublicKey,
+) -> simulated::Control<ed25519::PublicKey, tokio::Context> {
+    simulated::Oracle::control(transport, me)
+}
+
+fn transport_manager(
+    transport: &SimTransport,
+) -> simulated::Manager<ed25519::PublicKey, tokio::Context> {
+    simulated::Oracle::manager(transport)
+}
+
 struct SimEnvironment<'a> {
     context: tokio::Context,
     transport: &'a mut SimTransport,
@@ -74,11 +87,11 @@ impl TransportControl for SimTransport {
     type Manager = simulated::Manager<ed25519::PublicKey, tokio::Context>;
 
     fn control(&self, me: ed25519::PublicKey) -> Self::Control {
-        Self::control(self, me)
+        transport_control(self, me)
     }
 
     fn manager(&self) -> Self::Manager {
-        Self::manager(self)
+        transport_manager(self)
     }
 }
 
