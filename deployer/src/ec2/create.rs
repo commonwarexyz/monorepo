@@ -16,6 +16,9 @@ use std::{
 use tokio::process::Command;
 use tracing::info;
 
+/// Maximum number of instance IDs per DescribeInstances API call
+const MAX_DESCRIBE_BATCH: usize = 1000;
+
 /// Pre-signed URLs for observability tools (prometheus, grafana, loki, pyroscope, tempo, node_exporter, promtail)
 type ToolUrls = (String, String, String, String, String, String, String);
 
@@ -537,7 +540,7 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
         binary_launch_configs.push((instance, ec2_client, resources, ami_id, arch));
     }
 
-    // Launch monitoring instance (don't wait yet)
+    // Launch monitoring instance
     let monitoring_launch_future = {
         let key_name = key_name.clone();
         let tag = tag.clone();
@@ -558,17 +561,12 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
             )
             .await?[0]
                 .clone();
-            let ip =
-                wait_for_instances_running(monitoring_ec2_client, slice::from_ref(&instance_id))
-                    .await?[0]
-                    .clone();
-            let private_ip = get_private_ip(monitoring_ec2_client, &instance_id).await?;
-            info!(ip = ip.as_str(), "launched monitoring instance");
-            Ok::<(String, String, String), Error>((instance_id, ip, private_ip))
+            info!(instance_id = instance_id.as_str(), "launched monitoring instance");
+            Ok::<String, Error>(instance_id)
         }
     };
 
-    // Launch binary instances (don't wait yet)
+    // Launch binary instances (returns instance IDs only, no waiting)
     let binary_launch_futures =
         binary_launch_configs
             .iter()
@@ -580,6 +578,8 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
                     VolumeType::try_parse(&instance.storage_class).expect("Invalid storage class");
                 let binary_sg_id = resources.binary_sg_id.as_ref().unwrap();
                 let tag = tag.clone();
+                let instance_name = instance.name.clone();
+                let region = instance.region.clone();
                 async move {
                     let instance_id = launch_instances(
                         ec2_client,
@@ -596,28 +596,73 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
                     )
                     .await?[0]
                         .clone();
-                    let ip = wait_for_instances_running(ec2_client, slice::from_ref(&instance_id))
-                        .await?[0]
-                        .clone();
                     info!(
-                        ip = ip.as_str(),
-                        instance = instance.name.as_str(),
+                        instance_id = instance_id.as_str(),
+                        instance = instance_name.as_str(),
                         "launched instance"
                     );
-                    Ok::<Deployment, Error>(Deployment {
-                        instance: (*instance).clone(),
-                        id: instance_id,
-                        ip,
-                    })
+                    Ok::<(String, String, InstanceConfig), Error>((instance_id, region, (*instance).clone()))
                 }
             });
 
-    // Wait for all instances in parallel
-    let (monitoring_result, deployments) = tokio::try_join!(
+    // Wait for all launches to complete (get instance IDs)
+    let (monitoring_instance_id, binary_launches) = tokio::try_join!(
         monitoring_launch_future,
         try_join_all(binary_launch_futures)
     )?;
-    let (monitoring_instance_id, monitoring_ip, monitoring_private_ip) = monitoring_result;
+    info!("all instances launched, waiting for running state");
+
+    // Group binary instances by region for batched DescribeInstances calls
+    let mut instances_by_region: HashMap<String, Vec<(String, InstanceConfig)>> = HashMap::new();
+    for (instance_id, region, instance_config) in binary_launches {
+        instances_by_region
+            .entry(region)
+            .or_default()
+            .push((instance_id, instance_config));
+    }
+
+    // Wait for instances to be running, batched by region
+    let wait_futures = instances_by_region.into_iter().flat_map(|(region, instances)| {
+        let ec2_client = ec2_clients[&region].clone();
+        instances.chunks(MAX_DESCRIBE_BATCH).map(move |chunk| {
+            let ec2_client = ec2_client.clone();
+            let chunk: Vec<_> = chunk.to_vec();
+            let region = region.clone();
+            async move {
+                let instance_ids: Vec<String> = chunk.iter().map(|(id, _)| id.clone()).collect();
+                let ips = wait_for_instances_running(&ec2_client, &instance_ids).await?;
+                info!(
+                    region = region.as_str(),
+                    count = chunk.len(),
+                    "instances running in region"
+                );
+                let deployments: Vec<Deployment> = chunk
+                    .into_iter()
+                    .zip(ips)
+                    .map(|((instance_id, instance_config), ip)| Deployment {
+                        instance: instance_config,
+                        id: instance_id,
+                        ip,
+                    })
+                    .collect();
+                Ok::<Vec<Deployment>, Error>(deployments)
+            }
+        }).collect::<Vec<_>>()
+    });
+
+    // Wait for monitoring instance and all binary instances in parallel
+    let (monitoring_ips, binary_deployment_batches) = tokio::try_join!(
+        async {
+            wait_for_instances_running(monitoring_ec2_client, slice::from_ref(&monitoring_instance_id))
+                .await
+                .map_err(Error::AwsEc2)
+        },
+        try_join_all(wait_futures)
+    )?;
+    let monitoring_ip = monitoring_ips[0].clone();
+    let monitoring_private_ip = get_private_ip(monitoring_ec2_client, &monitoring_instance_id).await?;
+    let deployments: Vec<Deployment> = binary_deployment_batches.into_iter().flatten().collect();
+    info!(ip = monitoring_ip.as_str(), "monitoring instance running");
     info!("launched instances");
 
     // Add monitoring IP rules to binary security groups (for Prometheus scraping).

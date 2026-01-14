@@ -430,15 +430,21 @@ pub async fn launch_instances(
 }
 
 /// Waits for instances to reach the "running" state and returns their public IPs
+/// in the same order as the input instance IDs.
 pub async fn wait_for_instances_running(
     client: &Ec2Client,
     instance_ids: &[String],
 ) -> Result<Vec<String>, Ec2Error> {
+    // Track discovered IPs to avoid re-polling running instances
+    let mut discovered_ips: HashMap<String, String> = HashMap::new();
+    let mut pending_ids: HashSet<String> = instance_ids.iter().cloned().collect();
+
     loop {
-        // Ask for instance details
+        // Only query instances that haven't been discovered yet
+        let query_ids: Vec<String> = pending_ids.iter().cloned().collect();
         let Ok(resp) = client
             .describe_instances()
-            .set_instance_ids(Some(instance_ids.to_vec()))
+            .set_instance_ids(Some(query_ids))
             .send()
             .await
         else {
@@ -446,19 +452,36 @@ pub async fn wait_for_instances_running(
             continue;
         };
 
-        // Confirm all are running
-        let reservations = resp.reservations.unwrap();
-        let instances = reservations[0].instances.as_ref().unwrap();
-        if !instances.iter().all(|i| {
-            i.state.as_ref().unwrap().name.as_ref().unwrap() == &InstanceStateName::Running
-        }) {
-            sleep(RETRY_INTERVAL).await;
-            continue;
+        // Check each instance and record those that are running with IPs
+        for reservation in resp.reservations.unwrap_or_default() {
+            for instance in reservation.instances.unwrap_or_default() {
+                let id = match instance.instance_id {
+                    Some(id) => id,
+                    None => continue,
+                };
+                let is_running = instance
+                    .state
+                    .as_ref()
+                    .and_then(|s| s.name.as_ref())
+                    == Some(&InstanceStateName::Running);
+                if is_running {
+                    if let Some(ip) = instance.public_ip_address {
+                        discovered_ips.insert(id.clone(), ip);
+                        pending_ids.remove(&id);
+                    }
+                }
+            }
         }
-        return Ok(instances
-            .iter()
-            .map(|i| i.public_ip_address.as_ref().unwrap().clone())
-            .collect());
+
+        // Return once all instances are discovered
+        if pending_ids.is_empty() {
+            return Ok(instance_ids
+                .iter()
+                .map(|id| discovered_ips.get(id).unwrap().clone())
+                .collect());
+        }
+
+        sleep(RETRY_INTERVAL).await;
     }
 }
 
