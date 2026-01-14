@@ -250,6 +250,8 @@ cfg_if::cfg_if! {
         pub use destroy::destroy;
         mod clean;
         pub use clean::clean;
+        mod profile;
+        pub use profile::profile;
         pub mod utils;
         pub mod s3;
 
@@ -294,6 +296,9 @@ cfg_if::cfg_if! {
 
         /// Clean subcommand name
         pub const CLEAN_CMD: &str = "clean";
+
+        /// Profile subcommand name
+        pub const PROFILE_CMD: &str = "profile";
 
         /// Directory where deployer files are stored
         fn deployer_directory(tag: &str) -> PathBuf {
@@ -397,6 +402,9 @@ cfg_if::cfg_if! {
             S3Builder(#[from] aws_sdk_s3::error::BuildError),
             #[error("duplicate instance name: {0}")]
             DuplicateInstanceName(String),
+
+            #[error("instance not found: {0}")]
+            InstanceNotFound(String),
         }
 
         impl From<aws_sdk_s3::error::SdkError<aws_sdk_s3::operation::get_object::GetObjectError>> for Error {

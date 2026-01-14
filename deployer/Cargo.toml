@@ -27,6 +27,7 @@ aws = [
 	"tokio",
 	"tracing",
 	"tracing-subscriber",
+	"urlencoding",
 	"uuid",
 ]
 
@@ -45,6 +46,7 @@ thiserror = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["full"], optional = true }
 tracing = { workspace = true, optional = true }
 tracing-subscriber = { workspace = true, optional = true }
+urlencoding = { version = "2.1.3", optional = true }
 uuid = { workspace = true, features = ["v4"], optional = true }
 
 [[bin]]

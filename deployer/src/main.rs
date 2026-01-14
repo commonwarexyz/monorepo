@@ -83,6 +83,31 @@ async fn main() -> std::process::ExitCode {
                 .subcommand(
                     Command::new(ec2::CLEAN_CMD)
                         .about("Delete the shared S3 bucket and all its contents."),
+                )
+                .subcommand(
+                    Command::new(ec2::PROFILE_CMD)
+                        .about("Capture a CPU profile from a running instance using samply.")
+                        .arg(
+                            Arg::new("config")
+                                .long("config")
+                                .required(true)
+                                .help("Path to YAML config file")
+                                .value_parser(clap::value_parser!(PathBuf)),
+                        )
+                        .arg(
+                            Arg::new("instance")
+                                .long("instance")
+                                .required(true)
+                                .help("Name of instance to profile")
+                                .value_parser(clap::value_parser!(String)),
+                        )
+                        .arg(
+                            Arg::new("duration")
+                                .long("duration")
+                                .default_value("30")
+                                .help("Profile duration in seconds")
+                                .value_parser(clap::value_parser!(u64)),
+                        ),
                 ),
         )
         .get_matches();
@@ -134,6 +159,16 @@ async fn main() -> std::process::ExitCode {
             Some((ec2::CLEAN_CMD, _)) => {
                 if let Err(e) = ec2::clean().await {
                     error!(error=?e, "failed to clean S3 bucket");
+                } else {
+                    return std::process::ExitCode::SUCCESS;
+                }
+            }
+            Some((ec2::PROFILE_CMD, matches)) => {
+                let config_path = matches.get_one::<PathBuf>("config").unwrap();
+                let instance = matches.get_one::<String>("instance").unwrap();
+                let duration = *matches.get_one::<u64>("duration").unwrap();
+                if let Err(e) = ec2::profile(config_path, instance, duration).await {
+                    error!(error=?e, "failed to profile instance");
                 } else {
                     return std::process::ExitCode::SUCCESS;
                 }
