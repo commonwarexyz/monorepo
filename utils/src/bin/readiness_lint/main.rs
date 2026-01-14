@@ -25,6 +25,10 @@ struct Args {
     /// Output path for readiness.json
     #[arg(long)]
     output: Option<PathBuf>,
+
+    /// Check that existing readiness.json is up-to-date
+    #[arg(long)]
+    check: Option<PathBuf>,
 }
 
 fn main() -> ExitCode {
@@ -59,6 +63,27 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
         println!("Generated {}", output_path.display());
+    }
+
+    // Check if existing output is up-to-date
+    if let Some(check_path) = args.check {
+        match output::check(&workspace, &check_path) {
+            Ok(true) => {
+                println!("{} is up-to-date.", check_path.display());
+            }
+            Ok(false) => {
+                eprintln!(
+                    "{} is out-of-date. Run with --output {} to regenerate.",
+                    check_path.display(),
+                    check_path.display()
+                );
+                return ExitCode::FAILURE;
+            }
+            Err(e) => {
+                eprintln!("Error checking {}: {e}", check_path.display());
+                return ExitCode::FAILURE;
+            }
+        }
     }
 
     ExitCode::SUCCESS

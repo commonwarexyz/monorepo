@@ -1,7 +1,7 @@
 //! Generate readiness.json output.
 
 use crate::parser::{Module, Workspace};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, HashMap},
     fs,
@@ -18,16 +18,17 @@ pub enum OutputError {
 }
 
 /// Output format for readiness.json.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
 pub struct ReadinessOutput {
     pub version: String,
+    #[serde(default)]
     pub generated: String,
     pub crates: Vec<CrateOutput>,
     pub summary: Summary,
 }
 
 /// Output for a single crate.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
 pub struct CrateOutput {
     pub name: String,
     pub readiness: u8,
@@ -35,17 +36,17 @@ pub struct CrateOutput {
 }
 
 /// Output for a single module.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
 pub struct ModuleOutput {
     pub path: String,
     pub readiness: u8,
     pub is_explicit: bool,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub submodules: Vec<ModuleOutput>,
 }
 
 /// Summary statistics.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
 pub struct Summary {
     pub total_modules: usize,
     pub by_level: BTreeMap<u8, usize>,
@@ -53,46 +54,9 @@ pub struct Summary {
 
 /// Generate readiness.json output.
 pub fn generate(workspace: &Workspace, output_path: &Path) -> Result<(), OutputError> {
-    let mut crates = Vec::new();
-    let mut total_modules = 0;
-    let mut by_level: BTreeMap<u8, usize> = BTreeMap::new();
-
-    // Sort crates by name for consistent output
-    let mut crate_names: Vec<_> = workspace.crates.keys().collect();
-    crate_names.sort();
-
-    for crate_name in crate_names {
-        let krate = &workspace.crates[crate_name];
-
-        let (modules, module_count, level_counts) = collect_modules(&krate.modules, 0);
-
-        total_modules += module_count;
-        for (level, count) in level_counts {
-            *by_level.entry(level).or_insert(0) += count;
-        }
-
-        let crate_readiness = compute_crate_readiness(&krate.modules);
-
-        crates.push(CrateOutput {
-            name: crate_name.clone(),
-            readiness: crate_readiness,
-            modules,
-        });
-    }
-
-    let output = ReadinessOutput {
-        version: env!("CARGO_PKG_VERSION").to_string(),
-        generated: chrono::Utc::now().to_rfc3339(),
-        crates,
-        summary: Summary {
-            total_modules,
-            by_level,
-        },
-    };
-
+    let output = build_output(workspace);
     let json = serde_json::to_string_pretty(&output)?;
     fs::write(output_path, json)?;
-
     Ok(())
 }
 
@@ -136,6 +100,62 @@ fn collect_modules(
     }
 
     (output, count, by_level)
+}
+
+/// Check if the existing readiness.json is up-to-date.
+/// Returns Ok(true) if up-to-date, Ok(false) if out-of-date, Err on error.
+pub fn check(workspace: &Workspace, check_path: &Path) -> Result<bool, OutputError> {
+    let expected = build_output(workspace);
+
+    let existing_content = fs::read_to_string(check_path)?;
+    let mut existing: ReadinessOutput = serde_json::from_str(&existing_content)?;
+
+    // Ignore the generated timestamp when comparing
+    existing.generated = String::new();
+
+    let mut expected_for_cmp = expected;
+    expected_for_cmp.generated = String::new();
+
+    Ok(existing == expected_for_cmp)
+}
+
+/// Build the readiness output structure.
+fn build_output(workspace: &Workspace) -> ReadinessOutput {
+    let mut crates = Vec::new();
+    let mut total_modules = 0;
+    let mut by_level: BTreeMap<u8, usize> = BTreeMap::new();
+
+    let mut crate_names: Vec<_> = workspace.crates.keys().collect();
+    crate_names.sort();
+
+    for crate_name in crate_names {
+        let krate = &workspace.crates[crate_name];
+
+        let (modules, module_count, level_counts) = collect_modules(&krate.modules, 0);
+
+        total_modules += module_count;
+        for (level, count) in level_counts {
+            *by_level.entry(level).or_insert(0) += count;
+        }
+
+        let crate_readiness = compute_crate_readiness(&krate.modules);
+
+        crates.push(CrateOutput {
+            name: crate_name.clone(),
+            readiness: crate_readiness,
+            modules,
+        });
+    }
+
+    ReadinessOutput {
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        generated: chrono::Utc::now().to_rfc3339(),
+        crates,
+        summary: Summary {
+            total_modules,
+            by_level,
+        },
+    }
 }
 
 /// Compute the overall readiness level for a crate.

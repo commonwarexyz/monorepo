@@ -1,6 +1,6 @@
 {
   "version": "0.0.65",
-  "generated": "2026-01-14T18:19:34.584503+00:00",
+  "generated": "2026-01-14T19:21:31.578616+00:00",
   "crates": [
     {
       "name": "commonware-broadcast",
@@ -47,7 +47,7 @@
     },
     {
       "name": "commonware-codec",
-      "readiness": 0,
+      "readiness": 2,
       "modules": [
         {
           "path": "codec",
@@ -133,8 +133,8 @@
         },
         {
           "path": "varint",
-          "readiness": 0,
-          "is_explicit": false
+          "readiness": 2,
+          "is_explicit": true
         }
       ]
     },
@@ -731,7 +731,7 @@
     },
     {
       "name": "commonware-cryptography",
-      "readiness": 0,
+      "readiness": 2,
       "modules": [
         {
           "path": "blake3",
@@ -879,13 +879,13 @@
         },
         {
           "path": "crc32",
-          "readiness": 0,
-          "is_explicit": false,
+          "readiness": 2,
+          "is_explicit": true,
           "submodules": [
             {
               "path": "crc32::tests",
-              "readiness": 0,
-              "is_explicit": false
+              "readiness": 2,
+              "is_explicit": true
             }
           ]
         },
@@ -1084,12 +1084,12 @@
     },
     {
       "name": "commonware-math",
-      "readiness": 0,
+      "readiness": 2,
       "modules": [
         {
           "path": "algebra",
-          "readiness": 0,
-          "is_explicit": false
+          "readiness": 2,
+          "is_explicit": true
         },
         {
           "path": "fields",
@@ -1587,7 +1587,7 @@
     },
     {
       "name": "commonware-runtime",
-      "readiness": 0,
+      "readiness": 2,
       "modules": [
         {
           "path": "benchmarks",
@@ -1738,44 +1738,44 @@
         },
         {
           "path": "telemetry",
-          "readiness": 0,
-          "is_explicit": false,
+          "readiness": 2,
+          "is_explicit": true,
           "submodules": [
             {
               "path": "telemetry::metrics",
-              "readiness": 0,
+              "readiness": 2,
               "is_explicit": false,
               "submodules": [
                 {
                   "path": "telemetry::metrics::histogram",
-                  "readiness": 0,
+                  "readiness": 2,
                   "is_explicit": false
                 },
                 {
                   "path": "telemetry::metrics::status",
-                  "readiness": 0,
+                  "readiness": 2,
                   "is_explicit": false
                 },
                 {
                   "path": "telemetry::metrics::task",
-                  "readiness": 0,
+                  "readiness": 2,
                   "is_explicit": false
                 }
               ]
             },
             {
               "path": "telemetry::traces",
-              "readiness": 0,
+              "readiness": 2,
               "is_explicit": false,
               "submodules": [
                 {
                   "path": "telemetry::traces::collector",
-                  "readiness": 0,
+                  "readiness": 2,
                   "is_explicit": false
                 },
                 {
                   "path": "telemetry::traces::status",
-                  "readiness": 0,
+                  "readiness": 2,
                   "is_explicit": false
                 }
               ]
@@ -1811,87 +1811,87 @@
         },
         {
           "path": "utils",
-          "readiness": 0,
-          "is_explicit": false,
+          "readiness": 2,
+          "is_explicit": true,
           "submodules": [
             {
               "path": "utils::buffer",
-              "readiness": 0,
+              "readiness": 2,
               "is_explicit": false,
               "submodules": [
                 {
                   "path": "utils::buffer::pool",
-                  "readiness": 0,
+                  "readiness": 2,
                   "is_explicit": false,
                   "submodules": [
                     {
                       "path": "utils::buffer::pool::append",
-                      "readiness": 0,
+                      "readiness": 2,
                       "is_explicit": false
                     },
                     {
                       "path": "utils::buffer::pool::page_cache",
-                      "readiness": 0,
+                      "readiness": 2,
                       "is_explicit": false
                     },
                     {
                       "path": "utils::buffer::pool::read",
-                      "readiness": 0,
+                      "readiness": 2,
                       "is_explicit": false
                     },
                     {
                       "path": "utils::buffer::pool::tests",
-                      "readiness": 0,
+                      "readiness": 2,
                       "is_explicit": false
                     }
                   ]
                 },
                 {
                   "path": "utils::buffer::read",
-                  "readiness": 0,
+                  "readiness": 2,
                   "is_explicit": false
                 },
                 {
                   "path": "utils::buffer::tests",
-                  "readiness": 0,
+                  "readiness": 2,
                   "is_explicit": false
                 },
                 {
                   "path": "utils::buffer::tip",
-                  "readiness": 0,
+                  "readiness": 2,
                   "is_explicit": false
                 },
                 {
                   "path": "utils::buffer::write",
-                  "readiness": 0,
+                  "readiness": 2,
                   "is_explicit": false
                 }
               ]
             },
             {
               "path": "utils::cell",
-              "readiness": 0,
+              "readiness": 2,
               "is_explicit": false
             },
             {
               "path": "utils::handle",
-              "readiness": 0,
+              "readiness": 2,
               "is_explicit": false
             },
             {
               "path": "utils::signal",
-              "readiness": 0,
+              "readiness": 2,
               "is_explicit": false
             },
             {
               "path": "utils::supervision",
-              "readiness": 0,
+              "readiness": 2,
               "is_explicit": false
             },
             {
               "path": "utils::tests",
-              "readiness": 0,
-              "is_explicit": false
+              "readiness": 2,
+              "is_explicit": true
             }
           ]
         }
@@ -1899,7 +1899,7 @@
     },
     {
       "name": "commonware-storage",
-      "readiness": 0,
+      "readiness": 2,
       "modules": [
         {
           "path": "archive",
@@ -2061,69 +2061,69 @@
         },
         {
           "path": "journal",
-          "readiness": 0,
-          "is_explicit": false,
+          "readiness": 2,
+          "is_explicit": true,
           "submodules": [
             {
               "path": "journal::authenticated",
-              "readiness": 0,
+              "readiness": 2,
               "is_explicit": false
             },
             {
               "path": "journal::conformance",
-              "readiness": 0,
+              "readiness": 2,
               "is_explicit": false
             },
             {
               "path": "journal::contiguous",
-              "readiness": 0,
+              "readiness": 2,
               "is_explicit": false,
               "submodules": [
                 {
                   "path": "journal::contiguous::fixed",
-                  "readiness": 0,
+                  "readiness": 2,
                   "is_explicit": false
                 },
                 {
                   "path": "journal::contiguous::tests",
-                  "readiness": 0,
+                  "readiness": 2,
                   "is_explicit": false
                 },
                 {
                   "path": "journal::contiguous::variable",
-                  "readiness": 0,
+                  "readiness": 2,
                   "is_explicit": false
                 }
               ]
             },
             {
               "path": "journal::segmented",
-              "readiness": 0,
+              "readiness": 2,
               "is_explicit": false,
               "submodules": [
                 {
                   "path": "journal::segmented::fixed",
-                  "readiness": 0,
+                  "readiness": 2,
                   "is_explicit": false
                 },
                 {
                   "path": "journal::segmented::glob",
-                  "readiness": 0,
+                  "readiness": 2,
                   "is_explicit": false
                 },
                 {
                   "path": "journal::segmented::manager",
-                  "readiness": 0,
+                  "readiness": 2,
                   "is_explicit": false
                 },
                 {
                   "path": "journal::segmented::oversized",
-                  "readiness": 0,
+                  "readiness": 2,
                   "is_explicit": false
                 },
                 {
                   "path": "journal::segmented::variable",
-                  "readiness": 0,
+                  "readiness": 2,
                   "is_explicit": false
                 }
               ]
@@ -2785,7 +2785,8 @@
   "summary": {
     "total_modules": 493,
     "by_level": {
-      "0": 493
+      "0": 452,
+      "2": 41
     }
   }
 }
