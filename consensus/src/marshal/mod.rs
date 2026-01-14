@@ -130,7 +130,7 @@ mod tests {
     };
     use commonware_parallel::Sequential;
     use commonware_runtime::{buffer::PoolRef, deterministic, Clock, Metrics, Quota, Runner};
-    use commonware_storage::archive::immutable;
+    use commonware_storage::archive::{immutable, prunable};
     use commonware_utils::{vec::NonEmptyVec, NZUsize, NZU16, NZU64};
     use futures::StreamExt;
     use rand::{
@@ -746,6 +746,270 @@ mod tests {
                     assert_eq!(block.unwrap().height(), Height::new(height));
                 }
             }
+        })
+    }
+
+    #[test_traced("WARN")]
+    fn test_prune_finalized_archives() {
+        /// A hasher that uses the first 8 bytes of a Sha256Digest for hashing.
+        #[derive(Default)]
+        struct DigestHasher {
+            value: u64,
+        }
+
+        impl std::hash::Hasher for DigestHasher {
+            fn write(&mut self, bytes: &[u8]) {
+                // Use first 8 bytes of the digest for the hash
+                let mut arr = [0u8; 8];
+                let len = bytes.len().min(8);
+                arr[..len].copy_from_slice(&bytes[..len]);
+                self.value = u64::from_le_bytes(arr);
+            }
+
+            fn finish(&self) -> u64 {
+                self.value
+            }
+        }
+
+        /// A translator that keeps the full Sha256Digest as the key.
+        /// This is needed for prunable archives to satisfy the `Translator<Key = C>` bound
+        /// required by the `Certificates` and `Blocks` trait implementations.
+        #[derive(Clone, Default)]
+        struct DigestTranslator;
+
+        impl commonware_storage::translator::Translator for DigestTranslator {
+            type Key = D;
+
+            fn transform(&self, key: &[u8]) -> Self::Key {
+                let mut arr = [0u8; 32];
+                let len = key.len().min(32);
+                arr[..len].copy_from_slice(&key[..len]);
+                Sha256Digest::from(arr)
+            }
+        }
+
+        impl std::hash::BuildHasher for DigestTranslator {
+            type Hasher = DigestHasher;
+
+            fn build_hasher(&self) -> Self::Hasher {
+                DigestHasher::default()
+            }
+        }
+
+        let runner = deterministic::Runner::new(
+            deterministic::Config::new().with_timeout(Some(Duration::from_secs(120))),
+        );
+        runner.start(|mut context| async move {
+            let oracle = setup_network(context.clone(), None);
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+
+            let validator = participants[0].clone();
+            let provider = ConstantProvider::new(schemes[0].clone());
+
+            // Create config
+            let config = Config {
+                provider,
+                epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+                mailbox_size: 100,
+                view_retention_timeout: ViewDelta::new(10),
+                max_repair: NZUsize!(10),
+                block_codec_config: (),
+                partition_prefix: format!("prune-test-{}", validator.clone()),
+                prunable_items_per_section: NZU64!(10),
+                replay_buffer: NZUsize!(1024),
+                key_write_buffer: NZUsize!(1024),
+                value_write_buffer: NZUsize!(1024),
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                strategy: Sequential,
+            };
+
+            // Create the resolver
+            let control = oracle.control(validator.clone());
+            let backfill = control.register(1, TEST_QUOTA).await.unwrap();
+            let resolver_cfg = resolver::Config {
+                public_key: validator.clone(),
+                manager: oracle.manager(),
+                blocker: control.clone(),
+                mailbox_size: config.mailbox_size,
+                initial: Duration::from_secs(1),
+                timeout: Duration::from_secs(2),
+                fetch_retry_timeout: Duration::from_millis(100),
+                priority_requests: false,
+                priority_responses: false,
+            };
+            let resolver = resolver::init(&context, resolver_cfg, backfill);
+
+            // Create a buffered broadcast engine
+            let broadcast_config = buffered::Config {
+                public_key: validator.clone(),
+                mailbox_size: config.mailbox_size,
+                deque_size: 10,
+                priority: false,
+                codec_config: (),
+            };
+            let (broadcast_engine, buffer) =
+                buffered::Engine::new(context.clone(), broadcast_config);
+            let network = control.register(2, TEST_QUOTA).await.unwrap();
+            broadcast_engine.start(network);
+
+            // Initialize finalizations by height using PRUNABLE archive
+            let finalizations_by_height = prunable::Archive::init(
+                context.with_label("finalizations_by_height"),
+                prunable::Config {
+                    translator: DigestTranslator,
+                    key_partition: format!(
+                        "{}-finalizations-by-height-key",
+                        config.partition_prefix
+                    ),
+                    key_buffer_pool: config.buffer_pool.clone(),
+                    value_partition: format!(
+                        "{}-finalizations-by-height-value",
+                        config.partition_prefix
+                    ),
+                    compression: None,
+                    codec_config: S::certificate_codec_config_unbounded(),
+                    items_per_section: NZU64!(10),
+                    key_write_buffer: config.key_write_buffer,
+                    value_write_buffer: config.value_write_buffer,
+                    replay_buffer: config.replay_buffer,
+                },
+            )
+            .await
+            .expect("failed to initialize finalizations by height archive");
+
+            // Initialize finalized blocks using PRUNABLE archive
+            let finalized_blocks = prunable::Archive::init(
+                context.with_label("finalized_blocks"),
+                prunable::Config {
+                    translator: DigestTranslator,
+                    key_partition: format!("{}-finalized-blocks-key", config.partition_prefix),
+                    key_buffer_pool: config.buffer_pool.clone(),
+                    value_partition: format!("{}-finalized-blocks-value", config.partition_prefix),
+                    compression: None,
+                    codec_config: config.block_codec_config,
+                    items_per_section: NZU64!(10),
+                    key_write_buffer: config.key_write_buffer,
+                    value_write_buffer: config.value_write_buffer,
+                    replay_buffer: config.replay_buffer,
+                },
+            )
+            .await
+            .expect("failed to initialize finalized blocks archive");
+
+            let (actor, mut mailbox, _processed_height) = actor::Actor::init(
+                context.clone(),
+                finalizations_by_height,
+                finalized_blocks,
+                config,
+            )
+            .await;
+            let application = Application::<B>::default();
+
+            // Start the application
+            actor.start(application.clone(), buffer, resolver);
+
+            // Finalize blocks 1-20
+            let mut parent = Sha256::hash(b"");
+            let epocher = FixedEpocher::new(BLOCKS_PER_EPOCH);
+            for i in 1..=20u64 {
+                let block = B::new::<Sha256>(parent, Height::new(i), i);
+                let commitment = block.digest();
+                let bounds = epocher.containing(Height::new(i)).unwrap();
+                let round = Round::new(bounds.epoch(), View::new(i));
+
+                mailbox.verified(round, block.clone()).await;
+                let proposal = Proposal {
+                    round,
+                    parent: View::new(i - 1),
+                    payload: commitment,
+                };
+                let finalization = make_finalization(proposal, &schemes, QUORUM);
+                mailbox.report(Activity::Finalization(finalization)).await;
+
+                parent = commitment;
+            }
+
+            // Wait for application to process all blocks
+            // After this, last_processed_height will be 20
+            while application.blocks().len() < 20 {
+                context.sleep(Duration::from_millis(10)).await;
+            }
+
+            // Verify all blocks are accessible before pruning
+            for i in 1..=20u64 {
+                assert!(
+                    mailbox.get_block(Height::new(i)).await.is_some(),
+                    "block {i} should exist before pruning"
+                );
+                assert!(
+                    mailbox.get_finalization(Height::new(i)).await.is_some(),
+                    "finalization {i} should exist before pruning"
+                );
+            }
+
+            // All blocks should still be accessible (prune was ignored)
+            mailbox.prune(Height::new(25)).await;
+            context.sleep(Duration::from_millis(50)).await;
+            for i in 1..=20u64 {
+                assert!(
+                    mailbox.get_block(Height::new(i)).await.is_some(),
+                    "block {i} should still exist after pruning above floor"
+                );
+            }
+
+            // Pruning at height 10 should prune blocks below 10 (heights 1-9)
+            mailbox.prune(Height::new(10)).await;
+            context.sleep(Duration::from_millis(100)).await;
+            for i in 1..10u64 {
+                assert!(
+                    mailbox.get_block(Height::new(i)).await.is_none(),
+                    "block {i} should be pruned"
+                );
+                assert!(
+                    mailbox.get_finalization(Height::new(i)).await.is_none(),
+                    "finalization {i} should be pruned"
+                );
+            }
+
+            // Blocks at or above prune height (10-20) should still be accessible
+            for i in 10..=20u64 {
+                assert!(
+                    mailbox.get_block(Height::new(i)).await.is_some(),
+                    "block {i} should still exist after pruning"
+                );
+                assert!(
+                    mailbox.get_finalization(Height::new(i)).await.is_some(),
+                    "finalization {i} should still exist after pruning"
+                );
+            }
+
+            // Pruning at height 20 should prune blocks 10-19
+            mailbox.prune(Height::new(20)).await;
+            context.sleep(Duration::from_millis(100)).await;
+            for i in 10..20u64 {
+                assert!(
+                    mailbox.get_block(Height::new(i)).await.is_none(),
+                    "block {i} should be pruned after second prune"
+                );
+                assert!(
+                    mailbox.get_finalization(Height::new(i)).await.is_none(),
+                    "finalization {i} should be pruned after second prune"
+                );
+            }
+
+            // Block 20 should still be accessible
+            assert!(
+                mailbox.get_block(Height::new(20)).await.is_some(),
+                "block 20 should still exist"
+            );
+            assert!(
+                mailbox.get_finalization(Height::new(20)).await.is_some(),
+                "finalization 20 should still exist"
+            );
         })
     }
 

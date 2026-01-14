@@ -525,21 +525,20 @@ where
                             self.pending_ack = None.into();
 
                             // Prune the finalized block and finalization certificate archives in parallel.
-                            if let Err(err) = try_join!(
-                                // Prune the finalized blocks archive
-                                async {
-                                    self.finalized_blocks.prune(height).await.map_err(Box::new)?;
-                                    Ok::<_, BoxedError>(())
-                                },
-                                // Prune the finalization certificate archive
-                                async {
-                                    self.finalizations_by_height
-                                        .prune(height)
-                                        .await
-                                        .map_err(Box::new)?;
-                                    Ok::<_, BoxedError>(())
-                                }
-                            ) {
+                            if let Err(err) = self.prune_finalized_archives(height).await {
+                                error!(?err, %height, "failed to prune finalized archives");
+                                return;
+                            }
+                        }
+                        Message::Prune { height } => {
+                            // Only allow pruning at or below the current floor
+                            if height > self.last_processed_height {
+                                warn!(%height, floor = %self.last_processed_height, "prune height above floor, ignoring");
+                                continue;
+                            }
+
+                            // Prune the finalized block and finalization certificate archives in parallel.
+                            if let Err(err) = self.prune_finalized_archives(height).await {
                                 error!(?err, %height, "failed to prune finalized archives");
                                 return;
                             }
@@ -1059,6 +1058,27 @@ where
             .retain(Request::<B>::Finalized { height }.predicate())
             .await;
 
+        Ok(())
+    }
+
+    /// Prunes finalized blocks and certificates below the given height.
+    async fn prune_finalized_archives(&mut self, height: Height) -> Result<(), BoxedError> {
+        try_join!(
+            async {
+                self.finalized_blocks
+                    .prune(height)
+                    .await
+                    .map_err(Box::new)?;
+                Ok::<_, BoxedError>(())
+            },
+            async {
+                self.finalizations_by_height
+                    .prune(height)
+                    .await
+                    .map_err(Box::new)?;
+                Ok::<_, BoxedError>(())
+            }
+        )?;
         Ok(())
     }
 }
