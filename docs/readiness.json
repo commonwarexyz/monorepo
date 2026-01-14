@@ -1,0 +1,2792 @@
+{
+  "version": "0.0.65",
+  "generated": "2026-01-14T18:02:25.651015+00:00",
+  "crates": [
+    {
+      "name": "commonware-broadcast",
+      "readiness": 0,
+      "modules": [
+        {
+          "path": "buffered",
+          "readiness": 0,
+          "is_explicit": false,
+          "submodules": [
+            {
+              "path": "buffered::config",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "buffered::engine",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "buffered::ingress",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "buffered::metrics",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "buffered::mocks",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "buffered::tests",
+              "readiness": 0,
+              "is_explicit": false
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "commonware-codec",
+      "readiness": 0,
+      "modules": [
+        {
+          "path": "codec",
+          "readiness": 0,
+          "is_explicit": false
+        },
+        {
+          "path": "config",
+          "readiness": 0,
+          "is_explicit": false
+        },
+        {
+          "path": "conformance",
+          "readiness": 0,
+          "is_explicit": false
+        },
+        {
+          "path": "error",
+          "readiness": 0,
+          "is_explicit": false
+        },
+        {
+          "path": "extensions",
+          "readiness": 0,
+          "is_explicit": false
+        },
+        {
+          "path": "types",
+          "readiness": 0,
+          "is_explicit": false,
+          "submodules": [
+            {
+              "path": "types::btree_map",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "types::btree_set",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "types::bytes",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "types::hash_map",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "types::hash_set",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "types::net",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "types::primitives",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "types::tuple",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "types::vec",
+              "readiness": 0,
+              "is_explicit": false
+            }
+          ]
+        },
+        {
+          "path": "util",
+          "readiness": 0,
+          "is_explicit": false
+        },
+        {
+          "path": "varint",
+          "readiness": 0,
+          "is_explicit": false
+        }
+      ]
+    },
+    {
+      "name": "commonware-coding",
+      "readiness": 0,
+      "modules": [
+        {
+          "path": "no_coding",
+          "readiness": 0,
+          "is_explicit": false
+        },
+        {
+          "path": "reed_solomon",
+          "readiness": 0,
+          "is_explicit": false
+        },
+        {
+          "path": "test",
+          "readiness": 0,
+          "is_explicit": false
+        },
+        {
+          "path": "zoda",
+          "readiness": 0,
+          "is_explicit": false
+        }
+      ]
+    },
+    {
+      "name": "commonware-collector",
+      "readiness": 0,
+      "modules": [
+        {
+          "path": "p2p",
+          "readiness": 0,
+          "is_explicit": false,
+          "submodules": [
+            {
+              "path": "p2p::engine",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "p2p::ingress",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "p2p::mocks",
+              "readiness": 0,
+              "is_explicit": false,
+              "submodules": [
+                {
+                  "path": "p2p::mocks::handler",
+                  "readiness": 0,
+                  "is_explicit": false
+                },
+                {
+                  "path": "p2p::mocks::monitor",
+                  "readiness": 0,
+                  "is_explicit": false
+                },
+                {
+                  "path": "p2p::mocks::sender",
+                  "readiness": 0,
+                  "is_explicit": false
+                },
+                {
+                  "path": "p2p::mocks::types",
+                  "readiness": 0,
+                  "is_explicit": false
+                }
+              ]
+            },
+            {
+              "path": "p2p::tests",
+              "readiness": 0,
+              "is_explicit": false
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "commonware-conformance",
+      "readiness": 0,
+      "modules": [
+        {
+          "path": "tests",
+          "readiness": 0,
+          "is_explicit": false
+        }
+      ]
+    },
+    {
+      "name": "commonware-conformance-macros",
+      "readiness": 0,
+      "modules": [
+        {
+          "path": "tests",
+          "readiness": 0,
+          "is_explicit": false
+        }
+      ]
+    },
+    {
+      "name": "commonware-consensus",
+      "readiness": 0,
+      "modules": [
+        {
+          "path": "aggregation",
+          "readiness": 0,
+          "is_explicit": false,
+          "submodules": [
+            {
+              "path": "aggregation::config",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "aggregation::engine",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "aggregation::metrics",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "aggregation::mocks",
+              "readiness": 0,
+              "is_explicit": false,
+              "submodules": [
+                {
+                  "path": "aggregation::mocks::application",
+                  "readiness": 0,
+                  "is_explicit": false
+                },
+                {
+                  "path": "aggregation::mocks::monitor",
+                  "readiness": 0,
+                  "is_explicit": false
+                },
+                {
+                  "path": "aggregation::mocks::provider",
+                  "readiness": 0,
+                  "is_explicit": false
+                },
+                {
+                  "path": "aggregation::mocks::reporter",
+                  "readiness": 0,
+                  "is_explicit": false
+                }
+              ]
+            },
+            {
+              "path": "aggregation::safe_tip",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "aggregation::scheme",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "aggregation::tests",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "aggregation::types",
+              "readiness": 0,
+              "is_explicit": false
+            }
+          ]
+        },
+        {
+          "path": "application",
+          "readiness": 0,
+          "is_explicit": false,
+          "submodules": [
+            {
+              "path": "application::marshaled",
+              "readiness": 0,
+              "is_explicit": false
+            }
+          ]
+        },
+        {
+          "path": "marshal",
+          "readiness": 0,
+          "is_explicit": false,
+          "submodules": [
+            {
+              "path": "marshal::actor",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "marshal::cache",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "marshal::config",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "marshal::ingress",
+              "readiness": 0,
+              "is_explicit": false,
+              "submodules": [
+                {
+                  "path": "marshal::ingress::handler",
+                  "readiness": 0,
+                  "is_explicit": false
+                },
+                {
+                  "path": "marshal::ingress::mailbox",
+                  "readiness": 0,
+                  "is_explicit": false
+                }
+              ]
+            },
+            {
+              "path": "marshal::mocks",
+              "readiness": 0,
+              "is_explicit": false,
+              "submodules": [
+                {
+                  "path": "marshal::mocks::application",
+                  "readiness": 0,
+                  "is_explicit": false
+                },
+                {
+                  "path": "marshal::mocks::block",
+                  "readiness": 0,
+                  "is_explicit": false
+                },
+                {
+                  "path": "marshal::mocks::resolver",
+                  "readiness": 0,
+                  "is_explicit": false
+                }
+              ]
+            },
+            {
+              "path": "marshal::resolver",
+              "readiness": 0,
+              "is_explicit": false,
+              "submodules": [
+                {
+                  "path": "marshal::resolver::p2p",
+                  "readiness": 0,
+                  "is_explicit": false
+                }
+              ]
+            },
+            {
+              "path": "marshal::store",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "marshal::tests",
+              "readiness": 0,
+              "is_explicit": false
+            }
+          ]
+        },
+        {
+          "path": "ordered_broadcast",
+          "readiness": 0,
+          "is_explicit": false,
+          "submodules": [
+            {
+              "path": "ordered_broadcast::ack_manager",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "ordered_broadcast::config",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "ordered_broadcast::engine",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "ordered_broadcast::metrics",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "ordered_broadcast::mocks",
+              "readiness": 0,
+              "is_explicit": false,
+              "submodules": [
+                {
+                  "path": "ordered_broadcast::mocks::automaton",
+                  "readiness": 0,
+                  "is_explicit": false
+                },
+                {
+                  "path": "ordered_broadcast::mocks::monitor",
+                  "readiness": 0,
+                  "is_explicit": false
+                },
+                {
+                  "path": "ordered_broadcast::mocks::provider",
+                  "readiness": 0,
+                  "is_explicit": false
+                },
+                {
+                  "path": "ordered_broadcast::mocks::reporter",
+                  "readiness": 0,
+                  "is_explicit": false
+                },
+                {
+                  "path": "ordered_broadcast::mocks::sequencers",
+                  "readiness": 0,
+                  "is_explicit": false
+                }
+              ]
+            },
+            {
+              "path": "ordered_broadcast::scheme",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "ordered_broadcast::tests",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "ordered_broadcast::tip_manager",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "ordered_broadcast::types",
+              "readiness": 0,
+              "is_explicit": false
+            }
+          ]
+        },
+        {
+          "path": "reporter",
+          "readiness": 0,
+          "is_explicit": false
+        },
+        {
+          "path": "simplex",
+          "readiness": 0,
+          "is_explicit": false,
+          "submodules": [
+            {
+              "path": "simplex::actors",
+              "readiness": 0,
+              "is_explicit": false,
+              "submodules": [
+                {
+                  "path": "simplex::actors::batcher",
+                  "readiness": 0,
+                  "is_explicit": false,
+                  "submodules": [
+                    {
+                      "path": "simplex::actors::batcher::actor",
+                      "readiness": 0,
+                      "is_explicit": false
+                    },
+                    {
+                      "path": "simplex::actors::batcher::ingress",
+                      "readiness": 0,
+                      "is_explicit": false
+                    },
+                    {
+                      "path": "simplex::actors::batcher::round",
+                      "readiness": 0,
+                      "is_explicit": false
+                    },
+                    {
+                      "path": "simplex::actors::batcher::tests",
+                      "readiness": 0,
+                      "is_explicit": false
+                    },
+                    {
+                      "path": "simplex::actors::batcher::verifier",
+                      "readiness": 0,
+                      "is_explicit": false
+                    }
+                  ]
+                },
+                {
+                  "path": "simplex::actors::resolver",
+                  "readiness": 0,
+                  "is_explicit": false,
+                  "submodules": [
+                    {
+                      "path": "simplex::actors::resolver::actor",
+                      "readiness": 0,
+                      "is_explicit": false
+                    },
+                    {
+                      "path": "simplex::actors::resolver::ingress",
+                      "readiness": 0,
+                      "is_explicit": false
+                    },
+                    {
+                      "path": "simplex::actors::resolver::state",
+                      "readiness": 0,
+                      "is_explicit": false
+                    }
+                  ]
+                },
+                {
+                  "path": "simplex::actors::voter",
+                  "readiness": 0,
+                  "is_explicit": false,
+                  "submodules": [
+                    {
+                      "path": "simplex::actors::voter::actor",
+                      "readiness": 0,
+                      "is_explicit": false
+                    },
+                    {
+                      "path": "simplex::actors::voter::ingress",
+                      "readiness": 0,
+                      "is_explicit": false
+                    },
+                    {
+                      "path": "simplex::actors::voter::round",
+                      "readiness": 0,
+                      "is_explicit": false
+                    },
+                    {
+                      "path": "simplex::actors::voter::slot",
+                      "readiness": 0,
+                      "is_explicit": false
+                    },
+                    {
+                      "path": "simplex::actors::voter::state",
+                      "readiness": 0,
+                      "is_explicit": false
+                    },
+                    {
+                      "path": "simplex::actors::voter::tests",
+                      "readiness": 0,
+                      "is_explicit": false
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "path": "simplex::config",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "simplex::elector",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "simplex::engine",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "simplex::metrics",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "simplex::mocks",
+              "readiness": 0,
+              "is_explicit": false,
+              "submodules": [
+                {
+                  "path": "simplex::mocks::application",
+                  "readiness": 0,
+                  "is_explicit": false
+                },
+                {
+                  "path": "simplex::mocks::conflicter",
+                  "readiness": 0,
+                  "is_explicit": false
+                },
+                {
+                  "path": "simplex::mocks::equivocator",
+                  "readiness": 0,
+                  "is_explicit": false
+                },
+                {
+                  "path": "simplex::mocks::impersonator",
+                  "readiness": 0,
+                  "is_explicit": false
+                },
+                {
+                  "path": "simplex::mocks::nuller",
+                  "readiness": 0,
+                  "is_explicit": false
+                },
+                {
+                  "path": "simplex::mocks::nullify_only",
+                  "readiness": 0,
+                  "is_explicit": false
+                },
+                {
+                  "path": "simplex::mocks::outdated",
+                  "readiness": 0,
+                  "is_explicit": false
+                },
+                {
+                  "path": "simplex::mocks::reconfigurer",
+                  "readiness": 0,
+                  "is_explicit": false
+                },
+                {
+                  "path": "simplex::mocks::relay",
+                  "readiness": 0,
+                  "is_explicit": false
+                },
+                {
+                  "path": "simplex::mocks::reporter",
+                  "readiness": 0,
+                  "is_explicit": false
+                },
+                {
+                  "path": "simplex::mocks::twins",
+                  "readiness": 0,
+                  "is_explicit": false
+                }
+              ]
+            },
+            {
+              "path": "simplex::scheme",
+              "readiness": 0,
+              "is_explicit": false,
+              "submodules": [
+                {
+                  "path": "simplex::scheme::bls12381_multisig",
+                  "readiness": 0,
+                  "is_explicit": false
+                },
+                {
+                  "path": "simplex::scheme::bls12381_threshold",
+                  "readiness": 0,
+                  "is_explicit": false
+                },
+                {
+                  "path": "simplex::scheme::ed25519",
+                  "readiness": 0,
+                  "is_explicit": false
+                },
+                {
+                  "path": "simplex::scheme::reporter",
+                  "readiness": 0,
+                  "is_explicit": false
+                },
+                {
+                  "path": "simplex::scheme::secp256r1",
+                  "readiness": 0,
+                  "is_explicit": false
+                }
+              ]
+            },
+            {
+              "path": "simplex::tests",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "simplex::types",
+              "readiness": 0,
+              "is_explicit": false
+            }
+          ]
+        },
+        {
+          "path": "types",
+          "readiness": 0,
+          "is_explicit": false
+        }
+      ]
+    },
+    {
+      "name": "commonware-cryptography",
+      "readiness": 0,
+      "modules": [
+        {
+          "path": "blake3",
+          "readiness": 0,
+          "is_explicit": false,
+          "submodules": [
+            {
+              "path": "blake3::tests",
+              "readiness": 0,
+              "is_explicit": false
+            }
+          ]
+        },
+        {
+          "path": "bloomfilter",
+          "readiness": 0,
+          "is_explicit": false
+        },
+        {
+          "path": "bls12381",
+          "readiness": 0,
+          "is_explicit": false,
+          "submodules": [
+            {
+              "path": "bls12381::certificate",
+              "readiness": 0,
+              "is_explicit": false,
+              "submodules": [
+                {
+                  "path": "bls12381::certificate::multisig",
+                  "readiness": 0,
+                  "is_explicit": false,
+                  "submodules": [
+                    {
+                      "path": "bls12381::certificate::multisig::macros",
+                      "readiness": 0,
+                      "is_explicit": false
+                    },
+                    {
+                      "path": "bls12381::certificate::multisig::mocks",
+                      "readiness": 0,
+                      "is_explicit": false
+                    },
+                    {
+                      "path": "bls12381::certificate::multisig::tests",
+                      "readiness": 0,
+                      "is_explicit": false
+                    }
+                  ]
+                },
+                {
+                  "path": "bls12381::certificate::threshold",
+                  "readiness": 0,
+                  "is_explicit": false,
+                  "submodules": [
+                    {
+                      "path": "bls12381::certificate::threshold::macros",
+                      "readiness": 0,
+                      "is_explicit": false
+                    },
+                    {
+                      "path": "bls12381::certificate::threshold::mocks",
+                      "readiness": 0,
+                      "is_explicit": false
+                    },
+                    {
+                      "path": "bls12381::certificate::threshold::tests",
+                      "readiness": 0,
+                      "is_explicit": false
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "path": "bls12381::dkg",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "bls12381::primitives",
+              "readiness": 0,
+              "is_explicit": false,
+              "submodules": [
+                {
+                  "path": "bls12381::primitives::group",
+                  "readiness": 0,
+                  "is_explicit": false
+                },
+                {
+                  "path": "bls12381::primitives::ops",
+                  "readiness": 0,
+                  "is_explicit": false,
+                  "submodules": [
+                    {
+                      "path": "bls12381::primitives::ops::aggregate",
+                      "readiness": 0,
+                      "is_explicit": false
+                    },
+                    {
+                      "path": "bls12381::primitives::ops::batch",
+                      "readiness": 0,
+                      "is_explicit": false
+                    },
+                    {
+                      "path": "bls12381::primitives::ops::tests",
+                      "readiness": 0,
+                      "is_explicit": false
+                    },
+                    {
+                      "path": "bls12381::primitives::ops::threshold",
+                      "readiness": 0,
+                      "is_explicit": false
+                    }
+                  ]
+                },
+                {
+                  "path": "bls12381::primitives::sharing",
+                  "readiness": 0,
+                  "is_explicit": false
+                },
+                {
+                  "path": "bls12381::primitives::variant",
+                  "readiness": 0,
+                  "is_explicit": false
+                }
+              ]
+            },
+            {
+              "path": "bls12381::scheme",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "bls12381::tle",
+              "readiness": 0,
+              "is_explicit": false
+            }
+          ]
+        },
+        {
+          "path": "certificate",
+          "readiness": 0,
+          "is_explicit": false
+        },
+        {
+          "path": "crc32",
+          "readiness": 0,
+          "is_explicit": false,
+          "submodules": [
+            {
+              "path": "crc32::tests",
+              "readiness": 0,
+              "is_explicit": false
+            }
+          ]
+        },
+        {
+          "path": "ed25519",
+          "readiness": 0,
+          "is_explicit": false,
+          "submodules": [
+            {
+              "path": "ed25519::certificate",
+              "readiness": 0,
+              "is_explicit": false,
+              "submodules": [
+                {
+                  "path": "ed25519::certificate::macros",
+                  "readiness": 0,
+                  "is_explicit": false
+                },
+                {
+                  "path": "ed25519::certificate::mocks",
+                  "readiness": 0,
+                  "is_explicit": false
+                },
+                {
+                  "path": "ed25519::certificate::tests",
+                  "readiness": 0,
+                  "is_explicit": false
+                }
+              ]
+            },
+            {
+              "path": "ed25519::scheme",
+              "readiness": 0,
+              "is_explicit": false
+            }
+          ]
+        },
+        {
+          "path": "handshake",
+          "readiness": 0,
+          "is_explicit": false
+        },
+        {
+          "path": "lthash",
+          "readiness": 0,
+          "is_explicit": false,
+          "submodules": [
+            {
+              "path": "lthash::tests",
+              "readiness": 0,
+              "is_explicit": false
+            }
+          ]
+        },
+        {
+          "path": "secp256r1",
+          "readiness": 0,
+          "is_explicit": false,
+          "submodules": [
+            {
+              "path": "secp256r1::certificate",
+              "readiness": 0,
+              "is_explicit": false,
+              "submodules": [
+                {
+                  "path": "secp256r1::certificate::macros",
+                  "readiness": 0,
+                  "is_explicit": false
+                },
+                {
+                  "path": "secp256r1::certificate::mocks",
+                  "readiness": 0,
+                  "is_explicit": false
+                },
+                {
+                  "path": "secp256r1::certificate::tests",
+                  "readiness": 0,
+                  "is_explicit": false
+                }
+              ]
+            },
+            {
+              "path": "secp256r1::common",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "secp256r1::recoverable",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "secp256r1::standard",
+              "readiness": 0,
+              "is_explicit": false
+            }
+          ]
+        },
+        {
+          "path": "secret",
+          "readiness": 0,
+          "is_explicit": false
+        },
+        {
+          "path": "sha256",
+          "readiness": 0,
+          "is_explicit": false,
+          "submodules": [
+            {
+              "path": "sha256::tests",
+              "readiness": 0,
+              "is_explicit": false
+            }
+          ]
+        },
+        {
+          "path": "tests",
+          "readiness": 0,
+          "is_explicit": false
+        },
+        {
+          "path": "transcript",
+          "readiness": 0,
+          "is_explicit": false
+        }
+      ]
+    },
+    {
+      "name": "commonware-deployer",
+      "readiness": 0,
+      "modules": [
+        {
+          "path": "ec2",
+          "readiness": 0,
+          "is_explicit": false,
+          "submodules": [
+            {
+              "path": "ec2::authorize",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "ec2::aws",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "ec2::clean",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "ec2::create",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "ec2::destroy",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "ec2::s3",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "ec2::services",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "ec2::update",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "ec2::utils",
+              "readiness": 0,
+              "is_explicit": false
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "commonware-macros",
+      "readiness": 0,
+      "modules": [
+        {
+          "path": "nextest",
+          "readiness": 0,
+          "is_explicit": false
+        }
+      ]
+    },
+    {
+      "name": "commonware-math",
+      "readiness": 0,
+      "modules": [
+        {
+          "path": "algebra",
+          "readiness": 0,
+          "is_explicit": false
+        },
+        {
+          "path": "fields",
+          "readiness": 0,
+          "is_explicit": false
+        },
+        {
+          "path": "ntt",
+          "readiness": 0,
+          "is_explicit": false
+        },
+        {
+          "path": "poly",
+          "readiness": 0,
+          "is_explicit": false
+        },
+        {
+          "path": "test",
+          "readiness": 0,
+          "is_explicit": false
+        }
+      ]
+    },
+    {
+      "name": "commonware-p2p",
+      "readiness": 0,
+      "modules": [
+        {
+          "path": "authenticated",
+          "readiness": 0,
+          "is_explicit": false,
+          "submodules": [
+            {
+              "path": "authenticated::data",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "authenticated::discovery",
+              "readiness": 0,
+              "is_explicit": false,
+              "submodules": [
+                {
+                  "path": "authenticated::discovery::actors",
+                  "readiness": 0,
+                  "is_explicit": false,
+                  "submodules": [
+                    {
+                      "path": "authenticated::discovery::actors::dialer",
+                      "readiness": 0,
+                      "is_explicit": false
+                    },
+                    {
+                      "path": "authenticated::discovery::actors::listener",
+                      "readiness": 0,
+                      "is_explicit": false
+                    },
+                    {
+                      "path": "authenticated::discovery::actors::peer",
+                      "readiness": 0,
+                      "is_explicit": false,
+                      "submodules": [
+                        {
+                          "path": "authenticated::discovery::actors::peer::actor",
+                          "readiness": 0,
+                          "is_explicit": false
+                        },
+                        {
+                          "path": "authenticated::discovery::actors::peer::ingress",
+                          "readiness": 0,
+                          "is_explicit": false
+                        }
+                      ]
+                    },
+                    {
+                      "path": "authenticated::discovery::actors::router",
+                      "readiness": 0,
+                      "is_explicit": false,
+                      "submodules": [
+                        {
+                          "path": "authenticated::discovery::actors::router::actor",
+                          "readiness": 0,
+                          "is_explicit": false
+                        },
+                        {
+                          "path": "authenticated::discovery::actors::router::ingress",
+                          "readiness": 0,
+                          "is_explicit": false
+                        }
+                      ]
+                    },
+                    {
+                      "path": "authenticated::discovery::actors::spawner",
+                      "readiness": 0,
+                      "is_explicit": false,
+                      "submodules": [
+                        {
+                          "path": "authenticated::discovery::actors::spawner::actor",
+                          "readiness": 0,
+                          "is_explicit": false
+                        },
+                        {
+                          "path": "authenticated::discovery::actors::spawner::ingress",
+                          "readiness": 0,
+                          "is_explicit": false
+                        }
+                      ]
+                    },
+                    {
+                      "path": "authenticated::discovery::actors::tracker",
+                      "readiness": 0,
+                      "is_explicit": false,
+                      "submodules": [
+                        {
+                          "path": "authenticated::discovery::actors::tracker::actor",
+                          "readiness": 0,
+                          "is_explicit": false
+                        },
+                        {
+                          "path": "authenticated::discovery::actors::tracker::directory",
+                          "readiness": 0,
+                          "is_explicit": false
+                        },
+                        {
+                          "path": "authenticated::discovery::actors::tracker::ingress",
+                          "readiness": 0,
+                          "is_explicit": false
+                        },
+                        {
+                          "path": "authenticated::discovery::actors::tracker::metadata",
+                          "readiness": 0,
+                          "is_explicit": false
+                        },
+                        {
+                          "path": "authenticated::discovery::actors::tracker::metrics",
+                          "readiness": 0,
+                          "is_explicit": false
+                        },
+                        {
+                          "path": "authenticated::discovery::actors::tracker::record",
+                          "readiness": 0,
+                          "is_explicit": false
+                        },
+                        {
+                          "path": "authenticated::discovery::actors::tracker::reservation",
+                          "readiness": 0,
+                          "is_explicit": false
+                        },
+                        {
+                          "path": "authenticated::discovery::actors::tracker::set",
+                          "readiness": 0,
+                          "is_explicit": false
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "path": "authenticated::discovery::channels",
+                  "readiness": 0,
+                  "is_explicit": false
+                },
+                {
+                  "path": "authenticated::discovery::config",
+                  "readiness": 0,
+                  "is_explicit": false
+                },
+                {
+                  "path": "authenticated::discovery::metrics",
+                  "readiness": 0,
+                  "is_explicit": false
+                },
+                {
+                  "path": "authenticated::discovery::network",
+                  "readiness": 0,
+                  "is_explicit": false
+                },
+                {
+                  "path": "authenticated::discovery::tests",
+                  "readiness": 0,
+                  "is_explicit": false
+                },
+                {
+                  "path": "authenticated::discovery::types",
+                  "readiness": 0,
+                  "is_explicit": false
+                }
+              ]
+            },
+            {
+              "path": "authenticated::lookup",
+              "readiness": 0,
+              "is_explicit": false,
+              "submodules": [
+                {
+                  "path": "authenticated::lookup::actors",
+                  "readiness": 0,
+                  "is_explicit": false,
+                  "submodules": [
+                    {
+                      "path": "authenticated::lookup::actors::dialer",
+                      "readiness": 0,
+                      "is_explicit": false
+                    },
+                    {
+                      "path": "authenticated::lookup::actors::listener",
+                      "readiness": 0,
+                      "is_explicit": false
+                    },
+                    {
+                      "path": "authenticated::lookup::actors::peer",
+                      "readiness": 0,
+                      "is_explicit": false,
+                      "submodules": [
+                        {
+                          "path": "authenticated::lookup::actors::peer::actor",
+                          "readiness": 0,
+                          "is_explicit": false
+                        },
+                        {
+                          "path": "authenticated::lookup::actors::peer::ingress",
+                          "readiness": 0,
+                          "is_explicit": false
+                        }
+                      ]
+                    },
+                    {
+                      "path": "authenticated::lookup::actors::router",
+                      "readiness": 0,
+                      "is_explicit": false,
+                      "submodules": [
+                        {
+                          "path": "authenticated::lookup::actors::router::actor",
+                          "readiness": 0,
+                          "is_explicit": false
+                        },
+                        {
+                          "path": "authenticated::lookup::actors::router::ingress",
+                          "readiness": 0,
+                          "is_explicit": false
+                        }
+                      ]
+                    },
+                    {
+                      "path": "authenticated::lookup::actors::spawner",
+                      "readiness": 0,
+                      "is_explicit": false,
+                      "submodules": [
+                        {
+                          "path": "authenticated::lookup::actors::spawner::actor",
+                          "readiness": 0,
+                          "is_explicit": false
+                        },
+                        {
+                          "path": "authenticated::lookup::actors::spawner::ingress",
+                          "readiness": 0,
+                          "is_explicit": false
+                        }
+                      ]
+                    },
+                    {
+                      "path": "authenticated::lookup::actors::tracker",
+                      "readiness": 0,
+                      "is_explicit": false,
+                      "submodules": [
+                        {
+                          "path": "authenticated::lookup::actors::tracker::actor",
+                          "readiness": 0,
+                          "is_explicit": false
+                        },
+                        {
+                          "path": "authenticated::lookup::actors::tracker::directory",
+                          "readiness": 0,
+                          "is_explicit": false
+                        },
+                        {
+                          "path": "authenticated::lookup::actors::tracker::ingress",
+                          "readiness": 0,
+                          "is_explicit": false
+                        },
+                        {
+                          "path": "authenticated::lookup::actors::tracker::metadata",
+                          "readiness": 0,
+                          "is_explicit": false
+                        },
+                        {
+                          "path": "authenticated::lookup::actors::tracker::metrics",
+                          "readiness": 0,
+                          "is_explicit": false
+                        },
+                        {
+                          "path": "authenticated::lookup::actors::tracker::record",
+                          "readiness": 0,
+                          "is_explicit": false
+                        },
+                        {
+                          "path": "authenticated::lookup::actors::tracker::reservation",
+                          "readiness": 0,
+                          "is_explicit": false
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "path": "authenticated::lookup::channels",
+                  "readiness": 0,
+                  "is_explicit": false
+                },
+                {
+                  "path": "authenticated::lookup::config",
+                  "readiness": 0,
+                  "is_explicit": false
+                },
+                {
+                  "path": "authenticated::lookup::metrics",
+                  "readiness": 0,
+                  "is_explicit": false
+                },
+                {
+                  "path": "authenticated::lookup::network",
+                  "readiness": 0,
+                  "is_explicit": false
+                },
+                {
+                  "path": "authenticated::lookup::tests",
+                  "readiness": 0,
+                  "is_explicit": false
+                },
+                {
+                  "path": "authenticated::lookup::types",
+                  "readiness": 0,
+                  "is_explicit": false
+                }
+              ]
+            },
+            {
+              "path": "authenticated::mailbox",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "authenticated::relay",
+              "readiness": 0,
+              "is_explicit": false
+            }
+          ]
+        },
+        {
+          "path": "simulated",
+          "readiness": 0,
+          "is_explicit": false,
+          "submodules": [
+            {
+              "path": "simulated::bandwidth",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "simulated::ingress",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "simulated::metrics",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "simulated::network",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "simulated::tests",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "simulated::transmitter",
+              "readiness": 0,
+              "is_explicit": false
+            }
+          ]
+        },
+        {
+          "path": "types",
+          "readiness": 0,
+          "is_explicit": false
+        },
+        {
+          "path": "utils",
+          "readiness": 0,
+          "is_explicit": false,
+          "submodules": [
+            {
+              "path": "utils::codec",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "utils::limited",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "utils::mux",
+              "readiness": 0,
+              "is_explicit": false
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "commonware-parallel",
+      "readiness": 0,
+      "modules": [
+        {
+          "path": "test",
+          "readiness": 0,
+          "is_explicit": false
+        }
+      ]
+    },
+    {
+      "name": "commonware-resolver",
+      "readiness": 0,
+      "modules": [
+        {
+          "path": "p2p",
+          "readiness": 0,
+          "is_explicit": false,
+          "submodules": [
+            {
+              "path": "p2p::config",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "p2p::engine",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "p2p::fetcher",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "p2p::ingress",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "p2p::metrics",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "p2p::mocks",
+              "readiness": 0,
+              "is_explicit": false,
+              "submodules": [
+                {
+                  "path": "p2p::mocks::consumer",
+                  "readiness": 0,
+                  "is_explicit": false
+                },
+                {
+                  "path": "p2p::mocks::key",
+                  "readiness": 0,
+                  "is_explicit": false
+                },
+                {
+                  "path": "p2p::mocks::producer",
+                  "readiness": 0,
+                  "is_explicit": false
+                }
+              ]
+            },
+            {
+              "path": "p2p::tests",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "p2p::wire",
+              "readiness": 0,
+              "is_explicit": false
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "commonware-runtime",
+      "readiness": 0,
+      "modules": [
+        {
+          "path": "benchmarks",
+          "readiness": 0,
+          "is_explicit": false,
+          "submodules": [
+            {
+              "path": "benchmarks::context",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "benchmarks::tokio",
+              "readiness": 0,
+              "is_explicit": false
+            }
+          ]
+        },
+        {
+          "path": "deterministic",
+          "readiness": 0,
+          "is_explicit": false
+        },
+        {
+          "path": "iouring",
+          "readiness": 0,
+          "is_explicit": false,
+          "submodules": [
+            {
+              "path": "iouring::tests",
+              "readiness": 0,
+              "is_explicit": false
+            }
+          ]
+        },
+        {
+          "path": "macros",
+          "readiness": 0,
+          "is_explicit": false
+        },
+        {
+          "path": "mocks",
+          "readiness": 0,
+          "is_explicit": false
+        },
+        {
+          "path": "network",
+          "readiness": 0,
+          "is_explicit": false,
+          "submodules": [
+            {
+              "path": "network::audited",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "network::deterministic",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "network::iouring",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "network::metered",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "network::tests",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "network::tokio",
+              "readiness": 0,
+              "is_explicit": false
+            }
+          ]
+        },
+        {
+          "path": "process",
+          "readiness": 0,
+          "is_explicit": false,
+          "submodules": [
+            {
+              "path": "process::metered",
+              "readiness": 0,
+              "is_explicit": false
+            }
+          ]
+        },
+        {
+          "path": "storage",
+          "readiness": 0,
+          "is_explicit": false,
+          "submodules": [
+            {
+              "path": "storage::audited",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "storage::iouring",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "storage::memory",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "storage::metered",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "storage::tests",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "storage::tokio",
+              "readiness": 0,
+              "is_explicit": false,
+              "submodules": [
+                {
+                  "path": "storage::tokio::fallback",
+                  "readiness": 0,
+                  "is_explicit": false
+                },
+                {
+                  "path": "storage::tokio::tests",
+                  "readiness": 0,
+                  "is_explicit": false
+                },
+                {
+                  "path": "storage::tokio::unix",
+                  "readiness": 0,
+                  "is_explicit": false
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "path": "telemetry",
+          "readiness": 0,
+          "is_explicit": false,
+          "submodules": [
+            {
+              "path": "telemetry::metrics",
+              "readiness": 0,
+              "is_explicit": false,
+              "submodules": [
+                {
+                  "path": "telemetry::metrics::histogram",
+                  "readiness": 0,
+                  "is_explicit": false
+                },
+                {
+                  "path": "telemetry::metrics::status",
+                  "readiness": 0,
+                  "is_explicit": false
+                },
+                {
+                  "path": "telemetry::metrics::task",
+                  "readiness": 0,
+                  "is_explicit": false
+                }
+              ]
+            },
+            {
+              "path": "telemetry::traces",
+              "readiness": 0,
+              "is_explicit": false,
+              "submodules": [
+                {
+                  "path": "telemetry::traces::collector",
+                  "readiness": 0,
+                  "is_explicit": false
+                },
+                {
+                  "path": "telemetry::traces::status",
+                  "readiness": 0,
+                  "is_explicit": false
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "path": "tests",
+          "readiness": 0,
+          "is_explicit": false
+        },
+        {
+          "path": "tokio",
+          "readiness": 0,
+          "is_explicit": false,
+          "submodules": [
+            {
+              "path": "tokio::runtime",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "tokio::telemetry",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "tokio::tracing",
+              "readiness": 0,
+              "is_explicit": false
+            }
+          ]
+        },
+        {
+          "path": "utils",
+          "readiness": 0,
+          "is_explicit": false,
+          "submodules": [
+            {
+              "path": "utils::buffer",
+              "readiness": 0,
+              "is_explicit": false,
+              "submodules": [
+                {
+                  "path": "utils::buffer::pool",
+                  "readiness": 0,
+                  "is_explicit": false,
+                  "submodules": [
+                    {
+                      "path": "utils::buffer::pool::append",
+                      "readiness": 0,
+                      "is_explicit": false
+                    },
+                    {
+                      "path": "utils::buffer::pool::page_cache",
+                      "readiness": 0,
+                      "is_explicit": false
+                    },
+                    {
+                      "path": "utils::buffer::pool::read",
+                      "readiness": 0,
+                      "is_explicit": false
+                    },
+                    {
+                      "path": "utils::buffer::pool::tests",
+                      "readiness": 0,
+                      "is_explicit": false
+                    }
+                  ]
+                },
+                {
+                  "path": "utils::buffer::read",
+                  "readiness": 0,
+                  "is_explicit": false
+                },
+                {
+                  "path": "utils::buffer::tests",
+                  "readiness": 0,
+                  "is_explicit": false
+                },
+                {
+                  "path": "utils::buffer::tip",
+                  "readiness": 0,
+                  "is_explicit": false
+                },
+                {
+                  "path": "utils::buffer::write",
+                  "readiness": 0,
+                  "is_explicit": false
+                }
+              ]
+            },
+            {
+              "path": "utils::cell",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "utils::handle",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "utils::signal",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "utils::supervision",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "utils::tests",
+              "readiness": 0,
+              "is_explicit": false
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "commonware-storage",
+      "readiness": 0,
+      "modules": [
+        {
+          "path": "archive",
+          "readiness": 0,
+          "is_explicit": false,
+          "submodules": [
+            {
+              "path": "archive::conformance",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "archive::immutable",
+              "readiness": 0,
+              "is_explicit": false,
+              "submodules": [
+                {
+                  "path": "archive::immutable::storage",
+                  "readiness": 0,
+                  "is_explicit": false
+                },
+                {
+                  "path": "archive::immutable::tests",
+                  "readiness": 0,
+                  "is_explicit": false
+                }
+              ]
+            },
+            {
+              "path": "archive::prunable",
+              "readiness": 0,
+              "is_explicit": false,
+              "submodules": [
+                {
+                  "path": "archive::prunable::storage",
+                  "readiness": 0,
+                  "is_explicit": false
+                },
+                {
+                  "path": "archive::prunable::tests",
+                  "readiness": 0,
+                  "is_explicit": false
+                }
+              ]
+            },
+            {
+              "path": "archive::tests",
+              "readiness": 0,
+              "is_explicit": false
+            }
+          ]
+        },
+        {
+          "path": "bitmap",
+          "readiness": 0,
+          "is_explicit": false,
+          "submodules": [
+            {
+              "path": "bitmap::authenticated",
+              "readiness": 0,
+              "is_explicit": false
+            }
+          ]
+        },
+        {
+          "path": "bmt",
+          "readiness": 0,
+          "is_explicit": false,
+          "submodules": [
+            {
+              "path": "bmt::tests",
+              "readiness": 0,
+              "is_explicit": false
+            }
+          ]
+        },
+        {
+          "path": "cache",
+          "readiness": 0,
+          "is_explicit": false,
+          "submodules": [
+            {
+              "path": "cache::storage",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "cache::tests",
+              "readiness": 0,
+              "is_explicit": false
+            }
+          ]
+        },
+        {
+          "path": "freezer",
+          "readiness": 0,
+          "is_explicit": false,
+          "submodules": [
+            {
+              "path": "freezer::storage",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "freezer::tests",
+              "readiness": 0,
+              "is_explicit": false
+            }
+          ]
+        },
+        {
+          "path": "index",
+          "readiness": 0,
+          "is_explicit": false,
+          "submodules": [
+            {
+              "path": "index::ordered",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "index::partitioned",
+              "readiness": 0,
+              "is_explicit": false,
+              "submodules": [
+                {
+                  "path": "index::partitioned::ordered",
+                  "readiness": 0,
+                  "is_explicit": false
+                },
+                {
+                  "path": "index::partitioned::tests",
+                  "readiness": 0,
+                  "is_explicit": false
+                },
+                {
+                  "path": "index::partitioned::unordered",
+                  "readiness": 0,
+                  "is_explicit": false
+                }
+              ]
+            },
+            {
+              "path": "index::storage",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "index::tests",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "index::unordered",
+              "readiness": 0,
+              "is_explicit": false
+            }
+          ]
+        },
+        {
+          "path": "journal",
+          "readiness": 2,
+          "is_explicit": true,
+          "submodules": [
+            {
+              "path": "journal::authenticated",
+              "readiness": 2,
+              "is_explicit": false
+            },
+            {
+              "path": "journal::conformance",
+              "readiness": 2,
+              "is_explicit": false
+            },
+            {
+              "path": "journal::contiguous",
+              "readiness": 2,
+              "is_explicit": false,
+              "submodules": [
+                {
+                  "path": "journal::contiguous::fixed",
+                  "readiness": 2,
+                  "is_explicit": false
+                },
+                {
+                  "path": "journal::contiguous::tests",
+                  "readiness": 2,
+                  "is_explicit": false
+                },
+                {
+                  "path": "journal::contiguous::variable",
+                  "readiness": 2,
+                  "is_explicit": false
+                }
+              ]
+            },
+            {
+              "path": "journal::segmented",
+              "readiness": 2,
+              "is_explicit": false,
+              "submodules": [
+                {
+                  "path": "journal::segmented::fixed",
+                  "readiness": 2,
+                  "is_explicit": false
+                },
+                {
+                  "path": "journal::segmented::glob",
+                  "readiness": 2,
+                  "is_explicit": false
+                },
+                {
+                  "path": "journal::segmented::manager",
+                  "readiness": 2,
+                  "is_explicit": false
+                },
+                {
+                  "path": "journal::segmented::oversized",
+                  "readiness": 2,
+                  "is_explicit": false
+                },
+                {
+                  "path": "journal::segmented::variable",
+                  "readiness": 2,
+                  "is_explicit": false
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "path": "kv",
+          "readiness": 0,
+          "is_explicit": false,
+          "submodules": [
+            {
+              "path": "kv::batch",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "kv::tests",
+              "readiness": 0,
+              "is_explicit": false
+            }
+          ]
+        },
+        {
+          "path": "metadata",
+          "readiness": 0,
+          "is_explicit": false,
+          "submodules": [
+            {
+              "path": "metadata::storage",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "metadata::tests",
+              "readiness": 0,
+              "is_explicit": false
+            }
+          ]
+        },
+        {
+          "path": "mmr",
+          "readiness": 0,
+          "is_explicit": false,
+          "submodules": [
+            {
+              "path": "mmr::grafting",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "mmr::hasher",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "mmr::iterator",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "mmr::journaled",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "mmr::location",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "mmr::mem",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "mmr::position",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "mmr::proof",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "mmr::stability",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "mmr::storage",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "mmr::verification",
+              "readiness": 0,
+              "is_explicit": false
+            }
+          ]
+        },
+        {
+          "path": "ordinal",
+          "readiness": 0,
+          "is_explicit": false,
+          "submodules": [
+            {
+              "path": "ordinal::storage",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "ordinal::tests",
+              "readiness": 0,
+              "is_explicit": false
+            }
+          ]
+        },
+        {
+          "path": "qmdb",
+          "readiness": 0,
+          "is_explicit": false,
+          "submodules": [
+            {
+              "path": "qmdb::any",
+              "readiness": 0,
+              "is_explicit": false,
+              "submodules": [
+                {
+                  "path": "qmdb::any::db",
+                  "readiness": 0,
+                  "is_explicit": false
+                },
+                {
+                  "path": "qmdb::any::operation",
+                  "readiness": 0,
+                  "is_explicit": false,
+                  "submodules": [
+                    {
+                      "path": "qmdb::any::operation::fixed",
+                      "readiness": 0,
+                      "is_explicit": false
+                    },
+                    {
+                      "path": "qmdb::any::operation::tests",
+                      "readiness": 0,
+                      "is_explicit": false
+                    },
+                    {
+                      "path": "qmdb::any::operation::update",
+                      "readiness": 0,
+                      "is_explicit": false,
+                      "submodules": [
+                        {
+                          "path": "qmdb::any::operation::update::ordered",
+                          "readiness": 0,
+                          "is_explicit": false
+                        },
+                        {
+                          "path": "qmdb::any::operation::update::sealed",
+                          "readiness": 0,
+                          "is_explicit": false
+                        },
+                        {
+                          "path": "qmdb::any::operation::update::tests",
+                          "readiness": 0,
+                          "is_explicit": false
+                        },
+                        {
+                          "path": "qmdb::any::operation::update::unordered",
+                          "readiness": 0,
+                          "is_explicit": false
+                        }
+                      ]
+                    },
+                    {
+                      "path": "qmdb::any::operation::variable",
+                      "readiness": 0,
+                      "is_explicit": false
+                    }
+                  ]
+                },
+                {
+                  "path": "qmdb::any::ordered",
+                  "readiness": 0,
+                  "is_explicit": false,
+                  "submodules": [
+                    {
+                      "path": "qmdb::any::ordered::fixed",
+                      "readiness": 0,
+                      "is_explicit": false
+                    },
+                    {
+                      "path": "qmdb::any::ordered::test",
+                      "readiness": 0,
+                      "is_explicit": false
+                    },
+                    {
+                      "path": "qmdb::any::ordered::variable",
+                      "readiness": 0,
+                      "is_explicit": false
+                    }
+                  ]
+                },
+                {
+                  "path": "qmdb::any::states",
+                  "readiness": 0,
+                  "is_explicit": false
+                },
+                {
+                  "path": "qmdb::any::test",
+                  "readiness": 0,
+                  "is_explicit": false
+                },
+                {
+                  "path": "qmdb::any::unordered",
+                  "readiness": 0,
+                  "is_explicit": false,
+                  "submodules": [
+                    {
+                      "path": "qmdb::any::unordered::fixed",
+                      "readiness": 0,
+                      "is_explicit": false,
+                      "submodules": [
+                        {
+                          "path": "qmdb::any::unordered::fixed::sync",
+                          "readiness": 0,
+                          "is_explicit": false
+                        },
+                        {
+                          "path": "qmdb::any::unordered::fixed::test",
+                          "readiness": 0,
+                          "is_explicit": false
+                        }
+                      ]
+                    },
+                    {
+                      "path": "qmdb::any::unordered::sync_tests",
+                      "readiness": 0,
+                      "is_explicit": false
+                    },
+                    {
+                      "path": "qmdb::any::unordered::test",
+                      "readiness": 0,
+                      "is_explicit": false
+                    },
+                    {
+                      "path": "qmdb::any::unordered::variable",
+                      "readiness": 0,
+                      "is_explicit": false,
+                      "submodules": [
+                        {
+                          "path": "qmdb::any::unordered::variable::sync",
+                          "readiness": 0,
+                          "is_explicit": false
+                        },
+                        {
+                          "path": "qmdb::any::unordered::variable::test",
+                          "readiness": 0,
+                          "is_explicit": false
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "path": "qmdb::any::value",
+                  "readiness": 0,
+                  "is_explicit": false
+                }
+              ]
+            },
+            {
+              "path": "qmdb::current",
+              "readiness": 0,
+              "is_explicit": false,
+              "submodules": [
+                {
+                  "path": "qmdb::current::ordered",
+                  "readiness": 0,
+                  "is_explicit": false,
+                  "submodules": [
+                    {
+                      "path": "qmdb::current::ordered::fixed",
+                      "readiness": 0,
+                      "is_explicit": false
+                    }
+                  ]
+                },
+                {
+                  "path": "qmdb::current::proof",
+                  "readiness": 0,
+                  "is_explicit": false
+                },
+                {
+                  "path": "qmdb::current::unordered",
+                  "readiness": 0,
+                  "is_explicit": false,
+                  "submodules": [
+                    {
+                      "path": "qmdb::current::unordered::fixed",
+                      "readiness": 0,
+                      "is_explicit": false
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "path": "qmdb::immutable",
+              "readiness": 0,
+              "is_explicit": false,
+              "submodules": [
+                {
+                  "path": "qmdb::immutable::operation",
+                  "readiness": 0,
+                  "is_explicit": false
+                },
+                {
+                  "path": "qmdb::immutable::sync",
+                  "readiness": 0,
+                  "is_explicit": false,
+                  "submodules": [
+                    {
+                      "path": "qmdb::immutable::sync::tests",
+                      "readiness": 0,
+                      "is_explicit": false
+                    }
+                  ]
+                },
+                {
+                  "path": "qmdb::immutable::test",
+                  "readiness": 0,
+                  "is_explicit": false
+                }
+              ]
+            },
+            {
+              "path": "qmdb::keyless",
+              "readiness": 0,
+              "is_explicit": false,
+              "submodules": [
+                {
+                  "path": "qmdb::keyless::operation",
+                  "readiness": 0,
+                  "is_explicit": false
+                },
+                {
+                  "path": "qmdb::keyless::test",
+                  "readiness": 0,
+                  "is_explicit": false
+                }
+              ]
+            },
+            {
+              "path": "qmdb::operation",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "qmdb::store",
+              "readiness": 0,
+              "is_explicit": false,
+              "submodules": [
+                {
+                  "path": "qmdb::store::batch",
+                  "readiness": 0,
+                  "is_explicit": false
+                },
+                {
+                  "path": "qmdb::store::db",
+                  "readiness": 0,
+                  "is_explicit": false
+                },
+                {
+                  "path": "qmdb::store::private",
+                  "readiness": 0,
+                  "is_explicit": false
+                },
+                {
+                  "path": "qmdb::store::tests",
+                  "readiness": 0,
+                  "is_explicit": false
+                }
+              ]
+            },
+            {
+              "path": "qmdb::sync",
+              "readiness": 0,
+              "is_explicit": false,
+              "submodules": [
+                {
+                  "path": "qmdb::sync::database",
+                  "readiness": 0,
+                  "is_explicit": false
+                },
+                {
+                  "path": "qmdb::sync::engine",
+                  "readiness": 0,
+                  "is_explicit": false
+                },
+                {
+                  "path": "qmdb::sync::error",
+                  "readiness": 0,
+                  "is_explicit": false
+                },
+                {
+                  "path": "qmdb::sync::gaps",
+                  "readiness": 0,
+                  "is_explicit": false
+                },
+                {
+                  "path": "qmdb::sync::journal",
+                  "readiness": 0,
+                  "is_explicit": false
+                },
+                {
+                  "path": "qmdb::sync::requests",
+                  "readiness": 0,
+                  "is_explicit": false
+                },
+                {
+                  "path": "qmdb::sync::resolver",
+                  "readiness": 0,
+                  "is_explicit": false
+                },
+                {
+                  "path": "qmdb::sync::target",
+                  "readiness": 0,
+                  "is_explicit": false
+                }
+              ]
+            },
+            {
+              "path": "qmdb::verify",
+              "readiness": 0,
+              "is_explicit": false
+            }
+          ]
+        },
+        {
+          "path": "rmap",
+          "readiness": 0,
+          "is_explicit": false,
+          "submodules": [
+            {
+              "path": "rmap::tests",
+              "readiness": 0,
+              "is_explicit": false
+            }
+          ]
+        },
+        {
+          "path": "translator",
+          "readiness": 0,
+          "is_explicit": false
+        }
+      ]
+    },
+    {
+      "name": "commonware-stream",
+      "readiness": 0,
+      "modules": [
+        {
+          "path": "test",
+          "readiness": 0,
+          "is_explicit": false
+        },
+        {
+          "path": "utils",
+          "readiness": 0,
+          "is_explicit": false,
+          "submodules": [
+            {
+              "path": "utils::codec",
+              "readiness": 0,
+              "is_explicit": false
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "commonware-utils",
+      "readiness": 0,
+      "modules": [
+        {
+          "path": "acknowledgement",
+          "readiness": 0,
+          "is_explicit": false
+        },
+        {
+          "path": "bitmap",
+          "readiness": 0,
+          "is_explicit": false,
+          "submodules": [
+            {
+              "path": "bitmap::historical",
+              "readiness": 0,
+              "is_explicit": false,
+              "submodules": [
+                {
+                  "path": "bitmap::historical::batch",
+                  "readiness": 0,
+                  "is_explicit": false
+                },
+                {
+                  "path": "bitmap::historical::bitmap",
+                  "readiness": 0,
+                  "is_explicit": false
+                },
+                {
+                  "path": "bitmap::historical::error",
+                  "readiness": 0,
+                  "is_explicit": false
+                },
+                {
+                  "path": "bitmap::historical::tests",
+                  "readiness": 0,
+                  "is_explicit": false
+                }
+              ]
+            },
+            {
+              "path": "bitmap::prunable",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "bitmap::tests",
+              "readiness": 0,
+              "is_explicit": false
+            }
+          ]
+        },
+        {
+          "path": "channels",
+          "readiness": 0,
+          "is_explicit": false,
+          "submodules": [
+            {
+              "path": "channels::fallible",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "channels::ring",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "channels::tracked",
+              "readiness": 0,
+              "is_explicit": false
+            }
+          ]
+        },
+        {
+          "path": "concurrency",
+          "readiness": 0,
+          "is_explicit": false
+        },
+        {
+          "path": "faults",
+          "readiness": 0,
+          "is_explicit": false
+        },
+        {
+          "path": "futures",
+          "readiness": 0,
+          "is_explicit": false
+        },
+        {
+          "path": "hex_literal",
+          "readiness": 0,
+          "is_explicit": false
+        },
+        {
+          "path": "hostname",
+          "readiness": 0,
+          "is_explicit": false
+        },
+        {
+          "path": "net",
+          "readiness": 0,
+          "is_explicit": false
+        },
+        {
+          "path": "ordered",
+          "readiness": 0,
+          "is_explicit": false
+        },
+        {
+          "path": "priority_set",
+          "readiness": 0,
+          "is_explicit": false
+        },
+        {
+          "path": "rational",
+          "readiness": 0,
+          "is_explicit": false
+        },
+        {
+          "path": "sequence",
+          "readiness": 0,
+          "is_explicit": false,
+          "submodules": [
+            {
+              "path": "sequence::fixed_bytes",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "sequence::prefixed_u64",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "sequence::u32",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "sequence::u64",
+              "readiness": 0,
+              "is_explicit": false
+            },
+            {
+              "path": "sequence::unit",
+              "readiness": 0,
+              "is_explicit": false
+            }
+          ]
+        },
+        {
+          "path": "stable_buf",
+          "readiness": 0,
+          "is_explicit": false
+        },
+        {
+          "path": "tests",
+          "readiness": 0,
+          "is_explicit": false
+        },
+        {
+          "path": "time",
+          "readiness": 0,
+          "is_explicit": false
+        },
+        {
+          "path": "vec",
+          "readiness": 0,
+          "is_explicit": false
+        }
+      ]
+    }
+  ],
+  "summary": {
+    "total_modules": 493,
+    "by_level": {
+      "2": 13,
+      "0": 480
+    }
+  }
+}

@@ -29,6 +29,15 @@ rand.workspace = true
 thiserror.workspace = true
 zeroize.workspace = true
 
+# Lint feature dependencies
+chrono = { workspace = true, optional = true }
+clap = { workspace = true, optional = true, features = ["derive"] }
+serde = { workspace = true, optional = true, features = ["derive"] }
+serde_json = { workspace = true, optional = true }
+syn = { workspace = true, optional = true, features = ["full", "parsing"] }
+toml = { workspace = true, optional = true }
+walkdir = { workspace = true, optional = true }
+
 [target.'cfg(target_arch = "wasm32")'.dependencies.getrandom]
 # Enable "js" feature when WASM is target
 version = "0.2.15"
@@ -65,6 +74,16 @@ arbitrary = [
 	"num-bigint?/arbitrary",
 	"std",
 ]
+lint = [
+	"dep:chrono",
+	"dep:clap",
+	"dep:serde",
+	"dep:serde_json",
+	"dep:syn",
+	"dep:toml",
+	"dep:walkdir",
+	"std",
+]
 
 [lib]
 bench = false
@@ -74,3 +93,8 @@ crate-type = ["rlib", "cdylib"]
 name = "utils"
 harness = false
 path = "src/benches/bench.rs"
+
+[[bin]]
+name = "readiness-lint"
+path = "src/bin/readiness_lint/main.rs"
+required-features = ["lint"]

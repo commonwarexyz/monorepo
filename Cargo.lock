@@ -1695,6 +1695,8 @@ dependencies = [
  "arbitrary",
  "bytes",
  "cfg-if",
+ "chrono",
+ "clap",
  "commonware-codec",
  "commonware-conformance",
  "commonware-macros",
@@ -1710,7 +1712,12 @@ dependencies = [
  "proptest",
  "rand 0.8.5",
  "rstest",
+ "serde",
+ "serde_json",
+ "syn",
  "thiserror 2.0.17",
+ "toml",
+ "walkdir",
  "zeroize",
 ]
 

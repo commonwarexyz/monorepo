@@ -2,8 +2,8 @@
 //!
 //! # Status
 //!
-//! `commonware-p2p` is **ALPHA** software and is not yet recommended for production use. Developers should
-//! expect breaking changes and occasional instability.
+//! See the [readiness page](https://commonware.xyz/readiness.html) for this module's
+//! maturity level and stability guarantees.
 
 #![doc(
     html_logo_url = "https://commonware.xyz/imgs/rustdoc_logo.svg",

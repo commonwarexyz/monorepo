@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta content="text/html; charset=utf-8" http-equiv="Content-Type">
+    <meta name="viewport" content="width=device-width, initial-scale=1, minimum-scale=1" />
+    <link rel="preload" href="/style.css" as="style">
+    <link rel="preload" href="/shared.js" as="script">
+    <link rel="icon" href="/favicon.ico" type="image/x-icon">
+
+    <title>commonware > Readiness</title>
+    <meta name="description" content="Track module maturity in the Commonware Library.">
+    <meta name="keywords" content="commonware, readiness, stability, maturity, modules, api">
+
+    <link rel="canonical" href="https://commonware.xyz/readiness" />
+
+    <meta property="og:url" content="https://commonware.xyz/readiness" />
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="commonware > Readiness" />
+    <meta property="og:title" content="commonware > Readiness" />
+    <meta property="og:description" content="Track module maturity in the Commonware Library." />
+    <meta property="og:image" content="https://commonware.xyz/card.png" />
+
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta property="twitter:domain" content="commonware.xyz" />
+    <meta property="twitter:url" content="https://commonware.xyz/readiness" />
+    <meta property="twitter:title" content="commonware > Readiness" />
+    <meta property="twitter:description" content="Track module maturity in the Commonware Library." />
+    <meta property="twitter:image" content="https://commonware.xyz/card.png" />
+    <meta property="twitter:site" content="@commonwarexyz" />
+    <meta property="twitter:creator" content="@commonwarexyz" />
+    <meta property="twitter:creator:id" content="@commonwarexyz" />
+
+    <link rel="stylesheet" type="text/css" href="/style.css">
+    <style>
+        .readiness-badge {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 3px;
+            font-size: 0.85em;
+            font-weight: bold;
+            font-family: monospace;
+        }
+        .readiness-0 { background: #6b7280; color: white; }
+        .readiness-1 { background: #f59e0b; color: white; }
+        .readiness-2 { background: #3b82f6; color: white; }
+        .readiness-3 { background: #10b981; color: white; }
+        .readiness-4 { background: #8b5cf6; color: white; }
+
+        .level-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 20px 0;
+        }
+        .level-table th, .level-table td {
+            padding: 10px;
+            text-align: left;
+            border-bottom: 1px solid #e5e7eb;
+        }
+        .level-table th {
+            font-weight: bold;
+        }
+
+        .crate-section {
+            margin: 20px 0;
+            border: 1px solid #e5e7eb;
+        }
+        .crate-header {
+            padding: 12px 15px;
+            background: #f9fafb;
+            cursor: pointer;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .crate-header:hover {
+            background: #f3f4f6;
+        }
+        .crate-content {
+            padding: 15px;
+            display: none;
+        }
+        .crate-content.open {
+            display: block;
+        }
+        .module-item {
+            padding: 5px 0;
+            font-family: monospace;
+            font-size: 0.9em;
+        }
+        .module-item.submodule {
+            padding-left: 20px;
+            color: #6b7280;
+        }
+        .summary-grid {
+            display: grid;
+            grid-template-columns: repeat(5, 1fr);
+            gap: 10px;
+            margin: 20px 0;
+        }
+        .summary-card {
+            text-align: center;
+            padding: 15px;
+            border: 1px solid #e5e7eb;
+        }
+        .summary-card .count {
+            font-size: 2em;
+            font-weight: bold;
+        }
+        .summary-card .label {
+            font-size: 0.9em;
+            color: #6b7280;
+        }
+        #loading {
+            text-align: center;
+            padding: 40px;
+            color: #6b7280;
+        }
+        #error {
+            text-align: center;
+            padding: 40px;
+            color: #ef4444;
+            display: none;
+        }
+    </style>
+</head>
+
+<body>
+    <div id="logo-placeholder">
+        <div class="logo-line">
+            <span class="edge-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="horizontal-logo-symbol"> </span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol"> </span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="edge-logo-symbol">*</span>
+        </div>
+        <div class="logo-line">
+            <span class="vertical-logo-symbol">|</span>
+            <span class="logo-text"> commonware </span>
+            <span class="vertical-logo-symbol"> </span>
+        </div>
+        <div class="logo-line">
+            <span class="edge-logo-symbol">*</span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol"> </span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol"> </span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">*</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="edge-logo-symbol">+</span>
+        </div>
+    </div>
+    <div class="content">
+        <h1>Readiness</h1>
+        <p>Track module maturity in the <a href="https://github.com/commonwarexyz/monorepo">Commonware Library</a>. Each module is assigned a readiness level (0-4) indicating its stability.</p>
+
+        <h2>Readiness Levels</h2>
+        <table class="level-table">
+            <tr>
+                <th>Level</th>
+                <th>Meaning</th>
+            </tr>
+            <tr>
+                <td><span class="readiness-badge readiness-0">0</span></td>
+                <td>Experimental/little testing (default)</td>
+            </tr>
+            <tr>
+                <td><span class="readiness-badge readiness-1">1</span></td>
+                <td>Decent test coverage, breaking format changes possible</td>
+            </tr>
+            <tr>
+                <td><span class="readiness-badge readiness-2">2</span></td>
+                <td>Decent test coverage, wire/storage format stable</td>
+            </tr>
+            <tr>
+                <td><span class="readiness-badge readiness-3">3</span></td>
+                <td>Levels 1+2, API stable</td>
+            </tr>
+            <tr>
+                <td><span class="readiness-badge readiness-4">4</span></td>
+                <td>Production-deployed, audited multiple times</td>
+            </tr>
+        </table>
+
+        <h2>Summary</h2>
+        <div id="summary" class="summary-grid"></div>
+
+        <h2>Modules by Crate</h2>
+        <div id="loading">Loading readiness data...</div>
+        <div id="error">Failed to load readiness data.</div>
+        <div id="crates"></div>
+    </div>
+
+    <div id="footer-placeholder"></div>
+    <script src="/shared.js"></script>
+    <script>
+        'use strict';
+
+        async function loadReadinessData() {
+            try {
+                const response = await fetch('/readiness.json');
+                if (!response.ok) throw new Error('Failed to fetch');
+                const data = await response.json();
+                renderData(data);
+            } catch (e) {
+                document.getElementById('loading').style.display = 'none';
+                document.getElementById('error').style.display = 'block';
+                console.error('Failed to load readiness data:', e);
+            }
+        }
+
+        function renderData(data) {
+            document.getElementById('loading').style.display = 'none';
+
+            // Render summary
+            const summaryEl = document.getElementById('summary');
+            for (let level = 0; level <= 4; level++) {
+                const count = data.summary.by_level[level] || 0;
+                summaryEl.innerHTML += `
+                    <div class="summary-card">
+                        <div class="count">${count}</div>
+                        <div class="label"><span class="readiness-badge readiness-${level}">${level}</span></div>
+                    </div>
+                `;
+            }
+
+            // Render crates
+            const cratesEl = document.getElementById('crates');
+            for (const crate of data.crates) {
+                const crateDiv = document.createElement('div');
+                crateDiv.className = 'crate-section';
+
+                const header = document.createElement('div');
+                header.className = 'crate-header';
+                header.innerHTML = `
+                    <span>${crate.name}</span>
+                    <span class="readiness-badge readiness-${crate.readiness}">${crate.readiness}</span>
+                `;
+
+                const content = document.createElement('div');
+                content.className = 'crate-content';
+                content.innerHTML = renderModules(crate.modules, 0);
+
+                header.onclick = () => content.classList.toggle('open');
+
+                crateDiv.appendChild(header);
+                crateDiv.appendChild(content);
+                cratesEl.appendChild(crateDiv);
+            }
+        }
+
+        function renderModules(modules, depth) {
+            if (!modules || modules.length === 0) return '';
+
+            let html = '';
+            for (const mod of modules) {
+                const indent = depth > 0 ? ' submodule' : '';
+                const explicit = mod.is_explicit ? '' : ' (inherited)';
+                html += `
+                    <div class="module-item${indent}">
+                        <span class="readiness-badge readiness-${mod.readiness}">${mod.readiness}</span>
+                        ${mod.path}${explicit}
+                    </div>
+                `;
+                if (mod.submodules && mod.submodules.length > 0) {
+                    html += renderModules(mod.submodules, depth + 1);
+                }
+            }
+            return html;
+        }
+
+        document.addEventListener('DOMContentLoaded', loadReadinessData);
+    </script>
+</body>
+</html>
