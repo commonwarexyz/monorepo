@@ -11,7 +11,7 @@ use crate::ec2::{
 use aws_sdk_ec2::types::Filter;
 use std::{
     fs::File,
-    path::PathBuf,
+    path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
 use tokio::process::Command;
@@ -22,7 +22,7 @@ pub async fn profile(
     config_path: &PathBuf,
     instance_name: &str,
     duration: u64,
-    binary_path: &PathBuf,
+    binary_path: &Path,
 ) -> Result<(), Error> {
     // Load config
     let config: Config = {
