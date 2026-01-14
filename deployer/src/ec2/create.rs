@@ -513,13 +513,27 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
         .clone();
     let monitoring_subnet_id = monitoring_resources.subnet_id.clone();
 
+    // Lookup AMI IDs for binary instances
+    let mut ami_cache: HashMap<(String, Architecture), String> = HashMap::new();
+    ami_cache.insert(
+        (monitoring_region.clone(), monitoring_architecture),
+        monitoring_ami_id.clone(),
+    );
     let mut binary_launch_configs = Vec::new();
     for instance in &config.instances {
         let region = instance.region.clone();
         let resources = region_resources.get(&region).unwrap();
         let ec2_client = ec2_clients.get(&region).unwrap();
         let arch = instance_architectures[&instance.name];
-        let ami_id = find_latest_ami(ec2_client, arch).await?;
+        let ami_id = match ami_cache.get(&(region.clone(), arch)) {
+            Some(id) => id.clone(),
+            None => {
+                // Avoid looking up the same AMI multiple times
+                let id = find_latest_ami(ec2_client, arch).await?;
+                ami_cache.insert((region.clone(), arch), id.clone());
+                id
+            }
+        };
         binary_launch_configs.push((instance, ec2_client, resources, ami_id, arch));
     }
 
