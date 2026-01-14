@@ -145,7 +145,7 @@ fn build_output(workspace: &Workspace) -> ReadinessOutput {
 
         // Add the crate root entry (represents items defined directly in lib.rs)
         let root_module = ModuleOutput {
-            path: "crate::".to_string(),
+            path: "::".to_string(),
             readiness: krate.root_readiness,
             is_explicit: krate.root_is_explicit,
             visibility: Visibility::Public,

@@ -1,6 +1,6 @@
 {
   "version": "0.0.65",
-  "generated": "2026-01-14T21:44:12.925519+00:00",
+  "generated": "2026-01-14T21:46:05.345812+00:00",
   "crates": [
     {
       "name": "commonware-broadcast",
@@ -9,7 +9,7 @@
       },
       "modules": [
         {
-          "path": "crate::",
+          "path": "::",
           "readiness": 2,
           "is_explicit": true,
           "submodules": [
@@ -43,7 +43,7 @@
       },
       "modules": [
         {
-          "path": "crate::",
+          "path": "::",
           "readiness": 2,
           "is_explicit": true,
           "submodules": [
@@ -135,7 +135,7 @@
       },
       "modules": [
         {
-          "path": "crate::",
+          "path": "::",
           "readiness": 0,
           "is_explicit": false,
           "submodules": [
@@ -162,7 +162,7 @@
       },
       "modules": [
         {
-          "path": "crate::",
+          "path": "::",
           "readiness": 0,
           "is_explicit": false,
           "submodules": [
@@ -196,7 +196,7 @@
       },
       "modules": [
         {
-          "path": "crate::",
+          "path": "::",
           "readiness": 2,
           "is_explicit": true
         }
@@ -209,7 +209,7 @@
       },
       "modules": [
         {
-          "path": "crate::",
+          "path": "::",
           "readiness": 0,
           "is_explicit": false
         }
@@ -223,7 +223,7 @@
       },
       "modules": [
         {
-          "path": "crate::",
+          "path": "::",
           "readiness": 0,
           "is_explicit": false,
           "submodules": [
@@ -390,7 +390,7 @@
       },
       "modules": [
         {
-          "path": "crate::",
+          "path": "::",
           "readiness": 2,
           "is_explicit": true,
           "submodules": [
@@ -574,7 +574,7 @@
       },
       "modules": [
         {
-          "path": "crate::",
+          "path": "::",
           "readiness": 0,
           "is_explicit": false,
           "submodules": [
@@ -616,7 +616,7 @@
       },
       "modules": [
         {
-          "path": "crate::",
+          "path": "::",
           "readiness": 2,
           "is_explicit": true
         }
@@ -630,7 +630,7 @@
       },
       "modules": [
         {
-          "path": "crate::",
+          "path": "::",
           "readiness": 0,
           "is_explicit": false,
           "submodules": [
@@ -665,7 +665,7 @@
       },
       "modules": [
         {
-          "path": "crate::",
+          "path": "::",
           "readiness": 2,
           "is_explicit": true,
           "submodules": [
@@ -988,7 +988,7 @@
       },
       "modules": [
         {
-          "path": "crate::",
+          "path": "::",
           "readiness": 2,
           "is_explicit": true
         }
@@ -1001,7 +1001,7 @@
       },
       "modules": [
         {
-          "path": "crate::",
+          "path": "::",
           "readiness": 2,
           "is_explicit": true,
           "submodules": [
@@ -1035,7 +1035,7 @@
       },
       "modules": [
         {
-          "path": "crate::",
+          "path": "::",
           "readiness": 2,
           "is_explicit": true,
           "submodules": [
@@ -1187,7 +1187,7 @@
       },
       "modules": [
         {
-          "path": "crate::",
+          "path": "::",
           "readiness": 2,
           "is_explicit": true,
           "submodules": [
@@ -1658,7 +1658,7 @@
       },
       "modules": [
         {
-          "path": "crate::",
+          "path": "::",
           "readiness": 2,
           "is_explicit": true,
           "submodules": [
@@ -1685,7 +1685,7 @@
       },
       "modules": [
         {
-          "path": "crate::",
+          "path": "::",
           "readiness": 2,
           "is_explicit": true,
           "submodules": [
