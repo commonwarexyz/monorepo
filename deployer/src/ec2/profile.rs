@@ -163,8 +163,11 @@ fi
 
 echo "Profiling PID $PID for {duration} seconds..."
 
-# Record profile (requires sudo for perf access)
-sudo /home/ubuntu/samply record -p $PID --save-only -o /tmp/profile.json --duration {duration}
+# Enable perf access for samply
+sudo sysctl -w kernel.perf_event_paranoid=-1 > /dev/null
+
+# Record profile
+sudo /home/ubuntu/samply record -p $PID -s -o /tmp/profile.json -d {duration}
 sudo chown ubuntu:ubuntu /tmp/profile.json
 
 echo "Profile captured successfully"
