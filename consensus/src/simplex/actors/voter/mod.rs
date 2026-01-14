@@ -71,10 +71,12 @@ mod tests {
         sha256::Digest as Sha256Digest,
         Hasher as _, Sha256,
     };
-    use commonware_macros::{select, test_traced};
+    use commonware_macros::{select, test_collect_traces, test_traced};
     use commonware_p2p::simulated::{Config as NConfig, Network};
     use commonware_parallel::Sequential;
-    use commonware_runtime::{deterministic, Clock, Metrics, Quota, Runner};
+    use commonware_runtime::{
+        deterministic, telemetry::traces::collector::TraceStorage, Clock, Metrics, Quota, Runner,
+    };
     use commonware_utils::{NZUsize, NZU16};
     use futures::{channel::mpsc, FutureExt, StreamExt};
     use std::{
@@ -82,6 +84,7 @@ mod tests {
         sync::{Arc, Mutex},
         time::Duration,
     };
+    use tracing::Level;
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
@@ -3137,5 +3140,147 @@ mod tests {
         );
         certification_after_notarize_timeout_as_leader::<_, _>(ed25519::fixture);
         certification_after_notarize_timeout_as_leader::<_, _>(secp256r1::fixture);
+    }
+
+    /// Tests that when certification returns a cancelled receiver, the voter doesn't hang
+    /// and continues to make progress (via voting to nullify the view that could not be certified).
+    fn cancelled_certification_does_not_hang<S, F>(mut fixture: F, traces: TraceStorage)
+    where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+    {
+        let n = 5;
+        let quorum = quorum(n);
+        let namespace = b"consensus".to_vec();
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|mut context| async move {
+            // Create simulated network
+            let (network, oracle) = Network::new(
+                context.with_label("network"),
+                NConfig {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: true,
+                    tracked_peer_sets: None,
+                },
+            );
+            network.start();
+
+            // Get participants
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = fixture(&mut context, &namespace, n);
+
+            let elector = RoundRobin::<Sha256>::default();
+
+            // Set up voter with Certifier::Cancel
+            let (mut mailbox, mut batcher_receiver, _, relay, _) = setup_voter(
+                &mut context,
+                &oracle,
+                &participants,
+                &schemes,
+                elector,
+                Duration::from_millis(500),
+                Duration::from_millis(500),
+                Duration::from_millis(500),
+                mocks::application::Certifier::Cancel,
+            )
+            .await;
+
+            // Advance to view 3 where we're a follower.
+            // With RoundRobin, epoch=333, n=5: leader = (333 + view) % 5
+            // View 3: leader = 1 (not us)
+            let target_view = View::new(3);
+            let parent_payload = advance_to_view(
+                &mut mailbox,
+                &mut batcher_receiver,
+                &schemes,
+                quorum,
+                target_view,
+            )
+            .await;
+
+            // Broadcast the payload contents so verification can complete.
+            let proposal = Proposal::new(
+                Round::new(Epoch::new(333), target_view),
+                target_view.previous().unwrap(),
+                Sha256::hash(b"test_proposal"),
+            );
+            let leader = participants[1].clone();
+            let contents = (proposal.round, parent_payload, 0u64).encode();
+            relay
+                .broadcast(&leader, (proposal.payload, contents))
+                .await;
+            mailbox.proposal(proposal.clone()).await;
+
+            // Build and send notarization so the voter tries to certify
+            let (_, notarization) = build_notarization(&schemes, &proposal, quorum);
+            mailbox
+                .resolved(Certificate::Notarization(notarization))
+                .await;
+
+            // Certification will be cancelled, so the voter should eventually timeout
+            // and emit a nullify vote.
+            loop {
+                select! {
+                    msg = batcher_receiver.next() => {
+                        match msg.unwrap() {
+                            batcher::Message::Constructed(Vote::Nullify(nullify)) if nullify.view() == target_view => {
+                                break;
+                            }
+                            batcher::Message::Update { active, .. } => active.send(true).unwrap(),
+                            _ => {}
+                        }
+                    },
+                    _ = context.sleep(Duration::from_secs(5)) => {
+                        panic!(
+                            "voter should emit nullify for view {target_view} despite cancelled certification",
+                        );
+                    },
+                }
+            }
+
+            // Verify the "failed to certify proposal" log was emitted with the correct round
+            let expected_round = format!("Round {{ epoch: Epoch(333), view: View({target_view}) }}");
+            traces
+                .get_by_level(Level::DEBUG)
+                .expect_event(|event| {
+                    event.metadata.content == "failed to certify proposal"
+                        && event
+                            .metadata
+                            .fields
+                            .iter()
+                            .any(|(name, value)| name == "err" && value == "Canceled")
+                        && event
+                            .metadata
+                            .fields
+                            .iter()
+                            .any(|(name, value)| name == "round" && value == &expected_round)
+                })
+                .unwrap();
+        });
+    }
+
+    #[test_collect_traces]
+    fn test_cancelled_certification_does_not_hang(traces: TraceStorage) {
+        cancelled_certification_does_not_hang(
+            bls12381_threshold::fixture::<MinPk, _>,
+            traces.clone(),
+        );
+        cancelled_certification_does_not_hang(
+            bls12381_threshold::fixture::<MinSig, _>,
+            traces.clone(),
+        );
+        cancelled_certification_does_not_hang(
+            bls12381_multisig::fixture::<MinPk, _>,
+            traces.clone(),
+        );
+        cancelled_certification_does_not_hang(
+            bls12381_multisig::fixture::<MinSig, _>,
+            traces.clone(),
+        );
+        cancelled_certification_does_not_hang(ed25519::fixture, traces.clone());
+        cancelled_certification_does_not_hang(secp256r1::fixture, traces);
     }
 }
