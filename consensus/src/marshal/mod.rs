@@ -130,7 +130,10 @@ mod tests {
     };
     use commonware_parallel::Sequential;
     use commonware_runtime::{buffer::PoolRef, deterministic, Clock, Metrics, Quota, Runner};
-    use commonware_storage::archive::{immutable, prunable};
+    use commonware_storage::{
+        archive::{immutable, prunable},
+        translator::EightCap,
+    };
     use commonware_utils::{vec::NonEmptyVec, NZUsize, NZU16, NZU64};
     use futures::StreamExt;
     use rand::{
@@ -751,51 +754,6 @@ mod tests {
 
     #[test_traced("WARN")]
     fn test_prune_finalized_archives() {
-        /// A hasher that uses the first 8 bytes of a Sha256Digest for hashing.
-        #[derive(Default)]
-        struct DigestHasher {
-            value: u64,
-        }
-
-        impl std::hash::Hasher for DigestHasher {
-            fn write(&mut self, bytes: &[u8]) {
-                // Use first 8 bytes of the digest for the hash
-                let mut arr = [0u8; 8];
-                let len = bytes.len().min(8);
-                arr[..len].copy_from_slice(&bytes[..len]);
-                self.value = u64::from_le_bytes(arr);
-            }
-
-            fn finish(&self) -> u64 {
-                self.value
-            }
-        }
-
-        /// A translator that keeps the full Sha256Digest as the key.
-        /// This is needed for prunable archives to satisfy the `Translator<Key = C>` bound
-        /// required by the `Certificates` and `Blocks` trait implementations.
-        #[derive(Clone, Default)]
-        struct DigestTranslator;
-
-        impl commonware_storage::translator::Translator for DigestTranslator {
-            type Key = D;
-
-            fn transform(&self, key: &[u8]) -> Self::Key {
-                let mut arr = [0u8; 32];
-                let len = key.len().min(32);
-                arr[..len].copy_from_slice(&key[..len]);
-                Sha256Digest::from(arr)
-            }
-        }
-
-        impl std::hash::BuildHasher for DigestTranslator {
-            type Hasher = DigestHasher;
-
-            fn build_hasher(&self) -> Self::Hasher {
-                DigestHasher::default()
-            }
-        }
-
         let runner = deterministic::Runner::new(
             deterministic::Config::new().with_timeout(Some(Duration::from_secs(120))),
         );
@@ -860,7 +818,7 @@ mod tests {
             let finalizations_by_height = prunable::Archive::init(
                 context.with_label("finalizations_by_height"),
                 prunable::Config {
-                    translator: DigestTranslator,
+                    translator: EightCap,
                     key_partition: format!(
                         "{}-finalizations-by-height-key",
                         config.partition_prefix
@@ -885,7 +843,7 @@ mod tests {
             let finalized_blocks = prunable::Archive::init(
                 context.with_label("finalized_blocks"),
                 prunable::Config {
-                    translator: DigestTranslator,
+                    translator: EightCap,
                     key_partition: format!("{}-finalized-blocks-key", config.partition_prefix),
                     key_buffer_pool: config.buffer_pool.clone(),
                     value_partition: format!("{}-finalized-blocks-value", config.partition_prefix),
