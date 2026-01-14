@@ -1,5 +1,6 @@
 //! Different variants of the BLS signature scheme.
 
+pub use super::ops::check::CheckResult;
 use super::{
     group::{
         Scalar, SmallScalar, DST, G1, G1_MESSAGE, G1_PROOF_OF_POSSESSION, G2, G2_MESSAGE,
@@ -67,6 +68,15 @@ pub trait Variant: Clone + Send + Sync + Hash + Eq + Debug + 'static {
 
     /// Compute the pairing `e(G1, G2) -> GT`.
     fn pairing(public: &Self::Public, signature: &Self::Signature) -> GT;
+
+    /// Batch check subgroup membership for public keys and signatures (parallelized).
+    ///
+    /// Returns two `CheckResult`s: (public_key_failures, signature_failures).
+    fn check_subgroups(
+        publics: &[Self::Public],
+        signatures: &[Self::Signature],
+        strategy: &impl Strategy,
+    ) -> (CheckResult, CheckResult);
 }
 
 /// A [Variant] with a public key of type [G1] and a signature of type [G2].
@@ -177,6 +187,18 @@ impl Variant for MinPk {
         }
 
         GT::from_blst_fp12(result)
+    }
+
+    fn check_subgroups(
+        publics: &[Self::Public],
+        signatures: &[Self::Signature],
+        strategy: &impl Strategy,
+    ) -> (CheckResult, CheckResult) {
+        use super::ops::check::{check_g1_subgroup, check_g2_subgroup};
+        strategy.join(
+            || check_g1_subgroup(publics, strategy),
+            || check_g2_subgroup(signatures, strategy),
+        )
     }
 }
 
@@ -294,6 +316,18 @@ impl Variant for MinSig {
         }
 
         GT::from_blst_fp12(result)
+    }
+
+    fn check_subgroups(
+        publics: &[Self::Public],
+        signatures: &[Self::Signature],
+        strategy: &impl Strategy,
+    ) -> (CheckResult, CheckResult) {
+        use super::ops::check::{check_g1_subgroup, check_g2_subgroup};
+        strategy.join(
+            || check_g2_subgroup(publics, strategy),
+            || check_g1_subgroup(signatures, strategy),
+        )
     }
 }
 

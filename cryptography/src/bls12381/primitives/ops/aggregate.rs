@@ -257,9 +257,8 @@ where
 ///
 /// # Warning
 ///
-/// This function assumes the caller has performed a group check and collected a proof-of-possession
-/// for all provided `public`. This function assumes a group check was already performed on the
-/// `signature`. It is not safe to provide duplicate public keys.
+/// This function assumes the caller has collected a proof-of-possession for all public keys
+/// that were combined into `public`. It is not safe to provide duplicate public keys.
 pub fn verify_same_message<V: Variant>(
     public: &PublicKey<V>,
     namespace: &[u8],
@@ -279,10 +278,6 @@ pub fn verify_same_message<V: Variant>(
 /// Instead of requiring all messages that participated in the aggregate signature (and generating
 /// the combined message on-demand), this function accepts a precomputed combined message to allow
 /// the caller to cache previous constructions and/or perform parallel combination.
-///
-/// # Warning
-///
-/// This function assumes a group check was already performed on `public` and `signature`.
 pub fn verify_same_signer<V: Variant>(
     public: &V::Public,
     message: &Message<V>,

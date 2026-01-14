@@ -191,11 +191,8 @@ fn bisect<V: Variant>(
 /// verifications than checking each signature individually. If an invalid signer is detected,
 /// consider blocking them from participating in future batches to better amortize the cost.
 ///
-/// # Warning
-///
-/// This function assumes a group check was already performed on each public key
-/// and signature. Duplicate public keys are safe because random scalar weights
-/// ensure each (public key, signature) pair is verified independently.
+/// Duplicate public keys are safe because random scalar weights ensure each
+/// (public key, signature) pair is verified independently.
 pub fn verify_same_message<R, V>(
     rng: &mut R,
     namespace: &[u8],
@@ -211,15 +208,32 @@ where
         return Vec::new();
     }
 
+    // Extract pks and sigs
+    let (pks, sigs): (Vec<_>, Vec<_>) = entries.iter().cloned().unzip();
+
+    // Check subgroup membership for all public keys and signatures (parallelized).
+    let (pk_check, sig_check) = V::check_subgroups(&pks, &sigs, par);
+
+    // Merge failed indices from both checks (entries with invalid pk OR signature)
+    let mut invalid_subgroup: Vec<usize> = pk_check.failed_indices;
+    for i in sig_check.failed_indices {
+        if !invalid_subgroup.contains(&i) {
+            invalid_subgroup.push(i);
+        }
+    }
+
+    // If any entries have invalid subgroup membership, return them immediately
+    if !invalid_subgroup.is_empty() {
+        invalid_subgroup.sort_unstable();
+        return invalid_subgroup;
+    }
+
     let hm = hash_with_namespace::<V>(V::MESSAGE, namespace, message);
 
     // Generate 128-bit random scalars (sufficient for batch verification security)
     let scalars: Vec<SmallScalar> = (0..entries.len())
         .map(|_| SmallScalar::random(&mut *rng))
         .collect();
-
-    // Extract pks and sigs for MSM
-    let (pks, sigs) = entries.iter().cloned().collect::<(Vec<_>, Vec<_>)>();
 
     // Compute MSMs for pk and sig in parallel using 128-bit scalars.
     let (sum_pk, sum_sig) = par.join(
@@ -246,9 +260,6 @@ where
 ///
 /// Each entry is a tuple of (namespace, message, signature).
 ///
-/// # Warning
-///
-/// This function assumes a group check was already performed on `public` and each `signature`.
 /// Duplicate messages are safe because random scalar weights ensure each (message, signature)
 /// pair is verified independently.
 pub fn verify_same_signer<'a, R, V, I>(
@@ -268,6 +279,16 @@ where
         return Ok(());
     }
 
+    // Check subgroup membership for the public key and all signatures (parallelized).
+    let sigs: Vec<V::Signature> = entries.iter().map(|(_, _, sig)| *sig).collect();
+    let (pk_check, sig_check) = V::check_subgroups(&[*public], &sigs, strategy);
+    if !pk_check.all_valid() {
+        return Err(Error::InvalidPublicKey);
+    }
+    if !sig_check.all_valid() {
+        return Err(Error::InvalidSignature);
+    }
+
     // Generate 128-bit random scalars (sufficient for batch verification security)
     let scalars: Vec<SmallScalar> = (0..entries.len())
         .map(|_| SmallScalar::random(&mut *rng))
@@ -277,7 +298,6 @@ where
     let hms: Vec<V::Signature> = strategy.map_collect_vec(entries.iter(), |(namespace, msg, _)| {
         hash_with_namespace::<V>(V::MESSAGE, namespace, msg)
     });
-    let sigs: Vec<V::Signature> = entries.iter().map(|(_, _, sig)| *sig).collect();
 
     // Compute weighted sums in parallel using MSM with 128-bit scalars.
     let (weighted_hm, weighted_sig) = strategy.join(
