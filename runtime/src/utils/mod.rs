@@ -1,5 +1,7 @@
 //! Utility functions for interacting with any runtime.
 
+commonware_macros::readiness!(2);
+
 #[cfg(test)]
 use crate::{Runner, Spawner};
 #[cfg(test)]

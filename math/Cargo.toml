@@ -31,6 +31,7 @@ std = [
 arbitrary = { workspace = true, optional = true }
 bytes.workspace = true
 commonware-codec.workspace = true
+commonware-macros.workspace = true
 commonware-parallel.workspace = true
 commonware-utils.workspace = true
 proptest = { workspace = true, optional = true }

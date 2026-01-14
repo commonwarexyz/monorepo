@@ -34,7 +34,7 @@ chrono = { workspace = true, optional = true }
 clap = { workspace = true, optional = true, features = ["derive"] }
 serde = { workspace = true, optional = true, features = ["derive"] }
 serde_json = { workspace = true, optional = true }
-syn = { workspace = true, optional = true, features = ["full", "parsing"] }
+syn = { workspace = true, optional = true, features = ["full", "parsing", "visit"] }
 toml = { workspace = true, optional = true }
 walkdir = { workspace = true, optional = true }
 

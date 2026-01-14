@@ -4,6 +4,9 @@
 //! so that the familiar `+`, `+=`, etc. operators can be used. The traits are also
 //! designed with performant implementations in mind, so implementations try to
 //! use methods which don't require copying unnecessarily.
+
+commonware_macros::readiness!(2);
+
 use commonware_parallel::Strategy as ParStrategy;
 use core::{
     fmt::Debug,
