@@ -107,6 +107,13 @@ async fn main() -> std::process::ExitCode {
                                 .default_value("30")
                                 .help("Profile duration in seconds")
                                 .value_parser(clap::value_parser!(u64)),
+                        )
+                        .arg(
+                            Arg::new("binary")
+                                .long("binary")
+                                .required(true)
+                                .help("Path to local binary with debug symbols for symbolication")
+                                .value_parser(clap::value_parser!(PathBuf)),
                         ),
                 ),
         )
@@ -167,7 +174,8 @@ async fn main() -> std::process::ExitCode {
                 let config_path = matches.get_one::<PathBuf>("config").unwrap();
                 let instance = matches.get_one::<String>("instance").unwrap();
                 let duration = *matches.get_one::<u64>("duration").unwrap();
-                if let Err(e) = ec2::profile(config_path, instance, duration).await {
+                let binary_path = matches.get_one::<PathBuf>("binary").unwrap();
+                if let Err(e) = ec2::profile(config_path, instance, duration, binary_path).await {
                     error!(error=?e, "failed to profile instance");
                 } else {
                     return std::process::ExitCode::SUCCESS;

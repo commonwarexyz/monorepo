@@ -416,6 +416,9 @@ cfg_if::cfg_if! {
 
             #[error("file hashing failed: {0}")]
             HashFile(String),
+
+            #[error("symbolication failed: {0}")]
+            Symbolication(String),
         }
 
         impl From<aws_sdk_s3::error::SdkError<aws_sdk_s3::operation::get_object::GetObjectError>> for Error {

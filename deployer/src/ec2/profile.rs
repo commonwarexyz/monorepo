@@ -26,6 +26,7 @@ pub async fn profile(
     config_path: &PathBuf,
     instance_name: &str,
     duration: u64,
+    binary_path: &PathBuf,
 ) -> Result<(), Error> {
     // Load config
     let config: Config = {
@@ -184,13 +185,30 @@ echo "Profile captured successfully"
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_secs();
-    let local_path = format!("/tmp/profile-{}-{}.json", instance_name, timestamp);
-    scp_download(private_key, &instance_ip, "/tmp/profile.json", &local_path).await?;
+    let profile_path = format!("/tmp/profile-{}-{}.json", instance_name, timestamp);
+    scp_download(private_key, &instance_ip, "/tmp/profile.json", &profile_path).await?;
+    info!(profile = profile_path.as_str(), "downloaded profile");
 
-    info!(path = local_path.as_str(), "profile saved locally");
+    // Symbolicate the profile locally using samply with the provided binary
+    let symbolicated_path = format!("/tmp/profile-{}-{}-symbolicated.json", instance_name, timestamp);
+    info!(binary = ?binary_path, "symbolicating profile locally");
+    let output = Command::new("samply")
+        .arg("load")
+        .arg(&profile_path)
+        .arg("--binary")
+        .arg(binary_path)
+        .arg("-o")
+        .arg(&symbolicated_path)
+        .output()
+        .await?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(Error::Symbolication(stderr.to_string()));
+    }
+    info!(path = symbolicated_path.as_str(), "profile symbolicated");
 
-    // Read the profile file
-    let profile_content = std::fs::read(&local_path)?;
+    // Read the symbolicated profile file
+    let profile_content = std::fs::read(&symbolicated_path)?;
 
     // Start a local HTTP server on a random port
     let listener = TcpListener::bind("127.0.0.1:0").await?;
