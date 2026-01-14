@@ -27,6 +27,9 @@ pub const S3_TOOLS_CONFIGS_PREFIX: &str = "tools/configs";
 /// S3 prefix for per-deployment data
 pub const S3_DEPLOYMENTS_PREFIX: &str = "deployments";
 
+/// Maximum buffer size for file hashing (32MB)
+pub const MAX_HASH_BUFFER_SIZE: usize = 32 * 1024 * 1024;
+
 /// Duration for pre-signed URLs (6 hours)
 pub const PRESIGN_DURATION: Duration = Duration::from_secs(6 * 60 * 60);
 
@@ -239,8 +242,10 @@ pub async fn cache_and_presign(
 /// Computes the SHA256 hash of a file and returns it as a hex string
 pub fn hash_file(path: &Path) -> Result<String, Error> {
     let mut file = std::fs::File::open(path)?;
+    let file_size = file.metadata()?.len() as usize;
+    let buffer_size = file_size.min(MAX_HASH_BUFFER_SIZE);
     let mut hasher = Sha256::new();
-    let mut buffer = vec![0u8; 32 * 1024 * 1024]; // 32MB buffer for faster hashing of large files
+    let mut buffer = vec![0u8; buffer_size];
     loop {
         let bytes_read = file.read(&mut buffer)?;
         if bytes_read == 0 {
