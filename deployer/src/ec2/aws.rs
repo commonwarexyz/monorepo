@@ -7,8 +7,6 @@ use crate::ec2::{
 };
 use aws_config::BehaviorVersion;
 pub use aws_config::Region;
-pub use aws_sdk_ec2::Client as Ec2Client;
-pub use aws_sdk_ec2::types::{InstanceType, IpPermission, IpRange, UserIdGroupPair, VolumeType};
 use aws_sdk_ec2::{
     error::BuildError,
     primitives::Blob,
@@ -17,6 +15,10 @@ use aws_sdk_ec2::{
         SummaryStatus, Tag, TagSpecification, VpcPeeringConnectionStateReasonCode,
     },
     Error as Ec2Error,
+};
+pub use aws_sdk_ec2::{
+    types::{InstanceType, IpPermission, IpRange, UserIdGroupPair, VolumeType},
+    Client as Ec2Client,
 };
 use std::{
     collections::{HashMap, HashSet},
@@ -458,10 +460,7 @@ pub async fn wait_for_instances_running(
                     Some(id) => id,
                     None => continue,
                 };
-                let is_running = instance
-                    .state
-                    .as_ref()
-                    .and_then(|s| s.name.as_ref())
+                let is_running = instance.state.as_ref().and_then(|s| s.name.as_ref())
                     == Some(&InstanceStateName::Running);
                 if is_running {
                     if let Some(ip) = instance.public_ip_address {

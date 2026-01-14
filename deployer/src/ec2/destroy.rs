@@ -10,7 +10,11 @@ use crate::ec2::{
     Config, Error, DESTROYED_FILE_NAME, LOGS_PORT, MONITORING_REGION, PROFILES_PORT, TRACES_PORT,
 };
 use futures::future::try_join_all;
-use std::{collections::{HashMap, HashSet}, fs::File, path::PathBuf};
+use std::{
+    collections::{HashMap, HashSet},
+    fs::File,
+    path::PathBuf,
+};
 use tracing::{info, warn};
 
 /// Tears down all resources associated with the deployment tag

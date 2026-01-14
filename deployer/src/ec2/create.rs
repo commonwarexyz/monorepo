@@ -561,7 +561,10 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
             )
             .await?[0]
                 .clone();
-            info!(instance_id = instance_id.as_str(), "launched monitoring instance");
+            info!(
+                instance_id = instance_id.as_str(),
+                "launched monitoring instance"
+            );
             Ok::<String, Error>(instance_id)
         }
     };
@@ -601,7 +604,11 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
                         instance = instance_name.as_str(),
                         "launched instance"
                     );
-                    Ok::<(String, String, InstanceConfig), Error>((instance_id, region, (*instance).clone()))
+                    Ok::<(String, String, InstanceConfig), Error>((
+                        instance_id,
+                        region,
+                        (*instance).clone(),
+                    ))
                 }
             });
 
@@ -622,45 +629,55 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     }
 
     // Wait for instances to be running, batched by region
-    let wait_futures = instances_by_region.into_iter().flat_map(|(region, instances)| {
-        let ec2_client = ec2_clients[&region].clone();
-        instances.chunks(MAX_DESCRIBE_BATCH).map(move |chunk| {
-            let ec2_client = ec2_client.clone();
-            let chunk: Vec<_> = chunk.to_vec();
-            let region = region.clone();
-            async move {
-                let instance_ids: Vec<String> = chunk.iter().map(|(id, _)| id.clone()).collect();
-                let ips = wait_for_instances_running(&ec2_client, &instance_ids).await?;
-                info!(
-                    region = region.as_str(),
-                    count = chunk.len(),
-                    "instances running in region"
-                );
-                let deployments: Vec<Deployment> = chunk
-                    .into_iter()
-                    .zip(ips)
-                    .map(|((instance_id, instance_config), ip)| Deployment {
-                        instance: instance_config,
-                        id: instance_id,
-                        ip,
-                    })
-                    .collect();
-                Ok::<Vec<Deployment>, Error>(deployments)
-            }
-        }).collect::<Vec<_>>()
-    });
+    let wait_futures = instances_by_region
+        .into_iter()
+        .flat_map(|(region, instances)| {
+            let ec2_client = ec2_clients[&region].clone();
+            instances
+                .chunks(MAX_DESCRIBE_BATCH)
+                .map(move |chunk| {
+                    let ec2_client = ec2_client.clone();
+                    let chunk: Vec<_> = chunk.to_vec();
+                    let region = region.clone();
+                    async move {
+                        let instance_ids: Vec<String> =
+                            chunk.iter().map(|(id, _)| id.clone()).collect();
+                        let ips = wait_for_instances_running(&ec2_client, &instance_ids).await?;
+                        info!(
+                            region = region.as_str(),
+                            count = chunk.len(),
+                            "instances running in region"
+                        );
+                        let deployments: Vec<Deployment> = chunk
+                            .into_iter()
+                            .zip(ips)
+                            .map(|((instance_id, instance_config), ip)| Deployment {
+                                instance: instance_config,
+                                id: instance_id,
+                                ip,
+                            })
+                            .collect();
+                        Ok::<Vec<Deployment>, Error>(deployments)
+                    }
+                })
+                .collect::<Vec<_>>()
+        });
 
     // Wait for monitoring instance and all binary instances in parallel
     let (monitoring_ips, binary_deployment_batches) = tokio::try_join!(
         async {
-            wait_for_instances_running(monitoring_ec2_client, slice::from_ref(&monitoring_instance_id))
-                .await
-                .map_err(Error::AwsEc2)
+            wait_for_instances_running(
+                monitoring_ec2_client,
+                slice::from_ref(&monitoring_instance_id),
+            )
+            .await
+            .map_err(Error::AwsEc2)
         },
         try_join_all(wait_futures)
     )?;
     let monitoring_ip = monitoring_ips[0].clone();
-    let monitoring_private_ip = get_private_ip(monitoring_ec2_client, &monitoring_instance_id).await?;
+    let monitoring_private_ip =
+        get_private_ip(monitoring_ec2_client, &monitoring_instance_id).await?;
     let deployments: Vec<Deployment> = binary_deployment_batches.into_iter().flatten().collect();
     info!(ip = monitoring_ip.as_str(), "monitoring instance running");
     info!("launched instances");
