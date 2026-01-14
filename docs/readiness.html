@@ -73,6 +73,22 @@
             justify-content: space-between;
             align-items: center;
         }
+        .crate-counts {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+        }
+        .count-item {
+            display: flex;
+            align-items: center;
+            gap: 3px;
+            font-size: 0.85em;
+        }
+        .count-item .count-num {
+            font-weight: bold;
+            min-width: 20px;
+            text-align: right;
+        }
         .crate-header:hover {
             background: #f3f4f6;
         }
@@ -247,9 +263,25 @@
 
                 const header = document.createElement('div');
                 header.className = 'crate-header';
+
+                // Build module counts display
+                let countsHtml = '<div class="crate-counts">';
+                for (let level = 0; level <= 4; level++) {
+                    const count = crate.module_counts[level] || 0;
+                    if (count > 0) {
+                        countsHtml += `
+                            <span class="count-item">
+                                <span class="count-num">${count}</span>
+                                <span class="readiness-badge readiness-${level}">${level}</span>
+                            </span>
+                        `;
+                    }
+                }
+                countsHtml += '</div>';
+
                 header.innerHTML = `
                     <span>${crate.name}</span>
-                    <span class="readiness-badge readiness-${crate.readiness}">${crate.readiness}</span>
+                    ${countsHtml}
                 `;
 
                 const content = document.createElement('div');

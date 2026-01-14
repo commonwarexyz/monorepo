@@ -1,10 +1,12 @@
 {
   "version": "0.0.65",
-  "generated": "2026-01-14T19:21:31.578616+00:00",
+  "generated": "2026-01-14T19:27:24.658817+00:00",
   "crates": [
     {
       "name": "commonware-broadcast",
-      "readiness": 0,
+      "module_counts": {
+        "0": 7
+      },
       "modules": [
         {
           "path": "buffered",
@@ -47,7 +49,10 @@
     },
     {
       "name": "commonware-codec",
-      "readiness": 2,
+      "module_counts": {
+        "0": 16,
+        "2": 1
+      },
       "modules": [
         {
           "path": "codec",
@@ -140,7 +145,9 @@
     },
     {
       "name": "commonware-coding",
-      "readiness": 0,
+      "module_counts": {
+        "0": 4
+      },
       "modules": [
         {
           "path": "no_coding",
@@ -166,7 +173,9 @@
     },
     {
       "name": "commonware-collector",
-      "readiness": 0,
+      "module_counts": {
+        "0": 9
+      },
       "modules": [
         {
           "path": "p2p",
@@ -221,7 +230,9 @@
     },
     {
       "name": "commonware-conformance",
-      "readiness": 0,
+      "module_counts": {
+        "0": 1
+      },
       "modules": [
         {
           "path": "tests",
@@ -232,7 +243,9 @@
     },
     {
       "name": "commonware-conformance-macros",
-      "readiness": 0,
+      "module_counts": {
+        "0": 1
+      },
       "modules": [
         {
           "path": "tests",
@@ -243,7 +256,9 @@
     },
     {
       "name": "commonware-consensus",
-      "readiness": 0,
+      "module_counts": {
+        "0": 90
+      },
       "modules": [
         {
           "path": "aggregation",
@@ -731,7 +746,10 @@
     },
     {
       "name": "commonware-cryptography",
-      "readiness": 2,
+      "module_counts": {
+        "0": 48,
+        "2": 2
+      },
       "modules": [
         {
           "path": "blake3",
@@ -1015,7 +1033,9 @@
     },
     {
       "name": "commonware-deployer",
-      "readiness": 0,
+      "module_counts": {
+        "0": 10
+      },
       "modules": [
         {
           "path": "ec2",
@@ -1073,7 +1093,9 @@
     },
     {
       "name": "commonware-macros",
-      "readiness": 0,
+      "module_counts": {
+        "0": 1
+      },
       "modules": [
         {
           "path": "nextest",
@@ -1084,7 +1106,10 @@
     },
     {
       "name": "commonware-math",
-      "readiness": 2,
+      "module_counts": {
+        "0": 4,
+        "2": 1
+      },
       "modules": [
         {
           "path": "algebra",
@@ -1115,7 +1140,9 @@
     },
     {
       "name": "commonware-p2p",
-      "readiness": 0,
+      "module_counts": {
+        "0": 71
+      },
       "modules": [
         {
           "path": "authenticated",
@@ -1506,7 +1533,9 @@
     },
     {
       "name": "commonware-parallel",
-      "readiness": 0,
+      "module_counts": {
+        "0": 1
+      },
       "modules": [
         {
           "path": "test",
@@ -1517,7 +1546,9 @@
     },
     {
       "name": "commonware-resolver",
-      "readiness": 0,
+      "module_counts": {
+        "0": 12
+      },
       "modules": [
         {
           "path": "p2p",
@@ -1587,7 +1618,10 @@
     },
     {
       "name": "commonware-runtime",
-      "readiness": 2,
+      "module_counts": {
+        "0": 32,
+        "2": 24
+      },
       "modules": [
         {
           "path": "benchmarks",
@@ -1899,7 +1933,10 @@
     },
     {
       "name": "commonware-storage",
-      "readiness": 2,
+      "module_counts": {
+        "0": 110,
+        "2": 13
+      },
       "modules": [
         {
           "path": "archive",
@@ -2586,7 +2623,9 @@
     },
     {
       "name": "commonware-stream",
-      "readiness": 0,
+      "module_counts": {
+        "0": 3
+      },
       "modules": [
         {
           "path": "test",
@@ -2609,7 +2648,9 @@
     },
     {
       "name": "commonware-utils",
-      "readiness": 0,
+      "module_counts": {
+        "0": 32
+      },
       "modules": [
         {
           "path": "acknowledgement",

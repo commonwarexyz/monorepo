@@ -31,7 +31,8 @@ pub struct ReadinessOutput {
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
 pub struct CrateOutput {
     pub name: String,
-    pub readiness: u8,
+    /// Module counts by readiness level (e.g., {0: 45, 2: 3} means 45 at level 0, 3 at level 2)
+    pub module_counts: BTreeMap<u8, usize>,
     pub modules: Vec<ModuleOutput>,
 }
 
@@ -134,15 +135,13 @@ fn build_output(workspace: &Workspace) -> ReadinessOutput {
         let (modules, module_count, level_counts) = collect_modules(&krate.modules, 0);
 
         total_modules += module_count;
-        for (level, count) in level_counts {
-            *by_level.entry(level).or_insert(0) += count;
+        for (level, count) in &level_counts {
+            *by_level.entry(*level).or_insert(0) += count;
         }
-
-        let crate_readiness = compute_crate_readiness(&krate.modules);
 
         crates.push(CrateOutput {
             name: crate_name.clone(),
-            readiness: crate_readiness,
+            module_counts: level_counts,
             modules,
         });
     }
@@ -156,25 +155,4 @@ fn build_output(workspace: &Workspace) -> ReadinessOutput {
             by_level,
         },
     }
-}
-
-/// Compute the overall readiness level for a crate.
-/// Returns the minimum readiness among all explicitly annotated modules.
-/// Returns 0 if no modules have explicit readiness annotations.
-fn compute_crate_readiness(modules: &HashMap<String, Module>) -> u8 {
-    let mut min: Option<u8> = None;
-
-    for module in modules.values() {
-        if module.is_explicit {
-            min = Some(min.map_or(module.readiness, |m| m.min(module.readiness)));
-        }
-
-        // Check submodules for explicit readiness
-        let submodule_readiness = compute_crate_readiness(&module.submodules);
-        if submodule_readiness > 0 {
-            min = Some(min.map_or(submodule_readiness, |m| m.min(submodule_readiness)));
-        }
-    }
-
-    min.unwrap_or(0)
 }
