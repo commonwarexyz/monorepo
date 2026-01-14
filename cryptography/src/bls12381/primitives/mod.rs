@@ -55,6 +55,8 @@ use thiserror::Error;
 pub enum Error {
     #[error("not enough partial signatures: {0}/{1}")]
     NotEnoughPartialSignatures(usize, usize),
+    #[error("invalid public key")]
+    InvalidPublicKey,
     #[error("invalid signature")]
     InvalidSignature,
     #[error("invalid recovery")]

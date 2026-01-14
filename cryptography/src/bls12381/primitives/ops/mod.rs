@@ -5,7 +5,7 @@
 //! - Core primitives (keypair generation, signing, verification, proof of possession)
 //! - [`aggregate`]: Aggregation of public keys and signatures
 //! - [`batch`]: Batch verification of multiple signatures
-//! - [`check`]: Batch subgroup membership checks
+//! - [`check`]: Batch subgroup membership verification
 //! - [`threshold`]: Threshold signature operations
 //!
 //! # Domain Separation Tag (DST)

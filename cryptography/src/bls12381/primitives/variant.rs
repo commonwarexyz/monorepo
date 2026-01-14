@@ -2,8 +2,8 @@
 
 use super::{
     group::{
-        G1Unchecked, G2Unchecked, Scalar, SmallScalar, DST, G1, G1_MESSAGE, G1_PROOF_OF_POSSESSION,
-        G2, G2_MESSAGE, G2_PROOF_OF_POSSESSION, GT,
+        Scalar, SmallScalar, DST, G1, G1_MESSAGE, G1_PROOF_OF_POSSESSION, G2, G2_MESSAGE,
+        G2_PROOF_OF_POSSESSION, GT,
     },
     Error,
 };
@@ -33,14 +33,6 @@ pub trait Variant: Clone + Send + Sync + Hash + Eq + Debug + 'static {
         + Hash
         + Copy;
 
-    /// The unchecked public key type (deserialized, on-curve, but subgroup not verified).
-    type PublicUnchecked: FixedSize
-        + Read<Cfg = ()>
-        + Copy
-        + Send
-        + Sync
-        + CheckablePoint<Checked = Self::Public>;
-
     /// The signature type.
     type Signature: HashToGroup<Scalar = Scalar>
         + Space<SmallScalar>
@@ -50,14 +42,6 @@ pub trait Variant: Clone + Send + Sync + Hash + Eq + Debug + 'static {
         + Debug
         + Hash
         + Copy;
-
-    /// The unchecked signature type (deserialized, on-curve, but subgroup not verified).
-    type SignatureUnchecked: FixedSize
-        + Read<Cfg = ()>
-        + Copy
-        + Send
-        + Sync
-        + CheckablePoint<Checked = Self::Signature>;
 
     /// The domain separator tag (DST) for a proof of possession.
     const PROOF_OF_POSSESSION: DST;
@@ -91,9 +75,7 @@ pub struct MinPk {}
 
 impl Variant for MinPk {
     type Public = G1;
-    type PublicUnchecked = G1Unchecked;
     type Signature = G2;
-    type SignatureUnchecked = G2Unchecked;
 
     const PROOF_OF_POSSESSION: DST = G2_PROOF_OF_POSSESSION;
     const MESSAGE: DST = G2_MESSAGE;
@@ -105,6 +87,12 @@ impl Variant for MinPk {
         hm: &Self::Signature,
         signature: &Self::Signature,
     ) -> Result<(), Error> {
+        public
+            .ensure_in_subgroup()
+            .map_err(|_| Error::InvalidPublicKey)?;
+        signature
+            .ensure_in_subgroup()
+            .map_err(|_| Error::InvalidSignature)?;
         if !G2::multi_pairing_check(&[*hm], &[*public], signature, &-G1::generator()) {
             return Err(Error::InvalidSignature);
         }
@@ -151,6 +139,15 @@ impl Variant for MinPk {
             return Ok(());
         }
 
+        // Check subgroup membership for all public keys and signatures (parallelized).
+        use super::ops::check::{check_g1_subgroup, check_g2_subgroup};
+        if !check_g1_subgroup(publics, par).all_valid() {
+            return Err(Error::InvalidPublicKey);
+        }
+        if !check_g2_subgroup(signatures, par).all_valid() {
+            return Err(Error::InvalidSignature);
+        }
+
         // Generate 128-bit random scalars (sufficient for batch verification security).
         let scalars: Vec<SmallScalar> = (0..publics.len())
             .map(|_| SmallScalar::random(&mut *rng))
@@ -195,9 +192,7 @@ pub struct MinSig {}
 
 impl Variant for MinSig {
     type Public = G2;
-    type PublicUnchecked = G2Unchecked;
     type Signature = G1;
-    type SignatureUnchecked = G1Unchecked;
 
     const PROOF_OF_POSSESSION: DST = G1_PROOF_OF_POSSESSION;
     const MESSAGE: DST = G1_MESSAGE;
@@ -209,6 +204,12 @@ impl Variant for MinSig {
         hm: &Self::Signature,
         signature: &Self::Signature,
     ) -> Result<(), Error> {
+        public
+            .ensure_in_subgroup()
+            .map_err(|_| Error::InvalidPublicKey)?;
+        signature
+            .ensure_in_subgroup()
+            .map_err(|_| Error::InvalidSignature)?;
         if !G1::multi_pairing_check(&[*hm], &[*public], signature, &-G2::generator()) {
             return Err(Error::InvalidSignature);
         }
@@ -253,6 +254,15 @@ impl Variant for MinSig {
         assert_eq!(publics.len(), signatures.len());
         if publics.is_empty() {
             return Ok(());
+        }
+
+        // Check subgroup membership for all public keys and signatures (parallelized).
+        use super::ops::check::{check_g1_subgroup, check_g2_subgroup};
+        if !check_g2_subgroup(publics, par).all_valid() {
+            return Err(Error::InvalidPublicKey);
+        }
+        if !check_g1_subgroup(signatures, par).all_valid() {
+            return Err(Error::InvalidSignature);
         }
 
         // Generate 128-bit random scalars (sufficient for batch verification security).
@@ -334,73 +344,6 @@ impl<'a, V: Variant> arbitrary::Arbitrary<'a> for PartialSignature<V> {
             index: u.arbitrary()?,
             value: <V::Signature as CryptoGroup>::generator() * &u.arbitrary::<Scalar>()?,
         })
-    }
-}
-
-/// An unchecked partial signature (subgroup not verified).
-///
-/// Use `check()` to verify subgroup membership and convert to a checked
-/// `PartialSignature`.
-#[derive(Debug, Clone, Copy)]
-pub struct PartialSignatureUnchecked<V: Variant> {
-    pub index: Participant,
-    pub value: V::SignatureUnchecked,
-}
-
-impl<V: Variant> PartialSignatureUnchecked<V> {
-    /// Check that the signature is in the correct subgroup.
-    ///
-    /// Returns a checked `PartialSignature` if the subgroup check passes.
-    pub fn check(self) -> Result<PartialSignature<V>, CodecError>
-    where
-        V::SignatureUnchecked: CheckablePoint<Checked = V::Signature>,
-    {
-        Ok(PartialSignature {
-            index: self.index,
-            value: self.value.check()?,
-        })
-    }
-}
-
-impl<V: Variant> Read for PartialSignatureUnchecked<V> {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        let index = Participant::read(buf)?;
-        let value = V::SignatureUnchecked::read(buf)?;
-        Ok(Self { index, value })
-    }
-}
-
-impl<V: Variant> FixedSize for PartialSignatureUnchecked<V> {
-    // Participant is a u32 (4 bytes) + signature size
-    const SIZE: usize = 4 + V::Signature::SIZE;
-}
-
-/// Trait for unchecked points that can be converted to checked points.
-pub trait CheckablePoint: Sized {
-    /// The checked point type.
-    type Checked;
-
-    /// Check subgroup membership and convert to the checked type.
-    fn check(self) -> Result<Self::Checked, CodecError>;
-}
-
-impl CheckablePoint for G1Unchecked {
-    type Checked = G1;
-
-    #[allow(clippy::use_self)]
-    fn check(self) -> Result<Self::Checked, CodecError> {
-        G1Unchecked::check(self)
-    }
-}
-
-impl CheckablePoint for G2Unchecked {
-    type Checked = G2;
-
-    #[allow(clippy::use_self)]
-    fn check(self) -> Result<Self::Checked, CodecError> {
-        G2Unchecked::check(self)
     }
 }
 

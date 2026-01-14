@@ -9,10 +9,7 @@
 //! Use [`batch`](super::batch) when you need to ensure each individual signature is valid.
 
 use super::{
-    super::{
-        variant::{CheckablePoint, Variant},
-        Error,
-    },
+    super::{variant::Variant, Error},
     hash_with_namespace,
 };
 #[cfg(not(feature = "std"))]
@@ -74,35 +71,6 @@ where
     }
 }
 
-/// An unchecked aggregated public key (subgroup not verified).
-///
-/// Use `check()` to verify subgroup membership and convert to a checked
-/// `PublicKey`.
-#[derive(Debug, Clone, Copy)]
-pub struct PublicKeyUnchecked<V: Variant>(V::PublicUnchecked);
-
-impl<V: Variant> PublicKeyUnchecked<V>
-where
-    V::PublicUnchecked: CheckablePoint<Checked = V::Public>,
-{
-    /// Check that the public key is in the correct subgroup.
-    pub fn check(self) -> Result<PublicKey<V>, CodecError> {
-        Ok(PublicKey(self.0.check()?))
-    }
-}
-
-impl<V: Variant> Read for PublicKeyUnchecked<V> {
-    type Cfg = ();
-
-    fn read_cfg(reader: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, CodecError> {
-        Ok(Self(V::PublicUnchecked::read(reader)?))
-    }
-}
-
-impl<V: Variant> FixedSize for PublicKeyUnchecked<V> {
-    const SIZE: usize = V::Public::SIZE;
-}
-
 /// An aggregated signature from multiple individual signatures.
 ///
 /// This type is returned by [`combine_signatures`] and ensures that
@@ -153,35 +121,6 @@ where
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         Ok(Self(V::Signature::arbitrary(u)?))
     }
-}
-
-/// An unchecked aggregated signature (subgroup not verified).
-///
-/// Use `check()` to verify subgroup membership and convert to a checked
-/// `Signature`.
-#[derive(Debug, Clone, Copy)]
-pub struct SignatureUnchecked<V: Variant>(V::SignatureUnchecked);
-
-impl<V: Variant> SignatureUnchecked<V>
-where
-    V::SignatureUnchecked: CheckablePoint<Checked = V::Signature>,
-{
-    /// Check that the signature is in the correct subgroup.
-    pub fn check(self) -> Result<Signature<V>, CodecError> {
-        Ok(Signature(self.0.check()?))
-    }
-}
-
-impl<V: Variant> Read for SignatureUnchecked<V> {
-    type Cfg = ();
-
-    fn read_cfg(reader: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, CodecError> {
-        Ok(Self(V::SignatureUnchecked::read(reader)?))
-    }
-}
-
-impl<V: Variant> FixedSize for SignatureUnchecked<V> {
-    const SIZE: usize = V::Signature::SIZE;
 }
 
 /// A combined message hash from multiple individual messages.

@@ -323,46 +323,6 @@ where
     }
 }
 
-/// Unchecked combined vote/seed signature pair (subgroup not verified).
-#[derive(Clone, Copy)]
-pub struct SignatureUnchecked<V: Variant> {
-    /// Unchecked signature over the consensus vote message.
-    pub vote_signature: V::SignatureUnchecked,
-    /// Unchecked signature over the per-view seed.
-    pub seed_signature: V::SignatureUnchecked,
-}
-
-impl<V: Variant> SignatureUnchecked<V> {
-    /// Checks the signatures, returning a fully validated signature pair.
-    pub fn check(self) -> Result<Signature<V>, Error> {
-        use commonware_cryptography::bls12381::primitives::variant::CheckablePoint;
-        let vote_signature = self.vote_signature.check()?;
-        let seed_signature = self.seed_signature.check()?;
-        Ok(Signature {
-            vote_signature,
-            seed_signature,
-        })
-    }
-}
-
-impl<V: Variant> Read for SignatureUnchecked<V> {
-    type Cfg = ();
-
-    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let vote_signature = V::SignatureUnchecked::read(reader)?;
-        let seed_signature = V::SignatureUnchecked::read(reader)?;
-
-        Ok(Self {
-            vote_signature,
-            seed_signature,
-        })
-    }
-}
-
-impl<V: Variant> FixedSize for SignatureUnchecked<V> {
-    const SIZE: usize = V::SignatureUnchecked::SIZE * 2;
-}
-
 /// Seed represents a threshold signature over the current view.
 #[derive(Clone, Debug, PartialEq, Hash, Eq)]
 pub struct Seed<V: Variant> {
@@ -495,7 +455,6 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
     type Subject<'a, D: Digest> = Subject<'a, D>;
     type PublicKey = P;
     type Signature = Signature<V>;
-    type SignatureUnchecked = SignatureUnchecked<V>;
     type Certificate = Signature<V>;
 
     fn me(&self) -> Option<Participant> {
@@ -791,10 +750,6 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
     fn certificate_codec_config(&self) -> <Self::Certificate as Read>::Cfg {}
 
     fn certificate_codec_config_unbounded() -> <Self::Certificate as Read>::Cfg {}
-
-    fn check_signature(unchecked: Self::SignatureUnchecked) -> Result<Self::Signature, Error> {
-        unchecked.check()
-    }
 }
 
 #[cfg(test)]

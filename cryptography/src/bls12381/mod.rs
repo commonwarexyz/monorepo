@@ -12,4 +12,4 @@ pub mod dkg;
 pub mod primitives;
 mod scheme;
 pub mod tle;
-pub use scheme::{Batch, PrivateKey, PublicKey, PublicKeyUnchecked, Signature, SignatureUnchecked};
+pub use scheme::{Batch, PrivateKey, PublicKey, Signature};

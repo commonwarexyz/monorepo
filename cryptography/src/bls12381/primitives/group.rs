@@ -175,15 +175,6 @@ const BLST_FR_ONE: Scalar = Scalar(blst_fr {
 #[repr(transparent)]
 pub struct G1(blst_p1);
 
-/// An unchecked G1 point (deserialized, on-curve, but subgroup not verified).
-///
-/// This type is used for efficient deserialization when subgroup membership
-/// will be checked later (e.g., in a batch operation). Use `check()` to verify
-/// subgroup membership and convert to a checked `G1` point.
-#[derive(Clone, Copy)]
-#[repr(transparent)]
-pub struct G1Unchecked(blst_p1);
-
 /// The size in bytes of an encoded G1 element.
 pub const G1_ELEMENT_BYTE_LENGTH: usize = 48;
 
@@ -209,15 +200,6 @@ impl arbitrary::Arbitrary<'_> for G1 {
 #[derive(Clone, Copy, Eq, PartialEq)]
 #[repr(transparent)]
 pub struct G2(blst_p2);
-
-/// An unchecked G2 point (deserialized, on-curve, but subgroup not verified).
-///
-/// This type is used for efficient deserialization when subgroup membership
-/// will be checked later (e.g., in a batch operation). Use `check()` to verify
-/// subgroup membership and convert to a checked `G2` point.
-#[derive(Clone, Copy)]
-#[repr(transparent)]
-pub struct G2Unchecked(blst_p2);
 
 /// The size in bytes of an encoded G2 element.
 pub const G2_ELEMENT_BYTE_LENGTH: usize = 96;
@@ -810,71 +792,25 @@ impl G1 {
     }
 }
 
-impl G1Unchecked {
-    /// Check that this point is in the G1 subgroup.
-    ///
-    /// Returns a checked `G1` point if the subgroup check passes.
-    pub fn check(self) -> Result<G1, Error> {
-        // SAFETY: self.0 is a valid blst_p1 point that was decompressed and validated
-        // to be on curve during deserialization.
-        if unsafe { !blst_p1_in_g1(&self.0) } {
-            return Err(Invalid("G1", "Outside G1"));
-        }
-        Ok(G1(self.0))
-    }
-
-    /// Convert to checked WITHOUT verification.
-    ///
-    /// # Safety
-    ///
-    /// Caller must ensure the point is in the G1 subgroup (e.g., from a trusted source
-    /// like DKG output that was previously validated).
-    pub const unsafe fn into_checked_unchecked(self) -> G1 {
-        G1(self.0)
-    }
-}
-
-impl Read for G1Unchecked {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let bytes = <[u8; G1::SIZE]>::read(buf)?;
-        let mut ret = blst_p1::default();
-        // SAFETY: bytes is a valid 48-byte array. blst_p1_uncompress validates encoding
-        // and that the point is on the curve. We skip the expensive subgroup check here.
-        unsafe {
-            let mut affine = blst_p1_affine::default();
-            match blst_p1_uncompress(&mut affine, bytes.as_ptr()) {
-                BLST_ERROR::BLST_SUCCESS => {}
-                BLST_ERROR::BLST_BAD_ENCODING => return Err(Invalid("G1", "Bad encoding")),
-                BLST_ERROR::BLST_POINT_NOT_ON_CURVE => return Err(Invalid("G1", "Not on curve")),
-                BLST_ERROR::BLST_POINT_NOT_IN_GROUP => return Err(Invalid("G1", "Not in group")),
-                BLST_ERROR::BLST_AGGR_TYPE_MISMATCH => return Err(Invalid("G1", "Type mismatch")),
-                BLST_ERROR::BLST_VERIFY_FAIL => return Err(Invalid("G1", "Verify fail")),
-                BLST_ERROR::BLST_PK_IS_INFINITY => return Err(Invalid("G1", "PK is Infinity")),
-                BLST_ERROR::BLST_BAD_SCALAR => return Err(Invalid("G1", "Bad scalar")),
-            }
-            blst_p1_from_affine(&mut ret, &affine);
-
-            // Verify that deserialized element isn't infinite
-            if blst_p1_is_inf(&ret) {
-                return Err(Invalid("G1", "Infinity"));
-            }
-
-            // NOTE: No subgroup check here - use check() to verify
-        }
-        Ok(Self(ret))
-    }
-}
-
-impl FixedSize for G1Unchecked {
-    const SIZE: usize = G1_ELEMENT_BYTE_LENGTH;
-}
-
 impl Write for G1 {
     fn write(&self, buf: &mut impl BufMut) {
         let slice = self.as_slice();
         buf.put_slice(&slice);
+    }
+}
+
+impl G1 {
+    /// Verifies that this point is in the G1 subgroup.
+    ///
+    /// This check is necessary before using the point in pairing operations
+    /// to prevent small subgroup attacks. The check is called automatically
+    /// by verify operations, but can be called explicitly if needed.
+    pub fn ensure_in_subgroup(&self) -> Result<(), Error> {
+        // SAFETY: self.0 is a valid blst_p1 point
+        if unsafe { !blst_p1_in_g1(&self.0) } {
+            return Err(Invalid("G1", "Outside G1"));
+        }
+        Ok(())
     }
 }
 
@@ -884,8 +820,9 @@ impl Read for G1 {
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let bytes = <[u8; Self::SIZE]>::read(buf)?;
         let mut ret = blst_p1::default();
-        // SAFETY: bytes is a valid 48-byte array. blst_p1_uncompress validates encoding.
-        // Additional checks for infinity and subgroup membership prevent small subgroup attacks.
+        // SAFETY: bytes is a valid 48-byte array. blst_p1_uncompress validates encoding
+        // and that the point is on the curve.
+        // NOTE: Subgroup check is deferred to verify operations for performance.
         unsafe {
             let mut affine = blst_p1_affine::default();
             match blst_p1_uncompress(&mut affine, bytes.as_ptr()) {
@@ -905,10 +842,7 @@ impl Read for G1 {
                 return Err(Invalid("G1", "Infinity"));
             }
 
-            // Verify that the deserialized element is in G1
-            if !blst_p1_in_g1(&ret) {
-                return Err(Invalid("G1", "Outside G1"));
-            }
+            // NOTE: Subgroup check removed - called automatically by verify operations
         }
         Ok(Self(ret))
     }
@@ -1210,71 +1144,25 @@ impl G2 {
     }
 }
 
-impl G2Unchecked {
-    /// Check that this point is in the G2 subgroup.
-    ///
-    /// Returns a checked `G2` point if the subgroup check passes.
-    pub fn check(self) -> Result<G2, Error> {
-        // SAFETY: self.0 is a valid blst_p2 point that was decompressed and validated
-        // to be on curve during deserialization.
-        if unsafe { !blst_p2_in_g2(&self.0) } {
-            return Err(Invalid("G2", "Outside G2"));
-        }
-        Ok(G2(self.0))
-    }
-
-    /// Convert to checked WITHOUT verification.
-    ///
-    /// # Safety
-    ///
-    /// Caller must ensure the point is in the G2 subgroup (e.g., from a trusted source
-    /// like DKG output that was previously validated).
-    pub const unsafe fn into_checked_unchecked(self) -> G2 {
-        G2(self.0)
-    }
-}
-
-impl Read for G2Unchecked {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let bytes = <[u8; G2::SIZE]>::read(buf)?;
-        let mut ret = blst_p2::default();
-        // SAFETY: bytes is a valid 96-byte array. blst_p2_uncompress validates encoding
-        // and that the point is on the curve. We skip the expensive subgroup check here.
-        unsafe {
-            let mut affine = blst_p2_affine::default();
-            match blst_p2_uncompress(&mut affine, bytes.as_ptr()) {
-                BLST_ERROR::BLST_SUCCESS => {}
-                BLST_ERROR::BLST_BAD_ENCODING => return Err(Invalid("G2", "Bad encoding")),
-                BLST_ERROR::BLST_POINT_NOT_ON_CURVE => return Err(Invalid("G2", "Not on curve")),
-                BLST_ERROR::BLST_POINT_NOT_IN_GROUP => return Err(Invalid("G2", "Not in group")),
-                BLST_ERROR::BLST_AGGR_TYPE_MISMATCH => return Err(Invalid("G2", "Type mismatch")),
-                BLST_ERROR::BLST_VERIFY_FAIL => return Err(Invalid("G2", "Verify fail")),
-                BLST_ERROR::BLST_PK_IS_INFINITY => return Err(Invalid("G2", "PK is Infinity")),
-                BLST_ERROR::BLST_BAD_SCALAR => return Err(Invalid("G2", "Bad scalar")),
-            }
-            blst_p2_from_affine(&mut ret, &affine);
-
-            // Verify that deserialized element isn't infinite
-            if blst_p2_is_inf(&ret) {
-                return Err(Invalid("G2", "Infinity"));
-            }
-
-            // NOTE: No subgroup check here - use check() to verify
-        }
-        Ok(Self(ret))
-    }
-}
-
-impl FixedSize for G2Unchecked {
-    const SIZE: usize = G2_ELEMENT_BYTE_LENGTH;
-}
-
 impl Write for G2 {
     fn write(&self, buf: &mut impl BufMut) {
         let slice = self.as_slice();
         buf.put_slice(&slice);
+    }
+}
+
+impl G2 {
+    /// Verifies that this point is in the G2 subgroup.
+    ///
+    /// This check is necessary before using the point in pairing operations
+    /// to prevent small subgroup attacks. The check is called automatically
+    /// by verify operations, but can be called explicitly if needed.
+    pub fn ensure_in_subgroup(&self) -> Result<(), Error> {
+        // SAFETY: self.0 is a valid blst_p2 point
+        if unsafe { !blst_p2_in_g2(&self.0) } {
+            return Err(Invalid("G2", "Outside G2"));
+        }
+        Ok(())
     }
 }
 
@@ -1284,8 +1172,9 @@ impl Read for G2 {
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let bytes = <[u8; Self::SIZE]>::read(buf)?;
         let mut ret = blst_p2::default();
-        // SAFETY: bytes is a valid 96-byte array. blst_p2_uncompress validates encoding.
-        // Additional checks for infinity and subgroup membership prevent small subgroup attacks.
+        // SAFETY: bytes is a valid 96-byte array. blst_p2_uncompress validates encoding
+        // and that the point is on the curve.
+        // NOTE: Subgroup check is deferred to verify operations for performance.
         unsafe {
             let mut affine = blst_p2_affine::default();
             match blst_p2_uncompress(&mut affine, bytes.as_ptr()) {
@@ -1305,10 +1194,7 @@ impl Read for G2 {
                 return Err(Invalid("G2", "Infinity"));
             }
 
-            // Verify that the deserialized element is in G2
-            if !blst_p2_in_g2(&ret) {
-                return Err(Invalid("G2", "Outside G2"));
-            }
+            // NOTE: Subgroup check removed - called automatically by verify operations
         }
         Ok(Self(ret))
     }
