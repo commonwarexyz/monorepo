@@ -1,6 +1,6 @@
 {
   "version": "0.0.65",
-  "generated": "2026-01-14T20:18:53.145041+00:00",
+  "generated": "2026-01-14T20:24:27.188186+00:00",
   "crates": [
     {
       "name": "commonware-broadcast",
@@ -278,7 +278,8 @@
       "name": "commonware-cryptography",
       "module_counts": {
         "0": 11,
-        "2": 18
+        "1": 1,
+        "2": 17
       },
       "modules": [
         {
@@ -364,8 +365,8 @@
             },
             {
               "path": "bls12381::tle",
-              "readiness": 2,
-              "is_explicit": false
+              "readiness": 1,
+              "is_explicit": true
             }
           ]
         },
@@ -1203,7 +1204,8 @@
     "total_modules": 198,
     "by_level": {
       "0": 112,
-      "2": 86
+      "1": 1,
+      "2": 85
     }
   }
 }

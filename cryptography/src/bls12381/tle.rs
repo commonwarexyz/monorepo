@@ -79,6 +79,8 @@
 //! * <https://github.com/thibmeu/tlock-rs>: tlock-rs: Practical Timelock Encryption/Decryption in Rust
 //! * <https://github.com/drand/tlock> tlock: Timelock Encryption/Decryption Made Practical
 
+commonware_macros::readiness!(1);
+
 use crate::{
     bls12381::primitives::{
         group::{Scalar, DST, GT},
