@@ -136,6 +136,62 @@ where
     }
 }
 
+/// An unchecked attestation for a certificate (signature not fully validated).
+///
+/// This type is used for deferred validation of signatures, particularly for BLS
+/// schemes where subgroup checks are expensive and can be batched.
+#[derive(Clone)]
+pub struct AttestationUnchecked<S: Scheme> {
+    /// Index of the signer inside the participant set.
+    pub signer: Participant,
+    /// Unchecked signature (may need subgroup validation).
+    pub signature: S::SignatureUnchecked,
+}
+
+impl<S: Scheme> AttestationUnchecked<S> {
+    /// Checks the signature, returning a fully validated attestation.
+    ///
+    /// For BLS schemes, this performs the subgroup check. For other schemes,
+    /// this is typically a no-op.
+    pub fn check(self) -> Result<Attestation<S>, Error> {
+        let signature = S::check_signature(self.signature)?;
+        Ok(Attestation {
+            signer: self.signer,
+            signature,
+        })
+    }
+}
+
+impl<S: Scheme> Write for AttestationUnchecked<S>
+where
+    S::SignatureUnchecked: Write,
+{
+    fn write(&self, writer: &mut impl BufMut) {
+        self.signer.write(writer);
+        self.signature.write(writer);
+    }
+}
+
+impl<S: Scheme> EncodeSize for AttestationUnchecked<S>
+where
+    S::SignatureUnchecked: EncodeSize,
+{
+    fn encode_size(&self) -> usize {
+        self.signer.encode_size() + self.signature.encode_size()
+    }
+}
+
+impl<S: Scheme> Read for AttestationUnchecked<S> {
+    type Cfg = ();
+
+    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
+        let signer = Participant::read(reader)?;
+        let signature = S::SignatureUnchecked::read(reader)?;
+
+        Ok(Self { signer, signature })
+    }
+}
+
 /// Result of batch-verifying attestations.
 pub struct Verification<S: Scheme> {
     /// Contains the attestations accepted by the scheme.
@@ -191,6 +247,12 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
     type PublicKey: PublicKey;
     /// Signature emitted by individual participants.
     type Signature: Clone + Debug + PartialEq + Eq + Hash + Send + Sync + CodecFixed<Cfg = ()>;
+    /// Unchecked signature type for deferred validation (e.g., BLS subgroup checks).
+    ///
+    /// For schemes without expensive validation (like ed25519, secp256r1), this is the same
+    /// as `Signature`. For BLS schemes, this is a type that skips the subgroup check during
+    /// deserialization.
+    type SignatureUnchecked: Clone + Read<Cfg = ()> + Send + Sync;
     /// Certificate assembled from a set of attestations.
     type Certificate: Clone + Debug + PartialEq + Eq + Hash + Send + Sync + Codec;
 
@@ -318,6 +380,14 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
     /// Only use this when decoding data from trusted local storage, it must not be exposed to
     /// adversarial inputs or network payloads.
     fn certificate_codec_config_unbounded() -> <Self::Certificate as Read>::Cfg;
+
+    /// Checks an unchecked signature, returning the checked variant.
+    ///
+    /// For schemes without expensive validation (like ed25519, secp256r1), this is a no-op
+    /// that just reinterprets the bytes. For BLS schemes, this performs the subgroup check.
+    ///
+    /// Returns an error if the signature is invalid.
+    fn check_signature(unchecked: Self::SignatureUnchecked) -> Result<Self::Signature, Error>;
 }
 
 /// Supplies the signing scheme for a given scope.

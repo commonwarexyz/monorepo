@@ -518,6 +518,7 @@ mod macros {
                 type Subject<'a, D: $crate::Digest> = $subject;
                 type PublicKey = P;
                 type Signature = V::Signature;
+                type SignatureUnchecked = V::SignatureUnchecked;
                 type Certificate = V::Signature;
 
                 fn me(&self) -> Option<commonware_utils::Participant> {
@@ -627,6 +628,12 @@ mod macros {
                 fn certificate_codec_config_unbounded(
                 ) -> <Self::Certificate as commonware_codec::Read>::Cfg {
                     $crate::bls12381::certificate::threshold::Generic::<P, V, $namespace>::certificate_codec_config_unbounded()
+                }
+
+                fn check_signature(
+                    unchecked: Self::SignatureUnchecked,
+                ) -> Result<Self::Signature, commonware_codec::Error> {
+                    $crate::bls12381::primitives::variant::CheckablePoint::check(unchecked)
                 }
             }
         };

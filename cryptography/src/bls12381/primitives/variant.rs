@@ -34,7 +34,12 @@ pub trait Variant: Clone + Send + Sync + Hash + Eq + Debug + 'static {
         + Copy;
 
     /// The unchecked public key type (deserialized, on-curve, but subgroup not verified).
-    type PublicUnchecked: FixedSize + Read<Cfg = ()> + Copy;
+    type PublicUnchecked: FixedSize
+        + Read<Cfg = ()>
+        + Copy
+        + Send
+        + Sync
+        + CheckablePoint<Checked = Self::Public>;
 
     /// The signature type.
     type Signature: HashToGroup<Scalar = Scalar>
@@ -47,7 +52,12 @@ pub trait Variant: Clone + Send + Sync + Hash + Eq + Debug + 'static {
         + Copy;
 
     /// The unchecked signature type (deserialized, on-curve, but subgroup not verified).
-    type SignatureUnchecked: FixedSize + Read<Cfg = ()> + Copy;
+    type SignatureUnchecked: FixedSize
+        + Read<Cfg = ()>
+        + Copy
+        + Send
+        + Sync
+        + CheckablePoint<Checked = Self::Signature>;
 
     /// The domain separator tag (DST) for a proof of possession.
     const PROOF_OF_POSSESSION: DST;
