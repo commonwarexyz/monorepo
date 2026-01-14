@@ -182,7 +182,13 @@ echo "Profile captured successfully"
         .unwrap()
         .as_secs();
     let profile_path = format!("/tmp/profile-{}-{}.json", instance_name, timestamp);
-    scp_download(private_key, &instance_ip, "/tmp/profile.json", &profile_path).await?;
+    scp_download(
+        private_key,
+        &instance_ip,
+        "/tmp/profile.json",
+        &profile_path,
+    )
+    .await?;
     info!(profile = profile_path.as_str(), "downloaded profile");
 
     // Create a temp directory with a symlink named "binary" pointing to the debug binary

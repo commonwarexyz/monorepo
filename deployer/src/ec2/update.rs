@@ -59,8 +59,8 @@ pub async fn update(config_path: &PathBuf) -> Result<(), Error> {
     info!("computing file digests");
 
     // Compute digests concurrently (limited parallelism) and build deduplication maps
-    let hash_results: Vec<(String, String, String, String, String)> = stream::iter(
-        config.instances.iter().map(|instance| {
+    let hash_results: Vec<(String, String, String, String, String)> =
+        stream::iter(config.instances.iter().map(|instance| {
             let name = instance.name.clone();
             let binary_path = instance.binary.clone();
             let config_path = instance.config.clone();
@@ -71,11 +71,10 @@ pub async fn update(config_path: &PathBuf) -> Result<(), Error> {
                 )?;
                 Ok::<_, Error>((name, binary_path, config_path, binary_digest, config_digest))
             }
-        }),
-    )
-    .buffer_unordered(MAX_CONCURRENT_HASHES)
-    .try_collect()
-    .await?;
+        }))
+        .buffer_unordered(MAX_CONCURRENT_HASHES)
+        .try_collect()
+        .await?;
 
     let mut binary_digests: BTreeMap<String, String> = BTreeMap::new();
     let mut config_digests: BTreeMap<String, String> = BTreeMap::new();
@@ -185,7 +184,9 @@ pub async fn update(config_path: &PathBuf) -> Result<(), Error> {
             for reservation in resp.reservations.unwrap_or_default() {
                 for instance in reservation.instances.unwrap_or_default() {
                     if let Some(tags) = &instance.tags {
-                        if let Some(name_tag) = tags.iter().find(|t| t.key.as_deref() == Some("name")) {
+                        if let Some(name_tag) =
+                            tags.iter().find(|t| t.key.as_deref() == Some("name"))
+                        {
                             if name_tag.value.as_deref() != Some(MONITORING_NAME) {
                                 if let Some(public_ip) = &instance.public_ip_address {
                                     let name = name_tag.value.clone().unwrap();

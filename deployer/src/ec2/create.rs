@@ -208,8 +208,8 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     info!("observability tools uploaded");
 
     // Compute digests concurrently (limited parallelism) for binaries and configs
-    let hash_results: Vec<(String, String, String, String, String)> = stream::iter(
-        config.instances.iter().map(|instance| {
+    let hash_results: Vec<(String, String, String, String, String)> =
+        stream::iter(config.instances.iter().map(|instance| {
             let name = instance.name.clone();
             let binary_path = instance.binary.clone();
             let config_path = instance.config.clone();
@@ -220,11 +220,10 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
                 )?;
                 Ok::<_, Error>((name, binary_path, config_path, binary_digest, config_digest))
             }
-        }),
-    )
-    .buffer_unordered(MAX_CONCURRENT_HASHES)
-    .try_collect()
-    .await?;
+        }))
+        .buffer_unordered(MAX_CONCURRENT_HASHES)
+        .try_collect()
+        .await?;
 
     let mut binary_digests: BTreeMap<String, String> = BTreeMap::new(); // digest -> path
     let mut config_digests: BTreeMap<String, String> = BTreeMap::new(); // digest -> path
@@ -795,10 +794,8 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     let prom_path = tag_directory.join("prometheus.yml");
     std::fs::write(&prom_path, &prom_config)?;
     let dashboard_path = std::path::PathBuf::from(&config.monitoring.dashboard);
-    let (prom_digest, dashboard_digest) = tokio::try_join!(
-        hash_file(&prom_path),
-        hash_file(&dashboard_path),
-    )?;
+    let (prom_digest, dashboard_digest) =
+        tokio::try_join!(hash_file(&prom_path), hash_file(&dashboard_path),)?;
     let [prometheus_config_url, dashboard_url]: [String; 2] = try_join_all([
         cache_and_presign(
             &s3_client,
@@ -875,19 +872,28 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     }
 
     // Compute digests concurrently (limited parallelism) and deduplicate
-    let config_hash_results: Vec<(String, String, String, std::path::PathBuf, std::path::PathBuf)> =
-        stream::iter(instance_paths.into_iter().map(
-            |(name, promtail_path, pyroscope_path)| async move {
-                let (promtail_digest, pyroscope_digest) = tokio::try_join!(
-                    hash_file(&promtail_path),
-                    hash_file(&pyroscope_path),
-                )?;
-                Ok::<_, Error>((name, promtail_digest, pyroscope_digest, promtail_path, pyroscope_path))
-            },
-        ))
-        .buffer_unordered(MAX_CONCURRENT_HASHES)
-        .try_collect()
-        .await?;
+    let config_hash_results: Vec<(
+        String,
+        String,
+        String,
+        std::path::PathBuf,
+        std::path::PathBuf,
+    )> = stream::iter(instance_paths.into_iter().map(
+        |(name, promtail_path, pyroscope_path)| async move {
+            let (promtail_digest, pyroscope_digest) =
+                tokio::try_join!(hash_file(&promtail_path), hash_file(&pyroscope_path),)?;
+            Ok::<_, Error>((
+                name,
+                promtail_digest,
+                pyroscope_digest,
+                promtail_path,
+                pyroscope_path,
+            ))
+        },
+    ))
+    .buffer_unordered(MAX_CONCURRENT_HASHES)
+    .try_collect()
+    .await?;
 
     let mut promtail_digests: BTreeMap<String, std::path::PathBuf> = BTreeMap::new();
     let mut pyroscope_digests: BTreeMap<String, std::path::PathBuf> = BTreeMap::new();
