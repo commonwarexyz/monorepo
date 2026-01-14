@@ -173,7 +173,7 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
 
         // Initialize underlying variable data journal
         let mut data = variable::Journal::init(
-            context.clone(),
+            context.with_label("data"),
             variable::Config {
                 partition: data_partition,
                 compression: cfg.compression,
@@ -186,7 +186,7 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
 
         // Initialize offsets journal
         let mut offsets = fixed::Journal::init(
-            context,
+            context.with_label("offsets"),
             fixed::Config {
                 partition: offsets_partition,
                 items_per_blob: cfg.items_per_section,
@@ -232,7 +232,7 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
     pub async fn init_at_size(context: E, cfg: Config<V::Cfg>, size: u64) -> Result<Self, Error> {
         // Initialize empty data journal
         let data = variable::Journal::init(
-            context.clone(),
+            context.with_label("data"),
             variable::Config {
                 partition: cfg.data_partition(),
                 compression: cfg.compression,
@@ -245,7 +245,7 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
 
         // Initialize offsets journal at the target size
         let offsets = fixed::Journal::init_at_size(
-            context,
+            context.with_label("offsets"),
             fixed::Config {
                 partition: cfg.offsets_partition(),
                 items_per_blob: cfg.items_per_section,
