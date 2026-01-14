@@ -4,19 +4,19 @@
 //! backend generic over the database trait boundary (`Database` + `DatabaseCommit`).
 
 mod application;
-mod commitment;
-mod execution;
+mod domain;
 mod qmdb;
-mod sim;
-mod types;
+mod simulation;
 
-pub use commitment::{commit_state_root, StateChanges};
-pub use execution::{
+pub use application::execution::{
     evm_env, execute_txs, seed_precompile_address, ExecutionOutcome, CHAIN_ID,
     SEED_PRECOMPILE_ADDRESS_BYTES,
 };
-pub use sim::{simulate, SimConfig, SimOutcome};
-pub use types::{block_id, Block, BlockId, StateRoot, Tx, TxId};
+pub use domain::{
+    block_id, commit_state_root, AccountChange, Block, BlockCfg, BlockId, BootstrapConfig,
+    StateChanges, StateChangesCfg, StateRoot, Tx, TxCfg, TxId,
+};
+pub use simulation::{simulate, SimConfig, SimOutcome};
 
 pub type ConsensusDigest = commonware_cryptography::sha256::Digest;
 pub type PublicKey = commonware_cryptography::ed25519::PublicKey;

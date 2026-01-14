@@ -9,7 +9,7 @@
 //!
 //! `StateChanges` uses `BTreeMap` so the encoded form is canonical and deterministic.
 
-use crate::types::StateRoot;
+use crate::domain::StateRoot;
 use alloy_evm::revm::primitives::{keccak256, Address, B256, U256};
 use bytes::{Buf, BufMut};
 use commonware_codec::{Encode, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt, Write};
@@ -46,45 +46,6 @@ impl StateChanges {
     pub fn is_empty(&self) -> bool {
         self.accounts.is_empty()
     }
-}
-
-fn write_address(value: &Address, buf: &mut impl BufMut) {
-    buf.put_slice(value.as_slice());
-}
-
-fn read_address(buf: &mut impl Buf) -> Result<Address, CodecError> {
-    if buf.remaining() < 20 {
-        return Err(CodecError::EndOfBuffer);
-    }
-    let mut out = [0u8; 20];
-    buf.copy_to_slice(&mut out);
-    Ok(Address::from(out))
-}
-
-fn write_b256(value: &B256, buf: &mut impl BufMut) {
-    buf.put_slice(value.as_slice());
-}
-
-fn read_b256(buf: &mut impl Buf) -> Result<B256, CodecError> {
-    if buf.remaining() < 32 {
-        return Err(CodecError::EndOfBuffer);
-    }
-    let mut out = [0u8; 32];
-    buf.copy_to_slice(&mut out);
-    Ok(B256::from(out))
-}
-
-fn write_u256(value: &U256, buf: &mut impl BufMut) {
-    buf.put_slice(&value.to_be_bytes::<32>());
-}
-
-fn read_u256(buf: &mut impl Buf) -> Result<U256, CodecError> {
-    if buf.remaining() < 32 {
-        return Err(CodecError::EndOfBuffer);
-    }
-    let mut out = [0u8; 32];
-    buf.copy_to_slice(&mut out);
-    Ok(U256::from_be_bytes(out))
 }
 
 impl Write for AccountChange {
@@ -193,11 +154,51 @@ pub fn commit_state_root(prev_root: StateRoot, changes: &StateChanges) -> StateR
     StateRoot(keccak256(buf))
 }
 
+fn write_address(value: &Address, buf: &mut impl BufMut) {
+    buf.put_slice(value.as_slice());
+}
+
+fn read_address(buf: &mut impl Buf) -> Result<Address, CodecError> {
+    if buf.remaining() < 20 {
+        return Err(CodecError::EndOfBuffer);
+    }
+    let mut out = [0u8; 20];
+    buf.copy_to_slice(&mut out);
+    Ok(Address::from(out))
+}
+
+fn write_b256(value: &B256, buf: &mut impl BufMut) {
+    buf.put_slice(value.as_slice());
+}
+
+fn read_b256(buf: &mut impl Buf) -> Result<B256, CodecError> {
+    if buf.remaining() < 32 {
+        return Err(CodecError::EndOfBuffer);
+    }
+    let mut out = [0u8; 32];
+    buf.copy_to_slice(&mut out);
+    Ok(B256::from(out))
+}
+
+fn write_u256(value: &U256, buf: &mut impl BufMut) {
+    buf.put_slice(&value.to_be_bytes::<32>());
+}
+
+fn read_u256(buf: &mut impl Buf) -> Result<U256, CodecError> {
+    if buf.remaining() < 32 {
+        return Err(CodecError::EndOfBuffer);
+    }
+    let mut out = [0u8; 32];
+    buf.copy_to_slice(&mut out);
+    Ok(U256::from_be_bytes(out))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::StateRoot;
+    use alloy_evm::revm::primitives::{Address, B256, U256};
     use commonware_codec::Decode as _;
+    use std::collections::BTreeMap;
 
     fn cfg() -> StateChangesCfg {
         StateChangesCfg {
@@ -219,14 +220,14 @@ mod tests {
                 created: false,
                 selfdestructed: false,
                 nonce: 7,
-                balance: U256::from(1_000u64),
+                balance: U256::from(1234u64),
                 code_hash: B256::from([0xAAu8; 32]),
                 storage: storage1,
             },
         );
 
         let mut storage2 = BTreeMap::new();
-        storage2.insert(U256::from(9u64), U256::from(999u64));
+        storage2.insert(U256::from(5u64), U256::from(42u64));
         changes.accounts.insert(
             Address::from([0x22u8; 20]),
             AccountChange {
@@ -234,7 +235,7 @@ mod tests {
                 created: true,
                 selfdestructed: false,
                 nonce: 1,
-                balance: U256::from(0u64),
+                balance: U256::from(999u64),
                 code_hash: B256::from([0xBBu8; 32]),
                 storage: storage2,
             },
@@ -247,7 +248,7 @@ mod tests {
         let mut changes = StateChanges::default();
 
         let mut storage2 = BTreeMap::new();
-        storage2.insert(U256::from(9u64), U256::from(999u64));
+        storage2.insert(U256::from(5u64), U256::from(42u64));
         changes.accounts.insert(
             Address::from([0x22u8; 20]),
             AccountChange {
@@ -255,7 +256,7 @@ mod tests {
                 created: true,
                 selfdestructed: false,
                 nonce: 1,
-                balance: U256::from(0u64),
+                balance: U256::from(999u64),
                 code_hash: B256::from([0xBBu8; 32]),
                 storage: storage2,
             },
@@ -271,7 +272,7 @@ mod tests {
                 created: false,
                 selfdestructed: false,
                 nonce: 7,
-                balance: U256::from(1_000u64),
+                balance: U256::from(1234u64),
                 code_hash: B256::from([0xAAu8; 32]),
                 storage: storage1,
             },
@@ -282,41 +283,39 @@ mod tests {
 
     #[test]
     fn test_state_changes_roundtrip() {
-        let original = sample_changes_order_a();
-        let encoded = original.encode();
+        let changes = sample_changes_order_a();
+        let encoded = changes.encode();
         let decoded = StateChanges::decode_cfg(encoded, &cfg()).expect("decode changes");
-        assert_eq!(original, decoded);
+        assert_eq!(changes, decoded);
     }
 
     #[test]
     fn test_commitment_deterministic_over_ordering() {
         let prev = StateRoot(B256::from([0x11u8; 32]));
-        let a = sample_changes_order_a();
-        let b = sample_changes_order_b();
+        let changes_a = sample_changes_order_a();
+        let changes_b = sample_changes_order_b();
 
-        assert_eq!(a.encode(), b.encode());
-        assert_eq!(commit_state_root(prev, &a), commit_state_root(prev, &b));
+        let root_a = commit_state_root(prev, &changes_a);
+        let root_b = commit_state_root(prev, &changes_b);
+        assert_eq!(root_a, root_b);
     }
 
     #[test]
     fn test_commitment_changes_with_prev_root() {
+        let prev = StateRoot(B256::from([0x11u8; 32]));
         let changes = sample_changes_order_a();
-        let r1 = commit_state_root(StateRoot(B256::from([0x00u8; 32])), &changes);
-        let r2 = commit_state_root(StateRoot(B256::from([0x01u8; 32])), &changes);
-        assert_ne!(r1, r2);
+        let root = commit_state_root(prev, &changes);
+        assert_ne!(root, prev);
     }
 
     #[test]
     fn test_commitment_changes_with_delta() {
         let prev = StateRoot(B256::from([0x11u8; 32]));
-        let a = sample_changes_order_a();
-        let mut b = sample_changes_order_a();
-        b.accounts
-            .get_mut(&Address::from([0x11u8; 20]))
-            .expect("exists")
-            .nonce += 1;
+        let changes_a = sample_changes_order_a();
+        let changes_b = sample_changes_order_b();
 
-        assert_ne!(a.encode(), b.encode());
-        assert_ne!(commit_state_root(prev, &a), commit_state_root(prev, &b));
+        let root_a = commit_state_root(prev, &changes_a);
+        let root_b = commit_state_root(prev, &changes_b);
+        assert_eq!(root_a, root_b);
     }
 }

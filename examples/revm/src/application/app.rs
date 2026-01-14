@@ -5,12 +5,14 @@
 //! wrapper bridges these layers by fetching required ancestors from marshal and calling into this
 //! module with an `AncestorStream` you can iterate to walk back over pending blocks.
 //!
-//! The node wiring that wraps this application lives in `examples/revm/src/sim/node.rs`.
+//! The node wiring that wraps this application lives in `examples/revm/src/application/node.rs`.
 
-use super::state::{LedgerService, LedgerView};
-use crate::{
+use super::{
     execution::{evm_env, execute_txs},
-    types::{Block, TxId},
+    ledger::{LedgerService, LedgerView},
+};
+use crate::{
+    domain::{Block, TxId},
     ConsensusDigest, PublicKey,
 };
 use alloy_evm::revm::primitives::B256;

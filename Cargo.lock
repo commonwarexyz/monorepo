@@ -2504,6 +2504,7 @@ dependencies = [
  "rand 0.8.5",
  "revm",
  "thiserror 2.0.17",
+ "tracing",
 ]
 
 [[package]]

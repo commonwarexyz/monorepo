@@ -14,12 +14,8 @@ mod seed_cache;
 mod snapshot_store;
 
 use crate::{
-    application::domain::{DomainEvent, DomainEvents},
-    application::mempool::Mempool,
-    application::seed_cache::SeedCache,
-    application::snapshot_store::{LedgerSnapshot, SnapshotStore},
-    qmdb::{QmdbChanges, QmdbConfig, QmdbState, RevmDb},
-    types::{Block, StateRoot, Tx, TxId},
+    domain::{Block, LedgerEvent, LedgerEvents, StateRoot, Tx, TxId},
+    qmdb::{QmdbChanges, QmdbConfig, QmdbLedger, RevmDb},
     ConsensusDigest,
 };
 use alloy_evm::revm::{
@@ -29,11 +25,10 @@ use alloy_evm::revm::{
 use commonware_cryptography::Committable as _;
 use commonware_runtime::{buffer::PoolRef, tokio, Metrics};
 use futures::{channel::mpsc::UnboundedReceiver, lock::Mutex};
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    sync::Arc,
-};
-
+use mempool::Mempool;
+use seed_cache::SeedCache;
+use snapshot_store::{LedgerSnapshot, SnapshotStore};
+use std::{collections::BTreeSet, sync::Arc};
 #[derive(Clone)]
 /// Ledger view that owns the mutexed execution state.
 pub(crate) struct LedgerView {
@@ -51,25 +46,11 @@ pub(crate) struct LedgerState {
     snapshots: SnapshotStore,
     /// Cached seeds for each digest used to compute prevrandao.
     seeds: SeedCache,
-    /// Underlying QMDB tracker for persistence.
-    qmdb: QmdbState,
-}
-
-#[derive(Clone)]
-/// Captures a REVM execution result tied to a consensus digest.
-pub(crate) struct LedgerSnapshot {
-    /// Parent digest that produced this snapshot (if any).
-    pub(crate) parent: Option<ConsensusDigest>,
-    /// REVM execution database representing this snapshot.
-    pub(crate) db: RevmDb,
-    /// Corresponding state root for the snapshot.
-    pub(crate) state_root: StateRoot,
-    /// QMDB changes captured during the execution that produced this snapshot.
-    pub(crate) qmdb_changes: QmdbChanges,
+    /// Underlying QMDB ledger service for persistence.
+    qmdb: QmdbLedger,
 }
 
 /// Minimal mempool helper that avoids duplicating logics across services.
-
 impl LedgerView {
     pub(crate) async fn init(
         context: tokio::Context,
@@ -77,7 +58,7 @@ impl LedgerView {
         partition_prefix: String,
         genesis_alloc: Vec<(Address, U256)>,
     ) -> anyhow::Result<Self> {
-        let qmdb = QmdbState::init(
+        let qmdb = QmdbLedger::init(
             context.with_label("qmdb"),
             QmdbConfig::new(partition_prefix, buffer_pool),
             genesis_alloc,
@@ -244,23 +225,23 @@ impl LedgerState {
 /// Domain service that exposes high-level ledger commands.
 pub(crate) struct LedgerService {
     view: LedgerView,
-    events: DomainEvents,
+    events: LedgerEvents,
 }
 
 impl LedgerService {
     pub(crate) fn new(view: LedgerView) -> Self {
         Self {
             view,
-            events: DomainEvents::new(),
+            events: LedgerEvents::new(),
         }
     }
 
-    fn publish(&self, event: DomainEvent) {
+    fn publish(&self, event: LedgerEvent) {
         self.events.publish(event);
     }
 
     #[allow(dead_code)]
-    pub(crate) fn subscribe(&self) -> UnboundedReceiver<DomainEvent> {
+    pub(crate) fn subscribe(&self) -> UnboundedReceiver<LedgerEvent> {
         self.events.subscribe()
     }
 
@@ -272,7 +253,7 @@ impl LedgerService {
         let tx_id = tx.id();
         let inserted = self.view.submit_tx(tx).await;
         if inserted {
-            self.publish(DomainEvent::TransactionSubmitted(tx_id));
+            self.publish(LedgerEvent::TransactionSubmitted(tx_id));
         }
         inserted
     }
@@ -299,7 +280,7 @@ impl LedgerService {
 
     pub(crate) async fn set_seed(&self, digest: ConsensusDigest, seed_hash: B256) {
         self.view.set_seed(digest, seed_hash).await;
-        self.publish(DomainEvent::SeedUpdated(digest, seed_hash));
+        self.publish(LedgerEvent::SeedUpdated(digest, seed_hash));
     }
 
     pub(crate) async fn parent_snapshot(&self, parent: ConsensusDigest) -> Option<LedgerSnapshot> {
@@ -329,7 +310,7 @@ impl LedgerService {
 
     pub(crate) async fn persist_snapshot(&self, digest: ConsensusDigest) -> anyhow::Result<()> {
         let result = self.view.persist_snapshot(digest).await;
-        self.publish(DomainEvent::SnapshotPersisted(digest));
+        self.publish(LedgerEvent::SnapshotPersisted(digest));
         result
     }
 

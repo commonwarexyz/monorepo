@@ -1,4 +1,4 @@
-use super::super::state::LedgerService;
+use super::super::ledger::LedgerService;
 use crate::ConsensusDigest;
 use alloy_evm::revm::primitives::{keccak256, B256};
 use commonware_consensus::{

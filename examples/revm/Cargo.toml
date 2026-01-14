@@ -34,6 +34,7 @@ libc.workspace = true
 rand.workspace = true
 revm = { version = "33.1.0", default-features = false, features = ["std", "asyncdb"] }
 thiserror.workspace = true
+tracing.workspace = true
 
 [[bin]]
 name = "commonware-revm"

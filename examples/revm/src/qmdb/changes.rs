@@ -1,13 +1,9 @@
-//! QMDB change tracking and diff application helpers.
+//! QMDB change tracking and merge helpers.
 //!
-//! The REVM overlay produces an `EvmState` after execution. This module turns
-//! those updates into QMDB-friendly batches that can be persisted at finalized
-//! block boundaries.
+//! The execution layer builds `QmdbChanges` for finalized blocks and the
+//! QMDB layer applies them to the underlying stores.
 
-use alloy_evm::revm::{
-    primitives::{Address, B256, KECCAK_EMPTY, U256},
-    state::{Account, EvmState},
-};
+use alloy_evm::revm::primitives::{Address, B256, U256};
 use std::collections::BTreeMap;
 
 /// Aggregated changes to be persisted into QMDB.
@@ -37,24 +33,6 @@ pub(crate) struct AccountUpdate {
 }
 
 impl QmdbChanges {
-    /// Applies the touched accounts from an `EvmState` into the change set.
-    pub(crate) fn apply_evm_state(&mut self, state: &EvmState) {
-        for (address, account) in state.iter() {
-            if !account.is_touched() {
-                continue;
-            }
-            let update = account_update_from_evm_account(account);
-            match self.accounts.entry(*address) {
-                std::collections::btree_map::Entry::Vacant(entry) => {
-                    entry.insert(update);
-                }
-                std::collections::btree_map::Entry::Occupied(mut entry) => {
-                    entry.get_mut().merge(update);
-                }
-            }
-        }
-    }
-
     /// Merges updates from a later block into the current change set.
     pub(crate) fn merge(&mut self, other: Self) {
         for (address, update) in other.accounts {
@@ -65,6 +43,18 @@ impl QmdbChanges {
                 std::collections::btree_map::Entry::Occupied(mut entry) => {
                     entry.get_mut().merge(update);
                 }
+            }
+        }
+    }
+
+    /// Applies a per-account update into the change set.
+    pub(crate) fn apply_update(&mut self, address: Address, update: AccountUpdate) {
+        match self.accounts.entry(address) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(update);
+            }
+            std::collections::btree_map::Entry::Occupied(mut entry) => {
+                entry.get_mut().merge(update);
             }
         }
     }
@@ -106,34 +96,5 @@ impl AccountUpdate {
                 self.storage.insert(slot, value);
             }
         }
-    }
-}
-
-/// Builds an account update from the REVM account record.
-fn account_update_from_evm_account(account: &Account) -> AccountUpdate {
-    let mut storage = BTreeMap::new();
-    for (slot, slot_value) in account.changed_storage_slots() {
-        storage.insert(*slot, slot_value.present_value());
-    }
-
-    let code = account
-        .info
-        .code
-        .as_ref()
-        .map(|code| code.original_byte_slice().to_vec());
-    let code_hash = if account.info.code_hash == B256::ZERO {
-        KECCAK_EMPTY
-    } else {
-        account.info.code_hash
-    };
-
-    AccountUpdate {
-        created: account.is_created(),
-        selfdestructed: account.is_selfdestructed(),
-        nonce: account.info.nonce,
-        balance: account.info.balance,
-        code_hash,
-        code,
-        storage,
     }
 }

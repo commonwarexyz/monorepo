@@ -1,5 +1,7 @@
-use crate::qmdb::{QmdbChanges, RevmDb};
-use crate::{ConsensusDigest, StateRoot};
+use crate::{
+    qmdb::{QmdbChanges, RevmDb},
+    ConsensusDigest, StateRoot,
+};
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone)]

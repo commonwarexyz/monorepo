@@ -1,15 +1,18 @@
 //! Chain application logic (block production and verification).
 
 mod app;
-mod domain;
+pub(crate) mod execution;
 mod handle;
+mod ledger;
+mod node;
 mod observers;
 mod reporters;
-mod state;
 
 pub(crate) use app::RevmApplication;
-pub(crate) use domain::DomainEvent;
 pub use handle::NodeHandle;
+pub(crate) use ledger::{LedgerService, LedgerView};
+pub(crate) use node::{
+    start_node, threshold_schemes, NodeEnvironment, ThresholdScheme, TransportControl,
+};
 pub(crate) use observers::LedgerObservers;
 pub(crate) use reporters::{FinalizedReporter, SeedReporter};
-pub(crate) use state::{LedgerService, LedgerView};

@@ -1,13 +1,14 @@
-//! Domain-level helpers for the REVM example.
+//! Domain events for the REVM example.
 
-use crate::{types::TxId, ConsensusDigest};
+use super::TxId;
+use crate::ConsensusDigest;
 use alloy_evm::revm::primitives::B256;
 use futures::channel::mpsc::{unbounded, UnboundedReceiver, UnboundedSender};
 use std::sync::{Arc, Mutex as StdMutex};
 
-/// Domain events published by the ledger.
+/// Ledger-related domain events.
 #[derive(Clone, Debug)]
-pub(crate) enum DomainEvent {
+pub(crate) enum LedgerEvent {
     #[allow(dead_code)]
     TransactionSubmitted(TxId),
     #[allow(dead_code)]
@@ -17,23 +18,23 @@ pub(crate) enum DomainEvent {
 }
 
 #[derive(Clone)]
-pub(crate) struct DomainEvents {
-    listeners: Arc<StdMutex<Vec<UnboundedSender<DomainEvent>>>>,
+pub(crate) struct LedgerEvents {
+    listeners: Arc<StdMutex<Vec<UnboundedSender<LedgerEvent>>>>,
 }
 
-impl DomainEvents {
+impl LedgerEvents {
     pub(crate) fn new() -> Self {
         Self {
             listeners: Arc::new(StdMutex::new(Vec::new())),
         }
     }
 
-    pub(crate) fn publish(&self, event: DomainEvent) {
+    pub(crate) fn publish(&self, event: LedgerEvent) {
         let mut guard = self.listeners.lock().unwrap();
         guard.retain(|sender| sender.unbounded_send(event.clone()).is_ok());
     }
 
-    pub(crate) fn subscribe(&self) -> UnboundedReceiver<DomainEvent> {
+    pub(crate) fn subscribe(&self) -> UnboundedReceiver<LedgerEvent> {
         let (sender, receiver) = unbounded();
         self.listeners.lock().unwrap().push(sender);
         receiver

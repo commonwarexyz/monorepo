@@ -1,7 +1,7 @@
-use super::state::LedgerService;
-use crate::application::domain::DomainEvent;
+use super::ledger::LedgerService;
+use crate::domain::LedgerEvent;
 use commonware_runtime::Spawner;
-use futures::{channel::mpsc::UnboundedReceiver, StreamExt};
+use futures::StreamExt;
 use tracing::{debug, trace};
 
 /// Observers that react to ledger domain events without mutating aggregates.
@@ -16,13 +16,13 @@ impl LedgerObservers {
         spawner.shared(true).spawn(move |_| async move {
             while let Some(event) = receiver.next().await {
                 match event {
-                    DomainEvent::TransactionSubmitted(id) => {
-                        trace!(tx=%id, "mempool accepted transaction");
+                    LedgerEvent::TransactionSubmitted(id) => {
+                        trace!(tx=?id, "mempool accepted transaction");
                     }
-                    DomainEvent::SeedUpdated(digest, seed) => {
+                    LedgerEvent::SeedUpdated(digest, seed) => {
                         debug!(digest=?digest, seed=?seed, "seed cache refreshed");
                     }
-                    DomainEvent::SnapshotPersisted(digest) => {
+                    LedgerEvent::SnapshotPersisted(digest) => {
                         trace!(?digest, "snapshot persisted");
                     }
                 }

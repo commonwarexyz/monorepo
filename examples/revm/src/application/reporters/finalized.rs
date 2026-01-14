@@ -1,8 +1,8 @@
-use super::super::state::LedgerService;
-use crate::{
+use super::super::{
     execution::{evm_env, execute_txs},
-    types::Block,
+    ledger::LedgerService,
 };
+use crate::domain::Block;
 use commonware_consensus::{marshal::Update, Block as _, Reporter};
 use commonware_cryptography::Committable as _;
 use commonware_runtime::Spawner;

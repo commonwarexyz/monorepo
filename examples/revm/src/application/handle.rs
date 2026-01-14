@@ -4,9 +4,9 @@
 //! - submit transactions into the node-local mempool, and
 //! - query state at a finalized digest for assertions.
 
-use super::{domain::DomainEvent, state::LedgerService};
+use super::ledger::LedgerService;
 use crate::{
-    types::{StateRoot, Tx},
+    domain::{LedgerEvent, StateRoot, Tx},
     ConsensusDigest,
 };
 use alloy_evm::revm::primitives::{Address, B256, U256};
@@ -32,7 +32,7 @@ where
 
     /// Subscribe to the ledger domain event stream.
     #[allow(dead_code)]
-    pub fn subscribe_events(&self) -> UnboundedReceiver<DomainEvent> {
+    pub fn subscribe_events(&self) -> UnboundedReceiver<LedgerEvent> {
         self.state.subscribe()
     }
 

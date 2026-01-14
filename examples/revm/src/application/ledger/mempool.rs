@@ -1,4 +1,4 @@
-use crate::types::{Tx, TxId};
+use crate::domain::{Tx, TxId};
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Default, Clone)]
