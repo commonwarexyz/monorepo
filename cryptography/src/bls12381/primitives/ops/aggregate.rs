@@ -184,10 +184,10 @@ where
 ///
 /// # Warning
 ///
-/// This function assumes a group check was already performed on all `public_keys`,
-/// that each `public_key` is unique, and that the caller has a Proof-of-Possession (PoP)
-/// for each `public_key`. If any of these assumptions are violated, an attacker can
-/// exploit this function to verify an incorrect aggregate signature.
+/// This function assumes each `public_key` is unique and that the caller has a
+/// Proof-of-Possession (PoP) for each `public_key`. If any of these assumptions
+/// are violated, an attacker can exploit this function to verify an incorrect
+/// aggregate signature.
 pub fn combine_public_keys<'a, V, I>(public_keys: I) -> PublicKey<V>
 where
     V: Variant,
@@ -205,9 +205,8 @@ where
 ///
 /// # Warning
 ///
-/// This function assumes a group check was already performed on each `signature` and
-/// that each `signature` is unique. If any of these assumptions are violated, an attacker can
-/// exploit this function to verify an incorrect aggregate signature.
+/// This function assumes each `signature` is unique. If this assumption is violated,
+/// an attacker can exploit this function to verify an incorrect aggregate signature.
 pub fn combine_signatures<'a, V, I>(signatures: I) -> Signature<V>
 where
     V: Variant,
