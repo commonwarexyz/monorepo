@@ -1,21 +1,16 @@
 {
   "version": "0.0.65",
-  "generated": "2026-01-14T23:46:40.523738+00:00",
+  "generated": "2026-01-14T23:47:42.332318+00:00",
   "crates": [
     {
       "name": "commonware-broadcast",
       "entries": [
         {
-          "name": "crate",
-          "children": [
-            {
-              "name": "{Broadcaster}",
-              "readiness": 2
-            }
-          ]
+          "name": "buffered",
+          "readiness": 2
         },
         {
-          "name": "buffered",
+          "name": "crate::{Broadcaster}",
           "readiness": 2
         }
       ]
@@ -23,15 +18,6 @@
     {
       "name": "commonware-codec",
       "entries": [
-        {
-          "name": "error",
-          "children": [
-            {
-              "name": "{Error}",
-              "readiness": 2
-            }
-          ]
-        },
         {
           "name": "types",
           "children": [
@@ -76,6 +62,10 @@
         {
           "name": "codec",
           "readiness": 0
+        },
+        {
+          "name": "error::{Error}",
+          "readiness": 2
         },
         {
           "name": "extensions",
@@ -173,15 +163,6 @@
       "name": "commonware-cryptography",
       "entries": [
         {
-          "name": "crate",
-          "children": [
-            {
-              "name": "{BatchVerifier, Committable, Digest, DigestOf, Digestible, Hasher, PrivateKey, PublicKey, Recoverable, Signature, Signer, Verifier}",
-              "readiness": 2
-            }
-          ]
-        },
-        {
           "name": "secp256r1",
           "children": [
             {
@@ -218,6 +199,10 @@
         },
         {
           "name": "certificate",
+          "readiness": 2
+        },
+        {
+          "name": "crate::{BatchVerifier, Committable, Digest, DigestOf, Digestible, Hasher, PrivateKey, PublicKey, Recoverable, Signature, Signer, Verifier}",
           "readiness": 2
         },
         {
@@ -348,13 +333,8 @@
       "name": "commonware-parallel",
       "entries": [
         {
-          "name": "crate",
-          "children": [
-            {
-              "name": "{Sequential, Strategy}",
-              "readiness": 2
-            }
-          ]
+          "name": "crate::{Sequential, Strategy}",
+          "readiness": 2
         }
       ]
     },
@@ -362,13 +342,8 @@
       "name": "commonware-resolver",
       "entries": [
         {
-          "name": "crate",
-          "children": [
-            {
-              "name": "{Consumer, Resolver}",
-              "readiness": 2
-            }
-          ]
+          "name": "crate::{Consumer, Resolver}",
+          "readiness": 2
         },
         {
           "name": "p2p",
@@ -379,15 +354,6 @@
     {
       "name": "commonware-runtime",
       "entries": [
-        {
-          "name": "crate",
-          "children": [
-            {
-              "name": "{Blob, Clock, Error, KeyedRateLimiter, Listener, ListenerOf, Metrics, Network, RateLimiter, RayonPoolSpawner, Resolver, Runner, Sink, SinkOf, Spawner, Storage, Stream, StreamOf}",
-              "readiness": 2
-            }
-          ]
-        },
         {
           "name": "tokio",
           "children": [
@@ -404,6 +370,10 @@
               "readiness": 0
             }
           ]
+        },
+        {
+          "name": "crate::{Blob, Clock, Error, KeyedRateLimiter, Listener, ListenerOf, Metrics, Network, RateLimiter, RayonPoolSpawner, Resolver, Runner, Sink, SinkOf, Spawner, Storage, Stream, StreamOf}",
+          "readiness": 2
         },
         {
           "name": "deterministic",
@@ -659,13 +629,8 @@
       "name": "commonware-stream",
       "entries": [
         {
-          "name": "crate",
-          "children": [
-            {
-              "name": "{Config, Error, Receiver, Sender, dial, listen}",
-              "readiness": 2
-            }
-          ]
+          "name": "crate::{Config, Error, Receiver, Sender, dial, listen}",
+          "readiness": 2
         },
         {
           "name": "utils::codec",
@@ -676,33 +641,6 @@
     {
       "name": "commonware-utils",
       "entries": [
-        {
-          "name": "faults",
-          "children": [
-            {
-              "name": "{Faults, N3f1, N5f1}",
-              "readiness": 2
-            }
-          ]
-        },
-        {
-          "name": "priority_set",
-          "children": [
-            {
-              "name": "{PrioritySet}",
-              "readiness": 2
-            }
-          ]
-        },
-        {
-          "name": "stable_buf",
-          "children": [
-            {
-              "name": "{StableBuf}",
-              "readiness": 2
-            }
-          ]
-        },
         {
           "name": "acknowledgement",
           "readiness": 2
@@ -717,6 +655,10 @@
         },
         {
           "name": "concurrency",
+          "readiness": 2
+        },
+        {
+          "name": "faults::{Faults, N3f1, N5f1}",
           "readiness": 2
         },
         {
@@ -740,11 +682,19 @@
           "readiness": 2
         },
         {
+          "name": "priority_set::{PrioritySet}",
+          "readiness": 2
+        },
+        {
           "name": "rational",
           "readiness": 0
         },
         {
           "name": "sequence",
+          "readiness": 2
+        },
+        {
+          "name": "stable_buf::{StableBuf}",
           "readiness": 2
         },
         {

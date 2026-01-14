@@ -161,8 +161,8 @@ fn build_tree(entries: &mut [(String, u8)]) -> Vec<Entry> {
     let mut items: Vec<(String, u8)> = Vec::new();
 
     for (path, readiness) in entries.iter() {
-        // Items like "{Foo, Bar}" go directly at root
-        if path.starts_with('{') {
+        // Items like "{Foo, Bar}" or "crate::{Foo}" or "module::{Foo}" go directly at root
+        if path.starts_with('{') || path.contains("::{") {
             items.push((path.clone(), *readiness));
             continue;
         }
