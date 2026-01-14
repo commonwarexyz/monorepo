@@ -477,7 +477,7 @@ pub async fn wait_for_instances_running(
         if pending_ids.is_empty() {
             return Ok(instance_ids
                 .iter()
-                .map(|id| discovered_ips.get(id).unwrap().clone())
+                .map(|id| discovered_ips.remove(id).unwrap())
                 .collect());
         }
 
