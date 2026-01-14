@@ -25,6 +25,7 @@ use std::{
     time::Duration,
 };
 use tokio::time::sleep;
+use tracing::debug;
 
 /// Creates an EC2 client for the specified AWS region
 pub async fn create_ec2_client(region: Region) -> Ec2Client {
@@ -467,7 +468,7 @@ pub async fn launch_instances(
         {
             Ok(ids) => return ids,
             Err(e) => {
-                tracing::debug!(
+                debug!(
                     name = name,
                     attempt = attempt + 1,
                     error = %e,
@@ -490,17 +491,31 @@ pub async fn wait_for_instances_running(
     // Track discovered IPs to avoid re-polling running instances
     let mut discovered_ips: HashMap<String, String> = HashMap::new();
     let mut pending_ids: HashSet<String> = instance_ids.iter().cloned().collect();
+    let mut attempt = 0u32;
     loop {
         // Only query instances that haven't been discovered yet
         let query_ids: Vec<String> = pending_ids.iter().cloned().collect();
-        let Ok(resp) = client
+        let resp = match client
             .describe_instances()
             .set_instance_ids(Some(query_ids))
             .send()
             .await
-        else {
-            sleep(RETRY_INTERVAL).await;
-            continue;
+        {
+            Ok(resp) => {
+                attempt = 0;
+                resp
+            }
+            Err(e) => {
+                attempt = attempt.saturating_add(1);
+                debug!(
+                    pending = pending_ids.len(),
+                    attempt = attempt,
+                    error = %e,
+                    "describe_instances failed, retrying"
+                );
+                sleep(RETRY_INTERVAL).await;
+                continue;
+            }
         };
 
         // Check each instance and record those that are running with IPs
