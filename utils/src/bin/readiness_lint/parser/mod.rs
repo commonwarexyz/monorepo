@@ -24,6 +24,9 @@ pub enum ParseError {
 /// Configuration for the readiness parser.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct Config {
+    /// Crate names to exclude entirely from output.
+    #[serde(default)]
+    pub ignore_crates: Vec<String>,
     /// Module path patterns to exclude from output (glob patterns supported).
     /// Use `*::tests` to match any module named `tests` at any depth.
     #[serde(default)]
@@ -43,8 +46,13 @@ impl Config {
         Ok(config)
     }
 
+    /// Check if a crate should be ignored.
+    pub fn should_ignore_crate(&self, crate_name: &str) -> bool {
+        self.ignore_crates.contains(&crate_name.to_string())
+    }
+
     /// Check if a module path should be ignored.
-    pub fn should_ignore(&self, module_path: &str) -> bool {
+    pub fn should_ignore_module(&self, module_path: &str) -> bool {
         for pattern in &self.ignore_modules {
             if matches_glob_pattern(pattern, module_path) {
                 return true;
@@ -146,6 +154,10 @@ pub fn parse_workspace(root: &Path, config: &Config) -> Result<Workspace, ParseE
 
         let crate_path = root.join(member_path);
         if let Ok(krate) = parse_crate(&crate_path, config) {
+            // Skip ignored crates
+            if config.should_ignore_crate(&krate.name) {
+                continue;
+            }
             crates.insert(krate.name.clone(), krate);
         }
     }
@@ -240,7 +252,7 @@ fn parse_modules(
             };
 
             // Skip ignored modules
-            if config.should_ignore(&mod_path) {
+            if config.should_ignore_module(&mod_path) {
                 continue;
             }
 
@@ -302,7 +314,7 @@ fn parse_modules(
         };
 
         // Skip ignored modules
-        if config.should_ignore(&mod_path) {
+        if config.should_ignore_module(&mod_path) {
             continue;
         }
 
@@ -366,7 +378,7 @@ fn parse_modules(
         };
 
         // Skip ignored modules
-        if config.should_ignore(&mod_path) {
+        if config.should_ignore_module(&mod_path) {
             continue;
         }
 

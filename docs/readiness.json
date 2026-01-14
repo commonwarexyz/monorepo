@@ -1,6 +1,6 @@
 {
   "version": "0.0.65",
-  "generated": "2026-01-14T21:48:51.337268+00:00",
+  "generated": "2026-01-14T21:54:48.269871+00:00",
   "crates": [
     {
       "name": "commonware-broadcast",
@@ -178,32 +178,6 @@
               "visibility": "reexported"
             }
           ]
-        }
-      ]
-    },
-    {
-      "name": "commonware-conformance",
-      "module_counts": {
-        "2": 1
-      },
-      "modules": [
-        {
-          "path": "::",
-          "readiness": 2,
-          "is_explicit": true
-        }
-      ]
-    },
-    {
-      "name": "commonware-conformance-macros",
-      "module_counts": {
-        "0": 1
-      },
-      "modules": [
-        {
-          "path": "::",
-          "readiness": 0,
-          "is_explicit": false
         }
       ]
     },
@@ -1826,11 +1800,11 @@
     }
   ],
   "summary": {
-    "total_modules": 293,
+    "total_modules": 291,
     "by_level": {
-      "0": 27,
+      "0": 26,
       "1": 1,
-      "2": 265
+      "2": 264
     }
   }
 }

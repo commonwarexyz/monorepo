@@ -1,4 +1,11 @@
 # Configuration for readiness-lint tool
+
+# Crates to exclude entirely from readiness output
+ignore_crates = [
+    "commonware-conformance",
+    "commonware-conformance-macros",
+]
+
 # Module paths to exclude from readiness output (glob patterns supported)
 # The *:: prefix matches any parent path, so *::tests matches journal::tests, buffered::tests, etc.
 ignore_modules = [
