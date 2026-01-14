@@ -81,11 +81,11 @@ pub async fn update(config_path: &PathBuf) -> Result<(), Error> {
                     let key = binary_s3_key(tag, &digest);
                     let path = path.clone();
                     async move {
-                        let url = cache_file_and_presign(
+                        let url = cache_and_presign(
                             &s3_client,
                             S3_BUCKET_NAME,
                             &key,
-                            path.as_ref(),
+                            UploadSource::File(path.as_ref()),
                             PRESIGN_DURATION,
                         )
                         .await?;
@@ -105,11 +105,11 @@ pub async fn update(config_path: &PathBuf) -> Result<(), Error> {
                     let key = config_s3_key(tag, &digest);
                     let path = path.clone();
                     async move {
-                        let url = cache_file_and_presign(
+                        let url = cache_and_presign(
                             &s3_client,
                             S3_BUCKET_NAME,
                             &key,
-                            path.as_ref(),
+                            UploadSource::File(path.as_ref()),
                             PRESIGN_DURATION,
                         )
                         .await?;
