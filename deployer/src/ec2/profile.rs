@@ -199,8 +199,8 @@ echo "Profile captured successfully"
     let symbol_dir = format!("/tmp/symbols-{}-{}", instance_name, timestamp);
     std::fs::create_dir_all(&symbol_dir)?;
     let symlink_path = format!("{}/binary", symbol_dir);
-    std::os::unix::fs::symlink(&binary_path, &symlink_path)
-        .map_err(|e| Error::Symbolication(format!("failed to create symlink: {}", e)))?;
+    std::fs::copy(&binary_path, &symlink_path)
+        .map_err(|e| Error::Symbolication(format!("failed to copy binary: {}", e)))?;
 
     // Use samply load with --symbol-dir to open the profile with symbols
     info!(
