@@ -506,11 +506,13 @@ where
                             }
                         }
                         Message::SetFloor { height } => {
-                            if let Some(stored_height) = self.application_metadata.get(&LATEST_KEY) {
-                                if *stored_height >= height {
-                                    warn!(%height, existing = %stored_height, "floor not updated, lower than existing");
-                                    continue;
-                                }
+                            if self.last_processed_height >= height {
+                                warn!(
+                                    %height,
+                                    existing = %self.last_processed_height,
+                                    "floor not updated, lower than existing"
+                                );
+                                continue;
                             }
 
                             // Update the processed height
