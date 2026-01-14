@@ -5,6 +5,7 @@
 //! - Core primitives (keypair generation, signing, verification, proof of possession)
 //! - [`aggregate`]: Aggregation of public keys and signatures
 //! - [`batch`]: Batch verification of multiple signatures
+//! - [`check`]: Batch subgroup membership checks
 //! - [`threshold`]: Threshold signature operations
 //!
 //! # Domain Separation Tag (DST)
@@ -20,6 +21,7 @@
 
 pub mod aggregate;
 pub mod batch;
+pub mod check;
 pub mod threshold;
 
 use super::{

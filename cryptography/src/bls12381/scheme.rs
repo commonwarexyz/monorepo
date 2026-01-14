@@ -26,7 +26,7 @@
 //! ```
 
 use super::primitives::{
-    group::{self, Private},
+    group::{self, G1Unchecked, G2Unchecked, Private},
     ops,
     variant::{MinPk, Variant},
 };
@@ -253,6 +253,41 @@ impl arbitrary::Arbitrary<'_> for PublicKey {
     }
 }
 
+/// Unchecked BLS12-381 public key (subgroup not verified).
+///
+/// Use `check()` to verify subgroup membership and convert to a checked
+/// `PublicKey`.
+#[derive(Clone, Copy)]
+pub struct PublicKeyUnchecked {
+    raw: [u8; <MinPk as Variant>::Public::SIZE],
+    key: G1Unchecked,
+}
+
+impl PublicKeyUnchecked {
+    /// Check that the public key is in the correct subgroup.
+    pub fn check(self) -> Result<PublicKey, CodecError> {
+        Ok(PublicKey {
+            raw: self.raw,
+            key: self.key.check()?,
+        })
+    }
+}
+
+impl Read for PublicKeyUnchecked {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+        let raw = <[u8; <MinPk as Variant>::Public::SIZE]>::read(buf)?;
+        let key = G1Unchecked::decode(raw.as_ref())
+            .map_err(|e| CodecError::Wrapped(CURVE_NAME, e.into()))?;
+        Ok(Self { raw, key })
+    }
+}
+
+impl FixedSize for PublicKeyUnchecked {
+    const SIZE: usize = <MinPk as Variant>::Public::SIZE;
+}
+
 /// BLS12-381 signature.
 #[derive(Clone, Eq, PartialEq)]
 pub struct Signature {
@@ -359,6 +394,41 @@ impl arbitrary::Arbitrary<'_> for Signature {
 
         Ok(private_key.sign(b"_COMMONWARE_CRYPTOGRAPHY_BLS12381_TEST", &message))
     }
+}
+
+/// Unchecked BLS12-381 signature (subgroup not verified).
+///
+/// Use `check()` to verify subgroup membership and convert to a checked
+/// `Signature`.
+#[derive(Clone, Copy)]
+pub struct SignatureUnchecked {
+    raw: [u8; <MinPk as Variant>::Signature::SIZE],
+    signature: G2Unchecked,
+}
+
+impl SignatureUnchecked {
+    /// Check that the signature is in the correct subgroup.
+    pub fn check(self) -> Result<Signature, CodecError> {
+        Ok(Signature {
+            raw: self.raw,
+            signature: self.signature.check()?,
+        })
+    }
+}
+
+impl Read for SignatureUnchecked {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+        let raw = <[u8; <MinPk as Variant>::Signature::SIZE]>::read(buf)?;
+        let signature = G2Unchecked::decode(raw.as_ref())
+            .map_err(|e| CodecError::Wrapped(CURVE_NAME, e.into()))?;
+        Ok(Self { raw, signature })
+    }
+}
+
+impl FixedSize for SignatureUnchecked {
+    const SIZE: usize = <MinPk as Variant>::Signature::SIZE;
 }
 
 /// BLS12-381 batch verifier.
