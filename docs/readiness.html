@@ -205,7 +205,10 @@
         <h2>Summary</h2>
         <div id="summary" class="summary-grid"></div>
 
-        <h2>Modules by Crate</h2>
+        <h2>Explorer</h2>
+        <p style="color: #6b7280; font-size: 0.9em; margin-bottom: 15px;">
+            Only explicitly annotated modules and items are shown. Items use Rust's grouping syntax: <code>{Item1, Item2}</code>.
+        </p>
         <div id="loading">Loading readiness data...</div>
         <div id="error">Failed to load readiness data.</div>
         <div id="crates"></div>
@@ -232,16 +235,20 @@
         function renderData(data) {
             document.getElementById('loading').style.display = 'none';
 
-            // Render summary
+            // Render summary - combine modules and items
             const summaryEl = document.getElementById('summary');
             for (let level = 0; level <= 4; level++) {
-                const count = data.summary.by_level[level] || 0;
-                summaryEl.innerHTML += `
-                    <div class="summary-card">
-                        <div class="count">${count}</div>
-                        <div class="label"><span class="readiness-badge readiness-${level}">${level}</span></div>
-                    </div>
-                `;
+                const modules = data.summary.modules_by_level[level] || 0;
+                const items = data.summary.items_by_level[level] || 0;
+                const total = modules + items;
+                if (total > 0 || level <= 2) {
+                    summaryEl.innerHTML += `
+                        <div class="summary-card">
+                            <div class="count">${total}</div>
+                            <div class="label"><span class="readiness-badge readiness-${level}">${level}</span></div>
+                        </div>
+                    `;
+                }
             }
 
             // Render crates
@@ -253,13 +260,12 @@
                 const header = document.createElement('div');
                 header.className = 'crate-header';
 
-                // Build module counts display - show [count] colored by level
+                // Build counts display from readiness map
                 let countsHtml = '<div class="crate-counts">';
-                for (let level = 0; level <= 4; level++) {
-                    const count = crate.module_counts[level] || 0;
-                    if (count > 0) {
-                        countsHtml += `<span class="readiness-badge readiness-${level}">${count}</span>`;
-                    }
+                const levels = Object.keys(crate.readiness).map(Number).sort();
+                for (const level of levels) {
+                    const count = crate.readiness[level].length;
+                    countsHtml += `<span class="readiness-badge readiness-${level}">${count}</span>`;
                 }
                 countsHtml += '</div>';
 
@@ -270,7 +276,7 @@
 
                 const content = document.createElement('div');
                 content.className = 'crate-content';
-                content.innerHTML = renderModules(crate.modules, 0);
+                content.innerHTML = renderEntries(crate.readiness);
 
                 header.onclick = () => content.classList.toggle('open');
 
@@ -280,20 +286,19 @@
             }
         }
 
-        function renderModules(modules, depth) {
-            if (!modules || modules.length === 0) return '';
-
+        function renderEntries(readiness) {
             let html = '';
-            for (const mod of modules) {
-                const indent = depth > 0 ? ' submodule' : '';
-                html += `
-                    <div class="module-item${indent}">
-                        <span class="readiness-badge readiness-${mod.readiness}">${mod.readiness}</span>
-                        ${mod.path}
-                    </div>
-                `;
-                if (mod.submodules && mod.submodules.length > 0) {
-                    html += renderModules(mod.submodules, depth + 1);
+            // Sort levels in descending order (show higher readiness first)
+            const levels = Object.keys(readiness).map(Number).sort((a, b) => b - a);
+            for (const level of levels) {
+                const entries = readiness[level];
+                for (const entry of entries) {
+                    html += `
+                        <div class="module-item">
+                            <span class="readiness-badge readiness-${level}">${level}</span>
+                            ${entry}
+                        </div>
+                    `;
                 }
             }
             return html;

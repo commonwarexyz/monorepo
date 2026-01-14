@@ -1,6 +1,6 @@
 //! Generate readiness.json output.
 
-use crate::parser::{Module, Visibility, Workspace};
+use crate::parser::{Module, Workspace};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, HashMap},
@@ -17,7 +17,7 @@ pub enum OutputError {
     Json(#[from] serde_json::Error),
 }
 
-/// Output format for readiness.json.
+/// Output format for readiness.json - explorer style.
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
 pub struct ReadinessOutput {
     pub version: String,
@@ -27,37 +27,22 @@ pub struct ReadinessOutput {
     pub summary: Summary,
 }
 
-/// Output for a single crate.
+/// Output for a single crate - grouped by readiness level.
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
 pub struct CrateOutput {
     pub name: String,
-    /// Module counts by readiness level (e.g., {0: 45, 2: 3} means 45 at level 0, 3 at level 2)
-    pub module_counts: BTreeMap<u8, usize>,
-    pub modules: Vec<ModuleOutput>,
-}
-
-/// Output for a single module.
-#[derive(Debug, Serialize, Deserialize, PartialEq)]
-pub struct ModuleOutput {
-    pub path: String,
-    pub readiness: u8,
-    pub is_explicit: bool,
-    /// How this module is exposed: "public" (pub mod) or "reexported" (pub use)
-    #[serde(skip_serializing_if = "is_public", default)]
-    pub visibility: Visibility,
-    #[serde(skip_serializing_if = "Vec::is_empty", default)]
-    pub submodules: Vec<ModuleOutput>,
-}
-
-fn is_public(v: &Visibility) -> bool {
-    *v == Visibility::Public
+    /// Entries grouped by readiness level.
+    /// Each entry is either a module name or "{Item1, Item2, ...}" for grouped items.
+    pub readiness: BTreeMap<u8, Vec<String>>,
 }
 
 /// Summary statistics.
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
 pub struct Summary {
     pub total_modules: usize,
-    pub by_level: BTreeMap<u8, usize>,
+    pub total_items: usize,
+    pub modules_by_level: BTreeMap<u8, usize>,
+    pub items_by_level: BTreeMap<u8, usize>,
 }
 
 /// Generate readiness.json output.
@@ -68,51 +53,7 @@ pub fn generate(workspace: &Workspace, output_path: &Path) -> Result<(), OutputE
     Ok(())
 }
 
-/// Collect modules into output format.
-fn collect_modules(
-    modules: &HashMap<String, Module>,
-    inherited_readiness: u8,
-) -> (Vec<ModuleOutput>, usize, BTreeMap<u8, usize>) {
-    let mut output = Vec::new();
-    let mut count = 0;
-    let mut by_level = BTreeMap::new();
-
-    // Sort modules by name for consistent output
-    let mut mod_names: Vec<_> = modules.keys().collect();
-    mod_names.sort();
-
-    for mod_name in mod_names {
-        let module = &modules[mod_name];
-
-        let effective_readiness = if module.is_explicit {
-            module.readiness
-        } else {
-            inherited_readiness
-        };
-
-        let (submodules, subcount, sublevel) =
-            collect_modules(&module.submodules, effective_readiness);
-
-        count += 1 + subcount;
-        *by_level.entry(effective_readiness).or_insert(0) += 1;
-        for (level, c) in sublevel {
-            *by_level.entry(level).or_insert(0) += c;
-        }
-
-        output.push(ModuleOutput {
-            path: module.path.clone(),
-            readiness: effective_readiness,
-            is_explicit: module.is_explicit,
-            visibility: module.visibility,
-            submodules,
-        });
-    }
-
-    (output, count, by_level)
-}
-
 /// Check if the existing readiness.json is up-to-date.
-/// Returns Ok(true) if up-to-date, Ok(false) if out-of-date, Err on error.
 pub fn check(workspace: &Workspace, check_path: &Path) -> Result<bool, OutputError> {
     let expected = build_output(workspace);
 
@@ -132,7 +73,9 @@ pub fn check(workspace: &Workspace, check_path: &Path) -> Result<bool, OutputErr
 fn build_output(workspace: &Workspace) -> ReadinessOutput {
     let mut crates = Vec::new();
     let mut total_modules = 0;
-    let mut by_level: BTreeMap<u8, usize> = BTreeMap::new();
+    let mut total_items = 0;
+    let mut modules_by_level: BTreeMap<u8, usize> = BTreeMap::new();
+    let mut items_by_level: BTreeMap<u8, usize> = BTreeMap::new();
 
     let mut crate_names: Vec<_> = workspace.crates.keys().collect();
     crate_names.sort();
@@ -140,23 +83,50 @@ fn build_output(workspace: &Workspace) -> ReadinessOutput {
     for crate_name in crate_names {
         let krate = &workspace.crates[crate_name];
 
-        let (modules, module_count, level_counts) =
-            collect_modules(&krate.modules, krate.root_readiness);
+        // Collect entries by readiness level
+        let mut by_level: BTreeMap<u8, Vec<String>> = BTreeMap::new();
 
-        // Skip crates with no modules to show
-        if modules.is_empty() {
+        // Add root items (from lib.rs) with explicit #[ready(N)]
+        let mut items_at_level: BTreeMap<u8, Vec<String>> = BTreeMap::new();
+        for (item_name, &readiness) in &krate.root_items {
+            items_at_level
+                .entry(readiness)
+                .or_default()
+                .push(item_name.clone());
+        }
+
+        // Format items as "{Item1, Item2, ...}" and add to by_level
+        for (level, mut items) in items_at_level {
+            items.sort();
+            total_items += items.len();
+            *items_by_level.entry(level).or_insert(0) += items.len();
+            let formatted = format_items(&items);
+            by_level.entry(level).or_default().push(formatted);
+        }
+
+        // Collect modules with explicit readiness!(N)
+        collect_explicit_modules(
+            &krate.modules,
+            &mut by_level,
+            &mut total_modules,
+            &mut modules_by_level,
+            &mut total_items,
+            &mut items_by_level,
+        );
+
+        // Skip crates with nothing to show
+        if by_level.is_empty() {
             continue;
         }
 
-        total_modules += module_count;
-        for (level, count) in &level_counts {
-            *by_level.entry(*level).or_insert(0) += count;
+        // Sort entries within each level
+        for entries in by_level.values_mut() {
+            entries.sort();
         }
 
         crates.push(CrateOutput {
             name: crate_name.clone(),
-            module_counts: level_counts,
-            modules,
+            readiness: by_level,
         });
     }
 
@@ -166,7 +136,78 @@ fn build_output(workspace: &Workspace) -> ReadinessOutput {
         crates,
         summary: Summary {
             total_modules,
-            by_level,
+            total_items,
+            modules_by_level,
+            items_by_level,
         },
+    }
+}
+
+/// Recursively collect modules that have explicit readiness!(N) annotations.
+fn collect_explicit_modules(
+    modules: &HashMap<String, Module>,
+    by_level: &mut BTreeMap<u8, Vec<String>>,
+    total_modules: &mut usize,
+    modules_by_level: &mut BTreeMap<u8, usize>,
+    total_items: &mut usize,
+    items_by_level: &mut BTreeMap<u8, usize>,
+) {
+    for module in modules.values() {
+        // Only include modules with explicit readiness!(N)
+        if module.is_explicit {
+            *total_modules += 1;
+            *modules_by_level.entry(module.readiness).or_insert(0) += 1;
+            by_level
+                .entry(module.readiness)
+                .or_default()
+                .push(module.path.clone());
+        } else {
+            // Module doesn't have explicit readiness, but check for items with #[ready(N)]
+            if !module.items.is_empty() {
+                let mut items_at_level: BTreeMap<u8, Vec<String>> = BTreeMap::new();
+                for (item_name, &readiness) in &module.items {
+                    items_at_level
+                        .entry(readiness)
+                        .or_default()
+                        .push(item_name.clone());
+                }
+
+                for (level, mut items) in items_at_level {
+                    items.sort();
+                    *total_items += items.len();
+                    *items_by_level.entry(level).or_insert(0) += items.len();
+                    let formatted = format_items_with_module(&module.path, &items);
+                    by_level.entry(level).or_default().push(formatted);
+                }
+            }
+        }
+
+        // Recurse into submodules
+        collect_explicit_modules(
+            &module.submodules,
+            by_level,
+            total_modules,
+            modules_by_level,
+            total_items,
+            items_by_level,
+        );
+    }
+}
+
+/// Format a list of items as "{Item1, Item2, ...}".
+fn format_items(items: &[String]) -> String {
+    if items.len() == 1 {
+        format!("{{{}}}", items[0])
+    } else {
+        format!("{{{}}}", items.join(", "))
+    }
+}
+
+/// Format a list of items with module prefix as "module::{Item1, Item2, ...}".
+fn format_items_with_module(module_path: &str, items: &[String]) -> String {
+    if items.len() == 1 {
+        format!("{module_path}::{{{}}}", items[0])
+    } else {
+        format!("{module_path}::{{{}}}", items.join(", "))
     }
 }
