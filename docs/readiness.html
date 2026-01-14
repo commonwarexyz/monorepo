@@ -286,11 +286,10 @@
             let html = '';
             for (const mod of modules) {
                 const indent = depth > 0 ? ' submodule' : '';
-                const explicit = mod.is_explicit ? '' : ' (inherited)';
                 html += `
                     <div class="module-item${indent}">
                         <span class="readiness-badge readiness-${mod.readiness}">${mod.readiness}</span>
-                        ${mod.path}${explicit}
+                        ${mod.path}
                     </div>
                 `;
                 if (mod.submodules && mod.submodules.length > 0) {
