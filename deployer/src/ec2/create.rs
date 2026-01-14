@@ -610,7 +610,7 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
         monitoring_launch_future,
         try_join_all(binary_launch_futures)
     )?;
-    info!("all instances launched, waiting for running state");
+    info!("instances requested");
 
     // Group binary instances by region for batched DescribeInstances calls
     let mut instances_by_region: HashMap<String, Vec<(String, InstanceConfig)>> = HashMap::new();

@@ -438,7 +438,6 @@ pub async fn wait_for_instances_running(
     // Track discovered IPs to avoid re-polling running instances
     let mut discovered_ips: HashMap<String, String> = HashMap::new();
     let mut pending_ids: HashSet<String> = instance_ids.iter().cloned().collect();
-
     loop {
         // Only query instances that haven't been discovered yet
         let query_ids: Vec<String> = pending_ids.iter().cloned().collect();
@@ -481,6 +480,7 @@ pub async fn wait_for_instances_running(
                 .collect());
         }
 
+        // Try again after a delay
         sleep(RETRY_INTERVAL).await;
     }
 }
