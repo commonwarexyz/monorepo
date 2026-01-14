@@ -35,6 +35,11 @@ jobs:
       continue-on-error: true
       env:
         CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+    - name: Publish test
+      run: cargo publish --manifest-path test/Cargo.toml
+      continue-on-error: true
+      env:
+        CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
     - name: Publish parallel
       run: cargo publish --manifest-path parallel/Cargo.toml
       continue-on-error: true
