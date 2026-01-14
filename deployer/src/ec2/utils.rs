@@ -13,6 +13,9 @@ use tracing::{info, warn};
 /// Maximum number of SSH connection attempts before failing
 pub const MAX_SSH_ATTEMPTS: usize = 30;
 
+/// Maximum number of instances to configure concurrently via SSH
+pub const MAX_CONCURRENT_INSTANCES: usize = 64;
+
 /// Maximum number of polling attempts for service status
 pub const MAX_POLL_ATTEMPTS: usize = 30;
 

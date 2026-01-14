@@ -240,7 +240,7 @@ pub async fn cache_and_presign(
 pub fn hash_file(path: &Path) -> Result<String, Error> {
     let mut file = std::fs::File::open(path)?;
     let mut hasher = Sha256::new();
-    let mut buffer = [0u8; 8192];
+    let mut buffer = vec![0u8; 1024 * 1024]; // 1MB buffer for faster hashing of large files
     loop {
         let bytes_read = file.read(&mut buffer)?;
         if bytes_read == 0 {

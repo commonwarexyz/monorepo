@@ -5,7 +5,10 @@ use crate::ec2::{
     CREATED_FILE_NAME, DESTROYED_FILE_NAME, MONITORING_NAME, MONITORING_REGION,
 };
 use aws_sdk_ec2::types::Filter;
-use futures::future::try_join_all;
+use futures::{
+    future::try_join_all,
+    stream::{self, StreamExt, TryStreamExt},
+};
 use std::{
     collections::{BTreeMap, HashMap},
     fs::File,
@@ -51,7 +54,9 @@ pub async fn update(config_path: &PathBuf) -> Result<(), Error> {
 
     // Upload updated binaries and configs to S3 and generate pre-signed URLs
     // Uses digest-based deduplication to avoid re-uploading identical files
+    info!("creating S3 client");
     let s3_client = create_s3_client(Region::new(MONITORING_REGION)).await;
+    info!("computing file digests");
 
     // Compute digests and build deduplication maps
     let mut binary_digests: BTreeMap<String, String> = BTreeMap::new();
@@ -148,41 +153,51 @@ pub async fn update(config_path: &PathBuf) -> Result<(), Error> {
         .collect::<std::collections::HashSet<_>>();
     regions.insert(MONITORING_REGION.to_string());
 
-    // Collect all binary instances across regions
-    let mut binary_instances = Vec::new();
-    for region in &regions {
-        let ec2_client = create_ec2_client(Region::new(region.clone())).await;
-        let resp = ec2_client
-            .describe_instances()
-            .filters(Filter::builder().name("tag:deployer").values(tag).build())
-            .send()
-            .await
-            .map_err(|err| err.into_service_error())?;
-        for reservation in resp.reservations.unwrap_or_default() {
-            for instance in reservation.instances.unwrap_or_default() {
-                if let Some(tags) = &instance.tags {
-                    if let Some(name_tag) = tags.iter().find(|t| t.key.as_deref() == Some("name")) {
-                        if name_tag.value.as_deref() != Some(MONITORING_NAME) {
-                            if let Some(public_ip) = &instance.public_ip_address {
-                                binary_instances
-                                    .push((name_tag.value.clone().unwrap(), public_ip.clone()));
-                                info!(
-                                    region,
-                                    name = name_tag.value.clone().unwrap(),
-                                    ip = public_ip,
-                                    "found instance"
-                                );
+    // Collect all binary instances across regions (in parallel)
+    let region_futures = regions.iter().map(|region| {
+        let region = region.clone();
+        let tag = tag.clone();
+        async move {
+            let ec2_client = create_ec2_client(Region::new(region.clone())).await;
+            let resp = ec2_client
+                .describe_instances()
+                .filters(Filter::builder().name("tag:deployer").values(&tag).build())
+                .send()
+                .await
+                .map_err(|err| err.into_service_error())?;
+            let mut instances = Vec::new();
+            for reservation in resp.reservations.unwrap_or_default() {
+                for instance in reservation.instances.unwrap_or_default() {
+                    if let Some(tags) = &instance.tags {
+                        if let Some(name_tag) = tags.iter().find(|t| t.key.as_deref() == Some("name")) {
+                            if name_tag.value.as_deref() != Some(MONITORING_NAME) {
+                                if let Some(public_ip) = &instance.public_ip_address {
+                                    let name = name_tag.value.clone().unwrap();
+                                    info!(
+                                        region = region.as_str(),
+                                        name = name.as_str(),
+                                        ip = public_ip.as_str(),
+                                        "found instance"
+                                    );
+                                    instances.push((name, public_ip.clone()));
+                                }
                             }
                         }
                     }
                 }
             }
+            Ok::<_, Error>(instances)
         }
-    }
+    });
+    let binary_instances: Vec<(String, String)> = try_join_all(region_futures)
+        .await?
+        .into_iter()
+        .flatten()
+        .collect();
 
-    // Update each binary instance concurrently
+    // Update each binary instance with limited concurrency to avoid SSH overload
     let private_key = private_key_path.to_str().unwrap();
-    try_join_all(binary_instances.into_iter().filter_map(|(name, ip)| {
+    stream::iter(binary_instances.into_iter().filter_map(|(name, ip)| {
         if instance_map.contains_key(&name) {
             let binary_url = instance_binary_urls[&name].clone();
             let config_url = instance_config_urls[&name].clone();
@@ -196,6 +211,8 @@ pub async fn update(config_path: &PathBuf) -> Result<(), Error> {
             None
         }
     }))
+    .buffer_unordered(MAX_CONCURRENT_INSTANCES)
+    .try_collect::<Vec<_>>()
     .await?;
     info!("update complete");
     Ok(())

@@ -5,7 +5,10 @@ use crate::ec2::{
     Hosts, InstanceConfig, CREATED_FILE_NAME, LOGS_PORT, MONITORING_NAME, MONITORING_REGION,
     PROFILES_PORT, TRACES_PORT,
 };
-use futures::future::try_join_all;
+use futures::{
+    future::try_join_all,
+    stream::{self, StreamExt, TryStreamExt},
+};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fs::File,
@@ -1044,8 +1047,11 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
             Ok::<(), Error>(())
         },
         async {
-            // Configure binary instances
-            let all_binary_ips = try_join_all(binary_futures).await?;
+            // Configure binary instances (limited concurrency to avoid SSH overload)
+            let all_binary_ips: Vec<String> = stream::iter(binary_futures)
+                .buffer_unordered(MAX_CONCURRENT_INSTANCES)
+                .try_collect()
+                .await?;
             info!("configured binary instances");
             Ok::<Vec<String>, Error>(all_binary_ips)
         }
