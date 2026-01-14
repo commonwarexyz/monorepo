@@ -78,6 +78,10 @@ pub struct Crate {
     pub modules: HashMap<String, Module>,
     pub dependencies: Vec<String>,
     pub dev_dependencies: Vec<String>,
+    /// Readiness level of the crate root (lib.rs)
+    pub root_readiness: u8,
+    /// Whether the root readiness was explicitly set
+    pub root_is_explicit: bool,
 }
 
 /// A module with its readiness level and submodules.
@@ -154,10 +158,12 @@ fn parse_crate(path: &Path, config: &Config) -> Result<Crate, ParseError> {
 
     // Parse modules from lib.rs
     let lib_rs_path = path.join("src/lib.rs");
-    let modules = if lib_rs_path.exists() {
-        parse_modules(&lib_rs_path, &path.join("src"), "", config)?
+    let (modules, root_readiness) = if lib_rs_path.exists() {
+        let modules = parse_modules(&lib_rs_path, &path.join("src"), "", config)?;
+        let root_readiness = extract_readiness_from_file(&lib_rs_path);
+        (modules, root_readiness)
     } else {
-        HashMap::new()
+        (HashMap::new(), 0)
     };
 
     Ok(Crate {
@@ -166,6 +172,8 @@ fn parse_crate(path: &Path, config: &Config) -> Result<Crate, ParseError> {
         modules,
         dependencies,
         dev_dependencies,
+        root_readiness,
+        root_is_explicit: root_readiness > 0,
     })
 }
 
