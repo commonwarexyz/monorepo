@@ -371,9 +371,9 @@ pub async fn add_monitoring_ingress(
     Ok(())
 }
 
-/// Launches EC2 instances with specified configurations
+/// Attempts to launch EC2 instances. May fail on transient errors or rate limits.
 #[allow(clippy::too_many_arguments)]
-pub async fn launch_instances(
+async fn try_launch_instances(
     client: &Ec2Client,
     ami_id: &str,
     instance_type: InstanceType,
@@ -430,6 +430,55 @@ pub async fn launch_instances(
         .into_iter()
         .map(|i| i.instance_id.unwrap())
         .collect())
+}
+
+/// Launches EC2 instances with specified configurations.
+/// Retries indefinitely on transient failures and rate limits.
+#[allow(clippy::too_many_arguments)]
+pub async fn launch_instances(
+    client: &Ec2Client,
+    ami_id: &str,
+    instance_type: InstanceType,
+    storage_size: i32,
+    storage_class: VolumeType,
+    key_name: &str,
+    subnet_id: &str,
+    sg_id: &str,
+    count: i32,
+    name: &str,
+    tag: &str,
+) -> Vec<String> {
+    let mut attempt = 0u32;
+    loop {
+        match try_launch_instances(
+            client,
+            ami_id,
+            instance_type.clone(),
+            storage_size,
+            storage_class.clone(),
+            key_name,
+            subnet_id,
+            sg_id,
+            count,
+            name,
+            tag,
+        )
+        .await
+        {
+            Ok(ids) => return ids,
+            Err(e) => {
+                tracing::debug!(
+                    name = name,
+                    attempt = attempt + 1,
+                    error = %e,
+                    "launch_instances failed, retrying"
+                );
+                attempt = attempt.saturating_add(1);
+                let backoff = Duration::from_millis(500 * (1 << attempt.min(10)));
+                sleep(backoff).await;
+            }
+        }
+    }
 }
 
 /// Waits for instances to reach the "running" state and returns their public IPs

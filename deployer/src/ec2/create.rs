@@ -569,7 +569,7 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
                 MONITORING_NAME,
                 &tag,
             )
-            .await?[0]
+            .await[0]
                 .clone();
             info!(
                 instance_id = instance_id.as_str(),
@@ -607,7 +607,7 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
                         &instance.name,
                         &tag,
                     )
-                    .await?[0]
+                    .await[0]
                         .clone();
                     info!(
                         instance_id = instance_id.as_str(),
