@@ -128,7 +128,12 @@ pub async fn poll_service_inactive(key_file: &str, ip: &str, service: &str) -> R
 }
 
 /// Downloads a file from a remote instance via SCP with retries
-pub async fn scp_download(key_file: &str, ip: &str, remote_path: &str, local_path: &str) -> Result<(), Error> {
+pub async fn scp_download(
+    key_file: &str,
+    ip: &str,
+    remote_path: &str,
+    local_path: &str,
+) -> Result<(), Error> {
     for _ in 0..MAX_SSH_ATTEMPTS {
         let output = Command::new("scp")
             .arg("-i")

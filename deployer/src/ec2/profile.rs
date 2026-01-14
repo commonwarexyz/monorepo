@@ -1,7 +1,10 @@
 //! `profile` subcommand for `ec2`
 
 use crate::ec2::{
-    aws::*, deployer_directory, s3::*, services::*,
+    aws::*,
+    deployer_directory,
+    s3::*,
+    services::*,
     utils::{download_file, scp_download, ssh_execute},
     Config, Error, CREATED_FILE_NAME, DESTROYED_FILE_NAME, MONITORING_REGION,
 };
@@ -105,6 +108,7 @@ pub async fn profile(
     let s3_client = create_s3_client(Region::new(MONITORING_REGION)).await;
     ensure_bucket_exists(&s3_client, S3_BUCKET_NAME, MONITORING_REGION).await?;
 
+    // Cache samply archive in S3 (like other tools, we cache the archive and extract on the instance)
     let samply_s3_key = samply_bin_s3_key(SAMPLY_VERSION, arch);
     let samply_url = if object_exists(&s3_client, S3_BUCKET_NAME, &samply_s3_key).await? {
         info!(key = samply_s3_key.as_str(), "samply already in S3");
@@ -116,53 +120,38 @@ pub async fn profile(
         );
         let download_url = samply_download_url(SAMPLY_VERSION, arch);
         let temp_archive = tag_directory.join("samply.tar.xz");
-        let temp_binary = tag_directory.join("samply");
 
         // Download the archive
         download_file(&download_url, &temp_archive).await?;
 
-        // Extract the binary (samply archives contain just the binary at the root)
-        let output = Command::new("tar")
-            .arg("-xJf")
-            .arg(&temp_archive)
-            .arg("-C")
-            .arg(&tag_directory)
-            .output()
-            .await?;
-        if !output.status.success() {
-            return Err(Error::DownloadFailed(format!(
-                "failed to extract samply: {}",
-                String::from_utf8_lossy(&output.stderr)
-            )));
-        }
-
-        // Upload extracted binary to S3
+        // Upload archive to S3
         let url = cache_and_presign(
             &s3_client,
             S3_BUCKET_NAME,
             &samply_s3_key,
-            UploadSource::File(&temp_binary),
+            UploadSource::File(&temp_archive),
             PRESIGN_DURATION,
         )
         .await?;
 
-        // Clean up temp files
+        // Clean up temp file
         let _ = std::fs::remove_file(&temp_archive);
-        let _ = std::fs::remove_file(&temp_binary);
 
         url
     };
-    info!("samply binary ready");
+    info!("samply archive ready");
 
     // Build the remote profiling script
     let profile_script = format!(
         r#"
 set -e
 
-# Download samply if not present
+# Download and extract samply if not present
 if [ ! -f /home/ubuntu/samply ]; then
-    wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/samply '{samply_url}'
+    wget -q --tries=10 --retry-connrefused --waitretry=5 -O /tmp/samply.tar.xz '{samply_url}'
+    tar -xJf /tmp/samply.tar.xz -C /home/ubuntu --strip-components=1
     chmod +x /home/ubuntu/samply
+    rm /tmp/samply.tar.xz
 fi
 
 # Get binary PID

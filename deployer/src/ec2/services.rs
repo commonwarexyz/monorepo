@@ -96,7 +96,7 @@ pub(crate) fn samply_bin_s3_key(version: &str, architecture: Architecture) -> St
         Architecture::Arm64 => "aarch64",
         Architecture::X86_64 => "x86_64",
     };
-    format!("{S3_TOOLS_BINARIES_PREFIX}/samply/{version}/linux-{arch}/samply")
+    format!("{S3_TOOLS_BINARIES_PREFIX}/samply/{version}/linux-{arch}/samply-{arch}-unknown-linux-gnu.tar.xz")
 }
 
 // S3 key functions for component configs and services (include deployer version for cache invalidation)
