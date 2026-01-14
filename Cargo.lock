@@ -1684,6 +1684,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "commonware-test"
+version = "0.0.65"
+
+[[package]]
 name = "commonware-utils"
 version = "0.0.65"
 dependencies = [
