@@ -6,7 +6,7 @@
 //! # Responsibilities
 //!
 //! - Receive votes from network and batch verify signatures
-//! - Track votes per view in a [`VoteTracker`]
+//! - Track votes per view in a [`crate::minimmit::types::VoteTracker`]
 //! - Detect M threshold (2f+1) for certificate assembly
 //! - Detect L threshold (n-f) for finalization
 //! - Handle nullify-by-contradiction logic

@@ -58,7 +58,7 @@ pub struct Config<
 
     /// Automaton for the consensus engine.
     ///
-    /// Unlike simplex which requires [`CertifiableAutomaton`], minimmit only needs the base
+    /// Unlike simplex which requires [`crate::CertifiableAutomaton`], minimmit only needs the base
     /// [`Automaton`] trait since there is no separate certification phase.
     pub automaton: A,
 
