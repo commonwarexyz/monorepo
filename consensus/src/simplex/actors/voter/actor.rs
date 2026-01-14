@@ -822,7 +822,7 @@ impl<
                 let round = proposal.round;
                 let view = round.view();
                 debug!(%view, "attempting certification");
-                let receiver = self.automaton.certify(proposal.payload).await;
+                let receiver = self.automaton.certify(round, proposal.payload).await;
                 let handle = certify_pool.push(async move { (round, receiver.await) });
                 self.state.set_certify_handle(view, handle);
             }

@@ -72,7 +72,10 @@ pub use ingress::mailbox::Mailbox;
 pub mod resolver;
 pub mod store;
 
-use crate::{types::Height, Block};
+use crate::{
+    types::{Height, Round},
+    Block,
+};
 use commonware_utils::{acknowledgement::Exact, Acknowledgement};
 
 /// An update reported to the application, either a new finalized tip or a finalized block.
@@ -81,8 +84,8 @@ use commonware_utils::{acknowledgement::Exact, Acknowledgement};
 /// Finalized blocks are reported to the application in monotonically increasing order (no gaps permitted).
 #[derive(Clone, Debug)]
 pub enum Update<B: Block, A: Acknowledgement = Exact> {
-    /// A new finalized tip.
-    Tip(Height, B::Commitment),
+    /// A new finalized tip and the finalization round.
+    Tip(Height, B::Commitment, Round),
     /// A new finalized block and an [Acknowledgement] for the application to signal once processed.
     ///
     /// To ensure all blocks are delivered at least once, marshal waits to mark a block as delivered
@@ -123,7 +126,7 @@ mod tests {
         sha256::{Digest as Sha256Digest, Sha256},
         Committable, Digestible, Hasher as _,
     };
-    use commonware_macros::test_traced;
+    use commonware_macros::{select, test_traced};
     use commonware_p2p::{
         simulated::{self, Link, Network, Oracle},
         Manager,
@@ -1894,8 +1897,9 @@ mod tests {
 
             // Consensus determines parent should be block at height 21
             // and calls verify on the Marshaled automaton with a block at height 35
+            let byzantine_round = Round::new(Epoch::new(1), View::new(35));
             let byzantine_context = Context {
-                round: Round::new(Epoch::new(1), View::new(35)),
+                round: byzantine_round,
                 leader: me.clone(),
                 parent: (View::new(21), parent_commitment), // Consensus says parent is at height 21
             };
@@ -1910,7 +1914,9 @@ mod tests {
                 .verify(byzantine_context, malicious_commitment)
                 .await
                 .await;
-            let verify = marshaled.certify(malicious_commitment).await;
+            let verify = marshaled
+                .certify(byzantine_round, malicious_commitment)
+                .await;
 
             assert!(
                 !verify.await.unwrap(),
@@ -1939,8 +1945,9 @@ mod tests {
 
             // Consensus determines parent should be block at height 21
             // and calls verify on the Marshaled automaton with a block at height 22
+            let byzantine_round = Round::new(Epoch::new(1), View::new(22));
             let byzantine_context = Context {
-                round: Round::new(Epoch::new(1), View::new(22)),
+                round: byzantine_round,
                 leader: me.clone(),
                 parent: (View::new(21), parent_commitment), // Consensus says parent is at height 21
             };
@@ -1956,7 +1963,9 @@ mod tests {
                 .verify(byzantine_context, malicious_commitment)
                 .await
                 .await;
-            let verify = marshaled.certify(malicious_commitment).await;
+            let verify = marshaled
+                .certify(byzantine_round, malicious_commitment)
+                .await;
 
             assert!(
                 !verify.await.unwrap(),
@@ -2275,8 +2284,9 @@ mod tests {
 
             context.sleep(Duration::from_millis(10)).await;
 
+            let unsupported_round = Round::new(Epoch::new(1), View::new(20));
             let unsupported_context = Context {
-                round: Round::new(Epoch::new(1), View::new(20)),
+                round: unsupported_round,
                 leader: me.clone(),
                 parent: (View::new(19), parent_commitment),
             };
@@ -2285,12 +2295,167 @@ mod tests {
                 .verify(unsupported_context, block_commitment)
                 .await
                 .await;
-            let verify = marshaled.certify(block_commitment).await;
+            let verify = marshaled.certify(unsupported_round, block_commitment).await;
 
             assert!(
                 !verify.await.unwrap(),
                 "Block in unsupported epoch should be rejected"
             );
+        })
+    }
+
+    /// Regression test for cleanup bug in #2604.
+    ///
+    /// The bug: when certifying a block at view V+K, the cleanup logic would
+    /// remove verification contexts for ALL digests that don't have any entry
+    /// with round > V+K. This incorrectly deletes contexts for other blocks
+    /// at lower views that haven't been certified yet.
+    ///
+    /// Scenario:
+    /// 1. Verify block A at view V (stores context)
+    /// 2. Verify block B at view V+K (stores context)
+    /// 3. Certify block B at view V+K (cleanup runs)
+    /// 4. Certify block A at view V - should succeed, but #2604 would fail
+    ///    because cleanup deleted A's context (V < V+K)
+    #[test_traced("INFO")]
+    fn test_certify_lower_view_after_higher_view() {
+        #[derive(Clone)]
+        struct MockVerifyingApp {
+            genesis: B,
+        }
+
+        impl crate::Application<deterministic::Context> for MockVerifyingApp {
+            type Block = B;
+            type Context = Context<D, K>;
+            type SigningScheme = S;
+
+            async fn genesis(&mut self) -> Self::Block {
+                self.genesis.clone()
+            }
+
+            async fn propose(
+                &mut self,
+                _context: (deterministic::Context, Self::Context),
+                _ancestry: AncestorStream<Self::SigningScheme, Self::Block>,
+            ) -> Option<Self::Block> {
+                None
+            }
+        }
+
+        impl VerifyingApplication<deterministic::Context> for MockVerifyingApp {
+            async fn verify(
+                &mut self,
+                _context: (deterministic::Context, Self::Context),
+                _ancestry: AncestorStream<Self::SigningScheme, Self::Block>,
+            ) -> bool {
+                true
+            }
+        }
+
+        let runner = deterministic::Runner::timed(Duration::from_secs(60));
+        runner.start(|mut context| async move {
+            let mut oracle = setup_network(context.clone(), None);
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+
+            let me = participants[0].clone();
+            let (_base_app, marshal, _processed_height) = setup_validator(
+                context.with_label("validator_0"),
+                &mut oracle,
+                me.clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+
+            let genesis = B::new::<Sha256>(Sha256::hash(b""), Height::zero(), 0);
+
+            let mock_app = MockVerifyingApp {
+                genesis: genesis.clone(),
+            };
+            let mut marshaled = Marshaled::init(
+                context.clone(),
+                mock_app,
+                marshal.clone(),
+                FixedEpocher::new(BLOCKS_PER_EPOCH),
+                "validator_0".to_string(),
+            )
+            .await;
+
+            // Create parent block at height 1
+            let parent = B::new::<Sha256>(genesis.commitment(), Height::new(1), 100);
+            let parent_commitment = parent.commitment();
+            let parent_round = Round::new(Epoch::new(0), View::new(1));
+            marshal.clone().verified(parent_round, parent).await;
+
+            // Block A at view 5 (height 2)
+            let block_a = B::new::<Sha256>(parent_commitment, Height::new(2), 200);
+            let commitment_a = block_a.commitment();
+            marshal
+                .clone()
+                .proposed(Round::new(Epoch::new(0), View::new(5)), block_a)
+                .await;
+
+            // Block B at view 10 (height 2, different block same height - could happen with
+            // different proposers or re-proposals)
+            let block_b = B::new::<Sha256>(parent_commitment, Height::new(2), 300);
+            let commitment_b = block_b.commitment();
+            marshal
+                .clone()
+                .proposed(Round::new(Epoch::new(0), View::new(10)), block_b)
+                .await;
+
+            context.sleep(Duration::from_millis(10)).await;
+
+            // Step 1: Verify block A at view 5
+            let round_a = Round::new(Epoch::new(0), View::new(5));
+            let context_a = Context {
+                round: round_a,
+                leader: me.clone(),
+                parent: (View::new(1), parent_commitment),
+            };
+            let _ = marshaled.verify(context_a, commitment_a).await.await;
+
+            // Step 2: Verify block B at view 10
+            let round_b = Round::new(Epoch::new(0), View::new(10));
+            let context_b = Context {
+                round: round_b,
+                leader: me.clone(),
+                parent: (View::new(1), parent_commitment),
+            };
+            let _ = marshaled.verify(context_b, commitment_b).await.await;
+
+            // Step 3: Certify block B at view 10 FIRST
+            // In #2604, this cleanup would delete context for block A because view 5 < view 10
+            let certify_b = marshaled.certify(round_b, commitment_b).await;
+            assert!(
+                certify_b.await.unwrap(),
+                "Block B certification should succeed"
+            );
+
+            // Step 4: Certify block A at view 5
+            // In #2604, this would return a never-resolving receiver (context deleted)
+            // In #2817, this should succeed because cleanup is deferred to finalization
+            let certify_a = marshaled.certify(round_a, commitment_a).await;
+
+            // Use select with timeout to detect never-resolving receiver
+            select! {
+                result = certify_a => {
+                    assert!(
+                        result.unwrap(),
+                        "Block A certification should succeed (regression: #2604 cleanup bug)"
+                    );
+                },
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!(
+                        "Block A certification timed out - context was incorrectly deleted \
+                        (regression: #2604 cleanup bug where certifying view 10 deleted \
+                        context for view 5)"
+                    );
+                },
+            }
         })
     }
 

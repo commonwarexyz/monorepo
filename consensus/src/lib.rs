@@ -58,6 +58,7 @@ cfg_if::cfg_if! {
         use commonware_runtime::{Spawner, Metrics, Clock};
         use rand::Rng;
         use crate::marshal::ingress::mailbox::AncestorStream;
+        use crate::types::Round;
         use commonware_cryptography::certificate::Scheme;
 
         pub mod application;
@@ -114,14 +115,17 @@ cfg_if::cfg_if! {
         pub trait CertifiableAutomaton: Automaton {
             /// Determine whether a verified payload is safe to commit.
             ///
-            /// If context is required during certify, it must be included in the
-            /// data associated with the payload.
+            /// The round identifies which consensus round is being certified. This is necessary
+            /// because the same payload may be proposed in multiple rounds (e.g., re-proposals
+            /// at epoch boundaries), and the application needs to use the correct verification
+            /// context for each round.
             ///
             /// Applications that employ erasure coding can override this method to delay or prevent
             /// finalization until they have reconstructed and validated the full block (e.g. after
             /// receiving enough shards).
             fn certify(
                 &mut self,
+                _round: Round,
                 _payload: Self::Digest,
             ) -> impl Future<Output = oneshot::Receiver<bool>> + Send {
                 #[allow(clippy::async_yields_async)]
