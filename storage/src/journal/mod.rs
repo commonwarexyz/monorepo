@@ -7,8 +7,6 @@
 
 use thiserror::Error;
 
-commonware_macros::readiness!(2);
-
 pub mod authenticated;
 pub mod contiguous;
 pub mod segmented;

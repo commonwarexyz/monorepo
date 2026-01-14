@@ -80,22 +80,22 @@ fn compute_crate_readiness(workspace: &Workspace) -> HashMap<String, u8> {
     readiness
 }
 
-/// Compute the minimum readiness level across all modules.
-fn compute_min_module_readiness(modules: &HashMap<String, Module>) -> u8 {
-    let mut min = u8::MAX;
-
+/// Collect all explicit readiness levels from modules recursively.
+fn collect_explicit_readiness(modules: &HashMap<String, Module>, levels: &mut Vec<u8>) {
     for module in modules.values() {
         if module.is_explicit {
-            min = min.min(module.readiness);
+            levels.push(module.readiness);
         }
-
-        let submodule_min = compute_min_module_readiness(&module.submodules);
-        if submodule_min < u8::MAX {
-            min = min.min(submodule_min);
-        }
+        collect_explicit_readiness(&module.submodules, levels);
     }
+}
 
-    min
+/// Compute the minimum readiness level across all modules.
+/// Returns 0 if no modules have explicit readiness annotations.
+fn compute_min_module_readiness(modules: &HashMap<String, Module>) -> u8 {
+    let mut levels = Vec::new();
+    collect_explicit_readiness(modules, &mut levels);
+    levels.into_iter().min().unwrap_or(0)
 }
 
 /// Check modules against a dependency's readiness level.

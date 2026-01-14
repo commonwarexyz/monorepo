@@ -2,7 +2,7 @@
 
 use crate::parser::{Module, Workspace};
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::Path;
 use thiserror::Error;
@@ -46,14 +46,14 @@ pub struct ModuleOutput {
 #[derive(Debug, Serialize)]
 pub struct Summary {
     pub total_modules: usize,
-    pub by_level: HashMap<u8, usize>,
+    pub by_level: BTreeMap<u8, usize>,
 }
 
 /// Generate readiness.json output.
 pub fn generate(workspace: &Workspace, output_path: &Path) -> Result<(), OutputError> {
     let mut crates = Vec::new();
     let mut total_modules = 0;
-    let mut by_level: HashMap<u8, usize> = HashMap::new();
+    let mut by_level: BTreeMap<u8, usize> = BTreeMap::new();
 
     // Sort crates by name for consistent output
     let mut crate_names: Vec<_> = workspace.crates.keys().collect();
@@ -98,10 +98,10 @@ pub fn generate(workspace: &Workspace, output_path: &Path) -> Result<(), OutputE
 fn collect_modules(
     modules: &HashMap<String, Module>,
     inherited_readiness: u8,
-) -> (Vec<ModuleOutput>, usize, HashMap<u8, usize>) {
+) -> (Vec<ModuleOutput>, usize, BTreeMap<u8, usize>) {
     let mut output = Vec::new();
     let mut count = 0;
-    let mut by_level = HashMap::new();
+    let mut by_level = BTreeMap::new();
 
     // Sort modules by name for consistent output
     let mut mod_names: Vec<_> = modules.keys().collect();
