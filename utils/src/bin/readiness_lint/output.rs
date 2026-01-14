@@ -17,7 +17,7 @@ pub enum OutputError {
     Json(#[from] serde_json::Error),
 }
 
-/// Output format for readiness.json - explorer style.
+/// Output format for readiness.json - hierarchical explorer style.
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
 pub struct ReadinessOutput {
     pub version: String,
@@ -27,13 +27,21 @@ pub struct ReadinessOutput {
     pub summary: Summary,
 }
 
-/// Output for a single crate - grouped by readiness level.
+/// Output for a single crate with hierarchical entries.
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
 pub struct CrateOutput {
     pub name: String,
-    /// Entries grouped by readiness level.
-    /// Each entry is either a module name or "{Item1, Item2, ...}" for grouped items.
-    pub readiness: BTreeMap<u8, Vec<String>>,
+    pub entries: Vec<Entry>,
+}
+
+/// An entry in the hierarchy - either a module, items, or a grouping node.
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
+pub struct Entry {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub readiness: Option<u8>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub children: Vec<Entry>,
 }
 
 /// Summary statistics.
@@ -83,8 +91,8 @@ fn build_output(workspace: &Workspace) -> ReadinessOutput {
     for crate_name in crate_names {
         let krate = &workspace.crates[crate_name];
 
-        // Collect entries by readiness level
-        let mut by_level: BTreeMap<u8, Vec<String>> = BTreeMap::new();
+        // Collect flat entries first
+        let mut flat_entries: Vec<(String, u8)> = Vec::new();
 
         // Add root items (from lib.rs) with explicit #[ready(N)]
         let mut items_at_level: BTreeMap<u8, Vec<String>> = BTreeMap::new();
@@ -95,39 +103,37 @@ fn build_output(workspace: &Workspace) -> ReadinessOutput {
                 .push(item_name.clone());
         }
 
-        // Format items as "{Item1, Item2, ...}" and add to by_level
+        // Format items as "{Item1, Item2, ...}"
         for (level, mut items) in items_at_level {
             items.sort();
             total_items += items.len();
             *items_by_level.entry(level).or_insert(0) += items.len();
             let formatted = format_items(&items);
-            by_level.entry(level).or_default().push(formatted);
+            flat_entries.push((formatted, level));
         }
 
         // Collect all modules
         collect_modules(
             &krate.modules,
-            &mut by_level,
+            &mut flat_entries,
             &mut total_modules,
             &mut modules_by_level,
             &mut total_items,
             &mut items_by_level,
-            false, // no explicit parent at root
+            false,
         );
 
         // Skip crates with nothing to show
-        if by_level.is_empty() {
+        if flat_entries.is_empty() {
             continue;
         }
 
-        // Sort entries within each level
-        for entries in by_level.values_mut() {
-            entries.sort();
-        }
+        // Build hierarchical tree from flat entries
+        let entries = build_tree(&mut flat_entries);
 
         crates.push(CrateOutput {
             name: crate_name.clone(),
-            readiness: by_level,
+            entries,
         });
     }
 
@@ -144,11 +150,82 @@ fn build_output(workspace: &Workspace) -> ReadinessOutput {
     }
 }
 
+/// Build a hierarchical tree from flat path entries.
+fn build_tree(entries: &mut [(String, u8)]) -> Vec<Entry> {
+    // Sort entries by path for consistent output
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+
+    // Group by first path segment
+    let mut groups: BTreeMap<String, Vec<(String, u8)>> = BTreeMap::new();
+    let mut direct: Vec<(String, u8)> = Vec::new();
+
+    for (path, readiness) in entries.iter() {
+        // Items like "{Foo, Bar}" go directly at root
+        if path.starts_with('{') {
+            direct.push((path.clone(), *readiness));
+            continue;
+        }
+
+        // Split on :: to get first segment
+        if let Some(pos) = path.find("::") {
+            let first = &path[..pos];
+            let rest = &path[pos + 2..];
+            groups
+                .entry(first.to_string())
+                .or_default()
+                .push((rest.to_string(), *readiness));
+        } else {
+            // No :: means it's a direct child
+            direct.push((path.clone(), *readiness));
+        }
+    }
+
+    let mut result = Vec::new();
+
+    // Add grouped entries (with children)
+    for (name, mut children) in groups {
+        if children.len() == 1 && !children[0].0.contains("::") && !children[0].0.starts_with('{') {
+            // Single child without further nesting - flatten to "parent::child"
+            let (child_name, readiness) = &children[0];
+            result.push(Entry {
+                name: format!("{name}::{child_name}"),
+                readiness: Some(*readiness),
+                children: Vec::new(),
+            });
+        } else {
+            // Multiple children or nested - create group
+            let child_entries = build_tree(&mut children);
+            result.push(Entry {
+                name,
+                readiness: None,
+                children: child_entries,
+            });
+        }
+    }
+
+    // Add direct entries
+    for (name, readiness) in direct {
+        result.push(Entry {
+            name,
+            readiness: Some(readiness),
+            children: Vec::new(),
+        });
+    }
+
+    // Sort: groups first (no readiness), then by name
+    result.sort_by(|a, b| match (a.readiness, b.readiness) {
+        (None, Some(_)) => std::cmp::Ordering::Less,
+        (Some(_), None) => std::cmp::Ordering::Greater,
+        _ => a.name.cmp(&b.name),
+    });
+
+    result
+}
+
 /// Recursively collect modules and their readiness levels.
-/// `parent_explicit` indicates if an ancestor has explicit readiness (children inherit).
 fn collect_modules(
     modules: &HashMap<String, Module>,
-    by_level: &mut BTreeMap<u8, Vec<String>>,
+    entries: &mut Vec<(String, u8)>,
     total_modules: &mut usize,
     modules_by_level: &mut BTreeMap<u8, usize>,
     total_items: &mut usize,
@@ -157,40 +234,31 @@ fn collect_modules(
 ) {
     for module in modules.values() {
         if module.is_explicit {
-            // Module has explicit readiness!(N) - show it at that level
             *total_modules += 1;
             *modules_by_level.entry(module.readiness).or_insert(0) += 1;
-            by_level
-                .entry(module.readiness)
-                .or_default()
-                .push(module.path.clone());
+            entries.push((module.path.clone(), module.readiness));
 
-            // Recurse but mark that parent is explicit - children only shown if they differ
             collect_modules(
                 &module.submodules,
-                by_level,
+                entries,
                 total_modules,
                 modules_by_level,
                 total_items,
                 items_by_level,
-                true, // parent is explicit
+                true,
             );
         } else if parent_explicit {
-            // Parent has explicit readiness, this module inherits - don't show it
-            // But still recurse in case a deeper child has different explicit readiness
             collect_modules(
                 &module.submodules,
-                by_level,
+                entries,
                 total_modules,
                 modules_by_level,
                 total_items,
                 items_by_level,
-                true, // still under explicit parent
+                true,
             );
         } else {
-            // No explicit readiness and no explicit parent
             if !module.items.is_empty() {
-                // Module has items with #[ready(N)] - show those items
                 let mut items_at_level: BTreeMap<u8, Vec<String>> = BTreeMap::new();
                 for (item_name, &readiness) in &module.items {
                     items_at_level
@@ -204,24 +272,22 @@ fn collect_modules(
                     *total_items += items.len();
                     *items_by_level.entry(level).or_insert(0) += items.len();
                     let formatted = format_items_with_module(&module.path, &items);
-                    by_level.entry(level).or_default().push(formatted);
+                    entries.push((formatted, level));
                 }
             } else if module.submodules.is_empty() {
-                // Leaf module with no explicit readiness and no annotated items - show at level 0
                 *total_modules += 1;
                 *modules_by_level.entry(0).or_insert(0) += 1;
-                by_level.entry(0).or_default().push(module.path.clone());
+                entries.push((module.path.clone(), 0));
             }
 
-            // Recurse into submodules
             collect_modules(
                 &module.submodules,
-                by_level,
+                entries,
                 total_modules,
                 modules_by_level,
                 total_items,
                 items_by_level,
-                false, // no explicit parent
+                false,
             );
         }
     }

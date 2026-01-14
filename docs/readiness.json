@@ -1,263 +1,729 @@
 {
   "version": "0.0.65",
-  "generated": "2026-01-14T23:18:42.838099+00:00",
+  "generated": "2026-01-14T23:28:56.854409+00:00",
   "crates": [
     {
       "name": "commonware-broadcast",
-      "readiness": {
-        "2": [
-          "buffered",
-          "{Broadcaster}"
-        ]
-      }
+      "entries": [
+        {
+          "name": "buffered",
+          "readiness": 2
+        },
+        {
+          "name": "{Broadcaster}",
+          "readiness": 2
+        }
+      ]
     },
     {
       "name": "commonware-codec",
-      "readiness": {
-        "0": [
-          "codec",
-          "extensions",
-          "types::btree_map",
-          "types::btree_set",
-          "types::bytes",
-          "types::hash_map",
-          "types::hash_set",
-          "types::net",
-          "types::primitives",
-          "types::tuple",
-          "types::vec"
-        ],
-        "2": [
-          "error::{Error}",
-          "util",
-          "varint"
-        ]
-      }
+      "entries": [
+        {
+          "name": "error",
+          "children": [
+            {
+              "name": "{Error}",
+              "readiness": 2
+            }
+          ]
+        },
+        {
+          "name": "types",
+          "children": [
+            {
+              "name": "btree_map",
+              "readiness": 0
+            },
+            {
+              "name": "btree_set",
+              "readiness": 0
+            },
+            {
+              "name": "bytes",
+              "readiness": 0
+            },
+            {
+              "name": "hash_map",
+              "readiness": 0
+            },
+            {
+              "name": "hash_set",
+              "readiness": 0
+            },
+            {
+              "name": "net",
+              "readiness": 0
+            },
+            {
+              "name": "primitives",
+              "readiness": 0
+            },
+            {
+              "name": "tuple",
+              "readiness": 0
+            },
+            {
+              "name": "vec",
+              "readiness": 0
+            }
+          ]
+        },
+        {
+          "name": "codec",
+          "readiness": 0
+        },
+        {
+          "name": "extensions",
+          "readiness": 0
+        },
+        {
+          "name": "util",
+          "readiness": 2
+        },
+        {
+          "name": "varint",
+          "readiness": 2
+        }
+      ]
     },
     {
       "name": "commonware-coding",
-      "readiness": {
-        "0": [
-          "reed_solomon",
-          "zoda"
-        ]
-      }
+      "entries": [
+        {
+          "name": "reed_solomon",
+          "readiness": 0
+        },
+        {
+          "name": "zoda",
+          "readiness": 0
+        }
+      ]
     },
     {
       "name": "commonware-collector",
-      "readiness": {
-        "0": [
-          "p2p::engine",
-          "p2p::ingress"
-        ]
-      }
+      "entries": [
+        {
+          "name": "p2p",
+          "children": [
+            {
+              "name": "engine",
+              "readiness": 0
+            },
+            {
+              "name": "ingress",
+              "readiness": 0
+            }
+          ]
+        }
+      ]
     },
     {
       "name": "commonware-consensus",
-      "readiness": {
-        "0": [
-          "aggregation::scheme",
-          "aggregation::types",
-          "application::marshaled",
-          "ordered_broadcast::scheme",
-          "ordered_broadcast::types",
-          "types"
-        ],
-        "2": [
-          "marshal",
-          "simplex"
-        ]
-      }
+      "entries": [
+        {
+          "name": "aggregation",
+          "children": [
+            {
+              "name": "scheme",
+              "readiness": 0
+            },
+            {
+              "name": "types",
+              "readiness": 0
+            }
+          ]
+        },
+        {
+          "name": "ordered_broadcast",
+          "children": [
+            {
+              "name": "scheme",
+              "readiness": 0
+            },
+            {
+              "name": "types",
+              "readiness": 0
+            }
+          ]
+        },
+        {
+          "name": "application::marshaled",
+          "readiness": 0
+        },
+        {
+          "name": "marshal",
+          "readiness": 2
+        },
+        {
+          "name": "simplex",
+          "readiness": 2
+        },
+        {
+          "name": "types",
+          "readiness": 0
+        }
+      ]
     },
     {
       "name": "commonware-cryptography",
-      "readiness": {
-        "0": [
-          "blake3",
-          "bloomfilter",
-          "handshake",
-          "lthash",
-          "secp256r1::certificate",
-          "secp256r1::recoverable",
-          "secp256r1::standard",
-          "secret",
-          "transcript"
-        ],
-        "1": [
-          "bls12381::tle"
-        ],
-        "2": [
-          "bls12381",
-          "certificate",
-          "crc32",
-          "ed25519",
-          "sha256",
-          "{BatchVerifier, Committable, Digest, DigestOf, Digestible, Hasher, PrivateKey, PublicKey, Recoverable, Signature, Signer, Verifier}"
-        ]
-      }
+      "entries": [
+        {
+          "name": "secp256r1",
+          "children": [
+            {
+              "name": "certificate",
+              "readiness": 0
+            },
+            {
+              "name": "recoverable",
+              "readiness": 0
+            },
+            {
+              "name": "standard",
+              "readiness": 0
+            }
+          ]
+        },
+        {
+          "name": "blake3",
+          "readiness": 0
+        },
+        {
+          "name": "bloomfilter",
+          "readiness": 0
+        },
+        {
+          "name": "bls12381",
+          "readiness": 2
+        },
+        {
+          "name": "bls12381::tle",
+          "readiness": 1
+        },
+        {
+          "name": "certificate",
+          "readiness": 2
+        },
+        {
+          "name": "crc32",
+          "readiness": 2
+        },
+        {
+          "name": "ed25519",
+          "readiness": 2
+        },
+        {
+          "name": "handshake",
+          "readiness": 0
+        },
+        {
+          "name": "lthash",
+          "readiness": 0
+        },
+        {
+          "name": "secret",
+          "readiness": 0
+        },
+        {
+          "name": "sha256",
+          "readiness": 2
+        },
+        {
+          "name": "transcript",
+          "readiness": 0
+        },
+        {
+          "name": "{BatchVerifier, Committable, Digest, DigestOf, Digestible, Hasher, PrivateKey, PublicKey, Recoverable, Signature, Signer, Verifier}",
+          "readiness": 2
+        }
+      ]
     },
     {
       "name": "commonware-deployer",
-      "readiness": {
-        "0": [
-          "ec2::aws",
-          "ec2::s3",
-          "ec2::services",
-          "ec2::utils"
-        ]
-      }
+      "entries": [
+        {
+          "name": "ec2",
+          "children": [
+            {
+              "name": "aws",
+              "readiness": 0
+            },
+            {
+              "name": "s3",
+              "readiness": 0
+            },
+            {
+              "name": "services",
+              "readiness": 0
+            },
+            {
+              "name": "utils",
+              "readiness": 0
+            }
+          ]
+        }
+      ]
     },
     {
       "name": "commonware-math",
-      "readiness": {
-        "0": [
-          "fields",
-          "ntt"
-        ],
-        "2": [
-          "algebra",
-          "poly"
-        ]
-      }
+      "entries": [
+        {
+          "name": "algebra",
+          "readiness": 2
+        },
+        {
+          "name": "fields",
+          "readiness": 0
+        },
+        {
+          "name": "ntt",
+          "readiness": 0
+        },
+        {
+          "name": "poly",
+          "readiness": 2
+        }
+      ]
     },
     {
       "name": "commonware-p2p",
-      "readiness": {
-        "0": [
-          "authenticated::mailbox",
-          "simulated::ingress",
-          "simulated::network",
-          "types"
-        ],
-        "2": [
-          "authenticated::discovery",
-          "authenticated::lookup",
-          "core",
-          "utils"
-        ]
-      }
+      "entries": [
+        {
+          "name": "authenticated",
+          "children": [
+            {
+              "name": "discovery",
+              "readiness": 2
+            },
+            {
+              "name": "lookup",
+              "readiness": 2
+            },
+            {
+              "name": "mailbox",
+              "readiness": 0
+            }
+          ]
+        },
+        {
+          "name": "simulated",
+          "children": [
+            {
+              "name": "ingress",
+              "readiness": 0
+            },
+            {
+              "name": "network",
+              "readiness": 0
+            }
+          ]
+        },
+        {
+          "name": "core",
+          "readiness": 2
+        },
+        {
+          "name": "types",
+          "readiness": 0
+        },
+        {
+          "name": "utils",
+          "readiness": 2
+        }
+      ]
     },
     {
       "name": "commonware-parallel",
-      "readiness": {
-        "2": [
-          "{Sequential, Strategy}"
-        ]
-      }
+      "entries": [
+        {
+          "name": "{Sequential, Strategy}",
+          "readiness": 2
+        }
+      ]
     },
     {
       "name": "commonware-resolver",
-      "readiness": {
-        "2": [
-          "p2p",
-          "{Consumer, Resolver}"
-        ]
-      }
+      "entries": [
+        {
+          "name": "p2p",
+          "readiness": 2
+        },
+        {
+          "name": "{Consumer, Resolver}",
+          "readiness": 2
+        }
+      ]
     },
     {
       "name": "commonware-runtime",
-      "readiness": {
-        "0": [
-          "deterministic",
-          "tokio::runtime",
-          "tokio::telemetry",
-          "tokio::tracing"
-        ],
-        "2": [
-          "telemetry",
-          "utils",
-          "{Blob, Clock, Error, KeyedRateLimiter, Listener, ListenerOf, Metrics, Network, RateLimiter, RayonPoolSpawner, Resolver, Runner, Sink, SinkOf, Spawner, Storage, Stream, StreamOf}"
-        ]
-      }
+      "entries": [
+        {
+          "name": "tokio",
+          "children": [
+            {
+              "name": "runtime",
+              "readiness": 0
+            },
+            {
+              "name": "telemetry",
+              "readiness": 0
+            },
+            {
+              "name": "tracing",
+              "readiness": 0
+            }
+          ]
+        },
+        {
+          "name": "deterministic",
+          "readiness": 0
+        },
+        {
+          "name": "telemetry",
+          "readiness": 2
+        },
+        {
+          "name": "utils",
+          "readiness": 2
+        },
+        {
+          "name": "{Blob, Clock, Error, KeyedRateLimiter, Listener, ListenerOf, Metrics, Network, RateLimiter, RayonPoolSpawner, Resolver, Runner, Sink, SinkOf, Spawner, Storage, Stream, StreamOf}",
+          "readiness": 2
+        }
+      ]
     },
     {
       "name": "commonware-storage",
-      "readiness": {
-        "0": [
-          "bmt",
-          "cache::storage",
-          "freezer::storage",
-          "index::ordered",
-          "index::partitioned::ordered",
-          "index::partitioned::unordered",
-          "index::unordered",
-          "kv::batch",
-          "mmr::grafting",
-          "mmr::hasher",
-          "mmr::iterator",
-          "mmr::journaled",
-          "mmr::location",
-          "mmr::mem",
-          "mmr::position",
-          "mmr::proof",
-          "mmr::stability",
-          "mmr::storage",
-          "mmr::verification",
-          "ordinal::storage",
-          "qmdb::any::ordered::fixed",
-          "qmdb::any::ordered::variable",
-          "qmdb::any::states",
-          "qmdb::any::unordered::fixed::sync",
-          "qmdb::any::unordered::variable::sync",
-          "qmdb::current::ordered::fixed",
-          "qmdb::current::proof",
-          "qmdb::current::unordered::fixed",
-          "qmdb::immutable::operation",
-          "qmdb::immutable::sync",
-          "qmdb::keyless::operation",
-          "qmdb::operation",
-          "qmdb::store::batch",
-          "qmdb::store::db",
-          "qmdb::sync::engine",
-          "qmdb::sync::error",
-          "qmdb::sync::resolver",
-          "qmdb::sync::target",
-          "qmdb::verify",
-          "rmap"
-        ],
-        "2": [
-          "archive",
-          "journal",
-          "metadata",
-          "translator"
-        ]
-      }
+      "entries": [
+        {
+          "name": "index",
+          "children": [
+            {
+              "name": "partitioned",
+              "children": [
+                {
+                  "name": "ordered",
+                  "readiness": 0
+                },
+                {
+                  "name": "unordered",
+                  "readiness": 0
+                }
+              ]
+            },
+            {
+              "name": "ordered",
+              "readiness": 0
+            },
+            {
+              "name": "unordered",
+              "readiness": 0
+            }
+          ]
+        },
+        {
+          "name": "mmr",
+          "children": [
+            {
+              "name": "grafting",
+              "readiness": 0
+            },
+            {
+              "name": "hasher",
+              "readiness": 0
+            },
+            {
+              "name": "iterator",
+              "readiness": 0
+            },
+            {
+              "name": "journaled",
+              "readiness": 0
+            },
+            {
+              "name": "location",
+              "readiness": 0
+            },
+            {
+              "name": "mem",
+              "readiness": 0
+            },
+            {
+              "name": "position",
+              "readiness": 0
+            },
+            {
+              "name": "proof",
+              "readiness": 0
+            },
+            {
+              "name": "stability",
+              "readiness": 0
+            },
+            {
+              "name": "storage",
+              "readiness": 0
+            },
+            {
+              "name": "verification",
+              "readiness": 0
+            }
+          ]
+        },
+        {
+          "name": "qmdb",
+          "children": [
+            {
+              "name": "any",
+              "children": [
+                {
+                  "name": "ordered",
+                  "children": [
+                    {
+                      "name": "fixed",
+                      "readiness": 0
+                    },
+                    {
+                      "name": "variable",
+                      "readiness": 0
+                    }
+                  ]
+                },
+                {
+                  "name": "unordered",
+                  "children": [
+                    {
+                      "name": "fixed::sync",
+                      "readiness": 0
+                    },
+                    {
+                      "name": "variable::sync",
+                      "readiness": 0
+                    }
+                  ]
+                },
+                {
+                  "name": "states",
+                  "readiness": 0
+                }
+              ]
+            },
+            {
+              "name": "current",
+              "children": [
+                {
+                  "name": "ordered::fixed",
+                  "readiness": 0
+                },
+                {
+                  "name": "proof",
+                  "readiness": 0
+                },
+                {
+                  "name": "unordered::fixed",
+                  "readiness": 0
+                }
+              ]
+            },
+            {
+              "name": "immutable",
+              "children": [
+                {
+                  "name": "operation",
+                  "readiness": 0
+                },
+                {
+                  "name": "sync",
+                  "readiness": 0
+                }
+              ]
+            },
+            {
+              "name": "store",
+              "children": [
+                {
+                  "name": "batch",
+                  "readiness": 0
+                },
+                {
+                  "name": "db",
+                  "readiness": 0
+                }
+              ]
+            },
+            {
+              "name": "sync",
+              "children": [
+                {
+                  "name": "engine",
+                  "readiness": 0
+                },
+                {
+                  "name": "error",
+                  "readiness": 0
+                },
+                {
+                  "name": "resolver",
+                  "readiness": 0
+                },
+                {
+                  "name": "target",
+                  "readiness": 0
+                }
+              ]
+            },
+            {
+              "name": "keyless::operation",
+              "readiness": 0
+            },
+            {
+              "name": "operation",
+              "readiness": 0
+            },
+            {
+              "name": "verify",
+              "readiness": 0
+            }
+          ]
+        },
+        {
+          "name": "archive",
+          "readiness": 2
+        },
+        {
+          "name": "bmt",
+          "readiness": 0
+        },
+        {
+          "name": "cache::storage",
+          "readiness": 0
+        },
+        {
+          "name": "freezer::storage",
+          "readiness": 0
+        },
+        {
+          "name": "journal",
+          "readiness": 2
+        },
+        {
+          "name": "kv::batch",
+          "readiness": 0
+        },
+        {
+          "name": "metadata",
+          "readiness": 2
+        },
+        {
+          "name": "ordinal::storage",
+          "readiness": 0
+        },
+        {
+          "name": "rmap",
+          "readiness": 0
+        },
+        {
+          "name": "translator",
+          "readiness": 2
+        }
+      ]
     },
     {
       "name": "commonware-stream",
-      "readiness": {
-        "0": [
-          "utils::codec"
-        ],
-        "2": [
-          "{Config, Error, Receiver, Sender, dial, listen}"
-        ]
-      }
+      "entries": [
+        {
+          "name": "utils::codec",
+          "readiness": 0
+        },
+        {
+          "name": "{Config, Error, Receiver, Sender, dial, listen}",
+          "readiness": 2
+        }
+      ]
     },
     {
       "name": "commonware-utils",
-      "readiness": {
-        "0": [
-          "hex_literal",
-          "hostname",
-          "rational"
-        ],
-        "2": [
-          "acknowledgement",
-          "bitmap",
-          "channels",
-          "concurrency",
-          "faults::{Faults, N3f1, N5f1}",
-          "futures",
-          "net",
-          "ordered",
-          "priority_set::{PrioritySet}",
-          "sequence",
-          "stable_buf::{StableBuf}",
-          "time",
-          "vec"
-        ]
-      }
+      "entries": [
+        {
+          "name": "faults",
+          "children": [
+            {
+              "name": "{Faults, N3f1, N5f1}",
+              "readiness": 2
+            }
+          ]
+        },
+        {
+          "name": "priority_set",
+          "children": [
+            {
+              "name": "{PrioritySet}",
+              "readiness": 2
+            }
+          ]
+        },
+        {
+          "name": "stable_buf",
+          "children": [
+            {
+              "name": "{StableBuf}",
+              "readiness": 2
+            }
+          ]
+        },
+        {
+          "name": "acknowledgement",
+          "readiness": 2
+        },
+        {
+          "name": "bitmap",
+          "readiness": 2
+        },
+        {
+          "name": "channels",
+          "readiness": 2
+        },
+        {
+          "name": "concurrency",
+          "readiness": 2
+        },
+        {
+          "name": "futures",
+          "readiness": 2
+        },
+        {
+          "name": "hex_literal",
+          "readiness": 0
+        },
+        {
+          "name": "hostname",
+          "readiness": 0
+        },
+        {
+          "name": "net",
+          "readiness": 2
+        },
+        {
+          "name": "ordered",
+          "readiness": 2
+        },
+        {
+          "name": "rational",
+          "readiness": 0
+        },
+        {
+          "name": "sequence",
+          "readiness": 2
+        },
+        {
+          "name": "time",
+          "readiness": 2
+        },
+        {
+          "name": "vec",
+          "readiness": 2
+        }
+      ]
     }
   ],
   "summary": {
