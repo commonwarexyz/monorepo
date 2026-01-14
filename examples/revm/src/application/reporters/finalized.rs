@@ -11,7 +11,7 @@ use commonware_utils::acknowledgement::Acknowledgement as _;
 /// Helper function for `FinalizedReporter::report` that owns all its inputs.
 async fn finalized_report_inner<E>(state: LedgerService, spawner: E, update: Update<Block>)
 where
-    E: Spawner,
+    E: Spawner + Clone,
 {
     match update {
         Update::Tip(_, _) => {}
@@ -25,27 +25,32 @@ where
                     .await
                     .expect("missing parent snapshot");
                 let env = evm_env(block.height, block.prevrandao);
-                let exec = spawner.shared(true).spawn(|_| async move {
-                    execute_txs(parent_snapshot.db, env, &block.txs)
-                        .map(|(db, outcome)| (block, db, outcome))
+                let state_for_root = state.clone();
+                let exec_spawner = spawner.clone();
+                let exec = exec_spawner.shared(true).spawn(move |_| async move {
+                    let (db, outcome) = execute_txs(parent_snapshot.db, env, &block.txs)?;
+                    let state_root = state_for_root
+                        .preview_root(parent_digest, outcome.qmdb_changes.clone())
+                        .await?;
+                    Ok::<_, anyhow::Error>((block, db, outcome, state_root))
                 });
-                let (next_block, db, outcome) = exec
+                let (next_block, db, outcome, state_root) = exec
                     .await
                     .expect("execute task failed")
                     .expect("execute finalized block");
                 block = next_block;
-                let state_root = state
-                    .preview_root(parent_digest, outcome.qmdb_changes.clone())
-                    .await
-                    .expect("preview qmdb root");
                 assert_eq!(state_root, block.state_root, "state root mismatch");
                 state
                     .insert_snapshot(digest, parent_digest, db, state_root, outcome.qmdb_changes)
                     .await;
             }
-            state
-                .persist_snapshot(digest)
+            let persist_state = state.clone();
+            let persist = spawner
+                .shared(true)
+                .spawn(move |_| async move { persist_state.persist_snapshot(digest).await });
+            persist
                 .await
+                .expect("persist task failed")
                 .expect("persist finalized block");
             state.prune_mempool(&block.txs).await;
             // Marshal waits for the application to acknowledge processing before advancing the

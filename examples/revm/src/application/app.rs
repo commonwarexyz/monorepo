@@ -62,10 +62,15 @@ where
     let txs = state.build_txs(max_txs, &included).await;
 
     let env = evm_env(height, prevrandao);
-    let exec = spawner.shared(true).spawn(|_| async move {
-        execute_txs(parent_snapshot.db, env, &txs).map(|(db, outcome)| (txs, db, outcome))
+    let state_for_root = state.clone();
+    let exec = spawner.shared(true).spawn(move |_| async move {
+        let (db, outcome) = execute_txs(parent_snapshot.db, env, &txs)?;
+        let state_root = state_for_root
+            .preview_root(parent_digest, outcome.qmdb_changes.clone())
+            .await?;
+        Ok::<_, anyhow::Error>((txs, db, outcome, state_root))
     });
-    let (txs, db, outcome) = match exec.await {
+    let (txs, db, outcome, state_root) = match exec.await {
         Ok(Ok(result)) => result,
         _ => return None,
     };
@@ -77,10 +82,7 @@ where
         state_root: parent.state_root,
         txs,
     };
-    child.state_root = state
-        .preview_root(parent_digest, outcome.qmdb_changes.clone())
-        .await
-        .ok()?;
+    child.state_root = state_root;
 
     let digest = child.commitment();
     state
@@ -120,19 +122,17 @@ where
     };
 
     let env = evm_env(block.height, block.prevrandao);
-    let exec = spawner.shared(true).spawn(|_| async move {
-        execute_txs(parent_snapshot.db, env, &block.txs).map(|(db, outcome)| (block, db, outcome))
+    let state_for_root = state.clone();
+    let exec = spawner.shared(true).spawn(move |_| async move {
+        let (db, outcome) = execute_txs(parent_snapshot.db, env, &block.txs)?;
+        let state_root = state_for_root
+            .preview_root(parent_digest, outcome.qmdb_changes.clone())
+            .await?;
+        Ok::<_, anyhow::Error>((block, db, outcome, state_root))
     });
-    let (block, db, outcome) = match exec.await {
+    let (block, db, outcome, state_root) = match exec.await {
         Ok(Ok(result)) => result,
         _ => return false,
-    };
-    let state_root = match state
-        .preview_root(parent_digest, outcome.qmdb_changes.clone())
-        .await
-    {
-        Ok(root) => root,
-        Err(_) => return false,
     };
     if state_root != block.state_root {
         return false;
