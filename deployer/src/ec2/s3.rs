@@ -240,7 +240,7 @@ pub async fn cache_and_presign(
 }
 
 /// Computes the SHA256 hash of a file and returns it as a hex string
-pub fn hash_file(path: &Path) -> Result<String, Error> {
+fn hash_file_sync(path: &Path) -> Result<String, Error> {
     let mut file = std::fs::File::open(path)?;
     let file_size = file.metadata()?.len() as usize;
     let buffer_size = file_size.min(MAX_HASH_BUFFER_SIZE);
@@ -254,6 +254,14 @@ pub fn hash_file(path: &Path) -> Result<String, Error> {
         hasher.update(&buffer[..bytes_read]);
     }
     Ok(hasher.finalize().to_string())
+}
+
+/// Computes the SHA256 hash of a file asynchronously using a blocking thread pool
+pub async fn hash_file(path: &Path) -> Result<String, Error> {
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || hash_file_sync(&path))
+        .await
+        .map_err(|e| Error::HashFile(e.to_string()))?
 }
 
 /// Generates a pre-signed URL for downloading an object from S3

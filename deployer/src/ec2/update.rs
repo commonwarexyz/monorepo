@@ -58,18 +58,33 @@ pub async fn update(config_path: &PathBuf) -> Result<(), Error> {
     let s3_client = create_s3_client(Region::new(MONITORING_REGION)).await;
     info!("computing file digests");
 
-    // Compute digests and build deduplication maps
+    // Compute digests concurrently and build deduplication maps
+    let hash_results: Vec<(String, String, String)> = try_join_all(
+        config.instances.iter().map(|instance| {
+            let name = instance.name.clone();
+            let binary_path = instance.binary.clone();
+            let config_path = instance.config.clone();
+            async move {
+                let (binary_digest, config_digest) = tokio::try_join!(
+                    hash_file(std::path::Path::new(&binary_path)),
+                    hash_file(std::path::Path::new(&config_path)),
+                )?;
+                Ok::<_, Error>((name, binary_digest, config_digest))
+            }
+        }),
+    )
+    .await?;
+
     let mut binary_digests: BTreeMap<String, String> = BTreeMap::new();
     let mut config_digests: BTreeMap<String, String> = BTreeMap::new();
     let mut instance_binary_digest: HashMap<String, String> = HashMap::new();
     let mut instance_config_digest: HashMap<String, String> = HashMap::new();
-    for instance in &config.instances {
-        let binary_digest = hash_file(std::path::Path::new(&instance.binary))?;
-        let config_digest = hash_file(std::path::Path::new(&instance.config))?;
+    for (idx, (name, binary_digest, config_digest)) in hash_results.into_iter().enumerate() {
+        let instance = &config.instances[idx];
         binary_digests.insert(binary_digest.clone(), instance.binary.clone());
         config_digests.insert(config_digest.clone(), instance.config.clone());
-        instance_binary_digest.insert(instance.name.clone(), binary_digest);
-        instance_config_digest.insert(instance.name.clone(), config_digest);
+        instance_binary_digest.insert(name.clone(), binary_digest);
+        instance_config_digest.insert(name, config_digest);
     }
 
     // Upload unique binaries and configs (deduplicated by digest)

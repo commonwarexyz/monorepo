@@ -207,18 +207,33 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     }
     info!("observability tools uploaded");
 
-    // Compute digests for binaries and configs, grouping by digest for deduplication
+    // Compute digests concurrently for binaries and configs, grouping by digest for deduplication
+    let hash_results: Vec<(String, String, String)> = try_join_all(
+        config.instances.iter().map(|instance| {
+            let name = instance.name.clone();
+            let binary_path = instance.binary.clone();
+            let config_path = instance.config.clone();
+            async move {
+                let (binary_digest, config_digest) = tokio::try_join!(
+                    hash_file(std::path::Path::new(&binary_path)),
+                    hash_file(std::path::Path::new(&config_path)),
+                )?;
+                Ok::<_, Error>((name, binary_digest, config_digest))
+            }
+        }),
+    )
+    .await?;
+
     let mut binary_digests: BTreeMap<String, String> = BTreeMap::new(); // digest -> path
     let mut config_digests: BTreeMap<String, String> = BTreeMap::new(); // digest -> path
     let mut instance_binary_digest: HashMap<String, String> = HashMap::new(); // instance -> digest
     let mut instance_config_digest: HashMap<String, String> = HashMap::new(); // instance -> digest
-    for instance in &config.instances {
-        let binary_digest = hash_file(std::path::Path::new(&instance.binary))?;
-        let config_digest = hash_file(std::path::Path::new(&instance.config))?;
+    for (idx, (name, binary_digest, config_digest)) in hash_results.into_iter().enumerate() {
+        let instance = &config.instances[idx];
         binary_digests.insert(binary_digest.clone(), instance.binary.clone());
         config_digests.insert(config_digest.clone(), instance.config.clone());
-        instance_binary_digest.insert(instance.name.clone(), binary_digest);
-        instance_config_digest.insert(instance.name.clone(), config_digest);
+        instance_binary_digest.insert(name.clone(), binary_digest);
+        instance_config_digest.insert(name, config_digest);
     }
 
     // Upload unique binaries and configs to S3 (deduplicated by digest)
@@ -778,9 +793,11 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     let prom_config = generate_prometheus_config(&instances);
     let prom_path = tag_directory.join("prometheus.yml");
     std::fs::write(&prom_path, &prom_config)?;
-    let prom_digest = hash_file(&prom_path)?;
     let dashboard_path = std::path::PathBuf::from(&config.monitoring.dashboard);
-    let dashboard_digest = hash_file(&dashboard_path)?;
+    let (prom_digest, dashboard_digest) = tokio::try_join!(
+        hash_file(&prom_path),
+        hash_file(&dashboard_path),
+    )?;
     let [prometheus_config_url, dashboard_url]: [String; 2] = try_join_all([
         cache_and_presign(
             &s3_client,
@@ -816,7 +833,7 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     let hosts_yaml = serde_yaml::to_string(&hosts)?;
     let hosts_path = tag_directory.join("hosts.yaml");
     std::fs::write(&hosts_path, &hosts_yaml)?;
-    let hosts_digest = hash_file(&hosts_path)?;
+    let hosts_digest = hash_file(&hosts_path).await?;
     let hosts_url = cache_and_presign(
         &s3_client,
         S3_BUCKET_NAME,
@@ -826,11 +843,8 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     )
     .await?;
 
-    // Write per-instance config files locally, compute digests, and deduplicate
-    let mut promtail_digests: BTreeMap<String, std::path::PathBuf> = BTreeMap::new();
-    let mut pyroscope_digests: BTreeMap<String, std::path::PathBuf> = BTreeMap::new();
-    let mut instance_promtail_digest: HashMap<String, String> = HashMap::new();
-    let mut instance_pyroscope_digest: HashMap<String, String> = HashMap::new();
+    // Write per-instance config files locally
+    let mut instance_paths: Vec<(String, std::path::PathBuf, std::path::PathBuf)> = Vec::new();
     for deployment in &deployments {
         let instance = &deployment.instance;
         let ip = &deployment.ip;
@@ -845,7 +859,6 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
         );
         let promtail_path = tag_directory.join(format!("promtail_{}.yml", instance.name));
         std::fs::write(&promtail_path, &promtail_cfg)?;
-        let promtail_digest = hash_file(&promtail_path)?;
 
         let pyroscope_script = generate_pyroscope_script(
             &monitoring_private_ip,
@@ -856,12 +869,34 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
         );
         let pyroscope_path = tag_directory.join(format!("pyroscope-agent_{}.sh", instance.name));
         std::fs::write(&pyroscope_path, &pyroscope_script)?;
-        let pyroscope_digest = hash_file(&pyroscope_path)?;
 
+        instance_paths.push((instance.name.clone(), promtail_path, pyroscope_path));
+    }
+
+    // Compute digests concurrently and deduplicate
+    let config_hash_results: Vec<(String, String, String, std::path::PathBuf, std::path::PathBuf)> =
+        try_join_all(instance_paths.into_iter().map(
+            |(name, promtail_path, pyroscope_path)| async move {
+                let (promtail_digest, pyroscope_digest) = tokio::try_join!(
+                    hash_file(&promtail_path),
+                    hash_file(&pyroscope_path),
+                )?;
+                Ok::<_, Error>((name, promtail_digest, pyroscope_digest, promtail_path, pyroscope_path))
+            },
+        ))
+        .await?;
+
+    let mut promtail_digests: BTreeMap<String, std::path::PathBuf> = BTreeMap::new();
+    let mut pyroscope_digests: BTreeMap<String, std::path::PathBuf> = BTreeMap::new();
+    let mut instance_promtail_digest: HashMap<String, String> = HashMap::new();
+    let mut instance_pyroscope_digest: HashMap<String, String> = HashMap::new();
+    for (name, promtail_digest, pyroscope_digest, promtail_path, pyroscope_path) in
+        config_hash_results
+    {
         promtail_digests.insert(promtail_digest.clone(), promtail_path);
         pyroscope_digests.insert(pyroscope_digest.clone(), pyroscope_path);
-        instance_promtail_digest.insert(instance.name.clone(), promtail_digest);
-        instance_pyroscope_digest.insert(instance.name.clone(), pyroscope_digest);
+        instance_promtail_digest.insert(name.clone(), promtail_digest);
+        instance_pyroscope_digest.insert(name, pyroscope_digest);
     }
 
     // Upload unique promtail and pyroscope configs
