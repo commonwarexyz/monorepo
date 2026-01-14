@@ -592,7 +592,16 @@ where
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::{kv::Gettable as _, translator::TwoCap};
+    use crate::{
+        kv::{
+            tests::{
+                assert_batchable, assert_deletable, assert_gettable, assert_send, assert_updatable,
+            },
+            Gettable as _,
+        },
+        qmdb::store::tests::{assert_log_store, assert_prunable_store},
+        translator::TwoCap,
+    };
     use commonware_cryptography::{
         blake3::{Blake3, Digest},
         Hasher as _,
@@ -1173,29 +1182,31 @@ mod test {
         });
     }
 
-    fn assert_send<T: Send>(_: T) {}
+    #[allow(dead_code)]
+    fn assert_durable_futures_are_send(db: &mut TestStore, key: Digest, loc: Location) {
+        assert_log_store(db);
+        assert_prunable_store(db, loc);
+        assert_gettable(db, &key);
+        assert_send(db.sync());
+    }
 
-    #[test_traced]
-    fn test_futures_are_send() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let mut db = create_test_store(context.with_label("store")).await;
-            let key = Blake3::hash(&[1, 2, 3]);
-            let loc = Location::new_unchecked(0);
+    #[allow(dead_code)]
+    fn assert_dirty_futures_are_send(
+        db: &mut Db<deterministic::Context, Digest, Vec<u8>, TwoCap, NonDurable>,
+        key: Digest,
+        value: Vec<u8>,
+    ) {
+        assert_log_store(db);
+        assert_gettable(db, &key);
+        assert_updatable(db, key, value.clone());
+        assert_deletable(db, key);
+        assert_batchable(db, key, value);
+    }
 
-            assert_send(db.get(&key));
-            assert_send(db.get_metadata());
-            assert_send(db.sync());
-            assert_send(db.prune(loc));
-
-            let mut db = db.into_dirty();
-            assert_send(db.get(&key));
-            assert_send(db.get_metadata());
-            assert_send(db.update(key, vec![]));
-            assert_send(db.create(key, vec![]));
-            assert_send(db.upsert(key, |_| {}));
-            assert_send(db.delete(key));
-            assert_send(db.commit(None));
-        });
+    #[allow(dead_code)]
+    fn assert_dirty_commit_is_send(
+        db: Db<deterministic::Context, Digest, Vec<u8>, TwoCap, NonDurable>,
+    ) {
+        assert_send(db.commit(None));
     }
 }

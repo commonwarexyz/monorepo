@@ -124,3 +124,27 @@ pub trait MerkleizedStore: LogStore {
         max_ops: NonZeroU64,
     ) -> impl Future<Output = Result<(Proof<Self::Digest>, Vec<Self::Operation>), Error>> + Send;
 }
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::{LogStore, MerkleizedStore, PrunableStore};
+    use crate::mmr::Location;
+    use commonware_utils::NZU64;
+
+    pub fn assert_send<T: Send>(_: T) {}
+
+    #[allow(dead_code)]
+    pub fn assert_log_store<T: LogStore>(db: &T) {
+        assert_send(db.get_metadata());
+    }
+
+    #[allow(dead_code)]
+    pub fn assert_prunable_store<T: PrunableStore>(db: &mut T, loc: Location) {
+        assert_send(db.prune(loc));
+    }
+
+    #[allow(dead_code)]
+    pub fn assert_merkleized_store<T: MerkleizedStore>(db: &T, loc: Location) {
+        assert_send(db.proof(loc, NZU64!(1)));
+    }
+}

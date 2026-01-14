@@ -4,8 +4,7 @@ use super::{Deletable, Gettable, Updatable};
 use crate::qmdb::Error;
 use commonware_codec::CodecShared;
 use commonware_utils::Array;
-use core::future::Future;
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, future::Future};
 
 /// A batch of changes which may be written to an underlying store with [Batchable::write_batch].
 /// Writes and deletes to a batch are not applied to the store until the batch is written but
@@ -161,5 +160,32 @@ pub trait Batchable:
             }
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        kv::tests::{assert_deletable, assert_gettable, assert_send, assert_updatable},
+        qmdb::store::db::Db,
+        translator::TwoCap,
+    };
+    use commonware_cryptography::sha256::Digest;
+    use commonware_runtime::deterministic::Context;
+
+    type TestStore = Db<Context, Digest, Vec<u8>, TwoCap>;
+    type TestBatch<'a> = Batch<'a, Digest, Vec<u8>, TestStore>;
+
+    #[allow(dead_code)]
+    fn assert_batch_futures_are_send(batch: &mut TestBatch<'_>, key: Digest) {
+        assert_gettable(batch, &key);
+        assert_updatable(batch, key, vec![]);
+        assert_deletable(batch, key);
+    }
+
+    #[allow(dead_code)]
+    fn assert_batch_delete_unchecked_is_send(batch: &mut TestBatch<'_>, key: Digest) {
+        assert_send(batch.delete_unchecked(key));
     }
 }

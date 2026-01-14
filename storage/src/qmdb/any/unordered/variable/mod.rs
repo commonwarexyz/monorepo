@@ -92,7 +92,17 @@ impl<E: Storage + Clock + Metrics, K: Array, V: VariableValue, H: Hasher, T: Tra
 pub(super) mod test {
     use super::*;
     use crate::{
-        index::Unordered as _, kv::Batchable, qmdb::store::batch_tests, translator::TwoCap,
+        index::Unordered as _,
+        kv::tests::{assert_batchable, assert_deletable, assert_gettable, assert_send},
+        mmr::Location,
+        qmdb::{
+            store::{
+                batch_tests,
+                tests::{assert_log_store, assert_merkleized_store, assert_prunable_store},
+            },
+            NonDurable, Unmerkleized,
+        },
+        translator::TwoCap,
     };
     use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
     use commonware_macros::test_traced;
@@ -434,8 +444,6 @@ pub(super) mod test {
         }
     }
 
-    fn assert_send<T: Send>(_: T) {}
-
     /// Regression test for https://github.com/commonwarexyz/monorepo/issues/2787
     #[allow(dead_code, clippy::manual_async_fn)]
     fn issue_2787_regression(
@@ -453,31 +461,31 @@ pub(super) mod test {
         }
     }
 
-    #[test_traced]
-    fn test_futures_are_send() {
-        use crate::mmr::Location;
+    type MutableDb =
+        Db<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap, Unmerkleized, NonDurable>;
 
-        let runner = deterministic::Runner::default();
-        runner.start(|context| async move {
-            let mut db = open_db(context.clone()).await;
-            let key = Sha256::hash(&9u64.to_be_bytes());
-            let loc = Location::new_unchecked(0);
+    #[allow(dead_code)]
+    fn assert_merkleized_db_futures_are_send(db: &mut AnyTest, key: Digest, loc: Location) {
+        assert_gettable(db, &key);
+        assert_log_store(db);
+        assert_prunable_store(db, loc);
+        assert_merkleized_store(db, loc);
+        assert_send(db.sync());
+    }
 
-            assert_send(db.get(&key));
-            assert_send(db.get_metadata());
-            assert_send(db.sync());
-            assert_send(db.prune(loc));
-            assert_send(db.proof(loc, NZU64!(1)));
+    #[allow(dead_code)]
+    fn assert_mutable_db_futures_are_send(db: &mut MutableDb, key: Digest, value: Vec<u8>) {
+        assert_gettable(db, &key);
+        assert_log_store(db);
+        assert_send(db.update(key, value.clone()));
+        assert_send(db.create(key, value.clone()));
+        assert_deletable(db, key);
+        assert_batchable(db, key, value);
+        assert_send(db.get_with_loc(&key));
+    }
 
-            let mut db = db.into_mutable();
-            assert_send(db.get(&key));
-            assert_send(db.get_metadata());
-            assert_send(db.get_with_loc(&key));
-            assert_send(db.write_batch(vec![(key, Some(vec![1u8]))].into_iter()));
-            assert_send(db.update(key, vec![]));
-            assert_send(db.create(key, vec![]));
-            assert_send(db.delete(key));
-            assert_send(db.commit(None));
-        });
+    #[allow(dead_code)]
+    fn assert_mutable_db_commit_is_send(db: MutableDb) {
+        assert_send(db.commit(None));
     }
 }

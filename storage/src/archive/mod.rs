@@ -732,30 +732,58 @@ mod tests {
 
     fn assert_send<T: Send>(_: T) {}
 
-    #[test_traced]
-    fn test_archive_futures_are_send() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let mut archive = create_prunable(context.clone(), None).await;
-            let key = test_key("send_test");
+    #[allow(dead_code)]
+    fn assert_archive_futures_are_send<T: super::Archive>(
+        archive: &mut T,
+        key: T::Key,
+        value: T::Value,
+    ) where
+        T::Key: Clone,
+        T::Value: Clone,
+    {
+        assert_send(archive.put(1, key.clone(), value.clone()));
+        assert_send(archive.put_sync(2, key.clone(), value));
+        assert_send(archive.get(Identifier::Index(1)));
+        assert_send(archive.get(Identifier::Key(&key)));
+        assert_send(archive.has(Identifier::Index(1)));
+        assert_send(archive.has(Identifier::Key(&key)));
+        assert_send(archive.sync());
+    }
 
-            assert_send(archive.put(1, key.clone(), 42));
-            assert_send(archive.put_sync(2, key.clone(), 43));
-            assert_send(archive.get(Identifier::Index(1)));
-            assert_send(archive.get(Identifier::Key(&key)));
-            assert_send(archive.has(Identifier::Index(1)));
-            assert_send(archive.has(Identifier::Key(&key)));
-            assert_send(archive.sync());
+    #[allow(dead_code)]
+    fn assert_archive_destroy_is_send<T: super::Archive>(archive: T) {
+        assert_send(archive.destroy());
+    }
 
-            let mut archive2 = create_immutable(context.clone(), None).await;
-            assert_send(archive2.put(1, key.clone(), 42));
-            assert_send(archive2.put_sync(2, key.clone(), 43));
-            assert_send(archive2.get(Identifier::Index(1)));
-            assert_send(archive2.get(Identifier::Key(&key)));
-            assert_send(archive2.has(Identifier::Index(1)));
-            assert_send(archive2.has(Identifier::Key(&key)));
-            assert_send(archive2.sync());
-            assert_send(archive2.destroy());
-        });
+    #[allow(dead_code)]
+    fn assert_prunable_archive_futures_are_send(
+        archive: &mut prunable::Archive<TwoCap, Context, FixedBytes<64>, i32>,
+        key: FixedBytes<64>,
+        value: i32,
+    ) {
+        assert_archive_futures_are_send(archive, key, value);
+    }
+
+    #[allow(dead_code)]
+    fn assert_prunable_archive_destroy_is_send(
+        archive: prunable::Archive<TwoCap, Context, FixedBytes<64>, i32>,
+    ) {
+        assert_archive_destroy_is_send(archive);
+    }
+
+    #[allow(dead_code)]
+    fn assert_immutable_archive_futures_are_send(
+        archive: &mut immutable::Archive<Context, FixedBytes<64>, i32>,
+        key: FixedBytes<64>,
+        value: i32,
+    ) {
+        assert_archive_futures_are_send(archive, key, value);
+    }
+
+    #[allow(dead_code)]
+    fn assert_immutable_archive_destroy_is_send(
+        archive: immutable::Archive<Context, FixedBytes<64>, i32>,
+    ) {
+        assert_archive_destroy_is_send(archive);
     }
 }

@@ -323,3 +323,22 @@ mod conformance {
         CodecConformance<Record<u64>>,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::kv::tests::{assert_gettable, assert_send};
+    use commonware_runtime::deterministic::Context;
+
+    type TestCache = Cache<Context, u64>;
+
+    #[allow(dead_code)]
+    fn assert_cache_futures_are_send(cache: &TestCache, key: &u64) {
+        assert_gettable(cache, key);
+    }
+
+    #[allow(dead_code)]
+    fn assert_cache_destroy_is_send(cache: TestCache) {
+        assert_send(cache.destroy());
+    }
+}

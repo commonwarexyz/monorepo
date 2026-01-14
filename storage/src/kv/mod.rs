@@ -77,53 +77,34 @@ pub trait Deletable: Updatable {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{Batchable as _, Updatable as _};
-    use crate::{qmdb::store::db::Db, translator::TwoCap};
-    use commonware_cryptography::{
-        blake3::{Blake3, Digest},
-        Hasher as _,
-    };
-    use commonware_macros::test_traced;
-    use commonware_runtime::{buffer::PoolRef, deterministic, Metrics, Runner};
-    use commonware_utils::{NZUsize, NZU16, NZU64};
-    use std::num::{NonZeroU16, NonZeroUsize};
+pub(crate) mod tests {
+    use super::{Batchable, Deletable, Gettable, Updatable};
 
-    const PAGE_SIZE: NonZeroU16 = NZU16!(77);
-    const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(9);
+    pub fn assert_send<T: Send>(_: T) {}
 
-    type TestStore = Db<deterministic::Context, Digest, Vec<u8>, TwoCap>;
-
-    async fn create_test_store(context: deterministic::Context) -> TestStore {
-        let cfg = crate::qmdb::store::db::Config {
-            log_partition: "kv_test_journal".to_string(),
-            log_write_buffer: NZUsize!(64 * 1024),
-            log_compression: None,
-            log_codec_config: ((0..=10000).into(), ()),
-            log_items_per_section: NZU64!(7),
-            translator: TwoCap,
-            buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
-        };
-        TestStore::init(context, cfg).await.unwrap()
+    #[allow(dead_code)]
+    pub fn assert_gettable<T: Gettable + Send>(db: &T, key: &T::Key) {
+        assert_send(db.get(key));
     }
 
-    fn assert_send<T: Send>(_: T) {}
+    #[allow(dead_code)]
+    pub fn assert_updatable<T: Updatable + Send>(db: &mut T, key: T::Key, value: T::Value)
+    where
+        T::Key: Clone,
+        T::Value: Default + Clone,
+    {
+        assert_send(db.update(key.clone(), value.clone()));
+        assert_send(db.create(key.clone(), value));
+        assert_send(db.upsert(key, |_| {}));
+    }
 
-    #[test_traced]
-    fn test_kv_futures_are_send() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let mut db = create_test_store(context.with_label("store"))
-                .await
-                .into_dirty();
-            let key = Blake3::hash(&[1, 2, 3]);
+    #[allow(dead_code)]
+    pub fn assert_deletable<T: Deletable + Send>(db: &mut T, key: T::Key) {
+        assert_send(db.delete(key));
+    }
 
-            assert_send(db.get(&key));
-            assert_send(db.update(key, vec![]));
-            assert_send(db.create(key, vec![]));
-            assert_send(db.upsert(key, |_| {}));
-            assert_send(db.delete(key));
-            assert_send(db.write_batch(vec![(key, Some(vec![1u8]))].into_iter()));
-        });
+    #[allow(dead_code)]
+    pub fn assert_batchable<T: Batchable + Send>(db: &mut T, key: T::Key, value: T::Value) {
+        assert_send(db.write_batch(vec![(key, Some(value))].into_iter()));
     }
 }
