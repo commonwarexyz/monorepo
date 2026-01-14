@@ -230,7 +230,7 @@ mod tests {
         sha256::Digest as Sha256Digest, Sha256,
     };
     use commonware_parallel::Sequential;
-    use commonware_utils::{quorum_from_slice, TryFromIterator};
+    use commonware_utils::{Faults, N3f1, TryFromIterator};
     use rand::{rngs::StdRng, SeedableRng};
 
     type ThresholdScheme =
@@ -321,7 +321,7 @@ mod tests {
         } = bls12381_threshold::fixture::<MinPk, _>(&mut rng, b"test", 6);
         let participants = Set::try_from_iter(participants).unwrap();
         let elector: RandomElector<ThresholdScheme> = Random.build(&participants);
-        let quorum = quorum_from_slice(&schemes) as usize;
+        let quorum = N3f1::quorum_from_slice(&schemes) as usize;
 
         // Create certificate for round (1, 2)
         let round1 = Round::new(Epoch::new(1), View::new(2));
@@ -333,7 +333,9 @@ mod tests {
                     .unwrap()
             })
             .collect();
-        let cert1 = schemes[0].assemble(attestations1, &Sequential).unwrap();
+        let cert1 = schemes[0]
+            .assemble::<_, N3f1>(attestations1, &Sequential)
+            .unwrap();
 
         // Create certificate for round (1, 3) (different round -> different seed signature)
         let round2 = Round::new(Epoch::new(1), View::new(3));
@@ -345,7 +347,9 @@ mod tests {
                     .unwrap()
             })
             .collect();
-        let cert2 = schemes[0].assemble(attestations2, &Sequential).unwrap();
+        let cert2 = schemes[0]
+            .assemble::<_, N3f1>(attestations2, &Sequential)
+            .unwrap();
 
         // Same certificate always gives same leader
         let leader1a = elector.elect(round1, Some(&cert1));

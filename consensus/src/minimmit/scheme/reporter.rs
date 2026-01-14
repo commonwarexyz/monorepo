@@ -127,6 +127,7 @@ mod tests {
         Hasher, Sha256,
     };
     use commonware_parallel::Sequential;
+    use commonware_utils::N3f1;
     use futures::executor::block_on;
     use rand::{rngs::StdRng, SeedableRng};
     use std::sync::{Arc, Mutex};
@@ -290,7 +291,7 @@ mod tests {
             .collect();
 
         let certificate = schemes[0]
-            .assemble(votes, &Sequential)
+            .assemble::<_, N3f1>(votes, &Sequential)
             .expect("failed to assemble certificate");
 
         let notarization = Notarization {
@@ -376,7 +377,7 @@ mod tests {
             })
             .collect();
         let certificate = schemes[0]
-            .assemble(votes, &Sequential)
+            .assemble::<_, N3f1>(votes, &Sequential)
             .expect("assemble failed");
         let notarization_activity: Activity<ed25519::Scheme, Sha256Digest> =
             Activity::Notarization(Notarization {

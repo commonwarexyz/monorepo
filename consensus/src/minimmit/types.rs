@@ -12,6 +12,7 @@ use commonware_cryptography::{
     Digest, PublicKey,
 };
 use commonware_parallel::Strategy;
+use commonware_utils::N3f1;
 use rand_core::CryptoRngCore;
 use std::{collections::HashMap, fmt::Debug, hash::Hash};
 
@@ -858,7 +859,7 @@ impl<S: Scheme, D: Digest> Notarization<S, D> {
         strategy: &impl commonware_parallel::Strategy,
     ) -> Option<Self> {
         // Filter to only include votes for the specified proposal
-        let certificate = scheme.assemble(
+        let certificate = scheme.assemble::<_, N3f1>(
             notarizes
                 .into_iter()
                 .filter(|n| n.proposal == proposal)
@@ -898,7 +899,7 @@ impl<S: Scheme, D: Digest> Notarization<S, D> {
     where
         S: scheme::Scheme<D>,
     {
-        scheme.verify_certificate::<_, D>(
+        scheme.verify_certificate::<_, D, N3f1>(
             rng,
             Subject::Notarize {
                 proposal: &self.proposal,
@@ -1116,7 +1117,8 @@ impl<S: Scheme> Nullification<S> {
     ) -> Option<Self> {
         let mut iter = nullifies.into_iter().peekable();
         let round = iter.peek()?.round;
-        let certificate = scheme.assemble(iter.map(|n| n.attestation.clone()), strategy)?;
+        let certificate =
+            scheme.assemble::<_, N3f1>(iter.map(|n| n.attestation.clone()), strategy)?;
 
         Some(Self { round, certificate })
     }
@@ -1133,7 +1135,7 @@ impl<S: Scheme> Nullification<S> {
     where
         S: scheme::Scheme<D>,
     {
-        scheme.verify_certificate::<_, D>(
+        scheme.verify_certificate::<_, D, N3f1>(
             rng,
             Subject::Nullify { round: self.round },
             &self.certificate,
