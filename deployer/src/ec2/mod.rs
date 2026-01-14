@@ -136,6 +136,14 @@
 //! 1. Deletes the shared S3 bucket and all its contents (cached tools and any remaining deployment data).
 //! 2. Use this to fully clean up when you no longer need the deployer cache.
 //!
+//! ## `ec2 profile`
+//!
+//! 1. Loads the deployment configuration and locates the specified instance.
+//! 2. Caches the samply binary in S3 if not already present.
+//! 3. SSHes to the instance, downloads samply, and records a CPU profile of the running binary for the specified duration.
+//! 4. Downloads the profile locally via SCP.
+//! 5. Starts a temporary local HTTP server and opens Firefox Profiler with the profile URL.
+//!
 //! # Persistence
 //!
 //! * A directory `$HOME/.commonware_deployer/{tag}` stores the SSH private key and status files (`created`, `destroyed`).
