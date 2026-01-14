@@ -22,6 +22,8 @@
     html_favicon_url = "https://commonware.xyz/favicon.ico"
 )]
 
+commonware_macros::readiness!(2);
+
 use bytes::{Buf, BufMut};
 use commonware_macros::select;
 use commonware_parallel::{Rayon, ThreadPool};

@@ -5,6 +5,8 @@
     html_favicon_url = "https://commonware.xyz/favicon.ico"
 )]
 
+commonware_macros::readiness!(2);
+
 use commonware_codec::Codec;
 use futures::channel::oneshot;
 use std::future::Future;

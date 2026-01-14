@@ -60,6 +60,8 @@
     html_favicon_url = "https://commonware.xyz/favicon.ico"
 )]
 
+commonware_macros::readiness!(2);
+
 pub mod utils;
 
 use crate::utils::codec::{recv_frame, send_frame};

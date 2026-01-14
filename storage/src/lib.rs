@@ -11,6 +11,8 @@
 )]
 #![cfg_attr(not(feature = "std"), no_std)]
 
+commonware_macros::readiness!(2);
+
 extern crate alloc;
 pub mod mmr;
 

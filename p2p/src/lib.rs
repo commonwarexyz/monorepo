@@ -10,6 +10,8 @@
     html_favicon_url = "https://commonware.xyz/favicon.ico"
 )]
 
+commonware_macros::readiness!(2);
+
 use bytes::{Buf, Bytes};
 use commonware_cryptography::PublicKey;
 use commonware_utils::ordered::Set;

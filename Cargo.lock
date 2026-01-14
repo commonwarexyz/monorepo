@@ -1480,6 +1480,7 @@ name = "commonware-parallel"
 version = "0.0.65"
 dependencies = [
  "cfg-if",
+ "commonware-macros",
  "proptest",
  "rayon",
 ]

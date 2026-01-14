@@ -5,6 +5,8 @@
     html_favicon_url = "https://commonware.xyz/favicon.ico"
 )]
 
+commonware_macros::readiness!(2);
+
 use commonware_cryptography::PublicKey;
 use commonware_utils::{vec::NonEmptyVec, Span};
 use std::future::Future;

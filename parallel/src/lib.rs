@@ -54,6 +54,8 @@
 
 #![cfg_attr(not(any(test, feature = "std")), no_std)]
 
+commonware_macros::readiness!(2);
+
 use cfg_if::cfg_if;
 use core::fmt;
 
