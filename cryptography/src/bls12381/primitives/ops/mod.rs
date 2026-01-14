@@ -72,7 +72,7 @@ pub fn verify<V: Variant>(
     signature: &V::Signature,
 ) -> Result<(), Error> {
     let hm = hash::<V>(dst, message);
-    V::verify(public, &hm, signature)
+    V::verify(public, &hm, signature, true)
 }
 
 /// Signs the provided message with the private key.
@@ -125,7 +125,7 @@ pub fn verify_proof_of_possession<V: Variant>(
     signature: &V::Signature,
 ) -> Result<(), Error> {
     let hm = hash_with_namespace::<V>(V::PROOF_OF_POSSESSION, namespace, &public.encode());
-    V::verify(public, &hm, signature)
+    V::verify(public, &hm, signature, true)
 }
 
 #[cfg(test)]

@@ -6,6 +6,7 @@ use super::{
         Scalar, SmallScalar, DST, G1, G1_MESSAGE, G1_PROOF_OF_POSSESSION, G2, G2_MESSAGE,
         G2_PROOF_OF_POSSESSION, GT,
     },
+    ops::check::{check_g1_subgroup, check_g2_subgroup},
     Error,
 };
 #[cfg(not(feature = "std"))]
@@ -51,10 +52,15 @@ pub trait Variant: Clone + Send + Sync + Hash + Eq + Debug + 'static {
     const MESSAGE: DST;
 
     /// Verify the signature from the provided public key and pre-hashed message.
+    ///
+    /// If `check_subgroup` is true, verifies that `public` and `signature` are in
+    /// the correct subgroups before performing the pairing check. Set to false
+    /// when subgroup membership has already been verified (e.g., during bisection).
     fn verify(
         public: &Self::Public,
         hm: &Self::Signature,
         signature: &Self::Signature,
+        check_subgroup: bool,
     ) -> Result<(), Error>;
 
     /// Verify a batch of signatures from the provided public keys and pre-hashed messages.
@@ -96,13 +102,16 @@ impl Variant for MinPk {
         public: &Self::Public,
         hm: &Self::Signature,
         signature: &Self::Signature,
+        check_subgroup: bool,
     ) -> Result<(), Error> {
-        public
-            .ensure_in_subgroup()
-            .map_err(|_| Error::InvalidPublicKey)?;
-        signature
-            .ensure_in_subgroup()
-            .map_err(|_| Error::InvalidSignature)?;
+        if check_subgroup {
+            public
+                .ensure_in_subgroup()
+                .map_err(|_| Error::InvalidPublicKey)?;
+            signature
+                .ensure_in_subgroup()
+                .map_err(|_| Error::InvalidSignature)?;
+        }
         if !G2::multi_pairing_check(&[*hm], &[*public], signature, &-G1::generator()) {
             return Err(Error::InvalidSignature);
         }
@@ -150,7 +159,6 @@ impl Variant for MinPk {
         }
 
         // Check subgroup membership for all public keys and signatures (parallelized).
-        use super::ops::check::{check_g1_subgroup, check_g2_subgroup};
         if !check_g1_subgroup(publics, par).all_valid() {
             return Err(Error::InvalidPublicKey);
         }
@@ -194,7 +202,6 @@ impl Variant for MinPk {
         signatures: &[Self::Signature],
         strategy: &impl Strategy,
     ) -> (CheckResult, CheckResult) {
-        use super::ops::check::{check_g1_subgroup, check_g2_subgroup};
         strategy.join(
             || check_g1_subgroup(publics, strategy),
             || check_g2_subgroup(signatures, strategy),
@@ -225,13 +232,16 @@ impl Variant for MinSig {
         public: &Self::Public,
         hm: &Self::Signature,
         signature: &Self::Signature,
+        check_subgroup: bool,
     ) -> Result<(), Error> {
-        public
-            .ensure_in_subgroup()
-            .map_err(|_| Error::InvalidPublicKey)?;
-        signature
-            .ensure_in_subgroup()
-            .map_err(|_| Error::InvalidSignature)?;
+        if check_subgroup {
+            public
+                .ensure_in_subgroup()
+                .map_err(|_| Error::InvalidPublicKey)?;
+            signature
+                .ensure_in_subgroup()
+                .map_err(|_| Error::InvalidSignature)?;
+        }
         if !G1::multi_pairing_check(&[*hm], &[*public], signature, &-G2::generator()) {
             return Err(Error::InvalidSignature);
         }
@@ -279,7 +289,6 @@ impl Variant for MinSig {
         }
 
         // Check subgroup membership for all public keys and signatures (parallelized).
-        use super::ops::check::{check_g1_subgroup, check_g2_subgroup};
         if !check_g2_subgroup(publics, par).all_valid() {
             return Err(Error::InvalidPublicKey);
         }
@@ -323,7 +332,6 @@ impl Variant for MinSig {
         signatures: &[Self::Signature],
         strategy: &impl Strategy,
     ) -> (CheckResult, CheckResult) {
-        use super::ops::check::{check_g1_subgroup, check_g2_subgroup};
         strategy.join(
             || check_g2_subgroup(publics, strategy),
             || check_g1_subgroup(signatures, strategy),
@@ -455,11 +463,11 @@ mod tests {
 
         // Individual verification should fail for forged signatures
         assert!(
-            V::verify(&public1, &hm1, &forged_sig1).is_err(),
+            V::verify(&public1, &hm1, &forged_sig1, true).is_err(),
             "forged sig1 should be invalid individually"
         );
         assert!(
-            V::verify(&public2, &hm2, &forged_sig2).is_err(),
+            V::verify(&public2, &hm2, &forged_sig2, true).is_err(),
             "forged sig2 should be invalid individually"
         );
 
