@@ -20,6 +20,7 @@ cfg-if.workspace = true
 chrono = { workspace = true, optional = true }
 clap = { workspace = true, optional = true, features = ["derive"] }
 commonware-codec = { workspace = true, default-features = false }
+commonware-macros.workspace = true
 futures = { workspace = true, optional = true }
 hashbrown.workspace = true
 num-bigint = { workspace = true, optional = true }
@@ -43,7 +44,6 @@ features = ["js"]
 
 [dev-dependencies]
 commonware-conformance.workspace = true
-commonware-macros.workspace = true
 criterion.workspace = true
 num-bigint = { workspace = true, default-features = false }
 proptest.workspace = true

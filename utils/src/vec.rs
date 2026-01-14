@@ -1,5 +1,7 @@
 //! A vector type that guarantees at least one element.
 
+commonware_macros::readiness!(2);
+
 use crate::TryFromIterator;
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};

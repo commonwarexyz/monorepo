@@ -1,25 +1,25 @@
 {
   "version": "0.0.65",
-  "generated": "2026-01-14T20:03:09.785933+00:00",
+  "generated": "2026-01-14T20:18:53.145041+00:00",
   "crates": [
     {
       "name": "commonware-broadcast",
       "module_counts": {
-        "0": 1
+        "2": 1
       },
       "modules": [
         {
           "path": "buffered",
-          "readiness": 0,
-          "is_explicit": false
+          "readiness": 2,
+          "is_explicit": true
         }
       ]
     },
     {
       "name": "commonware-codec",
       "module_counts": {
-        "0": 14,
-        "2": 1
+        "0": 13,
+        "2": 2
       },
       "modules": [
         {
@@ -91,8 +91,8 @@
         },
         {
           "path": "util",
-          "readiness": 0,
-          "is_explicit": false
+          "readiness": 2,
+          "is_explicit": true
         },
         {
           "path": "varint",
@@ -117,7 +117,8 @@
     {
       "name": "commonware-consensus",
       "module_counts": {
-        "0": 27
+        "0": 9,
+        "2": 18
       },
       "modules": [
         {
@@ -151,51 +152,51 @@
         },
         {
           "path": "marshal",
-          "readiness": 0,
-          "is_explicit": false,
+          "readiness": 2,
+          "is_explicit": true,
           "submodules": [
             {
               "path": "marshal::actor",
-              "readiness": 0,
+              "readiness": 2,
               "is_explicit": false
             },
             {
               "path": "marshal::cache",
-              "readiness": 0,
+              "readiness": 2,
               "is_explicit": false
             },
             {
               "path": "marshal::ingress",
-              "readiness": 0,
+              "readiness": 2,
               "is_explicit": false,
               "submodules": [
                 {
                   "path": "marshal::ingress::handler",
-                  "readiness": 0,
+                  "readiness": 2,
                   "is_explicit": false
                 },
                 {
                   "path": "marshal::ingress::mailbox",
-                  "readiness": 0,
+                  "readiness": 2,
                   "is_explicit": false
                 }
               ]
             },
             {
               "path": "marshal::resolver",
-              "readiness": 0,
+              "readiness": 2,
               "is_explicit": false,
               "submodules": [
                 {
                   "path": "marshal::resolver::p2p",
-                  "readiness": 0,
+                  "readiness": 2,
                   "is_explicit": false
                 }
               ]
             },
             {
               "path": "marshal::store",
-              "readiness": 0,
+              "readiness": 2,
               "is_explicit": false
             }
           ]
@@ -219,49 +220,49 @@
         },
         {
           "path": "simplex",
-          "readiness": 0,
-          "is_explicit": false,
+          "readiness": 2,
+          "is_explicit": true,
           "submodules": [
             {
               "path": "simplex::elector",
-              "readiness": 0,
+              "readiness": 2,
               "is_explicit": false
             },
             {
               "path": "simplex::scheme",
-              "readiness": 0,
+              "readiness": 2,
               "is_explicit": false,
               "submodules": [
                 {
                   "path": "simplex::scheme::bls12381_multisig",
-                  "readiness": 0,
+                  "readiness": 2,
                   "is_explicit": false
                 },
                 {
                   "path": "simplex::scheme::bls12381_threshold",
-                  "readiness": 0,
+                  "readiness": 2,
                   "is_explicit": false
                 },
                 {
                   "path": "simplex::scheme::ed25519",
-                  "readiness": 0,
+                  "readiness": 2,
                   "is_explicit": false
                 },
                 {
                   "path": "simplex::scheme::reporter",
-                  "readiness": 0,
+                  "readiness": 2,
                   "is_explicit": false
                 },
                 {
                   "path": "simplex::scheme::secp256r1",
-                  "readiness": 0,
+                  "readiness": 2,
                   "is_explicit": false
                 }
               ]
             },
             {
               "path": "simplex::types",
-              "readiness": 0,
+              "readiness": 2,
               "is_explicit": false
             }
           ]
@@ -276,8 +277,8 @@
     {
       "name": "commonware-cryptography",
       "module_counts": {
-        "0": 28,
-        "2": 1
+        "0": 11,
+        "2": 18
       },
       "modules": [
         {
@@ -292,86 +293,86 @@
         },
         {
           "path": "bls12381",
-          "readiness": 0,
-          "is_explicit": false,
+          "readiness": 2,
+          "is_explicit": true,
           "submodules": [
             {
               "path": "bls12381::certificate",
-              "readiness": 0,
+              "readiness": 2,
               "is_explicit": false,
               "submodules": [
                 {
                   "path": "bls12381::certificate::multisig",
-                  "readiness": 0,
+                  "readiness": 2,
                   "is_explicit": false
                 },
                 {
                   "path": "bls12381::certificate::threshold",
-                  "readiness": 0,
+                  "readiness": 2,
                   "is_explicit": false
                 }
               ]
             },
             {
               "path": "bls12381::dkg",
-              "readiness": 0,
+              "readiness": 2,
               "is_explicit": false
             },
             {
               "path": "bls12381::primitives",
-              "readiness": 0,
+              "readiness": 2,
               "is_explicit": false,
               "submodules": [
                 {
                   "path": "bls12381::primitives::group",
-                  "readiness": 0,
+                  "readiness": 2,
                   "is_explicit": false
                 },
                 {
                   "path": "bls12381::primitives::ops",
-                  "readiness": 0,
+                  "readiness": 2,
                   "is_explicit": false,
                   "submodules": [
                     {
                       "path": "bls12381::primitives::ops::aggregate",
-                      "readiness": 0,
+                      "readiness": 2,
                       "is_explicit": false
                     },
                     {
                       "path": "bls12381::primitives::ops::batch",
-                      "readiness": 0,
+                      "readiness": 2,
                       "is_explicit": false
                     },
                     {
                       "path": "bls12381::primitives::ops::threshold",
-                      "readiness": 0,
+                      "readiness": 2,
                       "is_explicit": false
                     }
                   ]
                 },
                 {
                   "path": "bls12381::primitives::sharing",
-                  "readiness": 0,
+                  "readiness": 2,
                   "is_explicit": false
                 },
                 {
                   "path": "bls12381::primitives::variant",
-                  "readiness": 0,
+                  "readiness": 2,
                   "is_explicit": false
                 }
               ]
             },
             {
               "path": "bls12381::tle",
-              "readiness": 0,
+              "readiness": 2,
               "is_explicit": false
             }
           ]
         },
         {
           "path": "certificate",
-          "readiness": 0,
-          "is_explicit": false
+          "readiness": 2,
+          "is_explicit": true
         },
         {
           "path": "crc32",
@@ -380,12 +381,12 @@
         },
         {
           "path": "ed25519",
-          "readiness": 0,
-          "is_explicit": false,
+          "readiness": 2,
+          "is_explicit": true,
           "submodules": [
             {
               "path": "ed25519::certificate",
-              "readiness": 0,
+              "readiness": 2,
               "is_explicit": false
             }
           ]
@@ -477,8 +478,8 @@
     {
       "name": "commonware-math",
       "module_counts": {
-        "0": 3,
-        "2": 1
+        "0": 2,
+        "2": 2
       },
       "modules": [
         {
@@ -498,15 +499,16 @@
         },
         {
           "path": "poly",
-          "readiness": 0,
-          "is_explicit": false
+          "readiness": 2,
+          "is_explicit": true
         }
       ]
     },
     {
       "name": "commonware-p2p",
       "module_counts": {
-        "0": 9
+        "0": 7,
+        "2": 2
       },
       "modules": [
         {
@@ -516,13 +518,13 @@
           "submodules": [
             {
               "path": "authenticated::discovery",
-              "readiness": 0,
-              "is_explicit": false
+              "readiness": 2,
+              "is_explicit": true
             },
             {
               "path": "authenticated::lookup",
-              "readiness": 0,
-              "is_explicit": false
+              "readiness": 2,
+              "is_explicit": true
             }
           ]
         },
@@ -563,13 +565,13 @@
     {
       "name": "commonware-resolver",
       "module_counts": {
-        "0": 1
+        "2": 1
       },
       "modules": [
         {
           "path": "p2p",
-          "readiness": 0,
-          "is_explicit": false
+          "readiness": 2,
+          "is_explicit": true
         }
       ]
     },
@@ -672,23 +674,23 @@
     {
       "name": "commonware-storage",
       "module_counts": {
-        "0": 56,
-        "2": 10
+        "0": 51,
+        "2": 15
       },
       "modules": [
         {
           "path": "archive",
-          "readiness": 0,
-          "is_explicit": false,
+          "readiness": 2,
+          "is_explicit": true,
           "submodules": [
             {
               "path": "archive::immutable",
-              "readiness": 0,
+              "readiness": 2,
               "is_explicit": false
             },
             {
               "path": "archive::prunable",
-              "readiness": 0,
+              "readiness": 2,
               "is_explicit": false
             }
           ]
@@ -805,8 +807,8 @@
         },
         {
           "path": "metadata",
-          "readiness": 0,
-          "is_explicit": false
+          "readiness": 2,
+          "is_explicit": true
         },
         {
           "path": "mmr",
@@ -1041,8 +1043,8 @@
         },
         {
           "path": "translator",
-          "readiness": 0,
-          "is_explicit": false
+          "readiness": 2,
+          "is_explicit": true
         }
       ]
     },
@@ -1069,44 +1071,45 @@
     {
       "name": "commonware-utils",
       "module_counts": {
-        "0": 23
+        "0": 7,
+        "2": 16
       },
       "modules": [
         {
           "path": "acknowledgement",
-          "readiness": 0,
-          "is_explicit": false
+          "readiness": 2,
+          "is_explicit": true
         },
         {
           "path": "bitmap",
-          "readiness": 0,
-          "is_explicit": false,
+          "readiness": 2,
+          "is_explicit": true,
           "submodules": [
             {
               "path": "bitmap::historical",
-              "readiness": 0,
+              "readiness": 2,
               "is_explicit": false
             }
           ]
         },
         {
           "path": "channels",
-          "readiness": 0,
-          "is_explicit": false,
+          "readiness": 2,
+          "is_explicit": true,
           "submodules": [
             {
               "path": "channels::fallible",
-              "readiness": 0,
+              "readiness": 2,
               "is_explicit": false
             },
             {
               "path": "channels::ring",
-              "readiness": 0,
+              "readiness": 2,
               "is_explicit": false
             },
             {
               "path": "channels::tracked",
-              "readiness": 0,
+              "readiness": 2,
               "is_explicit": false
             }
           ]
@@ -1123,8 +1126,8 @@
         },
         {
           "path": "futures",
-          "readiness": 0,
-          "is_explicit": false
+          "readiness": 2,
+          "is_explicit": true
         },
         {
           "path": "hex_literal",
@@ -1143,8 +1146,8 @@
         },
         {
           "path": "ordered",
-          "readiness": 0,
-          "is_explicit": false
+          "readiness": 2,
+          "is_explicit": true
         },
         {
           "path": "rational",
@@ -1153,32 +1156,32 @@
         },
         {
           "path": "sequence",
-          "readiness": 0,
-          "is_explicit": false,
+          "readiness": 2,
+          "is_explicit": true,
           "submodules": [
             {
               "path": "sequence::fixed_bytes",
-              "readiness": 0,
+              "readiness": 2,
               "is_explicit": false
             },
             {
               "path": "sequence::prefixed_u64",
-              "readiness": 0,
+              "readiness": 2,
               "is_explicit": false
             },
             {
               "path": "sequence::u32",
-              "readiness": 0,
+              "readiness": 2,
               "is_explicit": false
             },
             {
               "path": "sequence::u64",
-              "readiness": 0,
+              "readiness": 2,
               "is_explicit": false
             },
             {
               "path": "sequence::unit",
-              "readiness": 0,
+              "readiness": 2,
               "is_explicit": false
             }
           ]
@@ -1190,8 +1193,8 @@
         },
         {
           "path": "vec",
-          "readiness": 0,
-          "is_explicit": false
+          "readiness": 2,
+          "is_explicit": true
         }
       ]
     }
@@ -1199,8 +1202,8 @@
   "summary": {
     "total_modules": 198,
     "by_level": {
-      "0": 174,
-      "2": 24
+      "0": 112,
+      "2": 86
     }
   }
 }

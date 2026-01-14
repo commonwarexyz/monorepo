@@ -3,6 +3,8 @@
 //! The bitmap is a compact representation of a sequence of bits, using chunks of bytes for a
 //! more-efficient memory layout than doing [`Vec<bool>`].
 
+commonware_macros::readiness!(2);
+
 #[cfg(not(feature = "std"))]
 use alloc::{collections::VecDeque, vec::Vec};
 use bytes::{Buf, BufMut};

@@ -1,3 +1,5 @@
+commonware_macros::readiness!(2);
+
 use commonware_codec::{Codec, EncodeFixed};
 use core::{
     cmp::{Ord, PartialOrd},

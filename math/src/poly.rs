@@ -1,3 +1,5 @@
+commonware_macros::readiness!(2);
+
 use crate::algebra::{msm_naive, Additive, CryptoGroup, Field, Object, Random, Ring, Space};
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};

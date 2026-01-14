@@ -63,6 +63,8 @@
 //! });
 //! ```
 
+commonware_macros::readiness!(2);
+
 mod storage;
 pub use storage::Metadata;
 use thiserror::Error;

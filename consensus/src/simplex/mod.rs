@@ -235,6 +235,8 @@
 //! Before sending a message, the `Journal` sync is invoked to prevent inadvertent Byzantine behavior
 //! on restart (especially in the case of unclean shutdown).
 
+commonware_macros::readiness!(2);
+
 pub mod elector;
 pub mod scheme;
 pub mod types;
