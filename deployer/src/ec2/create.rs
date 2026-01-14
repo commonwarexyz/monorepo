@@ -521,6 +521,12 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
         (monitoring_region.clone(), monitoring_architecture),
         monitoring_ami_id.clone(),
     );
+    info!(
+        region = monitoring_region.as_str(),
+        architecture = %monitoring_architecture,
+        ami_id = monitoring_ami_id.as_str(),
+        "selected AMI"
+    );
     let mut binary_launch_configs = Vec::new();
     for instance in &config.instances {
         let region = instance.region.clone();
@@ -530,9 +536,14 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
         let ami_id = match ami_cache.get(&(region.clone(), arch)) {
             Some(id) => id.clone(),
             None => {
-                // Avoid looking up the same AMI multiple times
                 let id = find_latest_ami(ec2_client, arch).await?;
                 ami_cache.insert((region.clone(), arch), id.clone());
+                info!(
+                    region = region.as_str(),
+                    architecture = %arch,
+                    ami_id = id.as_str(),
+                    "selected AMI"
+                );
                 id
             }
         };
