@@ -58,8 +58,8 @@ pub async fn update(config_path: &PathBuf) -> Result<(), Error> {
     let s3_client = create_s3_client(Region::new(MONITORING_REGION)).await;
     info!("computing file digests");
 
-    // Compute digests concurrently and build deduplication maps
-    let hash_results: Vec<(String, String, String)> = try_join_all(
+    // Compute digests concurrently (limited parallelism) and build deduplication maps
+    let hash_results: Vec<(String, String, String, String, String)> = stream::iter(
         config.instances.iter().map(|instance| {
             let name = instance.name.clone();
             let binary_path = instance.binary.clone();
@@ -69,20 +69,21 @@ pub async fn update(config_path: &PathBuf) -> Result<(), Error> {
                     hash_file(std::path::Path::new(&binary_path)),
                     hash_file(std::path::Path::new(&config_path)),
                 )?;
-                Ok::<_, Error>((name, binary_digest, config_digest))
+                Ok::<_, Error>((name, binary_path, config_path, binary_digest, config_digest))
             }
         }),
     )
+    .buffer_unordered(MAX_CONCURRENT_HASHES)
+    .try_collect()
     .await?;
 
     let mut binary_digests: BTreeMap<String, String> = BTreeMap::new();
     let mut config_digests: BTreeMap<String, String> = BTreeMap::new();
     let mut instance_binary_digest: HashMap<String, String> = HashMap::new();
     let mut instance_config_digest: HashMap<String, String> = HashMap::new();
-    for (idx, (name, binary_digest, config_digest)) in hash_results.into_iter().enumerate() {
-        let instance = &config.instances[idx];
-        binary_digests.insert(binary_digest.clone(), instance.binary.clone());
-        config_digests.insert(config_digest.clone(), instance.config.clone());
+    for (name, binary_path, config_path, binary_digest, config_digest) in hash_results {
+        binary_digests.insert(binary_digest.clone(), binary_path);
+        config_digests.insert(config_digest.clone(), config_path);
         instance_binary_digest.insert(name.clone(), binary_digest);
         instance_config_digest.insert(name, config_digest);
     }

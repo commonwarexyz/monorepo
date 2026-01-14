@@ -30,6 +30,9 @@ pub const S3_DEPLOYMENTS_PREFIX: &str = "deployments";
 /// Maximum buffer size for file hashing (32MB)
 pub const MAX_HASH_BUFFER_SIZE: usize = 32 * 1024 * 1024;
 
+/// Maximum number of concurrent file hash operations
+pub const MAX_CONCURRENT_HASHES: usize = 8;
+
 /// Duration for pre-signed URLs (6 hours)
 pub const PRESIGN_DURATION: Duration = Duration::from_secs(6 * 60 * 60);
 

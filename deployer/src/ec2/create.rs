@@ -207,8 +207,8 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     }
     info!("observability tools uploaded");
 
-    // Compute digests concurrently for binaries and configs, grouping by digest for deduplication
-    let hash_results: Vec<(String, String, String)> = try_join_all(
+    // Compute digests concurrently (limited parallelism) for binaries and configs
+    let hash_results: Vec<(String, String, String, String, String)> = stream::iter(
         config.instances.iter().map(|instance| {
             let name = instance.name.clone();
             let binary_path = instance.binary.clone();
@@ -218,20 +218,21 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
                     hash_file(std::path::Path::new(&binary_path)),
                     hash_file(std::path::Path::new(&config_path)),
                 )?;
-                Ok::<_, Error>((name, binary_digest, config_digest))
+                Ok::<_, Error>((name, binary_path, config_path, binary_digest, config_digest))
             }
         }),
     )
+    .buffer_unordered(MAX_CONCURRENT_HASHES)
+    .try_collect()
     .await?;
 
     let mut binary_digests: BTreeMap<String, String> = BTreeMap::new(); // digest -> path
     let mut config_digests: BTreeMap<String, String> = BTreeMap::new(); // digest -> path
     let mut instance_binary_digest: HashMap<String, String> = HashMap::new(); // instance -> digest
     let mut instance_config_digest: HashMap<String, String> = HashMap::new(); // instance -> digest
-    for (idx, (name, binary_digest, config_digest)) in hash_results.into_iter().enumerate() {
-        let instance = &config.instances[idx];
-        binary_digests.insert(binary_digest.clone(), instance.binary.clone());
-        config_digests.insert(config_digest.clone(), instance.config.clone());
+    for (name, binary_path, config_path, binary_digest, config_digest) in hash_results {
+        binary_digests.insert(binary_digest.clone(), binary_path);
+        config_digests.insert(config_digest.clone(), config_path);
         instance_binary_digest.insert(name.clone(), binary_digest);
         instance_config_digest.insert(name, config_digest);
     }
@@ -873,9 +874,9 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
         instance_paths.push((instance.name.clone(), promtail_path, pyroscope_path));
     }
 
-    // Compute digests concurrently and deduplicate
+    // Compute digests concurrently (limited parallelism) and deduplicate
     let config_hash_results: Vec<(String, String, String, std::path::PathBuf, std::path::PathBuf)> =
-        try_join_all(instance_paths.into_iter().map(
+        stream::iter(instance_paths.into_iter().map(
             |(name, promtail_path, pyroscope_path)| async move {
                 let (promtail_digest, pyroscope_digest) = tokio::try_join!(
                     hash_file(&promtail_path),
@@ -884,6 +885,8 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
                 Ok::<_, Error>((name, promtail_digest, pyroscope_digest, promtail_path, pyroscope_path))
             },
         ))
+        .buffer_unordered(MAX_CONCURRENT_HASHES)
+        .try_collect()
         .await?;
 
     let mut promtail_digests: BTreeMap<String, std::path::PathBuf> = BTreeMap::new();
