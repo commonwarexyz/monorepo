@@ -1,6 +1,6 @@
 //! Generate readiness.json output.
 
-use crate::parser::{Module, Workspace};
+use crate::parser::{Module, Visibility, Workspace};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, HashMap},
@@ -42,8 +42,15 @@ pub struct ModuleOutput {
     pub path: String,
     pub readiness: u8,
     pub is_explicit: bool,
+    /// How this module is exposed: "public" (pub mod) or "reexported" (pub use)
+    #[serde(skip_serializing_if = "is_public", default)]
+    pub visibility: Visibility,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub submodules: Vec<ModuleOutput>,
+}
+
+fn is_public(v: &Visibility) -> bool {
+    *v == Visibility::Public
 }
 
 /// Summary statistics.
@@ -96,6 +103,7 @@ fn collect_modules(
             path: module.path.clone(),
             readiness: effective_readiness,
             is_explicit: module.is_explicit,
+            visibility: module.visibility,
             submodules,
         });
     }

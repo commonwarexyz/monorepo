@@ -1,17 +1,31 @@
 {
   "version": "0.0.65",
-  "generated": "2026-01-14T21:04:55.980757+00:00",
+  "generated": "2026-01-14T21:27:59.491289+00:00",
   "crates": [
     {
       "name": "commonware-broadcast",
       "module_counts": {
-        "2": 1
+        "2": 3
       },
       "modules": [
         {
           "path": "buffered",
           "readiness": 2,
-          "is_explicit": true
+          "is_explicit": true,
+          "submodules": [
+            {
+              "path": "buffered::engine",
+              "readiness": 2,
+              "is_explicit": false,
+              "visibility": "reexported"
+            },
+            {
+              "path": "buffered::ingress",
+              "readiness": 2,
+              "is_explicit": false,
+              "visibility": "reexported"
+            }
+          ]
         }
       ]
     },
@@ -101,15 +115,55 @@
       ]
     },
     {
+      "name": "commonware-coding",
+      "module_counts": {
+        "0": 3
+      },
+      "modules": [
+        {
+          "path": "no_coding",
+          "readiness": 0,
+          "is_explicit": false,
+          "visibility": "reexported"
+        },
+        {
+          "path": "reed_solomon",
+          "readiness": 0,
+          "is_explicit": false,
+          "visibility": "reexported"
+        },
+        {
+          "path": "zoda",
+          "readiness": 0,
+          "is_explicit": false,
+          "visibility": "reexported"
+        }
+      ]
+    },
+    {
       "name": "commonware-collector",
       "module_counts": {
-        "0": 1
+        "0": 3
       },
       "modules": [
         {
           "path": "p2p",
           "readiness": 0,
-          "is_explicit": false
+          "is_explicit": false,
+          "submodules": [
+            {
+              "path": "p2p::engine",
+              "readiness": 0,
+              "is_explicit": false,
+              "visibility": "reexported"
+            },
+            {
+              "path": "p2p::ingress",
+              "readiness": 0,
+              "is_explicit": false,
+              "visibility": "reexported"
+            }
+          ]
         }
       ]
     },
@@ -277,7 +331,7 @@
       "name": "commonware-cryptography",
       "module_counts": {
         "1": 1,
-        "2": 28
+        "2": 30
       },
       "modules": [
         {
@@ -362,6 +416,12 @@
               ]
             },
             {
+              "path": "bls12381::scheme",
+              "readiness": 2,
+              "is_explicit": false,
+              "visibility": "reexported"
+            },
+            {
               "path": "bls12381::tle",
               "readiness": 1,
               "is_explicit": true
@@ -387,6 +447,12 @@
               "path": "ed25519::certificate",
               "readiness": 2,
               "is_explicit": false
+            },
+            {
+              "path": "ed25519::scheme",
+              "readiness": 2,
+              "is_explicit": false,
+              "visibility": "reexported"
             }
           ]
         },
@@ -506,7 +572,7 @@
     {
       "name": "commonware-p2p",
       "module_counts": {
-        "2": 9
+        "2": 50
       },
       "modules": [
         {
@@ -517,19 +583,278 @@
             {
               "path": "authenticated::discovery",
               "readiness": 2,
-              "is_explicit": true
+              "is_explicit": true,
+              "submodules": [
+                {
+                  "path": "authenticated::discovery::actors",
+                  "readiness": 2,
+                  "is_explicit": false,
+                  "visibility": "reexported",
+                  "submodules": [
+                    {
+                      "path": "authenticated::discovery::actors::dialer",
+                      "readiness": 2,
+                      "is_explicit": false
+                    },
+                    {
+                      "path": "authenticated::discovery::actors::listener",
+                      "readiness": 2,
+                      "is_explicit": false
+                    },
+                    {
+                      "path": "authenticated::discovery::actors::peer",
+                      "readiness": 2,
+                      "is_explicit": false,
+                      "submodules": [
+                        {
+                          "path": "authenticated::discovery::actors::peer::actor",
+                          "readiness": 2,
+                          "is_explicit": false,
+                          "visibility": "reexported"
+                        },
+                        {
+                          "path": "authenticated::discovery::actors::peer::ingress",
+                          "readiness": 2,
+                          "is_explicit": false,
+                          "visibility": "reexported"
+                        }
+                      ]
+                    },
+                    {
+                      "path": "authenticated::discovery::actors::router",
+                      "readiness": 2,
+                      "is_explicit": false,
+                      "submodules": [
+                        {
+                          "path": "authenticated::discovery::actors::router::actor",
+                          "readiness": 2,
+                          "is_explicit": false,
+                          "visibility": "reexported"
+                        },
+                        {
+                          "path": "authenticated::discovery::actors::router::ingress",
+                          "readiness": 2,
+                          "is_explicit": false,
+                          "visibility": "reexported"
+                        }
+                      ]
+                    },
+                    {
+                      "path": "authenticated::discovery::actors::spawner",
+                      "readiness": 2,
+                      "is_explicit": false,
+                      "submodules": [
+                        {
+                          "path": "authenticated::discovery::actors::spawner::actor",
+                          "readiness": 2,
+                          "is_explicit": false,
+                          "visibility": "reexported"
+                        },
+                        {
+                          "path": "authenticated::discovery::actors::spawner::ingress",
+                          "readiness": 2,
+                          "is_explicit": false,
+                          "visibility": "reexported"
+                        }
+                      ]
+                    },
+                    {
+                      "path": "authenticated::discovery::actors::tracker",
+                      "readiness": 2,
+                      "is_explicit": false,
+                      "submodules": [
+                        {
+                          "path": "authenticated::discovery::actors::tracker::actor",
+                          "readiness": 2,
+                          "is_explicit": false,
+                          "visibility": "reexported"
+                        },
+                        {
+                          "path": "authenticated::discovery::actors::tracker::ingress",
+                          "readiness": 2,
+                          "is_explicit": false,
+                          "visibility": "reexported"
+                        },
+                        {
+                          "path": "authenticated::discovery::actors::tracker::metadata",
+                          "readiness": 2,
+                          "is_explicit": false,
+                          "visibility": "reexported"
+                        },
+                        {
+                          "path": "authenticated::discovery::actors::tracker::reservation",
+                          "readiness": 2,
+                          "is_explicit": false,
+                          "visibility": "reexported"
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "path": "authenticated::discovery::channels",
+                  "readiness": 2,
+                  "is_explicit": false,
+                  "visibility": "reexported"
+                },
+                {
+                  "path": "authenticated::discovery::network",
+                  "readiness": 2,
+                  "is_explicit": false,
+                  "visibility": "reexported"
+                }
+              ]
             },
             {
               "path": "authenticated::lookup",
               "readiness": 2,
-              "is_explicit": true
+              "is_explicit": true,
+              "submodules": [
+                {
+                  "path": "authenticated::lookup::actors",
+                  "readiness": 2,
+                  "is_explicit": false,
+                  "visibility": "reexported",
+                  "submodules": [
+                    {
+                      "path": "authenticated::lookup::actors::dialer",
+                      "readiness": 2,
+                      "is_explicit": false
+                    },
+                    {
+                      "path": "authenticated::lookup::actors::listener",
+                      "readiness": 2,
+                      "is_explicit": false
+                    },
+                    {
+                      "path": "authenticated::lookup::actors::peer",
+                      "readiness": 2,
+                      "is_explicit": false,
+                      "submodules": [
+                        {
+                          "path": "authenticated::lookup::actors::peer::actor",
+                          "readiness": 2,
+                          "is_explicit": false,
+                          "visibility": "reexported"
+                        },
+                        {
+                          "path": "authenticated::lookup::actors::peer::ingress",
+                          "readiness": 2,
+                          "is_explicit": false,
+                          "visibility": "reexported"
+                        }
+                      ]
+                    },
+                    {
+                      "path": "authenticated::lookup::actors::router",
+                      "readiness": 2,
+                      "is_explicit": false,
+                      "submodules": [
+                        {
+                          "path": "authenticated::lookup::actors::router::actor",
+                          "readiness": 2,
+                          "is_explicit": false,
+                          "visibility": "reexported"
+                        },
+                        {
+                          "path": "authenticated::lookup::actors::router::ingress",
+                          "readiness": 2,
+                          "is_explicit": false,
+                          "visibility": "reexported"
+                        }
+                      ]
+                    },
+                    {
+                      "path": "authenticated::lookup::actors::spawner",
+                      "readiness": 2,
+                      "is_explicit": false,
+                      "submodules": [
+                        {
+                          "path": "authenticated::lookup::actors::spawner::actor",
+                          "readiness": 2,
+                          "is_explicit": false,
+                          "visibility": "reexported"
+                        },
+                        {
+                          "path": "authenticated::lookup::actors::spawner::ingress",
+                          "readiness": 2,
+                          "is_explicit": false,
+                          "visibility": "reexported"
+                        }
+                      ]
+                    },
+                    {
+                      "path": "authenticated::lookup::actors::tracker",
+                      "readiness": 2,
+                      "is_explicit": false,
+                      "submodules": [
+                        {
+                          "path": "authenticated::lookup::actors::tracker::actor",
+                          "readiness": 2,
+                          "is_explicit": false
+                        },
+                        {
+                          "path": "authenticated::lookup::actors::tracker::ingress",
+                          "readiness": 2,
+                          "is_explicit": false,
+                          "visibility": "reexported"
+                        },
+                        {
+                          "path": "authenticated::lookup::actors::tracker::metadata",
+                          "readiness": 2,
+                          "is_explicit": false,
+                          "visibility": "reexported"
+                        },
+                        {
+                          "path": "authenticated::lookup::actors::tracker::reservation",
+                          "readiness": 2,
+                          "is_explicit": false,
+                          "visibility": "reexported"
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "path": "authenticated::lookup::channels",
+                  "readiness": 2,
+                  "is_explicit": false,
+                  "visibility": "reexported"
+                },
+                {
+                  "path": "authenticated::lookup::network",
+                  "readiness": 2,
+                  "is_explicit": false,
+                  "visibility": "reexported"
+                }
+              ]
+            },
+            {
+              "path": "authenticated::mailbox",
+              "readiness": 2,
+              "is_explicit": false,
+              "visibility": "reexported"
             }
           ]
         },
         {
           "path": "simulated",
           "readiness": 2,
-          "is_explicit": false
+          "is_explicit": false,
+          "submodules": [
+            {
+              "path": "simulated::ingress",
+              "readiness": 2,
+              "is_explicit": false,
+              "visibility": "reexported"
+            },
+            {
+              "path": "simulated::network",
+              "readiness": 2,
+              "is_explicit": false,
+              "visibility": "reexported"
+            }
+          ]
         },
         {
           "path": "types",
@@ -563,20 +888,34 @@
     {
       "name": "commonware-resolver",
       "module_counts": {
-        "2": 1
+        "2": 3
       },
       "modules": [
         {
           "path": "p2p",
           "readiness": 2,
-          "is_explicit": true
+          "is_explicit": true,
+          "submodules": [
+            {
+              "path": "p2p::engine",
+              "readiness": 2,
+              "is_explicit": false,
+              "visibility": "reexported"
+            },
+            {
+              "path": "p2p::ingress",
+              "readiness": 2,
+              "is_explicit": false,
+              "visibility": "reexported"
+            }
+          ]
         }
       ]
     },
     {
       "name": "commonware-runtime",
       "module_counts": {
-        "2": 15
+        "2": 23
       },
       "modules": [
         {
@@ -631,6 +970,12 @@
           "is_explicit": false,
           "submodules": [
             {
+              "path": "tokio::runtime",
+              "readiness": 2,
+              "is_explicit": false,
+              "visibility": "reexported"
+            },
+            {
               "path": "tokio::telemetry",
               "readiness": 2,
               "is_explicit": false
@@ -655,9 +1000,53 @@
                 {
                   "path": "utils::buffer::pool",
                   "readiness": 2,
-                  "is_explicit": false
+                  "is_explicit": false,
+                  "submodules": [
+                    {
+                      "path": "utils::buffer::pool::append",
+                      "readiness": 2,
+                      "is_explicit": false,
+                      "visibility": "reexported"
+                    },
+                    {
+                      "path": "utils::buffer::pool::page_cache",
+                      "readiness": 2,
+                      "is_explicit": false,
+                      "visibility": "reexported"
+                    },
+                    {
+                      "path": "utils::buffer::pool::read",
+                      "readiness": 2,
+                      "is_explicit": false,
+                      "visibility": "reexported"
+                    }
+                  ]
+                },
+                {
+                  "path": "utils::buffer::read",
+                  "readiness": 2,
+                  "is_explicit": false,
+                  "visibility": "reexported"
+                },
+                {
+                  "path": "utils::buffer::write",
+                  "readiness": 2,
+                  "is_explicit": false,
+                  "visibility": "reexported"
                 }
               ]
+            },
+            {
+              "path": "utils::cell",
+              "readiness": 2,
+              "is_explicit": false,
+              "visibility": "reexported"
+            },
+            {
+              "path": "utils::handle",
+              "readiness": 2,
+              "is_explicit": false,
+              "visibility": "reexported"
             },
             {
               "path": "utils::signal",
@@ -671,7 +1060,7 @@
     {
       "name": "commonware-storage",
       "module_counts": {
-        "2": 66
+        "2": 78
       },
       "modules": [
         {
@@ -682,12 +1071,28 @@
             {
               "path": "archive::immutable",
               "readiness": 2,
-              "is_explicit": false
+              "is_explicit": false,
+              "submodules": [
+                {
+                  "path": "archive::immutable::storage",
+                  "readiness": 2,
+                  "is_explicit": false,
+                  "visibility": "reexported"
+                }
+              ]
             },
             {
               "path": "archive::prunable",
               "readiness": 2,
-              "is_explicit": false
+              "is_explicit": false,
+              "submodules": [
+                {
+                  "path": "archive::prunable::storage",
+                  "readiness": 2,
+                  "is_explicit": false,
+                  "visibility": "reexported"
+                }
+              ]
             }
           ]
         },
@@ -699,12 +1104,28 @@
         {
           "path": "cache",
           "readiness": 2,
-          "is_explicit": false
+          "is_explicit": false,
+          "submodules": [
+            {
+              "path": "cache::storage",
+              "readiness": 2,
+              "is_explicit": false,
+              "visibility": "reexported"
+            }
+          ]
         },
         {
           "path": "freezer",
           "readiness": 2,
-          "is_explicit": false
+          "is_explicit": false,
+          "submodules": [
+            {
+              "path": "freezer::storage",
+              "readiness": 2,
+              "is_explicit": false,
+              "visibility": "reexported"
+            }
+          ]
         },
         {
           "path": "index",
@@ -799,12 +1220,28 @@
         {
           "path": "kv",
           "readiness": 2,
-          "is_explicit": false
+          "is_explicit": false,
+          "submodules": [
+            {
+              "path": "kv::batch",
+              "readiness": 2,
+              "is_explicit": false,
+              "visibility": "reexported"
+            }
+          ]
         },
         {
           "path": "metadata",
           "readiness": 2,
-          "is_explicit": true
+          "is_explicit": true,
+          "submodules": [
+            {
+              "path": "metadata::storage",
+              "readiness": 2,
+              "is_explicit": false,
+              "visibility": "reexported"
+            }
+          ]
         },
         {
           "path": "mmr",
@@ -871,7 +1308,15 @@
         {
           "path": "ordinal",
           "readiness": 2,
-          "is_explicit": false
+          "is_explicit": false,
+          "submodules": [
+            {
+              "path": "ordinal::storage",
+              "readiness": 2,
+              "is_explicit": false,
+              "visibility": "reexported"
+            }
+          ]
         },
         {
           "path": "qmdb",
@@ -980,6 +1425,12 @@
               "is_explicit": false,
               "submodules": [
                 {
+                  "path": "qmdb::immutable::operation",
+                  "readiness": 2,
+                  "is_explicit": false,
+                  "visibility": "reexported"
+                },
+                {
                   "path": "qmdb::immutable::sync",
                   "readiness": 2,
                   "is_explicit": false
@@ -989,7 +1440,15 @@
             {
               "path": "qmdb::keyless",
               "readiness": 2,
-              "is_explicit": false
+              "is_explicit": false,
+              "submodules": [
+                {
+                  "path": "qmdb::keyless::operation",
+                  "readiness": 2,
+                  "is_explicit": false,
+                  "visibility": "reexported"
+                }
+              ]
             },
             {
               "path": "qmdb::operation",
@@ -1001,6 +1460,12 @@
               "readiness": 2,
               "is_explicit": false,
               "submodules": [
+                {
+                  "path": "qmdb::store::batch",
+                  "readiness": 2,
+                  "is_explicit": false,
+                  "visibility": "reexported"
+                },
                 {
                   "path": "qmdb::store::db",
                   "readiness": 2,
@@ -1019,9 +1484,21 @@
                   "is_explicit": false
                 },
                 {
+                  "path": "qmdb::sync::error",
+                  "readiness": 2,
+                  "is_explicit": false,
+                  "visibility": "reexported"
+                },
+                {
                   "path": "qmdb::sync::resolver",
                   "readiness": 2,
                   "is_explicit": false
+                },
+                {
+                  "path": "qmdb::sync::target",
+                  "readiness": 2,
+                  "is_explicit": false,
+                  "visibility": "reexported"
                 }
               ]
             },
@@ -1067,7 +1544,7 @@
     {
       "name": "commonware-utils",
       "module_counts": {
-        "2": 23
+        "2": 29
       },
       "modules": [
         {
@@ -1083,7 +1560,33 @@
             {
               "path": "bitmap::historical",
               "readiness": 2,
-              "is_explicit": false
+              "is_explicit": false,
+              "submodules": [
+                {
+                  "path": "bitmap::historical::batch",
+                  "readiness": 2,
+                  "is_explicit": false,
+                  "visibility": "reexported"
+                },
+                {
+                  "path": "bitmap::historical::bitmap",
+                  "readiness": 2,
+                  "is_explicit": false,
+                  "visibility": "reexported"
+                },
+                {
+                  "path": "bitmap::historical::error",
+                  "readiness": 2,
+                  "is_explicit": false,
+                  "visibility": "reexported"
+                }
+              ]
+            },
+            {
+              "path": "bitmap::prunable",
+              "readiness": 2,
+              "is_explicit": false,
+              "visibility": "reexported"
             }
           ]
         },
@@ -1145,6 +1648,12 @@
           "is_explicit": true
         },
         {
+          "path": "priority_set",
+          "readiness": 2,
+          "is_explicit": false,
+          "visibility": "reexported"
+        },
+        {
           "path": "rational",
           "readiness": 2,
           "is_explicit": false
@@ -1182,6 +1691,12 @@
           ]
         },
         {
+          "path": "stable_buf",
+          "readiness": 2,
+          "is_explicit": false,
+          "visibility": "reexported"
+        },
+        {
           "path": "time",
           "readiness": 2,
           "is_explicit": false
@@ -1195,11 +1710,11 @@
     }
   ],
   "summary": {
-    "total_modules": 198,
+    "total_modules": 276,
     "by_level": {
-      "0": 17,
+      "0": 22,
       "1": 1,
-      "2": 180
+      "2": 253
     }
   }
 }

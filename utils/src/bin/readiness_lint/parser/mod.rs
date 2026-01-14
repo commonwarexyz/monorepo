@@ -4,7 +4,7 @@ mod cfg_if;
 
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
 };
@@ -84,6 +84,17 @@ pub struct Crate {
     pub root_is_explicit: bool,
 }
 
+/// How a module is exposed in the public API.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Visibility {
+    /// Directly public via `pub mod`
+    #[default]
+    Public,
+    /// Private module with items reexported via `pub use`
+    Reexported,
+}
+
 /// A module with its readiness level and submodules.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Module {
@@ -92,6 +103,8 @@ pub struct Module {
     pub file_path: PathBuf,
     pub submodules: HashMap<String, Module>,
     pub is_explicit: bool,
+    /// How this module is exposed in the public API
+    pub visibility: Visibility,
 }
 
 impl Default for Module {
@@ -102,6 +115,7 @@ impl Default for Module {
             file_path: PathBuf::new(),
             submodules: HashMap::new(),
             is_explicit: false,
+            visibility: Visibility::Public,
         }
     }
 }
@@ -273,6 +287,7 @@ fn parse_modules(
                     file_path: mod_file_path,
                     submodules,
                     is_explicit,
+                    visibility: Visibility::Public,
                 },
             );
         }
@@ -332,10 +347,120 @@ fn parse_modules(
                 file_path: mod_file_path,
                 submodules,
                 is_explicit,
+                visibility: Visibility::Public,
             });
     }
 
+    // Parse pub use statements to find reexported private modules
+    let reexported_modules = extract_reexported_modules(&parsed);
+    for mod_name in reexported_modules {
+        // Skip if already included as public
+        if modules.contains_key(&mod_name) {
+            continue;
+        }
+
+        let mod_path = if parent_path.is_empty() {
+            mod_name.clone()
+        } else {
+            format!("{parent_path}::{mod_name}")
+        };
+
+        // Skip ignored modules
+        if config.should_ignore(&mod_path) {
+            continue;
+        }
+
+        // Find the module file
+        let mod_rs = src_dir.join(&mod_name).join("mod.rs");
+        let mod_file = src_dir.join(format!("{mod_name}.rs"));
+        let (mod_file_path, has_submodules) = if mod_rs.exists() {
+            (mod_rs, true)
+        } else if mod_file.exists() {
+            (mod_file, false)
+        } else {
+            continue;
+        };
+
+        // Check for readiness in the module file
+        let explicit_readiness = extract_readiness_from_file(&mod_file_path);
+        let is_explicit = explicit_readiness > 0;
+        let readiness = if is_explicit {
+            explicit_readiness
+        } else {
+            parent_readiness
+        };
+
+        // Recursively parse submodules (they inherit the reexported visibility context)
+        let submodules = if has_submodules {
+            let mod_dir = src_dir.join(&mod_name);
+            parse_modules(&mod_file_path, &mod_dir, &mod_path, readiness, config)?
+        } else {
+            HashMap::new()
+        };
+
+        modules.insert(
+            mod_name,
+            Module {
+                path: mod_path,
+                readiness,
+                file_path: mod_file_path,
+                submodules,
+                is_explicit,
+                visibility: Visibility::Reexported,
+            },
+        );
+    }
+
     Ok(modules)
+}
+
+/// Extract module names that have items reexported via `pub use`.
+/// Looks for patterns like `pub use module::Item;` or `pub use module::{A, B};`
+fn extract_reexported_modules(parsed: &syn::File) -> HashSet<String> {
+    let mut modules = HashSet::new();
+
+    for item in &parsed.items {
+        if let syn::Item::Use(item_use) = item {
+            // Only consider public use statements
+            if !matches!(item_use.vis, syn::Visibility::Public(_)) {
+                continue;
+            }
+
+            // Extract module names from the use tree
+            extract_modules_from_use_tree(&item_use.tree, &mut modules);
+        }
+    }
+
+    modules
+}
+
+/// Recursively extract module names from a use tree.
+fn extract_modules_from_use_tree(tree: &syn::UseTree, modules: &mut HashSet<String>) {
+    match tree {
+        syn::UseTree::Path(path) => {
+            let segment = path.ident.to_string();
+            // Skip external crates and self/super/crate keywords
+            if segment == "self" || segment == "super" || segment == "crate" {
+                // For crate::module::Item, we want "module"
+                if segment == "crate" {
+                    if let syn::UseTree::Path(inner) = path.tree.as_ref() {
+                        modules.insert(inner.ident.to_string());
+                    }
+                }
+                return;
+            }
+            // For module::Item or module::{...}, add the first segment
+            modules.insert(segment);
+        }
+        syn::UseTree::Group(group) => {
+            for tree in &group.items {
+                extract_modules_from_use_tree(tree, modules);
+            }
+        }
+        syn::UseTree::Name(_) | syn::UseTree::Rename(_) | syn::UseTree::Glob(_) => {
+            // These are leaf nodes (Item, Item as Alias, *)
+        }
+    }
 }
 
 /// Extract readiness level from a module file.
