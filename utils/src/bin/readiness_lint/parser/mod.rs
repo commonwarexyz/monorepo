@@ -159,8 +159,8 @@ fn parse_crate(path: &Path, config: &Config) -> Result<Crate, ParseError> {
     // Parse modules from lib.rs
     let lib_rs_path = path.join("src/lib.rs");
     let (modules, root_readiness) = if lib_rs_path.exists() {
-        let modules = parse_modules(&lib_rs_path, &path.join("src"), "", config)?;
         let root_readiness = extract_readiness_from_file(&lib_rs_path);
+        let modules = parse_modules(&lib_rs_path, &path.join("src"), "", root_readiness, config)?;
         (modules, root_readiness)
     } else {
         (HashMap::new(), 0)
@@ -196,6 +196,7 @@ fn parse_modules(
     file_path: &Path,
     src_dir: &Path,
     parent_path: &str,
+    parent_readiness: u8,
     config: &Config,
 ) -> Result<HashMap<String, Module>, ParseError> {
     let content = fs::read_to_string(file_path)?;
@@ -247,12 +248,19 @@ fn parse_modules(
             };
 
             // Check for #[readiness(N)] inside the module file
-            let readiness = extract_readiness_from_file(&mod_file_path);
+            let explicit_readiness = extract_readiness_from_file(&mod_file_path);
+            let is_explicit = explicit_readiness > 0;
+            // Inherit from parent if no explicit readiness
+            let readiness = if is_explicit {
+                explicit_readiness
+            } else {
+                parent_readiness
+            };
 
             // Recursively parse submodules
             let submodules = if has_submodules {
                 let mod_dir = src_dir.join(&mod_name);
-                parse_modules(&mod_file_path, &mod_dir, &mod_path, config)?
+                parse_modules(&mod_file_path, &mod_dir, &mod_path, readiness, config)?
             } else {
                 HashMap::new()
             };
@@ -264,7 +272,7 @@ fn parse_modules(
                     readiness,
                     file_path: mod_file_path,
                     submodules,
-                    is_explicit: readiness > 0,
+                    is_explicit,
                 },
             );
         }
@@ -294,11 +302,18 @@ fn parse_modules(
         };
 
         // Check for #[readiness(N)] inside the module file
-        let readiness = extract_readiness_from_file(&mod_file_path);
+        let explicit_readiness = extract_readiness_from_file(&mod_file_path);
+        let is_explicit = explicit_readiness > 0;
+        // Inherit from parent if no explicit readiness
+        let readiness = if is_explicit {
+            explicit_readiness
+        } else {
+            parent_readiness
+        };
 
         let submodules = if has_submodules {
             let mod_dir = src_dir.join(&mod_name);
-            parse_modules(&mod_file_path, &mod_dir, &mod_path, config)?
+            parse_modules(&mod_file_path, &mod_dir, &mod_path, readiness, config)?
         } else {
             HashMap::new()
         };
@@ -308,7 +323,7 @@ fn parse_modules(
             .and_modify(|m| {
                 if readiness > m.readiness {
                     m.readiness = readiness;
-                    m.is_explicit = true;
+                    m.is_explicit = is_explicit;
                 }
             })
             .or_insert(Module {
@@ -316,7 +331,7 @@ fn parse_modules(
                 readiness,
                 file_path: mod_file_path,
                 submodules,
-                is_explicit: readiness > 0,
+                is_explicit,
             });
     }
 
