@@ -132,7 +132,8 @@ fn build_output(workspace: &Workspace) -> ReadinessOutput {
     for crate_name in crate_names {
         let krate = &workspace.crates[crate_name];
 
-        let (modules, module_count, level_counts) = collect_modules(&krate.modules, 0);
+        let (modules, module_count, level_counts) =
+            collect_modules(&krate.modules, krate.root_readiness);
 
         // Skip crates with no public modules
         if modules.is_empty() {

@@ -1,6 +1,6 @@
 {
   "version": "0.0.65",
-  "generated": "2026-01-14T21:03:35.859815+00:00",
+  "generated": "2026-01-14T21:04:55.980757+00:00",
   "crates": [
     {
       "name": "commonware-broadcast",
@@ -18,73 +18,72 @@
     {
       "name": "commonware-codec",
       "module_counts": {
-        "0": 13,
-        "2": 2
+        "2": 15
       },
       "modules": [
         {
           "path": "codec",
-          "readiness": 0,
+          "readiness": 2,
           "is_explicit": false
         },
         {
           "path": "error",
-          "readiness": 0,
+          "readiness": 2,
           "is_explicit": false
         },
         {
           "path": "extensions",
-          "readiness": 0,
+          "readiness": 2,
           "is_explicit": false
         },
         {
           "path": "types",
-          "readiness": 0,
+          "readiness": 2,
           "is_explicit": false,
           "submodules": [
             {
               "path": "types::btree_map",
-              "readiness": 0,
+              "readiness": 2,
               "is_explicit": false
             },
             {
               "path": "types::btree_set",
-              "readiness": 0,
+              "readiness": 2,
               "is_explicit": false
             },
             {
               "path": "types::bytes",
-              "readiness": 0,
+              "readiness": 2,
               "is_explicit": false
             },
             {
               "path": "types::hash_map",
-              "readiness": 0,
+              "readiness": 2,
               "is_explicit": false
             },
             {
               "path": "types::hash_set",
-              "readiness": 0,
+              "readiness": 2,
               "is_explicit": false
             },
             {
               "path": "types::net",
-              "readiness": 0,
+              "readiness": 2,
               "is_explicit": false
             },
             {
               "path": "types::primitives",
-              "readiness": 0,
+              "readiness": 2,
               "is_explicit": false
             },
             {
               "path": "types::tuple",
-              "readiness": 0,
+              "readiness": 2,
               "is_explicit": false
             },
             {
               "path": "types::vec",
-              "readiness": 0,
+              "readiness": 2,
               "is_explicit": false
             }
           ]
@@ -277,19 +276,18 @@
     {
       "name": "commonware-cryptography",
       "module_counts": {
-        "0": 11,
         "1": 1,
-        "2": 17
+        "2": 28
       },
       "modules": [
         {
           "path": "blake3",
-          "readiness": 0,
+          "readiness": 2,
           "is_explicit": false
         },
         {
           "path": "bloomfilter",
-          "readiness": 0,
+          "readiness": 2,
           "is_explicit": false
         },
         {
@@ -394,49 +392,49 @@
         },
         {
           "path": "handshake",
-          "readiness": 0,
+          "readiness": 2,
           "is_explicit": false
         },
         {
           "path": "lthash",
-          "readiness": 0,
+          "readiness": 2,
           "is_explicit": false
         },
         {
           "path": "secp256r1",
-          "readiness": 0,
+          "readiness": 2,
           "is_explicit": false,
           "submodules": [
             {
               "path": "secp256r1::certificate",
-              "readiness": 0,
+              "readiness": 2,
               "is_explicit": false
             },
             {
               "path": "secp256r1::recoverable",
-              "readiness": 0,
+              "readiness": 2,
               "is_explicit": false
             },
             {
               "path": "secp256r1::standard",
-              "readiness": 0,
+              "readiness": 2,
               "is_explicit": false
             }
           ]
         },
         {
           "path": "secret",
-          "readiness": 0,
+          "readiness": 2,
           "is_explicit": false
         },
         {
           "path": "sha256",
-          "readiness": 0,
+          "readiness": 2,
           "is_explicit": false
         },
         {
           "path": "transcript",
-          "readiness": 0,
+          "readiness": 2,
           "is_explicit": false
         }
       ]
@@ -508,13 +506,12 @@
     {
       "name": "commonware-p2p",
       "module_counts": {
-        "0": 7,
-        "2": 2
+        "2": 9
       },
       "modules": [
         {
           "path": "authenticated",
-          "readiness": 0,
+          "readiness": 2,
           "is_explicit": false,
           "submodules": [
             {
@@ -531,32 +528,32 @@
         },
         {
           "path": "simulated",
-          "readiness": 0,
+          "readiness": 2,
           "is_explicit": false
         },
         {
           "path": "types",
-          "readiness": 0,
+          "readiness": 2,
           "is_explicit": false
         },
         {
           "path": "utils",
-          "readiness": 0,
+          "readiness": 2,
           "is_explicit": false,
           "submodules": [
             {
               "path": "utils::codec",
-              "readiness": 0,
+              "readiness": 2,
               "is_explicit": false
             },
             {
               "path": "utils::limited",
-              "readiness": 0,
+              "readiness": 2,
               "is_explicit": false
             },
             {
               "path": "utils::mux",
-              "readiness": 0,
+              "readiness": 2,
               "is_explicit": false
             }
           ]
@@ -579,13 +576,12 @@
     {
       "name": "commonware-runtime",
       "module_counts": {
-        "0": 4,
-        "2": 11
+        "2": 15
       },
       "modules": [
         {
           "path": "deterministic",
-          "readiness": 0,
+          "readiness": 2,
           "is_explicit": false
         },
         {
@@ -631,17 +627,17 @@
         },
         {
           "path": "tokio",
-          "readiness": 0,
+          "readiness": 2,
           "is_explicit": false,
           "submodules": [
             {
               "path": "tokio::telemetry",
-              "readiness": 0,
+              "readiness": 2,
               "is_explicit": false
             },
             {
               "path": "tokio::tracing",
-              "readiness": 0,
+              "readiness": 2,
               "is_explicit": false
             }
           ]
@@ -675,8 +671,7 @@
     {
       "name": "commonware-storage",
       "module_counts": {
-        "0": 51,
-        "2": 15
+        "2": 66
       },
       "modules": [
         {
@@ -698,49 +693,49 @@
         },
         {
           "path": "bmt",
-          "readiness": 0,
+          "readiness": 2,
           "is_explicit": false
         },
         {
           "path": "cache",
-          "readiness": 0,
+          "readiness": 2,
           "is_explicit": false
         },
         {
           "path": "freezer",
-          "readiness": 0,
+          "readiness": 2,
           "is_explicit": false
         },
         {
           "path": "index",
-          "readiness": 0,
+          "readiness": 2,
           "is_explicit": false,
           "submodules": [
             {
               "path": "index::ordered",
-              "readiness": 0,
+              "readiness": 2,
               "is_explicit": false
             },
             {
               "path": "index::partitioned",
-              "readiness": 0,
+              "readiness": 2,
               "is_explicit": false,
               "submodules": [
                 {
                   "path": "index::partitioned::ordered",
-                  "readiness": 0,
+                  "readiness": 2,
                   "is_explicit": false
                 },
                 {
                   "path": "index::partitioned::unordered",
-                  "readiness": 0,
+                  "readiness": 2,
                   "is_explicit": false
                 }
               ]
             },
             {
               "path": "index::unordered",
-              "readiness": 0,
+              "readiness": 2,
               "is_explicit": false
             }
           ]
@@ -803,7 +798,7 @@
         },
         {
           "path": "kv",
-          "readiness": 0,
+          "readiness": 2,
           "is_explicit": false
         },
         {
@@ -813,128 +808,128 @@
         },
         {
           "path": "mmr",
-          "readiness": 0,
+          "readiness": 2,
           "is_explicit": false,
           "submodules": [
             {
               "path": "mmr::grafting",
-              "readiness": 0,
+              "readiness": 2,
               "is_explicit": false
             },
             {
               "path": "mmr::hasher",
-              "readiness": 0,
+              "readiness": 2,
               "is_explicit": false
             },
             {
               "path": "mmr::iterator",
-              "readiness": 0,
+              "readiness": 2,
               "is_explicit": false
             },
             {
               "path": "mmr::journaled",
-              "readiness": 0,
+              "readiness": 2,
               "is_explicit": false
             },
             {
               "path": "mmr::location",
-              "readiness": 0,
+              "readiness": 2,
               "is_explicit": false
             },
             {
               "path": "mmr::mem",
-              "readiness": 0,
+              "readiness": 2,
               "is_explicit": false
             },
             {
               "path": "mmr::position",
-              "readiness": 0,
+              "readiness": 2,
               "is_explicit": false
             },
             {
               "path": "mmr::proof",
-              "readiness": 0,
+              "readiness": 2,
               "is_explicit": false
             },
             {
               "path": "mmr::stability",
-              "readiness": 0,
+              "readiness": 2,
               "is_explicit": false
             },
             {
               "path": "mmr::storage",
-              "readiness": 0,
+              "readiness": 2,
               "is_explicit": false
             },
             {
               "path": "mmr::verification",
-              "readiness": 0,
+              "readiness": 2,
               "is_explicit": false
             }
           ]
         },
         {
           "path": "ordinal",
-          "readiness": 0,
+          "readiness": 2,
           "is_explicit": false
         },
         {
           "path": "qmdb",
-          "readiness": 0,
+          "readiness": 2,
           "is_explicit": false,
           "submodules": [
             {
               "path": "qmdb::any",
-              "readiness": 0,
+              "readiness": 2,
               "is_explicit": false,
               "submodules": [
                 {
                   "path": "qmdb::any::ordered",
-                  "readiness": 0,
+                  "readiness": 2,
                   "is_explicit": false,
                   "submodules": [
                     {
                       "path": "qmdb::any::ordered::fixed",
-                      "readiness": 0,
+                      "readiness": 2,
                       "is_explicit": false
                     },
                     {
                       "path": "qmdb::any::ordered::variable",
-                      "readiness": 0,
+                      "readiness": 2,
                       "is_explicit": false
                     }
                   ]
                 },
                 {
                   "path": "qmdb::any::states",
-                  "readiness": 0,
+                  "readiness": 2,
                   "is_explicit": false
                 },
                 {
                   "path": "qmdb::any::unordered",
-                  "readiness": 0,
+                  "readiness": 2,
                   "is_explicit": false,
                   "submodules": [
                     {
                       "path": "qmdb::any::unordered::fixed",
-                      "readiness": 0,
+                      "readiness": 2,
                       "is_explicit": false,
                       "submodules": [
                         {
                           "path": "qmdb::any::unordered::fixed::sync",
-                          "readiness": 0,
+                          "readiness": 2,
                           "is_explicit": false
                         }
                       ]
                     },
                     {
                       "path": "qmdb::any::unordered::variable",
-                      "readiness": 0,
+                      "readiness": 2,
                       "is_explicit": false,
                       "submodules": [
                         {
                           "path": "qmdb::any::unordered::variable::sync",
-                          "readiness": 0,
+                          "readiness": 2,
                           "is_explicit": false
                         }
                       ]
@@ -945,34 +940,34 @@
             },
             {
               "path": "qmdb::current",
-              "readiness": 0,
+              "readiness": 2,
               "is_explicit": false,
               "submodules": [
                 {
                   "path": "qmdb::current::ordered",
-                  "readiness": 0,
+                  "readiness": 2,
                   "is_explicit": false,
                   "submodules": [
                     {
                       "path": "qmdb::current::ordered::fixed",
-                      "readiness": 0,
+                      "readiness": 2,
                       "is_explicit": false
                     }
                   ]
                 },
                 {
                   "path": "qmdb::current::proof",
-                  "readiness": 0,
+                  "readiness": 2,
                   "is_explicit": false
                 },
                 {
                   "path": "qmdb::current::unordered",
-                  "readiness": 0,
+                  "readiness": 2,
                   "is_explicit": false,
                   "submodules": [
                     {
                       "path": "qmdb::current::unordered::fixed",
-                      "readiness": 0,
+                      "readiness": 2,
                       "is_explicit": false
                     }
                   ]
@@ -981,65 +976,65 @@
             },
             {
               "path": "qmdb::immutable",
-              "readiness": 0,
+              "readiness": 2,
               "is_explicit": false,
               "submodules": [
                 {
                   "path": "qmdb::immutable::sync",
-                  "readiness": 0,
+                  "readiness": 2,
                   "is_explicit": false
                 }
               ]
             },
             {
               "path": "qmdb::keyless",
-              "readiness": 0,
+              "readiness": 2,
               "is_explicit": false
             },
             {
               "path": "qmdb::operation",
-              "readiness": 0,
+              "readiness": 2,
               "is_explicit": false
             },
             {
               "path": "qmdb::store",
-              "readiness": 0,
+              "readiness": 2,
               "is_explicit": false,
               "submodules": [
                 {
                   "path": "qmdb::store::db",
-                  "readiness": 0,
+                  "readiness": 2,
                   "is_explicit": false
                 }
               ]
             },
             {
               "path": "qmdb::sync",
-              "readiness": 0,
+              "readiness": 2,
               "is_explicit": false,
               "submodules": [
                 {
                   "path": "qmdb::sync::engine",
-                  "readiness": 0,
+                  "readiness": 2,
                   "is_explicit": false
                 },
                 {
                   "path": "qmdb::sync::resolver",
-                  "readiness": 0,
+                  "readiness": 2,
                   "is_explicit": false
                 }
               ]
             },
             {
               "path": "qmdb::verify",
-              "readiness": 0,
+              "readiness": 2,
               "is_explicit": false
             }
           ]
         },
         {
           "path": "rmap",
-          "readiness": 0,
+          "readiness": 2,
           "is_explicit": false
         },
         {
@@ -1052,17 +1047,17 @@
     {
       "name": "commonware-stream",
       "module_counts": {
-        "0": 2
+        "2": 2
       },
       "modules": [
         {
           "path": "utils",
-          "readiness": 0,
+          "readiness": 2,
           "is_explicit": false,
           "submodules": [
             {
               "path": "utils::codec",
-              "readiness": 0,
+              "readiness": 2,
               "is_explicit": false
             }
           ]
@@ -1072,8 +1067,7 @@
     {
       "name": "commonware-utils",
       "module_counts": {
-        "0": 7,
-        "2": 16
+        "2": 23
       },
       "modules": [
         {
@@ -1117,12 +1111,12 @@
         },
         {
           "path": "concurrency",
-          "readiness": 0,
+          "readiness": 2,
           "is_explicit": false
         },
         {
           "path": "faults",
-          "readiness": 0,
+          "readiness": 2,
           "is_explicit": false
         },
         {
@@ -1132,17 +1126,17 @@
         },
         {
           "path": "hex_literal",
-          "readiness": 0,
+          "readiness": 2,
           "is_explicit": false
         },
         {
           "path": "hostname",
-          "readiness": 0,
+          "readiness": 2,
           "is_explicit": false
         },
         {
           "path": "net",
-          "readiness": 0,
+          "readiness": 2,
           "is_explicit": false
         },
         {
@@ -1152,7 +1146,7 @@
         },
         {
           "path": "rational",
-          "readiness": 0,
+          "readiness": 2,
           "is_explicit": false
         },
         {
@@ -1189,7 +1183,7 @@
         },
         {
           "path": "time",
-          "readiness": 0,
+          "readiness": 2,
           "is_explicit": false
         },
         {
@@ -1203,9 +1197,9 @@
   "summary": {
     "total_modules": 198,
     "by_level": {
-      "0": 112,
+      "0": 17,
       "1": 1,
-      "2": 85
+      "2": 180
     }
   }
 }
