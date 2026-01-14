@@ -174,8 +174,8 @@ async fn main() -> std::process::ExitCode {
                 let config_path = matches.get_one::<PathBuf>("config").unwrap();
                 let instance = matches.get_one::<String>("instance").unwrap();
                 let duration = *matches.get_one::<u64>("duration").unwrap();
-                let binary_path = matches.get_one::<PathBuf>("binary").unwrap();
-                if let Err(e) = ec2::profile(config_path, instance, duration, binary_path).await {
+                let binary = matches.get_one::<PathBuf>("binary").unwrap();
+                if let Err(e) = ec2::profile(config_path, instance, duration, binary).await {
                     error!(error=?e, "failed to profile instance");
                 } else {
                     return std::process::ExitCode::SUCCESS;

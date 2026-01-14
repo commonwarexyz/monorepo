@@ -14,11 +14,7 @@ use std::{
     path::PathBuf,
     time::{SystemTime, UNIX_EPOCH},
 };
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::TcpListener,
-    process::Command,
-};
+use tokio::process::Command;
 use tracing::info;
 
 /// Captures a CPU profile from a running instance using samply
@@ -189,81 +185,32 @@ echo "Profile captured successfully"
     scp_download(private_key, &instance_ip, "/tmp/profile.json", &profile_path).await?;
     info!(profile = profile_path.as_str(), "downloaded profile");
 
-    // Symbolicate the profile locally using samply with the provided binary
-    let symbolicated_path = format!("/tmp/profile-{}-{}-symbolicated.json", instance_name, timestamp);
-    info!(binary = ?binary_path, "symbolicating profile locally");
-    let output = Command::new("samply")
-        .arg("load")
-        .arg(&profile_path)
-        .arg("--binary")
-        .arg(binary_path)
-        .arg("-o")
-        .arg(&symbolicated_path)
-        .output()
-        .await?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(Error::Symbolication(stderr.to_string()));
-    }
-    info!(path = symbolicated_path.as_str(), "profile symbolicated");
+    // Create a temp directory with a symlink named "binary" pointing to the debug binary
+    // (samply looks for symbols by filename, and the remote binary is named "binary")
+    let binary_path = binary_path
+        .canonicalize()
+        .map_err(|e| Error::Symbolication(format!("failed to resolve binary path: {}", e)))?;
+    let symbol_dir = format!("/tmp/symbols-{}-{}", instance_name, timestamp);
+    std::fs::create_dir_all(&symbol_dir)?;
+    let symlink_path = format!("{}/binary", symbol_dir);
+    std::os::unix::fs::symlink(&binary_path, &symlink_path)
+        .map_err(|e| Error::Symbolication(format!("failed to create symlink: {}", e)))?;
 
-    // Read the symbolicated profile file
-    let profile_content = std::fs::read(&symbolicated_path)?;
-
-    // Start a local HTTP server on a random port
-    let listener = TcpListener::bind("127.0.0.1:0").await?;
-    let port = listener.local_addr()?.port();
-    info!(port = port, "started local server for profile");
-
-    // Build the Firefox Profiler URL with from-url parameter
-    let local_url = format!("http://127.0.0.1:{}/profile.json", port);
-    let profiler_url = format!(
-        "https://profiler.firefox.com/from-url/{}",
-        urlencoding::encode(&local_url)
+    // Use samply load with --symbol-dir to open the profile with symbols
+    info!(
+        binary = ?binary_path,
+        symbol_dir = symbol_dir.as_str(),
+        "opening profile with samply"
     );
+    let mut cmd = Command::new("samply");
+    cmd.arg("load")
+        .arg(&profile_path)
+        .arg("--symbol-dir")
+        .arg(&symbol_dir);
 
-    // Open Firefox Profiler in the default browser
-    #[cfg(target_os = "macos")]
-    let open_cmd = "open";
-    #[cfg(target_os = "linux")]
-    let open_cmd = "xdg-open";
-    #[cfg(target_os = "windows")]
-    let open_cmd = "start";
-
-    let _ = Command::new(open_cmd).arg(&profiler_url).spawn();
-    info!("Firefox Profiler opened");
-
-    // Serve the profile file (handle both preflight OPTIONS and GET requests)
-    loop {
-        let (mut socket, _) = listener.accept().await?;
-        let mut buf = [0u8; 1024];
-        let n = socket.read(&mut buf).await?;
-        let request = String::from_utf8_lossy(&buf[..n]);
-
-        // CORS headers for Firefox Profiler
-        let cors_headers = "Access-Control-Allow-Origin: *\r\n\
-                           Access-Control-Allow-Methods: GET, OPTIONS\r\n\
-                           Access-Control-Allow-Headers: *\r\n";
-
-        if request.starts_with("OPTIONS") {
-            // Preflight request
-            let response =
-                format!("HTTP/1.1 204 No Content\r\n{cors_headers}Content-Length: 0\r\n\r\n");
-            socket.write_all(response.as_bytes()).await?;
-        } else if request.starts_with("GET") {
-            // Serve the profile
-            let response = format!(
-                "HTTP/1.1 200 OK\r\n\
-                 Content-Type: application/json\r\n\
-                 Content-Length: {}\r\n\
-                 {cors_headers}\r\n",
-                profile_content.len()
-            );
-            socket.write_all(response.as_bytes()).await?;
-            socket.write_all(&profile_content).await?;
-            info!("profile served to Firefox Profiler");
-            break;
-        }
+    let status = cmd.status().await?;
+    if !status.success() {
+        return Err(Error::Symbolication("samply load failed".to_string()));
     }
 
     Ok(())
