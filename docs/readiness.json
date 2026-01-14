@@ -1,14 +1,10 @@
 {
   "version": "0.0.65",
-  "generated": "2026-01-14T23:15:30.575940+00:00",
+  "generated": "2026-01-14T23:18:42.838099+00:00",
   "crates": [
     {
       "name": "commonware-broadcast",
       "readiness": {
-        "0": [
-          "buffered::engine",
-          "buffered::ingress"
-        ],
         "2": [
           "buffered",
           "{Broadcaster}"
@@ -63,21 +59,8 @@
           "aggregation::scheme",
           "aggregation::types",
           "application::marshaled",
-          "marshal::actor",
-          "marshal::cache",
-          "marshal::ingress::handler",
-          "marshal::ingress::mailbox",
-          "marshal::resolver::p2p",
-          "marshal::store",
           "ordered_broadcast::scheme",
           "ordered_broadcast::types",
-          "simplex::elector",
-          "simplex::scheme::bls12381_multisig",
-          "simplex::scheme::bls12381_threshold",
-          "simplex::scheme::ed25519",
-          "simplex::scheme::reporter",
-          "simplex::scheme::secp256r1",
-          "simplex::types",
           "types"
         ],
         "2": [
@@ -92,18 +75,6 @@
         "0": [
           "blake3",
           "bloomfilter",
-          "bls12381::certificate::multisig",
-          "bls12381::certificate::threshold",
-          "bls12381::dkg",
-          "bls12381::primitives::group",
-          "bls12381::primitives::ops::aggregate",
-          "bls12381::primitives::ops::batch",
-          "bls12381::primitives::ops::threshold",
-          "bls12381::primitives::sharing",
-          "bls12381::primitives::variant",
-          "bls12381::scheme",
-          "ed25519::certificate",
-          "ed25519::scheme",
           "handshake",
           "lthash",
           "secp256r1::certificate",
@@ -153,41 +124,10 @@
       "name": "commonware-p2p",
       "readiness": {
         "0": [
-          "authenticated::discovery::actors::dialer",
-          "authenticated::discovery::actors::listener",
-          "authenticated::discovery::actors::peer::actor",
-          "authenticated::discovery::actors::peer::ingress",
-          "authenticated::discovery::actors::router::actor",
-          "authenticated::discovery::actors::router::ingress",
-          "authenticated::discovery::actors::spawner::actor",
-          "authenticated::discovery::actors::spawner::ingress",
-          "authenticated::discovery::actors::tracker::actor",
-          "authenticated::discovery::actors::tracker::ingress",
-          "authenticated::discovery::actors::tracker::metadata",
-          "authenticated::discovery::actors::tracker::reservation",
-          "authenticated::discovery::channels",
-          "authenticated::discovery::network",
-          "authenticated::lookup::actors::dialer",
-          "authenticated::lookup::actors::listener",
-          "authenticated::lookup::actors::peer::actor",
-          "authenticated::lookup::actors::peer::ingress",
-          "authenticated::lookup::actors::router::actor",
-          "authenticated::lookup::actors::router::ingress",
-          "authenticated::lookup::actors::spawner::actor",
-          "authenticated::lookup::actors::spawner::ingress",
-          "authenticated::lookup::actors::tracker::actor",
-          "authenticated::lookup::actors::tracker::ingress",
-          "authenticated::lookup::actors::tracker::metadata",
-          "authenticated::lookup::actors::tracker::reservation",
-          "authenticated::lookup::channels",
-          "authenticated::lookup::network",
           "authenticated::mailbox",
           "simulated::ingress",
           "simulated::network",
-          "types",
-          "utils::codec",
-          "utils::limited",
-          "utils::mux"
+          "types"
         ],
         "2": [
           "authenticated::discovery",
@@ -208,10 +148,6 @@
     {
       "name": "commonware-resolver",
       "readiness": {
-        "0": [
-          "p2p::engine",
-          "p2p::ingress"
-        ],
         "2": [
           "p2p",
           "{Consumer, Resolver}"
@@ -223,21 +159,9 @@
       "readiness": {
         "0": [
           "deterministic",
-          "telemetry::metrics::histogram",
-          "telemetry::metrics::status",
-          "telemetry::traces::collector",
-          "telemetry::traces::status",
           "tokio::runtime",
           "tokio::telemetry",
-          "tokio::tracing",
-          "utils::buffer::pool::append",
-          "utils::buffer::pool::page_cache",
-          "utils::buffer::pool::read",
-          "utils::buffer::read",
-          "utils::buffer::write",
-          "utils::cell",
-          "utils::handle",
-          "utils::signal"
+          "tokio::tracing"
         ],
         "2": [
           "telemetry",
@@ -250,8 +174,6 @@
       "name": "commonware-storage",
       "readiness": {
         "0": [
-          "archive::immutable::storage",
-          "archive::prunable::storage",
           "bmt",
           "cache::storage",
           "freezer::storage",
@@ -259,15 +181,7 @@
           "index::partitioned::ordered",
           "index::partitioned::unordered",
           "index::unordered",
-          "journal::authenticated",
-          "journal::contiguous::fixed",
-          "journal::contiguous::variable",
-          "journal::segmented::fixed",
-          "journal::segmented::glob",
-          "journal::segmented::oversized",
-          "journal::segmented::variable",
           "kv::batch",
-          "metadata::storage",
           "mmr::grafting",
           "mmr::hasher",
           "mmr::iterator",
@@ -324,21 +238,9 @@
       "name": "commonware-utils",
       "readiness": {
         "0": [
-          "bitmap::historical::batch",
-          "bitmap::historical::bitmap",
-          "bitmap::historical::error",
-          "bitmap::prunable",
-          "channels::fallible",
-          "channels::ring",
-          "channels::tracked",
           "hex_literal",
           "hostname",
-          "rational",
-          "sequence::fixed_bytes",
-          "sequence::prefixed_u64",
-          "sequence::u32",
-          "sequence::u64",
-          "sequence::unit"
+          "rational"
         ],
         "2": [
           "acknowledgement",
@@ -359,10 +261,10 @@
     }
   ],
   "summary": {
-    "total_modules": 216,
+    "total_modules": 122,
     "total_items": 47,
     "modules_by_level": {
-      "0": 182,
+      "0": 88,
       "1": 1,
       "2": 33
     },

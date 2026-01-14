@@ -112,6 +112,7 @@ fn build_output(workspace: &Workspace) -> ReadinessOutput {
             &mut modules_by_level,
             &mut total_items,
             &mut items_by_level,
+            false, // no explicit parent at root
         );
 
         // Skip crates with nothing to show
@@ -144,6 +145,7 @@ fn build_output(workspace: &Workspace) -> ReadinessOutput {
 }
 
 /// Recursively collect modules and their readiness levels.
+/// `parent_explicit` indicates if an ancestor has explicit readiness (children inherit).
 fn collect_modules(
     modules: &HashMap<String, Module>,
     by_level: &mut BTreeMap<u8, Vec<String>>,
@@ -151,6 +153,7 @@ fn collect_modules(
     modules_by_level: &mut BTreeMap<u8, usize>,
     total_items: &mut usize,
     items_by_level: &mut BTreeMap<u8, usize>,
+    parent_explicit: bool,
 ) {
     for module in modules.values() {
         if module.is_explicit {
@@ -161,40 +164,66 @@ fn collect_modules(
                 .entry(module.readiness)
                 .or_default()
                 .push(module.path.clone());
-        } else if !module.items.is_empty() {
-            // Module has no explicit readiness, but has items with #[ready(N)]
-            // Show those items, and show the module itself at level 0
-            let mut items_at_level: BTreeMap<u8, Vec<String>> = BTreeMap::new();
-            for (item_name, &readiness) in &module.items {
-                items_at_level
-                    .entry(readiness)
-                    .or_default()
-                    .push(item_name.clone());
+
+            // Recurse but mark that parent is explicit - children only shown if they differ
+            collect_modules(
+                &module.submodules,
+                by_level,
+                total_modules,
+                modules_by_level,
+                total_items,
+                items_by_level,
+                true, // parent is explicit
+            );
+        } else if parent_explicit {
+            // Parent has explicit readiness, this module inherits - don't show it
+            // But still recurse in case a deeper child has different explicit readiness
+            collect_modules(
+                &module.submodules,
+                by_level,
+                total_modules,
+                modules_by_level,
+                total_items,
+                items_by_level,
+                true, // still under explicit parent
+            );
+        } else {
+            // No explicit readiness and no explicit parent
+            if !module.items.is_empty() {
+                // Module has items with #[ready(N)] - show those items
+                let mut items_at_level: BTreeMap<u8, Vec<String>> = BTreeMap::new();
+                for (item_name, &readiness) in &module.items {
+                    items_at_level
+                        .entry(readiness)
+                        .or_default()
+                        .push(item_name.clone());
+                }
+
+                for (level, mut items) in items_at_level {
+                    items.sort();
+                    *total_items += items.len();
+                    *items_by_level.entry(level).or_insert(0) += items.len();
+                    let formatted = format_items_with_module(&module.path, &items);
+                    by_level.entry(level).or_default().push(formatted);
+                }
+            } else if module.submodules.is_empty() {
+                // Leaf module with no explicit readiness and no annotated items - show at level 0
+                *total_modules += 1;
+                *modules_by_level.entry(0).or_insert(0) += 1;
+                by_level.entry(0).or_default().push(module.path.clone());
             }
 
-            for (level, mut items) in items_at_level {
-                items.sort();
-                *total_items += items.len();
-                *items_by_level.entry(level).or_insert(0) += items.len();
-                let formatted = format_items_with_module(&module.path, &items);
-                by_level.entry(level).or_default().push(formatted);
-            }
-        } else if module.submodules.is_empty() {
-            // Leaf module with no explicit readiness and no annotated items - show at level 0
-            *total_modules += 1;
-            *modules_by_level.entry(0).or_insert(0) += 1;
-            by_level.entry(0).or_default().push(module.path.clone());
+            // Recurse into submodules
+            collect_modules(
+                &module.submodules,
+                by_level,
+                total_modules,
+                modules_by_level,
+                total_items,
+                items_by_level,
+                false, // no explicit parent
+            );
         }
-
-        // Recurse into submodules
-        collect_modules(
-            &module.submodules,
-            by_level,
-            total_modules,
-            modules_by_level,
-            total_items,
-            items_by_level,
-        );
     }
 }
 
