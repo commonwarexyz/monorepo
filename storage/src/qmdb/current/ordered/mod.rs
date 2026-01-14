@@ -6,17 +6,20 @@
 //!
 //! Variants:
 //! - [fixed]: Variant optimized for values of fixed size.
+//! - [variable]: Variant for values of variable size.
 
 use crate::qmdb::{
-    any::{ordered::fixed::Update, FixedValue},
+    any::{ordered::Update, ValueEncoding},
     current::proof::OperationProof,
 };
 use commonware_cryptography::Digest;
 use commonware_utils::Array;
 
+pub mod db;
 pub mod fixed;
 #[cfg(any(test, feature = "test-traits"))]
 mod test_trait_impls;
+pub mod variable;
 
 /// Proof that a key has no assigned value in the database.
 ///
@@ -26,7 +29,7 @@ mod test_trait_impls;
 ///
 /// Verify using [Db::verify_exclusion_proof](fixed::Db::verify_exclusion_proof).
 #[derive(Clone, Eq, PartialEq, Debug)]
-pub enum ExclusionProof<K: Array, V: FixedValue, D: Digest, const N: usize> {
+pub enum ExclusionProof<K: Array, V: ValueEncoding, D: Digest, const N: usize> {
     /// Proves that two keys are active in the database and adjacent to each other in the key
     /// ordering. Any key falling between them (non-inclusively) can be proven excluded.
     KeyValue(OperationProof<D, N>, Update<K, V>),
@@ -35,5 +38,5 @@ pub enum ExclusionProof<K: Array, V: FixedValue, D: Digest, const N: usize> {
     /// Specifically, the proof establishes the most recent Commit operation has an activity floor
     /// equal to its own location, which is a necessary and sufficient condition for an empty
     /// database.
-    Commit(OperationProof<D, N>, Option<V>),
+    Commit(OperationProof<D, N>, Option<V::Value>),
 }

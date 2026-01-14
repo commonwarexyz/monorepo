@@ -5,7 +5,10 @@
 //!
 //! Variants:
 //! - [fixed]: Variant optimized for values of fixed size.
+//! - [variable]: Variant for values of variable size.
 
+pub mod db;
 pub mod fixed;
 #[cfg(any(test, feature = "test-traits"))]
 mod test_trait_impls;
+pub mod variable;

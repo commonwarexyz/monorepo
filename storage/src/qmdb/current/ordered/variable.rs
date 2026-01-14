@@ -1,62 +1,68 @@
-//! An _ordered_ variant of a [current] authenticated database optimized for fixed-size values.
+//! An _ordered_ variant of a [crate::qmdb::current] authenticated database for variable-size
+//! values
 //!
 //! This variant maintains the lexicographic-next active key for each active key, enabling exclusion
-//! proofs (proving a key is currently inactive). Use [current::unordered::fixed] if exclusion
-//! proofs are not needed.
+//! proofs (proving a key is currently inactive). Use [super::super::unordered::variable] if
+//! exclusion proofs are not needed.
 //!
 //! See [Db] for the main database type and [super::ExclusionProof] for proving key inactivity.
 
 pub use super::db::KeyValueProof;
 use crate::{
     bitmap::CleanBitMap,
-    journal::contiguous::fixed::Journal,
+    journal::contiguous::variable::Journal,
     mmr::{Location, StandardHasher},
     qmdb::{
         any::{
-            ordered::fixed::{Db as AnyDb, Operation},
-            value::FixedEncoding,
-            FixedValue,
+            ordered::variable::{Db as AnyDb, Operation},
+            value::VariableEncoding,
+            VariableValue,
         },
         current::{
             db::{merkleize_grafted_bitmap, root},
-            FixedConfig as Config,
+            VariableConfig as Config,
         },
         Durable, Error, Merkleized,
     },
     translator::Translator,
 };
-use commonware_codec::FixedSize;
+use commonware_codec::{FixedSize, Read};
 use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics, Storage as RStorage};
 use commonware_utils::Array;
 
 pub type Db<E, K, V, H, T, const N: usize, S = Merkleized<H>, D = Durable> =
-    super::db::Db<E, Journal<E, Operation<K, V>>, K, FixedEncoding<V>, H, T, N, S, D>;
+    super::db::Db<E, Journal<E, Operation<K, V>>, K, VariableEncoding<V>, H, T, N, S, D>;
 
 // Functionality for the Clean state - init only.
 impl<
         E: RStorage + Clock + Metrics,
         K: Array,
-        V: FixedValue,
+        V: VariableValue,
         H: Hasher,
         T: Translator,
         const N: usize,
     > Db<E, K, V, H, T, N, Merkleized<H>, Durable>
+where
+    Operation<K, V>: Read,
 {
     /// Initializes a [Db] from the given `config`. Leverages parallel Merkleization to initialize
     /// the bitmap MMR if a thread pool is provided.
-    pub async fn init(context: E, config: Config<T>) -> Result<Self, Error> {
+    pub async fn init(
+        context: E,
+        config: Config<T, <Operation<K, V> as Read>::Cfg>,
+    ) -> Result<Self, Error> {
         // TODO: Re-evaluate assertion placement after `generic_const_exprs` is stable.
         const {
-            // A compile-time assertion that the chunk size is some multiple of digest size. A multiple of 1 is optimal
-            // with respect to proof size, but a higher multiple allows for a smaller (RAM resident) merkle tree over
-            // the structure.
+            // A compile-time assertion that the chunk size is some multiple of digest size. A
+            // multiple of 1 is optimal with respect to proof size, but a higher multiple allows for
+            // a smaller (RAM resident) merkle tree over the structure.
             assert!(
                 N.is_multiple_of(H::Digest::SIZE),
                 "chunk size must be some multiple of the digest size",
             );
-            // A compile-time assertion that chunk size is a power of 2, which is necessary to allow the status bitmap
-            // tree to be aligned with the underlying operations MMR.
+            // A compile-time assertion that chunk size is a power of 2, which is necessary to allow
+            // the status bitmap tree to be aligned with the underlying operations MMR.
             assert!(N.is_power_of_two(), "chunk size must be a power of 2");
         }
 
@@ -104,27 +110,29 @@ impl<
 }
 
 #[cfg(test)]
-pub mod test {
-    use super::*;
+mod test {
     use crate::{
+        bitmap::CleanBitMap,
         index::Unordered as _,
         kv::tests::{assert_batchable, assert_deletable, assert_gettable, assert_send},
-        mmr::hasher::Hasher as _,
+        mmr::{hasher::Hasher as _, Location, StandardHasher},
         qmdb::{
-            any::ordered::Update,
+            any::ordered::variable::Operation,
             current::{
+                ordered::{db::KeyValueProof, variable::Db},
                 proof::{OperationProof, RangeProof},
                 tests::apply_random_ops,
+                VariableConfig as Config,
             },
             store::{
                 batch_tests,
                 tests::{assert_log_store, assert_merkleized_store, assert_prunable_store},
             },
-            NonDurable, Unmerkleized,
+            Durable, Error, Merkleized, NonDurable, Unmerkleized,
         },
         translator::OneCap,
     };
-    use commonware_cryptography::{sha256::Digest, Sha256};
+    use commonware_cryptography::{sha256::Digest, Hasher as _, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{buffer::PoolRef, deterministic, Runner as _};
     use commonware_utils::{NZUsize, NZU16, NZU64};
@@ -133,20 +141,21 @@ pub mod test {
         collections::HashMap,
         num::{NonZeroU16, NonZeroUsize},
     };
-    use tracing::warn;
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(88);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(8);
 
-    fn current_db_config(partition_prefix: &str) -> Config<OneCap> {
+    fn current_db_config(partition_prefix: &str) -> Config<OneCap, ()> {
         Config {
             mmr_journal_partition: format!("{partition_prefix}_journal_partition"),
             mmr_metadata_partition: format!("{partition_prefix}_metadata_partition"),
             mmr_items_per_blob: NZU64!(11),
             mmr_write_buffer: NZUsize!(1024),
-            log_journal_partition: format!("{partition_prefix}_partition_prefix"),
+            log_partition: format!("{partition_prefix}_log_partition"),
             log_items_per_blob: NZU64!(7),
             log_write_buffer: NZUsize!(1024),
+            log_compression: None,
+            log_codec_config: (),
             bitmap_metadata_partition: format!("{partition_prefix}_bitmap_metadata_partition"),
             translator: OneCap,
             thread_pool: None,
@@ -154,13 +163,15 @@ pub mod test {
         }
     }
 
-    /// A type alias for the concrete [Db] type used in these unit tests (Merkleized, Durable state).
+    /// A type alias for the concrete [Db] type used in these unit tests (Merkleized, Durable).
     type CleanCurrentTest =
         Db<deterministic::Context, Digest, Digest, Sha256, OneCap, 32, Merkleized<Sha256>, Durable>;
+
+    /// A type alias for the Mutable variant of CurrentTest (Unmerkleized, NonDurable state).
     type MutableCurrentTest =
         Db<deterministic::Context, Digest, Digest, Sha256, OneCap, 32, Unmerkleized, NonDurable>;
 
-    /// Return an [Db] database initialized with a fixed config.
+    /// Return a [Db] database initialized with a fixed config.
     async fn open_db(
         context: deterministic::Context,
         partition_prefix: String,
@@ -321,7 +332,7 @@ pub mod test {
 
     // Test that merkleization state changes don't reset `steps`.
     #[test_traced("DEBUG")]
-    fn test_current_ordered_fixed_db_steps_not_reset() {
+    fn test_current_ordered_variable_db_steps_not_reset() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let db = open_db(context, "steps_test".to_string()).await;
@@ -414,7 +425,7 @@ pub mod test {
                 &root,
             ));
 
-            // Create a proof of the now-inactive update operation assigining v1 to k against the
+            // Create a proof of the now-inactive update operation assigning v1 to k against the
             // current root.
             let (p, _, chunks) = db
                 .range_proof(hasher.inner(), op_loc, NZU64!(1))
@@ -430,7 +441,7 @@ pub mod test {
             };
             // This proof should verify using verify_range_proof which does not check activity
             // status.
-            let op = Operation::Update(Update {
+            let op = Operation::Update(crate::qmdb::any::ordered::Update {
                 key: k,
                 value: v1,
                 next_key: k,
@@ -553,7 +564,7 @@ pub mod test {
                     "failed to verify range at start_loc {start_loc}",
                 );
                 // Proof should not verify if we include extra chunks.
-                let mut chunks_with_extra = chunks.to_vec();
+                let mut chunks_with_extra = chunks.clone();
                 chunks_with_extra.push(chunks[chunks.len() - 1]);
                 assert!(!CleanCurrentTest::verify_range_proof(
                     hasher.inner(),
@@ -663,71 +674,6 @@ pub mod test {
     #[test_traced("WARN")]
     pub fn test_current_db_build_random_close_reopen() {
         crate::qmdb::current::tests::test_build_random_close_reopen(open_db);
-    }
-
-    /// Test that sync() persists the bitmap pruning boundary.
-    ///
-    /// This test verifies that calling `sync()` persists the bitmap pruning boundary that was
-    /// set during `into_merkleized()`. If `sync()` didn't call `write_pruned`, the
-    /// `bitmap_pruned_bits()` count would be 0 after reopen instead of the expected value.
-    #[test_traced("WARN")]
-    pub fn test_current_db_sync_persists_bitmap_pruning_boundary() {
-        const ELEMENTS: u64 = 500;
-
-        let executor = deterministic::Runner::default();
-        executor.start(|mut context| async move {
-            let partition = "sync_bitmap_pruning".to_string();
-            let rng_seed = context.next_u64();
-            let db = open_db(context.clone(), partition.clone()).await;
-
-            // Apply random operations with commits to advance the inactivity floor.
-            let db = apply_random_ops::<CleanCurrentTest>(ELEMENTS, true, rng_seed, db.into_mutable())
-                .await
-                .unwrap();
-            let (db, _) = db.commit(None).await.unwrap();
-            let mut db = db.into_merkleized().await.unwrap();
-
-            // The bitmap should have been pruned during into_merkleized().
-            let pruned_bits_before = db.bitmap_pruned_bits();
-            warn!(
-                "pruned_bits_before={}, inactivity_floor={}, op_count={}",
-                pruned_bits_before,
-                *db.inactivity_floor_loc(),
-                *db.op_count()
-            );
-
-            // Verify we actually have some pruning (otherwise the test is meaningless).
-            assert!(
-                pruned_bits_before > 0,
-                "Expected bitmap to have pruned bits after merkleization"
-            );
-
-            // Call sync() WITHOUT calling prune(). The bitmap pruning boundary was set
-            // during into_merkleized(), and sync() should persist it.
-            db.sync().await.unwrap();
-
-            // Record the root before dropping.
-            let root_before = db.root();
-            drop(db);
-
-            // Reopen the database.
-            let db = open_db(context.clone(), partition).await;
-
-            // The pruned bits count should match. If sync() didn't persist the bitmap pruned
-            // state, this would be 0.
-            let pruned_bits_after = db.bitmap_pruned_bits();
-            warn!("pruned_bits_after={}", pruned_bits_after);
-
-            assert_eq!(
-                pruned_bits_after, pruned_bits_before,
-                "Bitmap pruned bits mismatch after reopen - sync() may not have called write_pruned()"
-            );
-
-            // Also verify the root matches.
-            assert_eq!(db.root(), root_before);
-
-            db.destroy().await.unwrap();
-        });
     }
 
     /// Repeatedly update the same key to a new value and ensure we can prove its current value
@@ -868,7 +814,16 @@ pub mod test {
         });
     }
 
-    /// Build a tiny database and confirm exclusion proofs work as expected.
+    #[test_traced("DEBUG")]
+    fn test_batch() {
+        batch_tests::test_batch(|mut ctx| async move {
+            let seed = ctx.next_u64();
+            let prefix = format!("current_ordered_variable_batch_{seed}");
+            open_db(ctx, prefix).await.into_mutable()
+        });
+    }
+
+    /// Build a tiny database and confirm exclusion proofs work as expected with variable values.
     #[test_traced("DEBUG")]
     pub fn test_current_db_exclusion_proofs() {
         let executor = deterministic::Runner::default();
@@ -1080,15 +1035,6 @@ pub mod test {
                 &proof,
                 &empty_root, // wrong root
             ));
-        });
-    }
-
-    #[test_traced("DEBUG")]
-    fn test_batch() {
-        batch_tests::test_batch(|mut ctx| async move {
-            let seed = ctx.next_u64();
-            let partition = format!("current_ordered_batch_{seed}");
-            open_db(ctx, partition).await.into_mutable()
         });
     }
 

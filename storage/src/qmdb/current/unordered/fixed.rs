@@ -6,90 +6,35 @@
 //!
 //! See [Db] for the main database type.
 
+pub use super::db::KeyValueProof;
 use crate::{
     bitmap::CleanBitMap,
-    index::unordered::Index,
     journal::contiguous::fixed::Journal,
-    kv::{self, Batchable},
     mmr::{Location, StandardHasher},
     qmdb::{
         any::{
-            operation::update::Unordered as UnorderedUpdate,
-            unordered::fixed::{Db as AnyDb, Operation, Update},
+            unordered::fixed::{Db as AnyDb, Operation},
+            value::FixedEncoding,
             FixedValue,
         },
         current::{
-            self,
             db::{merkleize_grafted_bitmap, root},
-            proof::{OperationProof, RangeProof},
             FixedConfig as Config,
         },
-        store::{self},
-        DurabilityState, Durable, Error, MerkleizationState, Merkleized, NonDurable, Unmerkleized,
+        Durable, Error, Merkleized,
     },
     translator::Translator,
 };
 use commonware_codec::FixedSize;
-use commonware_cryptography::{DigestOf, Hasher};
+use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics, Storage as RStorage};
 use commonware_utils::Array;
-use std::num::NonZeroU64;
 
-/// Proof information for verifying a key has a particular value in the database.
-pub type KeyValueProof<D, const N: usize> = OperationProof<D, N>;
-
-/// A specialization of [current::db::Db] for unordered key spaces and fixed-size values.
+/// A specialization of [super::db::Db] for unordered key spaces and fixed-size values.
 pub type Db<E, K, V, H, T, const N: usize, S = Merkleized<H>, D = Durable> =
-    current::db::Db<E, Journal<E, Operation<K, V>>, Index<T, Location>, H, Update<K, V>, N, S, D>;
+    super::db::Db<E, Journal<E, Operation<K, V>>, K, FixedEncoding<V>, H, T, N, S, D>;
 
-// Functionality shared across all DB states, such as most non-mutating operations.
-impl<
-        E: RStorage + Clock + Metrics,
-        K: Array,
-        V: FixedValue,
-        H: Hasher,
-        T: Translator,
-        const N: usize,
-        M: MerkleizationState<DigestOf<H>>,
-        D: DurabilityState,
-    > Db<E, K, V, H, T, N, M, D>
-{
-    /// Get the value of `key` in the db, or None if it has no value.
-    pub async fn get(&self, key: &K) -> Result<Option<V>, Error> {
-        self.any.get(key).await
-    }
-
-    /// Return true if the proof authenticates that `key` currently has value `value` in the db with
-    /// the provided `root`.
-    pub fn verify_key_value_proof(
-        hasher: &mut H,
-        key: K,
-        value: V,
-        proof: &KeyValueProof<H::Digest, N>,
-        root: &H::Digest,
-    ) -> bool {
-        let op = Operation::Update(UnorderedUpdate(key, value));
-
-        proof.verify(hasher, Self::grafting_height(), op, root)
-    }
-
-    /// Return true if the given sequence of `ops` were applied starting at location `start_loc` in
-    /// the log with the provided root.
-    pub fn verify_range_proof(
-        hasher: &mut H,
-        proof: &RangeProof<H::Digest>,
-        start_loc: Location,
-        ops: &[Operation<K, V>],
-        chunks: &[[u8; N]],
-        root: &H::Digest,
-    ) -> bool {
-        let height = Self::grafting_height();
-
-        proof.verify(hasher, height, start_loc, ops, chunks, root)
-    }
-}
-
-// Functionality for the Clean state.
+// Functionality for the Clean state - init only.
 impl<
         E: RStorage + Clock + Metrics,
         K: Array,
@@ -159,205 +104,24 @@ impl<
     }
 }
 
-// Functionality for any Merkleized state (both Durable and NonDurable).
-impl<
-        E: RStorage + Clock + Metrics,
-        K: Array,
-        V: FixedValue,
-        H: Hasher,
-        T: Translator,
-        const N: usize,
-        D: store::State,
-    > Db<E, K, V, H, T, N, Merkleized<H>, D>
-{
-    /// Returns a proof that the specified range of operations are part of the database, along with
-    /// the operations from the range. A truncated range (from hitting the max) can be detected by
-    /// looking at the length of the returned operations vector. Also returns the bitmap chunks
-    /// required to verify the proof.
-    ///
-    /// # Errors
-    ///
-    /// Returns [crate::mmr::Error::LocationOverflow] if `start_loc` > [crate::mmr::MAX_LOCATION].
-    /// Returns [crate::mmr::Error::RangeOutOfBounds] if `start_loc` >= number of leaves in the MMR.
-    pub async fn range_proof(
-        &self,
-        hasher: &mut H,
-        start_loc: Location,
-        max_ops: NonZeroU64,
-    ) -> Result<(RangeProof<H::Digest>, Vec<Operation<K, V>>, Vec<[u8; N]>), Error> {
-        RangeProof::<H::Digest>::new_with_ops(
-            hasher,
-            &self.status,
-            Self::grafting_height(),
-            &self.any.log.mmr,
-            &self.any.log,
-            start_loc,
-            max_ops,
-        )
-        .await
-    }
-
-    /// Generate and return a proof of the current value of `key`, along with the other
-    /// [KeyValueProof] required to verify the proof. Returns KeyNotFound error if the key is not
-    /// currently assigned any value.
-    ///
-    /// # Errors
-    ///
-    /// Returns [Error::KeyNotFound] if the key is not currently assigned any value.
-    pub async fn key_value_proof(
-        &self,
-        hasher: &mut H,
-        key: K,
-    ) -> Result<KeyValueProof<H::Digest, N>, Error> {
-        let op_loc = self.any.get_with_loc(&key).await?;
-        let Some((_, loc)) = op_loc else {
-            return Err(Error::KeyNotFound);
-        };
-        let height = Self::grafting_height();
-        let mmr = &self.any.log.mmr;
-
-        OperationProof::<H::Digest, N>::new(hasher, &self.status, height, mmr, loc).await
-    }
-}
-
-// Functionality for the Mutable state.
-impl<
-        E: RStorage + Clock + Metrics,
-        K: Array,
-        V: FixedValue,
-        H: Hasher,
-        T: Translator,
-        const N: usize,
-    > Db<E, K, V, H, T, N, Unmerkleized, NonDurable>
-{
-    /// Updates `key` to have value `value`. The operation is reflected in the snapshot, but will be
-    /// subject to rollback until the next successful `commit`.
-    pub async fn update(&mut self, key: K, value: V) -> Result<(), Error> {
-        if let Some(old_loc) = self.any.update_key(key, value).await? {
-            self.status.set_bit(*old_loc, false);
-        }
-        self.status.push(true);
-
-        Ok(())
-    }
-
-    /// Creates a new key-value pair in the db. The operation is reflected in the snapshot, but will
-    /// be subject to rollback until the next successful `commit`. Returns true if the key was
-    /// created, false if it already existed.
-    pub async fn create(&mut self, key: K, value: V) -> Result<bool, Error> {
-        if !self.any.create(key, value).await? {
-            return Ok(false);
-        }
-        self.status.push(true);
-
-        Ok(true)
-    }
-
-    /// Delete `key` and its value from the db. Deleting a key that already has no value is a no-op.
-    /// The operation is reflected in the snapshot, but will be subject to rollback until the next
-    /// successful `commit`. Returns true if the key was deleted, false if it was already inactive.
-    pub async fn delete(&mut self, key: K) -> Result<bool, Error> {
-        let Some(loc) = self.any.delete_key(key).await? else {
-            return Ok(false);
-        };
-
-        self.status.push(false);
-        self.status.set_bit(*loc, false);
-
-        Ok(true)
-    }
-}
-
-// Store implementation for all states
-impl<
-        E: RStorage + Clock + Metrics,
-        K: Array,
-        V: FixedValue,
-        H: Hasher,
-        T: Translator,
-        const N: usize,
-        M: MerkleizationState<DigestOf<H>>,
-        D: DurabilityState,
-    > kv::Gettable for Db<E, K, V, H, T, N, M, D>
-{
-    type Key = K;
-    type Value = V;
-    type Error = Error;
-
-    async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
-        self.get(key).await
-    }
-}
-
-// StoreMut for (Unmerkleized,NonDurable) (aka mutable) state
-impl<
-        E: RStorage + Clock + Metrics,
-        K: Array,
-        V: FixedValue,
-        H: Hasher,
-        T: Translator,
-        const N: usize,
-    > kv::Updatable for Db<E, K, V, H, T, N, Unmerkleized, NonDurable>
-{
-    async fn update(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
-        self.update(key, value).await
-    }
-}
-
-// StoreDeletable for (Unmerkleized,NonDurable) (aka mutable) state
-impl<
-        E: RStorage + Clock + Metrics,
-        K: Array,
-        V: FixedValue,
-        H: Hasher,
-        T: Translator,
-        const N: usize,
-    > kv::Deletable for Db<E, K, V, H, T, N, Unmerkleized, NonDurable>
-{
-    async fn delete(&mut self, key: Self::Key) -> Result<bool, Self::Error> {
-        self.delete(key).await
-    }
-}
-
-// Batchable for (Unmerkleized,NonDurable) (aka mutable) state
-impl<E, K, V, T, H, const N: usize> Batchable for Db<E, K, V, H, T, N, Unmerkleized, NonDurable>
-where
-    E: RStorage + Clock + Metrics,
-    K: Array,
-    V: FixedValue,
-    T: Translator,
-    H: Hasher,
-{
-    async fn write_batch<'a, Iter>(&'a mut self, iter: Iter) -> Result<(), Error>
-    where
-        Iter: Iterator<Item = (K, Option<V>)> + Send + 'a,
-    {
-        let status = &mut self.status;
-        self.any
-            .write_batch_with_callback(iter, move |append: bool, loc: Option<Location>| {
-                status.push(append);
-                if let Some(loc) = loc {
-                    status.set_bit(*loc, false);
-                }
-            })
-            .await
-    }
-}
-
 #[cfg(test)]
 pub mod test {
     use super::*;
     use crate::{
         index::Unordered as _,
         kv::tests::{assert_batchable, assert_deletable, assert_gettable, assert_send},
-        mmr::{hasher::Hasher as _, Location, Proof},
+        mmr::{hasher::Hasher as _, Proof},
         qmdb::{
-            any,
-            current::tests::apply_random_ops,
+            any::operation::update::Unordered as UnorderedUpdate,
+            current::{
+                proof::RangeProof,
+                tests::apply_random_ops,
+            },
             store::{
                 batch_tests,
                 tests::{assert_log_store, assert_merkleized_store, assert_prunable_store},
             },
+            NonDurable, Unmerkleized,
         },
         translator::TwoCap,
     };
@@ -578,7 +342,7 @@ pub mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let db = open_db(context, "steps_test".to_string()).await;
-            any::test::test_any_db_steps_not_reset(db).await;
+            crate::qmdb::any::test::test_any_db_steps_not_reset(db).await;
         });
     }
 
@@ -898,7 +662,7 @@ pub mod test {
     /// after closing and re-opening.
     #[test_traced("WARN")]
     pub fn test_current_db_build_random_close_reopen() {
-        current::tests::test_build_random_close_reopen(open_db);
+        crate::qmdb::current::tests::test_build_random_close_reopen(open_db);
     }
 
     /// Test that sync() persists the bitmap pruning boundary.
@@ -1016,7 +780,7 @@ pub mod test {
     /// failure scenarios.
     #[test_traced("WARN")]
     pub fn test_current_db_simulate_write_failures() {
-        current::tests::test_simulate_write_failures(open_db);
+        crate::qmdb::current::tests::test_simulate_write_failures(open_db);
     }
 
     #[test_traced("WARN")]
