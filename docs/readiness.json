@@ -1,6 +1,6 @@
 {
   "version": "0.0.65",
-  "generated": "2026-01-14T19:57:51.352495+00:00",
+  "generated": "2026-01-14T20:03:09.785933+00:00",
   "crates": [
     {
       "name": "commonware-broadcast",
@@ -18,17 +18,12 @@
     {
       "name": "commonware-codec",
       "module_counts": {
-        "0": 15,
+        "0": 14,
         "2": 1
       },
       "modules": [
         {
           "path": "codec",
-          "readiness": 0,
-          "is_explicit": false
-        },
-        {
-          "path": "config",
           "readiness": 0,
           "is_explicit": false
         },
@@ -122,7 +117,7 @@
     {
       "name": "commonware-consensus",
       "module_counts": {
-        "0": 29
+        "0": 27
       },
       "modules": [
         {
@@ -166,11 +161,6 @@
             },
             {
               "path": "marshal::cache",
-              "readiness": 0,
-              "is_explicit": false
-            },
-            {
-              "path": "marshal::config",
               "readiness": 0,
               "is_explicit": false
             },
@@ -232,11 +222,6 @@
           "readiness": 0,
           "is_explicit": false,
           "submodules": [
-            {
-              "path": "simplex::config",
-              "readiness": 0,
-              "is_explicit": false
-            },
             {
               "path": "simplex::elector",
               "readiness": 0,
@@ -1212,9 +1197,9 @@
     }
   ],
   "summary": {
-    "total_modules": 201,
+    "total_modules": 198,
     "by_level": {
-      "0": 177,
+      "0": 174,
       "2": 24
     }
   }
