@@ -7,7 +7,6 @@ use crate::ec2::{
 };
 use aws_config::BehaviorVersion;
 pub use aws_config::Region;
-pub use aws_sdk_ec2::types::{InstanceType, IpPermission, IpRange, UserIdGroupPair, VolumeType};
 use aws_sdk_ec2::{
     error::BuildError,
     primitives::Blob,
@@ -15,20 +14,26 @@ use aws_sdk_ec2::{
         BlockDeviceMapping, EbsBlockDevice, Filter, InstanceStateName, ResourceType, SecurityGroup,
         SummaryStatus, Tag, TagSpecification, VpcPeeringConnectionStateReasonCode,
     },
-    Client as Ec2Client, Error as Ec2Error,
+    Error as Ec2Error,
+};
+pub use aws_sdk_ec2::{
+    types::{InstanceType, IpPermission, IpRange, UserIdGroupPair, VolumeType},
+    Client as Ec2Client,
 };
 use std::{
     collections::{HashMap, HashSet},
     time::Duration,
 };
 use tokio::time::sleep;
+use tracing::debug;
 
 /// Creates an EC2 client for the specified AWS region
 pub async fn create_ec2_client(region: Region) -> Ec2Client {
     let retry = aws_config::retry::RetryConfig::adaptive()
-        .with_max_attempts(10)
+        .with_max_attempts(u32::MAX)
         .with_initial_backoff(Duration::from_millis(500))
-        .with_max_backoff(Duration::from_secs(30));
+        .with_max_backoff(Duration::from_secs(30))
+        .with_reconnect_mode(aws_sdk_ec2::config::retry::ReconnectMode::ReconnectOnTransientError);
     let config = aws_config::defaults(BehaviorVersion::v2025_08_07())
         .region(region)
         .retry_config(retry)
@@ -367,9 +372,9 @@ pub async fn add_monitoring_ingress(
     Ok(())
 }
 
-/// Launches EC2 instances with specified configurations
+/// Attempts to launch EC2 instances. May fail on transient errors or rate limits.
 #[allow(clippy::too_many_arguments)]
-pub async fn launch_instances(
+async fn try_launch_instances(
     client: &Ec2Client,
     ami_id: &str,
     instance_type: InstanceType,
@@ -428,36 +433,138 @@ pub async fn launch_instances(
         .collect())
 }
 
+/// Checks if an EC2 error is fatal and should not be retried.
+fn is_fatal_ec2_error(e: &Ec2Error) -> bool {
+    let error_str = e.to_string();
+    error_str.contains("VcpuLimitExceeded")
+        || error_str.contains("InstanceLimitExceeded")
+        || error_str.contains("InsufficientInstanceCapacity")
+        || error_str.contains("MaxSpotInstanceCountExceeded")
+        || error_str.contains("VolumeLimitExceeded")
+        || error_str.contains("InsufficientFreeAddressesInSubnet")
+        || error_str.contains("InvalidParameterValue")
+        || error_str.contains("InvalidAMIID")
+        || error_str.contains("InvalidSubnetID")
+        || error_str.contains("InvalidGroup")
+        || error_str.contains("InvalidKeyPair")
+}
+
+/// Launches EC2 instances with specified configurations.
+/// Retries on transient failures but exits on fatal errors like limit exceeded.
+#[allow(clippy::too_many_arguments)]
+pub async fn launch_instances(
+    client: &Ec2Client,
+    ami_id: &str,
+    instance_type: InstanceType,
+    storage_size: i32,
+    storage_class: VolumeType,
+    key_name: &str,
+    subnet_id: &str,
+    sg_id: &str,
+    count: i32,
+    name: &str,
+    tag: &str,
+) -> Result<Vec<String>, Ec2Error> {
+    let mut attempt = 0u32;
+    loop {
+        match try_launch_instances(
+            client,
+            ami_id,
+            instance_type.clone(),
+            storage_size,
+            storage_class.clone(),
+            key_name,
+            subnet_id,
+            sg_id,
+            count,
+            name,
+            tag,
+        )
+        .await
+        {
+            Ok(ids) => return Ok(ids),
+            Err(e) => {
+                if is_fatal_ec2_error(&e) {
+                    return Err(e);
+                }
+                debug!(
+                    name = name,
+                    attempt = attempt + 1,
+                    error = %e,
+                    "launch_instances failed, retrying"
+                );
+                attempt = attempt.saturating_add(1);
+                let backoff = Duration::from_millis(500 * (1 << attempt.min(10)));
+                sleep(backoff).await;
+            }
+        }
+    }
+}
+
 /// Waits for instances to reach the "running" state and returns their public IPs
+/// in the same order as the input instance IDs.
 pub async fn wait_for_instances_running(
     client: &Ec2Client,
     instance_ids: &[String],
 ) -> Result<Vec<String>, Ec2Error> {
+    // Track discovered IPs to avoid re-polling running instances
+    let mut discovered_ips: HashMap<String, String> = HashMap::new();
+    let mut pending_ids: HashSet<String> = instance_ids.iter().cloned().collect();
+    let mut attempt = 0u32;
     loop {
-        // Ask for instance details
-        let Ok(resp) = client
+        // Only query instances that haven't been discovered yet
+        let query_ids: Vec<String> = pending_ids.iter().cloned().collect();
+        let resp = match client
             .describe_instances()
-            .set_instance_ids(Some(instance_ids.to_vec()))
+            .set_instance_ids(Some(query_ids))
             .send()
             .await
-        else {
-            sleep(RETRY_INTERVAL).await;
-            continue;
+        {
+            Ok(resp) => {
+                attempt = 0;
+                resp
+            }
+            Err(e) => {
+                attempt = attempt.saturating_add(1);
+                debug!(
+                    pending = pending_ids.len(),
+                    attempt = attempt,
+                    error = %e,
+                    "describe_instances failed, retrying"
+                );
+                sleep(RETRY_INTERVAL).await;
+                continue;
+            }
         };
 
-        // Confirm all are running
-        let reservations = resp.reservations.unwrap();
-        let instances = reservations[0].instances.as_ref().unwrap();
-        if !instances.iter().all(|i| {
-            i.state.as_ref().unwrap().name.as_ref().unwrap() == &InstanceStateName::Running
-        }) {
-            sleep(RETRY_INTERVAL).await;
-            continue;
+        // Check each instance and record those that are running with IPs
+        for reservation in resp.reservations.unwrap_or_default() {
+            for instance in reservation.instances.unwrap_or_default() {
+                let id = match instance.instance_id {
+                    Some(id) => id,
+                    None => continue,
+                };
+                let is_running = instance.state.as_ref().and_then(|s| s.name.as_ref())
+                    == Some(&InstanceStateName::Running);
+                if is_running {
+                    if let Some(ip) = instance.public_ip_address {
+                        discovered_ips.insert(id.clone(), ip);
+                        pending_ids.remove(&id);
+                    }
+                }
+            }
         }
-        return Ok(instances
-            .iter()
-            .map(|i| i.public_ip_address.as_ref().unwrap().clone())
-            .collect());
+
+        // Return once all instances are discovered
+        if pending_ids.is_empty() {
+            return Ok(instance_ids
+                .iter()
+                .map(|id| discovered_ips.remove(id).unwrap())
+                .collect());
+        }
+
+        // Try again after a delay
+        sleep(RETRY_INTERVAL).await;
     }
 }
 

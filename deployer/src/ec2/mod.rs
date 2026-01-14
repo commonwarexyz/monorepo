@@ -307,7 +307,6 @@ cfg_if::cfg_if! {
             CreateBucket,
             DeleteBucket,
             HeadObject,
-            PutObject,
             ListObjects,
             DeleteObjects,
         }
@@ -333,7 +332,6 @@ cfg_if::cfg_if! {
                     Self::CreateBucket => write!(f, "CreateBucket"),
                     Self::DeleteBucket => write!(f, "DeleteBucket"),
                     Self::HeadObject => write!(f, "HeadObject"),
-                    Self::PutObject => write!(f, "PutObject"),
                     Self::ListObjects => write!(f, "ListObjects"),
                     Self::DeleteObjects => write!(f, "DeleteObjects"),
                 }

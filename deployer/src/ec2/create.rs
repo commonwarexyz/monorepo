@@ -16,6 +16,9 @@ use std::{
 use tokio::process::Command;
 use tracing::info;
 
+/// Maximum number of instance IDs per DescribeInstances API call
+const MAX_DESCRIBE_BATCH: usize = 1000;
+
 /// Pre-signed URLs for observability tools (prometheus, grafana, loki, pyroscope, tempo, node_exporter, promtail)
 type ToolUrls = (String, String, String, String, String, String, String);
 
@@ -147,27 +150,26 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
         let tag_directory = tag_directory.clone();
         let s3_client = s3_client.clone();
         async move {
-            if !object_exists(&s3_client, S3_BUCKET_NAME, &s3_key).await? {
-                info!(
-                    key = s3_key.as_str(),
-                    "tool not in S3, downloading and uploading"
-                );
-                let temp_path = tag_directory.join(s3_key.replace('/', "_"));
-                download_file(&download_url, &temp_path).await?;
-                let url = upload_and_presign(
-                    &s3_client,
-                    S3_BUCKET_NAME,
-                    &s3_key,
-                    &temp_path,
-                    PRESIGN_DURATION,
-                )
-                .await?;
-                std::fs::remove_file(&temp_path)?;
-                Ok::<_, Error>(url)
-            } else {
+            if object_exists(&s3_client, S3_BUCKET_NAME, &s3_key).await? {
                 info!(key = s3_key.as_str(), "tool already in S3");
-                presign_url(&s3_client, S3_BUCKET_NAME, &s3_key, PRESIGN_DURATION).await
+                return presign_url(&s3_client, S3_BUCKET_NAME, &s3_key, PRESIGN_DURATION).await;
             }
+            info!(
+                key = s3_key.as_str(),
+                "tool not in S3, downloading and uploading"
+            );
+            let temp_path = tag_directory.join(s3_key.replace('/', "_"));
+            download_file(&download_url, &temp_path).await?;
+            let url = cache_and_presign(
+                &s3_client,
+                S3_BUCKET_NAME,
+                &s3_key,
+                UploadSource::File(&temp_path),
+                PRESIGN_DURATION,
+            )
+            .await?;
+            std::fs::remove_file(&temp_path)?;
+            Ok::<_, Error>(url)
         }
     };
 
@@ -230,11 +232,11 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
                     let key = binary_s3_key(tag, &digest);
                     let path = path.clone();
                     async move {
-                        let url = cache_file_and_presign(
+                        let url = cache_and_presign(
                             &s3_client,
                             S3_BUCKET_NAME,
                             &key,
-                            path.as_ref(),
+                            UploadSource::File(path.as_ref()),
                             PRESIGN_DURATION,
                         )
                         .await?;
@@ -254,11 +256,11 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
                     let key = config_s3_key(tag, &digest);
                     let path = path.clone();
                     async move {
-                        let url = cache_file_and_presign(
+                        let url = cache_and_presign(
                             &s3_client,
                             S3_BUCKET_NAME,
                             &key,
-                            path.as_ref(),
+                            UploadSource::File(path.as_ref()),
                             PRESIGN_DURATION,
                         )
                         .await?;
@@ -513,17 +515,42 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
         .clone();
     let monitoring_subnet_id = monitoring_resources.subnet_id.clone();
 
+    // Lookup AMI IDs for binary instances
+    let mut ami_cache: HashMap<(String, Architecture), String> = HashMap::new();
+    ami_cache.insert(
+        (monitoring_region.clone(), monitoring_architecture),
+        monitoring_ami_id.clone(),
+    );
+    info!(
+        region = monitoring_region.as_str(),
+        architecture = %monitoring_architecture,
+        ami_id = monitoring_ami_id.as_str(),
+        "selected AMI"
+    );
     let mut binary_launch_configs = Vec::new();
     for instance in &config.instances {
         let region = instance.region.clone();
         let resources = region_resources.get(&region).unwrap();
         let ec2_client = ec2_clients.get(&region).unwrap();
         let arch = instance_architectures[&instance.name];
-        let ami_id = find_latest_ami(ec2_client, arch).await?;
+        let ami_id = match ami_cache.get(&(region.clone(), arch)) {
+            Some(id) => id.clone(),
+            None => {
+                let id = find_latest_ami(ec2_client, arch).await?;
+                ami_cache.insert((region.clone(), arch), id.clone());
+                info!(
+                    region = region.as_str(),
+                    architecture = %arch,
+                    ami_id = id.as_str(),
+                    "selected AMI"
+                );
+                id
+            }
+        };
         binary_launch_configs.push((instance, ec2_client, resources, ami_id, arch));
     }
 
-    // Launch monitoring instance (don't wait yet)
+    // Launch monitoring instance
     let monitoring_launch_future = {
         let key_name = key_name.clone();
         let tag = tag.clone();
@@ -542,19 +569,17 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
                 MONITORING_NAME,
                 &tag,
             )
-            .await?[0]
-                .clone();
-            let ip =
-                wait_for_instances_running(monitoring_ec2_client, slice::from_ref(&instance_id))
-                    .await?[0]
-                    .clone();
-            let private_ip = get_private_ip(monitoring_ec2_client, &instance_id).await?;
-            info!(ip = ip.as_str(), "launched monitoring instance");
-            Ok::<(String, String, String), Error>((instance_id, ip, private_ip))
+            .await?
+            .remove(0);
+            info!(
+                instance_id = instance_id.as_str(),
+                "launched monitoring instance"
+            );
+            Ok::<String, Error>(instance_id)
         }
     };
 
-    // Launch binary instances (don't wait yet)
+    // Launch binary instances (returns instance IDs only, no waiting)
     let binary_launch_futures =
         binary_launch_configs
             .iter()
@@ -566,6 +591,8 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
                     VolumeType::try_parse(&instance.storage_class).expect("Invalid storage class");
                 let binary_sg_id = resources.binary_sg_id.as_ref().unwrap();
                 let tag = tag.clone();
+                let instance_name = instance.name.clone();
+                let region = instance.region.clone();
                 async move {
                     let instance_id = launch_instances(
                         ec2_client,
@@ -580,30 +607,89 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
                         &instance.name,
                         &tag,
                     )
-                    .await?[0]
-                        .clone();
-                    let ip = wait_for_instances_running(ec2_client, slice::from_ref(&instance_id))
-                        .await?[0]
-                        .clone();
+                    .await?
+                    .remove(0);
                     info!(
-                        ip = ip.as_str(),
-                        instance = instance.name.as_str(),
+                        instance_id = instance_id.as_str(),
+                        instance = instance_name.as_str(),
                         "launched instance"
                     );
-                    Ok::<Deployment, Error>(Deployment {
-                        instance: (*instance).clone(),
-                        id: instance_id,
-                        ip,
-                    })
+                    Ok::<(String, String, InstanceConfig), Error>((
+                        instance_id,
+                        region,
+                        (*instance).clone(),
+                    ))
                 }
             });
 
-    // Wait for all instances in parallel
-    let (monitoring_result, deployments) = tokio::try_join!(
+    // Wait for all launches to complete (get instance IDs)
+    let (monitoring_instance_id, binary_launches) = tokio::try_join!(
         monitoring_launch_future,
         try_join_all(binary_launch_futures)
     )?;
-    let (monitoring_instance_id, monitoring_ip, monitoring_private_ip) = monitoring_result;
+    info!("instances requested");
+
+    // Group binary instances by region for batched DescribeInstances calls
+    let mut instances_by_region: HashMap<String, Vec<(String, InstanceConfig)>> = HashMap::new();
+    for (instance_id, region, instance_config) in binary_launches {
+        instances_by_region
+            .entry(region)
+            .or_default()
+            .push((instance_id, instance_config));
+    }
+
+    // Wait for instances to be running, batched by region
+    let wait_futures = instances_by_region
+        .into_iter()
+        .flat_map(|(region, instances)| {
+            let ec2_client = ec2_clients[&region].clone();
+            instances
+                .chunks(MAX_DESCRIBE_BATCH)
+                .map(move |chunk| {
+                    let ec2_client = ec2_client.clone();
+                    let chunk: Vec<_> = chunk.to_vec();
+                    let region = region.clone();
+                    async move {
+                        let instance_ids: Vec<String> =
+                            chunk.iter().map(|(id, _)| id.clone()).collect();
+                        let ips = wait_for_instances_running(&ec2_client, &instance_ids).await?;
+                        info!(
+                            region = region.as_str(),
+                            count = chunk.len(),
+                            "instances running in region"
+                        );
+                        let deployments: Vec<Deployment> = chunk
+                            .into_iter()
+                            .zip(ips)
+                            .map(|((instance_id, instance_config), ip)| Deployment {
+                                instance: instance_config,
+                                id: instance_id,
+                                ip,
+                            })
+                            .collect();
+                        Ok::<Vec<Deployment>, Error>(deployments)
+                    }
+                })
+                .collect::<Vec<_>>()
+        });
+
+    // Wait for monitoring instance and all binary instances in parallel
+    let (monitoring_ips, binary_deployment_batches) = tokio::try_join!(
+        async {
+            wait_for_instances_running(
+                monitoring_ec2_client,
+                slice::from_ref(&monitoring_instance_id),
+            )
+            .await
+            .map_err(Error::AwsEc2)
+        },
+        try_join_all(wait_futures)
+    )?;
+    let monitoring_ip = monitoring_ips[0].clone();
+    let monitoring_private_ip =
+        get_private_ip(monitoring_ec2_client, &monitoring_instance_id).await?;
+    let deployments: Vec<Deployment> = binary_deployment_batches.into_iter().flatten().collect();
+    info!(ip = monitoring_ip.as_str(), "monitoring instance running");
     info!("launched instances");
 
     // Add monitoring IP rules to binary security groups (for Prometheus scraping).
@@ -635,21 +721,21 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
         pyroscope_agent_service_url,
         pyroscope_agent_timer_url,
     ]: [String; 15] = try_join_all([
-        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &bbr_config_s3_key(), BBR_CONF.as_bytes(), PRESIGN_DURATION),
-        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &grafana_datasources_s3_key(), DATASOURCES_YML.as_bytes(), PRESIGN_DURATION),
-        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &grafana_dashboards_s3_key(), ALL_YML.as_bytes(), PRESIGN_DURATION),
-        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &loki_config_s3_key(), LOKI_CONFIG.as_bytes(), PRESIGN_DURATION),
-        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &pyroscope_config_s3_key(), PYROSCOPE_CONFIG.as_bytes(), PRESIGN_DURATION),
-        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &tempo_config_s3_key(), TEMPO_CONFIG.as_bytes(), PRESIGN_DURATION),
-        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &prometheus_service_s3_key(), PROMETHEUS_SERVICE.as_bytes(), PRESIGN_DURATION),
-        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &loki_service_s3_key(), LOKI_SERVICE.as_bytes(), PRESIGN_DURATION),
-        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &pyroscope_service_s3_key(), PYROSCOPE_SERVICE.as_bytes(), PRESIGN_DURATION),
-        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &tempo_service_s3_key(), TEMPO_SERVICE.as_bytes(), PRESIGN_DURATION),
-        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &node_exporter_service_s3_key(), NODE_EXPORTER_SERVICE.as_bytes(), PRESIGN_DURATION),
-        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &promtail_service_s3_key(), PROMTAIL_SERVICE.as_bytes(), PRESIGN_DURATION),
-        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &logrotate_config_s3_key(), LOGROTATE_CONF.as_bytes(), PRESIGN_DURATION),
-        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &pyroscope_agent_service_s3_key(), PYROSCOPE_AGENT_SERVICE.as_bytes(), PRESIGN_DURATION),
-        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &pyroscope_agent_timer_s3_key(), PYROSCOPE_AGENT_TIMER.as_bytes(), PRESIGN_DURATION),
+        cache_and_presign(&s3_client, S3_BUCKET_NAME, &bbr_config_s3_key(), UploadSource::Static(BBR_CONF.as_bytes()), PRESIGN_DURATION),
+        cache_and_presign(&s3_client, S3_BUCKET_NAME, &grafana_datasources_s3_key(), UploadSource::Static(DATASOURCES_YML.as_bytes()), PRESIGN_DURATION),
+        cache_and_presign(&s3_client, S3_BUCKET_NAME, &grafana_dashboards_s3_key(), UploadSource::Static(ALL_YML.as_bytes()), PRESIGN_DURATION),
+        cache_and_presign(&s3_client, S3_BUCKET_NAME, &loki_config_s3_key(), UploadSource::Static(LOKI_CONFIG.as_bytes()), PRESIGN_DURATION),
+        cache_and_presign(&s3_client, S3_BUCKET_NAME, &pyroscope_config_s3_key(), UploadSource::Static(PYROSCOPE_CONFIG.as_bytes()), PRESIGN_DURATION),
+        cache_and_presign(&s3_client, S3_BUCKET_NAME, &tempo_config_s3_key(), UploadSource::Static(TEMPO_CONFIG.as_bytes()), PRESIGN_DURATION),
+        cache_and_presign(&s3_client, S3_BUCKET_NAME, &prometheus_service_s3_key(), UploadSource::Static(PROMETHEUS_SERVICE.as_bytes()), PRESIGN_DURATION),
+        cache_and_presign(&s3_client, S3_BUCKET_NAME, &loki_service_s3_key(), UploadSource::Static(LOKI_SERVICE.as_bytes()), PRESIGN_DURATION),
+        cache_and_presign(&s3_client, S3_BUCKET_NAME, &pyroscope_service_s3_key(), UploadSource::Static(PYROSCOPE_SERVICE.as_bytes()), PRESIGN_DURATION),
+        cache_and_presign(&s3_client, S3_BUCKET_NAME, &tempo_service_s3_key(), UploadSource::Static(TEMPO_SERVICE.as_bytes()), PRESIGN_DURATION),
+        cache_and_presign(&s3_client, S3_BUCKET_NAME, &node_exporter_service_s3_key(), UploadSource::Static(NODE_EXPORTER_SERVICE.as_bytes()), PRESIGN_DURATION),
+        cache_and_presign(&s3_client, S3_BUCKET_NAME, &promtail_service_s3_key(), UploadSource::Static(PROMTAIL_SERVICE.as_bytes()), PRESIGN_DURATION),
+        cache_and_presign(&s3_client, S3_BUCKET_NAME, &logrotate_config_s3_key(), UploadSource::Static(LOGROTATE_CONF.as_bytes()), PRESIGN_DURATION),
+        cache_and_presign(&s3_client, S3_BUCKET_NAME, &pyroscope_agent_service_s3_key(), UploadSource::Static(PYROSCOPE_AGENT_SERVICE.as_bytes()), PRESIGN_DURATION),
+        cache_and_presign(&s3_client, S3_BUCKET_NAME, &pyroscope_agent_timer_s3_key(), UploadSource::Static(PYROSCOPE_AGENT_TIMER.as_bytes()), PRESIGN_DURATION),
     ])
     .await?
     .try_into()
@@ -661,11 +747,11 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
         let binary_service_content = binary_service(*arch);
         let temp_path = tag_directory.join(format!("binary-{}.service", arch.as_str()));
         std::fs::write(&temp_path, &binary_service_content)?;
-        let binary_service_url = cache_file_and_presign(
+        let binary_service_url = cache_and_presign(
             &s3_client,
             S3_BUCKET_NAME,
             &binary_service_s3_key_for_arch(*arch),
-            &temp_path,
+            UploadSource::File(&temp_path),
             PRESIGN_DURATION,
         )
         .await?;
@@ -693,18 +779,18 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     let dashboard_path = std::path::PathBuf::from(&config.monitoring.dashboard);
     let dashboard_digest = hash_file(&dashboard_path)?;
     let [prometheus_config_url, dashboard_url]: [String; 2] = try_join_all([
-        cache_file_and_presign(
+        cache_and_presign(
             &s3_client,
             S3_BUCKET_NAME,
             &monitoring_s3_key(tag, &prom_digest),
-            &prom_path,
+            UploadSource::File(&prom_path),
             PRESIGN_DURATION,
         ),
-        cache_file_and_presign(
+        cache_and_presign(
             &s3_client,
             S3_BUCKET_NAME,
             &monitoring_s3_key(tag, &dashboard_digest),
-            &dashboard_path,
+            UploadSource::File(&dashboard_path),
             PRESIGN_DURATION,
         ),
     ])
@@ -728,11 +814,11 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     let hosts_path = tag_directory.join("hosts.yaml");
     std::fs::write(&hosts_path, &hosts_yaml)?;
     let hosts_digest = hash_file(&hosts_path)?;
-    let hosts_url = cache_file_and_presign(
+    let hosts_url = cache_and_presign(
         &s3_client,
         S3_BUCKET_NAME,
         &hosts_s3_key(tag, &hosts_digest),
-        &hosts_path,
+        UploadSource::File(&hosts_path),
         PRESIGN_DURATION,
     )
     .await?;
@@ -788,11 +874,11 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
                     let key = promtail_s3_key(tag, &digest);
                     let path = path.clone();
                     async move {
-                        let url = cache_file_and_presign(
+                        let url = cache_and_presign(
                             &s3_client,
                             S3_BUCKET_NAME,
                             &key,
-                            &path,
+                            UploadSource::File(&path),
                             PRESIGN_DURATION,
                         )
                         .await?;
@@ -812,11 +898,11 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
                     let key = pyroscope_s3_key(tag, &digest);
                     let path = path.clone();
                     async move {
-                        let url = cache_file_and_presign(
+                        let url = cache_and_presign(
                             &s3_client,
                             S3_BUCKET_NAME,
                             &key,
-                            &path,
+                            UploadSource::File(&path),
                             PRESIGN_DURATION,
                         )
                         .await?;

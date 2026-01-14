@@ -10,7 +10,11 @@ use crate::ec2::{
     Config, Error, DESTROYED_FILE_NAME, LOGS_PORT, MONITORING_REGION, PROFILES_PORT, TRACES_PORT,
 };
 use futures::future::try_join_all;
-use std::{collections::HashSet, fs::File, path::PathBuf};
+use std::{
+    collections::{HashMap, HashSet},
+    fs::File,
+    path::PathBuf,
+};
 use tracing::{info, warn};
 
 /// Tears down all resources associated with the deployment tag
@@ -232,21 +236,24 @@ pub async fn destroy(config: &PathBuf) -> Result<(), Error> {
             let key_name = format!("deployer-{tag}");
             delete_key_pair(&ec2_client, &key_name).await?;
             info!(region = region.as_str(), key_name, "deleted key pair");
+            Ok::<_, Error>((region, ec2_client))
+        }
+    });
+    let ec2_clients: HashMap<String, Ec2Client> = try_join_all(jobs).await?.into_iter().collect();
+
+    // Second pass: Delete VPCs after dependencies are removed
+    let vpc_jobs = ec2_clients.into_iter().map(|(region, ec2_client)| {
+        let tag = tag.clone();
+        async move {
+            let vpc_ids = find_vpcs_by_tag(&ec2_client, &tag).await?;
+            for vpc_id in vpc_ids {
+                delete_vpc(&ec2_client, &vpc_id).await?;
+                info!(region = region.as_str(), vpc_id, "deleted VPC");
+            }
             Ok::<(), Error>(())
         }
     });
-    try_join_all(jobs).await?;
-
-    // Second pass: Delete VPCs after dependencies are removed
-    for region in &all_regions {
-        let ec2_client = create_ec2_client(Region::new(region.clone())).await;
-        info!(region = region.as_str(), "created EC2 client");
-        let vpc_ids = find_vpcs_by_tag(&ec2_client, tag).await?;
-        for vpc_id in vpc_ids {
-            delete_vpc(&ec2_client, &vpc_id).await?;
-            info!(region = region.as_str(), vpc_id, "deleted VPC");
-        }
-    }
+    try_join_all(vpc_jobs).await?;
     info!(regions = ?all_regions, "resources removed");
 
     // Write destruction file

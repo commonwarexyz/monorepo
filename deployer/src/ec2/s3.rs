@@ -141,71 +141,97 @@ pub async fn object_exists(client: &S3Client, bucket: &str, key: &str) -> Result
     }
 }
 
-/// Uploads a file to S3
-pub async fn upload_file(
-    client: &S3Client,
-    bucket: &str,
-    key: &str,
-    path: &Path,
-) -> Result<(), Error> {
-    let body = ByteStream::from_path(path)
-        .await
-        .map_err(std::io::Error::other)?;
+/// Uploads a ByteStream to S3 with unlimited retries for transient failures.
+/// Takes a closure that produces the ByteStream, allowing re-creation on retry.
+async fn upload_with_retry<F, Fut>(client: &S3Client, bucket: &str, key: &str, make_body: F)
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = Result<ByteStream, Error>>,
+{
+    let mut attempt = 0u32;
+    loop {
+        let body = match make_body().await {
+            Ok(b) => b,
+            Err(e) => {
+                debug!(
+                    bucket = bucket,
+                    key = key,
+                    attempt = attempt + 1,
+                    error = %e,
+                    "failed to create body, retrying"
+                );
+                attempt = attempt.saturating_add(1);
+                let backoff = Duration::from_millis(500 * (1 << attempt.min(10)));
+                tokio::time::sleep(backoff).await;
+                continue;
+            }
+        };
 
-    client
-        .put_object()
-        .bucket(bucket)
-        .key(key)
-        .body(body)
-        .send()
-        .await
-        .map_err(|e| Error::AwsS3 {
-            bucket: bucket.to_string(),
-            operation: super::S3Operation::PutObject,
-            source: Box::new(aws_sdk_s3::Error::from(e.into_service_error())),
-        })?;
-
-    debug!(bucket = bucket, key = key, "uploaded file to S3");
-    Ok(())
-}
-
-/// Uploads a file to S3 and returns a pre-signed URL for downloading it
-#[must_use = "the pre-signed URL should be used to download the file"]
-pub async fn upload_and_presign(
-    client: &S3Client,
-    bucket: &str,
-    key: &str,
-    path: &Path,
-    expires_in: Duration,
-) -> Result<String, Error> {
-    upload_file(client, bucket, key, path).await?;
-    presign_url(client, bucket, key, expires_in).await
-}
-
-/// Caches content to S3 if it doesn't exist, then returns a pre-signed URL
-#[must_use = "the pre-signed URL should be used to download the content"]
-pub async fn cache_content_and_presign(
-    client: &S3Client,
-    bucket: &str,
-    key: &str,
-    content: &'static [u8],
-    expires_in: Duration,
-) -> Result<String, Error> {
-    if !object_exists(client, bucket, key).await? {
-        debug!(key = key, "static content not in S3, uploading");
-        let body = ByteStream::from_static(content);
-        client
+        match client
             .put_object()
             .bucket(bucket)
             .key(key)
             .body(body)
             .send()
             .await
-            .map_err(|e| Error::AwsS3 {
-                bucket: bucket.to_string(),
-                operation: super::S3Operation::PutObject,
-                source: Box::new(aws_sdk_s3::Error::from(e.into_service_error())),
-            })?;
+        {
+            Ok(_) => {
+                debug!(bucket = bucket, key = key, "uploaded to S3");
+                return;
+            }
+            Err(e) => {
+                debug!(
+                    bucket = bucket,
+                    key = key,
+                    attempt = attempt + 1,
+                    error = %e,
+                    "upload failed, retrying"
+                );
+                attempt = attempt.saturating_add(1);
+                let backoff = Duration::from_millis(500 * (1 << attempt.min(10)));
+                tokio::time::sleep(backoff).await;
+            }
+        }
+    }
+}
+
+/// Source for S3 upload
+pub enum UploadSource<'a> {
+    File(&'a Path),
+    Static(&'static [u8]),
+}
+
+/// Caches content to S3 if it doesn't exist, then returns a pre-signed URL
+#[must_use = "the pre-signed URL should be used to download the content"]
+pub async fn cache_and_presign(
+    client: &S3Client,
+    bucket: &str,
+    key: &str,
+    source: UploadSource<'_>,
+    expires_in: Duration,
+) -> Result<String, Error> {
+    if !object_exists(client, bucket, key).await? {
+        debug!(key = key, "not in S3, uploading");
+        match source {
+            UploadSource::File(path) => {
+                let path = path.to_path_buf();
+                upload_with_retry(client, bucket, key, || {
+                    let path = path.clone();
+                    async move {
+                        ByteStream::from_path(path)
+                            .await
+                            .map_err(|e| Error::Io(std::io::Error::other(e)))
+                    }
+                })
+                .await;
+            }
+            UploadSource::Static(content) => {
+                upload_with_retry(client, bucket, key, || async {
+                    Ok(ByteStream::from_static(content))
+                })
+                .await;
+            }
+        }
     }
     presign_url(client, bucket, key, expires_in).await
 }
@@ -223,22 +249,6 @@ pub fn hash_file(path: &Path) -> Result<String, Error> {
         hasher.update(&buffer[..bytes_read]);
     }
     Ok(hasher.finalize().to_string())
-}
-
-/// Caches a file to S3 by digest if it doesn't exist, then returns a pre-signed URL
-#[must_use = "the pre-signed URL should be used to download the file"]
-pub async fn cache_file_and_presign(
-    client: &S3Client,
-    bucket: &str,
-    key: &str,
-    path: &Path,
-    expires_in: Duration,
-) -> Result<String, Error> {
-    if !object_exists(client, bucket, key).await? {
-        debug!(key = key, "file not in S3, uploading");
-        upload_file(client, bucket, key, path).await?;
-    }
-    presign_url(client, bucket, key, expires_in).await
 }
 
 /// Generates a pre-signed URL for downloading an object from S3

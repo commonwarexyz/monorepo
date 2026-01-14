@@ -17,7 +17,7 @@ pub const MAX_SSH_ATTEMPTS: usize = 30;
 pub const MAX_POLL_ATTEMPTS: usize = 30;
 
 /// Interval between retries
-pub const RETRY_INTERVAL: Duration = Duration::from_secs(10);
+pub const RETRY_INTERVAL: Duration = Duration::from_secs(15);
 
 /// Protocol for deployer ingress
 pub const DEPLOYER_PROTOCOL: &str = "tcp";
