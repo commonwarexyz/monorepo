@@ -105,7 +105,6 @@ where
     epocher: ES,
     last_built: Arc<Mutex<Option<(Round, B)>>>,
     verification_contexts: Arc<Mutex<VerificationContexts<E, B, S>>>,
-    certification_txs: Arc<Mutex<Vec<oneshot::Sender<bool>>>>,
 
     build_duration: Gauge,
 }
@@ -145,7 +144,7 @@ where
         let verification_contexts = Metadata::init(
             context.with_label("verification_contexts_metadata"),
             metadata::Config {
-                partition: format!("{partition_prefix}_verification_contexts"),
+                partition: format!("{partition_prefix}-verification-contexts"),
                 codec_config: (RangeCfg::from(..), ((), ())),
             },
         )
@@ -159,7 +158,6 @@ where
             epocher,
             last_built: Arc::new(Mutex::new(None)),
             verification_contexts: Arc::new(Mutex::new(verification_contexts)),
-            certification_txs: Arc::new(Mutex::new(Vec::new())),
 
             build_duration,
         }
@@ -185,7 +183,6 @@ where
         let mut marshal = self.marshal.clone();
         let mut application = self.application.clone();
         let epocher = self.epocher.clone();
-        let verification_contexts = self.verification_contexts.clone();
 
         let (mut tx, rx) = oneshot::channel();
         self.context
@@ -195,24 +192,6 @@ where
                 // us to cancel work early.
                 let tx_closed = tx.closed();
                 pin_mut!(tx_closed);
-
-                // Helper to clean up verification context for this round
-                let cleanup = || async {
-                    let mut contexts_guard = verification_contexts.lock().await;
-                    if let Some(map) = contexts_guard.get_mut(&digest) {
-                        map.remove(&context.round);
-
-                        // Retain context maps for digests that relate to future rounds only.
-                        contexts_guard.retain(|_, map| {
-                            map.iter().any(|(m_round, _)| m_round > &context.round)
-                        });
-
-                        contexts_guard
-                            .sync()
-                            .await
-                            .expect("must persist verification context cleanup");
-                    }
-                };
 
                 let (parent_view, parent_commitment) = context.parent;
                 let parent_request = fetch_parent(
@@ -254,7 +233,6 @@ where
                     if is_valid {
                         marshal.verified(context.round, block).await;
                     }
-                    cleanup().await;
                     let _ = tx.send(is_valid);
                     return;
                 }
@@ -266,12 +244,10 @@ where
                         height = %block.height(),
                         "block height not covered by epoch strategy"
                     );
-                    cleanup().await;
                     tx.send_lossy(false);
                     return;
                 };
                 if block_bounds.epoch() != context.epoch() {
-                    cleanup().await;
                     tx.send_lossy(false);
                     return;
                 }
@@ -283,7 +259,6 @@ where
                         expected_parent = %parent.commitment(),
                         "block parent commitment does not match expected parent"
                     );
-                    cleanup().await;
                     tx.send_lossy(false);
                     return;
                 }
@@ -295,7 +270,6 @@ where
                         block_height = %block.height(),
                         "block height is not contiguous with parent height"
                     );
-                    cleanup().await;
                     tx.send_lossy(false);
                     return;
                 }
@@ -322,7 +296,6 @@ where
                 if application_valid {
                     marshal.verified(context.round, block).await;
                 }
-                cleanup().await;
                 tx.send_lossy(application_valid);
             });
 
@@ -336,12 +309,13 @@ where
     /// Panics if the verification context cannot be persisted.
     #[inline]
     async fn store_verification_context(
-        lock: &Arc<Mutex<VerificationContexts<E, B, S>>>,
+        contexts_lock: &Arc<Mutex<VerificationContexts<E, B, S>>>,
         context: <Self as Automaton>::Context,
         digest: B::Commitment,
     ) {
-        let mut contexts_guard = lock.lock().await;
-        contexts_guard
+        contexts_lock
+            .lock()
+            .await
             .upsert_sync(digest, |map| {
                 map.insert(context.round, context);
             })
@@ -560,35 +534,26 @@ where
     B: Block,
     ES: Epocher,
 {
-    async fn certify(&mut self, payload: Self::Digest) -> oneshot::Receiver<bool> {
-        // Look up context by block digest and pop the oldest (by round) context from the map.
-        // Using pop_first ensures each concurrent certification for the same digest gets a
-        // unique context, which is critical when a block is re-proposed across multiple views.
-        //
-        // This works because the voter certifies views in ascending order: when the same block
-        // appears in multiple views (e.g., re-proposals at epoch boundaries), certify is called
-        // for the lower view first.
-        let mut contexts_guard = self.verification_contexts.lock().await;
+    async fn certify(&mut self, round: Round, payload: Self::Digest) -> oneshot::Receiver<bool> {
+        // Look up context by (payload, round) to get the exact verification context.
+        // This is necessary because the same block may be proposed in multiple rounds
+        // (e.g., re-proposals at epoch boundaries), and each round has its own context.
+        // We clone rather than remove so the context remains available for crash recovery.
+        // Contexts are cleaned up when finalization advances past them (see report()).
+        let contexts_guard = self.verification_contexts.lock().await;
         let context = contexts_guard
-            .get_mut(&payload)
-            .and_then(|map| map.pop_first().map(|(_, ctx)| ctx));
+            .get(&payload)
+            .and_then(|map| map.get(&round).cloned());
         drop(contexts_guard);
 
         if let Some(context) = context {
             self.verify(context, payload).await
         } else {
-            // Acquire the lock on the certification transactions and store the sender.
-            // While we're here, we can also clean up any senders from previous views
-            // that consensus is no longer waiting on.
-            let (tx, rx) = oneshot::channel();
-            let mut txs_guard = self.certification_txs.lock().await;
-            txs_guard.retain(|tx| !tx.is_canceled());
-            txs_guard.push(tx);
-            drop(txs_guard);
-
-            // If we don't have a verification context, we cannot verify the block.
-            // In this event, we return a receiver that will never resolve to signal
-            // to consensus that we should time out the view and vote to nullify.
+            // Verify is always called before certify for a given proposal, so if we
+            // don't have a verification context here, it means this proposal was never
+            // verified. Return a receiver that never resolves to signal to consensus
+            // that we should time out the view and vote to nullify.
+            let (_tx, rx) = oneshot::channel();
             rx
         }
     }
@@ -645,8 +610,22 @@ where
 {
     type Activity = A::Activity;
 
-    /// Relays a report to the underlying [`Application`].
+    /// Relays a report to the underlying [`Application`] and cleans up old verification contexts.
     async fn report(&mut self, update: Self::Activity) {
+        // Clean up verification contexts for rounds <= the finalized round.
+        // This only modifies in-memory state; sync is called later when a new context is added.
+        if let Update::Tip(_, _, round) = &update {
+            let mut contexts_guard = self.verification_contexts.lock().await;
+            let keys: Vec<_> = contexts_guard.keys().cloned().collect();
+            for key in keys {
+                if let Some(map) = contexts_guard.get_mut(&key) {
+                    map.retain(|ctx_round, _| ctx_round > round);
+                    if map.is_empty() {
+                        contexts_guard.remove(&key);
+                    }
+                }
+            }
+        }
         self.application.report(update).await
     }
 }
