@@ -561,8 +561,8 @@ pub fn select_loop(input: TokenStream) -> TokenStream {
 
 /// Mark a module's readiness level (0-4).
 ///
-/// This is a no-op marker attribute used by the readiness linter to track module stability.
-/// The module is passed through unchanged.
+/// This helper macro expands to a marker constant that the readiness linter uses
+/// to track module stability.
 ///
 /// # Readiness Levels
 ///
@@ -574,32 +574,37 @@ pub fn select_loop(input: TokenStream) -> TokenStream {
 ///
 /// # Example
 ///
-/// ```rust,ignore
+/// ```rust
 /// use commonware_macros::readiness;
 ///
-/// #[readiness(2)]
-/// pub mod journal;
+/// // At the top of your module file:
+/// readiness!(2);
 /// ```
-#[proc_macro_attribute]
-pub fn readiness(attr: TokenStream, item: TokenStream) -> TokenStream {
-    // Validate that the attribute is a number 0-4
-    if !attr.is_empty() {
-        let level = parse_macro_input!(attr as LitInt);
-        let value: u8 = match level.base10_parse() {
-            Ok(v) => v,
-            Err(_) => {
-                return Error::new_spanned(level, "readiness level must be a number 0-4")
-                    .to_compile_error()
-                    .into();
-            }
-        };
-        if value > 4 {
-            return Error::new_spanned(level, "readiness level must be between 0 and 4")
+#[proc_macro]
+pub fn readiness(input: TokenStream) -> TokenStream {
+    let level = parse_macro_input!(input as LitInt);
+    let value: u8 = match level.base10_parse() {
+        Ok(v) => v,
+        Err(_) => {
+            return Error::new_spanned(level, "readiness level must be a number 0-4")
                 .to_compile_error()
                 .into();
         }
+    };
+    if value > 4 {
+        return Error::new_spanned(level, "readiness level must be between 0 and 4")
+            .to_compile_error()
+            .into();
     }
 
-    // Pass through the item unchanged
-    item
+    // Generate the marker constant with the readiness attribute
+    let output = quote! {
+        #[doc(hidden)]
+        const _: () = {
+            #[allow(dead_code)]
+            const _READINESS_LEVEL: u8 = #level;
+        };
+    };
+
+    output.into()
 }

@@ -254,23 +254,23 @@ fn parse_modules(
     Ok(modules)
 }
 
-/// Extract readiness level from a module file by looking for #[readiness(N)] on a const.
+/// Extract readiness level from a module file.
+/// Looks for `readiness!(N)` patterns (with or without path prefix).
 fn extract_readiness_from_file(file_path: &Path) -> u8 {
     let content = match fs::read_to_string(file_path) {
         Ok(c) => c,
         Err(_) => return 0,
     };
 
-    // Look for pattern: #[readiness(N)]
     for line in content.lines() {
         let trimmed = line.trim();
-        if trimmed.starts_with("#[readiness(") {
-            if let Some(start) = trimmed.find("#[readiness(") {
-                let rest = &trimmed[start + 12..];
-                if let Some(end) = rest.find(')') {
-                    if let Ok(level) = rest[..end].trim().parse::<u8>() {
-                        return level.min(4);
-                    }
+
+        // Look for pattern: readiness!(N) or commonware_macros::readiness!(N)
+        if let Some(pos) = trimmed.find("readiness!(") {
+            let rest = &trimmed[pos + 11..];
+            if let Some(end) = rest.find(')') {
+                if let Ok(level) = rest[..end].trim().parse::<u8>() {
+                    return level.min(4);
                 }
             }
         }

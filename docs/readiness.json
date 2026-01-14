@@ -1,6 +1,6 @@
 {
   "version": "0.0.65",
-  "generated": "2026-01-14T18:02:25.651015+00:00",
+  "generated": "2026-01-14T18:08:46.519122+00:00",
   "crates": [
     {
       "name": "commonware-broadcast",
@@ -2785,8 +2785,8 @@
   "summary": {
     "total_modules": 493,
     "by_level": {
-      "2": 13,
-      "0": 480
+      "0": 480,
+      "2": 13
     }
   }
 }
