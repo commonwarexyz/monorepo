@@ -1,6 +1,6 @@
 {
   "version": "0.0.65",
-  "generated": "2026-01-14T21:54:48.269871+00:00",
+  "generated": "2026-01-14T21:57:33.314125+00:00",
   "crates": [
     {
       "name": "commonware-broadcast",
@@ -9,7 +9,7 @@
       },
       "modules": [
         {
-          "path": "::",
+          "path": "(lib)",
           "readiness": 2,
           "is_explicit": true
         },
@@ -41,7 +41,7 @@
       },
       "modules": [
         {
-          "path": "::",
+          "path": "(lib)",
           "readiness": 2,
           "is_explicit": true
         },
@@ -127,14 +127,9 @@
     {
       "name": "commonware-coding",
       "module_counts": {
-        "0": 3
+        "0": 2
       },
       "modules": [
-        {
-          "path": "::",
-          "readiness": 0,
-          "is_explicit": false
-        },
         {
           "path": "reed_solomon",
           "readiness": 0,
@@ -152,14 +147,9 @@
     {
       "name": "commonware-collector",
       "module_counts": {
-        "0": 4
+        "0": 3
       },
       "modules": [
-        {
-          "path": "::",
-          "readiness": 0,
-          "is_explicit": false
-        },
         {
           "path": "p2p",
           "readiness": 0,
@@ -184,15 +174,10 @@
     {
       "name": "commonware-consensus",
       "module_counts": {
-        "0": 10,
+        "0": 9,
         "2": 18
       },
       "modules": [
-        {
-          "path": "::",
-          "readiness": 0,
-          "is_explicit": false
-        },
         {
           "path": "aggregation",
           "readiness": 0,
@@ -354,7 +339,7 @@
       },
       "modules": [
         {
-          "path": "::",
+          "path": "(lib)",
           "readiness": 2,
           "is_explicit": true
         },
@@ -532,14 +517,9 @@
     {
       "name": "commonware-deployer",
       "module_counts": {
-        "0": 6
+        "0": 5
       },
       "modules": [
-        {
-          "path": "::",
-          "readiness": 0,
-          "is_explicit": false
-        },
         {
           "path": "ec2",
           "readiness": 0,
@@ -576,7 +556,7 @@
       },
       "modules": [
         {
-          "path": "::",
+          "path": "(lib)",
           "readiness": 2,
           "is_explicit": true
         }
@@ -585,15 +565,10 @@
     {
       "name": "commonware-math",
       "module_counts": {
-        "0": 3,
+        "0": 2,
         "2": 2
       },
       "modules": [
-        {
-          "path": "::",
-          "readiness": 0,
-          "is_explicit": false
-        },
         {
           "path": "algebra",
           "readiness": 2,
@@ -623,7 +598,7 @@
       },
       "modules": [
         {
-          "path": "::",
+          "path": "(lib)",
           "readiness": 2,
           "is_explicit": true
         },
@@ -944,7 +919,7 @@
       },
       "modules": [
         {
-          "path": "::",
+          "path": "(lib)",
           "readiness": 2,
           "is_explicit": true
         }
@@ -957,7 +932,7 @@
       },
       "modules": [
         {
-          "path": "::",
+          "path": "(lib)",
           "readiness": 2,
           "is_explicit": true
         },
@@ -989,7 +964,7 @@
       },
       "modules": [
         {
-          "path": "::",
+          "path": "(lib)",
           "readiness": 2,
           "is_explicit": true
         },
@@ -1139,7 +1114,7 @@
       },
       "modules": [
         {
-          "path": "::",
+          "path": "(lib)",
           "readiness": 2,
           "is_explicit": true
         },
@@ -1608,7 +1583,7 @@
       },
       "modules": [
         {
-          "path": "::",
+          "path": "(lib)",
           "readiness": 2,
           "is_explicit": true
         },
@@ -1633,7 +1608,7 @@
       },
       "modules": [
         {
-          "path": "::",
+          "path": "(lib)",
           "readiness": 2,
           "is_explicit": true
         },
@@ -1800,9 +1775,9 @@
     }
   ],
   "summary": {
-    "total_modules": 291,
+    "total_modules": 286,
     "by_level": {
-      "0": 26,
+      "0": 21,
       "1": 1,
       "2": 264
     }

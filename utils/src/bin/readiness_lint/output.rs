@@ -143,22 +143,26 @@ fn build_output(workspace: &Workspace) -> ReadinessOutput {
         let (mut modules, module_count, mut level_counts) =
             collect_modules(&krate.modules, krate.root_readiness);
 
-        // Add the crate root entry (represents items defined directly in lib.rs)
-        // This is a sibling to pub mod modules, not a parent
-        let root_module = ModuleOutput {
-            path: "::".to_string(),
-            readiness: krate.root_readiness,
-            is_explicit: krate.root_is_explicit,
-            visibility: Visibility::Public,
-            submodules: vec![],
+        // Only add root entry if it has explicit readiness annotation
+        let total_count = if krate.root_is_explicit {
+            let root_module = ModuleOutput {
+                path: "(lib)".to_string(),
+                readiness: krate.root_readiness,
+                is_explicit: true,
+                visibility: Visibility::Public,
+                submodules: vec![],
+            };
+            modules.insert(0, root_module);
+            *level_counts.entry(krate.root_readiness).or_insert(0) += 1;
+            module_count + 1
+        } else {
+            module_count
         };
 
-        // Insert root at the beginning
-        modules.insert(0, root_module);
-
-        // Count the root module
-        *level_counts.entry(krate.root_readiness).or_insert(0) += 1;
-        let total_count = module_count + 1;
+        // Skip crates with no modules to show
+        if modules.is_empty() {
+            continue;
+        }
 
         total_modules += total_count;
         for (level, count) in &level_counts {
