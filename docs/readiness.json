@@ -1,6 +1,6 @@
 {
   "version": "0.0.65",
-  "generated": "2026-01-14T21:27:59.491289+00:00",
+  "generated": "2026-01-14T21:35:58.163274+00:00",
   "crates": [
     {
       "name": "commonware-broadcast",
@@ -117,15 +117,9 @@
     {
       "name": "commonware-coding",
       "module_counts": {
-        "0": 3
+        "0": 2
       },
       "modules": [
-        {
-          "path": "no_coding",
-          "readiness": 0,
-          "is_explicit": false,
-          "visibility": "reexported"
-        },
         {
           "path": "reed_solomon",
           "readiness": 0,
@@ -1710,9 +1704,9 @@
     }
   ],
   "summary": {
-    "total_modules": 276,
+    "total_modules": 275,
     "by_level": {
-      "0": 22,
+      "0": 21,
       "1": 1,
       "2": 253
     }

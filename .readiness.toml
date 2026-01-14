@@ -9,4 +9,5 @@ ignore_modules = [
     "*::benchmarks",
     "*::mocks",
     "*::config",
+    "*::no_coding",
 ]
