@@ -3,7 +3,6 @@
 //! This tool validates that modules don't depend on less-ready modules
 //! and generates readiness.json for the documentation page.
 
-mod analyzer;
 mod output;
 mod parser;
 mod validator;
@@ -41,18 +40,9 @@ fn main() -> ExitCode {
         }
     };
 
-    // Analyze dependencies
-    let dependencies = match analyzer::analyze(&workspace) {
-        Ok(d) => d,
-        Err(e) => {
-            eprintln!("Error analyzing dependencies: {e}");
-            return ExitCode::FAILURE;
-        }
-    };
-
     // Validate constraints if requested
     if args.validate {
-        let violations = validator::validate(&workspace, &dependencies);
+        let violations = validator::validate(&workspace);
         if !violations.is_empty() {
             eprintln!("Readiness constraint violations found:");
             for violation in &violations {
