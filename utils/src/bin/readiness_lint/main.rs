@@ -2,6 +2,29 @@
 //!
 //! This tool validates that modules don't depend on less-ready modules
 //! and generates readiness.json for the documentation page.
+//!
+//! # What This Tool Tracks
+//!
+//! This tool tracks Rust **modules** (`mod` declarations), not individual types,
+//! traits, or functions. All items within a module share the same readiness level.
+//! For example, `simplex::elector` appears as a single module even though it
+//! contains multiple types like `RoundRobin` and `Random`.
+//!
+//! To track items at finer granularity, split them into separate submodules
+//! (e.g., `elector/round_robin.rs` and `elector/random.rs`).
+//!
+//! # Readiness Levels
+//!
+//! - **0**: Experimental/little testing (default)
+//! - **1**: Decent test coverage, breaking format changes possible
+//! - **2**: Decent test coverage, wire/storage format stable
+//! - **3**: Levels 1+2, API stable
+//! - **4**: Production-deployed, audited multiple times
+//!
+//! # Usage
+//!
+//! Annotate modules with `commonware_macros::readiness!(N)` where N is 0-4.
+//! Submodules inherit their parent's readiness level unless explicitly annotated.
 
 mod output;
 mod parser;
