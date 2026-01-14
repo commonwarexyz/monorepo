@@ -139,7 +139,6 @@ pub async fn profile(
 
         url
     };
-    info!("samply archive ready");
 
     // Build the remote profiling script
     let profile_script = format!(
