@@ -163,9 +163,6 @@ fi
 
 echo "Profiling PID $PID for {duration} seconds..."
 
-# Enable perf access for samply
-sudo sysctl -w kernel.perf_event_paranoid=-1 > /dev/null
-
 # Record profile (use timeout with SIGINT so samply saves the profile)
 sudo timeout -s INT {duration}s /home/ubuntu/samply record -p $PID -s -o /tmp/profile.json || true
 sudo chown ubuntu:ubuntu /tmp/profile.json
