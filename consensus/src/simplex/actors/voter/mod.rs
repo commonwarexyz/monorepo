@@ -3264,10 +3264,22 @@ mod tests {
 
     #[test_collect_traces]
     fn test_cancelled_certification_does_not_hang(traces: TraceStorage) {
-        cancelled_certification_does_not_hang(bls12381_threshold::fixture::<MinPk, _>, traces.clone());
-        cancelled_certification_does_not_hang(bls12381_threshold::fixture::<MinSig, _>, traces.clone());
-        cancelled_certification_does_not_hang(bls12381_multisig::fixture::<MinPk, _>, traces.clone());
-        cancelled_certification_does_not_hang(bls12381_multisig::fixture::<MinSig, _>, traces.clone());
+        cancelled_certification_does_not_hang(
+            bls12381_threshold::fixture::<MinPk, _>,
+            traces.clone(),
+        );
+        cancelled_certification_does_not_hang(
+            bls12381_threshold::fixture::<MinSig, _>,
+            traces.clone(),
+        );
+        cancelled_certification_does_not_hang(
+            bls12381_multisig::fixture::<MinPk, _>,
+            traces.clone(),
+        );
+        cancelled_certification_does_not_hang(
+            bls12381_multisig::fixture::<MinSig, _>,
+            traces.clone(),
+        );
         cancelled_certification_does_not_hang(ed25519::fixture, traces.clone());
         cancelled_certification_does_not_hang(secp256r1::fixture, traces);
     }
