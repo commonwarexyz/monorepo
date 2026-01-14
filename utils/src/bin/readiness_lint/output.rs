@@ -140,31 +140,15 @@ fn build_output(workspace: &Workspace) -> ReadinessOutput {
     for crate_name in crate_names {
         let krate = &workspace.crates[crate_name];
 
-        let (mut modules, module_count, mut level_counts) =
+        let (modules, module_count, level_counts) =
             collect_modules(&krate.modules, krate.root_readiness);
-
-        // Only add root entry if it has explicit readiness annotation
-        let total_count = if krate.root_is_explicit {
-            let root_module = ModuleOutput {
-                path: "(lib)".to_string(),
-                readiness: krate.root_readiness,
-                is_explicit: true,
-                visibility: Visibility::Public,
-                submodules: vec![],
-            };
-            modules.insert(0, root_module);
-            *level_counts.entry(krate.root_readiness).or_insert(0) += 1;
-            module_count + 1
-        } else {
-            module_count
-        };
 
         // Skip crates with no modules to show
         if modules.is_empty() {
             continue;
         }
 
-        total_modules += total_count;
+        total_modules += module_count;
         for (level, count) in &level_counts {
             *by_level.entry(*level).or_insert(0) += count;
         }

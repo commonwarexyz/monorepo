@@ -20,6 +20,8 @@
 //! println!("digest: {:?}", digest);
 //! ```
 
+commonware_macros::readiness!(2);
+
 use crate::Hasher;
 #[cfg(not(feature = "std"))]
 use alloc::vec;
@@ -36,11 +38,13 @@ use sha2::{Digest as _, Sha256 as ISha256};
 use zeroize::Zeroize;
 
 /// Re-export `sha2::Sha256` as `CoreSha256` for external use if needed.
+#[commonware_macros::ready(2)]
 pub type CoreSha256 = ISha256;
 
 const DIGEST_LENGTH: usize = 32;
 
 /// SHA-256 hasher.
+#[commonware_macros::ready(2)]
 #[derive(Debug, Default)]
 pub struct Sha256 {
     hasher: ISha256,

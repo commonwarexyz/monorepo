@@ -28,6 +28,7 @@ impl<I: Ord + Hash + Clone, V: Ord + Copy> PartialOrd for Entry<I, V> {
 
 /// A set that offers efficient iteration over
 /// its elements in priority-ascending order.
+#[commonware_macros::ready(2)]
 pub struct PrioritySet<I: Ord + Hash + Clone, P: Ord + Copy> {
     entries: BTreeSet<Entry<I, P>>,
     keys: HashMap<I, P>,

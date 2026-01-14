@@ -1,5 +1,7 @@
 //! Utility functions for exchanging messages with many peers.
 
+commonware_macros::readiness!(2);
+
 use crate::Manager;
 use commonware_cryptography::PublicKey;
 use commonware_utils::{channels::fallible::FallibleExt, ordered::Set};

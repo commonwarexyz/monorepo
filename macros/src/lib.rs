@@ -608,3 +608,59 @@ pub fn readiness(input: TokenStream) -> TokenStream {
 
     output.into()
 }
+
+/// Mark an item's readiness level (0-4).
+///
+/// This attribute macro marks individual items (traits, structs, enums, functions,
+/// type aliases, constants) with their readiness level. The readiness linter uses
+/// this to validate that higher-readiness code only depends on equal or higher
+/// readiness items.
+///
+/// # Readiness Levels
+///
+/// - 0: Experimental/little testing (default if not specified)
+/// - 1: Decent test coverage, breaking format changes possible with no migration path
+/// - 2: Decent test coverage, wire/storage format stable
+/// - 3: Levels 1+2, API stable
+/// - 4: Deployed in production without issue, audited multiple times
+///
+/// # Example
+///
+/// ```rust
+/// use commonware_macros::ready;
+///
+/// #[ready(2)]
+/// pub trait MyTrait {
+///     fn do_something(&self);
+/// }
+///
+/// #[ready(2)]
+/// pub struct MyStruct {
+///     field: u32,
+/// }
+/// ```
+///
+/// # Difference from `readiness!`
+///
+/// - `readiness!(N)` - marks all items in a module with the same readiness level
+/// - `#[ready(N)]` - marks a single item, can override module-level readiness
+#[proc_macro_attribute]
+pub fn ready(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let level = parse_macro_input!(attr as LitInt);
+    let value: u8 = match level.base10_parse() {
+        Ok(v) => v,
+        Err(_) => {
+            return Error::new_spanned(level, "readiness level must be a number 0-4")
+                .to_compile_error()
+                .into();
+        }
+    };
+    if value > 4 {
+        return Error::new_spanned(level, "readiness level must be between 0 and 4")
+            .to_compile_error()
+            .into();
+    }
+
+    // Pass through the item unchanged - the attribute is just a marker for the linter
+    item
+}

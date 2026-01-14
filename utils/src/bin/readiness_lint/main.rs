@@ -75,6 +75,16 @@ fn main() -> ExitCode {
         }
     };
 
+    // Check for crate-level readiness (prohibited)
+    let crate_level_violations = validator::check_crate_level_readiness(&workspace);
+    if !crate_level_violations.is_empty() {
+        eprintln!("Crate-level readiness!() is prohibited. Move items to modules:");
+        for (crate_name, path) in &crate_level_violations {
+            eprintln!("  {crate_name}: {}", path.display());
+        }
+        return ExitCode::FAILURE;
+    }
+
     // Validate constraints if requested
     if args.validate {
         let violations = validator::validate(&workspace);

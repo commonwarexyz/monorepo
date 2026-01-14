@@ -4,9 +4,25 @@ use crate::parser::{Module, Workspace};
 use std::{
     collections::{HashMap, HashSet},
     fmt, fs,
-    path::Path,
+    path::{Path, PathBuf},
 };
 use syn::visit::Visit;
+
+/// Check for crate-level readiness!() annotations (prohibited).
+/// Returns a list of (crate_name, lib.rs path) pairs that have crate-level readiness.
+pub fn check_crate_level_readiness(workspace: &Workspace) -> Vec<(String, PathBuf)> {
+    let mut violations = Vec::new();
+
+    for (crate_name, krate) in &workspace.crates {
+        if krate.root_is_explicit {
+            let lib_rs = krate.path.join("src/lib.rs");
+            violations.push((crate_name.clone(), lib_rs));
+        }
+    }
+
+    violations.sort_by(|a, b| a.0.cmp(&b.0));
+    violations
+}
 
 /// A readiness constraint violation.
 #[derive(Debug, Clone)]
@@ -56,14 +72,20 @@ pub fn validate(workspace: &Workspace) -> Vec<Violation> {
     violations
 }
 
-/// Build a map from "crate_name::module::path" to readiness level.
-/// Includes ALL modules and crate roots - unmarked modules have readiness 0 (inherited or default).
+/// Build a map from "crate_name::module::path" or "crate_name::Item" to readiness level.
+/// Includes modules, crate roots, and items with explicit #[ready(N)] annotations.
 fn build_module_readiness_map(workspace: &Workspace) -> HashMap<String, u8> {
     let mut map = HashMap::new();
 
     for (crate_name, krate) in &workspace.crates {
         // Add crate root readiness (for crate-level imports like `use commonware_stream::Config`)
         map.insert(crate_name.clone(), krate.root_readiness);
+
+        // Add items defined at crate root (lib.rs) with their explicit #[ready(N)]
+        for (item_name, readiness) in &krate.root_items {
+            let item_path = format!("{crate_name}::{item_name}");
+            map.insert(item_path, *readiness);
+        }
 
         // Collect all modules with their effective readiness
         // Modules inherit from crate root if not explicitly set
@@ -79,7 +101,7 @@ fn build_module_readiness_map(workspace: &Workspace) -> HashMap<String, u8> {
     map
 }
 
-/// Recursively collect ALL modules into the map with their effective readiness.
+/// Recursively collect ALL modules and their items into the map with their effective readiness.
 fn collect_all_module_readiness(
     modules: &HashMap<String, Module>,
     crate_name: &str,
@@ -95,7 +117,16 @@ fn collect_all_module_readiness(
 
         // Store with full path: crate_name::module::path
         let full_path = format!("{crate_name}::{}", module.path);
-        map.insert(full_path, effective);
+        map.insert(full_path.clone(), effective);
+
+        // Add items with explicit #[ready(N)] annotations
+        // Items without explicit annotation inherit the module's readiness
+        for (item_name, item_readiness) in &module.items {
+            let item_path = format!("{full_path}::{item_name}");
+            map.insert(item_path, *item_readiness);
+            // Also add at crate level for re-exports (crate::Item)
+            // This is handled separately via add_item_reexport_readiness
+        }
 
         collect_all_module_readiness(&module.submodules, crate_name, effective, map);
     }
@@ -171,21 +202,28 @@ fn collect_reexport_items(
             collect_reexport_items(crate_name, &path.tree, &new_prefix, map);
         }
         syn::UseTree::Name(name) => {
-            // pub use module::Item - map crate::Item to module's readiness
+            // pub use module::Item - map crate::Item to source item's or module's readiness
             if !prefix.is_empty() {
                 let item_name = name.ident.to_string();
                 // Only process items (capitalized names)
                 if item_name.chars().next().map_or(false, |c| c.is_uppercase()) {
                     let module_path = format!("{crate_name}::{}", prefix.join("::"));
-                    // Look up the module's readiness and create an entry for crate::Item
-                    if let Some(&readiness) = map.get(&module_path) {
-                        let item_path = format!("{crate_name}::{item_name}");
+                    let item_at_module_path = format!("{module_path}::{item_name}");
+                    let item_path = format!("{crate_name}::{item_name}");
+
+                    // First, check if the item has an explicit #[ready(N)] annotation
+                    if let Some(&readiness) = map.get(&item_at_module_path) {
+                        map.insert(item_path, readiness);
+                    } else if let Some(&readiness) = map.get(&module_path) {
+                        // Fall back to module's readiness
                         map.insert(item_path, readiness);
                     } else {
                         // Try just the first module segment
                         let first_module = format!("{crate_name}::{}", prefix[0]);
-                        if let Some(&readiness) = map.get(&first_module) {
-                            let item_path = format!("{crate_name}::{item_name}");
+                        let item_at_first_module = format!("{first_module}::{item_name}");
+                        if let Some(&readiness) = map.get(&item_at_first_module) {
+                            map.insert(item_path, readiness);
+                        } else if let Some(&readiness) = map.get(&first_module) {
                             map.insert(item_path, readiness);
                         }
                     }
@@ -193,18 +231,30 @@ fn collect_reexport_items(
             }
         }
         syn::UseTree::Rename(rename) => {
-            // pub use module::Item as Alias - map crate::Alias to module's readiness
+            // pub use module::Item as Alias - map crate::Alias to source item's or module's readiness
             if !prefix.is_empty() {
                 let alias_name = rename.rename.to_string();
-                if alias_name.chars().next().map_or(false, |c| c.is_uppercase()) {
+                let original_name = rename.ident.to_string();
+                if alias_name
+                    .chars()
+                    .next()
+                    .map_or(false, |c| c.is_uppercase())
+                {
                     let module_path = format!("{crate_name}::{}", prefix.join("::"));
-                    if let Some(&readiness) = map.get(&module_path) {
-                        let item_path = format!("{crate_name}::{alias_name}");
+                    let item_at_module_path = format!("{module_path}::{original_name}");
+                    let item_path = format!("{crate_name}::{alias_name}");
+
+                    // First, check if the item has an explicit #[ready(N)] annotation
+                    if let Some(&readiness) = map.get(&item_at_module_path) {
+                        map.insert(item_path, readiness);
+                    } else if let Some(&readiness) = map.get(&module_path) {
                         map.insert(item_path, readiness);
                     } else {
                         let first_module = format!("{crate_name}::{}", prefix[0]);
-                        if let Some(&readiness) = map.get(&first_module) {
-                            let item_path = format!("{crate_name}::{alias_name}");
+                        let item_at_first_module = format!("{first_module}::{original_name}");
+                        if let Some(&readiness) = map.get(&item_at_first_module) {
+                            map.insert(item_path, readiness);
+                        } else if let Some(&readiness) = map.get(&first_module) {
                             map.insert(item_path, readiness);
                         }
                     }
@@ -296,17 +346,14 @@ fn check_modules(
 
             for import in imports {
                 // Check if this import has lower readiness
-                // First try the exact import path, then fall back to crate root
+                // Only check imports that have explicit readiness entries
+                // (either item-level #[ready(N)] or module-level readiness!())
                 let (dep_path, dep_readiness) = if let Some(&r) = module_readiness.get(&import) {
                     (import.clone(), r)
                 } else {
-                    // Fall back to crate root (e.g., "commonware-stream::Config" -> "commonware-stream")
-                    let crate_root = import.split("::").next().unwrap_or(&import);
-                    if let Some(&r) = module_readiness.get(crate_root) {
-                        (crate_root.to_string(), r)
-                    } else {
-                        continue; // Unknown dependency, skip
-                    }
+                    // Import not found - this means it doesn't have an explicit readiness annotation
+                    // Skip checking since crate-level readiness!() is prohibited
+                    continue;
                 };
 
                 if dep_readiness < effective_readiness {
@@ -554,8 +601,20 @@ fn collect_imports_recursive(dir: &Path, imports: &mut HashSet<String>) {
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
+            // Skip test-related directories
+            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                if is_test_module(name) {
+                    continue;
+                }
+            }
             collect_imports_recursive(&path, imports);
         } else if path.extension().map_or(false, |e| e == "rs") {
+            // Skip test-related files (e.g., conformance.rs, tests.rs)
+            if let Some(stem) = path.file_stem().and_then(|n| n.to_str()) {
+                if is_test_module(stem) {
+                    continue;
+                }
+            }
             for import in extract_imports(&path) {
                 imports.insert(import);
             }

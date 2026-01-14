@@ -22,8 +22,6 @@
     html_favicon_url = "https://commonware.xyz/favicon.ico"
 )]
 
-commonware_macros::readiness!(2);
-
 use bytes::{Buf, BufMut};
 use commonware_macros::select;
 use commonware_parallel::{Rayon, ThreadPool};
@@ -66,6 +64,7 @@ const METRICS_PREFIX: &str = "runtime";
 pub const DEFAULT_BLOB_VERSION: u16 = 0;
 
 /// Errors that can occur when interacting with the runtime.
+#[commonware_macros::ready(2)]
 #[derive(Error, Debug)]
 pub enum Error {
     #[error("exited")]
@@ -125,6 +124,7 @@ pub enum Error {
 
 /// Interface that any task scheduler must implement to start
 /// running tasks.
+#[commonware_macros::ready(2)]
 pub trait Runner {
     /// Context defines the environment available to tasks.
     /// Example of possible services provided by the context include:
@@ -145,6 +145,7 @@ pub trait Runner {
 }
 
 /// Interface that any task scheduler must implement to spawn tasks.
+#[commonware_macros::ready(2)]
 pub trait Spawner: Clone + Send + Sync + 'static {
     /// Return a [`Spawner`] that schedules tasks onto the runtime's shared executor.
     ///
@@ -242,6 +243,7 @@ pub trait Spawner: Clone + Send + Sync + 'static {
 
 /// Trait for creating [rayon]-compatible thread pools with each worker thread
 /// placed on dedicated threads via [Spawner].
+#[commonware_macros::ready(2)]
 pub trait RayonPoolSpawner: Spawner + Metrics {
     /// Creates a clone-able [rayon]-compatible thread pool with [Spawner::spawn].
     ///
@@ -267,6 +269,7 @@ pub trait RayonPoolSpawner: Spawner + Metrics {
 }
 
 /// Interface to register and encode metrics.
+#[commonware_macros::ready(2)]
 pub trait Metrics: Clone + Send + Sync + 'static {
     /// Get the current label of the context.
     fn label(&self) -> String;
@@ -312,6 +315,7 @@ pub use governor::Quota;
 ///
 /// This is a convenience type alias for creating single-entity rate limiters.
 /// For per-key rate limiting, use [KeyedRateLimiter].
+#[commonware_macros::ready(2)]
 pub type RateLimiter<C> = governor::RateLimiter<
     governor::state::NotKeyed,
     governor::state::InMemoryState,
@@ -325,6 +329,7 @@ pub type RateLimiter<C> = governor::RateLimiter<
 /// using governor's [HashMapStateStore].
 ///
 /// [HashMapStateStore]: governor::state::keyed::HashMapStateStore
+#[commonware_macros::ready(2)]
 pub type KeyedRateLimiter<K, C> = governor::RateLimiter<
     K,
     governor::state::keyed::HashMapStateStore<K>,
@@ -337,6 +342,7 @@ pub type KeyedRateLimiter<K, C> = governor::RateLimiter<
 ///
 /// It is necessary to mock time to provide deterministic execution
 /// of arbitrary tasks.
+#[commonware_macros::ready(2)]
 pub trait Clock:
     governor::clock::Clock<Instant = SystemTime>
     + governor::clock::ReasonablyRealtime
@@ -454,16 +460,20 @@ cfg_if::cfg_if! {
 }
 
 /// Syntactic sugar for the type of [Sink] used by a given [Network] N.
+#[commonware_macros::ready(2)]
 pub type SinkOf<N> = <<N as Network>::Listener as Listener>::Sink;
 
 /// Syntactic sugar for the type of [Stream] used by a given [Network] N.
+#[commonware_macros::ready(2)]
 pub type StreamOf<N> = <<N as Network>::Listener as Listener>::Stream;
 
 /// Syntactic sugar for the type of [Listener] used by a given [Network] N.
+#[commonware_macros::ready(2)]
 pub type ListenerOf<N> = <N as crate::Network>::Listener;
 
 /// Interface that any runtime must implement to create
 /// network connections.
+#[commonware_macros::ready(2)]
 pub trait Network: Clone + Send + Sync + 'static {
     /// The type of [Listener] that's returned when binding to a socket.
     /// Accepting a connection returns a [Sink] and [Stream] which are defined
@@ -484,6 +494,7 @@ pub trait Network: Clone + Send + Sync + 'static {
 }
 
 /// Interface for DNS resolution.
+#[commonware_macros::ready(2)]
 pub trait Resolver: Clone + Send + Sync + 'static {
     /// Resolve a hostname to IP addresses.
     ///
@@ -496,6 +507,7 @@ pub trait Resolver: Clone + Send + Sync + 'static {
 
 /// Interface that any runtime must implement to handle
 /// incoming network connections.
+#[commonware_macros::ready(2)]
 pub trait Listener: Sync + Send + 'static {
     /// The type of [Sink] that's returned when accepting a connection.
     /// This is used to send data to the remote connection.
@@ -515,6 +527,7 @@ pub trait Listener: Sync + Send + 'static {
 
 /// Interface that any runtime must implement to send
 /// messages over a network connection.
+#[commonware_macros::ready(2)]
 pub trait Sink: Sync + Send + 'static {
     /// Send a message to the sink.
     ///
@@ -526,6 +539,7 @@ pub trait Sink: Sync + Send + 'static {
 
 /// Interface that any runtime must implement to receive
 /// messages over a network connection.
+#[commonware_macros::ready(2)]
 pub trait Stream: Sync + Send + 'static {
     /// Receive a message from the stream, storing it in the given buffer.
     /// Reads exactly the number of bytes that fit in the buffer.
@@ -548,6 +562,7 @@ pub trait Stream: Sync + Send + 'static {
 /// Partition names must be non-empty and contain only ASCII alphanumeric
 /// characters, dashes (`-`), or underscores (`_`). Names containing other
 /// characters (e.g., `/`, `.`, spaces) will return an error.
+#[commonware_macros::ready(2)]
 pub trait Storage: Clone + Send + Sync + 'static {
     /// The readable/writeable storage buffer that can be opened by this Storage.
     type Blob: Blob;
@@ -619,6 +634,7 @@ pub trait Storage: Clone + Send + Sync + 'static {
 /// When a blob is dropped, any unsynced changes may be discarded. Implementations
 /// may attempt to sync during drop but errors will go unhandled. Call `sync`
 /// before dropping to ensure all changes are durably persisted.
+#[commonware_macros::ready(2)]
 #[allow(clippy::len_without_is_empty)]
 pub trait Blob: Clone + Send + Sync + 'static {
     /// Read from the blob at the given offset.

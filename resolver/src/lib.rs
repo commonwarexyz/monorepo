@@ -5,8 +5,6 @@
     html_favicon_url = "https://commonware.xyz/favicon.ico"
 )]
 
-commonware_macros::readiness!(2);
-
 use commonware_cryptography::PublicKey;
 use commonware_utils::{vec::NonEmptyVec, Span};
 use std::future::Future;
@@ -14,6 +12,7 @@ use std::future::Future;
 pub mod p2p;
 
 /// Notified when data is available, and must validate it.
+#[commonware_macros::ready(2)]
 pub trait Consumer: Clone + Send + 'static {
     /// Type used to uniquely identify data.
     type Key: Span;
@@ -37,6 +36,7 @@ pub trait Consumer: Clone + Send + 'static {
 }
 
 /// Responsible for fetching data and notifying a `Consumer`.
+#[commonware_macros::ready(2)]
 pub trait Resolver: Clone + Send + 'static {
     /// Type used to uniquely identify data.
     type Key: Span;

@@ -86,10 +86,13 @@ pub struct Crate {
     pub modules: HashMap<String, Module>,
     pub dependencies: Vec<String>,
     pub dev_dependencies: Vec<String>,
-    /// Readiness level of the crate root (lib.rs)
+    /// Readiness level of the crate root (lib.rs) - from readiness!() macro
     pub root_readiness: u8,
-    /// Whether the root readiness was explicitly set
+    /// Whether the root readiness was explicitly set via readiness!()
     pub root_is_explicit: bool,
+    /// Public items defined at crate root (lib.rs) with their readiness from #[ready(N)]
+    #[serde(default)]
+    pub root_items: HashMap<String, u8>,
 }
 
 /// How a module is exposed in the public API.
@@ -113,6 +116,10 @@ pub struct Module {
     pub is_explicit: bool,
     /// How this module is exposed in the public API
     pub visibility: Visibility,
+    /// Public items in this module with their readiness from #[ready(N)]
+    /// Only populated for items with explicit annotations different from module readiness
+    #[serde(default)]
+    pub items: HashMap<String, u8>,
 }
 
 impl Default for Module {
@@ -124,6 +131,7 @@ impl Default for Module {
             submodules: HashMap::new(),
             is_explicit: false,
             visibility: Visibility::Public,
+            items: HashMap::new(),
         }
     }
 }
@@ -184,12 +192,13 @@ fn parse_crate(path: &Path, config: &Config) -> Result<Crate, ParseError> {
 
     // Parse modules from lib.rs
     let lib_rs_path = path.join("src/lib.rs");
-    let (modules, root_readiness) = if lib_rs_path.exists() {
+    let (modules, root_readiness, root_items) = if lib_rs_path.exists() {
         let root_readiness = extract_readiness_from_file(&lib_rs_path);
         let modules = parse_modules(&lib_rs_path, &path.join("src"), "", root_readiness, config)?;
-        (modules, root_readiness)
+        let root_items = extract_items_from_file(&lib_rs_path);
+        (modules, root_readiness, root_items)
     } else {
-        (HashMap::new(), 0)
+        (HashMap::new(), 0, HashMap::new())
     };
 
     Ok(Crate {
@@ -200,6 +209,7 @@ fn parse_crate(path: &Path, config: &Config) -> Result<Crate, ParseError> {
         dev_dependencies,
         root_readiness,
         root_is_explicit: root_readiness > 0,
+        root_items,
     })
 }
 
@@ -291,15 +301,17 @@ fn parse_modules(
                 HashMap::new()
             };
 
+            let items = extract_items_from_file(&mod_file_path);
             modules.insert(
                 mod_name.clone(),
                 Module {
                     path: mod_path,
                     readiness,
-                    file_path: mod_file_path,
+                    file_path: mod_file_path.clone(),
                     submodules,
                     is_explicit,
                     visibility: Visibility::Public,
+                    items,
                 },
             );
         }
@@ -345,6 +357,7 @@ fn parse_modules(
             HashMap::new()
         };
 
+        let items = extract_items_from_file(&mod_file_path);
         modules
             .entry(mod_name.clone())
             .and_modify(|m| {
@@ -360,6 +373,7 @@ fn parse_modules(
                 submodules,
                 is_explicit,
                 visibility: Visibility::Public,
+                items,
             });
     }
 
@@ -410,6 +424,7 @@ fn parse_modules(
             HashMap::new()
         };
 
+        let items = extract_items_from_file(&mod_file_path);
         modules.insert(
             mod_name,
             Module {
@@ -419,6 +434,7 @@ fn parse_modules(
                 submodules,
                 is_explicit,
                 visibility: Visibility::Reexported,
+                items,
             },
         );
     }
@@ -486,6 +502,11 @@ fn extract_readiness_from_file(file_path: &Path) -> u8 {
     for line in content.lines() {
         let trimmed = line.trim();
 
+        // Skip comments (doc comments and regular comments)
+        if trimmed.starts_with("//") {
+            continue;
+        }
+
         // Look for pattern: readiness!(N) or commonware_macros::readiness!(N)
         if let Some(pos) = trimmed.find("readiness!(") {
             let rest = &trimmed[pos + 11..];
@@ -498,4 +519,74 @@ fn extract_readiness_from_file(file_path: &Path) -> u8 {
     }
 
     0
+}
+
+/// Extract public items and their readiness from #[ready(N)] attributes.
+/// Returns a map of item_name -> readiness level.
+/// Only includes items with explicit #[ready(N)] annotations.
+fn extract_items_from_file(file_path: &Path) -> HashMap<String, u8> {
+    let mut items = HashMap::new();
+
+    let content = match fs::read_to_string(file_path) {
+        Ok(c) => c,
+        Err(_) => return items,
+    };
+
+    let parsed = match syn::parse_file(&content) {
+        Ok(f) => f,
+        Err(_) => return items,
+    };
+
+    for item in &parsed.items {
+        let (name, attrs) = match item {
+            syn::Item::Struct(s) if matches!(s.vis, syn::Visibility::Public(_)) => {
+                (s.ident.to_string(), &s.attrs)
+            }
+            syn::Item::Enum(e) if matches!(e.vis, syn::Visibility::Public(_)) => {
+                (e.ident.to_string(), &e.attrs)
+            }
+            syn::Item::Trait(t) if matches!(t.vis, syn::Visibility::Public(_)) => {
+                (t.ident.to_string(), &t.attrs)
+            }
+            syn::Item::Fn(f) if matches!(f.vis, syn::Visibility::Public(_)) => {
+                (f.sig.ident.to_string(), &f.attrs)
+            }
+            syn::Item::Type(t) if matches!(t.vis, syn::Visibility::Public(_)) => {
+                (t.ident.to_string(), &t.attrs)
+            }
+            syn::Item::Const(c) if matches!(c.vis, syn::Visibility::Public(_)) => {
+                (c.ident.to_string(), &c.attrs)
+            }
+            _ => continue,
+        };
+
+        if let Some(readiness) = get_ready_attribute(attrs) {
+            items.insert(name, readiness);
+        }
+    }
+
+    items
+}
+
+/// Extract readiness level from #[ready(N)] attribute.
+fn get_ready_attribute(attrs: &[syn::Attribute]) -> Option<u8> {
+    for attr in attrs {
+        // Check for #[ready(N)] or #[commonware_macros::ready(N)]
+        let path = attr.path();
+        let is_ready = path.is_ident("ready")
+            || (path.segments.len() == 2
+                && path.segments[0].ident == "commonware_macros"
+                && path.segments[1].ident == "ready");
+
+        if is_ready {
+            // Parse the argument as a literal integer
+            if let syn::Meta::List(meta_list) = &attr.meta {
+                let tokens = meta_list.tokens.to_string();
+                if let Ok(level) = tokens.trim().parse::<u8>() {
+                    return Some(level.min(4));
+                }
+            }
+        }
+    }
+    None
 }

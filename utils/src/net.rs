@@ -1,5 +1,7 @@
 //! Utilities for working with IP addresses.
 
+commonware_macros::readiness!(2);
+
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 /// Bits in an IPv4 address.
@@ -76,6 +78,7 @@ fn ipv6_subnet(ip: Ipv6Addr, mask: &SubnetMask) -> IpAddr {
 }
 
 /// Extension trait providing subnet helpers for [`IpAddr`].
+#[commonware_macros::ready(2)]
 pub trait IpAddrExt {
     /// Return the [`Subnet`] for the given [`SubnetMask`].
     fn subnet(&self, mask: &SubnetMask) -> Subnet;
