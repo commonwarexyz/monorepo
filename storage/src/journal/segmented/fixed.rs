@@ -58,8 +58,7 @@ pub struct Config {
 
 /// A segmented journal with fixed-size entries.
 ///
-/// Each section is stored in a separate blob. Within each blob, items are
-/// fixed-size.
+/// Each section is stored in a separate blob. Within each blob, items are fixed-size.
 ///
 /// # Repair
 ///
@@ -187,76 +186,91 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     pub async fn replay(
         &self,
         start_section: u64,
+        start_position: u64,
         buffer: NonZeroUsize,
     ) -> Result<impl Stream<Item = Result<(u64, u64, A), Error>> + Send + '_, Error> {
         // Pre-create readers from blobs (async operation)
         let mut blob_info = Vec::new();
         for (&section, blob) in self.manager.sections_from(start_section) {
-            let replay = blob.replay(buffer).await?;
-            blob_info.push((section, replay));
+            let blob_size = blob.size().await;
+            let mut replay = blob.replay(buffer).await?;
+            // For the first section, seek to the start position
+            let initial_position = if section == start_section {
+                let start = start_position * Self::CHUNK_SIZE_U64;
+                if start > blob_size {
+                    return Err(Error::ItemOutOfRange(start_position));
+                }
+                replay.seek_to(start).await?;
+                start_position
+            } else {
+                0
+            };
+            blob_info.push((section, replay, initial_position));
         }
 
         // Stream items as they are read to avoid occupying too much memory.
         // Each blob is processed sequentially, yielding batches of items that are then
         // flattened into individual stream elements.
-        Ok(stream::iter(blob_info).flat_map(move |(section, replay)| {
-            stream::unfold(
-                ReplayState {
-                    section,
-                    replay,
-                    position: 0,
-                    done: false,
-                },
-                move |mut state| async move {
-                    if state.done {
-                        return None;
-                    }
-
-                    let mut batch: Vec<Result<(u64, u64, A), Error>> = Vec::new();
-                    loop {
-                        // Ensure we have enough data for one item
-                        match state.replay.ensure(Self::CHUNK_SIZE).await {
-                            Ok(true) => {}
-                            Ok(false) => {
-                                // Reader exhausted - we're done with this blob
-                                state.done = true;
-                                return if batch.is_empty() {
-                                    None
-                                } else {
-                                    Some((batch, state))
-                                };
-                            }
-                            Err(err) => {
-                                batch.push(Err(Error::Runtime(err)));
-                                state.done = true;
-                                return Some((batch, state));
-                            }
+        Ok(
+            stream::iter(blob_info).flat_map(move |(section, replay, initial_position)| {
+                stream::unfold(
+                    ReplayState {
+                        section,
+                        replay,
+                        position: initial_position,
+                        done: false,
+                    },
+                    move |mut state| async move {
+                        if state.done {
+                            return None;
                         }
 
-                        // Decode items from buffer
-                        while state.replay.remaining() >= Self::CHUNK_SIZE {
-                            match A::read(&mut state.replay) {
-                                Ok(item) => {
-                                    batch.push(Ok((state.section, state.position, item)));
-                                    state.position += 1;
+                        let mut batch: Vec<Result<(u64, u64, A), Error>> = Vec::new();
+                        loop {
+                            // Ensure we have enough data for one item
+                            match state.replay.ensure(Self::CHUNK_SIZE).await {
+                                Ok(true) => {}
+                                Ok(false) => {
+                                    // Reader exhausted - we're done with this blob
+                                    state.done = true;
+                                    return if batch.is_empty() {
+                                        None
+                                    } else {
+                                        Some((batch, state))
+                                    };
                                 }
                                 Err(err) => {
-                                    batch.push(Err(Error::Codec(err)));
+                                    batch.push(Err(Error::Runtime(err)));
                                     state.done = true;
                                     return Some((batch, state));
                                 }
                             }
-                        }
 
-                        // Return batch if we have items
-                        if !batch.is_empty() {
-                            return Some((batch, state));
+                            // Decode items from buffer
+                            while state.replay.remaining() >= Self::CHUNK_SIZE {
+                                match A::read(&mut state.replay) {
+                                    Ok(item) => {
+                                        batch.push(Ok((state.section, state.position, item)));
+                                        state.position += 1;
+                                    }
+                                    Err(err) => {
+                                        batch.push(Err(Error::Codec(err)));
+                                        state.done = true;
+                                        return Some((batch, state));
+                                    }
+                                }
+                            }
+
+                            // Return batch if we have items
+                            if !batch.is_empty() {
+                                return Some((batch, state));
+                            }
                         }
-                    }
-                },
-            )
-            .flat_map(stream::iter)
-        }))
+                    },
+                )
+                .flat_map(stream::iter)
+            }),
+        )
     }
 
     /// Sync the given section to storage.
@@ -318,6 +332,40 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     /// Remove all underlying blobs.
     pub async fn destroy(self) -> Result<(), Error> {
         self.manager.destroy().await
+    }
+
+    /// Initialize a section with a specific number of zero-filled items.
+    ///
+    /// This creates the section's blob and fills it with `item_count` items worth of zeros.
+    /// The data is written through the Append wrapper which handles checksums properly.
+    ///
+    /// # Arguments
+    /// * `section` - The section number to initialize
+    /// * `item_count` - Number of zero-filled items to write
+    pub(crate) async fn init_section_at_size(
+        &mut self,
+        section: u64,
+        item_count: u64,
+    ) -> Result<(), Error> {
+        // Get or create the blob for this section
+        let blob = self.manager.get_or_create(section).await?;
+
+        // Calculate the target byte size
+        let target_size = item_count * Self::CHUNK_SIZE_U64;
+
+        // Resize grows the blob by appending zeros, which handles checksums properly
+        blob.resize(target_size).await?;
+
+        Ok(())
+    }
+
+    /// Ensure a section exists, creating an empty blob if needed.
+    ///
+    /// This is used to maintain the invariant that at least one blob always exists
+    /// (the "tail" blob), which allows reconstructing journal size on reopen.
+    pub(crate) async fn ensure_section_exists(&mut self, section: u64) -> Result<(), Error> {
+        self.manager.get_or_create(section).await?;
+        Ok(())
     }
 }
 
@@ -423,7 +471,7 @@ mod tests {
 
             let items = {
                 let stream = journal
-                    .replay(0, NZUsize!(1024))
+                    .replay(0, 0, NZUsize!(1024))
                     .await
                     .expect("failed to replay");
                 pin_mut!(stream);
@@ -449,6 +497,127 @@ mod tests {
                 assert_eq!(item.1, (i - 10) as u64);
                 assert_eq!(item.2, test_digest(i as u64));
             }
+
+            journal.destroy().await.expect("failed to destroy");
+        });
+    }
+
+    #[test_traced]
+    fn test_segmented_fixed_replay_with_start_offset() {
+        // Test that replay with a non-zero start_position correctly skips items.
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg();
+            let mut journal = Journal::init(context.clone(), cfg.clone())
+                .await
+                .expect("failed to init");
+
+            // Append 10 items to section 1
+            for i in 0u64..10 {
+                journal
+                    .append(1, test_digest(i))
+                    .await
+                    .expect("failed to append");
+            }
+            // Append 5 items to section 2
+            for i in 10u64..15 {
+                journal
+                    .append(2, test_digest(i))
+                    .await
+                    .expect("failed to append");
+            }
+            journal.sync_all().await.expect("failed to sync");
+            drop(journal);
+
+            let journal = Journal::<_, Digest>::init(context.clone(), cfg.clone())
+                .await
+                .expect("failed to re-init");
+
+            // Replay from section 1, position 5 - should get items 5-9 from section 1 and all of section 2
+            {
+                let stream = journal
+                    .replay(1, 5, NZUsize!(1024))
+                    .await
+                    .expect("failed to replay");
+                pin_mut!(stream);
+
+                let mut items = Vec::new();
+                while let Some(result) = stream.next().await {
+                    let (section, pos, item) = result.expect("replay error");
+                    items.push((section, pos, item));
+                }
+
+                assert_eq!(
+                    items.len(),
+                    10,
+                    "Should have 5 items from section 1 + 5 from section 2"
+                );
+
+                // Check section 1 items (positions 5-9)
+                for (i, (section, pos, item)) in items.iter().enumerate().take(5) {
+                    assert_eq!(*section, 1);
+                    assert_eq!(*pos, (i + 5) as u64);
+                    assert_eq!(*item, test_digest((i + 5) as u64));
+                }
+
+                // Check section 2 items (positions 0-4)
+                for (i, (section, pos, item)) in items.iter().enumerate().skip(5) {
+                    assert_eq!(*section, 2);
+                    assert_eq!(*pos, (i - 5) as u64);
+                    assert_eq!(*item, test_digest((i + 5) as u64));
+                }
+            }
+
+            // Replay from section 1, position 9 - should get only item 9 from section 1 and all of section 2
+            {
+                let stream = journal
+                    .replay(1, 9, NZUsize!(1024))
+                    .await
+                    .expect("failed to replay");
+                pin_mut!(stream);
+
+                let mut items = Vec::new();
+                while let Some(result) = stream.next().await {
+                    let (section, pos, item) = result.expect("replay error");
+                    items.push((section, pos, item));
+                }
+
+                assert_eq!(
+                    items.len(),
+                    6,
+                    "Should have 1 item from section 1 + 5 from section 2"
+                );
+                assert_eq!(items[0], (1, 9, test_digest(9)));
+                for (i, (section, pos, item)) in items.iter().enumerate().skip(1) {
+                    assert_eq!(*section, 2);
+                    assert_eq!(*pos, (i - 1) as u64);
+                    assert_eq!(*item, test_digest((i + 9) as u64));
+                }
+            }
+
+            // Replay from section 2, position 3 - should get only items 3-4 from section 2
+            {
+                let stream = journal
+                    .replay(2, 3, NZUsize!(1024))
+                    .await
+                    .expect("failed to replay");
+                pin_mut!(stream);
+
+                let mut items = Vec::new();
+                while let Some(result) = stream.next().await {
+                    let (section, pos, item) = result.expect("replay error");
+                    items.push((section, pos, item));
+                }
+
+                assert_eq!(items.len(), 2, "Should have 2 items from section 2");
+                assert_eq!(items[0], (2, 3, test_digest(13)));
+                assert_eq!(items[1], (2, 4, test_digest(14)));
+            }
+
+            // Replay from position past the end should return ItemOutOfRange error
+            let result = journal.replay(1, 100, NZUsize!(1024)).await;
+            assert!(matches!(result, Err(Error::ItemOutOfRange(100))));
+            drop(result);
 
             journal.destroy().await.expect("failed to destroy");
         });
@@ -569,7 +738,7 @@ mod tests {
             // Verify data integrity via replay
             {
                 let stream = journal
-                    .replay(0, NZUsize!(1024))
+                    .replay(0, 0, NZUsize!(1024))
                     .await
                     .expect("failed to replay");
                 pin_mut!(stream);
@@ -671,7 +840,7 @@ mod tests {
 
             let count = {
                 let stream = journal
-                    .replay(0, NZUsize!(1024))
+                    .replay(0, 0, NZUsize!(1024))
                     .await
                     .expect("failed to replay");
                 pin_mut!(stream);
@@ -799,7 +968,7 @@ mod tests {
             // Replay and verify all items in order
             {
                 let stream = journal
-                    .replay(0, NZUsize!(1024))
+                    .replay(0, 0, NZUsize!(1024))
                     .await
                     .expect("failed to replay");
                 pin_mut!(stream);
@@ -819,7 +988,7 @@ mod tests {
             // Test replay starting from middle section (5)
             {
                 let stream = journal
-                    .replay(5, NZUsize!(1024))
+                    .replay(5, 0, NZUsize!(1024))
                     .await
                     .expect("failed to replay from section 5");
                 pin_mut!(stream);
@@ -889,7 +1058,7 @@ mod tests {
             // Replay all - should get items from sections 1 and 3, skipping empty section 2
             {
                 let stream = journal
-                    .replay(0, NZUsize!(1024))
+                    .replay(0, 0, NZUsize!(1024))
                     .await
                     .expect("failed to replay");
                 pin_mut!(stream);
@@ -912,7 +1081,7 @@ mod tests {
             // Replay starting from empty section 2 - should get only section 3
             {
                 let stream = journal
-                    .replay(2, NZUsize!(1024))
+                    .replay(2, 0, NZUsize!(1024))
                     .await
                     .expect("failed to replay from section 2");
                 pin_mut!(stream);
@@ -925,6 +1094,197 @@ mod tests {
 
                 assert_eq!(items.len(), 1, "Should have 1 item from section 3");
                 assert_eq!(items[0], (3, test_digest(300)));
+            }
+
+            journal.destroy().await.expect("failed to destroy");
+        });
+    }
+
+    #[test_traced]
+    fn test_segmented_fixed_truncation_recovery_across_page_boundary() {
+        // Test that truncating a single byte from a blob that has items straddling a page boundary
+        // correctly recovers by removing the incomplete item.
+        //
+        // With PAGE_SIZE=44 and ITEM_SIZE=32:
+        // - Item 0: bytes 0-31
+        // - Item 1: bytes 32-63 (straddles page boundary at 44)
+        // - Item 2: bytes 64-95 (straddles page boundary at 88)
+        //
+        // After 3 items we have 96 bytes = 2 full pages + 8 bytes. Truncating 1 byte leaves 95
+        // bytes, which is not a multiple of 32. Recovery should truncate to 64 bytes (2 complete
+        // items).
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg();
+            let mut journal = Journal::init(context.clone(), cfg.clone())
+                .await
+                .expect("failed to init");
+
+            // Append 3 items (just over 2 pages worth)
+            for i in 0u64..3 {
+                journal
+                    .append(1, test_digest(i))
+                    .await
+                    .expect("failed to append");
+            }
+            journal.sync_all().await.expect("failed to sync");
+
+            // Verify all 3 items are readable
+            for i in 0u64..3 {
+                let item = journal.get(1, i).await.expect("failed to get");
+                assert_eq!(item, test_digest(i));
+            }
+            drop(journal);
+
+            // Truncate the blob by exactly 1 byte to simulate partial write
+            let (blob, size) = context
+                .open(&cfg.partition, &1u64.to_be_bytes())
+                .await
+                .expect("failed to open blob");
+            blob.resize(size - 1).await.expect("failed to truncate");
+            blob.sync().await.expect("failed to sync");
+            drop(blob);
+
+            // Reopen journal - should recover by truncating last page due to failed checksum, and
+            // end up with a correct blob size due to partial-item trimming.
+            let journal = Journal::<_, Digest>::init(context.clone(), cfg.clone())
+                .await
+                .expect("failed to re-init");
+
+            // Verify section now has only 2 items
+            assert_eq!(journal.section_len(1).await.unwrap(), 2);
+
+            // Verify size is the expected multiple of ITEM_SIZE (this would fail if we didn't trim
+            // items and just relied on page-level checksum recovery).
+            assert_eq!(journal.size(1).await.unwrap(), 64);
+
+            // Items 0 and 1 should still be readable
+            let item0 = journal.get(1, 0).await.expect("failed to get item 0");
+            assert_eq!(item0, test_digest(0));
+            let item1 = journal.get(1, 1).await.expect("failed to get item 1");
+            assert_eq!(item1, test_digest(1));
+
+            // Item 2 should return ItemOutOfRange
+            let err = journal.get(1, 2).await;
+            assert!(
+                matches!(err, Err(Error::ItemOutOfRange(2))),
+                "expected ItemOutOfRange(2), got {:?}",
+                err
+            );
+
+            journal.destroy().await.expect("failed to destroy");
+        });
+    }
+
+    #[test_traced]
+    fn test_segmented_fixed_init_section_at_size() {
+        // Test that init_section_at_size correctly initializes a section with zero-filled items.
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg();
+            let mut journal = Journal::init(context.clone(), cfg.clone())
+                .await
+                .expect("failed to init");
+
+            // Initialize section 1 with 5 zero-filled items
+            journal
+                .init_section_at_size(1, 5)
+                .await
+                .expect("failed to init section at size");
+
+            // Verify section has correct length
+            assert_eq!(journal.section_len(1).await.unwrap(), 5);
+
+            // Verify size is correct (5 items * 32 bytes per Digest)
+            assert_eq!(journal.size(1).await.unwrap(), 5 * 32);
+
+            // Verify we can read the zero-filled items
+            let zero_digest = Sha256::fill(0);
+            for i in 0u64..5 {
+                let item = journal.get(1, i).await.expect("failed to get");
+                assert_eq!(item, zero_digest, "item {i} should be zero-filled");
+            }
+
+            // Verify position past the initialized range returns error
+            let err = journal.get(1, 5).await;
+            assert!(matches!(err, Err(Error::ItemOutOfRange(5))));
+
+            // Verify we can append after the initialized items
+            let pos = journal
+                .append(1, test_digest(100))
+                .await
+                .expect("failed to append");
+            assert_eq!(pos, 5, "append should return position 5");
+
+            // Verify section now has 6 items
+            assert_eq!(journal.section_len(1).await.unwrap(), 6);
+
+            // Verify the appended item is readable
+            let item = journal.get(1, 5).await.expect("failed to get");
+            assert_eq!(item, test_digest(100));
+
+            journal.sync_all().await.expect("failed to sync");
+            drop(journal);
+
+            // Test persistence - reopen and verify
+            let journal = Journal::<_, Digest>::init(context.clone(), cfg.clone())
+                .await
+                .expect("failed to re-init");
+
+            assert_eq!(journal.section_len(1).await.unwrap(), 6);
+
+            // Verify zero-filled items persisted
+            for i in 0u64..5 {
+                let item = journal.get(1, i).await.expect("failed to get");
+                assert_eq!(
+                    item, zero_digest,
+                    "item {i} should still be zero-filled after restart"
+                );
+            }
+
+            // Verify appended item persisted
+            let item = journal.get(1, 5).await.expect("failed to get");
+            assert_eq!(item, test_digest(100));
+
+            // Test replay includes zero-filled items
+            {
+                let stream = journal
+                    .replay(1, 0, NZUsize!(1024))
+                    .await
+                    .expect("failed to replay");
+                pin_mut!(stream);
+
+                let mut items = Vec::new();
+                while let Some(result) = stream.next().await {
+                    let (section, pos, item) = result.expect("replay error");
+                    items.push((section, pos, item));
+                }
+
+                assert_eq!(items.len(), 6);
+                for (i, item) in items.iter().enumerate().take(5) {
+                    assert_eq!(*item, (1, i as u64, zero_digest));
+                }
+                assert_eq!(items[5], (1, 5, test_digest(100)));
+            }
+
+            // Test replay with non-zero start offset skips zero-filled items
+            {
+                let stream = journal
+                    .replay(1, 3, NZUsize!(1024))
+                    .await
+                    .expect("failed to replay");
+                pin_mut!(stream);
+
+                let mut items = Vec::new();
+                while let Some(result) = stream.next().await {
+                    let (section, pos, item) = result.expect("replay error");
+                    items.push((section, pos, item));
+                }
+
+                assert_eq!(items.len(), 3);
+                assert_eq!(items[0], (1, 3, zero_digest));
+                assert_eq!(items[1], (1, 4, zero_digest));
+                assert_eq!(items[2], (1, 5, test_digest(100)));
             }
 
             journal.destroy().await.expect("failed to destroy");

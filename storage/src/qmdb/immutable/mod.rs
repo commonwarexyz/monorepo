@@ -1032,27 +1032,41 @@ pub(super) mod test {
         });
     }
 
-    fn assert_send<T: Send>(_: T) {}
+    use crate::{
+        kv::tests::{assert_gettable, assert_send},
+        qmdb::store::tests::{assert_log_store, assert_merkleized_store, assert_prunable_store},
+    };
 
-    #[test_traced]
-    fn test_futures_are_send() {
-        let runner = deterministic::Runner::default();
-        runner.start(|context| async move {
-            let mut db = open_db(context.clone()).await;
-            let key = Sha256::hash(&9u64.to_be_bytes());
-            let loc = Location::new_unchecked(0);
+    type MerkleizedDb =
+        Immutable<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap, Merkleized<Sha256>>;
+    type MutableDb = Immutable<
+        deterministic::Context,
+        Digest,
+        Vec<u8>,
+        Sha256,
+        TwoCap,
+        Unmerkleized,
+        NonDurable,
+    >;
 
-            assert_send(db.get(&key));
-            assert_send(db.get_metadata());
-            assert_send(db.sync());
-            assert_send(db.prune(loc));
-            assert_send(db.proof(loc, NZU64!(1)));
+    #[allow(dead_code)]
+    fn assert_merkleized_db_futures_are_send(db: &mut MerkleizedDb, key: Digest, loc: Location) {
+        assert_gettable(db, &key);
+        assert_log_store(db);
+        assert_prunable_store(db, loc);
+        assert_merkleized_store(db, loc);
+        assert_send(db.sync());
+    }
 
-            let mut db = db.into_mutable();
-            assert_send(db.get(&key));
-            assert_send(db.get_metadata());
-            assert_send(db.set(key, vec![1u8]));
-            assert_send(db.commit(None));
-        });
+    #[allow(dead_code)]
+    fn assert_mutable_db_futures_are_send(db: &mut MutableDb, key: Digest, value: Vec<u8>) {
+        assert_gettable(db, &key);
+        assert_log_store(db);
+        assert_send(db.set(key, value));
+    }
+
+    #[allow(dead_code)]
+    fn assert_mutable_db_commit_is_send(db: MutableDb) {
+        assert_send(db.commit(None));
     }
 }

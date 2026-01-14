@@ -1028,10 +1028,16 @@ where
 mod test {
     use super::*;
     use crate::{
-        kv::{Deletable as _, Gettable as _, Updatable as _},
+        kv::{
+            tests::{assert_batchable, assert_deletable, assert_gettable, assert_send},
+            Deletable as _, Gettable as _, Updatable as _,
+        },
         qmdb::{
             any::test::{fixed_db_config, variable_db_config},
-            store::{LogStore as _, MerkleizedStore},
+            store::{
+                tests::{assert_log_store, assert_merkleized_store, assert_prunable_store},
+                LogStore as _, MerkleizedStore,
+            },
         },
         translator::TwoCap,
     };
@@ -1041,7 +1047,7 @@ mod test {
         deterministic::{Context, Runner},
         Runner as _,
     };
-    use commonware_utils::{sequence::FixedBytes, NZU64};
+    use commonware_utils::sequence::FixedBytes;
     use core::{future::Future, pin::Pin};
     use futures::StreamExt as _;
 
@@ -1162,34 +1168,39 @@ mod test {
         });
     }
 
-    fn assert_send<T: Send>(_: T) {}
+    #[allow(dead_code)]
+    type MutableFixedDb =
+        fixed::Db<Context, FixedBytes<4>, Digest, Sha256, TwoCap, Unmerkleized, NonDurable>;
 
-    #[test_traced]
-    fn test_futures_are_send() {
-        let runner = Runner::default();
-        runner.start(|context| async move {
-            let mut db = open_fixed_db(context.clone()).await;
-            let key = FixedBytes::from([9u8; 4]);
-            let value = Sha256::fill(5u8);
-            let loc = Location::new_unchecked(0);
+    #[allow(dead_code)]
+    fn assert_merkleized_db_futures_are_send(db: &mut FixedDb, key: FixedBytes<4>, loc: Location) {
+        assert_gettable(db, &key);
+        assert_log_store(db);
+        assert_prunable_store(db, loc);
+        assert_merkleized_store(db, loc);
+        assert_send(db.sync());
+    }
 
-            assert_send(db.get(&key));
-            assert_send(db.get_metadata());
-            assert_send(db.sync());
-            assert_send(db.prune(loc));
-            assert_send(db.proof(loc, NZU64!(1)));
+    #[allow(dead_code)]
+    fn assert_mutable_db_futures_are_send(
+        db: &mut MutableFixedDb,
+        key: FixedBytes<4>,
+        value: Digest,
+    ) {
+        assert_gettable(db, &key);
+        assert_log_store(db);
+        assert_send(db.update(key.clone(), value));
+        assert_send(db.create(key.clone(), value));
+        assert_deletable(db, key.clone());
+        assert_batchable(db, key.clone(), value);
+        assert_send(db.get_all(&key));
+        assert_send(db.get_with_loc(&key));
+        assert_send(db.get_span(&key));
+    }
 
-            let mut db = db.into_mutable();
-            assert_send(db.get(&key));
-            assert_send(db.get_all(&key));
-            assert_send(db.get_with_loc(&key));
-            assert_send(db.get_span(&key));
-            assert_send(db.write_batch(vec![(key.clone(), Some(value))].into_iter()));
-            assert_send(db.update(key.clone(), value));
-            assert_send(db.create(key.clone(), value));
-            assert_send(db.delete(key));
-            assert_send(db.commit(None));
-        });
+    #[allow(dead_code)]
+    fn assert_mutable_db_commit_is_send(db: MutableFixedDb) {
+        assert_send(db.commit(None));
     }
 
     async fn test_ordered_any_db_basic<D: TestableAnyDb<Digest>>(

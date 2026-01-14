@@ -244,7 +244,7 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
         .await?;
 
         // Initialize offsets journal at the target size
-        let offsets = crate::qmdb::any::unordered::fixed::sync::init_journal_at_size(
+        let offsets = fixed::Journal::init_at_size(
             context,
             fixed::Config {
                 partition: cfg.offsets_partition(),

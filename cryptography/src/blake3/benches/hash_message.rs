@@ -2,7 +2,7 @@ use commonware_cryptography::{blake3::Blake3, Hasher};
 use criterion::{criterion_group, Criterion};
 use rand::{rngs::StdRng, RngCore, SeedableRng};
 
-fn benchmark_hash_message(c: &mut Criterion) {
+fn bench_hash_message(c: &mut Criterion) {
     let mut sampler = StdRng::seed_from_u64(0);
     let cases = [8, 12, 16, 19, 20, 24].map(|i| 2usize.pow(i));
     for message_length in cases.into_iter() {
@@ -19,4 +19,4 @@ fn benchmark_hash_message(c: &mut Criterion) {
     }
 }
 
-criterion_group!(benches, benchmark_hash_message);
+criterion_group!(benches, bench_hash_message);

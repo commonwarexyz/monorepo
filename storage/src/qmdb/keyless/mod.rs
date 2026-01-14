@@ -1132,26 +1132,29 @@ mod test {
         });
     }
 
-    fn assert_send<T: Send>(_: T) {}
+    use crate::{
+        kv::tests::assert_send,
+        qmdb::store::tests::{assert_log_store, assert_merkleized_store, assert_prunable_store},
+    };
 
-    #[test_traced]
-    fn test_futures_are_send() {
-        let runner = deterministic::Runner::default();
-        runner.start(|context| async move {
-            let mut db = open_db(context.clone()).await;
-            let loc = Location::new_unchecked(0);
+    #[allow(dead_code)]
+    fn assert_clean_db_futures_are_send(db: &mut CleanDb, loc: Location) {
+        assert_log_store(db);
+        assert_prunable_store(db, loc);
+        assert_merkleized_store(db, loc);
+        assert_send(db.sync());
+        assert_send(db.get(loc));
+    }
 
-            assert_send(db.get(loc));
-            assert_send(db.get_metadata());
-            assert_send(db.sync());
-            assert_send(db.prune(loc));
-            assert_send(db.proof(loc, NZU64!(1)));
+    #[allow(dead_code)]
+    fn assert_mutable_db_futures_are_send(db: &mut MutableDb, loc: Location, value: Vec<u8>) {
+        assert_log_store(db);
+        assert_send(db.get(loc));
+        assert_send(db.append(value));
+    }
 
-            let mut db = db.into_mutable();
-            assert_send(db.get(loc));
-            assert_send(db.get_metadata());
-            assert_send(db.append(vec![1u8]));
-            assert_send(db.commit(None));
-        });
+    #[allow(dead_code)]
+    fn assert_mutable_db_commit_is_send(db: MutableDb) {
+        assert_send(db.commit(None));
     }
 }

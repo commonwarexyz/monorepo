@@ -1,7 +1,7 @@
 use commonware_cryptography::lthash::LtHash;
 use criterion::{criterion_group, BatchSize, Criterion};
 
-fn benchmark_combine(c: &mut Criterion) {
+fn bench_combine(c: &mut Criterion) {
     c.bench_function(module_path!(), |b| {
         b.iter_batched(
             || {
@@ -19,4 +19,4 @@ fn benchmark_combine(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, benchmark_combine);
+criterion_group!(benches, bench_combine);

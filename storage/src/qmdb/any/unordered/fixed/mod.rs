@@ -76,11 +76,14 @@ pub(super) mod test {
     use super::*;
     use crate::{
         index::Unordered as _,
-        kv::Batchable as _,
-        mmr::{Position, StandardHasher},
+        kv::tests::{assert_batchable, assert_deletable, assert_gettable, assert_send},
+        mmr::{Location, Position, StandardHasher},
         qmdb::{
             any::unordered::{fixed::Operation, Update},
-            store::batch_tests,
+            store::{
+                batch_tests,
+                tests::{assert_log_store, assert_merkleized_store, assert_prunable_store},
+            },
             verify_proof, NonDurable, Unmerkleized,
         },
         translator::TwoCap,
@@ -628,33 +631,29 @@ pub(super) mod test {
         batch_tests::test_batch(|ctx| async move { create_test_db(ctx).await.into_mutable() });
     }
 
-    fn assert_send<T: Send>(_: T) {}
+    #[allow(dead_code)]
+    fn assert_merkleized_db_futures_are_send(db: &mut AnyTest, key: Digest, loc: Location) {
+        assert_gettable(db, &key);
+        assert_log_store(db);
+        assert_prunable_store(db, loc);
+        assert_merkleized_store(db, loc);
+        assert_send(db.sync());
+    }
 
-    #[test_traced]
-    fn test_futures_are_send() {
-        let runner = deterministic::Runner::default();
-        runner.start(|context| async move {
-            let mut db = open_db(context.clone()).await;
-            let key = to_digest(9);
-            let value = to_digest(5);
-            let loc = Location::new_unchecked(0);
+    #[allow(dead_code)]
+    fn assert_mutable_db_futures_are_send(db: &mut DirtyAnyTest, key: Digest, value: Digest) {
+        assert_gettable(db, &key);
+        assert_log_store(db);
+        assert_send(db.update(key, value));
+        assert_send(db.create(key, value));
+        assert_deletable(db, key);
+        assert_batchable(db, key, value);
+        assert_send(db.get_with_loc(&key));
+    }
 
-            assert_send(db.get(&key));
-            assert_send(db.get_metadata());
-            assert_send(db.sync());
-            assert_send(db.prune(loc));
-            assert_send(db.proof(loc, NZU64!(1)));
-
-            let mut db = db.into_mutable();
-            assert_send(db.get(&key));
-            assert_send(db.get_metadata());
-            assert_send(db.get_with_loc(&key));
-            assert_send(db.write_batch(vec![(key, Some(value))].into_iter()));
-            assert_send(db.update(key, value));
-            assert_send(db.create(key, value));
-            assert_send(db.delete(key));
-            assert_send(db.commit(None));
-        });
+    #[allow(dead_code)]
+    fn assert_mutable_db_commit_is_send(db: DirtyAnyTest) {
+        assert_send(db.commit(None));
     }
 
     // FromSyncTestable implementation for from_sync_result tests

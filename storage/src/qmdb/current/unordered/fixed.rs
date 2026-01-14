@@ -843,7 +843,13 @@ impl<
 pub mod test {
     use super::*;
     use crate::{
-        index::Unordered as _, mmr::hasher::Hasher as _, qmdb::store::batch_tests,
+        index::Unordered as _,
+        kv::tests::{assert_batchable, assert_deletable, assert_gettable, assert_send},
+        mmr::{hasher::Hasher as _, Location},
+        qmdb::store::{
+            batch_tests,
+            tests::{assert_log_store, assert_merkleized_store, assert_prunable_store},
+        },
         translator::TwoCap,
     };
     use commonware_cryptography::{sha256::Digest, Sha256};
@@ -1655,29 +1661,27 @@ pub mod test {
         });
     }
 
-    fn assert_send<T: Send>(_: T) {}
+    #[allow(dead_code)]
+    fn assert_clean_db_futures_are_send(db: &mut CleanCurrentTest, key: Digest, loc: Location) {
+        assert_gettable(db, &key);
+        assert_log_store(db);
+        assert_prunable_store(db, loc);
+        assert_merkleized_store(db, loc);
+        assert_send(db.sync());
+    }
 
-    #[test_traced]
-    fn test_futures_are_send() {
-        let runner = deterministic::Runner::default();
-        runner.start(|context| async move {
-            let mut db = open_db(context.clone(), "send_test").await;
-            let key = Sha256::hash(&9u64.to_be_bytes());
-            let loc = Location::new_unchecked(0);
+    #[allow(dead_code)]
+    fn assert_dirty_db_futures_are_send(db: &mut DirtyCurrentTest, key: Digest, value: Digest) {
+        assert_gettable(db, &key);
+        assert_log_store(db);
+        assert_send(db.update(key, value));
+        assert_send(db.create(key, value));
+        assert_deletable(db, key);
+        assert_batchable(db, key, value);
+    }
 
-            assert_send(db.get(&key));
-            assert_send(db.get_metadata());
-            assert_send(db.sync());
-            assert_send(db.prune(loc));
-            assert_send(db.proof(loc, NZU64!(1)));
-
-            let mut db = db.into_mutable();
-            assert_send(db.get(&key));
-            assert_send(db.get_metadata());
-            assert_send(db.update(key, key));
-            assert_send(db.create(key, key));
-            assert_send(db.delete(key));
-            assert_send(db.commit(None));
-        });
+    #[allow(dead_code)]
+    fn assert_dirty_db_commit_is_send(db: DirtyCurrentTest) {
+        assert_send(db.commit(None));
     }
 }
