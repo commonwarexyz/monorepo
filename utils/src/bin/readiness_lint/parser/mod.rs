@@ -21,6 +21,49 @@ pub enum ParseError {
     InvalidWorkspace(String),
 }
 
+/// Configuration for the readiness parser.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct Config {
+    /// Module path patterns to exclude from output (glob patterns supported).
+    /// Use `*::tests` to match any module named `tests` at any depth.
+    #[serde(default)]
+    pub ignore_modules: Vec<String>,
+}
+
+impl Config {
+    /// Load config from .readiness.toml in the given directory.
+    /// Returns default config if file doesn't exist.
+    pub fn load(root: &Path) -> Result<Self, ParseError> {
+        let config_path = root.join(".readiness.toml");
+        if !config_path.exists() {
+            return Ok(Self::default());
+        }
+        let content = fs::read_to_string(&config_path)?;
+        let config: Config = toml::from_str(&content)?;
+        Ok(config)
+    }
+
+    /// Check if a module path should be ignored.
+    pub fn should_ignore(&self, module_path: &str) -> bool {
+        for pattern in &self.ignore_modules {
+            if matches_glob_pattern(pattern, module_path) {
+                return true;
+            }
+        }
+        false
+    }
+}
+
+/// Simple glob pattern matching for module paths.
+/// Supports `*::` prefix to match any parent path.
+fn matches_glob_pattern(pattern: &str, path: &str) -> bool {
+    if let Some(suffix) = pattern.strip_prefix("*::") {
+        path.ends_with(&format!("::{suffix}")) || path == suffix
+    } else {
+        pattern == path
+    }
+}
+
 /// A parsed workspace containing all crates and their modules.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Workspace {
@@ -60,7 +103,7 @@ impl Default for Module {
 }
 
 /// Parse the workspace at the given root path.
-pub fn parse_workspace(root: &Path) -> Result<Workspace, ParseError> {
+pub fn parse_workspace(root: &Path, config: &Config) -> Result<Workspace, ParseError> {
     let cargo_toml_path = root.join("Cargo.toml");
     let cargo_toml_content = fs::read_to_string(&cargo_toml_path)?;
     let cargo_toml: Value = toml::from_str(&cargo_toml_content)?;
@@ -84,7 +127,7 @@ pub fn parse_workspace(root: &Path) -> Result<Workspace, ParseError> {
         }
 
         let crate_path = root.join(member_path);
-        if let Ok(krate) = parse_crate(&crate_path) {
+        if let Ok(krate) = parse_crate(&crate_path, config) {
             crates.insert(krate.name.clone(), krate);
         }
     }
@@ -93,7 +136,7 @@ pub fn parse_workspace(root: &Path) -> Result<Workspace, ParseError> {
 }
 
 /// Parse a single crate.
-fn parse_crate(path: &Path) -> Result<Crate, ParseError> {
+fn parse_crate(path: &Path, config: &Config) -> Result<Crate, ParseError> {
     let cargo_toml_path = path.join("Cargo.toml");
     let cargo_toml_content = fs::read_to_string(&cargo_toml_path)?;
     let cargo_toml: Value = toml::from_str(&cargo_toml_content)?;
@@ -112,7 +155,7 @@ fn parse_crate(path: &Path) -> Result<Crate, ParseError> {
     // Parse modules from lib.rs
     let lib_rs_path = path.join("src/lib.rs");
     let modules = if lib_rs_path.exists() {
-        parse_modules(&lib_rs_path, &path.join("src"), "")?
+        parse_modules(&lib_rs_path, &path.join("src"), "", config)?
     } else {
         HashMap::new()
     };
@@ -145,6 +188,7 @@ fn parse_modules(
     file_path: &Path,
     src_dir: &Path,
     parent_path: &str,
+    config: &Config,
 ) -> Result<HashMap<String, Module>, ParseError> {
     let content = fs::read_to_string(file_path)?;
     let mut modules = HashMap::new();
@@ -155,17 +199,27 @@ fn parse_modules(
         Err(_) => return Ok(modules),
     };
 
-    // Also check for cfg_if! blocks
-    let cfg_if_modules = cfg_if::extract_modules_from_cfg_if(&content);
+    // Also check for cfg_if! blocks (only public ones)
+    let cfg_if_modules = cfg_if::extract_public_modules_from_cfg_if(&content);
 
     for item in &parsed.items {
         if let syn::Item::Mod(item_mod) = item {
+            // Skip non-public modules (only include fully public `pub mod`)
+            if !matches!(item_mod.vis, syn::Visibility::Public(_)) {
+                continue;
+            }
+
             let mod_name = item_mod.ident.to_string();
             let mod_path = if parent_path.is_empty() {
                 mod_name.clone()
             } else {
                 format!("{parent_path}::{mod_name}")
             };
+
+            // Skip ignored modules
+            if config.should_ignore(&mod_path) {
+                continue;
+            }
 
             // Determine the module file path
             let (mod_file_path, has_submodules) = if item_mod.content.is_some() {
@@ -190,7 +244,7 @@ fn parse_modules(
             // Recursively parse submodules
             let submodules = if has_submodules {
                 let mod_dir = src_dir.join(&mod_name);
-                parse_modules(&mod_file_path, &mod_dir, &mod_path)?
+                parse_modules(&mod_file_path, &mod_dir, &mod_path, config)?
             } else {
                 HashMap::new()
             };
@@ -208,13 +262,18 @@ fn parse_modules(
         }
     }
 
-    // Merge cfg_if modules
-    for (mod_name, _cfg_if_readiness) in cfg_if_modules {
+    // Merge cfg_if modules (already filtered to public only)
+    for mod_name in cfg_if_modules {
         let mod_path = if parent_path.is_empty() {
             mod_name.clone()
         } else {
             format!("{parent_path}::{mod_name}")
         };
+
+        // Skip ignored modules
+        if config.should_ignore(&mod_path) {
+            continue;
+        }
 
         let mod_rs = src_dir.join(&mod_name).join("mod.rs");
         let mod_file = src_dir.join(format!("{mod_name}.rs"));
@@ -231,7 +290,7 @@ fn parse_modules(
 
         let submodules = if has_submodules {
             let mod_dir = src_dir.join(&mod_name);
-            parse_modules(&mod_file_path, &mod_dir, &mod_path)?
+            parse_modules(&mod_file_path, &mod_dir, &mod_path, config)?
         } else {
             HashMap::new()
         };

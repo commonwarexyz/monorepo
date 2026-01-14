@@ -1,0 +1,11 @@
+# Configuration for readiness-lint tool
+# Module paths to exclude from readiness output (glob patterns supported)
+# The *:: prefix matches any parent path, so *::tests matches journal::tests, buffered::tests, etc.
+ignore_modules = [
+    "*::tests",
+    "*::test",
+    "*::conformance",
+    "*::benches",
+    "*::benchmarks",
+    "*::mocks",
+]

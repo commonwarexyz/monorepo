@@ -9,16 +9,16 @@
 //! }
 //! ```
 
-use std::collections::HashMap;
+use std::collections::HashSet;
 
-/// Extract module names from cfg_if! blocks.
-/// Returns a map of module name to readiness level (always 0, actual readiness is in module file).
-pub fn extract_modules_from_cfg_if(content: &str) -> HashMap<String, u8> {
-    let mut modules = HashMap::new();
+/// Extract only public module names from cfg_if! blocks.
+/// Returns a set of module names that are declared as `pub mod`.
+pub fn extract_public_modules_from_cfg_if(content: &str) -> HashSet<String> {
+    let mut modules = HashSet::new();
 
     // Find cfg_if! blocks using simple string matching
     for cfg_if_match in find_cfg_if_blocks(content) {
-        parse_cfg_if_block(&cfg_if_match, &mut modules);
+        parse_cfg_if_block_public_only(&cfg_if_match, &mut modules);
     }
 
     modules
@@ -85,33 +85,31 @@ fn find_matching_brace(content: &str) -> Option<usize> {
     None
 }
 
-/// Parse a cfg_if! block to extract module declarations.
-fn parse_cfg_if_block(block: &str, modules: &mut HashMap<String, u8>) {
+/// Parse a cfg_if! block to extract only public module declarations.
+fn parse_cfg_if_block_public_only(block: &str, modules: &mut HashSet<String>) {
     // Look for module declarations like: pub mod name;
     for line in block.lines() {
         let line = line.trim();
-        if let Some(mod_name) = parse_mod_declaration(line) {
-            // Readiness is 0 here; actual value comes from parsing the module file
-            modules.insert(mod_name, 0);
+        if let Some(mod_name) = parse_public_mod_declaration(line) {
+            modules.insert(mod_name);
         }
     }
 }
 
-/// Parse a module declaration line like "pub mod name;" or "mod name;".
-fn parse_mod_declaration(line: &str) -> Option<String> {
+/// Parse a public module declaration line like "pub mod name;".
+/// Only returns modules declared with `pub mod`, not `mod` or `pub(crate) mod`.
+fn parse_public_mod_declaration(line: &str) -> Option<String> {
     let line = line.trim();
 
-    // Handle various module declaration patterns
-    let patterns = ["pub mod ", "mod ", "pub(crate) mod "];
-
-    for pattern in &patterns {
-        if let Some(rest) = line.strip_prefix(pattern) {
-            // Extract module name (up to ; or {)
-            let end = rest.find(|c| c == ';' || c == '{').unwrap_or(rest.len());
-            let name = rest[..end].trim().to_string();
-            if !name.is_empty() && name.chars().all(|c| c.is_alphanumeric() || c == '_') {
-                return Some(name);
-            }
+    // Only match fully public modules: "pub mod "
+    // Must NOT match "pub(crate) mod " or "pub(super) mod "
+    if line.starts_with("pub mod ") {
+        let rest = &line[8..]; // "pub mod ".len() == 8
+                               // Extract module name (up to ; or {)
+        let end = rest.find(|c| c == ';' || c == '{').unwrap_or(rest.len());
+        let name = rest[..end].trim().to_string();
+        if !name.is_empty() && name.chars().all(|c| c.is_alphanumeric() || c == '_') {
+            return Some(name);
         }
     }
 
@@ -123,39 +121,48 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_mod_declaration() {
+    fn test_parse_public_mod_declaration() {
+        // Public modules should be matched
         assert_eq!(
-            parse_mod_declaration("pub mod journal;"),
+            parse_public_mod_declaration("pub mod journal;"),
             Some("journal".to_string())
         );
         assert_eq!(
-            parse_mod_declaration("mod helpers;"),
-            Some("helpers".to_string())
-        );
-        assert_eq!(
-            parse_mod_declaration("pub(crate) mod internal;"),
-            Some("internal".to_string())
-        );
-        assert_eq!(
-            parse_mod_declaration("pub mod inline {"),
+            parse_public_mod_declaration("pub mod inline {"),
             Some("inline".to_string())
         );
-        assert_eq!(parse_mod_declaration("let x = 1;"), None);
+
+        // Non-public should NOT be matched
+        assert_eq!(parse_public_mod_declaration("mod helpers;"), None);
+        assert_eq!(
+            parse_public_mod_declaration("pub(crate) mod internal;"),
+            None
+        );
+        assert_eq!(
+            parse_public_mod_declaration("pub(super) mod internal;"),
+            None
+        );
+        assert_eq!(parse_public_mod_declaration("let x = 1;"), None);
     }
 
     #[test]
-    fn test_extract_modules_from_cfg_if() {
+    fn test_extract_public_modules_from_cfg_if() {
         let content = r#"
 cfg_if::cfg_if! {
     if #[cfg(feature = "std")] {
         pub mod journal;
+        mod private_mod;
+        pub(crate) mod internal;
         pub mod cache;
     }
 }
 "#;
-        let modules = extract_modules_from_cfg_if(content);
-        // All modules get readiness 0 from cfg_if; actual readiness is in module file
-        assert_eq!(modules.get("journal"), Some(&0));
-        assert_eq!(modules.get("cache"), Some(&0));
+        let modules = extract_public_modules_from_cfg_if(content);
+        // Only public modules should be extracted
+        assert!(modules.contains("journal"));
+        assert!(modules.contains("cache"));
+        // Private and pub(crate) should NOT be included
+        assert!(!modules.contains("private_mod"));
+        assert!(!modules.contains("internal"));
     }
 }

@@ -34,8 +34,17 @@ struct Args {
 fn main() -> ExitCode {
     let args = Args::parse();
 
+    // Load config from .readiness.toml
+    let config = match parser::Config::load(&args.repo_root) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("Error loading config: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
     // Parse the workspace to find all modules and their readiness levels
-    let workspace = match parser::parse_workspace(&args.repo_root) {
+    let workspace = match parser::parse_workspace(&args.repo_root, &config) {
         Ok(w) => w,
         Err(e) => {
             eprintln!("Error parsing workspace: {e}");
