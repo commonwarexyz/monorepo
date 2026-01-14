@@ -139,25 +139,22 @@ fn collect_modules(
 }
 
 /// Compute the overall readiness level for a crate.
+/// Returns the minimum readiness among all explicitly annotated modules.
+/// Returns 0 if no modules have explicit readiness annotations.
 fn compute_crate_readiness(modules: &HashMap<String, Module>) -> u8 {
-    let mut min = 0u8;
-    let mut has_explicit = false;
+    let mut min: Option<u8> = None;
 
     for module in modules.values() {
         if module.is_explicit {
-            if !has_explicit {
-                min = module.readiness;
-                has_explicit = true;
-            } else {
-                min = min.min(module.readiness);
-            }
+            min = Some(min.map_or(module.readiness, |m| m.min(module.readiness)));
         }
 
+        // Check submodules for explicit readiness
         let submodule_readiness = compute_crate_readiness(&module.submodules);
-        if submodule_readiness > 0 || has_explicit {
-            min = min.min(submodule_readiness);
+        if submodule_readiness > 0 {
+            min = Some(min.map_or(submodule_readiness, |m| m.min(submodule_readiness)));
         }
     }
 
-    min
+    min.unwrap_or(0)
 }
