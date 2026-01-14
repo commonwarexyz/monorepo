@@ -127,8 +127,8 @@ impl<
     /// has been pruned.
     pub async fn get(&self, key: &K) -> Result<Option<V>, Error> {
         let oldest = self.oldest_retained_loc();
-        let locs: Vec<Location> = self.snapshot.get(key).copied().collect();
-        for loc in locs {
+        let iter = self.snapshot.get(key);
+        for &loc in iter {
             if loc < oldest {
                 continue;
             }

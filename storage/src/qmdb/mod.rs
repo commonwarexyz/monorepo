@@ -193,10 +193,16 @@ where
     I: Index<Value = Location>,
     C: Contiguous<Item: Operation>,
 {
-    let Some(loc) = find_update_loc(snapshot, log, key).await? else {
+    // If the translated key is in the snapshot, get a cursor to look for the key.
+    let Some(mut cursor) = snapshot.get_mut(key) else {
         return Ok(None);
     };
-    delete_known_loc(snapshot, key, loc);
+
+    // Find the matching key among all conflicts, then delete it.
+    let Some(loc) = find_update_op(log, &mut cursor, key).await? else {
+        return Ok(None);
+    };
+    cursor.delete();
 
     Ok(Some(loc))
 }
@@ -213,16 +219,20 @@ where
     I: Index<Value = Location>,
     C: Contiguous<Item: Operation>,
 {
-    if let Some(loc) = find_update_loc(snapshot, log, key).await? {
+    // If the translated key is not in the snapshot, insert the new location. Otherwise, get a
+    // cursor to look for the key.
+    let Some(mut cursor) = snapshot.get_mut_or_insert(key, new_loc) else {
+        return Ok(None);
+    };
+
+    // Find the matching key among all conflicts, then update its location.
+    if let Some(loc) = find_update_op(log, &mut cursor, key).await? {
         assert!(new_loc > loc);
-        update_known_loc(snapshot, key, loc, new_loc);
+        cursor.update(new_loc);
         return Ok(Some(loc));
     }
 
     // The key wasn't in the snapshot, so add it to the cursor.
-    let Some(mut cursor) = snapshot.get_mut_or_insert(key, new_loc) else {
-        return Ok(None);
-    };
     cursor.insert(new_loc);
 
     Ok(None)
@@ -240,32 +250,38 @@ where
     I: Index<Value = Location>,
     C: Contiguous<Item: Operation>,
 {
-    if find_update_loc(snapshot, log, key).await?.is_some() {
+    // If the translated key is not in the snapshot, insert the new location. Otherwise, get a
+    // cursor to look for the key.
+    let Some(mut cursor) = snapshot.get_mut_or_insert(key, new_loc) else {
+        return Ok(true);
+    };
+
+    // Confirm the key doesn't already exist.
+    if find_update_op(log, &mut cursor, key).await?.is_some() {
         return Ok(false);
     }
 
     // The key doesn't exist, so add it to the cursor.
-    let Some(mut cursor) = snapshot.get_mut_or_insert(key, new_loc) else {
-        return Ok(true);
-    };
     cursor.insert(new_loc);
 
     Ok(true)
 }
 
-/// Find and return the location of the update operation for `key`, if it exists.
-async fn find_update_loc<I, C>(
-    snapshot: &I,
+/// Find and return the location of the update operation for `key`, if it exists. The cursor is
+/// positioned at the matching location, and can be used to update or delete the key.
+///
+/// # Panics
+///
+/// Panics if `key` is not found in the snapshot or if `old_loc` is not found in the cursor.
+async fn find_update_op<C>(
     log: &C,
+    cursor: &mut impl Cursor<Value = Location>,
     key: &<C::Item as Operation>::Key,
 ) -> Result<Option<Location>, Error>
 where
-    I: Index<Value = Location>,
     C: Contiguous<Item: Operation>,
 {
-    let locs: Vec<Location> = snapshot.get(key).copied().collect();
-
-    for loc in locs {
+    while let Some(&loc) = cursor.next() {
         let op = log.read(*loc).await?;
         let k = op.key().expect("operation without key");
         if *k == *key {
