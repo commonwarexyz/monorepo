@@ -77,6 +77,18 @@ impl RecvCipher {
     }
 
     /// Decrypts ciphertext and returns the original data.
+    ///
+    /// # Errors
+    ///
+    /// This will return an error in the following situations:
+    ///
+    /// - Too many messages have been received with this cipher.
+    /// - The ciphertext was corrupted in some way.
+    ///
+    /// In *both* cases, the `RecvCipher` will no longer be able to return
+    /// valid ciphertexts, and will always return an error on subsequent calls
+    /// to [`Self::recv`]. Terminating, and potentially reëstablishing,
+    /// the connection is a simple way to handle this case.
     pub fn recv(&mut self, encrypted_data: &[u8]) -> Result<Vec<u8>, Error> {
         let nonce = self.nonce.inc()?;
         self.inner
