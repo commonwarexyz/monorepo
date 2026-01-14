@@ -1,16 +1,21 @@
 {
   "version": "0.0.65",
-  "generated": "2026-01-14T23:28:56.854409+00:00",
+  "generated": "2026-01-14T23:46:40.523738+00:00",
   "crates": [
     {
       "name": "commonware-broadcast",
       "entries": [
         {
-          "name": "buffered",
-          "readiness": 2
+          "name": "crate",
+          "children": [
+            {
+              "name": "{Broadcaster}",
+              "readiness": 2
+            }
+          ]
         },
         {
-          "name": "{Broadcaster}",
+          "name": "buffered",
           "readiness": 2
         }
       ]
@@ -168,6 +173,15 @@
       "name": "commonware-cryptography",
       "entries": [
         {
+          "name": "crate",
+          "children": [
+            {
+              "name": "{BatchVerifier, Committable, Digest, DigestOf, Digestible, Hasher, PrivateKey, PublicKey, Recoverable, Signature, Signer, Verifier}",
+              "readiness": 2
+            }
+          ]
+        },
+        {
           "name": "secp256r1",
           "children": [
             {
@@ -194,11 +208,13 @@
         },
         {
           "name": "bls12381",
-          "readiness": 2
-        },
-        {
-          "name": "bls12381::tle",
-          "readiness": 1
+          "readiness": 2,
+          "children": [
+            {
+              "name": "tle",
+              "readiness": 1
+            }
+          ]
         },
         {
           "name": "certificate",
@@ -231,10 +247,6 @@
         {
           "name": "transcript",
           "readiness": 0
-        },
-        {
-          "name": "{BatchVerifier, Committable, Digest, DigestOf, Digestible, Hasher, PrivateKey, PublicKey, Recoverable, Signature, Signer, Verifier}",
-          "readiness": 2
         }
       ]
     },
@@ -336,8 +348,13 @@
       "name": "commonware-parallel",
       "entries": [
         {
-          "name": "{Sequential, Strategy}",
-          "readiness": 2
+          "name": "crate",
+          "children": [
+            {
+              "name": "{Sequential, Strategy}",
+              "readiness": 2
+            }
+          ]
         }
       ]
     },
@@ -345,11 +362,16 @@
       "name": "commonware-resolver",
       "entries": [
         {
-          "name": "p2p",
-          "readiness": 2
+          "name": "crate",
+          "children": [
+            {
+              "name": "{Consumer, Resolver}",
+              "readiness": 2
+            }
+          ]
         },
         {
-          "name": "{Consumer, Resolver}",
+          "name": "p2p",
           "readiness": 2
         }
       ]
@@ -357,6 +379,15 @@
     {
       "name": "commonware-runtime",
       "entries": [
+        {
+          "name": "crate",
+          "children": [
+            {
+              "name": "{Blob, Clock, Error, KeyedRateLimiter, Listener, ListenerOf, Metrics, Network, RateLimiter, RayonPoolSpawner, Resolver, Runner, Sink, SinkOf, Spawner, Storage, Stream, StreamOf}",
+              "readiness": 2
+            }
+          ]
+        },
         {
           "name": "tokio",
           "children": [
@@ -384,10 +415,6 @@
         },
         {
           "name": "utils",
-          "readiness": 2
-        },
-        {
-          "name": "{Blob, Clock, Error, KeyedRateLimiter, Listener, ListenerOf, Metrics, Network, RateLimiter, RayonPoolSpawner, Resolver, Runner, Sink, SinkOf, Spawner, Storage, Stream, StreamOf}",
           "readiness": 2
         }
       ]
@@ -632,12 +659,17 @@
       "name": "commonware-stream",
       "entries": [
         {
-          "name": "utils::codec",
-          "readiness": 0
+          "name": "crate",
+          "children": [
+            {
+              "name": "{Config, Error, Receiver, Sender, dial, listen}",
+              "readiness": 2
+            }
+          ]
         },
         {
-          "name": "{Config, Error, Receiver, Sender, dial, listen}",
-          "readiness": 2
+          "name": "utils::codec",
+          "readiness": 0
         }
       ]
     },

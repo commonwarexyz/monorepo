@@ -157,12 +157,13 @@ fn build_tree(entries: &mut [(String, u8)]) -> Vec<Entry> {
 
     // Group by first path segment
     let mut groups: BTreeMap<String, Vec<(String, u8)>> = BTreeMap::new();
-    let mut direct: Vec<(String, u8)> = Vec::new();
+    let mut direct: BTreeMap<String, u8> = BTreeMap::new();
+    let mut items: Vec<(String, u8)> = Vec::new();
 
     for (path, readiness) in entries.iter() {
         // Items like "{Foo, Bar}" go directly at root
         if path.starts_with('{') {
-            direct.push((path.clone(), *readiness));
+            items.push((path.clone(), *readiness));
             continue;
         }
 
@@ -175,36 +176,72 @@ fn build_tree(entries: &mut [(String, u8)]) -> Vec<Entry> {
                 .or_default()
                 .push((rest.to_string(), *readiness));
         } else {
-            // No :: means it's a direct child
-            direct.push((path.clone(), *readiness));
+            // No :: means it's a direct entry
+            direct.insert(path.clone(), *readiness);
         }
     }
 
     let mut result = Vec::new();
 
-    // Add grouped entries (with children)
-    for (name, mut children) in groups {
-        if children.len() == 1 && !children[0].0.contains("::") && !children[0].0.starts_with('{') {
-            // Single child without further nesting - flatten to "parent::child"
-            let (child_name, readiness) = &children[0];
-            result.push(Entry {
-                name: format!("{name}::{child_name}"),
-                readiness: Some(*readiness),
-                children: Vec::new(),
-            });
-        } else {
-            // Multiple children or nested - create group
-            let child_entries = build_tree(&mut children);
-            result.push(Entry {
-                name,
-                readiness: None,
-                children: child_entries,
-            });
+    // Merge direct entries with their children from groups
+    let all_names: std::collections::BTreeSet<_> =
+        direct.keys().chain(groups.keys()).cloned().collect();
+
+    for name in all_names {
+        let has_direct = direct.contains_key(&name);
+        let has_children = groups.contains_key(&name);
+
+        match (has_direct, has_children) {
+            (true, true) => {
+                // Both direct entry and children - merge them
+                let readiness = direct[&name];
+                let mut children = groups.remove(&name).unwrap();
+                let child_entries = build_tree(&mut children);
+                result.push(Entry {
+                    name,
+                    readiness: Some(readiness),
+                    children: child_entries,
+                });
+            }
+            (true, false) => {
+                // Only direct entry, no children
+                let readiness = direct[&name];
+                result.push(Entry {
+                    name,
+                    readiness: Some(readiness),
+                    children: Vec::new(),
+                });
+            }
+            (false, true) => {
+                // Only children, no direct entry
+                let mut children = groups.remove(&name).unwrap();
+                if children.len() == 1
+                    && !children[0].0.contains("::")
+                    && !children[0].0.starts_with('{')
+                {
+                    // Single child without further nesting - flatten to "parent::child"
+                    let (child_name, readiness) = &children[0];
+                    result.push(Entry {
+                        name: format!("{name}::{child_name}"),
+                        readiness: Some(*readiness),
+                        children: Vec::new(),
+                    });
+                } else {
+                    // Multiple children or nested - create group
+                    let child_entries = build_tree(&mut children);
+                    result.push(Entry {
+                        name,
+                        readiness: None,
+                        children: child_entries,
+                    });
+                }
+            }
+            (false, false) => unreachable!(),
         }
     }
 
-    // Add direct entries
-    for (name, readiness) in direct {
+    // Add item entries (like "{Foo, Bar}")
+    for (name, readiness) in items {
         result.push(Entry {
             name,
             readiness: Some(readiness),
@@ -293,12 +330,12 @@ fn collect_modules(
     }
 }
 
-/// Format a list of items as "{Item1, Item2, ...}".
+/// Format a list of items as "crate::{Item1, Item2, ...}".
 fn format_items(items: &[String]) -> String {
     if items.len() == 1 {
-        format!("{{{}}}", items[0])
+        format!("crate::{{{}}}", items[0])
     } else {
-        format!("{{{}}}", items.join(", "))
+        format!("crate::{{{}}}", items.join(", "))
     }
 }
 

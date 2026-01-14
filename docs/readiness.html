@@ -97,6 +97,10 @@
             padding-left: 20px;
             color: #6b7280;
         }
+        .module-item.module-group {
+            color: #9ca3af;
+            font-style: italic;
+        }
         .summary-grid {
             display: grid;
             grid-template-columns: repeat(5, 1fr);
@@ -314,11 +318,10 @@
                         </div>
                     `;
                 } else {
-                    // Group node without readiness - show as folder
+                    // Group node without readiness - show as muted label
                     html += `
-                        <div class="module-item"${indent}>
-                            <span style="color: #9ca3af; margin-right: 8px;">▸</span>
-                            ${entry.name}
+                        <div class="module-item module-group"${indent}>
+                            ${entry.name}/
                         </div>
                     `;
                 }
