@@ -1,4 +1,4 @@
-use crate::{Decode, Encode, EncodeSize, Read, Write};
+use crate::{Decode, Encode, EncodeSize, FixedSize, Read, Write};
 use bytes::{Buf, Bytes};
 use core::hash::Hash;
 use std::sync::OnceLock;
@@ -85,11 +85,11 @@ impl<T: Read> Write for Lazy<T> {
     }
 }
 
-impl<T: Read> Read for Lazy<T> {
+impl<T: Read + FixedSize> Read for Lazy<T> {
     type Cfg = T::Cfg;
 
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, crate::Error> {
-        Ok(Self::new(buf, cfg.clone()))
+        Ok(Self::new(&mut buf.take(T::SIZE), cfg.clone()))
     }
 }
 
