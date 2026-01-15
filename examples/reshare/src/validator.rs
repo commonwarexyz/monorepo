@@ -378,9 +378,10 @@ mod test {
                 priority_requests: false,
                 priority_responses: false,
             };
-            let marshal = marshal_resolver::init(&validator_ctx, resolver_cfg, marshal);
+            let marshal =
+                marshal_resolver::init(&validator_ctx.with_label("marshal"), resolver_cfg, marshal);
             let engine = engine::Engine::<_, _, _, _, Sha256, MinSig, S, L, _>::new(
-                validator_ctx,
+                validator_ctx.with_label("consensus"),
                 engine::Config {
                     signer: sk.clone(),
                     manager: oracle.manager(),

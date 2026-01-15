@@ -343,9 +343,10 @@ pub fn run_tasks(tasks: usize, runner: crate::deterministic::Runner) -> (String,
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::deterministic;
+    use crate::{deterministic, Metrics, Runner};
     use commonware_macros::test_traced;
     use futures::task::waker;
+    use prometheus_client::metrics::counter::Counter;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     #[test_traced]
@@ -501,9 +502,6 @@ mod tests {
 
     #[test_traced]
     fn test_find_duplicate_metrics() {
-        use crate::{Metrics, Runner};
-        use prometheus_client::metrics::counter::Counter;
-
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Initially no duplicates
@@ -524,25 +522,18 @@ mod tests {
                 "different labels should not conflict"
             );
         });
+    }
 
-        // Test duplicate detection with pre-constructed string
-        // (can't register actual duplicates since runtime catches them at shutdown)
-        let metrics_with_duplicates = r#"
-# HELP a_test help
-# TYPE a_test counter
-a_test 1
-# HELP b_test help
-# TYPE b_test counter
-b_test 1
-# HELP a_test help
-# TYPE a_test counter
-a_test 2
-"#;
-        let duplicates = find_duplicate_metrics(metrics_with_duplicates);
-        assert_eq!(
-            duplicates,
-            vec!["a_test"],
-            "same metric name should be detected as duplicate"
-        );
+    #[test]
+    #[should_panic(expected = "found duplicate metric names")]
+    fn test_find_duplicate_metrics_panics() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Register metrics with the same label, causing duplicates
+            let c1 = Counter::<u64>::default();
+            context.with_label("a").register("test", "help", c1);
+            let c2 = Counter::<u64>::default();
+            context.with_label("a").register("test", "help", c2);
+        });
     }
 }
