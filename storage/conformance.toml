@@ -24,7 +24,7 @@ hash = "6d6382956289a2f706581a4b1afa08c5cd8e8a4f55b11d454425333b6537cc17"
 
 ["commonware_storage::bmt::tests::conformance::CodecConformance<RangeProof<Sha256Digest>>"]
 n_cases = 65536
-hash = "6ecb0491b09443f1f93c178af5472f138ddc71b3e8c0c106f32eafca617b56af"
+hash = "4772878c1807343139c10cbb76ff21886daa6157d8a2fcbf63b94e98e0650322"
 
 ["commonware_storage::cache::storage::conformance::CodecConformance<Record<u64>>"]
 n_cases = 65536
