@@ -190,7 +190,7 @@ impl<H: Hasher> Tree<H> {
     /// This is a single-element multi-proof, which includes the minimal siblings
     /// needed to reconstruct the root.
     pub fn proof(&self, position: u32) -> Result<Proof<H::Digest>, Error> {
-        self.multi_proof(&[position])
+        self.multi_proof(core::iter::once(position))
     }
 
     /// Generates a Merkle range proof for a contiguous set of leaves from `start`
@@ -210,9 +210,8 @@ impl<H: Hasher> Tree<H> {
             return Err(Error::InvalidPosition(start));
         }
 
-        // Generate positions for the range and delegate to multi_proof
-        let positions: Vec<u32> = (start..=end).collect();
-        self.multi_proof(&positions)
+        // Delegate to multi_proof with the range iterator
+        self.multi_proof(start..=end)
     }
 
     /// Generates a Merkle proof for multiple non-contiguous leaves at the given `positions`.
@@ -223,22 +222,26 @@ impl<H: Hasher> Tree<H> {
     /// are deduplicated.
     ///
     /// Positions are sorted internally; duplicate positions will return an error.
-    pub fn multi_proof(&self, positions: &[u32]) -> Result<Proof<H::Digest>, Error> {
+    pub fn multi_proof<I, P>(&self, positions: I) -> Result<Proof<H::Digest>, Error>
+    where
+        I: IntoIterator<Item = P>,
+        P: core::borrow::Borrow<u32>,
+    {
+        let mut positions = positions.into_iter().peekable();
+
         // Handle empty positions first - can't prove zero elements
-        if positions.is_empty() {
-            return Err(Error::NoLeaves);
-        }
+        let first = *positions.peek().ok_or(Error::NoLeaves)?.borrow();
 
         // Handle empty tree case
         if self.empty {
-            return Err(Error::InvalidPosition(positions[0]));
+            return Err(Error::InvalidPosition(first));
         }
 
         let leaf_count = self.levels.first().len().get() as u32;
 
         // Get required sibling positions (this validates positions and checks for duplicates)
         let sibling_positions =
-            siblings_required_for_multi_proof(leaf_count, positions.iter().copied())?;
+            siblings_required_for_multi_proof(leaf_count, positions.map(|p| *p.borrow()))?;
 
         // Collect sibling digests in order
         let siblings: Vec<H::Digest> = sibling_positions
