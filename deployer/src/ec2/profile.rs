@@ -189,15 +189,15 @@ echo "Profile captured successfully"
     .await?;
     info!(profile = profile_path.as_str(), "downloaded profile");
 
-    // Create a temp directory with a symlink named "binary" pointing to the debug binary
+    // Create a temp directory with a copy of the debug binary named "binary"
     // (samply looks for symbols by filename, and the remote binary is named "binary")
     let binary_path = binary_path
         .canonicalize()
         .map_err(|e| Error::Symbolication(format!("failed to resolve binary path: {}", e)))?;
     let symbol_dir = format!("/tmp/symbols-{}-{}", instance_name, timestamp);
     std::fs::create_dir_all(&symbol_dir)?;
-    let symlink_path = format!("{}/binary", symbol_dir);
-    std::fs::copy(&binary_path, &symlink_path)
+    let binary_copy_path = format!("{}/binary", symbol_dir);
+    std::fs::copy(&binary_path, &binary_copy_path)
         .map_err(|e| Error::Symbolication(format!("failed to copy binary: {}", e)))?;
 
     // Use samply load with --symbol-dir to open the profile with symbols

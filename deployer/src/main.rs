@@ -44,8 +44,8 @@ async fn main() -> std::process::ExitCode {
                             Arg::new("concurrency")
                                 .long("concurrency")
                                 .default_value(ec2::DEFAULT_CONCURRENCY)
-                                .help("Maximum instances to configure at once")
-                                .value_parser(clap::value_parser!(usize)),
+                                .help("Maximum instances to configure at once (must be >= 1)")
+                                .value_parser(clap::builder::RangedU64ValueParser::<usize>::new().range(1..)),
                         ),
                 )
                 .subcommand(
@@ -62,8 +62,8 @@ async fn main() -> std::process::ExitCode {
                             Arg::new("concurrency")
                                 .long("concurrency")
                                 .default_value(ec2::DEFAULT_CONCURRENCY)
-                                .help("Maximum instances to update at once")
-                                .value_parser(clap::value_parser!(usize)),
+                                .help("Maximum instances to update at once (must be >= 1)")
+                                .value_parser(clap::builder::RangedU64ValueParser::<usize>::new().range(1..)),
                         ),
                 )
                 .subcommand(
