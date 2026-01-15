@@ -766,109 +766,124 @@ mod tests {
             } = bls12381_threshold::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             let validator = participants[0].clone();
-            let provider = ConstantProvider::new(schemes[0].clone());
-
-            // Create config
-            let config = Config {
-                provider,
-                epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
-                mailbox_size: 100,
-                view_retention_timeout: ViewDelta::new(10),
-                max_repair: NZUsize!(10),
-                block_codec_config: (),
-                partition_prefix: format!("prune-test-{}", validator.clone()),
-                prunable_items_per_section: NZU64!(10),
-                replay_buffer: NZUsize!(1024),
-                key_write_buffer: NZUsize!(1024),
-                value_write_buffer: NZUsize!(1024),
-                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
-                strategy: Sequential,
-            };
-
-            // Create the resolver
+            let partition_prefix = format!("prune-test-{}", validator.clone());
+            let buffer_pool = PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
             let control = oracle.control(validator.clone());
-            let backfill = control.register(1, TEST_QUOTA).await.unwrap();
-            let resolver_cfg = resolver::Config {
-                public_key: validator.clone(),
-                manager: oracle.manager(),
-                blocker: control.clone(),
-                mailbox_size: config.mailbox_size,
-                initial: Duration::from_secs(1),
-                timeout: Duration::from_secs(2),
-                fetch_retry_timeout: Duration::from_millis(100),
-                priority_requests: false,
-                priority_responses: false,
+
+            // Closure to initialize marshal with prunable archives
+            let init_marshal = || {
+                let ctx = context.clone();
+                let validator = validator.clone();
+                let schemes = schemes.clone();
+                let partition_prefix = partition_prefix.clone();
+                let buffer_pool = buffer_pool.clone();
+                let control = control.clone();
+                let oracle_manager = oracle.manager();
+                async move {
+                    let provider = ConstantProvider::new(schemes[0].clone());
+                    let config = Config {
+                        provider,
+                        epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+                        mailbox_size: 100,
+                        view_retention_timeout: ViewDelta::new(10),
+                        max_repair: NZUsize!(10),
+                        block_codec_config: (),
+                        partition_prefix: partition_prefix.clone(),
+                        prunable_items_per_section: NZU64!(10),
+                        replay_buffer: NZUsize!(1024),
+                        key_write_buffer: NZUsize!(1024),
+                        value_write_buffer: NZUsize!(1024),
+                        buffer_pool: buffer_pool.clone(),
+                        strategy: Sequential,
+                    };
+
+                    // Create resolver
+                    let backfill = control.register(0, TEST_QUOTA).await.unwrap();
+                    let resolver_cfg = resolver::Config {
+                        public_key: validator.clone(),
+                        manager: oracle_manager,
+                        blocker: control.clone(),
+                        mailbox_size: config.mailbox_size,
+                        initial: Duration::from_secs(1),
+                        timeout: Duration::from_secs(2),
+                        fetch_retry_timeout: Duration::from_millis(100),
+                        priority_requests: false,
+                        priority_responses: false,
+                    };
+                    let resolver = resolver::init(&ctx, resolver_cfg, backfill);
+
+                    // Create buffered broadcast engine
+                    let broadcast_config = buffered::Config {
+                        public_key: validator.clone(),
+                        mailbox_size: config.mailbox_size,
+                        deque_size: 10,
+                        priority: false,
+                        codec_config: (),
+                    };
+                    let (broadcast_engine, buffer) =
+                        buffered::Engine::new(ctx.clone(), broadcast_config);
+                    let network = control.register(1, TEST_QUOTA).await.unwrap();
+                    broadcast_engine.start(network);
+
+                    // Initialize prunable archives
+                    let finalizations_by_height = prunable::Archive::init(
+                        ctx.with_label("finalizations_by_height"),
+                        prunable::Config {
+                            translator: EightCap,
+                            key_partition: format!(
+                                "{}-finalizations-by-height-key",
+                                partition_prefix
+                            ),
+                            key_buffer_pool: buffer_pool.clone(),
+                            value_partition: format!(
+                                "{}-finalizations-by-height-value",
+                                partition_prefix
+                            ),
+                            compression: None,
+                            codec_config: S::certificate_codec_config_unbounded(),
+                            items_per_section: NZU64!(10),
+                            key_write_buffer: config.key_write_buffer,
+                            value_write_buffer: config.value_write_buffer,
+                            replay_buffer: config.replay_buffer,
+                        },
+                    )
+                    .await
+                    .expect("failed to initialize finalizations by height archive");
+
+                    let finalized_blocks = prunable::Archive::init(
+                        ctx.with_label("finalized_blocks"),
+                        prunable::Config {
+                            translator: EightCap,
+                            key_partition: format!("{}-finalized-blocks-key", partition_prefix),
+                            key_buffer_pool: buffer_pool.clone(),
+                            value_partition: format!("{}-finalized-blocks-value", partition_prefix),
+                            compression: None,
+                            codec_config: config.block_codec_config,
+                            items_per_section: NZU64!(10),
+                            key_write_buffer: config.key_write_buffer,
+                            value_write_buffer: config.value_write_buffer,
+                            replay_buffer: config.replay_buffer,
+                        },
+                    )
+                    .await
+                    .expect("failed to initialize finalized blocks archive");
+
+                    let (actor, mailbox, _processed_height) = actor::Actor::init(
+                        ctx.clone(),
+                        finalizations_by_height,
+                        finalized_blocks,
+                        config,
+                    )
+                    .await;
+                    let application = Application::<B>::default();
+                    actor.start(application.clone(), buffer, resolver);
+
+                    (mailbox, application)
+                }
             };
-            let resolver = resolver::init(&context, resolver_cfg, backfill);
 
-            // Create a buffered broadcast engine
-            let broadcast_config = buffered::Config {
-                public_key: validator.clone(),
-                mailbox_size: config.mailbox_size,
-                deque_size: 10,
-                priority: false,
-                codec_config: (),
-            };
-            let (broadcast_engine, buffer) =
-                buffered::Engine::new(context.clone(), broadcast_config);
-            let network = control.register(2, TEST_QUOTA).await.unwrap();
-            broadcast_engine.start(network);
-
-            // Initialize finalizations by height using PRUNABLE archive
-            let finalizations_by_height = prunable::Archive::init(
-                context.with_label("finalizations_by_height"),
-                prunable::Config {
-                    translator: EightCap,
-                    key_partition: format!(
-                        "{}-finalizations-by-height-key",
-                        config.partition_prefix
-                    ),
-                    key_buffer_pool: config.buffer_pool.clone(),
-                    value_partition: format!(
-                        "{}-finalizations-by-height-value",
-                        config.partition_prefix
-                    ),
-                    compression: None,
-                    codec_config: S::certificate_codec_config_unbounded(),
-                    items_per_section: NZU64!(10),
-                    key_write_buffer: config.key_write_buffer,
-                    value_write_buffer: config.value_write_buffer,
-                    replay_buffer: config.replay_buffer,
-                },
-            )
-            .await
-            .expect("failed to initialize finalizations by height archive");
-
-            // Initialize finalized blocks using PRUNABLE archive
-            let finalized_blocks = prunable::Archive::init(
-                context.with_label("finalized_blocks"),
-                prunable::Config {
-                    translator: EightCap,
-                    key_partition: format!("{}-finalized-blocks-key", config.partition_prefix),
-                    key_buffer_pool: config.buffer_pool.clone(),
-                    value_partition: format!("{}-finalized-blocks-value", config.partition_prefix),
-                    compression: None,
-                    codec_config: config.block_codec_config,
-                    items_per_section: NZU64!(10),
-                    key_write_buffer: config.key_write_buffer,
-                    value_write_buffer: config.value_write_buffer,
-                    replay_buffer: config.replay_buffer,
-                },
-            )
-            .await
-            .expect("failed to initialize finalized blocks archive");
-
-            let (actor, mut mailbox, _processed_height) = actor::Actor::init(
-                context.clone(),
-                finalizations_by_height,
-                finalized_blocks,
-                config,
-            )
-            .await;
-            let application = Application::<B>::default();
-
-            // Start the application
-            actor.start(application.clone(), buffer, resolver);
+            // Initial setup
+            let (mut mailbox, application) = init_marshal().await;
 
             // Finalize blocks 1-20
             let mut parent = Sha256::hash(b"");
@@ -967,6 +982,32 @@ mod tests {
             assert!(
                 mailbox.get_finalization(Height::new(20)).await.is_some(),
                 "finalization 20 should still exist"
+            );
+
+            // Restart to verify pruning persisted to storage (not just in-memory)
+            drop(mailbox);
+            let (mut mailbox, _application) = init_marshal().await;
+
+            // Verify blocks 1-19 are still pruned after restart
+            for i in 1..20u64 {
+                assert!(
+                    mailbox.get_block(Height::new(i)).await.is_none(),
+                    "block {i} should still be pruned after restart"
+                );
+                assert!(
+                    mailbox.get_finalization(Height::new(i)).await.is_none(),
+                    "finalization {i} should still be pruned after restart"
+                );
+            }
+
+            // Verify block 20 persisted correctly after restart
+            assert!(
+                mailbox.get_block(Height::new(20)).await.is_some(),
+                "block 20 should still exist after restart"
+            );
+            assert!(
+                mailbox.get_finalization(Height::new(20)).await.is_some(),
+                "finalization 20 should still exist after restart"
             );
         })
     }
