@@ -54,11 +54,10 @@ pub async fn update(config_path: &PathBuf, concurrency: usize) -> Result<(), Err
 
     // Upload updated binaries and configs to S3 and generate pre-signed URLs
     // Uses digest-based deduplication to avoid re-uploading identical files
-    info!("creating S3 client");
     let s3_client = create_s3_client(Region::new(MONITORING_REGION)).await;
-    info!("computing file digests");
 
     // Collect unique binary and config paths (dedup before hashing)
+    info!("computing file digests");
     let mut unique_binary_paths: std::collections::BTreeSet<String> =
         std::collections::BTreeSet::new();
     let mut unique_config_paths: std::collections::BTreeSet<String> =
