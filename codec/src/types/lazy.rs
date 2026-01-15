@@ -1,3 +1,4 @@
+//! This module exports the [`Lazy`] type.
 use crate::{Decode, Encode, EncodeSize, FixedSize, Read, Write};
 use bytes::{Buf, Bytes};
 use core::hash::Hash;
@@ -11,7 +12,13 @@ pub struct Lazy<T: Read> {
 }
 
 impl<T: Read> Lazy<T> {
-    pub fn new(buf: &mut impl Buf, cfg: T::Cfg) -> Self {
+    /// Create a [`Lazy`] by deferring decoding of an underlying value.
+    ///
+    /// The only cost incurred when this function is called is that of copying
+    /// some bytes.
+    ///
+    /// Use [`Self::get`] to access the actual value, by decoding these bytes.
+    pub fn deferred(buf: &mut impl Buf, cfg: T::Cfg) -> Self {
         let bytes = buf.copy_to_bytes(buf.remaining());
         Self {
             bytes,
@@ -22,6 +29,12 @@ impl<T: Read> Lazy<T> {
 }
 
 impl<T: Read> Lazy<T> {
+    /// Force decoding of the underlying value.
+    ///
+    /// This will return `None` only if decoding the value fails.
+    ///
+    /// This function wil incur the cost of decoding the value only once,
+    /// so there's no need to cache its output.
     pub fn get(&self) -> Option<&T> {
         self.value
             .get_or_init(|| {
@@ -47,6 +60,36 @@ impl<T: Read + Encode> From<T> for Lazy<T> {
     }
 }
 
+// # Implementing Codec.
+//
+// The strategy here is that for writing, we use the underlying bytes stored
+// in the value, and for reading, we rely on the type having a fixed size.
+
+impl<T: Read> EncodeSize for Lazy<T> {
+    fn encode_size(&self) -> usize {
+        self.bytes.len()
+    }
+}
+
+impl<T: Read> Write for Lazy<T> {
+    fn write(&self, buf: &mut impl bytes::BufMut) {
+        self.bytes.write(buf);
+    }
+}
+
+impl<T: Read + FixedSize> Read for Lazy<T> {
+    type Cfg = T::Cfg;
+
+    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, crate::Error> {
+        Ok(Self::deferred(&mut buf.take(T::SIZE), cfg.clone()))
+    }
+}
+
+// # Forwarded Impls
+//
+// We want to provide some convenience functions which might exist on the underlying
+// value in a Lazy. To do so, we really on `get` to access that value.
+
 impl<T: Read + PartialEq> PartialEq for Lazy<T> {
     fn eq(&self, other: &Self) -> bool {
         self.get() == other.get()
@@ -70,26 +113,6 @@ impl<T: Read + Ord> Ord for Lazy<T> {
 impl<T: Read + Hash> Hash for Lazy<T> {
     fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
         self.get().hash(state);
-    }
-}
-
-impl<T: Read> EncodeSize for Lazy<T> {
-    fn encode_size(&self) -> usize {
-        self.bytes.len()
-    }
-}
-
-impl<T: Read> Write for Lazy<T> {
-    fn write(&self, buf: &mut impl bytes::BufMut) {
-        self.bytes.write(buf);
-    }
-}
-
-impl<T: Read + FixedSize> Read for Lazy<T> {
-    type Cfg = T::Cfg;
-
-    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, crate::Error> {
-        Ok(Self::new(&mut buf.take(T::SIZE), cfg.clone()))
     }
 }
 
