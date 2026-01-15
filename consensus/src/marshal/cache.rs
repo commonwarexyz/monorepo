@@ -201,9 +201,10 @@ impl<R: Rng + Spawner + Metrics + Clock + Storage, B: Block, S: Scheme> Manager<
             key_write_buffer: self.cfg.key_write_buffer,
             value_write_buffer: self.cfg.value_write_buffer,
         };
-        let archive = prunable::Archive::init(self.context.with_label(&format!("{name}_{epoch}")), cfg)
-            .await
-            .unwrap_or_else(|_| panic!("failed to initialize {name} archive"));
+        let archive =
+            prunable::Archive::init(self.context.with_label(&format!("{name}_{epoch}")), cfg)
+                .await
+                .unwrap_or_else(|_| panic!("failed to initialize {name} archive"));
         info!(elapsed = ?start.elapsed(), "restored {name} archive");
         archive
     }
