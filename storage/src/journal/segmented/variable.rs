@@ -1885,7 +1885,9 @@ mod tests {
             };
 
             // Create sections 1-5 with data
-            let mut journal = Journal::init(context.clone(), cfg.clone()).await.unwrap();
+            let mut journal = Journal::init(context.with_label("first"), cfg.clone())
+                .await
+                .unwrap();
             for section in 1u64..=5 {
                 journal.append(section, section as i32).await.unwrap();
             }
@@ -1898,7 +1900,7 @@ mod tests {
             drop(journal);
 
             // Re-init and verify only sections 1-2 exist
-            let journal = Journal::<_, i32>::init(context.clone(), cfg.clone())
+            let journal = Journal::<_, i32>::init(context.with_label("second"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -1988,7 +1990,7 @@ mod tests {
                 buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
-            let mut journal = Journal::init(context.clone(), cfg.clone())
+            let mut journal = Journal::init(context.with_label("first"), cfg.clone())
                 .await
                 .expect("Failed to initialize journal");
 
@@ -2018,7 +2020,7 @@ mod tests {
             // The first thing encountered will be the trailing corrupt bytes
             let start_offset = valid_logical_size;
             {
-                let journal = Journal::<_, i32>::init(context.clone(), cfg.clone())
+                let journal = Journal::<_, i32>::init(context.with_label("second"), cfg.clone())
                     .await
                     .unwrap();
 
