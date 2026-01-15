@@ -2304,7 +2304,7 @@ mod tests {
         })
     }
 
-    /// Regression test for cleanup bug in #2604.
+    /// Regression test for cleanup bug.
     ///
     /// The bug: when certifying a block at view V+K, the cleanup logic would
     /// remove verification contexts for ALL digests that don't have any entry
@@ -2315,7 +2315,7 @@ mod tests {
     /// 1. Verify block A at view V (stores context)
     /// 2. Verify block B at view V+K (stores context)
     /// 3. Certify block B at view V+K (cleanup runs)
-    /// 4. Certify block A at view V - should succeed, but #2604 would fail
+    /// 4. Certify block A at view V - should succeed, but previously would fail
     ///    because cleanup deleted A's context (V < V+K)
     #[test_traced("INFO")]
     fn test_certify_lower_view_after_higher_view() {
@@ -2428,7 +2428,7 @@ mod tests {
             let _ = marshaled.verify(context_b, commitment_b).await.await;
 
             // Step 3: Certify block B at view 10 FIRST
-            // In #2604, this cleanup would delete context for block A because view 5 < view 10
+            // Previously, this cleanup would delete context for block A because view 5 < view 10
             let certify_b = marshaled.certify(round_b, commitment_b).await;
             assert!(
                 certify_b.await.unwrap(),
@@ -2436,8 +2436,8 @@ mod tests {
             );
 
             // Step 4: Certify block A at view 5
-            // In #2604, this would return a never-resolving receiver (context deleted)
-            // In #2817, this should succeed because cleanup is deferred to finalization
+            // Previously, this would return a never-resolving receiver (context deleted)
+            // After the fix, this should succeed because cleanup is deferred to finalization
             let certify_a = marshaled.certify(round_a, commitment_a).await;
 
             // Use select with timeout to detect never-resolving receiver
@@ -2445,14 +2445,13 @@ mod tests {
                 result = certify_a => {
                     assert!(
                         result.unwrap(),
-                        "Block A certification should succeed (regression: #2604 cleanup bug)"
+                        "Block A certification should succeed"
                     );
                 },
                 _ = context.sleep(Duration::from_secs(5)) => {
                     panic!(
                         "Block A certification timed out - context was incorrectly deleted \
-                        (regression: #2604 cleanup bug where certifying view 10 deleted \
-                        context for view 5)"
+                        (regression: cleanup bug where certifying view 10 deleted context for view 5)"
                     );
                 },
             }
