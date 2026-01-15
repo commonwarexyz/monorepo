@@ -608,7 +608,7 @@ impl Runner {
         // Check for duplicate metrics
         let mut buffer = String::new();
         encode(&mut buffer, &executor.registry.lock().unwrap()).expect("encoding failed");
-        let duplicates = crate::find_duplicate_metrics(&buffer);
+        let duplicates = find_duplicate_metrics(&buffer);
         assert!(
             duplicates.is_empty(),
             "found duplicate metric names: {:?}",
@@ -1445,6 +1445,22 @@ impl crate::Storage for Context {
     async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
         self.storage.scan(partition).await
     }
+}
+
+/// Find duplicate metric names in encoded Prometheus metrics output.
+fn find_duplicate_metrics(encoded: &str) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut duplicates = Vec::new();
+    for line in encoded.lines() {
+        if let Some(rest) = line.strip_prefix("# TYPE ") {
+            if let Some(name) = rest.split_whitespace().next() {
+                if !seen.insert(name.to_string()) {
+                    duplicates.push(name.to_string());
+                }
+            }
+        }
+    }
+    duplicates
 }
 
 #[cfg(test)]
