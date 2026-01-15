@@ -217,7 +217,7 @@ mod tests {
         translator::{OneCap, TwoCap},
     };
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic, Runner};
+    use commonware_runtime::{deterministic, Metrics, Runner};
     use rand::Rng;
     use std::{
         collections::HashMap,
@@ -394,11 +394,11 @@ mod tests {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             {
-                let mut index = new_partitioned_unordered(context.clone());
+                let mut index = new_partitioned_unordered(context.with_label("unordered"));
                 run_index_cursor_find(&mut index);
             }
             {
-                let mut index = new_partitioned_ordered(context);
+                let mut index = new_partitioned_ordered(context.with_label("ordered"));
                 run_index_cursor_find(&mut index);
             }
         });

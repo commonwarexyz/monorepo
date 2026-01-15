@@ -271,6 +271,7 @@ mod test {
         participants: BTreeMap<PublicKey, (PrivateKey, Option<Share>)>,
         handles: BTreeMap<PublicKey, Handle<()>>,
         failures: HashSet<u64>,
+        restart_counts: BTreeMap<PublicKey, u32>,
     }
 
     impl Team {
@@ -299,6 +300,7 @@ mod test {
                 participants,
                 handles: Default::default(),
                 failures: HashSet::new(),
+                restart_counts: Default::default(),
             }
         }
 
@@ -319,6 +321,7 @@ mod test {
                 participants,
                 handles: Default::default(),
                 failures: HashSet::new(),
+                restart_counts: Default::default(),
             }
         }
 
@@ -366,7 +369,9 @@ mod test {
                 },
             );
 
-            let validator_ctx = ctx.with_label(&format!("validator_{}", &pk));
+            let restart_count = self.restart_counts.entry(pk.clone()).or_insert(0);
+            let validator_ctx = ctx.with_label(&format!("validator_{pk}_r{restart_count}"));
+            *restart_count += 1;
             let resolver_cfg = marshal_resolver::Config {
                 public_key: pk.clone(),
                 manager: oracle.manager(),

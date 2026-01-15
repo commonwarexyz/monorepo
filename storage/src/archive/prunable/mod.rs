@@ -240,7 +240,7 @@ mod tests {
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_section: NZU64!(DEFAULT_ITEMS_PER_SECTION),
             };
-            let mut archive = Archive::init(context.clone(), cfg.clone())
+            let mut archive = Archive::init(context.with_label("first"), cfg.clone())
                 .await
                 .expect("Failed to initialize archive");
 
@@ -271,7 +271,7 @@ mod tests {
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_section: NZU64!(DEFAULT_ITEMS_PER_SECTION),
             };
-            let archive = Archive::<_, _, FixedBytes<64>, i32>::init(context, cfg.clone())
+            let archive = Archive::<_, _, FixedBytes<64>, i32>::init(context.with_label("second"), cfg.clone())
                 .await
                 .unwrap();
 
