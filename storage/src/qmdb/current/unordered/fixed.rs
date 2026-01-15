@@ -902,12 +902,12 @@ pub mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let partition = "build_small";
-            let db = open_db(context.clone(), partition).await;
+            let db = open_db(context.with_label("first"), partition).await;
             assert_eq!(db.op_count(), 1);
             assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(0));
             let root0 = db.root();
             drop(db);
-            let db = open_db(context.clone(), partition).await;
+            let db = open_db(context.with_label("second"), partition).await;
             assert_eq!(db.op_count(), 1);
             assert!(db.get_metadata().await.unwrap().is_none());
             assert_eq!(db.root(), root0);
@@ -927,7 +927,7 @@ pub mod test {
             let root1 = db.root();
             assert!(root1 != root0);
             drop(db);
-            let db = open_db(context.clone(), partition).await;
+            let db = open_db(context.with_label("third"), partition).await;
             assert_eq!(db.op_count(), 4); // 1 update, 1 commit, 1 moves + 1 initial commit.
             assert!(db.get_metadata().await.unwrap().is_none());
             assert_eq!(db.root(), root1);
@@ -960,7 +960,7 @@ pub mod test {
 
             // Confirm re-open preserves state.
             drop(db);
-            let db = open_db(context.clone(), partition).await;
+            let db = open_db(context.with_label("fourth"), partition).await;
             assert_eq!(db.op_count(), 7);
             // Last commit had no metadata (passed None to commit).
             assert!(db.get_metadata().await.unwrap().is_none());
@@ -990,7 +990,7 @@ pub mod test {
         // confirm that the end state of the db matches that of an identically updated hashmap.
         const ELEMENTS: u64 = 1000;
         executor.start(|context| async move {
-            let mut db = open_db(context.clone(), "build_big").await.into_mutable();
+            let mut db = open_db(context.with_label("first"), "build_big").await.into_mutable();
 
             let mut map = HashMap::<Digest, Digest>::default();
             for i in 0u64..ELEMENTS {
@@ -1039,7 +1039,7 @@ pub mod test {
             let root = db.root();
             db.sync().await.unwrap();
             drop(db);
-            let db = open_db(context.clone(), "build_big").await;
+            let db = open_db(context.with_label("second"), "build_big").await;
             assert_eq!(root, db.root());
             assert_eq!(db.op_count(), 1957);
             assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(838));
@@ -1079,7 +1079,7 @@ pub mod test {
         executor.start(|context| async move {
             let mut hasher = StandardHasher::<Sha256>::new();
             let partition = "build_small";
-            let mut db = open_db(context.clone(), partition).await.into_mutable();
+            let mut db = open_db(context, partition).await.into_mutable();
 
             // Add one key.
             let k = Sha256::fill(0x01);
@@ -1272,7 +1272,7 @@ pub mod test {
         executor.start(|mut context| async move {
             let partition = "range_proofs";
             let mut hasher = StandardHasher::<Sha256>::new();
-            let db = open_db(context.clone(), partition).await;
+            let db = open_db(context.with_label("db"), partition).await;
             let root = db.root();
 
             // Empty range proof should not crash or verify, since even an empty db has a single
@@ -1343,7 +1343,7 @@ pub mod test {
         executor.start(|mut context| async move {
             let partition = "range_proofs";
             let mut hasher = StandardHasher::<Sha256>::new();
-            let db = open_db(context.clone(), partition).await.into_mutable();
+            let db = open_db(context.with_label("db"), partition).await.into_mutable();
             let db = apply_random_ops(500, true, context.next_u64(), db)
                 .await
                 .unwrap();
@@ -1425,7 +1425,7 @@ pub mod test {
         executor.start(|mut context| async move {
             let partition = "build_random";
             let rng_seed = context.next_u64();
-            let db = open_db(context.clone(), partition).await.into_mutable();
+            let db = open_db(context.with_label("first"), partition).await.into_mutable();
             let db = apply_random_ops(ELEMENTS, true, rng_seed, db)
                 .await
                 .unwrap();
@@ -1437,7 +1437,7 @@ pub mod test {
             let root = db.root();
 
             drop(db);
-            let db = open_db(context, partition).await;
+            let db = open_db(context.with_label("second"), partition).await;
 
             // Ensure the root matches
             assert_eq!(db.root(), root);
@@ -1454,7 +1454,7 @@ pub mod test {
         executor.start(|context| async move {
             let mut hasher = StandardHasher::<Sha256>::new();
             let partition = "build_small";
-            let mut db = open_db(context.clone(), partition).await;
+            let mut db = open_db(context, partition).await;
 
             // Add one key.
             let k = Sha256::fill(0x00);

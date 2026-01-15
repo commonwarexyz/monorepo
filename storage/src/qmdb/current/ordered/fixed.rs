@@ -1022,12 +1022,12 @@ pub mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let partition = "build_small";
-            let db = open_db(context.clone(), partition).await;
+            let db = open_db(context.with_label("first"), partition).await;
             assert_eq!(db.op_count(), 1);
             assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(0));
             let root0 = db.root();
             drop(db);
-            let db = open_db(context.clone(), partition).await;
+            let db = open_db(context.with_label("second"), partition).await;
             assert_eq!(db.op_count(), 1);
             assert!(db.get_metadata().await.unwrap().is_none());
             assert_eq!(db.root(), root0);
@@ -1046,7 +1046,7 @@ pub mod test {
             assert!(root1 != root0);
 
             drop(db);
-            let db = open_db(context.clone(), partition).await;
+            let db = open_db(context.with_label("third"), partition).await;
             assert_eq!(db.op_count(), 4);
             assert_eq!(db.root(), root1);
 
@@ -1066,7 +1066,7 @@ pub mod test {
             let root2 = db.root();
 
             drop(db);
-            let db = open_db(context.clone(), partition).await;
+            let db = open_db(context.with_label("fourth"), partition).await;
             assert_eq!(db.op_count(), 6);
             assert_eq!(db.get_metadata().await.unwrap().unwrap(), metadata);
             assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(5));
@@ -1095,7 +1095,7 @@ pub mod test {
         // confirm that the end state of the db matches that of an identically updated hashmap.
         const ELEMENTS: u64 = 1000;
         executor.start(|context| async move {
-            let mut db = open_db(context.clone(), "build_big").await.into_mutable();
+            let mut db = open_db(context.with_label("first"), "build_big").await.into_mutable();
 
             let mut map = HashMap::<Digest, Digest>::default();
             for i in 0u64..ELEMENTS {
@@ -1142,7 +1142,7 @@ pub mod test {
             // Reopen the db, making sure it has exactly the same state.
             let root = db.root();
             drop(db);
-            let db = open_db(context.clone(), "build_big").await;
+            let db = open_db(context.with_label("second"), "build_big").await;
             assert_eq!(root, db.root());
             assert_eq!(db.op_count(), 4241);
             assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(3383));
@@ -1551,7 +1551,7 @@ pub mod test {
         executor.start(|mut context| async move {
             let partition = "build_random";
             let rng_seed = context.next_u64();
-            let db = open_db(context.clone(), partition).await.into_mutable();
+            let db = open_db(context.with_label("first"), partition).await.into_mutable();
             let db = apply_random_ops(ELEMENTS, true, rng_seed, db)
                 .await
                 .unwrap();
@@ -1562,7 +1562,7 @@ pub mod test {
             // Drop and reopen the db
             let root = db.root();
             drop(db);
-            let db = open_db(context, partition).await;
+            let db = open_db(context.with_label("second"), partition).await;
 
             // Ensure the root matches
             assert_eq!(db.root(), root);
@@ -1629,7 +1629,7 @@ pub mod test {
         executor.start(|mut context| async move {
             let partition = "build_random_fail_commit";
             let rng_seed = context.next_u64();
-            let db = open_db(context.clone(), partition).await.into_mutable();
+            let db = open_db(context.with_label("first"), partition).await.into_mutable();
             let db = apply_random_ops(ELEMENTS, true, rng_seed, db)
                 .await
                 .unwrap();
@@ -1648,7 +1648,7 @@ pub mod test {
             // SCENARIO #1: Simulate a crash that happens before any writes. Upon reopening, the
             // state of the DB should be as of the last commit.
             drop(db);
-            let db = open_db(context.clone(), partition).await;
+            let db = open_db(context.with_label("second"), partition).await;
             assert_eq!(db.root(), committed_root);
             assert_eq!(db.op_count(), committed_op_count);
 
@@ -1667,13 +1667,13 @@ pub mod test {
 
             // We should be able to recover, so the root should differ from the previous commit, and
             // the op count should be greater than before.
-            let db = open_db(context.clone(), partition).await;
+            let db = open_db(context.with_label("third"), partition).await;
             let scenario_2_root = db.root();
 
             // To confirm the second committed hash is correct we'll re-build the DB in a new
             // partition, but without any failures. They should have the exact same state.
             let fresh_partition = "build_random_fail_commit_fresh";
-            let db = open_db(context.clone(), fresh_partition)
+            let db = open_db(context.with_label("fourth"), fresh_partition)
                 .await
                 .into_mutable();
             let db = apply_random_ops(ELEMENTS, true, rng_seed, db)
@@ -1704,11 +1704,11 @@ pub mod test {
             let db_config_pruning = current_db_config("pruning_test");
 
             let mut db_no_pruning =
-                CleanCurrentTest::init(context.clone(), db_config_no_pruning.clone())
+                CleanCurrentTest::init(context.with_label("no_pruning_first"), db_config_no_pruning.clone())
                     .await
                     .unwrap()
                     .into_mutable();
-            let mut db_pruning = CleanCurrentTest::init(context.clone(), db_config_pruning.clone())
+            let mut db_pruning = CleanCurrentTest::init(context.with_label("pruning_first"), db_config_pruning.clone())
                 .await
                 .unwrap()
                 .into_mutable();
@@ -1754,10 +1754,10 @@ pub mod test {
             drop(db_pruning);
 
             // Restart both databases
-            let db_no_pruning = CleanCurrentTest::init(context.clone(), db_config_no_pruning)
+            let db_no_pruning = CleanCurrentTest::init(context.with_label("no_pruning_second"), db_config_no_pruning)
                 .await
                 .unwrap();
-            let db_pruning = CleanCurrentTest::init(context.clone(), db_config_pruning)
+            let db_pruning = CleanCurrentTest::init(context.with_label("pruning_second"), db_config_pruning)
                 .await
                 .unwrap();
             assert_eq!(
@@ -1785,7 +1785,7 @@ pub mod test {
         executor.start(|context| async move {
             let mut hasher = StandardHasher::<Sha256>::new();
             let partition = "exclusion_proofs";
-            let db = open_db(context.clone(), partition).await;
+            let db = open_db(context, partition).await;
 
             let key_exists_1 = Sha256::fill(0x10);
 

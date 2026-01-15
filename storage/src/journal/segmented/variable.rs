@@ -1349,7 +1349,7 @@ mod tests {
             };
 
             // Initialize the journal
-            let mut journal = Journal::init(context.clone(), cfg.clone())
+            let mut journal = Journal::init(context.with_label("first"), cfg.clone())
                 .await
                 .expect("Failed to initialize journal");
 
@@ -1381,7 +1381,7 @@ mod tests {
             blob.sync().await.expect("Failed to sync blob");
 
             // Re-initialize the journal to simulate a restart
-            let journal = Journal::init(context.clone(), cfg.clone())
+            let journal = Journal::init(context.with_label("second"), cfg.clone())
                 .await
                 .expect("Failed to re-initialize journal");
 
@@ -1672,7 +1672,7 @@ mod tests {
                 write_buffer: NZUsize!(1024),
             };
 
-            let mut journal = Journal::init(context.clone(), cfg.clone())
+            let mut journal = Journal::init(context.with_label("first"), cfg.clone())
                 .await
                 .expect("Failed to initialize journal");
 
@@ -1697,7 +1697,7 @@ mod tests {
 
             // Drop and reopen to test replay
             drop(journal);
-            let journal = Journal::<_, u8>::init(context, cfg)
+            let journal = Journal::<_, u8>::init(context.with_label("second"), cfg)
                 .await
                 .expect("Failed to re-initialize journal");
 
@@ -2429,9 +2429,10 @@ mod tests {
                 buffer_pool: PoolRef::new(SMALL_PAGE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
-            let mut journal: Journal<_, [u8; 128]> = Journal::init(context.clone(), cfg.clone())
-                .await
-                .expect("Failed to initialize journal");
+            let mut journal: Journal<_, [u8; 128]> =
+                Journal::init(context.with_label("first"), cfg.clone())
+                    .await
+                    .expect("Failed to initialize journal");
 
             // Create items that will span many 16-byte pages
             let item1: [u8; 128] = [1u8; 128];
@@ -2456,9 +2457,10 @@ mod tests {
 
             // Drop and reopen to test replay
             drop(journal);
-            let journal: Journal<_, [u8; 128]> = Journal::init(context.clone(), cfg.clone())
-                .await
-                .expect("Failed to re-initialize journal");
+            let journal: Journal<_, [u8; 128]> =
+                Journal::init(context.with_label("second"), cfg.clone())
+                    .await
+                    .expect("Failed to re-initialize journal");
 
             // Replay and verify all items
             {
