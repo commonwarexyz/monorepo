@@ -251,7 +251,7 @@ impl<
 
         let mut hasher = StandardHasher::<H>::new();
         let mut status = CleanBitMap::restore_pruned(
-            context.with_label("bitmap"),
+            context.with_label("bitmap_restore"),
             &bitmap_metadata_partition,
             thread_pool,
             &mut hasher,
@@ -262,7 +262,7 @@ impl<
         // Initialize the anydb with a callback that initializes the status bitmap.
         let last_known_inactivity_floor = Location::new_unchecked(status.len());
         let any = AnyDb::init_with_callback(
-            context.with_label("any"),
+            context.with_label("any_init"),
             config.to_any_config(),
             Some(last_known_inactivity_floor),
             |append: bool, loc: Option<Location>| {
@@ -302,7 +302,7 @@ impl<
         // re-Merkleize the inactive portion up to the inactivity floor.
         self.status
             .write_pruned(
-                self.context.with_label("bitmap"),
+                self.context.with_label("bitmap_sync"),
                 &self.bitmap_metadata_partition,
             )
             .await
@@ -312,7 +312,7 @@ impl<
     /// Destroy the db, removing all data from disk.
     pub async fn destroy(self) -> Result<(), Error> {
         // Clean up bitmap metadata partition.
-        CleanBitMap::<H::Digest, N>::destroy(self.context, &self.bitmap_metadata_partition).await?;
+        CleanBitMap::<H::Digest, N>::destroy(self.context.with_label("bitmap_destroy"), &self.bitmap_metadata_partition).await?;
 
         // Clean up Any components (MMR and log).
         self.any.destroy().await
@@ -448,7 +448,7 @@ impl<
         // because it may require replaying of pruned operations.
         self.status
             .write_pruned(
-                self.context.with_label("bitmap"),
+                self.context.with_label("bitmap_prune"),
                 &self.bitmap_metadata_partition,
             )
             .await?;
