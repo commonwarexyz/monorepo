@@ -568,10 +568,11 @@ where
             if let Some(context) = context {
                 self.verify(context, payload).await
             } else {
-                // Verify is always called before certify for a given proposal, so if we
-                // don't have a verification context here, it means this proposal was never
-                // verified. Return a receiver that never resolves to signal to consensus
-                // that we should time out the view and vote to nullify.
+                // Verify is always called before certify for a given proposal (if we are
+                // online and don't see the notarization certificate first), so if we don't
+                // have a verification context here, it means this proposal was never verified
+                // by us. Return a receiver that never resolves to signal to consensus that
+                // we should time out the view and vote to nullify.
                 let (_tx, rx) = oneshot::channel();
                 rx
             }
