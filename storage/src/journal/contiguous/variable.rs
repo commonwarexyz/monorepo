@@ -866,7 +866,7 @@ mod tests {
     use super::*;
     use crate::journal::contiguous::tests::run_contiguous_tests;
     use commonware_macros::test_traced;
-    use commonware_runtime::{buffer::pool::PoolRef, deterministic, Runner};
+    use commonware_runtime::{buffer::pool::PoolRef, deterministic, Metrics, Runner};
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use futures::FutureExt as _;
     use std::num::NonZeroU16;
@@ -1703,9 +1703,10 @@ mod tests {
             };
 
             // Initialize at position 15
-            let mut journal = Journal::<_, u64>::init_at_size(context.clone(), cfg.clone(), 15)
-                .await
-                .unwrap();
+            let mut journal =
+                Journal::<_, u64>::init_at_size(context.with_label("first"), cfg.clone(), 15)
+                    .await
+                    .unwrap();
 
             // Append some items
             for i in 0..5u64 {
@@ -1719,7 +1720,7 @@ mod tests {
             journal.sync().await.unwrap();
             drop(journal);
 
-            let mut journal = Journal::<_, u64>::init(context.clone(), cfg.clone())
+            let mut journal = Journal::<_, u64>::init(context.with_label("second"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -2034,10 +2035,12 @@ mod tests {
             };
 
             // Create initial journal with data beyond sync range
-            let mut journal =
-                Journal::<deterministic::Context, u64>::init(context.clone(), cfg.clone())
-                    .await
-                    .expect("Failed to create initial journal");
+            let mut journal = Journal::<deterministic::Context, u64>::init(
+                context.with_label("initial"),
+                cfg.clone(),
+            )
+            .await
+            .expect("Failed to create initial journal");
 
             // Add data at positions 0-29 (sections 0-5 with items_per_section=5)
             for i in 0..30u64 {
@@ -2048,9 +2051,9 @@ mod tests {
 
             // Initialize with sync boundaries that are exceeded by existing data
             let lower_bound = 8; // section 1
-            for upper_bound in 9..29 {
+            for (i, upper_bound) in (9..29).enumerate() {
                 let result = Journal::<deterministic::Context, u64>::init_sync(
-                    context.clone(),
+                    context.with_label(&format!("sync{}", i)),
                     cfg.clone(),
                     lower_bound..upper_bound,
                 )
@@ -2078,10 +2081,12 @@ mod tests {
             };
 
             // Create initial journal with stale data
-            let mut journal =
-                Journal::<deterministic::Context, u64>::init(context.clone(), cfg.clone())
-                    .await
-                    .expect("Failed to create initial journal");
+            let mut journal = Journal::<deterministic::Context, u64>::init(
+                context.with_label("first"),
+                cfg.clone(),
+            )
+            .await
+            .expect("Failed to create initial journal");
 
             // Add data at positions 0-9 (sections 0-1 with items_per_section=5)
             for i in 0..10u64 {
@@ -2094,7 +2099,7 @@ mod tests {
             let lower_bound = 15; // section 3
             let upper_bound = 26; // last element in section 5
             let journal = Journal::<deterministic::Context, u64>::init_sync(
-                context.clone(),
+                context.with_label("second"),
                 cfg.clone(),
                 lower_bound..upper_bound,
             )
@@ -2272,7 +2277,7 @@ mod tests {
             };
 
             // === Test 1: Basic single item operation ===
-            let mut journal = Journal::<_, u64>::init(context.clone(), cfg.clone())
+            let mut journal = Journal::<_, u64>::init(context.with_label("first"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -2352,7 +2357,7 @@ mod tests {
             drop(journal);
 
             // === Test 4: Restart persistence with single item per section ===
-            let journal = Journal::<_, u64>::init(context.clone(), cfg.clone())
+            let journal = Journal::<_, u64>::init(context.with_label("second"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -2375,7 +2380,7 @@ mod tests {
 
             // === Test 5: Restart after pruning with non-zero index (KEY SCENARIO) ===
             // Fresh journal for this test
-            let mut journal = Journal::<_, u64>::init(context.clone(), cfg.clone())
+            let mut journal = Journal::<_, u64>::init(context.with_label("third"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -2394,7 +2399,7 @@ mod tests {
             drop(journal);
 
             // Re-open journal
-            let journal = Journal::<_, u64>::init(context.clone(), cfg.clone())
+            let journal = Journal::<_, u64>::init(context.with_label("fourth"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -2416,7 +2421,7 @@ mod tests {
             // === Test 6: Prune all items (edge case) ===
             // This tests the scenario where prune removes everything.
             // Callers must check oldest_retained_pos() before reading.
-            let mut journal = Journal::<_, u64>::init(context.clone(), cfg.clone())
+            let mut journal = Journal::<_, u64>::init(context.with_label("fifth"), cfg.clone())
                 .await
                 .unwrap();
 

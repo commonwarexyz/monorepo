@@ -1212,7 +1212,7 @@ mod tests {
         executor.start(|context| async move {
             // Initialize the journal, allowing a max of 2 items per blob.
             let cfg = test_cfg(NZU64!(2));
-            let mut journal = Journal::init(context.clone(), cfg.clone())
+            let mut journal = Journal::init(context.with_label("first"), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
             assert!(matches!(journal.rewind(0).await, Ok(())));
@@ -1268,7 +1268,7 @@ mod tests {
             // Repeat with a different blob size (3 items per blob)
             let mut cfg = test_cfg(NZU64!(3));
             cfg.partition = "test_partition_2".into();
-            let mut journal = Journal::init(context.clone(), cfg.clone())
+            let mut journal = Journal::init(context.with_label("second"), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
             for _ in 0..10 {
@@ -1286,9 +1286,10 @@ mod tests {
             drop(journal);
 
             // Make sure re-opened journal is as expected
-            let mut journal: Journal<_, Digest> = Journal::init(context.clone(), cfg.clone())
-                .await
-                .expect("failed to re-initialize journal");
+            let mut journal: Journal<_, Digest> =
+                Journal::init(context.with_label("third"), cfg.clone())
+                    .await
+                    .expect("failed to re-initialize journal");
             assert_eq!(journal.size(), 10 * (100 - 49));
 
             // Make sure rewinding works after pruning
@@ -1409,7 +1410,7 @@ mod tests {
             };
 
             // === Test 1: Basic single item operation ===
-            let mut journal = Journal::init(context.clone(), cfg.clone())
+            let mut journal = Journal::init(context.with_label("first"), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
 
@@ -1506,7 +1507,7 @@ mod tests {
             drop(journal);
 
             // === Test 4: Restart persistence with single item per blob ===
-            let journal = Journal::<_, Digest>::init(context.clone(), cfg.clone())
+            let journal = Journal::<_, Digest>::init(context.with_label("second"), cfg.clone())
                 .await
                 .expect("failed to re-initialize journal");
 
@@ -1532,7 +1533,7 @@ mod tests {
 
             // === Test 5: Restart after pruning with non-zero index ===
             // Fresh journal for this test
-            let mut journal = Journal::init(context.clone(), cfg.clone())
+            let mut journal = Journal::init(context.with_label("third"), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
 
@@ -1551,7 +1552,7 @@ mod tests {
             drop(journal);
 
             // Re-open journal
-            let journal = Journal::<_, Digest>::init(context.clone(), cfg.clone())
+            let journal = Journal::<_, Digest>::init(context.with_label("fourth"), cfg.clone())
                 .await
                 .expect("failed to re-initialize journal");
 
