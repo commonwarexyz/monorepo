@@ -250,6 +250,52 @@ pub fn count_running_tasks(metrics: &impl crate::Metrics, prefix: &str) -> usize
         .count()
 }
 
+#[cfg(any(test, feature = "test-utils"))]
+/// Find duplicate metric names in the encoded Prometheus metrics output.
+///
+/// Parses the Prometheus text format and returns a vector of metric names
+/// that appear more than once. An empty vector indicates all metrics are
+/// properly namespaced.
+///
+/// This is useful for verifying that components don't accidentally register
+/// metrics with conflicting names.
+///
+/// # Example
+///
+/// ```rust
+/// use commonware_runtime::{Metrics, Runner, Spawner, deterministic};
+/// use commonware_runtime::find_duplicate_metrics;
+/// use prometheus_client::metrics::counter::Counter;
+///
+/// let executor = deterministic::Runner::default();
+/// executor.start(|context| async move {
+///     // Register metrics under different labels
+///     let c1 = Counter::<u64>::default();
+///     context.with_label("a").register("test", "help", c1);
+///     let c2 = Counter::<u64>::default();
+///     context.with_label("b").register("test", "help", c2);
+///
+///     // Check for duplicates
+///     let duplicates = find_duplicate_metrics(&context.encode());
+///     assert!(duplicates.is_empty(), "found duplicates: {:?}", duplicates);
+/// });
+/// ```
+pub fn find_duplicate_metrics(encoded: &str) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut duplicates = Vec::new();
+
+    for line in encoded.lines() {
+        if let Some(rest) = line.strip_prefix("# TYPE ") {
+            if let Some(name) = rest.split_whitespace().next() {
+                if !seen.insert(name.to_string()) {
+                    duplicates.push(name.to_string());
+                }
+            }
+        }
+    }
+    duplicates
+}
+
 /// Validates that a label matches Prometheus metric name format: `[a-zA-Z][a-zA-Z0-9_]*`.
 ///
 /// # Panics
@@ -450,6 +496,44 @@ mod tests {
                 count_running_tasks(&context, "worker"),
                 0,
                 "all worker tasks should be stopped"
+            );
+        });
+    }
+
+    #[test_traced]
+    fn test_find_duplicate_metrics() {
+        use crate::{Metrics, Runner};
+        use prometheus_client::metrics::counter::Counter;
+
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Initially no duplicates
+            assert!(
+                find_duplicate_metrics(&context.encode()).is_empty(),
+                "no duplicates initially"
+            );
+
+            // Register metrics under different labels (no duplicates)
+            let c1 = Counter::<u64>::default();
+            context.with_label("a").register("test", "help", c1);
+            let c2 = Counter::<u64>::default();
+            context.with_label("b").register("test", "help", c2);
+
+            let duplicates = find_duplicate_metrics(&context.encode());
+            assert!(
+                duplicates.is_empty(),
+                "different labels should not conflict"
+            );
+
+            // Register another metric under "a" (duplicate)
+            let c3 = Counter::<u64>::default();
+            context.with_label("a").register("test", "help", c3);
+
+            let duplicates = find_duplicate_metrics(&context.encode());
+            assert_eq!(
+                duplicates,
+                vec!["a_test"],
+                "same label should create duplicate"
             );
         });
     }

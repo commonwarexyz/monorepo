@@ -179,7 +179,7 @@ mod test {
     use commonware_parallel::Sequential;
     use commonware_runtime::{
         deterministic::{self, Runner},
-        Clock, Handle, Quota, Runner as _, Spawner,
+        Clock, Handle, Metrics, Quota, Runner as _, Spawner,
     };
     use commonware_utils::{union, N3f1, TryCollect};
     use futures::{
@@ -366,6 +366,7 @@ mod test {
                 },
             );
 
+            let validator_ctx = ctx.with_label(&format!("validator_{}", &pk));
             let resolver_cfg = marshal_resolver::Config {
                 public_key: pk.clone(),
                 manager: oracle.manager(),
@@ -377,9 +378,9 @@ mod test {
                 priority_requests: false,
                 priority_responses: false,
             };
-            let marshal = marshal_resolver::init(ctx, resolver_cfg, marshal);
+            let marshal = marshal_resolver::init(&validator_ctx, resolver_cfg, marshal);
             let engine = engine::Engine::<_, _, _, _, Sha256, MinSig, S, L, _>::new(
-                ctx.with_label(&format!("validator_{}", &pk)),
+                validator_ctx,
                 engine::Config {
                     signer: sk.clone(),
                     manager: oracle.manager(),
@@ -756,7 +757,12 @@ mod test {
         fn run(self) -> anyhow::Result<PlanResult> {
             // Multiply by total to ensure all participants report each failed epoch
             let expected_failures = self.failures.len() as u64 * self.total as u64;
-            let result = Runner::seeded(self.seed).start(|ctx| self.run_inner(ctx))?;
+            let (result, metrics) = Runner::seeded(self.seed).start(|ctx| async move {
+                let result = self.run_inner(ctx.clone()).await;
+                let metrics = ctx.encode();
+                (result, metrics)
+            });
+            let result = result?;
             info!(
                 failures = result.failures,
                 expected_failures, "test completed"
@@ -768,6 +774,13 @@ mod test {
                     result.failures
                 ));
             }
+
+            // Check for duplicate metrics at the end of every test
+            let duplicates = commonware_runtime::find_duplicate_metrics(&metrics);
+            if !duplicates.is_empty() {
+                return Err(anyhow!("found duplicate metric names: {:?}", duplicates));
+            }
+
             Ok(result)
         }
     }
