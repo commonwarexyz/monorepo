@@ -14,7 +14,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fs::File,
     net::IpAddr,
-    path::{Path, PathBuf},
+    path::PathBuf,
     slice,
 };
 use tokio::process::Command;
@@ -216,21 +216,13 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
         unique_config_paths.insert(instance.config.clone());
     }
 
-    // Compute digests concurrently (limited parallelism) for unique files only
+    // Compute digests concurrently for unique files only
     let unique_paths: Vec<String> = unique_binary_paths
         .iter()
         .chain(unique_config_paths.iter())
         .cloned()
         .collect();
-    let hash_results: Vec<(String, String)> =
-        stream::iter(unique_paths.into_iter().map(|path| async move {
-            let digest = hash_file(Path::new(&path)).await?;
-            Ok::<_, Error>((path, digest))
-        }))
-        .buffer_unordered(MAX_CONCURRENT_HASHES)
-        .try_collect()
-        .await?;
-    let path_to_digest: HashMap<String, String> = hash_results.into_iter().collect();
+    let path_to_digest = hash_files(unique_paths).await?;
 
     // Build dedup maps from digests
     let mut binary_digests: BTreeMap<String, String> = BTreeMap::new(); // digest -> path

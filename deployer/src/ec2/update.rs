@@ -12,7 +12,7 @@ use futures::{
 use std::{
     collections::{BTreeMap, HashMap},
     fs::File,
-    path::{Path, PathBuf},
+    path::PathBuf,
 };
 use tracing::{error, info};
 
@@ -74,15 +74,7 @@ pub async fn update(config_path: &PathBuf, concurrency: usize) -> Result<(), Err
         .chain(unique_config_paths.iter())
         .cloned()
         .collect();
-    let hash_results: Vec<(String, String)> =
-        futures::stream::iter(unique_paths.into_iter().map(|path| async move {
-            let digest = hash_file(Path::new(&path)).await?;
-            Ok::<_, Error>((path, digest))
-        }))
-        .buffer_unordered(concurrency)
-        .try_collect()
-        .await?;
-    let path_to_digest: HashMap<String, String> = hash_results.into_iter().collect();
+    let path_to_digest = hash_files(unique_paths).await?;
 
     // Build dedup maps from digests
     let mut binary_digests: BTreeMap<String, String> = BTreeMap::new();

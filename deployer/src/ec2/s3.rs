@@ -12,7 +12,8 @@ use aws_sdk_s3::{
     Client as S3Client,
 };
 use commonware_cryptography::{Hasher as _, Sha256};
-use std::{io::Read, path::Path, time::Duration};
+use futures::stream::{self, StreamExt, TryStreamExt};
+use std::{collections::HashMap, io::Read, path::Path, time::Duration};
 use tracing::{debug, info};
 
 /// S3 bucket name for caching deployer artifacts
@@ -263,6 +264,18 @@ pub async fn hash_file(path: &Path) -> Result<String, Error> {
     })
     .await
     .map_err(|e| Error::Io(std::io::Error::other(e)))?
+}
+
+/// Computes SHA256 hashes for multiple files concurrently.
+/// Returns a map from file path to hex-encoded digest.
+pub async fn hash_files(paths: Vec<String>) -> Result<HashMap<String, String>, Error> {
+    stream::iter(paths.into_iter().map(|path| async move {
+        let digest = hash_file(Path::new(&path)).await?;
+        Ok::<_, Error>((path, digest))
+    }))
+    .buffer_unordered(MAX_CONCURRENT_HASHES)
+    .try_collect()
+    .await
 }
 
 /// Generates a pre-signed URL for downloading an object from S3
