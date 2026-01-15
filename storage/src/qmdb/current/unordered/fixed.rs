@@ -1503,7 +1503,7 @@ pub mod test {
         executor.start(|mut context| async move {
             let partition = "build_random_fail_commit";
             let rng_seed = context.next_u64();
-            let db = open_db(context.clone(), partition).await.into_mutable();
+            let db = open_db(context.with_label("first"), partition).await.into_mutable();
             let db = apply_random_ops(ELEMENTS, true, rng_seed, db)
                 .await
                 .unwrap();
@@ -1522,7 +1522,7 @@ pub mod test {
             // SCENARIO #1: Simulate a crash that happens before any writes. Upon reopening, the
             // state of the DB should be as of the last commit.
             drop(db);
-            let db = open_db(context.clone(), partition).await;
+            let db = open_db(context.with_label("second"), partition).await;
             assert_eq!(db.root(), committed_root);
             assert_eq!(db.op_count(), committed_op_count);
 
@@ -1541,13 +1541,13 @@ pub mod test {
 
             // We should be able to recover, so the root should differ from the previous commit, and
             // the op count should be greater than before.
-            let db = open_db(context.clone(), partition).await;
+            let db = open_db(context.with_label("third"), partition).await;
             let scenario_2_root = db.root();
 
             // To confirm the second committed hash is correct we'll re-build the DB in a new
             // partition, but without any failures. They should have the exact same state.
             let fresh_partition = "build_random_fail_commit_fresh";
-            let db = open_db(context.clone(), fresh_partition)
+            let db = open_db(context.with_label("fourth"), fresh_partition)
                 .await
                 .into_mutable();
             let db = apply_random_ops(ELEMENTS, true, rng_seed, db)
@@ -1578,11 +1578,11 @@ pub mod test {
             let db_config_pruning = current_db_config("pruning_test");
 
             let mut db_no_pruning =
-                CleanCurrentTest::init(context.clone(), db_config_no_pruning.clone())
+                CleanCurrentTest::init(context.with_label("no_pruning_first"), db_config_no_pruning.clone())
                     .await
                     .unwrap()
                     .into_mutable();
-            let mut db_pruning = CleanCurrentTest::init(context.clone(), db_config_pruning.clone())
+            let mut db_pruning = CleanCurrentTest::init(context.with_label("pruning_first"), db_config_pruning.clone())
                 .await
                 .unwrap()
                 .into_mutable();

@@ -1018,7 +1018,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             // Create and populate target database
-            let target_db = create_test_db(context.clone()).await;
+            let target_db = create_test_db(context.with_label("target")).await;
             let mut target_db = target_db.into_mutable();
             let target_ops = create_test_ops(25);
             apply_ops(&mut target_db, target_ops).await;
@@ -1034,7 +1034,7 @@ mod tests {
             let (mut update_sender, update_receiver) = mpsc::channel(1);
             let target_db = Arc::new(commonware_runtime::RwLock::new(target_db));
             let config = Config {
-                context: context.clone(),
+                context: context.with_label("client"),
                 db_config: create_sync_config(&format!("invalid_update_{}", context.next_u64())),
                 fetch_batch_size: NZU64!(5),
                 target: Target {
@@ -1076,7 +1076,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             // Create and populate target database
-            let target_db = create_test_db(context.clone()).await;
+            let target_db = create_test_db(context.with_label("target")).await;
             let mut target_db = target_db.into_mutable();
             let target_ops = create_test_ops(10);
             apply_ops(&mut target_db, target_ops).await;
@@ -1092,7 +1092,7 @@ mod tests {
             let (mut update_sender, update_receiver) = mpsc::channel(1);
             let target_db = Arc::new(commonware_runtime::RwLock::new(target_db));
             let config = Config {
-                context: context.clone(),
+                context: context.with_label("client"),
                 db_config: create_sync_config(&format!("done_{}", context.next_u64())),
                 fetch_batch_size: NZU64!(20),
                 target: Target {
