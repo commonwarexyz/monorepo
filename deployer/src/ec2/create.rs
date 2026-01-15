@@ -435,22 +435,31 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
 
     // Create binary security groups (without monitoring IP - added later for parallel launch)
     info!("creating binary security groups");
-    for (region, resources) in region_resources.iter_mut() {
-        let binary_sg_id = create_security_group_binary(
-            &ec2_clients[region],
-            &resources.vpc_id,
-            &deployer_ip,
-            tag,
-            &config.ports,
-        )
-        .await?;
-        info!(
-            sg = binary_sg_id.as_str(),
-            vpc = resources.vpc_id.as_str(),
-            region = region.as_str(),
-            "created binary security group"
-        );
-        resources.binary_sg_id = Some(binary_sg_id);
+    let binary_sg_futures: Vec<_> = region_resources
+        .iter()
+        .map(|(region, resources)| {
+            let region = region.clone();
+            let ec2_client = ec2_clients[&region].clone();
+            let vpc_id = resources.vpc_id.clone();
+            let deployer_ip = deployer_ip.clone();
+            let tag = tag.clone();
+            let ports = config.ports.clone();
+            async move {
+                let binary_sg_id =
+                    create_security_group_binary(&ec2_client, &vpc_id, &deployer_ip, &tag, &ports)
+                        .await?;
+                info!(
+                    sg = binary_sg_id.as_str(),
+                    vpc = vpc_id.as_str(),
+                    region = region.as_str(),
+                    "created binary security group"
+                );
+                Ok::<_, Error>((region, binary_sg_id))
+            }
+        })
+        .collect();
+    for (region, binary_sg_id) in try_join_all(binary_sg_futures).await? {
+        region_resources.get_mut(&region).unwrap().binary_sg_id = Some(binary_sg_id);
     }
     info!("created binary security groups");
 
