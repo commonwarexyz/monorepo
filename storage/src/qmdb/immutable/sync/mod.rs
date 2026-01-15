@@ -458,7 +458,7 @@ mod tests {
             // Drop & reopen the database to test persistence
             synced_db.sync().await.unwrap();
             drop(synced_db);
-            let reopened_db = ImmutableSyncTest::init(client_context, db_config)
+            let reopened_db = ImmutableSyncTest::init(context.with_label("reopened"), db_config)
                 .await
                 .unwrap();
 

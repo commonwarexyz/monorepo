@@ -1628,10 +1628,10 @@ pub mod test {
             drop(db_pruning);
 
             // Restart both databases
-            let db_no_pruning = CleanCurrentTest::init(context.clone(), db_config_no_pruning)
+            let db_no_pruning = CleanCurrentTest::init(context.with_label("no_pruning_second"), db_config_no_pruning)
                 .await
                 .unwrap();
-            let db_pruning = CleanCurrentTest::init(context.clone(), db_config_pruning)
+            let db_pruning = CleanCurrentTest::init(context.with_label("pruning_second"), db_config_pruning)
                 .await
                 .unwrap();
             assert_eq!(
