@@ -44,7 +44,7 @@ pub async fn create_s3_client(region: Region) -> S3Client {
         .with_initial_backoff(Duration::from_millis(500))
         .with_max_backoff(Duration::from_secs(30))
         .with_reconnect_mode(ReconnectMode::ReconnectOnTransientError);
-    let config = aws_config::defaults(BehaviorVersion::v2025_08_07())
+    let config = aws_config::defaults(BehaviorVersion::v2026_01_12())
         .region(region)
         .retry_config(retry)
         .load()
