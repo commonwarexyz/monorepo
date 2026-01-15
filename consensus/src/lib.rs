@@ -115,14 +115,17 @@ cfg_if::cfg_if! {
         pub trait CertifiableAutomaton: Automaton {
             /// Determine whether a verified payload is safe to commit.
             ///
-            /// The round identifies which consensus round is being certified. This is necessary
-            /// because the same payload may be proposed in multiple rounds (e.g., re-proposals
-            /// at epoch boundaries), and the application needs to use the correct verification
-            /// context for each round.
+            /// The round parameter identifies which consensus round is being certified, allowing
+            /// applications to associate certification with the correct verification context.
             ///
-            /// Applications that employ erasure coding can override this method to delay or prevent
-            /// finalization until they have reconstructed and validated the full block (e.g. after
-            /// receiving enough shards).
+            /// Note: In applications where payloads incorporate the round number (recommended),
+            /// each round will have a unique payload digest. However, the same payload may appear
+            /// in multiple rounds when re-proposing notarized blocks at epoch boundaries or in
+            /// integrations where payloads are round-agnostic.
+            ///
+            /// This is particularly useful for applications that employ erasure coding, which
+            /// can override this method to delay or prevent finalization until they have
+            /// reconstructed and validated the full block (e.g., after receiving enough shards).
             fn certify(
                 &mut self,
                 _round: Round,
