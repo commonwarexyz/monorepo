@@ -137,8 +137,7 @@ pub async fn profile(
 
     // Build the remote profiling script
     let profile_script = format!(
-        r#"
-set -e
+        r#"set -e
 
 # Download and extract samply if not present
 if [ ! -f /home/ubuntu/samply ]; then
@@ -158,6 +157,7 @@ fi
 echo "Profiling PID $PID for {duration} seconds..."
 
 # Record profile (use timeout with SIGINT so samply saves the profile)
+rm -f /tmp/profile.json
 sudo timeout -s INT {duration}s /home/ubuntu/samply record -p $PID -s -o /tmp/profile.json || true
 sudo chown ubuntu:ubuntu /tmp/profile.json
 
