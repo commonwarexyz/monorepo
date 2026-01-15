@@ -1,5 +1,7 @@
 //! Primitive implementations of [Translator].
 
+commonware_macros::readiness!(2);
+
 use std::hash::{BuildHasher, Hash, Hasher};
 
 /// Translate keys into a new representation (often a smaller one).

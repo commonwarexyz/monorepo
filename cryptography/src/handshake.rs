@@ -32,6 +32,9 @@
 //! The protocol includes timestamp validation to protect against replay attacks and clock skew:
 //! - Messages with timestamps too old are rejected to prevent replay attacks
 //! - Messages with timestamps too far in the future are rejected to safeguard against clock skew
+
+commonware_macros::readiness!(2);
+
 use crate::{
     transcript::{Summary, Transcript},
     PublicKey, Signature, Signer, Verifier,

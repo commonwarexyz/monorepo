@@ -111,6 +111,7 @@ function insertFooter() {
             <a href="https://github.com/commonwarexyz/monorepo">GitHub</a>
             <a href="/benchmarks.html">Benchmarks</a>
             <a href="/mcp.html">MCP</a>
+            <a href="/readiness.html">Readiness</a>
             <a href="/hiring.html">Hiring</a>
             <a href="https://x.com/commonwarexyz">X</a>
             <a href="/podcast.html">Podcast</a>

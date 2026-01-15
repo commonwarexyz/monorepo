@@ -86,6 +86,7 @@ const CIPHERTEXT_OVERHEAD: u32 = {
 };
 
 /// Errors that can occur when interacting with a stream.
+#[commonware_macros::ready(2)]
 #[derive(Error, Debug)]
 pub enum Error {
     #[error("handshake error: {0}")]
@@ -130,6 +131,7 @@ impl From<HandshakeError> for Error {
 ///
 /// Synchronize this configuration across all peers.
 /// Mismatched configurations may cause dropped connections or parsing errors.
+#[commonware_macros::ready(2)]
 #[derive(Clone)]
 pub struct Config<S> {
     /// The private key used for signing messages.
@@ -170,6 +172,7 @@ impl<S> Config<S> {
 
 /// Establishes an authenticated connection to a peer as the dialer.
 /// Returns sender and receiver for encrypted communication.
+#[commonware_macros::ready(2)]
 pub async fn dial<R: CryptoRngCore + Clock, S: Signer, I: Stream, O: Sink>(
     mut ctx: R,
     config: Config<S>,
@@ -227,6 +230,7 @@ pub async fn dial<R: CryptoRngCore + Clock, S: Signer, I: Stream, O: Sink>(
 
 /// Accepts an authenticated connection from a peer as the listener.
 /// Returns the peer's identity, sender, and receiver for encrypted communication.
+#[commonware_macros::ready(2)]
 pub async fn listen<
     R: CryptoRngCore + Clock,
     S: Signer,
@@ -293,6 +297,7 @@ pub async fn listen<
 }
 
 /// Sends encrypted messages to a peer.
+#[commonware_macros::ready(2)]
 pub struct Sender<O> {
     cipher: SendCipher,
     sink: O,
@@ -317,6 +322,7 @@ impl<O: Sink> Sender<O> {
 }
 
 /// Receives encrypted messages from a peer.
+#[commonware_macros::ready(2)]
 pub struct Receiver<I> {
     cipher: RecvCipher,
     stream: I,

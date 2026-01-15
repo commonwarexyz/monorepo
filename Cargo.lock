@@ -877,6 +877,7 @@ version = "0.4.42"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "145052bdd345b87320e369255277e3fb5152762ad123a901ef5c262dd38fe8d2"
 dependencies = [
+ "arbitrary",
  "iana-time-zone",
  "js-sys",
  "num-traits",
@@ -1078,6 +1079,7 @@ dependencies = [
  "arbitrary",
  "bytes",
  "commonware-conformance",
+ "commonware-macros",
  "paste",
  "rand 0.8.5",
  "rand_chacha 0.3.1",
@@ -1260,6 +1262,7 @@ dependencies = [
  "chacha20poly1305",
  "commonware-codec",
  "commonware-conformance",
+ "commonware-macros",
  "commonware-math",
  "commonware-parallel",
  "commonware-utils",
@@ -1417,6 +1420,7 @@ dependencies = [
  "bytes",
  "commonware-codec",
  "commonware-conformance",
+ "commonware-macros",
  "commonware-parallel",
  "commonware-utils",
  "proptest",
@@ -1476,6 +1480,7 @@ name = "commonware-parallel"
 version = "0.0.65"
 dependencies = [
  "cfg-if",
+ "commonware-macros",
  "proptest",
  "rayon",
 ]
@@ -1695,6 +1700,8 @@ dependencies = [
  "arbitrary",
  "bytes",
  "cfg-if",
+ "chrono",
+ "clap",
  "commonware-codec",
  "commonware-conformance",
  "commonware-macros",
@@ -1710,7 +1717,12 @@ dependencies = [
  "proptest",
  "rand 0.8.5",
  "rstest",
+ "serde",
+ "serde_json",
+ "syn",
  "thiserror 2.0.17",
+ "toml",
+ "walkdir",
  "zeroize",
 ]
 

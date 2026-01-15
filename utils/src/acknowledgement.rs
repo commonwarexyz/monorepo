@@ -1,5 +1,7 @@
 //! Utilities for providing acknowledgement.
 
+commonware_macros::readiness!(2);
+
 use core::{
     fmt::Debug,
     pin::Pin,

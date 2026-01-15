@@ -1,5 +1,7 @@
 //! Ordered collections that guarantee sorted, deduplicated items.
 
+commonware_macros::readiness!(2);
+
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 use bytes::{Buf, BufMut};

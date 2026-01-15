@@ -1,5 +1,7 @@
 //! Utilities for working with IP addresses.
 
+commonware_macros::readiness!(2);
+
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 /// Bits in an IPv4 address.

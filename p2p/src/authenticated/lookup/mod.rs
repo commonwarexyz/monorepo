@@ -150,6 +150,8 @@
 //! });
 //! ```
 
+commonware_macros::readiness!(2);
+
 mod actors;
 mod channels;
 mod config;

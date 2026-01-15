@@ -7,6 +7,7 @@ use alloc::vec::Vec;
 use bytes::Bytes;
 use core::ops::Index;
 
+#[commonware_macros::ready(2)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 /// A buffer whose memory is stable as long as its not reallocated.
 pub enum StableBuf {

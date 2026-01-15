@@ -28,6 +28,7 @@ arbitrary = [
 arbitrary = { workspace = true, optional = true }
 bytes.workspace = true
 commonware-conformance = { workspace = true, optional = true }
+commonware-macros.workspace = true
 paste.workspace = true
 rand = { workspace = true, optional = true }
 rand_chacha = { workspace = true, optional = true }

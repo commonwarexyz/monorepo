@@ -1,5 +1,7 @@
 //! Utilities for working with futures.
 
+commonware_macros::readiness!(2);
+
 use core::ops::{Deref, DerefMut};
 use futures::{
     channel::oneshot,

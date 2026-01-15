@@ -1,5 +1,7 @@
 //! Error types for codec operations.
 
+commonware_macros::readiness!(2);
+
 #[cfg(not(feature = "std"))]
 use alloc::boxed::Box;
 use thiserror::Error;

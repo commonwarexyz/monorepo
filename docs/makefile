@@ -33,14 +33,18 @@ mirror:
 sitemap:
 	python3 generate_sitemap.py
 
+# Generate readiness.json
+readiness:
+	cargo run -p commonware-utils --features lint --bin readiness-lint -- --repo-root .. --output readiness.json
+
 # Deploy: mirror code and generate sitemap
 deploy: mirror sitemap
 
-# Build everything: markdown, mirror, and sitemap
-all: markdown mirror sitemap
+# Build everything: markdown, mirror, sitemap, and readiness
+all: markdown mirror sitemap readiness
 
 # Clean all generated files
 clean:
-	rm -rf code $(MD_TARGETS) $(SITEMAP)
+	rm -rf code $(MD_TARGETS) $(SITEMAP) readiness.json
 
-.PHONY: markdown mirror sitemap deploy all clean
+.PHONY: markdown mirror sitemap readiness deploy all clean

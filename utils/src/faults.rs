@@ -39,6 +39,7 @@ use num_traits::ToPrimitive;
 /// All methods accept any integer type that implements [`ToPrimitive`], allowing
 /// callers to use `u32`, `u64`, `i32`, `usize`, etc. without explicit conversion.
 /// Output is always `u32`.
+#[commonware_macros::ready(2)]
 pub trait Faults {
     /// Compute the maximum number of faults that can be tolerated for `n` participants.
     ///
@@ -97,6 +98,7 @@ pub trait Faults {
 /// | 7  | 2  | 5      |
 /// | 10 | 3  | 7      |
 /// | 13 | 4  | 9      |
+#[commonware_macros::ready(2)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct N3f1;
 
@@ -125,6 +127,7 @@ impl Faults for N3f1 {
 /// | 11 | 2  | 9            | 5               |
 /// | 16 | 3  | 13           | 7               |
 /// | 21 | 4  | 17           | 9               |
+#[commonware_macros::ready(2)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct N5f1;
 

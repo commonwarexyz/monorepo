@@ -20,6 +20,8 @@
 //! println!("digest: {:?}", digest);
 //! ```
 
+commonware_macros::readiness!(2);
+
 use crate::Hasher;
 use blake3::Hash;
 use bytes::{Buf, BufMut};

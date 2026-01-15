@@ -19,6 +19,8 @@
 //! digest. The engine will return the message immediately if it is in the cache, or wait for it to
 //! be received over the network if it is not.
 
+commonware_macros::readiness!(2);
+
 mod config;
 pub use config::Config;
 mod engine;

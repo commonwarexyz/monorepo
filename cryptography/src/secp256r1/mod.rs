@@ -33,6 +33,8 @@
 //! assert_eq!(signature.recover_signer(namespace, msg).unwrap(), signer.public_key());
 //! ```
 
+commonware_macros::readiness!(2);
+
 pub mod certificate;
 mod common;
 pub mod recoverable;

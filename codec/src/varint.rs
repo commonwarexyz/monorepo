@@ -29,6 +29,8 @@
 //! assert_eq!(decoded, -3);
 //! ```
 
+commonware_macros::readiness!(2);
+
 use crate::{EncodeSize, Error, FixedSize, Read, ReadExt, Write};
 use bytes::{Buf, BufMut};
 use core::{fmt::Debug, mem::size_of};

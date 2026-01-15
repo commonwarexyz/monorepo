@@ -1,5 +1,7 @@
 //! Utilities for managing concurrency.
 
+commonware_macros::readiness!(2);
+
 use core::{
     hash::Hash,
     num::NonZeroU32,
