@@ -347,6 +347,7 @@ impl Pool {
     /// Returns a slice to the page data for the given slot index.
     #[inline]
     fn page_slice(&self, slot: usize) -> &[u8] {
+        assert!(slot < self.capacity);
         let start = slot * self.page_size;
         &self.arena[start..start + self.page_size]
     }
@@ -354,6 +355,7 @@ impl Pool {
     /// Returns a mutable slice to the page data for the given slot index.
     #[inline]
     fn page_slice_mut(&mut self, slot: usize) -> &mut [u8] {
+        assert!(slot < self.capacity);
         let start = slot * self.page_size;
         &mut self.arena[start..start + self.page_size]
     }
