@@ -627,7 +627,7 @@ mod tests {
     use commonware_codec::FixedSize;
     use commonware_cryptography::{sha256, Hasher, Sha256};
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic, Runner as _};
+    use commonware_runtime::{deterministic, Metrics, Runner as _};
 
     const SHA256_SIZE: usize = sha256::Digest::SIZE;
 
@@ -1071,7 +1071,7 @@ mod tests {
             let mut hasher = StandardHasher::<Sha256>::new();
             // Initializing from an empty partition should result in an empty bitmap.
             let bitmap = CleanBitMap::<_, SHA256_SIZE>::restore_pruned(
-                context.clone(),
+                context.with_label("initial"),
                 PARTITION,
                 None,
                 &mut hasher,
@@ -1106,11 +1106,11 @@ mod tests {
                     )
                     .unwrap();
                 bitmap
-                    .write_pruned(context.clone(), PARTITION)
+                    .write_pruned(context.with_label(&format!("write_{i}")), PARTITION)
                     .await
                     .unwrap();
                 bitmap = CleanBitMap::<_, SHA256_SIZE>::restore_pruned(
-                    context.clone(),
+                    context.with_label(&format!("restore_{i}")),
                     PARTITION,
                     None,
                     &mut hasher,
