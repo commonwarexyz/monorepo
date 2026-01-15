@@ -843,8 +843,7 @@ mod tests {
     fn test_align_with_mismatched_committed_ops() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut journal =
-                create_empty_journal(context.with_label("first"), "mismatched").await;
+            let mut journal = create_empty_journal(context.with_label("first"), "mismatched").await;
 
             // Add 20 uncommitted operations
             for i in 0..20 {
@@ -1660,13 +1659,14 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Test empty journal
-            let journal = create_empty_journal(context.clone(), "replay").await;
+            let journal = create_empty_journal(context.with_label("empty"), "replay").await;
             let stream = journal.replay(0, NZUsize!(10)).await.unwrap();
             futures::pin_mut!(stream);
             assert!(stream.next().await.is_none());
 
             // Test replaying all operations
-            let journal = create_journal_with_ops(context, "replay", 50).await;
+            let journal =
+                create_journal_with_ops(context.with_label("with_ops"), "replay", 50).await;
             let stream = journal.replay(0, NZUsize!(100)).await.unwrap();
             futures::pin_mut!(stream);
 
