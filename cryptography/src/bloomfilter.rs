@@ -1,5 +1,7 @@
 //! An implementation of a [Bloom Filter](https://en.wikipedia.org/wiki/Bloom_filter).
 
+commonware_macros::readiness!(1);
+
 use crate::{
     sha256::{Digest, Sha256},
     Hasher,

@@ -3,6 +3,9 @@
 //! This is useful for hashing data, committing to it, and extracting secure
 //! randomness from it. The API evades common footguns when doing these things
 //! in an ad hoc way.
+
+commonware_macros::readiness!(2);
+
 use crate::{Signer, Verifier};
 use blake3::BLOCK_LEN;
 use bytes::Buf;

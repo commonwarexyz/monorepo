@@ -1,6 +1,6 @@
 {
   "version": "0.0.65",
-  "generated": "2026-01-14T23:47:42.332318+00:00",
+  "generated": "2026-01-14T23:57:51.985690+00:00",
   "crates": [
     {
       "name": "commonware-broadcast",
@@ -61,10 +61,10 @@
         },
         {
           "name": "codec",
-          "readiness": 0
+          "readiness": 1
         },
         {
-          "name": "error::{Error}",
+          "name": "error",
           "readiness": 2
         },
         {
@@ -163,29 +163,12 @@
       "name": "commonware-cryptography",
       "entries": [
         {
-          "name": "secp256r1",
-          "children": [
-            {
-              "name": "certificate",
-              "readiness": 0
-            },
-            {
-              "name": "recoverable",
-              "readiness": 0
-            },
-            {
-              "name": "standard",
-              "readiness": 0
-            }
-          ]
-        },
-        {
           "name": "blake3",
-          "readiness": 0
+          "readiness": 2
         },
         {
           "name": "bloomfilter",
-          "readiness": 0
+          "readiness": 1
         },
         {
           "name": "bls12381",
@@ -215,15 +198,19 @@
         },
         {
           "name": "handshake",
-          "readiness": 0
+          "readiness": 2
         },
         {
           "name": "lthash",
-          "readiness": 0
+          "readiness": 1
+        },
+        {
+          "name": "secp256r1",
+          "readiness": 2
         },
         {
           "name": "secret",
-          "readiness": 0
+          "readiness": 2
         },
         {
           "name": "sha256",
@@ -231,7 +218,7 @@
         },
         {
           "name": "transcript",
-          "readiness": 0
+          "readiness": 2
         }
       ]
     },
@@ -709,15 +696,15 @@
     }
   ],
   "summary": {
-    "total_modules": 122,
-    "total_items": 47,
+    "total_modules": 121,
+    "total_items": 46,
     "modules_by_level": {
-      "0": 88,
-      "1": 1,
-      "2": 33
+      "0": 78,
+      "1": 4,
+      "2": 39
     },
     "items_by_level": {
-      "2": 47
+      "2": 46
     }
   }
 }
