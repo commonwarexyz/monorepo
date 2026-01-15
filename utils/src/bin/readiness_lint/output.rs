@@ -24,7 +24,6 @@ pub struct ReadinessOutput {
     #[serde(default)]
     pub generated: String,
     pub crates: Vec<CrateOutput>,
-    pub summary: Summary,
 }
 
 /// Output for a single crate with hierarchical entries.
@@ -42,15 +41,6 @@ pub struct Entry {
     pub readiness: Option<u8>,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub children: Vec<Entry>,
-}
-
-/// Summary statistics.
-#[derive(Debug, Serialize, Deserialize, PartialEq)]
-pub struct Summary {
-    pub total_modules: usize,
-    pub total_items: usize,
-    pub modules_by_level: BTreeMap<u8, usize>,
-    pub items_by_level: BTreeMap<u8, usize>,
 }
 
 /// Generate readiness.json output.
@@ -80,10 +70,6 @@ pub fn check(workspace: &Workspace, check_path: &Path) -> Result<bool, OutputErr
 /// Build the readiness output structure.
 fn build_output(workspace: &Workspace) -> ReadinessOutput {
     let mut crates = Vec::new();
-    let mut total_modules = 0;
-    let mut total_items = 0;
-    let mut modules_by_level: BTreeMap<u8, usize> = BTreeMap::new();
-    let mut items_by_level: BTreeMap<u8, usize> = BTreeMap::new();
 
     let mut crate_names: Vec<_> = workspace.crates.keys().collect();
     crate_names.sort();
@@ -106,22 +92,12 @@ fn build_output(workspace: &Workspace) -> ReadinessOutput {
         // Format items as "{Item1, Item2, ...}"
         for (level, mut items) in items_at_level {
             items.sort();
-            total_items += items.len();
-            *items_by_level.entry(level).or_insert(0) += items.len();
             let formatted = format_items(&items);
             flat_entries.push((formatted, level));
         }
 
         // Collect all modules
-        collect_modules(
-            &krate.modules,
-            &mut flat_entries,
-            &mut total_modules,
-            &mut modules_by_level,
-            &mut total_items,
-            &mut items_by_level,
-            false,
-        );
+        collect_modules(&krate.modules, &mut flat_entries, false);
 
         // Skip crates with nothing to show
         if flat_entries.is_empty() {
@@ -141,12 +117,6 @@ fn build_output(workspace: &Workspace) -> ReadinessOutput {
         version: env!("CARGO_PKG_VERSION").to_string(),
         generated: chrono::Utc::now().to_rfc3339(),
         crates,
-        summary: Summary {
-            total_modules,
-            total_items,
-            modules_by_level,
-            items_by_level,
-        },
     }
 }
 
@@ -263,37 +233,14 @@ fn build_tree(entries: &mut [(String, u8)]) -> Vec<Entry> {
 fn collect_modules(
     modules: &HashMap<String, Module>,
     entries: &mut Vec<(String, u8)>,
-    total_modules: &mut usize,
-    modules_by_level: &mut BTreeMap<u8, usize>,
-    total_items: &mut usize,
-    items_by_level: &mut BTreeMap<u8, usize>,
     parent_explicit: bool,
 ) {
     for module in modules.values() {
         if module.is_explicit {
-            *total_modules += 1;
-            *modules_by_level.entry(module.readiness).or_insert(0) += 1;
             entries.push((module.path.clone(), module.readiness));
-
-            collect_modules(
-                &module.submodules,
-                entries,
-                total_modules,
-                modules_by_level,
-                total_items,
-                items_by_level,
-                true,
-            );
+            collect_modules(&module.submodules, entries, true);
         } else if parent_explicit {
-            collect_modules(
-                &module.submodules,
-                entries,
-                total_modules,
-                modules_by_level,
-                total_items,
-                items_by_level,
-                true,
-            );
+            collect_modules(&module.submodules, entries, true);
         } else {
             if !module.items.is_empty() {
                 let mut items_at_level: BTreeMap<u8, Vec<String>> = BTreeMap::new();
@@ -306,26 +253,14 @@ fn collect_modules(
 
                 for (level, mut items) in items_at_level {
                     items.sort();
-                    *total_items += items.len();
-                    *items_by_level.entry(level).or_insert(0) += items.len();
                     let formatted = format_items_with_module(&module.path, &items);
                     entries.push((formatted, level));
                 }
             } else if module.submodules.is_empty() {
-                *total_modules += 1;
-                *modules_by_level.entry(0).or_insert(0) += 1;
                 entries.push((module.path.clone(), 0));
             }
 
-            collect_modules(
-                &module.submodules,
-                entries,
-                total_modules,
-                modules_by_level,
-                total_items,
-                items_by_level,
-                false,
-            );
+            collect_modules(&module.submodules, entries, false);
         }
     }
 }

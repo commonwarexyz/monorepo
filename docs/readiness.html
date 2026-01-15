@@ -69,14 +69,6 @@
             padding: 12px 15px;
             background: #f9fafb;
             cursor: pointer;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-        }
-        .crate-counts {
-            display: flex;
-            gap: 6px;
-            align-items: center;
         }
         .crate-header:hover {
             background: #f3f4f6;
@@ -100,25 +92,6 @@
         .module-item.module-group {
             color: #9ca3af;
             font-style: italic;
-        }
-        .summary-grid {
-            display: grid;
-            grid-template-columns: repeat(5, 1fr);
-            gap: 10px;
-            margin: 20px 0;
-        }
-        .summary-card {
-            text-align: center;
-            padding: 15px;
-            border: 1px solid #e5e7eb;
-        }
-        .summary-card .count {
-            font-size: 2em;
-            font-weight: bold;
-        }
-        .summary-card .label {
-            font-size: 0.9em;
-            color: #6b7280;
         }
         #loading {
             text-align: center;
@@ -206,9 +179,6 @@
             </tr>
         </table>
 
-        <h2>Summary</h2>
-        <div id="summary" class="summary-grid"></div>
-
         <h2>Explorer</h2>
         <p style="color: #6b7280; font-size: 0.9em; margin-bottom: 15px;">
             Only explicitly annotated modules and items are shown. Items use Rust's grouping syntax: <code>{Item1, Item2}</code>.
@@ -239,22 +209,6 @@
         function renderData(data) {
             document.getElementById('loading').style.display = 'none';
 
-            // Render summary - combine modules and items
-            const summaryEl = document.getElementById('summary');
-            for (let level = 0; level <= 4; level++) {
-                const modules = data.summary.modules_by_level[level] || 0;
-                const items = data.summary.items_by_level[level] || 0;
-                const total = modules + items;
-                if (total > 0 || level <= 2) {
-                    summaryEl.innerHTML += `
-                        <div class="summary-card">
-                            <div class="count">${total}</div>
-                            <div class="label"><span class="readiness-badge readiness-${level}">${level}</span></div>
-                        </div>
-                    `;
-                }
-            }
-
             // Render crates
             const cratesEl = document.getElementById('crates');
             for (const crate of data.crates) {
@@ -264,19 +218,7 @@
                 const header = document.createElement('div');
                 header.className = 'crate-header';
 
-                // Count entries by level
-                const counts = countByLevel(crate.entries);
-                let countsHtml = '<div class="crate-counts">';
-                const levels = Object.keys(counts).map(Number).sort();
-                for (const level of levels) {
-                    countsHtml += `<span class="readiness-badge readiness-${level}">${counts[level]}</span>`;
-                }
-                countsHtml += '</div>';
-
-                header.innerHTML = `
-                    <span>${crate.name}</span>
-                    ${countsHtml}
-                `;
+                header.innerHTML = `<span>${crate.name}</span>`;
 
                 const content = document.createElement('div');
                 content.className = 'crate-content';
@@ -288,22 +230,6 @@
                 crateDiv.appendChild(content);
                 cratesEl.appendChild(crateDiv);
             }
-        }
-
-        function countByLevel(entries) {
-            const counts = {};
-            for (const entry of entries) {
-                if (entry.readiness !== undefined && entry.readiness !== null) {
-                    counts[entry.readiness] = (counts[entry.readiness] || 0) + 1;
-                }
-                if (entry.children && entry.children.length > 0) {
-                    const childCounts = countByLevel(entry.children);
-                    for (const [level, count] of Object.entries(childCounts)) {
-                        counts[level] = (counts[level] || 0) + count;
-                    }
-                }
-            }
-            return counts;
         }
 
         function renderEntries(entries, depth) {
