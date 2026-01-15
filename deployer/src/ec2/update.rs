@@ -58,14 +58,40 @@ pub async fn update(config_path: &PathBuf, concurrency: usize) -> Result<(), Err
     let s3_client = create_s3_client(Region::new(MONITORING_REGION)).await;
     info!("computing file digests");
 
-    // Compute digests and build deduplication maps
+    // Collect unique binary and config paths (dedup before hashing)
+    let mut unique_binary_paths: std::collections::BTreeSet<String> =
+        std::collections::BTreeSet::new();
+    let mut unique_config_paths: std::collections::BTreeSet<String> =
+        std::collections::BTreeSet::new();
+    for instance in &config.instances {
+        unique_binary_paths.insert(instance.binary.clone());
+        unique_config_paths.insert(instance.config.clone());
+    }
+
+    // Compute digests concurrently for unique files only
+    let unique_paths: Vec<String> = unique_binary_paths
+        .iter()
+        .chain(unique_config_paths.iter())
+        .cloned()
+        .collect();
+    let hash_results: Vec<(String, String)> =
+        futures::stream::iter(unique_paths.into_iter().map(|path| async move {
+            let digest = hash_file(Path::new(&path)).await?;
+            Ok::<_, Error>((path, digest))
+        }))
+        .buffer_unordered(concurrency)
+        .try_collect()
+        .await?;
+    let path_to_digest: HashMap<String, String> = hash_results.into_iter().collect();
+
+    // Build dedup maps from digests
     let mut binary_digests: BTreeMap<String, String> = BTreeMap::new();
     let mut config_digests: BTreeMap<String, String> = BTreeMap::new();
     let mut instance_binary_digest: HashMap<String, String> = HashMap::new();
     let mut instance_config_digest: HashMap<String, String> = HashMap::new();
     for instance in &config.instances {
-        let binary_digest = hash_file(Path::new(&instance.binary)).await?;
-        let config_digest = hash_file(Path::new(&instance.config)).await?;
+        let binary_digest = path_to_digest[&instance.binary].clone();
+        let config_digest = path_to_digest[&instance.config].clone();
         binary_digests.insert(binary_digest.clone(), instance.binary.clone());
         config_digests.insert(config_digest.clone(), instance.config.clone());
         instance_binary_digest.insert(instance.name.clone(), binary_digest);

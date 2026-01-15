@@ -14,7 +14,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fs::File,
     net::IpAddr,
-    path::PathBuf,
+    path::{Path, PathBuf},
     slice,
 };
 use tokio::process::Command;
@@ -208,33 +208,43 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     }
     info!("observability tools uploaded");
 
-    // Compute digests concurrently (limited parallelism) for binaries and configs
-    let hash_results: Vec<(String, String, String, String, String)> =
-        stream::iter(config.instances.iter().map(|instance| {
-            let name = instance.name.clone();
-            let binary_path = instance.binary.clone();
-            let config_path = instance.config.clone();
-            async move {
-                let (binary_digest, config_digest) = tokio::try_join!(
-                    hash_file(std::path::Path::new(&binary_path)),
-                    hash_file(std::path::Path::new(&config_path)),
-                )?;
-                Ok::<_, Error>((name, binary_path, config_path, binary_digest, config_digest))
-            }
-        }))
-        .buffer_unordered(MAX_CONCURRENT_HASHES)
-        .try_collect()
-        .await?;
+    // Collect unique binary and config paths (dedup before hashing)
+    let mut unique_binary_paths: BTreeSet<String> = BTreeSet::new();
+    let mut unique_config_paths: BTreeSet<String> = BTreeSet::new();
+    for instance in &config.instances {
+        unique_binary_paths.insert(instance.binary.clone());
+        unique_config_paths.insert(instance.config.clone());
+    }
 
+    // Compute digests concurrently (limited parallelism) for unique files only
+    let unique_paths: Vec<String> = unique_binary_paths
+        .iter()
+        .chain(unique_config_paths.iter())
+        .cloned()
+        .collect();
+    let hash_results: Vec<(String, String)> = stream::iter(unique_paths.into_iter().map(|path| {
+        async move {
+            let digest = hash_file(Path::new(&path)).await?;
+            Ok::<_, Error>((path, digest))
+        }
+    }))
+    .buffer_unordered(MAX_CONCURRENT_HASHES)
+    .try_collect()
+    .await?;
+    let path_to_digest: HashMap<String, String> = hash_results.into_iter().collect();
+
+    // Build dedup maps from digests
     let mut binary_digests: BTreeMap<String, String> = BTreeMap::new(); // digest -> path
     let mut config_digests: BTreeMap<String, String> = BTreeMap::new(); // digest -> path
     let mut instance_binary_digest: HashMap<String, String> = HashMap::new(); // instance -> digest
     let mut instance_config_digest: HashMap<String, String> = HashMap::new(); // instance -> digest
-    for (name, binary_path, config_path, binary_digest, config_digest) in hash_results {
-        binary_digests.insert(binary_digest.clone(), binary_path);
-        config_digests.insert(config_digest.clone(), config_path);
-        instance_binary_digest.insert(name.clone(), binary_digest);
-        instance_config_digest.insert(name, config_digest);
+    for instance in &config.instances {
+        let binary_digest = path_to_digest[&instance.binary].clone();
+        let config_digest = path_to_digest[&instance.config].clone();
+        binary_digests.insert(binary_digest.clone(), instance.binary.clone());
+        config_digests.insert(config_digest.clone(), instance.config.clone());
+        instance_binary_digest.insert(instance.name.clone(), binary_digest);
+        instance_config_digest.insert(instance.name.clone(), config_digest);
     }
 
     // Upload unique binaries and configs to S3 (deduplicated by digest)

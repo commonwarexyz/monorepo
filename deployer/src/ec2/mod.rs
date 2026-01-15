@@ -449,8 +449,6 @@ cfg_if::cfg_if! {
             DuplicateInstanceName(String),
             #[error("instance not found: {0}")]
             InstanceNotFound(String),
-            #[error("file hashing failed: {0}")]
-            HashFile(String),
             #[error("symbolication failed: {0}")]
             Symbolication(String),
         }

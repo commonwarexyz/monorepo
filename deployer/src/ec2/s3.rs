@@ -242,29 +242,27 @@ pub async fn cache_and_presign(
     presign_url(client, bucket, key, expires_in).await
 }
 
-/// Computes the SHA256 hash of a file and returns it as a hex string
-fn hash_file_sync(path: &Path) -> Result<String, Error> {
-    let mut file = std::fs::File::open(path)?;
-    let file_size = file.metadata()?.len() as usize;
-    let buffer_size = file_size.min(MAX_HASH_BUFFER_SIZE);
-    let mut hasher = Sha256::new();
-    let mut buffer = vec![0u8; buffer_size];
-    loop {
-        let bytes_read = file.read(&mut buffer)?;
-        if bytes_read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..bytes_read]);
-    }
-    Ok(hasher.finalize().to_string())
-}
-
-/// Computes the SHA256 hash of a file asynchronously using a blocking thread pool
+/// Computes the SHA256 hash of a file and returns it as a hex string.
+/// Uses spawn_blocking internally to avoid blocking the async runtime.
 pub async fn hash_file(path: &Path) -> Result<String, Error> {
     let path = path.to_path_buf();
-    tokio::task::spawn_blocking(move || hash_file_sync(&path))
-        .await
-        .map_err(|e| Error::HashFile(e.to_string()))?
+    tokio::task::spawn_blocking(move || {
+        let mut file = std::fs::File::open(&path)?;
+        let file_size = file.metadata()?.len() as usize;
+        let buffer_size = file_size.min(MAX_HASH_BUFFER_SIZE);
+        let mut hasher = Sha256::new();
+        let mut buffer = vec![0u8; buffer_size];
+        loop {
+            let bytes_read = file.read(&mut buffer)?;
+            if bytes_read == 0 {
+                break;
+            }
+            hasher.update(&buffer[..bytes_read]);
+        }
+        Ok(hasher.finalize().to_string())
+    })
+    .await
+    .map_err(|e| Error::Io(std::io::Error::other(e)))?
 }
 
 /// Generates a pre-signed URL for downloading an object from S3
