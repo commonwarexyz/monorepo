@@ -654,7 +654,7 @@ mod tests {
     use super::*;
     use bytes::BufMut;
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic, Blob, Runner, Storage};
+    use commonware_runtime::{deterministic, Blob, Metrics, Runner, Storage};
     use commonware_utils::{NZUsize, NZU16};
     use futures::{pin_mut, StreamExt};
     use std::num::NonZeroU16;
@@ -679,7 +679,7 @@ mod tests {
             };
             let index = 1u64;
             let data = 10;
-            let mut journal = Journal::init(context.clone(), cfg.clone())
+            let mut journal = Journal::init(context.with_label("first"), cfg.clone())
                 .await
                 .expect("Failed to initialize journal");
 
@@ -691,12 +691,12 @@ mod tests {
 
             // Check metrics
             let buffer = context.encode();
-            assert!(buffer.contains("tracked 1"));
+            assert!(buffer.contains("first_tracked 1"));
 
             // Drop and re-open the journal to simulate a restart
             journal.sync(index).await.expect("Failed to sync journal");
             drop(journal);
-            let journal = Journal::<_, i32>::init(context.clone(), cfg)
+            let journal = Journal::<_, i32>::init(context.with_label("second"), cfg)
                 .await
                 .expect("Failed to re-initialize journal");
 
@@ -721,7 +721,7 @@ mod tests {
 
             // Check metrics
             let buffer = context.encode();
-            assert!(buffer.contains("tracked 1"));
+            assert!(buffer.contains("second_tracked 1"));
         });
     }
 
@@ -742,7 +742,7 @@ mod tests {
             };
 
             // Initialize the journal
-            let mut journal = Journal::init(context.clone(), cfg.clone())
+            let mut journal = Journal::init(context.with_label("first"), cfg.clone())
                 .await
                 .expect("Failed to initialize journal");
 
@@ -758,12 +758,12 @@ mod tests {
 
             // Check metrics
             let buffer = context.encode();
-            assert!(buffer.contains("tracked 3"));
-            assert!(buffer.contains("synced_total 4"));
+            assert!(buffer.contains("first_tracked 3"));
+            assert!(buffer.contains("first_synced_total 4"));
 
             // Drop and re-open the journal to simulate a restart
             drop(journal);
-            let journal = Journal::init(context, cfg)
+            let journal = Journal::init(context.with_label("second"), cfg)
                 .await
                 .expect("Failed to re-initialize journal");
 
@@ -814,7 +814,7 @@ mod tests {
             };
 
             // Initialize the journal
-            let mut journal = Journal::init(context.clone(), cfg.clone())
+            let mut journal = Journal::init(context.with_label("first"), cfg.clone())
                 .await
                 .expect("Failed to initialize journal");
 
@@ -840,16 +840,16 @@ mod tests {
 
             // Check metrics
             let buffer = context.encode();
-            assert!(buffer.contains("pruned_total 2"));
+            assert!(buffer.contains("first_pruned_total 2"));
 
             // Prune again with a section less than the previous one, should be a no-op
             journal.prune(2).await.expect("Failed to no-op prune");
             let buffer = context.encode();
-            assert!(buffer.contains("pruned_total 2"));
+            assert!(buffer.contains("first_pruned_total 2"));
 
             // Drop and re-open the journal to simulate a restart
             drop(journal);
-            let mut journal = Journal::init(context.clone(), cfg.clone())
+            let mut journal = Journal::init(context.with_label("second"), cfg.clone())
                 .await
                 .expect("Failed to re-initialize journal");
 
@@ -1013,7 +1013,7 @@ mod tests {
 
             // First session: create and prune
             {
-                let mut journal = Journal::init(context.clone(), cfg.clone())
+                let mut journal = Journal::init(context.with_label("first"), cfg.clone())
                     .await
                     .expect("Failed to initialize journal");
 
@@ -1030,7 +1030,7 @@ mod tests {
 
             // Second session: verify oldest_retained_section is reset
             {
-                let journal = Journal::<_, i32>::init(context.clone(), cfg.clone())
+                let journal = Journal::<_, i32>::init(context.with_label("second"), cfg.clone())
                     .await
                     .expect("Failed to re-initialize journal");
 
@@ -1498,7 +1498,7 @@ mod tests {
             };
 
             // Initialize the journal
-            let mut journal = Journal::init(context.clone(), cfg.clone())
+            let mut journal = Journal::init(context.with_label("first"), cfg.clone())
                 .await
                 .expect("Failed to initialize journal");
 
@@ -1530,7 +1530,7 @@ mod tests {
             blob.sync().await.expect("Failed to sync blob");
 
             // Re-initialize the journal to simulate a restart
-            let journal = Journal::init(context, cfg)
+            let journal = Journal::init(context.with_label("second"), cfg)
                 .await
                 .expect("Failed to re-initialize journal");
 
@@ -2064,7 +2064,7 @@ mod tests {
                 buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(4096),
             };
-            let mut journal = Journal::init(context.clone(), cfg.clone())
+            let mut journal = Journal::init(context.with_label("first"), cfg.clone())
                 .await
                 .expect("Failed to initialize journal");
 
@@ -2095,7 +2095,7 @@ mod tests {
 
             // Drop and reopen to test replay
             drop(journal);
-            let journal = Journal::<_, LargeItem>::init(context.clone(), cfg.clone())
+            let journal = Journal::<_, LargeItem>::init(context.with_label("second"), cfg.clone())
                 .await
                 .expect("Failed to re-initialize journal");
 
@@ -2138,7 +2138,7 @@ mod tests {
                 buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
-            let mut journal = Journal::init(context.clone(), cfg.clone())
+            let mut journal = Journal::init(context.with_label("first"), cfg.clone())
                 .await
                 .expect("Failed to initialize journal");
 
@@ -2177,7 +2177,7 @@ mod tests {
 
             // Drop and reopen to test replay
             drop(journal);
-            let journal = Journal::<_, i32>::init(context.clone(), cfg.clone())
+            let journal = Journal::<_, i32>::init(context.with_label("second"), cfg.clone())
                 .await
                 .expect("Failed to re-initialize journal");
 
@@ -2257,7 +2257,7 @@ mod tests {
                 buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
-            let mut journal = Journal::init(context.clone(), cfg.clone())
+            let mut journal = Journal::init(context.with_label("first"), cfg.clone())
                 .await
                 .expect("Failed to initialize journal");
 
@@ -2285,7 +2285,7 @@ mod tests {
 
             // Drop and reopen to test replay
             drop(journal);
-            let journal = Journal::<_, i32>::init(context.clone(), cfg.clone())
+            let journal = Journal::<_, i32>::init(context.with_label("second"), cfg.clone())
                 .await
                 .expect("Failed to re-initialize journal");
 
@@ -2350,7 +2350,7 @@ mod tests {
                 buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(4096),
             };
-            let mut journal = Journal::init(context.clone(), cfg.clone())
+            let mut journal = Journal::init(context.with_label("first"), cfg.clone())
                 .await
                 .expect("Failed to initialize journal");
 
@@ -2377,7 +2377,7 @@ mod tests {
 
             // Drop and reopen to test replay
             drop(journal);
-            let journal = Journal::<_, ExactItem>::init(context.clone(), cfg.clone())
+            let journal = Journal::<_, ExactItem>::init(context.with_label("second"), cfg.clone())
                 .await
                 .expect("Failed to re-initialize journal");
 
