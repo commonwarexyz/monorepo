@@ -201,8 +201,11 @@ impl<H: Hasher> Tree<H> {
     /// proofs when proving multiple consecutive elements.
     pub fn range_proof(&self, start: u32, end: u32) -> Result<Proof<H::Digest>, Error> {
         // For empty trees, return an empty proof
-        if self.empty && start == 0 && end == 0 {
-            return Ok(Proof::default());
+        if self.empty {
+            if start == 0 && end == 0 {
+                return Ok(Proof::default());
+            }
+            return Err(Error::InvalidPosition(start));
         }
 
         // Validate range bounds
@@ -210,8 +213,25 @@ impl<H: Hasher> Tree<H> {
             return Err(Error::InvalidPosition(start));
         }
 
-        // Delegate to multi_proof with the range iterator
-        self.multi_proof(start..=end)
+        let leaf_count = self.levels.first().len().get() as u32;
+        if start >= leaf_count {
+            return Err(Error::InvalidPosition(start));
+        }
+        if end >= leaf_count {
+            return Err(Error::InvalidPosition(end));
+        }
+
+        // Compute required siblings without enumerating every leaf in the range.
+        let sibling_positions = siblings_required_for_range_proof(leaf_count, start, end)?;
+        let siblings: Vec<H::Digest> = sibling_positions
+            .iter()
+            .map(|&(level, index)| self.levels[level][index])
+            .collect();
+
+        Ok(Proof {
+            leaf_count,
+            siblings,
+        })
     }
 
     /// Generates a Merkle proof for multiple non-contiguous leaves at the given `positions`.
@@ -391,6 +411,51 @@ fn siblings_required_for_multi_proof(
     Ok(sibling_positions)
 }
 
+/// Returns the sorted, deduplicated positions of siblings required to prove
+/// inclusion of a contiguous range of leaves from `start` to `end` (inclusive).
+fn siblings_required_for_range_proof(
+    leaf_count: u32,
+    start: u32,
+    end: u32,
+) -> Result<BTreeSet<(usize, usize)>, Error> {
+    if leaf_count == 0 {
+        return Err(Error::NoLeaves);
+    }
+    if start > end {
+        return Err(Error::InvalidPosition(start));
+    }
+    if start >= leaf_count {
+        return Err(Error::InvalidPosition(start));
+    }
+    if end >= leaf_count {
+        return Err(Error::InvalidPosition(end));
+    }
+
+    let mut sibling_positions = BTreeSet::new();
+    let levels_count = levels_in_tree(leaf_count);
+    let mut level_start = start as usize;
+    let mut level_end = end as usize;
+    let mut level_size = leaf_count as usize;
+
+    for level in 0..levels_count - 1 {
+        if level_start % 2 == 1 {
+            sibling_positions.insert((level, level_start - 1));
+        }
+        if level_end.is_multiple_of(2) {
+            let right = level_end + 1;
+            if right < level_size {
+                sibling_positions.insert((level, right));
+            }
+        }
+
+        level_start /= 2;
+        level_end /= 2;
+        level_size = level_size.div_ceil(2);
+    }
+
+    Ok(sibling_positions)
+}
+
 impl<D: Digest> Proof<D> {
     /// Verifies that a given `leaf` at `position` is included in a Binary Merkle Tree
     /// with `root` using the provided `hasher`.
@@ -534,7 +599,7 @@ impl<D: Digest> Proof<D> {
                 let parent_pos = pos / 2;
 
                 // Determine if we have the left or right child
-                let (left, right) = if pos % 2 == 0 {
+                let (left, right) = if pos.is_multiple_of(2) {
                     // We are the LEFT child
                     let left = digest;
 
@@ -613,6 +678,16 @@ impl<D: Digest> Proof<D> {
         // For empty trees, only position 0 with empty leaves is valid
         if leaves.is_empty() && position != 0 {
             return Err(Error::InvalidPosition(position));
+        }
+        if !leaves.is_empty() {
+            let leaves_len =
+                u32::try_from(leaves.len()).map_err(|_| Error::InvalidPosition(position))?;
+            let end = position
+                .checked_add(leaves_len - 1)
+                .ok_or(Error::InvalidPosition(position))?;
+            if end >= self.leaf_count {
+                return Err(Error::InvalidPosition(end));
+            }
         }
 
         // Convert to format expected by verify_multi_inclusion
