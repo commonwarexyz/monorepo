@@ -250,7 +250,6 @@ pub fn count_running_tasks(metrics: &impl crate::Metrics, prefix: &str) -> usize
         .count()
 }
 
-#[cfg(any(test, feature = "test-utils"))]
 /// Find duplicate metric names in the encoded Prometheus metrics output.
 ///
 /// Parses the Prometheus text format and returns a vector of metric names
@@ -524,17 +523,26 @@ mod tests {
                 duplicates.is_empty(),
                 "different labels should not conflict"
             );
-
-            // Register another metric under "a" (duplicate)
-            let c3 = Counter::<u64>::default();
-            context.with_label("a").register("test", "help", c3);
-
-            let duplicates = find_duplicate_metrics(&context.encode());
-            assert_eq!(
-                duplicates,
-                vec!["a_test"],
-                "same label should create duplicate"
-            );
         });
+
+        // Test duplicate detection with pre-constructed string
+        // (can't register actual duplicates since runtime catches them at shutdown)
+        let metrics_with_duplicates = r#"
+# HELP a_test help
+# TYPE a_test counter
+a_test 1
+# HELP b_test help
+# TYPE b_test counter
+b_test 1
+# HELP a_test help
+# TYPE a_test counter
+a_test 2
+"#;
+        let duplicates = find_duplicate_metrics(metrics_with_duplicates);
+        assert_eq!(
+            duplicates,
+            vec!["a_test"],
+            "same metric name should be detected as duplicate"
+        );
     }
 }

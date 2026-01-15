@@ -605,6 +605,16 @@ impl Runner {
         // Extract the executor from the Arc
         let executor = Arc::into_inner(executor).expect("executor still has strong references");
 
+        // Check for duplicate metrics
+        let mut buffer = String::new();
+        encode(&mut buffer, &executor.registry.lock().unwrap()).expect("encoding failed");
+        let duplicates = crate::find_duplicate_metrics(&buffer);
+        assert!(
+            duplicates.is_empty(),
+            "found duplicate metric names: {:?}",
+            duplicates
+        );
+
         // Construct a checkpoint that can be used to restart the runtime
         let checkpoint = Checkpoint {
             cycle: executor.cycle,

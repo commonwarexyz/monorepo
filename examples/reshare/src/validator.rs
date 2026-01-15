@@ -179,7 +179,7 @@ mod test {
     use commonware_parallel::Sequential;
     use commonware_runtime::{
         deterministic::{self, Runner},
-        Clock, Handle, Metrics, Quota, Runner as _, Spawner,
+        Clock, Handle, Quota, Runner as _, Spawner,
     };
     use commonware_utils::{union, N3f1, TryCollect};
     use futures::{
@@ -757,12 +757,7 @@ mod test {
         fn run(self) -> anyhow::Result<PlanResult> {
             // Multiply by total to ensure all participants report each failed epoch
             let expected_failures = self.failures.len() as u64 * self.total as u64;
-            let (result, metrics) = Runner::seeded(self.seed).start(|ctx| async move {
-                let result = self.run_inner(ctx.clone()).await;
-                let metrics = ctx.encode();
-                (result, metrics)
-            });
-            let result = result?;
+            let result = Runner::seeded(self.seed).start(|ctx| self.run_inner(ctx))?;
             info!(
                 failures = result.failures,
                 expected_failures, "test completed"
@@ -774,13 +769,6 @@ mod test {
                     result.failures
                 ));
             }
-
-            // Check for duplicate metrics at the end of every test
-            let duplicates = commonware_runtime::find_duplicate_metrics(&metrics);
-            if !duplicates.is_empty() {
-                return Err(anyhow!("found duplicate metric names: {:?}", duplicates));
-            }
-
             Ok(result)
         }
     }
