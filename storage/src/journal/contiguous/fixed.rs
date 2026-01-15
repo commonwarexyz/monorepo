@@ -738,7 +738,7 @@ mod tests {
         executor.start(|context| async move {
             // Initialize the journal, allowing a max of 7 items per blob.
             let cfg = test_cfg(ITEMS_PER_BLOB);
-            let mut journal = Journal::init(context.clone(), cfg.clone())
+            let mut journal = Journal::init(context.with_label("first"), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
 
@@ -802,7 +802,7 @@ mod tests {
             blob.sync().await.expect("Failed to sync blob");
 
             // Re-initialize the journal to simulate a restart
-            let journal = Journal::init(context.clone(), cfg.clone())
+            let journal = Journal::init(context.with_label("second"), cfg.clone())
                 .await
                 .expect("Failed to re-initialize journal");
 
@@ -849,7 +849,7 @@ mod tests {
         executor.start(|context| async move {
             // Initialize the journal, allowing a max of 7 items per blob.
             let cfg = test_cfg(ITEMS_PER_BLOB);
-            let mut journal = Journal::init(context.clone(), cfg.clone())
+            let mut journal = Journal::init(context.with_label("first"), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
 
@@ -877,7 +877,7 @@ mod tests {
 
             // The segmented journal will trim the incomplete blob on init, resulting in the blob
             // missing one item. This should be detected as corruption during replay.
-            let journal = Journal::<_, Digest>::init(context.clone(), cfg.clone())
+            let journal = Journal::<_, Digest>::init(context.with_label("second"), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
 
@@ -905,7 +905,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(NZU64!(2));
-            let mut journal = Journal::init(context.clone(), cfg.clone())
+            let mut journal = Journal::init(context.with_label("first"), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
 
@@ -924,7 +924,7 @@ mod tests {
                 .expect("failed to remove blob");
 
             // Init won't detect the corruption.
-            let result = Journal::<_, Digest>::init(context.clone(), cfg.clone())
+            let result = Journal::<_, Digest>::init(context.with_label("second"), cfg.clone())
                 .await
                 .expect("init shouldn't fail");
 
@@ -953,7 +953,7 @@ mod tests {
         executor.start(|context| async move {
             // Initialize the journal, allowing a max of 7 items per blob.
             let cfg = test_cfg(ITEMS_PER_BLOB);
-            let mut journal = Journal::init(context.clone(), cfg.clone())
+            let mut journal = Journal::init(context.with_label("first"), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
 
@@ -978,7 +978,7 @@ mod tests {
             blob.resize(size - 1).await.expect("Failed to corrupt blob");
             blob.sync().await.expect("Failed to sync blob");
 
-            let journal = Journal::<_, Digest>::init(context.clone(), cfg.clone())
+            let journal = Journal::<_, Digest>::init(context.with_label("second"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -1065,7 +1065,7 @@ mod tests {
         executor.start(|context| async move {
             // Initialize the journal, allowing a max of 3 items per blob.
             let cfg = test_cfg(NZU64!(3));
-            let mut journal = Journal::init(context.clone(), cfg.clone())
+            let mut journal = Journal::init(context.with_label("first"), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
             for i in 0..5 {
@@ -1088,7 +1088,7 @@ mod tests {
             blob.sync().await.expect("Failed to sync blob");
 
             // Re-initialize the journal to simulate a restart
-            let journal = Journal::<_, Digest>::init(context.clone(), cfg.clone())
+            let journal = Journal::<_, Digest>::init(context.with_label("second"), cfg.clone())
                 .await
                 .expect("Failed to re-initialize journal");
             // The truncation invalidates the last page, which is removed. This loses one item.
@@ -1100,7 +1100,7 @@ mod tests {
                 .remove(&cfg.partition, Some(&1u64.to_be_bytes()))
                 .await
                 .expect("Failed to remove blob");
-            let journal = Journal::<_, Digest>::init(context.clone(), cfg.clone())
+            let journal = Journal::<_, Digest>::init(context.with_label("third"), cfg.clone())
                 .await
                 .expect("Failed to re-initialize journal");
             // Only the first blob remains
@@ -1116,7 +1116,7 @@ mod tests {
         executor.start(|context| async move {
             // Initialize the journal, allowing a max of 10 items per blob.
             let cfg = test_cfg(NZU64!(10));
-            let mut journal = Journal::init(context.clone(), cfg.clone())
+            let mut journal = Journal::init(context.with_label("first"), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
             // Add only a single item
@@ -1138,7 +1138,7 @@ mod tests {
             blob.sync().await.expect("Failed to sync blob");
 
             // Re-initialize the journal to simulate a restart
-            let mut journal = Journal::<_, Digest>::init(context.clone(), cfg.clone())
+            let mut journal = Journal::<_, Digest>::init(context.with_label("second"), cfg.clone())
                 .await
                 .expect("Failed to re-initialize journal");
 
@@ -1163,7 +1163,7 @@ mod tests {
         executor.start(|context| async move {
             // Initialize the journal, allowing a max of 10 items per blob.
             let cfg = test_cfg(NZU64!(10));
-            let mut journal = Journal::init(context.clone(), cfg.clone())
+            let mut journal = Journal::init(context.with_label("first"), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
 
@@ -1188,7 +1188,7 @@ mod tests {
             blob.sync().await.expect("Failed to sync blob");
 
             // Re-initialize the journal to simulate a restart
-            let mut journal = Journal::<_, Digest>::init(context.clone(), cfg.clone())
+            let mut journal = Journal::<_, Digest>::init(context.with_label("second"), cfg.clone())
                 .await
                 .expect("Failed to re-initialize journal");
 
@@ -1322,7 +1322,7 @@ mod tests {
         executor.start(|context: Context| async move {
             // Use a small items_per_blob to keep the test focused on a single blob
             let cfg = test_cfg(NZU64!(100));
-            let mut journal = Journal::init(context.clone(), cfg.clone())
+            let mut journal = Journal::init(context.with_label("first"), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
 
@@ -1362,7 +1362,7 @@ mod tests {
             blob.sync().await.expect("Failed to sync blob");
 
             // Re-initialize the journal - it should recover by truncating to valid data
-            let journal = Journal::<_, Digest>::init(context.clone(), cfg.clone())
+            let journal = Journal::<_, Digest>::init(context.with_label("second"), cfg.clone())
                 .await
                 .expect("Failed to re-initialize journal after page truncation");
 
