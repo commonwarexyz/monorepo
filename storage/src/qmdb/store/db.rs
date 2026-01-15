@@ -653,7 +653,9 @@ mod test {
             dirty.update(d1, v1).await.unwrap();
             drop(dirty);
 
-            let db = create_test_store(context.with_label("store_1")).await.into_dirty();
+            let db = create_test_store(context.with_label("store_1"))
+                .await
+                .into_dirty();
             assert_eq!(db.op_count(), 1);
 
             // Test calling commit on an empty db which should make it (durably) non-empty.
@@ -665,7 +667,9 @@ mod test {
             assert!(matches!(db.prune(db.inactivity_floor_loc()).await, Ok(())));
             assert_eq!(db.get_metadata().await.unwrap(), Some(metadata.clone()));
 
-            let mut db = create_test_store(context.with_label("store_2")).await.into_dirty();
+            let mut db = create_test_store(context.with_label("store_2"))
+                .await
+                .into_dirty();
             assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
 
             // Confirm the inactivity floor doesn't fall endlessly behind with multiple commits on a

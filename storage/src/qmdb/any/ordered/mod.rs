@@ -1550,7 +1550,9 @@ mod test {
             let val3 = Sha256::fill(3u8);
 
             // Delete the previous key of a newly created key.
-            let mut db = open_variable_db(context.with_label("first")).await.into_mutable();
+            let mut db = open_variable_db(context.with_label("first"))
+                .await
+                .into_mutable();
             db.update(key1.clone(), val1).await.unwrap();
             db.update(key3.clone(), val3).await.unwrap();
             let mut db = db.commit(None).await.unwrap().0.into_mutable();
@@ -1571,7 +1573,9 @@ mod test {
             db.into_merkleized().destroy().await.unwrap();
 
             // Create a key that becomes the previous key of a concurrently deleted key.
-            let mut db = open_variable_db(context.with_label("second")).await.into_mutable();
+            let mut db = open_variable_db(context.with_label("second"))
+                .await
+                .into_mutable();
             db.update(key1.clone(), val1).await.unwrap();
             db.update(key3.clone(), val3).await.unwrap();
             let mut db = db.commit(None).await.unwrap().0.into_mutable();

@@ -19,9 +19,13 @@ pub mod tests {
     use commonware_utils::{test_rng, Array};
     use core::{fmt::Debug, future::Future};
     use rand::Rng;
-    use std::collections::HashSet;
-    use std::sync::atomic::{AtomicU64, Ordering};
-    use std::sync::Arc;
+    use std::{
+        collections::HashSet,
+        sync::{
+            atomic::{AtomicU64, Ordering},
+            Arc,
+        },
+    };
 
     pub trait TestKey: Array + Copy + Send + Sync {
         fn from_seed(seed: u8) -> Self;

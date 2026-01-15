@@ -387,7 +387,9 @@ pub(super) mod test {
     fn test_any_fixed_db_historical_proof_edge_cases() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut db = create_test_db(context.with_label("first")).await.into_mutable();
+            let mut db = create_test_db(context.with_label("first"))
+                .await
+                .into_mutable();
             let ops = create_test_ops(50);
             apply_ops(&mut db, ops.clone()).await;
             let db = db.commit(None).await.unwrap().0.into_merkleized();
@@ -410,7 +412,9 @@ pub(super) mod test {
             assert_eq!(single_ops.len(), 1);
 
             // Create historical database with single operation without committing it.
-            let mut single_db = create_test_db(context.with_label("second")).await.into_mutable();
+            let mut single_db = create_test_db(context.with_label("second"))
+                .await
+                .into_mutable();
             apply_ops(&mut single_db, ops[0..1].to_vec()).await;
             let single_db = single_db.into_merkleized();
             let single_root = single_db.root();
@@ -463,7 +467,9 @@ pub(super) mod test {
     fn test_any_fixed_db_historical_proof_different_historical_sizes() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut db = create_test_db(context.with_label("main")).await.into_mutable();
+            let mut db = create_test_db(context.with_label("main"))
+                .await
+                .into_mutable();
             let ops = create_test_ops(100);
             apply_ops(&mut db, ops.clone()).await;
             let db = db.commit(None).await.unwrap().0.into_merkleized();
@@ -483,10 +489,9 @@ pub(super) mod test {
                 assert_eq!(historical_proof.size, Position::try_from(end_loc).unwrap());
 
                 // Create reference database at the given historical size
-                let mut ref_db =
-                    create_test_db(context.with_label(&format!("ref_{}", *end_loc)))
-                        .await
-                        .into_mutable();
+                let mut ref_db = create_test_db(context.with_label(&format!("ref_{}", *end_loc)))
+                    .await
+                    .into_mutable();
                 apply_ops(&mut ref_db, ops[0..(*end_loc - 1) as usize].to_vec()).await;
                 let ref_db = ref_db.into_merkleized();
 

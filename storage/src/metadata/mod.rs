@@ -104,10 +104,9 @@ mod tests {
                 partition: "test".to_string(),
                 codec_config: ((0..).into(), ()),
             };
-            let mut metadata =
-                Metadata::<_, U64, Vec<u8>>::init(context.with_label("first"), cfg)
-                    .await
-                    .unwrap();
+            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.with_label("first"), cfg)
+                .await
+                .unwrap();
 
             // Get a key that doesn't exist
             let key = U64::new(42);
@@ -149,10 +148,9 @@ mod tests {
                 partition: "test".to_string(),
                 codec_config: ((0..).into(), ()),
             };
-            let mut metadata =
-                Metadata::<_, U64, Vec<u8>>::init(context.with_label("second"), cfg)
-                    .await
-                    .unwrap();
+            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.with_label("second"), cfg)
+                .await
+                .unwrap();
 
             // Check metrics
             let buffer = context.encode();
@@ -187,10 +185,9 @@ mod tests {
                 partition: "test".to_string(),
                 codec_config: ((0..).into(), ()),
             };
-            let mut metadata =
-                Metadata::<_, U64, Vec<u8>>::init(context.with_label("first"), cfg)
-                    .await
-                    .unwrap();
+            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.with_label("first"), cfg)
+                .await
+                .unwrap();
 
             let key = U64::new(42);
 
@@ -222,10 +219,9 @@ mod tests {
                 partition: "test".to_string(),
                 codec_config: ((0..).into(), ()),
             };
-            let mut metadata =
-                Metadata::<_, U64, Vec<u8>>::init(context.with_label("second"), cfg)
-                    .await
-                    .unwrap();
+            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.with_label("second"), cfg)
+                .await
+                .unwrap();
 
             // After restart, put still returns previous value
             let previous = metadata.put(key.clone(), b"fourth".to_vec());
@@ -245,10 +241,9 @@ mod tests {
                 partition: "test".to_string(),
                 codec_config: ((0..).into(), ()),
             };
-            let mut metadata =
-                Metadata::<_, U64, Vec<u8>>::init(context.with_label("first"), cfg)
-                    .await
-                    .unwrap();
+            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.with_label("first"), cfg)
+                .await
+                .unwrap();
 
             // Put a key
             let key = U64::new(42);
@@ -286,10 +281,9 @@ mod tests {
                 partition: "test".to_string(),
                 codec_config: ((0..).into(), ()),
             };
-            let mut metadata =
-                Metadata::<_, U64, Vec<u8>>::init(context.with_label("second"), cfg)
-                    .await
-                    .unwrap();
+            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.with_label("second"), cfg)
+                .await
+                .unwrap();
 
             // Check metrics
             let buffer = context.encode();
@@ -321,10 +315,9 @@ mod tests {
                 partition: "test".to_string(),
                 codec_config: ((0..).into(), ()),
             };
-            let metadata =
-                Metadata::<_, U64, Vec<u8>>::init(context.with_label("third"), cfg)
-                    .await
-                    .unwrap();
+            let metadata = Metadata::<_, U64, Vec<u8>>::init(context.with_label("third"), cfg)
+                .await
+                .unwrap();
 
             // Check metrics
             let buffer = context.encode();
@@ -352,10 +345,9 @@ mod tests {
                 partition: "test".to_string(),
                 codec_config: ((0..).into(), ()),
             };
-            let mut metadata =
-                Metadata::<_, U64, Vec<u8>>::init(context.with_label("first"), cfg)
-                    .await
-                    .unwrap();
+            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.with_label("first"), cfg)
+                .await
+                .unwrap();
 
             // Put a key
             let key = U64::new(42);
@@ -386,10 +378,9 @@ mod tests {
                 partition: "test".to_string(),
                 codec_config: ((0..).into(), ()),
             };
-            let metadata =
-                Metadata::<_, U64, Vec<u8>>::init(context.with_label("second"), cfg)
-                    .await
-                    .unwrap();
+            let metadata = Metadata::<_, U64, Vec<u8>>::init(context.with_label("second"), cfg)
+                .await
+                .unwrap();
 
             // Get the key (falls back to non-corrupt)
             let value = metadata.get(&key).unwrap();
@@ -409,10 +400,9 @@ mod tests {
                 partition: "test".to_string(),
                 codec_config: ((0..).into(), ()),
             };
-            let mut metadata =
-                Metadata::<_, U64, Vec<u8>>::init(context.with_label("first"), cfg)
-                    .await
-                    .unwrap();
+            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.with_label("first"), cfg)
+                .await
+                .unwrap();
 
             // Put a key
             let key = U64::new(42);
@@ -446,10 +436,9 @@ mod tests {
                 partition: "test".to_string(),
                 codec_config: ((0..).into(), ()),
             };
-            let metadata =
-                Metadata::<_, U64, Vec<u8>>::init(context.with_label("second"), cfg)
-                    .await
-                    .unwrap();
+            let metadata = Metadata::<_, U64, Vec<u8>>::init(context.with_label("second"), cfg)
+                .await
+                .unwrap();
 
             // Get the key (falls back to non-corrupt)
             let value = metadata.get(&key);
@@ -508,10 +497,9 @@ mod tests {
                 partition: "test".to_string(),
                 codec_config: ((0..).into(), ()),
             };
-            let metadata =
-                Metadata::<_, U64, Vec<u8>>::init(context.with_label("second"), cfg)
-                    .await
-                    .unwrap();
+            let metadata = Metadata::<_, U64, Vec<u8>>::init(context.with_label("second"), cfg)
+                .await
+                .unwrap();
 
             // Get the key (falls back to non-corrupt)
             let value = metadata.get(&key).unwrap();
@@ -564,10 +552,9 @@ mod tests {
                 partition: "test".to_string(),
                 codec_config: ((0..).into(), ()),
             };
-            let metadata =
-                Metadata::<_, U64, Vec<u8>>::init(context.with_label("second"), cfg)
-                    .await
-                    .unwrap();
+            let metadata = Metadata::<_, U64, Vec<u8>>::init(context.with_label("second"), cfg)
+                .await
+                .unwrap();
 
             // Get the key (falls back to non-corrupt)
             let value = metadata.get(&key).unwrap();
@@ -823,10 +810,9 @@ mod tests {
 
             // Restart the metadata store
             drop(metadata);
-            let metadata =
-                Metadata::<_, U64, Vec<u8>>::init(context.with_label("second"), cfg)
-                    .await
-                    .unwrap();
+            let metadata = Metadata::<_, U64, Vec<u8>>::init(context.with_label("second"), cfg)
+                .await
+                .unwrap();
 
             // Verify the change persisted
             let value = metadata.get(&U64::new(1)).unwrap();
@@ -871,10 +857,9 @@ mod tests {
 
             // Restart the metadata store
             drop(metadata);
-            let metadata =
-                Metadata::<_, U64, Vec<u8>>::init(context.with_label("second"), cfg)
-                    .await
-                    .unwrap();
+            let metadata = Metadata::<_, U64, Vec<u8>>::init(context.with_label("second"), cfg)
+                .await
+                .unwrap();
 
             // Verify the changes persisted
             let value = metadata.get(&key).unwrap();
@@ -995,10 +980,9 @@ mod tests {
 
             // Restart the metadata store
             drop(metadata);
-            let metadata =
-                Metadata::<_, U64, Vec<u8>>::init(context.with_label("second"), cfg)
-                    .await
-                    .unwrap();
+            let metadata = Metadata::<_, U64, Vec<u8>>::init(context.with_label("second"), cfg)
+                .await
+                .unwrap();
 
             // Verify the changes persisted
             let value = metadata.get(&U64::new(0)).unwrap();
@@ -1042,10 +1026,9 @@ mod tests {
 
             // Restart the metadata store
             drop(metadata);
-            let mut metadata =
-                Metadata::<_, U64, Vec<u8>>::init(context.with_label("second"), cfg)
-                    .await
-                    .unwrap();
+            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.with_label("second"), cfg)
+                .await
+                .unwrap();
 
             // Verify the changes persisted
             assert!(metadata.get(&U64::new(1)).is_none());
@@ -1208,10 +1191,9 @@ mod tests {
                 partition: "test".to_string(),
                 codec_config: ((0..).into(), ()),
             };
-            let mut metadata =
-                Metadata::<_, U64, Vec<u8>>::init(context.with_label("first"), cfg)
-                    .await
-                    .unwrap();
+            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.with_label("first"), cfg)
+                .await
+                .unwrap();
 
             // Add some keys with different prefixes
             metadata.put(U64::new(0x1000), b"value1".to_vec());
@@ -1248,10 +1230,9 @@ mod tests {
                 partition: "test".to_string(),
                 codec_config: ((0..).into(), ()),
             };
-            let mut metadata =
-                Metadata::<_, U64, Vec<u8>>::init(context.with_label("second"), cfg)
-                    .await
-                    .unwrap();
+            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.with_label("second"), cfg)
+                .await
+                .unwrap();
 
             // Verify keys are still removed after restart
             assert!(metadata.get(&U64::new(0x1000)).is_none());

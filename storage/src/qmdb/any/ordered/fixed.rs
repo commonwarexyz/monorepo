@@ -681,7 +681,9 @@ mod test {
     fn test_ordered_any_fixed_db_historical_proof_edge_cases() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut db = create_test_db(context.with_label("first")).await.into_mutable();
+            let mut db = create_test_db(context.with_label("first"))
+                .await
+                .into_mutable();
             let ops = create_test_ops(50);
             apply_ops(&mut db, ops.clone()).await;
             let (db, _) = db.commit(None).await.unwrap();
@@ -705,7 +707,9 @@ mod test {
             assert_eq!(single_ops.len(), 1);
 
             // Create historical database with single operation
-            let mut single_db = create_test_db(context.with_label("second")).await.into_mutable();
+            let mut single_db = create_test_db(context.with_label("second"))
+                .await
+                .into_mutable();
             apply_ops(&mut single_db, ops[0..1].to_vec()).await;
             // Don't commit - this changes the root due to commit operations
             let single_db = single_db.into_merkleized();

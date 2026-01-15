@@ -39,8 +39,10 @@ use commonware_runtime::{Clock, Metrics, Storage as RStorage};
 use commonware_utils::Array;
 use core::ops::Range;
 use futures::stream::Stream;
-use std::num::NonZeroU64;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::{
+    num::NonZeroU64,
+    sync::atomic::{AtomicU64, Ordering},
+};
 
 /// A key-value QMDB based on an MMR over its log of operations, supporting key exclusion proofs and
 /// authentication of whether a currently has a specific value.
@@ -318,7 +320,11 @@ impl<
     /// Destroy the db, removing all data from disk.
     pub async fn destroy(self) -> Result<(), Error> {
         // Clean up bitmap metadata partition.
-        CleanBitMap::<H::Digest, N>::destroy(self.context.with_label("bitmap_destroy"), &self.bitmap_metadata_partition).await?;
+        CleanBitMap::<H::Digest, N>::destroy(
+            self.context.with_label("bitmap_destroy"),
+            &self.bitmap_metadata_partition,
+        )
+        .await?;
 
         // Clean up Any components (MMR and log).
         self.any.destroy().await
@@ -1108,7 +1114,9 @@ pub mod test {
         // confirm that the end state of the db matches that of an identically updated hashmap.
         const ELEMENTS: u64 = 1000;
         executor.start(|context| async move {
-            let mut db = open_db(context.with_label("first"), "build_big").await.into_mutable();
+            let mut db = open_db(context.with_label("first"), "build_big")
+                .await
+                .into_mutable();
 
             let mut map = HashMap::<Digest, Digest>::default();
             for i in 0u64..ELEMENTS {
@@ -1564,7 +1572,9 @@ pub mod test {
         executor.start(|mut context| async move {
             let partition = "build_random";
             let rng_seed = context.next_u64();
-            let db = open_db(context.with_label("first"), partition).await.into_mutable();
+            let db = open_db(context.with_label("first"), partition)
+                .await
+                .into_mutable();
             let db = apply_random_ops(ELEMENTS, true, rng_seed, db)
                 .await
                 .unwrap();
@@ -1642,7 +1652,9 @@ pub mod test {
         executor.start(|mut context| async move {
             let partition = "build_random_fail_commit";
             let rng_seed = context.next_u64();
-            let db = open_db(context.with_label("first"), partition).await.into_mutable();
+            let db = open_db(context.with_label("first"), partition)
+                .await
+                .into_mutable();
             let db = apply_random_ops(ELEMENTS, true, rng_seed, db)
                 .await
                 .unwrap();
@@ -1716,15 +1728,20 @@ pub mod test {
 
             let db_config_pruning = current_db_config("pruning_test");
 
-            let mut db_no_pruning =
-                CleanCurrentTest::init(context.with_label("no_pruning_first"), db_config_no_pruning.clone())
-                    .await
-                    .unwrap()
-                    .into_mutable();
-            let mut db_pruning = CleanCurrentTest::init(context.with_label("pruning_first"), db_config_pruning.clone())
-                .await
-                .unwrap()
-                .into_mutable();
+            let mut db_no_pruning = CleanCurrentTest::init(
+                context.with_label("no_pruning_first"),
+                db_config_no_pruning.clone(),
+            )
+            .await
+            .unwrap()
+            .into_mutable();
+            let mut db_pruning = CleanCurrentTest::init(
+                context.with_label("pruning_first"),
+                db_config_pruning.clone(),
+            )
+            .await
+            .unwrap()
+            .into_mutable();
 
             // Apply identical operations to both databases, but only prune one.
             const NUM_OPERATIONS: u64 = 1000;
@@ -1767,12 +1784,16 @@ pub mod test {
             drop(db_pruning);
 
             // Restart both databases
-            let db_no_pruning = CleanCurrentTest::init(context.with_label("no_pruning_second"), db_config_no_pruning)
-                .await
-                .unwrap();
-            let db_pruning = CleanCurrentTest::init(context.with_label("pruning_second"), db_config_pruning)
-                .await
-                .unwrap();
+            let db_no_pruning = CleanCurrentTest::init(
+                context.with_label("no_pruning_second"),
+                db_config_no_pruning,
+            )
+            .await
+            .unwrap();
+            let db_pruning =
+                CleanCurrentTest::init(context.with_label("pruning_second"), db_config_pruning)
+                    .await
+                    .unwrap();
             assert_eq!(
                 db_no_pruning.inactivity_floor_loc(),
                 db_pruning.inactivity_floor_loc()

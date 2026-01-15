@@ -1018,10 +1018,9 @@ mod tests {
             drop(store);
 
             // Reopen the store
-            let mut store =
-                Ordinal::<_, FixedBytes<128>>::init(context.with_label("second"), cfg)
-                    .await
-                    .expect("Failed to initialize store");
+            let mut store = Ordinal::<_, FixedBytes<128>>::init(context.with_label("second"), cfg)
+                .await
+                .expect("Failed to initialize store");
 
             // Verify all values are still there after restart
             for (index, value) in &values {

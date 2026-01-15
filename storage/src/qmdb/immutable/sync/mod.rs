@@ -279,7 +279,9 @@ mod tests {
     fn test_sync(#[case] target_db_ops: usize, #[case] fetch_batch_size: NonZeroU64) {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
-            let mut target_db = create_test_db(context.with_label("target")).await.into_mutable();
+            let mut target_db = create_test_db(context.with_label("target"))
+                .await
+                .into_mutable();
             let target_db_ops = create_test_ops(target_db_ops);
             apply_ops(&mut target_db, target_db_ops.clone()).await;
             let metadata = Some(Sha256::fill(1));

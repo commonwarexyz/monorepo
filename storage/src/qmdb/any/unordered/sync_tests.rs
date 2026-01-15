@@ -238,7 +238,8 @@ where
 
         // Reopen and verify state persisted
         drop(synced_db);
-        let reopened_db = H::init_db_with_config(client_context.with_label("reopened"), db_config).await;
+        let reopened_db =
+            H::init_db_with_config(client_context.with_label("reopened"), db_config).await;
         assert_eq!(reopened_db.op_count(), final_op_count);
         assert_eq!(reopened_db.inactivity_floor_loc(), final_inactivity_floor);
         assert_eq!(reopened_db.root(), final_root);
@@ -420,7 +421,8 @@ where
 
         // Create two databases with their own configs
         let target_config = H::config(&context.next_u64().to_string());
-        let mut target_db = H::init_db_with_config(context.with_label("target"), target_config).await;
+        let mut target_db =
+            H::init_db_with_config(context.with_label("target"), target_config).await;
         let sync_config = H::config(&context.next_u64().to_string());
         let client_context = context.with_label("client");
         let mut sync_db =
@@ -982,7 +984,8 @@ where
 
         // Re-open the database
         drop(synced_db);
-        let reopened_db = H::init_db_with_config(client_context.with_label("reopened"), db_config).await;
+        let reopened_db =
+            H::init_db_with_config(client_context.with_label("reopened"), db_config).await;
 
         // Verify the state is unchanged
         assert_eq!(reopened_db.root(), expected_root);
@@ -1013,7 +1016,8 @@ where
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
         let db_config = H::config(&context.next_u64().to_string());
-        let mut db = H::init_db_with_config(context.with_label("source"), H::clone_config(&db_config)).await;
+        let mut db =
+            H::init_db_with_config(context.with_label("source"), H::clone_config(&db_config)).await;
         let ops = H::create_ops(100);
         db = H::apply_ops(db, ops).await;
         // commit already done in apply_ops
