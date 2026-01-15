@@ -445,7 +445,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg();
-            let mut journal = Journal::init(context.clone(), cfg.clone())
+            let mut journal = Journal::init(context.with_label("first"), cfg.clone())
                 .await
                 .expect("failed to init");
 
@@ -465,7 +465,7 @@ mod tests {
             journal.sync_all().await.expect("failed to sync");
             drop(journal);
 
-            let journal = Journal::<_, Digest>::init(context.clone(), cfg.clone())
+            let journal = Journal::<_, Digest>::init(context.with_label("second"), cfg.clone())
                 .await
                 .expect("failed to re-init");
 
@@ -508,7 +508,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg();
-            let mut journal = Journal::init(context.clone(), cfg.clone())
+            let mut journal = Journal::init(context.with_label("first"), cfg.clone())
                 .await
                 .expect("failed to init");
 
@@ -529,7 +529,7 @@ mod tests {
             journal.sync_all().await.expect("failed to sync");
             drop(journal);
 
-            let journal = Journal::<_, Digest>::init(context.clone(), cfg.clone())
+            let journal = Journal::<_, Digest>::init(context.with_label("second"), cfg.clone())
                 .await
                 .expect("failed to re-init");
 
@@ -765,7 +765,7 @@ mod tests {
             let cfg = test_cfg();
 
             // Create sections 1-5
-            let mut journal = Journal::init(context.clone(), cfg.clone())
+            let mut journal = Journal::init(context.with_label("first"), cfg.clone())
                 .await
                 .expect("failed to init");
             for section in 1u64..=5 {
@@ -783,7 +783,7 @@ mod tests {
             drop(journal);
 
             // Re-init and verify only sections 1-2 exist
-            let journal = Journal::<_, Digest>::init(context.clone(), cfg.clone())
+            let journal = Journal::<_, Digest>::init(context.with_label("second"), cfg.clone())
                 .await
                 .expect("failed to re-init");
 
@@ -814,7 +814,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg();
-            let mut journal = Journal::init(context.clone(), cfg.clone())
+            let mut journal = Journal::init(context.with_label("first"), cfg.clone())
                 .await
                 .expect("failed to init");
 
@@ -834,7 +834,7 @@ mod tests {
             blob.resize(size - 1).await.expect("failed to truncate");
             blob.sync().await.expect("failed to sync");
 
-            let journal = Journal::<_, Digest>::init(context.clone(), cfg.clone())
+            let journal = Journal::<_, Digest>::init(context.with_label("second"), cfg.clone())
                 .await
                 .expect("failed to re-init");
 
@@ -865,7 +865,7 @@ mod tests {
             let cfg = test_cfg();
 
             // Create and populate journal
-            let mut journal = Journal::init(context.clone(), cfg.clone())
+            let mut journal = Journal::init(context.with_label("first"), cfg.clone())
                 .await
                 .expect("failed to init");
 
@@ -879,7 +879,7 @@ mod tests {
             drop(journal);
 
             // Reopen and verify data persisted
-            let journal = Journal::<_, Digest>::init(context.clone(), cfg)
+            let journal = Journal::<_, Digest>::init(context.with_label("second"), cfg)
                 .await
                 .expect("failed to re-init");
 
@@ -924,7 +924,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg();
-            let mut journal = Journal::init(context.clone(), cfg.clone())
+            let mut journal = Journal::init(context.with_label("first"), cfg.clone())
                 .await
                 .expect("failed to init");
 
@@ -961,7 +961,7 @@ mod tests {
 
             // Drop and reopen to test replay
             drop(journal);
-            let journal = Journal::<_, Digest>::init(context.clone(), cfg.clone())
+            let journal = Journal::<_, Digest>::init(context.with_label("second"), cfg.clone())
                 .await
                 .expect("failed to re-init");
 
@@ -1015,7 +1015,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg();
-            let mut journal = Journal::init(context.clone(), cfg.clone())
+            let mut journal = Journal::init(context.with_label("first"), cfg.clone())
                 .await
                 .expect("failed to init");
 
@@ -1051,7 +1051,7 @@ mod tests {
 
             // Drop and reopen to test replay
             drop(journal);
-            let journal = Journal::<_, Digest>::init(context.clone(), cfg.clone())
+            let journal = Journal::<_, Digest>::init(context.with_label("second"), cfg.clone())
                 .await
                 .expect("failed to re-init");
 
@@ -1182,7 +1182,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg();
-            let mut journal = Journal::init(context.clone(), cfg.clone())
+            let mut journal = Journal::init(context.with_label("first"), cfg.clone())
                 .await
                 .expect("failed to init");
 
@@ -1227,7 +1227,7 @@ mod tests {
             drop(journal);
 
             // Test persistence - reopen and verify
-            let journal = Journal::<_, Digest>::init(context.clone(), cfg.clone())
+            let journal = Journal::<_, Digest>::init(context.with_label("second"), cfg.clone())
                 .await
                 .expect("failed to re-init");
 
