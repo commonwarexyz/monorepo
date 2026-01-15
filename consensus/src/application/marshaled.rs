@@ -239,7 +239,7 @@ where
                     if is_valid {
                         marshal.verified(context.round, block).await;
                     }
-                    let _ = tx.send(is_valid);
+                    tx.send_lossy(is_valid);
                     return;
                 }
 
@@ -452,11 +452,11 @@ where
                     )
                     .await;
 
-                    let result = tx.send(digest);
+                    let success = tx.send_lossy(digest);
                     debug!(
                         round = ?consensus_context.round,
                         ?digest,
-                        success = result.is_ok(),
+                        success,
                         "re-proposed parent block at epoch boundary"
                     );
                     return;
@@ -503,11 +503,11 @@ where
                 )
                 .await;
 
-                let result = tx.send(digest);
+                let success = tx.send_lossy(digest);
                 debug!(
                     round = ?consensus_context.round,
                     ?digest,
-                    success = result.is_ok(),
+                    success,
                     "proposed new block"
                 );
             });
@@ -528,7 +528,7 @@ where
         self.verification_tasks.lock().await.insert(round, task);
 
         let (tx, rx) = oneshot::channel();
-        let _ = tx.send(true);
+        tx.send_lossy(true);
         rx
     }
 }
