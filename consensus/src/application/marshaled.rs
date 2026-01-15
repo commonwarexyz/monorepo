@@ -13,13 +13,12 @@
 //! Instead, it re-proposes the boundary block to avoid producing blocks that would be pruned
 //! by the epoch transition.
 //!
-//! # Asynchronous Verification
+//! # Deferred Verification
 //!
-//! Using [`CertifiableAutomaton`], it is possible to perform block verification asynchronously
-//! to voting. By default, [`Marshaled`] uses asynchronous verification, optimistically voting in favor
-//! of the proposed block. In [`CertifiableAutomaton::certify`], verification will be executed, and
-//! finalization of blocks is delayed until certification completes. For more details, see
-//! [`CertifiableAutomaton`]'s documentation.
+//! By default, [`Marshaled`] uses deferred verification, optimistically voting in favor
+//! of the proposed block but waiting to finalize until verification is complete. In
+//! [`Automaton::verify`], verification is started, and in [`CertifiableAutomaton::certify`],
+//! we wait on the result (before voting to finalize.)
 //!
 //! # Usage
 //!
