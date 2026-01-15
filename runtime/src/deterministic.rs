@@ -1861,4 +1861,31 @@ mod tests {
             assert!(iterations > 500);
         });
     }
+
+    #[test]
+    #[should_panic(expected = "label must start with [a-zA-Z]")]
+    fn test_metrics_label_empty() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            context.with_label("");
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "label must start with [a-zA-Z]")]
+    fn test_metrics_label_invalid_first_char() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            context.with_label("1invalid");
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "label must only contain [a-zA-Z0-9_]")]
+    fn test_metrics_label_invalid_char() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            context.with_label("invalid-label");
+        });
+    }
 }

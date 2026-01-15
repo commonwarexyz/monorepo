@@ -2053,33 +2053,6 @@ mod tests {
         })
     }
 
-    fn test_metrics_label_empty<R: Runner>(runner: R)
-    where
-        R::Context: Metrics,
-    {
-        runner.start(|context| async move {
-            context.with_label("");
-        })
-    }
-
-    fn test_metrics_label_invalid_first_char<R: Runner>(runner: R)
-    where
-        R::Context: Metrics,
-    {
-        runner.start(|context| async move {
-            context.with_label("1invalid");
-        })
-    }
-
-    fn test_metrics_label_invalid_char<R: Runner>(runner: R)
-    where
-        R::Context: Metrics,
-    {
-        runner.start(|context| async move {
-            context.with_label("invalid-label");
-        })
-    }
-
     #[test]
     fn test_deterministic_future() {
         let runner = deterministic::Runner::default();
@@ -2349,27 +2322,6 @@ mod tests {
     fn test_deterministic_metrics_label() {
         let executor = deterministic::Runner::default();
         test_metrics_label(executor);
-    }
-
-    #[test]
-    #[should_panic(expected = "label must start with [a-zA-Z]")]
-    fn test_deterministic_metrics_label_empty() {
-        let executor = deterministic::Runner::default();
-        test_metrics_label_empty(executor);
-    }
-
-    #[test]
-    #[should_panic(expected = "label must start with [a-zA-Z]")]
-    fn test_deterministic_metrics_label_invalid_first_char() {
-        let executor = deterministic::Runner::default();
-        test_metrics_label_invalid_first_char(executor);
-    }
-
-    #[test]
-    #[should_panic(expected = "label must only contain [a-zA-Z0-9_]")]
-    fn test_deterministic_metrics_label_invalid_char() {
-        let executor = deterministic::Runner::default();
-        test_metrics_label_invalid_char(executor);
     }
 
     #[test_collect_traces]
@@ -2720,27 +2672,6 @@ mod tests {
     fn test_tokio_metrics_label() {
         let executor = tokio::Runner::default();
         test_metrics_label(executor);
-    }
-
-    #[test]
-    #[should_panic(expected = "label must start with [a-zA-Z]")]
-    fn test_tokio_metrics_label_empty() {
-        let executor = tokio::Runner::default();
-        test_metrics_label_empty(executor);
-    }
-
-    #[test]
-    #[should_panic(expected = "label must start with [a-zA-Z]")]
-    fn test_tokio_metrics_label_invalid_first_char() {
-        let executor = tokio::Runner::default();
-        test_metrics_label_invalid_first_char(executor);
-    }
-
-    #[test]
-    #[should_panic(expected = "label must only contain [a-zA-Z0-9_]")]
-    fn test_tokio_metrics_label_invalid_char() {
-        let executor = tokio::Runner::default();
-        test_metrics_label_invalid_char(executor);
     }
 
     #[test]
