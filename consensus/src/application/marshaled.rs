@@ -62,7 +62,11 @@ use futures::{
 };
 use prometheus_client::metrics::gauge::Gauge;
 use rand::Rng;
-use std::{collections::BTreeMap, sync::Arc, time::Instant};
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::Arc,
+    time::Instant,
+};
 use tracing::{debug, warn};
 
 type VerificationContexts<E, B, S> = Metadata<
@@ -105,6 +109,7 @@ where
     epocher: ES,
     last_built: Arc<Mutex<Option<(Round, B)>>>,
     verification_contexts: Arc<Mutex<VerificationContexts<E, B, S>>>,
+    verification_tasks: Arc<Mutex<HashMap<Round, oneshot::Receiver<bool>>>>,
 
     build_duration: Gauge,
 }
@@ -158,6 +163,7 @@ where
             epocher,
             last_built: Arc::new(Mutex::new(None)),
             verification_contexts: Arc::new(Mutex::new(verification_contexts)),
+            verification_tasks: Arc::new(Mutex::new(HashMap::new())),
 
             build_duration,
         }
@@ -513,7 +519,13 @@ where
         context: Context<Self::Digest, S::PublicKey>,
         digest: Self::Digest,
     ) -> oneshot::Receiver<bool> {
-        Self::store_verification_context(&self.verification_contexts, context, digest).await;
+        Self::store_verification_context(&self.verification_contexts, context.clone(), digest)
+            .await;
+
+        // Begin the verification process.
+        let round = context.round;
+        let task = self.verify(context, digest).await;
+        self.verification_tasks.lock().await.insert(round, task);
 
         let (tx, rx) = oneshot::channel();
         let _ = tx.send(true);
@@ -535,26 +547,35 @@ where
     ES: Epocher,
 {
     async fn certify(&mut self, round: Round, payload: Self::Digest) -> oneshot::Receiver<bool> {
-        // Look up context by (payload, round) to get the exact verification context.
-        // This is necessary because the same block may be proposed in multiple rounds
-        // (e.g., re-proposals at epoch boundaries), and each round has its own context.
-        // We clone rather than remove so the context remains available for crash recovery.
-        // Contexts are cleaned up when finalization advances past them (see report()).
-        let contexts_guard = self.verification_contexts.lock().await;
-        let context = contexts_guard
-            .get(&payload)
-            .and_then(|map| map.get(&round).cloned());
-        drop(contexts_guard);
+        // Attempt to retrieve the existing verification task for this round.
+        let mut tasks_guard = self.verification_tasks.lock().await;
+        let task = tasks_guard.remove(&round);
+        drop(tasks_guard);
 
-        if let Some(context) = context {
-            self.verify(context, payload).await
+        if let Some(task) = task {
+            task
         } else {
-            // Verify is always called before certify for a given proposal, so if we
-            // don't have a verification context here, it means this proposal was never
-            // verified. Return a receiver that never resolves to signal to consensus
-            // that we should time out the view and vote to nullify.
-            let (_tx, rx) = oneshot::channel();
-            rx
+            // Look up context by (payload, round) to get the exact verification context.
+            // This is necessary because the same block may be proposed in multiple rounds
+            // (e.g., re-proposals at epoch boundaries), and each round has its own context.
+            // We clone rather than remove so the context remains available for crash recovery.
+            // Contexts are cleaned up when finalization advances past them (see report()).
+            let contexts_guard = self.verification_contexts.lock().await;
+            let context = contexts_guard
+                .get(&payload)
+                .and_then(|map| map.get(&round).cloned());
+            drop(contexts_guard);
+
+            if let Some(context) = context {
+                self.verify(context, payload).await
+            } else {
+                // Verify is always called before certify for a given proposal, so if we
+                // don't have a verification context here, it means this proposal was never
+                // verified. Return a receiver that never resolves to signal to consensus
+                // that we should time out the view and vote to nullify.
+                let (_tx, rx) = oneshot::channel();
+                rx
+            }
         }
     }
 }
@@ -625,6 +646,9 @@ where
                     }
                 }
             }
+
+            let mut tasks_guard = self.verification_tasks.lock().await;
+            tasks_guard.retain(|ctx_round, _| *ctx_round > *round);
         }
         self.application.report(update).await
     }
