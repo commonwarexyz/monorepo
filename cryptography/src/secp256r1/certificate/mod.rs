@@ -102,7 +102,7 @@ impl<P: crate::PublicKey, N: Namespace> Generic<P, N> {
 
         Some(Attestation {
             signer: *index,
-            signature,
+            signature: signature.into(),
         })
     }
 
@@ -120,11 +120,14 @@ impl<P: crate::PublicKey, N: Namespace> Generic<P, N> {
         let Some(public_key) = self.participants.value(attestation.signer.into()) else {
             return false;
         };
+        let Some(signature) = attestation.signature.get() else {
+            return false;
+        };
 
         public_key.verify(
             subject.namespace(&self.namespace),
             &subject.message(),
-            &attestation.signature,
+            signature,
         )
     }
 
@@ -153,8 +156,12 @@ impl<P: crate::PublicKey, N: Namespace> Generic<P, N> {
                 invalid.insert(attestation.signer);
                 continue;
             };
+            let Some(signature) = attestation.signature.get() else {
+                invalid.insert(attestation.signer);
+                continue;
+            };
 
-            if public_key.verify(namespace, &message, &attestation.signature) {
+            if public_key.verify(namespace, &message, signature) {
                 verified.push(attestation);
             } else {
                 invalid.insert(attestation.signer);
@@ -177,7 +184,7 @@ impl<P: crate::PublicKey, N: Namespace> Generic<P, N> {
             if usize::from(signer) >= self.participants.len() {
                 return None;
             }
-
+            let signature = signature.get().cloned()?;
             entries.push((signer, signature));
         }
         if entries.len() < self.participants.quorum::<M>() as usize {
