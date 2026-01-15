@@ -80,7 +80,7 @@ use rand_core::CryptoRngCore;
 use rayon::{ThreadPoolBuildError, ThreadPoolBuilder};
 use sha2::{Digest as _, Sha256};
 use std::{
-    collections::{BTreeMap, BinaryHeap, HashMap},
+    collections::{BTreeMap, BinaryHeap, HashMap, HashSet},
     mem::{replace, take},
     net::{IpAddr, SocketAddr},
     num::NonZeroUsize,
@@ -282,6 +282,7 @@ impl Default for Config {
 /// Deterministic runtime that randomly selects tasks to run based on a seed.
 pub struct Executor {
     registry: Mutex<Registry>,
+    registered_metrics: Mutex<HashSet<String>>,
     cycle: Duration,
     deadline: Option<SystemTime>,
     metrics: Arc<Metrics>,
@@ -605,16 +606,6 @@ impl Runner {
         // Extract the executor from the Arc
         let executor = Arc::into_inner(executor).expect("executor still has strong references");
 
-        // Check for duplicate metrics
-        let mut buffer = String::new();
-        encode(&mut buffer, &executor.registry.lock().unwrap()).expect("encoding failed");
-        let duplicates = find_duplicate_metrics(&buffer);
-        assert!(
-            duplicates.is_empty(),
-            "found duplicate metric names: {:?}",
-            duplicates
-        );
-
         // Construct a checkpoint that can be used to restart the runtime
         let checkpoint = Checkpoint {
             cycle: executor.cycle,
@@ -851,6 +842,7 @@ impl Context {
 
         let executor = Arc::new(Executor {
             registry: Mutex::new(registry),
+            registered_metrics: Mutex::new(HashSet::new()),
             cycle: cfg.cycle,
             deadline,
             metrics,
@@ -915,6 +907,7 @@ impl Context {
 
             // New state for the new runtime
             registry: Mutex::new(registry),
+            registered_metrics: Mutex::new(HashSet::new()),
             metrics,
             tasks: Arc::new(Tasks::new()),
             sleeping: Mutex::new(BinaryHeap::new()),
@@ -1130,7 +1123,7 @@ impl crate::Metrics for Context {
         let name = name.into();
         let help = help.into();
 
-        // Register metric
+        // Name metric
         let executor = self.executor();
         executor.auditor.event(b"register", |hasher| {
             hasher.update(name.as_bytes());
@@ -1144,6 +1137,14 @@ impl crate::Metrics for Context {
                 format!("{}_{}", *prefix, name)
             }
         };
+
+        // Register metric
+        let is_new = executor
+            .registered_metrics
+            .lock()
+            .unwrap()
+            .insert(prefixed_name.clone());
+        assert!(is_new, "duplicate metric name: {}", prefixed_name);
         executor
             .registry
             .lock()
@@ -1445,22 +1446,6 @@ impl crate::Storage for Context {
     async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
         self.storage.scan(partition).await
     }
-}
-
-/// Find duplicate metric names in encoded Prometheus metrics output.
-fn find_duplicate_metrics(encoded: &str) -> Vec<String> {
-    let mut seen = std::collections::HashSet::new();
-    let mut duplicates = Vec::new();
-    for line in encoded.lines() {
-        if let Some(rest) = line.strip_prefix("# TYPE ") {
-            if let Some(name) = rest.split_whitespace().next() {
-                if !seen.insert(name.to_string()) {
-                    duplicates.push(name.to_string());
-                }
-            }
-        }
-    }
-    duplicates
 }
 
 #[cfg(test)]

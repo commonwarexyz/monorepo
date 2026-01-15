@@ -469,7 +469,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "found duplicate metric names")]
+    #[should_panic(expected = "duplicate metric name:")]
     fn test_duplicate_metrics_panics() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
