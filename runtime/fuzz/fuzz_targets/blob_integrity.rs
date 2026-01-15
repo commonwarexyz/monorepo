@@ -18,7 +18,7 @@ use arbitrary::{Arbitrary, Unstructured};
 use bytes::Buf;
 use commonware_runtime::{
     buffer::pool::{Append, PoolRef},
-    deterministic, Blob, Runner, Storage,
+    deterministic, Blob, Error, Runner, Storage,
 };
 use commonware_utils::{NZUsize, NZU16};
 use libfuzzer_sys::fuzz_target;
@@ -181,7 +181,7 @@ fn fuzz(input: FuzzInput) {
 
             // Determine which pages this read spans.
             let start_page = offset / page_size;
-            let end_page = (offset + len as u64 - 1) / page_size;
+            let end_page = (offset + len as u64 + READER_BUFFER_CAPACITY as u64) / page_size;
             let read_touches_corrupted_page =
                 start_page <= corrupted_page && corrupted_page <= end_page;
 
@@ -238,13 +238,16 @@ fn fuzz(input: FuzzInput) {
                         // Not enough data available - skip
                         continue;
                     }
-                    Err(_) => {
+                    Err(Error::InvalidChecksum) => {
                         // Ensure failed due to CRC error - acceptable if we touch corrupted page
                         assert!(
                             read_touches_corrupted_page,
                             "Replay ensure failed at offset {}, len {} but didn't touch corrupted page {}",
                             offset, len, corrupted_page
                         );
+                    }
+                    Err(err) => {
+                        panic!("Replay ensure failed at offset {}, len {} with unexpected error: {:?}", offset, len, err);
                     }
                 }
             } else {
