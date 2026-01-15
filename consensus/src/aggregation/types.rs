@@ -314,20 +314,18 @@ pub struct Certificate<S: Scheme, D: Digest> {
 }
 
 impl<S: Scheme, D: Digest> Certificate<S, D> {
-    pub fn from_acks<'a>(
-        scheme: &S,
-        acks: impl IntoIterator<Item = &'a Ack<S, D>>,
-        strategy: &impl Strategy,
-    ) -> Option<Self>
+    pub fn from_acks<'a, I>(scheme: &S, acks: I, strategy: &impl Strategy) -> Option<Self>
     where
         S: scheme::Scheme<D>,
+        I: IntoIterator<Item = &'a Ack<S, D>>,
+        I::IntoIter: Send,
     {
         let mut iter = acks.into_iter().peekable();
         let item = iter.peek()?.item.clone();
         let attestations = iter
             .filter(|ack| ack.item == item)
             .map(|ack| ack.attestation.clone());
-        let certificate = scheme.assemble::<_, N3f1>(attestations, strategy)?;
+        let certificate = scheme.assemble::<_, N3f1>(attestations.into_iter(), strategy)?;
 
         Some(Self { item, certificate })
     }

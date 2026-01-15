@@ -87,7 +87,7 @@ impl<N: Namespace> Generic<N> {
 
         Some(Attestation {
             signer: *index,
-            signature,
+            signature: signature.into(),
         })
     }
 
@@ -105,11 +105,14 @@ impl<N: Namespace> Generic<N> {
         let Some(public_key) = self.participants.key(attestation.signer) else {
             return false;
         };
+        let Some(signature) = attestation.signature.get() else {
+            return false;
+        };
 
         public_key.verify(
             subject.namespace(&self.namespace),
             &subject.message(),
-            &attestation.signature,
+            signature,
         )
     }
 
@@ -140,15 +143,23 @@ impl<N: Namespace> Generic<N> {
                 invalid.insert(attestation.signer);
                 continue;
             };
+            let Some(signature) = attestation.signature.get() else {
+                invalid.insert(attestation.signer);
+                continue;
+            };
 
-            batch.add(namespace, &message, public_key, &attestation.signature);
+            batch.add(namespace, &message, public_key, signature);
             candidates.push((attestation, public_key));
         }
 
         if !candidates.is_empty() && !batch.verify(rng) {
             // Batch failed: fall back to per-signer verification to isolate faulty attestations.
             for (attestation, public_key) in &candidates {
-                if !public_key.verify(namespace, &message, &attestation.signature) {
+                let Some(signature) = attestation.signature.get() else {
+                    invalid.insert(attestation.signer);
+                    continue;
+                };
+                if !public_key.verify(namespace, &message, signature) {
                     invalid.insert(attestation.signer);
                 }
             }
@@ -218,6 +229,7 @@ impl<N: Namespace> Generic<N> {
             if usize::from(signer) >= self.participants.len() {
                 return None;
             }
+            let signature = signature.get().cloned()?;
 
             entries.push((signer, signature));
         }
