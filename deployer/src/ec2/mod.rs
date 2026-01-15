@@ -336,6 +336,9 @@ cfg_if::cfg_if! {
         /// Port on monitoring where traces are pushed
         const TRACES_PORT: u16 = 4318;
 
+        /// Maximum instances to manipulate at one time
+        pub const DEFAULT_CONCURRENCY: &str = "128";
+
         /// Subcommand name
         pub const CMD: &str = "ec2";
 

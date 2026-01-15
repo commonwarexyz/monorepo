@@ -45,7 +45,7 @@ pub struct RegionResources {
 }
 
 /// Sets up EC2 instances, deploys files, and configures monitoring and logging
-pub async fn create(config: &PathBuf) -> Result<(), Error> {
+pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
     // Load configuration from YAML file
     let config: Config = {
         let config_file = File::open(config)?;
@@ -1070,7 +1070,7 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
         async {
             // Configure binary instances (limited concurrency to avoid SSH overload)
             let all_binary_ips: Vec<String> = stream::iter(binary_futures)
-                .buffer_unordered(MAX_CONCURRENT_CONFIGURATION)
+                .buffer_unordered(concurrency)
                 .try_collect()
                 .await?;
             info!("configured binary instances");
