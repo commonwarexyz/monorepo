@@ -283,7 +283,7 @@ where
             Application::new(dkg_mailbox.clone()),
             marshal_mailbox.clone(),
             FixedEpocher::new(BLOCKS_PER_EPOCH),
-            config.partition_prefix.clone(),
+            format!("{}_marshaled", config.partition_prefix),
         )
         .await;
 
