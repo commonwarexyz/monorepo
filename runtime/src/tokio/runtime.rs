@@ -18,7 +18,7 @@ use crate::{
     storage::metered::Storage as MeteredStorage,
     telemetry::metrics::task::Label,
     utils::{signal::Stopper, supervision::Tree, Panicker},
-    validate_label, Clock, Error, Execution, Handle, Metrics as _, SinkOf, Spawner as _, StreamOf,
+    Clock, Error, Execution, Handle, Metrics as _, SinkOf, Spawner as _, StreamOf,
     METRICS_PREFIX,
 };
 use commonware_macros::select;
@@ -539,9 +539,6 @@ impl crate::RayonPoolSpawner for Context {
 
 impl crate::Metrics for Context {
     fn with_label(&self, label: &str) -> Self {
-        // Ensure the label is well-formatted
-        validate_label(label);
-
         // Construct the full label name
         let name = {
             let prefix = self.name.clone();
