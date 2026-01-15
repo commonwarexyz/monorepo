@@ -29,6 +29,9 @@ pub const PYROSCOPE_VERSION: &str = "1.12.0";
 /// Version of Grafana to download and install
 pub const GRAFANA_VERSION: &str = "11.5.2";
 
+/// Version of Samply to download and install
+pub const SAMPLY_VERSION: &str = "0.13.1";
+
 // S3 key functions for tool binaries
 //
 // Convention: {S3_TOOLS_BINARIES_PREFIX}/{tool}/{version}/{platform}/{filename}
@@ -86,6 +89,14 @@ pub(crate) fn promtail_bin_s3_key(version: &str, architecture: Architecture) -> 
         "{S3_TOOLS_BINARIES_PREFIX}/promtail/{version}/linux-{arch}/promtail-linux-{arch}.zip",
         arch = architecture.as_str()
     )
+}
+
+pub(crate) fn samply_bin_s3_key(version: &str, architecture: Architecture) -> String {
+    let arch = match architecture {
+        Architecture::Arm64 => "aarch64",
+        Architecture::X86_64 => "x86_64",
+    };
+    format!("{S3_TOOLS_BINARIES_PREFIX}/samply/{version}/linux-{arch}/samply-{arch}-unknown-linux-gnu.tar.xz")
 }
 
 // S3 key functions for component configs and services (include deployer version for cache invalidation)
@@ -248,6 +259,17 @@ pub(crate) fn promtail_download_url(version: &str, architecture: Architecture) -
     format!(
         "https://github.com/grafana/loki/releases/download/v{version}/promtail-linux-{arch}.zip",
         arch = architecture.as_str()
+    )
+}
+
+/// Returns the download URL for Samply from GitHub
+pub(crate) fn samply_download_url(version: &str, architecture: Architecture) -> String {
+    let arch = match architecture {
+        Architecture::Arm64 => "aarch64",
+        Architecture::X86_64 => "x86_64",
+    };
+    format!(
+        "https://github.com/mstange/samply/releases/download/samply-v{version}/samply-{arch}-unknown-linux-gnu.tar.xz"
     )
 }
 

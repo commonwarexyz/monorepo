@@ -39,6 +39,13 @@ async fn main() -> std::process::ExitCode {
                                 .required(true)
                                 .help("Path to YAML config file")
                                 .value_parser(clap::value_parser!(PathBuf)),
+                        )
+                        .arg(
+                            Arg::new("concurrency")
+                                .long("concurrency")
+                                .default_value(ec2::DEFAULT_CONCURRENCY)
+                                .help("Maximum instances to configure at once (must be >= 1)")
+                                .value_parser(clap::builder::RangedU64ValueParser::<usize>::new().range(1..)),
                         ),
                 )
                 .subcommand(
@@ -50,6 +57,13 @@ async fn main() -> std::process::ExitCode {
                                 .required(true)
                                 .help("Path to YAML config file")
                                 .value_parser(clap::value_parser!(PathBuf)),
+                        )
+                        .arg(
+                            Arg::new("concurrency")
+                                .long("concurrency")
+                                .default_value(ec2::DEFAULT_CONCURRENCY)
+                                .help("Maximum instances to update at once (must be >= 1)")
+                                .value_parser(clap::builder::RangedU64ValueParser::<usize>::new().range(1..)),
                         ),
                 )
                 .subcommand(
@@ -83,6 +97,38 @@ async fn main() -> std::process::ExitCode {
                 .subcommand(
                     Command::new(ec2::CLEAN_CMD)
                         .about("Delete the shared S3 bucket and all its contents."),
+                )
+                .subcommand(
+                    Command::new(ec2::PROFILE_CMD)
+                        .about("Capture a CPU profile from a running instance using samply.")
+                        .arg(
+                            Arg::new("config")
+                                .long("config")
+                                .required(true)
+                                .help("Path to YAML config file")
+                                .value_parser(clap::value_parser!(PathBuf)),
+                        )
+                        .arg(
+                            Arg::new("instance")
+                                .long("instance")
+                                .required(true)
+                                .help("Name of instance to profile")
+                                .value_parser(clap::value_parser!(String)),
+                        )
+                        .arg(
+                            Arg::new("duration")
+                                .long("duration")
+                                .default_value("30")
+                                .help("Profile duration in seconds")
+                                .value_parser(clap::value_parser!(u64)),
+                        )
+                        .arg(
+                            Arg::new("binary")
+                                .long("binary")
+                                .required(true)
+                                .help("Path to local binary with debug symbols for symbolication")
+                                .value_parser(clap::value_parser!(PathBuf)),
+                        ),
                 ),
         )
         .get_matches();
@@ -100,7 +146,8 @@ async fn main() -> std::process::ExitCode {
         match ec2_matches.subcommand() {
             Some((ec2::CREATE_CMD, matches)) => {
                 let config_path = matches.get_one::<PathBuf>("config").unwrap();
-                if let Err(e) = ec2::create(config_path).await {
+                let concurrency = *matches.get_one::<usize>("concurrency").unwrap();
+                if let Err(e) = ec2::create(config_path, concurrency).await {
                     error!(error=?e, "failed to create EC2 deployment");
                 } else {
                     return std::process::ExitCode::SUCCESS;
@@ -108,7 +155,8 @@ async fn main() -> std::process::ExitCode {
             }
             Some((ec2::UPDATE_CMD, matches)) => {
                 let config_path = matches.get_one::<PathBuf>("config").unwrap();
-                if let Err(e) = ec2::update(config_path).await {
+                let concurrency = *matches.get_one::<usize>("concurrency").unwrap();
+                if let Err(e) = ec2::update(config_path, concurrency).await {
                     error!(error=?e, "failed to update EC2 deployment");
                 } else {
                     return std::process::ExitCode::SUCCESS;
@@ -134,6 +182,17 @@ async fn main() -> std::process::ExitCode {
             Some((ec2::CLEAN_CMD, _)) => {
                 if let Err(e) = ec2::clean().await {
                     error!(error=?e, "failed to clean S3 bucket");
+                } else {
+                    return std::process::ExitCode::SUCCESS;
+                }
+            }
+            Some((ec2::PROFILE_CMD, matches)) => {
+                let config_path = matches.get_one::<PathBuf>("config").unwrap();
+                let instance = matches.get_one::<String>("instance").unwrap();
+                let duration = *matches.get_one::<u64>("duration").unwrap();
+                let binary = matches.get_one::<PathBuf>("binary").unwrap();
+                if let Err(e) = ec2::profile(config_path, instance, duration, binary).await {
+                    error!(error=?e, "failed to profile instance");
                 } else {
                     return std::process::ExitCode::SUCCESS;
                 }

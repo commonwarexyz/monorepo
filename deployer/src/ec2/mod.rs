@@ -114,10 +114,17 @@
 //!
 //! ## `ec2 update`
 //!
+//! Performs rolling updates across all binary instances:
+//!
 //! 1. Uploads the latest binary and configuration to S3.
-//! 2. Stops the `binary` service on each binary instance.
-//! 3. Instances download the updated files from S3 via pre-signed URLs.
-//! 4. Restarts the `binary` service, ensuring minimal downtime.
+//! 2. For each instance (up to `--concurrency` at a time, default 128):
+//!    a. Stops the `binary` service.
+//!    b. Downloads the updated files from S3 via pre-signed URLs.
+//!    c. Restarts the `binary` service.
+//!    d. Waits for the service to become active before proceeding.
+//!
+//! _Use `--concurrency 1` for fully sequential updates that wait for each instance to be healthy
+//! before updating the next._
 //!
 //! ## `ec2 authorize`
 //!
@@ -135,6 +142,57 @@
 //!
 //! 1. Deletes the shared S3 bucket and all its contents (cached tools and any remaining deployment data).
 //! 2. Use this to fully clean up when you no longer need the deployer cache.
+//!
+//! ## `ec2 profile`
+//!
+//! 1. Loads the deployment configuration and locates the specified instance.
+//! 2. Caches the samply binary in S3 if not already present.
+//! 3. SSHes to the instance, downloads samply, and records a CPU profile of the running binary for the specified duration.
+//! 4. Downloads the profile locally via SCP.
+//! 5. Opens Firefox Profiler with symbols resolved from your local debug binary.
+//!
+//! # Profiling
+//!
+//! The deployer supports two profiling modes:
+//!
+//! ## Continuous Profiling (Pyroscope)
+//!
+//! Enable continuous CPU profiling by setting `profiling: true` in your instance config. This runs
+//! Pyroscope in the background, continuously collecting profiles that are viewable in the Grafana
+//! dashboard on the monitoring instance.
+//!
+//! For best results, build and deploy your binary with debug symbols and frame pointers:
+//!
+//! ```bash
+//! CARGO_PROFILE_RELEASE_DEBUG=true RUSTFLAGS="-C force-frame-pointers=yes" cargo build --release
+//! ```
+//!
+//! ## On-Demand Profiling (samply)
+//!
+//! To generate an on-demand CPU profile (viewable in the Firefox Profiler UI), run the
+//! following:
+//!
+//! ```bash
+//! deployer ec2 profile --config config.yaml --instance <name> --binary <path-to-binary-with-debug>
+//! ```
+//!
+//! This captures a 30-second profile (configurable with `--duration`) using samply on the remote
+//! instance, downloads it, and opens it in Firefox Profiler. Unlike Continuous Profiling, this mode
+//! does not require deploying a binary with debug symbols (reducing deployment time).
+//!
+//! Like above, build your binary with debug symbols (but not frame pointers):
+//!
+//! ```bash
+//! CARGO_PROFILE_RELEASE_DEBUG=true cargo build --release
+//! ```
+//!
+//! Now, strip symbols and deploy via `ec2 create` (preserve the original binary for profile symbolication
+//! when you run the `ec2 profile` command shown above):
+//!
+//! ```bash
+//! cp target/release/my-binary target/release/my-binary-debug
+//! strip target/release/my-binary
+//! ```
 //!
 //! # Persistence
 //!
@@ -250,6 +308,8 @@ cfg_if::cfg_if! {
         pub use destroy::destroy;
         mod clean;
         pub use clean::clean;
+        mod profile;
+        pub use profile::profile;
         pub mod utils;
         pub mod s3;
 
@@ -277,6 +337,9 @@ cfg_if::cfg_if! {
         /// Port on monitoring where traces are pushed
         const TRACES_PORT: u16 = 4318;
 
+        /// Maximum instances to manipulate at one time
+        pub const DEFAULT_CONCURRENCY: &str = "128";
+
         /// Subcommand name
         pub const CMD: &str = "ec2";
 
@@ -294,6 +357,9 @@ cfg_if::cfg_if! {
 
         /// Clean subcommand name
         pub const CLEAN_CMD: &str = "clean";
+
+        /// Profile subcommand name
+        pub const PROFILE_CMD: &str = "profile";
 
         /// Directory where deployer files are stored
         fn deployer_directory(tag: &str) -> PathBuf {
@@ -397,6 +463,10 @@ cfg_if::cfg_if! {
             S3Builder(#[from] aws_sdk_s3::error::BuildError),
             #[error("duplicate instance name: {0}")]
             DuplicateInstanceName(String),
+            #[error("instance not found: {0}")]
+            InstanceNotFound(String),
+            #[error("symbolication failed: {0}")]
+            Symbolication(String),
         }
 
         impl From<aws_sdk_s3::error::SdkError<aws_sdk_s3::operation::get_object::GetObjectError>> for Error {

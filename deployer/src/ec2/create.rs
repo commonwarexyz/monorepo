@@ -5,7 +5,11 @@ use crate::ec2::{
     Hosts, InstanceConfig, CREATED_FILE_NAME, LOGS_PORT, MONITORING_NAME, MONITORING_REGION,
     PROFILES_PORT, TRACES_PORT,
 };
-use futures::future::try_join_all;
+use commonware_cryptography::{Hasher as _, Sha256};
+use futures::{
+    future::try_join_all,
+    stream::{self, StreamExt, TryStreamExt},
+};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fs::File,
@@ -41,7 +45,7 @@ pub struct RegionResources {
 }
 
 /// Sets up EC2 instances, deploys files, and configures monitoring and logging
-pub async fn create(config: &PathBuf) -> Result<(), Error> {
+pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
     // Load configuration from YAML file
     let config: Config = {
         let config_file = File::open(config)?;
@@ -204,14 +208,30 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     }
     info!("observability tools uploaded");
 
-    // Compute digests for binaries and configs, grouping by digest for deduplication
+    // Collect unique binary and config paths (dedup before hashing)
+    let mut unique_binary_paths: BTreeSet<String> = BTreeSet::new();
+    let mut unique_config_paths: BTreeSet<String> = BTreeSet::new();
+    for instance in &config.instances {
+        unique_binary_paths.insert(instance.binary.clone());
+        unique_config_paths.insert(instance.config.clone());
+    }
+
+    // Compute digests concurrently for unique files only
+    let unique_paths: Vec<String> = unique_binary_paths
+        .iter()
+        .chain(unique_config_paths.iter())
+        .cloned()
+        .collect();
+    let path_to_digest = hash_files(unique_paths).await?;
+
+    // Build dedup maps from digests
     let mut binary_digests: BTreeMap<String, String> = BTreeMap::new(); // digest -> path
     let mut config_digests: BTreeMap<String, String> = BTreeMap::new(); // digest -> path
     let mut instance_binary_digest: HashMap<String, String> = HashMap::new(); // instance -> digest
     let mut instance_config_digest: HashMap<String, String> = HashMap::new(); // instance -> digest
     for instance in &config.instances {
-        let binary_digest = hash_file(std::path::Path::new(&instance.binary))?;
-        let config_digest = hash_file(std::path::Path::new(&instance.config))?;
+        let binary_digest = path_to_digest[&instance.binary].clone();
+        let config_digest = path_to_digest[&instance.config].clone();
         binary_digests.insert(binary_digest.clone(), instance.binary.clone());
         config_digests.insert(config_digest.clone(), instance.config.clone());
         instance_binary_digest.insert(instance.name.clone(), binary_digest);
@@ -415,26 +435,35 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
 
     // Create binary security groups (without monitoring IP - added later for parallel launch)
     info!("creating binary security groups");
-    for (region, resources) in region_resources.iter_mut() {
-        let binary_sg_id = create_security_group_binary(
-            &ec2_clients[region],
-            &resources.vpc_id,
-            &deployer_ip,
-            tag,
-            &config.ports,
-        )
-        .await?;
-        info!(
-            sg = binary_sg_id.as_str(),
-            vpc = resources.vpc_id.as_str(),
-            region = region.as_str(),
-            "created binary security group"
-        );
-        resources.binary_sg_id = Some(binary_sg_id);
+    let binary_sg_futures: Vec<_> = region_resources
+        .iter()
+        .map(|(region, resources)| {
+            let region = region.clone();
+            let ec2_client = ec2_clients[&region].clone();
+            let vpc_id = resources.vpc_id.clone();
+            let deployer_ip = deployer_ip.clone();
+            let tag = tag.clone();
+            let ports = config.ports.clone();
+            async move {
+                let binary_sg_id =
+                    create_security_group_binary(&ec2_client, &vpc_id, &deployer_ip, &tag, &ports)
+                        .await?;
+                info!(
+                    sg = binary_sg_id.as_str(),
+                    vpc = vpc_id.as_str(),
+                    region = region.as_str(),
+                    "created binary security group"
+                );
+                Ok::<_, Error>((region, binary_sg_id))
+            }
+        })
+        .collect();
+    for (region, binary_sg_id) in try_join_all(binary_sg_futures).await? {
+        region_resources.get_mut(&region).unwrap().binary_sg_id = Some(binary_sg_id);
     }
     info!("created binary security groups");
 
-    // Setup VPC peering connections
+    // Setup VPC peering connections concurrently
     info!("initializing VPC peering connections");
     let monitoring_region = MONITORING_REGION.to_string();
     let monitoring_resources = region_resources.get(&monitoring_region).unwrap();
@@ -443,61 +472,75 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     let monitoring_route_table_id = &monitoring_resources.route_table_id;
     let binary_regions: HashSet<String> =
         config.instances.iter().map(|i| i.region.clone()).collect();
-    for region in &regions {
-        if region != &monitoring_region && binary_regions.contains(region) {
-            let binary_resources = region_resources.get(region).unwrap();
-            let binary_vpc_id = &binary_resources.vpc_id;
-            let binary_cidr = &binary_resources.vpc_cidr;
-            let peer_id = create_vpc_peering_connection(
-                &ec2_clients[&monitoring_region],
-                monitoring_vpc_id,
-                binary_vpc_id,
-                region,
-                tag,
-            )
-            .await?;
-            info!(
-                peer = peer_id.as_str(),
-                monitoring = monitoring_vpc_id.as_str(),
-                binary = binary_vpc_id.as_str(),
-                region = region.as_str(),
-                "created VPC peering connection"
-            );
-            wait_for_vpc_peering_connection(&ec2_clients[region], &peer_id).await?;
-            info!(
-                peer = peer_id.as_str(),
-                region = region.as_str(),
-                "VPC peering connection is available"
-            );
-            accept_vpc_peering_connection(&ec2_clients[region], &peer_id).await?;
-            info!(
-                peer = peer_id.as_str(),
-                region = region.as_str(),
-                "accepted VPC peering connection"
-            );
-            add_route(
-                &ec2_clients[&monitoring_region],
-                monitoring_route_table_id,
-                binary_cidr,
-                &peer_id,
-            )
-            .await?;
-            add_route(
-                &ec2_clients[region],
-                &binary_resources.route_table_id,
-                monitoring_cidr,
-                &peer_id,
-            )
-            .await?;
-            info!(
-                peer = peer_id.as_str(),
-                monitoring = monitoring_vpc_id.as_str(),
-                binary = binary_vpc_id.as_str(),
-                region = region.as_str(),
-                "added routes for VPC peering connection"
-            );
-        }
-    }
+    let peering_futures: Vec<_> = regions
+        .iter()
+        .filter(|region| *region != &monitoring_region && binary_regions.contains(*region))
+        .map(|region| {
+            let region = region.clone();
+            let monitoring_ec2_client = ec2_clients[&monitoring_region].clone();
+            let binary_ec2_client = ec2_clients[&region].clone();
+            let monitoring_vpc_id = monitoring_vpc_id.clone();
+            let monitoring_cidr = monitoring_cidr.clone();
+            let monitoring_route_table_id = monitoring_route_table_id.clone();
+            let binary_resources = region_resources.get(&region).unwrap();
+            let binary_vpc_id = binary_resources.vpc_id.clone();
+            let binary_cidr = binary_resources.vpc_cidr.clone();
+            let binary_route_table_id = binary_resources.route_table_id.clone();
+            let tag = tag.clone();
+            async move {
+                let peer_id = create_vpc_peering_connection(
+                    &monitoring_ec2_client,
+                    &monitoring_vpc_id,
+                    &binary_vpc_id,
+                    &region,
+                    &tag,
+                )
+                .await?;
+                info!(
+                    peer = peer_id.as_str(),
+                    monitoring = monitoring_vpc_id.as_str(),
+                    binary = binary_vpc_id.as_str(),
+                    region = region.as_str(),
+                    "created VPC peering connection"
+                );
+                wait_for_vpc_peering_connection(&binary_ec2_client, &peer_id).await?;
+                info!(
+                    peer = peer_id.as_str(),
+                    region = region.as_str(),
+                    "VPC peering connection is available"
+                );
+                accept_vpc_peering_connection(&binary_ec2_client, &peer_id).await?;
+                info!(
+                    peer = peer_id.as_str(),
+                    region = region.as_str(),
+                    "accepted VPC peering connection"
+                );
+                add_route(
+                    &monitoring_ec2_client,
+                    &monitoring_route_table_id,
+                    &binary_cidr,
+                    &peer_id,
+                )
+                .await?;
+                add_route(
+                    &binary_ec2_client,
+                    &binary_route_table_id,
+                    &monitoring_cidr,
+                    &peer_id,
+                )
+                .await?;
+                info!(
+                    peer = peer_id.as_str(),
+                    monitoring = monitoring_vpc_id.as_str(),
+                    binary = binary_vpc_id.as_str(),
+                    region = region.as_str(),
+                    "added routes for VPC peering connection"
+                );
+                Ok::<_, Error>(())
+            }
+        })
+        .collect();
+    try_join_all(peering_futures).await?;
     info!("initialized VPC peering connections");
 
     // Prepare launch configurations for all instances
@@ -773,11 +816,11 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
         })
         .collect();
     let prom_config = generate_prometheus_config(&instances);
+    let prom_digest = Sha256::hash(prom_config.as_bytes()).to_string();
     let prom_path = tag_directory.join("prometheus.yml");
     std::fs::write(&prom_path, &prom_config)?;
-    let prom_digest = hash_file(&prom_path)?;
     let dashboard_path = std::path::PathBuf::from(&config.monitoring.dashboard);
-    let dashboard_digest = hash_file(&dashboard_path)?;
+    let dashboard_digest = hash_file(&dashboard_path).await?;
     let [prometheus_config_url, dashboard_url]: [String; 2] = try_join_all([
         cache_and_presign(
             &s3_client,
@@ -811,9 +854,9 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
             .collect(),
     };
     let hosts_yaml = serde_yaml::to_string(&hosts)?;
+    let hosts_digest = Sha256::hash(hosts_yaml.as_bytes()).to_string();
     let hosts_path = tag_directory.join("hosts.yaml");
     std::fs::write(&hosts_path, &hosts_yaml)?;
-    let hosts_digest = hash_file(&hosts_path)?;
     let hosts_url = cache_and_presign(
         &s3_client,
         S3_BUCKET_NAME,
@@ -823,7 +866,7 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     )
     .await?;
 
-    // Write per-instance config files locally, compute digests, and deduplicate
+    // Write per-instance config files locally and compute digests
     let mut promtail_digests: BTreeMap<String, std::path::PathBuf> = BTreeMap::new();
     let mut pyroscope_digests: BTreeMap<String, std::path::PathBuf> = BTreeMap::new();
     let mut instance_promtail_digest: HashMap<String, String> = HashMap::new();
@@ -840,9 +883,9 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
             &instance.region,
             arch,
         );
+        let promtail_digest = Sha256::hash(promtail_cfg.as_bytes()).to_string();
         let promtail_path = tag_directory.join(format!("promtail_{}.yml", instance.name));
         std::fs::write(&promtail_path, &promtail_cfg)?;
-        let promtail_digest = hash_file(&promtail_path)?;
 
         let pyroscope_script = generate_pyroscope_script(
             &monitoring_private_ip,
@@ -851,12 +894,16 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
             &instance.region,
             arch,
         );
+        let pyroscope_digest = Sha256::hash(pyroscope_script.as_bytes()).to_string();
         let pyroscope_path = tag_directory.join(format!("pyroscope-agent_{}.sh", instance.name));
         std::fs::write(&pyroscope_path, &pyroscope_script)?;
-        let pyroscope_digest = hash_file(&pyroscope_path)?;
 
-        promtail_digests.insert(promtail_digest.clone(), promtail_path);
-        pyroscope_digests.insert(pyroscope_digest.clone(), pyroscope_path);
+        promtail_digests
+            .entry(promtail_digest.clone())
+            .or_insert(promtail_path);
+        pyroscope_digests
+            .entry(pyroscope_digest.clone())
+            .or_insert(pyroscope_path);
         instance_promtail_digest.insert(instance.name.clone(), promtail_digest);
         instance_pyroscope_digest.insert(instance.name.clone(), pyroscope_digest);
     }
@@ -1044,8 +1091,11 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
             Ok::<(), Error>(())
         },
         async {
-            // Configure binary instances
-            let all_binary_ips = try_join_all(binary_futures).await?;
+            // Configure binary instances (limited concurrency to avoid SSH overload)
+            let all_binary_ips: Vec<String> = stream::iter(binary_futures)
+                .buffer_unordered(concurrency)
+                .try_collect()
+                .await?;
             info!("configured binary instances");
             Ok::<Vec<String>, Error>(all_binary_ips)
         }

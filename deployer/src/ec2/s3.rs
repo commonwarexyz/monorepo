@@ -11,8 +11,9 @@ use aws_sdk_s3::{
     types::{BucketLocationConstraint, CreateBucketConfiguration, Delete, ObjectIdentifier},
     Client as S3Client,
 };
-use commonware_cryptography::{Hasher, Sha256};
-use std::{io::Read, path::Path, time::Duration};
+use commonware_cryptography::{Hasher as _, Sha256};
+use futures::stream::{self, StreamExt, TryStreamExt};
+use std::{collections::HashMap, io::Read, path::Path, time::Duration};
 use tracing::{debug, info};
 
 /// S3 bucket name for caching deployer artifacts
@@ -26,6 +27,12 @@ pub const S3_TOOLS_CONFIGS_PREFIX: &str = "tools/configs";
 
 /// S3 prefix for per-deployment data
 pub const S3_DEPLOYMENTS_PREFIX: &str = "deployments";
+
+/// Maximum buffer size for file hashing (32MB)
+pub const MAX_HASH_BUFFER_SIZE: usize = 32 * 1024 * 1024;
+
+/// Maximum number of concurrent file hash operations
+pub const MAX_CONCURRENT_HASHES: usize = 8;
 
 /// Duration for pre-signed URLs (6 hours)
 pub const PRESIGN_DURATION: Duration = Duration::from_secs(6 * 60 * 60);
@@ -236,19 +243,39 @@ pub async fn cache_and_presign(
     presign_url(client, bucket, key, expires_in).await
 }
 
-/// Computes the SHA256 hash of a file and returns it as a hex string
-pub fn hash_file(path: &Path) -> Result<String, Error> {
-    let mut file = std::fs::File::open(path)?;
-    let mut hasher = Sha256::new();
-    let mut buffer = [0u8; 8192];
-    loop {
-        let bytes_read = file.read(&mut buffer)?;
-        if bytes_read == 0 {
-            break;
+/// Computes the SHA256 hash of a file and returns it as a hex string.
+/// Uses spawn_blocking internally to avoid blocking the async runtime.
+pub async fn hash_file(path: &Path) -> Result<String, Error> {
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let mut file = std::fs::File::open(&path)?;
+        let file_size = file.metadata()?.len() as usize;
+        let buffer_size = file_size.min(MAX_HASH_BUFFER_SIZE);
+        let mut hasher = Sha256::new();
+        let mut buffer = vec![0u8; buffer_size];
+        loop {
+            let bytes_read = file.read(&mut buffer)?;
+            if bytes_read == 0 {
+                break;
+            }
+            hasher.update(&buffer[..bytes_read]);
         }
-        hasher.update(&buffer[..bytes_read]);
-    }
-    Ok(hasher.finalize().to_string())
+        Ok(hasher.finalize().to_string())
+    })
+    .await
+    .map_err(|e| Error::Io(std::io::Error::other(e)))?
+}
+
+/// Computes SHA256 hashes for multiple files concurrently.
+/// Returns a map from file path to hex-encoded digest.
+pub async fn hash_files(paths: Vec<String>) -> Result<HashMap<String, String>, Error> {
+    stream::iter(paths.into_iter().map(|path| async move {
+        let digest = hash_file(Path::new(&path)).await?;
+        Ok::<_, Error>((path, digest))
+    }))
+    .buffer_unordered(MAX_CONCURRENT_HASHES)
+    .try_collect()
+    .await
 }
 
 /// Generates a pre-signed URL for downloading an object from S3

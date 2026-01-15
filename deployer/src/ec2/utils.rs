@@ -127,6 +127,36 @@ pub async fn poll_service_inactive(key_file: &str, ip: &str, service: &str) -> R
     Err(Error::ServiceTimeout(ip.to_string(), service.to_string()))
 }
 
+/// Downloads a file from a remote instance via SCP with retries
+pub async fn scp_download(
+    key_file: &str,
+    ip: &str,
+    remote_path: &str,
+    local_path: &str,
+) -> Result<(), Error> {
+    for _ in 0..MAX_SSH_ATTEMPTS {
+        let output = Command::new("scp")
+            .arg("-i")
+            .arg(key_file)
+            .arg("-o")
+            .arg("IdentitiesOnly=yes")
+            .arg("-o")
+            .arg("ServerAliveInterval=600")
+            .arg("-o")
+            .arg("StrictHostKeyChecking=no")
+            .arg(format!("ubuntu@{ip}:{remote_path}"))
+            .arg(local_path)
+            .output()
+            .await?;
+        if output.status.success() {
+            return Ok(());
+        }
+        warn!(error = ?String::from_utf8_lossy(&output.stderr), "SCP failed");
+        sleep(RETRY_INTERVAL).await;
+    }
+    Err(Error::SshFailed)
+}
+
 /// Enables BBR on a remote instance by downloading config from S3 and applying sysctl settings.
 pub async fn enable_bbr(key_file: &str, ip: &str, bbr_conf_url: &str) -> Result<(), Error> {
     let download_cmd = format!(
