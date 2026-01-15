@@ -30,12 +30,12 @@ use crate::{
 use commonware_codec::{Codec, CodecShared};
 use commonware_cryptography::{DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
-use commonware_utils::Array;
+use commonware_utils::{bitmap::Prunable as PrunableBitMap, Array};
 use core::{num::NonZeroU64, ops::Range};
 
 /// Get the grafting height for a bitmap with chunk size determined by N.
-const fn grafting_height<H: Hasher, const N: usize>() -> u32 {
-    CleanBitMap::<H::Digest, N>::CHUNK_SIZE_BITS.trailing_zeros()
+const fn grafting_height<const N: usize>() -> u32 {
+    PrunableBitMap::<N>::CHUNK_SIZE_BITS.trailing_zeros()
 }
 
 /// A Current QMDB implementation generic over ordered/unordered keys and variable/fixed values.
@@ -56,11 +56,7 @@ pub struct Db<
 
     /// The bitmap over the activity status of each operation. Supports augmenting [Db] proofs in
     /// order to further prove whether a key _currently_ has a specific value.
-    pub(super) status: BitMap<H::Digest, N, M>,
-
-    pub(super) context: E,
-
-    pub(super) bitmap_metadata_partition: String,
+    pub(super) status: BitMap<E, H::Digest, N, M>,
 
     /// Cached root digest. Invariant: valid when in Clean state.
     pub(super) cached_root: Option<H::Digest>,
@@ -112,7 +108,7 @@ where
     /// This value is log2 of the chunk size in bits. Since we assume the chunk size is a power of
     /// 2, we compute this from trailing_zeros.
     pub const fn grafting_height() -> u32 {
-        grafting_height::<H, N>()
+        grafting_height::<N>()
     }
 
     /// Return the number of bits that have been pruned from the status bitmap.
@@ -154,12 +150,7 @@ where
         // Write the pruned portion of the bitmap to disk *first* to ensure recovery in case of
         // failure during pruning. If we don't do this, we may not be able to recover the bitmap
         // because it may require replaying of pruned operations.
-        self.status
-            .write_pruned(
-                self.context.with_label("bitmap"),
-                &self.bitmap_metadata_partition,
-            )
-            .await?;
+        self.status.write_pruned().await?;
 
         self.any.prune(prune_loc).await
     }
@@ -183,19 +174,13 @@ where
 
         // Write the bitmap pruning boundary to disk so that next startup doesn't have to
         // re-Merkleize the inactive portion up to the inactivity floor.
-        self.status
-            .write_pruned(
-                self.context.with_label("bitmap"),
-                &self.bitmap_metadata_partition,
-            )
-            .await
-            .map_err(Into::into)
+        self.status.write_pruned().await.map_err(Into::into)
     }
 
     /// Destroy the db, removing all data from disk.
     pub async fn destroy(self) -> Result<(), Error> {
         // Clean up bitmap metadata partition.
-        CleanBitMap::<H::Digest, N>::destroy(self.context, &self.bitmap_metadata_partition).await?;
+        self.status.destroy().await?;
 
         // Clean up Any components (MMR and log).
         self.any.destroy().await
@@ -206,8 +191,6 @@ where
         Db {
             any: self.any.into_mutable(),
             status: self.status.into_dirty(),
-            context: self.context,
-            bitmap_metadata_partition: self.bitmap_metadata_partition,
             cached_root: None,
         }
     }
@@ -230,8 +213,6 @@ where
         Db {
             any: self.any.into_mutable(),
             status: self.status,
-            context: self.context,
-            bitmap_metadata_partition: self.bitmap_metadata_partition,
             cached_root: None,
         }
     }
@@ -264,8 +245,6 @@ where
         Ok(Db {
             any,
             status,
-            context: self.context,
-            bitmap_metadata_partition: self.bitmap_metadata_partition,
             cached_root,
         })
     }
@@ -312,8 +291,6 @@ where
         Ok(Db {
             any,
             status,
-            context: self.context,
-            bitmap_metadata_partition: self.bitmap_metadata_partition,
             cached_root,
         })
     }
@@ -367,8 +344,6 @@ where
             Db {
                 any,
                 status: self.status,
-                context: self.context,
-                bitmap_metadata_partition: self.bitmap_metadata_partition,
                 cached_root: None, // Not merkleized yet
             },
             range,
@@ -393,8 +368,6 @@ where
         Db {
             any: self.any.into_mutable(),
             status: self.status.into_dirty(),
-            context: self.context,
-            bitmap_metadata_partition: self.bitmap_metadata_partition,
             cached_root: None,
         }
     }
@@ -517,15 +490,15 @@ where
 /// Return the root of the current QMDB represented by the provided mmr and bitmap.
 pub(super) async fn root<E: Storage + Clock + Metrics, H: Hasher, const N: usize>(
     hasher: &mut StandardHasher<H>,
-    status: &CleanBitMap<H::Digest, N>,
+    status: &CleanBitMap<E, H::Digest, N>,
     mmr: &Mmr<E, H::Digest, Clean<DigestOf<H>>>,
 ) -> Result<H::Digest, Error> {
-    let grafted_mmr = GraftingStorage::<'_, H, _, _>::new(status, mmr, grafting_height::<H, N>());
+    let grafted_mmr = GraftingStorage::<'_, H, _, _>::new(status, mmr, grafting_height::<N>());
     let mmr_root = grafted_mmr.root(hasher).await?;
 
     // If we are on a chunk boundary, then the mmr_root fully captures the state of the DB.
     let (last_chunk, next_bit) = status.last_chunk();
-    if next_bit == CleanBitMap::<H::Digest, N>::CHUNK_SIZE_BITS {
+    if next_bit == PrunableBitMap::<N>::CHUNK_SIZE_BITS {
         // Last chunk is complete, no partial chunk to add
         return Ok(mmr_root);
     }
@@ -536,7 +509,7 @@ pub(super) async fn root<E: Storage + Clock + Metrics, H: Hasher, const N: usize
     hasher.inner().update(last_chunk);
     let last_chunk_digest = hasher.inner().finalize();
 
-    Ok(CleanBitMap::<H::Digest, N>::partial_chunk_root(
+    Ok(crate::bitmap::partial_chunk_root::<H, N>(
         hasher.inner(),
         &mmr_root,
         next_bit,
@@ -551,15 +524,16 @@ pub(super) async fn root<E: Storage + Clock + Metrics, H: Hasher, const N: usize
 /// * `hasher` - The hasher used for merkleization.
 /// * `status` - The `DirtyBitMap` to be merkleized. Ownership is taken.
 /// * `mmr` - The MMR storage used for grafting.
-pub(super) async fn merkleize_grafted_bitmap<H, const N: usize>(
+pub(super) async fn merkleize_grafted_bitmap<E, H, const N: usize>(
     hasher: &mut StandardHasher<H>,
-    status: DirtyBitMap<H::Digest, N>,
+    status: DirtyBitMap<E, H::Digest, N>,
     mmr: &impl crate::mmr::storage::Storage<H::Digest>,
-) -> Result<CleanBitMap<H::Digest, N>, Error>
+) -> Result<CleanBitMap<E, H::Digest, N>, Error>
 where
+    E: Storage + Clock + Metrics,
     H: Hasher,
 {
-    let mut grafter = GraftingHasher::new(hasher, grafting_height::<H, N>());
+    let mut grafter = GraftingHasher::new(hasher, grafting_height::<N>());
     grafter
         .load_grafted_digests(&status.dirty_chunks(), mmr)
         .await?;

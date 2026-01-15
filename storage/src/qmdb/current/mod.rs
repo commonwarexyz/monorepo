@@ -86,7 +86,7 @@ pub mod tests {
     };
     use commonware_runtime::{
         deterministic::{self, Context},
-        Runner as _,
+        Metrics as _, Runner as _,
     };
     use core::future::Future;
     use rand::{rngs::StdRng, RngCore, SeedableRng};
@@ -159,7 +159,7 @@ pub mod tests {
         let state1 = executor.start(|mut context| async move {
             let partition = "build_random".to_string();
             let rng_seed = context.next_u64();
-            let db: C = open_db_clone(context.clone(), partition.clone()).await;
+            let db: C = open_db_clone(context.with_label("first"), partition.clone()).await;
             let db = apply_random_ops::<C>(ELEMENTS, true, rng_seed, db.into_mutable())
                 .await
                 .unwrap();
@@ -170,7 +170,7 @@ pub mod tests {
             // Drop and reopen the db
             let root = db.root();
             drop(db);
-            let db: C = open_db_clone(context.clone(), partition).await;
+            let db: C = open_db_clone(context.with_label("second"), partition).await;
 
             // Ensure the root matches
             assert_eq!(db.root(), root);
@@ -184,7 +184,7 @@ pub mod tests {
         let state2 = executor.start(|mut context| async move {
             let partition = "build_random".to_string();
             let rng_seed = context.next_u64();
-            let db: C = open_db(context.clone(), partition.clone()).await;
+            let db: C = open_db(context.with_label("first"), partition.clone()).await;
             let db = apply_random_ops::<C>(ELEMENTS, true, rng_seed, db.into_mutable())
                 .await
                 .unwrap();
@@ -194,7 +194,7 @@ pub mod tests {
 
             let root = db.root();
             drop(db);
-            let db: C = open_db(context.clone(), partition).await;
+            let db: C = open_db(context.with_label("second"), partition).await;
             assert_eq!(db.root(), root);
 
             db.destroy().await.unwrap();
@@ -222,7 +222,7 @@ pub mod tests {
         executor.start(|mut context| async move {
             let partition = "build_random_fail_commit".to_string();
             let rng_seed = context.next_u64();
-            let db: C = open_db(context.clone(), partition.clone()).await;
+            let db: C = open_db(context.with_label("first"), partition.clone()).await;
             let db = apply_random_ops::<C>(ELEMENTS, true, rng_seed, db.into_mutable())
                 .await
                 .unwrap();
@@ -241,7 +241,7 @@ pub mod tests {
             // SCENARIO #1: Simulate a crash that happens before any writes. Upon reopening, the
             // state of the DB should be as of the last commit.
             drop(db);
-            let db: C = open_db(context.clone(), partition.clone()).await;
+            let db: C = open_db(context.with_label("scenario1"), partition.clone()).await;
             assert_eq!(db.root(), committed_root);
             assert_eq!(db.op_count(), committed_op_count);
 
@@ -260,13 +260,13 @@ pub mod tests {
 
             // We should be able to recover, so the root should differ from the previous commit, and
             // the op count should be greater than before.
-            let db: C = open_db(context.clone(), partition.clone()).await;
+            let db: C = open_db(context.with_label("scenario2"), partition.clone()).await;
             let scenario_2_root = db.root();
 
             // To confirm the second committed hash is correct we'll re-build the DB in a new
             // partition, but without any failures. They should have the exact same state.
             let fresh_partition = "build_random_fail_commit_fresh".to_string();
-            let db: C = open_db(context.clone(), fresh_partition.clone()).await;
+            let db: C = open_db(context.with_label("fresh"), fresh_partition.clone()).await;
             let db = apply_random_ops::<C>(ELEMENTS, true, rng_seed, db.into_mutable())
                 .await
                 .unwrap();

@@ -187,7 +187,7 @@ impl<
         let bitmap_metadata_partition = config.bitmap_metadata_partition.clone();
 
         let mut hasher = StandardHasher::<H>::new();
-        let mut status = CleanBitMap::restore_pruned(
+        let mut status = CleanBitMap::init(
             context.with_label("bitmap"),
             &bitmap_metadata_partition,
             thread_pool,
@@ -219,8 +219,6 @@ impl<
         Ok(Self {
             any,
             status,
-            context,
-            bitmap_metadata_partition,
             cached_root,
         })
     }
@@ -538,12 +536,13 @@ pub mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let partition = "build_small".to_string();
-            let db = open_db(context.clone(), partition.clone()).await;
+            let db = open_db(context.with_label("first"), partition.clone()).await;
             assert_eq!(db.op_count(), 1);
             assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(0));
+            assert_eq!(db.oldest_retained_loc(), Location::new_unchecked(0));
             let root0 = db.root();
             drop(db);
-            let db = open_db(context.clone(), partition.clone()).await;
+            let db = open_db(context.with_label("second"), partition.clone()).await;
             assert_eq!(db.op_count(), 1);
             assert!(db.get_metadata().await.unwrap().is_none());
             assert_eq!(db.root(), root0);
@@ -562,7 +561,7 @@ pub mod test {
             assert!(root1 != root0);
 
             drop(db);
-            let db = open_db(context.clone(), partition.clone()).await;
+            let db = open_db(context.with_label("third"), partition.clone()).await;
             assert_eq!(db.op_count(), 4);
             assert_eq!(db.root(), root1);
 
@@ -582,7 +581,7 @@ pub mod test {
             let root2 = db.root();
 
             drop(db);
-            let db = open_db(context.clone(), partition.clone()).await;
+            let db = open_db(context.with_label("fourth"), partition.clone()).await;
             assert_eq!(db.op_count(), 6);
             assert_eq!(db.get_metadata().await.unwrap().unwrap(), metadata);
             assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(5));
@@ -611,7 +610,7 @@ pub mod test {
         // confirm that the end state of the db matches that of an identically updated hashmap.
         const ELEMENTS: u64 = 1000;
         executor.start(|context| async move {
-            let mut db = open_db(context.clone(), "build_big".to_string())
+            let mut db = open_db(context.with_label("first"), "build_big".to_string())
                 .await
                 .into_mutable();
 
@@ -660,7 +659,7 @@ pub mod test {
             // Reopen the db, making sure it has exactly the same state.
             let root = db.root();
             drop(db);
-            let db = open_db(context.clone(), "build_big".to_string()).await;
+            let db = open_db(context.with_label("second"), "build_big".to_string()).await;
             assert_eq!(root, db.root());
             assert_eq!(db.op_count(), 4241);
             assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(3383));
@@ -822,8 +821,10 @@ pub mod test {
             // The new location should differ but still be in the same chunk.
             assert_ne!(active_loc, proof_inactive.proof.loc);
             assert_eq!(
-                CleanBitMap::<Digest, 32>::leaf_pos(*active_loc),
-                CleanBitMap::<Digest, 32>::leaf_pos(*proof_inactive.proof.loc)
+                CleanBitMap::<deterministic::Context, Digest, 32>::leaf_pos(*active_loc),
+                CleanBitMap::<deterministic::Context, Digest, 32>::leaf_pos(
+                    *proof_inactive.proof.loc
+                )
             );
             let mut fake_proof = proof_inactive.clone();
             fake_proof.proof.loc = active_loc;
@@ -865,7 +866,7 @@ pub mod test {
         executor.start(|mut context| async move {
             let partition = "range_proofs".to_string();
             let mut hasher = StandardHasher::<Sha256>::new();
-            let db = open_db(context.clone(), partition).await;
+            let db = open_db(context.with_label("db"), partition).await;
             let root = db.root();
 
             // Empty range proof should not crash or verify, since even an empty db has a single
@@ -937,7 +938,7 @@ pub mod test {
         executor.start(|mut context| async move {
             let partition = "range_proofs".to_string();
             let mut hasher = StandardHasher::<Sha256>::new();
-            let db = open_db(context.clone(), partition.clone())
+            let db = open_db(context.with_label("db"), partition.clone())
                 .await
                 .into_mutable();
             let db = apply_random_ops::<CleanCurrentTest>(500, true, context.next_u64(), db)
@@ -1040,7 +1041,7 @@ pub mod test {
         executor.start(|mut context| async move {
             let partition = "sync_bitmap_pruning".to_string();
             let rng_seed = context.next_u64();
-            let db = open_db(context.clone(), partition.clone()).await;
+            let db = open_db(context.with_label("first"), partition.clone()).await;
 
             // Apply random operations with commits to advance the inactivity floor.
             let db = apply_random_ops::<CleanCurrentTest>(ELEMENTS, true, rng_seed, db.into_mutable())
@@ -1073,7 +1074,7 @@ pub mod test {
             drop(db);
 
             // Reopen the database.
-            let db = open_db(context.clone(), partition).await;
+            let db = open_db(context.with_label("second"), partition).await;
 
             // The pruned bits count should match. If sync() didn't persist the bitmap pruned
             // state, this would be 0.
@@ -1155,15 +1156,18 @@ pub mod test {
 
             let db_config_pruning = current_db_config("pruning_test");
 
-            let mut db_no_pruning =
-                CleanCurrentTest::init(context.clone(), db_config_no_pruning.clone())
+            let mut db_no_pruning = CleanCurrentTest::init(
+                context.with_label("no_pruning"),
+                db_config_no_pruning.clone(),
+            )
+            .await
+            .unwrap()
+            .into_mutable();
+            let mut db_pruning =
+                CleanCurrentTest::init(context.with_label("pruning"), db_config_pruning.clone())
                     .await
                     .unwrap()
                     .into_mutable();
-            let mut db_pruning = CleanCurrentTest::init(context.clone(), db_config_pruning.clone())
-                .await
-                .unwrap()
-                .into_mutable();
 
             // Apply identical operations to both databases, but only prune one.
             const NUM_OPERATIONS: u64 = 1000;
@@ -1206,12 +1210,16 @@ pub mod test {
             drop(db_pruning);
 
             // Restart both databases
-            let db_no_pruning = CleanCurrentTest::init(context.clone(), db_config_no_pruning)
-                .await
-                .unwrap();
-            let db_pruning = CleanCurrentTest::init(context.clone(), db_config_pruning)
-                .await
-                .unwrap();
+            let db_no_pruning = CleanCurrentTest::init(
+                context.with_label("no_pruning_restart"),
+                db_config_no_pruning,
+            )
+            .await
+            .unwrap();
+            let db_pruning =
+                CleanCurrentTest::init(context.with_label("pruning_restart"), db_config_pruning)
+                    .await
+                    .unwrap();
             assert_eq!(
                 db_no_pruning.inactivity_floor_loc(),
                 db_pruning.inactivity_floor_loc()
