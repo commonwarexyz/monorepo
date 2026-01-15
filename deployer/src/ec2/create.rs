@@ -463,7 +463,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
     }
     info!("created binary security groups");
 
-    // Setup VPC peering connections
+    // Setup VPC peering connections concurrently
     info!("initializing VPC peering connections");
     let monitoring_region = MONITORING_REGION.to_string();
     let monitoring_resources = region_resources.get(&monitoring_region).unwrap();
@@ -472,61 +472,75 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
     let monitoring_route_table_id = &monitoring_resources.route_table_id;
     let binary_regions: HashSet<String> =
         config.instances.iter().map(|i| i.region.clone()).collect();
-    for region in &regions {
-        if region != &monitoring_region && binary_regions.contains(region) {
-            let binary_resources = region_resources.get(region).unwrap();
-            let binary_vpc_id = &binary_resources.vpc_id;
-            let binary_cidr = &binary_resources.vpc_cidr;
-            let peer_id = create_vpc_peering_connection(
-                &ec2_clients[&monitoring_region],
-                monitoring_vpc_id,
-                binary_vpc_id,
-                region,
-                tag,
-            )
-            .await?;
-            info!(
-                peer = peer_id.as_str(),
-                monitoring = monitoring_vpc_id.as_str(),
-                binary = binary_vpc_id.as_str(),
-                region = region.as_str(),
-                "created VPC peering connection"
-            );
-            wait_for_vpc_peering_connection(&ec2_clients[region], &peer_id).await?;
-            info!(
-                peer = peer_id.as_str(),
-                region = region.as_str(),
-                "VPC peering connection is available"
-            );
-            accept_vpc_peering_connection(&ec2_clients[region], &peer_id).await?;
-            info!(
-                peer = peer_id.as_str(),
-                region = region.as_str(),
-                "accepted VPC peering connection"
-            );
-            add_route(
-                &ec2_clients[&monitoring_region],
-                monitoring_route_table_id,
-                binary_cidr,
-                &peer_id,
-            )
-            .await?;
-            add_route(
-                &ec2_clients[region],
-                &binary_resources.route_table_id,
-                monitoring_cidr,
-                &peer_id,
-            )
-            .await?;
-            info!(
-                peer = peer_id.as_str(),
-                monitoring = monitoring_vpc_id.as_str(),
-                binary = binary_vpc_id.as_str(),
-                region = region.as_str(),
-                "added routes for VPC peering connection"
-            );
-        }
-    }
+    let peering_futures: Vec<_> = regions
+        .iter()
+        .filter(|region| *region != &monitoring_region && binary_regions.contains(*region))
+        .map(|region| {
+            let region = region.clone();
+            let monitoring_ec2_client = ec2_clients[&monitoring_region].clone();
+            let binary_ec2_client = ec2_clients[&region].clone();
+            let monitoring_vpc_id = monitoring_vpc_id.clone();
+            let monitoring_cidr = monitoring_cidr.clone();
+            let monitoring_route_table_id = monitoring_route_table_id.clone();
+            let binary_resources = region_resources.get(&region).unwrap();
+            let binary_vpc_id = binary_resources.vpc_id.clone();
+            let binary_cidr = binary_resources.vpc_cidr.clone();
+            let binary_route_table_id = binary_resources.route_table_id.clone();
+            let tag = tag.clone();
+            async move {
+                let peer_id = create_vpc_peering_connection(
+                    &monitoring_ec2_client,
+                    &monitoring_vpc_id,
+                    &binary_vpc_id,
+                    &region,
+                    &tag,
+                )
+                .await?;
+                info!(
+                    peer = peer_id.as_str(),
+                    monitoring = monitoring_vpc_id.as_str(),
+                    binary = binary_vpc_id.as_str(),
+                    region = region.as_str(),
+                    "created VPC peering connection"
+                );
+                wait_for_vpc_peering_connection(&binary_ec2_client, &peer_id).await?;
+                info!(
+                    peer = peer_id.as_str(),
+                    region = region.as_str(),
+                    "VPC peering connection is available"
+                );
+                accept_vpc_peering_connection(&binary_ec2_client, &peer_id).await?;
+                info!(
+                    peer = peer_id.as_str(),
+                    region = region.as_str(),
+                    "accepted VPC peering connection"
+                );
+                add_route(
+                    &monitoring_ec2_client,
+                    &monitoring_route_table_id,
+                    &binary_cidr,
+                    &peer_id,
+                )
+                .await?;
+                add_route(
+                    &binary_ec2_client,
+                    &binary_route_table_id,
+                    &monitoring_cidr,
+                    &peer_id,
+                )
+                .await?;
+                info!(
+                    peer = peer_id.as_str(),
+                    monitoring = monitoring_vpc_id.as_str(),
+                    binary = binary_vpc_id.as_str(),
+                    region = region.as_str(),
+                    "added routes for VPC peering connection"
+                );
+                Ok::<_, Error>(())
+            }
+        })
+        .collect();
+    try_join_all(peering_futures).await?;
     info!("initialized VPC peering connections");
 
     // Prepare launch configurations for all instances
