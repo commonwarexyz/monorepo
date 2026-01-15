@@ -169,31 +169,30 @@
 //!
 //! ## On-Demand Profiling (samply)
 //!
-//! To generate an on-demand CPU profile (compatible with the Firefox Profiler UI), run the
+//! To generate an on-demand CPU profile (viewable in the Firefox Profiler UI), run the
 //! following:
 //!
 //! ```bash
-//! deployer ec2 profile --config config.yaml --instance <name> --binary <path-to-debug-binary>
+//! deployer ec2 profile --config config.yaml --instance <name> --binary <path-to-binary-with-debug>
 //! ```
 //!
 //! This captures a 30-second profile (configurable with `--duration`) using samply on the remote
 //! instance, downloads it, and opens it in Firefox Profiler. Unlike Continuous Profiling, this mode
-//! does not require deploying a binary with debug symbols (only frame pointers).
+//! does not require deploying a binary with debug symbols (reducing deployment time).
 //!
-//! Like above, build your binary with debug symbols and frame pointers:
+//! Like above, build your binary with debug symbols (but not frame pointers):
 //!
 //! ```bash
-//! CARGO_PROFILE_RELEASE_DEBUG=true RUSTFLAGS="-C force-frame-pointers=yes" cargo build --release
+//! CARGO_PROFILE_RELEASE_DEBUG=true cargo build --release
 //! ```
 //!
-//! However, strip symbols before deployment (while preserving the original for symbolication):
+//! Now, strip symbols and deploy via `ec2 create` (preserve the original binary for profile symbolication
+//! when you run the `ec2 profile` command shown above):
 //!
 //! ```bash
 //! cp target/release/my-binary target/release/my-binary-debug
 //! strip target/release/my-binary
 //! ```
-//!
-//! When a profile is downloaded, it will be symbolicated using the debug binary you preserved.
 //!
 //! # Persistence
 //!
