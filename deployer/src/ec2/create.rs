@@ -5,6 +5,7 @@ use crate::ec2::{
     Hosts, InstanceConfig, CREATED_FILE_NAME, LOGS_PORT, MONITORING_NAME, MONITORING_REGION,
     PROFILES_PORT, TRACES_PORT,
 };
+use commonware_cryptography::{Hasher as _, Sha256};
 use futures::{
     future::try_join_all,
     stream::{self, StreamExt, TryStreamExt},
@@ -791,11 +792,11 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
         })
         .collect();
     let prom_config = generate_prometheus_config(&instances);
+    let prom_digest = Sha256::hash(prom_config.as_bytes()).to_string();
     let prom_path = tag_directory.join("prometheus.yml");
     std::fs::write(&prom_path, &prom_config)?;
     let dashboard_path = std::path::PathBuf::from(&config.monitoring.dashboard);
-    let (prom_digest, dashboard_digest) =
-        tokio::try_join!(hash_file(&prom_path), hash_file(&dashboard_path),)?;
+    let dashboard_digest = hash_file(&dashboard_path).await?;
     let [prometheus_config_url, dashboard_url]: [String; 2] = try_join_all([
         cache_and_presign(
             &s3_client,
@@ -829,9 +830,9 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
             .collect(),
     };
     let hosts_yaml = serde_yaml::to_string(&hosts)?;
+    let hosts_digest = Sha256::hash(hosts_yaml.as_bytes()).to_string();
     let hosts_path = tag_directory.join("hosts.yaml");
     std::fs::write(&hosts_path, &hosts_yaml)?;
-    let hosts_digest = hash_file(&hosts_path).await?;
     let hosts_url = cache_and_presign(
         &s3_client,
         S3_BUCKET_NAME,
@@ -841,8 +842,11 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     )
     .await?;
 
-    // Write per-instance config files locally
-    let mut instance_paths: Vec<(String, std::path::PathBuf, std::path::PathBuf)> = Vec::new();
+    // Write per-instance config files locally and compute digests
+    let mut promtail_digests: BTreeMap<String, std::path::PathBuf> = BTreeMap::new();
+    let mut pyroscope_digests: BTreeMap<String, std::path::PathBuf> = BTreeMap::new();
+    let mut instance_promtail_digest: HashMap<String, String> = HashMap::new();
+    let mut instance_pyroscope_digest: HashMap<String, String> = HashMap::new();
     for deployment in &deployments {
         let instance = &deployment.instance;
         let ip = &deployment.ip;
@@ -855,6 +859,7 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
             &instance.region,
             arch,
         );
+        let promtail_digest = Sha256::hash(promtail_cfg.as_bytes()).to_string();
         let promtail_path = tag_directory.join(format!("promtail_{}.yml", instance.name));
         std::fs::write(&promtail_path, &promtail_cfg)?;
 
@@ -865,47 +870,18 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
             &instance.region,
             arch,
         );
+        let pyroscope_digest = Sha256::hash(pyroscope_script.as_bytes()).to_string();
         let pyroscope_path = tag_directory.join(format!("pyroscope-agent_{}.sh", instance.name));
         std::fs::write(&pyroscope_path, &pyroscope_script)?;
 
-        instance_paths.push((instance.name.clone(), promtail_path, pyroscope_path));
-    }
-
-    // Compute digests concurrently (limited parallelism) and deduplicate
-    let config_hash_results: Vec<(
-        String,
-        String,
-        String,
-        std::path::PathBuf,
-        std::path::PathBuf,
-    )> = stream::iter(instance_paths.into_iter().map(
-        |(name, promtail_path, pyroscope_path)| async move {
-            let (promtail_digest, pyroscope_digest) =
-                tokio::try_join!(hash_file(&promtail_path), hash_file(&pyroscope_path),)?;
-            Ok::<_, Error>((
-                name,
-                promtail_digest,
-                pyroscope_digest,
-                promtail_path,
-                pyroscope_path,
-            ))
-        },
-    ))
-    .buffer_unordered(MAX_CONCURRENT_HASHES)
-    .try_collect()
-    .await?;
-
-    let mut promtail_digests: BTreeMap<String, std::path::PathBuf> = BTreeMap::new();
-    let mut pyroscope_digests: BTreeMap<String, std::path::PathBuf> = BTreeMap::new();
-    let mut instance_promtail_digest: HashMap<String, String> = HashMap::new();
-    let mut instance_pyroscope_digest: HashMap<String, String> = HashMap::new();
-    for (name, promtail_digest, pyroscope_digest, promtail_path, pyroscope_path) in
-        config_hash_results
-    {
-        promtail_digests.insert(promtail_digest.clone(), promtail_path);
-        pyroscope_digests.insert(pyroscope_digest.clone(), pyroscope_path);
-        instance_promtail_digest.insert(name.clone(), promtail_digest);
-        instance_pyroscope_digest.insert(name, pyroscope_digest);
+        promtail_digests
+            .entry(promtail_digest.clone())
+            .or_insert(promtail_path);
+        pyroscope_digests
+            .entry(pyroscope_digest.clone())
+            .or_insert(pyroscope_path);
+        instance_promtail_digest.insert(instance.name.clone(), promtail_digest);
+        instance_pyroscope_digest.insert(instance.name.clone(), pyroscope_digest);
     }
 
     // Upload unique promtail and pyroscope configs

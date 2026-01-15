@@ -11,7 +11,7 @@ use aws_sdk_s3::{
     types::{BucketLocationConstraint, CreateBucketConfiguration, Delete, ObjectIdentifier},
     Client as S3Client,
 };
-use commonware_cryptography::{Hasher, Sha256};
+use commonware_cryptography::{Hasher as _, Sha256};
 use std::{io::Read, path::Path, time::Duration};
 use tracing::{debug, info};
 
