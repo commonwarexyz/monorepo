@@ -81,7 +81,6 @@ pub async fn profile(
         .send()
         .await
         .map_err(|err| err.into_service_error())?;
-
     let instance_ip = resp
         .reservations
         .unwrap_or_default()
@@ -90,7 +89,6 @@ pub async fn profile(
         .filter_map(|i| i.public_ip_address)
         .next()
         .ok_or_else(|| Error::InstanceNotFound(instance_name.to_string()))?;
-
     info!(
         instance = instance_name,
         ip = instance_ip.as_str(),

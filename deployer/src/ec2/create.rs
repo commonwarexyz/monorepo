@@ -1069,7 +1069,7 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
         async {
             // Configure binary instances (limited concurrency to avoid SSH overload)
             let all_binary_ips: Vec<String> = stream::iter(binary_futures)
-                .buffer_unordered(MAX_CONCURRENT_INSTANCES)
+                .buffer_unordered(MAX_CONCURRENT_CONFIGURATION)
                 .try_collect()
                 .await?;
             info!("configured binary instances");

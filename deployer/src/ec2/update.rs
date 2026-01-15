@@ -12,12 +12,12 @@ use futures::{
 use std::{
     collections::{BTreeMap, HashMap},
     fs::File,
-    path::PathBuf,
+    path::{Path, PathBuf},
 };
 use tracing::{error, info};
 
 /// Updates the binary and configuration on all binary nodes
-pub async fn update(config_path: &PathBuf) -> Result<(), Error> {
+pub async fn update(config_path: &PathBuf, concurrency: usize) -> Result<(), Error> {
     // Load config
     let config: Config = {
         let config_file = File::open(config_path)?;
@@ -58,33 +58,18 @@ pub async fn update(config_path: &PathBuf) -> Result<(), Error> {
     let s3_client = create_s3_client(Region::new(MONITORING_REGION)).await;
     info!("computing file digests");
 
-    // Compute digests concurrently (limited parallelism) and build deduplication maps
-    let hash_results: Vec<(String, String, String, String, String)> =
-        stream::iter(config.instances.iter().map(|instance| {
-            let name = instance.name.clone();
-            let binary_path = instance.binary.clone();
-            let config_path = instance.config.clone();
-            async move {
-                let (binary_digest, config_digest) = tokio::try_join!(
-                    hash_file(std::path::Path::new(&binary_path)),
-                    hash_file(std::path::Path::new(&config_path)),
-                )?;
-                Ok::<_, Error>((name, binary_path, config_path, binary_digest, config_digest))
-            }
-        }))
-        .buffer_unordered(MAX_CONCURRENT_HASHES)
-        .try_collect()
-        .await?;
-
+    // Compute digests and build deduplication maps
     let mut binary_digests: BTreeMap<String, String> = BTreeMap::new();
     let mut config_digests: BTreeMap<String, String> = BTreeMap::new();
     let mut instance_binary_digest: HashMap<String, String> = HashMap::new();
     let mut instance_config_digest: HashMap<String, String> = HashMap::new();
-    for (name, binary_path, config_path, binary_digest, config_digest) in hash_results {
-        binary_digests.insert(binary_digest.clone(), binary_path);
-        config_digests.insert(config_digest.clone(), config_path);
-        instance_binary_digest.insert(name.clone(), binary_digest);
-        instance_config_digest.insert(name, config_digest);
+    for instance in &config.instances {
+        let binary_digest = hash_file(Path::new(&instance.binary)).await?;
+        let config_digest = hash_file(Path::new(&instance.config)).await?;
+        binary_digests.insert(binary_digest.clone(), instance.binary.clone());
+        config_digests.insert(config_digest.clone(), instance.config.clone());
+        instance_binary_digest.insert(instance.name.clone(), binary_digest);
+        instance_config_digest.insert(instance.name.clone(), config_digest);
     }
 
     // Upload unique binaries and configs (deduplicated by digest)
@@ -228,7 +213,7 @@ pub async fn update(config_path: &PathBuf) -> Result<(), Error> {
             None
         }
     }))
-    .buffer_unordered(MAX_CONCURRENT_INSTANCES)
+    .buffer_unordered(concurrency)
     .try_collect::<Vec<_>>()
     .await?;
     info!("update complete");

@@ -114,10 +114,17 @@
 //!
 //! ## `ec2 update`
 //!
+//! Performs rolling updates across all binary instances:
+//!
 //! 1. Uploads the latest binary and configuration to S3.
-//! 2. Stops the `binary` service on each binary instance.
-//! 3. Instances download the updated files from S3 via pre-signed URLs.
-//! 4. Restarts the `binary` service, ensuring minimal downtime.
+//! 2. For each instance (up to `--concurrency` at a time, default 128):
+//!    a. Stops the `binary` service.
+//!    b. Downloads the updated files from S3 via pre-signed URLs.
+//!    c. Restarts the `binary` service.
+//!    d. Waits for the service to become active before proceeding.
+//!
+//! Use `--concurrency 1` for fully sequential updates that wait for each instance to be healthy
+//! before updating the next.
 //!
 //! ## `ec2 authorize`
 //!
@@ -142,7 +149,37 @@
 //! 2. Caches the samply binary in S3 if not already present.
 //! 3. SSHes to the instance, downloads samply, and records a CPU profile of the running binary for the specified duration.
 //! 4. Downloads the profile locally via SCP.
-//! 5. Starts a temporary local HTTP server and opens Firefox Profiler with the profile URL.
+//! 5. Opens Firefox Profiler with symbols resolved from your local debug binary.
+//!
+//! # Profiling
+//!
+//! The deployer supports two profiling modes:
+//!
+//! ## Continuous Profiling (Pyroscope)
+//!
+//! Enable continuous CPU profiling by setting `profiling: true` in your instance config. This runs
+//! Pyroscope in the background, continuously collecting profiles that are viewable in the Grafana
+//! dashboard on the monitoring instance.
+//!
+//! ## On-Demand Profiling (samply)
+//!
+//! For detailed, on-demand CPU profiles with the Firefox Profiler UI:
+//!
+//! ```bash
+//! deployer ec2 profile --config config.yaml --instance <name> --binary <path-to-debug-binary>
+//! ```
+//!
+//! This captures a 30-second profile (configurable with `--duration`) using samply on the remote
+//! instance, downloads it, and opens it in Firefox Profiler with symbols resolved from your local
+//! debug binary.
+//!
+//! ## Building for Profiling
+//!
+//! For best results with either profiling mode, build your binary with debug symbols and frame pointers:
+//!
+//! ```bash
+//! CARGO_PROFILE_RELEASE_DEBUG=true RUSTFLAGS="-C force-frame-pointers=yes" cargo build --release
+//! ```
 //!
 //! # Persistence
 //!
@@ -410,13 +447,10 @@ cfg_if::cfg_if! {
             S3Builder(#[from] aws_sdk_s3::error::BuildError),
             #[error("duplicate instance name: {0}")]
             DuplicateInstanceName(String),
-
             #[error("instance not found: {0}")]
             InstanceNotFound(String),
-
             #[error("file hashing failed: {0}")]
             HashFile(String),
-
             #[error("symbolication failed: {0}")]
             Symbolication(String),
         }

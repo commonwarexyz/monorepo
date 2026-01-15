@@ -50,6 +50,13 @@ async fn main() -> std::process::ExitCode {
                                 .required(true)
                                 .help("Path to YAML config file")
                                 .value_parser(clap::value_parser!(PathBuf)),
+                        )
+                        .arg(
+                            Arg::new("concurrency")
+                                .long("concurrency")
+                                .default_value("128")
+                                .help("Maximum number of instances to update concurrently")
+                                .value_parser(clap::value_parser!(usize)),
                         ),
                 )
                 .subcommand(
@@ -140,7 +147,8 @@ async fn main() -> std::process::ExitCode {
             }
             Some((ec2::UPDATE_CMD, matches)) => {
                 let config_path = matches.get_one::<PathBuf>("config").unwrap();
-                if let Err(e) = ec2::update(config_path).await {
+                let concurrency = *matches.get_one::<usize>("concurrency").unwrap();
+                if let Err(e) = ec2::update(config_path, concurrency).await {
                     error!(error=?e, "failed to update EC2 deployment");
                 } else {
                     return std::process::ExitCode::SUCCESS;
