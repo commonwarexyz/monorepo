@@ -897,7 +897,7 @@ mod tests {
             };
 
             // === Phase 1: Create journal with data and prune ===
-            let mut journal = Journal::<_, u64>::init(context.clone(), cfg.clone())
+            let mut journal = Journal::<_, u64>::init(context.with_label("first"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -921,7 +921,7 @@ mod tests {
                 .expect("Failed to remove offsets partition");
 
             // === Phase 3: Verify this is detected as unrecoverable ===
-            let result = Journal::<_, u64>::init(context.clone(), cfg.clone()).await;
+            let result = Journal::<_, u64>::init(context.with_label("second"), cfg.clone()).await;
             assert!(matches!(result, Err(Error::Corruption(_))));
         });
     }
@@ -947,7 +947,7 @@ mod tests {
             };
 
             // === Setup: Create journal with data ===
-            let mut variable = Journal::<_, u64>::init(context.clone(), cfg.clone())
+            let mut variable = Journal::<_, u64>::init(context.with_label("first"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -966,7 +966,7 @@ mod tests {
                 .expect("Failed to remove data partition");
 
             // === Verify init aligns the mismatch ===
-            let mut journal = Journal::<_, u64>::init(context.clone(), cfg.clone())
+            let mut journal = Journal::<_, u64>::init(context.with_label("second"), cfg.clone())
                 .await
                 .expect("Should align offsets to match empty data");
 
@@ -998,7 +998,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             run_contiguous_tests(move |test_name: String| {
-                let context = context.clone();
+                let context = context.with_label(&test_name);
                 async move {
                     Journal::<_, u64>::init(
                         context,
@@ -1554,7 +1554,7 @@ mod tests {
                 write_buffer: NZUsize!(1024),
             };
 
-            let mut journal = Journal::<_, u64>::init(context.clone(), cfg.clone())
+            let mut journal = Journal::<_, u64>::init(context.with_label("first"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -1569,7 +1569,7 @@ mod tests {
             // Simulate a crash (offsets not synced)
             drop(journal);
 
-            let journal = Journal::<_, u64>::init(context.clone(), cfg.clone())
+            let journal = Journal::<_, u64>::init(context.with_label("second"), cfg.clone())
                 .await
                 .unwrap();
 
