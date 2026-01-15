@@ -1116,7 +1116,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg();
-            let mut journal = Journal::init(context.clone(), cfg.clone())
+            let mut journal = Journal::init(context.with_label("first"), cfg.clone())
                 .await
                 .expect("failed to init");
 
@@ -1147,7 +1147,7 @@ mod tests {
 
             // Reopen journal - should recover by truncating last page due to failed checksum, and
             // end up with a correct blob size due to partial-item trimming.
-            let journal = Journal::<_, Digest>::init(context.clone(), cfg.clone())
+            let journal = Journal::<_, Digest>::init(context.with_label("second"), cfg.clone())
                 .await
                 .expect("failed to re-init");
 
