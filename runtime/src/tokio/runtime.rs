@@ -18,8 +18,7 @@ use crate::{
     storage::metered::Storage as MeteredStorage,
     telemetry::metrics::task::Label,
     utils::{signal::Stopper, supervision::Tree, Panicker},
-    Clock, Error, Execution, Handle, Metrics as _, SinkOf, Spawner as _, StreamOf,
-    METRICS_PREFIX,
+    Clock, Error, Execution, Handle, Metrics as _, SinkOf, Spawner as _, StreamOf, METRICS_PREFIX,
 };
 use commonware_macros::select;
 use commonware_parallel::ThreadPool;
