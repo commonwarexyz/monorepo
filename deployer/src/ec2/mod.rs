@@ -161,37 +161,39 @@
 //! Pyroscope in the background, continuously collecting profiles that are viewable in the Grafana
 //! dashboard on the monitoring instance.
 //!
+//! For best results, build and deploy your binary with debug symbols and frame pointers:
+//!
+//! ```bash
+//! CARGO_PROFILE_RELEASE_DEBUG=true RUSTFLAGS="-C force-frame-pointers=yes" cargo build --release
+//! ```
+//!
 //! ## On-Demand Profiling (samply)
 //!
-//! For detailed, on-demand CPU profiles with the Firefox Profiler UI:
+//! To generate an on-demand CPU profile (compatible with the Firefox Profiler UI), run the
+//! following:
 //!
 //! ```bash
 //! deployer ec2 profile --config config.yaml --instance <name> --binary <path-to-debug-binary>
 //! ```
 //!
 //! This captures a 30-second profile (configurable with `--duration`) using samply on the remote
-//! instance, downloads it, and opens it in Firefox Profiler with symbols resolved from your local
-//! debug binary.
+//! instance, downloads it, and opens it in Firefox Profiler. Unlike Continuous Profiling, this mode
+//! does not require deploying a binary with debug symbols (only frame pointers).
 //!
-//! ## Building for Profiling
-//!
-//! For best results with either profiling mode, build your binary with debug symbols and frame pointers:
+//! Like above, build your binary with debug symbols and frame pointers:
 //!
 //! ```bash
 //! CARGO_PROFILE_RELEASE_DEBUG=true RUSTFLAGS="-C force-frame-pointers=yes" cargo build --release
 //! ```
 //!
-//! The deployed binary only needs frame pointers (`-C force-frame-pointers=yes`) to capture accurate
-//! stack traces. Debug symbols are not required on the remote instance. Instead, keep the debug binary
-//! locally and pass it to `ec2 profile --binary <path>` for symbolication.
-//!
-//! To reduce deployed binary size, strip symbols before deployment while preserving the original for
-//! symbolication:
+//! However, strip symbols before deployment (while preserving the original for symbolication):
 //!
 //! ```bash
 //! cp target/release/my-binary target/release/my-binary-debug
 //! strip target/release/my-binary
 //! ```
+//!
+//! When a profile is downloaded, it will be symbolicated using the debug binary you preserved.
 //!
 //! # Persistence
 //!
