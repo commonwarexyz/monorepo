@@ -181,6 +181,18 @@
 //! CARGO_PROFILE_RELEASE_DEBUG=true RUSTFLAGS="-C force-frame-pointers=yes" cargo build --release
 //! ```
 //!
+//! The deployed binary only needs frame pointers (`-C force-frame-pointers=yes`) to capture accurate
+//! stack traces. Debug symbols are not required on the remote instance. Instead, keep the debug binary
+//! locally and pass it to `ec2 profile --binary <path>` for symbolication.
+//!
+//! To reduce deployed binary size, strip symbols before deployment while preserving the original for
+//! symbolication:
+//!
+//! ```bash
+//! cp target/release/my-binary target/release/my-binary-debug
+//! strip target/release/my-binary
+//! ```
+//!
 //! # Persistence
 //!
 //! * A directory `$HOME/.commonware_deployer/{tag}` stores the SSH private key and status files (`created`, `destroyed`).
