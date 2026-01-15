@@ -628,7 +628,7 @@ impl<D: Digest> Proof<D> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_codec::{Decode, DecodeExt, Encode};
+    use commonware_codec::{Decode, Encode};
     use commonware_cryptography::sha256::{Digest, Sha256};
     use rstest::rstest;
 
@@ -1500,7 +1500,7 @@ mod tests {
 
         // Test multi-proof for non-contiguous positions [0, 3, 5]
         let positions = [0, 3, 5];
-        let multi_proof = tree.multi_proof(&positions).unwrap();
+        let multi_proof = tree.multi_proof(positions).unwrap();
         let mut hasher = Sha256::default();
 
         let elements: Vec<(Digest, u32)> = positions
@@ -1528,7 +1528,7 @@ mod tests {
 
         // Test single element multi-proof for each position
         for (i, digest) in digests.iter().enumerate() {
-            let multi_proof = tree.multi_proof(&[i as u32]).unwrap();
+            let multi_proof = tree.multi_proof([i as u32]).unwrap();
             let elements = [(*digest, i as u32)];
             assert!(
                 multi_proof
@@ -1585,7 +1585,7 @@ mod tests {
 
         // Test adjacent positions (should deduplicate shared siblings)
         let positions = [2, 3];
-        let multi_proof = tree.multi_proof(&positions).unwrap();
+        let multi_proof = tree.multi_proof(positions).unwrap();
 
         let elements: Vec<(Digest, u32)> = positions
             .iter()
@@ -1612,7 +1612,7 @@ mod tests {
 
         // Test widely separated positions
         let positions = [0, 7, 8, 15];
-        let multi_proof = tree.multi_proof(&positions).unwrap();
+        let multi_proof = tree.multi_proof(positions).unwrap();
 
         let elements: Vec<(Digest, u32)> = positions
             .iter()
@@ -1631,11 +1631,14 @@ mod tests {
 
         // Empty tree with empty positions should return NoLeaves error
         // (we can't prove zero elements)
-        assert!(matches!(tree.multi_proof(&[]), Err(Error::NoLeaves)));
+        assert!(matches!(
+            tree.multi_proof(std::iter::empty::<u32>()),
+            Err(Error::NoLeaves)
+        ));
 
         // Empty tree with any position should fail with InvalidPosition
         assert!(matches!(
-            tree.multi_proof(&[0]),
+            tree.multi_proof([0]),
             Err(Error::InvalidPosition(0))
         ));
     }
@@ -1653,7 +1656,10 @@ mod tests {
         let tree = builder.build();
 
         // Empty positions should return error
-        assert!(matches!(tree.multi_proof(&[]), Err(Error::NoLeaves)));
+        assert!(matches!(
+            tree.multi_proof(std::iter::empty::<u32>()),
+            Err(Error::NoLeaves)
+        ));
     }
 
     #[test]
@@ -1670,11 +1676,11 @@ mod tests {
 
         // Duplicate positions should return error
         assert!(matches!(
-            tree.multi_proof(&[1, 1]),
+            tree.multi_proof([1, 1]),
             Err(Error::DuplicatePosition(1))
         ));
         assert!(matches!(
-            tree.multi_proof(&[0, 2, 2, 5]),
+            tree.multi_proof([0, 2, 2, 5]),
             Err(Error::DuplicatePosition(2))
         ));
     }
@@ -1695,7 +1701,7 @@ mod tests {
 
         // Test with unsorted positions (should work - internal sorting)
         let positions = [5, 0, 3];
-        let multi_proof = tree.multi_proof(&positions).unwrap();
+        let multi_proof = tree.multi_proof(positions).unwrap();
 
         // Verify with unsorted elements (should work - internal sorting)
         let unsorted_elements = [(digests[5], 5), (digests[0], 0), (digests[3], 3)];
@@ -1725,7 +1731,7 @@ mod tests {
             // First and last
             if tree_size >= 2 {
                 let positions = [0, (tree_size - 1) as u32];
-                let multi_proof = tree.multi_proof(&positions).unwrap();
+                let multi_proof = tree.multi_proof(positions).unwrap();
                 let elements: Vec<(Digest, u32)> = positions
                     .iter()
                     .map(|&p| (digests[p as usize], p))
@@ -1773,7 +1779,7 @@ mod tests {
 
         // Generate valid proof
         let positions = [0, 3, 5];
-        let multi_proof = tree.multi_proof(&positions).unwrap();
+        let multi_proof = tree.multi_proof(positions).unwrap();
 
         // Verify with wrong elements
         let wrong_elements = [
@@ -1802,7 +1808,7 @@ mod tests {
 
         // Generate valid proof
         let positions = [0, 3, 5];
-        let multi_proof = tree.multi_proof(&positions).unwrap();
+        let multi_proof = tree.multi_proof(positions).unwrap();
 
         // Verify with wrong positions (same elements, different positions)
         let wrong_positions = [
@@ -1830,7 +1836,7 @@ mod tests {
 
         // Generate valid proof
         let positions = [0, 3, 5];
-        let multi_proof = tree.multi_proof(&positions).unwrap();
+        let multi_proof = tree.multi_proof(positions).unwrap();
 
         let elements: Vec<(Digest, u32)> = positions
             .iter()
@@ -1860,7 +1866,7 @@ mod tests {
 
         // Generate valid proof
         let positions = [0, 5];
-        let multi_proof = tree.multi_proof(&positions).unwrap();
+        let multi_proof = tree.multi_proof(positions).unwrap();
 
         let elements: Vec<(Digest, u32)> = positions
             .iter()
@@ -1909,7 +1915,7 @@ mod tests {
             .sum();
 
         // Get multi-proof for same positions
-        let multi_proof = tree.multi_proof(&[0, 1, 8, 9]).unwrap();
+        let multi_proof = tree.multi_proof([0, 1, 8, 9]).unwrap();
 
         // Multi-proof should have fewer siblings due to deduplication
         assert!(
@@ -1936,7 +1942,7 @@ mod tests {
 
         // Generate proof
         let positions = [0, 3, 5];
-        let multi_proof = tree.multi_proof(&positions).unwrap();
+        let multi_proof = tree.multi_proof(positions).unwrap();
 
         // Serialize and deserialize
         let serialized = multi_proof.encode();
@@ -1968,7 +1974,7 @@ mod tests {
 
         // Generate proof
         let positions = [0, 3, 5];
-        let multi_proof = tree.multi_proof(&positions).unwrap();
+        let multi_proof = tree.multi_proof(positions).unwrap();
 
         // Serialize and truncate
         let mut serialized = multi_proof.encode();
@@ -1992,7 +1998,7 @@ mod tests {
 
         // Generate proof
         let positions = [0, 3, 5];
-        let multi_proof = tree.multi_proof(&positions).unwrap();
+        let multi_proof = tree.multi_proof(positions).unwrap();
 
         // Serialize and add extra byte
         let mut serialized = multi_proof.encode_mut();
@@ -2027,11 +2033,11 @@ mod tests {
 
         // Test out of bounds position
         assert!(matches!(
-            tree.multi_proof(&[0, 8]),
+            tree.multi_proof([0, 8]),
             Err(Error::InvalidPosition(8))
         ));
         assert!(matches!(
-            tree.multi_proof(&[100]),
+            tree.multi_proof([100]),
             Err(Error::InvalidPosition(100))
         ));
     }
@@ -2052,7 +2058,7 @@ mod tests {
 
         // Generate valid proof
         let positions = [0, 3];
-        let multi_proof = tree.multi_proof(&positions).unwrap();
+        let multi_proof = tree.multi_proof(positions).unwrap();
 
         // Try to verify with out of bounds position
         let invalid_elements = [(digests[0], 0), (digests[3], 100)];
@@ -2080,7 +2086,7 @@ mod tests {
 
             // Test with positions including the last element
             let positions = [0, (tree_size - 1) as u32];
-            let multi_proof = tree.multi_proof(&positions).unwrap();
+            let multi_proof = tree.multi_proof(positions).unwrap();
 
             let elements: Vec<(Digest, u32)> = positions
                 .iter()
@@ -2110,7 +2116,7 @@ mod tests {
 
         // Generate valid proof
         let positions = [0, 3];
-        let multi_proof = tree.multi_proof(&positions).unwrap();
+        let multi_proof = tree.multi_proof(positions).unwrap();
 
         // Try to verify with empty elements
         let empty_elements: &[(Digest, u32)] = &[];
@@ -2157,7 +2163,7 @@ mod tests {
         let mut hasher = Sha256::default();
 
         // Generate multi-proof for the only leaf
-        let multi_proof = tree.multi_proof(&[0]).unwrap();
+        let multi_proof = tree.multi_proof([0]).unwrap();
 
         // Single leaf tree: leaf_count should be 1
         assert_eq!(multi_proof.leaf_count, 1);
@@ -2212,7 +2218,7 @@ mod tests {
 
         // Generate valid proof and tamper with leaf_count
         let positions = [0, 3];
-        let mut multi_proof = tree.multi_proof(&positions).unwrap();
+        let mut multi_proof = tree.multi_proof(positions).unwrap();
         multi_proof.leaf_count = 0;
 
         let elements: Vec<(Digest, u32)> = positions
@@ -2241,7 +2247,7 @@ mod tests {
 
         // Generate valid proof and inflate leaf_count
         let positions = [0, 3];
-        let mut multi_proof = tree.multi_proof(&positions).unwrap();
+        let mut multi_proof = tree.multi_proof(positions).unwrap();
         let original_leaf_count = multi_proof.leaf_count;
         multi_proof.leaf_count = 1000;
 
@@ -2276,7 +2282,7 @@ mod tests {
 
         // Generate valid proof and deflate leaf_count
         let positions = [0, 3];
-        let mut multi_proof = tree.multi_proof(&positions).unwrap();
+        let mut multi_proof = tree.multi_proof(positions).unwrap();
         multi_proof.leaf_count = 4; // Smaller than actual tree
 
         let elements: Vec<(Digest, u32)> = positions
@@ -2308,7 +2314,7 @@ mod tests {
 
         // Generate proof for 2 positions
         let positions = [0, 3];
-        let multi_proof = tree.multi_proof(&positions).unwrap();
+        let multi_proof = tree.multi_proof(positions).unwrap();
 
         // Try to verify with only 1 element (too few)
         let too_few = [(digests[0], 0u32)];
@@ -2344,7 +2350,7 @@ mod tests {
 
         // Generate valid proof with multiple siblings
         let positions = [0, 5];
-        let mut multi_proof = tree.multi_proof(&positions).unwrap();
+        let mut multi_proof = tree.multi_proof(positions).unwrap();
 
         // Ensure we have at least 2 siblings to swap
         if multi_proof.siblings.len() >= 2 {
@@ -2381,7 +2387,7 @@ mod tests {
 
         // Generate valid proof
         let positions = [0, 2];
-        let mut multi_proof = tree.multi_proof(&positions).unwrap();
+        let mut multi_proof = tree.multi_proof(positions).unwrap();
 
         // Set massive leaf_count (attacker trying to exhaust memory)
         multi_proof.leaf_count = u32::MAX;
