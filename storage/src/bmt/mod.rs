@@ -39,7 +39,7 @@
 //! // Generate a proof for leaf at index 1
 //! let mut hasher = Sha256::default();
 //! let proof = tree.proof(1).unwrap();
-//! assert!(proof.verify_element_inclusion(&mut hasher, &digests[1], &root).is_ok());
+//! assert!(proof.verify_element_inclusion(&mut hasher, &digests[1], 1, &root).is_ok());
 //! ```
 
 use alloc::collections::btree_set::BTreeSet;
@@ -1190,6 +1190,54 @@ mod tests {
             let root = test_merkle_tree(n);
             assert_eq!(hex(&root), previous);
         }
+    }
+
+    /// Regression test for https://github.com/commonwarexyz/monorepo/issues/2837
+    ///
+    /// Before the fix, two proofs with identical siblings but different leaf_count
+    /// values would both verify successfully against the same root, enabling
+    /// proof malleability attacks.
+    #[test]
+    fn test_leaf_count_malleability_rejected() {
+        // Create a tree with 255 leaves (as in the issue report)
+        let digests: Vec<Digest> = (0..255u32)
+            .map(|i| Sha256::hash(&i.to_be_bytes()))
+            .collect();
+
+        let mut builder = Builder::<Sha256>::new(255);
+        for digest in &digests {
+            builder.add(digest);
+        }
+        let tree = builder.build();
+        let root = tree.root();
+
+        // Get a valid proof for position 0
+        let original_proof = tree.proof(0).unwrap();
+        assert_eq!(original_proof.leaf_count, 255);
+
+        // Original proof should verify
+        let mut hasher = Sha256::default();
+        assert!(
+            original_proof
+                .verify_element_inclusion(&mut hasher, &digests[0], 0, &root)
+                .is_ok(),
+            "Original proof should verify"
+        );
+
+        // Create a malleated proof with leaf_count=254 but same siblings
+        // (This is the exact attack from issue #2837)
+        let malleated_proof = Proof {
+            leaf_count: 254,
+            siblings: original_proof.siblings.clone(),
+        };
+
+        // Malleated proof should NOT verify because the root now incorporates
+        // the leaf_count: root = H(leaf_count || tree_root)
+        let result = malleated_proof.verify_element_inclusion(&mut hasher, &digests[0], 0, &root);
+        assert!(
+            result.is_err(),
+            "Malleated proof with wrong leaf_count must fail verification"
+        );
     }
 
     #[test]
