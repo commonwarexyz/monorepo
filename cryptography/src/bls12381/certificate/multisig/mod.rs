@@ -111,7 +111,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
 
         Some(Attestation {
             signer: *index,
-            signature,
+            signature: signature.into(),
         })
     }
 
@@ -129,12 +129,15 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         let Some(public_key) = self.participants.value(attestation.signer.into()) else {
             return false;
         };
+        let Some(sig) = attestation.signature.get() else {
+            return false;
+        };
 
         ops::verify_message::<V>(
             public_key,
             subject.namespace(&self.namespace),
             &subject.message(),
-            &attestation.signature,
+            sig,
         )
         .is_ok()
     }
@@ -153,19 +156,35 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         R: CryptoRngCore,
         D: Digest,
         I: IntoIterator<Item = Attestation<S>>,
+        I::IntoIter: Send,
         T: Strategy,
     {
+        let filtered = strategy.map_collect_vec(attestations.into_iter(), |attestation| {
+            let Some(public_key) = self.participants.value(attestation.signer.into()) else {
+                return (attestation.signer, None);
+            };
+            let Some(signature) = attestation.signature.get().cloned() else {
+                return (attestation.signer, None);
+            };
+            (
+                attestation.signer,
+                Some((attestation, *public_key, signature)),
+            )
+        });
+
         let mut invalid = BTreeSet::new();
         let mut candidates = Vec::new();
         let mut entries = Vec::new();
-        for attestation in attestations.into_iter() {
-            let Some(public_key) = self.participants.value(attestation.signer.into()) else {
-                invalid.insert(attestation.signer);
-                continue;
-            };
-
-            entries.push((*public_key, attestation.signature));
-            candidates.push(attestation);
+        for (signer, maybe_good) in filtered {
+            match maybe_good {
+                None => {
+                    invalid.insert(signer);
+                }
+                Some((a, pk, sig)) => {
+                    candidates.push(a);
+                    entries.push((pk, sig));
+                }
+            }
         }
 
         // If there are no candidates to verify, return before doing any work.
@@ -211,6 +230,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
             if usize::from(signer) >= self.participants.len() {
                 return None;
             }
+            let signature = signature.get().cloned()?;
 
             entries.push((signer, signature));
         }
@@ -504,6 +524,7 @@ mod macros {
                     R: rand_core::CryptoRngCore,
                     D: $crate::Digest,
                     I: IntoIterator<Item = $crate::certificate::Attestation<Self>>,
+                    I::IntoIter: Send
                 {
                     self.generic
                         .verify_attestations::<_, _, D, _, _>(rng, subject, attestations, strategy)
@@ -752,7 +773,7 @@ mod tests {
 
         // Test: Corrupt one attestation - invalid signature
         let mut attestations_corrupted = attestations;
-        attestations_corrupted[0].signature = attestations_corrupted[1].signature;
+        attestations_corrupted[0].signature = attestations_corrupted[1].signature.clone();
         let result = schemes[0].verify_attestations::<_, Sha256Digest, _>(
             &mut rng,
             TestSubject {
@@ -1386,15 +1407,17 @@ mod tests {
         let delta = V::Signature::generator() * &random_scalar;
         let forged_attestation1: Attestation<Scheme<ed25519::PublicKey, V>> = Attestation {
             signer: attestation1.signer,
-            signature: attestation1.signature - &delta,
+            signature: (*attestation1.signature.get().unwrap() - &delta).into(),
         };
         let forged_attestation2: Attestation<Scheme<ed25519::PublicKey, V>> = Attestation {
             signer: attestation2.signer,
-            signature: attestation2.signature + &delta,
+            signature: (*attestation2.signature.get().unwrap() + &delta).into(),
         };
 
-        let forged_sum = forged_attestation1.signature + &forged_attestation2.signature;
-        let valid_sum = attestation1.signature + &attestation2.signature;
+        let forged_sum = *forged_attestation1.signature.get().unwrap()
+            + forged_attestation2.signature.get().unwrap();
+        let valid_sum =
+            *attestation1.signature.get().unwrap() + attestation2.signature.get().unwrap();
         assert_eq!(forged_sum, valid_sum, "signature sums should be equal");
 
         let verification = schemes[0].verify_attestations::<_, Sha256Digest, _>(

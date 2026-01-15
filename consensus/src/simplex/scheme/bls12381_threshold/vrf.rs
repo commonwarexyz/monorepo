@@ -515,7 +515,7 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
 
         Some(Attestation {
             signer: share.index,
-            signature,
+            signature: signature.into(),
         })
     }
 
@@ -539,16 +539,20 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
         let vote_message = subject.message();
         let seed_message = seed_message_from_subject(&subject);
 
+        let Some(signature) = attestation.signature.get() else {
+            return false;
+        };
+
         let entries = &[
             (
                 vote_namespace,
                 vote_message.as_ref(),
-                attestation.signature.vote_signature,
+                signature.vote_signature,
             ),
             (
                 &namespace.seed,
                 seed_message.as_ref(),
-                attestation.signature.seed_signature,
+                signature.seed_signature,
             ),
         ];
         batch::verify_same_signer::<_, V, _>(rng, &evaluated, entries, strategy).is_ok()
@@ -565,23 +569,27 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
         R: CryptoRngCore,
         D: Digest,
         I: IntoIterator<Item = Attestation<Self>>,
+        I::IntoIter: Send,
     {
         let namespace = self.namespace();
-        let (vote_partials, seed_partials): (Vec<_>, Vec<_>) = attestations
-            .into_iter()
-            .map(|attestation| {
-                (
-                    PartialSignature::<V> {
-                        index: attestation.signer,
-                        value: attestation.signature.vote_signature,
-                    },
-                    PartialSignature::<V> {
-                        index: attestation.signer,
-                        value: attestation.signature.seed_signature,
-                    },
-                )
-            })
-            .unzip();
+        let partials = strategy.map_collect_vec(attestations.into_iter(), |attestation| {
+            let index = attestation.signer;
+            let Some(sig) = attestation.signature.get() else {
+                return (index, None, None);
+            };
+
+            (
+                index,
+                Some(PartialSignature::<V> {
+                    index,
+                    value: sig.vote_signature,
+                }),
+                Some(PartialSignature::<V> {
+                    index,
+                    value: sig.seed_signature,
+                }),
+            )
+        });
 
         let polynomial = self.polynomial();
         let vote_namespace = subject.namespace(namespace);
@@ -603,7 +611,7 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
                     polynomial,
                     vote_namespace,
                     &vote_message,
-                    vote_partials.iter(),
+                    partials.iter().filter_map(|x| x.1.as_ref()),
                     strategy,
                 ) {
                     Ok(()) => BTreeSet::new(),
@@ -617,7 +625,7 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
                     polynomial,
                     &namespace.seed,
                     &seed_message,
-                    seed_partials.iter(),
+                    partials.iter().filter_map(|x| x.2.as_ref()),
                     strategy,
                 ) {
                     Ok(()) => BTreeSet::new(),
@@ -626,17 +634,25 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
             },
         );
         // Merge invalid sets
-        let invalid: BTreeSet<_> = vote_invalid.union(&seed_invalid).copied().collect();
+        let mut invalid: BTreeSet<_> = vote_invalid.union(&seed_invalid).copied().collect();
 
-        let verified = vote_partials
+        for (signer, vote, seed) in partials.iter() {
+            if vote.is_none() || seed.is_none() {
+                invalid.insert(*signer);
+            }
+        }
+
+        let verified = partials
             .into_iter()
-            .zip(seed_partials)
-            .map(|(vote, seed)| Attestation {
-                signer: vote.index,
-                signature: Signature {
-                    vote_signature: vote.value,
-                    seed_signature: seed.value,
-                },
+            .filter_map(|(signer, vote, seed)| {
+                Some(Attestation {
+                    signer,
+                    signature: Signature {
+                        vote_signature: vote?.value,
+                        seed_signature: seed?.value,
+                    }
+                    .into(),
+                })
             })
             .filter(|attestation| !invalid.contains(&attestation.signer))
             .collect();
@@ -647,23 +663,25 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
     fn assemble<I, M>(&self, attestations: I, strategy: &impl Strategy) -> Option<Self::Certificate>
     where
         I: IntoIterator<Item = Attestation<Self>>,
+        I::IntoIter: Send,
         M: Faults,
     {
-        let (vote_partials, seed_partials): (Vec<_>, Vec<_>) = attestations
-            .into_iter()
-            .map(|attestation| {
-                (
-                    PartialSignature::<V> {
-                        index: attestation.signer,
-                        value: attestation.signature.vote_signature,
-                    },
-                    PartialSignature::<V> {
-                        index: attestation.signer,
-                        value: attestation.signature.seed_signature,
-                    },
-                )
-            })
-            .unzip();
+        let partials = strategy.map_collect_vec(attestations.into_iter(), |attestation| {
+            let index = attestation.signer;
+            let sig = attestation.signature.get()?;
+            Some((
+                PartialSignature::<V> {
+                    index,
+                    value: sig.vote_signature,
+                },
+                PartialSignature::<V> {
+                    index,
+                    value: sig.seed_signature,
+                },
+            ))
+        });
+        let (vote_partials, seed_partials): (Vec<_>, Vec<_>) =
+            partials.into_iter().flatten().unzip();
 
         let quorum = self.polynomial();
         if vote_partials.len() < quorum.required::<M>() as usize {
@@ -1514,8 +1532,9 @@ mod tests {
                 .value;
 
         assert_eq!(vote.signer, share.index);
-        assert_eq!(vote.signature.vote_signature, expected_message);
-        assert_eq!(vote.signature.seed_signature, expected_seed);
+        let sig = vote.signature.get().unwrap();
+        assert_eq!(sig.vote_signature, expected_message);
+        assert_eq!(sig.seed_signature, expected_seed);
     }
 
     #[test]
@@ -1638,18 +1657,19 @@ mod tests {
 
         let random_scalar = Scalar::random(&mut rng);
         let delta = V::Signature::generator() * &random_scalar;
+        let att_sig = attestation.signature.get().unwrap();
         let forged_attestation: Attestation<Scheme<V>> = Attestation {
             signer: attestation.signer,
             signature: Signature {
-                vote_signature: attestation.signature.vote_signature - &delta,
-                seed_signature: attestation.signature.seed_signature + &delta,
-            },
+                vote_signature: att_sig.vote_signature - &delta,
+                seed_signature: att_sig.seed_signature + &delta,
+            }
+            .into(),
         };
 
-        let forged_sum = forged_attestation.signature.vote_signature
-            + &forged_attestation.signature.seed_signature;
-        let valid_sum =
-            attestation.signature.vote_signature + &attestation.signature.seed_signature;
+        let forged_sig = forged_attestation.signature.get().unwrap();
+        let forged_sum = forged_sig.vote_signature + &forged_sig.seed_signature;
+        let valid_sum = att_sig.vote_signature + &att_sig.seed_signature;
         assert_eq!(forged_sum, valid_sum, "signature sums should be equal");
 
         assert!(
@@ -1700,25 +1720,29 @@ mod tests {
 
         let random_scalar = Scalar::random(&mut rng);
         let delta = V::Signature::generator() * &random_scalar;
+        let att1_sig = attestation1.signature.get().unwrap();
+        let att2_sig = attestation2.signature.get().unwrap();
         let forged_attestation1: Attestation<Scheme<V>> = Attestation {
             signer: attestation1.signer,
             signature: Signature {
-                vote_signature: attestation1.signature.vote_signature - &delta,
-                seed_signature: attestation1.signature.seed_signature,
-            },
+                vote_signature: att1_sig.vote_signature - &delta,
+                seed_signature: att1_sig.seed_signature,
+            }
+            .into(),
         };
         let forged_attestation2: Attestation<Scheme<V>> = Attestation {
             signer: attestation2.signer,
             signature: Signature {
-                vote_signature: attestation2.signature.vote_signature + &delta,
-                seed_signature: attestation2.signature.seed_signature,
-            },
+                vote_signature: att2_sig.vote_signature + &delta,
+                seed_signature: att2_sig.seed_signature,
+            }
+            .into(),
         };
 
-        let forged_vote_sum = forged_attestation1.signature.vote_signature
-            + &forged_attestation2.signature.vote_signature;
-        let valid_vote_sum =
-            attestation1.signature.vote_signature + &attestation2.signature.vote_signature;
+        let forged1_sig = forged_attestation1.signature.get().unwrap();
+        let forged2_sig = forged_attestation2.signature.get().unwrap();
+        let forged_vote_sum = forged1_sig.vote_signature + &forged2_sig.vote_signature;
+        let valid_vote_sum = att1_sig.vote_signature + &att2_sig.vote_signature;
         assert_eq!(
             forged_vote_sum, valid_vote_sum,
             "vote signature sums should be equal"

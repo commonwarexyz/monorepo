@@ -217,7 +217,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
 
         Some(Attestation {
             signer: share.index,
-            signature,
+            signature: signature.into(),
         })
     }
 
@@ -235,12 +235,15 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         let Ok(evaluated) = self.polynomial().partial_public(attestation.signer) else {
             return false;
         };
+        let Some(signature) = attestation.signature.get() else {
+            return false;
+        };
 
         ops::verify_message::<V>(
             &evaluated,
             subject.namespace(self.namespace()),
             &subject.message(),
-            &attestation.signature,
+            signature,
         )
         .is_ok()
     }
@@ -259,17 +262,25 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         R: CryptoRngCore,
         D: Digest,
         I: IntoIterator<Item = Attestation<S>>,
+        I::IntoIter: Send,
         T: Strategy,
     {
         let mut invalid = BTreeSet::new();
-        let partials: Vec<_> = attestations
+        let partials = strategy.map_collect_vec(attestations.into_iter(), |attestation| {
+            let index = attestation.signer;
+            let partial = attestation
+                .signature
+                .get()
+                .map(|&value| PartialSignature::<V> { index, value });
+            (index, partial)
+        });
+        let partials: Vec<_> = partials
             .into_iter()
-            .map(|attestation| PartialSignature::<V> {
-                index: attestation.signer,
-                value: attestation.signature,
+            .filter_map(|(index, partial)| {
+                partial.as_ref().map(|_| invalid.insert(index));
+                partial
             })
             .collect();
-
         let polynomial = self.polynomial();
         if let Err(errs) = threshold::batch_verify_same_message::<_, V, _>(
             rng,
@@ -289,7 +300,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
             .filter(|partial| !invalid.contains(&partial.index))
             .map(|partial| Attestation {
                 signer: partial.index,
-                signature: partial.value,
+                signature: partial.value.into(),
             })
             .collect();
 
@@ -301,16 +312,20 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
     where
         S: Scheme<Signature = V::Signature>,
         I: IntoIterator<Item = Attestation<S>>,
+        I::IntoIter: Send,
         T: Strategy,
         M: Faults,
     {
-        let partials: Vec<_> = attestations
-            .into_iter()
-            .map(|attestation| PartialSignature::<V> {
-                index: attestation.signer,
-                value: attestation.signature,
-            })
-            .collect();
+        let partials = strategy.map_collect_vec(attestations.into_iter(), |attestation| {
+            attestation
+                .signature
+                .get()
+                .map(|&value| PartialSignature::<V> {
+                    index: attestation.signer,
+                    value,
+                })
+        });
+        let partials: Vec<_> = partials.into_iter().flatten().collect();
 
         let quorum = self.polynomial();
         if partials.len() < quorum.required::<M>() as usize {
@@ -561,6 +576,7 @@ mod macros {
                     R: rand_core::CryptoRngCore,
                     D: $crate::Digest,
                     I: IntoIterator<Item = $crate::certificate::Attestation<Self>>,
+                    I::IntoIter: Send
                 {
                     self.generic
                         .verify_attestations::<_, _, D, _, _>(rng, subject, attestations, strategy)
@@ -573,6 +589,7 @@ mod macros {
                 ) -> Option<Self::Certificate>
                 where
                     I: IntoIterator<Item = $crate::certificate::Attestation<Self>>,
+                    I::IntoIter: Send,
                     M: commonware_utils::Faults,
                 {
                     self.generic.assemble::<Self, _, _, M>(attestations, strategy)
@@ -800,7 +817,7 @@ mod tests {
 
         // Test: Corrupt one attestation - invalid signature
         let mut attestations_corrupted = attestations;
-        attestations_corrupted[0].signature = attestations_corrupted[1].signature;
+        attestations_corrupted[0].signature = attestations_corrupted[1].signature.clone();
         let result = schemes[0].verify_attestations::<_, Sha256Digest, _>(
             &mut rng,
             TestSubject {
@@ -1402,7 +1419,7 @@ mod tests {
         let expected = sign_message::<V>(share, NAMESPACE, MESSAGE);
 
         assert_eq!(signature.signer, share.index);
-        assert_eq!(signature.signature, expected.value);
+        assert_eq!(signature.signature.get().unwrap(), &expected.value);
     }
 
     #[test]
