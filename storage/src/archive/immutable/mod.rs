@@ -187,7 +187,9 @@ mod tests {
             drop(archive);
 
             // Re-initialize archive (should load from checkpoint)
-            let archive = Archive::init(context.with_label("third"), cfg).await.unwrap();
+            let archive = Archive::init(context.with_label("third"), cfg)
+                .await
+                .unwrap();
 
             // Verify data persisted
             assert_eq!(

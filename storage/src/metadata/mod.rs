@@ -573,8 +573,9 @@ mod tests {
                     partition: "test".to_string(),
                     codec_config: ((0..).into(), ()),
                 };
-                let mut metadata =
-                    Metadata::init(context.with_label("first"), cfg).await.unwrap();
+                let mut metadata = Metadata::init(context.with_label("first"), cfg)
+                    .await
+                    .unwrap();
 
                 // Put a key
                 metadata.put(key.clone(), hello.clone());

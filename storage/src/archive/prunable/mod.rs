@@ -271,9 +271,12 @@ mod tests {
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_section: NZU64!(DEFAULT_ITEMS_PER_SECTION),
             };
-            let archive = Archive::<_, _, FixedBytes<64>, i32>::init(context.with_label("second"), cfg.clone())
-                .await
-                .unwrap();
+            let archive = Archive::<_, _, FixedBytes<64>, i32>::init(
+                context.with_label("second"),
+                cfg.clone(),
+            )
+            .await
+            .unwrap();
 
             // Getting the value should fail because compression settings mismatch.
             // Without compression, the codec sees extra bytes after decoding the value
