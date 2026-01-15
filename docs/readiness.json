@@ -1,6 +1,6 @@
 {
   "version": "0.0.65",
-  "generated": "2026-01-15T00:20:10.860865+00:00",
+  "generated": "2026-01-15T01:02:04.601639+00:00",
   "crates": [
     {
       "name": "commonware-broadcast",
@@ -172,13 +172,7 @@
         },
         {
           "name": "bls12381",
-          "readiness": 2,
-          "children": [
-            {
-              "name": "tle",
-              "readiness": 1
-            }
-          ]
+          "readiness": 2
         },
         {
           "name": "certificate",

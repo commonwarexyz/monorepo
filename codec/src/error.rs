@@ -7,7 +7,6 @@ use alloc::boxed::Box;
 use thiserror::Error;
 
 /// Error type for codec operations
-#[commonware_macros::ready(2)]
 #[derive(Error, Debug)]
 pub enum Error {
     /// Indicates that the input buffer (`Buf`) did not contain enough bytes to read

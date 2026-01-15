@@ -24,6 +24,88 @@ pub fn check_crate_level_readiness(workspace: &Workspace) -> Vec<(String, PathBu
     violations
 }
 
+/// A conflict where a readiness annotation has descendants with their own annotations.
+#[derive(Debug, Clone)]
+pub struct ReadinessConflict {
+    pub crate_name: String,
+    pub module_path: String,
+    pub readiness: u8,
+    /// Descendant items with #[ready()]
+    pub items: Vec<String>,
+    /// Descendant submodules with readiness!()
+    pub submodules: Vec<String>,
+}
+
+impl fmt::Display for ReadinessConflict {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}::{} (readiness {}) has descendants with annotations",
+            self.crate_name, self.module_path, self.readiness
+        )?;
+        if !self.items.is_empty() {
+            write!(f, " - items: {}", self.items.join(", "))?;
+        }
+        if !self.submodules.is_empty() {
+            write!(f, " - submodules: {}", self.submodules.join(", "))?;
+        }
+        Ok(())
+    }
+}
+
+/// Check for nested readiness annotations.
+/// If any ancestor has a readiness annotation, descendants cannot have their own.
+pub fn check_readiness_conflicts(workspace: &Workspace) -> Vec<ReadinessConflict> {
+    let mut conflicts = Vec::new();
+
+    for (crate_name, krate) in &workspace.crates {
+        collect_readiness_conflicts(&krate.modules, crate_name, &mut conflicts);
+    }
+
+    conflicts.sort_by(|a, b| (&a.crate_name, &a.module_path).cmp(&(&b.crate_name, &b.module_path)));
+    conflicts
+}
+
+fn collect_readiness_conflicts(
+    modules: &HashMap<String, Module>,
+    crate_name: &str,
+    conflicts: &mut Vec<ReadinessConflict>,
+) {
+    for module in modules.values() {
+        if module.is_explicit {
+            // Check for items with #[ready()] in this module
+            let mut items: Vec<_> = module.items.keys().cloned().collect();
+            items.sort();
+
+            // Check for any descendant submodules with readiness!()
+            let mut submodules = Vec::new();
+            collect_explicit_descendants(&module.submodules, &mut submodules);
+            submodules.sort();
+
+            if !items.is_empty() || !submodules.is_empty() {
+                conflicts.push(ReadinessConflict {
+                    crate_name: crate_name.to_string(),
+                    module_path: module.path.clone(),
+                    readiness: module.readiness,
+                    items,
+                    submodules,
+                });
+            }
+        }
+        collect_readiness_conflicts(&module.submodules, crate_name, conflicts);
+    }
+}
+
+/// Recursively collect all descendant modules with explicit readiness!().
+fn collect_explicit_descendants(modules: &HashMap<String, Module>, result: &mut Vec<String>) {
+    for module in modules.values() {
+        if module.is_explicit {
+            result.push(module.path.clone());
+        }
+        collect_explicit_descendants(&module.submodules, result);
+    }
+}
+
 /// A readiness constraint violation.
 #[derive(Debug, Clone)]
 pub struct Violation {
@@ -96,6 +178,9 @@ fn build_module_readiness_map(workspace: &Workspace) -> HashMap<String, u8> {
 
         // Handle item re-exports: map "crate::Item" to source module's readiness
         add_item_reexport_readiness(krate, &mut map);
+
+        // Handle module-level re-exports (from mod.rs files)
+        add_module_reexports(krate, &mut map);
     }
 
     map
@@ -272,6 +357,125 @@ fn collect_reexport_items(
     }
 }
 
+/// Add readiness entries for items re-exported from submodules in mod.rs files.
+/// Handles patterns like `pub use scheme::{Item1, Item2}` in mod.rs.
+fn add_module_reexports(krate: &crate::parser::Crate, map: &mut HashMap<String, u8>) {
+    for (mod_name, module) in &krate.modules {
+        add_module_reexports_recursive(&krate.name, mod_name, module, map);
+    }
+}
+
+fn add_module_reexports_recursive(
+    crate_name: &str,
+    mod_path: &str,
+    module: &Module,
+    map: &mut HashMap<String, u8>,
+) {
+    // Check if this is a directory module (has mod.rs)
+    let mod_rs = module.file_path.clone();
+    if mod_rs.file_name().map_or(false, |n| n == "mod.rs") {
+        // Parse the mod.rs file for re-exports
+        if let Ok(content) = fs::read_to_string(&mod_rs) {
+            if let Ok(syntax) = syn::parse_file(&content) {
+                for item in &syntax.items {
+                    if let syn::Item::Use(item_use) = item {
+                        if matches!(item_use.vis, syn::Visibility::Public(_)) {
+                            collect_module_reexport_items(
+                                crate_name,
+                                mod_path,
+                                &item_use.tree,
+                                &[],
+                                map,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Recurse into submodules
+    for (submod_name, submod) in &module.submodules {
+        let submod_path = format!("{mod_path}::{submod_name}");
+        add_module_reexports_recursive(crate_name, &submod_path, submod, map);
+    }
+}
+
+/// Collect re-exported items from a use tree in a mod.rs file.
+fn collect_module_reexport_items(
+    crate_name: &str,
+    mod_path: &str,
+    tree: &syn::UseTree,
+    prefix: &[String],
+    map: &mut HashMap<String, u8>,
+) {
+    match tree {
+        syn::UseTree::Path(path) => {
+            let mut new_prefix = prefix.to_vec();
+            new_prefix.push(path.ident.to_string());
+            collect_module_reexport_items(crate_name, mod_path, &path.tree, &new_prefix, map);
+        }
+        syn::UseTree::Name(name) => {
+            if !prefix.is_empty() {
+                let item_name = name.ident.to_string();
+                // Only process items (capitalized names)
+                if item_name.chars().next().map_or(false, |c| c.is_uppercase()) {
+                    // Source path: crate::mod_path::submod::Item
+                    let source_submod = prefix.join("::");
+                    let source_item_path =
+                        format!("{crate_name}::{mod_path}::{source_submod}::{item_name}");
+                    // Target path: crate::mod_path::Item (re-exported without submod)
+                    let target_item_path = format!("{crate_name}::{mod_path}::{item_name}");
+
+                    // Look up the source item's readiness
+                    if let Some(&readiness) = map.get(&source_item_path) {
+                        map.insert(target_item_path, readiness);
+                    } else {
+                        // Fall back to source module's readiness
+                        let source_mod_path = format!("{crate_name}::{mod_path}::{source_submod}");
+                        if let Some(&readiness) = map.get(&source_mod_path) {
+                            map.insert(target_item_path, readiness);
+                        }
+                    }
+                }
+            }
+        }
+        syn::UseTree::Rename(rename) => {
+            if !prefix.is_empty() {
+                let alias_name = rename.rename.to_string();
+                let original_name = rename.ident.to_string();
+                if alias_name
+                    .chars()
+                    .next()
+                    .map_or(false, |c| c.is_uppercase())
+                {
+                    let source_submod = prefix.join("::");
+                    let source_item_path =
+                        format!("{crate_name}::{mod_path}::{source_submod}::{original_name}");
+                    let target_item_path = format!("{crate_name}::{mod_path}::{alias_name}");
+
+                    if let Some(&readiness) = map.get(&source_item_path) {
+                        map.insert(target_item_path, readiness);
+                    } else {
+                        let source_mod_path = format!("{crate_name}::{mod_path}::{source_submod}");
+                        if let Some(&readiness) = map.get(&source_mod_path) {
+                            map.insert(target_item_path, readiness);
+                        }
+                    }
+                }
+            }
+        }
+        syn::UseTree::Glob(_) => {
+            // Skip glob imports
+        }
+        syn::UseTree::Group(group) => {
+            for item in &group.items {
+                collect_module_reexport_items(crate_name, mod_path, item, prefix, map);
+            }
+        }
+    }
+}
+
 /// Add aliases for submodules that are re-exported.
 /// e.g., "runtime::utils::buffer" also becomes "runtime::buffer"
 fn add_submodule_aliases(
@@ -403,6 +607,7 @@ impl CommonwarePathVisitor {
     }
 
     /// Extract module path from a syn::Path if it's a commonware import.
+    /// Tracks the full path including items for item-level readiness resolution.
     fn extract_from_path(&mut self, path: &syn::Path) {
         if self.in_test_cfg {
             return;
@@ -427,22 +632,17 @@ impl CommonwarePathVisitor {
             return;
         }
 
-        // Look for module segments (lowercase identifiers after crate name)
-        if segments.len() > 1 {
-            let second = &segments[1];
-            // If second segment starts with lowercase, it's likely a module
-            if second.chars().next().map_or(false, |c| c.is_lowercase()) {
-                self.modules.insert(format!("{crate_name}::{second}"));
-                return;
-            }
-            // This is an item import (e.g., `commonware_stream::Config`)
-            // Track the specific item so it can be resolved via re-export map
-            self.modules.insert(format!("{crate_name}::{second}"));
+        if segments.len() == 1 {
+            // Just the crate itself (e.g., `use commonware_stream;`)
+            self.modules.insert(crate_name);
             return;
         }
 
-        // Just the crate itself (e.g., `use commonware_stream;`)
-        self.modules.insert(crate_name);
+        // Build the full path: crate::module::submodule::Item
+        // We track the full path so item-level readiness can be resolved
+        let rest: Vec<_> = segments[1..].iter().map(|s| s.as_str()).collect();
+        let full_path = format!("{crate_name}::{}", rest.join("::"));
+        self.modules.insert(full_path);
     }
 
     /// Check if attributes contain #[cfg(test)]
@@ -537,6 +737,7 @@ fn collect_use_paths(tree: &syn::UseTree, prefix: &[String], modules: &mut HashS
 }
 
 /// Add a module path if it's a commonware module.
+/// Tracks the full path including items for item-level readiness resolution.
 fn add_commonware_module(path: &[String], modules: &mut HashSet<String>) {
     if path.is_empty() {
         return;
@@ -552,21 +753,17 @@ fn add_commonware_module(path: &[String], modules: &mut HashSet<String>) {
         return;
     }
 
-    // Look for module segment (second element, lowercase)
-    if path.len() > 1 {
-        let second = &path[1];
-        if second.chars().next().map_or(false, |c| c.is_lowercase()) {
-            modules.insert(format!("{crate_name}::{second}"));
-            return;
-        }
-        // This is an item import (e.g., `commonware_stream::Config`)
-        // Add both the specific item path and the crate root as fallback
-        modules.insert(format!("{crate_name}::{second}"));
+    if path.len() == 1 {
+        // Just the crate itself (e.g., `use commonware_stream;`)
+        modules.insert(crate_name);
         return;
     }
 
-    // Just the crate itself (e.g., `use commonware_stream;`)
-    modules.insert(crate_name);
+    // Build the full path: crate::module::submodule::Item
+    // We track the full path so item-level readiness can be resolved
+    let rest: Vec<_> = path[1..].iter().map(|s| s.as_str()).collect();
+    let full_path = format!("{crate_name}::{}", rest.join("::"));
+    modules.insert(full_path);
 }
 
 /// Extract commonware module imports from all files in a module.

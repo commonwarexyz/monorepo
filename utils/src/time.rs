@@ -160,7 +160,6 @@ impl DurationExt for Duration {
 }
 
 /// Extension trait to add methods to `std::time::SystemTime`
-#[commonware_macros::ready(2)]
 pub trait SystemTimeExt {
     /// Returns the duration since the Unix epoch.
     ///

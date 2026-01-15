@@ -85,6 +85,16 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
 
+    // Check for nested readiness annotations (prohibited)
+    let readiness_conflicts = validator::check_readiness_conflicts(&workspace);
+    if !readiness_conflicts.is_empty() {
+        eprintln!("Readiness annotations cannot be nested:");
+        for conflict in &readiness_conflicts {
+            eprintln!("  {conflict}");
+        }
+        return ExitCode::FAILURE;
+    }
+
     // Validate constraints if requested
     if args.validate {
         let violations = validator::validate(&workspace);
