@@ -796,7 +796,7 @@ pub(super) mod test {
         executor.start(|context| async move {
             // Insert 1000 keys then sync.
             const ELEMENTS: u64 = 1000;
-            let db = open_db(context.clone()).await;
+            let db = open_db(context.with_label("first")).await;
             let mut db = db.into_mutable();
 
             for i in 0u64..ELEMENTS {
@@ -826,14 +826,14 @@ pub(super) mod test {
 
             // Recovery should replay the log to regenerate the MMR.
             // op_count = 1002 (first batch + commit) + 1000 (second batch) + 1 (second commit) = 2003
-            let db = open_db(context.clone()).await;
+            let db = open_db(context.with_label("second")).await;
             assert_eq!(db.op_count(), 2003);
             let root = db.root();
             assert_ne!(root, halfway_root);
 
             // Drop & reopen could preserve the final commit.
             drop(db);
-            let db = open_db(context.clone()).await;
+            let db = open_db(context.with_label("third")).await;
             assert_eq!(db.op_count(), 2003);
             assert_eq!(db.root(), root);
 
