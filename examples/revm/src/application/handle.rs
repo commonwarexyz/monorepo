@@ -10,24 +10,18 @@ use crate::{
     ConsensusDigest,
 };
 use alloy_evm::revm::primitives::{Address, B256, U256};
-use commonware_runtime::Spawner;
 use futures::channel::mpsc::UnboundedReceiver;
 
 #[derive(Clone)]
 /// Handle that exposes application queries and submissions to the simulation harness.
-pub struct NodeHandle<E> {
+pub struct NodeHandle {
     /// Ledger service used by the simulation harness.
     state: LedgerService,
-    /// Spawner used to execute queries that interact with runtime traits.
-    spawner: E,
 }
 
-impl<E> NodeHandle<E>
-where
-    E: Spawner,
-{
-    pub(crate) const fn new(state: LedgerService, spawner: E) -> Self {
-        Self { state, spawner }
+impl NodeHandle {
+    pub(crate) const fn new(state: LedgerService) -> Self {
+        Self { state }
     }
 
     /// Subscribe to the ledger domain event stream.
@@ -41,14 +35,7 @@ where
     }
 
     pub async fn query_balance(&self, digest: ConsensusDigest, address: Address) -> Option<U256> {
-        let state = self.state.clone();
-        let spawner = self.spawner.clone();
-        spawner
-            .shared(true)
-            .spawn(move |_| async move { state.query_balance(digest, address).await })
-            .await
-            .ok()
-            .flatten()
+        self.state.query_balance(digest, address).await
     }
 
     pub async fn query_state_root(&self, digest: ConsensusDigest) -> Option<StateRoot> {

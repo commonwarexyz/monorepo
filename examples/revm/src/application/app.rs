@@ -28,16 +28,14 @@ use rand::Rng;
 use std::{collections::BTreeSet, marker::PhantomData};
 
 /// Helper function for propose that owns all its inputs.
-async fn propose_inner<S, E>(
+async fn propose_inner<S>(
     // Ledger service commands for proposal preparation.
     state: LedgerService,
     max_txs: usize,
-    spawner: E,
     mut ancestry: AncestorStream<S, Block>,
 ) -> Option<Block>
 where
     S: CertScheme,
-    E: Spawner,
 {
     let parent = ancestry.next().await?;
 
@@ -62,13 +60,7 @@ where
     let txs = state.build_txs(max_txs, &included).await;
 
     let env = evm_env(height, prevrandao);
-    let exec = spawner.shared(true).spawn(|_| async move {
-        execute_txs(parent_snapshot.db, env, &txs).map(|(db, outcome)| (txs, db, outcome))
-    });
-    let (txs, db, outcome) = match exec.await {
-        Ok(Ok(result)) => result,
-        _ => return None,
-    };
+    let (db, outcome) = execute_txs(parent_snapshot.db, env, &txs).ok()?;
 
     let mut child = Block {
         parent: parent.id(),
@@ -96,14 +88,12 @@ where
 }
 
 /// Helper function for verify that owns all its inputs.
-async fn verify_inner<S, E>(
+async fn verify_inner<S>(
     state: LedgerService,
-    spawner: E,
     mut ancestry: AncestorStream<S, Block>,
 ) -> bool
 where
     S: CertScheme,
-    E: Spawner,
 {
     let block = match ancestry.next().await {
         Some(block) => block,
@@ -120,12 +110,9 @@ where
     };
 
     let env = evm_env(block.height, block.prevrandao);
-    let exec = spawner.shared(true).spawn(|_| async move {
-        execute_txs(parent_snapshot.db, env, &block.txs).map(|(db, outcome)| (block, db, outcome))
-    });
-    let (block, db, outcome) = match exec.await {
-        Ok(Ok(result)) => result,
-        _ => return false,
+    let (db, outcome) = match execute_txs(parent_snapshot.db, env, &block.txs) {
+        Ok(result) => result,
+        Err(_) => return false,
     };
     let state_root = match state
         .preview_root(parent_digest, outcome.qmdb_changes.clone())
@@ -189,8 +176,8 @@ where
     ) -> impl std::future::Future<Output = Option<Self::Block>> + Send {
         let state = self.state.clone();
         let max_txs = self.max_txs;
-        let spawner = context.0;
-        async move { propose_inner(state, max_txs, spawner, ancestry).await }
+        let _ = context;
+        async move { propose_inner(state, max_txs, ancestry).await }
     }
 }
 
@@ -206,7 +193,7 @@ where
         ancestry: AncestorStream<Self::SigningScheme, Self::Block>,
     ) -> impl std::future::Future<Output = bool> + Send {
         let state = self.state.clone();
-        let spawner = context.0;
-        async move { verify_inner(state, spawner, ancestry).await }
+        let _ = context;
+        async move { verify_inner(state, ancestry).await }
     }
 }

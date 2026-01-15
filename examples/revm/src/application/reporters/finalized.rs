@@ -5,14 +5,10 @@ use super::super::{
 use crate::domain::Block;
 use commonware_consensus::{marshal::Update, Block as _, Reporter};
 use commonware_cryptography::Committable as _;
-use commonware_runtime::Spawner;
 use commonware_utils::acknowledgement::Acknowledgement as _;
 
 /// Helper function for `FinalizedReporter::report` that owns all its inputs.
-async fn finalized_report_inner<E>(state: LedgerService, spawner: E, update: Update<Block>)
-where
-    E: Spawner,
-{
+async fn finalized_report_inner(state: LedgerService, update: Update<Block>) {
     match update {
         Update::Tip(_, _) => {}
         Update::Block(block, ack) => {
@@ -25,14 +21,10 @@ where
                     .await
                     .expect("missing parent snapshot");
                 let env = evm_env(block.height, block.prevrandao);
-                let exec = spawner.clone().shared(true).spawn(|_| async move {
+                let (next_block, db, outcome) =
                     execute_txs(parent_snapshot.db, env, &block.txs)
                         .map(|(db, outcome)| (block, db, outcome))
-                });
-                let (next_block, db, outcome) = exec
-                    .await
-                    .expect("execute task failed")
-                    .expect("execute finalized block");
+                        .expect("execute finalized block");
                 block = next_block;
                 let state_root = state
                     .preview_root(parent_digest, outcome.qmdb_changes.clone())
@@ -43,13 +35,9 @@ where
                     .insert_snapshot(digest, parent_digest, db, state_root, outcome.qmdb_changes)
                     .await;
             }
-            let persist_state = state.clone();
-            let persist = spawner
-                .shared(true)
-                .spawn(move |_| async move { persist_state.persist_snapshot(digest).await });
-            persist
+            state
+                .persist_snapshot(digest)
                 .await
-                .expect("persist task failed")
                 .expect("persist finalized block");
             state.prune_mempool(&block.txs).await;
             // Marshal waits for the application to acknowledge processing before advancing the
@@ -61,33 +49,24 @@ where
 
 #[derive(Clone)]
 /// Persists finalized blocks.
-pub(crate) struct FinalizedReporter<E> {
+pub(crate) struct FinalizedReporter {
     /// Ledger service used to verify blocks and persist snapshots.
     state: LedgerService,
-    /// Runtime spawner used for executing block replay tasks.
-    spawner: E,
 }
 
-impl<E> FinalizedReporter<E>
-where
-    E: Spawner,
-{
-    pub(crate) const fn new(state: LedgerService, spawner: E) -> Self {
-        Self { state, spawner }
+impl FinalizedReporter {
+    pub(crate) const fn new(state: LedgerService) -> Self {
+        Self { state }
     }
 }
 
-impl<E> Reporter for FinalizedReporter<E>
-where
-    E: Spawner,
-{
+impl Reporter for FinalizedReporter {
     type Activity = Update<Block>;
 
     fn report(&mut self, update: Self::Activity) -> impl std::future::Future<Output = ()> + Send {
         let state = self.state.clone();
-        let spawner = self.spawner.clone();
         async move {
-            finalized_report_inner(state, spawner, update).await;
+            finalized_report_inner(state, update).await;
         }
     }
 }

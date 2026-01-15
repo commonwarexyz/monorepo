@@ -55,7 +55,7 @@ pub struct SimOutcome {
     pub to_balance: U256,
 }
 
-type NodeHandle = crate::application::NodeHandle<tokio::Context>;
+type NodeHandle = crate::application::NodeHandle;
 type SimTransport = simulated::Oracle<ed25519::PublicKey, tokio::Context>;
 
 fn transport_control(

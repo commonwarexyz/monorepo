@@ -38,7 +38,7 @@ pub(crate) async fn start_node<E>(
     scheme: ThresholdScheme,
     finalized_tx: mpsc::UnboundedSender<FinalizationEvent>,
     bootstrap: &BootstrapConfig,
-) -> anyhow::Result<NodeHandle<tokio::Context>>
+) -> anyhow::Result<NodeHandle>
 where
     E: NodeEnvironment,
     E::Transport: TransportControl<
@@ -88,10 +88,10 @@ where
             }
         }
     });
-    let handle = NodeHandle::new(ledger.clone(), context.clone());
+    let handle = NodeHandle::new(ledger.clone());
     let app = RevmApplication::<ThresholdScheme>::new(block_cfg.max_txs, state.clone());
 
-    let finalized_reporter = FinalizedReporter::new(ledger.clone(), context.clone());
+    let finalized_reporter = FinalizedReporter::new(ledger.clone());
 
     let marshal_mailbox = start_marshal(
         &context,

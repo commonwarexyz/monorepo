@@ -62,7 +62,7 @@ pub(super) struct MarshalStart<M> {
     /// Channels used for marshal backfill requests/responses.
     pub(super) backfill: (ChannelSender, ChannelReceiver),
     /// Application-level reporter that observes finalized blocks.
-    pub(super) application: FinalizedReporter<tokio::Context>,
+    pub(super) application: FinalizedReporter,
 }
 
 /// Wire up the marshal actor for block dissemination/backfill and finalized reporting.
