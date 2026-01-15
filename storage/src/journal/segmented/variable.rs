@@ -1415,7 +1415,7 @@ mod tests {
             assert_eq!(blob_size, 0);
 
             // Attempt to replay journal after truncation
-            let mut journal = Journal::init(context.clone(), cfg.clone())
+            let mut journal = Journal::init(context.with_label("third"), cfg.clone())
                 .await
                 .expect("Failed to re-initialize journal");
 

@@ -40,6 +40,7 @@ use commonware_utils::Array;
 use core::ops::Range;
 use futures::stream::Stream;
 use std::num::NonZeroU64;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// A key-value QMDB based on an MMR over its log of operations, supporting key exclusion proofs and
 /// authentication of whether a currently has a specific value.
@@ -71,6 +72,9 @@ pub struct Db<
 
     /// Cached root digest. Invariant: valid when in Clean state.
     cached_root: Option<H::Digest>,
+
+    /// Counter for unique labels when writing bitmap metadata multiple times.
+    write_counter: AtomicU64,
 }
 
 /// Proof information for verifying a key has a particular value in the database.
@@ -286,6 +290,7 @@ impl<
             context,
             bitmap_metadata_partition,
             cached_root,
+            write_counter: AtomicU64::new(0),
         })
     }
 
@@ -300,9 +305,10 @@ impl<
 
         // Write the bitmap pruning boundary to disk so that next startup doesn't have to
         // re-Merkleize the inactive portion up to the inactivity floor.
+        let n = self.write_counter.fetch_add(1, Ordering::Relaxed);
         self.status
             .write_pruned(
-                self.context.with_label("bitmap_sync"),
+                self.context.with_label(&format!("bitmap_sync_{n}")),
                 &self.bitmap_metadata_partition,
             )
             .await
@@ -326,6 +332,7 @@ impl<
             context: self.context,
             bitmap_metadata_partition: self.bitmap_metadata_partition,
             cached_root: None,
+            write_counter: self.write_counter,
         }
     }
 }
@@ -446,9 +453,10 @@ impl<
         // Write the pruned portion of the bitmap to disk *first* to ensure recovery in case of
         // failure during pruning. If we don't do this, we may not be able to recover the bitmap
         // because it may require replaying of pruned operations.
+        let n = self.write_counter.fetch_add(1, Ordering::Relaxed);
         self.status
             .write_pruned(
-                self.context.with_label("bitmap_prune"),
+                self.context.with_label(&format!("bitmap_prune_{n}")),
                 &self.bitmap_metadata_partition,
             )
             .await?;
@@ -562,6 +570,7 @@ impl<
                 context: self.context,
                 bitmap_metadata_partition: self.bitmap_metadata_partition,
                 cached_root: None, // Not merkleized yet
+                write_counter: self.write_counter,
             },
             range,
         ))
@@ -601,6 +610,7 @@ impl<
             context: self.context,
             bitmap_metadata_partition: self.bitmap_metadata_partition,
             cached_root,
+            write_counter: self.write_counter,
         })
     }
 }
@@ -623,6 +633,7 @@ impl<
             context: self.context,
             bitmap_metadata_partition: self.bitmap_metadata_partition,
             cached_root: None,
+            write_counter: self.write_counter,
         }
     }
 }
@@ -670,6 +681,7 @@ impl<
             context: self.context,
             bitmap_metadata_partition: self.bitmap_metadata_partition,
             cached_root,
+            write_counter: self.write_counter,
         })
     }
 
@@ -681,6 +693,7 @@ impl<
             context: self.context,
             bitmap_metadata_partition: self.bitmap_metadata_partition,
             cached_root: None,
+            write_counter: self.write_counter,
         }
     }
 }

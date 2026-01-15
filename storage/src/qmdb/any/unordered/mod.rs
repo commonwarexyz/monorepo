@@ -466,7 +466,13 @@ pub(super) mod test {
     };
     use commonware_utils::NZU64;
     use core::{future::Future, pin::Pin};
-    use std::collections::HashMap;
+    use std::{
+        collections::HashMap,
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        },
+    };
 
     /// A type alias for the concrete [fixed::Db] type used in these unit tests.
     type FixedDb = fixed::Db<Context, Digest, Digest, Sha256, TwoCap, Merkleized<Sha256>, Durable>;
@@ -568,8 +574,16 @@ pub(super) mod test {
     fn test_any_fixed_db_empty() {
         let executor = Runner::default();
         executor.start(|context| async move {
-            let db = open_fixed_db(context.clone()).await;
-            test_any_db_empty(context, db, |ctx| Box::pin(open_fixed_db(ctx))).await;
+            let counter = Arc::new(AtomicUsize::new(0));
+            let db = open_fixed_db(context.with_label("db_0")).await;
+            let ctx = context.clone();
+            let reopen_counter = counter.clone();
+            test_any_db_empty(context, db, move |_| {
+                let id = reopen_counter.fetch_add(1, Ordering::SeqCst);
+                let ctx = ctx.with_label(&format!("db_{}", id + 1));
+                Box::pin(open_fixed_db(ctx))
+            })
+            .await;
         });
     }
 
@@ -577,8 +591,16 @@ pub(super) mod test {
     fn test_any_variable_db_empty() {
         let executor = Runner::default();
         executor.start(|context| async move {
-            let db = open_variable_db(context.clone()).await;
-            test_any_db_empty(context, db, |ctx| Box::pin(open_variable_db(ctx))).await;
+            let counter = Arc::new(AtomicUsize::new(0));
+            let db = open_variable_db(context.with_label("db_0")).await;
+            let ctx = context.clone();
+            let reopen_counter = counter.clone();
+            test_any_db_empty(context, db, move |_| {
+                let id = reopen_counter.fetch_add(1, Ordering::SeqCst);
+                let ctx = ctx.with_label(&format!("db_{}", id + 1));
+                Box::pin(open_variable_db(ctx))
+            })
+            .await;
         });
     }
 
@@ -640,7 +662,7 @@ pub(super) mod test {
         let root = db.root();
         db.sync().await.unwrap();
         drop(db);
-        let db = reopen_db(context.clone()).await;
+        let db = reopen_db(context.with_label("reopened")).await;
         assert_eq!(root, db.root());
         assert_eq!(db.op_count(), Location::new_unchecked(1957));
         assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(838));
@@ -807,8 +829,16 @@ pub(super) mod test {
     fn test_any_fixed_db_basic() {
         let executor = Runner::default();
         executor.start(|context| async move {
-            let db = open_fixed_db(context.clone()).await;
-            test_any_db_basic(context, db, |ctx| Box::pin(open_fixed_db(ctx))).await;
+            let counter = Arc::new(AtomicUsize::new(0));
+            let db = open_fixed_db(context.with_label("db_0")).await;
+            let ctx = context.clone();
+            let reopen_counter = counter.clone();
+            test_any_db_basic(context, db, move |_| {
+                let id = reopen_counter.fetch_add(1, Ordering::SeqCst);
+                let ctx = ctx.with_label(&format!("db_{}", id + 1));
+                Box::pin(open_fixed_db(ctx))
+            })
+            .await;
         });
     }
 
@@ -816,8 +846,16 @@ pub(super) mod test {
     fn test_any_variable_db_basic() {
         let executor = Runner::default();
         executor.start(|context| async move {
-            let db = open_variable_db(context.clone()).await;
-            test_any_db_basic(context, db, |ctx| Box::pin(open_variable_db(ctx))).await;
+            let counter = Arc::new(AtomicUsize::new(0));
+            let db = open_variable_db(context.with_label("db_0")).await;
+            let ctx = context.clone();
+            let reopen_counter = counter.clone();
+            test_any_db_basic(context, db, move |_| {
+                let id = reopen_counter.fetch_add(1, Ordering::SeqCst);
+                let ctx = ctx.with_label(&format!("db_{}", id + 1));
+                Box::pin(open_variable_db(ctx))
+            })
+            .await;
         });
     }
 
@@ -849,7 +887,7 @@ pub(super) mod test {
         let op_count = db.op_count();
         let inactivity_floor_loc = db.inactivity_floor_loc();
 
-        let db = reopen_db(context.clone()).await;
+        let db = reopen_db(context.with_label("reopen1")).await;
         assert_eq!(db.op_count(), op_count);
         assert_eq!(db.inactivity_floor_loc(), inactivity_floor_loc);
         assert_eq!(db.root(), root);
@@ -860,7 +898,7 @@ pub(super) mod test {
             let v = make_value((i + 1) * 10000);
             db.update(k, v).await.unwrap();
         }
-        let db = reopen_db(context.clone()).await;
+        let db = reopen_db(context.with_label("reopen2")).await;
         assert_eq!(db.op_count(), op_count);
         assert_eq!(db.inactivity_floor_loc(), inactivity_floor_loc);
         assert_eq!(db.root(), root);
@@ -871,7 +909,7 @@ pub(super) mod test {
             let v = make_value((i + 1) * 10000);
             dirty.update(k, v).await.unwrap();
         }
-        let db = reopen_db(context.clone()).await;
+        let db = reopen_db(context.with_label("reopen3")).await;
         assert_eq!(db.op_count(), op_count);
         assert_eq!(db.root(), root);
 
@@ -883,7 +921,7 @@ pub(super) mod test {
                 db.update(k, v).await.unwrap();
             }
         }
-        let db = reopen_db(context.clone()).await;
+        let db = reopen_db(context.with_label("reopen4")).await;
         assert_eq!(db.op_count(), op_count);
         assert_eq!(db.root(), root);
 
@@ -894,7 +932,7 @@ pub(super) mod test {
             db.update(k, v).await.unwrap();
         }
         let _ = db.commit(None).await.unwrap();
-        let db = reopen_db(context.clone()).await;
+        let db = reopen_db(context.with_label("reopen5")).await;
         assert!(db.op_count() > op_count);
         assert_ne!(db.inactivity_floor_loc(), inactivity_floor_loc);
         assert_ne!(db.root(), root);
@@ -911,7 +949,7 @@ pub(super) mod test {
     ) {
         let root = db.root();
 
-        let db = reopen_db(context.clone()).await;
+        let db = reopen_db(context.with_label("reopen1")).await;
         assert_eq!(db.op_count(), 1);
         assert_eq!(db.root(), root);
 
@@ -921,7 +959,7 @@ pub(super) mod test {
             let v = make_value((i + 1) * 10000);
             db.update(k, v).await.unwrap();
         }
-        let db = reopen_db(context.clone()).await;
+        let db = reopen_db(context.with_label("reopen2")).await;
         assert_eq!(db.op_count(), 1);
         assert_eq!(db.root(), root);
 
@@ -932,7 +970,7 @@ pub(super) mod test {
             db.update(k, v).await.unwrap();
         }
         drop(db);
-        let db = reopen_db(context.clone()).await;
+        let db = reopen_db(context.with_label("reopen3")).await;
         assert_eq!(db.op_count(), 1);
         assert_eq!(db.root(), root);
 
@@ -945,7 +983,7 @@ pub(super) mod test {
             }
         }
         drop(db);
-        let db = reopen_db(context.clone()).await;
+        let db = reopen_db(context.with_label("reopen4")).await;
         assert_eq!(db.op_count(), 1);
         assert_eq!(db.root(), root);
 
@@ -964,7 +1002,7 @@ pub(super) mod test {
             .await
             .unwrap();
         drop(db);
-        let db = reopen_db(context.clone()).await;
+        let db = reopen_db(context.with_label("reopen5")).await;
         assert!(db.op_count() > 1);
         assert_ne!(db.root(), root);
 
@@ -1006,7 +1044,7 @@ pub(super) mod test {
 
         let root = db.root();
         drop(db);
-        let db = reopen_db(context.clone()).await;
+        let db = reopen_db(context.with_label("reopened")).await;
         assert_eq!(root, db.root());
         assert_eq!(db.get_metadata().await.unwrap(), None);
         assert!(db.get(&k).await.unwrap().is_none());

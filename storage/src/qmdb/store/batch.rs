@@ -14,12 +14,14 @@ pub mod tests {
     use commonware_cryptography::sha256;
     use commonware_runtime::{
         deterministic::{self, Context},
-        Runner as _,
+        Metrics, Runner as _,
     };
     use commonware_utils::{test_rng, Array};
     use core::{fmt::Debug, future::Future};
     use rand::Rng;
     use std::collections::HashSet;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
 
     pub trait TestKey: Array + Copy + Send + Sync {
         fn from_seed(seed: u8) -> Self;
@@ -62,16 +64,28 @@ pub mod tests {
         let mut new_db_clone = new_db.clone();
         let state1 = executor.start(|context| async move {
             let ctx = context.clone();
-            run_batch_tests(&mut || new_db_clone(ctx.clone()))
-                .await
-                .unwrap();
+            let counter = Arc::new(AtomicU64::new(0));
+            let counter_clone = counter.clone();
+            run_batch_tests(&mut || {
+                let n = counter_clone.fetch_add(1, Ordering::Relaxed);
+                new_db_clone(ctx.with_label(&format!("db_{n}")))
+            })
+            .await
+            .unwrap();
             ctx.auditor().state()
         });
 
         let executor = deterministic::Runner::default();
         let state2 = executor.start(|context| async move {
             let ctx = context.clone();
-            run_batch_tests(&mut || new_db(ctx.clone())).await.unwrap();
+            let counter = Arc::new(AtomicU64::new(0));
+            let counter_clone = counter.clone();
+            run_batch_tests(&mut || {
+                let n = counter_clone.fetch_add(1, Ordering::Relaxed);
+                new_db(ctx.with_label(&format!("db_{n}")))
+            })
+            .await
+            .unwrap();
             ctx.auditor().state()
         });
 

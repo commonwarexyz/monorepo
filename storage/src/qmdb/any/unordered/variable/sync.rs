@@ -111,7 +111,7 @@ where
         if size <= range.start {
             // Create a new journal with the new bounds
             journal.destroy().await?;
-            Self::create_journal(context, config, range).await
+            Self::create_journal(context.with_label("resized"), config, range).await
         } else {
             // Just prune to the lower bound
             journal.prune(*range.start).await?;

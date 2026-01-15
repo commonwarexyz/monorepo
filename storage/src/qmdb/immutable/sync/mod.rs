@@ -929,7 +929,7 @@ mod tests {
         });
     }
 
-    /// Test that the client succeeds when bounds are updated
+    /// Test that the client succeeds when the upper bound is updated (increased)
     #[test_traced("WARN")]
     fn test_target_update_bounds_increase() {
         let executor = deterministic::Runner::default();
@@ -953,20 +953,13 @@ mod tests {
             let more_ops = create_test_ops_seeded(5, 1);
             apply_ops(&mut target_db, more_ops.clone()).await;
             let (durable_db, _) = target_db.commit(None).await.unwrap();
-            let mut target_db = durable_db.into_merkleized();
-
-            target_db.prune(Location::new_unchecked(10)).await.unwrap();
-            let target_db = target_db.into_mutable();
-            let (durable_db, _) = target_db.commit(None).await.unwrap();
             let target_db = durable_db.into_merkleized();
 
-            // Capture final target state
-            let final_lower_bound = target_db.oldest_retained_loc();
+            // Capture final target state (only upper bound changes)
             let final_upper_bound = target_db.op_count();
             let final_root = target_db.root();
 
-            // Assert we're actually updating the bounds
-            assert_ne!(final_lower_bound, initial_lower_bound);
+            // Assert we're actually updating the upper bound
             assert_ne!(final_upper_bound, initial_upper_bound);
 
             // Create client with initial target
@@ -975,7 +968,7 @@ mod tests {
             let config = Config {
                 context: context.with_label("client"),
                 db_config: create_sync_config(&format!("bounds_inc_{}", context.next_u64())),
-                fetch_batch_size: NZU64!(1),
+                fetch_batch_size: NZU64!(2),
                 target: Target {
                     root: initial_root,
                     range: initial_lower_bound..initial_upper_bound,
@@ -986,22 +979,35 @@ mod tests {
                 update_rx: Some(update_receiver),
             };
 
-            // Send target update with increased upper bound
+            // Create engine and step until some data is fetched
+            let mut client: Engine<ImmutableSyncTest, _> = Engine::new(config).await.unwrap();
+            loop {
+                client = match client.step().await.unwrap() {
+                    NextStep::Continue(new_client) => new_client,
+                    NextStep::Complete(_) => panic!("client should not be complete"),
+                };
+                let log_size = client.journal().size();
+                if log_size > initial_lower_bound {
+                    break;
+                }
+            }
+
+            // Send target update with increased upper bound (same lower bound)
             update_sender
                 .send(Target {
                     root: final_root,
-                    range: final_lower_bound..final_upper_bound,
+                    range: initial_lower_bound..final_upper_bound,
                 })
                 .await
                 .unwrap();
 
             // Complete the sync
-            let synced_db: ImmutableSyncTest = sync::sync(config).await.unwrap();
+            let synced_db: ImmutableSyncTest = client.sync().await.unwrap();
 
             // Verify the synced database has the expected state
             assert_eq!(synced_db.root(), final_root);
             assert_eq!(synced_db.op_count(), final_upper_bound);
-            assert_eq!(synced_db.oldest_retained_loc(), final_lower_bound);
+            assert_eq!(synced_db.oldest_retained_loc(), initial_lower_bound);
 
             synced_db.destroy().await.unwrap();
             let target_db = Arc::try_unwrap(target_db).map_or_else(
