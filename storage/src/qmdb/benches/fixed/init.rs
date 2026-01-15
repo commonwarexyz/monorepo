@@ -1,6 +1,9 @@
 //! Benchmark the startup initialization performance of each QMDB variant on a large randomly
 //! generated database with fixed-size values.
 
+// This module is only used by the qmdb_init benchmark binary, not qmdb_generate.
+#![allow(dead_code)]
+
 use crate::fixed::{
     any_cfg, current_cfg, gen_random_kv, get_any_ordered_fixed, get_any_ordered_variable,
     get_any_unordered_fixed, get_any_unordered_variable, get_current_ordered_fixed,
