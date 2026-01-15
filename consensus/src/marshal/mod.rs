@@ -2321,7 +2321,7 @@ mod tests {
 
             // Restart marshal, removing any in-memory cache
             let mut actor = setup_validator(
-                context.with_label(&format!("validator_{i}")),
+                context.with_label(&format!("validator_{i}_restart")),
                 &mut oracle,
                 validator.clone(),
                 ConstantProvider::new(schemes[i].clone()),
