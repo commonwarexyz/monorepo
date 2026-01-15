@@ -123,8 +123,8 @@
 //!    c. Restarts the `binary` service.
 //!    d. Waits for the service to become active before proceeding.
 //!
-//! Use `--concurrency 1` for fully sequential updates that wait for each instance to be healthy
-//! before updating the next.
+//! _Use `--concurrency 1` for fully sequential updates that wait for each instance to be healthy
+//! before updating the next._
 //!
 //! ## `ec2 authorize`
 //!
