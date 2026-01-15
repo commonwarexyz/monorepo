@@ -995,10 +995,14 @@ mod tests {
 
     #[test_traced]
     fn test_variable_contiguous() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
+            let counter = std::sync::Arc::new(AtomicUsize::new(0));
             run_contiguous_tests(move |test_name: String| {
-                let context = context.with_label(&test_name);
+                let id = counter.fetch_add(1, Ordering::SeqCst);
+                let context = context.with_label(&format!("{test_name}_{id}"));
                 async move {
                     Journal::<_, u64>::init(
                         context,
@@ -1122,7 +1126,7 @@ mod tests {
             };
 
             // === Phase 1: Create journal and append data ===
-            let mut journal = Journal::<_, u64>::init(context.clone(), cfg.clone())
+            let mut journal = Journal::<_, u64>::init(context.with_label("first"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -1153,7 +1157,7 @@ mod tests {
             drop(journal);
 
             // === Phase 3: Re-init and verify position preserved ===
-            let mut journal = Journal::<_, u64>::init(context.clone(), cfg.clone())
+            let mut journal = Journal::<_, u64>::init(context.with_label("second"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -1204,7 +1208,7 @@ mod tests {
                 write_buffer: NZUsize!(1024),
             };
 
-            let mut variable = Journal::<_, u64>::init(context.clone(), cfg.clone())
+            let mut variable = Journal::<_, u64>::init(context.with_label("first"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -1226,7 +1230,7 @@ mod tests {
             drop(variable);
 
             // === Verify recovery ===
-            let variable = Journal::<_, u64>::init(context.clone(), cfg.clone())
+            let variable = Journal::<_, u64>::init(context.with_label("second"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -1266,7 +1270,7 @@ mod tests {
                 write_buffer: NZUsize!(1024),
             };
 
-            let mut variable = Journal::<_, u64>::init(context.clone(), cfg.clone())
+            let mut variable = Journal::<_, u64>::init(context.with_label("first"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -1283,7 +1287,7 @@ mod tests {
             drop(variable);
 
             // === Verify corruption detected ===
-            let result = Journal::<_, u64>::init(context.clone(), cfg.clone()).await;
+            let result = Journal::<_, u64>::init(context.with_label("second"), cfg.clone()).await;
             assert!(matches!(result, Err(Error::Corruption(_))));
         });
     }
@@ -1303,7 +1307,7 @@ mod tests {
                 write_buffer: NZUsize!(1024),
             };
 
-            let mut variable = Journal::<_, u64>::init(context.clone(), cfg.clone())
+            let mut variable = Journal::<_, u64>::init(context.with_label("first"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -1324,7 +1328,7 @@ mod tests {
             drop(variable);
 
             // === Verify recovery ===
-            let variable = Journal::<_, u64>::init(context.clone(), cfg.clone())
+            let variable = Journal::<_, u64>::init(context.with_label("second"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -1359,7 +1363,7 @@ mod tests {
                 write_buffer: NZUsize!(1024),
             };
 
-            let mut variable = Journal::<_, u64>::init(context.clone(), cfg.clone())
+            let mut variable = Journal::<_, u64>::init(context.with_label("first"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -1381,7 +1385,7 @@ mod tests {
             drop(variable);
 
             // === Verify recovery ===
-            let variable = Journal::<_, u64>::init(context.clone(), cfg.clone())
+            let variable = Journal::<_, u64>::init(context.with_label("second"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -1427,7 +1431,7 @@ mod tests {
                 write_buffer: NZUsize!(1024),
             };
 
-            let mut variable = Journal::<_, u64>::init(context.clone(), cfg.clone())
+            let mut variable = Journal::<_, u64>::init(context.with_label("first"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -1447,7 +1451,7 @@ mod tests {
             drop(variable);
 
             // === Verify recovery ===
-            let mut variable = Journal::<_, u64>::init(context.clone(), cfg.clone())
+            let mut variable = Journal::<_, u64>::init(context.with_label("second"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -1488,7 +1492,7 @@ mod tests {
             };
 
             // === Phase 1: Create journal with one full section ===
-            let mut journal = Journal::<_, u64>::init(context.clone(), cfg.clone())
+            let mut journal = Journal::<_, u64>::init(context.with_label("first"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -1518,7 +1522,7 @@ mod tests {
             drop(journal);
 
             // === Phase 4: Verify recovery succeeds ===
-            let journal = Journal::<_, u64>::init(context.clone(), cfg.clone())
+            let journal = Journal::<_, u64>::init(context.with_label("second"), cfg.clone())
                 .await
                 .expect("Should recover from crash after data sync but before offsets sync");
 
