@@ -295,7 +295,7 @@ where
         // Start the new engine
         let elector = L::default();
         let engine = simplex::Engine::new(
-            self.context.with_label("consensus_engine"),
+            self.context.with_label(format!("consensus_engine_{}", epoch)),
             simplex::Config {
                 scheme,
                 elector,
