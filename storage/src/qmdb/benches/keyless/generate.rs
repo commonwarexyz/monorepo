@@ -1,3 +1,5 @@
+//! Benchmark the generation of a large randomly generated keyless database.
+
 use commonware_cryptography::Sha256;
 use commonware_parallel::ThreadPool;
 use commonware_runtime::{
