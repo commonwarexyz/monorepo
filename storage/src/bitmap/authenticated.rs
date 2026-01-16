@@ -35,7 +35,7 @@ use tracing::{debug, error, warn};
 
 /// Returns a root digest that incorporates bits not yet part of the MMR because they
 /// belong to the last (unfilled) chunk.
-pub fn partial_chunk_root<H: Hasher, const N: usize>(
+pub(crate) fn partial_chunk_root<H: Hasher, const N: usize>(
     hasher: &mut H,
     mmr_root: &H::Digest,
     next_bit: u64,

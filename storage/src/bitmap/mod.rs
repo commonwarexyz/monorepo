@@ -1,2 +1,3 @@
 mod authenticated;
-pub use authenticated::{partial_chunk_root, BitMap, CleanBitMap, DirtyBitMap};
+pub use authenticated::{BitMap, CleanBitMap, DirtyBitMap};
+pub(crate) use authenticated::partial_chunk_root;
