@@ -34,7 +34,7 @@ type PageFetchFut = Shared<Pin<Box<dyn Future<Output = Result<StableBuf, Arc<Err
 /// for replacement. When a page needs to be evicted, we start the search at `clock` within `cache`,
 /// searching for the first page with a false reference bit, and setting any skipped page's
 /// reference bit to false along the way.
-pub struct Pool {
+struct Pool {
     /// The page cache index, with a key composed of (blob id, page number), that maps each cached
     /// page to the index of its slot in `entries` and `arena`.
     ///
@@ -330,7 +330,7 @@ impl Pool {
     /// # Panics
     ///
     /// Panics if `capacity` or `page_size` is 0.
-    pub fn new(capacity: usize, page_size: usize) -> Self {
+    fn new(capacity: usize, page_size: usize) -> Self {
         assert!(capacity > 0);
         assert!(page_size > 0);
         Self {
