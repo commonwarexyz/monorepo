@@ -2703,10 +2703,9 @@ mod tests {
                 .expect("Failed to remove data partition");
 
             // Phase 3: Reopen - should detect stale offsets and rewind to 17
-            let journal =
-                Journal::<_, u64>::init(context.with_label("second"), cfg.clone())
-                    .await
-                    .unwrap();
+            let journal = Journal::<_, u64>::init(context.with_label("second"), cfg.clone())
+                .await
+                .unwrap();
 
             // Should be back to init_at_size(17) state
             assert_eq!(journal.size(), 17);
@@ -2733,10 +2732,9 @@ mod tests {
             };
 
             // Phase 1: Create journal with data, then clear
-            let mut journal =
-                Journal::<_, u64>::init(context.with_label("first"), cfg.clone())
-                    .await
-                    .unwrap();
+            let mut journal = Journal::<_, u64>::init(context.with_label("first"), cfg.clone())
+                .await
+                .unwrap();
 
             // Append some initial data
             for i in 0..10u64 {
@@ -2764,10 +2762,9 @@ mod tests {
                 .expect("Failed to remove data partition");
 
             // Phase 3: Reopen - should detect stale offsets and rewind to 17
-            let journal =
-                Journal::<_, u64>::init(context.with_label("second"), cfg.clone())
-                    .await
-                    .unwrap();
+            let journal = Journal::<_, u64>::init(context.with_label("second"), cfg.clone())
+                .await
+                .unwrap();
 
             // Should be back to clear_to_size(17) state
             assert_eq!(journal.size(), 17);
