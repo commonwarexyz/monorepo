@@ -31,7 +31,7 @@ use commonware_utils::{
     sequence::prefixed_u64::U64,
 };
 use std::collections::HashSet;
-use tracing::{debug, error};
+use tracing::{debug, error, warn};
 
 /// Returns a root digest that incorporates bits not yet part of the MMR because they
 /// belong to the last (unfilled) chunk.
@@ -295,7 +295,10 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> CleanBitMap<E, D,
                 error!("pruned chunks value not a valid u64");
                 Error::DataCorrupted("pruned chunks value not a valid u64")
             })?),
-            None => 0,
+            None => {
+                warn!("bitmap metadata does not contain pruned chunks, initializing as empty");
+                0
+            }
         } as usize;
         if pruned_chunks == 0 {
             let mmr = CleanMmr::new(hasher);
