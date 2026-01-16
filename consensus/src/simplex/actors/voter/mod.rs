@@ -3294,4 +3294,215 @@ mod tests {
         cancelled_certification_does_not_hang(ed25519::fixture, traces.clone());
         cancelled_certification_does_not_hang(secp256r1::fixture, traces);
     }
+
+    /// Demonstrates that validators in future views cannot retroactively help
+    /// stuck validators escape via nullification.
+    ///
+    /// This test extends the previous scenario to show that:
+    /// 1. A stuck validator (view 3) cannot be rescued by notarizations from future views
+    /// 2. The only escape route is a finalization certificate (which requires Byzantine cooperation)
+    ///
+    /// Once the f+1 honest validators certify view 3 and advance to view 4,
+    /// they can only vote to nullify view 4 (their current view) without equivocating.
+    /// The `handle_timeout` function only votes to nullify `self.view` (current view).
+    fn future_notarization_does_not_rescue_stuck_validator<S, F>(mut fixture: F)
+    where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+    {
+        let n = 4;
+        let quorum = quorum(n);
+        let namespace = b"future_notarization_no_rescue".to_vec();
+        let executor = deterministic::Runner::timed(Duration::from_secs(60));
+        executor.start(|mut context| async move {
+            // Create simulated network
+            let (network, oracle) = Network::new(
+                context.with_label("network"),
+                NConfig {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: true,
+                    tracked_peer_sets: None,
+                },
+            );
+            network.start();
+
+            // Get participants
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = fixture(&mut context, &namespace, n);
+
+            // Setup voter with Certifier::Cancel to simulate missing verification context.
+            let elector = RoundRobin::<Sha256>::default();
+            let (mut mailbox, mut batcher_receiver, _, relay, _) = setup_voter(
+                &mut context,
+                &oracle,
+                &participants,
+                &schemes,
+                elector.clone(),
+                Duration::from_secs(2),
+                Duration::from_secs(3),
+                Duration::from_secs(1),
+                mocks::application::Certifier::Cancel,
+            )
+            .await;
+
+            // Advance to view 3
+            let view_3 = View::new(3);
+            let parent_payload = advance_to_view(
+                &mut mailbox,
+                &mut batcher_receiver,
+                &schemes,
+                quorum,
+                view_3,
+            )
+            .await;
+
+            let proposal_3 = Proposal::new(
+                Round::new(Epoch::new(333), view_3),
+                view_3.previous().unwrap(),
+                Sha256::hash(b"view_3_proposal"),
+            );
+            let leader = participants[1].clone();
+            let contents = (proposal_3.round, parent_payload, 0u64).encode();
+            relay
+                .broadcast(&leader, (proposal_3.payload, contents))
+                .await;
+            mailbox.proposal(proposal_3.clone()).await;
+
+            let (_, notarization_3) = build_notarization(&schemes, &proposal_3, quorum);
+            mailbox
+                .resolved(Certificate::Notarization(notarization_3))
+                .await;
+
+            // Wait for the first nullify vote (confirms stuck state)
+            loop {
+                select! {
+                    msg = batcher_receiver.next() => {
+                        match msg.unwrap() {
+                            batcher::Message::Constructed(Vote::Nullify(n)) if n.view() == view_3 => break,
+                            batcher::Message::Update { active, .. } => active.send(true).unwrap(),
+                            _ => {}
+                        }
+                    },
+                    _ = context.sleep(Duration::from_secs(10)) => {
+                        panic!("expected nullify vote for view 3");
+                    },
+                }
+            }
+
+            // Now simulate what the "advanced" validators (f+1 honest with context) are doing:
+            // They certified view 3 and advanced to view 4, where they're making progress.
+            // Send a notarization for view 4 to the stuck validator.
+            let view_4 = View::new(4);
+            let proposal_4 = Proposal::new(
+                Round::new(Epoch::new(333), view_4),
+                view_3, // Parent is view 3 (certified by the advanced validators)
+                Sha256::hash(b"view_4_proposal"),
+            );
+            let (_, notarization_4) = build_notarization(&schemes, &proposal_4, quorum);
+
+            // Send the view 4 notarization to the stuck validator
+            mailbox
+                .resolved(Certificate::Notarization(notarization_4))
+                .await;
+
+            // The stuck validator should still not advance.
+            //
+            // Receiving a notarization for view 4 doesn't help because:
+            // 1. add_notarization() does not call enter_view() - it only adds to certification_candidates
+            // 2. To advance past view 3, the validator needs EITHER:
+            //    a. Certification of view 3 to succeed (impossible - no context)
+            //    b. A nullification certificate for view 3 (impossible - only f votes)
+            //    c. A finalization certificate (requires Byzantine to vote finalize)
+            let advanced = loop {
+                select! {
+                    msg = batcher_receiver.next() => {
+                        match msg.unwrap() {
+                            batcher::Message::Update { current, active, .. } => {
+                                active.send(true).unwrap();
+                                if current > view_3 {
+                                    break true;
+                                }
+                            }
+                            batcher::Message::Constructed(Vote::Nullify(n)) => {
+                                // Still voting nullify for view 3 - expected
+                                assert_eq!(n.view(), view_3, "should only vote nullify for stuck view");
+                            }
+                            _ => {}
+                        }
+                    },
+                    _ = context.sleep(Duration::from_secs(5)) => {
+                        break false;
+                    },
+                }
+            };
+
+            assert!(
+                !advanced,
+                "receiving a notarization for view 4 should NOT rescue the stuck validator - \
+                 they still can't certify view 3 (no context) and can't form a nullification \
+                 (not enough votes). The f+1 honest validators who advanced to view 4 cannot \
+                 retroactively help because they can only vote nullify for their current view (4), \
+                 not for view 3."
+            );
+
+            // HOWEVER: A finalization certificate WOULD rescue the stuck validator.
+            // If the Byzantine validators eventually cooperate and vote finalize,
+            // the finalization would abort the stuck certification and advance the view.
+            //
+            // Let's demonstrate this escape route works (if Byzantine cooperate):
+            let (_, finalization_4) = build_finalization(&schemes, &proposal_4, quorum);
+            mailbox
+                .resolved(Certificate::Finalization(finalization_4))
+                .await;
+
+            // Now the validator SHOULD advance (finalization aborts stuck certification)
+            let rescued = loop {
+                select! {
+                    msg = batcher_receiver.next() => {
+                        match msg.unwrap() {
+                            batcher::Message::Update { current, active, .. } => {
+                                active.send(true).unwrap();
+                                if current > view_4 {
+                                    break true;
+                                }
+                            }
+                            _ => {}
+                        }
+                    },
+                    _ = context.sleep(Duration::from_secs(5)) => {
+                        break false;
+                    },
+                }
+            };
+
+            assert!(
+                rescued,
+                "a finalization certificate SHOULD rescue the stuck validator - \
+                 this is the ONLY escape route, but it requires Byzantine cooperation \
+                 (they must vote finalize). If Byzantine permanently withhold finalize votes, \
+                 the stuck validators are permanently excluded from consensus."
+            );
+        });
+    }
+
+    #[test_traced]
+    fn test_future_notarization_does_not_rescue_stuck_validator() {
+        future_notarization_does_not_rescue_stuck_validator::<_, _>(
+            bls12381_threshold::fixture::<MinPk, _>,
+        );
+        future_notarization_does_not_rescue_stuck_validator::<_, _>(
+            bls12381_threshold::fixture::<MinSig, _>,
+        );
+        future_notarization_does_not_rescue_stuck_validator::<_, _>(
+            bls12381_multisig::fixture::<MinPk, _>,
+        );
+        future_notarization_does_not_rescue_stuck_validator::<_, _>(
+            bls12381_multisig::fixture::<MinSig, _>,
+        );
+        future_notarization_does_not_rescue_stuck_validator::<_, _>(ed25519::fixture);
+        future_notarization_does_not_rescue_stuck_validator::<_, _>(secp256r1::fixture);
+    }
 }
