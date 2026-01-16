@@ -20,7 +20,7 @@ use crate::{
 use commonware_codec::Codec;
 use commonware_cryptography::{Digest, Hasher as CHasher};
 use commonware_runtime::{Clock, Metrics, Storage as RStorage};
-use commonware_utils::bitmap::{BitMap, Prunable as PrunableBitMap};
+use commonware_utils::bitmap::BitMap;
 use core::ops::Range;
 use futures::future::try_join_all;
 use std::num::NonZeroU64;
@@ -295,7 +295,7 @@ impl<D: Digest, const N: usize> OperationProof<D, N> {
     ) -> bool {
         // Make sure that the bit for the operation in the bitmap chunk is actually a 1 (indicating
         // the operation is indeed active).
-        if !PrunableBitMap::<N>::get_bit_from_chunk(&self.chunk, *self.loc) {
+        if !BitMap::<N>::get_bit_from_chunk(&self.chunk, *self.loc) {
             debug!(
                 ?self.loc,
                 "proof verification failed, operation is inactive"
