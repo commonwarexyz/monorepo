@@ -32,3 +32,6 @@ paste.workspace = true
 rand = { workspace = true, optional = true }
 rand_chacha = { workspace = true, optional = true }
 thiserror.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true

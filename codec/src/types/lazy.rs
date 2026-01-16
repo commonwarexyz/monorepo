@@ -21,12 +21,14 @@ use std::sync::OnceLock;
 /// If you have a `T`, you can use [`Lazy::new`]:
 ///
 /// ```
+/// # use commonware_codec::types::lazy::Lazy;
 /// let l = Lazy::new(4000u64);
 /// ```
 ///
 /// or [`Into`]:
 ///
 /// ```
+/// # use commonware_codec::types::lazy::Lazy;
 /// let l: Lazy<u64> = 4000u64.into();
 /// ```
 ///
@@ -34,7 +36,8 @@ use std::sync::OnceLock;
 /// bytes and a [`Read::Cfg`]:
 ///
 /// ```
-/// let l: Lazy<u64> = Lazy::deferred(4000u64.encode(), &());
+/// # use commonware_codec::{Encode, types::lazy::Lazy};
+/// let l: Lazy<u64> = Lazy::deferred(&mut 4000u64.encode(), ());
 /// ```
 ///
 /// ## Consumption
@@ -42,10 +45,11 @@ use std::sync::OnceLock;
 /// Given a [`Lazy`], use [`Lazy::get`] to access the value:
 ///
 /// ```
-/// let l = Lazy::<u64>::deferred(4000u64.encode(), &());
-/// assert_eq!(l.get(), Some(4000u64));
+/// # use commonware_codec::{Encode, types::lazy::Lazy};
+/// let l = Lazy::<u64>::deferred(&mut 4000u64.encode(), ());
+/// assert_eq!(l.get(), Some(&4000u64));
 /// // Does not pay the cost of deserializing again
-/// assert_eq!(l.get(), Some(4000u64));
+/// assert_eq!(l.get(), Some(&4000u64));
 /// ```
 ///
 /// This returns an [`Option`], because deserialization might fail.
@@ -191,5 +195,80 @@ impl<T: Read + Hash> Hash for Lazy<T> {
 impl<T: Read + core::fmt::Debug> core::fmt::Debug for Lazy<T> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         self.get().fmt(f)
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::Lazy;
+    use crate::{DecodeExt, Encode, FixedSize, Read, Write};
+    use proptest::prelude::*;
+
+    /// A byte that's always <= 100
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+    struct Small(u8);
+
+    impl FixedSize for Small {
+        const SIZE: usize = 1;
+    }
+
+    impl Write for Small {
+        fn write(&self, buf: &mut impl bytes::BufMut) {
+            self.0.write(buf);
+        }
+    }
+
+    impl Read for Small {
+        type Cfg = ();
+
+        fn read_cfg(buf: &mut impl bytes::Buf, _cfg: &Self::Cfg) -> Result<Self, crate::Error> {
+            let byte = u8::read_cfg(buf, &())?;
+            if byte > 100 {
+                return Err(crate::Error::Invalid("Small", "value > 100"));
+            }
+            Ok(Self(byte))
+        }
+    }
+
+    impl Arbitrary for Small {
+        type Parameters = ();
+        type Strategy = BoxedStrategy<Self>;
+
+        fn arbitrary_with(_args: Self::Parameters) -> Self::Strategy {
+            (0..=100u8).prop_map(Small).boxed()
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn test_lazy_new_eq_deferred(x: Small) {
+            let from_new = Lazy::new(x);
+            let from_deferred = Lazy::deferred(&mut x.encode(), ());
+            prop_assert_eq!(from_new, from_deferred);
+        }
+
+        #[test]
+        fn test_lazy_write_eq_direct(x: Small) {
+            let direct = x.encode();
+            let via_lazy = Lazy::new(x).encode();
+            prop_assert_eq!(direct, via_lazy);
+        }
+
+        #[test]
+        fn test_lazy_read_eq_direct(byte: u8) {
+            let direct: Option<Small> = Small::decode(byte.encode()).ok();
+            let via_lazy: Option<Small> =
+                Lazy::<Small>::decode(byte.encode()).ok().and_then(|l| l.get().copied());
+            prop_assert_eq!(direct, via_lazy);
+        }
+
+        #[test]
+        fn test_lazy_cmp_eq_direct(a: Small, b: Small) {
+            let la = Lazy::new(a);
+            let lb = Lazy::new(b);
+            prop_assert_eq!(a == b, la == lb);
+            prop_assert_eq!(a < b, la < lb);
+            prop_assert_eq!(a >= b, la >= lb);
+        }
     }
 }
