@@ -1,7 +1,9 @@
 //! Types for the `commonware-reshare` example application.
 use bytes::{Buf, BufMut};
 use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write};
-use commonware_consensus::{types::Height, Block as ConsensusBlock, Heightable};
+use commonware_consensus::{
+    simplex::types::Context, types::Height, Block as ConsensusBlock, CertifiableBlock, Heightable,
+};
 use commonware_cryptography::{
     bls12381::{dkg::SignedDealerLog, primitives::variant::Variant},
     Committable, Digest, Digestible, Hasher, Signer,
@@ -22,6 +24,9 @@ where
     /// The current height.
     pub height: Height,
 
+    /// The consensus context when this block was proposed.
+    pub context: Context<H::Digest, C::PublicKey>,
+
     /// An optional outcome of a dealing operation.
     pub log: Option<SignedDealerLog<V, C>>,
 }
@@ -36,11 +41,13 @@ where
     pub const fn new(
         parent: H::Digest,
         height: Height,
+        context: Context<H::Digest, C::PublicKey>,
         log: Option<SignedDealerLog<V, C>>,
     ) -> Self {
         Self {
             parent,
             height,
+            context,
             log,
         }
     }
@@ -55,6 +62,7 @@ where
     fn write(&self, buf: &mut impl BufMut) {
         self.parent.write(buf);
         self.height.write(buf);
+        self.context.write(buf);
         self.log.write(buf);
     }
 }
@@ -66,7 +74,10 @@ where
     V: Variant,
 {
     fn encode_size(&self) -> usize {
-        self.parent.encode_size() + self.height.encode_size() + self.log.encode_size()
+        self.parent.encode_size()
+            + self.height.encode_size()
+            + self.context.encode_size()
+            + self.log.encode_size()
     }
 }
 
@@ -83,6 +94,7 @@ where
         Ok(Self {
             parent: H::Digest::read(buf)?,
             height: Height::read(buf)?,
+            context: Context::read(buf)?,
             log: Read::read_cfg(buf, cfg)?,
         })
     }
@@ -136,8 +148,23 @@ where
     }
 }
 
-/// Returns the genesis block.
-pub const fn genesis_block<H, C, V>() -> Block<H, C, V>
+impl<H, C, V> CertifiableBlock for Block<H, C, V>
+where
+    H: Hasher,
+    C: Signer,
+    V: Variant,
+{
+    type Context = Context<H::Digest, C::PublicKey>;
+
+    fn context(&self) -> Self::Context {
+        self.context.clone()
+    }
+}
+
+/// Returns the genesis block with the given context.
+///
+/// The genesis block has an empty parent digest and height zero.
+pub const fn genesis_block<H, C, V>(context: Context<H::Digest, C::PublicKey>) -> Block<H, C, V>
 where
     H: Hasher,
     C: Signer,
@@ -146,6 +173,7 @@ where
     Block::new(
         <<H as Hasher>::Digest as Digest>::EMPTY,
         Height::zero(),
+        context,
         None,
     )
 }

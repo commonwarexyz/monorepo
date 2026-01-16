@@ -45,8 +45,8 @@ use crate::{
     marshal::{self, ingress::mailbox::AncestorStream, Update},
     simplex::types::Context,
     types::{Epoch, Epocher, Round},
-    Application, Automaton, Block, CertifiableAutomaton, Epochable, Relay, Reporter,
-    VerifyingApplication,
+    Application, Automaton, Block, CertifiableAutomaton, CertifiableBlock, Epochable, Relay,
+    Reporter, VerifyingApplication,
 };
 use commonware_codec::RangeCfg;
 use commonware_cryptography::{certificate::Scheme, Committable};
@@ -93,13 +93,33 @@ type VerificationContexts<E, B, S> = Metadata<
 /// This means the entire ancestry chain back to genesis is transitively validated.
 ///
 /// Applications do not need to re-implement these checks in their own verification logic.
+///
+/// # Verification Context Recovery
+///
+/// With deferred verification, validators vote optimistically before verification completes.
+/// If a validator crashes after voting but before certification, they lose their in-memory
+/// verification task. To handle this, verification contexts are recovered from two sources:
+///
+/// 1. Metadata storage: Contexts are stored durably when [`Automaton::verify`] is called,
+///    allowing validators who participated in notarization to recover after a crash. This is
+///    critical: the security guarantee that the block-embedded context is trustworthy depends
+///    on f+1 honest notarizing validators verifying against the context from consensus. If they
+///    instead fell back to trusting the block's context, they would become consumers rather
+///    than verifiers, breaking this guarantee.
+///
+/// 2. Block-embedded context: Blocks implement [`CertifiableBlock`] which embeds the
+///    consensus context. This allows validators who never participated in notarization to help
+///    complete finalization when Byzantine validators withhold their finalize votes. If a
+///    Byzantine proposer embeds a malicious context, the f+1 honest validators from the
+///    notarizing quorum will verify against their stored context and reject the mismatch,
+///    preventing a 2f+1 finalization quorum from forming.
 #[derive(Clone)]
 pub struct Marshaled<E, S, A, B, ES>
 where
     E: Rng + Storage + Spawner + Metrics + Clock,
     S: Scheme,
     A: Application<E>,
-    B: Block,
+    B: CertifiableBlock,
     ES: Epocher,
 {
     context: E,
@@ -123,7 +143,7 @@ where
         SigningScheme = S,
         Context = Context<B::Commitment, S::PublicKey>,
     >,
-    B: Block,
+    B: CertifiableBlock<Context = <A as Application<E>>::Context>,
     ES: Epocher,
 {
     /// Creates a new [`Marshaled`] wrapper.
@@ -171,19 +191,23 @@ where
     /// Verifies a proposed block within epoch boundaries.
     ///
     /// This method validates that:
-    /// 1. The block is within the current epoch (unless it's a boundary block re-proposal)
-    /// 2. Re-proposals are only allowed for the last block in an epoch
-    /// 3. The block's parent commitment matches the consensus context's expected parent
-    /// 4. The block's height is exactly one greater than the parent's height
-    /// 5. The underlying application's verification logic passes
+    /// 1. The block's embedded context matches the consensus-provided context
+    /// 2. The block is within the current epoch (unless it's a boundary block re-proposal)
+    /// 3. Re-proposals are only allowed for the last block in an epoch
+    /// 4. The block's parent commitment matches the consensus context's expected parent
+    /// 5. The block's height is exactly one greater than the parent's height
+    /// 6. The underlying application's verification logic passes
     ///
     /// Verification is spawned in a background task and returns a receiver that will contain
     /// the verification result. Valid blocks are reported to the marshal as verified.
+    ///
+    /// If `block` is provided, it will be used directly instead of fetching from the marshal.
     #[inline]
     async fn verify(
         &mut self,
         context: <Self as Automaton>::Context,
         digest: B::Commitment,
+        block: Option<B>,
     ) -> oneshot::Receiver<bool> {
         let mut marshal = self.marshal.clone();
         let mut application = self.application.clone();
@@ -206,11 +230,14 @@ where
                     &mut marshal,
                 )
                 .await;
-                let block_request = marshal.subscribe(None, digest).await;
+                let block_request = match block {
+                    Some(block) => Either::Left(ready(Ok(block))),
+                    None => Either::Right(marshal.subscribe(None, digest).await),
+                };
                 let block_requests = try_join(parent_request, block_request);
                 pin_mut!(block_requests);
 
-                // If consensus drops the rceiver, we can stop work early.
+                // If consensus drops the receiver, we can stop work early.
                 let (parent, block) = match select(block_requests, &mut tx_closed).await {
                     Either::Left((Ok((parent, block)), _)) => (parent, block),
                     Either::Left((Err(_), _)) => {
@@ -228,6 +255,20 @@ where
                         return;
                     }
                 };
+
+                // Verify the block's embedded context matches what consensus provided.
+                // For some validators who did not vote, this is a no-op. However, it is
+                // guaranteed that at least f+1 honest validators who did vote (and cached
+                // the true context) will verify against this same context.
+                if block.context() != context {
+                    debug!(
+                        ?context,
+                        block_context = ?block.context(),
+                        "block-embedded context does not match consensus context"
+                    );
+                    tx.send_lossy(false);
+                    return;
+                }
 
                 // You can only re-propose the same block if it's the last height in the epoch.
                 if parent.commitment() == block.commitment() {
@@ -339,7 +380,7 @@ where
         SigningScheme = S,
         Context = Context<B::Commitment, S::PublicKey>,
     >,
-    B: Block,
+    B: CertifiableBlock<Context = <A as Application<E>>::Context>,
     ES: Epocher,
 {
     type Digest = B::Commitment;
@@ -523,7 +564,7 @@ where
 
         // Begin the verification process.
         let round = context.round;
-        let task = self.verify(context, digest).await;
+        let task = self.verify(context, digest, None).await;
         self.verification_tasks.lock().await.insert(round, task);
 
         let (tx, rx) = oneshot::channel();
@@ -542,7 +583,7 @@ where
         SigningScheme = S,
         Context = Context<B::Commitment, S::PublicKey>,
     >,
-    B: Block,
+    B: CertifiableBlock<Context = <A as Application<E>>::Context>,
     ES: Epocher,
 {
     async fn certify(&mut self, round: Round, payload: Self::Digest) -> oneshot::Receiver<bool> {
@@ -552,31 +593,53 @@ where
         drop(tasks_guard);
 
         if let Some(task) = task {
-            task
-        } else {
-            // Look up context by (payload, round) to get the exact verification context.
-            // This is necessary because the same block may be proposed in multiple rounds
-            // (e.g., re-proposals at epoch boundaries), and each round has its own context.
-            // We clone rather than remove so the context remains available for crash recovery.
-            // Contexts are cleaned up when finalization advances past them (see report()).
-            let contexts_guard = self.verification_contexts.lock().await;
-            let context = contexts_guard
-                .get(&payload)
-                .and_then(|map| map.get(&round).cloned());
-            drop(contexts_guard);
-
-            if let Some(context) = context {
-                self.verify(context, payload).await
-            } else {
-                // Verify is always called before certify for a given proposal (if we are
-                // online and don't see the notarization certificate first), so if we don't
-                // have a verification context here, it means this proposal was never verified
-                // by us. Return a receiver that never resolves to signal to consensus that
-                // we should time out the view and vote to nullify.
-                let (_tx, rx) = oneshot::channel();
-                rx
-            }
+            return task;
         }
+
+        // Look up context by (payload, round) to get the exact verification context.
+        // This is necessary because the same block may be proposed in multiple rounds
+        // (e.g., re-proposals at epoch boundaries), and each round has its own context.
+        // We clone rather than remove so the context remains available for crash recovery.
+        // Contexts are cleaned up when finalization advances past them (see report()).
+        let contexts_guard = self.verification_contexts.lock().await;
+        let context = contexts_guard
+            .get(&payload)
+            .and_then(|map| map.get(&round).cloned());
+        drop(contexts_guard);
+
+        if let Some(context) = context {
+            return self.verify(context, payload, None).await;
+        }
+
+        // No stored context means we never verified this proposal locally. We can use the
+        // block's embedded context to help complete finalization when Byzantine validators
+        // withhold their finalize votes. If a Byzantine proposer embedded a malicious context,
+        // the f+1 honest validators from the notarizing quorum will verify against their stored
+        // context and reject the mismatch, preventing a 2f+1 finalization quorum.
+        //
+        // Subscribe to the block and verify using its embedded context once available.
+        debug!(
+            ?round,
+            ?payload,
+            "subscribing to block for certification using embedded context"
+        );
+        let block_rx = self.marshal.subscribe(Some(round), payload).await;
+        let mut marshaled = self.clone();
+        let (tx, rx) = oneshot::channel();
+        self.context
+            .with_label("certify")
+            .spawn(move |_| async move {
+                let Ok(block) = block_rx.await else {
+                    // Subscription was cancelled, just drop tx to signal failure
+                    return;
+                };
+                let context = block.context();
+                let verify_rx = marshaled.verify(context, payload, Some(block)).await;
+                if let Ok(result) = verify_rx.await {
+                    tx.send_lossy(result);
+                }
+            });
+        rx
     }
 }
 
@@ -585,7 +648,7 @@ where
     E: Rng + Storage + Spawner + Metrics + Clock,
     S: Scheme,
     A: Application<E, Block = B, Context = Context<B::Commitment, S::PublicKey>>,
-    B: Block,
+    B: CertifiableBlock<Context = <A as Application<E>>::Context>,
     ES: Epocher,
 {
     type Digest = B::Commitment;
@@ -626,7 +689,7 @@ where
     S: Scheme,
     A: Application<E, Block = B, Context = Context<B::Commitment, S::PublicKey>>
         + Reporter<Activity = Update<B>>,
-    B: Block,
+    B: CertifiableBlock<Context = <A as Application<E>>::Context>,
     ES: Epocher,
 {
     type Activity = A::Activity;
