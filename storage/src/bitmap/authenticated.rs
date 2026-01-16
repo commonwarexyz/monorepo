@@ -568,12 +568,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> DirtyBitMap<E, D,
         } else {
             let (last_chunk, next_bit) = self.bitmap.last_chunk();
             let last_chunk_digest = hasher.digest(last_chunk);
-            partial_chunk_root::<_, N>(
-                hasher.inner(),
-                &mmr_root,
-                next_bit,
-                &last_chunk_digest,
-            )
+            partial_chunk_root::<_, N>(hasher.inner(), &mmr_root, next_bit, &last_chunk_digest)
         };
 
         Ok(CleanBitMap {
