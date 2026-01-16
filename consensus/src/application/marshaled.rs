@@ -256,6 +256,19 @@ where
                     }
                 };
 
+                // You can only re-propose the same block if it's the last height in the epoch.
+                if parent.commitment() == block.commitment() {
+                    let last_in_epoch = epocher
+                        .last(context.epoch())
+                        .expect("current epoch should exist");
+                    let is_valid = block.height() == last_in_epoch;
+                    if is_valid {
+                        marshal.verified(context.round, block).await;
+                    }
+                    tx.send_lossy(is_valid);
+                    return;
+                }
+
                 // Verify the block's embedded context matches what consensus provided.
                 // For some validators who did not vote, this is a no-op. However, it is
                 // guaranteed that at least f+1 honest validators who did vote (and cached
@@ -267,19 +280,6 @@ where
                         "block-embedded context does not match consensus context"
                     );
                     tx.send_lossy(false);
-                    return;
-                }
-
-                // You can only re-propose the same block if it's the last height in the epoch.
-                if parent.commitment() == block.commitment() {
-                    let last_in_epoch = epocher
-                        .last(context.epoch())
-                        .expect("current epoch should exist");
-                    let is_valid = block.height() == last_in_epoch;
-                    if is_valid {
-                        marshal.verified(context.round, block).await;
-                    }
-                    tx.send_lossy(is_valid);
                     return;
                 }
 
