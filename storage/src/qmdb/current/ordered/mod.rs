@@ -15,6 +15,8 @@ use commonware_cryptography::Digest;
 use commonware_utils::Array;
 
 pub mod fixed;
+#[cfg(any(test, feature = "test-traits"))]
+mod test_trait_impls;
 
 /// Proof that a key has no assigned value in the database.
 ///
