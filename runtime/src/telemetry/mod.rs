@@ -32,7 +32,9 @@ impl MetricsRegistry {
         {
             return metric;
         }
-        self.inner.register(name, help, metric.clone());
+        self.inner.register(name.clone(), help, metric.clone());
+        self.registered
+            .insert(name.clone(), Box::new(metric.clone()));
         metric
     }
 
