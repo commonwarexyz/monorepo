@@ -16,6 +16,7 @@ use crate::{
 use commonware_codec::Encode;
 use commonware_cryptography::Digest;
 use commonware_macros::select;
+use commonware_runtime::Metrics;
 use commonware_utils::NZU64;
 use futures::{channel::mpsc, future::Either, StreamExt};
 use std::{collections::BTreeMap, fmt::Debug, num::NonZeroU64};
@@ -142,6 +143,9 @@ where
 
     /// Optional receiver for target updates during sync
     update_receiver: Option<mpsc::Receiver<Target<DB::Digest>>>,
+
+    /// Counter for journal resizes (used to create unique context labels)
+    resize_count: usize,
 }
 
 #[cfg(test)]
@@ -193,6 +197,7 @@ where
             context: config.context,
             config: config.db_config,
             update_receiver: config.update_rx,
+            resize_count: 0,
         };
         engine.schedule_requests().await?;
         Ok(engine)
@@ -272,9 +277,11 @@ where
         self,
         new_target: Target<DB::Digest>,
     ) -> Result<Self, Error<DB, R>> {
+        let resize_count = self.resize_count + 1;
+        let resize_context = self.context.with_label(&format!("r{resize_count}"));
         let journal = DB::resize_journal(
             self.journal,
-            self.context.clone(),
+            resize_context,
             &self.config,
             new_target.range.clone(),
         )
@@ -294,6 +301,7 @@ where
             context: self.context,
             config: self.config,
             update_receiver: self.update_receiver,
+            resize_count,
         })
     }
 
