@@ -597,6 +597,7 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
     /// After clearing, the journal will behave as if initialized with `init_at_size(new_size)`.
     pub(crate) async fn clear_to_size(&mut self, new_size: u64) -> Result<(), Error> {
         self.data.clear().await?;
+
         self.offsets.clear_to_size(new_size).await?;
         self.size = new_size;
         self.oldest_retained_pos = new_size;
