@@ -13,7 +13,7 @@
 use crate::{
     metadata::{Config as MConfig, Metadata},
     mmr::{
-        hasher::Hasher,
+        hasher::Hasher as MmrHasher,
         iterator::nodes_to_pin,
         mem::{Clean, CleanMmr, Config, Dirty, Mmr, State},
         storage::Storage,
@@ -23,7 +23,7 @@ use crate::{
     },
 };
 use commonware_codec::DecodeExt;
-use commonware_cryptography::{Digest, Hasher as CryptoHasher};
+use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::ThreadPool;
 use commonware_runtime::{Clock, Metrics, Storage as RStorage};
 use commonware_utils::{bitmap::Prunable as PrunableBitMap, sequence::prefixed_u64::U64};
@@ -32,7 +32,7 @@ use tracing::{debug, error};
 
 /// Returns a root digest that incorporates bits not yet part of the MMR because they
 /// belong to the last (unfilled) chunk.
-pub fn partial_chunk_root<H: CryptoHasher, const N: usize>(
+pub fn partial_chunk_root<H: Hasher, const N: usize>(
     hasher: &mut H,
     mmr_root: &H::Digest,
     next_bit: u64,
@@ -187,7 +187,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize, S: State<D>> BitM
     /// Verify whether `proof` proves that the `chunk` containing the given bit belongs to the
     /// bitmap corresponding to `root`.
     pub fn verify_bit_inclusion(
-        hasher: &mut impl Hasher<D>,
+        hasher: &mut impl MmrHasher<D>,
         proof: &Proof<D>,
         chunk: &[u8; N],
         bit: u64,
@@ -277,7 +277,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> CleanBitMap<E, D,
         context: E,
         partition: &str,
         pool: Option<ThreadPool>,
-        hasher: &mut impl Hasher<D>,
+        hasher: &mut impl MmrHasher<D>,
     ) -> Result<Self, Error> {
         let metadata_cfg = MConfig {
             partition: partition.to_string(),
@@ -433,7 +433,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> CleanBitMap<E, D,
     /// Returns [Error::BitOutOfBounds] if `bit` is out of bounds.
     pub async fn proof(
         &self,
-        hasher: &mut impl Hasher<D>,
+        hasher: &mut impl MmrHasher<D>,
         bit: u64,
     ) -> Result<(Proof<D>, [u8; N]), Error> {
         if bit >= self.len() {
@@ -533,7 +533,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> DirtyBitMap<E, D,
     /// Merkleize all updates not yet reflected in the bitmap's root.
     pub async fn merkleize(
         mut self,
-        hasher: &mut impl Hasher<D>,
+        hasher: &mut impl MmrHasher<D>,
     ) -> Result<CleanBitMap<E, D, N>, Error> {
         // Add newly pushed complete chunks to the MMR.
         let start = self.authenticated_len;
