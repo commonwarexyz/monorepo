@@ -28,10 +28,10 @@ pub(crate) struct MetricsRegistry {
 }
 
 impl MetricsRegistry {
-    /// Registers `metric` on the registry under `name` and with a `help` explainer.
+    /// Returns a metric of type `M` if it was previously registered under `name.`
     ///
-    /// If a metric under `name` was previously registered, drops `metric` and
-    /// instead returns the already registered item.
+    /// If it does not already exist, registers `metric` under `name` with `help`
+    /// message and returns a clone of it.
     pub(crate) fn get_or_register<M: Clone + Metric>(
         &mut self,
         name: &str,
@@ -41,6 +41,24 @@ impl MetricsRegistry {
         if let Some(metric) = self.get::<M>(name) {
             return metric;
         }
+        self.register(name.to_string(), help.to_string(), metric.clone());
+        metric
+    }
+
+    /// Returns a metric of type `M` if it was previously registered under `name.`
+    ///
+    /// If it does not already exist, calls `metric` to construct the metric prior
+    /// to registering it under `name` with a `help` message and returns a clone of it.
+    pub(crate) fn get_or_register_with<M: Clone + Metric>(
+        &mut self,
+        name: &str,
+        help: &str,
+        metric: impl FnOnce() -> M,
+    ) -> M {
+        if let Some(metric) = self.get::<M>(name) {
+            return metric;
+        }
+        let metric = metric();
         self.register(name.to_string(), help.to_string(), metric.clone());
         metric
     }

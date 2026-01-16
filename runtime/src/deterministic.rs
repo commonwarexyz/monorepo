@@ -983,6 +983,14 @@ impl Context {
             }
         }
     }
+
+    fn prefix_with_name(&self, name: &str) -> String {
+        if self.name.is_empty() {
+            name.to_string()
+        } else {
+            format!("{}_{}", self.name, name)
+        }
+    }
 }
 
 impl crate::Spawner for Context {
@@ -1106,14 +1114,7 @@ impl crate::Metrics for Context {
         validate_label(label);
 
         // Construct the full label name
-        let name = {
-            let prefix = self.name.clone();
-            if prefix.is_empty() {
-                label.to_string()
-            } else {
-                format!("{prefix}_{label}")
-            }
-        };
+        let name = self.prefix_with_name(label);
         assert!(
             !name.starts_with(METRICS_PREFIX),
             "using runtime label is not allowed"
@@ -1139,14 +1140,7 @@ impl crate::Metrics for Context {
             hasher.update(name.as_bytes());
             hasher.update(help.as_bytes());
         });
-        let prefixed_name = {
-            let prefix = &self.name;
-            if prefix.is_empty() {
-                name
-            } else {
-                format!("{}_{}", *prefix, name)
-            }
-        };
+        let prefixed_name = self.prefix_with_name(&name);
 
         // Register metric (panics if name already registered)
         let is_new = executor
@@ -1191,20 +1185,37 @@ impl crate::Metrics for Context {
             hasher.update(name.as_bytes());
             hasher.update(help.as_bytes());
         });
-        let prefixed_name = {
-            let prefix = &self.name;
-            if prefix.is_empty() {
-                name
-            } else {
-                format!("{}_{}", *prefix, name)
-            }
-        };
-        let metric = self
-            .executor()
+        let prefixed_name = self.prefix_with_name(&name);
+        let metric = executor.metrics_registry.lock().unwrap().get_or_register(
+            &prefixed_name,
+            &help,
+            metric,
+        );
+        metric
+    }
+
+    fn get_or_register_with<M: Clone + Metric>(
+        &self,
+        name: impl std::fmt::Display,
+        help: impl std::fmt::Display,
+        metric: impl FnOnce() -> M,
+    ) -> M {
+        // Prepare args
+        let name = name.to_string();
+        let help = help.to_string();
+
+        // Name metric
+        let executor = self.executor();
+        executor.auditor.event(b"register", |hasher| {
+            hasher.update(name.as_bytes());
+            hasher.update(help.as_bytes());
+        });
+        let prefixed_name = self.prefix_with_name(&name);
+        let metric = executor
             .metrics_registry
             .lock()
             .unwrap()
-            .get_or_register(&prefixed_name, &help, metric);
+            .get_or_register_with(&prefixed_name, &help, metric);
         metric
     }
 }
