@@ -23,12 +23,28 @@ use crate::{
     },
 };
 use commonware_codec::DecodeExt;
-use commonware_cryptography::Digest;
+use commonware_cryptography::{Digest, Hasher as CryptoHasher};
 use commonware_parallel::ThreadPool;
 use commonware_runtime::{Clock, Metrics, Storage as RStorage};
 use commonware_utils::{bitmap::Prunable as PrunableBitMap, sequence::prefixed_u64::U64};
 use std::collections::HashSet;
 use tracing::{debug, error};
+
+/// Returns a root digest that incorporates bits not yet part of the MMR because they
+/// belong to the last (unfilled) chunk.
+pub fn partial_chunk_root<H: CryptoHasher, const N: usize>(
+    hasher: &mut H,
+    mmr_root: &H::Digest,
+    next_bit: u64,
+    last_chunk_digest: &H::Digest,
+) -> H::Digest {
+    assert!(next_bit > 0);
+    assert!(next_bit < PrunableBitMap::<N>::CHUNK_SIZE_BITS);
+    hasher.update(mmr_root);
+    hasher.update(&next_bit.to_be_bytes());
+    hasher.update(last_chunk_digest);
+    hasher.finalize()
+}
 
 /// A bitmap in the clean state (root has been computed).
 pub type CleanBitMap<E, D, const N: usize> = BitMap<E, D, N, Clean<D>>;
@@ -221,7 +237,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize, S: State<D>> BitM
             }
             let last_chunk_digest = hasher.digest(chunk);
             let next_bit = bit_len % Self::CHUNK_SIZE_BITS;
-            let reconstructed_root = super::partial_chunk_root::<_, N>(
+            let reconstructed_root = partial_chunk_root::<_, N>(
                 hasher.inner(),
                 &last_digest,
                 next_bit,
@@ -244,7 +260,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize, S: State<D>> BitM
 
         let next_bit = bit_len % Self::CHUNK_SIZE_BITS;
         let reconstructed_root =
-            super::partial_chunk_root::<_, N>(hasher.inner(), &mmr_root, next_bit, &last_digest);
+            partial_chunk_root::<_, N>(hasher.inner(), &mmr_root, next_bit, &last_digest);
 
         reconstructed_root == *root
     }
@@ -549,7 +565,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> DirtyBitMap<E, D,
         } else {
             let (last_chunk, next_bit) = self.bitmap.last_chunk();
             let last_chunk_digest = hasher.digest(last_chunk);
-            super::partial_chunk_root::<_, N>(
+            partial_chunk_root::<_, N>(
                 hasher.inner(),
                 &mmr_root,
                 next_bit,
