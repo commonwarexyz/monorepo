@@ -26,7 +26,10 @@ use commonware_codec::DecodeExt;
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::ThreadPool;
 use commonware_runtime::{Clock, Metrics, Storage as RStorage};
-use commonware_utils::{bitmap::Prunable as PrunableBitMap, sequence::prefixed_u64::U64};
+use commonware_utils::{
+    bitmap::{BitMap as UtilsBitMap, Prunable as PrunableBitMap},
+    sequence::prefixed_u64::U64,
+};
 use std::collections::HashSet;
 use tracing::{debug, error};
 
@@ -39,7 +42,7 @@ pub fn partial_chunk_root<H: Hasher, const N: usize>(
     last_chunk_digest: &H::Digest,
 ) -> H::Digest {
     assert!(next_bit > 0);
-    assert!(next_bit < PrunableBitMap::<N>::CHUNK_SIZE_BITS);
+    assert!(next_bit < UtilsBitMap::<N>::CHUNK_SIZE_BITS);
     hasher.update(mmr_root);
     hasher.update(&next_bit.to_be_bytes());
     hasher.update(last_chunk_digest);
