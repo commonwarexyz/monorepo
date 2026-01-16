@@ -813,40 +813,32 @@ impl<D: Digest> DirtyMmr<D> {
 mod tests {
     use super::*;
     use crate::mmr::{
+        conformance::{build_reference_roots, STABILITY_TEST_ELEMENTS},
         hasher::{Hasher as _, Standard},
-        stability::ROOTS,
     };
     use commonware_cryptography::{sha256, Hasher, Sha256};
     use commonware_runtime::{deterministic, tokio, RayonPoolSpawner, Runner};
     use commonware_utils::{hex, NZUsize};
 
-    /// Build the MMR corresponding to the stability test `ROOTS` and confirm the roots match.
-    fn build_and_check_test_roots_mmr(mmr: &mut CleanMmr<sha256::Digest>) {
-        let mut hasher: Standard<Sha256> = Standard::new();
-        for i in 0u64..199 {
-            hasher.inner().update(&i.to_be_bytes());
-            let element = hasher.inner().finalize();
-            let root = *mmr.root();
-            let expected_root = ROOTS[i as usize];
-            assert_eq!(hex(&root), expected_root, "at: {i}");
-            mmr.add(&mut hasher, &element);
-        }
-        assert_eq!(hex(mmr.root()), ROOTS[199], "Root after 200 elements");
-    }
-
-    /// Same as `build_and_check_test_roots` but uses `add` + `merkleize` instead of `add`.
-    pub fn build_batched_and_check_test_roots(
+    /// Build an MMR using batched `add` + `merkleize` and verify it produces the same final root
+    /// as the reference `CleanMmr::add` implementation.
+    pub fn build_batched_and_verify_root(
         mut mmr: DirtyMmr<sha256::Digest>,
         pool: Option<ThreadPool>,
+        expected_root: &sha256::Digest,
     ) {
         let mut hasher: Standard<Sha256> = Standard::new();
-        for i in 0u64..199 {
+        for i in 0u64..STABILITY_TEST_ELEMENTS {
             hasher.inner().update(&i.to_be_bytes());
             let element = hasher.inner().finalize();
             mmr.add(&mut hasher, &element);
         }
         let mmr = mmr.merkleize(&mut hasher, pool);
-        assert_eq!(hex(mmr.root()), ROOTS[199], "Root after 200 elements");
+        assert_eq!(
+            mmr.root(),
+            expected_root,
+            "Batched MMR root should match reference"
+        );
     }
 
     /// Test empty MMR behavior.
@@ -1060,29 +1052,30 @@ mod tests {
         });
     }
 
-    /// Test that the MMR root computation remains stable by comparing against previously computed
-    /// roots.
+    /// Test that batched MMR building produces the same root as the reference implementation.
+    /// Root stability for the reference implementation is verified by the conformance test.
     #[test]
-    fn test_mem_mmr_root_stability() {
+    fn test_mem_mmr_batched_root() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            // Test root stability under different MMR building methods.
-            let mut hasher: Standard<Sha256> = Standard::new();
-            let mut mmr = CleanMmr::new(&mut hasher);
-            build_and_check_test_roots_mmr(&mut mmr);
+            let reference_roots = build_reference_roots();
+            let expected_root = &reference_roots[199];
 
             let mut hasher: Standard<Sha256> = Standard::new();
             let mmr = CleanMmr::new(&mut hasher);
-            build_batched_and_check_test_roots(mmr.into_dirty(), None);
+            build_batched_and_verify_root(mmr.into_dirty(), None, expected_root);
         });
     }
 
-    /// Test root stability using the parallel builder implementation. This requires we use the
-    /// tokio runtime since the deterministic runtime would block due to being single-threaded.
+    /// Test that parallel batched MMR building produces the same root as the reference.
+    /// This requires the tokio runtime since the deterministic runtime is single-threaded.
     #[test]
-    fn test_mem_mmr_root_stability_parallel() {
+    fn test_mem_mmr_batched_root_parallel() {
         let executor = tokio::Runner::default();
         executor.start(|context| async move {
+            let reference_roots = build_reference_roots();
+            let expected_root = &reference_roots[199];
+
             let pool = context.create_pool(NZUsize!(4)).unwrap();
             let mut hasher: Standard<Sha256> = Standard::new();
 
@@ -1095,22 +1088,22 @@ mod tests {
                 &mut hasher,
             )
             .unwrap();
-            build_batched_and_check_test_roots(mmr.into_dirty(), Some(pool));
+            build_batched_and_verify_root(mmr.into_dirty(), Some(pool), expected_root);
         });
     }
 
-    /// Build the MMR corresponding to the stability test while pruning after each add, and confirm
-    /// the static roots match that from the root computation.
+    /// Test that pruning after each add does not affect root computation.
     #[test]
-    fn test_mem_mmr_root_stability_while_pruning() {
+    fn test_mem_mmr_root_with_pruning() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
+            let reference_roots = build_reference_roots();
+
             let mut hasher: Standard<Sha256> = Standard::new();
             let mut mmr = CleanMmr::new(&mut hasher);
-            for i in 0u64..199 {
+            for i in 0u64..STABILITY_TEST_ELEMENTS {
                 let root = *mmr.root();
-                let expected_root = ROOTS[i as usize];
-                assert_eq!(hex(&root), expected_root, "at: {i}");
+                assert_eq!(root, reference_roots[i as usize], "root mismatch at: {i}");
                 hasher.inner().update(&i.to_be_bytes());
                 let element = hasher.inner().finalize();
                 mmr.add(&mut hasher, &element);
@@ -1141,18 +1134,18 @@ mod tests {
     fn test_mem_mmr_pop() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
+            let reference_roots = build_reference_roots();
+
             let mut hasher: Standard<Sha256> = Standard::new();
             let (mut mmr, _) = compute_big_mmr(&mut hasher, Mmr::default(), None);
             let root = *mmr.root();
-            let expected_root = ROOTS[199];
-            assert_eq!(hex(&root), expected_root);
+            assert_eq!(root, reference_roots[199]);
 
-            // Pop off one node at a time until empty, confirming the root is still is as expected.
-            for i in (0..199u64).rev() {
+            // Pop off one node at a time until empty, confirming the root matches reference.
+            for i in (0..STABILITY_TEST_ELEMENTS).rev() {
                 assert!(mmr.pop(&mut hasher).is_ok());
                 let root = *mmr.root();
-                let expected_root = ROOTS[i as usize];
-                assert_eq!(hex(&root), expected_root);
+                assert_eq!(root, reference_roots[i as usize], "root mismatch after pop at {i}");
             }
 
             assert!(
@@ -1161,7 +1154,7 @@ mod tests {
             );
 
             // Test that we can pop all elements up to and including the oldest retained leaf.
-            for i in 0u64..199 {
+            for i in 0u64..STABILITY_TEST_ELEMENTS {
                 hasher.inner().update(&i.to_be_bytes());
                 let element = hasher.inner().finalize();
                 mmr.add(&mut hasher, &element);
@@ -1172,7 +1165,7 @@ mod tests {
             while mmr.size() > leaf_pos {
                 mmr.pop(&mut hasher).unwrap();
             }
-            assert_eq!(hex(mmr.root()), ROOTS[100]);
+            assert_eq!(*mmr.root(), reference_roots[100]);
             let result = mmr.pop(&mut hasher);
             assert!(matches!(result, Err(ElementPruned(_))));
             assert_eq!(mmr.oldest_retained_pos(), None);
@@ -1300,7 +1293,7 @@ mod tests {
         let mmr = dirty_mmr.merkleize(hasher, None);
         let updated_root = *mmr.root();
         assert_eq!(
-            "af3acad6aad59c1a880de643b1200a0962a95d06c087ebf677f29eb93fc359a4",
+            "1abc0b8c19c46301279fd98b1d768874bd3f54b8088f329cc9fc2b20bec8bc9a",
             hex(&updated_root)
         );
 

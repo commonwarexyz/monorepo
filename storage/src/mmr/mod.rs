@@ -73,7 +73,9 @@ pub mod location;
 pub mod mem;
 pub mod position;
 pub mod proof;
-pub mod stability;
+
+#[cfg(test)]
+pub(crate) mod conformance;
 
 cfg_if::cfg_if! {
     if #[cfg(feature = "std")] {

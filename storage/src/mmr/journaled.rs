@@ -833,8 +833,10 @@ impl<E: RStorage + Clock + Metrics + Sync, D: Digest> Storage<D> for CleanMmr<E,
 mod tests {
     use super::*;
     use crate::mmr::{
-        hasher::Hasher as _, location::LocationRangeExt as _, stability::ROOTS, Location,
-        StandardHasher as Standard,
+        conformance::{build_reference_roots, STABILITY_TEST_ELEMENTS},
+        hasher::Hasher as _,
+        location::LocationRangeExt as _,
+        Location, StandardHasher as Standard,
     };
     use commonware_cryptography::{
         sha256::{self, Digest},
@@ -842,7 +844,7 @@ mod tests {
     };
     use commonware_macros::test_traced;
     use commonware_runtime::{buffer::PoolRef, deterministic, Blob as _, Runner};
-    use commonware_utils::{hex, NZUsize, NZU16, NZU64};
+    use commonware_utils::{NZU16, NZU64, NZUsize};
     use std::num::NonZeroU16;
 
     fn test_digest(v: usize) -> Digest {
@@ -863,8 +865,10 @@ mod tests {
         }
     }
 
-    pub async fn build_batched_and_check_test_roots_journaled<E: RStorage + Clock + Metrics>(
+    /// Build a journaled MMR with 199 elements and verify the root matches the reference.
+    pub async fn build_batched_and_verify_journaled<E: RStorage + Clock + Metrics>(
         journaled_mmr: CleanMmr<E, sha256::Digest>,
+        expected_root: &sha256::Digest,
     ) -> CleanMmr<E, sha256::Digest> {
         let mut hasher: Standard<Sha256> = Standard::new();
 
@@ -875,7 +879,7 @@ mod tests {
         dirty_mmr.add(&mut hasher, &element).await.unwrap();
 
         // Subsequent elements keep it Dirty
-        for i in 1u64..199 {
+        for i in 1u64..STABILITY_TEST_ELEMENTS {
             hasher.inner().update(&i.to_be_bytes());
             let element = hasher.inner().finalize();
             dirty_mmr.add(&mut hasher, &element).await.unwrap();
@@ -884,19 +888,22 @@ mod tests {
         let journaled_mmr = dirty_mmr.merkleize(&mut hasher);
 
         assert_eq!(
-            hex(&journaled_mmr.root()),
-            ROOTS[199],
-            "Root after 200 elements"
+            journaled_mmr.root(),
+            *expected_root,
+            "Journaled MMR root should match reference"
         );
 
         journaled_mmr
     }
 
-    /// Test that the MMR root computation remains stable.
+    /// Test that the journaled MMR produces the same root as the in-memory reference.
     #[test]
-    fn test_journaled_mmr_root_stability() {
+    fn test_journaled_mmr_batched_root() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
+            let reference_roots = build_reference_roots();
+            let expected_root = &reference_roots[199];
+
             let mmr = Mmr::init(
                 context.clone(),
                 &mut Standard::<Sha256>::new(),
@@ -904,7 +911,7 @@ mod tests {
             )
             .await
             .unwrap();
-            let mmr = build_batched_and_check_test_roots_journaled(mmr).await;
+            let mmr = build_batched_and_verify_journaled(mmr, expected_root).await;
             mmr.destroy().await.unwrap();
         });
     }
@@ -977,33 +984,33 @@ mod tests {
     fn test_journaled_mmr_pop() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
+            let reference_roots = build_reference_roots();
+
             let mut hasher: Standard<Sha256> = Standard::new();
             let mut mmr = Mmr::init(context.clone(), &mut hasher, test_config())
                 .await
                 .unwrap();
 
             let mut c_hasher = Sha256::new();
-            for i in 0u64..199 {
+            for i in 0u64..STABILITY_TEST_ELEMENTS {
                 c_hasher.update(&i.to_be_bytes());
                 let element = c_hasher.finalize();
                 mmr.add(&mut hasher, &element).await.unwrap();
             }
-            assert_eq!(ROOTS[199], hex(&mmr.root()));
+            assert_eq!(reference_roots[199], mmr.root());
 
-            // Pop off one node at a time without syncing until empty, confirming the root is still
-            // is as expected.
-            for i in (0..199u64).rev() {
+            // Pop off one node at a time without syncing until empty, confirming the root matches.
+            for i in (0..STABILITY_TEST_ELEMENTS).rev() {
                 assert!(mmr.pop(&mut hasher, 1).await.is_ok());
                 let root = mmr.root();
-                let expected_root = ROOTS[i as usize];
-                assert_eq!(hex(&root), expected_root);
+                assert_eq!(root, reference_roots[i as usize], "root mismatch after pop at {i}");
             }
             assert!(matches!(mmr.pop(&mut hasher, 1).await, Err(Error::Empty)));
             assert!(mmr.pop(&mut hasher, 0).await.is_ok());
 
             // Repeat the test though sync part of the way to tip to test crossing the boundary from
             // cached to uncached leaves, and pop 2 at a time instead of just 1.
-            for i in 0u64..199 {
+            for i in 0u64..STABILITY_TEST_ELEMENTS {
                 c_hasher.update(&i.to_be_bytes());
                 let element = c_hasher.finalize();
                 mmr.add(&mut hasher, &element).await.unwrap();
@@ -1014,15 +1021,14 @@ mod tests {
             for i in (0..198u64).rev().step_by(2) {
                 assert!(mmr.pop(&mut hasher, 2).await.is_ok(), "at position {i:?}");
                 let root = mmr.root();
-                let expected_root = ROOTS[i as usize];
-                assert_eq!(hex(&root), expected_root, "at position {i:?}");
+                assert_eq!(root, reference_roots[i as usize], "root mismatch at position {i:?}");
             }
             assert_eq!(mmr.size(), 1);
             assert!(mmr.pop(&mut hasher, 1).await.is_ok()); // pop the last element
             assert!(matches!(mmr.pop(&mut hasher, 99).await, Err(Error::Empty)));
 
             // Repeat one more time only after pruning the MMR first.
-            for i in 0u64..199 {
+            for i in 0u64..STABILITY_TEST_ELEMENTS {
                 c_hasher.update(&i.to_be_bytes());
                 let element = c_hasher.finalize();
                 mmr.add(&mut hasher, &element).await.unwrap();
