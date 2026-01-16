@@ -114,8 +114,7 @@ fn fuzz(input: FuzzInput) {
                 BitmapOperation::GetChunk { bit_offset } => {
                     if bit_count > 0 {
                         let safe_offset = (bit_offset % bit_count).max(pruned_bits);
-                        let chunk_aligned = (safe_offset
-                            / BitMap::<CHUNK_SIZE>::CHUNK_SIZE_BITS)
+                        let chunk_aligned = (safe_offset / BitMap::<CHUNK_SIZE>::CHUNK_SIZE_BITS)
                             * BitMap::<CHUNK_SIZE>::CHUNK_SIZE_BITS;
                         if chunk_aligned >= pruned_bits && chunk_aligned < bit_count {
                             let _ = match &bitmap {
@@ -133,9 +132,7 @@ fn fuzz(input: FuzzInput) {
                             Bitmap::Clean(bitmap) => bitmap.last_chunk(),
                             Bitmap::Dirty(bitmap) => bitmap.last_chunk(),
                         };
-                        assert!(
-                            bits <= BitMap::<CHUNK_SIZE>::CHUNK_SIZE_BITS
-                        );
+                        assert!(bits <= BitMap::<CHUNK_SIZE>::CHUNK_SIZE_BITS);
                         assert!(chunk.len() == CHUNK_SIZE);
                     }
                     bitmap

@@ -5,7 +5,7 @@
 //! - [OperationProof]: Proves a specific operation is active in the database.
 
 use crate::{
-    bitmap::CleanBitMap,
+    bitmap::{partial_chunk_root, CleanBitMap},
     journal::contiguous::Contiguous,
     mmr::{
         grafting::{Storage as GraftingStorage, Verifier},
@@ -25,22 +25,6 @@ use core::ops::Range;
 use futures::future::try_join_all;
 use std::num::NonZeroU64;
 use tracing::debug;
-
-/// Returns a root digest that incorporates bits not yet part of the MMR because they
-/// belong to the last (unfilled) chunk.
-fn partial_chunk_root<H: CHasher, const N: usize>(
-    hasher: &mut H,
-    mmr_root: &H::Digest,
-    next_bit: u64,
-    last_chunk_digest: &H::Digest,
-) -> H::Digest {
-    assert!(next_bit > 0);
-    assert!(next_bit < BitMap::<N>::CHUNK_SIZE_BITS);
-    hasher.update(mmr_root);
-    hasher.update(&next_bit.to_be_bytes());
-    hasher.update(last_chunk_digest);
-    hasher.finalize()
-}
 
 /// A proof that a range of operations exist in the database.
 #[derive(Clone, Eq, PartialEq, Debug)]
@@ -212,8 +196,7 @@ impl<D: Digest> RangeProof<D> {
         // If the proof is over an operation in the partial chunk, we need to verify the last chunk
         // digest from the proof matches the digest of chunk, since these bits are not part of the
         // mmr.
-        if *(end_loc - 1) / BitMap::<N>::CHUNK_SIZE_BITS
-            == *op_count / BitMap::<N>::CHUNK_SIZE_BITS
+        if *(end_loc - 1) / BitMap::<N>::CHUNK_SIZE_BITS == *op_count / BitMap::<N>::CHUNK_SIZE_BITS
         {
             let Some(last_chunk) = chunks.last() else {
                 debug!("chunks is empty");

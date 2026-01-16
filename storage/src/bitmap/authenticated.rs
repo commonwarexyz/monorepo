@@ -168,22 +168,6 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize, S: State<D>> BitM
         PrunableBitMap::<N>::get_bit_from_chunk(chunk, bit)
     }
 
-    /// Returns a root digest that incorporates bits that aren't part of the MMR yet because they
-    /// belong to the last (unfilled) chunk.
-    pub fn partial_chunk_root(
-        hasher: &mut impl commonware_cryptography::Hasher<Digest = D>,
-        mmr_root: &D,
-        next_bit: u64,
-        last_chunk_digest: &D,
-    ) -> D {
-        assert!(next_bit > 0);
-        assert!(next_bit < Self::CHUNK_SIZE_BITS);
-        hasher.update(mmr_root);
-        hasher.update(&next_bit.to_be_bytes());
-        hasher.update(last_chunk_digest);
-        hasher.finalize()
-    }
-
     /// Verify whether `proof` proves that the `chunk` containing the given bit belongs to the
     /// bitmap corresponding to `root`.
     pub fn verify_bit_inclusion(
@@ -237,7 +221,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize, S: State<D>> BitM
             }
             let last_chunk_digest = hasher.digest(chunk);
             let next_bit = bit_len % Self::CHUNK_SIZE_BITS;
-            let reconstructed_root = Self::partial_chunk_root(
+            let reconstructed_root = super::partial_chunk_root::<_, N>(
                 hasher.inner(),
                 &last_digest,
                 next_bit,
@@ -260,7 +244,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize, S: State<D>> BitM
 
         let next_bit = bit_len % Self::CHUNK_SIZE_BITS;
         let reconstructed_root =
-            Self::partial_chunk_root(hasher.inner(), &mmr_root, next_bit, &last_digest);
+            super::partial_chunk_root::<_, N>(hasher.inner(), &mmr_root, next_bit, &last_digest);
 
         reconstructed_root == *root
     }
@@ -565,7 +549,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> DirtyBitMap<E, D,
         } else {
             let (last_chunk, next_bit) = self.bitmap.last_chunk();
             let last_chunk_digest = hasher.digest(last_chunk);
-            CleanBitMap::<E, D, N>::partial_chunk_root(
+            super::partial_chunk_root::<_, N>(
                 hasher.inner(),
                 &mmr_root,
                 next_bit,

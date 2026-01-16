@@ -103,7 +103,7 @@ async fn root<E: RStorage + Clock + Metrics, H: CHasher, const N: usize>(
     hasher.inner().update(last_chunk);
     let last_chunk_digest = hasher.inner().finalize();
 
-    Ok(CleanBitMap::<E, H::Digest, N>::partial_chunk_root(
+    Ok(crate::bitmap::partial_chunk_root::<_, N>(
         hasher.inner(),
         &mmr_root,
         next_bit,
