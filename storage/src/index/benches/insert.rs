@@ -63,6 +63,15 @@ impl Metrics for DummyMetrics {
     }
 
     fn register<N: Into<String>, H: Into<String>>(&self, _: N, _: H, _: impl Metric) {}
+
+    fn get_or_register<N: Into<String>, H: Into<String>, M: Metric>(
+        &self,
+        name: N,
+        help: H,
+        metric: M,
+    ) -> M {
+        metric
+    }
 }
 
 fn bench_insert(c: &mut Criterion) {

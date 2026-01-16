@@ -1165,6 +1165,15 @@ impl crate::Metrics for Context {
         encode(&mut buffer, &executor.registry.lock().unwrap()).expect("encoding failed");
         buffer
     }
+
+    fn get_or_register<M: Clone + Metric>(
+        &self,
+        _name: impl std::fmt::Display,
+        _help: impl std::fmt::Display,
+        _metric: M,
+    ) -> M {
+        todo!()
+    }
 }
 
 struct Sleeper {

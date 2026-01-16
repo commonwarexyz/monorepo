@@ -29,6 +29,7 @@ use commonware_utils::StableBuf;
 use prometheus_client::registry::Metric;
 use rayon::ThreadPoolBuildError;
 use std::{
+    fmt::Display,
     future::Future,
     io::Error as IoError,
     net::SocketAddr,
@@ -300,6 +301,45 @@ pub trait Metrics: Clone + Send + Sync + 'static {
     ///
     /// Names must start with `[a-zA-Z]` and contain only `[a-zA-Z0-9_]`.
     fn register<N: Into<String>, H: Into<String>>(&self, name: N, help: H, metric: impl Metric);
+
+    /// Returns a metric already registered for the runtime or registers `metric`.
+    ///
+    /// Any registered metric will include (as a prefix) the label of the current context.
+    ///
+    /// Names must start with `[a-zA-Z]` and contain only `[a-zA-Z0-9_]`.
+    fn get_or_register<M: Clone + Metric>(
+        &self,
+        name: impl Display,
+        help: impl Display,
+        metric: M,
+    ) -> M;
+
+    /// Returns a metric already registered for the runtime or registers its default.
+    ///
+    /// Any registered metric will include (as a prefix) the label of the current context.
+    ///
+    /// Names must start with `[a-zA-Z]` and contain only `[a-zA-Z0-9_]`.
+    fn get_or_register_default<M: Clone + Default + Metric>(
+        &self,
+        name: impl Display,
+        help: impl Display,
+    ) -> M {
+        self.get_or_register_with(name, help, M::default)
+    }
+
+    /// Returns a metric already registered for the runtime or registers its by calling `f`.
+    ///
+    /// Any registered metric will include (as a prefix) the label of the current context.
+    ///
+    /// Names must start with `[a-zA-Z]` and contain only `[a-zA-Z0-9_]`.
+    fn get_or_register_with<M: Clone + Metric>(
+        &self,
+        name: impl Display,
+        help: impl Display,
+        f: impl FnOnce() -> M,
+    ) -> M {
+        self.get_or_register(name, help, f())
+    }
 
     /// Encode all metrics into a buffer.
     ///

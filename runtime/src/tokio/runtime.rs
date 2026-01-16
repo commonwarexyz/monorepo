@@ -32,7 +32,10 @@ use prometheus_client::{
 use rand::{rngs::OsRng, CryptoRng, RngCore};
 use rayon::{ThreadPoolBuildError, ThreadPoolBuilder};
 use std::{
+    any::Any,
+    collections::HashMap,
     env,
+    fmt::Display,
     future::Future,
     net::{IpAddr, SocketAddr},
     num::NonZeroUsize,
@@ -219,7 +222,7 @@ impl Default for Config {
 
 /// Runtime based on [Tokio](https://tokio.rs).
 pub struct Executor {
-    registry: Mutex<Registry>,
+    metrics_registry: Mutex<MetricsRegistry>,
     metrics: Arc<Metrics>,
     runtime: Runtime,
     shutdown: Mutex<Stopper>,
@@ -253,8 +256,10 @@ impl crate::Runner for Runner {
         Fut: Future,
     {
         // Create a new registry
-        let mut registry = Registry::default();
-        let runtime_registry = registry.sub_registry_with_prefix(METRICS_PREFIX);
+        let mut metrics_registry = MetricsRegistry::default();
+        let runtime_registry = metrics_registry
+            .registry
+            .sub_registry_with_prefix(METRICS_PREFIX);
 
         // Initialize runtime
         let metrics = Arc::new(Metrics::init(runtime_registry));
@@ -330,7 +335,7 @@ impl crate::Runner for Runner {
 
         // Initialize executor
         let executor = Arc::new(Executor {
-            registry: Mutex::new(registry),
+            metrics_registry: Mutex::new(metrics_registry),
             metrics,
             runtime,
             shutdown: Mutex::new(Stopper::default()),
@@ -568,15 +573,42 @@ impl crate::Metrics for Context {
             }
         };
         self.executor
-            .registry
+            .metrics_registry
             .lock()
             .unwrap()
+            .registry
             .register(prefixed_name, help, metric)
+    }
+
+    fn get_or_register<M: Clone + Metric>(
+        &self,
+        name: impl Display,
+        help: impl Display,
+        metric: M,
+    ) -> M {
+        let name = name.to_string();
+        let prefixed_name = {
+            let prefix = &self.name;
+            if prefix.is_empty() {
+                name
+            } else {
+                format!("{}_{}", *prefix, name)
+            }
+        };
+        self.executor
+            .metrics_registry
+            .lock()
+            .unwrap()
+            .get_or_register(prefixed_name, help.to_string(), metric)
     }
 
     fn encode(&self) -> String {
         let mut buffer = String::new();
-        encode(&mut buffer, &self.executor.registry.lock().unwrap()).expect("encoding failed");
+        encode(
+            &mut buffer,
+            &self.executor.metrics_registry.lock().unwrap().registry,
+        )
+        .expect("encoding failed");
         buffer
     }
 }
@@ -691,5 +723,26 @@ impl crate::Storage for Context {
 
     async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
         self.storage.scan(partition).await
+    }
+}
+
+#[derive(Debug, Default)]
+struct MetricsRegistry {
+    registered: HashMap<String, Box<dyn Any + Send + Sync>>,
+    registry: Registry,
+}
+
+impl MetricsRegistry {
+    fn get_or_register<M: Clone + Metric>(&mut self, name: String, help: String, metric: M) -> M {
+        if let Some(metric) = self
+            .registered
+            .get(&name)
+            .and_then(|boxed| boxed.downcast_ref::<M>())
+            .cloned()
+        {
+            return metric;
+        }
+        self.registry.register(name, help, metric.clone());
+        metric
     }
 }
