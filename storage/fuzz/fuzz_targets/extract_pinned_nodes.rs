@@ -14,7 +14,7 @@ const MAX_SIZE: usize = 256;
 struct FuzzInput {
     start_loc: u64,
     operations_len: u64,
-    proof_size: u64,
+    proof_leaves: u64,
     digests: Vec<[u8; 32]>,
 }
 
@@ -27,7 +27,7 @@ fuzz_target!(|input: FuzzInput| {
         .collect();
 
     let proof = Proof {
-        size: input.proof_size.into(),
+        leaves: Location::new(input.proof_leaves).unwrap(),
         digests,
     };
 

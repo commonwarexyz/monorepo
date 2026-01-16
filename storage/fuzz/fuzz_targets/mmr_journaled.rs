@@ -287,8 +287,9 @@ fn fuzz(input: FuzzInput) {
                             let range =
                                 Location::new(start_loc).unwrap()..Location::new(end_loc).unwrap();
 
-                            if let Ok(historical_proof) =
-                                mmr.historical_range_proof(mmr.size(), range.clone()).await
+                            if let Ok(historical_proof) = mmr
+                                .historical_range_proof(mmr.leaves(), range.clone())
+                                .await
                             {
                                 let root = mmr.root();
                                 assert!(historical_proof.verify_range_inclusion(

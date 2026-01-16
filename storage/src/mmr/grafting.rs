@@ -267,10 +267,6 @@ impl<H: CHasher> HasherTrait for Hasher<'_, H> {
     }
 
     /// Computes the root of the peak tree of a grafted MMR.
-    ///
-    /// # Panics
-    ///
-    /// Panics if number of `leaves` is invalid (e.g. overflows MAX_LOCATION).
     fn root<'a>(
         &mut self,
         leaves: Location,

@@ -844,7 +844,7 @@ mod tests {
     };
     use commonware_macros::test_traced;
     use commonware_runtime::{buffer::PoolRef, deterministic, Blob as _, Runner};
-    use commonware_utils::{NZU16, NZU64, NZUsize};
+    use commonware_utils::{NZUsize, NZU16, NZU64};
     use std::num::NonZeroU16;
 
     fn test_digest(v: usize) -> Digest {
@@ -1003,7 +1003,10 @@ mod tests {
             for i in (0..STABILITY_TEST_ELEMENTS).rev() {
                 assert!(mmr.pop(&mut hasher, 1).await.is_ok());
                 let root = mmr.root();
-                assert_eq!(root, reference_roots[i as usize], "root mismatch after pop at {i}");
+                assert_eq!(
+                    root, reference_roots[i as usize],
+                    "root mismatch after pop at {i}"
+                );
             }
             assert!(matches!(mmr.pop(&mut hasher, 1).await, Err(Error::Empty)));
             assert!(mmr.pop(&mut hasher, 0).await.is_ok());
@@ -1021,7 +1024,10 @@ mod tests {
             for i in (0..198u64).rev().step_by(2) {
                 assert!(mmr.pop(&mut hasher, 2).await.is_ok(), "at position {i:?}");
                 let root = mmr.root();
-                assert_eq!(root, reference_roots[i as usize], "root mismatch at position {i:?}");
+                assert_eq!(
+                    root, reference_roots[i as usize],
+                    "root mismatch at position {i:?}"
+                );
             }
             assert_eq!(mmr.size(), 1);
             assert!(mmr.pop(&mut hasher, 1).await.is_ok()); // pop the last element

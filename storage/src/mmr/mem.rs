@@ -1119,7 +1119,7 @@ mod tests {
     ) -> (CleanMmr<sha256::Digest>, Vec<Position>) {
         let mut leaves = Vec::new();
         let mut c_hasher = Sha256::default();
-        for i in 0u64..199 {
+        for i in 0u64..STABILITY_TEST_ELEMENTS {
             c_hasher.update(&i.to_be_bytes());
             let element = c_hasher.finalize();
             let leaf_pos = mmr.size();

@@ -80,7 +80,7 @@ pub fn digests_required_for_proof<D: Digest>(
 /// # Errors
 ///
 /// Returns [crate::mmr::Error::LocationOverflow] if `op_count` > [crate::mmr::MAX_LOCATION].
-pub fn create_proof<D: Digest>(
+pub const fn create_proof<D: Digest>(
     op_count: Location,
     digests: Vec<D>,
 ) -> Result<Proof<D>, crate::mmr::Error> {
