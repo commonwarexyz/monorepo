@@ -3,7 +3,7 @@
 //! The Binary Merkle Tree is constructed level-by-level. The first level consists of position-hashed leaf digests.
 //! On each additional level, pairs of nodes are hashed from the previous level (if a level contains an odd
 //! number of nodes, the last node is duplicated). The finalized root of the tree incorporates the leaf count
-//! to prevent proof malleability attacks: `root = hash(leaf_count || tree_root)`.
+//! to prevent proof malleability: `root = hash(leaf_count || tree_root)`.
 //!
 //! For example, given three leaves A, B, and C, the tree is constructed as follows:
 //!
@@ -115,8 +115,8 @@ pub struct Tree<H: Hasher> {
     /// The finalized root digest, which incorporates the leaf count.
     ///
     /// This is computed as `H(leaf_count || tree_root)` to prevent
-    /// proof malleability attacks where different tree sizes could
-    /// produce valid proofs for the same root.
+    /// proof malleability where proofs that declare different leaf
+    /// counts could verify against the same root.
     root: H::Digest,
 }
 
@@ -212,7 +212,6 @@ impl<H: Hasher> Tree<H> {
         if start > end {
             return Err(Error::InvalidPosition(start));
         }
-
         let leaf_count = self.levels.first().len().get() as u32;
         if start >= leaf_count {
             return Err(Error::InvalidPosition(start));
@@ -438,7 +437,7 @@ fn siblings_required_for_range_proof(
     let mut level_size = leaf_count as usize;
 
     for level in 0..levels_count - 1 {
-        if level_start % 2 == 1 {
+        if !level_start.is_multiple_of(2) {
             sibling_positions.insert((level, level_start - 1));
         }
         if level_end.is_multiple_of(2) {
@@ -713,7 +712,7 @@ mod tests {
     /// values would both verify successfully against the same root, enabling
     /// proof malleability attacks.
     #[test]
-    fn test_leaf_count_malleability_rejected() {
+    fn issue_2837_regression() {
         // Create a tree with 255 leaves (as in the issue report)
         let digests: Vec<Digest> = (0..255u32)
             .map(|i| Sha256::hash(&i.to_be_bytes()))
