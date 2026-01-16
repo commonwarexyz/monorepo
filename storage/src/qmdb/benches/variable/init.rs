@@ -83,6 +83,9 @@ fn bench_variable_init(c: &mut Criterion) {
                             let ctx = context::get::<commonware_runtime::tokio::Context>();
                             let pool = ctx.clone().create_pool(THREADS).unwrap();
                             let any_cfg = any_cfg(pool);
+
+                            // Start the timer here to avoid including time to allocate buffer pool,
+                            // thread pool, and other shared structures.
                             let start = Instant::now();
                             for _ in 0..iters {
                                 match variant {
