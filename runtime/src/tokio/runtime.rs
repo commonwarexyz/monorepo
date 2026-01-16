@@ -412,6 +412,14 @@ impl Context {
     fn metrics(&self) -> &Metrics {
         &self.executor.metrics
     }
+
+    fn prefix_with_name(&self, name: &str) -> String {
+        if self.name.is_empty() {
+            name.to_string()
+        } else {
+            format!("{}_{}", self.name, name)
+        }
+    }
 }
 
 impl crate::Spawner for Context {
@@ -562,14 +570,7 @@ impl crate::Metrics for Context {
 
     fn register<N: Into<String>, H: Into<String>>(&self, name: N, help: H, metric: impl Metric) {
         let name = name.into();
-        let prefixed_name = {
-            let prefix = &self.name;
-            if prefix.is_empty() {
-                name
-            } else {
-                format!("{}_{}", *prefix, name)
-            }
-        };
+        let prefixed_name = self.prefix_with_name(&name);
         self.executor
             .metrics_registry
             .lock()
@@ -585,19 +586,27 @@ impl crate::Metrics for Context {
         metric: M,
     ) -> M {
         let name = name.to_string();
-        let prefixed_name = {
-            let prefix = &self.name;
-            if prefix.is_empty() {
-                name
-            } else {
-                format!("{}_{}", *prefix, name)
-            }
-        };
+        let prefixed_name = self.prefix_with_name(&name);
         self.executor
             .metrics_registry
             .lock()
             .unwrap()
             .get_or_register(&prefixed_name, &help.to_string(), metric)
+    }
+
+    fn get_or_register_with<M: Clone + Metric>(
+        &self,
+        name: impl Display,
+        help: impl Display,
+        metric: impl FnOnce() -> M,
+    ) -> M {
+        let name = name.to_string();
+        let prefixed_name = self.prefix_with_name(&name);
+        self.executor
+            .metrics_registry
+            .lock()
+            .unwrap()
+            .get_or_register_with(&prefixed_name, &help.to_string(), metric)
     }
 
     fn encode(&self) -> String {
