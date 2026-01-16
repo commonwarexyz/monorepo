@@ -22,7 +22,7 @@
 
 use super::Header;
 use crate::{
-    iouring::{self, should_retry},
+    iouring::{self, should_retry, OpBuf},
     Error,
 };
 use commonware_codec::Encode;
@@ -297,14 +297,14 @@ impl crate::Blob for Blob {
                 .send(iouring::Op {
                     work: op,
                     sender,
-                    buffer: Some(buf),
+                    buffers: Some(OpBuf::Single(buf)),
                 })
                 .await
                 .map_err(|_| Error::ReadFailed)?;
 
             // Wait for the result
-            let (result, got_buf) = receiver.await.map_err(|_| Error::ReadFailed)?;
-            buf = got_buf.unwrap();
+            let (result, got_buffers) = receiver.await.map_err(|_| Error::ReadFailed)?;
+            buf = got_buffers.unwrap().into_single().unwrap();
             if should_retry(result) {
                 continue;
             }
@@ -356,14 +356,14 @@ impl crate::Blob for Blob {
                 .send(iouring::Op {
                     work: op,
                     sender,
-                    buffer: Some(buf),
+                    buffers: Some(OpBuf::Single(buf)),
                 })
                 .await
                 .map_err(|_| Error::WriteFailed)?;
 
             // Wait for the result
-            let (return_value, got_buf) = receiver.await.map_err(|_| Error::WriteFailed)?;
-            buf = got_buf.unwrap();
+            let (return_value, got_buffers) = receiver.await.map_err(|_| Error::WriteFailed)?;
+            buf = got_buffers.unwrap().into_single().unwrap();
             if should_retry(return_value) {
                 continue;
             }
@@ -399,7 +399,7 @@ impl crate::Blob for Blob {
                 .send(iouring::Op {
                     work: op,
                     sender,
-                    buffer: None,
+                    buffers: None,
                 })
                 .await
                 .map_err(|_| {
