@@ -401,6 +401,7 @@ impl Pool {
             // allow cached pages to be writable.
             debug!(blob_id, page_num, "updating duplicate page");
 
+            // Update the stale data with the new page.
             let entry = &self.entries[slot];
             assert_eq!(entry.key, key);
             entry.referenced.store(true, Ordering::Relaxed);
