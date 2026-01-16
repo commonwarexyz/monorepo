@@ -85,7 +85,7 @@ pub struct BitMap<E: Clock + RStorage + Metrics, D: Digest, const N: usize, S: S
     cached_root: Option<D>,
 
     /// Metadata for persisting pruned state.
-    metadata: Option<Metadata<E, U64, Vec<u8>>>,
+    metadata: Metadata<E, U64, Vec<u8>>,
 }
 
 /// Prefix used for the metadata key identifying node digests.
@@ -304,7 +304,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> CleanBitMap<E, D,
                 dirty_chunks: HashSet::new(),
                 pool,
                 cached_root: Some(cached_root),
-                metadata: Some(metadata),
+                metadata,
             });
         }
         let mmr_size = Position::try_from(Location::new_unchecked(pruned_chunks as u64))?;
@@ -342,7 +342,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> CleanBitMap<E, D,
             dirty_chunks: HashSet::new(),
             pool,
             cached_root: Some(cached_root),
-            metadata: Some(metadata),
+            metadata,
         })
     }
 
@@ -354,15 +354,12 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> CleanBitMap<E, D,
     /// pruning boundary. Restoring the entire bitmap state is then possible by replaying the
     /// retained elements.
     pub async fn write_pruned(&mut self) -> Result<(), Error> {
-        let metadata = self
-            .metadata
-            .as_mut()
-            .expect("write_pruned requires metadata (bitmap must be created with restore_pruned)");
-        metadata.clear();
+        self.metadata.clear();
 
         // Write the number of pruned chunks.
         let key = U64::new(PRUNED_CHUNKS_PREFIX, 0);
-        metadata.put(key, self.bitmap.pruned_chunks().to_be_bytes().to_vec());
+        self.metadata
+            .put(key, self.bitmap.pruned_chunks().to_be_bytes().to_vec());
 
         // Write the pinned nodes.
         // This will never panic because pruned_chunks is always less than MAX_LOCATION.
@@ -371,18 +368,15 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> CleanBitMap<E, D,
         for (i, digest) in nodes_to_pin(mmr_size).enumerate() {
             let digest = self.mmr.get_node_unchecked(digest);
             let key = U64::new(NODE_PREFIX, i as u64);
-            metadata.put(key, digest.to_vec());
+            self.metadata.put(key, digest.to_vec());
         }
 
-        metadata.sync().await.map_err(MetadataError)
+        self.metadata.sync().await.map_err(MetadataError)
     }
 
     /// Destroy the bitmap metadata from disk.
     pub async fn destroy(self) -> Result<(), Error> {
-        let metadata = self
-            .metadata
-            .expect("destroy requires metadata (bitmap must be created with restore_pruned)");
-        metadata.destroy().await.map_err(MetadataError)
+        self.metadata.destroy().await.map_err(MetadataError)
     }
 
     /// Prune all complete chunks before the chunk containing the given bit.
