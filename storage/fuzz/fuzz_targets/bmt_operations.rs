@@ -1,9 +1,9 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use commonware_codec::{Decode, DecodeExt, Encode};
+use commonware_codec::{Decode, Encode};
 use commonware_cryptography::{sha256::Digest as Sha256Digest, Hasher as _, Sha256};
-use commonware_storage::bmt::{Builder, Proof, RangeProof};
+use commonware_storage::bmt::{Builder, Proof};
 use libfuzzer_sys::fuzz_target;
 
 #[derive(Arbitrary, Debug, Clone)]
@@ -200,7 +200,12 @@ fn fuzz(input: FuzzInput) {
 
                     // Verify range proof
                     let root = t.root();
-                    let _ = rp.verify(&mut hasher, *start_position, &leaf_digests, &root);
+                    let _ = rp.verify_range_inclusion(
+                        &mut hasher,
+                        *start_position,
+                        &leaf_digests,
+                        &root,
+                    );
                 }
             }
 
@@ -211,7 +216,8 @@ fn fuzz(input: FuzzInput) {
             }
 
             BmtOperation::DeserializeRangeProof { data } => {
-                let _ = RangeProof::<Sha256Digest>::decode(&mut data.as_slice());
+                // Use a reasonable max_items for range proof deserialization
+                let _ = Proof::<Sha256Digest>::decode_cfg(&mut data.as_slice(), &32);
             }
 
             // Range proof edge cases
@@ -258,7 +264,12 @@ fn fuzz(input: FuzzInput) {
 
                             // Verify with wrong position (verify_start instead of proof_start)
                             let root = t.root();
-                            let _ = rp.verify(&mut hasher, *verify_start, &leaf_digests, &root);
+                            let _ = rp.verify_range_inclusion(
+                                &mut hasher,
+                                *verify_start,
+                                &leaf_digests,
+                                &root,
+                            );
                         }
                     }
                 }
@@ -278,7 +289,8 @@ fn fuzz(input: FuzzInput) {
 
                     // Verify with tampered digests
                     let root = t.root();
-                    let _ = rp.verify(&mut hasher, *start, &tampered_digests, &root);
+                    let _ =
+                        rp.verify_range_inclusion(&mut hasher, *start, &tampered_digests, &root);
                 }
             }
 
