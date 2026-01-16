@@ -250,7 +250,7 @@ cfg_if::cfg_if! {
     }
 }
 
-#[cfg(any(test, feature = "fuzz"))]
+#[cfg(any(test, feature = "mocks"))]
 pub mod mocks;
 
 use crate::types::{View, ViewDelta};
