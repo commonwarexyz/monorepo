@@ -1151,11 +1151,13 @@ mod tests {
         });
     }
 
-    fn test_operations_and_restart(num_keys: usize) -> String {
+    fn test_operations_and_restart(num_keys: usize, prefix: &str) -> String {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
-        executor.start(|mut context| async move {
-            // Initialize the freezer
+        executor.start(|context| async move {
+            // Use prefix for labels to avoid metric name conflicts between runs,
+            // but keep partition names the same for deterministic state comparison.
+            let mut context = context.with_label(prefix);
             let cfg = Config {
                 key_partition: "test_key_index".into(),
                 key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
@@ -1303,8 +1305,8 @@ mod tests {
     #[test_group("slow")]
     #[test_traced]
     fn test_determinism() {
-        let state1 = test_operations_and_restart(1_000);
-        let state2 = test_operations_and_restart(1_000);
+        let state1 = test_operations_and_restart(1_000, "run1");
+        let state2 = test_operations_and_restart(1_000, "run2");
         assert_eq!(state1, state2);
     }
 
