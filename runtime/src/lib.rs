@@ -274,8 +274,8 @@ pub trait Metrics: Clone + Send + Sync + 'static {
     ///
     /// This is commonly used to create a nested context for `register`.
     ///
-    /// It is not permitted for any implementation to use `METRICS_PREFIX` as the start of a
-    /// label (reserved for metrics for the runtime).
+    /// Labels must start with `[a-zA-Z]` and contain only `[a-zA-Z0-9_]`. It is not permitted for
+    /// any implementation to use `METRICS_PREFIX` as the start of a label (reserved for metrics for the runtime).
     fn with_label(&self, label: &str) -> Self;
 
     /// Prefix the given label with the current context's label.
@@ -297,6 +297,8 @@ pub trait Metrics: Clone + Send + Sync + 'static {
     /// Register a metric with the runtime.
     ///
     /// Any registered metric will include (as a prefix) the label of the current context.
+    ///
+    /// Names must start with `[a-zA-Z]` and contain only `[a-zA-Z0-9_]`.
     fn register<N: Into<String>, H: Into<String>>(&self, name: N, help: H, metric: impl Metric);
 
     /// Encode all metrics into a buffer.
