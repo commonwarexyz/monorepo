@@ -18,6 +18,12 @@
 //! need to enable this feature. It is commonly used when testing consensus with external execution environments
 //! that use their own runtime (but are deterministic over some set of inputs).**
 //!
+//! # Metrics
+//!
+//! This runtime enforces metrics are unique and well-formed:
+//! - Labels must start with `[a-zA-Z]` and contain only `[a-zA-Z0-9_]`
+//! - Metric names must be unique (panics on duplicate registration)
+//!
 //! # Example
 //!
 //! ```rust
@@ -1092,7 +1098,7 @@ impl crate::RayonPoolSpawner for Context {
 
 impl crate::Metrics for Context {
     fn with_label(&self, label: &str) -> Self {
-        // Ensure the label is well-formatted
+        // Validate label format (must match [a-zA-Z][a-zA-Z0-9_]*)
         validate_label(label);
 
         // Construct the full label name
@@ -1138,7 +1144,7 @@ impl crate::Metrics for Context {
             }
         };
 
-        // Register metric
+        // Register metric (panics if name already registered)
         let is_new = executor
             .registered_metrics
             .lock()

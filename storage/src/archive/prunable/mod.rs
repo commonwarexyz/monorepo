@@ -521,7 +521,7 @@ mod tests {
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_section: NZU64!(items_per_section),
             };
-            let mut archive = Archive::init(context.clone(), cfg.clone())
+            let mut archive = Archive::init(context.with_label("init1"), cfg.clone())
                 .await
                 .expect("Failed to initialize archive");
 
@@ -582,10 +582,12 @@ mod tests {
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_section: NZU64!(items_per_section),
             };
-            let mut archive =
-                Archive::<_, _, _, FixedBytes<1024>>::init(context.clone(), cfg.clone())
-                    .await
-                    .expect("Failed to initialize archive");
+            let mut archive = Archive::<_, _, _, FixedBytes<1024>>::init(
+                context.with_label("init2"),
+                cfg.clone(),
+            )
+            .await
+            .expect("Failed to initialize archive");
 
             // Ensure all keys can be retrieved
             for (key, (index, data)) in &keys {

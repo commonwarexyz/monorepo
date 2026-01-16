@@ -38,10 +38,7 @@ use commonware_cryptography::{DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage as RStorage};
 use commonware_utils::Array;
 use core::ops::Range;
-use std::{
-    num::NonZeroU64,
-    sync::atomic::{AtomicU64, Ordering},
-};
+use std::num::NonZeroU64;
 
 /// Proof information for verifying a key has a particular value in the database.
 pub type KeyValueProof<D, const N: usize> = OperationProof<D, N>;
@@ -68,17 +65,10 @@ pub struct Db<
 
     /// The bitmap over the activity status of each operation. Supports augmenting [Db] proofs in
     /// order to further prove whether a key _currently_ has a specific value.
-    status: BitMap<H::Digest, N, M>,
-
-    context: E,
-
-    bitmap_metadata_partition: String,
+    status: BitMap<E, H::Digest, N, M>,
 
     /// Cached root digest. Invariant: valid when in Clean state.
     cached_root: Option<H::Digest>,
-
-    /// Counter for unique labels when writing bitmap metadata multiple times.
-    write_counter: AtomicU64,
 }
 
 // Functionality shared across all DB states, such as most non-mutating operations.
@@ -125,7 +115,7 @@ impl<
     /// This value is log2 of the chunk size in bits. Since we assume the chunk size is a power of
     /// 2, we compute this from trailing_zeros.
     const fn grafting_height() -> u32 {
-        CleanBitMap::<H::Digest, N>::CHUNK_SIZE_BITS.trailing_zeros()
+        CleanBitMap::<E, H::Digest, N>::CHUNK_SIZE_BITS.trailing_zeros()
     }
 
     /// Return true if the proof authenticates that `key` currently has value `value` in the db with
@@ -189,8 +179,8 @@ impl<
         let bitmap_metadata_partition = config.bitmap_metadata_partition.clone();
 
         let mut hasher = StandardHasher::<H>::new();
-        let mut status = CleanBitMap::restore_pruned(
-            context.with_label("bitmap_restore"),
+        let mut status = CleanBitMap::init(
+            context.with_label("bitmap"),
             &bitmap_metadata_partition,
             thread_pool,
             &mut hasher,
@@ -222,10 +212,7 @@ impl<
         Ok(Self {
             any,
             status,
-            context,
-            bitmap_metadata_partition,
             cached_root,
-            write_counter: AtomicU64::new(0),
         })
     }
 
@@ -240,24 +227,13 @@ impl<
 
         // Write the bitmap pruning boundary to disk so that next startup doesn't have to
         // re-Merkleize the inactive portion up to the inactivity floor.
-        let n = self.write_counter.fetch_add(1, Ordering::Relaxed);
-        self.status
-            .write_pruned(
-                self.context.with_label(&format!("bitmap_sync_{n}")),
-                &self.bitmap_metadata_partition,
-            )
-            .await
-            .map_err(Into::into)
+        self.status.write_pruned().await.map_err(Into::into)
     }
 
     /// Destroy the db, removing all data from disk.
     pub async fn destroy(self) -> Result<(), Error> {
         // Clean up bitmap metadata partition.
-        CleanBitMap::<H::Digest, N>::destroy(
-            self.context.with_label("bitmap_destroy"),
-            &self.bitmap_metadata_partition,
-        )
-        .await?;
+        self.status.destroy().await?;
 
         // Clean up Any components (MMR and log).
         self.any.destroy().await
@@ -268,10 +244,7 @@ impl<
         Db {
             any: self.any.into_mutable(),
             status: self.status.into_dirty(),
-            context: self.context,
-            bitmap_metadata_partition: self.bitmap_metadata_partition,
             cached_root: None,
-            write_counter: self.write_counter,
         }
     }
 }
@@ -293,13 +266,7 @@ impl<
         // Write the pruned portion of the bitmap to disk *first* to ensure recovery in case of
         // failure during pruning. If we don't do this, we may not be able to recover the bitmap
         // because it may require replaying of pruned operations.
-        let n = self.write_counter.fetch_add(1, Ordering::Relaxed);
-        self.status
-            .write_pruned(
-                self.context.with_label(&format!("bitmap_prune_{n}")),
-                &self.bitmap_metadata_partition,
-            )
-            .await?;
+        self.status.write_pruned().await?;
 
         self.any.prune(prune_loc).await
     }
@@ -448,10 +415,7 @@ impl<
             Db {
                 any,
                 status: self.status,
-                context: self.context,
-                bitmap_metadata_partition: self.bitmap_metadata_partition,
                 cached_root: None, // Not merkleized yet
-                write_counter: self.write_counter,
             },
             range,
         ))
@@ -488,10 +452,7 @@ impl<
         Ok(Db {
             any,
             status,
-            context: self.context,
-            bitmap_metadata_partition: self.bitmap_metadata_partition,
             cached_root,
-            write_counter: self.write_counter,
         })
     }
 }
@@ -511,10 +472,7 @@ impl<
         Db {
             any: self.any.into_mutable(),
             status: self.status.into_dirty(),
-            context: self.context,
-            bitmap_metadata_partition: self.bitmap_metadata_partition,
             cached_root: None,
-            write_counter: self.write_counter,
         }
     }
 }
@@ -559,10 +517,7 @@ impl<
         Ok(Db {
             any,
             status,
-            context: self.context,
-            bitmap_metadata_partition: self.bitmap_metadata_partition,
             cached_root,
-            write_counter: self.write_counter,
         })
     }
 
@@ -571,10 +526,7 @@ impl<
         Db {
             any: self.any.into_mutable(),
             status: self.status,
-            context: self.context,
-            bitmap_metadata_partition: self.bitmap_metadata_partition,
             cached_root: None,
-            write_counter: self.write_counter,
         }
     }
 }
@@ -800,10 +752,7 @@ impl<
         Db {
             any: self.any.into_mutable(),
             status: self.status,
-            context: self.context,
-            bitmap_metadata_partition: self.bitmap_metadata_partition,
             cached_root: None,
-            write_counter: self.write_counter,
         }
     }
 
@@ -1208,8 +1157,8 @@ pub mod test {
             // The new location should differ but still be in the same chunk.
             assert_ne!(active_loc, proof_inactive.loc);
             assert_eq!(
-                CleanBitMap::<Digest, 32>::leaf_pos(*active_loc),
-                CleanBitMap::<Digest, 32>::leaf_pos(*proof_inactive.loc)
+                CleanBitMap::<deterministic::Context, Digest, 32>::leaf_pos(*active_loc),
+                CleanBitMap::<deterministic::Context, Digest, 32>::leaf_pos(*proof_inactive.loc)
             );
             let mut fake_proof = proof_inactive.clone();
             fake_proof.loc = active_loc;

@@ -466,13 +466,7 @@ pub(super) mod test {
     };
     use commonware_utils::NZU64;
     use core::{future::Future, pin::Pin};
-    use std::{
-        collections::HashMap,
-        sync::{
-            atomic::{AtomicUsize, Ordering},
-            Arc,
-        },
-    };
+    use std::collections::HashMap;
 
     /// A type alias for the concrete [fixed::Db] type used in these unit tests.
     type FixedDb = fixed::Db<Context, Digest, Digest, Sha256, TwoCap, Merkleized<Sha256>, Durable>;
@@ -506,11 +500,21 @@ pub(super) mod test {
             .unwrap()
     }
 
+    /// Test an empty database.
+    ///
+    /// The `reopen_db` closure receives a unique index for each invocation to enable
+    /// unique metric labels (the deterministic runtime panics on duplicates).
     async fn test_any_db_empty<D: TestableAnyDb<Digest>>(
-        context: Context,
         mut db: D,
-        reopen_db: impl Fn(Context) -> Pin<Box<dyn std::future::Future<Output = D> + Send>>,
+        mut reopen_db: impl FnMut(usize) -> Pin<Box<dyn std::future::Future<Output = D> + Send>>,
     ) {
+        let mut reopen_counter = 0usize;
+        let mut next_db = || {
+            let idx = reopen_counter;
+            reopen_counter += 1;
+            reopen_db(idx)
+        };
+
         assert_eq!(db.op_count(), 1);
         assert!(matches!(db.prune(db.inactivity_floor_loc()).await, Ok(())));
         assert!(db.get_metadata().await.unwrap().is_none());
@@ -524,7 +528,7 @@ pub(super) mod test {
         let mut db = db.into_mutable();
         db.update(k1, v1).await.unwrap();
         drop(db);
-        let db = reopen_db(context.clone()).await;
+        let db = next_db().await;
         assert_eq!(db.op_count(), 1);
         assert_eq!(db.root(), empty_root);
 
@@ -542,7 +546,7 @@ pub(super) mod test {
 
         // Re-opening the DB without a clean shutdown should still recover the correct state.
         drop(db);
-        let db = reopen_db(context.clone()).await;
+        let db = next_db().await;
         assert_eq!(db.op_count(), 2);
         assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
         assert_eq!(db.root(), root);
@@ -574,13 +578,10 @@ pub(super) mod test {
     fn test_any_fixed_db_empty() {
         let executor = Runner::default();
         executor.start(|context| async move {
-            let counter = Arc::new(AtomicUsize::new(0));
             let db = open_fixed_db(context.with_label("db_0")).await;
             let ctx = context.clone();
-            let reopen_counter = counter.clone();
-            test_any_db_empty(context, db, move |_| {
-                let id = reopen_counter.fetch_add(1, Ordering::SeqCst);
-                let ctx = ctx.with_label(&format!("db_{}", id + 1));
+            test_any_db_empty(db, move |idx| {
+                let ctx = ctx.with_label(&format!("db_{}", idx + 1));
                 Box::pin(open_fixed_db(ctx))
             })
             .await;
@@ -591,13 +592,10 @@ pub(super) mod test {
     fn test_any_variable_db_empty() {
         let executor = Runner::default();
         executor.start(|context| async move {
-            let counter = Arc::new(AtomicUsize::new(0));
             let db = open_variable_db(context.with_label("db_0")).await;
             let ctx = context.clone();
-            let reopen_counter = counter.clone();
-            test_any_db_empty(context, db, move |_| {
-                let id = reopen_counter.fetch_add(1, Ordering::SeqCst);
-                let ctx = ctx.with_label(&format!("db_{}", id + 1));
+            test_any_db_empty(db, move |idx| {
+                let ctx = ctx.with_label(&format!("db_{}", idx + 1));
                 Box::pin(open_variable_db(ctx))
             })
             .await;
@@ -691,11 +689,20 @@ pub(super) mod test {
     }
 
     /// Test basic CRUD and commit behavior.
+    ///
+    /// The `reopen_db` closure receives a unique index for each invocation to enable
+    /// unique metric labels (the deterministic runtime panics on duplicates).
     pub(crate) async fn test_any_db_basic<D: TestableAnyDb<Digest>>(
-        context: Context,
         db: D,
-        reopen_db: impl Fn(Context) -> Pin<Box<dyn Future<Output = D> + Send>>,
+        mut reopen_db: impl FnMut(usize) -> Pin<Box<dyn Future<Output = D> + Send>>,
     ) {
+        let mut reopen_counter = 0usize;
+        let mut next_db = || {
+            let idx = reopen_counter;
+            reopen_counter += 1;
+            reopen_db(idx)
+        };
+
         let mut db = db.into_mutable();
 
         // Build a db with 2 keys and make sure updates and deletions of those keys work as
@@ -773,7 +780,7 @@ pub(super) mod test {
         assert_eq!(db.op_count(), 14);
         let root = db.root();
         drop(db);
-        let db = reopen_db(context.clone()).await;
+        let db = next_db().await;
         assert_eq!(db.op_count(), 14);
         assert_eq!(db.root(), root);
         let mut db = db.into_mutable();
@@ -798,7 +805,7 @@ pub(super) mod test {
         // Confirm close/reopen gets us back to the same state.
         assert_eq!(db.op_count(), 23);
         let root = db.root();
-        let db = reopen_db(context.clone()).await;
+        let db = next_db().await;
 
         assert_eq!(db.root(), root);
         assert_eq!(db.op_count(), 23);
@@ -829,13 +836,10 @@ pub(super) mod test {
     fn test_any_fixed_db_basic() {
         let executor = Runner::default();
         executor.start(|context| async move {
-            let counter = Arc::new(AtomicUsize::new(0));
             let db = open_fixed_db(context.with_label("db_0")).await;
             let ctx = context.clone();
-            let reopen_counter = counter.clone();
-            test_any_db_basic(context, db, move |_| {
-                let id = reopen_counter.fetch_add(1, Ordering::SeqCst);
-                let ctx = ctx.with_label(&format!("db_{}", id + 1));
+            test_any_db_basic(db, move |idx| {
+                let ctx = ctx.with_label(&format!("db_{}", idx + 1));
                 Box::pin(open_fixed_db(ctx))
             })
             .await;
@@ -846,13 +850,10 @@ pub(super) mod test {
     fn test_any_variable_db_basic() {
         let executor = Runner::default();
         executor.start(|context| async move {
-            let counter = Arc::new(AtomicUsize::new(0));
             let db = open_variable_db(context.with_label("db_0")).await;
             let ctx = context.clone();
-            let reopen_counter = counter.clone();
-            test_any_db_basic(context, db, move |_| {
-                let id = reopen_counter.fetch_add(1, Ordering::SeqCst);
-                let ctx = ctx.with_label(&format!("db_{}", id + 1));
+            test_any_db_basic(db, move |idx| {
+                let ctx = ctx.with_label(&format!("db_{}", idx + 1));
                 Box::pin(open_variable_db(ctx))
             })
             .await;

@@ -145,7 +145,7 @@ impl<const N: usize> Prunable<N> {
     /// `bit` is an index into the entire bitmap, not just the chunk.
     #[inline]
     pub const fn get_bit_from_chunk(chunk: &[u8; N], bit: u64) -> bool {
-        BitMap::<N>::get_from_chunk(chunk, bit)
+        BitMap::<N>::get_bit_from_chunk(chunk, bit)
     }
 
     /// Return the last chunk of the bitmap and its size in bits.
