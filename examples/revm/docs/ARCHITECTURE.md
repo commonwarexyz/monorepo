@@ -1,6 +1,6 @@
 # REVM Example Architecture
 
-This document walks through the REVM simulation example with a top-down view that emphasizes the domain model (blocks, transactions, QMDB-rooted state) and the runtime components that operate on it. The diagram in `examples/revm/docs/revm_architecture.png` sketches the major flows described below.
+This document walks through the REVM simulation example with a top-down view that emphasizes the domain model (blocks, transactions, QMDB-rooted state) and the runtime components that operate on it. The diagram in `examples/revm/docs/revm_architecture.png` is the recommended starting point; its source lives in `examples/revm/docs/revm_architecture.dot`.
 
 ## 1. High-Level Workflow
 
@@ -19,7 +19,7 @@ This document walks through the REVM simulation example with a top-down view tha
 | **Block** | Parent pointer, height, prevrandao seed, state root, transactions. Blocks are encoded/decoded via `examples/revm/src/domain/types.rs` and committed via the simplex digest. | `examples/revm/src/domain/types.rs` |
 | **Tx** | Minimal transaction (from, to, value, gas limit, calldata) with deterministic codec for gossip. | `examples/revm/src/domain/types.rs` |
 | **BootstrapConfig** | Genesis allocation plus bootstrap transactions applied before consensus starts. | `examples/revm/src/domain/types.rs` |
-| **StateChanges & QmdbChanges** | Deterministic encodings of touched accounts/storage used for rolling commitments and QMDB persistence. | `examples/revm/src/domain/commitment.rs`, `examples/revm/src/qmdb/changes.rs` |
+| **StateChanges & QmdbChanges** | Deterministic encodings of touched accounts/storage used for execution tracing and QMDB persistence. | `examples/revm/src/domain/commitment.rs`, `examples/revm/src/qmdb/changes.rs` |
 | **StateRoot** | Hash combining QMDB partition roots plus a namespace tag, ensuring authenticated state. | `examples/revm/src/qmdb/mod.rs`, `examples/revm/src/domain/types.rs` |
 
 ## 3. Core Components
@@ -42,7 +42,7 @@ This document walks through the REVM simulation example with a top-down view tha
 
 - `execute_txs` uses Alloy/REVM with a custom seed precompile to run each tx in the provided `RevmDb`.
 - After each transaction it:
-  1. Builds deterministic `StateChanges` for commitment verification.
+  1. Builds deterministic `StateChanges` for tracing and tests.
   2. Applies touched accounts to a `QmdbChanges` batch.
   3. Commits the changes back to `RevmDb`.
 - The `ExecutionOutcome` contains both the per-tx `StateChanges` and the aggregated `QmdbChanges`.
@@ -104,7 +104,7 @@ Ledger observers subscribe to domain events, emit telemetry/log output for seed 
 
 ## 5. Diagram
 
-See `examples/revm/docs/revm_architecture.png` for the visual layout of these components. The diagram mirrors the textual flows above (CLI → Simulation → Nodes → Reporters → QMDB).
+![REVM example architecture](revm_architecture.png)
 
 ## 6. Related Docs
 

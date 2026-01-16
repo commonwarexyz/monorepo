@@ -1,18 +1,10 @@
 //! Deterministic state-change helpers for the example chain.
 //!
-//! This example does not implement Ethereum's Merkle-Patricia Trie. Instead it uses a rolling
-//! commitment that is easy to compute and verify without needing to iterate the whole database.
-//!
-//! Commitment scheme:
-//! - `delta = keccak256(Encode(StateChanges))`
-//! - `new_root = keccak256(prev_root || delta)`
-//!
 //! `StateChanges` uses `BTreeMap` so the encoded form is canonical and deterministic.
 
-use crate::domain::StateRoot;
-use alloy_evm::revm::primitives::{keccak256, Address, B256, U256};
+use alloy_evm::revm::primitives::{Address, B256, U256};
 use bytes::{Buf, BufMut};
-use commonware_codec::{Encode, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt, Write};
+use commonware_codec::{EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt, Write};
 use std::collections::BTreeMap;
 
 #[derive(Clone, Copy, Debug)]
@@ -37,7 +29,7 @@ pub struct AccountChange {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
-/// Canonical per-transaction state delta used for the rolling commitment.
+/// Canonical per-transaction state delta.
 pub struct StateChanges {
     pub accounts: BTreeMap<Address, AccountChange>,
 }
@@ -145,15 +137,6 @@ impl Read for StateChanges {
     }
 }
 
-/// Compute the next rolling state commitment from a previous root and a canonical state delta.
-pub fn commit_state_root(prev_root: StateRoot, changes: &StateChanges) -> StateRoot {
-    let delta = keccak256(changes.encode());
-    let mut buf = [0u8; 64];
-    buf[..32].copy_from_slice(prev_root.0.as_slice());
-    buf[32..].copy_from_slice(delta.as_slice());
-    StateRoot(keccak256(buf))
-}
-
 fn write_address(value: &Address, buf: &mut impl BufMut) {
     buf.put_slice(value.as_slice());
 }
@@ -197,6 +180,7 @@ fn read_u256(buf: &mut impl Buf) -> Result<U256, CodecError> {
 mod tests {
     use super::*;
     use alloy_evm::revm::primitives::{Address, B256, U256};
+    use commonware_codec::Encode as _;
     use commonware_codec::Decode as _;
     use std::collections::BTreeMap;
 
@@ -244,78 +228,11 @@ mod tests {
         changes
     }
 
-    fn sample_changes_order_b() -> StateChanges {
-        let mut changes = StateChanges::default();
-
-        let mut storage2 = BTreeMap::new();
-        storage2.insert(U256::from(5u64), U256::from(42u64));
-        changes.accounts.insert(
-            Address::from([0x22u8; 20]),
-            AccountChange {
-                touched: true,
-                created: true,
-                selfdestructed: false,
-                nonce: 1,
-                balance: U256::from(999u64),
-                code_hash: B256::from([0xBBu8; 32]),
-                storage: storage2,
-            },
-        );
-
-        let mut storage1 = BTreeMap::new();
-        storage1.insert(U256::from(1u64), U256::from(100u64));
-        storage1.insert(U256::from(2u64), U256::from(200u64));
-        changes.accounts.insert(
-            Address::from([0x11u8; 20]),
-            AccountChange {
-                touched: true,
-                created: false,
-                selfdestructed: false,
-                nonce: 7,
-                balance: U256::from(1234u64),
-                code_hash: B256::from([0xAAu8; 32]),
-                storage: storage1,
-            },
-        );
-
-        changes
-    }
-
     #[test]
     fn test_state_changes_roundtrip() {
         let changes = sample_changes_order_a();
         let encoded = changes.encode();
         let decoded = StateChanges::decode_cfg(encoded, &cfg()).expect("decode changes");
         assert_eq!(changes, decoded);
-    }
-
-    #[test]
-    fn test_commitment_deterministic_over_ordering() {
-        let prev = StateRoot(B256::from([0x11u8; 32]));
-        let changes_a = sample_changes_order_a();
-        let changes_b = sample_changes_order_b();
-
-        let root_a = commit_state_root(prev, &changes_a);
-        let root_b = commit_state_root(prev, &changes_b);
-        assert_eq!(root_a, root_b);
-    }
-
-    #[test]
-    fn test_commitment_changes_with_prev_root() {
-        let prev = StateRoot(B256::from([0x11u8; 32]));
-        let changes = sample_changes_order_a();
-        let root = commit_state_root(prev, &changes);
-        assert_ne!(root, prev);
-    }
-
-    #[test]
-    fn test_commitment_changes_with_delta() {
-        let prev = StateRoot(B256::from([0x11u8; 32]));
-        let changes_a = sample_changes_order_a();
-        let changes_b = sample_changes_order_b();
-
-        let root_a = commit_state_root(prev, &changes_a);
-        let root_b = commit_state_root(prev, &changes_b);
-        assert_eq!(root_a, root_b);
     }
 }

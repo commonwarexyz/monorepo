@@ -10,9 +10,7 @@ REVM-based example chain driven by threshold-simplex (`commonware_consensus::sim
 - Blocks carry a batch of EVM transactions plus an advertised 32-byte `state_root` commitment.
 - Validators re-execute proposed blocks with `alloy-evm` / `revm` and reject proposals whose `state_root` mismatches.
 - State is persisted in QMDB and exposed to REVM via `WrapDatabaseAsync` + `CacheDB` (QMDB is the base store; CacheDB is the speculative overlay).
-- State commitment is deterministic and does not require iterating the whole DB:
-  - `delta = keccak256(Encode(StateChanges))`
-  - `new_root = keccak256(prev_root || delta)`
+- The `state_root` is derived from authenticated QMDB partition roots (accounts, storage, code).
 - Seed plumbing: threshold-simplex certificate seed signatures are hashed to 32 bytes and injected as `block.prevrandao` (EIP-4399).
 - Bonus: a stateful precompile at `0x00000000000000000000000000000000000000ff` returns the current block's `prevrandao` (32 bytes).
 
@@ -21,7 +19,7 @@ REVM-based example chain driven by threshold-simplex (`commonware_consensus::sim
 - `src/types.rs`: canonical block/tx types and digest mapping (`ConsensusDigest = sha256(BlockId)`).
 - `src/application/`: proposal/verification logic (marshaled), shared state (mempool + DB snapshots), reporters, and query handle.
 - `src/execution.rs`: EVM execution (`EthEvmBuilder`) and the seed precompile.
-- `src/commitment.rs`: canonical `StateChanges` encoding and rolling `StateRoot` commitment.
+- `src/commitment.rs`: canonical `StateChanges` encoding.
 - `src/sim/`: tokio, single-process simulation harness (N nodes, simulated P2P).
 
 ## How It Works
@@ -81,7 +79,7 @@ cargo test -p commonware-revm
 
 ## Notes and Next Steps
 
-- This is intentionally minimal and does not implement an Ethereum trie; `state_root` is a rolling commitment over per-tx state deltas.
+- This is intentionally minimal and does not implement an Ethereum trie; `state_root` comes from authenticated QMDB partition roots.
 - Transactions are built directly as EVM call environments (no signature/fee market modeling); gas price is set to 0.
 - The demo block stream is minimal (a single transfer is injected early); extend `src/application/` to add more tx generation.
 - The example now uses a QMDB-backed persistence layer with per-finalized-block batch commits.

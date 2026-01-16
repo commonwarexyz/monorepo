@@ -13,8 +13,8 @@ pub use application::execution::{
     SEED_PRECOMPILE_ADDRESS_BYTES,
 };
 pub use domain::{
-    block_id, commit_state_root, AccountChange, Block, BlockCfg, BlockId, BootstrapConfig,
-    StateChanges, StateChangesCfg, StateRoot, Tx, TxCfg, TxId,
+    block_id, AccountChange, Block, BlockCfg, BlockId, BootstrapConfig, StateChanges,
+    StateChangesCfg, StateRoot, Tx, TxCfg, TxId,
 };
 pub use simulation::{simulate, SimConfig, SimOutcome};
 
