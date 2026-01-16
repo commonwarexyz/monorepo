@@ -42,6 +42,14 @@
 //! ### `destroy`
 //!
 //! Destroy all resources associated with a given deployment.
+//!
+//! ### `clean`
+//!
+//! Delete the shared S3 bucket and all its contents.
+//!
+//! ### `profile`
+//!
+//! Capture a CPU profile from a running instance using samply.
 
 #![doc(
     html_logo_url = "https://commonware.xyz/imgs/rustdoc_logo.svg",
