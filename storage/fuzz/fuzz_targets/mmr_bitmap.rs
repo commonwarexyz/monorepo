@@ -70,6 +70,7 @@ fn fuzz(input: FuzzInput) {
         let mut bitmap = Bitmap::Clean(init_bitmap);
         let mut bit_count = 0u64;
         let mut pruned_bits = 0u64;
+        let mut restore_count = 0usize;
 
         for op in input.operations {
             bitmap = match op {
@@ -232,13 +233,14 @@ fn fuzz(input: FuzzInput) {
 
                 BitmapOperation::RestorePruned => {
                     let bitmap = CleanAuthenticatedBitMap::<_, _, CHUNK_SIZE>::init(
-                        context.with_label("restore"),
+                        context.with_label(&format!("restore_{restore_count}")),
                         PARTITION,
                         None,
                         &mut hasher,
                     )
                     .await
                     .unwrap();
+                    restore_count += 1;
                     // Update tracking variables to match restored state
                     bit_count = bitmap.len();
                     pruned_bits = bitmap.pruned_bits();
