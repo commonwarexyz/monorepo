@@ -602,6 +602,8 @@ mod tests {
             }
 
             // Test 3: Initialize at size in middle of blob (7 with items_per_blob=5)
+            // With the optimized init_at_size, no zeros are written - positions before
+            // virtual_start are treated as "pruned".
             {
                 let mut journal =
                     fixed::Journal::init_at_size(context.with_label("third"), cfg.clone(), 7)
@@ -609,30 +611,30 @@ mod tests {
                         .expect("Failed to initialize journal at size 7");
 
                 assert_eq!(journal.size(), 7);
-                // Tail blob should have 2 items worth of space (7 % 5 = 2)
-                assert_eq!(journal.oldest_retained_pos(), Some(5)); // First item in tail blob
+                // No readable items until data is appended
+                assert_eq!(journal.oldest_retained_pos(), None);
 
-                // Operations 0-4 should be pruned (blob 0 doesn't exist)
-                for i in 0..5 {
+                // All positions 0-6 should be pruned (virtual positions)
+                for i in 0..7 {
                     let result = journal.read(i).await;
                     assert!(matches!(result, Err(journal::Error::ItemPruned(_))));
-                }
-
-                // Operations 5-6 should be unreadable (dummy data in tail blob)
-                for i in 5..7 {
-                    let result = journal.read(i).await;
-                    assert_eq!(result.unwrap(), Sha256::fill(0)); // dummy data is all 0s
                 }
 
                 // Should be able to append from position 7
                 let append_pos = journal.append(test_digest(7)).await.unwrap();
                 assert_eq!(append_pos, 7);
                 assert_eq!(journal.read(7).await.unwrap(), test_digest(7));
+                // oldest_retained_pos is the section boundary (5) since gap is filled on append
+                assert_eq!(journal.oldest_retained_pos(), Some(5));
+                // Positions 5-6 are now readable as zeros (filled on first append)
+                assert_eq!(journal.read(5).await.unwrap(), Sha256::fill(0));
+                assert_eq!(journal.read(6).await.unwrap(), Sha256::fill(0));
 
                 journal.destroy().await.unwrap();
             }
 
             // Test 4: Initialize at larger size spanning multiple pruned blobs
+            // With the optimized init_at_size, no zeros are written.
             {
                 let mut journal =
                     fixed::Journal::init_at_size(context.with_label("fourth"), cfg.clone(), 23)
@@ -640,18 +642,13 @@ mod tests {
                         .expect("Failed to initialize journal at size 23");
 
                 assert_eq!(journal.size(), 23);
-                assert_eq!(journal.oldest_retained_pos(), Some(20)); // First item in tail blob
+                // No readable items until data is appended
+                assert_eq!(journal.oldest_retained_pos(), None);
 
-                // Operations 0-19 should be pruned (blobs 0-3 don't exist)
-                for i in 0..20 {
+                // All positions 0-22 should be pruned (virtual positions)
+                for i in 0..23 {
                     let result = journal.read(i).await;
                     assert!(matches!(result, Err(journal::Error::ItemPruned(_))));
-                }
-
-                // Operations 20-22 should be all 0s (dummy data in tail blob)
-                for i in 20..23 {
-                    let result = journal.read(i).await.unwrap();
-                    assert_eq!(result, Sha256::fill(0));
                 }
 
                 // Should be able to append from position 23

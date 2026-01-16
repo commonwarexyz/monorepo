@@ -64,13 +64,20 @@ use crate::{
     Persistable,
 };
 use commonware_codec::CodecFixedShared;
-use commonware_runtime::{buffer::PoolRef, Metrics, Storage};
+use commonware_runtime::{buffer::PoolRef, Blob, Metrics, Storage};
 use futures::{stream::Stream, StreamExt};
 use std::{
     num::{NonZeroU64, NonZeroUsize},
     ops::Range,
 };
 use tracing::debug;
+
+/// Name of the metadata blob that stores the virtual start position.
+/// This allows `init_at_size` to avoid filling sections with zeros.
+const META_BLOB_NAME: &[u8] = b"meta";
+
+/// Suffix for the metadata partition.
+const META_PARTITION_SUFFIX: &str = "_meta";
 
 /// Configuration for `Journal` storage.
 #[derive(Clone)]
@@ -108,8 +115,19 @@ pub struct Config {
 pub struct Journal<E: Storage + Metrics, A: CodecFixedShared> {
     inner: SegmentedJournal<E, A>,
 
+    /// Storage context for metadata operations.
+    context: E,
+
+    /// The partition name for metadata operations.
+    partition: String,
+
     /// The maximum number of items per blob (section).
     items_per_blob: u64,
+
+    /// Virtual start position set by `init_at_size`. Positions before this are treated
+    /// as pruned even if they fall within the oldest section. This avoids filling
+    /// sections with zeros when initializing at a mid-section position.
+    virtual_start: u64,
 
     /// Total number of items appended (not affected by pruning).
     size: u64,
@@ -128,6 +146,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     /// used to iterate over all items in the `Journal`.
     pub async fn init(context: E, cfg: Config) -> Result<Self, Error> {
         let items_per_blob = cfg.items_per_blob.get();
+        let partition = cfg.partition.clone();
 
         let segmented_cfg = SegmentedConfig {
             partition: cfg.partition,
@@ -135,13 +154,17 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
             write_buffer: cfg.write_buffer,
         };
 
-        let mut inner = SegmentedJournal::init(context, segmented_cfg).await?;
+        let mut inner = SegmentedJournal::init(context.clone(), segmented_cfg).await?;
 
-        // Calculate size and pruning_boundary from the inner journal's state
+        // Read the virtual start position from metadata if it exists.
+        // This is set by init_at_size to avoid filling sections with zeros.
+        let virtual_start = Self::read_metadata(&context, &partition).await?;
+
+        // Calculate size from the inner journal's state
         let oldest_section = inner.oldest_section();
         let newest_section = inner.newest_section();
 
-        let size = match (oldest_section, newest_section) {
+        let physical_size = match (oldest_section, newest_section) {
             (Some(_), Some(newest)) => {
                 // Compute size from the tail (newest) section
                 let tail_len = inner.section_len(newest).await?;
@@ -149,6 +172,10 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
             }
             _ => 0,
         };
+
+        // The actual size is the maximum of physical size and virtual start.
+        // Virtual start represents items that were "pruned" without being written.
+        let size = physical_size.max(virtual_start);
 
         // Invariant: Tail blob must exist, even if empty. This ensures we can reconstruct size on
         // reopen even after pruning all items. The tail blob is at `size / items_per_blob` (where
@@ -158,9 +185,56 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
 
         Ok(Self {
             inner,
+            context,
+            partition,
             items_per_blob,
+            virtual_start,
             size,
         })
+    }
+
+    /// Get the name of the metadata partition.
+    fn meta_partition(partition: &str) -> String {
+        format!("{}{}", partition, META_PARTITION_SUFFIX)
+    }
+
+    /// Read the virtual start position from metadata.
+    async fn read_metadata(context: &E, partition: &str) -> Result<u64, Error> {
+        let meta_partition = Self::meta_partition(partition);
+        match context.open(&meta_partition, META_BLOB_NAME).await {
+            Ok((blob, size)) => {
+                if size < 8 {
+                    // Metadata blob is too small or empty, treat as 0
+                    return Ok(0);
+                }
+                let buf = blob.read_at(vec![0u8; 8], 0).await?;
+                let bytes: [u8; 8] = buf.as_ref().try_into().unwrap();
+                Ok(u64::from_le_bytes(bytes))
+            }
+            Err(commonware_runtime::Error::BlobMissing(..)) => Ok(0),
+            Err(commonware_runtime::Error::PartitionMissing(_)) => Ok(0),
+            Err(e) => Err(Error::Runtime(e)),
+        }
+    }
+
+    /// Write the virtual start position to metadata.
+    async fn write_metadata(context: &E, partition: &str, virtual_start: u64) -> Result<(), Error> {
+        let meta_partition = Self::meta_partition(partition);
+        let (blob, _) = context.open(&meta_partition, META_BLOB_NAME).await?;
+        blob.write_at(virtual_start.to_le_bytes().to_vec(), 0)
+            .await?;
+        blob.sync().await?;
+        Ok(())
+    }
+
+    /// Remove the metadata partition.
+    async fn remove_metadata(context: &E, partition: &str) -> Result<(), Error> {
+        let meta_partition = Self::meta_partition(partition);
+        match context.remove(&meta_partition, None).await {
+            Ok(()) => Ok(()),
+            Err(commonware_runtime::Error::PartitionMissing(_)) => Ok(()),
+            Err(e) => Err(Error::Runtime(e)),
+        }
     }
 
     /// Initialize a new `Journal` instance in a pruned state at a given size.
@@ -174,20 +248,19 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     /// * `size` - The number of operations that have been "pruned"
     ///
     /// # Behavior
-    /// - Creates only the tail blob at the section that would contain position `size-1`
-    /// - The items in the tail blob before `size` are filled with zeros (dummy data)
-    /// - `oldest_retained_pos()` returns the start of the tail section, matching behavior if the
-    ///   journal were reopened normally
-    /// - Positions within the tail section but before `size` contain dummy zero data
+    /// - Creates only the tail blob at the section that would contain position `size`
+    /// - Stores `size` in metadata to avoid filling sections with zeros
+    /// - `oldest_retained_pos()` returns `None` (no readable items until data is appended)
+    /// - Positions before `size` return `ItemPruned` errors
     ///
     /// # Invariants
     /// - The directory given by `cfg.partition` should be empty
     pub async fn init_at_size(context: E, cfg: Config, size: u64) -> Result<Self, Error> {
         let items_per_blob = cfg.items_per_blob.get();
+        let partition = cfg.partition.clone();
 
-        // Calculate the tail blob section and items within it
+        // Calculate the tail blob section
         let tail_section = size / items_per_blob;
-        let tail_items = size % items_per_blob;
 
         // Initialize the segmented journal (empty)
         let segmented_cfg = SegmentedConfig {
@@ -196,16 +269,20 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
             write_buffer: cfg.write_buffer,
         };
 
-        let mut inner = SegmentedJournal::init(context, segmented_cfg).await?;
+        let mut inner = SegmentedJournal::init(context.clone(), segmented_cfg).await?;
 
-        // Initialize the tail section with zero-filled items if needed. This uses resize internally
-        // which appropriately uses the underlying page-oriented layout with checksums.
-        inner.init_section_at_size(tail_section, tail_items).await?;
-        inner.sync_all().await?;
+        // Create an empty tail section (no zeros!)
+        inner.ensure_section_exists(tail_section).await?;
+
+        // Write the virtual start position to metadata
+        Self::write_metadata(&context, &partition, size).await?;
 
         Ok(Self {
             inner,
+            context,
+            partition,
             items_per_blob,
+            virtual_start: size,
             size,
         })
     }
@@ -309,7 +386,17 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     /// operation fails.
     pub async fn append(&mut self, item: A) -> Result<u64, Error> {
         let position = self.size;
-        let (section, _pos_in_section) = self.position_to_section(position);
+        let (section, pos_in_section) = self.position_to_section(position);
+
+        // If we have a virtual start and the section is behind, fill the gap with zeros.
+        // This happens on the first append after init_at_size when the position is mid-section.
+        // We defer the zero-filling to the first actual write to minimize I/O during init.
+        let current_section_len = self.inner.section_len(section).await?;
+        if current_section_len < pos_in_section {
+            self.inner
+                .init_section_at_size(section, pos_in_section)
+                .await?;
+        }
 
         self.inner.append(section, item).await?;
         self.size += 1;
@@ -357,6 +444,10 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     ///
     /// Note that this value could be older than the `min_item_pos` last passed to prune.
     pub fn oldest_retained_pos(&self) -> Option<u64> {
+        // If virtual_start == size, no actual data has been appended after init_at_size.
+        if self.virtual_start == self.size {
+            return None;
+        }
         if self.pruning_boundary() == self.size {
             return None;
         }
@@ -383,6 +474,18 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         }
         if pos < self.pruning_boundary() {
             return Err(Error::ItemPruned(pos));
+        }
+        // Check if position is in the "virtual" range (after section boundary but before
+        // virtual_start). This can happen when init_at_size was used and no data has been
+        // appended yet, or when data was appended but not at this position.
+        if pos < self.virtual_start {
+            // Check if the section has actual data at this position
+            let (section, pos_in_section) = self.position_to_section(pos);
+            let section_len = self.inner.section_len(section).await?;
+            if pos_in_section >= section_len {
+                // Position is in the virtual gap - not yet filled with zeros
+                return Err(Error::ItemPruned(pos));
+            }
         }
 
         // Get the relevant blob to read from.
@@ -469,6 +572,8 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
 
     /// Remove any underlying blobs created by the journal.
     pub async fn destroy(self) -> Result<(), Error> {
+        // Remove metadata blob
+        Self::remove_metadata(&self.context, &self.partition).await?;
         self.inner.destroy().await
     }
 
@@ -479,14 +584,14 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     pub(crate) async fn clear_to_size(&mut self, new_size: u64) -> Result<(), Error> {
         self.inner.clear().await?;
 
-        // Initialize the tail section if needed
+        // Create empty tail section (no zeros!)
         let tail_section = new_size / self.items_per_blob;
-        let tail_items = new_size % self.items_per_blob;
-        self.inner
-            .init_section_at_size(tail_section, tail_items)
-            .await?;
-        self.inner.sync_all().await?;
+        self.inner.ensure_section_exists(tail_section).await?;
 
+        // Write the virtual start position to metadata
+        Self::write_metadata(&self.context, &self.partition, new_size).await?;
+
+        self.virtual_start = new_size;
         self.size = new_size;
         Ok(())
     }
@@ -1679,20 +1784,29 @@ mod tests {
             let cfg = test_cfg(NZU64!(5));
 
             // Initialize at position 7 (middle of section 1 with items_per_blob=5)
-            // This creates section 1 with zero-filled items at positions 5 and 6
+            // With metadata-based initialization, no zeros are written - positions before 7 are
+            // treated as pruned.
             let mut journal = Journal::<_, Digest>::init_at_size(context.clone(), cfg.clone(), 7)
                 .await
                 .unwrap();
 
             assert_eq!(journal.size(), 7);
-            // Fixed journal creates zero-filled items, so oldest_retained_pos is the start of the section
-            assert_eq!(journal.oldest_retained_pos(), Some(5));
+            // No readable items until data is appended (positions 0-6 are "virtually pruned")
+            assert_eq!(journal.oldest_retained_pos(), None);
+            // Positions in the virtual range return ItemPruned
+            assert!(matches!(journal.read(5).await, Err(Error::ItemPruned(5))));
+            assert!(matches!(journal.read(6).await, Err(Error::ItemPruned(6))));
 
             // Next append should get position 7
             let pos = journal.append(test_digest(700)).await.unwrap();
             assert_eq!(pos, 7);
             assert_eq!(journal.size(), 8);
             assert_eq!(journal.read(7).await.unwrap(), test_digest(700));
+            // oldest_retained_pos is the section boundary (5) since the gap is now filled
+            assert_eq!(journal.oldest_retained_pos(), Some(5));
+            // Positions 5-6 are now readable as zeros (filled on first append)
+            assert_eq!(journal.read(5).await.unwrap(), Sha256::fill(0));
+            assert_eq!(journal.read(6).await.unwrap(), Sha256::fill(0));
 
             journal.destroy().await.unwrap();
         });
