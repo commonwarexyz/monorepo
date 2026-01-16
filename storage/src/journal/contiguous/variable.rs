@@ -995,14 +995,10 @@ mod tests {
 
     #[test_traced]
     fn test_variable_contiguous() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let counter = std::sync::Arc::new(AtomicUsize::new(0));
-            run_contiguous_tests(move |test_name: String| {
-                let id = counter.fetch_add(1, Ordering::SeqCst);
-                let context = context.with_label(&format!("{test_name}_{id}"));
+            run_contiguous_tests(move |test_name: String, idx: usize| {
+                let context = context.with_label(&format!("{test_name}_{idx}"));
                 async move {
                     Journal::<_, u64>::init(
                         context,

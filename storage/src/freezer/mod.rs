@@ -1171,10 +1171,12 @@ mod tests {
                 table_replay_buffer: NZUsize!(DEFAULT_TABLE_REPLAY_BUFFER),
                 codec_config: (),
             };
-            let mut freezer =
-                Freezer::<_, FixedBytes<96>, FixedBytes<256>>::init(context.clone(), cfg.clone())
-                    .await
-                    .expect("Failed to initialize freezer");
+            let mut freezer = Freezer::<_, FixedBytes<96>, FixedBytes<256>>::init(
+                context.with_label("init1"),
+                cfg.clone(),
+            )
+            .await
+            .expect("Failed to initialize freezer");
 
             // Generate and insert random key-value pairs
             let mut pairs = Vec::new();
@@ -1242,7 +1244,7 @@ mod tests {
 
             // Reopen the freezer
             let mut freezer = Freezer::<_, FixedBytes<96>, FixedBytes<256>>::init_with_checkpoint(
-                context.clone(),
+                context.with_label("init2"),
                 cfg.clone(),
                 Some(checkpoint),
             )

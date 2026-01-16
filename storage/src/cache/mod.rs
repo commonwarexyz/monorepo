@@ -261,7 +261,7 @@ mod tests {
                 items_per_blob: NZU64!(items_per_blob),
                 buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
-            let mut cache = Cache::init(context.clone(), cfg.clone())
+            let mut cache = Cache::init(context.with_label("init1"), cfg.clone())
                 .await
                 .expect("Failed to initialize cache");
 
@@ -305,7 +305,7 @@ mod tests {
                 items_per_blob: NZU64!(items_per_blob),
                 buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
-            let mut cache = Cache::<_, [u8; 1024]>::init(context.clone(), cfg.clone())
+            let mut cache = Cache::<_, [u8; 1024]>::init(context.with_label("init2"), cfg.clone())
                 .await
                 .expect("Failed to initialize cache");
 

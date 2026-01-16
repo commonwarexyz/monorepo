@@ -282,6 +282,13 @@ impl Default for Config {
 /// Deterministic runtime that randomly selects tasks to run based on a seed.
 pub struct Executor {
     registry: Mutex<Registry>,
+
+    /// Tracks all registered metric names to detect duplicates.
+    ///
+    /// Unlike the tokio runtime (which allows duplicate registrations because
+    /// prometheus-client silently ignores them), the deterministic runtime
+    /// panics on duplicate metric names. This helps catch bugs in tests where
+    /// components are reinitialized without unique labels.
     registered_metrics: Mutex<HashSet<String>>,
     cycle: Duration,
     deadline: Option<SystemTime>,
@@ -1090,9 +1097,16 @@ impl crate::RayonPoolSpawner for Context {
     }
 }
 
+/// Metrics implementation for the deterministic runtime.
+///
+/// This implementation enforces stricter validation than the tokio runtime:
+/// - Labels must start with `[a-zA-Z]` and contain only `[a-zA-Z0-9_]`
+/// - Metric names must be unique (panics on duplicate registration)
+///
+/// These checks help catch configuration bugs early in tests.
 impl crate::Metrics for Context {
     fn with_label(&self, label: &str) -> Self {
-        // Ensure the label is well-formatted
+        // Validate label format (must match [a-zA-Z][a-zA-Z0-9_]*)
         validate_label(label);
 
         // Construct the full label name
@@ -1138,7 +1152,7 @@ impl crate::Metrics for Context {
             }
         };
 
-        // Register metric
+        // Register metric (panics if name already registered)
         let is_new = executor
             .registered_metrics
             .lock()

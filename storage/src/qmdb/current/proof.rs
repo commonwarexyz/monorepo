@@ -20,10 +20,27 @@ use crate::{
 use commonware_codec::Codec;
 use commonware_cryptography::{Digest, Hasher as CHasher};
 use commonware_runtime::{Clock, Metrics, Storage as RStorage};
+use commonware_utils::bitmap::{BitMap as UtilBitMap, Prunable as PrunableBitMap};
 use core::ops::Range;
 use futures::future::try_join_all;
 use std::num::NonZeroU64;
 use tracing::debug;
+
+/// Returns a root digest that incorporates bits not yet part of the MMR because they
+/// belong to the last (unfilled) chunk.
+fn partial_chunk_root<H: CHasher, const N: usize>(
+    hasher: &mut H,
+    mmr_root: &H::Digest,
+    next_bit: u64,
+    last_chunk_digest: &H::Digest,
+) -> H::Digest {
+    assert!(next_bit > 0);
+    assert!(next_bit < UtilBitMap::<N>::CHUNK_SIZE_BITS);
+    hasher.update(mmr_root);
+    hasher.update(&next_bit.to_be_bytes());
+    hasher.update(last_chunk_digest);
+    hasher.finalize()
+}
 
 /// A proof that a range of operations exist in the database.
 #[derive(Clone, Eq, PartialEq, Debug)]
@@ -37,9 +54,14 @@ pub struct RangeProof<D: Digest> {
 
 impl<D: Digest> RangeProof<D> {
     /// Create a new range proof for the provided `range` of operations.
-    pub async fn new<H: CHasher<Digest = D>, S: Storage<D>, const N: usize>(
+    pub async fn new<
+        E: RStorage + Clock + Metrics,
+        H: CHasher<Digest = D>,
+        S: Storage<D>,
+        const N: usize,
+    >(
         hasher: &mut H,
-        status: &CleanBitMap<D, N>,
+        status: &CleanBitMap<E, D, N>,
         grafting_height: u32,
         mmr: &S,
         range: Range<Location>,
@@ -48,7 +70,7 @@ impl<D: Digest> RangeProof<D> {
         let proof = verification::range_proof(&grafted_mmr, range).await?;
 
         let (last_chunk, next_bit) = status.last_chunk();
-        let partial_chunk_digest = if next_bit != CleanBitMap::<D, N>::CHUNK_SIZE_BITS {
+        let partial_chunk_digest = if next_bit != CleanBitMap::<E, D, N>::CHUNK_SIZE_BITS {
             // Last chunk is incomplete, meaning it's not yet in the MMR and needs to be included
             // in the proof.
             hasher.update(last_chunk);
@@ -78,7 +100,7 @@ impl<D: Digest> RangeProof<D> {
         const N: usize,
     >(
         hasher: &mut H,
-        status: &CleanBitMap<D, N>,
+        status: &CleanBitMap<E, D, N>,
         height: u32,
         mmr: &Mmr<E, D, Clean<D>>,
         log: &C,
@@ -107,7 +129,7 @@ impl<D: Digest> RangeProof<D> {
             .for_each(|op| ops.push(op));
 
         // Gather the chunks necessary to verify the proof.
-        let chunk_bits = CleanBitMap::<H::Digest, N>::CHUNK_SIZE_BITS;
+        let chunk_bits = UtilBitMap::<N>::CHUNK_SIZE_BITS;
         let start = *start_loc / chunk_bits; // chunk that contains the first bit
         let end = (*end_loc - 1) / chunk_bits; // chunk that contains the last bit
         let mut chunks = Vec::with_capacity((end - start + 1) as usize);
@@ -154,7 +176,7 @@ impl<D: Digest> RangeProof<D> {
         }
 
         // Validate the number of input chunks.
-        let chunk_bits = CleanBitMap::<H::Digest, N>::CHUNK_SIZE_BITS;
+        let chunk_bits = UtilBitMap::<N>::CHUNK_SIZE_BITS;
         let start = *start_loc / chunk_bits; // chunk that contains first bit
         let end = (*end_loc.saturating_sub(1)) / chunk_bits; // chunk that contains the last bit
         let expected = end - start + 1;
@@ -167,14 +189,14 @@ impl<D: Digest> RangeProof<D> {
         let elements = ops.iter().map(|op| op.encode()).collect::<Vec<_>>();
 
         let chunk_vec = chunks.iter().map(|c| c.as_ref()).collect::<Vec<_>>();
-        let start_chunk_loc = *start_loc / CleanBitMap::<H::Digest, N>::CHUNK_SIZE_BITS;
+        let start_chunk_loc = *start_loc / UtilBitMap::<N>::CHUNK_SIZE_BITS;
         let mut verifier = Verifier::<H>::new(
             grafting_height,
             Location::new_unchecked(start_chunk_loc),
             chunk_vec,
         );
 
-        let next_bit = *op_count % CleanBitMap::<H::Digest, N>::CHUNK_SIZE_BITS;
+        let next_bit = *op_count % UtilBitMap::<N>::CHUNK_SIZE_BITS;
         if next_bit == 0 {
             return self
                 .proof
@@ -190,8 +212,8 @@ impl<D: Digest> RangeProof<D> {
         // If the proof is over an operation in the partial chunk, we need to verify the last chunk
         // digest from the proof matches the digest of chunk, since these bits are not part of the
         // mmr.
-        if *(end_loc - 1) / CleanBitMap::<H::Digest, N>::CHUNK_SIZE_BITS
-            == *op_count / CleanBitMap::<H::Digest, N>::CHUNK_SIZE_BITS
+        if *(end_loc - 1) / UtilBitMap::<N>::CHUNK_SIZE_BITS
+            == *op_count / UtilBitMap::<N>::CHUNK_SIZE_BITS
         {
             let Some(last_chunk) = chunks.last() else {
                 debug!("chunks is empty");
@@ -216,12 +238,8 @@ impl<D: Digest> RangeProof<D> {
             }
         };
 
-        let reconstructed_root = CleanBitMap::<H::Digest, N>::partial_chunk_root(
-            hasher,
-            &mmr_root,
-            next_bit,
-            &last_chunk_digest,
-        );
+        let reconstructed_root =
+            partial_chunk_root::<H, N>(hasher, &mmr_root, next_bit, &last_chunk_digest);
 
         reconstructed_root == *root
     }
@@ -247,9 +265,9 @@ impl<D: Digest, const N: usize> OperationProof<D, N> {
     /// # Panics
     ///
     /// - Panics if `loc` is out of bounds.
-    pub async fn new<H: CHasher<Digest = D>, S: Storage<D>>(
+    pub async fn new<E: RStorage + Clock + Metrics, H: CHasher<Digest = D>, S: Storage<D>>(
         hasher: &mut H,
-        status: &CleanBitMap<D, N>,
+        status: &CleanBitMap<E, D, N>,
         grafting_height: u32,
         mmr: &S,
         loc: Location,
@@ -277,7 +295,7 @@ impl<D: Digest, const N: usize> OperationProof<D, N> {
     ) -> bool {
         // Make sure that the bit for the operation in the bitmap chunk is actually a 1 (indicating
         // the operation is indeed active).
-        if !CleanBitMap::<H::Digest, N>::get_bit_from_chunk(&self.chunk, *self.loc) {
+        if !PrunableBitMap::<N>::get_bit_from_chunk(&self.chunk, *self.loc) {
             debug!(
                 ?self.loc,
                 "proof verification failed, operation is inactive"
