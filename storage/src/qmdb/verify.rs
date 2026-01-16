@@ -70,11 +70,10 @@ pub fn digests_required_for_proof<D: Digest>(
     op_count: Location,
     range: Range<Location>,
 ) -> Result<Vec<Position>, crate::mmr::Error> {
-    let mmr_size = Position::try_from(op_count)?;
-    proof::nodes_required_for_range_proof(mmr_size, range)
+    proof::nodes_required_for_range_proof(op_count, range)
 }
 
-/// Create a [Proof] from a op_count and a list of digests.
+/// Create a [Proof] from an operation count and a list of digests.
 ///
 /// To compute the digests required for a [Proof], use [digests_required_for_proof].
 ///
@@ -86,7 +85,7 @@ pub fn create_proof<D: Digest>(
     digests: Vec<D>,
 ) -> Result<Proof<D>, crate::mmr::Error> {
     Ok(Proof::<D> {
-        size: Position::try_from(op_count)?,
+        leaves: op_count,
         digests,
     })
 }
@@ -117,8 +116,8 @@ where
 pub fn create_proof_store_from_digests<D: Digest>(
     proof: &Proof<D>,
     digests: Vec<(Position, D)>,
-) -> ProofStore<D> {
-    ProofStore::new_from_digests(proof.size, digests)
+) -> Result<ProofStore<D>, Error> {
+    ProofStore::new_from_digests(proof.leaves, digests)
 }
 
 /// Create a Multi-Proof for specific operations (identified by location) from a [ProofStore].
@@ -380,7 +379,7 @@ mod tests {
 
             // Construct proof
             let proof = create_proof(OP_COUNT, digests.clone()).expect("test locations valid");
-            assert_eq!(proof.size, Position::try_from(OP_COUNT).unwrap());
+            assert_eq!(proof.leaves, OP_COUNT);
             assert_eq!(proof.digests.len(), digests.len());
 
             assert!(verify_proof(
@@ -503,7 +502,7 @@ mod tests {
             .unwrap();
 
             // Create proof store from digests
-            let proof_store = create_proof_store_from_digests(&proof, digests);
+            let proof_store = create_proof_store_from_digests(&proof, digests).unwrap();
 
             // Verify we can use the proof store
             let sub_proof = verification::range_proof(

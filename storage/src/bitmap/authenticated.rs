@@ -196,29 +196,23 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize, S: State<D>> BitM
         bit: u64,
         root: &D,
     ) -> bool {
-        let bit_len = *proof.size;
+        let bit_len = *proof.leaves;
         if bit >= bit_len {
             debug!(bit_len, bit, "tried to verify non-existent bit");
             return false;
         }
 
-        let leaves = PrunableBitMap::<N>::unpruned_chunk(bit_len);
-        // The chunk index should always be < MAX_LOCATION so this should never fail.
-        let size = Position::try_from(Location::new_unchecked(leaves as u64))
-            .expect("chunk_loc returned invalid location");
+        // The chunk index should always be < MAX_LOCATION so we can use new_unchecked.
+        let chunked_leaves =
+            Location::new_unchecked(PrunableBitMap::<N>::unpruned_chunk(bit_len) as u64);
         let mut mmr_proof = Proof {
-            size,
+            leaves: chunked_leaves,
             digests: proof.digests.clone(),
         };
 
-        let loc = PrunableBitMap::<N>::unpruned_chunk(bit);
+        let loc = Location::new_unchecked(PrunableBitMap::<N>::unpruned_chunk(bit) as u64);
         if bit_len.is_multiple_of(Self::CHUNK_SIZE_BITS) {
-            return mmr_proof.verify_element_inclusion(
-                hasher,
-                chunk,
-                Location::new_unchecked(loc as u64),
-                root,
-            );
+            return mmr_proof.verify_element_inclusion(hasher, chunk, loc, root);
         }
 
         if proof.digests.is_empty() {
@@ -227,7 +221,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize, S: State<D>> BitM
         }
         let last_digest = mmr_proof.digests.pop().unwrap();
 
-        if leaves == loc {
+        if chunked_leaves == loc {
             // The proof is over a bit in the partial chunk. In this case the proof's only digest
             // should be the MMR's root, otherwise it is invalid. Since we've popped off the last
             // digest already, there should be no remaining digests.
@@ -251,15 +245,13 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize, S: State<D>> BitM
 
         // For the case where the proof is over a bit in a full chunk, `last_digest` contains the
         // digest of that chunk.
-        let mmr_root =
-            match mmr_proof.reconstruct_root(hasher, &[chunk], Location::new_unchecked(loc as u64))
-            {
-                Ok(root) => root,
-                Err(error) => {
-                    debug!(error = ?error, "invalid proof input");
-                    return false;
-                }
-            };
+        let mmr_root = match mmr_proof.reconstruct_root(hasher, &[chunk], loc) {
+            Ok(root) => root,
+            Err(error) => {
+                debug!(error = ?error, "invalid proof input");
+                return false;
+            }
+        };
 
         let next_bit = bit_len % Self::CHUNK_SIZE_BITS;
         let reconstructed_root =
@@ -456,7 +448,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> CleanBitMap<E, D,
             // required in the proof: the mmr's root.
             return Ok((
                 Proof {
-                    size: Position::new(self.len()),
+                    leaves: Location::new_unchecked(self.len()),
                     digests: vec![*self.mmr.root()],
                 },
                 chunk,
@@ -465,7 +457,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> CleanBitMap<E, D,
 
         let range = chunk_loc..chunk_loc + 1;
         let mut proof = verification::range_proof(&self.mmr, range).await?;
-        proof.size = Position::new(self.len());
+        proof.leaves = Location::new_unchecked(self.len());
         if next_bit == Self::CHUNK_SIZE_BITS {
             // Bitmap is chunk aligned.
             return Ok((proof, chunk));
@@ -659,7 +651,7 @@ mod tests {
         executor.start(|_context| async move {
             let mut hasher = StandardHasher::<Sha256>::new();
             let proof = Proof {
-                size: Position::new(100),
+                leaves: Location::new_unchecked(100),
                 digests: Vec::new(),
             };
             assert!(
