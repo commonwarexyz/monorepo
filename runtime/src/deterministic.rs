@@ -51,7 +51,7 @@ use crate::{
         audited::Storage as AuditedStorage, memory::Storage as MemStorage,
         metered::Storage as MeteredStorage,
     },
-    telemetry::metrics::task::Label,
+    telemetry::{metrics::task::Label, MetricsRegistry},
     utils::{
         signal::{Signal, Stopper},
         supervision::Tree,
@@ -287,7 +287,7 @@ impl Default for Config {
 
 /// Deterministic runtime that randomly selects tasks to run based on a seed.
 pub struct Executor {
-    registry: Mutex<Registry>,
+    metrics_registry: Mutex<MetricsRegistry>,
     registered_metrics: Mutex<HashSet<String>>,
     cycle: Duration,
     deadline: Option<SystemTime>,
@@ -826,8 +826,10 @@ impl Clone for Context {
 impl Context {
     fn new(cfg: Config) -> (Self, Arc<Executor>, Panicked) {
         // Create a new registry
-        let mut registry = Registry::default();
-        let runtime_registry = registry.sub_registry_with_prefix(METRICS_PREFIX);
+        let mut metrics_registry = MetricsRegistry::default();
+        let runtime_registry = metrics_registry
+            .write_through()
+            .sub_registry_with_prefix(METRICS_PREFIX);
 
         // Initialize runtime
         let metrics = Arc::new(Metrics::init(runtime_registry));
@@ -847,7 +849,7 @@ impl Context {
         let (panicker, panicked) = Panicker::new(cfg.catch_panics);
 
         let executor = Arc::new(Executor {
-            registry: Mutex::new(registry),
+            metrics_registry: Mutex::new(metrics_registry),
             registered_metrics: Mutex::new(HashSet::new()),
             cycle: cfg.cycle,
             deadline,
@@ -890,8 +892,10 @@ impl Context {
     /// If either one of these conditions is violated, this method will panic.
     fn recover(checkpoint: Checkpoint) -> (Self, Arc<Executor>, Panicked) {
         // Rebuild metrics
-        let mut registry = Registry::default();
-        let runtime_registry = registry.sub_registry_with_prefix(METRICS_PREFIX);
+        let mut metrics_registry = MetricsRegistry::default();
+        let runtime_registry = metrics_registry
+            .write_through()
+            .sub_registry_with_prefix(METRICS_PREFIX);
         let metrics = Arc::new(Metrics::init(runtime_registry));
 
         // Copy state
@@ -912,7 +916,7 @@ impl Context {
             dns: checkpoint.dns,
 
             // New state for the new runtime
-            registry: Mutex::new(registry),
+            metrics_registry: Mutex::new(metrics_registry),
             registered_metrics: Mutex::new(HashSet::new()),
             metrics,
             tasks: Arc::new(Tasks::new()),
@@ -1152,9 +1156,10 @@ impl crate::Metrics for Context {
             .insert(prefixed_name.clone());
         assert!(is_new, "duplicate metric name: {}", prefixed_name);
         executor
-            .registry
+            .metrics_registry
             .lock()
             .unwrap()
+            .write_through()
             .register(prefixed_name, help, metric);
     }
 
@@ -1162,17 +1167,27 @@ impl crate::Metrics for Context {
         let executor = self.executor();
         executor.auditor.event(b"encode", |_| {});
         let mut buffer = String::new();
-        encode(&mut buffer, &executor.registry.lock().unwrap()).expect("encoding failed");
+        encode(
+            &mut buffer,
+            &executor.metrics_registry.lock().unwrap().write_through(),
+        )
+        .expect("encoding failed");
         buffer
     }
 
     fn get_or_register<M: Clone + Metric>(
         &self,
-        _name: impl std::fmt::Display,
-        _help: impl std::fmt::Display,
-        _metric: M,
+        name: impl std::fmt::Display,
+        help: impl std::fmt::Display,
+        metric: M,
     ) -> M {
-        todo!()
+        let executor = self.executor();
+        let metric = executor.metrics_registry.lock().unwrap().get_or_register(
+            name.to_string(),
+            help.to_string(),
+            metric,
+        );
+        metric
     }
 }
 

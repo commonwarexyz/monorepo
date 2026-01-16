@@ -16,7 +16,7 @@ use crate::{
     process::metered::Metrics as MeteredProcess,
     signal::Signal,
     storage::metered::Storage as MeteredStorage,
-    telemetry::metrics::task::Label,
+    telemetry::{metrics::task::Label, MetricsRegistry},
     utils::{signal::Stopper, supervision::Tree, Panicker},
     Clock, Error, Execution, Handle, Metrics as _, SinkOf, Spawner as _, StreamOf, METRICS_PREFIX,
 };
@@ -32,8 +32,6 @@ use prometheus_client::{
 use rand::{rngs::OsRng, CryptoRng, RngCore};
 use rayon::{ThreadPoolBuildError, ThreadPoolBuilder};
 use std::{
-    any::Any,
-    collections::HashMap,
     env,
     fmt::Display,
     future::Future,
@@ -258,7 +256,7 @@ impl crate::Runner for Runner {
         // Create a new registry
         let mut metrics_registry = MetricsRegistry::default();
         let runtime_registry = metrics_registry
-            .registry
+            .write_through()
             .sub_registry_with_prefix(METRICS_PREFIX);
 
         // Initialize runtime
@@ -576,7 +574,7 @@ impl crate::Metrics for Context {
             .metrics_registry
             .lock()
             .unwrap()
-            .registry
+            .write_through()
             .register(prefixed_name, help, metric)
     }
 
@@ -606,7 +604,12 @@ impl crate::Metrics for Context {
         let mut buffer = String::new();
         encode(
             &mut buffer,
-            &self.executor.metrics_registry.lock().unwrap().registry,
+            &self
+                .executor
+                .metrics_registry
+                .lock()
+                .unwrap()
+                .write_through(),
         )
         .expect("encoding failed");
         buffer
@@ -723,26 +726,5 @@ impl crate::Storage for Context {
 
     async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
         self.storage.scan(partition).await
-    }
-}
-
-#[derive(Debug, Default)]
-struct MetricsRegistry {
-    registered: HashMap<String, Box<dyn Any + Send + Sync>>,
-    registry: Registry,
-}
-
-impl MetricsRegistry {
-    fn get_or_register<M: Clone + Metric>(&mut self, name: String, help: String, metric: M) -> M {
-        if let Some(metric) = self
-            .registered
-            .get(&name)
-            .and_then(|boxed| boxed.downcast_ref::<M>())
-            .cloned()
-        {
-            return metric;
-        }
-        self.registry.register(name, help, metric.clone());
-        metric
     }
 }
