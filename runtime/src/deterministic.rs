@@ -1181,12 +1181,30 @@ impl crate::Metrics for Context {
         help: impl std::fmt::Display,
         metric: M,
     ) -> M {
+        // Prepare args
+        let name = name.to_string();
+        let help = help.to_string();
+
+        // Name metric
         let executor = self.executor();
-        let metric = executor.metrics_registry.lock().unwrap().get_or_register(
-            name.to_string(),
-            help.to_string(),
-            metric,
-        );
+        executor.auditor.event(b"register", |hasher| {
+            hasher.update(name.as_bytes());
+            hasher.update(help.as_bytes());
+        });
+        let prefixed_name = {
+            let prefix = &self.name;
+            if prefix.is_empty() {
+                name
+            } else {
+                format!("{}_{}", *prefix, name)
+            }
+        };
+        let metric = self
+            .executor()
+            .metrics_registry
+            .lock()
+            .unwrap()
+            .get_or_register(prefixed_name, help, metric);
         metric
     }
 }
