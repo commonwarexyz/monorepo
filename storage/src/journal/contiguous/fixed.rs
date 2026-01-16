@@ -1646,6 +1646,14 @@ mod tests {
                 assert!(matches!(journal.read(i).await, Err(Error::ItemPruned(_))));
             }
 
+            // Verify size persists after restart without writing any data
+            drop(journal);
+            let mut journal =
+                Journal::<_, Digest>::init(context.with_label("journal_after_clear"), cfg.clone())
+                    .await
+                    .expect("failed to re-initialize journal after clear");
+            assert_eq!(journal.size(), 100);
+
             // Append new data starting at position 100
             for i in 100..105u64 {
                 let pos = journal.append(test_digest(i)).await.unwrap();

@@ -2498,6 +2498,15 @@ mod tests {
                 ));
             }
 
+            // Verify size persists after restart without writing any data
+            drop(journal);
+            let mut journal =
+                Journal::<_, u64>::init(context.with_label("journal_after_clear"), cfg.clone())
+                    .await
+                    .unwrap();
+            assert_eq!(journal.size(), 100);
+            assert_eq!(journal.oldest_retained_pos(), None);
+
             // Append new data starting at position 100
             for i in 100..105u64 {
                 let pos = journal.append(i * 100).await.unwrap();
