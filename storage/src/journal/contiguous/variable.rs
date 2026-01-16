@@ -2459,4 +2459,73 @@ mod tests {
             journal.destroy().await.unwrap();
         });
     }
+
+    #[test_traced]
+    fn test_variable_journal_clear_to_size() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "clear_test".to_string(),
+                items_per_section: NZU64!(10),
+                compression: None,
+                codec_config: (),
+                buffer_pool: PoolRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
+                write_buffer: NZUsize!(1024),
+            };
+
+            let mut journal = Journal::<_, u64>::init(context.with_label("journal"), cfg.clone())
+                .await
+                .unwrap();
+
+            // Append 25 items (spanning multiple sections)
+            for i in 0..25u64 {
+                journal.append(i * 100).await.unwrap();
+            }
+            assert_eq!(journal.size(), 25);
+            assert_eq!(journal.oldest_retained_pos(), Some(0));
+            journal.sync().await.unwrap();
+
+            // Clear to position 100, effectively resetting the journal
+            journal.clear_to_size(100).await.unwrap();
+            assert_eq!(journal.size(), 100);
+            assert_eq!(journal.oldest_retained_pos(), None);
+
+            // Old positions should fail
+            for i in 0..25 {
+                assert!(matches!(
+                    journal.read(i).await,
+                    Err(crate::journal::Error::ItemPruned(_))
+                ));
+            }
+
+            // Append new data starting at position 100
+            for i in 100..105u64 {
+                let pos = journal.append(i * 100).await.unwrap();
+                assert_eq!(pos, i);
+            }
+            assert_eq!(journal.size(), 105);
+            assert_eq!(journal.oldest_retained_pos(), Some(100));
+
+            // New positions should be readable
+            for i in 100..105u64 {
+                assert_eq!(journal.read(i).await.unwrap(), i * 100);
+            }
+
+            // Sync and re-init to verify persistence
+            journal.sync().await.unwrap();
+            drop(journal);
+
+            let journal = Journal::<_, u64>::init(context.with_label("journal_reopened"), cfg)
+                .await
+                .unwrap();
+
+            assert_eq!(journal.size(), 105);
+            assert_eq!(journal.oldest_retained_pos(), Some(100));
+            for i in 100..105u64 {
+                assert_eq!(journal.read(i).await.unwrap(), i * 100);
+            }
+
+            journal.destroy().await.unwrap();
+        });
+    }
 }

@@ -1620,4 +1620,58 @@ mod tests {
             journal.destroy().await.expect("failed to destroy journal");
         });
     }
+
+    #[test_traced]
+    fn test_fixed_journal_clear_to_size() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(NZU64!(10));
+            let mut journal = Journal::init(context.with_label("journal"), cfg.clone())
+                .await
+                .expect("failed to initialize journal");
+
+            // Append 25 items (positions 0-24, spanning 3 blobs)
+            for i in 0..25u64 {
+                journal.append(test_digest(i)).await.unwrap();
+            }
+            assert_eq!(journal.size(), 25);
+            journal.sync().await.unwrap();
+
+            // Clear to position 100, effectively resetting the journal
+            journal.clear_to_size(100).await.unwrap();
+            assert_eq!(journal.size(), 100);
+
+            // Old positions should fail
+            for i in 0..25 {
+                assert!(matches!(journal.read(i).await, Err(Error::ItemPruned(_))));
+            }
+
+            // Append new data starting at position 100
+            for i in 100..105u64 {
+                let pos = journal.append(test_digest(i)).await.unwrap();
+                assert_eq!(pos, i);
+            }
+            assert_eq!(journal.size(), 105);
+
+            // New positions should be readable
+            for i in 100..105u64 {
+                assert_eq!(journal.read(i).await.unwrap(), test_digest(i));
+            }
+
+            // Sync and re-init to verify persistence
+            journal.sync().await.unwrap();
+            drop(journal);
+
+            let journal = Journal::<_, Digest>::init(context.with_label("journal_reopened"), cfg)
+                .await
+                .expect("failed to re-initialize journal");
+
+            assert_eq!(journal.size(), 105);
+            for i in 100..105u64 {
+                assert_eq!(journal.read(i).await.unwrap(), test_digest(i));
+            }
+
+            journal.destroy().await.unwrap();
+        });
+    }
 }

@@ -1297,4 +1297,67 @@ mod tests {
             journal.destroy().await.expect("failed to destroy");
         });
     }
+
+    #[test_traced]
+    fn test_journal_clear() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "clear_test".into(),
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                write_buffer: NZUsize!(1024),
+            };
+
+            let mut journal: Journal<_, Digest> =
+                Journal::init(context.with_label("journal"), cfg.clone())
+                    .await
+                    .expect("Failed to initialize journal");
+
+            // Append items across multiple sections
+            for section in 0..5u64 {
+                for i in 0..10u64 {
+                    journal
+                        .append(section, test_digest(section * 1000 + i))
+                        .await
+                        .expect("Failed to append");
+                }
+                journal.sync(section).await.expect("Failed to sync");
+            }
+
+            // Verify we have data
+            assert_eq!(journal.get(0, 0).await.unwrap(), test_digest(0));
+            assert_eq!(journal.get(4, 0).await.unwrap(), test_digest(4000));
+
+            // Clear the journal
+            journal.clear().await.expect("Failed to clear");
+
+            // After clear, all reads should fail
+            for section in 0..5u64 {
+                assert!(matches!(
+                    journal.get(section, 0).await,
+                    Err(Error::SectionOutOfRange(s)) if s == section
+                ));
+            }
+
+            // Append new data after clear
+            for i in 0..5u64 {
+                journal
+                    .append(10, test_digest(i * 100))
+                    .await
+                    .expect("Failed to append after clear");
+            }
+            journal.sync(10).await.expect("Failed to sync after clear");
+
+            // New data should be readable
+            assert_eq!(journal.get(10, 0).await.unwrap(), test_digest(0));
+
+            // Old sections should still be missing
+            assert!(matches!(
+                journal.get(0, 0).await,
+                Err(Error::SectionOutOfRange(0))
+            ));
+
+            journal.destroy().await.unwrap();
+        });
+    }
 }
