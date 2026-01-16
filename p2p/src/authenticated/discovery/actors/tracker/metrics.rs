@@ -26,32 +26,27 @@ pub struct Metrics {
 impl Metrics {
     /// Create and return a new set of metrics, registered with the given context.
     pub fn init<E: RuntimeMetrics>(context: E) -> Self {
-        let metrics = Self::default();
-        context.register(
-            "tracked",
-            "Total number of unique peers in all peer sets being tracked",
-            metrics.tracked.clone(),
-        );
-        context.register(
-            "blocked",
-            "Blocked peers (value = expiry time as epoch millis)",
-            metrics.blocked.clone(),
-        );
-        context.register(
-            "reserved",
-            "Total number of outstanding reservations",
-            metrics.reserved.clone(),
-        );
-        context.register(
-            "limits",
-            "Count of the number of rate-limited connection events for each peer",
-            metrics.limits.clone(),
-        );
-        context.register(
-            "updates",
-            "Count of the number of updates for each peer",
-            metrics.updates.clone(),
-        );
-        metrics
+        Self {
+            tracked: context.get_or_register_default::<Gauge>(
+                "tracked",
+                "Total number of unique peers in all peer sets being tracked",
+            ),
+            blocked: context.get_or_register_default::<Family<metrics::Peer, Gauge>>(
+                "blocked",
+                "Blocked peers (value = expiry time as epoch millis)",
+            ),
+            reserved: context.get_or_register_default::<Gauge>(
+                "reserved",
+                "Total number of outstanding reservations",
+            ),
+            limits: context.get_or_register_default::<Family<metrics::Peer, Counter>>(
+                "limits",
+                "Count of the number of rate-limited connection events for each peer",
+            ),
+            updates: context.get_or_register_default::<Family<metrics::Peer, Counter>>(
+                "updates",
+                "Count of the number of updates for each peer",
+            ),
+        }
     }
 }

@@ -69,11 +69,9 @@ pub struct Actor<E: Spawner + Clock + Network + Resolver + Metrics, C: Signer> {
 
 impl<E: Spawner + Clock + Network + Resolver + CryptoRngCore + Metrics, C: Signer> Actor<E, C> {
     pub fn new(context: E, cfg: Config<C>) -> Self {
-        let attempts = Family::<metrics::Peer, Counter>::default();
-        context.register(
+        let attempts = context.get_or_register_default::<Family<metrics::Peer, Counter>>(
             "attempts",
             "The number of dial attempts made to each peer",
-            attempts.clone(),
         );
         Self {
             context: ContextCell::new(context),

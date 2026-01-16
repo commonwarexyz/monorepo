@@ -20,9 +20,9 @@
 //!
 //! # Metrics
 //!
-//! This runtime enforces metrics are unique and well-formed:
+//! This runtime enforces metrics are well-formed:
 //! - Labels must start with `[a-zA-Z]` and contain only `[a-zA-Z0-9_]`
-//! - Metric names must be unique (panics on duplicate registration)
+//! - Registering the same metric name twice returns the existing metric
 //!
 //! # Example
 //!
@@ -86,7 +86,7 @@ use rand_core::CryptoRngCore;
 use rayon::{ThreadPoolBuildError, ThreadPoolBuilder};
 use sha2::{Digest as _, Sha256};
 use std::{
-    collections::{BTreeMap, BinaryHeap, HashMap, HashSet},
+    collections::{BTreeMap, BinaryHeap, HashMap},
     mem::{replace, take},
     net::{IpAddr, SocketAddr},
     num::NonZeroUsize,
@@ -288,7 +288,6 @@ impl Default for Config {
 /// Deterministic runtime that randomly selects tasks to run based on a seed.
 pub struct Executor {
     metrics_registry: Mutex<MetricsRegistry>,
-    registered_metrics: Mutex<HashSet<String>>,
     cycle: Duration,
     deadline: Option<SystemTime>,
     metrics: Arc<Metrics>,
@@ -850,7 +849,6 @@ impl Context {
 
         let executor = Arc::new(Executor {
             metrics_registry: Mutex::new(metrics_registry),
-            registered_metrics: Mutex::new(HashSet::new()),
             cycle: cfg.cycle,
             deadline,
             metrics,
@@ -917,7 +915,6 @@ impl Context {
 
             // New state for the new runtime
             metrics_registry: Mutex::new(metrics_registry),
-            registered_metrics: Mutex::new(HashSet::new()),
             metrics,
             tasks: Arc::new(Tasks::new()),
             sleeping: Mutex::new(BinaryHeap::new()),
@@ -1127,34 +1124,6 @@ impl crate::Metrics for Context {
 
     fn label(&self) -> String {
         self.name.clone()
-    }
-
-    fn register<N: Into<String>, H: Into<String>>(&self, name: N, help: H, metric: impl Metric) {
-        // Prepare args
-        let name = name.into();
-        let help = help.into();
-
-        // Name metric
-        let executor = self.executor();
-        executor.auditor.event(b"register", |hasher| {
-            hasher.update(name.as_bytes());
-            hasher.update(help.as_bytes());
-        });
-        let prefixed_name = self.prefix_with_name(&name);
-
-        // Register metric (panics if name already registered)
-        let is_new = executor
-            .registered_metrics
-            .lock()
-            .unwrap()
-            .insert(prefixed_name.clone());
-        assert!(is_new, "duplicate metric name: {}", prefixed_name);
-        executor
-            .metrics_registry
-            .lock()
-            .unwrap()
-            .write_through()
-            .register(prefixed_name, help, metric);
     }
 
     fn encode(&self) -> String {

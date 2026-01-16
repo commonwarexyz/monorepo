@@ -159,29 +159,22 @@ where
 {
     /// Creates a new fetcher.
     pub fn new(context: E, config: Config<P>) -> Self {
-        let performance = Family::<Peer, Gauge>::default();
-        context.register(
+        let performance = context.get_or_register_default::<Family<Peer, Gauge>>(
             "peer_performance",
             "Per-peer performance (exponential moving average of response time in ms)",
-            performance.clone(),
         );
-        let requests_created = status::Counter::default();
-        context.register(
+        let requests_created = context.get_or_register_default::<status::Counter>(
             "requests_created",
             "Status of request creation attempts",
-            requests_created.clone(),
         );
-        let requests_sent = status::Counter::default();
-        context.register(
+        let requests_sent = context.get_or_register_default::<status::Counter>(
             "requests_sent",
             "Status of individual network requests sent to peers",
-            requests_sent.clone(),
         );
-        let resolves = Histogram::new(Buckets::NETWORK);
-        context.register(
+        let resolves = context.get_or_register_with(
             "resolves",
             "Number and duration of requests that were resolved",
-            resolves.clone(),
+            || Histogram::new(Buckets::NETWORK),
         );
         Self {
             context,

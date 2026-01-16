@@ -175,12 +175,9 @@ impl<E: Storage + Metrics + Clock, K: Array, V: CodecShared> Archive<E, K, V> {
         .await?;
 
         // Initialize metrics
-        let gets = Counter::default();
-        let has = Counter::default();
-        let syncs = Counter::default();
-        context.register("gets", "Number of gets performed", gets.clone());
-        context.register("has", "Number of has performed", has.clone());
-        context.register("syncs", "Number of syncs called", syncs.clone());
+        let gets = context.get_or_register_default::<Counter>("gets", "Number of gets performed");
+        let has = context.get_or_register_default::<Counter>("has", "Number of has performed");
+        let syncs = context.get_or_register_default::<Counter>("syncs", "Number of syncs called");
 
         Ok(Self {
             items_per_section: cfg.items_per_section.get(),

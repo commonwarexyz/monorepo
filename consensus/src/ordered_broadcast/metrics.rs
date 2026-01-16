@@ -50,55 +50,41 @@ pub struct Metrics<E: RuntimeMetrics + Clock> {
 impl<E: RuntimeMetrics + Clock> Metrics<E> {
     /// Create and return a new set of metrics, registered with the given context.
     pub fn init(context: E) -> Self {
-        let sequencer_heights = Family::default();
-        context.register(
+        let sequencer_heights = context.get_or_register_default::<Family<SequencerLabel, Gauge>>(
             "sequencer_heights",
             "Height per sequencer tracked",
-            sequencer_heights.clone(),
         );
-        let acks = status::Counter::default();
-        context.register("acks", "Number of acks processed by status", acks.clone());
-        let nodes = status::Counter::default();
-        context.register(
+        let acks = context.get_or_register_default::<status::Counter>(
+            "acks",
+            "Number of acks processed by status",
+        );
+        let nodes = context.get_or_register_default::<status::Counter>(
             "nodes",
             "Number of nodes processed by status",
-            nodes.clone(),
         );
-        let verify = status::Counter::default();
-        context.register(
+        let verify = context.get_or_register_default::<status::Counter>(
             "verify",
             "Number of application verifications by status",
-            verify.clone(),
         );
-        let certificates = Counter::default();
-        context.register(
-            "certificates",
-            "Number of certificates produced",
-            certificates.clone(),
-        );
-        let propose = status::Counter::default();
-        context.register(
+        let certificates = context
+            .get_or_register_default::<Counter>("certificates", "Number of certificates produced");
+        let propose = context.get_or_register_default::<status::Counter>(
             "propose",
             "Number of propose attempts by status",
-            propose.clone(),
         );
-        let rebroadcast = status::Counter::default();
-        context.register(
+        let rebroadcast = context.get_or_register_default::<status::Counter>(
             "rebroadcast",
             "Number of rebroadcast attempts by status",
-            rebroadcast.clone(),
         );
-        let verify_duration = Histogram::new(histogram::Buckets::LOCAL);
-        context.register(
+        let verify_duration = context.get_or_register_with(
             "verify_duration",
             "Histogram of application verification durations",
-            verify_duration.clone(),
+            || Histogram::new(histogram::Buckets::LOCAL),
         );
-        let e2e_duration = Histogram::new(histogram::Buckets::NETWORK);
-        context.register(
+        let e2e_duration = context.get_or_register_with(
             "e2e_duration",
             "Histogram of time from new proposal to certificate generation",
-            e2e_duration.clone(),
+            || Histogram::new(histogram::Buckets::NETWORK),
         );
         let clock = Arc::new(context);
 

@@ -144,8 +144,10 @@ fn main() {
             .with_label("flood_sender")
             .spawn(move |context| async move {
                 let mut rng = StdRng::seed_from_u64(0);
-                let messages: Counter<u64, AtomicU64> = Counter::default();
-                context.register("messages", "Sent messages", messages.clone());
+                let messages = context.get_or_register_default::<Counter<u64, AtomicU64>>(
+                    "messages",
+                    "Sent messages",
+                );
                 loop {
                     // Create message
                     let mut msg = vec![0; config.message_size as usize];
@@ -162,8 +164,10 @@ fn main() {
             context
                 .with_label("flood_receiver")
                 .spawn(move |context| async move {
-                    let messages: Counter<u64, AtomicU64> = Counter::default();
-                    context.register("messages", "Received messages", messages.clone());
+                    let messages = context.get_or_register_default::<Counter<u64, AtomicU64>>(
+                        "messages",
+                        "Received messages",
+                    );
                     loop {
                         if let Err(e) = flood_receiver.recv().await {
                             error!(?e, "could not receive flood message");

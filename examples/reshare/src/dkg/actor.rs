@@ -129,18 +129,14 @@ where
         let (sender, mailbox) = mpsc::channel(config.mailbox_size);
 
         // Create metrics
-        let successful_epochs = Counter::default();
-        let failed_epochs = Counter::default();
-        let our_reveals = Counter::default();
-        let all_reveals = Counter::default();
-        context.register(
-            "successful_epochs",
-            "successful epochs",
-            successful_epochs.clone(),
-        );
-        context.register("failed_epochs", "failed epochs", failed_epochs.clone());
-        context.register("our_reveals", "our share was revealed", our_reveals.clone());
-        context.register("all_reveals", "all share reveals", all_reveals.clone());
+        let successful_epochs =
+            context.get_or_register_default::<Counter>("successful_epochs", "successful epochs");
+        let failed_epochs =
+            context.get_or_register_default::<Counter>("failed_epochs", "failed epochs");
+        let our_reveals =
+            context.get_or_register_default::<Counter>("our_reveals", "our share was revealed");
+        let all_reveals =
+            context.get_or_register_default::<Counter>("all_reveals", "all share reveals");
 
         (
             Self {

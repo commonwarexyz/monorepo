@@ -40,12 +40,11 @@ impl<E: Spawner + Metrics, P: PublicKey> Actor<E, P> {
         let (control_sender, control_receiver) = Mailbox::new(cfg.mailbox_size);
 
         // Create metrics
-        let messages_dropped = Family::<metrics::Message, Counter>::default();
-        context.register(
-            "messages_dropped",
-            "messages dropped",
-            messages_dropped.clone(),
-        );
+        let messages_dropped = context
+            .get_or_register_default::<Family<metrics::Message, Counter>>(
+                "messages_dropped",
+                "messages dropped",
+            );
 
         // Create actor
         (

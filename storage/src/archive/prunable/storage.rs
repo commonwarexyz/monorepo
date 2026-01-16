@@ -177,30 +177,17 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: CodecShared> Archive<T, E
         }
 
         // Initialize metrics
-        let items_tracked = Gauge::default();
-        let indices_pruned = Counter::default();
-        let unnecessary_reads = Counter::default();
-        let gets = Counter::default();
-        let has = Counter::default();
-        let syncs = Counter::default();
-        context.register(
-            "items_tracked",
-            "Number of items tracked",
-            items_tracked.clone(),
-        );
-        context.register(
-            "indices_pruned",
-            "Number of indices pruned",
-            indices_pruned.clone(),
-        );
-        context.register(
+        let items_tracked =
+            context.get_or_register_default::<Gauge>("items_tracked", "Number of items tracked");
+        let indices_pruned = context
+            .get_or_register_default::<Counter>("indices_pruned", "Number of indices pruned");
+        let unnecessary_reads = context.get_or_register_default::<Counter>(
             "unnecessary_reads",
             "Number of unnecessary reads performed during key lookups",
-            unnecessary_reads.clone(),
         );
-        context.register("gets", "Number of gets performed", gets.clone());
-        context.register("has", "Number of has performed", has.clone());
-        context.register("syncs", "Number of syncs called", syncs.clone());
+        let gets = context.get_or_register_default::<Counter>("gets", "Number of gets performed");
+        let has = context.get_or_register_default::<Counter>("has", "Number of has performed");
+        let syncs = context.get_or_register_default::<Counter>("syncs", "Number of syncs called");
         let _ = items_tracked.try_set(indices.len());
 
         // Return populated archive

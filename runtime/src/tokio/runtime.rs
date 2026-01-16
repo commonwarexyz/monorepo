@@ -568,17 +568,6 @@ impl crate::Metrics for Context {
         self.name.clone()
     }
 
-    fn register<N: Into<String>, H: Into<String>>(&self, name: N, help: H, metric: impl Metric) {
-        let name = name.into();
-        let prefixed_name = self.prefix_with_name(&name);
-        self.executor
-            .metrics_registry
-            .lock()
-            .unwrap()
-            .write_through()
-            .register(prefixed_name, help, metric)
-    }
-
     fn get_or_register<M: Clone + Metric>(
         &self,
         name: impl Display,

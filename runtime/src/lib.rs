@@ -295,13 +295,6 @@ pub trait Metrics: Clone + Send + Sync + 'static {
         label
     }
 
-    /// Register a metric with the runtime.
-    ///
-    /// Any registered metric will include (as a prefix) the label of the current context.
-    ///
-    /// Names must start with `[a-zA-Z]` and contain only `[a-zA-Z0-9_]`.
-    fn register<N: Into<String>, H: Into<String>>(&self, name: N, help: H, metric: impl Metric);
-
     /// Returns a metric already registered for the runtime or registers `metric`.
     ///
     /// Any registered metric will include (as a prefix) the label of the current context.
@@ -344,9 +337,9 @@ pub trait Metrics: Clone + Send + Sync + 'static {
     /// Encode all metrics into a buffer.
     ///
     /// To ensure downstream analytics tools work correctly, users must never duplicate metrics
-    /// (via the concatenation of nested `with_label` and `register` calls). This can be avoided
-    /// by using `with_label` to create new context instances (ensures all context instances are
-    /// namespaced).
+    /// (via the concatenation of nested `with_label` and metric registration calls). This can be
+    /// avoided by using `with_label` to create new context instances (ensures all context
+    /// instances are namespaced).
     fn encode(&self) -> String;
 }
 
@@ -2066,8 +2059,7 @@ mod tests {
             assert_eq!(context.label(), "");
 
             // Register a metric
-            let counter = Counter::<u64>::default();
-            context.register("test", "test", counter.clone());
+            let counter = context.get_or_register_default::<Counter<u64>>("test", "test");
 
             // Increment the counter
             counter.inc();
@@ -2078,8 +2070,7 @@ mod tests {
 
             // Nested context
             let context = context.with_label("nested");
-            let nested_counter = Counter::<u64>::default();
-            context.register("test", "test", nested_counter.clone());
+            let nested_counter = context.get_or_register_default::<Counter<u64>>("test", "test");
 
             // Increment the counter
             nested_counter.inc();
@@ -2748,8 +2739,8 @@ mod tests {
             );
 
             // Register a test metric
-            let counter: Counter<u64> = Counter::default();
-            context.register("test_counter", "Test counter", counter.clone());
+            let counter =
+                context.get_or_register_default::<Counter<u64>>("test_counter", "Test counter");
             counter.inc();
 
             // Helper functions to parse HTTP response

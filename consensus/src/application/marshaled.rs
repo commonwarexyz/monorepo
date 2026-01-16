@@ -101,11 +101,9 @@ where
 {
     /// Creates a new [Marshaled] wrapper.
     pub fn new(context: E, application: A, marshal: marshal::Mailbox<S, B>, epocher: ES) -> Self {
-        let build_duration = Gauge::default();
-        context.register(
+        let build_duration = context.get_or_register_default::<Gauge>(
             "build_duration",
             "Time taken for the application to build a new block, in milliseconds",
-            build_duration.clone(),
         );
 
         Self {

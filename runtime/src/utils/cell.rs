@@ -165,10 +165,6 @@ where
         Self::Present(self.as_present().with_label(label))
     }
 
-    fn register<N: Into<String>, H: Into<String>>(&self, name: N, help: H, metric: impl Metric) {
-        self.as_present().register(name, help, metric)
-    }
-
     fn get_or_register<M: Clone + Metric>(
         &self,
         name: impl Display,
