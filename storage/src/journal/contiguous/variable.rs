@@ -1755,6 +1755,48 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_init_at_size_persistence_without_data() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "init_at_size_persist_empty".to_string(),
+                items_per_section: NZU64!(5),
+                compression: None,
+                codec_config: (),
+                buffer_pool: PoolRef::new(SMALL_PAGE_SIZE, NZUsize!(2)),
+                write_buffer: NZUsize!(1024),
+            };
+
+            // Initialize at position 15
+            let journal =
+                Journal::<_, u64>::init_at_size(context.with_label("first"), cfg.clone(), 15)
+                    .await
+                    .unwrap();
+
+            assert_eq!(journal.size(), 15);
+            assert_eq!(journal.oldest_retained_pos(), None);
+
+            // Drop without writing any data
+            drop(journal);
+
+            // Reopen and verify size persisted
+            let mut journal = Journal::<_, u64>::init(context.with_label("second"), cfg.clone())
+                .await
+                .unwrap();
+
+            assert_eq!(journal.size(), 15);
+            assert_eq!(journal.oldest_retained_pos(), None);
+
+            // Can append starting at position 15
+            let pos = journal.append(1500).await.unwrap();
+            assert_eq!(pos, 15);
+            assert_eq!(journal.read(15).await.unwrap(), 1500);
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
     fn test_init_at_size_large_offset() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {

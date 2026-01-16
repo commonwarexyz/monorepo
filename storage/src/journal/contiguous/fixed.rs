@@ -1622,6 +1622,225 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_fixed_journal_init_at_size_zero() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(NZU64!(5));
+            let mut journal = Journal::<_, Digest>::init_at_size(context.clone(), cfg.clone(), 0)
+                .await
+                .unwrap();
+
+            assert_eq!(journal.size(), 0);
+            assert_eq!(journal.oldest_retained_pos(), None);
+
+            // Next append should get position 0
+            let pos = journal.append(test_digest(100)).await.unwrap();
+            assert_eq!(pos, 0);
+            assert_eq!(journal.size(), 1);
+            assert_eq!(journal.read(0).await.unwrap(), test_digest(100));
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_fixed_journal_init_at_size_section_boundary() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(NZU64!(5));
+
+            // Initialize at position 10 (exactly at section 2 boundary with items_per_blob=5)
+            let mut journal = Journal::<_, Digest>::init_at_size(context.clone(), cfg.clone(), 10)
+                .await
+                .unwrap();
+
+            assert_eq!(journal.size(), 10);
+            assert_eq!(journal.oldest_retained_pos(), None);
+
+            // Next append should get position 10
+            let pos = journal.append(test_digest(1000)).await.unwrap();
+            assert_eq!(pos, 10);
+            assert_eq!(journal.size(), 11);
+            assert_eq!(journal.read(10).await.unwrap(), test_digest(1000));
+
+            // Can continue appending
+            let pos = journal.append(test_digest(1001)).await.unwrap();
+            assert_eq!(pos, 11);
+            assert_eq!(journal.read(11).await.unwrap(), test_digest(1001));
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_fixed_journal_init_at_size_mid_section() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(NZU64!(5));
+
+            // Initialize at position 7 (middle of section 1 with items_per_blob=5)
+            // This creates section 1 with zero-filled items at positions 5 and 6
+            let mut journal = Journal::<_, Digest>::init_at_size(context.clone(), cfg.clone(), 7)
+                .await
+                .unwrap();
+
+            assert_eq!(journal.size(), 7);
+            // Fixed journal creates zero-filled items, so oldest_retained_pos is the start of the section
+            assert_eq!(journal.oldest_retained_pos(), Some(5));
+
+            // Next append should get position 7
+            let pos = journal.append(test_digest(700)).await.unwrap();
+            assert_eq!(pos, 7);
+            assert_eq!(journal.size(), 8);
+            assert_eq!(journal.read(7).await.unwrap(), test_digest(700));
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_fixed_journal_init_at_size_persistence() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(NZU64!(5));
+
+            // Initialize at position 15
+            let mut journal =
+                Journal::<_, Digest>::init_at_size(context.with_label("first"), cfg.clone(), 15)
+                    .await
+                    .unwrap();
+
+            // Append some items
+            for i in 0..5u64 {
+                let pos = journal.append(test_digest(1500 + i)).await.unwrap();
+                assert_eq!(pos, 15 + i);
+            }
+
+            assert_eq!(journal.size(), 20);
+
+            // Sync and reopen
+            journal.sync().await.unwrap();
+            drop(journal);
+
+            let mut journal = Journal::<_, Digest>::init(context.with_label("second"), cfg.clone())
+                .await
+                .unwrap();
+
+            // Size and data should be preserved
+            assert_eq!(journal.size(), 20);
+            assert_eq!(journal.oldest_retained_pos(), Some(15));
+
+            // Verify data
+            for i in 0..5u64 {
+                assert_eq!(journal.read(15 + i).await.unwrap(), test_digest(1500 + i));
+            }
+
+            // Can continue appending
+            let pos = journal.append(test_digest(9999)).await.unwrap();
+            assert_eq!(pos, 20);
+            assert_eq!(journal.read(20).await.unwrap(), test_digest(9999));
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_fixed_journal_init_at_size_persistence_without_data() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(NZU64!(5));
+
+            // Initialize at position 15
+            let journal =
+                Journal::<_, Digest>::init_at_size(context.with_label("first"), cfg.clone(), 15)
+                    .await
+                    .unwrap();
+
+            assert_eq!(journal.size(), 15);
+            assert_eq!(journal.oldest_retained_pos(), None);
+
+            // Drop without writing any data
+            drop(journal);
+
+            // Reopen and verify size persisted
+            let mut journal = Journal::<_, Digest>::init(context.with_label("second"), cfg.clone())
+                .await
+                .unwrap();
+
+            assert_eq!(journal.size(), 15);
+            assert_eq!(journal.oldest_retained_pos(), None);
+
+            // Can append starting at position 15
+            let pos = journal.append(test_digest(1500)).await.unwrap();
+            assert_eq!(pos, 15);
+            assert_eq!(journal.read(15).await.unwrap(), test_digest(1500));
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_fixed_journal_init_at_size_large_offset() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(NZU64!(5));
+
+            // Initialize at a large position (position 1000)
+            let mut journal =
+                Journal::<_, Digest>::init_at_size(context.clone(), cfg.clone(), 1000)
+                    .await
+                    .unwrap();
+
+            assert_eq!(journal.size(), 1000);
+            assert_eq!(journal.oldest_retained_pos(), None);
+
+            // Next append should get position 1000
+            let pos = journal.append(test_digest(100000)).await.unwrap();
+            assert_eq!(pos, 1000);
+            assert_eq!(journal.read(1000).await.unwrap(), test_digest(100000));
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_fixed_journal_init_at_size_prune_and_append() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(NZU64!(5));
+
+            // Initialize at position 20
+            let mut journal = Journal::<_, Digest>::init_at_size(context.clone(), cfg.clone(), 20)
+                .await
+                .unwrap();
+
+            // Append items 20-29
+            for i in 0..10u64 {
+                journal.append(test_digest(2000 + i)).await.unwrap();
+            }
+
+            assert_eq!(journal.size(), 30);
+
+            // Prune to position 25
+            journal.prune(25).await.unwrap();
+
+            assert_eq!(journal.size(), 30);
+            assert_eq!(journal.oldest_retained_pos(), Some(25));
+
+            // Verify remaining items are readable
+            for i in 25..30u64 {
+                assert_eq!(journal.read(i).await.unwrap(), test_digest(2000 + (i - 20)));
+            }
+
+            // Continue appending
+            let pos = journal.append(test_digest(3000)).await.unwrap();
+            assert_eq!(pos, 30);
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
     fn test_fixed_journal_clear_to_size() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
