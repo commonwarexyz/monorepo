@@ -1204,7 +1204,7 @@ impl crate::Metrics for Context {
             .metrics_registry
             .lock()
             .unwrap()
-            .get_or_register(prefixed_name, help, metric);
+            .get_or_register(&prefixed_name, &help, metric);
         metric
     }
 }
