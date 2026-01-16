@@ -2044,15 +2044,6 @@ mod tests {
         });
     }
 
-    fn test_metrics_label<R: Runner>(runner: R)
-    where
-        R::Context: Metrics,
-    {
-        runner.start(|context| async move {
-            context.with_label(METRICS_PREFIX);
-        })
-    }
-
     #[test]
     fn test_deterministic_future() {
         let runner = deterministic::Runner::default();
@@ -2315,13 +2306,6 @@ mod tests {
     fn test_deterministic_metrics() {
         let executor = deterministic::Runner::default();
         test_metrics(executor);
-    }
-
-    #[test]
-    #[should_panic]
-    fn test_deterministic_metrics_label() {
-        let executor = deterministic::Runner::default();
-        test_metrics_label(executor);
     }
 
     #[test_collect_traces]
@@ -2665,13 +2649,6 @@ mod tests {
     fn test_tokio_metrics() {
         let executor = tokio::Runner::default();
         test_metrics(executor);
-    }
-
-    #[test]
-    #[should_panic]
-    fn test_tokio_metrics_label() {
-        let executor = tokio::Runner::default();
-        test_metrics_label(executor);
     }
 
     #[test]

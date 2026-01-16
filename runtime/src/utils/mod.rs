@@ -1,9 +1,5 @@
 //! Utility functions for interacting with any runtime.
 
-#[cfg(test)]
-use crate::{Runner, Spawner};
-#[cfg(test)]
-use futures::stream::{FuturesUnordered, StreamExt};
 use futures::task::ArcWake;
 use std::{
     any::Any,
@@ -266,33 +262,6 @@ pub fn validate_label(label: &str) {
         chars.all(|c| c.is_ascii_alphanumeric() || c == '_'),
         "label must only contain [a-zA-Z0-9_]: {label}"
     );
-}
-
-#[cfg(test)]
-async fn task(i: usize) -> usize {
-    for _ in 0..5 {
-        reschedule().await;
-    }
-    i
-}
-
-#[cfg(test)]
-pub fn run_tasks(tasks: usize, runner: crate::deterministic::Runner) -> (String, Vec<usize>) {
-    runner.start(|context| async move {
-        // Randomly schedule tasks
-        let mut handles = FuturesUnordered::new();
-        for i in 0..=tasks - 1 {
-            handles.push(context.clone().spawn(move |_| task(i)));
-        }
-
-        // Collect output order
-        let mut outputs = Vec::new();
-        while let Some(result) = handles.next().await {
-            outputs.push(result.unwrap());
-        }
-        assert_eq!(outputs.len(), tasks);
-        (context.auditor().state(), outputs)
-    })
 }
 
 #[cfg(test)]

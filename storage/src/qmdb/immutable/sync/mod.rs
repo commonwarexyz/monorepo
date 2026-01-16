@@ -953,7 +953,7 @@ mod tests {
             // (use different seed to avoid key collisions)
             let mut target_db = target_db.into_mutable();
             let more_ops = create_test_ops_seeded(5, 1);
-            apply_ops(&mut target_db, more_ops.clone()).await;
+            apply_ops(&mut target_db, more_ops).await;
             let (durable_db, _) = target_db.commit(None).await.unwrap();
             let target_db = durable_db.into_merkleized();
 

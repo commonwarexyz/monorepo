@@ -258,7 +258,7 @@ impl<
         // Initialize the anydb with a callback that initializes the status bitmap.
         let last_known_inactivity_floor = Location::new_unchecked(status.len());
         let any = AnyDb::init_with_callback(
-            context.with_label("any_init"),
+            context.with_label("any"),
             config.to_any_config(),
             Some(last_known_inactivity_floor),
             |append: bool, loc: Option<Location>| {

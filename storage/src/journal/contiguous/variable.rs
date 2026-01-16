@@ -2053,7 +2053,7 @@ mod tests {
             let lower_bound = 8; // section 1
             for (i, upper_bound) in (9..29).enumerate() {
                 let result = Journal::<deterministic::Context, u64>::init_sync(
-                    context.with_label(&format!("sync{}", i)),
+                    context.with_label(&format!("sync_{i}")),
                     cfg.clone(),
                     lower_bound..upper_bound,
                 )

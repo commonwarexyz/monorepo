@@ -1137,7 +1137,7 @@ mod tests {
 
             // Restart state and replay
             let mut restarted = State::new(
-                context.with_label("restarted"),
+                context.with_label("state_restarted"),
                 Config {
                     scheme: local_scheme,
                     elector: <RoundRobin>::default(),

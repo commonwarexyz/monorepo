@@ -1461,9 +1461,31 @@ mod tests {
     use crate::FutureExt;
     #[cfg(feature = "external")]
     use crate::Spawner;
-    use crate::{
-        deterministic, reschedule, utils::run_tasks, Blob, Metrics, Resolver, Runner as _, Storage,
-    };
+    use crate::{deterministic, reschedule, Blob, Metrics, Resolver, Runner as _, Storage};
+    use futures::stream::{FuturesUnordered, StreamExt as _};
+
+    async fn task(i: usize) -> usize {
+        for _ in 0..5 {
+            reschedule().await;
+        }
+        i
+    }
+
+    fn run_tasks(tasks: usize, runner: deterministic::Runner) -> (String, Vec<usize>) {
+        runner.start(|context| async move {
+            let mut handles = FuturesUnordered::new();
+            for i in 0..=tasks - 1 {
+                handles.push(context.clone().spawn(move |_| task(i)));
+            }
+
+            let mut outputs = Vec::new();
+            while let Some(result) = handles.next().await {
+                outputs.push(result.unwrap());
+            }
+            assert_eq!(outputs.len(), tasks);
+            (context.auditor().state(), outputs)
+        })
+    }
     use commonware_macros::test_traced;
     #[cfg(not(feature = "external"))]
     use futures::future::pending;
@@ -1892,6 +1914,15 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             context.with_label("invalid-label");
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "using runtime label is not allowed")]
+    fn test_metrics_label_reserved_prefix() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            context.with_label(METRICS_PREFIX);
         });
     }
 }
