@@ -1,8 +1,13 @@
 //! `update` subcommand for `ec2`
 
 use crate::ec2::{
-    aws::*, deployer_directory, s3::*, services::*, utils::*, Config, Error, InstanceConfig,
-    CREATED_FILE_NAME, DESTROYED_FILE_NAME, MONITORING_NAME, MONITORING_REGION,
+    aws::{self, *},
+    deployer_directory,
+    s3::{self, *},
+    services::*,
+    utils::*,
+    Config, Error, InstanceConfig, CREATED_FILE_NAME, DESTROYED_FILE_NAME, MONITORING_NAME,
+    MONITORING_REGION,
 };
 use aws_sdk_ec2::types::Filter;
 use futures::{
@@ -54,7 +59,7 @@ pub async fn update(config_path: &PathBuf, concurrency: usize) -> Result<(), Err
 
     // Upload updated binaries and configs to S3 and generate pre-signed URLs
     // Uses digest-based deduplication to avoid re-uploading identical files
-    let s3_client = create_s3_client(Region::new(MONITORING_REGION)).await;
+    let s3_client = s3::create_client(Region::new(MONITORING_REGION)).await;
 
     // Collect unique binary and config paths (dedup before hashing)
     info!("computing file digests");
@@ -105,7 +110,7 @@ pub async fn update(config_path: &PathBuf, concurrency: usize) -> Result<(), Err
                     async move {
                         let url = cache_and_presign(
                             &s3_client,
-                            S3_BUCKET_NAME,
+                            BUCKET_NAME,
                             &key,
                             UploadSource::File(path.as_ref()),
                             PRESIGN_DURATION,
@@ -129,7 +134,7 @@ pub async fn update(config_path: &PathBuf, concurrency: usize) -> Result<(), Err
                     async move {
                         let url = cache_and_presign(
                             &s3_client,
-                            S3_BUCKET_NAME,
+                            BUCKET_NAME,
                             &key,
                             UploadSource::File(path.as_ref()),
                             PRESIGN_DURATION,
@@ -175,7 +180,7 @@ pub async fn update(config_path: &PathBuf, concurrency: usize) -> Result<(), Err
         let region = region.clone();
         let tag = tag.clone();
         async move {
-            let ec2_client = create_ec2_client(Region::new(region.clone())).await;
+            let ec2_client = aws::create_client(Region::new(region.clone())).await;
             let resp = ec2_client
                 .describe_instances()
                 .filters(Filter::builder().name("tag:deployer").values(&tag).build())
@@ -256,8 +261,8 @@ async fn update_instance(
 
     // Download the latest binary and config from S3 concurrently via pre-signed URLs
     let download_cmd = format!(
-        r#"wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/binary '{}' &
-wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/config.conf '{}' &
+        r#"{WGET} -O /home/ubuntu/binary '{}' &
+{WGET} -O /home/ubuntu/config.conf '{}' &
 wait
 
 # Verify all downloads succeeded

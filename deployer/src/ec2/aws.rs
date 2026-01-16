@@ -28,7 +28,7 @@ use tokio::time::sleep;
 use tracing::debug;
 
 /// Creates an EC2 client for the specified AWS region
-pub async fn create_ec2_client(region: Region) -> Ec2Client {
+pub async fn create_client(region: Region) -> Ec2Client {
     let retry = aws_config::retry::RetryConfig::adaptive()
         .with_max_attempts(u32::MAX)
         .with_initial_backoff(Duration::from_millis(500))

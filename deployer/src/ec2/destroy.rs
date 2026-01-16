@@ -1,12 +1,9 @@
 //! `destroy` subcommand for `ec2`
 
 use crate::ec2::{
-    aws::*,
+    aws::{self, *},
     deployer_directory,
-    s3::{
-        create_s3_client, delete_prefix, is_no_such_bucket_error, Region, S3_BUCKET_NAME,
-        S3_DEPLOYMENTS_PREFIX,
-    },
+    s3::{self, delete_prefix, is_no_such_bucket_error, Region, BUCKET_NAME, DEPLOYMENTS_PREFIX},
     Config, Error, DESTROYED_FILE_NAME, LOGS_PORT, MONITORING_REGION, PROFILES_PORT, TRACES_PORT,
 };
 use futures::future::try_join_all;
@@ -41,13 +38,13 @@ pub async fn destroy(config: &PathBuf) -> Result<(), Error> {
     }
 
     // Clean up S3 deployment data (preserves cached tools)
-    info!(bucket = S3_BUCKET_NAME, "cleaning up S3 deployment data");
-    let s3_client = create_s3_client(Region::new(MONITORING_REGION)).await;
-    let deployment_prefix = format!("{}/{}/", S3_DEPLOYMENTS_PREFIX, tag);
-    match delete_prefix(&s3_client, S3_BUCKET_NAME, &deployment_prefix).await {
+    info!(bucket = BUCKET_NAME, "cleaning up S3 deployment data");
+    let s3_client = s3::create_client(Region::new(MONITORING_REGION)).await;
+    let deployment_prefix = format!("{}/{}/", DEPLOYMENTS_PREFIX, tag);
+    match delete_prefix(&s3_client, BUCKET_NAME, &deployment_prefix).await {
         Ok(()) => {
             info!(
-                bucket = S3_BUCKET_NAME,
+                bucket = BUCKET_NAME,
                 prefix = deployment_prefix.as_str(),
                 "deleted S3 deployment data"
             );
@@ -55,11 +52,11 @@ pub async fn destroy(config: &PathBuf) -> Result<(), Error> {
         Err(e) => {
             if is_no_such_bucket_error(&e) {
                 info!(
-                    bucket = S3_BUCKET_NAME,
+                    bucket = BUCKET_NAME,
                     "bucket does not exist, skipping S3 cleanup"
                 );
             } else {
-                warn!(bucket = S3_BUCKET_NAME, %e, "failed to delete S3 deployment data, continuing with destroy");
+                warn!(bucket = BUCKET_NAME, %e, "failed to delete S3 deployment data, continuing with destroy");
             }
         }
     }
@@ -77,7 +74,7 @@ pub async fn destroy(config: &PathBuf) -> Result<(), Error> {
         let region = region.clone();
         let tag = tag.clone();
         async move {
-            let ec2_client = create_ec2_client(Region::new(region.clone())).await;
+            let ec2_client = aws::create_client(Region::new(region.clone())).await;
             info!(region = region.as_str(), "created EC2 client");
 
             let instance_ids = find_instances_by_tag(&ec2_client, &tag).await?;

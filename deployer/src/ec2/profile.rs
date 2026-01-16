@@ -1,9 +1,9 @@
 //! `profile` subcommand for `ec2`
 
 use crate::ec2::{
-    aws::*,
+    aws::{self, *},
     deployer_directory,
-    s3::*,
+    s3::{self, *},
     services::*,
     utils::{download_file, scp_download, ssh_execute},
     Config, Error, CREATED_FILE_NAME, DESTROYED_FILE_NAME, MONITORING_REGION,
@@ -62,7 +62,7 @@ pub async fn profile(
     let private_key = private_key_path.to_str().unwrap();
 
     // Query AWS to find the instance IP
-    let ec2_client = create_ec2_client(Region::new(instance_region.clone())).await;
+    let ec2_client = aws::create_client(Region::new(instance_region.clone())).await;
     let resp = ec2_client
         .describe_instances()
         .filters(Filter::builder().name("tag:deployer").values(tag).build())
@@ -100,14 +100,14 @@ pub async fn profile(
     info!(architecture = %arch, "detected architecture");
 
     // Cache samply binary in S3 if needed and get presigned URL
-    let s3_client = create_s3_client(Region::new(MONITORING_REGION)).await;
-    ensure_bucket_exists(&s3_client, S3_BUCKET_NAME, MONITORING_REGION).await?;
+    let s3_client = s3::create_client(Region::new(MONITORING_REGION)).await;
+    ensure_bucket_exists(&s3_client, BUCKET_NAME, MONITORING_REGION).await?;
 
     // Cache samply archive in S3 (like other tools, we cache the archive and extract on the instance)
     let samply_s3_key = samply_bin_s3_key(SAMPLY_VERSION, arch);
-    let samply_url = if object_exists(&s3_client, S3_BUCKET_NAME, &samply_s3_key).await? {
+    let samply_url = if object_exists(&s3_client, BUCKET_NAME, &samply_s3_key).await? {
         info!(key = samply_s3_key.as_str(), "samply already in S3");
-        presign_url(&s3_client, S3_BUCKET_NAME, &samply_s3_key, PRESIGN_DURATION).await?
+        presign_url(&s3_client, BUCKET_NAME, &samply_s3_key, PRESIGN_DURATION).await?
     } else {
         info!(
             key = samply_s3_key.as_str(),
@@ -122,7 +122,7 @@ pub async fn profile(
         // Upload archive to S3
         let url = cache_and_presign(
             &s3_client,
-            S3_BUCKET_NAME,
+            BUCKET_NAME,
             &samply_s3_key,
             UploadSource::File(&temp_archive),
             PRESIGN_DURATION,
@@ -141,7 +141,7 @@ pub async fn profile(
 
 # Download and extract samply if not present
 if [ ! -f /home/ubuntu/samply ]; then
-    wget -q --tries=10 --retry-connrefused --waitretry=5 -O /tmp/samply.tar.xz '{samply_url}'
+    {WGET} -O /tmp/samply.tar.xz '{samply_url}'
     tar -xJf /tmp/samply.tar.xz -C /home/ubuntu --strip-components=1
     chmod +x /home/ubuntu/samply
     rm /tmp/samply.tar.xz

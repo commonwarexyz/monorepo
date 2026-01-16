@@ -1,9 +1,13 @@
 //! `create` subcommand for `ec2`
 
 use crate::ec2::{
-    aws::*, deployer_directory, s3::*, services::*, utils::*, Architecture, Config, Error, Host,
-    Hosts, InstanceConfig, CREATED_FILE_NAME, LOGS_PORT, MONITORING_NAME, MONITORING_REGION,
-    PROFILES_PORT, TRACES_PORT,
+    aws::{self, *},
+    deployer_directory,
+    s3::{self, *},
+    services::*,
+    utils::*,
+    Architecture, Config, Error, Host, Hosts, InstanceConfig, CREATED_FILE_NAME, LOGS_PORT,
+    MONITORING_NAME, MONITORING_REGION, PROFILES_PORT, TRACES_PORT,
 };
 use commonware_cryptography::{Hasher as _, Sha256};
 use futures::{
@@ -120,7 +124,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
 
     // Detect architecture for each unique instance type (architecture is global, not region-specific)
     info!("detecting architectures for instance types");
-    let ec2_client = create_ec2_client(Region::new(MONITORING_REGION)).await;
+    let ec2_client = aws::create_client(Region::new(MONITORING_REGION)).await;
     let mut arch_by_instance_type: HashMap<String, Architecture> = HashMap::new();
     for instance_type in &unique_instance_types {
         let arch = detect_architecture(&ec2_client, instance_type).await?;
@@ -144,9 +148,9 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
     }
 
     // Setup S3 bucket and cache observability tools
-    info!(bucket = S3_BUCKET_NAME, "setting up S3 bucket");
-    let s3_client = create_s3_client(Region::new(MONITORING_REGION)).await;
-    ensure_bucket_exists(&s3_client, S3_BUCKET_NAME, MONITORING_REGION).await?;
+    info!(bucket = BUCKET_NAME, "setting up S3 bucket");
+    let s3_client = s3::create_client(Region::new(MONITORING_REGION)).await;
+    ensure_bucket_exists(&s3_client, BUCKET_NAME, MONITORING_REGION).await?;
 
     // Cache observability tools for each architecture needed
     info!("uploading observability tools to S3");
@@ -154,9 +158,9 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
         let tag_directory = tag_directory.clone();
         let s3_client = s3_client.clone();
         async move {
-            if object_exists(&s3_client, S3_BUCKET_NAME, &s3_key).await? {
+            if object_exists(&s3_client, BUCKET_NAME, &s3_key).await? {
                 info!(key = s3_key.as_str(), "tool already in S3");
-                return presign_url(&s3_client, S3_BUCKET_NAME, &s3_key, PRESIGN_DURATION).await;
+                return presign_url(&s3_client, BUCKET_NAME, &s3_key, PRESIGN_DURATION).await;
             }
             info!(
                 key = s3_key.as_str(),
@@ -166,7 +170,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
             download_file(&download_url, &temp_path).await?;
             let url = cache_and_presign(
                 &s3_client,
-                S3_BUCKET_NAME,
+                BUCKET_NAME,
                 &s3_key,
                 UploadSource::File(&temp_path),
                 PRESIGN_DURATION,
@@ -254,7 +258,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
                     async move {
                         let url = cache_and_presign(
                             &s3_client,
-                            S3_BUCKET_NAME,
+                            BUCKET_NAME,
                             &key,
                             UploadSource::File(path.as_ref()),
                             PRESIGN_DURATION,
@@ -278,7 +282,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
                     async move {
                         let url = cache_and_presign(
                             &s3_client,
-                            S3_BUCKET_NAME,
+                            BUCKET_NAME,
                             &key,
                             UploadSource::File(path.as_ref()),
                             PRESIGN_DURATION,
@@ -327,7 +331,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
 
             async move {
                 // Create client for region
-                let ec2_client = create_ec2_client(Region::new(region.clone())).await;
+                let ec2_client = aws::create_client(Region::new(region.clone())).await;
                 info!(region = region.as_str(), "created EC2 client");
 
                 // Find availability zone that supports all instance types
@@ -764,21 +768,21 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
         pyroscope_agent_service_url,
         pyroscope_agent_timer_url,
     ]: [String; 15] = try_join_all([
-        cache_and_presign(&s3_client, S3_BUCKET_NAME, &bbr_config_s3_key(), UploadSource::Static(BBR_CONF.as_bytes()), PRESIGN_DURATION),
-        cache_and_presign(&s3_client, S3_BUCKET_NAME, &grafana_datasources_s3_key(), UploadSource::Static(DATASOURCES_YML.as_bytes()), PRESIGN_DURATION),
-        cache_and_presign(&s3_client, S3_BUCKET_NAME, &grafana_dashboards_s3_key(), UploadSource::Static(ALL_YML.as_bytes()), PRESIGN_DURATION),
-        cache_and_presign(&s3_client, S3_BUCKET_NAME, &loki_config_s3_key(), UploadSource::Static(LOKI_CONFIG.as_bytes()), PRESIGN_DURATION),
-        cache_and_presign(&s3_client, S3_BUCKET_NAME, &pyroscope_config_s3_key(), UploadSource::Static(PYROSCOPE_CONFIG.as_bytes()), PRESIGN_DURATION),
-        cache_and_presign(&s3_client, S3_BUCKET_NAME, &tempo_config_s3_key(), UploadSource::Static(TEMPO_CONFIG.as_bytes()), PRESIGN_DURATION),
-        cache_and_presign(&s3_client, S3_BUCKET_NAME, &prometheus_service_s3_key(), UploadSource::Static(PROMETHEUS_SERVICE.as_bytes()), PRESIGN_DURATION),
-        cache_and_presign(&s3_client, S3_BUCKET_NAME, &loki_service_s3_key(), UploadSource::Static(LOKI_SERVICE.as_bytes()), PRESIGN_DURATION),
-        cache_and_presign(&s3_client, S3_BUCKET_NAME, &pyroscope_service_s3_key(), UploadSource::Static(PYROSCOPE_SERVICE.as_bytes()), PRESIGN_DURATION),
-        cache_and_presign(&s3_client, S3_BUCKET_NAME, &tempo_service_s3_key(), UploadSource::Static(TEMPO_SERVICE.as_bytes()), PRESIGN_DURATION),
-        cache_and_presign(&s3_client, S3_BUCKET_NAME, &node_exporter_service_s3_key(), UploadSource::Static(NODE_EXPORTER_SERVICE.as_bytes()), PRESIGN_DURATION),
-        cache_and_presign(&s3_client, S3_BUCKET_NAME, &promtail_service_s3_key(), UploadSource::Static(PROMTAIL_SERVICE.as_bytes()), PRESIGN_DURATION),
-        cache_and_presign(&s3_client, S3_BUCKET_NAME, &logrotate_config_s3_key(), UploadSource::Static(LOGROTATE_CONF.as_bytes()), PRESIGN_DURATION),
-        cache_and_presign(&s3_client, S3_BUCKET_NAME, &pyroscope_agent_service_s3_key(), UploadSource::Static(PYROSCOPE_AGENT_SERVICE.as_bytes()), PRESIGN_DURATION),
-        cache_and_presign(&s3_client, S3_BUCKET_NAME, &pyroscope_agent_timer_s3_key(), UploadSource::Static(PYROSCOPE_AGENT_TIMER.as_bytes()), PRESIGN_DURATION),
+        cache_and_presign(&s3_client, BUCKET_NAME, &bbr_config_s3_key(), UploadSource::Static(BBR_CONF.as_bytes()), PRESIGN_DURATION),
+        cache_and_presign(&s3_client, BUCKET_NAME, &grafana_datasources_s3_key(), UploadSource::Static(DATASOURCES_YML.as_bytes()), PRESIGN_DURATION),
+        cache_and_presign(&s3_client, BUCKET_NAME, &grafana_dashboards_s3_key(), UploadSource::Static(ALL_YML.as_bytes()), PRESIGN_DURATION),
+        cache_and_presign(&s3_client, BUCKET_NAME, &loki_config_s3_key(), UploadSource::Static(LOKI_CONFIG.as_bytes()), PRESIGN_DURATION),
+        cache_and_presign(&s3_client, BUCKET_NAME, &pyroscope_config_s3_key(), UploadSource::Static(PYROSCOPE_CONFIG.as_bytes()), PRESIGN_DURATION),
+        cache_and_presign(&s3_client, BUCKET_NAME, &tempo_config_s3_key(), UploadSource::Static(TEMPO_CONFIG.as_bytes()), PRESIGN_DURATION),
+        cache_and_presign(&s3_client, BUCKET_NAME, &prometheus_service_s3_key(), UploadSource::Static(PROMETHEUS_SERVICE.as_bytes()), PRESIGN_DURATION),
+        cache_and_presign(&s3_client, BUCKET_NAME, &loki_service_s3_key(), UploadSource::Static(LOKI_SERVICE.as_bytes()), PRESIGN_DURATION),
+        cache_and_presign(&s3_client, BUCKET_NAME, &pyroscope_service_s3_key(), UploadSource::Static(PYROSCOPE_SERVICE.as_bytes()), PRESIGN_DURATION),
+        cache_and_presign(&s3_client, BUCKET_NAME, &tempo_service_s3_key(), UploadSource::Static(TEMPO_SERVICE.as_bytes()), PRESIGN_DURATION),
+        cache_and_presign(&s3_client, BUCKET_NAME, &node_exporter_service_s3_key(), UploadSource::Static(NODE_EXPORTER_SERVICE.as_bytes()), PRESIGN_DURATION),
+        cache_and_presign(&s3_client, BUCKET_NAME, &promtail_service_s3_key(), UploadSource::Static(PROMTAIL_SERVICE.as_bytes()), PRESIGN_DURATION),
+        cache_and_presign(&s3_client, BUCKET_NAME, &logrotate_config_s3_key(), UploadSource::Static(LOGROTATE_CONF.as_bytes()), PRESIGN_DURATION),
+        cache_and_presign(&s3_client, BUCKET_NAME, &pyroscope_agent_service_s3_key(), UploadSource::Static(PYROSCOPE_AGENT_SERVICE.as_bytes()), PRESIGN_DURATION),
+        cache_and_presign(&s3_client, BUCKET_NAME, &pyroscope_agent_timer_s3_key(), UploadSource::Static(PYROSCOPE_AGENT_TIMER.as_bytes()), PRESIGN_DURATION),
     ])
     .await?
     .try_into()
@@ -792,7 +796,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
         std::fs::write(&temp_path, &binary_service_content)?;
         let binary_service_url = cache_and_presign(
             &s3_client,
-            S3_BUCKET_NAME,
+            BUCKET_NAME,
             &binary_service_s3_key_for_arch(*arch),
             UploadSource::File(&temp_path),
             PRESIGN_DURATION,
@@ -824,14 +828,14 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
     let [prometheus_config_url, dashboard_url]: [String; 2] = try_join_all([
         cache_and_presign(
             &s3_client,
-            S3_BUCKET_NAME,
+            BUCKET_NAME,
             &monitoring_s3_key(tag, &prom_digest),
             UploadSource::File(&prom_path),
             PRESIGN_DURATION,
         ),
         cache_and_presign(
             &s3_client,
-            S3_BUCKET_NAME,
+            BUCKET_NAME,
             &monitoring_s3_key(tag, &dashboard_digest),
             UploadSource::File(&dashboard_path),
             PRESIGN_DURATION,
@@ -859,7 +863,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
     std::fs::write(&hosts_path, &hosts_yaml)?;
     let hosts_url = cache_and_presign(
         &s3_client,
-        S3_BUCKET_NAME,
+        BUCKET_NAME,
         &hosts_s3_key(tag, &hosts_digest),
         UploadSource::File(&hosts_path),
         PRESIGN_DURATION,
@@ -923,7 +927,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
                     async move {
                         let url = cache_and_presign(
                             &s3_client,
-                            S3_BUCKET_NAME,
+                            BUCKET_NAME,
                             &key,
                             UploadSource::File(&path),
                             PRESIGN_DURATION,
@@ -947,7 +951,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
                     async move {
                         let url = cache_and_presign(
                             &s3_client,
-                            S3_BUCKET_NAME,
+                            BUCKET_NAME,
                             &key,
                             UploadSource::File(&path),
                             PRESIGN_DURATION,
