@@ -1,4 +1,5 @@
 //! This module exports the [`Lazy`] type.
+
 use crate::{Decode, Encode, EncodeSize, FixedSize, Read, Write};
 use bytes::{Buf, Bytes};
 use core::hash::Hash;
@@ -64,12 +65,12 @@ use std::sync::OnceLock;
 #[derive(Clone)]
 pub struct Lazy<T: Read> {
     /// This should only be `None` if `value` is initialized.
-    proto: Option<Proto<T>>,
+    proto: Option<Pending<T>>,
     value: OnceLock<Option<T>>,
 }
 
 #[derive(Clone)]
-struct Proto<T: Read> {
+struct Pending<T: Read> {
     bytes: Bytes,
     cfg: T::Cfg,
 }
@@ -93,7 +94,7 @@ impl<T: Read> Lazy<T> {
     pub fn deferred(buf: &mut impl Buf, cfg: T::Cfg) -> Self {
         let bytes = buf.copy_to_bytes(buf.remaining());
         Self {
-            proto: Some(Proto { bytes, cfg }),
+            proto: Some(Pending { bytes, cfg }),
             value: Default::default(),
         }
     }
@@ -109,7 +110,7 @@ impl<T: Read> Lazy<T> {
     pub fn get(&self) -> Option<&T> {
         self.value
             .get_or_init(|| {
-                let Proto { bytes, cfg } = self
+                let Pending { bytes, cfg } = self
                     .proto
                     .as_ref()
                     .expect("Lazy should have proto if value is not initialized");
@@ -280,5 +281,26 @@ mod test {
             prop_assert_eq!(a < b, la < lb);
             prop_assert_eq!(a >= b, la >= lb);
         }
+    }
+}
+
+/// Module for comparing assembly of different Lazy construction methods.
+#[doc(hidden)]
+pub mod asm_compare {
+    use super::*;
+    use bytes::Bytes as BytesType;
+
+    type FB = [u8; 32];
+
+    /// Calls Lazy::deferred with a [u8; 32].
+    #[inline(never)]
+    pub fn via_deferred(mut buf: BytesType, cfg: ()) -> Lazy<FB> {
+        Lazy::deferred(&mut buf, cfg)
+    }
+
+    /// Calls Lazy::read_cfg with a [u8; 32].
+    #[inline(never)]
+    pub fn via_read(mut buf: BytesType, cfg: &()) -> Result<Lazy<FB>, crate::Error> {
+        Lazy::<FB>::read_cfg(&mut buf, cfg)
     }
 }
