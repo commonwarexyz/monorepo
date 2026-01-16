@@ -8,59 +8,13 @@ extern crate alloc;
 use crate::{
     codec::{EncodeSize, Read, Write},
     error::Error,
+    types::read_ordered_map,
     RangeCfg,
 };
 use alloc::collections::BTreeMap;
 use bytes::{Buf, BufMut};
-use core::cmp::Ordering;
 
 const BTREEMAP_TYPE: &str = "BTreeMap";
-
-/// Read keyed items from [Buf] in ascending order.
-fn read_ordered_map<K, V, F>(
-    buf: &mut impl Buf,
-    len: usize,
-    k_cfg: &K::Cfg,
-    v_cfg: &V::Cfg,
-    mut insert: F,
-    map_type: &'static str,
-) -> Result<(), Error>
-where
-    K: Read + Ord,
-    V: Read,
-    F: FnMut(K, V) -> Option<V>,
-{
-    let mut last: Option<(K, V)> = None;
-    for _ in 0..len {
-        // Read key
-        let key = K::read_cfg(buf, k_cfg)?;
-
-        // Check if keys are in ascending order relative to the previous key
-        if let Some((ref last_key, _)) = last {
-            match key.cmp(last_key) {
-                Ordering::Equal => return Err(Error::Invalid(map_type, "Duplicate key")),
-                Ordering::Less => return Err(Error::Invalid(map_type, "Keys must ascend")),
-                _ => {}
-            }
-        }
-
-        // Read value
-        let value = V::read_cfg(buf, v_cfg)?;
-
-        // Add previous item, if exists
-        if let Some((last_key, last_value)) = last.take() {
-            insert(last_key, last_value);
-        }
-        last = Some((key, value));
-    }
-
-    // Add last item, if exists
-    if let Some((last_key, last_value)) = last {
-        insert(last_key, last_value);
-    }
-
-    Ok(())
-}
 
 // ---------- BTreeMap ----------
 
