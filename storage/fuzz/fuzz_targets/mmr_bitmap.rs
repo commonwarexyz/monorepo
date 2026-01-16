@@ -4,6 +4,7 @@ use arbitrary::Arbitrary;
 use commonware_cryptography::{sha256, Digest, Sha256};
 use commonware_runtime::{deterministic, Clock, Metrics, Runner, Storage};
 use commonware_storage::{CleanAuthenticatedBitMap, DirtyAuthenticatedBitMap};
+use commonware_utils::bitmap::BitMap;
 use libfuzzer_sys::fuzz_target;
 
 const MAX_OPERATIONS: usize = 100;
@@ -114,8 +115,8 @@ fn fuzz(input: FuzzInput) {
                     if bit_count > 0 {
                         let safe_offset = (bit_offset % bit_count).max(pruned_bits);
                         let chunk_aligned = (safe_offset
-                            / commonware_utils::bitmap::BitMap::<CHUNK_SIZE>::CHUNK_SIZE_BITS)
-                            * commonware_utils::bitmap::BitMap::<CHUNK_SIZE>::CHUNK_SIZE_BITS;
+                            / BitMap::<CHUNK_SIZE>::CHUNK_SIZE_BITS)
+                            * BitMap::<CHUNK_SIZE>::CHUNK_SIZE_BITS;
                         if chunk_aligned >= pruned_bits && chunk_aligned < bit_count {
                             let _ = match &bitmap {
                                 Bitmap::Clean(bitmap) => bitmap.get_chunk_containing(chunk_aligned),
@@ -133,7 +134,7 @@ fn fuzz(input: FuzzInput) {
                             Bitmap::Dirty(bitmap) => bitmap.last_chunk(),
                         };
                         assert!(
-                            bits <= commonware_utils::bitmap::BitMap::<CHUNK_SIZE>::CHUNK_SIZE_BITS
+                            bits <= BitMap::<CHUNK_SIZE>::CHUNK_SIZE_BITS
                         );
                         assert!(chunk.len() == CHUNK_SIZE);
                     }

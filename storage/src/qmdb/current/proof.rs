@@ -20,7 +20,7 @@ use crate::{
 use commonware_codec::Codec;
 use commonware_cryptography::{Digest, Hasher as CHasher};
 use commonware_runtime::{Clock, Metrics, Storage as RStorage};
-use commonware_utils::bitmap::{BitMap as UtilBitMap, Prunable as PrunableBitMap};
+use commonware_utils::bitmap::{BitMap, Prunable as PrunableBitMap};
 use core::ops::Range;
 use futures::future::try_join_all;
 use std::num::NonZeroU64;
@@ -35,7 +35,7 @@ fn partial_chunk_root<H: CHasher, const N: usize>(
     last_chunk_digest: &H::Digest,
 ) -> H::Digest {
     assert!(next_bit > 0);
-    assert!(next_bit < UtilBitMap::<N>::CHUNK_SIZE_BITS);
+    assert!(next_bit < BitMap::<N>::CHUNK_SIZE_BITS);
     hasher.update(mmr_root);
     hasher.update(&next_bit.to_be_bytes());
     hasher.update(last_chunk_digest);
@@ -129,7 +129,7 @@ impl<D: Digest> RangeProof<D> {
             .for_each(|op| ops.push(op));
 
         // Gather the chunks necessary to verify the proof.
-        let chunk_bits = UtilBitMap::<N>::CHUNK_SIZE_BITS;
+        let chunk_bits = BitMap::<N>::CHUNK_SIZE_BITS;
         let start = *start_loc / chunk_bits; // chunk that contains the first bit
         let end = (*end_loc - 1) / chunk_bits; // chunk that contains the last bit
         let mut chunks = Vec::with_capacity((end - start + 1) as usize);
@@ -176,7 +176,7 @@ impl<D: Digest> RangeProof<D> {
         }
 
         // Validate the number of input chunks.
-        let chunk_bits = UtilBitMap::<N>::CHUNK_SIZE_BITS;
+        let chunk_bits = BitMap::<N>::CHUNK_SIZE_BITS;
         let start = *start_loc / chunk_bits; // chunk that contains first bit
         let end = (*end_loc.saturating_sub(1)) / chunk_bits; // chunk that contains the last bit
         let expected = end - start + 1;
@@ -189,14 +189,14 @@ impl<D: Digest> RangeProof<D> {
         let elements = ops.iter().map(|op| op.encode()).collect::<Vec<_>>();
 
         let chunk_vec = chunks.iter().map(|c| c.as_ref()).collect::<Vec<_>>();
-        let start_chunk_loc = *start_loc / UtilBitMap::<N>::CHUNK_SIZE_BITS;
+        let start_chunk_loc = *start_loc / BitMap::<N>::CHUNK_SIZE_BITS;
         let mut verifier = Verifier::<H>::new(
             grafting_height,
             Location::new_unchecked(start_chunk_loc),
             chunk_vec,
         );
 
-        let next_bit = *op_count % UtilBitMap::<N>::CHUNK_SIZE_BITS;
+        let next_bit = *op_count % BitMap::<N>::CHUNK_SIZE_BITS;
         if next_bit == 0 {
             return self
                 .proof
@@ -212,8 +212,8 @@ impl<D: Digest> RangeProof<D> {
         // If the proof is over an operation in the partial chunk, we need to verify the last chunk
         // digest from the proof matches the digest of chunk, since these bits are not part of the
         // mmr.
-        if *(end_loc - 1) / UtilBitMap::<N>::CHUNK_SIZE_BITS
-            == *op_count / UtilBitMap::<N>::CHUNK_SIZE_BITS
+        if *(end_loc - 1) / BitMap::<N>::CHUNK_SIZE_BITS
+            == *op_count / BitMap::<N>::CHUNK_SIZE_BITS
         {
             let Some(last_chunk) = chunks.last() else {
                 debug!("chunks is empty");
