@@ -3462,14 +3462,11 @@ mod tests {
             let rescued = loop {
                 select! {
                     msg = batcher_receiver.next() => {
-                        match msg.unwrap() {
-                            batcher::Message::Update { current, active, .. } => {
-                                active.send(true).unwrap();
-                                if current > view_4 {
-                                    break true;
-                                }
+                        if let batcher::Message::Update { current, active, .. } = msg.unwrap() {
+                            active.send(true).unwrap();
+                            if current > view_4 {
+                                break true;
                             }
-                            _ => {}
                         }
                     },
                     _ = context.sleep(Duration::from_secs(5)) => {
