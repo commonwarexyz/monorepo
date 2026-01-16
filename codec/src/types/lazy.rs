@@ -144,7 +144,8 @@ impl<T: Read + EncodeSize> EncodeSize for Lazy<T> {
 impl<T: Read + Write> Write for Lazy<T> {
     fn write(&self, buf: &mut impl bytes::BufMut) {
         if let Some(proto) = &self.proto {
-            proto.bytes.write(buf);
+            // Write raw bytes without length prefix (Bytes::write adds a length prefix)
+            buf.put_slice(&proto.bytes);
             return;
         }
         self.get()
@@ -252,6 +253,15 @@ mod test {
             let direct = x.encode();
             let via_lazy = Lazy::new(x).encode();
             prop_assert_eq!(direct, via_lazy);
+        }
+
+        #[test]
+        fn test_lazy_encode_consistent_across_construction(x: Small) {
+            let direct = x.encode();
+            let via_new = Lazy::new(x).encode();
+            let via_deferred = Lazy::<Small>::deferred(&mut x.encode(), ()).encode();
+            prop_assert_eq!(&direct, &via_new);
+            prop_assert_eq!(&direct, &via_deferred);
         }
 
         #[test]
