@@ -105,7 +105,7 @@ impl PoolRef {
         Self {
             page_size: page_size_u64,
             next_id: Arc::new(AtomicU64::new(0)),
-            pool: Arc::new(RwLock::new(Pool::new(capacity, page_size))),
+            pool: Arc::new(RwLock::new(Pool::new(page_size, capacity))),
         }
     }
 
@@ -325,11 +325,7 @@ impl Pool {
     /// of `capacity` pages, each of size `page_size` bytes.
     ///
     /// The arena is pre-allocated to hold all pages contiguously.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `capacity` or `page_size` is 0.
-    fn new(capacity: NonZeroUsize, page_size: NonZeroU16) -> Self {
+    pub fn new(page_size: NonZeroU16, capacity: NonZeroUsize) -> Self {
         let page_size = page_size.get() as usize;
         let capacity = capacity.get();
         Self {
@@ -458,7 +454,7 @@ mod tests {
 
     #[test_traced]
     fn test_pool_basic() {
-        let mut pool: Pool = Pool::new(NZUsize!(10), PAGE_SIZE);
+        let mut pool: Pool = Pool::new(PAGE_SIZE, NZUsize!(10));
 
         // Cache stores logical-sized pages.
         let mut buf = vec![0; PAGE_SIZE.get() as usize];
