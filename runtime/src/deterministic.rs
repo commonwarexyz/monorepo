@@ -18,6 +18,12 @@
 //! need to enable this feature. It is commonly used when testing consensus with external execution environments
 //! that use their own runtime (but are deterministic over some set of inputs).**
 //!
+//! # Metrics
+//!
+//! This runtime enforces metrics are unique and well-formed:
+//! - Labels must start with `[a-zA-Z]` and contain only `[a-zA-Z0-9_]`
+//! - Metric names must be unique (panics on duplicate registration)
+//!
 //! # Example
 //!
 //! ```rust
@@ -80,7 +86,7 @@ use rand_core::CryptoRngCore;
 use rayon::{ThreadPoolBuildError, ThreadPoolBuilder};
 use sha2::{Digest as _, Sha256};
 use std::{
-    collections::{BTreeMap, BinaryHeap, HashMap},
+    collections::{BTreeMap, BinaryHeap, HashMap, HashSet},
     mem::{replace, take},
     net::{IpAddr, SocketAddr},
     num::NonZeroUsize,
@@ -282,6 +288,7 @@ impl Default for Config {
 /// Deterministic runtime that randomly selects tasks to run based on a seed.
 pub struct Executor {
     registry: Mutex<Registry>,
+    registered_metrics: Mutex<HashSet<String>>,
     cycle: Duration,
     deadline: Option<SystemTime>,
     metrics: Arc<Metrics>,
@@ -841,6 +848,7 @@ impl Context {
 
         let executor = Arc::new(Executor {
             registry: Mutex::new(registry),
+            registered_metrics: Mutex::new(HashSet::new()),
             cycle: cfg.cycle,
             deadline,
             metrics,
@@ -905,6 +913,7 @@ impl Context {
 
             // New state for the new runtime
             registry: Mutex::new(registry),
+            registered_metrics: Mutex::new(HashSet::new()),
             metrics,
             tasks: Arc::new(Tasks::new()),
             sleeping: Mutex::new(BinaryHeap::new()),
@@ -1089,7 +1098,7 @@ impl crate::RayonPoolSpawner for Context {
 
 impl crate::Metrics for Context {
     fn with_label(&self, label: &str) -> Self {
-        // Ensure the label is well-formatted
+        // Validate label format (must match [a-zA-Z][a-zA-Z0-9_]*)
         validate_label(label);
 
         // Construct the full label name
@@ -1120,7 +1129,7 @@ impl crate::Metrics for Context {
         let name = name.into();
         let help = help.into();
 
-        // Register metric
+        // Name metric
         let executor = self.executor();
         executor.auditor.event(b"register", |hasher| {
             hasher.update(name.as_bytes());
@@ -1134,6 +1143,14 @@ impl crate::Metrics for Context {
                 format!("{}_{}", *prefix, name)
             }
         };
+
+        // Register metric (panics if name already registered)
+        let is_new = executor
+            .registered_metrics
+            .lock()
+            .unwrap()
+            .insert(prefixed_name.clone());
+        assert!(is_new, "duplicate metric name: {}", prefixed_name);
         executor
             .registry
             .lock()
@@ -1444,9 +1461,31 @@ mod tests {
     use crate::FutureExt;
     #[cfg(feature = "external")]
     use crate::Spawner;
-    use crate::{
-        deterministic, reschedule, utils::run_tasks, Blob, Metrics, Resolver, Runner as _, Storage,
-    };
+    use crate::{deterministic, reschedule, Blob, Metrics, Resolver, Runner as _, Storage};
+    use futures::stream::{FuturesUnordered, StreamExt as _};
+
+    async fn task(i: usize) -> usize {
+        for _ in 0..5 {
+            reschedule().await;
+        }
+        i
+    }
+
+    fn run_tasks(tasks: usize, runner: deterministic::Runner) -> (String, Vec<usize>) {
+        runner.start(|context| async move {
+            let mut handles = FuturesUnordered::new();
+            for i in 0..=tasks - 1 {
+                handles.push(context.clone().spawn(move |_| task(i)));
+            }
+
+            let mut outputs = Vec::new();
+            while let Some(result) = handles.next().await {
+                outputs.push(result.unwrap());
+            }
+            assert_eq!(outputs.len(), tasks);
+            (context.auditor().state(), outputs)
+        })
+    }
     use commonware_macros::test_traced;
     #[cfg(not(feature = "external"))]
     use futures::future::pending;
@@ -1848,6 +1887,42 @@ mod tests {
                 })
                 .expect("missing runtime_iterations_total metric");
             assert!(iterations > 500);
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "label must start with [a-zA-Z]")]
+    fn test_metrics_label_empty() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            context.with_label("");
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "label must start with [a-zA-Z]")]
+    fn test_metrics_label_invalid_first_char() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            context.with_label("1invalid");
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "label must only contain [a-zA-Z0-9_]")]
+    fn test_metrics_label_invalid_char() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            context.with_label("invalid-label");
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "using runtime label is not allowed")]
+    fn test_metrics_label_reserved_prefix() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            context.with_label(METRICS_PREFIX);
         });
     }
 }

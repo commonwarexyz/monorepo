@@ -1646,7 +1646,7 @@ mod tests {
                 write_buffer: NZUsize!(1024 * 1024),
                 buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
-            let (voter, mut mailbox) = Actor::new(context.clone(), voter_cfg);
+            let (voter, mut mailbox) = Actor::new(context.with_label("voter"), voter_cfg);
 
             // Resolver and batcher mailboxes
             let (resolver_sender, mut resolver_receiver) = mpsc::channel(8);
@@ -1736,7 +1736,7 @@ mod tests {
                 write_buffer: NZUsize!(1024 * 1024),
                 buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
-            let (voter, _mailbox) = Actor::new(context.clone(), voter_cfg);
+            let (voter, _mailbox) = Actor::new(context.with_label("voter_restarted"), voter_cfg);
 
             // Resolver and batcher mailboxes
             let (resolver_sender, mut resolver_receiver) = mpsc::channel(8);
@@ -2330,7 +2330,7 @@ mod tests {
                 write_buffer: NZUsize!(1024 * 1024),
                 buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
-            let (voter, mut mailbox) = Actor::new(context.clone(), voter_cfg);
+            let (voter, mut mailbox) = Actor::new(context.with_label("voter"), voter_cfg);
 
             let (resolver_sender, _) = mpsc::channel(8);
             let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
@@ -2463,7 +2463,7 @@ mod tests {
                 write_buffer: NZUsize!(1024 * 1024),
                 buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
-            let (voter, _) = Actor::new(context.clone(), voter_cfg);
+            let (voter, _) = Actor::new(context.with_label("voter_restarted"), voter_cfg);
 
             let (resolver_sender, _) = mpsc::channel(8);
             let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);

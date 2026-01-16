@@ -6,7 +6,7 @@ use crate::{
     journal::{authenticated, contiguous::fixed},
     mmr::{mem::Clean, Location, Position, StandardHasher},
     // TODO(https://github.com/commonwarexyz/monorepo/issues/1873): support any::fixed::ordered
-    qmdb::{self, any::FixedValue, Durable, Merkleized},
+    qmdb::{self, any::FixedValue, sync::Journal, Durable, Merkleized},
     translator::Translator,
 };
 use commonware_cryptography::{DigestOf, Hasher};
@@ -100,16 +100,14 @@ where
 
     async fn resize_journal(
         mut journal: Self::Journal,
-        context: Self::Context,
-        config: &Self::Config,
         range: Range<Location>,
     ) -> Result<Self::Journal, qmdb::Error> {
         let size = journal.size();
 
         if size <= range.start {
-            // Create a new journal with the new bounds
-            journal.destroy().await?;
-            Self::create_journal(context, config, range).await
+            // Clear and reuse the journal
+            journal.clear(*range.start).await?;
+            Ok(journal)
         } else {
             // Just prune to the lower bound
             journal.prune(*range.start).await?;
@@ -498,9 +496,10 @@ mod tests {
             };
 
             // Create initial journal with 30 operations (0-29)
-            let mut journal = fixed::Journal::<Context, Digest>::init(context.clone(), cfg.clone())
-                .await
-                .expect("Failed to create initial journal");
+            let mut journal =
+                fixed::Journal::<Context, Digest>::init(context.with_label("first"), cfg.clone())
+                    .await
+                    .expect("Failed to create initial journal");
 
             for i in 0..30 {
                 journal.append(test_digest(i)).await.unwrap();
@@ -514,7 +513,7 @@ mod tests {
             let lower_bound = 8;
             for upper_bound in 9..30 {
                 let result = fixed::Journal::<Context, Digest>::init_sync(
-                    context.clone(),
+                    context.with_label(&format!("loop_{}", upper_bound)),
                     cfg.clone(),
                     lower_bound..upper_bound,
                 )
@@ -563,9 +562,10 @@ mod tests {
 
             // Test 1: Initialize at size 0 (empty journal)
             {
-                let mut journal = fixed::Journal::init_at_size(context.clone(), cfg.clone(), 0)
-                    .await
-                    .expect("Failed to initialize journal at size 0");
+                let mut journal =
+                    fixed::Journal::init_at_size(context.with_label("first"), cfg.clone(), 0)
+                        .await
+                        .expect("Failed to initialize journal at size 0");
 
                 assert_eq!(journal.size(), 0);
                 assert_eq!(journal.oldest_retained_pos(), None);
@@ -579,9 +579,10 @@ mod tests {
 
             // Test 2: Initialize at size exactly at blob boundary (10 with items_per_blob=5)
             {
-                let mut journal = fixed::Journal::init_at_size(context.clone(), cfg.clone(), 10)
-                    .await
-                    .expect("Failed to initialize journal at size 10");
+                let mut journal =
+                    fixed::Journal::init_at_size(context.with_label("second"), cfg.clone(), 10)
+                        .await
+                        .expect("Failed to initialize journal at size 10");
 
                 assert_eq!(journal.size(), 10);
                 assert_eq!(journal.oldest_retained_pos(), None); // Tail is empty
@@ -602,9 +603,10 @@ mod tests {
 
             // Test 3: Initialize at size in middle of blob (7 with items_per_blob=5)
             {
-                let mut journal = fixed::Journal::init_at_size(context.clone(), cfg.clone(), 7)
-                    .await
-                    .expect("Failed to initialize journal at size 7");
+                let mut journal =
+                    fixed::Journal::init_at_size(context.with_label("third"), cfg.clone(), 7)
+                        .await
+                        .expect("Failed to initialize journal at size 7");
 
                 assert_eq!(journal.size(), 7);
                 // Tail blob should have 2 items worth of space (7 % 5 = 2)
@@ -632,9 +634,10 @@ mod tests {
 
             // Test 4: Initialize at larger size spanning multiple pruned blobs
             {
-                let mut journal = fixed::Journal::init_at_size(context.clone(), cfg.clone(), 23)
-                    .await
-                    .expect("Failed to initialize journal at size 23");
+                let mut journal =
+                    fixed::Journal::init_at_size(context.with_label("fourth"), cfg.clone(), 23)
+                        .await
+                        .expect("Failed to initialize journal at size 23");
 
                 assert_eq!(journal.size(), 23);
                 assert_eq!(journal.oldest_retained_pos(), Some(20)); // First item in tail blob

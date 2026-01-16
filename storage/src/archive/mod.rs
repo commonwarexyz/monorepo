@@ -120,7 +120,7 @@ mod tests {
     use commonware_runtime::{
         buffer::PoolRef,
         deterministic::{self, Context},
-        Runner,
+        Metrics, Runner,
     };
     use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
     use rand::Rng;
@@ -406,7 +406,7 @@ mod tests {
     {
         // Create and populate archive
         {
-            let mut archive = creator(context.clone(), compression).await;
+            let mut archive = creator(context.with_label("first"), compression).await;
 
             // Insert multiple keys
             let keys = vec![
@@ -428,7 +428,7 @@ mod tests {
 
         // Reopen and verify data
         {
-            let archive = creator(context, compression).await;
+            let archive = creator(context.with_label("second"), compression).await;
 
             // Verify all keys are still present
             let keys = vec![
@@ -495,7 +495,7 @@ mod tests {
     {
         let mut keys = BTreeMap::new();
         {
-            let mut archive = creator(context.clone(), compression).await;
+            let mut archive = creator(context.with_label("first"), compression).await;
 
             // Insert 100 keys with gaps
             let mut last_index = 0u64;
@@ -524,7 +524,7 @@ mod tests {
         }
 
         {
-            let archive = creator(context, compression).await;
+            let archive = creator(context.with_label("second"), compression).await;
             let sorted_indices: Vec<u64> = keys.keys().cloned().collect();
 
             // Check gap before the first element
@@ -619,7 +619,7 @@ mod tests {
         // Insert many keys
         let mut keys = BTreeMap::new();
         {
-            let mut archive = creator(context.clone(), compression).await;
+            let mut archive = creator(context.with_label("first"), compression).await;
             while keys.len() < num {
                 let index = keys.len() as u64;
                 let mut key = [0u8; 64];
@@ -659,7 +659,7 @@ mod tests {
 
         // Reinitialize and verify
         {
-            let archive = creator(context.clone(), compression).await;
+            let archive = creator(context.with_label("second"), compression).await;
 
             // Ensure all keys can be retrieved
             for (key, (index, data)) in &keys {

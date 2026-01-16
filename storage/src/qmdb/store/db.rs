@@ -635,7 +635,7 @@ mod test {
     pub fn test_store_construct_empty() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
-            let mut db = create_test_store(context.clone()).await;
+            let mut db = create_test_store(context.with_label("store_0")).await;
             assert_eq!(db.op_count(), 1);
             assert_eq!(db.log.oldest_retained_pos(), Some(0));
             assert_eq!(db.inactivity_floor_loc(), 0);
@@ -653,7 +653,9 @@ mod test {
             dirty.update(d1, v1).await.unwrap();
             drop(dirty);
 
-            let db = create_test_store(context.clone()).await.into_dirty();
+            let db = create_test_store(context.with_label("store_1"))
+                .await
+                .into_dirty();
             assert_eq!(db.op_count(), 1);
 
             // Test calling commit on an empty db which should make it (durably) non-empty.
@@ -665,7 +667,9 @@ mod test {
             assert!(matches!(db.prune(db.inactivity_floor_loc()).await, Ok(())));
             assert_eq!(db.get_metadata().await.unwrap(), Some(metadata.clone()));
 
-            let mut db = create_test_store(context.clone()).await.into_dirty();
+            let mut db = create_test_store(context.with_label("store_2"))
+                .await
+                .into_dirty();
             assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
 
             // Confirm the inactivity floor doesn't fall endlessly behind with multiple commits on a
@@ -691,7 +695,7 @@ mod test {
         let executor = deterministic::Runner::default();
 
         executor.start(|mut ctx| async move {
-            let mut db = create_test_store(ctx.with_label("store"))
+            let mut db = create_test_store(ctx.with_label("store_0"))
                 .await
                 .into_dirty();
 
@@ -720,7 +724,7 @@ mod test {
             drop(db);
 
             // Re-open the store
-            let mut db = create_test_store(ctx.with_label("store"))
+            let mut db = create_test_store(ctx.with_label("store_1"))
                 .await
                 .into_dirty();
 
@@ -749,7 +753,7 @@ mod test {
             assert_eq!(db.inactivity_floor_loc, 2);
 
             // Re-open the store
-            let mut db = create_test_store(ctx.with_label("store"))
+            let mut db = create_test_store(ctx.with_label("store_2"))
                 .await
                 .into_dirty();
 
@@ -811,7 +815,7 @@ mod test {
         let executor = deterministic::Runner::default();
 
         executor.start(|mut ctx| async move {
-            let mut db = create_test_store(ctx.with_label("store"))
+            let mut db = create_test_store(ctx.with_label("store_0"))
                 .await
                 .into_dirty();
 
@@ -831,7 +835,7 @@ mod test {
             drop(db);
 
             // Re-open the store, prune it, then ensure it replays the log correctly.
-            let mut db = create_test_store(ctx.with_label("store")).await;
+            let mut db = create_test_store(ctx.with_label("store_1")).await;
             db.prune(db.inactivity_floor_loc()).await.unwrap();
 
             let iter = db.snapshot.get(&k);
@@ -859,7 +863,7 @@ mod test {
         let executor = deterministic::Runner::default();
 
         executor.start(|mut ctx| async move {
-            let mut db = create_test_store(ctx.with_label("store"))
+            let mut db = create_test_store(ctx.with_label("store_0"))
                 .await
                 .into_dirty();
 
@@ -881,7 +885,7 @@ mod test {
 
             // Re-open the store to ensure it builds the snapshot for the conflicting
             // keys correctly.
-            let db = create_test_store(ctx.with_label("store")).await;
+            let db = create_test_store(ctx.with_label("store_1")).await;
 
             assert_eq!(db.get(&k1).await.unwrap().unwrap(), v1);
             assert_eq!(db.get(&k2).await.unwrap().unwrap(), v2);
@@ -895,7 +899,7 @@ mod test {
         let executor = deterministic::Runner::default();
 
         executor.start(|mut ctx| async move {
-            let mut db = create_test_store(ctx.with_label("store"))
+            let mut db = create_test_store(ctx.with_label("store_0"))
                 .await
                 .into_dirty();
 
@@ -922,7 +926,7 @@ mod test {
             let _ = db.commit(None).await.unwrap();
 
             // Re-open the store and ensure the key is still deleted
-            let mut db = create_test_store(ctx.with_label("store"))
+            let mut db = create_test_store(ctx.with_label("store_1"))
                 .await
                 .into_dirty();
             let fetched_value = db.get(&k).await.unwrap();
@@ -938,7 +942,7 @@ mod test {
 
             // Re-open the store and ensure the snapshot restores the key, after processing
             // the delete and the subsequent set.
-            let mut db = create_test_store(ctx.with_label("store"))
+            let mut db = create_test_store(ctx.with_label("store_2"))
                 .await
                 .into_dirty();
             let fetched_value = db.get(&k).await.unwrap();
@@ -1005,7 +1009,7 @@ mod test {
         // Build a db with 1000 keys, some of which we update and some of which we delete.
         const ELEMENTS: u64 = 1000;
         executor.start(|context| async move {
-            let mut db = create_test_store(context.with_label("store"))
+            let mut db = create_test_store(context.with_label("store_0"))
                 .await
                 .into_dirty();
 
@@ -1017,7 +1021,7 @@ mod test {
 
             // Simulate a failed commit and test that we rollback to the previous root.
             drop(db);
-            let db = create_test_store(context.with_label("store")).await;
+            let db = create_test_store(context.with_label("store_1")).await;
             assert_eq!(db.op_count(), 1);
 
             // re-apply the updates and commit them this time.
@@ -1043,7 +1047,7 @@ mod test {
 
             // Simulate a failed commit and test that we rollback to the previous root.
             drop(db);
-            let mut db = create_test_store(context.with_label("store"))
+            let mut db = create_test_store(context.with_label("store_2"))
                 .await
                 .into_dirty();
             assert_eq!(db.op_count(), op_count);
@@ -1074,14 +1078,14 @@ mod test {
 
             // Simulate a failed commit and test that we rollback to the previous root.
             drop(db);
-            let db = create_test_store(context.with_label("store")).await;
+            let db = create_test_store(context.with_label("store_3")).await;
             assert_eq!(db.op_count(), op_count);
 
             // Sync and reopen the store to ensure the final commit is preserved.
             let mut db = db;
             db.sync().await.unwrap();
             drop(db);
-            let mut db = create_test_store(context.with_label("store"))
+            let mut db = create_test_store(context.with_label("store_4"))
                 .await
                 .into_dirty();
             assert_eq!(db.op_count(), op_count);
@@ -1112,7 +1116,7 @@ mod test {
         let executor = deterministic::Runner::default();
 
         executor.start(|mut ctx| async move {
-            let mut db = create_test_store(ctx.with_label("store"))
+            let mut db = create_test_store(ctx.with_label("store_0"))
                 .await
                 .into_dirty();
 
@@ -1142,7 +1146,7 @@ mod test {
             drop(db);
 
             // Re-open the store
-            let mut db = create_test_store(ctx.with_label("store"))
+            let mut db = create_test_store(ctx.with_label("store_1"))
                 .await
                 .into_dirty();
 
@@ -1167,7 +1171,7 @@ mod test {
             drop(db);
 
             // Re-open the store
-            let db = create_test_store(ctx.with_label("store")).await;
+            let db = create_test_store(ctx.with_label("store_2")).await;
 
             // Ensure the re-opened store retained the committed operations
             assert_eq!(db.op_count(), 4);

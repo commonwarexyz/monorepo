@@ -295,7 +295,7 @@ mod test {
         const ELEMENTS: u64 = 1000;
         executor.start(|context| async move {
             let mut hasher = Standard::<Sha256>::new();
-            let db = open_db(context.clone()).await;
+            let db = open_db(context.with_label("first")).await;
             let mut db = db.into_mutable();
 
             let mut map = HashMap::<Digest, Digest>::default();
@@ -345,7 +345,7 @@ mod test {
             let root = db.root();
             db.sync().await.unwrap();
             drop(db);
-            let db = open_db(context.clone()).await;
+            let db = open_db(context.with_label("second")).await;
             assert_eq!(root, db.root());
             assert_eq!(db.op_count(), 4241);
             assert_eq!(db.inactivity_floor_loc(), 3383);
@@ -394,7 +394,7 @@ mod test {
     fn test_ordered_any_fixed_non_empty_db_recovery() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let db = open_db(context.clone()).await;
+            let db = open_db(context.with_label("first")).await;
             let mut db = db.into_mutable();
 
             // Insert 1000 keys then sync.
@@ -412,7 +412,7 @@ mod test {
             let inactivity_floor_loc = db.inactivity_floor_loc();
 
             // Reopen DB without clean shutdown and make sure the state is the same.
-            let db = open_db(context.clone()).await;
+            let db = open_db(context.with_label("second")).await;
             assert_eq!(db.op_count(), op_count);
             assert_eq!(db.inactivity_floor_loc(), inactivity_floor_loc);
             assert_eq!(db.root(), root);
@@ -429,7 +429,7 @@ mod test {
             let mut db = db.into_mutable();
             apply_more_ops(&mut db).await;
             drop(db);
-            let db = open_db(context.clone()).await;
+            let db = open_db(context.with_label("third")).await;
             assert_eq!(db.op_count(), op_count);
             assert_eq!(db.inactivity_floor_loc(), inactivity_floor_loc);
             assert_eq!(db.root(), root);
@@ -438,7 +438,7 @@ mod test {
             let mut db = db.into_mutable();
             apply_more_ops(&mut db).await;
             drop(db);
-            let db = open_db(context.clone()).await;
+            let db = open_db(context.with_label("fourth")).await;
             assert_eq!(db.op_count(), op_count);
             assert_eq!(db.root(), root);
 
@@ -447,7 +447,7 @@ mod test {
             apply_more_ops(&mut db).await;
             apply_more_ops(&mut db).await;
             apply_more_ops(&mut db).await;
-            let db = open_db(context.clone()).await;
+            let db = open_db(context.with_label("fifth")).await;
             assert_eq!(db.op_count(), op_count);
             assert_eq!(db.root(), root);
 
@@ -455,7 +455,7 @@ mod test {
             let mut db = db.into_mutable();
             apply_more_ops(&mut db).await;
             let _ = db.commit(None).await.unwrap();
-            let db = open_db(context.clone()).await;
+            let db = open_db(context.with_label("sixth")).await;
             assert!(db.op_count() > op_count);
             assert_ne!(db.inactivity_floor_loc(), inactivity_floor_loc);
             assert_ne!(db.root(), root);
@@ -471,11 +471,11 @@ mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Initialize an empty db.
-            let db = open_db(context.clone()).await;
+            let db = open_db(context.with_label("first")).await;
             let root = db.root();
 
             // Reopen DB without clean shutdown and make sure the state is the same.
-            let db = open_db(context.clone()).await;
+            let db = open_db(context.with_label("second")).await;
             assert_eq!(db.op_count(), 1);
             assert_eq!(db.root(), root);
 
@@ -491,7 +491,7 @@ mod test {
             let mut db = db.into_mutable();
             apply_ops(&mut db).await;
             drop(db);
-            let db = open_db(context.clone()).await;
+            let db = open_db(context.with_label("third")).await;
             assert_eq!(db.op_count(), 1);
             assert_eq!(db.root(), root);
 
@@ -499,7 +499,7 @@ mod test {
             let mut db = db.into_mutable();
             apply_ops(&mut db).await;
             drop(db);
-            let db = open_db(context.clone()).await;
+            let db = open_db(context.with_label("fourth")).await;
             assert_eq!(db.op_count(), 1);
             assert_eq!(db.root(), root);
 
@@ -508,7 +508,7 @@ mod test {
             apply_ops(&mut db).await;
             apply_ops(&mut db).await;
             apply_ops(&mut db).await;
-            let db = open_db(context.clone()).await;
+            let db = open_db(context.with_label("fifth")).await;
             assert_eq!(db.op_count(), 1);
             assert_eq!(db.root(), root);
 
@@ -516,7 +516,7 @@ mod test {
             let mut db = db.into_mutable();
             apply_ops(&mut db).await;
             let _ = db.commit(None).await.unwrap();
-            let db = open_db(context.clone()).await;
+            let db = open_db(context.with_label("sixth")).await;
             assert!(db.op_count() > 1);
             assert_ne!(db.root(), root);
 
@@ -530,7 +530,7 @@ mod test {
     fn test_ordered_any_fixed_db_log_replay() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let db = open_db(context.clone()).await;
+            let db = open_db(context.with_label("first")).await;
             let mut db = db.into_mutable();
 
             // Update the same key many times.
@@ -546,7 +546,7 @@ mod test {
 
             // Simulate a failed commit and test that the log replay doesn't leave behind old data.
             drop(db);
-            let db = open_db(context.clone()).await;
+            let db = open_db(context.with_label("second")).await;
             let iter = db.snapshot.get(&k);
             assert_eq!(iter.cloned().collect::<Vec<_>>().len(), 1);
             assert_eq!(db.root(), root);
@@ -559,7 +559,7 @@ mod test {
     fn test_ordered_any_fixed_db_multiple_commits_delete_gets_replayed() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let db = open_db(context.clone()).await;
+            let db = open_db(context.with_label("first")).await;
             let mut db = db.into_mutable();
 
             let mut map = HashMap::<Digest, Digest>::default();
@@ -592,7 +592,7 @@ mod test {
             let root = db.root();
             db.sync().await.unwrap();
             drop(db);
-            let db = open_db(context.clone()).await;
+            let db = open_db(context.with_label("second")).await;
             assert_eq!(root, db.root());
             assert_eq!(db.get_metadata().await.unwrap(), None);
             assert!(db.get(&k).await.unwrap().is_none());
@@ -681,7 +681,9 @@ mod test {
     fn test_ordered_any_fixed_db_historical_proof_edge_cases() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut db = create_test_db(context.clone()).await.into_mutable();
+            let mut db = create_test_db(context.with_label("first"))
+                .await
+                .into_mutable();
             let ops = create_test_ops(50);
             apply_ops(&mut db, ops.clone()).await;
             let (db, _) = db.commit(None).await.unwrap();
@@ -705,7 +707,9 @@ mod test {
             assert_eq!(single_ops.len(), 1);
 
             // Create historical database with single operation
-            let mut single_db = create_test_db(context.clone()).await.into_mutable();
+            let mut single_db = create_test_db(context.with_label("second"))
+                .await
+                .into_mutable();
             apply_ops(&mut single_db, ops[0..1].to_vec()).await;
             // Don't commit - this changes the root due to commit operations
             let single_db = single_db.into_merkleized();
@@ -990,7 +994,7 @@ mod test {
             // Use a OneCap to ensure many collisions.
             let config = create_generic_test_config::<OneCap>(seed, OneCap);
             let db = Db::<Context, Digest, i32, Sha256, OneCap, Merkleized<Sha256>, Durable>::init(
-                context.clone(),
+                context.with_label("first"),
                 config,
             )
             .await
@@ -1002,7 +1006,7 @@ mod test {
             // Repeat test with TwoCap to test low/no collisions.
             let config = create_generic_test_config::<TwoCap>(seed, TwoCap);
             let db = Db::<Context, Digest, i32, Sha256, TwoCap, Merkleized<Sha256>, Durable>::init(
-                context.clone(),
+                context.with_label("second"),
                 config,
             )
             .await

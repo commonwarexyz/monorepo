@@ -360,7 +360,7 @@ mod tests {
                     .await;
 
             let reporters = spawn_validator_engines(
-                context.with_label("validator"),
+                context.with_label("validators"),
                 &fixture,
                 &fixture.participants,
                 &mut registrations,
@@ -494,7 +494,7 @@ mod tests {
                 initialize_simulation(context.with_label("simulation"), &fixture, RELIABLE_LINK)
                     .await;
             let mut reporters = spawn_validator_engines(
-                context.with_label("validator"),
+                context.with_label("validators"),
                 &fixture,
                 &fixture.participants,
                 &mut registrations,
@@ -576,7 +576,7 @@ mod tests {
             .await;
 
             let reporters = spawn_validator_engines(
-                context.with_label("validator"),
+                context.with_label("validators"),
                 &fixture,
                 &fixture.participants,
                 &mut registrations,
@@ -685,7 +685,7 @@ mod tests {
                     .await;
 
             let reporters = spawn_validator_engines(
-                context.with_label("validator"),
+                context.with_label("validators"),
                 &fixture,
                 &fixture.participants,
                 &mut registrations,
@@ -1064,7 +1064,7 @@ mod tests {
                 fixture.participants[0..num_validators as usize / 2].to_vec();
 
             let reporters = spawn_validator_engines(
-                context.with_label("validator"),
+                context.with_label("validators"),
                 &fixture,
                 &sequencers,
                 &mut registrations,

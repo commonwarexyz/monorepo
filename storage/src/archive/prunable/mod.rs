@@ -240,7 +240,7 @@ mod tests {
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_section: NZU64!(DEFAULT_ITEMS_PER_SECTION),
             };
-            let mut archive = Archive::init(context.clone(), cfg.clone())
+            let mut archive = Archive::init(context.with_label("first"), cfg.clone())
                 .await
                 .expect("Failed to initialize archive");
 
@@ -271,9 +271,12 @@ mod tests {
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_section: NZU64!(DEFAULT_ITEMS_PER_SECTION),
             };
-            let archive = Archive::<_, _, FixedBytes<64>, i32>::init(context, cfg.clone())
-                .await
-                .unwrap();
+            let archive = Archive::<_, _, FixedBytes<64>, i32>::init(
+                context.with_label("second"),
+                cfg.clone(),
+            )
+            .await
+            .unwrap();
 
             // Getting the value should fail because compression settings mismatch.
             // Without compression, the codec sees extra bytes after decoding the value
@@ -518,7 +521,7 @@ mod tests {
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_section: NZU64!(items_per_section),
             };
-            let mut archive = Archive::init(context.clone(), cfg.clone())
+            let mut archive = Archive::init(context.with_label("init1"), cfg.clone())
                 .await
                 .expect("Failed to initialize archive");
 
@@ -579,10 +582,12 @@ mod tests {
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_section: NZU64!(items_per_section),
             };
-            let mut archive =
-                Archive::<_, _, _, FixedBytes<1024>>::init(context.clone(), cfg.clone())
-                    .await
-                    .expect("Failed to initialize archive");
+            let mut archive = Archive::<_, _, _, FixedBytes<1024>>::init(
+                context.with_label("init2"),
+                cfg.clone(),
+            )
+            .await
+            .expect("Failed to initialize archive");
 
             // Ensure all keys can be retrieved
             for (key, (index, data)) in &keys {

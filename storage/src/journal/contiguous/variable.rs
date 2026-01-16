@@ -591,6 +591,19 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
         self.offsets.destroy().await
     }
 
+    /// Clear all data and reset the journal to a new starting position.
+    ///
+    /// Unlike `destroy`, this keeps the journal alive so it can be reused.
+    /// After clearing, the journal will behave as if initialized with `init_at_size(new_size)`.
+    pub(crate) async fn clear_to_size(&mut self, new_size: u64) -> Result<(), Error> {
+        self.data.clear().await?;
+
+        self.offsets.clear_to_size(new_size).await?;
+        self.size = new_size;
+        self.oldest_retained_pos = new_size;
+        Ok(())
+    }
+
     /// Return the section number where the next append will write.
     const fn current_section(&self) -> u64 {
         position_to_section(self.size, self.items_per_section)
@@ -866,7 +879,7 @@ mod tests {
     use super::*;
     use crate::journal::contiguous::tests::run_contiguous_tests;
     use commonware_macros::test_traced;
-    use commonware_runtime::{buffer::pool::PoolRef, deterministic, Runner};
+    use commonware_runtime::{buffer::pool::PoolRef, deterministic, Metrics, Runner};
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use futures::FutureExt as _;
     use std::num::NonZeroU16;
@@ -897,7 +910,7 @@ mod tests {
             };
 
             // === Phase 1: Create journal with data and prune ===
-            let mut journal = Journal::<_, u64>::init(context.clone(), cfg.clone())
+            let mut journal = Journal::<_, u64>::init(context.with_label("first"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -921,7 +934,7 @@ mod tests {
                 .expect("Failed to remove offsets partition");
 
             // === Phase 3: Verify this is detected as unrecoverable ===
-            let result = Journal::<_, u64>::init(context.clone(), cfg.clone()).await;
+            let result = Journal::<_, u64>::init(context.with_label("second"), cfg.clone()).await;
             assert!(matches!(result, Err(Error::Corruption(_))));
         });
     }
@@ -947,7 +960,7 @@ mod tests {
             };
 
             // === Setup: Create journal with data ===
-            let mut variable = Journal::<_, u64>::init(context.clone(), cfg.clone())
+            let mut variable = Journal::<_, u64>::init(context.with_label("first"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -966,7 +979,7 @@ mod tests {
                 .expect("Failed to remove data partition");
 
             // === Verify init aligns the mismatch ===
-            let mut journal = Journal::<_, u64>::init(context.clone(), cfg.clone())
+            let mut journal = Journal::<_, u64>::init(context.with_label("second"), cfg.clone())
                 .await
                 .expect("Should align offsets to match empty data");
 
@@ -997,8 +1010,8 @@ mod tests {
     fn test_variable_contiguous() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            run_contiguous_tests(move |test_name: String| {
-                let context = context.clone();
+            run_contiguous_tests(move |test_name: String, idx: usize| {
+                let context = context.with_label(&format!("{test_name}_{idx}"));
                 async move {
                     Journal::<_, u64>::init(
                         context,
@@ -1122,7 +1135,7 @@ mod tests {
             };
 
             // === Phase 1: Create journal and append data ===
-            let mut journal = Journal::<_, u64>::init(context.clone(), cfg.clone())
+            let mut journal = Journal::<_, u64>::init(context.with_label("first"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -1153,7 +1166,7 @@ mod tests {
             drop(journal);
 
             // === Phase 3: Re-init and verify position preserved ===
-            let mut journal = Journal::<_, u64>::init(context.clone(), cfg.clone())
+            let mut journal = Journal::<_, u64>::init(context.with_label("second"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -1204,7 +1217,7 @@ mod tests {
                 write_buffer: NZUsize!(1024),
             };
 
-            let mut variable = Journal::<_, u64>::init(context.clone(), cfg.clone())
+            let mut variable = Journal::<_, u64>::init(context.with_label("first"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -1226,7 +1239,7 @@ mod tests {
             drop(variable);
 
             // === Verify recovery ===
-            let variable = Journal::<_, u64>::init(context.clone(), cfg.clone())
+            let variable = Journal::<_, u64>::init(context.with_label("second"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -1266,7 +1279,7 @@ mod tests {
                 write_buffer: NZUsize!(1024),
             };
 
-            let mut variable = Journal::<_, u64>::init(context.clone(), cfg.clone())
+            let mut variable = Journal::<_, u64>::init(context.with_label("first"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -1283,7 +1296,7 @@ mod tests {
             drop(variable);
 
             // === Verify corruption detected ===
-            let result = Journal::<_, u64>::init(context.clone(), cfg.clone()).await;
+            let result = Journal::<_, u64>::init(context.with_label("second"), cfg.clone()).await;
             assert!(matches!(result, Err(Error::Corruption(_))));
         });
     }
@@ -1303,7 +1316,7 @@ mod tests {
                 write_buffer: NZUsize!(1024),
             };
 
-            let mut variable = Journal::<_, u64>::init(context.clone(), cfg.clone())
+            let mut variable = Journal::<_, u64>::init(context.with_label("first"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -1324,7 +1337,7 @@ mod tests {
             drop(variable);
 
             // === Verify recovery ===
-            let variable = Journal::<_, u64>::init(context.clone(), cfg.clone())
+            let variable = Journal::<_, u64>::init(context.with_label("second"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -1359,7 +1372,7 @@ mod tests {
                 write_buffer: NZUsize!(1024),
             };
 
-            let mut variable = Journal::<_, u64>::init(context.clone(), cfg.clone())
+            let mut variable = Journal::<_, u64>::init(context.with_label("first"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -1381,7 +1394,7 @@ mod tests {
             drop(variable);
 
             // === Verify recovery ===
-            let variable = Journal::<_, u64>::init(context.clone(), cfg.clone())
+            let variable = Journal::<_, u64>::init(context.with_label("second"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -1427,7 +1440,7 @@ mod tests {
                 write_buffer: NZUsize!(1024),
             };
 
-            let mut variable = Journal::<_, u64>::init(context.clone(), cfg.clone())
+            let mut variable = Journal::<_, u64>::init(context.with_label("first"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -1447,7 +1460,7 @@ mod tests {
             drop(variable);
 
             // === Verify recovery ===
-            let mut variable = Journal::<_, u64>::init(context.clone(), cfg.clone())
+            let mut variable = Journal::<_, u64>::init(context.with_label("second"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -1488,7 +1501,7 @@ mod tests {
             };
 
             // === Phase 1: Create journal with one full section ===
-            let mut journal = Journal::<_, u64>::init(context.clone(), cfg.clone())
+            let mut journal = Journal::<_, u64>::init(context.with_label("first"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -1518,7 +1531,7 @@ mod tests {
             drop(journal);
 
             // === Phase 4: Verify recovery succeeds ===
-            let journal = Journal::<_, u64>::init(context.clone(), cfg.clone())
+            let journal = Journal::<_, u64>::init(context.with_label("second"), cfg.clone())
                 .await
                 .expect("Should recover from crash after data sync but before offsets sync");
 
@@ -1554,7 +1567,7 @@ mod tests {
                 write_buffer: NZUsize!(1024),
             };
 
-            let mut journal = Journal::<_, u64>::init(context.clone(), cfg.clone())
+            let mut journal = Journal::<_, u64>::init(context.with_label("first"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -1569,7 +1582,7 @@ mod tests {
             // Simulate a crash (offsets not synced)
             drop(journal);
 
-            let journal = Journal::<_, u64>::init(context.clone(), cfg.clone())
+            let journal = Journal::<_, u64>::init(context.with_label("second"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -1703,9 +1716,10 @@ mod tests {
             };
 
             // Initialize at position 15
-            let mut journal = Journal::<_, u64>::init_at_size(context.clone(), cfg.clone(), 15)
-                .await
-                .unwrap();
+            let mut journal =
+                Journal::<_, u64>::init_at_size(context.with_label("first"), cfg.clone(), 15)
+                    .await
+                    .unwrap();
 
             // Append some items
             for i in 0..5u64 {
@@ -1719,7 +1733,7 @@ mod tests {
             journal.sync().await.unwrap();
             drop(journal);
 
-            let mut journal = Journal::<_, u64>::init(context.clone(), cfg.clone())
+            let mut journal = Journal::<_, u64>::init(context.with_label("second"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -1736,6 +1750,48 @@ mod tests {
             let pos = journal.append(9999).await.unwrap();
             assert_eq!(pos, 20);
             assert_eq!(journal.read(20).await.unwrap(), 9999);
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_init_at_size_persistence_without_data() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "init_at_size_persist_empty".to_string(),
+                items_per_section: NZU64!(5),
+                compression: None,
+                codec_config: (),
+                buffer_pool: PoolRef::new(SMALL_PAGE_SIZE, NZUsize!(2)),
+                write_buffer: NZUsize!(1024),
+            };
+
+            // Initialize at position 15
+            let journal =
+                Journal::<_, u64>::init_at_size(context.with_label("first"), cfg.clone(), 15)
+                    .await
+                    .unwrap();
+
+            assert_eq!(journal.size(), 15);
+            assert_eq!(journal.oldest_retained_pos(), None);
+
+            // Drop without writing any data
+            drop(journal);
+
+            // Reopen and verify size persisted
+            let mut journal = Journal::<_, u64>::init(context.with_label("second"), cfg.clone())
+                .await
+                .unwrap();
+
+            assert_eq!(journal.size(), 15);
+            assert_eq!(journal.oldest_retained_pos(), None);
+
+            // Can append starting at position 15
+            let pos = journal.append(1500).await.unwrap();
+            assert_eq!(pos, 15);
+            assert_eq!(journal.read(15).await.unwrap(), 1500);
 
             journal.destroy().await.unwrap();
         });
@@ -2034,10 +2090,12 @@ mod tests {
             };
 
             // Create initial journal with data beyond sync range
-            let mut journal =
-                Journal::<deterministic::Context, u64>::init(context.clone(), cfg.clone())
-                    .await
-                    .expect("Failed to create initial journal");
+            let mut journal = Journal::<deterministic::Context, u64>::init(
+                context.with_label("initial"),
+                cfg.clone(),
+            )
+            .await
+            .expect("Failed to create initial journal");
 
             // Add data at positions 0-29 (sections 0-5 with items_per_section=5)
             for i in 0..30u64 {
@@ -2048,9 +2106,9 @@ mod tests {
 
             // Initialize with sync boundaries that are exceeded by existing data
             let lower_bound = 8; // section 1
-            for upper_bound in 9..29 {
+            for (i, upper_bound) in (9..29).enumerate() {
                 let result = Journal::<deterministic::Context, u64>::init_sync(
-                    context.clone(),
+                    context.with_label(&format!("sync_{i}")),
                     cfg.clone(),
                     lower_bound..upper_bound,
                 )
@@ -2078,10 +2136,12 @@ mod tests {
             };
 
             // Create initial journal with stale data
-            let mut journal =
-                Journal::<deterministic::Context, u64>::init(context.clone(), cfg.clone())
-                    .await
-                    .expect("Failed to create initial journal");
+            let mut journal = Journal::<deterministic::Context, u64>::init(
+                context.with_label("first"),
+                cfg.clone(),
+            )
+            .await
+            .expect("Failed to create initial journal");
 
             // Add data at positions 0-9 (sections 0-1 with items_per_section=5)
             for i in 0..10u64 {
@@ -2094,7 +2154,7 @@ mod tests {
             let lower_bound = 15; // section 3
             let upper_bound = 26; // last element in section 5
             let journal = Journal::<deterministic::Context, u64>::init_sync(
-                context.clone(),
+                context.with_label("second"),
                 cfg.clone(),
                 lower_bound..upper_bound,
             )
@@ -2272,7 +2332,7 @@ mod tests {
             };
 
             // === Test 1: Basic single item operation ===
-            let mut journal = Journal::<_, u64>::init(context.clone(), cfg.clone())
+            let mut journal = Journal::<_, u64>::init(context.with_label("first"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -2352,7 +2412,7 @@ mod tests {
             drop(journal);
 
             // === Test 4: Restart persistence with single item per section ===
-            let journal = Journal::<_, u64>::init(context.clone(), cfg.clone())
+            let journal = Journal::<_, u64>::init(context.with_label("second"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -2375,7 +2435,7 @@ mod tests {
 
             // === Test 5: Restart after pruning with non-zero index (KEY SCENARIO) ===
             // Fresh journal for this test
-            let mut journal = Journal::<_, u64>::init(context.clone(), cfg.clone())
+            let mut journal = Journal::<_, u64>::init(context.with_label("third"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -2394,7 +2454,7 @@ mod tests {
             drop(journal);
 
             // Re-open journal
-            let journal = Journal::<_, u64>::init(context.clone(), cfg.clone())
+            let journal = Journal::<_, u64>::init(context.with_label("fourth"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -2416,7 +2476,7 @@ mod tests {
             // === Test 6: Prune all items (edge case) ===
             // This tests the scenario where prune removes everything.
             // Callers must check oldest_retained_pos() before reading.
-            let mut journal = Journal::<_, u64>::init(context.clone(), cfg.clone())
+            let mut journal = Journal::<_, u64>::init(context.with_label("fifth"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -2438,6 +2498,84 @@ mod tests {
             journal.append(500).await.unwrap();
             assert_eq!(journal.oldest_retained_pos(), Some(5));
             assert_eq!(journal.read(journal.size() - 1).await.unwrap(), 500);
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_variable_journal_clear_to_size() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "clear_test".to_string(),
+                items_per_section: NZU64!(10),
+                compression: None,
+                codec_config: (),
+                buffer_pool: PoolRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
+                write_buffer: NZUsize!(1024),
+            };
+
+            let mut journal = Journal::<_, u64>::init(context.with_label("journal"), cfg.clone())
+                .await
+                .unwrap();
+
+            // Append 25 items (spanning multiple sections)
+            for i in 0..25u64 {
+                journal.append(i * 100).await.unwrap();
+            }
+            assert_eq!(journal.size(), 25);
+            assert_eq!(journal.oldest_retained_pos(), Some(0));
+            journal.sync().await.unwrap();
+
+            // Clear to position 100, effectively resetting the journal
+            journal.clear_to_size(100).await.unwrap();
+            assert_eq!(journal.size(), 100);
+            assert_eq!(journal.oldest_retained_pos(), None);
+
+            // Old positions should fail
+            for i in 0..25 {
+                assert!(matches!(
+                    journal.read(i).await,
+                    Err(crate::journal::Error::ItemPruned(_))
+                ));
+            }
+
+            // Verify size persists after restart without writing any data
+            drop(journal);
+            let mut journal =
+                Journal::<_, u64>::init(context.with_label("journal_after_clear"), cfg.clone())
+                    .await
+                    .unwrap();
+            assert_eq!(journal.size(), 100);
+            assert_eq!(journal.oldest_retained_pos(), None);
+
+            // Append new data starting at position 100
+            for i in 100..105u64 {
+                let pos = journal.append(i * 100).await.unwrap();
+                assert_eq!(pos, i);
+            }
+            assert_eq!(journal.size(), 105);
+            assert_eq!(journal.oldest_retained_pos(), Some(100));
+
+            // New positions should be readable
+            for i in 100..105u64 {
+                assert_eq!(journal.read(i).await.unwrap(), i * 100);
+            }
+
+            // Sync and re-init to verify persistence
+            journal.sync().await.unwrap();
+            drop(journal);
+
+            let journal = Journal::<_, u64>::init(context.with_label("journal_reopened"), cfg)
+                .await
+                .unwrap();
+
+            assert_eq!(journal.size(), 105);
+            assert_eq!(journal.oldest_retained_pos(), Some(100));
+            for i in 100..105u64 {
+                assert_eq!(journal.read(i).await.unwrap(), i * 100);
+            }
 
             journal.destroy().await.unwrap();
         });

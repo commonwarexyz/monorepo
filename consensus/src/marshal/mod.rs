@@ -771,8 +771,8 @@ mod tests {
             let control = oracle.control(validator.clone());
 
             // Closure to initialize marshal with prunable archives
-            let init_marshal = || {
-                let ctx = context.clone();
+            let init_marshal = |label: &str| {
+                let ctx = context.with_label(label);
                 let validator = validator.clone();
                 let schemes = schemes.clone();
                 let partition_prefix = partition_prefix.clone();
@@ -883,7 +883,7 @@ mod tests {
             };
 
             // Initial setup
-            let (mut mailbox, application) = init_marshal().await;
+            let (mut mailbox, application) = init_marshal("init").await;
 
             // Finalize blocks 1-20
             let mut parent = Sha256::hash(b"");
@@ -986,7 +986,7 @@ mod tests {
 
             // Restart to verify pruning persisted to storage (not just in-memory)
             drop(mailbox);
-            let (mut mailbox, _application) = init_marshal().await;
+            let (mut mailbox, _application) = init_marshal("restart").await;
 
             // Verify blocks 1-19 are still pruned after restart
             for i in 1..20u64 {
@@ -2321,7 +2321,7 @@ mod tests {
 
             // Restart marshal, removing any in-memory cache
             let mut actor = setup_validator(
-                context.with_label(&format!("validator_{i}")),
+                context.with_label(&format!("validator_{i}_restart")),
                 &mut oracle,
                 validator.clone(),
                 ConstantProvider::new(schemes[i].clone()),
