@@ -461,14 +461,13 @@ impl<D: Digest> CleanMmr<D> {
             leaves
         );
 
-        let size = self.size();
-        let positions = proof::nodes_required_for_range_proof(size, range)?;
+        let positions = proof::nodes_required_for_range_proof(leaves, range)?;
         let digests = positions
             .into_iter()
             .map(|pos| self.get_node(pos).ok_or(Error::ElementPruned(pos)))
             .collect::<Result<Vec<_>, _>>()?;
 
-        Ok(Proof { size, digests })
+        Ok(Proof { leaves, digests })
     }
 
     /// Get the digests of nodes that need to be pinned (those required for proof generation) in
@@ -580,8 +579,7 @@ impl<D: Digest> DirtyMmr<D> {
         let peaks = self
             .peak_iterator()
             .map(|(peak_pos, _)| self.get_node_unchecked(peak_pos));
-        let size = self.size();
-        let digest = hasher.root(size, peaks);
+        let digest = hasher.root(self.leaves(), peaks);
 
         CleanMmr {
             nodes: self.nodes,
@@ -873,7 +871,10 @@ mod tests {
             mmr.prune_all();
             assert_eq!(mmr.size(), 0, "prune_all on empty MMR should do nothing");
 
-            assert_eq!(*mmr.root(), hasher.root(Position::new(0), [].iter()));
+            assert_eq!(
+                *mmr.root(),
+                hasher.root(Location::new_unchecked(0), [].iter())
+            );
         });
     }
 
@@ -959,7 +960,7 @@ mod tests {
             // verify root
             let root = *mmr.root();
             let peak_digests = [digest14, digest17, mmr.nodes[18]];
-            let expected_root = hasher.root(Position::new(19), peak_digests.iter());
+            let expected_root = hasher.root(Location::new_unchecked(11), peak_digests.iter());
             assert_eq!(root, expected_root, "incorrect root");
 
             // pruning tests

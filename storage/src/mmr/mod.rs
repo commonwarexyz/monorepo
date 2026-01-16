@@ -139,3 +139,12 @@ pub enum Error {
     #[error("data corrupted: {0}")]
     DataCorrupted(&'static str),
 }
+
+impl From<LocationError> for Error {
+    fn from(err: LocationError) -> Self {
+        match err {
+            LocationError::NonLeaf(pos) => Self::PositionNotLeaf(pos),
+            LocationError::Overflow(pos) => Self::InvalidPosition(pos),
+        }
+    }
+}

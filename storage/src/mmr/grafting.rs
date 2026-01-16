@@ -139,7 +139,7 @@ impl<'a, H: CHasher> Hasher<'a, H> {
         Ok(())
     }
 
-    /// Compute the position of the leaf in the base tree onto which we should graft the leaf at
+    /// Compute the position of the node in the base tree onto which we should graft the leaf at
     /// position `pos` in the source tree.
     fn destination_pos(&self, pos: Position) -> Position {
         destination_pos(pos, self.height)
@@ -266,13 +266,18 @@ impl<H: CHasher> HasherTrait for Hasher<'_, H> {
             .node_digest(self.destination_pos(pos), left_digest, right_digest)
     }
 
+    /// Computes the root of the peak tree of a grafted MMR.
+    ///
+    /// # Panics
+    ///
+    /// Panics if number of `leaves` is invalid (e.g. overflows MAX_LOCATION).
     fn root<'a>(
         &mut self,
-        size: Position,
+        leaves: Location,
         peak_digests: impl Iterator<Item = &'a H::Digest>,
     ) -> H::Digest {
-        let dest_pos = self.destination_pos(size);
-        self.hasher.root(dest_pos, peak_digests)
+        let dest_leaves = Location::new_unchecked(*leaves << self.height);
+        self.hasher.root(dest_leaves, peak_digests)
     }
 
     fn digest(&mut self, data: &[u8]) -> H::Digest {
@@ -325,13 +330,20 @@ impl<H: CHasher> HasherTrait for HasherFork<'_, H> {
             .node_digest(destination_pos(pos, self.height), left_digest, right_digest)
     }
 
+    /// Computes the root of the peak tree of a grafted MMR.
+    ///
+    /// # Panics
+    ///
+    /// Panics if number of `leaves` is invalid (e.g. overflows MAX_LOCATION).
     fn root<'a>(
         &mut self,
-        size: Position,
+        leaves: Location,
         peak_digests: impl Iterator<Item = &'a H::Digest>,
     ) -> H::Digest {
+        let size = Position::try_from(leaves).expect("invalid number of leaves");
         let dest_pos = destination_pos(size, self.height);
-        self.hasher.root(dest_pos, peak_digests)
+        let dest_leaves = Location::try_from(dest_pos).expect("dest_pos should be valid size");
+        self.hasher.root(dest_leaves, peak_digests)
     }
 
     fn digest(&mut self, data: &[u8]) -> H::Digest {
@@ -446,10 +458,10 @@ impl<H: CHasher> HasherTrait for Verifier<'_, H> {
 
     fn root<'a>(
         &mut self,
-        size: Position,
+        leaves: Location,
         peak_digests: impl Iterator<Item = &'a H::Digest>,
     ) -> H::Digest {
-        self.hasher.root(size, peak_digests)
+        self.hasher.root(leaves, peak_digests)
     }
 
     fn digest(&mut self, data: &[u8]) -> H::Digest {
@@ -486,13 +498,14 @@ impl<'a, H: CHasher, S1: StorageTrait<H::Digest>, S2: StorageTrait<H::Digest>>
 
     pub async fn root(&self, hasher: &mut StandardHasher<H>) -> Result<H::Digest, Error> {
         let size = self.size();
+        let leaves = Location::try_from(size).expect("size should be valid leaves");
         let peak_futures = PeakIterator::new(size).map(|(peak_pos, _)| self.get_node(peak_pos));
         let peaks = try_join_all(peak_futures).await?;
         let unwrapped_peaks = peaks.iter().map(|p| {
             p.as_ref()
                 .expect("peak should be non-none, are the trees unaligned?")
         });
-        let digest = hasher.root(self.base_mmr.size(), unwrapped_peaks);
+        let digest = hasher.root(leaves, unwrapped_peaks);
 
         Ok(digest)
     }
@@ -621,7 +634,7 @@ mod tests {
         let d4 = test_digest::<H>(4);
 
         let empty_vec: Vec<H::Digest> = Vec::new();
-        let empty_out = mmr_hasher.root(Position::new(0), empty_vec.iter());
+        let empty_out = mmr_hasher.root(Location::new_unchecked(0), empty_vec.iter());
         assert_ne!(
             empty_out,
             test_digest::<H>(0),
@@ -629,22 +642,22 @@ mod tests {
         );
 
         let digests = [d1, d2, d3, d4];
-        let out = mmr_hasher.root(Position::new(10), digests.iter());
+        let out = mmr_hasher.root(Location::new_unchecked(10), digests.iter());
         assert_ne!(out, test_digest::<H>(0), "root should be non-zero");
         assert_ne!(out, empty_out, "root should differ from empty MMR");
 
-        let mut out2 = mmr_hasher.root(Position::new(10), digests.iter());
+        let mut out2 = mmr_hasher.root(Location::new_unchecked(10), digests.iter());
         assert_eq!(out, out2, "root should be computed consistently");
 
-        out2 = mmr_hasher.root(Position::new(11), digests.iter());
+        out2 = mmr_hasher.root(Location::new_unchecked(11), digests.iter());
         assert_ne!(out, out2, "root should change with different position");
 
         let digests = [d1, d2, d4, d3];
-        out2 = mmr_hasher.root(Position::new(10), digests.iter());
+        out2 = mmr_hasher.root(Location::new_unchecked(10), digests.iter());
         assert_ne!(out, out2, "root should change with different digest order");
 
         let digests = [d1, d2, d3];
-        out2 = mmr_hasher.root(Position::new(10), digests.iter());
+        out2 = mmr_hasher.root(Location::new_unchecked(10), digests.iter());
         assert_ne!(
             out, out2,
             "root should change with different number of hashes"
@@ -831,11 +844,7 @@ mod tests {
 
                 let grafted_storage_root = grafted_mmr.root(&mut standard).await.unwrap();
                 assert_ne!(grafted_storage_root, base_root);
-
-                // Grafted storage root uses the size of the base MMR in its digest, so it will
-                // differ than the peak tree root even though these particular trees would otherwise
-                // produce the same root.
-                assert_ne!(grafted_storage_root, peak_root);
+                assert_eq!(grafted_storage_root, peak_root);
 
                 // Confirm we can generate and verify an inclusion proofs for each of the 4 leafs of
                 // the grafted MMR.
@@ -924,7 +933,7 @@ mod tests {
                     ));
 
                     // Proof should fail if we use the wrong root.
-                    assert!(!proof.verify_element_inclusion(&mut verifier, &b4, loc, &peak_root));
+                    assert!(!proof.verify_element_inclusion(&mut verifier, &b4, loc, &base_root));
 
                     // Proof should fail if we use the wrong position
                     assert!(!proof.verify_element_inclusion(

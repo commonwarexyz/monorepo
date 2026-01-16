@@ -137,10 +137,6 @@ impl<D: Digest> RangeProof<D> {
         chunks: &[[u8; N]],
         root: &H::Digest,
     ) -> bool {
-        let Ok(op_count) = Location::try_from(self.proof.size) else {
-            debug!("verification failed, invalid proof size");
-            return false;
-        };
         if ops.is_empty() || chunks.is_empty() {
             debug!("verification failed, empty input");
             return false;
@@ -151,10 +147,12 @@ impl<D: Digest> RangeProof<D> {
             debug!("verification failed, end_loc overflow");
             return false;
         };
-        if end_loc > op_count {
+
+        let leaves = self.proof.leaves;
+        if end_loc > leaves {
             debug!(
                 loc = ?end_loc,
-                ?op_count, "verification failed, invalid range"
+                ?leaves, "verification failed, invalid range"
             );
             return false;
         }
@@ -180,7 +178,7 @@ impl<D: Digest> RangeProof<D> {
             chunk_vec,
         );
 
-        let next_bit = *op_count % BitMap::<N>::CHUNK_SIZE_BITS;
+        let next_bit = *leaves % BitMap::<N>::CHUNK_SIZE_BITS;
         if next_bit == 0 {
             return self
                 .proof
@@ -196,8 +194,7 @@ impl<D: Digest> RangeProof<D> {
         // If the proof is over an operation in the partial chunk, we need to verify the last chunk
         // digest from the proof matches the digest of chunk, since these bits are not part of the
         // mmr.
-        if *(end_loc - 1) / BitMap::<N>::CHUNK_SIZE_BITS == *op_count / BitMap::<N>::CHUNK_SIZE_BITS
-        {
+        if *(end_loc - 1) / BitMap::<N>::CHUNK_SIZE_BITS == *leaves / BitMap::<N>::CHUNK_SIZE_BITS {
             let Some(last_chunk) = chunks.last() else {
                 debug!("chunks is empty");
                 return false;
