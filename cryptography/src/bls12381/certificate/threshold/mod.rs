@@ -277,7 +277,9 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         let partials: Vec<_> = partials
             .into_iter()
             .filter_map(|(index, partial)| {
-                partial.as_ref().map(|_| invalid.insert(index));
+                if partial.is_none() {
+                    invalid.insert(index);
+                }
                 partial
             })
             .collect();
