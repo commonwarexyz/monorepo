@@ -4,14 +4,82 @@ use bytes::{Buf, Bytes};
 use core::hash::Hash;
 use std::sync::OnceLock;
 
+/// A type which can be deserialized lazily.
+///
+/// This is useful when deserializing a value is expensive, and you don't want
+/// to immediately pay this cost. This type allows you to move this cost to a
+/// later point in your program, or use parallelism to spread the cost across
+/// computing cores.
+///
+/// # Usage
+///
+/// Any usage of the type requires that `T` implements [`Read`], because we need
+/// to know what type [`Read::Cfg`] is.
+///
+/// ## Construction
+///
+/// If you have a `T`, you can use [`Lazy::new`]:
+///
+/// ```
+/// let l = Lazy::new(4000u64);
+/// ```
+///
+/// or [`Into`]:
+///
+/// ```
+/// let l: Lazy<u64> = 4000u64.into();
+/// ```
+///
+/// If you *don't* have a `T`, then you can instead create a [`Lazy`] using
+/// bytes and a [`Read::Cfg`]:
+///
+/// ```
+/// let l: Lazy<u64> = Lazy::deferred(4000u64.encode(), &());
+/// ```
+///
+/// ## Consumption
+///
+/// Given a [`Lazy`], use [`Lazy::get`] to access the value:
+///
+/// ```
+/// let l = Lazy::<u64>::deferred(4000u64.encode(), &());
+/// assert_eq!(l.get(), Some(4000u64));
+/// // Does not pay the cost of deserializing again
+/// assert_eq!(l.get(), Some(4000u64));
+/// ```
+///
+/// This returns an [`Option`], because deserialization might fail.
+///
+/// ## Traits
+///
+/// [`Lazy`] can be serialized and deserialized, implementing [`Read`], [`Write`],
+/// and [`EncodeSize`], based on the underlying implementation of `T`.
+///
+/// Furthermore, we implement [`Eq`], [`Ord`], [`Hash`] based on the implementation
+/// of `T` as well. These methods will force deserialization of the value.
 #[derive(Clone)]
 pub struct Lazy<T: Read> {
-    bytes: Bytes,
-    cfg: Option<T::Cfg>,
+    /// This should only be `None` if `value` is initialized.
+    proto: Option<Proto<T>>,
     value: OnceLock<Option<T>>,
 }
 
+#[derive(Clone)]
+struct Proto<T: Read> {
+    bytes: Bytes,
+    cfg: T::Cfg,
+}
+
 impl<T: Read> Lazy<T> {
+    // I considered calling this "now", but this was too close to "new".
+    /// Create a [`Lazy`] using a value.
+    pub fn new(value: T) -> Self {
+        Self {
+            proto: None,
+            value: Some(value).into(),
+        }
+    }
+
     /// Create a [`Lazy`] by deferring decoding of an underlying value.
     ///
     /// The only cost incurred when this function is called is that of copying
@@ -21,8 +89,7 @@ impl<T: Read> Lazy<T> {
     pub fn deferred(buf: &mut impl Buf, cfg: T::Cfg) -> Self {
         let bytes = buf.copy_to_bytes(buf.remaining());
         Self {
-            bytes,
-            cfg: Some(cfg),
+            proto: Some(Proto { bytes, cfg }),
             value: Default::default(),
         }
     }
@@ -38,13 +105,11 @@ impl<T: Read> Lazy<T> {
     pub fn get(&self) -> Option<&T> {
         self.value
             .get_or_init(|| {
-                T::decode_cfg(
-                    self.bytes.clone(),
-                    self.cfg
-                        .as_ref()
-                        .expect("Lazy should have cfg if value is not initialized"),
-                )
-                .ok()
+                let Proto { bytes, cfg } = self
+                    .proto
+                    .as_ref()
+                    .expect("Lazy should have proto if value is not initialized");
+                T::decode_cfg(bytes.clone(), cfg).ok()
             })
             .as_ref()
     }
@@ -52,11 +117,7 @@ impl<T: Read> Lazy<T> {
 
 impl<T: Read + Encode> From<T> for Lazy<T> {
     fn from(value: T) -> Self {
-        Self {
-            bytes: value.encode(),
-            cfg: None,
-            value: Some(value).into(),
-        }
+        Self::new(value)
     }
 }
 
@@ -65,15 +126,26 @@ impl<T: Read + Encode> From<T> for Lazy<T> {
 // The strategy here is that for writing, we use the underlying bytes stored
 // in the value, and for reading, we rely on the type having a fixed size.
 
-impl<T: Read> EncodeSize for Lazy<T> {
+impl<T: Read + EncodeSize> EncodeSize for Lazy<T> {
     fn encode_size(&self) -> usize {
-        self.bytes.len()
+        if let Some(proto) = &self.proto {
+            return proto.bytes.len();
+        }
+        self.get()
+            .expect("Lazy should have a value if proto is None")
+            .encode_size()
     }
 }
 
-impl<T: Read> Write for Lazy<T> {
+impl<T: Read + Write> Write for Lazy<T> {
     fn write(&self, buf: &mut impl bytes::BufMut) {
-        self.bytes.write(buf);
+        if let Some(proto) = &self.proto {
+            proto.bytes.write(buf);
+            return;
+        }
+        self.get()
+            .expect("Lazy should have a value if proto is None")
+            .write(buf);
     }
 }
 
