@@ -22,7 +22,7 @@
 //!
 //! _While the crate is named `commonware-deployer`, the CLI is named `deployer`._
 //!
-//! ## `ec2`
+//! ## `aws`
 //!
 //! Deploy a custom binary (and configuration) to any number of EC2 instances across multiple regions. Collect
 //! metrics and logs from all instances via a private network.
@@ -42,10 +42,18 @@
 //! ### `destroy`
 //!
 //! Destroy all resources associated with a given deployment.
+//!
+//! ### `clean`
+//!
+//! Delete the shared S3 bucket and all its contents.
+//!
+//! ### `profile`
+//!
+//! Capture a CPU profile from a running instance using samply.
 
 #![doc(
     html_logo_url = "https://commonware.xyz/imgs/rustdoc_logo.svg",
     html_favicon_url = "https://commonware.xyz/favicon.ico"
 )]
 
-pub mod ec2;
+pub mod aws;

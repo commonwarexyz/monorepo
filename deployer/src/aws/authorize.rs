@@ -1,8 +1,8 @@
 //! `authorize` subcommand for `ec2`
 
-use crate::ec2::{
-    aws::*,
+use crate::aws::{
     deployer_directory,
+    ec2::{self, *},
     utils::{exact_cidr, get_public_ip, DEPLOYER_MAX_PORT, DEPLOYER_MIN_PORT, DEPLOYER_PROTOCOL},
     Config, Error, CREATED_FILE_NAME, DESTROYED_FILE_NAME, MONITORING_REGION,
 };
@@ -60,7 +60,7 @@ pub async fn authorize(config_path: &PathBuf, ip: Option<String>) -> Result<(), 
     // Update security groups in each region
     let mut changes = Vec::new();
     for region in all_regions {
-        let ec2_client = create_ec2_client(Region::new(region.clone())).await;
+        let ec2_client = ec2::create_client(Region::new(region.clone())).await;
         info!(region = region.as_str(), "created EC2 client");
 
         // Iterate over all security groups

@@ -1,6 +1,6 @@
 //! AWS S3 SDK function wrappers for caching deployer artifacts
 
-use crate::ec2::Error;
+use crate::aws::Error;
 use aws_config::BehaviorVersion;
 pub use aws_config::Region;
 use aws_sdk_s3::{
@@ -16,17 +16,17 @@ use futures::stream::{self, StreamExt, TryStreamExt};
 use std::{collections::HashMap, io::Read, path::Path, time::Duration};
 use tracing::{debug, info};
 
-/// S3 bucket name for caching deployer artifacts
-pub const S3_BUCKET_NAME: &str = "commonware-deployer-cache";
+/// Bucket name for caching deployer artifacts
+pub const BUCKET_NAME: &str = "commonware-deployer-cache";
 
-/// S3 prefix for tool binaries: tools/binaries/{tool}/{version}/{platform}/{filename}
-pub const S3_TOOLS_BINARIES_PREFIX: &str = "tools/binaries";
+/// Prefix for tool binaries: tools/binaries/{tool}/{version}/{platform}/{filename}
+pub const TOOLS_BINARIES_PREFIX: &str = "tools/binaries";
 
-/// S3 prefix for tool configs: tools/configs/{deployer_version}/{component}/{file}
-pub const S3_TOOLS_CONFIGS_PREFIX: &str = "tools/configs";
+/// Prefix for tool configs: tools/configs/{deployer_version}/{component}/{file}
+pub const TOOLS_CONFIGS_PREFIX: &str = "tools/configs";
 
-/// S3 prefix for per-deployment data
-pub const S3_DEPLOYMENTS_PREFIX: &str = "deployments";
+/// Prefix for per-deployment data
+pub const DEPLOYMENTS_PREFIX: &str = "deployments";
 
 /// Maximum buffer size for file hashing (32MB)
 pub const MAX_HASH_BUFFER_SIZE: usize = 32 * 1024 * 1024;
@@ -37,8 +37,21 @@ pub const MAX_CONCURRENT_HASHES: usize = 8;
 /// Duration for pre-signed URLs (6 hours)
 pub const PRESIGN_DURATION: Duration = Duration::from_secs(6 * 60 * 60);
 
+/// Common wget prefix with retry settings for S3 downloads
+///
+/// Retries on connection failures and HTTP errors:
+/// - 404: Not Found (S3 eventual consistency)
+/// - 408: Request Timeout
+/// - 429: Too Many Requests (rate limiting)
+/// - 500: Internal Server Error
+/// - 502: Bad Gateway
+/// - 503: Service Unavailable
+/// - 504: Gateway Timeout
+pub const WGET: &str =
+    "wget -q --tries=30 --retry-connrefused --retry-on-http-error=404,408,429,500,502,503,504 --waitretry=5";
+
 /// Creates an S3 client for the specified AWS region
-pub async fn create_s3_client(region: Region) -> S3Client {
+pub async fn create_client(region: Region) -> S3Client {
     let retry = aws_config::retry::RetryConfig::adaptive()
         .with_max_attempts(u32::MAX)
         .with_initial_backoff(Duration::from_millis(500))
