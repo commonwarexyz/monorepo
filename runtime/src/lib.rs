@@ -302,6 +302,11 @@ pub trait Metrics: Clone + Send + Sync + 'static {
     fn register<N: Into<String>, H: Into<String>>(&self, name: N, help: H, metric: impl Metric);
 
     /// Encode all metrics into a buffer.
+    ///
+    /// To ensure downstream analytics tools work correctly, users must never duplicate metrics
+    /// (via the concatenation of nested `with_label` and `register` calls). This can be avoided
+    /// by using `with_label` to create new context instances (ensures all context instances are
+    /// namespaced).
     fn encode(&self) -> String;
 }
 
