@@ -100,13 +100,12 @@ impl PoolRef {
     /// Returns a new [PoolRef] that will buffer up to `capacity` pages with the
     /// given `page_size`.
     pub fn new(page_size: NonZeroU16, capacity: NonZeroUsize) -> Self {
-        let page_size_usize = page_size.get() as usize;
-        let page_size = page_size.get() as u64;
+        let page_size_u64 = page_size.get() as u64;
 
         Self {
-            page_size,
+            page_size: page_size_u64,
             next_id: Arc::new(AtomicU64::new(0)),
-            pool: Arc::new(RwLock::new(Pool::new(capacity.get(), page_size_usize))),
+            pool: Arc::new(RwLock::new(Pool::new(capacity, page_size))),
         }
     }
 
@@ -330,9 +329,9 @@ impl Pool {
     /// # Panics
     ///
     /// Panics if `capacity` or `page_size` is 0.
-    fn new(capacity: usize, page_size: usize) -> Self {
-        assert!(capacity > 0);
-        assert!(page_size > 0);
+    fn new(capacity: NonZeroUsize, page_size: NonZeroU16) -> Self {
+        let page_size = page_size.get() as usize;
+        let capacity = capacity.get();
         Self {
             index: HashMap::new(),
             entries: Vec::with_capacity(capacity),
@@ -459,7 +458,7 @@ mod tests {
 
     #[test_traced]
     fn test_pool_basic() {
-        let mut pool: Pool = Pool::new(10, PAGE_SIZE.get() as usize);
+        let mut pool: Pool = Pool::new(NZUsize!(10), PAGE_SIZE);
 
         // Cache stores logical-sized pages.
         let mut buf = vec![0; PAGE_SIZE.get() as usize];
