@@ -47,7 +47,7 @@ pub struct Pool {
     /// Metadata for each cache slot.
     ///
     /// Each `entries` slot has exactly one corresponding `index` entry.
-    entries: Vec<CacheEntryMeta>,
+    entries: Vec<CacheEntry>,
 
     /// Pre-allocated arena containing all page data contiguously.
     /// Slot i's data is at `arena[i * page_size .. (i+1) * page_size]`.
@@ -68,7 +68,7 @@ pub struct Pool {
 }
 
 /// Metadata for a single cache entry (page data stored in arena).
-struct CacheEntryMeta {
+struct CacheEntry {
     /// The cache key which is composed of the blob id and page number of the page.
     key: (u64, u64),
 
@@ -413,7 +413,7 @@ impl Pool {
             // Still growing: use next available slot
             let slot = self.entries.len();
             self.index.insert(key, slot);
-            self.entries.push(CacheEntryMeta {
+            self.entries.push(CacheEntry {
                 key,
                 referenced: AtomicBool::new(true),
             });
