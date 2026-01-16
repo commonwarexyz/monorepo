@@ -4,6 +4,7 @@ mod aggregate_verify_same_message;
 mod aggregate_verify_same_signer;
 mod batch_to_affine;
 mod batch_verify_same_signer;
+mod check_subgroup;
 mod combine_public_keys;
 mod combine_signatures;
 mod dkg;
@@ -22,6 +23,7 @@ mod tle_encrypt;
 
 criterion_main!(
     batch_to_affine::benches,
+    check_subgroup::benches,
     dkg::benches,
     hash_to_curve::benches,
     threshold_recover::benches,

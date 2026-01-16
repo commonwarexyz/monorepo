@@ -106,7 +106,8 @@ impl<V: Variant> SegmentTree<V> {
             let (pk, sig) = self.tree[node].expect("node exists");
 
             // Valid subtree - all leaves below are valid.
-            if V::verify(&pk, hm, &sig).is_ok() {
+            // Subgroup check already performed before bisection.
+            if V::verify(&pk, hm, &sig, false).is_ok() {
                 continue;
             }
 
@@ -191,11 +192,8 @@ fn bisect<V: Variant>(
 /// verifications than checking each signature individually. If an invalid signer is detected,
 /// consider blocking them from participating in future batches to better amortize the cost.
 ///
-/// # Warning
-///
-/// This function assumes a group check was already performed on each public key
-/// and signature. Duplicate public keys are safe because random scalar weights
-/// ensure each (public key, signature) pair is verified independently.
+/// Duplicate public keys are safe because random scalar weights ensure each
+/// (public key, signature) pair is verified independently.
 pub fn verify_same_message<R, V>(
     rng: &mut R,
     namespace: &[u8],
@@ -211,34 +209,68 @@ where
         return Vec::new();
     }
 
+    // Extract pks and sigs
+    let (pks, sigs): (Vec<_>, Vec<_>) = entries.iter().cloned().unzip();
+
+    // Check subgroup membership for all public keys and signatures (parallelized).
+    let (pk_check, sig_check) = V::check_subgroups(&pks, &sigs, par);
+
+    // Collect indices that failed subgroup check (invalid pk OR signature)
+    let mut invalid: Vec<usize> = pk_check.failed_indices;
+    for i in sig_check.failed_indices {
+        if !invalid.contains(&i) {
+            invalid.push(i);
+        }
+    }
+
+    // Filter to only valid entries for batch verification
+    let valid_indices: Vec<usize> = (0..entries.len())
+        .filter(|i| !invalid.contains(i))
+        .collect();
+
+    // If all entries failed subgroup check, return them
+    if valid_indices.is_empty() {
+        invalid.sort_unstable();
+        return invalid;
+    }
+
+    // Extract valid pks and sigs for verification
+    let valid_pks: Vec<_> = valid_indices.iter().map(|&i| pks[i]).collect();
+    let valid_sigs: Vec<_> = valid_indices.iter().map(|&i| sigs[i]).collect();
+
     let hm = hash_with_namespace::<V>(V::MESSAGE, namespace, message);
 
     // Generate 128-bit random scalars (sufficient for batch verification security)
-    let scalars: Vec<SmallScalar> = (0..entries.len())
+    let scalars: Vec<SmallScalar> = (0..valid_pks.len())
         .map(|_| SmallScalar::random(&mut *rng))
         .collect();
 
-    // Extract pks and sigs for MSM
-    let (pks, sigs) = entries.iter().cloned().collect::<(Vec<_>, Vec<_>)>();
-
     // Compute MSMs for pk and sig in parallel using 128-bit scalars.
     let (sum_pk, sum_sig) = par.join(
-        || V::Public::msm(&pks, &scalars, par),
-        || V::Signature::msm(&sigs, &scalars, par),
+        || V::Public::msm(&valid_pks, &scalars, par),
+        || V::Signature::msm(&valid_sigs, &scalars, par),
     );
 
-    // Fast path: if all signatures are valid, return empty
-    if V::verify(&sum_pk, &hm, &sum_sig).is_ok() {
-        return Vec::new();
+    // Fast path: if all valid signatures pass, return only subgroup failures
+    // Subgroup check already performed above.
+    if V::verify(&sum_pk, &hm, &sum_sig, false).is_ok() {
+        invalid.sort_unstable();
+        return invalid;
     }
 
-    // Slow path: bisection to find invalid signatures
-    // Pre-compute individual weighted values for bisection
+    // Slow path: bisection to find invalid signatures among valid entries
     let weighted_entries = par.map_collect_vec(
-        scalars.iter().zip(pks.iter().zip(sigs.iter())),
+        scalars.iter().zip(valid_pks.iter().zip(valid_sigs.iter())),
         |(s, (&pk, &sig))| (pk * s, sig * s),
     );
-    bisect::<V>(&weighted_entries, &hm, true, par)
+    let bisect_invalid = bisect::<V>(&weighted_entries, &hm, true, par);
+
+    // Map bisection results back to original indices and merge with subgroup failures
+    for local_idx in bisect_invalid {
+        invalid.push(valid_indices[local_idx]);
+    }
+    invalid.sort_unstable();
+    invalid
 }
 
 /// Verifies multiple signatures over multiple messages from a single public key,
@@ -246,9 +278,6 @@ where
 ///
 /// Each entry is a tuple of (namespace, message, signature).
 ///
-/// # Warning
-///
-/// This function assumes a group check was already performed on `public` and each `signature`.
 /// Duplicate messages are safe because random scalar weights ensure each (message, signature)
 /// pair is verified independently.
 pub fn verify_same_signer<'a, R, V, I>(
@@ -268,6 +297,16 @@ where
         return Ok(());
     }
 
+    // Check subgroup membership for the public key and all signatures (parallelized).
+    let sigs: Vec<V::Signature> = entries.iter().map(|(_, _, sig)| *sig).collect();
+    let (pk_check, sig_check) = V::check_subgroups(&[*public], &sigs, strategy);
+    if !pk_check.all_valid() {
+        return Err(Error::InvalidPublicKey);
+    }
+    if !sig_check.all_valid() {
+        return Err(Error::InvalidSignature);
+    }
+
     // Generate 128-bit random scalars (sufficient for batch verification security)
     let scalars: Vec<SmallScalar> = (0..entries.len())
         .map(|_| SmallScalar::random(&mut *rng))
@@ -277,7 +316,6 @@ where
     let hms: Vec<V::Signature> = strategy.map_collect_vec(entries.iter(), |(namespace, msg, _)| {
         hash_with_namespace::<V>(V::MESSAGE, namespace, msg)
     });
-    let sigs: Vec<V::Signature> = entries.iter().map(|(_, _, sig)| *sig).collect();
 
     // Compute weighted sums in parallel using MSM with 128-bit scalars.
     let (weighted_hm, weighted_sig) = strategy.join(
@@ -286,7 +324,8 @@ where
     );
 
     // Verify: e(pk, weighted_hm) == e(weighted_sig, G)
-    V::verify(public, &weighted_hm, &weighted_sig)
+    // Subgroup check already performed above.
+    V::verify(public, &weighted_hm, &weighted_sig, false)
 }
 
 #[cfg(test)]
@@ -396,7 +435,7 @@ mod tests {
         let hm1 = hash_with_namespace::<V>(V::MESSAGE, namespace, msg1);
         let hm2 = hash_with_namespace::<V>(V::MESSAGE, namespace, msg2);
         let hm_sum = hm1 + &hm2;
-        V::verify(&public, &hm_sum, forged_agg.inner())
+        V::verify(&public, &hm_sum, forged_agg.inner(), true)
             .expect("naive aggregate verification accepts forged aggregate");
 
         // Batch verification (with random weights) rejects forged signatures

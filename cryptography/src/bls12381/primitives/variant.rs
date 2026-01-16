@@ -1,10 +1,12 @@
 //! Different variants of the BLS signature scheme.
 
+pub use super::ops::check::CheckResult;
 use super::{
     group::{
         Scalar, SmallScalar, DST, G1, G1_MESSAGE, G1_PROOF_OF_POSSESSION, G2, G2_MESSAGE,
         G2_PROOF_OF_POSSESSION, GT,
     },
+    ops::check::{check_g1_subgroup, check_g2_subgroup},
     Error,
 };
 #[cfg(not(feature = "std"))]
@@ -50,10 +52,15 @@ pub trait Variant: Clone + Send + Sync + Hash + Eq + Debug + 'static {
     const MESSAGE: DST;
 
     /// Verify the signature from the provided public key and pre-hashed message.
+    ///
+    /// If `check_subgroup` is true, verifies that `public` and `signature` are in
+    /// the correct subgroups before performing the pairing check. Set to false
+    /// when subgroup membership has already been verified (e.g., during bisection).
     fn verify(
         public: &Self::Public,
         hm: &Self::Signature,
         signature: &Self::Signature,
+        check_subgroup: bool,
     ) -> Result<(), Error>;
 
     /// Verify a batch of signatures from the provided public keys and pre-hashed messages.
@@ -67,6 +74,15 @@ pub trait Variant: Clone + Send + Sync + Hash + Eq + Debug + 'static {
 
     /// Compute the pairing `e(G1, G2) -> GT`.
     fn pairing(public: &Self::Public, signature: &Self::Signature) -> GT;
+
+    /// Batch check subgroup membership for public keys and signatures (parallelized).
+    ///
+    /// Returns two `CheckResult`s: (public_key_failures, signature_failures).
+    fn check_subgroups(
+        publics: &[Self::Public],
+        signatures: &[Self::Signature],
+        strategy: &impl Strategy,
+    ) -> (CheckResult, CheckResult);
 }
 
 /// A [Variant] with a public key of type [G1] and a signature of type [G2].
@@ -86,7 +102,16 @@ impl Variant for MinPk {
         public: &Self::Public,
         hm: &Self::Signature,
         signature: &Self::Signature,
+        check_subgroup: bool,
     ) -> Result<(), Error> {
+        if check_subgroup {
+            public
+                .ensure_in_subgroup()
+                .map_err(|_| Error::InvalidPublicKey)?;
+            signature
+                .ensure_in_subgroup()
+                .map_err(|_| Error::InvalidSignature)?;
+        }
         if !G2::multi_pairing_check(&[*hm], &[*public], signature, &-G1::generator()) {
             return Err(Error::InvalidSignature);
         }
@@ -133,6 +158,14 @@ impl Variant for MinPk {
             return Ok(());
         }
 
+        // Check subgroup membership for all public keys and signatures (parallelized).
+        if !check_g1_subgroup(publics, par).all_valid() {
+            return Err(Error::InvalidPublicKey);
+        }
+        if !check_g2_subgroup(signatures, par).all_valid() {
+            return Err(Error::InvalidSignature);
+        }
+
         // Generate 128-bit random scalars (sufficient for batch verification security).
         let scalars: Vec<SmallScalar> = (0..publics.len())
             .map(|_| SmallScalar::random(&mut *rng))
@@ -163,6 +196,17 @@ impl Variant for MinPk {
 
         GT::from_blst_fp12(result)
     }
+
+    fn check_subgroups(
+        publics: &[Self::Public],
+        signatures: &[Self::Signature],
+        strategy: &impl Strategy,
+    ) -> (CheckResult, CheckResult) {
+        strategy.join(
+            || check_g1_subgroup(publics, strategy),
+            || check_g2_subgroup(signatures, strategy),
+        )
+    }
 }
 
 impl Debug for MinPk {
@@ -188,7 +232,16 @@ impl Variant for MinSig {
         public: &Self::Public,
         hm: &Self::Signature,
         signature: &Self::Signature,
+        check_subgroup: bool,
     ) -> Result<(), Error> {
+        if check_subgroup {
+            public
+                .ensure_in_subgroup()
+                .map_err(|_| Error::InvalidPublicKey)?;
+            signature
+                .ensure_in_subgroup()
+                .map_err(|_| Error::InvalidSignature)?;
+        }
         if !G1::multi_pairing_check(&[*hm], &[*public], signature, &-G2::generator()) {
             return Err(Error::InvalidSignature);
         }
@@ -235,6 +288,14 @@ impl Variant for MinSig {
             return Ok(());
         }
 
+        // Check subgroup membership for all public keys and signatures (parallelized).
+        if !check_g2_subgroup(publics, par).all_valid() {
+            return Err(Error::InvalidPublicKey);
+        }
+        if !check_g1_subgroup(signatures, par).all_valid() {
+            return Err(Error::InvalidSignature);
+        }
+
         // Generate 128-bit random scalars (sufficient for batch verification security).
         let scalars: Vec<SmallScalar> = (0..publics.len())
             .map(|_| SmallScalar::random(&mut *rng))
@@ -264,6 +325,17 @@ impl Variant for MinSig {
         }
 
         GT::from_blst_fp12(result)
+    }
+
+    fn check_subgroups(
+        publics: &[Self::Public],
+        signatures: &[Self::Signature],
+        strategy: &impl Strategy,
+    ) -> (CheckResult, CheckResult) {
+        strategy.join(
+            || check_g2_subgroup(publics, strategy),
+            || check_g1_subgroup(signatures, strategy),
+        )
     }
 }
 
@@ -391,11 +463,11 @@ mod tests {
 
         // Individual verification should fail for forged signatures
         assert!(
-            V::verify(&public1, &hm1, &forged_sig1).is_err(),
+            V::verify(&public1, &hm1, &forged_sig1, true).is_err(),
             "forged sig1 should be invalid individually"
         );
         assert!(
-            V::verify(&public2, &hm2, &forged_sig2).is_err(),
+            V::verify(&public2, &hm2, &forged_sig2, true).is_err(),
             "forged sig2 should be invalid individually"
         );
 

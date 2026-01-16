@@ -1137,7 +1137,7 @@ mod tests {
         let pk2 = sharing.partial_public(partial2.index).unwrap();
         let pk_sum = pk1 + &pk2;
         let hm = hash_with_namespace::<V>(V::MESSAGE, namespace, msg);
-        V::verify(&pk_sum, &hm, &forged_sum)
+        V::verify(&pk_sum, &hm, &forged_sum, true)
             .expect("vulnerable naive verification accepts forged aggregate");
 
         let forged_partials = [forged_partial1, forged_partial2];
@@ -1221,7 +1221,7 @@ mod tests {
         let hm1 = hash_with_namespace::<V>(V::MESSAGE, namespace, msg1);
         let hm2 = hash_with_namespace::<V>(V::MESSAGE, namespace, msg2);
         let hm_sum = hm1 + &hm2;
-        V::verify(&pk, &hm_sum, &forged_sum)
+        V::verify(&pk, &hm_sum, &forged_sum, true)
             .expect("vulnerable naive verification accepts forged aggregate");
 
         let forged_entries = vec![

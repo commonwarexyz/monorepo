@@ -18,12 +18,13 @@ use blst::{
     blst_bendian_from_fp12, blst_bendian_from_scalar, blst_expand_message_xmd, blst_fp12, blst_fr,
     blst_fr_add, blst_fr_cneg, blst_fr_from_scalar, blst_fr_from_uint64, blst_fr_inverse,
     blst_fr_mul, blst_fr_sub, blst_hash_to_g1, blst_hash_to_g2, blst_keygen, blst_p1,
-    blst_p1_add_or_double, blst_p1_affine, blst_p1_cneg, blst_p1_compress, blst_p1_from_affine,
-    blst_p1_in_g1, blst_p1_is_inf, blst_p1_mult, blst_p1_to_affine, blst_p1_uncompress,
-    blst_p1s_mult_pippenger, blst_p1s_mult_pippenger_scratch_sizeof, blst_p1s_to_affine, blst_p2,
-    blst_p2_add_or_double, blst_p2_affine, blst_p2_cneg, blst_p2_compress, blst_p2_from_affine,
-    blst_p2_in_g2, blst_p2_is_inf, blst_p2_mult, blst_p2_to_affine, blst_p2_uncompress,
-    blst_p2s_mult_pippenger, blst_p2s_mult_pippenger_scratch_sizeof, blst_p2s_to_affine,
+    blst_p1_add_or_double, blst_p1_affine, blst_p1_cneg, blst_p1_compress, blst_p1_double,
+    blst_p1_from_affine, blst_p1_in_g1, blst_p1_is_inf, blst_p1_mult, blst_p1_to_affine,
+    blst_p1_uncompress, blst_p1s_mult_pippenger, blst_p1s_mult_pippenger_scratch_sizeof,
+    blst_p1s_tile_pippenger, blst_p1s_to_affine, blst_p2, blst_p2_add_or_double, blst_p2_affine,
+    blst_p2_cneg, blst_p2_compress, blst_p2_double, blst_p2_from_affine, blst_p2_in_g2,
+    blst_p2_is_inf, blst_p2_mult, blst_p2_to_affine, blst_p2_uncompress, blst_p2s_mult_pippenger,
+    blst_p2s_mult_pippenger_scratch_sizeof, blst_p2s_tile_pippenger, blst_p2s_to_affine,
     blst_scalar, blst_scalar_from_be_bytes, blst_scalar_from_bendian, blst_scalar_from_fr,
     blst_sk_check, Pairing, BLS12_381_G1, BLS12_381_G2, BLST_ERROR,
 };
@@ -42,7 +43,6 @@ use core::{
     fmt::{Debug, Display, Formatter},
     hash::{Hash, Hasher},
     iter,
-    mem::MaybeUninit,
     ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign},
     ptr,
 };
@@ -54,6 +54,54 @@ fn all_zero(bytes: &[u8]) -> Choice {
     bytes
         .iter()
         .fold(Choice::TRUE, |acc, b| acc & b.ct_eq(&0u8))
+}
+
+/// Calculate the optimal window size for Pippenger's algorithm.
+const fn pippenger_window_size(npoints: usize) -> usize {
+    let wbits = (usize::BITS - npoints.leading_zeros()) as usize;
+    if wbits > 13 {
+        wbits - 4
+    } else if wbits > 5 {
+        wbits - 3
+    } else {
+        2
+    }
+}
+
+/// Calculate the grid breakdown for parallel MSM.
+/// Returns (nx, ny, window) where nx*ny is the number of tiles.
+fn msm_breakdown(nbits: usize, window: usize, ncpus: usize) -> (usize, usize, usize) {
+    let num_bits = |l: usize| (usize::BITS - l.leading_zeros()) as usize;
+
+    let (nx, wnd) = if nbits > window * ncpus {
+        let mut wnd = num_bits(ncpus / 4);
+        if (window + wnd) > 18 {
+            wnd = window - wnd;
+        } else {
+            wnd = (nbits / window).div_ceil(ncpus);
+            if (nbits / (window + 1)).div_ceil(ncpus) < wnd {
+                wnd = window + 1;
+            } else {
+                wnd = window;
+            }
+        }
+        (1, wnd)
+    } else {
+        let mut nx = 2usize;
+        let mut wnd = window - 2;
+        while (nbits / wnd + 1) * nx < ncpus {
+            nx += 1;
+            wnd = window - num_bits(3 * nx / 2);
+        }
+        nx -= 1;
+        wnd = window - num_bits(3 * nx / 2);
+        (nx, wnd)
+    };
+
+    let ny = nbits / wnd + 1;
+    let final_wnd = nbits / ny + 1;
+
+    (nx, ny, final_wnd)
 }
 
 /// Domain separation tag used when hashing a message to a curve (G1 or G2).
@@ -745,13 +793,18 @@ impl G1 {
         pairing.finalverify(None)
     }
 
-    fn msm_inner<'a>(iter: impl Iterator<Item = (&'a Self, &'a [u8])>, nbits: usize) -> Self {
+    fn msm_inner<'a>(
+        iter: impl Iterator<Item = (&'a Self, &'a [u8])>,
+        nbits: usize,
+        strategy: &impl Strategy,
+    ) -> Self {
         // Filter out zero points/scalars and convert to blst types.
         // `blst` does not filter out infinity, so we must ensure it is impossible.
         //
         // Sources:
         // * https://github.com/supranational/blst/blob/cbc7e166a10d7286b91a3a7bea341e708962db13/src/multi_scalar.c#L10-L12
         // * https://github.com/MystenLabs/fastcrypto/blob/0acf0ff1a163c60e0dec1e16e4fbad4a4cf853bd/fastcrypto/src/groups/bls12381.rs#L160-L194
+        let nbytes = nbits.div_ceil(8);
         let (points_filtered, scalars_filtered): (Vec<_>, Vec<_>) = iter
             .filter_map(|(point, scalar)| {
                 if *point == Self::zero() || all_zero(scalar).into() {
@@ -765,30 +818,149 @@ impl G1 {
             return Self::zero();
         }
 
+        let npoints = points_filtered.len();
+        let ncpus = strategy.parallelism_hint();
+
+        // Convert to affine points
         let affine_points = Self::batch_to_affine(&points_filtered);
-        let points: Vec<*const blst_p1_affine> =
-            affine_points.iter().map(|p| p as *const _).collect();
-        let scalars: Vec<*const u8> = scalars_filtered.iter().map(|s| s.as_ptr()).collect();
+
+        // Flatten scalars into contiguous byte array
+        let scalar_bytes: Vec<u8> = scalars_filtered
+            .iter()
+            .flat_map(|s| s[..nbytes].iter().copied())
+            .collect();
+
+        // For small inputs or single CPU, use single-threaded path
+        if ncpus < 2 || npoints < 32 {
+            return Self::msm_single_threaded(&affine_points, &scalar_bytes, nbits);
+        }
+
+        // Parallel MSM using tile_pippenger
+        Self::msm_parallel(&affine_points, &scalar_bytes, nbits, ncpus, strategy)
+    }
+
+    fn msm_single_threaded(affine_points: &[blst_p1_affine], scalars: &[u8], nbits: usize) -> Self {
+        let npoints = affine_points.len();
 
         // SAFETY: blst_p1s_mult_pippenger_scratch_sizeof returns size in bytes for valid input.
-        let scratch_size = unsafe { blst_p1s_mult_pippenger_scratch_sizeof(points.len()) };
+        let scratch_size = unsafe { blst_p1s_mult_pippenger_scratch_sizeof(npoints) };
         assert_eq!(scratch_size % 8, 0, "scratch_size must be multiple of 8");
-        let mut scratch = vec![MaybeUninit::<u64>::uninit(); scratch_size / 8];
+        let mut scratch = vec![0u64; scratch_size / 8];
 
-        let mut msm_result = blst_p1::default();
+        // blst uses null-terminated pointer arrays
+        let p: [*const blst_p1_affine; 2] = [affine_points.as_ptr(), ptr::null()];
+        let s: [*const u8; 2] = [scalars.as_ptr(), ptr::null()];
+
+        let mut result = blst_p1::default();
         // SAFETY: All pointer arrays are valid and point to data that outlives this call.
         unsafe {
             blst_p1s_mult_pippenger(
-                &mut msm_result,
-                points.as_ptr(),
-                points.len(),
-                scalars.as_ptr(),
+                &mut result,
+                p.as_ptr(),
+                npoints,
+                s.as_ptr(),
                 nbits,
-                scratch.as_mut_ptr() as *mut _,
+                scratch.as_mut_ptr(),
             );
         }
+        Self::from_blst_p1(result)
+    }
 
-        Self::from_blst_p1(msm_result)
+    fn msm_parallel(
+        affine_points: &[blst_p1_affine],
+        scalars: &[u8],
+        nbits: usize,
+        ncpus: usize,
+        strategy: &impl Strategy,
+    ) -> Self {
+        let npoints = affine_points.len();
+        let nbytes = nbits.div_ceil(8);
+        let (nx, ny, window) = msm_breakdown(nbits, pippenger_window_size(npoints), ncpus);
+
+        // Build grid of tiles
+        struct Tile {
+            x: usize,
+            dx: usize,
+            y: usize,
+        }
+
+        let mut tiles = Vec::with_capacity(nx * ny);
+        let dx = npoints / nx;
+
+        // First row (highest bits)
+        let mut y = window * (ny - 1);
+        for i in 0..nx {
+            let x = i * dx;
+            let tile_dx = if i == nx - 1 { npoints - x } else { dx };
+            tiles.push(Tile { x, dx: tile_dx, y });
+        }
+
+        // Remaining rows
+        while y != 0 {
+            y -= window;
+            for i in 0..nx {
+                let x = i * dx;
+                let tile_dx = if i == nx - 1 { npoints - x } else { dx };
+                tiles.push(Tile { x, dx: tile_dx, y });
+            }
+        }
+
+        // Compute all tiles in parallel
+        // SAFETY: blst_p1s_mult_pippenger_scratch_sizeof(0) returns base scratch size.
+        let scratch_size = unsafe { blst_p1s_mult_pippenger_scratch_sizeof(0) } / 8;
+
+        let tile_results: Vec<(usize, usize, blst_p1)> =
+            strategy.map_collect_vec(tiles.iter().enumerate(), |(idx, tile)| {
+                let mut scratch = vec![0u64; scratch_size << (window - 1)];
+                let mut result = blst_p1::default();
+
+                // blst uses null-terminated pointer arrays
+                let p: [*const blst_p1_affine; 2] = [affine_points[tile.x..].as_ptr(), ptr::null()];
+                let s: [*const u8; 2] = [scalars[tile.x * nbytes..].as_ptr(), ptr::null()];
+
+                // SAFETY: All pointers valid, scratch sized correctly for window.
+                unsafe {
+                    blst_p1s_tile_pippenger(
+                        &mut result,
+                        p.as_ptr(),
+                        tile.dx,
+                        s.as_ptr(),
+                        nbits,
+                        scratch.as_mut_ptr(),
+                        tile.y,
+                        window,
+                    );
+                }
+                (idx / nx, idx % nx, result)
+            });
+
+        // Combine results by row
+        let mut row_sums: Vec<Option<blst_p1>> = vec![None; ny];
+        for (row, _col, point) in tile_results {
+            match &mut row_sums[row] {
+                // SAFETY: blst_p1_add_or_double is safe for valid blst_p1 points.
+                Some(sum) => unsafe { blst_p1_add_or_double(sum, sum, &point) },
+                None => row_sums[row] = Some(point),
+            }
+        }
+
+        // Combine rows with doubling (highest bits first)
+        let mut result = blst_p1::default();
+        for (i, row_sum) in row_sums.into_iter().enumerate() {
+            if let Some(sum) = row_sum {
+                // SAFETY: blst_p1_add_or_double is safe for valid blst_p1 points.
+                unsafe { blst_p1_add_or_double(&mut result, &result, &sum) };
+            }
+            // Double `window` times for all but the last row
+            if i < ny - 1 {
+                for _ in 0..window {
+                    // SAFETY: blst_p1_double is safe for valid blst_p1 points.
+                    unsafe { blst_p1_double(&mut result, &result) };
+                }
+            }
+        }
+
+        Self::from_blst_p1(result)
     }
 }
 
@@ -799,14 +971,30 @@ impl Write for G1 {
     }
 }
 
+impl G1 {
+    /// Verifies that this point is in the G1 subgroup.
+    ///
+    /// This check is necessary before using the point in pairing operations
+    /// to prevent small subgroup attacks. The check is called automatically
+    /// by verify operations, but can be called explicitly if needed.
+    pub fn ensure_in_subgroup(&self) -> Result<(), Error> {
+        // SAFETY: self.0 is a valid blst_p1 point
+        if unsafe { !blst_p1_in_g1(&self.0) } {
+            return Err(Invalid("G1", "Outside G1"));
+        }
+        Ok(())
+    }
+}
+
 impl Read for G1 {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let bytes = <[u8; Self::SIZE]>::read(buf)?;
         let mut ret = blst_p1::default();
-        // SAFETY: bytes is a valid 48-byte array. blst_p1_uncompress validates encoding.
-        // Additional checks for infinity and subgroup membership prevent small subgroup attacks.
+        // SAFETY: bytes is a valid 48-byte array. blst_p1_uncompress validates encoding
+        // and that the point is on the curve.
+        // NOTE: Subgroup check is deferred to verify operations for performance.
         unsafe {
             let mut affine = blst_p1_affine::default();
             match blst_p1_uncompress(&mut affine, bytes.as_ptr()) {
@@ -826,10 +1014,7 @@ impl Read for G1 {
                 return Err(Invalid("G1", "Infinity"));
             }
 
-            // Verify that the deserialized element is in G1
-            if !blst_p1_in_g1(&ret) {
-                return Err(Invalid("G1", "Outside G1"));
-            }
+            // NOTE: Subgroup check removed - called automatically by verify operations
         }
         Ok(Self(ret))
     }
@@ -966,7 +1151,7 @@ impl<'a> Mul<&'a SmallScalar> for G1 {
 }
 
 impl Space<Scalar> for G1 {
-    fn msm(points: &[Self], scalars: &[Scalar], _strategy: &impl Strategy) -> Self {
+    fn msm(points: &[Self], scalars: &[Scalar], strategy: &impl Strategy) -> Self {
         assert_eq!(points.len(), scalars.len(), "mismatched lengths");
         let scalar_bytes: Vec<_> = scalars.iter().map(|s| s.as_blst_scalar()).collect();
         Self::msm_inner(
@@ -974,16 +1159,18 @@ impl Space<Scalar> for G1 {
                 .iter()
                 .zip(scalar_bytes.iter().map(|s| s.b.as_slice())),
             SCALAR_BITS,
+            strategy,
         )
     }
 }
 
 impl Space<SmallScalar> for G1 {
-    fn msm(points: &[Self], scalars: &[SmallScalar], _strategy: &impl Strategy) -> Self {
+    fn msm(points: &[Self], scalars: &[SmallScalar], strategy: &impl Strategy) -> Self {
         assert_eq!(points.len(), scalars.len(), "mismatched lengths");
         Self::msm_inner(
             points.iter().zip(scalars.iter().map(|s| s.as_bytes())),
             SMALL_SCALAR_BITS,
+            strategy,
         )
     }
 }
@@ -1084,13 +1271,18 @@ impl G2 {
         G1::multi_pairing_check(p2, p1, t2, t1)
     }
 
-    fn msm_inner<'a>(iter: impl Iterator<Item = (&'a Self, &'a [u8])>, nbits: usize) -> Self {
+    fn msm_inner<'a>(
+        iter: impl Iterator<Item = (&'a Self, &'a [u8])>,
+        nbits: usize,
+        strategy: &impl Strategy,
+    ) -> Self {
         // Filter out zero points/scalars and convert to blst types.
         // `blst` does not filter out infinity, so we must ensure it is impossible.
         //
         // Sources:
         // * https://github.com/supranational/blst/blob/cbc7e166a10d7286b91a3a7bea341e708962db13/src/multi_scalar.c#L10-L12
         // * https://github.com/MystenLabs/fastcrypto/blob/0acf0ff1a163c60e0dec1e16e4fbad4a4cf853bd/fastcrypto/src/groups/bls12381.rs#L160-L194
+        let nbytes = nbits.div_ceil(8);
         let (points_filtered, scalars_filtered): (Vec<_>, Vec<_>) = iter
             .filter_map(|(point, scalar)| {
                 if *point == Self::zero() || all_zero(scalar).into() {
@@ -1104,30 +1296,149 @@ impl G2 {
             return Self::zero();
         }
 
+        let npoints = points_filtered.len();
+        let ncpus = strategy.parallelism_hint();
+
+        // Convert to affine points
         let affine_points = Self::batch_to_affine(&points_filtered);
-        let points: Vec<*const blst_p2_affine> =
-            affine_points.iter().map(|p| p as *const _).collect();
-        let scalars: Vec<*const u8> = scalars_filtered.iter().map(|s| s.as_ptr()).collect();
+
+        // Flatten scalars into contiguous byte array
+        let scalar_bytes: Vec<u8> = scalars_filtered
+            .iter()
+            .flat_map(|s| s[..nbytes].iter().copied())
+            .collect();
+
+        // For small inputs or single CPU, use single-threaded path
+        if ncpus < 2 || npoints < 32 {
+            return Self::msm_single_threaded(&affine_points, &scalar_bytes, nbits);
+        }
+
+        // Parallel MSM using tile_pippenger
+        Self::msm_parallel(&affine_points, &scalar_bytes, nbits, ncpus, strategy)
+    }
+
+    fn msm_single_threaded(affine_points: &[blst_p2_affine], scalars: &[u8], nbits: usize) -> Self {
+        let npoints = affine_points.len();
 
         // SAFETY: blst_p2s_mult_pippenger_scratch_sizeof returns size in bytes for valid input.
-        let scratch_size = unsafe { blst_p2s_mult_pippenger_scratch_sizeof(points.len()) };
+        let scratch_size = unsafe { blst_p2s_mult_pippenger_scratch_sizeof(npoints) };
         assert_eq!(scratch_size % 8, 0, "scratch_size must be multiple of 8");
-        let mut scratch = vec![MaybeUninit::<u64>::uninit(); scratch_size / 8];
+        let mut scratch = vec![0u64; scratch_size / 8];
 
-        let mut msm_result = blst_p2::default();
+        // blst uses null-terminated pointer arrays
+        let p: [*const blst_p2_affine; 2] = [affine_points.as_ptr(), ptr::null()];
+        let s: [*const u8; 2] = [scalars.as_ptr(), ptr::null()];
+
+        let mut result = blst_p2::default();
         // SAFETY: All pointer arrays are valid and point to data that outlives this call.
         unsafe {
             blst_p2s_mult_pippenger(
-                &mut msm_result,
-                points.as_ptr(),
-                points.len(),
-                scalars.as_ptr(),
+                &mut result,
+                p.as_ptr(),
+                npoints,
+                s.as_ptr(),
                 nbits,
-                scratch.as_mut_ptr() as *mut _,
+                scratch.as_mut_ptr(),
             );
         }
+        Self::from_blst_p2(result)
+    }
 
-        Self::from_blst_p2(msm_result)
+    fn msm_parallel(
+        affine_points: &[blst_p2_affine],
+        scalars: &[u8],
+        nbits: usize,
+        ncpus: usize,
+        strategy: &impl Strategy,
+    ) -> Self {
+        let npoints = affine_points.len();
+        let nbytes = nbits.div_ceil(8);
+        let (nx, ny, window) = msm_breakdown(nbits, pippenger_window_size(npoints), ncpus);
+
+        // Build grid of tiles
+        struct Tile {
+            x: usize,
+            dx: usize,
+            y: usize,
+        }
+
+        let mut tiles = Vec::with_capacity(nx * ny);
+        let dx = npoints / nx;
+
+        // First row (highest bits)
+        let mut y = window * (ny - 1);
+        for i in 0..nx {
+            let x = i * dx;
+            let tile_dx = if i == nx - 1 { npoints - x } else { dx };
+            tiles.push(Tile { x, dx: tile_dx, y });
+        }
+
+        // Remaining rows
+        while y != 0 {
+            y -= window;
+            for i in 0..nx {
+                let x = i * dx;
+                let tile_dx = if i == nx - 1 { npoints - x } else { dx };
+                tiles.push(Tile { x, dx: tile_dx, y });
+            }
+        }
+
+        // Compute all tiles in parallel
+        // SAFETY: blst_p2s_mult_pippenger_scratch_sizeof(0) returns base scratch size.
+        let scratch_size = unsafe { blst_p2s_mult_pippenger_scratch_sizeof(0) } / 8;
+
+        let tile_results: Vec<(usize, usize, blst_p2)> =
+            strategy.map_collect_vec(tiles.iter().enumerate(), |(idx, tile)| {
+                let mut scratch = vec![0u64; scratch_size << (window - 1)];
+                let mut result = blst_p2::default();
+
+                // blst uses null-terminated pointer arrays
+                let p: [*const blst_p2_affine; 2] = [affine_points[tile.x..].as_ptr(), ptr::null()];
+                let s: [*const u8; 2] = [scalars[tile.x * nbytes..].as_ptr(), ptr::null()];
+
+                // SAFETY: All pointers valid, scratch sized correctly for window.
+                unsafe {
+                    blst_p2s_tile_pippenger(
+                        &mut result,
+                        p.as_ptr(),
+                        tile.dx,
+                        s.as_ptr(),
+                        nbits,
+                        scratch.as_mut_ptr(),
+                        tile.y,
+                        window,
+                    );
+                }
+                (idx / nx, idx % nx, result)
+            });
+
+        // Combine results by row
+        let mut row_sums: Vec<Option<blst_p2>> = vec![None; ny];
+        for (row, _col, point) in tile_results {
+            match &mut row_sums[row] {
+                // SAFETY: blst_p2_add_or_double is safe for valid blst_p2 points.
+                Some(sum) => unsafe { blst_p2_add_or_double(sum, sum, &point) },
+                None => row_sums[row] = Some(point),
+            }
+        }
+
+        // Combine rows with doubling (highest bits first)
+        let mut result = blst_p2::default();
+        for (i, row_sum) in row_sums.into_iter().enumerate() {
+            if let Some(sum) = row_sum {
+                // SAFETY: blst_p2_add_or_double is safe for valid blst_p2 points.
+                unsafe { blst_p2_add_or_double(&mut result, &result, &sum) };
+            }
+            // Double `window` times for all but the last row
+            if i < ny - 1 {
+                for _ in 0..window {
+                    // SAFETY: blst_p2_double is safe for valid blst_p2 points.
+                    unsafe { blst_p2_double(&mut result, &result) };
+                }
+            }
+        }
+
+        Self::from_blst_p2(result)
     }
 }
 
@@ -1138,14 +1449,30 @@ impl Write for G2 {
     }
 }
 
+impl G2 {
+    /// Verifies that this point is in the G2 subgroup.
+    ///
+    /// This check is necessary before using the point in pairing operations
+    /// to prevent small subgroup attacks. The check is called automatically
+    /// by verify operations, but can be called explicitly if needed.
+    pub fn ensure_in_subgroup(&self) -> Result<(), Error> {
+        // SAFETY: self.0 is a valid blst_p2 point
+        if unsafe { !blst_p2_in_g2(&self.0) } {
+            return Err(Invalid("G2", "Outside G2"));
+        }
+        Ok(())
+    }
+}
+
 impl Read for G2 {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let bytes = <[u8; Self::SIZE]>::read(buf)?;
         let mut ret = blst_p2::default();
-        // SAFETY: bytes is a valid 96-byte array. blst_p2_uncompress validates encoding.
-        // Additional checks for infinity and subgroup membership prevent small subgroup attacks.
+        // SAFETY: bytes is a valid 96-byte array. blst_p2_uncompress validates encoding
+        // and that the point is on the curve.
+        // NOTE: Subgroup check is deferred to verify operations for performance.
         unsafe {
             let mut affine = blst_p2_affine::default();
             match blst_p2_uncompress(&mut affine, bytes.as_ptr()) {
@@ -1165,10 +1492,7 @@ impl Read for G2 {
                 return Err(Invalid("G2", "Infinity"));
             }
 
-            // Verify that the deserialized element is in G2
-            if !blst_p2_in_g2(&ret) {
-                return Err(Invalid("G2", "Outside G2"));
-            }
+            // NOTE: Subgroup check removed - called automatically by verify operations
         }
         Ok(Self(ret))
     }
@@ -1305,7 +1629,7 @@ impl<'a> Mul<&'a SmallScalar> for G2 {
 }
 
 impl Space<Scalar> for G2 {
-    fn msm(points: &[Self], scalars: &[Scalar], _strategy: &impl Strategy) -> Self {
+    fn msm(points: &[Self], scalars: &[Scalar], strategy: &impl Strategy) -> Self {
         assert_eq!(points.len(), scalars.len(), "mismatched lengths");
         let scalar_bytes: Vec<_> = scalars.iter().map(|s| s.as_blst_scalar()).collect();
         Self::msm_inner(
@@ -1313,16 +1637,18 @@ impl Space<Scalar> for G2 {
                 .iter()
                 .zip(scalar_bytes.iter().map(|s| s.b.as_slice())),
             SCALAR_BITS,
+            strategy,
         )
     }
 }
 
 impl Space<SmallScalar> for G2 {
-    fn msm(points: &[Self], scalars: &[SmallScalar], _strategy: &impl Strategy) -> Self {
+    fn msm(points: &[Self], scalars: &[SmallScalar], strategy: &impl Strategy) -> Self {
         assert_eq!(points.len(), scalars.len(), "mismatched lengths");
         Self::msm_inner(
             points.iter().zip(scalars.iter().map(|s| s.as_bytes())),
             SMALL_SCALAR_BITS,
+            strategy,
         )
     }
 }
