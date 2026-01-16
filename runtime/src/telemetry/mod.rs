@@ -1,15 +1,26 @@
 //! Utilities for collecting and reporting telemetry data.
 
-use std::{any::Any, collections::HashMap};
+use std::{
+    any::{Any, TypeId},
+    borrow::Cow,
+    collections::HashMap,
+};
 
 use prometheus_client::registry::{Metric, Registry};
 
 pub mod metrics;
 pub mod traces;
 
+/// They key used for the metric in the registry.
+#[derive(Debug, PartialEq, Eq, Hash)]
+struct Key<'a> {
+    name: Cow<'a, str>,
+    type_id: TypeId,
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct MetricsRegistry {
-    registered: HashMap<String, Box<dyn Any + Send + Sync>>,
+    registered: HashMap<Key<'static>, Box<dyn Any + Send + Sync>>,
     inner: Registry,
 }
 
@@ -24,17 +35,26 @@ impl MetricsRegistry {
         help: String,
         metric: M,
     ) -> M {
+        let type_id = TypeId::of::<M>();
         if let Some(metric) = self
             .registered
-            .get(&name)
+            .get(&Key {
+                name: Cow::Borrowed(&name),
+                type_id,
+            })
             .and_then(|boxed| boxed.downcast_ref::<M>())
             .cloned()
         {
             return metric;
         }
         self.inner.register(name.clone(), help, metric.clone());
-        self.registered
-            .insert(name.clone(), Box::new(metric.clone()));
+        self.registered.insert(
+            Key {
+                name: Cow::Owned(name),
+                type_id,
+            },
+            Box::new(metric.clone()),
+        );
         metric
     }
 
