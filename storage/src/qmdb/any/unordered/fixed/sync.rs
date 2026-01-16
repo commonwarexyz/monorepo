@@ -6,7 +6,7 @@ use crate::{
     journal::{authenticated, contiguous::fixed},
     mmr::{mem::Clean, Location, Position, StandardHasher},
     // TODO(https://github.com/commonwarexyz/monorepo/issues/1873): support any::fixed::ordered
-    qmdb::{self, any::FixedValue, Durable, Merkleized},
+    qmdb::{self, any::FixedValue, sync::Journal, Durable, Merkleized},
     translator::Translator,
 };
 use commonware_cryptography::{DigestOf, Hasher};
@@ -100,16 +100,14 @@ where
 
     async fn resize_journal(
         mut journal: Self::Journal,
-        context: Self::Context,
-        config: &Self::Config,
         range: Range<Location>,
     ) -> Result<Self::Journal, qmdb::Error> {
         let size = journal.size();
 
         if size <= range.start {
-            // Create a new journal with the new bounds
-            journal.destroy().await?;
-            Self::create_journal(context.with_label("resized"), config, range).await
+            // Clear and reuse the journal
+            journal.clear(*range.start).await?;
+            Ok(journal)
         } else {
             // Just prune to the lower bound
             journal.prune(*range.start).await?;

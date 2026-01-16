@@ -591,6 +591,18 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
         self.offsets.destroy().await
     }
 
+    /// Clear all data and reset the journal to a new starting position.
+    ///
+    /// Unlike `destroy`, this keeps the journal alive so it can be reused.
+    /// After clearing, the journal will behave as if initialized with `init_at_size(new_size)`.
+    pub(crate) async fn clear_to_size(&mut self, new_size: u64) -> Result<(), Error> {
+        self.data.clear().await?;
+        self.offsets.clear_to_size(new_size).await?;
+        self.size = new_size;
+        self.oldest_retained_pos = new_size;
+        Ok(())
+    }
+
     /// Return the section number where the next append will write.
     const fn current_section(&self) -> u64 {
         position_to_section(self.size, self.items_per_section)

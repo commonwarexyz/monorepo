@@ -334,6 +334,13 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         self.manager.destroy().await
     }
 
+    /// Clear all data, resetting the journal to an empty state.
+    ///
+    /// Unlike `destroy`, this keeps the journal alive so it can be reused.
+    pub async fn clear(&mut self) -> Result<(), Error> {
+        self.manager.clear().await
+    }
+
     /// Initialize a section with a specific number of zero-filled items.
     ///
     /// This creates the section's blob and fills it with `item_count` items worth of zeros.

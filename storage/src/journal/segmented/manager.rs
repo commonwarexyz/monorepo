@@ -306,6 +306,24 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
         Ok(())
     }
 
+    /// Clear all blobs, resetting the manager to an empty state.
+    ///
+    /// Unlike `destroy`, this keeps the manager alive so it can be reused.
+    pub async fn clear(&mut self) -> Result<(), Error> {
+        let blobs = std::mem::take(&mut self.blobs);
+        for (section, blob) in blobs {
+            let size = blob.size().await;
+            drop(blob);
+            debug!(section, size, "cleared blob");
+            self.context
+                .remove(&self.partition, Some(&section.to_be_bytes()))
+                .await?;
+        }
+        let _ = self.tracked.try_set(0);
+        self.oldest_retained_section = 0;
+        Ok(())
+    }
+
     /// Rewind by removing all sections after `section` and resizing the target section.
     pub async fn rewind(&mut self, section: u64, size: u64) -> Result<(), Error> {
         self.prune_guard(section)?;

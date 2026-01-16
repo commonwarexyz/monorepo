@@ -647,6 +647,13 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
     pub async fn destroy(self) -> Result<(), Error> {
         self.manager.destroy().await
     }
+
+    /// Clear all data, resetting the journal to an empty state.
+    ///
+    /// Unlike `destroy`, this keeps the journal alive so it can be reused.
+    pub async fn clear(&mut self) -> Result<(), Error> {
+        self.manager.clear().await
+    }
 }
 
 #[cfg(test)]

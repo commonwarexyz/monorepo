@@ -471,6 +471,25 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     pub async fn destroy(self) -> Result<(), Error> {
         self.inner.destroy().await
     }
+
+    /// Clear all data and reset the journal to a new starting position.
+    ///
+    /// Unlike `destroy`, this keeps the journal alive so it can be reused.
+    /// After clearing, the journal will behave as if initialized with `init_at_size(new_size)`.
+    pub(crate) async fn clear_to_size(&mut self, new_size: u64) -> Result<(), Error> {
+        self.inner.clear().await?;
+
+        // Initialize the tail section if needed
+        let tail_section = new_size / self.items_per_blob;
+        let tail_items = new_size % self.items_per_blob;
+        self.inner
+            .init_section_at_size(tail_section, tail_items)
+            .await?;
+        self.inner.sync_all().await?;
+
+        self.size = new_size;
+        Ok(())
+    }
 }
 
 // Implement Contiguous trait for fixed-length journals

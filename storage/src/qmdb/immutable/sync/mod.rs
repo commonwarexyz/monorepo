@@ -4,7 +4,8 @@ use crate::{
     qmdb::{
         any::VariableValue,
         immutable::{self, Operation},
-        sync, Error,
+        sync::{self, Journal},
+        Error,
     },
     translator::Translator,
 };
@@ -88,16 +89,14 @@ where
 
     async fn resize_journal(
         mut journal: Self::Journal,
-        context: Self::Context,
-        config: &Self::Config,
         range: Range<Location>,
     ) -> Result<Self::Journal, Error> {
         let size = journal.size();
 
         if size <= range.start {
-            // Destroy and recreate
-            journal.destroy().await?;
-            Self::create_journal(context, config, range).await
+            // Clear and reuse the journal
+            journal.clear(*range.start).await?;
+            Ok(journal)
         } else {
             // Prune to range start (position-based, not section-based)
             journal
