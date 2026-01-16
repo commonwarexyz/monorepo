@@ -38,8 +38,10 @@ use std::{
 };
 use tracing::{debug, warn};
 
+// Configure 32MB buffer pool
 const PAGE_SIZE: NonZeroU16 = NZU16!(1 << 12);
-const POOL_CAPACITY: NonZeroUsize = NZUsize!(1 << 20);
+const POOL_CAPACITY: NonZeroUsize = NZUsize!(1 << 13);
+
 const WRITE_BUFFER: NonZeroUsize = NZUsize!(1 << 12);
 const READ_BUFFER: NonZeroUsize = NZUsize!(1 << 20);
 
