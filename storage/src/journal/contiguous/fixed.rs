@@ -210,6 +210,44 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         })
     }
 
+    /// Initialize a new `Journal` instance in a pruned state at a given size with a fill value.
+    ///
+    /// Like `init_at_size`, but fills placeholder items with the given value instead of zeros.
+    /// This is useful when a sentinel value is needed to distinguish placeholders from real data.
+    pub async fn init_at_size_with_fill(
+        context: E,
+        cfg: Config,
+        size: u64,
+        fill: A,
+    ) -> Result<Self, Error> {
+        let items_per_blob = cfg.items_per_blob.get();
+
+        // Calculate the tail blob section and items within it
+        let tail_section = size / items_per_blob;
+        let tail_items = size % items_per_blob;
+
+        // Initialize the segmented journal (empty)
+        let segmented_cfg = SegmentedConfig {
+            partition: cfg.partition,
+            buffer_pool: cfg.buffer_pool,
+            write_buffer: cfg.write_buffer,
+        };
+
+        let mut inner = SegmentedJournal::init(context, segmented_cfg).await?;
+
+        // Initialize the tail section with fill value if needed
+        inner
+            .init_section_at_size_with_fill(tail_section, tail_items, fill)
+            .await?;
+        inner.sync_all().await?;
+
+        Ok(Self {
+            inner,
+            items_per_blob,
+            size,
+        })
+    }
+
     /// Initialize a journal for synchronization, reusing existing data if possible.
     ///
     /// Handles sync scenarios based on existing journal data vs. the given sync range:
@@ -484,6 +522,28 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         let tail_items = new_size % self.items_per_blob;
         self.inner
             .init_section_at_size(tail_section, tail_items)
+            .await?;
+        self.inner.sync_all().await?;
+
+        self.size = new_size;
+        Ok(())
+    }
+
+    /// Clear all data and reset the journal to a new starting position with a fill value.
+    ///
+    /// Like `clear_to_size`, but fills placeholder items with the given value instead of zeros.
+    pub(crate) async fn clear_to_size_with_fill(
+        &mut self,
+        new_size: u64,
+        fill: A,
+    ) -> Result<(), Error> {
+        self.inner.clear().await?;
+
+        // Initialize the tail section with fill value if needed
+        let tail_section = new_size / self.items_per_blob;
+        let tail_items = new_size % self.items_per_blob;
+        self.inner
+            .init_section_at_size_with_fill(tail_section, tail_items, fill)
             .await?;
         self.inner.sync_all().await?;
 
@@ -1774,6 +1834,42 @@ mod tests {
             let pos = journal.append(test_digest(1500)).await.unwrap();
             assert_eq!(pos, 15);
             assert_eq!(journal.read(15).await.unwrap(), test_digest(1500));
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_fixed_journal_init_at_size_mid_section_persistence_without_data() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(NZU64!(5));
+
+            // Initialize at position 17 (mid-section, creates zero-filled items at 15,16)
+            let journal =
+                Journal::<_, Digest>::init_at_size(context.with_label("first"), cfg.clone(), 17)
+                    .await
+                    .unwrap();
+
+            assert_eq!(journal.size(), 17);
+            // Fixed journal has zero-filled items at 15,16, so oldest_retained_pos is Some(15)
+            assert_eq!(journal.oldest_retained_pos(), Some(15));
+
+            // Drop without writing any data
+            drop(journal);
+
+            // Reopen and verify size persisted
+            let mut journal = Journal::<_, Digest>::init(context.with_label("second"), cfg.clone())
+                .await
+                .unwrap();
+
+            assert_eq!(journal.size(), 17);
+            assert_eq!(journal.oldest_retained_pos(), Some(15));
+
+            // Can append starting at position 17
+            let pos = journal.append(test_digest(1700)).await.unwrap();
+            assert_eq!(pos, 17);
+            assert_eq!(journal.read(17).await.unwrap(), test_digest(1700));
 
             journal.destroy().await.unwrap();
         });
