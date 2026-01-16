@@ -676,27 +676,29 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
             // 2. The journal was initialized via init_at_size/clear_to_size, possibly
             //    followed by appends that crashed before data was synced.
             //
-            // We distinguish by checking the first offset:
-            // - If NOT sentinel: normal journal data loss, prune offsets to size
-            // - If sentinel: init_at_size state, check for later non-sentinels and rewind
+            // We find the first non-sentinel offset to determine the recovery action:
+            // - First non-sentinel at oldest: normal data loss, prune to size
+            // - First non-sentinel after oldest: init_at_size crash, rewind to that pos
+            // - No non-sentinel: all sentinels, keep them (init_at_size state)
             if let Some(oldest) = offsets.oldest_retained_pos() {
-                let first_offset = offsets.read(oldest).await?;
-                if first_offset != OFFSET_SENTINEL {
-                    // Normal journal that lost its data - prune offsets to match
-                    info!("crash repair: pruning offsets to {size} (data loss detected)");
-                    offsets.prune(size).await?;
-                    offsets.sync().await?;
-                } else {
-                    // First offset is sentinel - check for non-sentinels (crashed appends)
-                    let mut first_stale_pos = None;
-                    for pos in (oldest + 1)..size {
-                        let offset = offsets.read(pos).await?;
-                        if offset != OFFSET_SENTINEL {
-                            first_stale_pos = Some(pos);
-                            break;
-                        }
+                let mut first_stale_pos = None;
+                for pos in oldest..size {
+                    let offset = offsets.read(pos).await?;
+                    if offset != OFFSET_SENTINEL {
+                        first_stale_pos = Some(pos);
+                        break;
                     }
-                    if let Some(stale_pos) = first_stale_pos {
+                }
+
+                match first_stale_pos {
+                    Some(stale_pos) if stale_pos == oldest => {
+                        // Normal journal data loss - all offsets are stale
+                        info!("crash repair: pruning offsets to {size} (data loss detected)");
+                        offsets.prune(size).await?;
+                        offsets.sync().await?;
+                    }
+                    Some(stale_pos) => {
+                        // init_at_size with crashed appends - rewind to first stale
                         info!(
                             "crash repair: rewinding offsets to {stale_pos} (stale appends detected)"
                         );
@@ -704,7 +706,9 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
                         offsets.sync().await?;
                         return Ok((stale_pos, stale_pos));
                     }
-                    // else: all sentinel values - this is init_at_size/clear_to_size state, keep them
+                    None => {
+                        // All sentinels - init_at_size/clear_to_size state, keep them
+                    }
                 }
             }
 
