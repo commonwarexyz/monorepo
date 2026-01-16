@@ -1,9 +1,6 @@
 //! Benchmark the initialization performance of each QMDB variant on a large randomly generated
 //! database with variable-sized values.
 
-// This module is only used by the qmdb_init benchmark binary, not qmdb_generate.
-#![allow(dead_code)]
-
 use crate::variable::{
     any_cfg, gen_random_kv, get_any_ordered, get_any_unordered, Digest, OVariableDb, UVariableDb,
     Variant, THREADS, VARIANTS,

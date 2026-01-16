@@ -1,9 +1,6 @@
 //! Benchmark the generation of a large database with values of varying sizes for each (a)db variant
 //! that supports variable-size values.
 
-// This module is only used by the qmdb_generate benchmark binary, not qmdb_init.
-#![allow(dead_code)]
-
 use crate::variable::{
     gen_random_kv, gen_random_kv_batched, get_any_ordered, get_any_unordered, Digest, Variant,
     VARIANTS,

@@ -239,8 +239,6 @@ where
     durable
 }
 
-// Only used by generate benchmark, not init benchmark.
-#[allow(dead_code)]
 async fn gen_random_kv_batched<M>(
     mut db: M,
     num_elements: u64,

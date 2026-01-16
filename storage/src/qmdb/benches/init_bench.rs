@@ -7,7 +7,9 @@
 
 use criterion::criterion_main;
 
+#[allow(dead_code)]
 mod fixed;
+#[allow(dead_code)]
 mod variable;
 
 criterion_main!(fixed::init::benches, variable::init::benches);

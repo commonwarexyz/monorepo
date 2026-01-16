@@ -4,8 +4,10 @@
 
 use criterion::criterion_main;
 
+#[allow(dead_code)]
 mod fixed;
 mod keyless_generate;
+#[allow(dead_code)]
 mod variable;
 
 criterion_main!(
