@@ -1,8 +1,8 @@
 //! `create` subcommand for `ec2`
 
-use crate::ec2::{
-    aws::{self, *},
+use crate::aws::{
     deployer_directory,
+    ec2::{self, *},
     s3::{self, *},
     services::*,
     utils::*,
@@ -124,7 +124,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
 
     // Detect architecture for each unique instance type (architecture is global, not region-specific)
     info!("detecting architectures for instance types");
-    let ec2_client = aws::create_client(Region::new(MONITORING_REGION)).await;
+    let ec2_client = ec2::create_client(Region::new(MONITORING_REGION)).await;
     let mut arch_by_instance_type: HashMap<String, Architecture> = HashMap::new();
     for instance_type in &unique_instance_types {
         let arch = detect_architecture(&ec2_client, instance_type).await?;
@@ -331,7 +331,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
 
             async move {
                 // Create client for region
-                let ec2_client = aws::create_client(Region::new(region.clone())).await;
+                let ec2_client = ec2::create_client(Region::new(region.clone())).await;
                 info!(region = region.as_str(), "created EC2 client");
 
                 // Find availability zone that supports all instance types

@@ -1,8 +1,8 @@
 //! `update` subcommand for `ec2`
 
-use crate::ec2::{
-    aws::{self, *},
+use crate::aws::{
     deployer_directory,
+    ec2::{self, *},
     s3::{self, *},
     services::*,
     utils::*,
@@ -180,7 +180,7 @@ pub async fn update(config_path: &PathBuf, concurrency: usize) -> Result<(), Err
         let region = region.clone();
         let tag = tag.clone();
         async move {
-            let ec2_client = aws::create_client(Region::new(region.clone())).await;
+            let ec2_client = ec2::create_client(Region::new(region.clone())).await;
             let resp = ec2_client
                 .describe_instances()
                 .filters(Filter::builder().name("tag:deployer").values(&tag).build())

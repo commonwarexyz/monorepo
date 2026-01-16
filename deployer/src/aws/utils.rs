@@ -1,6 +1,6 @@
 //! Utility functions for interacting with EC2 instances
 
-use crate::ec2::{s3::WGET, Error};
+use crate::aws::{s3::WGET, Error};
 use std::path::Path;
 use tokio::{
     fs::File,

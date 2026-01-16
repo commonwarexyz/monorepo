@@ -1,8 +1,8 @@
 //! `destroy` subcommand for `ec2`
 
-use crate::ec2::{
-    aws::{self, *},
+use crate::aws::{
     deployer_directory,
+    ec2::{self, *},
     s3::{self, delete_prefix, is_no_such_bucket_error, Region, BUCKET_NAME, DEPLOYMENTS_PREFIX},
     Config, Error, DESTROYED_FILE_NAME, LOGS_PORT, MONITORING_REGION, PROFILES_PORT, TRACES_PORT,
 };
@@ -74,7 +74,7 @@ pub async fn destroy(config: &PathBuf) -> Result<(), Error> {
         let region = region.clone();
         let tag = tag.clone();
         async move {
-            let ec2_client = aws::create_client(Region::new(region.clone())).await;
+            let ec2_client = ec2::create_client(Region::new(region.clone())).await;
             info!(region = region.as_str(), "created EC2 client");
 
             let instance_ids = find_instances_by_tag(&ec2_client, &tag).await?;

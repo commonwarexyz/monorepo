@@ -1,6 +1,6 @@
 //! Service configuration for Prometheus, Loki, Grafana, Promtail, and a caller-provided binary
 
-use crate::ec2::{
+use crate::aws::{
     s3::{DEPLOYMENTS_PREFIX, TOOLS_BINARIES_PREFIX, TOOLS_CONFIGS_PREFIX, WGET},
     Architecture,
 };

@@ -1,7 +1,7 @@
 //! AWS EC2 SDK function wrappers
 
 use super::{METRICS_PORT, SYSTEM_PORT};
-use crate::ec2::{
+use crate::aws::{
     utils::{exact_cidr, DEPLOYER_MAX_PORT, DEPLOYER_MIN_PORT, DEPLOYER_PROTOCOL, RETRY_INTERVAL},
     PortConfig,
 };

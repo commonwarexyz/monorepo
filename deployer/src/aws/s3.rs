@@ -1,6 +1,6 @@
 //! AWS S3 SDK function wrappers for caching deployer artifacts
 
-use crate::ec2::Error;
+use crate::aws::Error;
 use aws_config::BehaviorVersion;
 pub use aws_config::Region;
 use aws_sdk_s3::{

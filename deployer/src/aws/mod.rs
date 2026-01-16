@@ -98,7 +98,7 @@
 //!
 //! # Workflow
 //!
-//! ## `ec2 create`
+//! ## `aws create`
 //!
 //! 1. Validates configuration and generates an SSH key pair, stored in `$HOME/.commonware_deployer/{tag}/id_rsa_{tag}`.
 //! 2. Ensures the shared S3 bucket exists and caches observability tools (Prometheus, Grafana, Loki, etc.) if not already present.
@@ -112,7 +112,7 @@
 //! 10. Updates the monitoring security group to allow telemetry traffic from binary instances.
 //! 11. Marks completion with `$HOME/.commonware_deployer/{tag}/created`.
 //!
-//! ## `ec2 update`
+//! ## `aws update`
 //!
 //! Performs rolling updates across all binary instances:
 //!
@@ -126,24 +126,24 @@
 //! _Use `--concurrency 1` for fully sequential updates that wait for each instance to be healthy
 //! before updating the next._
 //!
-//! ## `ec2 authorize`
+//! ## `aws authorize`
 //!
 //! 1. Obtains the deployer's current public IP address (or parses the one provided).
 //! 2. For each security group in the deployment, adds an ingress rule for the IP (if it doesn't already exist).
 //!
-//! ## `ec2 destroy`
+//! ## `aws destroy`
 //!
 //! 1. Terminates all instances across regions.
 //! 2. Deletes security groups, subnets, route tables, VPC peering connections, internet gateways, key pairs, and VPCs in dependency order.
 //! 3. Deletes deployment-specific data from S3 (cached tools remain for future deployments).
 //! 4. Marks destruction with `$HOME/.commonware_deployer/{tag}/destroyed`, retaining the directory to prevent tag reuse.
 //!
-//! ## `ec2 clean`
+//! ## `aws clean`
 //!
 //! 1. Deletes the shared S3 bucket and all its contents (cached tools and any remaining deployment data).
 //! 2. Use this to fully clean up when you no longer need the deployer cache.
 //!
-//! ## `ec2 profile`
+//! ## `aws profile`
 //!
 //! 1. Loads the deployment configuration and locates the specified instance.
 //! 2. Caches the samply binary in S3 if not already present.
@@ -173,7 +173,7 @@
 //! following:
 //!
 //! ```bash
-//! deployer ec2 profile --config config.yaml --instance <name> --binary <path-to-binary-with-debug>
+//! deployer aws profile --config config.yaml --instance <name> --binary <path-to-binary-with-debug>
 //! ```
 //!
 //! This captures a 30-second profile (configurable with `--duration`) using samply on the remote
@@ -186,8 +186,8 @@
 //! CARGO_PROFILE_RELEASE_DEBUG=true cargo build --release
 //! ```
 //!
-//! Now, strip symbols and deploy via `ec2 create` (preserve the original binary for profile symbolication
-//! when you run the `ec2 profile` command shown above):
+//! Now, strip symbols and deploy via `aws create` (preserve the original binary for profile symbolication
+//! when you run the `aws profile` command shown above):
 //!
 //! ```bash
 //! cp target/release/my-binary target/release/my-binary-debug
@@ -296,7 +296,7 @@ cfg_if::cfg_if! {
             }
         }
 
-        pub mod aws;
+        pub mod ec2;
         mod create;
         pub mod services;
         pub use create::create;
@@ -341,7 +341,7 @@ cfg_if::cfg_if! {
         pub const DEFAULT_CONCURRENCY: &str = "128";
 
         /// Subcommand name
-        pub const CMD: &str = "ec2";
+        pub const CMD: &str = "aws";
 
         /// Create subcommand name
         pub const CREATE_CMD: &str = "create";

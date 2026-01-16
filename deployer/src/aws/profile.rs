@@ -1,8 +1,8 @@
 //! `profile` subcommand for `ec2`
 
-use crate::ec2::{
-    aws::{self, *},
+use crate::aws::{
     deployer_directory,
+    ec2::{self, *},
     s3::{self, *},
     services::*,
     utils::{download_file, scp_download, ssh_execute},
@@ -62,7 +62,7 @@ pub async fn profile(
     let private_key = private_key_path.to_str().unwrap();
 
     // Query AWS to find the instance IP
-    let ec2_client = aws::create_client(Region::new(instance_region.clone())).await;
+    let ec2_client = ec2::create_client(Region::new(instance_region.clone())).await;
     let resp = ec2_client
         .describe_instances()
         .filters(Filter::builder().name("tag:deployer").values(tag).build())

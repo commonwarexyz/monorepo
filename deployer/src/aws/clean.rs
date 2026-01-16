@@ -1,6 +1,6 @@
 //! `clean` subcommand for `ec2`
 
-use crate::ec2::{
+use crate::aws::{
     s3::{self, delete_bucket_and_contents, is_no_such_bucket_error, BUCKET_NAME},
     Error, MONITORING_REGION,
 };
