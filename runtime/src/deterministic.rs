@@ -1190,10 +1190,6 @@ impl crate::Metrics for Context {
 
         // Name metric
         let executor = self.executor();
-        executor.auditor.event(b"register", |hasher| {
-            hasher.update(name.as_bytes());
-            hasher.update(help.as_bytes());
-        });
         let prefixed_name = self.prefix_with_name(&name);
         let auditor = &executor.auditor;
         let help = &help;
