@@ -1175,23 +1175,7 @@ impl crate::Metrics for Context {
         help: impl std::fmt::Display,
         metric: M,
     ) -> M {
-        // Prepare args
-        let name = name.to_string();
-        let help = help.to_string();
-
-        // Name metric
-        let executor = self.executor();
-        executor.auditor.event(b"register", |hasher| {
-            hasher.update(name.as_bytes());
-            hasher.update(help.as_bytes());
-        });
-        let prefixed_name = self.prefix_with_name(&name);
-        let metric = executor.metrics_registry.lock().unwrap().get_or_register(
-            &prefixed_name,
-            &help,
-            metric,
-        );
-        metric
+        self.get_or_register_with(name, help, move || metric)
     }
 
     fn get_or_register_with<M: Clone + Metric>(
@@ -1211,11 +1195,23 @@ impl crate::Metrics for Context {
             hasher.update(help.as_bytes());
         });
         let prefixed_name = self.prefix_with_name(&name);
+        let auditor = &executor.auditor;
+        let help = &help;
+
+        // Only records the metric on the auditor once: if it doesn't exist
+        // yet, this closure is called, triggering the record.
+        let audit_on_construct = move || {
+            auditor.event(b"register", |hasher| {
+                hasher.update(name.as_bytes());
+                hasher.update(help.as_bytes());
+            });
+            metric()
+        };
         let metric = executor
             .metrics_registry
             .lock()
             .unwrap()
-            .get_or_register_with(&prefixed_name, &help, metric);
+            .get_or_register_with(&prefixed_name, help, audit_on_construct);
         metric
     }
 }
