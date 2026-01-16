@@ -76,14 +76,14 @@ impl<D: Digest> PartialEq for Proof<D> {
 
 impl<D: Digest> EncodeSize for Proof<D> {
     fn encode_size(&self) -> usize {
-        UInt(*self.leaves).encode_size() + self.digests.encode_size()
+        self.leaves.encode_size() + self.digests.encode_size()
     }
 }
 
 impl<D: Digest> Write for Proof<D> {
     fn write(&self, buf: &mut impl BufMut) {
         // Write the number of nodes in the MMR as a varint
-        UInt(*self.leaves).write(buf);
+        self.leaves.write(buf);
 
         // Write the digests
         self.digests.write(buf);
@@ -189,7 +189,7 @@ impl<D: Digest> Proof<D> {
         H: Hasher<Digest = D>,
         E: AsRef<[u8]>,
     {
-        // Empty proof is valid for an empty MMR
+        // Empty proof is valid for an empty MMRp
         if elements.is_empty() {
             return self.leaves == Location::new_unchecked(0)
                 && *root == hasher.root(Location::new_unchecked(0), core::iter::empty());

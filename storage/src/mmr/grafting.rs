@@ -532,9 +532,7 @@ impl<H: CHasher, S1: StorageTrait<H::Digest>, S2: StorageTrait<H::Digest>> Stora
 mod tests {
     use super::*;
     use crate::mmr::{
-        conformance::{build_reference_roots, build_test_mmr, STABILITY_TEST_ELEMENTS},
-        mem::CleanMmr,
-        verification, Position, StandardHasher,
+        conformance::build_test_mmr, mem::CleanMmr, verification, Position, StandardHasher,
     };
     use commonware_cryptography::{Hasher as CHasher, Sha256};
     use commonware_macros::test_traced;
@@ -694,19 +692,17 @@ mod tests {
     fn test_hasher_grafting() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            let reference_roots = build_reference_roots();
-            let expected_root = &reference_roots[199];
+            const NUM_ELEMENTS: u64 = 200;
 
             let mut standard: StandardHasher<Sha256> = StandardHasher::new();
             let mmr = CleanMmr::new(&mut standard);
-            let base_mmr = build_test_mmr(&mut standard, mmr);
-            let root = *base_mmr.root();
-            assert_eq!(&root, expected_root);
+            let base_mmr = build_test_mmr(&mut standard, mmr, NUM_ELEMENTS);
+            let expected_root = *base_mmr.root();
 
             let mut hasher: Hasher<'_, Sha256> = Hasher::new(&mut standard, 0);
             hasher
                 .load_grafted_digests(
-                    &(0..STABILITY_TEST_ELEMENTS)
+                    &(0..NUM_ELEMENTS)
                         .map(Location::new_unchecked)
                         .collect::<Vec<_>>(),
                     &base_mmr,
@@ -725,20 +721,20 @@ mod tests {
                 assert_eq!(hasher.destination_pos(rand_leaf_pos), rand_leaf_pos);
 
                 let mmr = CleanMmr::new(&mut hasher);
-                let peak_mmr = build_test_mmr(&mut hasher, mmr);
+                let peak_mmr = build_test_mmr(&mut hasher, mmr, NUM_ELEMENTS);
                 let root = *peak_mmr.root();
                 // Peak digest should differ from the base MMR.
-                assert_ne!(root, *expected_root);
+                assert_ne!(root, expected_root);
             }
 
             // Try grafting at a height of 1 instead of 0, which requires we double the # of leaves
             // in the base tree to maintain the corresponding # of segments.
-            let base_mmr = build_test_mmr(&mut standard, base_mmr);
+            let base_mmr = build_test_mmr(&mut standard, base_mmr, NUM_ELEMENTS);
             {
                 let mut hasher: Hasher<'_, Sha256> = Hasher::new(&mut standard, 1);
                 hasher
                     .load_grafted_digests(
-                        &(0..STABILITY_TEST_ELEMENTS)
+                        &(0..NUM_ELEMENTS)
                             .map(Location::new_unchecked)
                             .collect::<Vec<_>>(),
                         &base_mmr,
@@ -770,10 +766,10 @@ mod tests {
                 );
 
                 let mmr = CleanMmr::new(&mut hasher);
-                let peak_mmr = build_test_mmr(&mut hasher, mmr);
+                let peak_mmr = build_test_mmr(&mut hasher, mmr, NUM_ELEMENTS);
                 let root = *peak_mmr.root();
                 // Peak digest should differ from the base MMR.
-                assert_ne!(root, *expected_root);
+                assert_ne!(root, expected_root);
             }
 
             // Height 2 grafting destination computation check.
