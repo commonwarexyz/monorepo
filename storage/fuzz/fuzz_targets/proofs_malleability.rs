@@ -212,7 +212,7 @@ fn fuzz(input: FuzzInput) {
                             &mut hasher,
                             &range_elements,
                             start_loc,
-                            &root
+                            root
                         ),
                         "Original MMR range proof must be valid"
                     );
@@ -226,7 +226,7 @@ fn fuzz(input: FuzzInput) {
                                 &mut hasher,
                                 &range_elements,
                                 start_loc,
-                                &root,
+                                root,
                             );
                             assert!(!is_valid, "Mutated MMR range proof must be invalid");
                         }
