@@ -44,9 +44,9 @@ use commonware_conformance::{conformance_tests, Conformance};
 
 /// Tests stability of MMR root computation.
 ///
-/// Builds an MMR with 200 elements using a deterministic hasher and returns all
-/// roots concatenated. Any change to the root computation algorithm will cause
-/// this test to fail.
+/// Builds an MMR by adding 199 elements and returns all 200 roots concatenated
+/// (including the empty root at index 0). Any change to the root computation
+/// algorithm will cause this test to fail.
 struct MmrRootStability;
 
 impl Conformance for MmrRootStability {
