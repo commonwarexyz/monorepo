@@ -276,8 +276,7 @@ impl<H: CHasher> HasherTrait for Hasher<'_, H> {
         leaves: Location,
         peak_digests: impl Iterator<Item = &'a H::Digest>,
     ) -> H::Digest {
-        let dest_leaves = Location::new_unchecked(*leaves << self.height);
-        self.hasher.root(dest_leaves, peak_digests)
+        self.hasher.root(leaves, peak_digests)
     }
 
     fn digest(&mut self, data: &[u8]) -> H::Digest {
@@ -849,7 +848,11 @@ mod tests {
 
                 let grafted_storage_root = grafted_mmr.root(&mut standard).await.unwrap();
                 assert_ne!(grafted_storage_root, base_root);
-                assert_eq!(grafted_storage_root, peak_root);
+
+                // storage_root will differ from the peak_root because the storage_root uses a leaf count corresponding
+                // to the number of leaves in the base mmr (and more generally includes information from base tree
+                // leaves that fall into the "partil chunk" of the bitmap) vs the peak tree's leaf count.
+                assert_ne!(grafted_storage_root, peak_root);
 
                 // Confirm we can generate and verify an inclusion proofs for each of the 4 leafs of
                 // the grafted MMR.

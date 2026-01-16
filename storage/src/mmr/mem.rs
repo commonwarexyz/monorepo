@@ -1145,7 +1145,10 @@ mod tests {
             for i in (0..STABILITY_TEST_ELEMENTS).rev() {
                 assert!(mmr.pop(&mut hasher).is_ok());
                 let root = *mmr.root();
-                assert_eq!(root, reference_roots[i as usize], "root mismatch after pop at {i}");
+                assert_eq!(
+                    root, reference_roots[i as usize],
+                    "root mismatch after pop at {i}"
+                );
             }
 
             assert!(
