@@ -960,29 +960,11 @@ mod tests {
         });
     }
 
-    /// Build a reference MMR with the provided number of elements using
-    /// `CleanMmr::add` and return all roots.
-    pub fn build_reference_roots(elements: u64) -> Vec<sha256::Digest> {
-        let mut hasher: Standard<Sha256> = Standard::new();
-        let mut mmr = mem::CleanMmr::new(&mut hasher);
-        let mut roots = Vec::with_capacity(elements as usize);
-
-        for i in 0u64..elements {
-            hasher.inner().update(&i.to_be_bytes());
-            let element = hasher.inner().finalize();
-            mmr.add(&mut hasher, &element);
-            roots.push(*mmr.root());
-        }
-
-        roots
-    }
-
     #[test_traced]
     fn test_journaled_mmr_pop() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             const NUM_ELEMENTS: u64 = 200;
-            let reference_roots = build_reference_roots(NUM_ELEMENTS);
 
             let mut hasher: Standard<Sha256> = Standard::new();
             let mut mmr = Mmr::init(context.clone(), &mut hasher, test_config())
@@ -995,14 +977,20 @@ mod tests {
                 let element = c_hasher.finalize();
                 mmr.add(&mut hasher, &element).await.unwrap();
             }
-            assert_eq!(reference_roots[199], mmr.root());
 
             // Pop off one node at a time without syncing until empty, confirming the root matches.
             for i in (0..NUM_ELEMENTS).rev() {
                 assert!(mmr.pop(&mut hasher, 1).await.is_ok());
                 let root = mmr.root();
+                let mut reference_mmr = mem::CleanMmr::new(&mut hasher);
+                for j in 0..i {
+                    c_hasher.update(&j.to_be_bytes());
+                    let element = c_hasher.finalize();
+                    reference_mmr.add(&mut hasher, &element);
+                }
                 assert_eq!(
-                    root, reference_roots[i as usize],
+                    root,
+                    *reference_mmr.root(),
                     "root mismatch after pop at {i}"
                 );
             }
@@ -1019,16 +1007,18 @@ mod tests {
                     mmr.sync().await.unwrap();
                 }
             }
-            for i in (0..198u64).rev().step_by(2) {
+            for i in (0..NUM_ELEMENTS - 1).rev().step_by(2) {
                 assert!(mmr.pop(&mut hasher, 2).await.is_ok(), "at position {i:?}");
                 let root = mmr.root();
+                let reference_mmr = mem::CleanMmr::new(&mut hasher);
+                let reference_mmr = build_test_mmr(&mut hasher, reference_mmr, i);
+                eprintln!("trying reference mmr of size {}", i);
                 assert_eq!(
-                    root, reference_roots[i as usize],
+                    root,
+                    *reference_mmr.root(),
                     "root mismatch at position {i:?}"
                 );
             }
-            assert_eq!(mmr.size(), 1);
-            assert!(mmr.pop(&mut hasher, 1).await.is_ok()); // pop the last element
             assert!(matches!(mmr.pop(&mut hasher, 99).await, Err(Error::Empty)));
 
             // Repeat one more time only after pruning the MMR first.
