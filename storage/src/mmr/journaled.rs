@@ -1012,7 +1012,6 @@ mod tests {
                 let root = mmr.root();
                 let reference_mmr = mem::CleanMmr::new(&mut hasher);
                 let reference_mmr = build_test_mmr(&mut hasher, reference_mmr, i);
-                eprintln!("trying reference mmr of size {}", i);
                 assert_eq!(
                     root,
                     *reference_mmr.root(),

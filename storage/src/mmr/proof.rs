@@ -189,7 +189,7 @@ impl<D: Digest> Proof<D> {
         H: Hasher<Digest = D>,
         E: AsRef<[u8]>,
     {
-        // Empty proof is valid for an empty MMRp
+        // Empty proof is valid for an empty MMR
         if elements.is_empty() {
             return self.leaves == Location::new_unchecked(0)
                 && *root == hasher.root(Location::new_unchecked(0), core::iter::empty());

@@ -841,9 +841,10 @@ mod tests {
                 let grafted_storage_root = grafted_mmr.root(&mut standard).await.unwrap();
                 assert_ne!(grafted_storage_root, base_root);
 
-                // storage_root will differ from the peak_root because the storage_root uses a leaf count corresponding
-                // to the number of leaves in the base mmr (and more generally includes information from base tree
-                // leaves that fall into the "partil chunk" of the bitmap) vs the peak tree's leaf count.
+                // storage_root will differ from the peak_root because the storage_root uses a leaf
+                // count corresponding to the number of leaves in the base mmr (and more generally
+                // includes information from base tree leaves that fall into the "partial chunk" of
+                // the bitmap) vs the peak tree's leaf count.
                 assert_ne!(grafted_storage_root, peak_root);
 
                 // Confirm we can generate and verify an inclusion proofs for each of the 4 leafs of
