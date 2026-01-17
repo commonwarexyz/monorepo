@@ -3,6 +3,7 @@
 use crate::{Decode, Encode, EncodeSize, FixedSize, Read, Write};
 use bytes::{Buf, Bytes};
 use core::hash::Hash;
+#[cfg(feature = "std")]
 use std::sync::OnceLock;
 
 /// A type which can be deserialized lazily.
@@ -65,8 +66,11 @@ use std::sync::OnceLock;
 #[derive(Clone)]
 pub struct Lazy<T: Read> {
     /// This should only be `None` if `value` is initialized.
-    proto: Option<Pending<T>>,
+    pending: Option<Pending<T>>,
+    #[cfg(feature = "std")]
     value: OnceLock<Option<T>>,
+    #[cfg(not(feature = "std"))]
+    value: Option<T>,
 }
 
 #[derive(Clone)]
@@ -80,7 +84,7 @@ impl<T: Read> Lazy<T> {
     /// Create a [`Lazy`] using a value.
     pub fn new(value: T) -> Self {
         Self {
-            proto: None,
+            pending: None,
             value: Some(value).into(),
         }
     }
@@ -93,9 +97,18 @@ impl<T: Read> Lazy<T> {
     /// Use [`Self::get`] to access the actual value, by decoding these bytes.
     pub fn deferred(buf: &mut impl Buf, cfg: T::Cfg) -> Self {
         let bytes = buf.copy_to_bytes(buf.remaining());
-        Self {
-            proto: Some(Pending { bytes, cfg }),
-            value: Default::default(),
+        cfg_if::cfg_if! {
+            if #[cfg(feature = "std")] {
+                Self {
+                    pending: Some(Pending { bytes, cfg }),
+                    value: Default::default(),
+                }
+            } else {
+                Self {
+                    value: T::decode_cfg(bytes.clone(), &cfg).ok(),
+                    pending: Some(Pending { bytes, cfg }),
+                }
+            }
         }
     }
 }
@@ -108,15 +121,21 @@ impl<T: Read> Lazy<T> {
     /// This function wil incur the cost of decoding the value only once,
     /// so there's no need to cache its output.
     pub fn get(&self) -> Option<&T> {
-        self.value
-            .get_or_init(|| {
-                let Pending { bytes, cfg } = self
-                    .proto
+        cfg_if::cfg_if! {
+            if #[cfg(feature = "std")] {
+                self.value
+                    .get_or_init(|| {
+                        let Pending { bytes, cfg } = self
+                            .pending
+                            .as_ref()
+                            .expect("Lazy should have proto if value is not initialized");
+                        T::decode_cfg(bytes.clone(), cfg).ok()
+                    })
                     .as_ref()
-                    .expect("Lazy should have proto if value is not initialized");
-                T::decode_cfg(bytes.clone(), cfg).ok()
-            })
-            .as_ref()
+            } else {
+                self.value.as_ref()
+            }
+        }
     }
 }
 
@@ -133,8 +152,8 @@ impl<T: Read + Encode> From<T> for Lazy<T> {
 
 impl<T: Read + EncodeSize> EncodeSize for Lazy<T> {
     fn encode_size(&self) -> usize {
-        if let Some(proto) = &self.proto {
-            return proto.bytes.len();
+        if let Some(pending) = &self.pending {
+            return pending.bytes.len();
         }
         self.get()
             .expect("Lazy should have a value if proto is None")
@@ -144,9 +163,9 @@ impl<T: Read + EncodeSize> EncodeSize for Lazy<T> {
 
 impl<T: Read + Write> Write for Lazy<T> {
     fn write(&self, buf: &mut impl bytes::BufMut) {
-        if let Some(proto) = &self.proto {
+        if let Some(pending) = &self.pending {
             // Write raw bytes without length prefix (Bytes::write adds a length prefix)
-            buf.put_slice(&proto.bytes);
+            buf.put_slice(&pending.bytes);
             return;
         }
         self.get()
@@ -281,26 +300,5 @@ mod test {
             prop_assert_eq!(a < b, la < lb);
             prop_assert_eq!(a >= b, la >= lb);
         }
-    }
-}
-
-/// Module for comparing assembly of different Lazy construction methods.
-#[doc(hidden)]
-pub mod asm_compare {
-    use super::*;
-    use bytes::Bytes as BytesType;
-
-    type FB = [u8; 32];
-
-    /// Calls Lazy::deferred with a [u8; 32].
-    #[inline(never)]
-    pub fn via_deferred(mut buf: BytesType, cfg: ()) -> Lazy<FB> {
-        Lazy::deferred(&mut buf, cfg)
-    }
-
-    /// Calls Lazy::read_cfg with a [u8; 32].
-    #[inline(never)]
-    pub fn via_read(mut buf: BytesType, cfg: &()) -> Result<Lazy<FB>, crate::Error> {
-        Lazy::<FB>::read_cfg(&mut buf, cfg)
     }
 }
