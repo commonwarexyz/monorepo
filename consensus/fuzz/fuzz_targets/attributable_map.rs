@@ -44,7 +44,7 @@ fn make_vote(
         round: Round::new(data.epoch, data.view),
         attestation: Attestation {
             signer: data.signer,
-            signature: sig,
+            signature: sig.into(),
         },
     }
 }
