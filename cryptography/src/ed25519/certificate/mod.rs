@@ -205,8 +205,11 @@ impl<N: Namespace> Generic<N> {
                 invalid.insert(attestation.signer);
                 continue;
             };
+            let Some(signature) = attestation.signature.get() else {
+                continue;
+            };
 
-            if public_key.verify(namespace, &message, &attestation.signature) {
+            if public_key.verify(namespace, &message, signature) {
                 verified.push(attestation);
             } else {
                 invalid.insert(attestation.signer);

@@ -1077,6 +1077,7 @@ version = "0.0.65"
 dependencies = [
  "arbitrary",
  "bytes",
+ "cfg-if",
  "commonware-conformance",
  "paste",
  "proptest",
