@@ -44,8 +44,79 @@ pub struct RegionResources {
     pub vpc_cidr: String,
     pub route_table_id: String,
     pub subnet_id: String,
+    pub subnet_cidr: String,
     pub binary_sg_id: Option<String>,
     pub monitoring_sg_id: Option<String>,
+    /// All availability zones that support the required instance types
+    pub availability_zones: Vec<String>,
+    /// Index of the current AZ being used (into availability_zones)
+    pub current_az_index: usize,
+    /// Counter for subnet CIDR allocation (third octet: 1, 2, 3, ...)
+    subnet_counter: u8,
+}
+
+impl RegionResources {
+    /// Returns true if there are more availability zones to try
+    pub const fn has_more_azs(&self) -> bool {
+        self.current_az_index + 1 < self.availability_zones.len()
+    }
+
+    /// Returns the current availability zone
+    pub fn current_az(&self) -> &str {
+        &self.availability_zones[self.current_az_index]
+    }
+}
+
+/// Creates a new subnet in the next availability zone.
+/// The old subnet is kept (instances already launched there remain).
+/// Returns the new subnet ID.
+async fn create_subnet_in_next_az(
+    ec2_client: &Ec2Client,
+    resources: &mut RegionResources,
+    tag: &str,
+    region: &str,
+    region_idx: usize,
+) -> Result<String, Error> {
+    // Move to next AZ
+    resources.current_az_index += 1;
+    resources.subnet_counter += 1;
+    let new_az = resources.current_az();
+
+    // Compute new subnet CIDR (increment the third octet)
+    let new_subnet_cidr = format!("10.{}.{}.0/24", region_idx, resources.subnet_counter);
+
+    info!(
+        az = new_az,
+        subnet_cidr = new_subnet_cidr.as_str(),
+        region = region,
+        "creating subnet in next availability zone"
+    );
+
+    // Create new subnet in the new AZ
+    let new_subnet_id = create_subnet(
+        ec2_client,
+        &resources.vpc_id,
+        &resources.route_table_id,
+        &new_subnet_cidr,
+        new_az,
+        tag,
+    )
+    .await?;
+    info!(
+        subnet = new_subnet_id.as_str(),
+        az = new_az,
+        region = region,
+        "created subnet in new AZ"
+    );
+
+    resources.subnet_id = new_subnet_id.clone();
+    resources.subnet_cidr = new_subnet_cidr;
+    Ok(new_subnet_id)
+}
+
+/// Checks if an error is due to insufficient instance capacity in the AZ
+fn is_insufficient_capacity_error(e: &Error) -> bool {
+    e.to_string().contains("InsufficientInstanceCapacity")
 }
 
 /// Sets up EC2 instances, deploys files, and configures monitoring and logging
@@ -334,10 +405,13 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
                 let ec2_client = ec2::create_client(Region::new(region.clone())).await;
                 info!(region = region.as_str(), "created EC2 client");
 
-                // Find availability zone that supports all instance types
-                let az = find_availability_zone(&ec2_client, &instance_types).await?;
+                // Find all availability zones that support all instance types
+                let availability_zones =
+                    find_availability_zones(&ec2_client, &instance_types).await?;
+                let az = &availability_zones[0];
                 info!(
                     az = az.as_str(),
+                    available_azs = ?availability_zones,
                     region = region.as_str(),
                     "selected availability zone"
                 );
@@ -371,7 +445,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
                     &vpc_id,
                     &route_table_id,
                     &subnet_cidr,
-                    &az,
+                    az,
                     &tag,
                 )
                 .await?;
@@ -417,13 +491,18 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
                 Ok::<_, Error>((
                     region,
                     ec2_client,
+                    idx,
                     RegionResources {
                         vpc_id,
                         vpc_cidr,
                         route_table_id,
                         subnet_id,
+                        subnet_cidr,
                         binary_sg_id: None,
                         monitoring_sg_id,
+                        availability_zones,
+                        current_az_index: 0,
+                        subnet_counter: 1,
                     },
                 ))
             }
@@ -431,10 +510,14 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
         .collect();
 
     let region_results = try_join_all(region_init_futures).await?;
-    let (ec2_clients, mut region_resources): (HashMap<_, _>, HashMap<_, _>) = region_results
-        .into_iter()
-        .map(|(region, client, resources)| ((region.clone(), client), (region, resources)))
-        .unzip();
+    let mut ec2_clients: HashMap<String, Ec2Client> = HashMap::new();
+    let mut region_resources: HashMap<String, RegionResources> = HashMap::new();
+    let mut region_indices: HashMap<String, usize> = HashMap::new();
+    for (region, client, idx, resources) in region_results {
+        ec2_clients.insert(region.clone(), client);
+        region_indices.insert(region.clone(), idx);
+        region_resources.insert(region, resources);
+    }
     info!(?regions, "initialized resources");
 
     // Create binary security groups (without monitoring IP - added later for parallel launch)
@@ -560,7 +643,6 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
         .as_ref()
         .unwrap()
         .clone();
-    let monitoring_subnet_id = monitoring_resources.subnet_id.clone();
 
     // Lookup AMI IDs for binary instances
     let mut ami_cache: HashMap<(String, Architecture), String> = HashMap::new();
@@ -597,83 +679,184 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
         binary_launch_configs.push((instance, ec2_client, resources, ami_id, arch));
     }
 
-    // Launch monitoring instance
-    let monitoring_launch_future = {
-        let key_name = key_name.clone();
-        let tag = tag.clone();
-        let sg_id = monitoring_sg_id.clone();
-        async move {
-            let instance_id = launch_instances(
+    // Group binary instance configs by region for AZ fallback handling
+    let mut binary_configs_by_region: HashMap<String, Vec<(&InstanceConfig, String)>> =
+        HashMap::new();
+    for (instance, _ec2_client, _resources, ami_id, _arch) in &binary_launch_configs {
+        binary_configs_by_region
+            .entry(instance.region.clone())
+            .or_default()
+            .push((instance, ami_id.clone()));
+    }
+
+    // Launch monitoring instance with AZ fallback
+    let monitoring_region_idx = region_indices[&monitoring_region];
+    let monitoring_instance_id = {
+        let monitoring_resources = region_resources.get_mut(&monitoring_region).unwrap();
+        loop {
+            let result = launch_instances(
                 monitoring_ec2_client,
                 &monitoring_ami_id,
-                monitoring_instance_type,
+                monitoring_instance_type.clone(),
                 config.monitoring.storage_size,
-                monitoring_storage_class,
+                monitoring_storage_class.clone(),
                 &key_name,
-                &monitoring_subnet_id,
-                &sg_id,
+                &monitoring_resources.subnet_id,
+                &monitoring_sg_id,
                 1,
                 MONITORING_NAME,
-                &tag,
+                tag,
             )
-            .await?
-            .remove(0);
-            info!(
-                instance_id = instance_id.as_str(),
-                "launched monitoring instance"
-            );
-            Ok::<String, Error>(instance_id)
+            .await;
+
+            match result {
+                Ok(mut ids) => {
+                    let instance_id = ids.remove(0);
+                    info!(
+                        instance_id = instance_id.as_str(),
+                        az = monitoring_resources.current_az(),
+                        "launched monitoring instance"
+                    );
+                    break instance_id;
+                }
+                Err(e) => {
+                    let err: Error = e.into();
+                    if is_insufficient_capacity_error(&err)
+                        && monitoring_resources.has_more_azs()
+                    {
+                        info!(
+                            az = monitoring_resources.current_az(),
+                            error = %err,
+                            "insufficient capacity in AZ, trying next"
+                        );
+                        create_subnet_in_next_az(
+                            monitoring_ec2_client,
+                            monitoring_resources,
+                            tag,
+                            &monitoring_region,
+                            monitoring_region_idx,
+                        )
+                        .await?;
+                        continue;
+                    }
+                    return Err(err);
+                }
+            }
         }
     };
 
-    // Launch binary instances (returns instance IDs only, no waiting)
-    let binary_launch_futures =
-        binary_launch_configs
-            .iter()
-            .map(|(instance, ec2_client, resources, ami_id, _arch)| {
-                let key_name = key_name.clone();
-                let instance_type = InstanceType::try_parse(&instance.instance_type)
-                    .expect("Invalid instance type");
-                let storage_class =
-                    VolumeType::try_parse(&instance.storage_class).expect("Invalid storage class");
-                let binary_sg_id = resources.binary_sg_id.as_ref().unwrap();
-                let tag = tag.clone();
-                let instance_name = instance.name.clone();
-                let region = instance.region.clone();
-                async move {
-                    let instance_id = launch_instances(
-                        ec2_client,
-                        ami_id,
-                        instance_type,
-                        instance.storage_size,
-                        storage_class,
-                        &key_name,
-                        &resources.subnet_id,
-                        binary_sg_id,
-                        1,
-                        &instance.name,
-                        &tag,
-                    )
-                    .await?
-                    .remove(0);
-                    info!(
-                        instance_id = instance_id.as_str(),
-                        instance = instance_name.as_str(),
-                        "launched instance"
-                    );
-                    Ok::<(String, String, InstanceConfig), Error>((
-                        instance_id,
-                        region,
-                        (*instance).clone(),
-                    ))
-                }
-            });
+    // Launch binary instances by region with AZ fallback
+    // Instances within a region are launched in parallel; on capacity error, remaining
+    // instances are launched in a new subnet in the next AZ
+    let mut binary_launches: Vec<(String, String, InstanceConfig)> = Vec::new();
+    for (region, instances_in_region) in binary_configs_by_region {
+        let ec2_client = ec2_clients.get(&region).unwrap();
+        let resources = region_resources.get_mut(&region).unwrap();
+        let region_idx = region_indices[&region];
 
-    // Wait for all launches to complete (get instance IDs)
-    let (monitoring_instance_id, binary_launches) = tokio::try_join!(
-        monitoring_launch_future,
-        try_join_all(binary_launch_futures)
-    )?;
+        // Track which instances still need to be launched (by index into instances_in_region)
+        let mut pending_indices: Vec<usize> = (0..instances_in_region.len()).collect();
+
+        while !pending_indices.is_empty() {
+            // Try to launch all pending instances in parallel
+            let launch_futures: Vec<_> = pending_indices
+                .iter()
+                .map(|&idx| {
+                    let (instance, ami_id) = &instances_in_region[idx];
+                    let instance_type =
+                        InstanceType::try_parse(&instance.instance_type).expect("Invalid instance type");
+                    let storage_class =
+                        VolumeType::try_parse(&instance.storage_class).expect("Invalid storage class");
+                    let binary_sg_id = resources.binary_sg_id.as_ref().unwrap().clone();
+                    let subnet_id = resources.subnet_id.clone();
+                    let key_name = key_name.clone();
+                    let tag = tag.clone();
+                    let instance_name = instance.name.clone();
+                    let ami_id = ami_id.clone();
+                    let instance_config = (*instance).clone();
+                    async move {
+                        let result = launch_instances(
+                            ec2_client,
+                            &ami_id,
+                            instance_type,
+                            instance.storage_size,
+                            storage_class,
+                            &key_name,
+                            &subnet_id,
+                            &binary_sg_id,
+                            1,
+                            &instance.name,
+                            &tag,
+                        )
+                        .await;
+                        (idx, instance_name, instance_config, result)
+                    }
+                })
+                .collect();
+
+            // Collect all results (don't short-circuit on first error)
+            let results = futures::future::join_all(launch_futures).await;
+
+            // Separate successes from failures
+            let mut new_pending_indices = Vec::new();
+            let mut had_capacity_error = false;
+            let mut fatal_error: Option<Error> = None;
+
+            for (idx, instance_name, instance_config, result) in results {
+                match result {
+                    Ok(mut ids) => {
+                        let instance_id = ids.remove(0);
+                        info!(
+                            instance_id = instance_id.as_str(),
+                            instance = instance_name.as_str(),
+                            az = resources.current_az(),
+                            "launched instance"
+                        );
+                        binary_launches.push((instance_id, region.clone(), instance_config));
+                    }
+                    Err(e) => {
+                        let err: Error = e.into();
+                        if is_insufficient_capacity_error(&err) {
+                            had_capacity_error = true;
+                            // Re-add to pending for retry in next AZ
+                            new_pending_indices.push(idx);
+                        } else if fatal_error.is_none() {
+                            fatal_error = Some(err);
+                        }
+                    }
+                }
+            }
+
+            // If we had a fatal (non-capacity) error, return it
+            if let Some(err) = fatal_error {
+                return Err(err);
+            }
+
+            // If we had capacity errors and have more AZs, create subnet in next AZ
+            if had_capacity_error {
+                if resources.has_more_azs() {
+                    info!(
+                        region = region.as_str(),
+                        az = resources.current_az(),
+                        remaining = new_pending_indices.len(),
+                        "insufficient capacity in AZ, launching remaining instances in next AZ"
+                    );
+                    create_subnet_in_next_az(ec2_client, resources, tag, &region, region_idx)
+                        .await?;
+                    pending_indices = new_pending_indices;
+                } else {
+                    return Err(Error::AwsEc2(aws_sdk_ec2::Error::from(
+                        aws_sdk_ec2::error::BuildError::other(format!(
+                            "insufficient capacity in all availability zones for region {region}"
+                        )),
+                    )));
+                }
+            } else {
+                // All instances launched successfully
+                break;
+            }
+        }
+    }
     info!("instances requested");
 
     // Group binary instances by region for batched DescribeInstances calls
