@@ -20,9 +20,9 @@
 //!
 //! # Metrics
 //!
-//! This runtime enforces metrics are unique and well-formed:
+//! This runtime enforces metrics are well-formed:
 //! - Labels must start with `[a-zA-Z]` and contain only `[a-zA-Z0-9_]`
-//! - Metric names must be unique (panics on duplicate registration)
+//! - Registering the same metric name twice returns the existing metric
 //!
 //! # Example
 //!
@@ -51,7 +51,7 @@ use crate::{
         audited::Storage as AuditedStorage, memory::Storage as MemStorage,
         metered::Storage as MeteredStorage,
     },
-    telemetry::metrics::task::Label,
+    telemetry::{metrics::task::Label, MetricsRegistry},
     utils::{
         signal::{Signal, Stopper},
         supervision::Tree,
@@ -86,7 +86,7 @@ use rand_core::CryptoRngCore;
 use rayon::{ThreadPoolBuildError, ThreadPoolBuilder};
 use sha2::{Digest as _, Sha256};
 use std::{
-    collections::{BTreeMap, BinaryHeap, HashMap, HashSet},
+    collections::{BTreeMap, BinaryHeap, HashMap},
     mem::{replace, take},
     net::{IpAddr, SocketAddr},
     num::NonZeroUsize,
@@ -287,8 +287,7 @@ impl Default for Config {
 
 /// Deterministic runtime that randomly selects tasks to run based on a seed.
 pub struct Executor {
-    registry: Mutex<Registry>,
-    registered_metrics: Mutex<HashSet<String>>,
+    metrics_registry: Mutex<MetricsRegistry>,
     cycle: Duration,
     deadline: Option<SystemTime>,
     metrics: Arc<Metrics>,
@@ -826,8 +825,10 @@ impl Clone for Context {
 impl Context {
     fn new(cfg: Config) -> (Self, Arc<Executor>, Panicked) {
         // Create a new registry
-        let mut registry = Registry::default();
-        let runtime_registry = registry.sub_registry_with_prefix(METRICS_PREFIX);
+        let mut metrics_registry = MetricsRegistry::default();
+        let runtime_registry = metrics_registry
+            .write_through()
+            .sub_registry_with_prefix(METRICS_PREFIX);
 
         // Initialize runtime
         let metrics = Arc::new(Metrics::init(runtime_registry));
@@ -847,8 +848,7 @@ impl Context {
         let (panicker, panicked) = Panicker::new(cfg.catch_panics);
 
         let executor = Arc::new(Executor {
-            registry: Mutex::new(registry),
-            registered_metrics: Mutex::new(HashSet::new()),
+            metrics_registry: Mutex::new(metrics_registry),
             cycle: cfg.cycle,
             deadline,
             metrics,
@@ -890,8 +890,10 @@ impl Context {
     /// If either one of these conditions is violated, this method will panic.
     fn recover(checkpoint: Checkpoint) -> (Self, Arc<Executor>, Panicked) {
         // Rebuild metrics
-        let mut registry = Registry::default();
-        let runtime_registry = registry.sub_registry_with_prefix(METRICS_PREFIX);
+        let mut metrics_registry = MetricsRegistry::default();
+        let runtime_registry = metrics_registry
+            .write_through()
+            .sub_registry_with_prefix(METRICS_PREFIX);
         let metrics = Arc::new(Metrics::init(runtime_registry));
 
         // Copy state
@@ -912,8 +914,7 @@ impl Context {
             dns: checkpoint.dns,
 
             // New state for the new runtime
-            registry: Mutex::new(registry),
-            registered_metrics: Mutex::new(HashSet::new()),
+            metrics_registry: Mutex::new(metrics_registry),
             metrics,
             tasks: Arc::new(Tasks::new()),
             sleeping: Mutex::new(BinaryHeap::new()),
@@ -977,6 +978,14 @@ impl Context {
             None => {
                 dns.remove(&host);
             }
+        }
+    }
+
+    fn prefix_with_name(&self, name: &str) -> String {
+        if self.name.is_empty() {
+            name.to_string()
+        } else {
+            format!("{}_{}", self.name, name)
         }
     }
 }
@@ -1102,14 +1111,7 @@ impl crate::Metrics for Context {
         validate_label(label);
 
         // Construct the full label name
-        let name = {
-            let prefix = self.name.clone();
-            if prefix.is_empty() {
-                label.to_string()
-            } else {
-                format!("{prefix}_{label}")
-            }
-        };
+        let name = self.prefix_with_name(label);
         assert!(
             !name.starts_with(METRICS_PREFIX),
             "using runtime label is not allowed"
@@ -1124,46 +1126,58 @@ impl crate::Metrics for Context {
         self.name.clone()
     }
 
-    fn register<N: Into<String>, H: Into<String>>(&self, name: N, help: H, metric: impl Metric) {
-        // Prepare args
-        let name = name.into();
-        let help = help.into();
-
-        // Name metric
-        let executor = self.executor();
-        executor.auditor.event(b"register", |hasher| {
-            hasher.update(name.as_bytes());
-            hasher.update(help.as_bytes());
-        });
-        let prefixed_name = {
-            let prefix = &self.name;
-            if prefix.is_empty() {
-                name
-            } else {
-                format!("{}_{}", *prefix, name)
-            }
-        };
-
-        // Register metric (panics if name already registered)
-        let is_new = executor
-            .registered_metrics
-            .lock()
-            .unwrap()
-            .insert(prefixed_name.clone());
-        assert!(is_new, "duplicate metric name: {}", prefixed_name);
-        executor
-            .registry
-            .lock()
-            .unwrap()
-            .register(prefixed_name, help, metric);
-    }
-
     fn encode(&self) -> String {
         let executor = self.executor();
         executor.auditor.event(b"encode", |_| {});
         let mut buffer = String::new();
-        encode(&mut buffer, &executor.registry.lock().unwrap()).expect("encoding failed");
+        encode(
+            &mut buffer,
+            &executor.metrics_registry.lock().unwrap().write_through(),
+        )
+        .expect("encoding failed");
         buffer
+    }
+
+    fn get_or_register<M: Clone + Metric>(
+        &self,
+        name: impl std::fmt::Display,
+        help: impl std::fmt::Display,
+        metric: M,
+    ) -> M {
+        self.get_or_register_with(name, help, move || metric)
+    }
+
+    fn get_or_register_with<M: Clone + Metric>(
+        &self,
+        name: impl std::fmt::Display,
+        help: impl std::fmt::Display,
+        metric: impl FnOnce() -> M,
+    ) -> M {
+        // Prepare args
+        let name = name.to_string();
+        let help = help.to_string();
+
+        // Name metric
+        let executor = self.executor();
+        let prefixed_name = self.prefix_with_name(&name);
+        let auditor = &executor.auditor;
+        let help = &help;
+
+        // Only records the metric on the auditor once: if it doesn't exist
+        // yet, this closure is called, triggering the record.
+        let audit_on_construct = move || {
+            auditor.event(b"register", |hasher| {
+                hasher.update(name.as_bytes());
+                hasher.update(help.as_bytes());
+            });
+            metric()
+        };
+        let metric = executor
+            .metrics_registry
+            .lock()
+            .unwrap()
+            .get_or_register_with(&prefixed_name, help, audit_on_construct);
+        metric
     }
 }
 

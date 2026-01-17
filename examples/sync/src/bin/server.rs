@@ -74,25 +74,17 @@ impl<DB> State<DB> {
     where
         E: Metrics,
     {
-        let state = Self {
+        Self {
             database: RwLock::new(Some(database)),
-            request_counter: Counter::default(),
-            error_counter: Counter::default(),
-            ops_counter: Counter::default(),
+            request_counter: context
+                .get_or_register_default::<Counter>("requests", "Number of requests received"),
+            error_counter: context.get_or_register_default::<Counter>("error", "Number of errors"),
+            ops_counter: context.get_or_register_default::<Counter>(
+                "ops_added",
+                "Number of operations added since server start, not including the initial operations",
+            ),
             last_operation_time: RwLock::new(SystemTime::now()),
-        };
-        context.register(
-            "requests",
-            "Number of requests received",
-            state.request_counter.clone(),
-        );
-        context.register("error", "Number of errors", state.error_counter.clone());
-        context.register(
-            "ops_added",
-            "Number of operations added since server start, not including the initial operations",
-            state.ops_counter.clone(),
-        );
-        state
+        }
     }
 }
 

@@ -736,28 +736,18 @@ impl<E: Storage + Metrics + Clock, K: Array, V: CodecShared> Freezer<E, K, V> {
         };
 
         // Create metrics
-        let puts = Counter::default();
-        let gets = Counter::default();
-        let unnecessary_reads = Counter::default();
-        let unnecessary_writes = Counter::default();
-        let resizes = Counter::default();
-        context.register("puts", "number of put operations", puts.clone());
-        context.register("gets", "number of get operations", gets.clone());
-        context.register(
+        let puts = context.get_or_register_default::<Counter>("puts", "number of put operations");
+        let gets = context.get_or_register_default::<Counter>("gets", "number of get operations");
+        let unnecessary_reads = context.get_or_register_default::<Counter>(
             "unnecessary_reads",
             "number of unnecessary reads performed during key lookups",
-            unnecessary_reads.clone(),
         );
-        context.register(
+        let unnecessary_writes = context.get_or_register_default::<Counter>(
             "unnecessary_writes",
             "number of unnecessary writes performed during resize",
-            unnecessary_writes.clone(),
         );
-        context.register(
-            "resizes",
-            "number of table resizing operations",
-            resizes.clone(),
-        );
+        let resizes = context
+            .get_or_register_default::<Counter>("resizes", "number of table resizing operations");
 
         Ok(Self {
             context,

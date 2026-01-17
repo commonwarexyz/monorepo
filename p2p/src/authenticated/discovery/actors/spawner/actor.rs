@@ -43,31 +43,25 @@ impl<E: Spawner + Clock + CryptoRngCore + Metrics, O: Sink, I: Stream, C: Public
 {
     #[allow(clippy::type_complexity)]
     pub fn new(context: E, cfg: Config<C>) -> (Self, Mailbox<Message<O, I, C>>) {
-        let connections = Gauge::default();
-        let sent_messages = Family::<metrics::Message, Counter>::default();
-        let received_messages = Family::<metrics::Message, Counter>::default();
-        let dropped_messages = Family::<metrics::Message, Counter>::default();
-        let rate_limited = Family::<metrics::Message, Counter>::default();
-        context.register(
-            "connections",
-            "number of connected peers",
-            connections.clone(),
+        let connections =
+            context.get_or_register_default::<Gauge>("connections", "number of connected peers");
+        let sent_messages = context.get_or_register_default::<Family<metrics::Message, Counter>>(
+            "messages_sent",
+            "messages sent",
         );
-        context.register("messages_sent", "messages sent", sent_messages.clone());
-        context.register(
-            "messages_received",
-            "messages received",
-            received_messages.clone(),
-        );
-        context.register(
-            "messages_dropped",
-            "messages dropped due to full application buffer",
-            dropped_messages.clone(),
-        );
-        context.register(
+        let received_messages = context
+            .get_or_register_default::<Family<metrics::Message, Counter>>(
+                "messages_received",
+                "messages received",
+            );
+        let dropped_messages = context
+            .get_or_register_default::<Family<metrics::Message, Counter>>(
+                "messages_dropped",
+                "messages dropped due to full application buffer",
+            );
+        let rate_limited = context.get_or_register_default::<Family<metrics::Message, Counter>>(
             "messages_rate_limited",
             "messages rate limited",
-            rate_limited.clone(),
         );
         let (sender, receiver) = Mailbox::new(cfg.mailbox_size);
 

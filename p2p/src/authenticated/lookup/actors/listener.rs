@@ -61,29 +61,21 @@ pub struct Actor<E: Spawner + Clock + Network + CryptoRngCore + Metrics, C: Sign
 impl<E: Spawner + Clock + Network + CryptoRngCore + Metrics, C: Signer> Actor<E, C> {
     pub fn new(context: E, cfg: Config<C>, mailbox: mpsc::Receiver<HashSet<IpAddr>>) -> Self {
         // Create metrics
-        let handshakes_blocked = Counter::default();
-        context.register(
+        let handshakes_blocked = context.get_or_register_default::<Counter>(
             "handshakes_blocked",
             "number of handshake attempts blocked because the IP was not registered",
-            handshakes_blocked.clone(),
         );
-        let handshakes_concurrent_rate_limited = Counter::default();
-        context.register(
+        let handshakes_concurrent_rate_limited = context.get_or_register_default::<Counter>(
             "handshake_concurrent_rate_limited",
             "number of handshake attempts dropped because maximum concurrent handshakes was reached",
-            handshakes_concurrent_rate_limited.clone(),
         );
-        let handshakes_ip_rate_limited = Counter::default();
-        context.register(
+        let handshakes_ip_rate_limited = context.get_or_register_default::<Counter>(
             "handshake_ip_rate_limited",
             "number of handshake attempts dropped because an IP exceeded its rate limit",
-            handshakes_ip_rate_limited.clone(),
         );
-        let handshakes_subnet_rate_limited = Counter::default();
-        context.register(
+        let handshakes_subnet_rate_limited = context.get_or_register_default::<Counter>(
             "handshake_subnet_rate_limited",
             "number of handshake attempts dropped because a subnet exceeded its rate limit",
-            handshakes_subnet_rate_limited.clone(),
         );
 
         Self {

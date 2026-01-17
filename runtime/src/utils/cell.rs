@@ -5,6 +5,7 @@ use prometheus_client::registry::Metric;
 use rand::{CryptoRng, RngCore};
 use rayon::ThreadPoolBuildError;
 use std::{
+    fmt::Display,
     future::Future,
     net::SocketAddr,
     num::NonZeroUsize,
@@ -164,8 +165,13 @@ where
         Self::Present(self.as_present().with_label(label))
     }
 
-    fn register<N: Into<String>, H: Into<String>>(&self, name: N, help: H, metric: impl Metric) {
-        self.as_present().register(name, help, metric)
+    fn get_or_register<M: Clone + Metric>(
+        &self,
+        name: impl Display,
+        help: impl Display,
+        metric: M,
+    ) -> M {
+        self.as_present().get_or_register(name, help, metric)
     }
 
     fn encode(&self) -> String {

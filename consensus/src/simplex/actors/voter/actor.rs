@@ -137,24 +137,18 @@ impl<
         }
 
         // Initialize metrics
-        let outbound_messages = Family::<Outbound, Counter>::default();
-        let notarization_latency = Histogram::new(LATENCY);
-        let finalization_latency = Histogram::new(LATENCY);
-        context.register(
+        let outbound_messages = context.get_or_register_default::<Family<Outbound, Counter>>(
             "outbound_messages",
             "number of outbound messages",
-            outbound_messages.clone(),
         );
-        context.register(
-            "notarization_latency",
-            "notarization latency",
-            notarization_latency.clone(),
-        );
-        context.register(
-            "finalization_latency",
-            "finalization latency",
-            finalization_latency.clone(),
-        );
+        let notarization_latency =
+            context.get_or_register_with("notarization_latency", "notarization latency", || {
+                Histogram::new(LATENCY)
+            });
+        let finalization_latency =
+            context.get_or_register_with("finalization_latency", "finalization latency", || {
+                Histogram::new(LATENCY)
+            });
 
         // Initialize store
         let (mailbox_sender, mailbox_receiver) = mpsc::channel(cfg.mailbox_size);

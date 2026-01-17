@@ -213,17 +213,13 @@ where
             .unwrap_or(Height::zero());
 
         // Create metrics
-        let finalized_height = Gauge::default();
-        context.register(
+        let finalized_height = context.get_or_register_default::<Gauge>(
             "finalized_height",
             "Finalized height of application",
-            finalized_height.clone(),
         );
-        let processed_height = Gauge::default();
-        context.register(
+        let processed_height = context.get_or_register_default::<Gauge>(
             "processed_height",
             "Processed height of application",
-            processed_height.clone(),
         );
         let _ = processed_height.try_set(last_processed_height.get());
 

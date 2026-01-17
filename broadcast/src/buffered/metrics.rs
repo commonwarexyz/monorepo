@@ -40,32 +40,25 @@ pub struct Metrics {
 impl Metrics {
     /// Create and return a new set of metrics, registered with the given context.
     pub fn init<E: RuntimeMetrics>(context: E) -> Self {
-        let metrics = Self::default();
-        context.register(
-            "peer",
-            "Number of broadcasts received by peer",
-            metrics.peer.clone(),
-        );
-        context.register(
-            "receive",
-            "Number of received messages by status",
-            metrics.receive.clone(),
-        );
-        context.register(
-            "subscribe",
-            "Number of `subscribe` requests by status",
-            metrics.subscribe.clone(),
-        );
-        context.register(
-            "get",
-            "Number of `get` requests by status",
-            metrics.get.clone(),
-        );
-        context.register(
-            "waiters",
-            "Number of digests being awaited",
-            metrics.waiters.clone(),
-        );
-        metrics
+        Self {
+            peer: context.get_or_register_default::<Family<SequencerLabel, Counter>>(
+                "peer",
+                "Number of broadcasts received by peer",
+            ),
+            receive: context.get_or_register_default::<status::Counter>(
+                "receive",
+                "Number of received messages by status",
+            ),
+            subscribe: context.get_or_register_default::<status::Counter>(
+                "subscribe",
+                "Number of `subscribe` requests by status",
+            ),
+            get: context.get_or_register_default::<status::Counter>(
+                "get",
+                "Number of `get` requests by status",
+            ),
+            waiters: context
+                .get_or_register_default::<Gauge>("waiters", "Number of digests being awaited"),
+        }
     }
 }

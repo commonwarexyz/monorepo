@@ -175,14 +175,15 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
     pub fn new(mut context: E, cfg: Config) -> (Self, Oracle<P, E>) {
         let (sender, receiver) = mpsc::unbounded();
         let (oracle_mailbox, oracle_receiver) = UnboundedMailbox::new();
-        let sent_messages = Family::<metrics::Message, Counter>::default();
-        let received_messages = Family::<metrics::Message, Counter>::default();
-        context.register("messages_sent", "messages sent", sent_messages.clone());
-        context.register(
-            "messages_received",
-            "messages received",
-            received_messages.clone(),
+        let sent_messages = context.get_or_register_default::<Family<metrics::Message, Counter>>(
+            "messages_sent",
+            "messages sent",
         );
+        let received_messages = context
+            .get_or_register_default::<Family<metrics::Message, Counter>>(
+                "messages_received",
+                "messages received",
+            );
 
         // Start with a pseudo-random IP address to assign sockets to for new peers
         let next_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::from_bits(context.next_u32())), 0);

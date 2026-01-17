@@ -224,16 +224,11 @@ impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
         );
 
         // Initialize metrics
-        let puts = Counter::default();
-        let gets = Counter::default();
-        let has = Counter::default();
-        let syncs = Counter::default();
-        let pruned = Counter::default();
-        context.register("puts", "Number of put calls", puts.clone());
-        context.register("gets", "Number of get calls", gets.clone());
-        context.register("has", "Number of has calls", has.clone());
-        context.register("syncs", "Number of sync calls", syncs.clone());
-        context.register("pruned", "Number of pruned blobs", pruned.clone());
+        let puts = context.get_or_register_default::<Counter>("puts", "Number of put calls");
+        let gets = context.get_or_register_default::<Counter>("gets", "Number of get calls");
+        let has = context.get_or_register_default::<Counter>("has", "Number of has calls");
+        let syncs = context.get_or_register_default::<Counter>("syncs", "Number of sync calls");
+        let pruned = context.get_or_register_default::<Counter>("pruned", "Number of pruned blobs");
 
         Ok(Self {
             context,

@@ -16,7 +16,7 @@ use crate::{
     process::metered::Metrics as MeteredProcess,
     signal::Signal,
     storage::metered::Storage as MeteredStorage,
-    telemetry::metrics::task::Label,
+    telemetry::{metrics::task::Label, MetricsRegistry},
     utils::{signal::Stopper, supervision::Tree, Panicker},
     Clock, Error, Execution, Handle, Metrics as _, SinkOf, Spawner as _, StreamOf, METRICS_PREFIX,
 };
@@ -33,6 +33,7 @@ use rand::{rngs::OsRng, CryptoRng, RngCore};
 use rayon::{ThreadPoolBuildError, ThreadPoolBuilder};
 use std::{
     env,
+    fmt::Display,
     future::Future,
     net::{IpAddr, SocketAddr},
     num::NonZeroUsize,
@@ -219,7 +220,7 @@ impl Default for Config {
 
 /// Runtime based on [Tokio](https://tokio.rs).
 pub struct Executor {
-    registry: Mutex<Registry>,
+    metrics_registry: Mutex<MetricsRegistry>,
     metrics: Arc<Metrics>,
     runtime: Runtime,
     shutdown: Mutex<Stopper>,
@@ -253,8 +254,10 @@ impl crate::Runner for Runner {
         Fut: Future,
     {
         // Create a new registry
-        let mut registry = Registry::default();
-        let runtime_registry = registry.sub_registry_with_prefix(METRICS_PREFIX);
+        let mut metrics_registry = MetricsRegistry::default();
+        let runtime_registry = metrics_registry
+            .write_through()
+            .sub_registry_with_prefix(METRICS_PREFIX);
 
         // Initialize runtime
         let metrics = Arc::new(Metrics::init(runtime_registry));
@@ -330,7 +333,7 @@ impl crate::Runner for Runner {
 
         // Initialize executor
         let executor = Arc::new(Executor {
-            registry: Mutex::new(registry),
+            metrics_registry: Mutex::new(metrics_registry),
             metrics,
             runtime,
             shutdown: Mutex::new(Stopper::default()),
@@ -408,6 +411,14 @@ impl Context {
     /// Access the [Metrics] of the runtime.
     fn metrics(&self) -> &Metrics {
         &self.executor.metrics
+    }
+
+    fn prefix_with_name(&self, name: &str) -> String {
+        if self.name.is_empty() {
+            name.to_string()
+        } else {
+            format!("{}_{}", self.name, name)
+        }
     }
 }
 
@@ -557,26 +568,48 @@ impl crate::Metrics for Context {
         self.name.clone()
     }
 
-    fn register<N: Into<String>, H: Into<String>>(&self, name: N, help: H, metric: impl Metric) {
-        let name = name.into();
-        let prefixed_name = {
-            let prefix = &self.name;
-            if prefix.is_empty() {
-                name
-            } else {
-                format!("{}_{}", *prefix, name)
-            }
-        };
+    fn get_or_register<M: Clone + Metric>(
+        &self,
+        name: impl Display,
+        help: impl Display,
+        metric: M,
+    ) -> M {
+        let name = name.to_string();
+        let prefixed_name = self.prefix_with_name(&name);
         self.executor
-            .registry
+            .metrics_registry
             .lock()
             .unwrap()
-            .register(prefixed_name, help, metric)
+            .get_or_register(&prefixed_name, &help.to_string(), metric)
+    }
+
+    fn get_or_register_with<M: Clone + Metric>(
+        &self,
+        name: impl Display,
+        help: impl Display,
+        metric: impl FnOnce() -> M,
+    ) -> M {
+        let name = name.to_string();
+        let prefixed_name = self.prefix_with_name(&name);
+        self.executor
+            .metrics_registry
+            .lock()
+            .unwrap()
+            .get_or_register_with(&prefixed_name, &help.to_string(), metric)
     }
 
     fn encode(&self) -> String {
         let mut buffer = String::new();
-        encode(&mut buffer, &self.executor.registry.lock().unwrap()).expect("encoding failed");
+        encode(
+            &mut buffer,
+            &self
+                .executor
+                .metrics_registry
+                .lock()
+                .unwrap()
+                .write_through(),
+        )
+        .expect("encoding failed");
         buffer
     }
 }

@@ -429,24 +429,31 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Register metrics under different labels (no duplicates)
-            let c1 = Counter::<u64>::default();
-            context.with_label("a").register("test", "help", c1);
-            let c2 = Counter::<u64>::default();
-            context.with_label("b").register("test", "help", c2);
+            let _c1 = context
+                .with_label("a")
+                .get_or_register_default::<Counter<u64>>("test", "help");
+            let _c2 = context
+                .with_label("b")
+                .get_or_register_default::<Counter<u64>>("test", "help");
         });
         // Test passes if runtime doesn't panic on shutdown
     }
 
-    #[test]
-    #[should_panic(expected = "duplicate metric name:")]
-    fn test_duplicate_metrics_panics() {
+    #[test_traced]
+    fn test_duplicate_metrics_returns_same() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            // Register metrics with the same label, causing duplicates
-            let c1 = Counter::<u64>::default();
-            context.with_label("a").register("test", "help", c1);
-            let c2 = Counter::<u64>::default();
-            context.with_label("a").register("test", "help", c2);
+            // Register same metric twice with same label - should return the same metric
+            let c1 = context
+                .with_label("a")
+                .get_or_register_default::<Counter<u64>>("test", "help");
+            let c2 = context
+                .with_label("a")
+                .get_or_register_default::<Counter<u64>>("test", "help");
+
+            // Both should be the same metric
+            c1.inc();
+            assert_eq!(c2.get(), 1);
         });
     }
 }

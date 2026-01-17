@@ -69,12 +69,12 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
     State<E, S, L, D>
 {
     pub fn new(context: E, cfg: Config<S, L>) -> Self {
-        let current_view = Gauge::<i64, AtomicI64>::default();
-        let tracked_views = Gauge::<i64, AtomicI64>::default();
-        let skipped_views = Counter::default();
-        context.register("current_view", "current view", current_view.clone());
-        context.register("tracked_views", "tracked views", tracked_views.clone());
-        context.register("skipped_views", "skipped views", skipped_views.clone());
+        let current_view = context
+            .get_or_register_default::<Gauge<i64, AtomicI64>>("current_view", "current view");
+        let tracked_views = context
+            .get_or_register_default::<Gauge<i64, AtomicI64>>("tracked_views", "tracked views");
+        let skipped_views =
+            context.get_or_register_default::<Counter>("skipped_views", "skipped views");
 
         // Build elector with participants
         let elector = cfg.elector.build(cfg.scheme.participants());

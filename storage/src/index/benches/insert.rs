@@ -62,7 +62,14 @@ impl Metrics for DummyMetrics {
         "".to_string()
     }
 
-    fn register<N: Into<String>, H: Into<String>>(&self, _: N, _: H, _: impl Metric) {}
+    fn get_or_register<M: Clone + Metric>(
+        &self,
+        _name: impl std::fmt::Display,
+        _help: impl std::fmt::Display,
+        metric: M,
+    ) -> M {
+        metric
+    }
 }
 
 fn bench_insert(c: &mut Criterion) {

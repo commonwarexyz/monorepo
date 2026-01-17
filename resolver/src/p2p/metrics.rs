@@ -30,51 +30,37 @@ pub struct Metrics<E: RuntimeMetrics + Clock> {
 impl<E: RuntimeMetrics + Clock> Metrics<E> {
     /// Create and return a new set of metrics, registered with the given context.
     pub fn init(context: E) -> Self {
-        let fetch_pending = Gauge::default();
-        context.register(
+        let fetch_pending = context.get_or_register_default::<Gauge>(
             "fetch_pending",
             "Current number of pending fetch requests",
-            fetch_pending.clone(),
         );
-        let fetch_active = Gauge::default();
-        context.register(
+        let fetch_active = context.get_or_register_default::<Gauge>(
             "fetch_active",
             "Current number of active fetch requests",
-            fetch_active.clone(),
         );
-        let serve_processing = Gauge::default();
-        context.register(
+        let serve_processing = context.get_or_register_default::<Gauge>(
             "serve_processing",
             "Current number of serves currently processing",
-            serve_processing.clone(),
         );
-        let peers_blocked = Gauge::default();
-        context.register(
-            "peers_blocked",
-            "Current number of blocked peers",
-            peers_blocked.clone(),
-        );
-        let fetch = status::Counter::default();
-        context.register("fetch", "Number of fetches by status", fetch.clone());
-        let cancel = status::Counter::default();
-        context.register(
+        let peers_blocked = context
+            .get_or_register_default::<Gauge>("peers_blocked", "Current number of blocked peers");
+        let fetch = context
+            .get_or_register_default::<status::Counter>("fetch", "Number of fetches by status");
+        let cancel = context.get_or_register_default::<status::Counter>(
             "cancel",
             "Number of canceled fetches by status",
-            cancel.clone(),
         );
-        let serve = status::Counter::default();
-        context.register("serve", "Number of serves by status", serve.clone());
-        let serve_duration = Histogram::new(histogram::Buckets::LOCAL);
-        context.register(
+        let serve = context
+            .get_or_register_default::<status::Counter>("serve", "Number of serves by status");
+        let serve_duration = context.get_or_register_with(
             "serve_duration",
             "Histogram of successful serves",
-            serve_duration.clone(),
+            || Histogram::new(histogram::Buckets::LOCAL),
         );
-        let fetch_duration = Histogram::new(histogram::Buckets::NETWORK);
-        context.register(
+        let fetch_duration = context.get_or_register_with(
             "fetch_duration",
             "Histogram of successful fetches",
-            fetch_duration.clone(),
+            || Histogram::new(histogram::Buckets::NETWORK),
         );
         let clock = Arc::new(context);
 

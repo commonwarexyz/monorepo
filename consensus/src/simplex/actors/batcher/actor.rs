@@ -76,48 +76,41 @@ impl<
     > Actor<E, S, B, D, R, T>
 {
     pub fn new(context: E, cfg: Config<S, B, R, T>) -> (Self, Mailbox<S, D>) {
-        let added = Counter::default();
-        let verified = Counter::default();
-        let inbound_messages = Family::<Inbound, Counter>::default();
-        let batch_size =
-            Histogram::new([1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0]);
-        context.register(
+        let added = context.get_or_register_default::<Counter>(
             "added",
             "number of messages added to the verifier",
-            added.clone(),
         );
-        context.register("verified", "number of messages verified", verified.clone());
-        context.register(
+
+        let verified =
+            context.get_or_register_default::<Counter>("verified", "number of messages verified");
+
+        let inbound_messages = context.get_or_register_default::<Family<Inbound, Counter>>(
             "inbound_messages",
             "number of inbound messages",
-            inbound_messages.clone(),
         );
-        let latest_vote = Family::<Peer, Gauge>::default();
-        context.register(
+
+        let latest_vote = context.get_or_register_default::<Family<Peer, Gauge>>(
             "latest_vote",
             "view of latest vote received per peer",
-            latest_vote.clone(),
         );
         for participant in cfg.scheme.participants().iter() {
             latest_vote.get_or_create(&Peer::new(participant)).set(0);
         }
-        context.register(
+
+        let batch_size = context.get_or_register_with(
             "batch_size",
             "number of messages in a signature verification batch",
-            batch_size.clone(),
+            || Histogram::new([1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0]),
         );
-        let verify_latency = Histogram::new(Buckets::CRYPTOGRAPHY);
-        context.register(
+        let verify_latency = context.get_or_register_with(
             "verify_latency",
             "latency of signature verification",
-            verify_latency.clone(),
+            || Histogram::new(Buckets::CRYPTOGRAPHY),
         );
-        let recover_latency = Histogram::new(Buckets::CRYPTOGRAPHY);
-        context.register(
-            "recover_latency",
-            "certificate recover latency",
-            recover_latency.clone(),
-        );
+        let recover_latency =
+            context.get_or_register_with("recover_latency", "certificate recover latency", || {
+                Histogram::new(Buckets::CRYPTOGRAPHY)
+            });
         // TODO(#1833): Metrics should use the post-start context
         let clock = Arc::new(context.clone());
         let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
