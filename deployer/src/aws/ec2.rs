@@ -975,11 +975,12 @@ pub async fn delete_vpc(ec2_client: &Ec2Client, vpc_id: &str) -> Result<(), Ec2E
     Ok(())
 }
 
-/// Finds the availability zone that supports all required instance types
-pub async fn find_availability_zone(
+/// Finds all availability zones that support all required instance types.
+/// Returns them sorted alphabetically for deterministic ordering.
+pub async fn find_availability_zones(
     client: &Ec2Client,
     instance_types: &[String],
-) -> Result<String, Ec2Error> {
+) -> Result<Vec<String>, Ec2Error> {
     // Retrieve all instance type offerings for availability zones in the region
     let offerings = client
         .describe_instance_type_offerings()
@@ -1012,17 +1013,24 @@ pub async fn find_availability_zone(
     // Convert the required instance types to a HashSet for efficient subset checking
     let required_instance_types: HashSet<String> = instance_types.iter().cloned().collect();
 
-    // Find an availability zone that supports all required instance types
-    for (az, supported_types) in az_to_instance_types {
-        if required_instance_types.is_subset(&supported_types) {
-            return Ok(az); // Return the first matching availability zone
-        }
-    }
+    // Find all availability zones that support all required instance types
+    let mut valid_azs: Vec<String> = az_to_instance_types
+        .into_iter()
+        .filter(|(_, supported_types)| required_instance_types.is_subset(supported_types))
+        .map(|(az, _)| az)
+        .collect();
+
+    // Sort for deterministic ordering
+    valid_azs.sort();
 
     // If no availability zone supports all instance types, return an error
-    Err(Ec2Error::from(BuildError::other(format!(
-        "no availability zone supports all required instance types: {instance_types:?}"
-    ))))
+    if valid_azs.is_empty() {
+        return Err(Ec2Error::from(BuildError::other(format!(
+            "no availability zone supports all required instance types: {instance_types:?}"
+        ))));
+    }
+
+    Ok(valid_azs)
 }
 
 /// Waits until all network interfaces associated with a security group are deleted
