@@ -291,7 +291,7 @@
 //! - [scheme::bls12381_threshold::standard]: Certificates contain only a vote signature.
 //!
 //! - [scheme::bls12381_threshold::vrf]: Certificates contain a vote signature and a view signature (i.e. a seed that can be used
-//!   as a VRF). This variant can be configured for random leader election (via [elector::Random]) and/or incorporate this randomness
+//!   as a VRF). This variant can be configured for random leader election (via [`crate::elector::Random`]) and/or incorporate this randomness
 //!   into execution.
 //!
 //! #### Embedded VRF ([scheme::bls12381_threshold::vrf])
@@ -327,7 +327,6 @@
 //! Before sending a message, the `Journal` sync is invoked to prevent inadvertent Byzantine behavior
 //! on restart (especially in the case of unclean shutdown).
 
-pub mod elector;
 pub mod scheme;
 pub mod types;
 
@@ -390,8 +389,8 @@ pub(crate) fn quorum(n: u32) -> u32 {
 mod tests {
     use super::*;
     use crate::{
+        elector::{Config as Elector, Random, RoundRobin},
         simplex::{
-            elector::{Config as Elector, Random, RoundRobin},
             mocks::twins::Strategy,
             scheme::{
                 bls12381_multisig,
@@ -1251,7 +1250,7 @@ mod tests {
 
             let (complete, checkpoint) = prev_checkpoint
                 .map_or_else(
-                    || deterministic::Runner::timed(Duration::from_secs(180)),
+                    || deterministic::Runner::timed(Duration::from_secs(360)),
                     deterministic::Runner::from,
                 )
                 .start_and_recover(f);

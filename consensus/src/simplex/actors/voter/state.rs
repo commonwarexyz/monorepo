@@ -1,7 +1,7 @@
 use super::round::Round;
 use crate::{
+    elector::{Config as ElectorConfig, Elector},
     simplex::{
-        elector::{Config as ElectorConfig, Elector},
         interesting,
         metrics::{Leader, Timeout, TimeoutReason},
         min_active,
@@ -687,10 +687,14 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::simplex::{
+    use crate::{
         elector::RoundRobin,
-        scheme::ed25519,
-        types::{Finalization, Finalize, Notarization, Notarize, Nullification, Nullify, Proposal},
+        simplex::{
+            scheme::ed25519,
+            types::{
+                Finalization, Finalize, Notarization, Notarize, Nullification, Nullify, Proposal,
+            },
+        },
     };
     use commonware_cryptography::{certificate::mocks::Fixture, sha256::Digest as Sha256Digest};
     use commonware_parallel::Sequential;

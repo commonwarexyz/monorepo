@@ -7,7 +7,7 @@ use crate::{
 };
 use clap::{Args, Parser, Subcommand};
 use commonware_codec::Encode;
-use commonware_consensus::simplex::elector::{Random, RoundRobin};
+use commonware_consensus::elector::{Random, RoundRobin};
 use commonware_cryptography::{bls12381::primitives::variant::MinSig, ed25519::PublicKey};
 use commonware_runtime::{
     tokio::{self, telemetry::Logging},

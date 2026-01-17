@@ -1,4 +1,4 @@
-//! Leader election strategies for simplex consensus.
+//! Leader election strategies for consensus.
 //!
 //! This module provides the [`Config`] and [`Elector`] traits for customizing
 //! how leaders are selected for each consensus round, along with built-in implementations.
@@ -8,10 +8,9 @@
 //! - [`RoundRobin`]/[`RoundRobinElector`]: Deterministic rotation through participants
 //!   based on view number. Optionally shuffled using a seed. Works with any signing scheme.
 //!
-//! - [`Random`]/[`RandomElector`]: Uses randomness derived from BLS threshold VRF signatures
+//! - [`Random`]/[`RandomElector`]: Uses randomness derived from BLS threshold signatures
 //!   for unpredictable leader selection. Falls back to round-robin for the first view
-//!   (no certificate available). Requires [`super::scheme::bls12381_threshold::vrf`]
-//!   (implements [`super::scheme::bls12381_threshold::vrf::Seedable`]).
+//!   (no certificate available). Only works with `simplex::scheme::bls12381_threshold::vrf`.
 //!
 //! # Custom Electors
 //!
@@ -160,8 +159,7 @@ impl<S: Scheme> Elector<S> for RoundRobinElector<S> {
 /// leader selection. Falls back to standard round-robin for view 1 when no
 /// certificate is available.
 ///
-/// Only works with [`super::scheme::bls12381_threshold::vrf`]
-/// (implements [`super::scheme::bls12381_threshold::vrf::Seedable`]).
+/// Only works with `simplex::scheme::bls12381_threshold::vrf` signing scheme.
 #[derive(Clone, Debug, Default)]
 pub struct Random;
 
@@ -234,12 +232,21 @@ where
     }
 }
 
+// Minimmit bls12381_threshold does NOT support Random election.
+//
+// The minimmit BLS12-381 threshold scheme uses:
+// - Aggregated certificates for M-notarization (2f+1): no seed/VRF
+// - Threshold certificates for L-notarization (n-f): no seed/VRF
+//
+// This design prioritizes security (unforgeable M-notarization, secure finalization)
+// over random leader election. Minimmit should use RoundRobin election instead.
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{
         simplex::{
-            scheme::{bls12381_threshold::vrf as bls12381_threshold_vrf, ed25519},
+            scheme::{bls12381_threshold, ed25519},
             types::Subject,
         },
         types::{Epoch, View},
@@ -254,7 +261,7 @@ mod tests {
     const NAMESPACE: &[u8] = b"test";
 
     type ThresholdScheme =
-        bls12381_threshold_vrf::Scheme<commonware_cryptography::ed25519::PublicKey, MinPk>;
+        bls12381_threshold::vrf::Scheme<commonware_cryptography::ed25519::PublicKey, MinPk>;
 
     #[test]
     fn round_robin_rotates_through_participants() {
@@ -397,7 +404,8 @@ mod tests {
             bls12381_threshold_vrf::fixture::<MinPk, _>(&mut rng, NAMESPACE, 5);
         let participants = Set::try_from_iter(participants).unwrap();
         let n = participants.len();
-        let elector: RandomElector<ThresholdScheme> = Random.build(&participants);
+        let elector: RandomElector<ThresholdScheme> =
+            <Random as Config<ThresholdScheme>>::build(Random, &participants);
 
         // For view 1 (no certificate), Random should behave like RoundRobin
         let leaders: Vec<_> = (0..n as u64)
@@ -425,7 +433,8 @@ mod tests {
             ..
         } = bls12381_threshold_vrf::fixture::<MinPk, _>(&mut rng, NAMESPACE, 5);
         let participants = Set::try_from_iter(participants).unwrap();
-        let elector: RandomElector<ThresholdScheme> = Random.build(&participants);
+        let elector: RandomElector<ThresholdScheme> =
+            <Random as Config<ThresholdScheme>>::build(Random, &participants);
         let quorum = N3f1::quorum(schemes.len()) as usize;
 
         // Create certificate for round (1, 2)
@@ -474,7 +483,8 @@ mod tests {
     #[should_panic(expected = "no participants")]
     fn random_build_panics_on_empty_participants() {
         let participants: Set<commonware_cryptography::ed25519::PublicKey> = Set::default();
-        let _: RandomElector<ThresholdScheme> = Random.build(&participants);
+        let _: RandomElector<ThresholdScheme> =
+            <Random as Config<ThresholdScheme>>::build(Random, &participants);
     }
 
     #[test]
@@ -484,7 +494,8 @@ mod tests {
         let Fixture { participants, .. } =
             bls12381_threshold_vrf::fixture::<MinPk, _>(&mut rng, NAMESPACE, 5);
         let participants = Set::try_from_iter(participants).unwrap();
-        let elector: RandomElector<ThresholdScheme> = Random.build(&participants);
+        let elector: RandomElector<ThresholdScheme> =
+            <Random as Config<ThresholdScheme>>::build(Random, &participants);
 
         // View 2 requires a certificate
         let round = Round::new(Epoch::new(1), View::new(2));
@@ -546,7 +557,8 @@ mod tests {
                     ..
                 } = bls12381_threshold_vrf::fixture::<MinPk, _>(&mut rng, NAMESPACE, n);
                 let participants = Set::try_from_iter(participants).unwrap();
-                let elector: RandomElector<ThresholdScheme> = Random.build(&participants);
+                let elector: RandomElector<ThresholdScheme> =
+                    <Random as Config<ThresholdScheme>>::build(Random, &participants);
                 let quorum = N3f1::quorum(schemes.len()) as usize;
 
                 // Generate deterministic round parameters
