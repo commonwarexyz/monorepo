@@ -3,7 +3,7 @@
 use arbitrary::Arbitrary;
 use commonware_cryptography::sha256;
 use commonware_storage::{
-    mmr::{Location, Proof},
+    mmr::{Location, Proof, MAX_LOCATION},
     qmdb::verify::extract_pinned_nodes,
 };
 use libfuzzer_sys::fuzz_target;
@@ -26,8 +26,10 @@ fuzz_target!(|input: FuzzInput| {
         .map(|bytes| sha256::Digest::from(*bytes))
         .collect();
 
+    let leaves = input.proof_leaves.clamp(0, MAX_LOCATION);
+
     let proof = Proof {
-        leaves: Location::new(input.proof_leaves).unwrap(),
+        leaves: Location::new(leaves).unwrap(),
         digests,
     };
 

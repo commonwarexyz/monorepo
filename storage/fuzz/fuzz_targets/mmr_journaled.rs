@@ -103,6 +103,7 @@ enum MmrState<
 
 fn fuzz(input: FuzzInput) {
     let runner = deterministic::Runner::seeded(input.seed);
+    let mut metrics_label_counter = 0;
 
     runner.start(|context| async move {
         let mut leaves = Vec::new();
