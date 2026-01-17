@@ -291,8 +291,10 @@ where
 
         // Get tip and send to application
         let tip = self.get_latest().await;
-        if let Some((height, commitment)) = tip {
-            application.report(Update::Tip(height, commitment)).await;
+        if let Some((height, commitment, round)) = tip {
+            application
+                .report(Update::Tip(height, commitment, round))
+                .await;
             self.tip = height;
             let _ = self.finalized_height.try_set(height.get());
         }
@@ -367,7 +369,10 @@ where
                                     .ok()
                                     .flatten()
                                     .map(|f| (height, f.proposal.payload)),
-                                BlockID::Latest => self.get_latest().await,
+                                BlockID::Latest => self
+                                .get_latest()
+                                .await
+                                .map(|(h, c, _)| (h, c)),
                             };
                             response.send_lossy(info);
                         }
@@ -433,7 +438,7 @@ where
                                 }
                                 BlockID::Latest => {
                                     let block = match self.get_latest().await {
-                                        Some((_, commitment)) => self.find_block(&mut buffer, commitment).await,
+                                        Some((_, commitment, _)) => self.find_block(&mut buffer, commitment).await,
                                         None => None,
                                     };
                                     response.send_lossy(block);
@@ -898,6 +903,9 @@ where
     ) {
         self.notify_subscribers(commitment, &block).await;
 
+        // Extract round before finalization is moved into try_join
+        let round = finalization.as_ref().map(|f| f.round());
+
         // In parallel, update the finalized blocks and finalizations archives
         if let Err(e) = try_join!(
             // Update the finalized blocks archive
@@ -920,8 +928,10 @@ where
         }
 
         // Update metrics and send tip update to application
-        if height > self.tip {
-            application.report(Update::Tip(height, commitment)).await;
+        if let Some(round) = round.filter(|_| height > self.tip) {
+            application
+                .report(Update::Tip(height, commitment, round))
+                .await;
             self.tip = height;
             let _ = self.finalized_height.try_set(height.get());
         }
@@ -941,13 +951,13 @@ where
     /// yet be found in the `finalizations_by_height` archive. While not checked explicitly, we
     /// should have the associated block (in the `finalized_blocks` archive) for the information
     /// returned.
-    async fn get_latest(&mut self) -> Option<(Height, B::Commitment)> {
+    async fn get_latest(&mut self) -> Option<(Height, B::Commitment, Round)> {
         let height = self.finalizations_by_height.last_index()?;
         let finalization = self
             .get_finalization_by_height(height)
             .await
             .expect("finalization missing");
-        Some((height, finalization.proposal.payload))
+        Some((height, finalization.proposal.payload, finalization.round()))
     }
 
     // -------------------- Mixed Storage --------------------

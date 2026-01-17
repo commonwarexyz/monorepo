@@ -72,7 +72,10 @@ pub use ingress::mailbox::Mailbox;
 pub mod resolver;
 pub mod store;
 
-use crate::{types::Height, Block};
+use crate::{
+    types::{Height, Round},
+    Block,
+};
 use commonware_utils::{acknowledgement::Exact, Acknowledgement};
 
 /// An update reported to the application, either a new finalized tip or a finalized block.
@@ -81,8 +84,8 @@ use commonware_utils::{acknowledgement::Exact, Acknowledgement};
 /// Finalized blocks are reported to the application in monotonically increasing order (no gaps permitted).
 #[derive(Clone, Debug)]
 pub enum Update<B: Block, A: Acknowledgement = Exact> {
-    /// A new finalized tip.
-    Tip(Height, B::Commitment),
+    /// A new finalized tip and the finalization round.
+    Tip(Height, B::Commitment, Round),
     /// A new finalized block and an [Acknowledgement] for the application to signal once processed.
     ///
     /// To ensure all blocks are delivered at least once, marshal waits to mark a block as delivered
@@ -104,6 +107,7 @@ mod tests {
         config::Config,
         mocks::{application::Application, block::Block},
         resolver::p2p as resolver,
+        Update,
     };
     use crate::{
         application::marshaled::Marshaled,
@@ -113,7 +117,7 @@ mod tests {
             types::{Activity, Context, Finalization, Finalize, Notarization, Notarize, Proposal},
         },
         types::{Epoch, Epocher, FixedEpocher, Height, Round, View, ViewDelta},
-        Automaton, Heightable, Reporter, VerifyingApplication,
+        Automaton, CertifiableAutomaton, Heightable, Reporter, VerifyingApplication,
     };
     use commonware_broadcast::buffered;
     use commonware_cryptography::{
@@ -123,7 +127,7 @@ mod tests {
         sha256::{Digest as Sha256Digest, Sha256},
         Committable, Digestible, Hasher as _,
     };
-    use commonware_macros::test_traced;
+    use commonware_macros::{select, test_traced};
     use commonware_p2p::{
         simulated::{self, Link, Network, Oracle},
         Manager,
@@ -148,11 +152,37 @@ mod tests {
     use tracing::info;
 
     type D = Sha256Digest;
-    type B = Block<D>;
     type K = PublicKey;
+    type Ctx = crate::simplex::types::Context<D, K>;
+    type B = Block<D, Ctx>;
     type V = MinPk;
     type S = bls12381_threshold::Scheme<K, V>;
     type P = ConstantProvider<S, Epoch>;
+
+    /// Default leader key for tests.
+    fn default_leader() -> K {
+        use commonware_cryptography::{ed25519::PrivateKey, Signer as _};
+        PrivateKey::from_seed(0).public_key()
+    }
+
+    /// Create a test block with a derived context.
+    ///
+    /// The context is constructed with:
+    /// - Round: epoch 0, view = height
+    /// - Leader: default (all zeros)
+    /// - Parent: (view = height - 1, commitment = parent)
+    fn make_block(parent: D, height: Height, timestamp: u64) -> B {
+        let parent_view = height
+            .previous()
+            .map(|h| View::new(h.get()))
+            .unwrap_or(View::zero());
+        let context = Ctx {
+            round: Round::new(Epoch::zero(), View::new(height.get())),
+            leader: default_leader(),
+            parent: (parent_view, parent),
+        };
+        B::new::<Sha256>(parent, height, context, timestamp)
+    }
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
@@ -172,6 +202,51 @@ mod tests {
         success_rate: 0.7,
     };
     const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
+
+    /// A mock verifying application for testing the Marshaled wrapper.
+    ///
+    /// This application always returns true for verification, allowing tests
+    /// to focus on the context handling and other aspects of Marshaled.
+    #[derive(Clone)]
+    struct MockVerifyingApp {
+        genesis: B,
+    }
+
+    impl crate::Application<deterministic::Context> for MockVerifyingApp {
+        type Block = B;
+        type Context = Context<D, K>;
+        type SigningScheme = S;
+
+        async fn genesis(&mut self) -> Self::Block {
+            self.genesis.clone()
+        }
+
+        async fn propose(
+            &mut self,
+            _context: (deterministic::Context, Self::Context),
+            _ancestry: AncestorStream<Self::SigningScheme, Self::Block>,
+        ) -> Option<Self::Block> {
+            None
+        }
+    }
+
+    impl VerifyingApplication<deterministic::Context> for MockVerifyingApp {
+        async fn verify(
+            &mut self,
+            _context: (deterministic::Context, Self::Context),
+            _ancestry: AncestorStream<Self::SigningScheme, Self::Block>,
+        ) -> bool {
+            true
+        }
+    }
+
+    impl Reporter for MockVerifyingApp {
+        type Activity = Update<B>;
+
+        async fn report(&mut self, _update: Self::Activity) {
+            // No-op for tests
+        }
+    }
 
     async fn setup_validator(
         context: deterministic::Context,
@@ -466,7 +541,7 @@ mod tests {
             let mut blocks = Vec::<B>::new();
             let mut parent = Sha256::hash(b"");
             for i in 1..=NUM_BLOCKS {
-                let block = B::new::<Sha256>(parent, Height::new(i), i);
+                let block = make_block(parent, Height::new(i), i);
                 parent = block.digest();
                 blocks.push(block);
             }
@@ -617,7 +692,7 @@ mod tests {
             let mut blocks = Vec::<B>::new();
             let mut parent = Sha256::hash(b"");
             for i in 1..=NUM_BLOCKS {
-                let block = B::new::<Sha256>(parent, Height::new(i), i);
+                let block = make_block(parent, Height::new(i), i);
                 parent = block.digest();
                 blocks.push(block);
             }
@@ -889,7 +964,7 @@ mod tests {
             let mut parent = Sha256::hash(b"");
             let epocher = FixedEpocher::new(BLOCKS_PER_EPOCH);
             for i in 1..=20u64 {
-                let block = B::new::<Sha256>(parent, Height::new(i), i);
+                let block = make_block(parent, Height::new(i), i);
                 let commitment = block.digest();
                 let bounds = epocher.containing(Height::new(i)).unwrap();
                 let round = Round::new(bounds.epoch(), View::new(i));
@@ -1039,7 +1114,7 @@ mod tests {
             setup_network_links(&mut oracle, &participants, LINK).await;
 
             let parent = Sha256::hash(b"");
-            let block = B::new::<Sha256>(parent, Height::new(1), 1);
+            let block = make_block(parent, Height::new(1), 1);
             let commitment = block.digest();
 
             let subscription_rx = actor
@@ -1094,8 +1169,8 @@ mod tests {
             setup_network_links(&mut oracle, &participants, LINK).await;
 
             let parent = Sha256::hash(b"");
-            let block1 = B::new::<Sha256>(parent, Height::new(1), 1);
-            let block2 = B::new::<Sha256>(block1.digest(), Height::new(2), 2);
+            let block1 = make_block(parent, Height::new(1), 1);
+            let block2 = make_block(block1.digest(), Height::new(2), 2);
             let commitment1 = block1.digest();
             let commitment2 = block2.digest();
 
@@ -1170,8 +1245,8 @@ mod tests {
             setup_network_links(&mut oracle, &participants, LINK).await;
 
             let parent = Sha256::hash(b"");
-            let block1 = B::new::<Sha256>(parent, Height::new(1), 1);
-            let block2 = B::new::<Sha256>(block1.digest(), Height::new(2), 2);
+            let block1 = make_block(parent, Height::new(1), 1);
+            let block2 = make_block(block1.digest(), Height::new(2), 2);
             let commitment1 = block1.digest();
             let commitment2 = block2.digest();
 
@@ -1238,11 +1313,11 @@ mod tests {
             setup_network_links(&mut oracle, &participants, LINK).await;
 
             let parent = Sha256::hash(b"");
-            let block1 = B::new::<Sha256>(parent, Height::new(1), 1);
-            let block2 = B::new::<Sha256>(block1.digest(), Height::new(2), 2);
-            let block3 = B::new::<Sha256>(block2.digest(), Height::new(3), 3);
-            let block4 = B::new::<Sha256>(block3.digest(), Height::new(4), 4);
-            let block5 = B::new::<Sha256>(block4.digest(), Height::new(5), 5);
+            let block1 = make_block(parent, Height::new(1), 1);
+            let block2 = make_block(block1.digest(), Height::new(2), 2);
+            let block3 = make_block(block2.digest(), Height::new(3), 3);
+            let block4 = make_block(block3.digest(), Height::new(4), 4);
+            let block5 = make_block(block4.digest(), Height::new(5), 5);
 
             let sub1_rx = actor.subscribe(None, block1.digest()).await;
             let sub2_rx = actor.subscribe(None, block2.digest()).await;
@@ -1351,7 +1426,7 @@ mod tests {
 
             // Create and verify a block, then finalize it
             let parent = Sha256::hash(b"");
-            let block = B::new::<Sha256>(parent, Height::new(1), 1);
+            let block = make_block(parent, Height::new(1), 1);
             let digest = block.digest();
             let round = Round::new(Epoch::new(0), View::new(1));
             actor.verified(round, block.clone()).await;
@@ -1417,7 +1492,7 @@ mod tests {
 
             // Build and finalize heights 1..=3
             let parent0 = Sha256::hash(b"");
-            let block1 = B::new::<Sha256>(parent0, Height::new(1), 1);
+            let block1 = make_block(parent0, Height::new(1), 1);
             let d1 = block1.digest();
             actor
                 .verified(Round::new(Epoch::new(0), View::new(1)), block1.clone())
@@ -1435,7 +1510,7 @@ mod tests {
             let latest = actor.get_info(Identifier::Latest).await;
             assert_eq!(latest, Some((Height::new(1), d1)));
 
-            let block2 = B::new::<Sha256>(d1, Height::new(2), 2);
+            let block2 = make_block(d1, Height::new(2), 2);
             let d2 = block2.digest();
             actor
                 .verified(Round::new(Epoch::new(0), View::new(2)), block2.clone())
@@ -1453,7 +1528,7 @@ mod tests {
             let latest = actor.get_info(Identifier::Latest).await;
             assert_eq!(latest, Some((Height::new(2), d2)));
 
-            let block3 = B::new::<Sha256>(d2, Height::new(3), 3);
+            let block3 = make_block(d2, Height::new(3), 3);
             let d3 = block3.digest();
             actor
                 .verified(Round::new(Epoch::new(0), View::new(3)), block3.clone())
@@ -1500,7 +1575,7 @@ mod tests {
 
             // Finalize a block at height 1
             let parent = Sha256::hash(b"");
-            let block = B::new::<Sha256>(parent, Height::new(1), 1);
+            let block = make_block(parent, Height::new(1), 1);
             let commitment = block.digest();
             let round = Round::new(Epoch::new(0), View::new(1));
             actor.verified(round, block.clone()).await;
@@ -1557,7 +1632,7 @@ mod tests {
 
             // 1) From cache via verified
             let parent = Sha256::hash(b"");
-            let ver_block = B::new::<Sha256>(parent, Height::new(1), 1);
+            let ver_block = make_block(parent, Height::new(1), 1);
             let ver_commitment = ver_block.digest();
             let round1 = Round::new(Epoch::new(0), View::new(1));
             actor.verified(round1, ver_block.clone()).await;
@@ -1568,7 +1643,7 @@ mod tests {
             assert_eq!(got.digest(), ver_commitment);
 
             // 2) From finalized archive
-            let fin_block = B::new::<Sha256>(ver_commitment, Height::new(2), 2);
+            let fin_block = make_block(ver_commitment, Height::new(2), 2);
             let fin_commitment = fin_block.digest();
             let round2 = Round::new(Epoch::new(0), View::new(2));
             actor.verified(round2, fin_block.clone()).await;
@@ -1619,7 +1694,7 @@ mod tests {
 
             // Finalize a block at height 1
             let parent = Sha256::hash(b"");
-            let block = B::new::<Sha256>(parent, Height::new(1), 1);
+            let block = make_block(parent, Height::new(1), 1);
             let commitment = block.digest();
             let round = Round::new(Epoch::new(0), View::new(1));
             actor.verified(round, block.clone()).await;
@@ -1690,7 +1765,7 @@ mod tests {
             // Validator 0: Create and finalize blocks 1-5
             let mut parent = Sha256::hash(b"");
             for i in 1..=5u64 {
-                let block = B::new::<Sha256>(parent, Height::new(i), i);
+                let block = make_block(parent, Height::new(i), i);
                 let commitment = block.digest();
                 let round = Round::new(Epoch::new(0), View::new(i));
 
@@ -1756,7 +1831,7 @@ mod tests {
             // Finalize blocks at heights 1-5
             let mut parent = Sha256::hash(b"");
             for i in 1..=5 {
-                let block = B::new::<Sha256>(parent, Height::new(i), i);
+                let block = make_block(parent, Height::new(i), i);
                 let commitment = block.digest();
                 let round = Round::new(Epoch::new(0), View::new(i));
                 actor.verified(round, block.clone()).await;
@@ -1786,40 +1861,6 @@ mod tests {
 
     #[test_traced("WARN")]
     fn test_marshaled_rejects_invalid_ancestry() {
-        #[derive(Clone)]
-        struct MockVerifyingApp {
-            genesis: B,
-        }
-
-        impl crate::Application<deterministic::Context> for MockVerifyingApp {
-            type Block = B;
-            type Context = Context<D, K>;
-            type SigningScheme = S;
-
-            async fn genesis(&mut self) -> Self::Block {
-                self.genesis.clone()
-            }
-
-            async fn propose(
-                &mut self,
-                _context: (deterministic::Context, Self::Context),
-                _ancestry: AncestorStream<Self::SigningScheme, Self::Block>,
-            ) -> Option<Self::Block> {
-                None
-            }
-        }
-
-        impl VerifyingApplication<deterministic::Context> for MockVerifyingApp {
-            async fn verify(
-                &mut self,
-                _context: (deterministic::Context, Self::Context),
-                _ancestry: AncestorStream<Self::SigningScheme, Self::Block>,
-            ) -> bool {
-                // Ancestry verification occurs entirely in `Marshaled`.
-                true
-            }
-        }
-
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
             let mut oracle = setup_network(context.clone(), None);
@@ -1839,18 +1880,20 @@ mod tests {
             .await;
 
             // Create genesis block
-            let genesis = B::new::<Sha256>(Sha256::hash(b""), Height::zero(), 0);
+            let genesis = make_block(Sha256::hash(b""), Height::zero(), 0);
 
             // Wrap with Marshaled verifier
             let mock_app = MockVerifyingApp {
                 genesis: genesis.clone(),
             };
-            let mut marshaled = Marshaled::new(
+            let mut marshaled = Marshaled::init(
                 context.clone(),
                 mock_app,
                 marshal.clone(),
                 FixedEpocher::new(BLOCKS_PER_EPOCH),
-            );
+                "test-marshaled".to_string(),
+            )
+            .await;
 
             // Test case 1: Non-contiguous height
             //
@@ -1858,7 +1901,7 @@ mod tests {
             // With BLOCKS_PER_EPOCH=20: epoch 0 is heights 0-19, epoch 1 is heights 20-39
             //
             // Store honest parent at height 21 (epoch 1)
-            let honest_parent = B::new::<Sha256>(
+            let honest_parent = make_block(
                 genesis.commitment(),
                 Height::new(BLOCKS_PER_EPOCH.get() + 1),
                 1000,
@@ -1873,7 +1916,7 @@ mod tests {
             // Byzantine proposer broadcasts malicious block at height 35
             // In reality this would come via buffered broadcast, but for test simplicity
             // we call broadcast() directly which makes it available for subscription
-            let malicious_block = B::new::<Sha256>(
+            let malicious_block = make_block(
                 parent_commitment,
                 Height::new(BLOCKS_PER_EPOCH.get() + 15),
                 2000,
@@ -1892,20 +1935,25 @@ mod tests {
 
             // Consensus determines parent should be block at height 21
             // and calls verify on the Marshaled automaton with a block at height 35
+            let byzantine_round = Round::new(Epoch::new(1), View::new(35));
             let byzantine_context = Context {
-                round: Round::new(Epoch::new(1), View::new(35)),
+                round: byzantine_round,
                 leader: me.clone(),
                 parent: (View::new(21), parent_commitment), // Consensus says parent is at height 21
             };
 
-            // Marshaled.verify() should reject the malicious block
+            // Marshaled.certify() should reject the malicious block
             // The Marshaled verifier will:
             // 1. Fetch honest_parent (height 21) from marshal based on context.parent
             // 2. Fetch malicious_block (height 35) from marshal based on digest
             // 3. Validate height is contiguous (fail)
             // 4. Return false
-            let verify = marshaled
+            let _ = marshaled
                 .verify(byzantine_context, malicious_commitment)
+                .await
+                .await;
+            let verify = marshaled
+                .certify(byzantine_round, malicious_commitment)
                 .await;
 
             assert!(
@@ -1916,7 +1964,7 @@ mod tests {
             // Test case 2: Mismatched parent commitment
             //
             // Create another malicious block with correct height but invalid parent commitment
-            let malicious_block = B::new::<Sha256>(
+            let malicious_block = make_block(
                 genesis.commitment(),
                 Height::new(BLOCKS_PER_EPOCH.get() + 2),
                 3000,
@@ -1935,21 +1983,26 @@ mod tests {
 
             // Consensus determines parent should be block at height 21
             // and calls verify on the Marshaled automaton with a block at height 22
+            let byzantine_round = Round::new(Epoch::new(1), View::new(22));
             let byzantine_context = Context {
-                round: Round::new(Epoch::new(1), View::new(22)),
+                round: byzantine_round,
                 leader: me.clone(),
                 parent: (View::new(21), parent_commitment), // Consensus says parent is at height 21
             };
 
-            // Marshaled.verify() should reject the malicious block
+            // Marshaled.certify() should reject the malicious block
             // The Marshaled verifier will:
             // 1. Fetch honest_parent (height 21) from marshal based on context.parent
             // 2. Fetch malicious_block (height 22) from marshal based on digest
             // 3. Validate height is contiguous
             // 3. Validate parent commitment matches (fail)
             // 4. Return false
-            let verify = marshaled
+            let _ = marshaled
                 .verify(byzantine_context, malicious_commitment)
+                .await
+                .await;
+            let verify = marshaled
+                .certify(byzantine_round, malicious_commitment)
                 .await;
 
             assert!(
@@ -1985,7 +2038,7 @@ mod tests {
 
             // Create block at height 1
             let parent = Sha256::hash(b"");
-            let block = B::new::<Sha256>(parent, Height::new(1), 1);
+            let block = make_block(parent, Height::new(1), 1);
             let commitment = block.digest();
 
             // Both validators verify the block
@@ -2103,7 +2156,7 @@ mod tests {
             let mut parent = Sha256::hash(b"");
             let mut blocks = Vec::new();
             for i in 1..=3 {
-                let block = B::new::<Sha256>(parent, Height::new(i), i);
+                let block = make_block(parent, Height::new(i), i);
                 let commitment = block.digest();
                 let round = Round::new(Epoch::new(0), View::new(i));
 
@@ -2151,39 +2204,6 @@ mod tests {
 
     #[test_traced("WARN")]
     fn test_marshaled_rejects_unsupported_epoch() {
-        #[derive(Clone)]
-        struct MockVerifyingApp {
-            genesis: B,
-        }
-
-        impl crate::Application<deterministic::Context> for MockVerifyingApp {
-            type Block = B;
-            type Context = Context<D, K>;
-            type SigningScheme = S;
-
-            async fn genesis(&mut self) -> Self::Block {
-                self.genesis.clone()
-            }
-
-            async fn propose(
-                &mut self,
-                _context: (deterministic::Context, Self::Context),
-                _ancestry: AncestorStream<Self::SigningScheme, Self::Block>,
-            ) -> Option<Self::Block> {
-                None
-            }
-        }
-
-        impl VerifyingApplication<deterministic::Context> for MockVerifyingApp {
-            async fn verify(
-                &mut self,
-                _context: (deterministic::Context, Self::Context),
-                _ancestry: AncestorStream<Self::SigningScheme, Self::Block>,
-            ) -> bool {
-                true
-            }
-        }
-
         #[derive(Clone)]
         struct LimitedEpocher {
             inner: FixedEpocher,
@@ -2235,7 +2255,7 @@ mod tests {
             )
             .await;
 
-            let genesis = B::new::<Sha256>(Sha256::hash(b""), Height::zero(), 0);
+            let genesis = make_block(Sha256::hash(b""), Height::zero(), 0);
 
             let mock_app = MockVerifyingApp {
                 genesis: genesis.clone(),
@@ -2244,17 +2264,23 @@ mod tests {
                 inner: FixedEpocher::new(BLOCKS_PER_EPOCH),
                 max_epoch: 0,
             };
-            let mut marshaled =
-                Marshaled::new(context.clone(), mock_app, marshal.clone(), limited_epocher);
+            let mut marshaled = Marshaled::init(
+                context.clone(),
+                mock_app,
+                marshal.clone(),
+                limited_epocher,
+                "test-marshaled".to_string(),
+            )
+            .await;
 
             // Create a parent block at height 19 (last block in epoch 0, which is supported)
-            let parent = B::new::<Sha256>(genesis.commitment(), Height::new(19), 1000);
+            let parent = make_block(genesis.commitment(), Height::new(19), 1000);
             let parent_commitment = parent.commitment();
             let parent_round = Round::new(Epoch::new(0), View::new(19));
             marshal.clone().verified(parent_round, parent).await;
 
             // Create a block at height 20 (first block in epoch 1, which is NOT supported)
-            let block = B::new::<Sha256>(parent_commitment, Height::new(20), 2000);
+            let block = make_block(parent_commitment, Height::new(20), 2000);
             let block_commitment = block.commitment();
             marshal
                 .clone()
@@ -2263,20 +2289,144 @@ mod tests {
 
             context.sleep(Duration::from_millis(10)).await;
 
+            let unsupported_round = Round::new(Epoch::new(1), View::new(20));
             let unsupported_context = Context {
-                round: Round::new(Epoch::new(1), View::new(20)),
+                round: unsupported_round,
                 leader: me.clone(),
                 parent: (View::new(19), parent_commitment),
             };
 
-            let verify = marshaled
+            let _ = marshaled
                 .verify(unsupported_context, block_commitment)
+                .await
                 .await;
+            let verify = marshaled.certify(unsupported_round, block_commitment).await;
 
             assert!(
                 !verify.await.unwrap(),
                 "Block in unsupported epoch should be rejected"
             );
+        })
+    }
+
+    /// Regression test for cleanup bug.
+    ///
+    /// The bug: when certifying a block at view V+K, the cleanup logic would
+    /// remove verification contexts for ALL digests that don't have any entry
+    /// with round > V+K. This incorrectly deletes contexts for other blocks
+    /// at lower views that haven't been certified yet.
+    ///
+    /// Scenario:
+    /// 1. Verify block A at view V (stores context)
+    /// 2. Verify block B at view V+K (stores context)
+    /// 3. Certify block B at view V+K (cleanup runs)
+    /// 4. Certify block A at view V - should succeed, but previously would fail
+    ///    because cleanup deleted A's context (V < V+K)
+    #[test_traced("INFO")]
+    fn test_certify_lower_view_after_higher_view() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(60));
+        runner.start(|mut context| async move {
+            let mut oracle = setup_network(context.clone(), None);
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+
+            let me = participants[0].clone();
+            let (_base_app, marshal, _processed_height) = setup_validator(
+                context.with_label("validator_0"),
+                &mut oracle,
+                me.clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+
+            let genesis = make_block(Sha256::hash(b""), Height::zero(), 0);
+
+            let mock_app = MockVerifyingApp {
+                genesis: genesis.clone(),
+            };
+            let mut marshaled = Marshaled::init(
+                context.clone(),
+                mock_app,
+                marshal.clone(),
+                FixedEpocher::new(BLOCKS_PER_EPOCH),
+                "test-marshaled".to_string(),
+            )
+            .await;
+
+            // Create parent block at height 1
+            let parent = make_block(genesis.commitment(), Height::new(1), 100);
+            let parent_commitment = parent.commitment();
+            let parent_round = Round::new(Epoch::new(0), View::new(1));
+            marshal.clone().verified(parent_round, parent).await;
+
+            // Block A at view 5 (height 2) - create with context matching what verify will receive
+            let round_a = Round::new(Epoch::new(0), View::new(5));
+            let context_a = Context {
+                round: round_a,
+                leader: me.clone(),
+                parent: (View::new(1), parent_commitment),
+            };
+            let block_a = B::new::<Sha256>(parent_commitment, Height::new(2), context_a.clone(), 200);
+            let commitment_a = block_a.commitment();
+            marshal
+                .clone()
+                .proposed(round_a, block_a)
+                .await;
+
+            // Block B at view 10 (height 2, different block same height - could happen with
+            // different proposers or re-proposals)
+            let round_b = Round::new(Epoch::new(0), View::new(10));
+            let context_b = Context {
+                round: round_b,
+                leader: me.clone(),
+                parent: (View::new(1), parent_commitment),
+            };
+            let block_b = B::new::<Sha256>(parent_commitment, Height::new(2), context_b.clone(), 300);
+            let commitment_b = block_b.commitment();
+            marshal
+                .clone()
+                .proposed(round_b, block_b)
+                .await;
+
+            context.sleep(Duration::from_millis(10)).await;
+
+            // Step 1: Verify block A at view 5
+            let _ = marshaled.verify(context_a, commitment_a).await.await;
+
+            // Step 2: Verify block B at view 10
+            let _ = marshaled.verify(context_b, commitment_b).await.await;
+
+            // Step 3: Certify block B at view 10 FIRST
+            // Previously, this cleanup would delete context for block A because view 5 < view 10
+            let certify_b = marshaled.certify(round_b, commitment_b).await;
+            assert!(
+                certify_b.await.unwrap(),
+                "Block B certification should succeed"
+            );
+
+            // Step 4: Certify block A at view 5
+            // Previously, this would return a never-resolving receiver (context deleted)
+            // After the fix, this should succeed because cleanup is deferred to finalization
+            let certify_a = marshaled.certify(round_a, commitment_a).await;
+
+            // Use select with timeout to detect never-resolving receiver
+            select! {
+                result = certify_a => {
+                    assert!(
+                        result.unwrap(),
+                        "Block A certification should succeed"
+                    );
+                },
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!(
+                        "Block A certification timed out - context was incorrectly deleted \
+                        (regression: cleanup bug where certifying view 10 deleted context for view 5)"
+                    );
+                },
+            }
         })
     }
 
@@ -2304,7 +2454,7 @@ mod tests {
 
             // Create block at height 1
             let parent = Sha256::hash(b"");
-            let block = B::new::<Sha256>(parent, Height::new(1), 1);
+            let block = make_block(parent, Height::new(1), 1);
             let commitment = block.digest();
 
             // Broadcast the block
@@ -2349,6 +2499,524 @@ mod tests {
                 .await
                 .expect("block should be cached after broadcast");
             assert_eq!(fetched, block);
+        });
+    }
+
+    /// Safety Test: Verify that when a block's embedded context differs from the
+    /// consensus-provided context, verification fails.
+    ///
+    /// This is the core safety check: honest validators will reject blocks where
+    /// `block.context() != consensus_context`, preventing Byzantine proposers from
+    /// embedding malicious contexts.
+    #[test_traced("INFO")]
+    fn test_verify_rejects_context_mismatch() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(60));
+        runner.start(|mut context| async move {
+            let mut oracle = setup_network(context.clone(), None);
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+
+            let me = participants[0].clone();
+            let (_base_app, marshal, _processed_height) = setup_validator(
+                context.with_label("validator_0"),
+                &mut oracle,
+                me.clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+
+            let genesis = make_block(Sha256::hash(b""), Height::zero(), 0);
+
+            let mock_app = MockVerifyingApp {
+                genesis: genesis.clone(),
+            };
+            let mut marshaled = Marshaled::init(
+                context.clone(),
+                mock_app,
+                marshal.clone(),
+                FixedEpocher::new(BLOCKS_PER_EPOCH),
+                "test-marshaled".to_string(),
+            )
+            .await;
+
+            // Create parent at height 1 with its own context
+            let parent = make_block(genesis.commitment(), Height::new(1), 100);
+            let parent_commitment = parent.commitment();
+            let parent_round = Round::new(Epoch::new(0), View::new(1));
+            marshal.clone().verified(parent_round, parent).await;
+
+            // Create a block at height 2 with context_block (view 2)
+            let context_block = Context {
+                round: Round::new(Epoch::new(0), View::new(2)),
+                leader: me.clone(),
+                parent: (View::new(1), parent_commitment),
+            };
+            let block = B::new::<Sha256>(
+                parent_commitment,
+                Height::new(2),
+                context_block.clone(),
+                200,
+            );
+            let commitment = block.commitment();
+
+            // Propose the block to marshal so it's available for subscription
+            marshal
+                .clone()
+                .proposed(context_block.round, block.clone())
+                .await;
+
+            context.sleep(Duration::from_millis(10)).await;
+
+            // Now call verify with a DIFFERENT context (view 5 instead of view 2)
+            // This simulates a Byzantine proposer who embedded context_block but
+            // consensus is actually at a different round.
+            let context_consensus = Context {
+                round: Round::new(Epoch::new(0), View::new(5)), // Different round!
+                leader: me.clone(),
+                parent: (View::new(1), parent_commitment),
+            };
+
+            // Verify should fail because block.context() != context_consensus
+            let verify_rx = marshaled
+                .verify(context_consensus.clone(), commitment)
+                .await;
+
+            // The Automaton::verify returns immediately with true (optimistic),
+            // but we need to wait for the actual verification task to complete
+            // via certify.
+            let certify_rx = marshaled.certify(context_consensus.round, commitment).await;
+
+            select! {
+                result = certify_rx => {
+                    assert!(
+                        !result.unwrap(),
+                        "Verification should FAIL when block.context() != consensus context"
+                    );
+                },
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("Verification timed out");
+                },
+            }
+
+            // Suppress unused variable warning
+            drop(verify_rx);
+        });
+    }
+
+    /// Safety Test: Verify that after clearing in-memory verification tasks
+    /// (simulating a crash), certify uses the stored context from Metadata,
+    /// not the block's embedded context.
+    ///
+    /// This ensures that validators who participated in notarization will always
+    /// verify against the context they received from consensus, even after crashes.
+    #[test_traced("INFO")]
+    fn test_stored_context_used_after_simulated_crash() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(60));
+        runner.start(|mut context| async move {
+            let mut oracle = setup_network(context.clone(), None);
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+
+            let me = participants[0].clone();
+            let (_base_app, marshal, _processed_height) = setup_validator(
+                context.with_label("validator_0"),
+                &mut oracle,
+                me.clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+
+            let genesis = make_block(Sha256::hash(b""), Height::zero(), 0);
+
+            let mock_app = MockVerifyingApp {
+                genesis: genesis.clone(),
+            };
+            let mut marshaled = Marshaled::init(
+                context.clone(),
+                mock_app,
+                marshal.clone(),
+                FixedEpocher::new(BLOCKS_PER_EPOCH),
+                "test-marshaled".to_string(),
+            )
+            .await;
+
+            // Create parent at height 1
+            let parent = make_block(genesis.commitment(), Height::new(1), 100);
+            let parent_commitment = parent.commitment();
+            let parent_round = Round::new(Epoch::new(0), View::new(1));
+            marshal.clone().verified(parent_round, parent).await;
+
+            // Create a block with CORRECT context (matching what we'll pass to verify)
+            let correct_context = Context {
+                round: Round::new(Epoch::new(0), View::new(2)),
+                leader: me.clone(),
+                parent: (View::new(1), parent_commitment),
+            };
+            let block = B::new::<Sha256>(
+                parent_commitment,
+                Height::new(2),
+                correct_context.clone(),
+                200,
+            );
+            let commitment = block.commitment();
+
+            // Propose the block
+            marshal
+                .clone()
+                .proposed(correct_context.round, block.clone())
+                .await;
+
+            context.sleep(Duration::from_millis(10)).await;
+
+            // Call verify - this stores the context in Metadata
+            let _verify_rx = marshaled.verify(correct_context.clone(), commitment).await;
+
+            // Wait for verification to complete
+            context.sleep(Duration::from_millis(100)).await;
+
+            // Simulate crash by recreating Marshaled with same storage partition
+            // This will have empty in-memory tasks but preserved Metadata
+            let mock_app_restart = MockVerifyingApp {
+                genesis: genesis.clone(),
+            };
+            let mut marshaled = Marshaled::init(
+                context.with_label("restart"), // Different label to avoid metric conflicts
+                mock_app_restart,
+                marshal.clone(),
+                FixedEpocher::new(BLOCKS_PER_EPOCH),
+                "test-marshaled".to_string(), // Same partition - will load existing contexts
+            )
+            .await;
+
+            // Now call certify - it should recover from stored context
+            let certify_rx = marshaled.certify(correct_context.round, commitment).await;
+
+            select! {
+                result = certify_rx => {
+                    assert!(
+                        result.unwrap(),
+                        "Certify should succeed using stored context after simulated crash"
+                    );
+                },
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("Certify timed out - stored context may not have been used");
+                },
+            }
+        });
+    }
+
+    /// Liveness Test: Verify that a validator who never called verify can still
+    /// certify by using the block's embedded context.
+    ///
+    /// This is important for liveness: when Byzantine validators withhold finalize
+    /// votes, honest validators who weren't in the notarizing quorum can use the
+    /// block's embedded context to help complete finalization.
+    #[test_traced("INFO")]
+    fn test_certify_uses_block_context_for_non_participants() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(60));
+        runner.start(|mut context| async move {
+            let mut oracle = setup_network(context.clone(), None);
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+
+            let me = participants[0].clone();
+            let (_base_app, marshal, _processed_height) = setup_validator(
+                context.with_label("validator_0"),
+                &mut oracle,
+                me.clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+
+            let genesis = make_block(Sha256::hash(b""), Height::zero(), 0);
+
+            let mock_app = MockVerifyingApp {
+                genesis: genesis.clone(),
+            };
+            let mut marshaled = Marshaled::init(
+                context.clone(),
+                mock_app,
+                marshal.clone(),
+                FixedEpocher::new(BLOCKS_PER_EPOCH),
+                "test-marshaled".to_string(),
+            )
+            .await;
+
+            // Create parent at height 1
+            let parent = make_block(genesis.commitment(), Height::new(1), 100);
+            let parent_commitment = parent.commitment();
+            let parent_round = Round::new(Epoch::new(0), View::new(1));
+            marshal.clone().verified(parent_round, parent).await;
+
+            // Create a block with its embedded context
+            let block_context = Context {
+                round: Round::new(Epoch::new(0), View::new(2)),
+                leader: me.clone(),
+                parent: (View::new(1), parent_commitment),
+            };
+            let block = B::new::<Sha256>(
+                parent_commitment,
+                Height::new(2),
+                block_context.clone(),
+                200,
+            );
+            let commitment = block.commitment();
+
+            // Propose the block (but do NOT call verify - simulating a validator
+            // who never participated in notarization)
+            marshal
+                .clone()
+                .proposed(block_context.round, block.clone())
+                .await;
+
+            context.sleep(Duration::from_millis(10)).await;
+
+            // Directly call certify without prior verify
+            // This should use the block's embedded context
+            let certify_rx = marshaled.certify(block_context.round, commitment).await;
+
+            select! {
+                result = certify_rx => {
+                    assert!(
+                        result.unwrap(),
+                        "Certify should succeed using block's embedded context"
+                    );
+                },
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("Certify timed out - block context fallback may not be working");
+                },
+            }
+        });
+    }
+
+    /// Safety Test: Verify that f+1 honest validators who stored their context
+    /// will reject a block with a mismatched embedded context, even when other
+    /// validators use the block's context.
+    ///
+    /// This demonstrates the key safety property: a Byzantine proposer cannot
+    /// achieve a 2f+1 finalization quorum with a malicious context because
+    /// f+1 honest notarizers will reject the mismatch.
+    #[test_traced("INFO")]
+    fn test_honest_notarizers_reject_malicious_context() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(60));
+        runner.start(|mut context| async move {
+            let mut oracle = setup_network(context.clone(), None);
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+
+            let me = participants[0].clone();
+            let (_base_app, marshal, _processed_height) = setup_validator(
+                context.with_label("validator_0"),
+                &mut oracle,
+                me.clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+
+            let genesis = make_block(Sha256::hash(b""), Height::zero(), 0);
+
+            let mock_app = MockVerifyingApp {
+                genesis: genesis.clone(),
+            };
+            let mut marshaled = Marshaled::init(
+                context.clone(),
+                mock_app,
+                marshal.clone(),
+                FixedEpocher::new(BLOCKS_PER_EPOCH),
+                "test-marshaled".to_string(),
+            )
+            .await;
+
+            // Create parent at height 1
+            let parent = make_block(genesis.commitment(), Height::new(1), 100);
+            let parent_commitment = parent.commitment();
+            let parent_round = Round::new(Epoch::new(0), View::new(1));
+            marshal.clone().verified(parent_round, parent).await;
+
+            // Byzantine proposer creates a block with MALICIOUS context (wrong parent view)
+            let malicious_context = Context {
+                round: Round::new(Epoch::new(0), View::new(2)),
+                leader: me.clone(),
+                parent: (View::new(0), parent_commitment), // WRONG: should be View::new(1)
+            };
+            let block = B::new::<Sha256>(
+                parent_commitment,
+                Height::new(2),
+                malicious_context.clone(),
+                200,
+            );
+            let commitment = block.commitment();
+
+            // Propose the malicious block
+            marshal
+                .clone()
+                .proposed(malicious_context.round, block.clone())
+                .await;
+
+            context.sleep(Duration::from_millis(10)).await;
+
+            // Honest validator received the CORRECT context from consensus
+            let honest_context = Context {
+                round: Round::new(Epoch::new(0), View::new(2)),
+                leader: me.clone(),
+                parent: (View::new(1), parent_commitment), // CORRECT parent view
+            };
+
+            // Call verify with the honest (correct) context
+            let _verify_rx = marshaled.verify(honest_context.clone(), commitment).await;
+
+            // Certify should FAIL because block.context() has wrong parent view
+            let certify_rx = marshaled.certify(honest_context.round, commitment).await;
+
+            select! {
+                result = certify_rx => {
+                    assert!(
+                        !result.unwrap(),
+                        "Honest notarizer should REJECT block with malicious context"
+                    );
+                },
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("Certify timed out");
+                },
+            }
+        });
+    }
+
+    /// Liveness Test: Verify that cleanup only removes contexts for finalized rounds,
+    /// preserving contexts needed for pending certifications.
+    ///
+    /// This ensures that cleanup doesn't accidentally break ongoing certifications.
+    #[test_traced("INFO")]
+    fn test_cleanup_preserves_pending_contexts() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(60));
+        runner.start(|mut context| async move {
+            let mut oracle = setup_network(context.clone(), None);
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+
+            let me = participants[0].clone();
+            let (_base_app, marshal, _processed_height) = setup_validator(
+                context.with_label("validator_0"),
+                &mut oracle,
+                me.clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+
+            let genesis = make_block(Sha256::hash(b""), Height::zero(), 0);
+
+            let mock_app = MockVerifyingApp {
+                genesis: genesis.clone(),
+            };
+            let mut marshaled = Marshaled::init(
+                context.clone(),
+                mock_app,
+                marshal.clone(),
+                FixedEpocher::new(BLOCKS_PER_EPOCH),
+                "test-marshaled".to_string(),
+            )
+            .await;
+
+            // Create parent at height 1
+            let parent = make_block(genesis.commitment(), Height::new(1), 100);
+            let parent_commitment = parent.commitment();
+            let parent_round = Round::new(Epoch::new(0), View::new(1));
+            marshal.clone().verified(parent_round, parent).await;
+
+            // Create blocks at views 5 and 10
+            let context_5 = Context {
+                round: Round::new(Epoch::new(0), View::new(5)),
+                leader: me.clone(),
+                parent: (View::new(1), parent_commitment),
+            };
+            let block_5 = B::new::<Sha256>(parent_commitment, Height::new(2), context_5.clone(), 200);
+            let commitment_5 = block_5.commitment();
+
+            let context_10 = Context {
+                round: Round::new(Epoch::new(0), View::new(10)),
+                leader: me.clone(),
+                parent: (View::new(1), parent_commitment),
+            };
+            let block_10 = B::new::<Sha256>(parent_commitment, Height::new(2), context_10.clone(), 300);
+            let commitment_10 = block_10.commitment();
+
+            // Propose both blocks
+            marshal.clone().proposed(context_5.round, block_5).await;
+            marshal.clone().proposed(context_10.round, block_10).await;
+            context.sleep(Duration::from_millis(10)).await;
+
+            // Verify both blocks
+            let _verify_5 = marshaled.verify(context_5.clone(), commitment_5).await;
+            let _verify_10 = marshaled.verify(context_10.clone(), commitment_10).await;
+            context.sleep(Duration::from_millis(100)).await;
+
+            // Simulate finalization at round 7 (view 7)
+            // This should clean up context for view 5, but preserve view 10
+            let finalized_round = Round::new(Epoch::new(0), View::new(7));
+            marshaled
+                .report(Update::Tip(Height::new(2), genesis.commitment(), finalized_round))
+                .await;
+
+            // Simulate crash by recreating Marshaled with same storage partition
+            // This will have empty in-memory tasks but preserved Metadata (post-cleanup)
+            let mock_app_restart = MockVerifyingApp {
+                genesis: genesis.clone(),
+            };
+            let mut marshaled = Marshaled::init(
+                context.with_label("restart"), // Different label to avoid metric conflicts
+                mock_app_restart,
+                marshal.clone(),
+                FixedEpocher::new(BLOCKS_PER_EPOCH),
+                "test-marshaled".to_string(),
+            )
+            .await;
+
+            // View 5 context should have been cleaned up - certify should use block's context
+            // and succeed (since block.context() matches what we originally passed)
+            let certify_5 = marshaled.certify(context_5.round, commitment_5).await;
+
+            // View 10 context should still exist - certify should succeed
+            let certify_10 = marshaled.certify(context_10.round, commitment_10).await;
+
+            // Both should eventually succeed (view 5 via block context, view 10 via stored)
+            select! {
+                result = certify_10 => {
+                    assert!(
+                        result.unwrap(),
+                        "View 10 certify should succeed - context was preserved"
+                    );
+                },
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("View 10 certify timed out - context may have been incorrectly cleaned up");
+                },
+            }
+
+            select! {
+                result = certify_5 => {
+                    assert!(
+                        result.unwrap(),
+                        "View 5 certify should succeed via block's embedded context"
+                    );
+                },
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("View 5 certify timed out");
+                },
+            }
         });
     }
 }

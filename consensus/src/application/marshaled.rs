@@ -2,7 +2,7 @@
 //!
 //! # Overview
 //!
-//! [Marshaled] is an adapter that wraps any [VerifyingApplication] implementation to handle
+//! [`Marshaled`] is an adapter that wraps any [`VerifyingApplication`] implementation to handle
 //! epoch transitions automatically. It intercepts consensus operations (propose, verify) and
 //! ensures blocks are only produced within valid epoch boundaries.
 //!
@@ -13,18 +13,26 @@
 //! Instead, it re-proposes the boundary block to avoid producing blocks that would be pruned
 //! by the epoch transition.
 //!
+//! # Deferred Verification
+//!
+//! By default, [`Marshaled`] uses deferred verification, optimistically voting in favor
+//! of the proposed block but waiting to finalize until verification is complete. In
+//! [`Automaton::verify`], verification is started, and in [`CertifiableAutomaton::certify`],
+//! we wait on the result (before voting to finalize.)
+//!
 //! # Usage
 //!
-//! Wrap your application implementation with [Marshaled::new] and provide it to your
-//! consensus engine for the [Automaton] and [Relay]. The wrapper handles all epoch logic transparently.
+//! Wrap your [`Application`] implementation with [`Marshaled::init`] and provide it to your
+//! consensus engine for the [`Automaton`] and [`Relay`]. The wrapper handles all epoch logic transparently.
 //!
 //! ```rust,ignore
-//! let application = Marshaled::new(
+//! let application = Marshaled::init(
 //!     context,
 //!     my_application,
 //!     marshal_mailbox,
-//!     BLOCKS_PER_EPOCH,
-//! );
+//!     epocher,
+//!     partition_prefix
+//! ).await;
 //! ```
 //!
 //! # Implementation Notes
@@ -37,24 +45,36 @@ use crate::{
     marshal::{self, ingress::mailbox::AncestorStream, Update},
     simplex::types::Context,
     types::{Epoch, Epocher, Round},
-    Application, Automaton, Block, CertifiableAutomaton, Epochable, Relay, Reporter,
-    VerifyingApplication,
+    Application, Automaton, Block, CertifiableAutomaton, CertifiableBlock, Epochable, Relay,
+    Reporter, VerifyingApplication,
 };
-use commonware_cryptography::certificate::Scheme;
-use commonware_runtime::{telemetry::metrics::status::GaugeExt, Clock, Metrics, Spawner};
+use commonware_codec::RangeCfg;
+use commonware_cryptography::{certificate::Scheme, Committable};
+use commonware_runtime::{telemetry::metrics::status::GaugeExt, Clock, Metrics, Spawner, Storage};
+use commonware_storage::metadata::{self, Metadata};
 use commonware_utils::{channels::fallible::OneshotExt, futures::ClosedExt};
 use futures::{
     channel::oneshot::{self, Canceled},
-    future::{select, try_join, Either, Ready},
+    future::{ready, select, try_join, Either, Ready},
     lock::Mutex,
     pin_mut,
 };
 use prometheus_client::metrics::gauge::Gauge;
 use rand::Rng;
-use std::{sync::Arc, time::Instant};
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::Arc,
+    time::Instant,
+};
 use tracing::{debug, warn};
 
-/// An [Application] adapter that handles epoch transitions and validates block ancestry.
+type VerificationContexts<E, B, S> = Metadata<
+    E,
+    <B as Committable>::Commitment,
+    BTreeMap<Round, Context<<B as Committable>::Commitment, <S as Scheme>::PublicKey>>,
+>;
+
+/// An [`Application`] adapter that handles epoch transitions and validates block ancestry.
 ///
 /// This wrapper intercepts consensus operations to enforce epoch boundaries and validate
 /// block ancestry. It prevents blocks from being produced outside their valid epoch,
@@ -63,7 +83,7 @@ use tracing::{debug, warn};
 ///
 /// # Ancestry Validation
 ///
-/// Applications wrapped by [Marshaled] can rely on the following ancestry checks being
+/// Applications wrapped by [`Marshaled`] can rely on the following ancestry checks being
 /// performed automatically during verification:
 /// - Parent commitment matches the consensus context's expected parent
 /// - Block height is exactly one greater than the parent's height
@@ -73,13 +93,33 @@ use tracing::{debug, warn};
 /// This means the entire ancestry chain back to genesis is transitively validated.
 ///
 /// Applications do not need to re-implement these checks in their own verification logic.
+///
+/// # Verification Context Recovery
+///
+/// With deferred verification, validators vote optimistically before verification completes.
+/// If a validator crashes after voting but before certification, they lose their in-memory
+/// verification task. To handle this, verification contexts are recovered from two sources:
+///
+/// 1. Metadata storage: Contexts are stored durably when [`Automaton::verify`] is called,
+///    allowing validators who participated in notarization to recover after a crash. This is
+///    critical: the security guarantee that the block-embedded context is trustworthy depends
+///    on f+1 honest notarizing validators verifying against the context from consensus. If they
+///    instead fell back to trusting the block's context, they would become consumers rather
+///    than verifiers, breaking this guarantee.
+///
+/// 2. Block-embedded context: Blocks implement [`CertifiableBlock`] which embeds the
+///    consensus context. This allows validators who never participated in notarization to help
+///    complete finalization when Byzantine validators withhold their finalize votes. If a
+///    Byzantine proposer embeds a malicious context, the f+1 honest validators from the
+///    notarizing quorum will verify against their stored context and reject the mismatch,
+///    preventing a 2f+1 finalization quorum from forming.
 #[derive(Clone)]
 pub struct Marshaled<E, S, A, B, ES>
 where
-    E: Rng + Spawner + Metrics + Clock,
+    E: Rng + Storage + Spawner + Metrics + Clock,
     S: Scheme,
     A: Application<E>,
-    B: Block,
+    B: CertifiableBlock,
     ES: Epocher,
 {
     context: E,
@@ -87,42 +127,15 @@ where
     marshal: marshal::Mailbox<S, B>,
     epocher: ES,
     last_built: Arc<Mutex<Option<(Round, B)>>>,
+    verification_contexts: Arc<Mutex<VerificationContexts<E, B, S>>>,
+    verification_tasks: Arc<Mutex<HashMap<Round, oneshot::Receiver<bool>>>>,
 
     build_duration: Gauge,
 }
 
 impl<E, S, A, B, ES> Marshaled<E, S, A, B, ES>
 where
-    E: Rng + Spawner + Metrics + Clock,
-    S: Scheme,
-    A: Application<E, Block = B, Context = Context<B::Commitment, S::PublicKey>>,
-    B: Block,
-    ES: Epocher,
-{
-    /// Creates a new [Marshaled] wrapper.
-    pub fn new(context: E, application: A, marshal: marshal::Mailbox<S, B>, epocher: ES) -> Self {
-        let build_duration = Gauge::default();
-        context.register(
-            "build_duration",
-            "Time taken for the application to build a new block, in milliseconds",
-            build_duration.clone(),
-        );
-
-        Self {
-            context,
-            application,
-            marshal,
-            epocher,
-            last_built: Arc::new(Mutex::new(None)),
-
-            build_duration,
-        }
-    }
-}
-
-impl<E, S, A, B, ES> Automaton for Marshaled<E, S, A, B, ES>
-where
-    E: Rng + Spawner + Metrics + Clock,
+    E: Rng + Storage + Spawner + Metrics + Clock,
     S: Scheme,
     A: VerifyingApplication<
         E,
@@ -130,180 +143,71 @@ where
         SigningScheme = S,
         Context = Context<B::Commitment, S::PublicKey>,
     >,
-    B: Block,
+    B: CertifiableBlock<Context = <A as Application<E>>::Context>,
     ES: Epocher,
 {
-    type Digest = B::Commitment;
-    type Context = Context<Self::Digest, S::PublicKey>;
-
-    /// Returns the genesis commitment for a given epoch.
-    ///
-    /// For epoch 0, this returns the application's genesis block commitment. For subsequent
-    /// epochs, it returns the commitment of the last block from the previous epoch, which
-    /// serves as the genesis block for the new epoch.
+    /// Creates a new [`Marshaled`] wrapper.
     ///
     /// # Panics
     ///
-    /// Panics if a non-zero epoch is requested but the previous epoch's final block is not
-    /// available in storage. This indicates a critical error in the consensus engine startup
-    /// sequence, as engines must always have the genesis block before starting.
-    async fn genesis(&mut self, epoch: Epoch) -> Self::Digest {
-        if epoch.is_zero() {
-            return self.application.genesis().await.commitment();
+    /// Panics if the verification contexts [`Metadata`] store cannot be initialized.
+    pub async fn init(
+        context: E,
+        application: A,
+        marshal: marshal::Mailbox<S, B>,
+        epocher: ES,
+        partition_prefix: String,
+    ) -> Self {
+        let build_duration = Gauge::default();
+        context.register(
+            "build_duration",
+            "Time taken for the application to build a new block, in milliseconds",
+            build_duration.clone(),
+        );
+
+        let verification_contexts = Metadata::init(
+            context.with_label("verification_contexts_metadata"),
+            metadata::Config {
+                partition: format!("{partition_prefix}-verification-contexts"),
+                codec_config: (RangeCfg::from(..), ((), ())),
+            },
+        )
+        .await
+        .expect("must initialize verification contexts metadata");
+
+        Self {
+            context,
+            application,
+            marshal,
+            epocher,
+            last_built: Arc::new(Mutex::new(None)),
+            verification_contexts: Arc::new(Mutex::new(verification_contexts)),
+            verification_tasks: Arc::new(Mutex::new(HashMap::new())),
+
+            build_duration,
         }
-
-        let prev = epoch.previous().expect("checked to be non-zero above");
-        let last_height = self
-            .epocher
-            .last(prev)
-            .expect("previous epoch should exist");
-        let Some(block) = self.marshal.get_block(last_height).await else {
-            // A new consensus engine will never be started without having the genesis block
-            // of the new epoch (the last block of the previous epoch) already stored.
-            unreachable!("missing starting epoch block at height {}", last_height);
-        };
-        block.commitment()
-    }
-
-    /// Proposes a new block or re-proposes the epoch boundary block.
-    ///
-    /// This method builds a new block from the underlying application unless the parent block
-    /// is the last block in the current epoch. When at an epoch boundary, it re-proposes the
-    /// boundary block to avoid creating blocks that would be invalidated by the epoch transition.
-    ///
-    /// The proposal operation is spawned in a background task and returns a receiver that will
-    /// contain the proposed block's commitment when ready. The built block is cached for later
-    /// broadcasting.
-    async fn propose(
-        &mut self,
-        consensus_context: Context<Self::Digest, S::PublicKey>,
-    ) -> oneshot::Receiver<Self::Digest> {
-        let mut marshal = self.marshal.clone();
-        let mut application = self.application.clone();
-        let last_built = self.last_built.clone();
-        let epocher = self.epocher.clone();
-
-        // Metrics
-        let build_duration = self.build_duration.clone();
-
-        let (mut tx, rx) = oneshot::channel();
-        self.context
-            .with_label("propose")
-            .spawn(move |runtime_context| async move {
-                // Create a future for tracking if the receiver is dropped, which could allow
-                // us to cancel work early.
-                let tx_closed = tx.closed();
-                pin_mut!(tx_closed);
-
-                let (parent_view, parent_commitment) = consensus_context.parent;
-                let parent_request = fetch_parent(
-                    parent_commitment,
-                    Some(Round::new(consensus_context.epoch(), parent_view)),
-                    &mut application,
-                    &mut marshal,
-                )
-                .await;
-                pin_mut!(parent_request);
-
-                let parent = match select(parent_request, &mut tx_closed).await {
-                    Either::Left((Ok(parent), _)) => parent,
-                    Either::Left((Err(_), _)) => {
-                        debug!(
-                            ?parent_commitment,
-                            reason = "failed to fetch parent block",
-                            "skipping proposal"
-                        );
-                        return;
-                    }
-                    Either::Right(_) => {
-                        debug!(reason = "consensus dropped receiver", "skipping proposal");
-                        return;
-                    }
-                };
-
-                // Special case: If the parent block is the last block in the epoch,
-                // re-propose it as to not produce any blocks that will be cut out
-                // by the epoch transition.
-                let last_in_epoch = epocher
-                    .last(consensus_context.epoch())
-                    .expect("current epoch should exist");
-                if parent.height() == last_in_epoch {
-                    let digest = parent.commitment();
-                    {
-                        let mut lock = last_built.lock().await;
-                        *lock = Some((consensus_context.round, parent));
-                    }
-
-                    let result = tx.send(digest);
-                    debug!(
-                        round = ?consensus_context.round,
-                        ?digest,
-                        success = result.is_ok(),
-                        "re-proposed parent block at epoch boundary"
-                    );
-                    return;
-                }
-
-                let ancestor_stream = AncestorStream::new(marshal.clone(), [parent]);
-                let build_request = application.propose(
-                    (
-                        runtime_context.with_label("app_propose"),
-                        consensus_context.clone(),
-                    ),
-                    ancestor_stream,
-                );
-                pin_mut!(build_request);
-
-                let start = Instant::now();
-                let built_block = match select(build_request, &mut tx_closed).await {
-                    Either::Left((Some(block), _)) => block,
-                    Either::Left((None, _)) => {
-                        debug!(
-                            ?parent_commitment,
-                            reason = "block building failed",
-                            "skipping proposal"
-                        );
-                        return;
-                    }
-                    Either::Right(_) => {
-                        debug!(reason = "consensus dropped receiver", "skipping proposal");
-                        return;
-                    }
-                };
-                let _ = build_duration.try_set(start.elapsed().as_millis());
-
-                let digest = built_block.commitment();
-                {
-                    let mut lock = last_built.lock().await;
-                    *lock = Some((consensus_context.round, built_block));
-                }
-
-                let result = tx.send(digest);
-                debug!(
-                    round = ?consensus_context.round,
-                    ?digest,
-                    success = result.is_ok(),
-                    "proposed new block"
-                );
-            });
-        rx
     }
 
     /// Verifies a proposed block within epoch boundaries.
     ///
     /// This method validates that:
-    /// 1. The block is within the current epoch (unless it's a boundary block re-proposal)
-    /// 2. Re-proposals are only allowed for the last block in an epoch
-    /// 3. The block's parent commitment matches the consensus context's expected parent
-    /// 4. The block's height is exactly one greater than the parent's height
-    /// 5. The underlying application's verification logic passes
+    /// 1. The block's embedded context matches the consensus-provided context
+    /// 2. The block is within the current epoch (unless it's a boundary block re-proposal)
+    /// 3. Re-proposals are only allowed for the last block in an epoch
+    /// 4. The block's parent commitment matches the consensus context's expected parent
+    /// 5. The block's height is exactly one greater than the parent's height
+    /// 6. The underlying application's verification logic passes
     ///
     /// Verification is spawned in a background task and returns a receiver that will contain
     /// the verification result. Valid blocks are reported to the marshal as verified.
+    ///
+    /// If `block` is provided, it will be used directly instead of fetching from the marshal.
+    #[inline]
     async fn verify(
         &mut self,
-        context: Context<Self::Digest, S::PublicKey>,
-        digest: Self::Digest,
+        context: <Self as Automaton>::Context,
+        digest: B::Commitment,
+        block: Option<B>,
     ) -> oneshot::Receiver<bool> {
         let mut marshal = self.marshal.clone();
         let mut application = self.application.clone();
@@ -326,11 +230,14 @@ where
                     &mut marshal,
                 )
                 .await;
-                let block_request = marshal.subscribe(None, digest).await;
+                let block_request = match block {
+                    Some(block) => Either::Left(ready(Ok(block))),
+                    None => Either::Right(marshal.subscribe(None, digest).await),
+                };
                 let block_requests = try_join(parent_request, block_request);
                 pin_mut!(block_requests);
 
-                // If consensus drops the rceiver, we can stop work early.
+                // If consensus drops the receiver, we can stop work early.
                 let (parent, block) = match select(block_requests, &mut tx_closed).await {
                     Either::Left((Ok((parent, block)), _)) => (parent, block),
                     Either::Left((Err(_), _)) => {
@@ -354,12 +261,25 @@ where
                     let last_in_epoch = epocher
                         .last(context.epoch())
                         .expect("current epoch should exist");
-                    if block.height() == last_in_epoch {
+                    let is_valid = block.height() == last_in_epoch;
+                    if is_valid {
                         marshal.verified(context.round, block).await;
-                        tx.send_lossy(true);
-                    } else {
-                        tx.send_lossy(false);
                     }
+                    tx.send_lossy(is_valid);
+                    return;
+                }
+
+                // Verify the block's embedded context matches what consensus provided.
+                // For some validators who did not vote, this is a no-op. However, it is
+                // guaranteed that at least f+1 honest validators who did vote (and cached
+                // the true context) will verify against this same context.
+                if block.context() != context {
+                    debug!(
+                        ?context,
+                        block_context = ?block.context(),
+                        "block-embedded context does not match consensus context"
+                    );
+                    tx.send_lossy(false);
                     return;
                 }
 
@@ -424,13 +344,35 @@ where
                 }
                 tx.send_lossy(application_valid);
             });
+
         rx
+    }
+
+    /// Acquire a lock to the verification contexts and store the given context.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the verification context cannot be persisted.
+    #[inline]
+    async fn store_verification_context(
+        contexts_lock: &Arc<Mutex<VerificationContexts<E, B, S>>>,
+        context: <Self as Automaton>::Context,
+        digest: B::Commitment,
+    ) {
+        contexts_lock
+            .lock()
+            .await
+            .upsert_sync(digest, |map| {
+                map.insert(context.round, context);
+            })
+            .await
+            .expect("must persist verification context");
     }
 }
 
-impl<E, S, A, B, ES> CertifiableAutomaton for Marshaled<E, S, A, B, ES>
+impl<E, S, A, B, ES> Automaton for Marshaled<E, S, A, B, ES>
 where
-    E: Rng + Spawner + Metrics + Clock,
+    E: Rng + Storage + Spawner + Metrics + Clock,
     S: Scheme,
     A: VerifyingApplication<
         E,
@@ -438,18 +380,275 @@ where
         SigningScheme = S,
         Context = Context<B::Commitment, S::PublicKey>,
     >,
-    B: Block,
+    B: CertifiableBlock<Context = <A as Application<E>>::Context>,
     ES: Epocher,
 {
-    // Uses default certify implementation which always returns true
+    type Digest = B::Commitment;
+    type Context = Context<Self::Digest, S::PublicKey>;
+
+    /// Returns the genesis commitment for a given epoch.
+    ///
+    /// For epoch 0, this returns the application's genesis block commitment. For subsequent
+    /// epochs, it returns the commitment of the last block from the previous epoch, which
+    /// serves as the genesis block for the new epoch.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a non-zero epoch is requested but the previous epoch's final block is not
+    /// available in storage. This indicates a critical error in the consensus engine startup
+    /// sequence, as engines must always have the genesis block before starting.
+    async fn genesis(&mut self, epoch: Epoch) -> Self::Digest {
+        if epoch.is_zero() {
+            return self.application.genesis().await.commitment();
+        }
+
+        let prev = epoch.previous().expect("checked to be non-zero above");
+        let last_height = self
+            .epocher
+            .last(prev)
+            .expect("previous epoch should exist");
+        let Some(block) = self.marshal.get_block(last_height).await else {
+            // A new consensus engine will never be started without having the genesis block
+            // of the new epoch (the last block of the previous epoch) already stored.
+            unreachable!("missing starting epoch block at height {}", last_height);
+        };
+        block.commitment()
+    }
+
+    /// Proposes a new block or re-proposes the epoch boundary block.
+    ///
+    /// This method builds a new block from the underlying application unless the parent block
+    /// is the last block in the current epoch. When at an epoch boundary, it re-proposes the
+    /// boundary block to avoid creating blocks that would be invalidated by the epoch transition.
+    ///
+    /// The proposal operation is spawned in a background task and returns a receiver that will
+    /// contain the proposed block's commitment when ready. The built block is cached for later
+    /// broadcasting.
+    async fn propose(
+        &mut self,
+        consensus_context: Context<Self::Digest, S::PublicKey>,
+    ) -> oneshot::Receiver<Self::Digest> {
+        let mut marshal = self.marshal.clone();
+        let mut application = self.application.clone();
+        let last_built = self.last_built.clone();
+        let epocher = self.epocher.clone();
+        let verification_contexts = self.verification_contexts.clone();
+
+        // Metrics
+        let build_duration = self.build_duration.clone();
+
+        let (mut tx, rx) = oneshot::channel();
+        self.context
+            .with_label("propose")
+            .spawn(move |runtime_context| async move {
+                // Create a future for tracking if the receiver is dropped, which could allow
+                // us to cancel work early.
+                let tx_closed = tx.closed();
+                pin_mut!(tx_closed);
+
+                let (parent_view, parent_commitment) = consensus_context.parent;
+                let parent_request = fetch_parent(
+                    parent_commitment,
+                    Some(Round::new(consensus_context.epoch(), parent_view)),
+                    &mut application,
+                    &mut marshal,
+                )
+                .await;
+                pin_mut!(parent_request);
+
+                let parent = match select(parent_request, &mut tx_closed).await {
+                    Either::Left((Ok(parent), _)) => parent,
+                    Either::Left((Err(_), _)) => {
+                        debug!(
+                            ?parent_commitment,
+                            reason = "failed to fetch parent block",
+                            "skipping proposal"
+                        );
+                        return;
+                    }
+                    Either::Right(_) => {
+                        debug!(reason = "consensus dropped receiver", "skipping proposal");
+                        return;
+                    }
+                };
+
+                // Special case: If the parent block is the last block in the epoch,
+                // re-propose it as to not produce any blocks that will be cut out
+                // by the epoch transition.
+                let last_in_epoch = epocher
+                    .last(consensus_context.epoch())
+                    .expect("current epoch should exist");
+                if parent.height() == last_in_epoch {
+                    let digest = parent.commitment();
+                    {
+                        let mut lock = last_built.lock().await;
+                        *lock = Some((consensus_context.round, parent));
+                    }
+
+                    Self::store_verification_context(
+                        &verification_contexts,
+                        consensus_context.clone(),
+                        digest,
+                    )
+                    .await;
+
+                    let success = tx.send_lossy(digest);
+                    debug!(
+                        round = ?consensus_context.round,
+                        ?digest,
+                        success,
+                        "re-proposed parent block at epoch boundary"
+                    );
+                    return;
+                }
+
+                let ancestor_stream = AncestorStream::new(marshal.clone(), [parent]);
+                let build_request = application.propose(
+                    (
+                        runtime_context.with_label("app_propose"),
+                        consensus_context.clone(),
+                    ),
+                    ancestor_stream,
+                );
+                pin_mut!(build_request);
+
+                let start = Instant::now();
+                let built_block = match select(build_request, &mut tx_closed).await {
+                    Either::Left((Some(block), _)) => block,
+                    Either::Left((None, _)) => {
+                        debug!(
+                            ?parent_commitment,
+                            reason = "block building failed",
+                            "skipping proposal"
+                        );
+                        return;
+                    }
+                    Either::Right(_) => {
+                        debug!(reason = "consensus dropped receiver", "skipping proposal");
+                        return;
+                    }
+                };
+                let _ = build_duration.try_set(start.elapsed().as_millis());
+
+                let digest = built_block.commitment();
+                {
+                    let mut lock = last_built.lock().await;
+                    *lock = Some((consensus_context.round, built_block));
+                }
+
+                Self::store_verification_context(
+                    &verification_contexts,
+                    consensus_context.clone(),
+                    digest,
+                )
+                .await;
+
+                let success = tx.send_lossy(digest);
+                debug!(
+                    round = ?consensus_context.round,
+                    ?digest,
+                    success,
+                    "proposed new block"
+                );
+            });
+        rx
+    }
+
+    async fn verify(
+        &mut self,
+        context: Context<Self::Digest, S::PublicKey>,
+        digest: Self::Digest,
+    ) -> oneshot::Receiver<bool> {
+        Self::store_verification_context(&self.verification_contexts, context.clone(), digest)
+            .await;
+
+        // Begin the verification process.
+        let round = context.round;
+        let task = self.verify(context, digest, None).await;
+        self.verification_tasks.lock().await.insert(round, task);
+
+        let (tx, rx) = oneshot::channel();
+        tx.send_lossy(true);
+        rx
+    }
+}
+
+impl<E, S, A, B, ES> CertifiableAutomaton for Marshaled<E, S, A, B, ES>
+where
+    E: Rng + Storage + Spawner + Metrics + Clock,
+    S: Scheme,
+    A: VerifyingApplication<
+        E,
+        Block = B,
+        SigningScheme = S,
+        Context = Context<B::Commitment, S::PublicKey>,
+    >,
+    B: CertifiableBlock<Context = <A as Application<E>>::Context>,
+    ES: Epocher,
+{
+    async fn certify(&mut self, round: Round, payload: Self::Digest) -> oneshot::Receiver<bool> {
+        // Attempt to retrieve the existing verification task for this round.
+        let mut tasks_guard = self.verification_tasks.lock().await;
+        let task = tasks_guard.remove(&round);
+        drop(tasks_guard);
+
+        if let Some(task) = task {
+            return task;
+        }
+
+        // Look up context by (payload, round) to get the exact verification context.
+        // This is necessary because the same block may be proposed in multiple rounds
+        // (e.g., re-proposals at epoch boundaries), and each round has its own context.
+        // We clone rather than remove so the context remains available for crash recovery.
+        // Contexts are cleaned up when finalization advances past them (see report()).
+        let contexts_guard = self.verification_contexts.lock().await;
+        let context = contexts_guard
+            .get(&payload)
+            .and_then(|map| map.get(&round).cloned());
+        drop(contexts_guard);
+
+        if let Some(context) = context {
+            return self.verify(context, payload, None).await;
+        }
+
+        // No stored context means we never verified this proposal locally. We can use the
+        // block's embedded context to help complete finalization when Byzantine validators
+        // withhold their finalize votes. If a Byzantine proposer embedded a malicious context,
+        // the f+1 honest validators from the notarizing quorum will verify against their stored
+        // context and reject the mismatch, preventing a 2f+1 finalization quorum.
+        //
+        // Subscribe to the block and verify using its embedded context once available.
+        debug!(
+            ?round,
+            ?payload,
+            "subscribing to block for certification using embedded context"
+        );
+        let block_rx = self.marshal.subscribe(Some(round), payload).await;
+        let mut marshaled = self.clone();
+        let (tx, rx) = oneshot::channel();
+        self.context
+            .with_label("certify")
+            .spawn(move |_| async move {
+                let Ok(block) = block_rx.await else {
+                    // Subscription was cancelled, just drop tx to signal failure
+                    return;
+                };
+                let context = block.context();
+                let verify_rx = marshaled.verify(context, payload, Some(block)).await;
+                if let Ok(result) = verify_rx.await {
+                    tx.send_lossy(result);
+                }
+            });
+        rx
+    }
 }
 
 impl<E, S, A, B, ES> Relay for Marshaled<E, S, A, B, ES>
 where
-    E: Rng + Spawner + Metrics + Clock,
+    E: Rng + Storage + Spawner + Metrics + Clock,
     S: Scheme,
     A: Application<E, Block = B, Context = Context<B::Commitment, S::PublicKey>>,
-    B: Block,
+    B: CertifiableBlock<Context = <A as Application<E>>::Context>,
     ES: Epocher,
 {
     type Digest = B::Commitment;
@@ -486,17 +685,34 @@ where
 
 impl<E, S, A, B, ES> Reporter for Marshaled<E, S, A, B, ES>
 where
-    E: Rng + Spawner + Metrics + Clock,
+    E: Rng + Storage + Spawner + Metrics + Clock,
     S: Scheme,
     A: Application<E, Block = B, Context = Context<B::Commitment, S::PublicKey>>
         + Reporter<Activity = Update<B>>,
-    B: Block,
+    B: CertifiableBlock<Context = <A as Application<E>>::Context>,
     ES: Epocher,
 {
     type Activity = A::Activity;
 
-    /// Relays a report to the underlying [Application].
+    /// Relays a report to the underlying [`Application`] and cleans up old verification contexts.
     async fn report(&mut self, update: Self::Activity) {
+        // Clean up verification contexts for rounds <= the finalized round.
+        // This only modifies in-memory state; sync is called later when a new context is added.
+        if let Update::Tip(_, _, round) = &update {
+            let mut contexts_guard = self.verification_contexts.lock().await;
+            let keys: Vec<_> = contexts_guard.keys().cloned().collect();
+            for key in keys {
+                if let Some(map) = contexts_guard.get_mut(&key) {
+                    map.retain(|ctx_round, _| ctx_round > round);
+                    if map.is_empty() {
+                        contexts_guard.remove(&key);
+                    }
+                }
+            }
+
+            let mut tasks_guard = self.verification_tasks.lock().await;
+            tasks_guard.retain(|ctx_round, _| *ctx_round > *round);
+        }
         self.application.report(update).await
     }
 }
@@ -517,14 +733,14 @@ async fn fetch_parent<E, S, A, B>(
     marshal: &mut marshal::Mailbox<S, B>,
 ) -> Either<Ready<Result<B, Canceled>>, oneshot::Receiver<B>>
 where
-    E: Rng + Spawner + Metrics + Clock,
+    E: Rng + Storage + Spawner + Metrics + Clock,
     S: Scheme,
     A: Application<E, Block = B, Context = Context<B::Commitment, S::PublicKey>>,
     B: Block,
 {
     let genesis = application.genesis().await;
     if parent_commitment == genesis.commitment() {
-        Either::Left(futures::future::ready(Ok(genesis)))
+        Either::Left(ready(Ok(genesis)))
     } else {
         Either::Right(marshal.subscribe(parent_round, parent_commitment).await)
     }
