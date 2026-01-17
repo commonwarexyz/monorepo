@@ -27,6 +27,7 @@ arbitrary = [
 [dependencies]
 arbitrary = { workspace = true, optional = true }
 bytes.workspace = true
+cfg-if.workspace = true
 commonware-conformance = { workspace = true, optional = true }
 paste.workspace = true
 rand = { workspace = true, optional = true }
