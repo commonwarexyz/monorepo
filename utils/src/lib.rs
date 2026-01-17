@@ -22,7 +22,7 @@ commonware_macros::stability_scope!(BETA {
     use bytes::{BufMut, BytesMut};
     use core::{fmt::Write as FmtWrite, time::Duration};
     pub mod faults;
-    pub use faults::{Faults, N3f1, N5f1};
+    pub use faults::{Faults, M5f1, N3f1, N5f1};
 
     pub mod sequence;
     pub use sequence::{Array, Span};

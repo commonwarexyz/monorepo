@@ -9,12 +9,19 @@
     html_favicon_url = "https://commonware.xyz/favicon.ico"
 )]
 
-use commonware_macros::stability_scope;
+commonware_macros::stability_scope!(ALPHA {
+    pub mod aggregation;
+    pub mod minimmit;
+    pub mod ordered_broadcast;
 
-stability_scope!(BETA {
+    #[cfg(any(test, feature = "mocks"))]
+    pub mod mocks;
+});
+commonware_macros::stability_scope!(BETA {
     use commonware_codec::{Codec, Encode};
     use commonware_cryptography::Digestible;
 
+    pub mod elector;
     pub mod simplex;
 
     pub mod types;
@@ -62,14 +69,13 @@ stability_scope!(BETA {
         fn context(&self) -> Self::Context;
     }
 });
-stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
+commonware_macros::stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     use crate::types::Round;
     use commonware_cryptography::Digest;
     use commonware_utils::channel::{fallible::OneshotExt, mpsc, oneshot};
     use std::future::Future;
 
     pub mod marshal;
-
     mod reporter;
     pub use reporter::*;
 
@@ -200,11 +206,7 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         ) -> impl Future<Output = (Self::Index, mpsc::Receiver<Self::Index>)> + Send;
     }
 });
-stability_scope!(ALPHA {
-    pub mod aggregation;
-    pub mod ordered_broadcast;
-});
-stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
+commonware_macros::stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
     use crate::marshal::ancestry::{AncestorStream, BlockProvider};
     use commonware_cryptography::certificate::Scheme;
     use commonware_runtime::{Clock, Metrics, Spawner};

@@ -34,9 +34,9 @@ pub struct Config<S: Scheme, B: Blocker, R: Reporter, T: Strategy> {
 mod tests {
     use super::*;
     use crate::{
+        elector::RoundRobin,
         simplex::{
             actors::voter,
-            elector::RoundRobin,
             mocks, quorum,
             scheme::{
                 bls12381_multisig,
