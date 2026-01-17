@@ -73,7 +73,9 @@ pub mod location;
 pub mod mem;
 pub mod position;
 pub mod proof;
-pub mod stability;
+
+#[cfg(test)]
+pub(crate) mod conformance;
 
 cfg_if::cfg_if! {
     if #[cfg(feature = "std")] {
@@ -138,4 +140,13 @@ pub enum Error {
     InvalidPinnedNodes,
     #[error("data corrupted: {0}")]
     DataCorrupted(&'static str),
+}
+
+impl From<LocationError> for Error {
+    fn from(err: LocationError) -> Self {
+        match err {
+            LocationError::NonLeaf(pos) => Self::PositionNotLeaf(pos),
+            LocationError::Overflow(pos) => Self::InvalidPosition(pos),
+        }
+    }
 }

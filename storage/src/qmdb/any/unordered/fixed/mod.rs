@@ -330,7 +330,7 @@ pub(super) mod test {
             let (regular_proof, regular_ops) =
                 db.proof(Location::new_unchecked(6), max_ops).await.unwrap();
 
-            assert_eq!(historical_proof.size, regular_proof.size);
+            assert_eq!(historical_proof.leaves, regular_proof.leaves);
             assert_eq!(historical_proof.digests, regular_proof.digests);
             assert_eq!(historical_ops, regular_ops);
             assert_eq!(historical_ops, ops[5..15]);
@@ -355,11 +355,8 @@ pub(super) mod test {
                 .historical_proof(original_op_count, Location::new_unchecked(6), NZU64!(10))
                 .await
                 .unwrap();
-            assert_eq!(
-                historical_proof.size,
-                Position::try_from(original_op_count).unwrap()
-            );
-            assert_eq!(historical_proof.size, regular_proof.size);
+            assert_eq!(historical_proof.leaves, original_op_count);
+            assert_eq!(historical_proof.leaves, regular_proof.leaves);
             assert_eq!(historical_ops.len(), 10);
             assert_eq!(historical_proof.digests, regular_proof.digests);
             assert_eq!(historical_ops, regular_ops);
@@ -405,10 +402,7 @@ pub(super) mod test {
                 )
                 .await
                 .unwrap();
-            assert_eq!(
-                single_proof.size,
-                Position::try_from(Location::new_unchecked(2)).unwrap()
-            );
+            assert_eq!(single_proof.leaves, Location::new_unchecked(2));
             assert_eq!(single_ops.len(), 1);
 
             // Create historical database with single operation without committing it.
@@ -448,10 +442,7 @@ pub(super) mod test {
                 )
                 .await
                 .unwrap();
-            assert_eq!(
-                min_proof.size,
-                Position::try_from(Location::new_unchecked(4)).unwrap()
-            );
+            assert_eq!(min_proof.leaves, Location::new_unchecked(4));
             assert_eq!(min_ops.len(), 3);
             assert_eq!(min_ops, ops[0..3]);
 
@@ -486,7 +477,7 @@ pub(super) mod test {
                     .await
                     .unwrap();
 
-                assert_eq!(historical_proof.size, Position::try_from(end_loc).unwrap());
+                assert_eq!(historical_proof.leaves, end_loc);
 
                 // Create reference database at the given historical size
                 let mut ref_db = create_test_db(context.with_label(&format!("ref_{}", *end_loc)))
@@ -496,7 +487,7 @@ pub(super) mod test {
                 let ref_db = ref_db.into_merkleized();
 
                 let (ref_proof, ref_ops) = ref_db.proof(start_loc, max_ops).await.unwrap();
-                assert_eq!(ref_proof.size, historical_proof.size);
+                assert_eq!(ref_proof.leaves, historical_proof.leaves);
                 assert_eq!(ref_ops, historical_ops);
                 assert_eq!(ref_proof.digests, historical_proof.digests);
                 let end_loc = std::cmp::min(start_loc.checked_add(max_ops.get()).unwrap(), end_loc);
@@ -533,12 +524,11 @@ pub(super) mod test {
             let db = db.commit(None).await.unwrap().0.into_merkleized();
 
             let historical_op_count = Location::new_unchecked(5);
-            let historical_mmr_size = Position::try_from(historical_op_count).unwrap();
             let (proof, ops) = db
                 .historical_proof(historical_op_count, Location::new_unchecked(1), NZU64!(10))
                 .await
                 .unwrap();
-            assert_eq!(proof.size, historical_mmr_size);
+            assert_eq!(proof.leaves, historical_op_count);
             assert_eq!(ops.len(), 4);
 
             let mut hasher = StandardHasher::<Sha256>::new();
@@ -624,7 +614,7 @@ pub(super) mod test {
             // Changing the proof size should cause verification to fail
             {
                 let mut proof = proof.clone();
-                proof.size = Position::new(100);
+                proof.leaves = Location::new_unchecked(100);
                 let root_hash = db.root();
                 assert!(!verify_proof(
                     &mut hasher,

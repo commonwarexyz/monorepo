@@ -4,7 +4,7 @@ use arbitrary::Arbitrary;
 use commonware_codec::Encode as _;
 use commonware_cryptography::{sha256::Digest, Sha256};
 use commonware_storage::mmr::{
-    verification::ProofStore, Location, Position, Proof, StandardHasher as Standard,
+    verification::ProofStore, Location, Proof, StandardHasher as Standard,
 };
 use libfuzzer_sys::fuzz_target;
 use std::ops::Range;
@@ -23,7 +23,7 @@ impl<'a> Arbitrary<'a> for FuzzInput {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
         Ok(FuzzInput {
             proof: Proof {
-                size: Position::from(u.arbitrary::<u64>()?),
+                leaves: Location::from(u.arbitrary::<u64>()?),
                 digests: u
                     .arbitrary::<Vec<[u8; 32]>>()?
                     .into_iter()

@@ -1,5 +1,7 @@
 use super::position::Position;
 use crate::mmr::MAX_POSITION;
+use bytes::Buf;
+use commonware_codec::{Read, ReadExt};
 use core::{
     convert::TryFrom,
     fmt,
@@ -181,6 +183,31 @@ impl From<Location> for u64 {
     #[inline]
     fn from(loc: Location) -> Self {
         *loc
+    }
+}
+
+// Codec implementations using varint encoding for efficient storage
+impl commonware_codec::Write for Location {
+    #[inline]
+    fn write(&self, buf: &mut impl bytes::BufMut) {
+        commonware_codec::varint::UInt(self.0).write(buf);
+    }
+}
+
+impl commonware_codec::EncodeSize for Location {
+    #[inline]
+    fn encode_size(&self) -> usize {
+        commonware_codec::varint::UInt(self.0).encode_size()
+    }
+}
+
+impl Read for Location {
+    type Cfg = ();
+
+    #[inline]
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, commonware_codec::Error> {
+        let value: u64 = commonware_codec::varint::UInt::read(buf)?.into();
+        Ok(Self::new_unchecked(value))
     }
 }
 
