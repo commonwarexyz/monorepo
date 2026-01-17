@@ -10,8 +10,9 @@ use crate::{
 use commonware_broadcast::buffered;
 use commonware_consensus::{
     application::marshaled::Marshaled,
+    elector::Config as Elector,
     marshal::{self, ingress::handler},
-    simplex::{elector::Config as Elector, scheme::Scheme, types::Finalization},
+    simplex::{scheme::Scheme, types::Finalization},
     types::{FixedEpocher, ViewDelta},
 };
 use commonware_cryptography::{

@@ -11,12 +11,17 @@
 
 commonware_macros::stability_scope!(ALPHA {
     pub mod aggregation;
+    pub mod minimmit;
     pub mod ordered_broadcast;
+
+    #[cfg(any(test, feature = "mocks"))]
+    pub mod mocks;
 });
 commonware_macros::stability_scope!(BETA {
     use commonware_codec::Codec;
     use commonware_cryptography::{Committable, Digestible};
 
+    pub mod elector;
     pub mod simplex;
 
     pub mod types;
@@ -71,7 +76,6 @@ commonware_macros::stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     use std::future::Future;
 
     pub mod marshal;
-
     mod reporter;
     pub use reporter::*;
 
