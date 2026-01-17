@@ -17,7 +17,7 @@ use alloc::{
     vec::Vec,
 };
 use bytes::{Buf, BufMut};
-use commonware_codec::{varint::UInt, EncodeSize, Read, ReadExt, ReadRangeExt, Write};
+use commonware_codec::{EncodeSize, Read, ReadExt, ReadRangeExt, Write};
 use commonware_cryptography::Digest;
 use core::ops::Range;
 #[cfg(feature = "std")]
@@ -82,7 +82,7 @@ impl<D: Digest> EncodeSize for Proof<D> {
 
 impl<D: Digest> Write for Proof<D> {
     fn write(&self, buf: &mut impl BufMut) {
-        // Write the number of nodes in the MMR as a varint
+        // Write the number of leaves in the MMR as a varint
         self.leaves.write(buf);
 
         // Write the digests
@@ -101,12 +101,12 @@ impl<D: Digest> Read for Proof<D> {
         max_items: &Self::Cfg,
     ) -> Result<Self, commonware_codec::Error> {
         // Read the number of nodes in the MMR
-        let leaves = Location::new(UInt::<u64>::read(buf)?.into())
-            .ok_or_else(|| commonware_codec::Error::Invalid("leaf count", "exceeds max"))?;
+        let leaves = Location::read(buf)?;
 
         // Read the digests
         let max_digests = max_items.saturating_mul(MAX_PROOF_DIGESTS_PER_ELEMENT);
         let digests = Vec::<D>::read_range(buf, ..=max_digests)?;
+
         Ok(Self { leaves, digests })
     }
 }
