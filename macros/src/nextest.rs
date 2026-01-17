@@ -89,13 +89,14 @@ fn load_nextest_groups() -> Result<NextestGroups, String> {
                 msg
             )
         })?;
-        if !names.insert(normalized.clone()) {
+        if names.contains(&normalized) {
             return Err(format!(
                 "duplicate normalized test group `{}` in {}",
                 normalized,
                 path.display()
             ));
         }
+        names.insert(normalized);
     }
 
     if names.is_empty() {
