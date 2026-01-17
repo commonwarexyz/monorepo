@@ -1,10 +1,9 @@
-//! Mock application used by `simplex` tests to produce and verify payloads,
+//! Mock application used by consensus tests to produce and verify payloads,
 //! simulating proposal/verification latency and broadcasting via a mock relay.
 
 use super::relay::Relay;
 use crate::{
-    simplex::types::Context,
-    types::{Epoch, Round},
+    types::{Context, Epoch, Round},
     Automaton as Au, CertifiableAutomaton as CAu, Relay as Re,
 };
 use bytes::Bytes;
@@ -24,7 +23,7 @@ use std::{
     sync::Arc,
     time::Duration,
 };
-use tracing::debug;
+use tracing::{debug, warn};
 
 pub enum Message<D: Digest, P: PublicKey> {
     Genesis {
@@ -223,10 +222,6 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
         self.fail_verification = fail;
     }
 
-    fn panic(&self, msg: &str) -> ! {
-        panic!("[{:?}] {}", self.me, msg);
-    }
-
     fn genesis(&mut self, epoch: Epoch) -> H::Digest {
         self.hasher
             .update(&(Bytes::from(GENESIS_BYTES), epoch).encode());
@@ -279,16 +274,12 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
         let (parsed_round, parent, _) =
             <(Round, H::Digest, u64)>::decode(&mut contents).expect("invalid payload");
         if parsed_round != context.round {
-            self.panic(&format!(
-                "invalid round (in payload): {} != {}",
-                parsed_round, context.round
-            ));
+            warn!(?parsed_round, expected = ?context.round, "invalid round in payload");
+            return false;
         }
         if parent != context.parent.1 {
-            self.panic(&format!(
-                "invalid parent (in payload): {:?} != {:?}",
-                parent, context.parent.1
-            ));
+            warn!(?parent, expected = ?context.parent.1, "invalid parent in payload");
+            return false;
         }
         // We don't care about the random number
         self.verified.insert(payload);

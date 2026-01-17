@@ -1,8 +1,8 @@
 //! Mock `Reporter` for tests: tracks participants/leaders, verifies activities,
 //! records votes/faults, and exposes a simple subscription.
 use crate::{
+    elector::{Config as ElectorConfig, Elector},
     simplex::{
-        elector::{Config as ElectorConfig, Elector},
         scheme,
         types::{
             Activity, Attributable, ConflictingFinalize, ConflictingNotarize, Finalization,

@@ -10,9 +10,9 @@ use crate::{
 use arbitrary::Arbitrary;
 use commonware_codec::Read;
 use commonware_consensus::{
+    elector::Config as Elector,
     simplex::{
         config,
-        elector::Config as Elector,
         mocks::{application, relay, reporter},
         scheme::Scheme,
         Engine,

@@ -1,10 +1,11 @@
 use super::{
     actors::{batcher, resolver, voter},
     config::Config,
-    elector::Config as Elector,
     types::{Activity, Context},
 };
-use crate::{simplex::scheme::Scheme, CertifiableAutomaton, Relay, Reporter};
+use crate::{
+    elector::Config as Elector, simplex::scheme::Scheme, CertifiableAutomaton, Relay, Reporter,
+};
 use commonware_cryptography::Digest;
 use commonware_macros::select;
 use commonware_p2p::{Blocker, Receiver, Sender};

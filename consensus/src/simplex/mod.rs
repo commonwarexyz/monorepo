@@ -241,7 +241,6 @@
 //! Before sending a message, the `Journal` sync is invoked to prevent inadvertent Byzantine behavior
 //! on restart (especially in the case of unclean shutdown).
 
-pub mod elector;
 pub mod scheme;
 pub mod types;
 
@@ -301,8 +300,8 @@ pub(crate) fn quorum(n: u32) -> u32 {
 mod tests {
     use super::*;
     use crate::{
+        elector::{Config as Elector, Random, RoundRobin},
         simplex::{
-            elector::{Config as Elector, Random, RoundRobin},
             mocks::twins::Strategy,
             scheme::{
                 bls12381_multisig,

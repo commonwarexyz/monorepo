@@ -1,0 +1,326 @@
+//! Per-view consensus logic for Minimmit.
+
+use crate::{
+    minimmit::types::{Certificate, Notarize, Proposal},
+    types::View,
+};
+use commonware_cryptography::Digest;
+use std::collections::{BTreeMap, BTreeSet};
+
+/// Phase within a view to prevent invalid transitions.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum Phase<D: Digest> {
+    /// Haven't voted or nullified yet.
+    #[default]
+    Idle,
+    /// Voted for this proposal digest (cannot vote again).
+    Voted { digest: D },
+    /// Sent a nullify vote (cannot vote in this view).
+    Nullified,
+}
+
+/// Per-view state machine.
+#[derive(Debug)]
+pub struct ViewState<S: crate::minimmit::scheme::Scheme<D>, D: Digest> {
+    view: View,
+    phase: Phase<D>,
+    proposals: BTreeMap<D, Proposal<D>>,
+    verified: BTreeSet<D>,
+    broadcast_m_notarization: Option<D>,
+    propose_sent: bool,
+    broadcast_notarize: bool,
+    broadcast_nullify: bool,
+    broadcast_nullification: bool,
+    broadcast_finalization: bool,
+    _marker: std::marker::PhantomData<S>,
+}
+
+impl<S: crate::minimmit::scheme::Scheme<D>, D: Digest> ViewState<S, D> {
+    /// Creates a new view state.
+    pub const fn new(view: View) -> Self {
+        Self {
+            view,
+            phase: Phase::Idle,
+            proposals: BTreeMap::new(),
+            verified: BTreeSet::new(),
+            broadcast_m_notarization: None,
+            propose_sent: false,
+            broadcast_notarize: false,
+            broadcast_nullify: false,
+            broadcast_nullification: false,
+            broadcast_finalization: false,
+            _marker: std::marker::PhantomData,
+        }
+    }
+
+    /// Returns the view this state represents.
+    pub const fn view(&self) -> View {
+        self.view
+    }
+
+    /// Returns the current phase.
+    pub const fn phase(&self) -> &Phase<D> {
+        &self.phase
+    }
+
+    /// Returns the proposal for the given digest, if present.
+    pub fn proposal(&self, digest: D) -> Option<&Proposal<D>> {
+        self.proposals.get(&digest)
+    }
+
+    /// Returns the first proposal digest, if any.
+    pub fn first_proposal_digest(&self) -> Option<D> {
+        self.proposals.keys().next().copied()
+    }
+
+    /// Returns true if the proposal for the digest is verified.
+    pub fn is_verified(&self, digest: D) -> bool {
+        self.verified.contains(&digest)
+    }
+
+    /// Returns true if any proposal is verified.
+    pub fn has_verified(&self) -> bool {
+        !self.verified.is_empty()
+    }
+
+    /// Returns true if we already sent a proposal in this view.
+    pub const fn propose_sent(&self) -> bool {
+        self.propose_sent
+    }
+
+    /// Marks that we sent a proposal in this view.
+    pub const fn mark_propose_sent(&mut self) -> bool {
+        if self.propose_sent {
+            return false;
+        }
+        self.propose_sent = true;
+        true
+    }
+
+    /// Returns true if we can vote in this view.
+    pub const fn can_vote(&self) -> bool {
+        matches!(self.phase, Phase::Idle)
+    }
+
+    /// Returns true if a timeout nullify is allowed.
+    pub const fn can_nullify_timeout(&self) -> bool {
+        matches!(self.phase, Phase::Idle)
+    }
+
+    /// Returns true if condition (b) nullify is allowed.
+    pub const fn can_nullify_condition_b(&self) -> bool {
+        matches!(self.phase, Phase::Voted { .. })
+    }
+
+    /// Records a proposal for this view.
+    pub fn set_proposal(&mut self, proposal: Proposal<D>) -> bool {
+        let digest = proposal.payload;
+        if self.proposals.contains_key(&digest) {
+            return false;
+        }
+        self.proposals.insert(digest, proposal);
+        true
+    }
+
+    /// Marks the proposal for `digest` as verified.
+    pub fn mark_verified(&mut self, digest: D) -> bool {
+        if !self.proposals.contains_key(&digest) {
+            return false;
+        }
+        self.verified.insert(digest)
+    }
+
+    /// Records that we voted for a proposal digest.
+    pub const fn vote(&mut self, digest: D) -> bool {
+        if !self.can_vote() {
+            return false;
+        }
+        self.phase = Phase::Voted { digest };
+        true
+    }
+
+    /// Records that we nullified the view.
+    pub const fn nullify(&mut self) -> bool {
+        if matches!(self.phase, Phase::Nullified) {
+            return false;
+        }
+        self.phase = Phase::Nullified;
+        true
+    }
+
+    /// Marks that we've broadcast a notarize vote.
+    pub const fn mark_broadcast_notarize(&mut self) -> bool {
+        if self.broadcast_notarize {
+            return false;
+        }
+        self.broadcast_notarize = true;
+        true
+    }
+
+    /// Marks that we've broadcast a nullify vote.
+    pub const fn mark_broadcast_nullify(&mut self) -> bool {
+        if self.broadcast_nullify {
+            return false;
+        }
+        self.broadcast_nullify = true;
+        true
+    }
+
+    /// Marks that we've broadcast an M-notarization certificate.
+    ///
+    /// Returns true if this is the first M-notarization broadcast for this view.
+    /// Only the first M-notarization is broadcast; subsequent ones for different
+    /// digests are processed but not re-broadcast.
+    pub const fn mark_broadcast_m_notarization(&mut self, digest: D) -> bool {
+        if self.broadcast_m_notarization.is_some() {
+            return false;
+        }
+        self.broadcast_m_notarization = Some(digest);
+        true
+    }
+
+    /// Marks that we've broadcast a nullification certificate.
+    pub const fn mark_broadcast_nullification(&mut self) -> bool {
+        if self.broadcast_nullification {
+            return false;
+        }
+        self.broadcast_nullification = true;
+        true
+    }
+
+    /// Marks that we've broadcast a finalization certificate.
+    pub const fn mark_broadcast_finalization(&mut self) -> bool {
+        if self.broadcast_finalization {
+            return false;
+        }
+        self.broadcast_finalization = true;
+        true
+    }
+
+    /// Returns true if the notarize vote was broadcast.
+    pub const fn broadcast_notarize(&self) -> bool {
+        self.broadcast_notarize
+    }
+
+    /// Returns true if the nullify vote was broadcast.
+    pub const fn broadcast_nullify(&self) -> bool {
+        self.broadcast_nullify
+    }
+
+    /// Returns true if an M-notarization certificate was broadcast for this view.
+    pub const fn has_broadcast_m_notarization(&self) -> bool {
+        self.broadcast_m_notarization.is_some()
+    }
+
+    /// Returns true if the nullification certificate was broadcast.
+    pub const fn broadcast_nullification(&self) -> bool {
+        self.broadcast_nullification
+    }
+
+    /// Returns true if the finalization certificate was broadcast.
+    pub const fn broadcast_finalization(&self) -> bool {
+        self.broadcast_finalization
+    }
+
+    /// Returns true if a certificate of the same type was already recorded.
+    ///
+    /// For M-notarizations, this returns true if ANY M-notarization was broadcast
+    /// (regardless of digest), since we only broadcast the first one per view.
+    pub const fn has_certificate(&self, certificate: &Certificate<S, D>) -> bool {
+        match certificate {
+            Certificate::MNotarization(_) => self.broadcast_m_notarization.is_some(),
+            Certificate::Nullification(_) => self.broadcast_nullification,
+            Certificate::Finalization(_) => self.broadcast_finalization,
+        }
+    }
+
+    /// Replays a notarize vote from crash recovery.
+    ///
+    /// Sets internal state to reflect that we already voted for this proposal,
+    /// preventing double-voting and double-broadcasting after restart.
+    pub fn replay_notarize(&mut self, notarize: &Notarize<S, D>) {
+        let digest = notarize.proposal.payload;
+        self.proposals
+            .entry(digest)
+            .or_insert_with(|| notarize.proposal.clone());
+        self.verified.insert(digest);
+        self.phase = Phase::Voted { digest };
+        self.broadcast_notarize = true;
+    }
+
+    /// Replays a nullify vote from crash recovery.
+    ///
+    /// Sets internal state to reflect that we already nullified this view,
+    /// preventing double-nullifying and double-broadcasting after restart.
+    pub const fn replay_nullify(&mut self) {
+        self.phase = Phase::Nullified;
+        self.broadcast_nullify = true;
+    }
+
+    /// Replays a certificate from crash recovery.
+    ///
+    /// Sets internal broadcast flags to prevent double-broadcasting after restart.
+    pub const fn replay_certificate(&mut self, certificate: &Certificate<S, D>) {
+        match certificate {
+            Certificate::MNotarization(m) => {
+                self.broadcast_m_notarization = Some(m.proposal.payload);
+            }
+            Certificate::Nullification(_) => {
+                self.broadcast_nullification = true;
+            }
+            Certificate::Finalization(_) => {
+                self.broadcast_finalization = true;
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        minimmit::scheme::ed25519,
+        types::{Epoch, Round as Rnd},
+    };
+    use commonware_cryptography::sha256::Digest as Sha256Digest;
+
+    type Scheme = ed25519::Scheme;
+
+    #[test]
+    fn phase_transitions_block_double_vote() {
+        let view = View::new(1);
+        let mut state: ViewState<Scheme, Sha256Digest> = ViewState::new(view);
+        assert!(state.can_vote());
+        assert!(state.vote(Sha256Digest::from([1u8; 32])));
+        assert!(!state.can_vote());
+        assert!(!state.vote(Sha256Digest::from([2u8; 32])));
+    }
+
+    #[test]
+    fn nullify_blocks_vote() {
+        let view = View::new(2);
+        let mut state: ViewState<Scheme, Sha256Digest> = ViewState::new(view);
+        assert!(state.nullify());
+        assert!(!state.can_vote());
+        assert!(!state.vote(Sha256Digest::from([3u8; 32])));
+    }
+
+    #[test]
+    fn proposal_flow() {
+        let view = View::new(3);
+        let mut state: ViewState<Scheme, Sha256Digest> = ViewState::new(view);
+        let parent_payload = Sha256Digest::from([2u8; 32]);
+        let proposal = Proposal::new(
+            Rnd::new(Epoch::new(1), view),
+            View::new(2),
+            parent_payload,
+            Sha256Digest::from([4u8; 32]),
+        );
+        let digest = proposal.payload;
+        assert!(state.set_proposal(proposal.clone()));
+        assert!(!state.set_proposal(proposal));
+        assert!(state.mark_verified(digest));
+        assert!(!state.mark_verified(digest));
+        assert!(state.is_verified(digest));
+    }
+}

@@ -1,6 +1,6 @@
 #![no_main]
 
-use commonware_consensus::simplex::{elector::RoundRobin, scheme::ed25519};
+use commonware_consensus::{elector::RoundRobin, simplex::scheme::ed25519};
 use commonware_consensus_fuzz::{fuzz, FuzzInput, Simplex};
 use commonware_cryptography::certificate::mocks::Fixture;
 use commonware_runtime::deterministic;

@@ -14,6 +14,8 @@ use commonware_codec::Codec;
 use commonware_cryptography::{Committable, Digestible};
 
 pub mod aggregation;
+pub mod elector;
+pub mod minimmit;
 pub mod ordered_broadcast;
 pub mod simplex;
 pub mod types;
@@ -76,6 +78,7 @@ cfg_if::cfg_if! {
 
         pub mod application;
         pub mod marshal;
+        pub mod mocks;
         mod reporter;
         pub use reporter::*;
 

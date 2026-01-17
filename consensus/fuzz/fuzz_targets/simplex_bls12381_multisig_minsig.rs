@@ -1,6 +1,6 @@
 #![no_main]
 
-use commonware_consensus::simplex::{elector::RoundRobin, scheme::bls12381_multisig};
+use commonware_consensus::{elector::RoundRobin, simplex::scheme::bls12381_multisig};
 use commonware_consensus_fuzz::{fuzz, FuzzInput, Simplex};
 use commonware_cryptography::{
     bls12381::primitives::variant::MinSig, certificate::mocks::Fixture,
