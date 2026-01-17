@@ -218,9 +218,13 @@ where
     fn elect(
         &self,
         round: Round,
-        certificate: Option<&bls12381_threshold::Signature<V>>,
+        certificate: Option<&bls12381_threshold::Certificate<V>>,
     ) -> Participant {
-        Random::select_leader::<V>(round, self.n, certificate.map(|c| c.seed_signature))
+        Random::select_leader::<V>(
+            round,
+            self.n,
+            certificate.and_then(|c| c.get().map(|s| s.seed_signature)),
+        )
     }
 }
 
