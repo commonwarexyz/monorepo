@@ -636,12 +636,16 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
         // Merge invalid sets
         let mut invalid: BTreeSet<_> = vote_invalid.union(&seed_invalid).copied().collect();
 
+        // At this point, invalid contains all the signatures which successfully
+        // parsed, and which ended up being invalid. We now want to add in all
+        // the signatures which failed to parse.
         for (signer, vote, seed) in partials.iter() {
             if vote.is_none() || seed.is_none() {
                 invalid.insert(*signer);
             }
         }
 
+        // Signatures that are not invalid.
         let verified = partials
             .into_iter()
             .filter_map(|(signer, vote, seed)| {
