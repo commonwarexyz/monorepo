@@ -1093,7 +1093,7 @@ mod tests {
             );
             network.start();
 
-            // Both sender and receiver have the same bandiwdth (1000 B/s)
+            // Both sender and receiver have the same bandwidth (1000 B/s)
             // 500 bytes at 1000 B/s = 0.5 seconds
             test_bandwidth_between_peers(
                 &mut context,
