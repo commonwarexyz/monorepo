@@ -134,6 +134,10 @@ mod priority_set;
 pub use priority_set::PrioritySet;
 #[cfg(feature = "std")]
 pub mod futures;
+#[cfg(feature = "std")]
+pub mod subscribable;
+#[cfg(feature = "std")]
+pub use subscribable::Subscribable;
 mod stable_buf;
 pub use stable_buf::StableBuf;
 #[cfg(feature = "std")]

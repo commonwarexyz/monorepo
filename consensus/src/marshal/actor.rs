@@ -19,7 +19,7 @@ use crate::{
     types::{Epoch, Epocher, Height, Round, ViewDelta},
     Block, Reporter,
 };
-use commonware_broadcast::{buffered, Broadcaster};
+use commonware_broadcast::Broadcaster;
 use commonware_codec::{Decode, Encode};
 use commonware_cryptography::{
     certificate::{Provider, Scheme as CertificateScheme},
@@ -42,7 +42,7 @@ use commonware_utils::{
     channels::fallible::OneshotExt,
     futures::{AbortablePool, Aborter, OptionFuture},
     sequence::U64,
-    Acknowledgement, BoxedError,
+    Acknowledgement, BoxedError, Subscribable,
 };
 use futures::{
     channel::{mpsc, oneshot},
@@ -257,10 +257,10 @@ where
     }
 
     /// Start the actor.
-    pub fn start<R, K>(
+    pub fn start<R, C, K>(
         mut self,
         application: impl Reporter<Activity = Update<B, A>>,
-        buffer: buffered::Mailbox<K, B>,
+        buffer: C,
         resolver: (mpsc::Receiver<handler::Message<B>>, R),
     ) -> Handle<()>
     where
@@ -269,15 +269,17 @@ where
             PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
         >,
         K: PublicKey,
+        C: Subscribable<Key = B::Commitment, Value = B>
+            + Broadcaster<Message = B, Recipients = Recipients<K>>,
     {
         spawn_cell!(self.context, self.run(application, buffer, resolver).await)
     }
 
     /// Run the application actor.
-    async fn run<R, K>(
+    async fn run<R, C, K>(
         mut self,
         mut application: impl Reporter<Activity = Update<B, A>>,
-        mut buffer: buffered::Mailbox<K, B>,
+        mut buffer: C,
         (mut resolver_rx, mut resolver): (mpsc::Receiver<handler::Message<B>>, R),
     ) where
         R: Resolver<
@@ -285,6 +287,8 @@ where
             PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
         >,
         K: PublicKey,
+        C: Subscribable<Key = B::Commitment, Value = B>
+            + Broadcaster<Message = B, Recipients = Recipients<K>>,
     {
         // Create a local pool for waiter futures.
         let mut waiters = AbortablePool::<(B::Commitment, B)>::default();
@@ -493,8 +497,7 @@ where
                                     entry.get_mut().subscribers.push(response);
                                 }
                                 Entry::Vacant(entry) => {
-                                    let (tx, rx) = oneshot::channel();
-                                    buffer.subscribe_prepared(None, commitment, None, tx).await;
+                                    let rx = buffer.subscribe(commitment).await;
                                     let aborter = waiters.push(async move {
                                         (commitment, rx.await.expect("buffer subscriber closed"))
                                     });
@@ -875,7 +878,7 @@ where
         block: B,
         finalization: Option<Finalization<P::Scheme, B::Commitment>>,
         application: &mut impl Reporter<Activity = Update<B, A>>,
-        buffer: &mut buffered::Mailbox<impl PublicKey, B>,
+        buffer: &mut impl Subscribable<Key = B::Commitment, Value = B>,
         resolver: &mut impl Resolver<Key = Request<B>>,
     ) {
         self.store_finalization(height, commitment, block, finalization, application)
@@ -953,13 +956,13 @@ where
     // -------------------- Mixed Storage --------------------
 
     /// Looks for a block anywhere in local storage.
-    async fn find_block<K: PublicKey>(
+    async fn find_block(
         &mut self,
-        buffer: &mut buffered::Mailbox<K, B>,
+        buffer: &mut impl Subscribable<Key = B::Commitment, Value = B>,
         commitment: B::Commitment,
     ) -> Option<B> {
         // Check buffer.
-        if let Some(block) = buffer.get(None, commitment, None).await.into_iter().next() {
+        if let Some(block) = buffer.get(commitment).await {
             return Some(block);
         }
         // Check verified / notarized blocks via cache manager.
@@ -976,9 +979,9 @@ where
     /// Attempt to repair any identified gaps in the finalized blocks archive. The total
     /// number of missing heights that can be repaired at once is bounded by `self.max_repair`,
     /// though multiple gaps may be spanned.
-    async fn try_repair_gaps<K: PublicKey>(
+    async fn try_repair_gaps(
         &mut self,
-        buffer: &mut buffered::Mailbox<K, B>,
+        buffer: &mut impl Subscribable<Key = B::Commitment, Value = B>,
         resolver: &mut impl Resolver<Key = Request<B>>,
         application: &mut impl Reporter<Activity = Update<B, A>>,
     ) {

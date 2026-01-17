@@ -21,13 +21,7 @@ use std::collections::{BTreeMap, VecDeque};
 use tracing::{debug, error, trace, warn};
 
 /// A responder waiting for a message.
-struct Waiter<P, Dd, M> {
-    /// The peer sending the message.
-    peer: Option<P>,
-
-    /// The digest of the message.
-    digest: Option<Dd>,
-
+struct Waiter<M> {
     /// The responder to send the message to.
     responder: oneshot::Sender<M>,
 }
@@ -77,8 +71,7 @@ pub struct Engine<E: Clock + Spawner + Metrics, P: PublicKey, M: Committable + D
     mailbox_receiver: mpsc::Receiver<Message<P, M>>,
 
     /// Pending requests from the application.
-    #[allow(clippy::type_complexity)]
-    waiters: BTreeMap<M::Commitment, Vec<Waiter<P, M::Digest, M>>>,
+    waiters: BTreeMap<M::Commitment, Vec<Waiter<M>>>,
 
     ////////////////////////////////////////
     // Cache
@@ -175,13 +168,13 @@ impl<E: Clock + Spawner + Metrics, P: PublicKey, M: Committable + Digestible + C
                             trace!("mailbox: broadcast");
                             self.handle_broadcast(&mut sender, recipients, message, responder).await;
                         }
-                        Message::Subscribe{ peer, commitment, digest, responder } => {
+                        Message::Subscribe{ commitment, responder } => {
                             trace!("mailbox: subscribe");
-                            self.handle_subscribe(peer, commitment, digest, responder).await;
+                            self.handle_subscribe(commitment, responder).await;
                         }
-                        Message::Get{ peer, commitment, digest, responder } => {
+                        Message::Get{ commitment, responder } => {
                             trace!("mailbox: get");
-                            self.handle_get(peer, commitment, digest, responder).await;
+                            self.handle_get(commitment, responder).await;
                         }
                     }
                 },
@@ -241,82 +234,40 @@ impl<E: Clock + Spawner + Metrics, P: PublicKey, M: Committable + Digestible + C
         responder.send_lossy(sent_to);
     }
 
-    /// Searches through all maintained messages for a match.
-    fn find_messages(
-        &mut self,
-        peer: &Option<P>,
-        commitment: M::Commitment,
-        digest: Option<M::Digest>,
-        all: bool,
-    ) -> Vec<M> {
-        match peer {
-            // Only consider messages from the peer filter
-            Some(s) => self
-                .deques
-                .get(s)
-                .into_iter()
-                .flat_map(|dq| dq.iter())
-                .filter(|pair| pair.commitment == commitment)
-                .filter_map(|pair| {
-                    self.items
-                        .get(&pair.commitment)
-                        .and_then(|m| m.get(&pair.digest))
-                })
-                .cloned()
-                .collect(),
-
-            // Search by commitment
-            None => self.items.get(&commitment).map_or_else(
-                // If there are no messages for the commitment, return an empty vector
-                Vec::new,
-                |msgs| match digest {
-                    // If a digest is provided, return whatever matches it.
-                    Some(dg) => msgs.get(&dg).cloned().into_iter().collect(),
-
-                    // If no digest was provided, return `all` messages for the commitment.
-                    None if all => msgs.values().cloned().collect(),
-                    None => msgs.values().next().cloned().into_iter().collect(),
-                },
-            ),
-        }
+    /// Finds a message by commitment.
+    fn find_message(&self, commitment: M::Commitment) -> Option<M> {
+        self.items
+            .get(&commitment)
+            .and_then(|msgs| msgs.values().next())
+            .cloned()
     }
 
     /// Handles a `subscribe` request from the application.
     ///
     /// If the message is already in the cache, the responder is immediately sent the message.
     /// Otherwise, the responder is stored in the waiters list.
-    async fn handle_subscribe(
-        &mut self,
-        peer: Option<P>,
-        commitment: M::Commitment,
-        digest: Option<M::Digest>,
-        responder: oneshot::Sender<M>,
-    ) {
+    async fn handle_subscribe(&mut self, commitment: M::Commitment, responder: oneshot::Sender<M>) {
         // Check if the message is already in the cache
-        let mut items = self.find_messages(&peer, commitment, digest, false);
-        if let Some(item) = items.pop() {
+        if let Some(item) = self.find_message(commitment) {
             self.respond_subscribe(responder, item);
             return;
         }
 
         // Store the responder
-        self.waiters.entry(commitment).or_default().push(Waiter {
-            peer,
-            digest,
-            responder,
-        });
+        self.waiters
+            .entry(commitment)
+            .or_default()
+            .push(Waiter { responder });
     }
 
     /// Handles a `get` request from the application.
     async fn handle_get(
         &mut self,
-        peer: Option<P>,
         commitment: M::Commitment,
-        digest: Option<M::Digest>,
-        responder: oneshot::Sender<Vec<M>>,
+        responder: oneshot::Sender<Option<M>>,
     ) {
-        let items = self.find_messages(&peer, commitment, digest, true);
-        self.respond_get(responder, items);
+        let item = self.find_message(commitment);
+        self.respond_get(responder, item);
     }
 
     /// Handles a message that was received from a peer.
@@ -345,36 +296,10 @@ impl<E: Clock + Spawner + Metrics, P: PublicKey, M: Committable + Digestible + C
             digest: msg.digest(),
         };
 
-        // Send the message to the waiters, if any, ignoring errors (as the receiver may have dropped)
-        if let Some(mut waiters) = self.waiters.remove(&pair.commitment) {
-            let mut i = 0;
-            while i < waiters.len() {
-                // Get the peer and digest filters
-                let Waiter {
-                    peer: peer_filter,
-                    digest: digest_filter,
-                    responder: _,
-                } = &waiters[i];
-
-                // Keep the waiter if either filter does not match
-                if peer_filter.as_ref().is_some_and(|s| s != &peer)
-                    || digest_filter.is_some_and(|d| d != pair.digest)
-                {
-                    i += 1;
-                    continue;
-                }
-
-                // Filters match, so fulfill the subscription and drop the entry.
-                //
-                // The index `i` is intentionally not incremented here to check
-                // the element that was swapped into position `i`.
-                let responder = waiters.swap_remove(i).responder;
-                self.respond_subscribe(responder, msg.clone());
-            }
-
-            // Re-insert if any waiters remain for this commitment
-            if !waiters.is_empty() {
-                self.waiters.insert(pair.commitment, waiters);
+        // Send the message to all waiters for this commitment
+        if let Some(waiters) = self.waiters.remove(&pair.commitment) {
+            for waiter in waiters {
+                self.respond_subscribe(waiter.responder, msg.clone());
             }
         }
 
@@ -468,8 +393,8 @@ impl<E: Clock + Spawner + Metrics, P: PublicKey, M: Committable + Digestible + C
 
     /// Respond to a waiter with an optional message.
     /// Increments the appropriate metric based on the result.
-    fn respond_get(&mut self, responder: oneshot::Sender<Vec<M>>, msg: Vec<M>) {
-        let found = !msg.is_empty();
+    fn respond_get(&mut self, responder: oneshot::Sender<Option<M>>, msg: Option<M>) {
+        let found = msg.is_some();
         self.metrics.get.inc(if responder.send_lossy(msg) {
             if found {
                 Status::Success

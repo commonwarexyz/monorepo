@@ -14,6 +14,7 @@ use commonware_cryptography::{
 };
 use commonware_p2p::{simulated::Network, Recipients};
 use commonware_runtime::{deterministic, Clock, Metrics, Quota, Runner};
+use commonware_utils::Subscribable;
 use libfuzzer_sys::fuzz_target;
 use rand::{seq::SliceRandom, SeedableRng};
 use std::{collections::BTreeMap, num::NonZeroU32, time::Duration};
@@ -88,15 +89,11 @@ enum BroadcastAction {
     },
     Subscribe {
         peer_index: usize,
-        sender: Option<usize>,
         commitment: [u8; 32],
-        digest: Option<[u8; 32]>,
     },
     Get {
         peer_index: usize,
-        sender: Option<usize>,
         commitment: [u8; 32],
-        digest: Option<[u8; 32]>,
     },
     Sleep {
         duration_ms: u64,
@@ -114,15 +111,11 @@ impl<'a> Arbitrary<'a> for BroadcastAction {
             }),
             1 => Ok(BroadcastAction::Subscribe {
                 peer_index: u.arbitrary()?,
-                sender: u.arbitrary()?,
                 commitment: u.arbitrary()?,
-                digest: u.arbitrary()?,
             }),
             2 => Ok(BroadcastAction::Get {
                 peer_index: u.arbitrary()?,
-                sender: u.arbitrary()?,
                 commitment: u.arbitrary()?,
-                digest: u.arbitrary()?,
             }),
             _ => Ok(BroadcastAction::Sleep {
                 duration_ms: u.int_in_range(0..=MAX_SLEEP_DURATION_MS)?,
@@ -264,44 +257,24 @@ fn fuzz(input: FuzzInput) {
                 }
                 BroadcastAction::Subscribe {
                     peer_index,
-                    sender,
                     commitment,
-                    digest,
                 } => {
                     let clamped_peer_idx = peer_index % peers.len();
                     let peer = peers[clamped_peer_idx].clone();
 
                     if let Some(mut mailbox) = mailboxes.get(&peer).cloned() {
-                        let sender_key = sender.map(|sender_idx| {
-                            let clamped_sender_idx = sender_idx % peers.len();
-                            peers[clamped_sender_idx].clone()
-                        });
-                        drop(
-                            mailbox
-                                .subscribe(sender_key, commitment.into(), digest.map(|d| d.into()))
-                                .await,
-                        );
+                        drop(mailbox.subscribe(commitment.into()).await);
                     }
                 }
                 BroadcastAction::Get {
                     peer_index,
-                    sender,
                     commitment,
-                    digest,
                 } => {
                     let clamped_peer_idx = peer_index % peers.len();
                     let peer = peers[clamped_peer_idx].clone();
 
                     if let Some(mut mailbox) = mailboxes.get(&peer).cloned() {
-                        let sender_key = sender.map(|sender_idx| {
-                            let clamped_sender_idx = sender_idx % peers.len();
-                            peers[clamped_sender_idx].clone()
-                        });
-                        drop(
-                            mailbox
-                                .get(sender_key, commitment.into(), digest.map(|d| d.into()))
-                                .await,
-                        );
+                        drop(mailbox.get(commitment.into()).await);
                     }
                 }
                 BroadcastAction::Sleep { duration_ms } => {
