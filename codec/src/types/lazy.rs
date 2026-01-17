@@ -128,7 +128,7 @@ impl<T: Read> Lazy<T> {
                         let Pending { bytes, cfg } = self
                             .pending
                             .as_ref()
-                            .expect("Lazy should have proto if value is not initialized");
+                            .expect("Lazy should have pending if value is not initialized");
                         T::decode_cfg(bytes.clone(), cfg).ok()
                     })
                     .as_ref()
@@ -156,7 +156,7 @@ impl<T: Read + EncodeSize> EncodeSize for Lazy<T> {
             return pending.bytes.len();
         }
         self.get()
-            .expect("Lazy should have a value if proto is None")
+            .expect("Lazy should have a value if pending is None")
             .encode_size()
     }
 }
@@ -169,7 +169,7 @@ impl<T: Read + Write> Write for Lazy<T> {
             return;
         }
         self.get()
-            .expect("Lazy should have a value if proto is None")
+            .expect("Lazy should have a value if pending is None")
             .write(buf);
     }
 }
