@@ -4,9 +4,9 @@ use super::{
     Config, Mailbox,
 };
 use crate::{
+    elector::Config as Elector,
     simplex::{
         actors::{batcher, resolver},
-        elector::Config as Elector,
         metrics::{self, Outbound, TimeoutReason},
         scheme::Scheme,
         types::{
@@ -458,6 +458,11 @@ impl<
         let artifact = Artifact::Finalization(finalization.clone());
         let (added, equivocator) = self.state.add_finalization(finalization);
         if added {
+            // Record latency when the leader first observes their finalization,
+            // whether assembled locally or received from the network.
+            if let Some(elapsed) = self.leader_elapsed(view) {
+                self.finalization_latency.observe(elapsed);
+            }
             self.append_journal(view, artifact).await;
         }
         self.block_equivocator(equivocator).await;
@@ -630,11 +635,6 @@ impl<
         let Some(finalization) = self.state.broadcast_finalization(view) else {
             return;
         };
-
-        // Only record latency if we are the current leader.
-        if let Some(elapsed) = self.leader_elapsed(view) {
-            self.finalization_latency.observe(elapsed);
-        }
 
         // Tell the resolver this view is complete so it can stop requesting it.
         // Skip if the resolver just sent us this certificate (avoid boomerang).
