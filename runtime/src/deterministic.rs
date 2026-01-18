@@ -1191,7 +1191,7 @@ impl crate::Metrics for Context {
         crate::utils::deduplicate_metric_metadata(&buffer)
     }
 
-    fn with_tag(&self, key: &str, value: &str) -> Self {
+    fn with_tag(&self, key: &str, value: impl std::fmt::Display) -> Self {
         validate_label(key);
 
         assert!(

@@ -204,7 +204,7 @@ impl<R: Rng + Spawner + Metrics + Clock + Storage, B: Block, S: Scheme> Manager<
         let archive = prunable::Archive::init(
             self.context
                 .with_label(&format!("cache_{name}"))
-                .with_tag("epoch", &epoch.to_string()),
+                .with_tag("epoch", epoch),
             cfg,
         )
         .await

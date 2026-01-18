@@ -339,7 +339,7 @@ pub trait Metrics: Clone + Send + Sync + 'static {
     /// // Produces: consensus_engine_5_votes_total, consensus_engine_6_votes_total, ...
     ///
     /// // Use tags to add epoch as a label dimension:
-    /// let ctx = context.with_label("consensus_engine").with_tag("epoch", &epoch.to_string());
+    /// let ctx = context.with_label("consensus_engine").with_tag("epoch", epoch);
     /// // Produces: consensus_engine_votes_total{epoch="5"}, consensus_engine_votes_total{epoch="6"}, ...
     /// ```
     ///
@@ -373,7 +373,7 @@ pub trait Metrics: Clone + Send + Sync + 'static {
     /// 2. Use in panel queries: `consensus_engine_votes_total{epoch="$latest_epoch"}`
     ///
     /// Keys must start with `[a-zA-Z]` and contain only `[a-zA-Z0-9_]`. Values can be any string.
-    fn with_tag(&self, key: &str, value: &str) -> Self;
+    fn with_tag(&self, key: &str, value: impl std::fmt::Display) -> Self;
 }
 
 /// Re-export of [governor::Quota] for rate limiting configuration.

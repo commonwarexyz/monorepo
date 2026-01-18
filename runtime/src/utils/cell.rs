@@ -172,7 +172,7 @@ where
         self.as_present().encode()
     }
 
-    fn with_tag(&self, key: &str, value: &str) -> Self {
+    fn with_tag(&self, key: &str, value: impl std::fmt::Display) -> Self {
         Self::Present(self.as_present().with_tag(key, value))
     }
 }
