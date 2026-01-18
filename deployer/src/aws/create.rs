@@ -43,7 +43,6 @@ pub struct RegionResources {
     pub vpc_id: String,
     pub vpc_cidr: String,
     pub route_table_id: String,
-    /// Subnet IDs in this region, one per availability zone
     pub subnet_ids: Vec<String>,
     pub binary_sg_id: Option<String>,
     pub monitoring_sg_id: Option<String>,
