@@ -2125,7 +2125,9 @@ mod tests {
     {
         runner.start(|context| async move {
             // Create context with a attribute
-            let ctx_epoch5 = context.with_label("consensus").with_attribute("epoch", "e5");
+            let ctx_epoch5 = context
+                .with_label("consensus")
+                .with_attribute("epoch", "e5");
 
             // Register a metric with the attribute
             let counter = Counter::<u64>::default();
@@ -2141,7 +2143,9 @@ mod tests {
             );
 
             // Create context with different epoch attribute (same metric name)
-            let ctx_epoch6 = context.with_label("consensus").with_attribute("epoch", "e6");
+            let ctx_epoch6 = context
+                .with_label("consensus")
+                .with_attribute("epoch", "e6");
             let counter2 = Counter::<u64>::default();
             ctx_epoch6.register("votes", "vote count", counter2.clone());
             counter2.inc();
@@ -2189,7 +2193,6 @@ mod tests {
                 "Expected metric with region attribute, got: {}",
                 buffer
             );
-
         });
     }
 
@@ -2336,6 +2339,241 @@ mod tests {
     fn test_tokio_metrics_attribute_with_nested_label() {
         let runner = tokio::Runner::default();
         test_metrics_attribute_with_nested_label(runner);
+    }
+
+    fn test_metrics_attributes_isolated_between_contexts<R: Runner>(runner: R)
+    where
+        R::Context: Metrics,
+    {
+        runner.start(|context| async move {
+            // Create two separate sub-contexts, each with their own attribute
+            let ctx_a = context.with_label("component_a").with_attribute("epoch", 1);
+            let ctx_b = context.with_label("component_b").with_attribute("epoch", 2);
+
+            // Register metrics in ctx_a
+            let c1 = Counter::<u64>::default();
+            ctx_a.register("requests", "help", c1);
+
+            // Register metrics in ctx_b
+            let c2 = Counter::<u64>::default();
+            ctx_b.register("requests", "help", c2);
+
+            // Register another metric in ctx_a AFTER ctx_b was used
+            let c3 = Counter::<u64>::default();
+            ctx_a.register("errors", "help", c3);
+
+            let output = context.encode();
+
+            // ctx_a metrics should only have epoch=1
+            assert!(
+                output.contains("component_a_requests_total{epoch=\"1\"} 0"),
+                "ctx_a requests should have epoch=1: {output}"
+            );
+            assert!(
+                output.contains("component_a_errors_total{epoch=\"1\"} 0"),
+                "ctx_a errors should have epoch=1: {output}"
+            );
+            assert!(
+                !output.contains("component_a_requests_total{epoch=\"2\"}"),
+                "ctx_a requests should not have epoch=2: {output}"
+            );
+
+            // ctx_b metrics should only have epoch=2
+            assert!(
+                output.contains("component_b_requests_total{epoch=\"2\"} 0"),
+                "ctx_b should have epoch=2: {output}"
+            );
+            assert!(
+                !output.contains("component_b_requests_total{epoch=\"1\"}"),
+                "ctx_b should not have epoch=1: {output}"
+            );
+        });
+    }
+
+    #[test]
+    fn test_deterministic_metrics_attributes_isolated_between_contexts() {
+        let executor = deterministic::Runner::default();
+        test_metrics_attributes_isolated_between_contexts(executor);
+    }
+
+    #[test]
+    fn test_tokio_metrics_attributes_isolated_between_contexts() {
+        let runner = tokio::Runner::default();
+        test_metrics_attributes_isolated_between_contexts(runner);
+    }
+
+    fn test_metrics_attributes_sorted_deterministically<R: Runner>(runner: R)
+    where
+        R::Context: Metrics,
+    {
+        runner.start(|context| async move {
+            // Create two contexts with same attributes but different order
+            let ctx_ab = context
+                .with_label("service")
+                .with_attribute("region", "us")
+                .with_attribute("env", "prod");
+
+            let ctx_ba = context
+                .with_label("service")
+                .with_attribute("env", "prod")
+                .with_attribute("region", "us");
+
+            // Register via first context
+            let c1 = Counter::<u64>::default();
+            ctx_ab.register("requests", "help", c1.clone());
+            c1.inc();
+
+            // Register via second context - same attributes, different metric
+            let c2 = Counter::<u64>::default();
+            ctx_ba.register("errors", "help", c2.clone());
+            c2.inc();
+            c2.inc();
+
+            let output = context.encode();
+
+            // Both should have the same label order (alphabetically sorted: env, region)
+            assert!(
+                output.contains("service_requests_total{env=\"prod\",region=\"us\"} 1"),
+                "requests should have sorted labels: {output}"
+            );
+            assert!(
+                output.contains("service_errors_total{env=\"prod\",region=\"us\"} 2"),
+                "errors should have sorted labels: {output}"
+            );
+
+            // Should NOT have reverse order
+            assert!(
+                !output.contains("region=\"us\",env=\"prod\""),
+                "should not have unsorted label order: {output}"
+            );
+        });
+    }
+
+    #[test]
+    fn test_deterministic_metrics_attributes_sorted_deterministically() {
+        let executor = deterministic::Runner::default();
+        test_metrics_attributes_sorted_deterministically(executor);
+    }
+
+    #[test]
+    fn test_tokio_metrics_attributes_sorted_deterministically() {
+        let runner = tokio::Runner::default();
+        test_metrics_attributes_sorted_deterministically(runner);
+    }
+
+    fn test_metrics_nested_labels_with_attributes<R: Runner>(runner: R)
+    where
+        R::Context: Metrics,
+    {
+        runner.start(|context| async move {
+            // Service A: plain, no nested labels
+            let svc_a = context.with_label("service_a");
+
+            // Service A with attribute (same top-level label, different context)
+            let svc_a_v2 = context.with_label("service_a").with_attribute("version", 2);
+
+            // Service B with nested label: service_b_worker
+            let svc_b_worker = context.with_label("service_b").with_label("worker");
+
+            // Service B with nested label AND attribute
+            let svc_b_worker_shard = context
+                .with_label("service_b")
+                .with_label("worker")
+                .with_attribute("shard", 99);
+
+            // Service B different nested label: service_b_manager
+            let svc_b_manager = context.with_label("service_b").with_label("manager");
+
+            // Service C: plain, proves no cross-service contamination
+            let svc_c = context.with_label("service_c");
+
+            // Register metrics in all contexts
+            let c1 = Counter::<u64>::default();
+            svc_a.register("requests", "help", c1);
+
+            let c2 = Counter::<u64>::default();
+            svc_a_v2.register("requests", "help", c2);
+
+            let c3 = Counter::<u64>::default();
+            svc_b_worker.register("tasks", "help", c3);
+
+            let c4 = Counter::<u64>::default();
+            svc_b_worker_shard.register("tasks", "help", c4);
+
+            let c5 = Counter::<u64>::default();
+            svc_b_manager.register("decisions", "help", c5);
+
+            let c6 = Counter::<u64>::default();
+            svc_c.register("requests", "help", c6);
+
+            let output = context.encode();
+
+            // Service A plain and attributed both exist independently
+            assert!(
+                output.contains("service_a_requests_total 0"),
+                "svc_a plain should exist: {output}"
+            );
+            assert!(
+                output.contains("service_a_requests_total{version=\"2\"} 0"),
+                "svc_a_v2 should have version=2: {output}"
+            );
+
+            // Service B worker: plain and attributed versions
+            assert!(
+                output.contains("service_b_worker_tasks_total 0"),
+                "svc_b_worker plain should exist: {output}"
+            );
+            assert!(
+                output.contains("service_b_worker_tasks_total{shard=\"99\"} 0"),
+                "svc_b_worker_shard should have shard=99: {output}"
+            );
+
+            // Service B manager: no attributes
+            assert!(
+                output.contains("service_b_manager_decisions_total 0"),
+                "svc_b_manager should have no attributes: {output}"
+            );
+            assert!(
+                !output.contains("service_b_manager_decisions_total{"),
+                "svc_b_manager should have no attributes at all: {output}"
+            );
+
+            // Service C: no attributes, no contamination
+            assert!(
+                output.contains("service_c_requests_total 0"),
+                "svc_c should have no attributes: {output}"
+            );
+            assert!(
+                !output.contains("service_c_requests_total{"),
+                "svc_c should have no attributes at all: {output}"
+            );
+
+            // Cross-contamination checks
+            assert!(
+                !output.contains("service_b_manager_decisions_total{shard="),
+                "svc_b_manager should not have shard: {output}"
+            );
+            assert!(
+                !output.contains("service_a_requests_total{shard="),
+                "svc_a should not have shard: {output}"
+            );
+            assert!(
+                !output.contains("service_c_requests_total{version="),
+                "svc_c should not have version: {output}"
+            );
+        });
+    }
+
+    #[test]
+    fn test_deterministic_metrics_nested_labels_with_attributes() {
+        let executor = deterministic::Runner::default();
+        test_metrics_nested_labels_with_attributes(executor);
+    }
+
+    #[test]
+    fn test_tokio_metrics_nested_labels_with_attributes() {
+        let runner = tokio::Runner::default();
+        test_metrics_nested_labels_with_attributes(runner);
     }
 
     #[test]

@@ -344,7 +344,7 @@ pub fn assert_unique_metrics(buffer: &str) {
     let mut seen = HashSet::new();
     for line in buffer.lines() {
         if !line.starts_with('#') && !line.is_empty() {
-            let metric_name = line.split_once(|c| c == ' ' || c == '{').map(|(n, _)| n);
+            let metric_name = line.split_once([' ', '{']).map(|(n, _)| n);
             if let Some(name) = metric_name {
                 assert!(seen.insert(line.to_string()), "duplicate metric: {}", name);
             }

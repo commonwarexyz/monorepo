@@ -348,7 +348,7 @@ impl crate::Runner for Runner {
         let context = Context {
             storage,
             name: label.name(),
-            tags: Vec::new(),
+            attributes: Vec::new(),
             executor: executor.clone(),
             network,
             tree: Tree::root(),
@@ -383,7 +383,7 @@ cfg_if::cfg_if! {
 /// runtime.
 pub struct Context {
     name: String,
-    tags: Vec<(String, String)>,
+    attributes: Vec<(String, String)>,
     executor: Arc<Executor>,
     storage: Storage,
     network: Network,
@@ -397,7 +397,7 @@ impl Clone for Context {
         let (child, _) = Tree::child(&self.tree);
         Self {
             name: self.name.clone(),
-            tags: self.tags.clone(),
+            attributes: self.attributes.clone(),
             executor: self.executor.clone(),
             storage: self.storage.clone(),
             network: self.network.clone(),
@@ -457,7 +457,7 @@ impl crate::Spawner for Context {
         let executor = self.executor.clone();
         let future: BoxFuture<'_, T> = if is_instrumented {
             let span = info_span!("task", name = %label.name());
-            for (key, value) in &self.tags {
+            for (key, value) in &self.attributes {
                 span.set_attribute(key.clone(), value.clone());
             }
             f(self).instrument(span).boxed()
@@ -556,7 +556,7 @@ impl crate::Metrics for Context {
         };
         Self {
             name,
-            tags: self.tags.clone(),
+            attributes: self.attributes.clone(),
             ..self.clone()
         }
     }
@@ -576,9 +576,9 @@ impl crate::Metrics for Context {
             }
         };
 
-        // Apply tags via sub_registry_with_label and register
+        // Apply attributes via sub_registry_with_label and register
         let mut registry = self.executor.registry.lock().unwrap();
-        let sub_registry = self.tags.iter().fold(&mut *registry, |reg, (k, v)| {
+        let sub_registry = self.attributes.iter().fold(&mut *registry, |reg, (k, v)| {
             reg.sub_registry_with_label((Cow::Owned(k.clone()), Cow::Owned(v.clone())))
         });
         sub_registry.register(prefixed_name, help, metric);
@@ -591,11 +591,12 @@ impl crate::Metrics for Context {
     }
 
     fn with_attribute(&self, key: &str, value: impl std::fmt::Display) -> Self {
-        let mut tags = self.tags.clone();
-        tags.push((key.to_string(), value.to_string()));
+        let mut attributes = self.attributes.clone();
+        attributes.push((key.to_string(), value.to_string()));
+        attributes.sort_by(|(a, _), (b, _)| a.cmp(b));
 
         Self {
-            tags,
+            attributes,
             ..self.clone()
         }
     }

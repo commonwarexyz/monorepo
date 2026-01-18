@@ -53,10 +53,10 @@ use crate::{
     },
     telemetry::metrics::task::Label,
     utils::{
-        assert_unique_metrics, MetricEncoder,
+        assert_unique_metrics,
         signal::{Signal, Stopper},
         supervision::Tree,
-        Panicker,
+        MetricEncoder, Panicker,
     },
     validate_label, Clock, Error, Execution, Handle, ListenerOf, Metrics as _, Panicked,
     Spawner as _, METRICS_PREFIX,
@@ -801,7 +801,7 @@ type Storage = MeteredStorage<AuditedStorage<MemStorage>>;
 /// runtime.
 pub struct Context {
     name: String,
-    tags: Vec<(String, String)>,
+    attributes: Vec<(String, String)>,
     executor: Weak<Executor>,
     network: Arc<Network>,
     storage: Arc<Storage>,
@@ -815,7 +815,7 @@ impl Clone for Context {
         let (child, _) = Tree::child(&self.tree);
         Self {
             name: self.name.clone(),
-            tags: self.tags.clone(),
+            attributes: self.attributes.clone(),
             executor: self.executor.clone(),
             network: self.network.clone(),
             storage: self.storage.clone(),
@@ -868,7 +868,7 @@ impl Context {
         (
             Self {
                 name: String::new(),
-                tags: Vec::new(),
+                attributes: Vec::new(),
                 executor: Arc::downgrade(&executor),
                 network: Arc::new(network),
                 storage: Arc::new(storage),
@@ -926,7 +926,7 @@ impl Context {
         (
             Self {
                 name: String::new(),
-                tags: Vec::new(),
+                attributes: Vec::new(),
                 executor: Arc::downgrade(&executor),
                 network: Arc::new(network),
                 storage: checkpoint.storage,
@@ -1025,7 +1025,7 @@ impl crate::Spawner for Context {
         let executor = self.executor();
         let future: BoxFuture<'_, T> = if is_instrumented {
             let span = info_span!(parent: None, "task", name = %label.name());
-            for (key, value) in &self.tags {
+            for (key, value) in &self.attributes {
                 span.set_attribute(key.clone(), value.clone());
             }
             f(self).instrument(span).boxed()
@@ -1122,7 +1122,7 @@ impl crate::Metrics for Context {
         );
         Self {
             name,
-            tags: self.tags.clone(),
+            attributes: self.attributes.clone(),
             ..self.clone()
         }
     }
@@ -1131,15 +1131,16 @@ impl crate::Metrics for Context {
         validate_label(key);
 
         assert!(
-            !self.tags.iter().any(|(k, _)| k == key),
+            !self.attributes.iter().any(|(k, _)| k == key),
             "duplicate attribute key: {key}"
         );
 
-        let mut tags = self.tags.clone();
-        tags.push((key.to_string(), value.to_string()));
+        let mut attributes = self.attributes.clone();
+        attributes.push((key.to_string(), value.to_string()));
+        attributes.sort_by(|(a, _), (b, _)| a.cmp(b));
 
         Self {
-            tags,
+            attributes,
             ..self.clone()
         }
     }
@@ -1158,7 +1159,7 @@ impl crate::Metrics for Context {
         executor.auditor.event(b"register", |hasher| {
             hasher.update(name.as_bytes());
             hasher.update(help.as_bytes());
-            for (k, v) in &self.tags {
+            for (k, v) in &self.attributes {
                 hasher.update(k.as_bytes());
                 hasher.update(v.as_bytes());
             }
@@ -1172,9 +1173,9 @@ impl crate::Metrics for Context {
             }
         };
 
-        // Apply tags via sub_registry_with_label and register
+        // Apply attributes via sub_registry_with_label and register
         let mut registry = executor.registry.lock().unwrap();
-        let sub_registry = self.tags.iter().fold(&mut *registry, |reg, (k, v)| {
+        let sub_registry = self.attributes.iter().fold(&mut *registry, |reg, (k, v)| {
             reg.sub_registry_with_label((Cow::Owned(k.clone()), Cow::Owned(v.clone())))
         });
         sub_registry.register(prefixed_name, help, metric);
