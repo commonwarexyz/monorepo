@@ -365,7 +365,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
                     "created route table"
                 );
 
-                // Create a subnet in each AZ concurrently (use /24 subnets: 10.{idx}.{az_idx+1}.0/24)
+                // Create a subnet in each AZ concurrently
                 let subnet_futures: Vec<_> = azs
                     .iter()
                     .enumerate()
@@ -377,7 +377,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
                         let az = az.clone();
                         let region = region.clone();
                         async move {
-                            let subnet_cidr = format!("10.{idx}.{}.0/24", az_idx + 1);
+                            let subnet_cidr = format!("10.{idx}.{az_idx}.0/24");
                             let subnet_id = create_subnet(
                                 &ec2_client,
                                 &vpc_id,
