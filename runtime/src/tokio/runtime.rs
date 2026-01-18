@@ -18,7 +18,8 @@ use crate::{
     storage::metered::Storage as MeteredStorage,
     telemetry::metrics::task::Label,
     utils::{signal::Stopper, supervision::Tree, Panicker},
-    Clock, Error, Execution, Handle, Metrics as _, SinkOf, Spawner as _, StreamOf, METRICS_PREFIX,
+    validate_label, Clock, Error, Execution, Handle, Metrics as _, SinkOf, Spawner as _, StreamOf,
+    METRICS_PREFIX,
 };
 use commonware_macros::select;
 use commonware_parallel::ThreadPool;
@@ -32,6 +33,8 @@ use prometheus_client::{
 use rand::{rngs::OsRng, CryptoRng, RngCore};
 use rayon::{ThreadPoolBuildError, ThreadPoolBuilder};
 use std::{
+    borrow::Cow,
+    collections::HashMap,
     env,
     future::Future,
     net::{IpAddr, SocketAddr},
@@ -220,6 +223,7 @@ impl Default for Config {
 /// Runtime based on [Tokio](https://tokio.rs).
 pub struct Executor {
     registry: Mutex<Registry>,
+    latest_gauges: Mutex<HashMap<String, Gauge>>,
     metrics: Arc<Metrics>,
     runtime: Runtime,
     shutdown: Mutex<Stopper>,
@@ -331,6 +335,7 @@ impl crate::Runner for Runner {
         // Initialize executor
         let executor = Arc::new(Executor {
             registry: Mutex::new(registry),
+            latest_gauges: Mutex::new(HashMap::new()),
             metrics,
             runtime,
             shutdown: Mutex::new(Stopper::default()),
@@ -346,6 +351,7 @@ impl crate::Runner for Runner {
         let context = Context {
             storage,
             name: label.name(),
+            tags: Vec::new(),
             executor: executor.clone(),
             network,
             tree: Tree::root(),
@@ -380,6 +386,7 @@ cfg_if::cfg_if! {
 /// runtime.
 pub struct Context {
     name: String,
+    tags: Vec<(String, String)>,
     executor: Arc<Executor>,
     storage: Storage,
     network: Network,
@@ -393,6 +400,7 @@ impl Clone for Context {
         let (child, _) = Tree::child(&self.tree);
         Self {
             name: self.name.clone(),
+            tags: self.tags.clone(),
             executor: self.executor.clone(),
             storage: self.storage.clone(),
             network: self.network.clone(),
@@ -538,6 +546,8 @@ impl crate::RayonPoolSpawner for Context {
 
 impl crate::Metrics for Context {
     fn with_label(&self, label: &str) -> Self {
+        validate_label(label);
+
         // Construct the full label name
         let name = {
             let prefix = self.name.clone();
@@ -547,8 +557,13 @@ impl crate::Metrics for Context {
                 format!("{prefix}_{label}")
             }
         };
+        assert!(
+            !name.starts_with(METRICS_PREFIX),
+            "using runtime label is not allowed"
+        );
         Self {
             name,
+            tags: self.tags.clone(),
             ..self.clone()
         }
     }
@@ -567,17 +582,64 @@ impl crate::Metrics for Context {
                 format!("{}_{}", *prefix, name)
             }
         };
-        self.executor
-            .registry
-            .lock()
-            .unwrap()
-            .register(prefixed_name, help, metric)
+
+        // Apply tags via sub_registry_with_label and register
+        let mut registry = self.executor.registry.lock().unwrap();
+        let sub_registry = self.tags.iter().fold(&mut *registry, |reg, (k, v)| {
+            reg.sub_registry_with_label((Cow::Owned(k.clone()), Cow::Owned(v.clone())))
+        });
+        sub_registry.register(prefixed_name, help, metric);
     }
 
     fn encode(&self) -> String {
         let mut buffer = String::new();
         encode(&mut buffer, &self.executor.registry.lock().unwrap()).expect("encoding failed");
-        buffer
+        crate::utils::deduplicate_metric_metadata(&buffer)
+    }
+
+    fn with_tag(&self, key: &str, value: &str) -> Self {
+        validate_label(key);
+        validate_label(value);
+
+        let mut tags = self.tags.clone();
+        if let Some(existing) = tags.iter_mut().find(|(k, _)| k == key) {
+            existing.1 = value.to_string();
+        } else {
+            tags.push((key.to_string(), value.to_string()));
+        }
+
+        Self {
+            tags,
+            ..self.clone()
+        }
+    }
+
+    fn latest(&self, key: &str, value: i64) {
+        validate_label(key);
+
+        // Build the metric name
+        let metric_name = {
+            let prefix = &self.name;
+            if prefix.is_empty() {
+                format!("latest_{}", key)
+            } else {
+                format!("{}_latest_{}", prefix, key)
+            }
+        };
+
+        // Get or create the gauge
+        let mut latest_gauges = self.executor.latest_gauges.lock().unwrap();
+        let gauge = latest_gauges.entry(metric_name.clone()).or_insert_with(|| {
+            let gauge = Gauge::default();
+            self.executor.registry.lock().unwrap().register(
+                metric_name,
+                format!("Latest value for {}", key),
+                gauge.clone(),
+            );
+            gauge
+        });
+
+        gauge.set(value);
     }
 }
 

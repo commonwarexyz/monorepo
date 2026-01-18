@@ -86,6 +86,7 @@ use rand_core::CryptoRngCore;
 use rayon::{ThreadPoolBuildError, ThreadPoolBuilder};
 use sha2::{Digest as _, Sha256};
 use std::{
+    borrow::Cow,
     collections::{BTreeMap, BinaryHeap, HashMap, HashSet},
     mem::{replace, take},
     net::{IpAddr, SocketAddr},
@@ -289,6 +290,7 @@ impl Default for Config {
 pub struct Executor {
     registry: Mutex<Registry>,
     registered_metrics: Mutex<HashSet<String>>,
+    latest_gauges: Mutex<HashMap<String, Gauge>>,
     cycle: Duration,
     deadline: Option<SystemTime>,
     metrics: Arc<Metrics>,
@@ -799,6 +801,7 @@ type Storage = MeteredStorage<AuditedStorage<MemStorage>>;
 /// runtime.
 pub struct Context {
     name: String,
+    tags: Vec<(String, String)>,
     executor: Weak<Executor>,
     network: Arc<Network>,
     storage: Arc<Storage>,
@@ -812,6 +815,7 @@ impl Clone for Context {
         let (child, _) = Tree::child(&self.tree);
         Self {
             name: self.name.clone(),
+            tags: self.tags.clone(),
             executor: self.executor.clone(),
             network: self.network.clone(),
             storage: self.storage.clone(),
@@ -849,6 +853,7 @@ impl Context {
         let executor = Arc::new(Executor {
             registry: Mutex::new(registry),
             registered_metrics: Mutex::new(HashSet::new()),
+            latest_gauges: Mutex::new(HashMap::new()),
             cycle: cfg.cycle,
             deadline,
             metrics,
@@ -865,6 +870,7 @@ impl Context {
         (
             Self {
                 name: String::new(),
+                tags: Vec::new(),
                 executor: Arc::downgrade(&executor),
                 network: Arc::new(network),
                 storage: Arc::new(storage),
@@ -914,6 +920,7 @@ impl Context {
             // New state for the new runtime
             registry: Mutex::new(registry),
             registered_metrics: Mutex::new(HashSet::new()),
+            latest_gauges: Mutex::new(HashMap::new()),
             metrics,
             tasks: Arc::new(Tasks::new()),
             sleeping: Mutex::new(BinaryHeap::new()),
@@ -923,6 +930,7 @@ impl Context {
         (
             Self {
                 name: String::new(),
+                tags: Vec::new(),
                 executor: Arc::downgrade(&executor),
                 network: Arc::new(network),
                 storage: checkpoint.storage,
@@ -1116,6 +1124,7 @@ impl crate::Metrics for Context {
         );
         Self {
             name,
+            tags: self.tags.clone(),
             ..self.clone()
         }
     }
@@ -1134,6 +1143,10 @@ impl crate::Metrics for Context {
         executor.auditor.event(b"register", |hasher| {
             hasher.update(name.as_bytes());
             hasher.update(help.as_bytes());
+            for (k, v) in &self.tags {
+                hasher.update(k.as_bytes());
+                hasher.update(v.as_bytes());
+            }
         });
         let prefixed_name = {
             let prefix = &self.name;
@@ -1144,18 +1157,33 @@ impl crate::Metrics for Context {
             }
         };
 
-        // Register metric (panics if name already registered)
+        // Build unique key including tags for duplicate detection
+        let unique_key = if self.tags.is_empty() {
+            prefixed_name.clone()
+        } else {
+            let tags_str: String = self
+                .tags
+                .iter()
+                .map(|(k, v)| format!("{}={}", k, v))
+                .collect::<Vec<_>>()
+                .join(",");
+            format!("{}_{{{}}}", prefixed_name, tags_str)
+        };
+
+        // Register metric (panics if name+tags already registered)
         let is_new = executor
             .registered_metrics
             .lock()
             .unwrap()
-            .insert(prefixed_name.clone());
-        assert!(is_new, "duplicate metric name: {}", prefixed_name);
-        executor
-            .registry
-            .lock()
-            .unwrap()
-            .register(prefixed_name, help, metric);
+            .insert(unique_key.clone());
+        assert!(is_new, "duplicate metric: {}", unique_key);
+
+        // Apply tags via sub_registry_with_label and register
+        let mut registry = executor.registry.lock().unwrap();
+        let sub_registry = self.tags.iter().fold(&mut *registry, |reg, (k, v)| {
+            reg.sub_registry_with_label((Cow::Owned(k.clone()), Cow::Owned(v.clone())))
+        });
+        sub_registry.register(prefixed_name, help, metric);
     }
 
     fn encode(&self) -> String {
@@ -1163,7 +1191,55 @@ impl crate::Metrics for Context {
         executor.auditor.event(b"encode", |_| {});
         let mut buffer = String::new();
         encode(&mut buffer, &executor.registry.lock().unwrap()).expect("encoding failed");
-        buffer
+        crate::utils::deduplicate_metric_metadata(&buffer)
+    }
+
+    fn with_tag(&self, key: &str, value: &str) -> Self {
+        validate_label(key);
+        validate_label(value);
+
+        assert!(
+            !self.tags.iter().any(|(k, _)| k == key),
+            "duplicate tag key: {key}"
+        );
+
+        let mut tags = self.tags.clone();
+        tags.push((key.to_string(), value.to_string()));
+
+        Self {
+            tags,
+            ..self.clone()
+        }
+    }
+
+    fn latest(&self, key: &str, value: i64) {
+        validate_label(key);
+
+        let executor = self.executor();
+
+        // Build the metric name
+        let metric_name = {
+            let prefix = &self.name;
+            if prefix.is_empty() {
+                format!("latest_{}", key)
+            } else {
+                format!("{}_latest_{}", prefix, key)
+            }
+        };
+
+        // Get or create the gauge
+        let mut latest_gauges = executor.latest_gauges.lock().unwrap();
+        let gauge = latest_gauges.entry(metric_name.clone()).or_insert_with(|| {
+            let gauge = Gauge::default();
+            executor.registry.lock().unwrap().register(
+                metric_name,
+                format!("Latest value for {}", key),
+                gauge.clone(),
+            );
+            gauge
+        });
+
+        gauge.set(value);
     }
 }
 

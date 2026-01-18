@@ -63,6 +63,12 @@ impl Metrics for DummyMetrics {
     }
 
     fn register<N: Into<String>, H: Into<String>>(&self, _: N, _: H, _: impl Metric) {}
+
+    fn with_tag(&self, _: &str, _: &str) -> Self {
+        Self
+    }
+
+    fn latest(&self, _: &str, _: i64) {}
 }
 
 fn bench_insert(c: &mut Criterion) {

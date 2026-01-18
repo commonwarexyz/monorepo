@@ -171,6 +171,14 @@ where
     fn encode(&self) -> String {
         self.as_present().encode()
     }
+
+    fn with_tag(&self, key: &str, value: &str) -> Self {
+        Self::Present(self.as_present().with_tag(key, value))
+    }
+
+    fn latest(&self, key: &str, value: i64) {
+        self.as_present().latest(key, value)
+    }
 }
 
 impl<C> crate::Clock for Cell<C>

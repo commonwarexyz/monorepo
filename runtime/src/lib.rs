@@ -308,6 +308,101 @@ pub trait Metrics: Clone + Send + Sync + 'static {
     /// by using `with_label` to create new context instances (ensures all context instances are
     /// namespaced).
     fn encode(&self) -> String;
+
+    /// Create a new instance of `Metrics` with an additional tag (Prometheus label) applied
+    /// to all metrics registered in this context.
+    ///
+    /// Unlike [`Metrics::with_label`] which affects the metric name prefix, `with_tag` adds
+    /// a Prometheus label that appears as a separate dimension in the metric output. This is
+    /// useful for tracking epoch-specific or instance-specific metrics without causing metric
+    /// name cardinality explosion.
+    ///
+    /// # When to Use Tags vs Labels
+    ///
+    /// Use [`Metrics::with_label`] for static, structural grouping (e.g., component names):
+    /// ```text
+    /// consensus_votes_total 100
+    /// storage_reads_total 500
+    /// ```
+    ///
+    /// Use `with_tag` for dynamic dimensions that change at runtime (e.g., epochs):
+    /// ```text
+    /// consensus_votes_total{epoch="5"} 100
+    /// consensus_votes_total{epoch="6"} 200
+    /// ```
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Instead of creating epoch-specific metric names (causes cardinality explosion):
+    /// let ctx = context.with_label(&format!("consensus_engine_{}", epoch));
+    /// // Produces: consensus_engine_5_votes_total, consensus_engine_6_votes_total, ...
+    ///
+    /// // Use tags to add epoch as a label dimension:
+    /// let ctx = context.with_label("consensus_engine").with_tag("epoch", &epoch.to_string());
+    /// // Produces: consensus_engine_votes_total{epoch="5"}, consensus_engine_votes_total{epoch="6"}, ...
+    /// ```
+    ///
+    /// Multiple tags can be chained:
+    /// ```ignore
+    /// let ctx = context
+    ///     .with_label("engine")
+    ///     .with_tag("region", "us_east")
+    ///     .with_tag("instance", "i1");
+    /// // Produces: engine_requests_total{region="us_east",instance="i1"} 42
+    /// ```
+    ///
+    /// # Grafana Integration
+    ///
+    /// To query metrics for a specific tag value:
+    /// ```text
+    /// consensus_engine_votes_total{epoch="5"}
+    /// ```
+    ///
+    /// To query the latest epoch dynamically, combine with [`Metrics::latest`]:
+    /// 1. Call `context.latest("epoch", current_epoch)` to track the current epoch
+    /// 2. Create a Grafana variable: `$latest_epoch` with query `max(orchestrator_latest_epoch)`
+    /// 3. Use in panels: `consensus_engine_votes_total{epoch="$latest_epoch"}`
+    ///
+    /// Keys and values must start with `[a-zA-Z]` and contain only `[a-zA-Z0-9_]`.
+    fn with_tag(&self, key: &str, value: &str) -> Self;
+
+    /// Record the latest value for a given key, useful for alerting on current state.
+    ///
+    /// This creates or updates a gauge named `{label}_latest_{key}` that tracks the most
+    /// recent value. This is useful for monitoring systems to know the current epoch,
+    /// version, or other monotonically increasing values.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Track the current epoch for alerting
+    /// context.latest("epoch", epoch.get() as i64);
+    /// // Produces gauge: orchestrator_latest_epoch 5
+    /// ```
+    ///
+    /// # Grafana Integration
+    ///
+    /// The `latest` gauge enables dynamic filtering in Grafana dashboards:
+    ///
+    /// 1. Export the latest value:
+    ///    ```ignore
+    ///    context.with_label("orchestrator").latest("epoch", 5);
+    ///    // Produces: orchestrator_latest_epoch 5
+    ///    ```
+    ///
+    /// 2. Create a Grafana dashboard variable `$latest_epoch`:
+    ///    - Type: Query
+    ///    - Query: `max(orchestrator_latest_epoch)`
+    ///
+    /// 3. Use in panel queries to show only current epoch metrics:
+    ///    ```text
+    ///    consensus_engine_votes_total{epoch="$latest_epoch"}
+    ///    ```
+    ///
+    /// The dashboard automatically updates when the gauge changes, showing metrics
+    /// for the current epoch without manual intervention.
+    fn latest(&self, key: &str, value: i64);
 }
 
 /// Re-export of [governor::Quota] for rate limiting configuration.
@@ -2051,6 +2146,219 @@ mod tests {
         });
     }
 
+    fn test_metrics_with_tag<R: Runner>(runner: R)
+    where
+        R::Context: Metrics,
+    {
+        runner.start(|context| async move {
+            // Create context with a tag
+            let ctx_epoch5 = context.with_label("consensus").with_tag("epoch", "e5");
+
+            // Register a metric with the tag
+            let counter = Counter::<u64>::default();
+            ctx_epoch5.register("votes", "vote count", counter.clone());
+            counter.inc();
+
+            // Encode and verify the tag appears as a label
+            let buffer = context.encode();
+            assert!(
+                buffer.contains("consensus_votes_total{epoch=\"e5\"} 1"),
+                "Expected metric with epoch tag, got: {}",
+                buffer
+            );
+
+            // Create context with different epoch tag (same metric name)
+            let ctx_epoch6 = context.with_label("consensus").with_tag("epoch", "e6");
+            let counter2 = Counter::<u64>::default();
+            ctx_epoch6.register("votes", "vote count", counter2.clone());
+            counter2.inc();
+            counter2.inc();
+
+            // Both should appear in encoded output with canonical format (single HELP/TYPE)
+            let buffer = context.encode();
+            assert!(
+                buffer.contains("consensus_votes_total{epoch=\"e5\"} 1"),
+                "Expected metric with epoch=e5, got: {}",
+                buffer
+            );
+            assert!(
+                buffer.contains("consensus_votes_total{epoch=\"e6\"} 2"),
+                "Expected metric with epoch=e6, got: {}",
+                buffer
+            );
+
+            // Verify canonical format: HELP and TYPE should appear exactly once
+            assert_eq!(
+                buffer.matches("# HELP consensus_votes").count(),
+                1,
+                "HELP should appear exactly once, got: {}",
+                buffer
+            );
+            assert_eq!(
+                buffer.matches("# TYPE consensus_votes").count(),
+                1,
+                "TYPE should appear exactly once, got: {}",
+                buffer
+            );
+
+            // Multiple tags
+            let ctx_multi = context
+                .with_label("engine")
+                .with_tag("region", "us")
+                .with_tag("instance", "i1");
+            let counter3 = Counter::<u64>::default();
+            ctx_multi.register("requests", "request count", counter3.clone());
+            counter3.inc();
+
+            let buffer = context.encode();
+            assert!(
+                buffer.contains("engine_requests_total{") && buffer.contains("region=\"us\""),
+                "Expected metric with region tag, got: {}",
+                buffer
+            );
+
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "duplicate tag key: epoch")]
+    fn test_deterministic_metrics_duplicate_tag_panics() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let _ = context
+                .with_label("test")
+                .with_tag("epoch", "old")
+                .with_tag("epoch", "new");
+        });
+    }
+
+    #[test]
+    fn test_tokio_metrics_duplicate_tag_replaces() {
+        let runner = tokio::Runner::default();
+        runner.start(|context| async move {
+            let ctx = context
+                .with_label("test")
+                .with_tag("epoch", "old")
+                .with_tag("epoch", "new");
+
+            let counter = Counter::<u64>::default();
+            ctx.register("metric", "help", counter.clone());
+            counter.inc();
+
+            let buffer = context.encode();
+            assert!(
+                buffer.contains("test_metric_total{epoch=\"new\"} 1"),
+                "Expected new epoch value, got: {}",
+                buffer
+            );
+            assert!(
+                !buffer.contains("epoch=\"old\""),
+                "Should not contain old epoch value, got: {}",
+                buffer
+            );
+        });
+    }
+
+    fn test_metrics_latest<R: Runner>(runner: R)
+    where
+        R::Context: Metrics,
+    {
+        runner.start(|context| async move {
+            let ctx = context.with_label("orchestrator");
+
+            // Set latest epoch
+            ctx.latest("epoch", 5);
+
+            // Encode and verify gauge exists
+            let buffer = context.encode();
+            assert!(
+                buffer.contains("orchestrator_latest_epoch 5"),
+                "Expected latest_epoch gauge, got: {}",
+                buffer
+            );
+
+            // Update to new epoch
+            ctx.latest("epoch", 6);
+
+            // Verify updated value
+            let buffer = context.encode();
+            assert!(
+                buffer.contains("orchestrator_latest_epoch 6"),
+                "Expected updated latest_epoch gauge, got: {}",
+                buffer
+            );
+
+            // Different key
+            ctx.latest("view", 100);
+            let buffer = context.encode();
+            assert!(
+                buffer.contains("orchestrator_latest_view 100"),
+                "Expected latest_view gauge, got: {}",
+                buffer
+            );
+        });
+    }
+
+    fn test_metrics_tag_with_nested_label<R: Runner>(runner: R)
+    where
+        R::Context: Metrics,
+    {
+        runner.start(|context| async move {
+            // Create context with tag, then nest a label
+            let ctx = context
+                .with_label("orchestrator")
+                .with_tag("epoch", "e5")
+                .with_label("engine");
+
+            // Register a metric
+            let counter = Counter::<u64>::default();
+            ctx.register("votes", "vote count", counter.clone());
+            counter.inc();
+
+            // Verify the tag is preserved through the nested label
+            let buffer = context.encode();
+            assert!(
+                buffer.contains("orchestrator_engine_votes_total{epoch=\"e5\"} 1"),
+                "Expected metric with preserved epoch tag, got: {}",
+                buffer
+            );
+
+            // Multiple levels of nesting with tags at different levels
+            let ctx2 = context
+                .with_label("outer")
+                .with_tag("region", "us")
+                .with_label("middle")
+                .with_tag("az", "east")
+                .with_label("inner");
+
+            let counter2 = Counter::<u64>::default();
+            ctx2.register("requests", "request count", counter2.clone());
+            counter2.inc();
+            counter2.inc();
+
+            let buffer = context.encode();
+            assert!(
+                buffer.contains("outer_middle_inner_requests_total{")
+                    && buffer.contains("region=\"us\"")
+                    && buffer.contains("az=\"east\""),
+                "Expected metric with all tags preserved, got: {}",
+                buffer
+            );
+        });
+    }
+
+    #[test]
+    fn test_deterministic_metrics_tag_with_nested_label() {
+        let executor = deterministic::Runner::default();
+        test_metrics_tag_with_nested_label(executor);
+    }
+
+    #[test]
+    fn test_tokio_metrics_tag_with_nested_label() {
+        let runner = tokio::Runner::default();
+        test_metrics_tag_with_nested_label(runner);
+    }
+
     #[test]
     fn test_deterministic_future() {
         let runner = deterministic::Runner::default();
@@ -2313,6 +2621,18 @@ mod tests {
     fn test_deterministic_metrics() {
         let executor = deterministic::Runner::default();
         test_metrics(executor);
+    }
+
+    #[test]
+    fn test_deterministic_metrics_with_tag() {
+        let executor = deterministic::Runner::default();
+        test_metrics_with_tag(executor);
+    }
+
+    #[test]
+    fn test_deterministic_metrics_latest() {
+        let executor = deterministic::Runner::default();
+        test_metrics_latest(executor);
     }
 
     #[test_collect_traces]
@@ -2656,6 +2976,18 @@ mod tests {
     fn test_tokio_metrics() {
         let executor = tokio::Runner::default();
         test_metrics(executor);
+    }
+
+    #[test]
+    fn test_tokio_metrics_with_tag() {
+        let executor = tokio::Runner::default();
+        test_metrics_with_tag(executor);
+    }
+
+    #[test]
+    fn test_tokio_metrics_latest() {
+        let executor = tokio::Runner::default();
+        test_metrics_latest(executor);
     }
 
     #[test]

@@ -264,6 +264,40 @@ pub fn validate_label(label: &str) {
     );
 }
 
+/// Deduplicates HELP and TYPE metadata lines in Prometheus exposition format.
+///
+/// When the same metric is registered multiple times with different tag values
+/// (via `sub_registry_with_label`), prometheus_client outputs duplicate HELP/TYPE
+/// lines. This function merges them to produce canonical Prometheus format.
+pub fn deduplicate_metric_metadata(buffer: &str) -> String {
+    use std::collections::HashSet;
+
+    let mut seen_help: HashSet<&str> = HashSet::new();
+    let mut seen_type: HashSet<&str> = HashSet::new();
+    let mut result = String::with_capacity(buffer.len());
+
+    for line in buffer.lines() {
+        if let Some(rest) = line.strip_prefix("# HELP ") {
+            let metric_name = rest.split_whitespace().next().unwrap_or("");
+            if seen_help.insert(metric_name) {
+                result.push_str(line);
+                result.push('\n');
+            }
+        } else if let Some(rest) = line.strip_prefix("# TYPE ") {
+            let metric_name = rest.split_whitespace().next().unwrap_or("");
+            if seen_type.insert(metric_name) {
+                result.push_str(line);
+                result.push('\n');
+            }
+        } else {
+            result.push_str(line);
+            result.push('\n');
+        }
+    }
+
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -272,6 +306,86 @@ mod tests {
     use futures::task::waker;
     use prometheus_client::metrics::counter::Counter;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    #[test]
+    fn test_deduplicate_metric_metadata_empty() {
+        assert_eq!(deduplicate_metric_metadata(""), "");
+        assert_eq!(deduplicate_metric_metadata("# EOF\n"), "# EOF\n");
+    }
+
+    #[test]
+    fn test_deduplicate_metric_metadata_no_duplicates() {
+        let input = r#"# HELP foo_total A counter.
+# TYPE foo_total counter
+foo_total 1
+# HELP bar_gauge A gauge.
+# TYPE bar_gauge gauge
+bar_gauge 42
+# EOF
+"#;
+        let output = deduplicate_metric_metadata(input);
+        assert_eq!(output, input);
+    }
+
+    #[test]
+    fn test_deduplicate_metric_metadata_with_duplicates() {
+        let input = r#"# HELP votes_total vote count.
+# TYPE votes_total counter
+votes_total{epoch="e5"} 1
+# HELP votes_total vote count.
+# TYPE votes_total counter
+votes_total{epoch="e6"} 2
+# EOF
+"#;
+        let expected = r#"# HELP votes_total vote count.
+# TYPE votes_total counter
+votes_total{epoch="e5"} 1
+votes_total{epoch="e6"} 2
+# EOF
+"#;
+        let output = deduplicate_metric_metadata(input);
+        assert_eq!(output, expected);
+    }
+
+    #[test]
+    fn test_deduplicate_metric_metadata_multiple_metrics() {
+        let input = r#"# HELP a_total First.
+# TYPE a_total counter
+a_total{tag="x"} 1
+# HELP b_total Second.
+# TYPE b_total counter
+b_total 5
+# HELP a_total First.
+# TYPE a_total counter
+a_total{tag="y"} 2
+# EOF
+"#;
+        let expected = r#"# HELP a_total First.
+# TYPE a_total counter
+a_total{tag="x"} 1
+# HELP b_total Second.
+# TYPE b_total counter
+b_total 5
+a_total{tag="y"} 2
+# EOF
+"#;
+        let output = deduplicate_metric_metadata(input);
+        assert_eq!(output, expected);
+    }
+
+    #[test]
+    fn test_deduplicate_metric_metadata_preserves_order() {
+        let input = r#"# HELP z First alphabetically last.
+# TYPE z counter
+z_total 1
+# HELP a Last alphabetically first.
+# TYPE a counter
+a_total 2
+# EOF
+"#;
+        let output = deduplicate_metric_metadata(input);
+        assert_eq!(output, input);
+    }
 
     #[test_traced]
     fn test_rwlock() {
@@ -438,7 +552,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "duplicate metric name:")]
+    #[should_panic(expected = "duplicate metric:")]
     fn test_duplicate_metrics_panics() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
