@@ -17,9 +17,8 @@ use crate::{
     signal::Signal,
     storage::metered::Storage as MeteredStorage,
     telemetry::metrics::task::Label,
-    utils::{signal::Stopper, supervision::Tree, Panicker},
-    validate_label, Clock, Error, Execution, Handle, Metrics as _, SinkOf, Spawner as _, StreamOf,
-    METRICS_PREFIX,
+    utils::{deduplicate_metric_metadata, signal::Stopper, supervision::Tree, Panicker},
+    Clock, Error, Execution, Handle, Metrics as _, SinkOf, Spawner as _, StreamOf, METRICS_PREFIX,
 };
 use commonware_macros::select;
 use commonware_parallel::ThreadPool;
@@ -546,8 +545,6 @@ impl crate::RayonPoolSpawner for Context {
 
 impl crate::Metrics for Context {
     fn with_label(&self, label: &str) -> Self {
-        validate_label(label);
-
         // Construct the full label name
         let name = {
             let prefix = self.name.clone();
@@ -557,10 +554,6 @@ impl crate::Metrics for Context {
                 format!("{prefix}_{label}")
             }
         };
-        assert!(
-            !name.starts_with(METRICS_PREFIX),
-            "using runtime label is not allowed"
-        );
         Self {
             name,
             tags: self.tags.clone(),
@@ -594,12 +587,10 @@ impl crate::Metrics for Context {
     fn encode(&self) -> String {
         let mut buffer = String::new();
         encode(&mut buffer, &self.executor.registry.lock().unwrap()).expect("encoding failed");
-        crate::utils::deduplicate_metric_metadata(&buffer)
+        deduplicate_metric_metadata(&buffer)
     }
 
     fn with_attribute(&self, key: &str, value: impl std::fmt::Display) -> Self {
-        validate_label(key);
-
         let mut tags = self.tags.clone();
         tags.push((key.to_string(), value.to_string()));
 

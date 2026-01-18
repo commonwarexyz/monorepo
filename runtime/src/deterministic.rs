@@ -53,6 +53,7 @@ use crate::{
     },
     telemetry::metrics::task::Label,
     utils::{
+        assert_unique_metrics, deduplicate_metric_metadata,
         signal::{Signal, Stopper},
         supervision::Tree,
         Panicker,
@@ -1126,6 +1127,23 @@ impl crate::Metrics for Context {
         }
     }
 
+    fn with_attribute(&self, key: &str, value: impl std::fmt::Display) -> Self {
+        validate_label(key);
+
+        assert!(
+            !self.tags.iter().any(|(k, _)| k == key),
+            "duplicate attribute key: {key}"
+        );
+
+        let mut tags = self.tags.clone();
+        tags.push((key.to_string(), value.to_string()));
+
+        Self {
+            tags,
+            ..self.clone()
+        }
+    }
+
     fn label(&self) -> String {
         self.name.clone()
     }
@@ -1164,7 +1182,7 @@ impl crate::Metrics for Context {
         // Check for duplicate data lines in encoded output
         let mut buffer = String::new();
         encode(&mut buffer, &registry).expect("encoding failed");
-        crate::utils::assert_no_duplicate_metric_data(&buffer);
+        assert_unique_metrics(&buffer);
     }
 
     fn encode(&self) -> String {
@@ -1172,24 +1190,7 @@ impl crate::Metrics for Context {
         executor.auditor.event(b"encode", |_| {});
         let mut buffer = String::new();
         encode(&mut buffer, &executor.registry.lock().unwrap()).expect("encoding failed");
-        crate::utils::deduplicate_metric_metadata(&buffer)
-    }
-
-    fn with_attribute(&self, key: &str, value: impl std::fmt::Display) -> Self {
-        validate_label(key);
-
-        assert!(
-            !self.tags.iter().any(|(k, _)| k == key),
-            "duplicate attribute key: {key}"
-        );
-
-        let mut tags = self.tags.clone();
-        tags.push((key.to_string(), value.to_string()));
-
-        Self {
-            tags,
-            ..self.clone()
-        }
+        deduplicate_metric_metadata(&buffer)
     }
 }
 

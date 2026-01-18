@@ -321,7 +321,7 @@ pub trait Metrics: Clone + Send + Sync + 'static {
     /// // Produces: engine_requests_total{region="us_east",instance="i1"} 42
     /// ```
     ///
-    /// # Grafana Integration
+    /// # Querying The Latest Attribute
     ///
     /// To query metrics for a specific attribute value:
     /// ```text
@@ -337,9 +337,8 @@ pub trait Metrics: Clone + Send + Sync + 'static {
     /// // Produces: orchestrator_latest_epoch 5
     /// ```
     ///
-    /// Then in Grafana:
-    /// 1. Create a dashboard variable `$latest_epoch` with query: `max(orchestrator_latest_epoch)`
-    /// 2. Use in panel queries: `consensus_engine_votes_total{epoch="$latest_epoch"}`
+    /// Then create a dashboard variable `$latest_epoch` with query `max(orchestrator_latest_epoch)`
+    /// and use it in panel queries: `consensus_engine_votes_total{epoch="$latest_epoch"}`
     ///
     /// Keys must start with `[a-zA-Z]` and contain only `[a-zA-Z0-9_]`. Values can be any string.
     fn with_attribute(&self, key: &str, value: impl std::fmt::Display) -> Self;

@@ -278,7 +278,6 @@ pub fn deduplicate_metric_metadata(buffer: &str) -> String {
     let mut seen_help: HashSet<&str> = HashSet::new();
     let mut seen_type: HashSet<&str> = HashSet::new();
     let mut result = String::with_capacity(buffer.len());
-
     for line in buffer.lines() {
         if let Some(rest) = line.strip_prefix("# HELP ") {
             let metric_name = rest.split_whitespace().next().unwrap_or("");
@@ -306,7 +305,7 @@ pub fn deduplicate_metric_metadata(buffer: &str) -> String {
 /// Data lines are non-comment, non-empty lines (e.g., `metric_total 42` or
 /// `metric{label="value"} 1`). Duplicate data lines indicate the same metric
 /// was registered twice with identical labels.
-pub fn assert_no_duplicate_metric_data(buffer: &str) {
+pub fn assert_unique_metrics(buffer: &str) {
     let mut seen = HashSet::new();
     for line in buffer.lines() {
         if !line.starts_with('#') && !line.is_empty() {
@@ -408,7 +407,7 @@ a_total 2
     }
 
     #[test]
-    fn test_assert_no_duplicate_metric_data_passes() {
+    fn test_assert_unique_metrics_passes() {
         let input = r#"# HELP test A metric.
 # TYPE test counter
 test_total 1
@@ -416,19 +415,19 @@ test_total{label="a"} 2
 test_total{label="b"} 3
 # EOF
 "#;
-        assert_no_duplicate_metric_data(input);
+        assert_unique_metrics(input);
     }
 
     #[test]
     #[should_panic(expected = "duplicate metric:")]
-    fn test_assert_no_duplicate_metric_data_panics() {
+    fn test_assert_unique_metrics_panics() {
         let input = r#"# HELP test A metric.
 # TYPE test counter
 test_total 1
 test_total 1
 # EOF
 "#;
-        assert_no_duplicate_metric_data(input);
+        assert_unique_metrics(input);
     }
 
     #[test_traced]
