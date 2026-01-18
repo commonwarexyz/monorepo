@@ -364,7 +364,7 @@ pub trait Metrics: Clone + Send + Sync + 'static {
     /// 2. Create a Grafana variable: `$latest_epoch` with query `max(orchestrator_latest_epoch)`
     /// 3. Use in panels: `consensus_engine_votes_total{epoch="$latest_epoch"}`
     ///
-    /// Keys and values must start with `[a-zA-Z]` and contain only `[a-zA-Z0-9_]`.
+    /// Keys must start with `[a-zA-Z]` and contain only `[a-zA-Z0-9_]`. Values can be any string.
     fn with_tag(&self, key: &str, value: &str) -> Self;
 
     /// Record the latest value for a given key, useful for alerting on current state.
@@ -760,7 +760,10 @@ mod tests {
         future::{pending, ready},
         join, pin_mut, FutureExt, SinkExt, StreamExt,
     };
-    use prometheus_client::metrics::counter::Counter;
+    use prometheus_client::{
+        encoding::EncodeLabelSet,
+        metrics::{counter::Counter, family::Family},
+    };
     use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
     use std::{
         collections::HashMap,
@@ -2230,6 +2233,91 @@ mod tests {
                 .with_tag("epoch", "old")
                 .with_tag("epoch", "new");
         });
+    }
+
+    #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+    struct PeerLabels {
+        peer: String,
+    }
+
+    fn test_metrics_family_with_tag<R: Runner>(runner: R)
+    where
+        R::Context: Metrics,
+    {
+        runner.start(|context| async move {
+            // Create context with a tag, then register a Family metric
+            let ctx = context.with_label("p2p").with_tag("region", "us");
+
+            // Register a Family metric (like p2p does)
+            let family = Family::<PeerLabels, Counter>::default();
+            ctx.register("messages_sent", "messages sent to peers", family.clone());
+
+            // Use the family to create counters for different peers
+            family
+                .get_or_create(&PeerLabels {
+                    peer: "alice".to_string(),
+                })
+                .inc();
+            family
+                .get_or_create(&PeerLabels {
+                    peer: "alice".to_string(),
+                })
+                .inc();
+            family
+                .get_or_create(&PeerLabels {
+                    peer: "bob".to_string(),
+                })
+                .inc();
+
+            // Encode and verify both tag (region) and family labels (peer) appear
+            let buffer = context.encode();
+
+            // Should have region tag from with_tag AND peer label from Family
+            assert!(
+                buffer.contains("p2p_messages_sent_total{")
+                    && buffer.contains("region=\"us\"")
+                    && buffer.contains("peer=\"alice\""),
+                "Expected metric with both region tag and alice peer label, got: {}",
+                buffer
+            );
+            assert!(
+                buffer.contains("peer=\"bob\""),
+                "Expected metric with bob peer label, got: {}",
+                buffer
+            );
+
+            // Verify the counts are correct
+            assert!(
+                buffer.contains("peer=\"alice\"} 2"),
+                "Expected alice count of 2, got: {}",
+                buffer
+            );
+            assert!(
+                buffer.contains("peer=\"bob\"} 1"),
+                "Expected bob count of 1, got: {}",
+                buffer
+            );
+
+            // Verify canonical format (single HELP/TYPE)
+            assert_eq!(
+                buffer.matches("# HELP p2p_messages_sent").count(),
+                1,
+                "HELP should appear exactly once, got: {}",
+                buffer
+            );
+        });
+    }
+
+    #[test]
+    fn test_deterministic_metrics_family_with_tag() {
+        let executor = deterministic::Runner::default();
+        test_metrics_family_with_tag(executor);
+    }
+
+    #[test]
+    fn test_tokio_metrics_family_with_tag() {
+        let runner = tokio::Runner::default();
+        test_metrics_family_with_tag(runner);
     }
 
     fn test_metrics_latest<R: Runner>(runner: R)

@@ -599,7 +599,6 @@ impl crate::Metrics for Context {
 
     fn with_tag(&self, key: &str, value: &str) -> Self {
         validate_label(key);
-        validate_label(value);
 
         let mut tags = self.tags.clone();
         tags.push((key.to_string(), value.to_string()));

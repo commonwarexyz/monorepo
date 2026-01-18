@@ -1196,7 +1196,6 @@ impl crate::Metrics for Context {
 
     fn with_tag(&self, key: &str, value: &str) -> Self {
         validate_label(key);
-        validate_label(value);
 
         assert!(
             !self.tags.iter().any(|(k, _)| k == key),
