@@ -278,37 +278,6 @@ pub trait Metrics: Clone + Send + Sync + 'static {
     /// any implementation to use `METRICS_PREFIX` as the start of a label (reserved for metrics for the runtime).
     fn with_label(&self, label: &str) -> Self;
 
-    /// Prefix the given label with the current context's label.
-    ///
-    /// Unlike `with_label`, this method does not create a new context.
-    fn scoped_label(&self, label: &str) -> String {
-        let label = if self.label().is_empty() {
-            label.to_string()
-        } else {
-            format!("{}_{}", self.label(), label)
-        };
-        assert!(
-            !label.starts_with(METRICS_PREFIX),
-            "using runtime label is not allowed"
-        );
-        label
-    }
-
-    /// Register a metric with the runtime.
-    ///
-    /// Any registered metric will include (as a prefix) the label of the current context.
-    ///
-    /// Names must start with `[a-zA-Z]` and contain only `[a-zA-Z0-9_]`.
-    fn register<N: Into<String>, H: Into<String>>(&self, name: N, help: H, metric: impl Metric);
-
-    /// Encode all metrics into a buffer.
-    ///
-    /// To ensure downstream analytics tools work correctly, users must never duplicate metrics
-    /// (via the concatenation of nested `with_label` and `register` calls). This can be avoided
-    /// by using `with_label` to create new context instances (ensures all context instances are
-    /// namespaced).
-    fn encode(&self) -> String;
-
     /// Create a new instance of `Metrics` with an additional attribute (Prometheus label) applied
     /// to all metrics registered in this context.
     ///
@@ -317,7 +286,7 @@ pub trait Metrics: Clone + Send + Sync + 'static {
     /// useful for tracking epoch-specific or instance-specific metrics without causing metric
     /// name cardinality explosion.
     ///
-    /// # When to Use Tags vs Labels
+    /// # When to Use Attributes vs Labels
     ///
     /// Use [`Metrics::with_label`] for static, structural grouping (e.g., component names):
     /// ```text
@@ -374,6 +343,37 @@ pub trait Metrics: Clone + Send + Sync + 'static {
     ///
     /// Keys must start with `[a-zA-Z]` and contain only `[a-zA-Z0-9_]`. Values can be any string.
     fn with_attribute(&self, key: &str, value: impl std::fmt::Display) -> Self;
+
+    /// Prefix the given label with the current context's label.
+    ///
+    /// Unlike `with_label`, this method does not create a new context.
+    fn scoped_label(&self, label: &str) -> String {
+        let label = if self.label().is_empty() {
+            label.to_string()
+        } else {
+            format!("{}_{}", self.label(), label)
+        };
+        assert!(
+            !label.starts_with(METRICS_PREFIX),
+            "using runtime label is not allowed"
+        );
+        label
+    }
+
+    /// Register a metric with the runtime.
+    ///
+    /// Any registered metric will include (as a prefix) the label of the current context.
+    ///
+    /// Names must start with `[a-zA-Z]` and contain only `[a-zA-Z0-9_]`.
+    fn register<N: Into<String>, H: Into<String>>(&self, name: N, help: H, metric: impl Metric);
+
+    /// Encode all metrics into a buffer.
+    ///
+    /// To ensure downstream analytics tools work correctly, users must never duplicate metrics
+    /// (via the concatenation of nested `with_label` and `register` calls). This can be avoided
+    /// by using `with_label` to create new context instances (ensures all context instances are
+    /// namespaced).
+    fn encode(&self) -> String;
 }
 
 /// Re-export of [governor::Quota] for rate limiting configuration.
