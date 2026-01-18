@@ -86,7 +86,9 @@
 //!
 //! ### Subnets
 //!
-//! Single subnet per VPC (e.g., `10.<region-index>.1.0/24`), linked to a route table with an internet gateway.
+//! One subnet per availability zone in each VPC (e.g., `10.<region-index>.<az-index+1>.0/24`), linked to
+//! a shared route table with an internet gateway. Instances are distributed across AZs and automatically
+//! fall back to other AZs if capacity is exhausted.
 //!
 //! ### VPC Peering
 //!
