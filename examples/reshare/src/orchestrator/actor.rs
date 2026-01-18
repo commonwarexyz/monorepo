@@ -21,8 +21,10 @@ use commonware_p2p::{
 };
 use commonware_parallel::Strategy;
 use commonware_runtime::{
-    buffer::PoolRef, spawn_cell, Clock, ContextCell, Handle, Metrics, Network, Spawner, Storage,
+    buffer::PoolRef, spawn_cell, telemetry::metrics::status::GaugeExt, Clock, ContextCell, Handle,
+    Metrics, Network, Spawner, Storage,
 };
+use prometheus_client::metrics::gauge::Gauge;
 use commonware_utils::{vec::NonEmptyVec, NZUsize, NZU16};
 use futures::{channel::mpsc, StreamExt};
 use rand_core::CryptoRngCore;
@@ -83,6 +85,9 @@ where
     muxer_size: usize,
     partition_prefix: String,
     pool_ref: PoolRef,
+
+    latest_epoch: Gauge,
+
     _phantom: PhantomData<L>,
 }
 
@@ -107,6 +112,10 @@ where
         let (sender, mailbox) = mpsc::channel(config.mailbox_size);
         let pool_ref = PoolRef::new(NZU16!(16_384), NZUsize!(10_000));
 
+        // Register latest_epoch gauge for Grafana integration
+        let latest_epoch = Gauge::default();
+        context.register("latest_epoch", "current epoch", latest_epoch.clone());
+
         (
             Self {
                 context: ContextCell::new(context),
@@ -119,6 +128,7 @@ where
                 muxer_size: config.muxer_size,
                 partition_prefix: config.partition_prefix,
                 pool_ref,
+                latest_epoch,
                 _phantom: PhantomData,
             },
             Mailbox::new(sender),
@@ -254,6 +264,7 @@ where
                             )
                             .await;
                         engines.insert(transition.epoch, engine);
+                        let _ = self.latest_epoch.try_set(transition.epoch.get());
 
                         info!(epoch = %transition.epoch, "entered epoch");
                     }
