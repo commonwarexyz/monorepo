@@ -67,8 +67,6 @@ impl Metrics for DummyMetrics {
     fn with_tag(&self, _: &str, _: &str) -> Self {
         Self
     }
-
-    fn latest(&self, _: &str, _: i64) {}
 }
 
 fn bench_insert(c: &mut Criterion) {

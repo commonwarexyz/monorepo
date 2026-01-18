@@ -34,7 +34,6 @@ use rand::{rngs::OsRng, CryptoRng, RngCore};
 use rayon::{ThreadPoolBuildError, ThreadPoolBuilder};
 use std::{
     borrow::Cow,
-    collections::HashMap,
     env,
     future::Future,
     net::{IpAddr, SocketAddr},
@@ -223,7 +222,6 @@ impl Default for Config {
 /// Runtime based on [Tokio](https://tokio.rs).
 pub struct Executor {
     registry: Mutex<Registry>,
-    latest_gauges: Mutex<HashMap<String, Gauge>>,
     metrics: Arc<Metrics>,
     runtime: Runtime,
     shutdown: Mutex<Stopper>,
@@ -335,7 +333,6 @@ impl crate::Runner for Runner {
         // Initialize executor
         let executor = Arc::new(Executor {
             registry: Mutex::new(registry),
-            latest_gauges: Mutex::new(HashMap::new()),
             metrics,
             runtime,
             shutdown: Mutex::new(Stopper::default()),
@@ -607,34 +604,6 @@ impl crate::Metrics for Context {
             tags,
             ..self.clone()
         }
-    }
-
-    fn latest(&self, key: &str, value: i64) {
-        validate_label(key);
-
-        // Build the metric name
-        let metric_name = {
-            let prefix = &self.name;
-            if prefix.is_empty() {
-                format!("latest_{}", key)
-            } else {
-                format!("{}_latest_{}", prefix, key)
-            }
-        };
-
-        // Get or create the gauge
-        let mut latest_gauges = self.executor.latest_gauges.lock().unwrap();
-        let gauge = latest_gauges.entry(metric_name.clone()).or_insert_with(|| {
-            let gauge = Gauge::default();
-            self.executor.registry.lock().unwrap().register(
-                metric_name,
-                format!("Latest value for {}", key),
-                gauge.clone(),
-            );
-            gauge
-        });
-
-        gauge.set(value);
     }
 }
 

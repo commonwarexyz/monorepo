@@ -359,50 +359,21 @@ pub trait Metrics: Clone + Send + Sync + 'static {
     /// consensus_engine_votes_total{epoch="5"}
     /// ```
     ///
-    /// To query the latest epoch dynamically, combine with [`Metrics::latest`]:
-    /// 1. Call `context.latest("epoch", current_epoch)` to track the current epoch
-    /// 2. Create a Grafana variable: `$latest_epoch` with query `max(orchestrator_latest_epoch)`
-    /// 3. Use in panels: `consensus_engine_votes_total{epoch="$latest_epoch"}`
+    /// To query the latest epoch dynamically, create a gauge to track the current value:
+    /// ```ignore
+    /// // Create a gauge to track the current epoch
+    /// let latest_epoch = Gauge::<i64>::default();
+    /// context.with_label("orchestrator").register("latest_epoch", "current epoch", latest_epoch.clone());
+    /// latest_epoch.set(current_epoch);
+    /// // Produces: orchestrator_latest_epoch 5
+    /// ```
+    ///
+    /// Then in Grafana:
+    /// 1. Create a dashboard variable `$latest_epoch` with query: `max(orchestrator_latest_epoch)`
+    /// 2. Use in panel queries: `consensus_engine_votes_total{epoch="$latest_epoch"}`
     ///
     /// Keys must start with `[a-zA-Z]` and contain only `[a-zA-Z0-9_]`. Values can be any string.
     fn with_tag(&self, key: &str, value: &str) -> Self;
-
-    /// Record the latest value for a given key, useful for alerting on current state.
-    ///
-    /// This creates or updates a gauge named `{label}_latest_{key}` that tracks the most
-    /// recent value. This is useful for monitoring systems to know the current epoch,
-    /// version, or other monotonically increasing values.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// // Track the current epoch for alerting
-    /// context.latest("epoch", epoch.get() as i64);
-    /// // Produces gauge: orchestrator_latest_epoch 5
-    /// ```
-    ///
-    /// # Grafana Integration
-    ///
-    /// The `latest` gauge enables dynamic filtering in Grafana dashboards:
-    ///
-    /// 1. Export the latest value:
-    ///    ```ignore
-    ///    context.with_label("orchestrator").latest("epoch", 5);
-    ///    // Produces: orchestrator_latest_epoch 5
-    ///    ```
-    ///
-    /// 2. Create a Grafana dashboard variable `$latest_epoch`:
-    ///    - Type: Query
-    ///    - Query: `max(orchestrator_latest_epoch)`
-    ///
-    /// 3. Use in panel queries to show only current epoch metrics:
-    ///    ```text
-    ///    consensus_engine_votes_total{epoch="$latest_epoch"}
-    ///    ```
-    ///
-    /// The dashboard automatically updates when the gauge changes, showing metrics
-    /// for the current epoch without manual intervention.
-    fn latest(&self, key: &str, value: i64);
 }
 
 /// Re-export of [governor::Quota] for rate limiting configuration.
@@ -2320,46 +2291,6 @@ mod tests {
         test_metrics_family_with_tag(runner);
     }
 
-    fn test_metrics_latest<R: Runner>(runner: R)
-    where
-        R::Context: Metrics,
-    {
-        runner.start(|context| async move {
-            let ctx = context.with_label("orchestrator");
-
-            // Set latest epoch
-            ctx.latest("epoch", 5);
-
-            // Encode and verify gauge exists
-            let buffer = context.encode();
-            assert!(
-                buffer.contains("orchestrator_latest_epoch 5"),
-                "Expected latest_epoch gauge, got: {}",
-                buffer
-            );
-
-            // Update to new epoch
-            ctx.latest("epoch", 6);
-
-            // Verify updated value
-            let buffer = context.encode();
-            assert!(
-                buffer.contains("orchestrator_latest_epoch 6"),
-                "Expected updated latest_epoch gauge, got: {}",
-                buffer
-            );
-
-            // Different key
-            ctx.latest("view", 100);
-            let buffer = context.encode();
-            assert!(
-                buffer.contains("orchestrator_latest_view 100"),
-                "Expected latest_view gauge, got: {}",
-                buffer
-            );
-        });
-    }
-
     fn test_metrics_tag_with_nested_label<R: Runner>(runner: R)
     where
         R::Context: Metrics,
@@ -2688,12 +2619,6 @@ mod tests {
     fn test_deterministic_metrics_with_tag() {
         let executor = deterministic::Runner::default();
         test_metrics_with_tag(executor);
-    }
-
-    #[test]
-    fn test_deterministic_metrics_latest() {
-        let executor = deterministic::Runner::default();
-        test_metrics_latest(executor);
     }
 
     #[test_collect_traces]
@@ -3043,12 +2968,6 @@ mod tests {
     fn test_tokio_metrics_with_tag() {
         let executor = tokio::Runner::default();
         test_metrics_with_tag(executor);
-    }
-
-    #[test]
-    fn test_tokio_metrics_latest() {
-        let executor = tokio::Runner::default();
-        test_metrics_latest(executor);
     }
 
     #[test]

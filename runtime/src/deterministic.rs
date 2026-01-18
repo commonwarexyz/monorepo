@@ -290,7 +290,6 @@ impl Default for Config {
 pub struct Executor {
     registry: Mutex<Registry>,
     registered_metrics: Mutex<HashSet<String>>,
-    latest_gauges: Mutex<HashMap<String, Gauge>>,
     cycle: Duration,
     deadline: Option<SystemTime>,
     metrics: Arc<Metrics>,
@@ -853,7 +852,6 @@ impl Context {
         let executor = Arc::new(Executor {
             registry: Mutex::new(registry),
             registered_metrics: Mutex::new(HashSet::new()),
-            latest_gauges: Mutex::new(HashMap::new()),
             cycle: cfg.cycle,
             deadline,
             metrics,
@@ -920,7 +918,6 @@ impl Context {
             // New state for the new runtime
             registry: Mutex::new(registry),
             registered_metrics: Mutex::new(HashSet::new()),
-            latest_gauges: Mutex::new(HashMap::new()),
             metrics,
             tasks: Arc::new(Tasks::new()),
             sleeping: Mutex::new(BinaryHeap::new()),
@@ -1209,36 +1206,6 @@ impl crate::Metrics for Context {
             tags,
             ..self.clone()
         }
-    }
-
-    fn latest(&self, key: &str, value: i64) {
-        validate_label(key);
-
-        let executor = self.executor();
-
-        // Build the metric name
-        let metric_name = {
-            let prefix = &self.name;
-            if prefix.is_empty() {
-                format!("latest_{}", key)
-            } else {
-                format!("{}_latest_{}", prefix, key)
-            }
-        };
-
-        // Get or create the gauge
-        let mut latest_gauges = executor.latest_gauges.lock().unwrap();
-        let gauge = latest_gauges.entry(metric_name.clone()).or_insert_with(|| {
-            let gauge = Gauge::default();
-            executor.registry.lock().unwrap().register(
-                metric_name,
-                format!("Latest value for {}", key),
-                gauge.clone(),
-            );
-            gauge
-        });
-
-        gauge.set(value);
     }
 }
 
