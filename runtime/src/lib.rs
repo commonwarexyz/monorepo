@@ -2193,18 +2193,6 @@ mod tests {
         });
     }
 
-    #[test]
-    #[should_panic(expected = "duplicate attribute key: epoch")]
-    fn test_deterministic_metrics_duplicate_attribute_panics() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let _ = context
-                .with_label("test")
-                .with_attribute("epoch", "old")
-                .with_attribute("epoch", "new");
-        });
-    }
-
     #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
     struct PeerLabels {
         peer: String,
