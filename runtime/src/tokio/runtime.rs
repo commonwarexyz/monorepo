@@ -45,6 +45,7 @@ use std::{
 };
 use tokio::runtime::{Builder, Runtime};
 use tracing::{info_span, Instrument};
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 #[cfg(feature = "iouring-network")]
 const IOURING_NETWORK_SIZE: u32 = 1024;
@@ -455,10 +456,13 @@ impl crate::Spawner for Context {
 
         // Spawn the task
         let executor = self.executor.clone();
+        let tags = self.tags.clone();
         let future: BoxFuture<'_, T> = if is_instrumented {
-            f(self)
-                .instrument(info_span!("task", name = %label.name()))
-                .boxed()
+            let span = info_span!("task", name = %label.name());
+            for (key, value) in tags {
+                span.set_attribute(key, value);
+            }
+            f(self).instrument(span).boxed()
         } else {
             f(self).boxed()
         };

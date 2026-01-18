@@ -98,6 +98,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tracing::{info_span, trace, Instrument};
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 #[derive(Debug)]
 struct Metrics {
@@ -1024,10 +1025,13 @@ impl crate::Spawner for Context {
 
         // Spawn the task (we don't care about Model)
         let executor = self.executor();
+        let tags = self.tags.clone();
         let future: BoxFuture<'_, T> = if is_instrumented {
-            f(self)
-                .instrument(info_span!(parent: None, "task", name = %label.name()))
-                .boxed()
+            let span = info_span!(parent: None, "task", name = %label.name());
+            for (key, value) in tags {
+                span.set_attribute(key, value);
+            }
+            f(self).instrument(span).boxed()
         } else {
             f(self).boxed()
         };
