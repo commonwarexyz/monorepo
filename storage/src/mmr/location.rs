@@ -6,6 +6,7 @@ use core::{
     ops::{Add, AddAssign, Deref, Range, Sub, SubAssign},
 };
 use thiserror::Error;
+use commonware_macros::ready;
 
 /// Maximum valid [Location] value that can exist in a valid MMR.
 ///
@@ -48,6 +49,7 @@ pub const MAX_LOCATION: u64 = 0x3FFF_FFFF_FFFF_FFFF; // 2^62 - 1
 /// While [Location] can technically hold any `u64` value, only values up to [MAX_LOCATION]
 /// can be safely converted to [Position]. Values beyond this are considered invalid.
 #[derive(Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash, Default, Debug)]
+#[ready(0)]
 pub struct Location(u64);
 
 #[cfg(feature = "arbitrary")]
@@ -348,6 +350,7 @@ impl TryFrom<Position> for Location {
 
 /// Error returned when attempting to convert a [Position] to a [Location].
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Error)]
+#[ready(0)]
 pub enum LocationError {
     #[error("{0} is not a leaf")]
     NonLeaf(Position),

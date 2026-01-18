@@ -46,6 +46,7 @@ use commonware_codec::{EncodeSize, Read, ReadExt, ReadRangeExt, Write};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_utils::{non_empty_vec, vec::NonEmptyVec};
 use thiserror::Error;
+use commonware_macros::ready;
 
 /// There should never be more than 255 levels in a proof (would mean the Binary Merkle Tree
 /// has more than 2^255 leaves).
@@ -53,6 +54,7 @@ pub const MAX_LEVELS: usize = u8::MAX as usize;
 
 /// Errors that can occur when working with a Binary Merkle Tree (BMT).
 #[derive(Error, Debug)]
+#[ready(0)]
 pub enum Error {
     #[error("invalid position: {0}")]
     InvalidPosition(u32),
@@ -67,6 +69,7 @@ pub enum Error {
 }
 
 /// Constructor for a Binary Merkle Tree (BMT).
+#[ready(0)]
 pub struct Builder<H: Hasher> {
     hasher: H,
     leaves: Vec<H::Digest>,
@@ -103,6 +106,7 @@ impl<H: Hasher> Builder<H> {
 
 /// Constructed Binary Merkle Tree (BMT).
 #[derive(Clone, Debug)]
+#[ready(0)]
 pub struct Tree<H: Hasher> {
     /// Records whether the tree is empty.
     empty: bool,
@@ -271,6 +275,7 @@ impl<H: Hasher> Tree<H> {
 
 /// A pair of sibling digests, one on the left boundary and one on the right boundary.
 #[derive(Clone, Debug, Eq)]
+#[ready(0)]
 pub struct Bounds<D: Digest> {
     /// The left sibling digest.
     pub left: Option<D>,
@@ -324,6 +329,7 @@ where
 
 /// A Merkle range proof for a contiguous set of leaves in a Binary Merkle Tree.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[ready(0)]
 pub struct RangeProof<D: Digest> {
     /// The sibling digests needed to prove all elements in the range.
     ///
@@ -506,6 +512,7 @@ impl<D: Digest> EncodeSize for RangeProof<D> {
 /// for each leaf because sibling nodes that are shared between multiple paths
 /// are deduplicated.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[ready(0)]
 pub struct Proof<D: Digest> {
     /// The total number of leaves in the tree.
     pub leaf_count: u32,

@@ -7,9 +7,11 @@ use commonware_storage::bmt::{self, Builder};
 use reed_solomon_simd::{Error as RsError, ReedSolomonDecoder, ReedSolomonEncoder};
 use std::{collections::HashSet, marker::PhantomData};
 use thiserror::Error;
+use commonware_macros::ready;
 
 /// Errors that can occur when interacting with the Reed-Solomon coder.
 #[derive(Error, Debug)]
+#[ready(0)]
 pub enum Error {
     #[error("reed-solomon error: {0}")]
     ReedSolomon(#[from] RsError),
@@ -40,6 +42,7 @@ fn total_shards(config: &Config) -> Result<u16, Error> {
 
 /// A piece of data from a Reed-Solomon encoded object.
 #[derive(Debug, Clone)]
+#[ready(0)]
 pub struct Chunk<H: Hasher> {
     /// The shard of encoded data.
     shard: Vec<u8>,
@@ -457,6 +460,7 @@ fn decode<H: Hasher, S: Strategy>(
 ///    an adversary provides a valid set of chunks that decode to different data.
 /// 4. If the roots match, the original data is extracted from the reconstructed data shards.
 #[derive(Clone, Copy)]
+#[ready(0)]
 pub struct ReedSolomon<H> {
     _marker: PhantomData<H>,
 }

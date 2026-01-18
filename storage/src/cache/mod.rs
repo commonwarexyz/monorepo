@@ -79,12 +79,14 @@
 use commonware_runtime::buffer::PoolRef;
 use std::num::{NonZeroU64, NonZeroUsize};
 use thiserror::Error;
+use commonware_macros::ready;
 
 mod storage;
 pub use storage::Cache;
 
 /// Errors that can occur when interacting with the cache.
 #[derive(Debug, Error)]
+#[ready(0)]
 pub enum Error {
     #[error("journal error: {0}")]
     Journal(#[from] crate::journal::Error),
@@ -98,6 +100,7 @@ pub enum Error {
 
 /// Configuration for [Cache] storage.
 #[derive(Clone)]
+#[ready(0)]
 pub struct Config<C> {
     /// The partition to use for the cache's [crate::journal] storage.
     pub partition: String,

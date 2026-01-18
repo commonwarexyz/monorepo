@@ -17,6 +17,7 @@ use std::{
     marker::PhantomData,
 };
 use tracing::{debug, warn};
+use commonware_macros::ready;
 
 /// Value stored in the index file.
 #[derive(Debug, Clone)]
@@ -70,6 +71,7 @@ where
 }
 
 /// Implementation of [Ordinal].
+#[ready(0)]
 pub struct Ordinal<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> {
     // Configuration and context
     context: E,

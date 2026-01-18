@@ -11,6 +11,7 @@ use futures::{future::try_join_all, pin_mut, StreamExt};
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::collections::{BTreeMap, BTreeSet};
 use tracing::debug;
+use commonware_macros::ready;
 
 /// Record stored in the `Cache`.
 struct Record<V: CodecShared> {
@@ -59,6 +60,7 @@ where
 }
 
 /// Implementation of `Cache` storage.
+#[ready(0)]
 pub struct Cache<E: Storage + Metrics, V: CodecShared> {
     items_per_blob: u64,
     journal: Journal<E, Record<V>>,

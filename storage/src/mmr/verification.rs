@@ -16,9 +16,11 @@ use commonware_cryptography::Digest;
 use core::ops::Range;
 use futures::future::try_join_all;
 use std::collections::{BTreeSet, HashMap};
+use commonware_macros::ready;
 
 /// A store derived from a [Proof] that can be used to generate proofs over any sub-range of the
 /// original range.
+#[ready(0)]
 pub struct ProofStore<D> {
     digests: HashMap<Position, D>,
     size: Position,
@@ -56,11 +58,13 @@ impl<D: Digest> ProofStore<D> {
     }
 
     /// Return a range proof for the nodes corresponding to the given location range.
+    #[ready(0)]
     pub async fn range_proof(&self, range: Range<Location>) -> Result<Proof<D>, Error> {
         range_proof(self, range).await
     }
 
     /// Return a multi proof for the elements corresponding to the given locations.
+    #[ready(0)]
     pub async fn multi_proof(&self, locations: &[Location]) -> Result<Proof<D>, Error> {
         multi_proof(self, locations).await
     }
@@ -84,6 +88,7 @@ impl<D: Digest> Storage<D> for ProofStore<D> {
 /// Returns [Error::RangeOutOfBounds] if any location in `range` > `mmr.size()`
 /// Returns [Error::ElementPruned] if some element needed to generate the proof has been pruned
 /// Returns [Error::Empty] if the requested range is empty
+#[ready(0)]
 pub async fn range_proof<D: Digest, S: Storage<D>>(
     mmr: &S,
     range: Range<Location>,
@@ -100,6 +105,7 @@ pub async fn range_proof<D: Digest, S: Storage<D>>(
 /// Returns [Error::RangeOutOfBounds] if any location in `range` > `size`
 /// Returns [Error::ElementPruned] if some element needed to generate the proof has been pruned
 /// Returns [Error::Empty] if the requested range is empty
+#[ready(0)]
 pub async fn historical_range_proof<D: Digest, S: Storage<D>>(
     mmr: &S,
     size: Position,
@@ -134,6 +140,7 @@ pub async fn historical_range_proof<D: Digest, S: Storage<D>>(
 /// Returns [Error::RangeOutOfBounds] if any location in `locations` > `mmr.size()`
 /// Returns [Error::ElementPruned] if some element needed to generate the proof has been pruned
 /// Returns [Error::Empty] if locations is empty
+#[ready(0)]
 pub async fn multi_proof<D: Digest, S: Storage<D>>(
     mmr: &S,
     locations: &[Location],

@@ -15,9 +15,11 @@ use commonware_utils::{
 };
 use futures::channel::{mpsc, oneshot};
 use std::net::IpAddr;
+use commonware_macros::ready;
 
 /// Messages that can be sent to the tracker actor.
 #[derive(Debug)]
+#[ready(0)]
 pub enum Message<C: PublicKey> {
     // ---------- Used by oracle ----------
     /// Register a peer set at a given index.
@@ -167,6 +169,7 @@ impl<C: PublicKey> UnboundedMailbox<Message<C>> {
 
 /// Allows releasing reservations
 #[derive(Clone)]
+#[ready(0)]
 pub struct Releaser<C: PublicKey> {
     sender: UnboundedMailbox<Message<C>>,
 }
@@ -188,6 +191,7 @@ impl<C: PublicKey> Releaser<C> {
 /// Peers that are not explicitly authorized
 /// will be blocked by commonware-p2p.
 #[derive(Debug, Clone)]
+#[ready(0)]
 pub struct Oracle<C: PublicKey> {
     sender: UnboundedMailbox<Message<C>>,
 }

@@ -14,6 +14,7 @@ use commonware_codec::CodecShared;
 use commonware_cryptography::Digest;
 use core::future::Future;
 use std::num::NonZeroU64;
+use commonware_macros::ready;
 
 mod batch;
 pub mod db;
@@ -30,6 +31,7 @@ pub trait State: private::Sealed + Sized + Send + Sync {}
 
 /// Marker type for a store in a "durable" state (no uncommitted operations).
 #[derive(Clone, Copy, Debug)]
+#[ready(0)]
 pub struct Durable;
 
 impl private::Sealed for Durable {}
@@ -37,6 +39,7 @@ impl State for Durable {}
 
 /// Marker type for a store in a "non-durable" state (may contain uncommitted operations).
 #[derive(Clone, Debug, Default)]
+#[ready(0)]
 pub struct NonDurable {
     /// The number of _steps_ to raise the inactivity floor. Each step involves moving exactly one
     /// active operation to tip.

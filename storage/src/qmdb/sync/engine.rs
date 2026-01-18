@@ -19,6 +19,7 @@ use commonware_macros::select;
 use commonware_utils::NZU64;
 use futures::{channel::mpsc, future::Either, StreamExt};
 use std::{collections::BTreeMap, fmt::Debug, num::NonZeroU64};
+use commonware_macros::ready;
 
 /// Type alias for sync engine errors
 type Error<DB, R> = qmdb::sync::Error<<R as Resolver>::Error, <DB as Database>::Digest>;
@@ -74,6 +75,7 @@ async fn wait_for_event<Op, D: Digest, E>(
 }
 
 /// Configuration for creating a new Engine
+#[ready(0)]
 pub struct Config<DB, R>
 where
     DB: Database,

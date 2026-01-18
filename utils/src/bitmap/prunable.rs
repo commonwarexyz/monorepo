@@ -4,9 +4,11 @@ use super::BitMap;
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt, Write};
 use thiserror::Error;
+use commonware_macros::ready;
 
 /// Errors that can occur when working with a prunable bitmap.
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
+#[ready(0)]
 pub enum Error {
     /// The provided pruned_chunks value would overflow.
     #[error("pruned_chunks * CHUNK_SIZE_BITS overflows u64")]
@@ -20,6 +22,7 @@ pub enum Error {
 /// Operations panic if `bit / CHUNK_SIZE_BITS > usize::MAX`. On 32-bit systems
 /// with N=32, this occurs at bit >= 1,099,511,627,776.
 #[derive(Clone, Debug)]
+#[ready(0)]
 pub struct Prunable<const N: usize> {
     /// The underlying BitMap storing the actual bits.
     bitmap: BitMap<N>,

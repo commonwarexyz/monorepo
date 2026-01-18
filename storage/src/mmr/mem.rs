@@ -13,6 +13,7 @@ use alloc::{
 };
 use commonware_cryptography::Digest;
 use core::{mem, ops::Range};
+use commonware_macros::ready;
 cfg_if::cfg_if! {
     if #[cfg(feature = "std")] {
         use commonware_parallel::ThreadPool;
@@ -27,9 +28,11 @@ cfg_if::cfg_if! {
 const MIN_TO_PARALLELIZE: usize = 20;
 
 /// An MMR whose root digest has not been computed.
+#[ready(0)]
 pub type DirtyMmr<D> = Mmr<D, Dirty>;
 
 /// An MMR whose root digest has been computed.
+#[ready(0)]
 pub type CleanMmr<D> = Mmr<D, Clean<D>>;
 
 /// Sealed trait for MMR state types.
@@ -46,6 +49,7 @@ pub trait State<D: Digest>: private::Sealed + Sized + Send + Sync {
 
 /// Marker type for a MMR whose root digest has been computed.
 #[derive(Clone, Copy, Debug)]
+#[ready(0)]
 pub struct Clean<D: Digest> {
     /// The root digest of the MMR.
     pub root: D,
@@ -60,6 +64,7 @@ impl<D: Digest> State<D> for Clean<D> {
 
 /// Marker type for a dirty MMR (root digest not computed).
 #[derive(Clone, Debug, Default)]
+#[ready(0)]
 pub struct Dirty {
     /// Non-leaf nodes that need to have their digests recomputed due to a batched update operation.
     ///
@@ -79,6 +84,7 @@ impl<D: Digest> State<D> for Dirty {
 }
 
 /// Configuration for initializing an [Mmr].
+#[ready(0)]
 pub struct Config<D: Digest> {
     /// The retained nodes of the MMR.
     pub nodes: Vec<D>,
@@ -115,6 +121,7 @@ pub struct Config<D: Digest> {
 /// digest needs to be computed. A dirty MMR can be converted into a clean MMR by calling
 /// [DirtyMmr::merkleize].
 #[derive(Clone, Debug)]
+#[ready(0)]
 pub struct Mmr<D: Digest, S: State<D> = Dirty> {
     /// The nodes of the MMR, laid out according to a post-order traversal of the MMR trees,
     /// starting from the from tallest tree to shortest.

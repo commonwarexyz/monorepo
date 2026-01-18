@@ -15,6 +15,7 @@ use std::{
     hash::{Hash, Hasher},
 };
 use tracing::error;
+use commonware_macros::ready;
 
 /// The subject of a backfill request.
 const BLOCK_REQUEST: u8 = 0;
@@ -23,6 +24,7 @@ const NOTARIZED_REQUEST: u8 = 2;
 
 /// Messages sent from the resolver's [Consumer]/[Producer] implementation
 /// to the marshal [Actor](super::super::actor::Actor).
+#[ready(0)]
 pub enum Message<B: Block> {
     /// A request to deliver a value for a given key.
     Deliver {
@@ -47,6 +49,7 @@ pub enum Message<B: Block> {
 /// This struct implements the [Consumer] and [Producer] traits from the
 /// resolver, and acts as a bridge to the main actor loop.
 #[derive(Clone)]
+#[ready(0)]
 pub struct Handler<B: Block> {
     sender: mpsc::Sender<Message<B>>,
 }
@@ -105,6 +108,7 @@ impl<B: Block> Producer for Handler<B> {
 
 /// A request for backfilling data.
 #[derive(Clone)]
+#[ready(0)]
 pub enum Request<B: Block> {
     Block(B::Commitment),
     Finalized { height: Height },

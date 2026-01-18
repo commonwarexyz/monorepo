@@ -24,8 +24,10 @@ use std::{
     net::IpAddr,
 };
 use tracing::debug;
+use commonware_macros::ready;
 
 /// The tracker actor that manages peer discovery and connection reservations.
+#[ready(0)]
 pub struct Actor<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> {
     context: ContextCell<E>,
 

@@ -91,12 +91,14 @@ use futures::stream::{self, Stream, StreamExt};
 use std::{io::Cursor, num::NonZeroUsize};
 use tracing::{trace, warn};
 use zstd::{bulk::compress, decode_all};
+use commonware_macros::ready;
 
 /// Maximum size of a varint for u32 (also the minimum useful read size for parsing item headers).
 const MAX_VARINT_SIZE: usize = 5;
 
 /// Configuration for `Journal` storage.
 #[derive(Clone)]
+#[ready(0)]
 pub struct Config<C> {
     /// The `commonware-runtime::Storage` partition to use
     /// for storing journal blobs.
@@ -211,6 +213,7 @@ fn decode_item<V: Codec>(item_data: impl Buf, cfg: &V::Cfg, compressed: bool) ->
 /// the first invalid data read will be considered the new end of the journal (and the
 /// underlying [Blob] will be truncated to the last valid item). Repair occurs during
 /// replay (not init) because any blob could have trailing bytes.
+#[ready(0)]
 pub struct Journal<E: Storage + Metrics, V: Codec> {
     manager: Manager<E, AppendFactory>,
 

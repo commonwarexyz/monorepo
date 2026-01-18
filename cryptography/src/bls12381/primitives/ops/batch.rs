@@ -22,6 +22,7 @@ use alloc::{vec, vec::Vec};
 use commonware_math::algebra::Space;
 use commonware_parallel::Strategy;
 use rand_core::CryptoRngCore;
+use commonware_macros::ready;
 
 /// Segment tree for batch verification bisection.
 ///
@@ -196,6 +197,7 @@ fn bisect<V: Variant>(
 /// This function assumes a group check was already performed on each public key
 /// and signature. Duplicate public keys are safe because random scalar weights
 /// ensure each (public key, signature) pair is verified independently.
+#[ready(0)]
 pub fn verify_same_message<R, V>(
     rng: &mut R,
     namespace: &[u8],
@@ -251,6 +253,7 @@ where
 /// This function assumes a group check was already performed on `public` and each `signature`.
 /// Duplicate messages are safe because random scalar weights ensure each (message, signature)
 /// pair is verified independently.
+#[ready(0)]
 pub fn verify_same_signer<'a, R, V, I>(
     rng: &mut R,
     public: &V::Public,

@@ -4,7 +4,6 @@
 //! randomness from it. The API evades common footguns when doing these things
 //! in an ad hoc way.
 
-commonware_macros::readiness!(2);
 
 use crate::{Signer, Verifier};
 use blake3::BLOCK_LEN;
@@ -18,6 +17,7 @@ use rand_core::{
     CryptoRng, CryptoRngCore, RngCore,
 };
 use zeroize::ZeroizeOnDrop;
+use commonware_macros::ready;
 
 /// Provides an implementation of [CryptoRngCore].
 ///
@@ -100,6 +100,7 @@ enum StartTag {
 /// - domain separating different uses of tags and randomness,
 /// - making sure that secret state is zeroized as necessary.
 #[derive(ZeroizeOnDrop)]
+#[ready(0)]
 pub struct Transcript {
     hasher: blake3::Hasher,
     pending: u64,
@@ -287,6 +288,7 @@ impl Transcript {
 /// You can think of this as a hash over the transcript, providing a commitment
 /// to the data it recorded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[ready(0)]
 pub struct Summary {
     hash: blake3::Hash,
 }

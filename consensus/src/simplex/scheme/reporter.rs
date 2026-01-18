@@ -25,6 +25,7 @@ use crate::{
 use commonware_cryptography::{certificate, Digest};
 use commonware_parallel::Strategy;
 use rand_core::CryptoRngCore;
+use commonware_macros::ready;
 
 /// Reporter wrapper that filters and verifies activities based on scheme attributability.
 ///
@@ -32,6 +33,7 @@ use rand_core::CryptoRngCore;
 /// activities. It prevents signature forgery attacks on non-attributable schemes while ensuring
 /// all activities are cryptographically valid before reporting.
 #[derive(Clone)]
+#[ready(0)]
 pub struct AttributableReporter<
     E: Clone + CryptoRngCore + Send + 'static,
     S: certificate::Scheme,

@@ -18,6 +18,7 @@ use rand_core::CryptoRngCore;
 #[cfg(feature = "std")]
 use std::borrow::{Cow, ToOwned};
 use zeroize::Zeroizing;
+use commonware_macros::ready;
 
 const CURVE_NAME: &str = "ed25519";
 const PRIVATE_KEY_LENGTH: usize = 32;
@@ -26,6 +27,7 @@ const SIGNATURE_LENGTH: usize = 64;
 
 /// Ed25519 Private Key.
 #[derive(Clone, Debug)]
+#[ready(0)]
 pub struct PrivateKey {
     raw: Secret<[u8; PRIVATE_KEY_LENGTH]>,
     key: Secret<ed25519_consensus::SigningKey>,
@@ -132,6 +134,7 @@ impl arbitrary::Arbitrary<'_> for PrivateKey {
 
 /// Ed25519 Public Key.
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[ready(0)]
 pub struct PublicKey {
     raw: [u8; PUBLIC_KEY_LENGTH],
     key: ed25519_consensus::VerificationKey,
@@ -246,6 +249,7 @@ impl arbitrary::Arbitrary<'_> for PublicKey {
 
 /// Ed25519 Signature.
 #[derive(Clone, Eq, PartialEq)]
+#[ready(0)]
 pub struct Signature {
     raw: [u8; SIGNATURE_LENGTH],
     signature: ed25519_consensus::Signature,
@@ -351,6 +355,7 @@ impl arbitrary::Arbitrary<'_> for Signature {
 
 /// Ed25519 Batch Verifier.
 #[cfg(feature = "std")]
+#[ready(0)]
 pub struct Batch {
     verifier: ed25519_consensus::batch::Verifier,
 }

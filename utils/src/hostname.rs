@@ -7,6 +7,7 @@ use commonware_codec::{
     EncodeSize, Error as CodecError, RangeCfg, Read as CodecRead, Write as CodecWrite,
 };
 use thiserror::Error;
+use commonware_macros::ready;
 
 /// Maximum length of a hostname (253 characters per RFC 1035).
 ///
@@ -19,6 +20,7 @@ pub const MAX_HOSTNAME_LABEL_LEN: usize = 63;
 
 /// Error type for hostname validation.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[ready(0)]
 pub enum Error {
     #[error("hostname is empty")]
     Empty,
@@ -47,6 +49,7 @@ pub enum Error {
 /// - Labels do not start or end with a hyphen
 /// - No empty labels (no consecutive dots, leading dots, or trailing dots)
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[ready(0)]
 pub struct Hostname(String);
 
 impl Hostname {

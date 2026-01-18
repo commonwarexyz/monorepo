@@ -22,6 +22,7 @@ use commonware_cryptography::Digest;
 use core::ops::Range;
 #[cfg(feature = "std")]
 use tracing::debug;
+use commonware_macros::ready;
 
 /// The maximum number of digests in a proof per element being proven.
 ///
@@ -32,6 +33,7 @@ pub const MAX_PROOF_DIGESTS_PER_ELEMENT: usize = 122;
 
 /// Errors that can occur when reconstructing a digest from a proof due to invalid input.
 #[derive(Error, Debug)]
+#[ready(0)]
 pub enum ReconstructionError {
     #[error("missing digests in proof")]
     MissingDigests,
@@ -58,6 +60,7 @@ pub enum ReconstructionError {
 /// 2: the nodes in the remaining mountains necessary for reconstructing their peak digests from the
 /// elements within the range, ordered by the position of their parent.
 #[derive(Clone, Debug, Eq)]
+#[ready(0)]
 pub struct Proof<D: Digest> {
     /// The total number of nodes in the MMR for MMR proofs, though other authenticated data
     /// structures may override the meaning of this field. For example, the authenticated

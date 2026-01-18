@@ -4,6 +4,7 @@ use crate::bitmap::{historical::BatchGuard, Prunable};
 use alloc::{collections::BTreeMap, vec::Vec};
 #[cfg(feature = "std")]
 use std::collections::BTreeMap;
+use commonware_macros::ready;
 
 /// Type of change to a chunk.
 #[derive(Clone, Debug)]
@@ -32,6 +33,7 @@ pub(super) struct CommitDiff<const N: usize> {
 /// A historical bitmap that maintains one actual bitmap plus diffs for history and batching.
 ///
 /// Commit numbers must be strictly monotonically increasing and < u64::MAX.
+#[ready(0)]
 pub struct BitMap<const N: usize> {
     /// The current/HEAD state - the one and only full bitmap.
     pub(super) current: Prunable<N>,

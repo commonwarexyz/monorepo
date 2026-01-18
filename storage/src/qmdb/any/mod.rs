@@ -23,6 +23,7 @@ use commonware_cryptography::Hasher;
 use commonware_parallel::ThreadPool;
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage};
 use std::num::{NonZeroU64, NonZeroUsize};
+use commonware_macros::ready;
 
 pub(crate) mod db;
 mod operation;
@@ -35,6 +36,7 @@ pub mod unordered;
 
 /// Configuration for an `Any` authenticated db with fixed-size values.
 #[derive(Clone)]
+#[ready(0)]
 pub struct FixedConfig<T: Translator> {
     /// The name of the [Storage] partition used for the MMR's backing journal.
     pub mmr_journal_partition: String,
@@ -69,6 +71,7 @@ pub struct FixedConfig<T: Translator> {
 
 /// Configuration for an `Any` authenticated db with variable-sized values.
 #[derive(Clone)]
+#[ready(0)]
 pub struct VariableConfig<T: Translator, C> {
     /// The name of the [Storage] partition used for the MMR's backing journal.
     pub mmr_journal_partition: String,

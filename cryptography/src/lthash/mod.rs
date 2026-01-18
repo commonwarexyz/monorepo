@@ -72,7 +72,6 @@
 //! * <https://github.com/facebook/folly/blob/main/folly/crypto/LtHash.cpp>: An open-source C++ library developed and used at Facebook.
 //! * <https://github.com/solana-foundation/solana-improvement-documents/blob/main/proposals/0215-accounts-lattice-hash.md>: Homomorphic Hashing of Account State
 
-commonware_macros::readiness!(1);
 
 use crate::{
     blake3::{Blake3, CoreBlake3, Digest},
@@ -80,6 +79,7 @@ use crate::{
 };
 use bytes::{Buf, BufMut};
 use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
+use commonware_macros::ready;
 
 /// Size of the internal [LtHash] state in bytes.
 const LTHASH_SIZE: usize = 2048;
@@ -90,6 +90,7 @@ const LTHASH_ELEMENTS: usize = LTHASH_SIZE / 2; // each u16 is 2 bytes
 /// An additive homomorphic hash function over [crate::Blake3].
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[ready(0)]
 pub struct LtHash {
     /// Internal state as 1024 16-bit unsigned integers
     state: [u16; LTHASH_ELEMENTS],

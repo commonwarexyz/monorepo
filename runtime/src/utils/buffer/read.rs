@@ -1,6 +1,7 @@
 use crate::{Blob, Error};
 use commonware_utils::StableBuf;
 use std::num::NonZeroUsize;
+use commonware_macros::ready;
 
 /// A reader that buffers content from a [Blob] to optimize the performance
 /// of a full scan of contents.
@@ -32,6 +33,7 @@ use std::num::NonZeroUsize;
 ///     assert_eq!(reader.position(), 16);
 /// });
 /// ```
+#[ready(0)]
 pub struct Read<B: Blob> {
     /// The underlying blob to read from.
     blob: B,

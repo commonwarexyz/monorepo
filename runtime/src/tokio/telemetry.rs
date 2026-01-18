@@ -16,8 +16,10 @@ use std::net::SocketAddr;
 use tokio::net::TcpListener;
 use tracing::Level;
 use tracing_subscriber::{layer::SubscriberExt, Layer, Registry};
+use commonware_macros::ready;
 
 /// Logging configuration.
+#[ready(0)]
 pub struct Logging {
     /// The level of logging to use.
     pub level: Level,
@@ -34,6 +36,7 @@ pub struct Logging {
 ///
 /// If `metrics` is provided, starts serving metrics at the given address at `/metrics`.
 /// If `traces` is provided, enables OpenTelemetry trace export.
+#[ready(0)]
 pub fn init(
     context: Context,
     logging: Logging,

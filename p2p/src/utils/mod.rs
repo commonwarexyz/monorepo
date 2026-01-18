@@ -1,11 +1,11 @@
 //! Utility functions for exchanging messages with many peers.
 
-commonware_macros::readiness!(2);
 
 use crate::Manager;
 use commonware_cryptography::PublicKey;
 use commonware_utils::{channels::fallible::FallibleExt, ordered::Set};
 use futures::channel::mpsc::{unbounded, UnboundedReceiver, UnboundedSender};
+use commonware_macros::ready;
 
 pub mod codec;
 pub mod limited;
@@ -13,6 +13,7 @@ pub mod mux;
 
 /// A [Manager] over a static set of peers.
 #[derive(Debug, Clone)]
+#[ready(0)]
 pub struct StaticManager<P: PublicKey> {
     id: u64,
     peers: Set<P>,

@@ -63,14 +63,15 @@
 //! });
 //! ```
 
-commonware_macros::readiness!(2);
 
+use commonware_macros::ready;
 mod storage;
 pub use storage::Metadata;
 use thiserror::Error;
 
 /// Errors that can occur when interacting with [Metadata].
 #[derive(Debug, Error)]
+#[ready(0)]
 pub enum Error {
     #[error("runtime error: {0}")]
     Runtime(#[from] commonware_runtime::Error),
@@ -80,6 +81,7 @@ pub enum Error {
 
 /// Configuration for [Metadata] storage.
 #[derive(Clone)]
+#[ready(0)]
 pub struct Config<C> {
     /// The [commonware_runtime::Storage] partition to use for storing metadata.
     pub partition: String,

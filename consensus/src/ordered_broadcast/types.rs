@@ -19,6 +19,7 @@ use std::{
     hash::{Hash, Hasher},
     sync::Arc,
 };
+use commonware_macros::ready;
 
 /// Error that may be encountered when interacting with `ordered-broadcast`.
 ///
@@ -33,6 +34,7 @@ use std::{
 /// - Ignorable message errors (outside epoch/height bounds)
 /// - Attributable faults (conflicting chunks)
 #[derive(Debug, thiserror::Error)]
+#[ready(0)]
 pub enum Error {
     // Parser Errors
     /// The parent is missing for a non-genesis chunk
@@ -169,6 +171,7 @@ fn chunk_namespace(namespace: &[u8]) -> Vec<u8> {
 /// This provides domain separation for signatures, preventing cross-protocol attacks
 /// by ensuring signatures for acks cannot be reused for other message types.
 #[inline]
+#[ready(0)]
 pub fn ack_namespace(namespace: &[u8]) -> Vec<u8> {
     union(namespace, ACK_SUFFIX)
 }
@@ -178,6 +181,7 @@ pub fn ack_namespace(namespace: &[u8]) -> Vec<u8> {
 /// This type encapsulates the pre-computed namespace bytes used for signing and
 /// verifying chunks (nodes and proposals).
 #[derive(Clone, Debug)]
+#[ready(0)]
 pub struct ChunkNamespace(Vec<u8>);
 
 impl Namespace for ChunkNamespace {
@@ -190,6 +194,7 @@ impl Namespace for ChunkNamespace {
 ///
 /// The namespace is pre-computed at construction time.
 #[derive(Clone)]
+#[ready(0)]
 pub struct ChunkSigner<C: Signer> {
     signer: C,
     namespace: ChunkNamespace,
@@ -225,6 +230,7 @@ impl<C: Signer> ChunkSigner<C> {
 ///
 /// The namespace is pre-computed at construction time.
 #[derive(Clone)]
+#[ready(0)]
 pub struct ChunkVerifier {
     namespace: ChunkNamespace,
 }
@@ -254,6 +260,7 @@ impl ChunkVerifier {
 /// Carries the necessary context for the automaton to verify a payload, including
 /// the sequencer's public key and its sequencer-specific height.
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
+#[ready(0)]
 pub struct Context<P: PublicKey> {
     /// Sequencer's public key.
     pub sequencer: P,
@@ -275,6 +282,7 @@ impl<P: PublicKey> Heightable for Context<P> {
 /// acknowledge chunks with a vote, which are then aggregated into a certificate to prove
 /// reliable broadcast.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[ready(0)]
 pub struct Chunk<P: PublicKey, D: Digest> {
     /// Sequencer's public key.
     pub sequencer: P,
@@ -357,6 +365,7 @@ where
 /// This type encapsulates the pre-computed namespace bytes used for signing and
 /// verifying acks.
 #[derive(Clone, Debug)]
+#[ready(0)]
 pub struct AckNamespace(Vec<u8>);
 
 impl Namespace for AckNamespace {
@@ -370,6 +379,7 @@ impl Namespace for AckNamespace {
 /// This is used as the context type for `Scheme` implementations for validators.
 /// It contains the chunk being acknowledged and the epoch of the validator set.
 #[derive(Debug, Clone)]
+#[ready(0)]
 pub struct AckSubject<'a, P: PublicKey, D: Digest> {
     /// The chunk being acknowledged.
     pub chunk: &'a Chunk<P, D>,
@@ -400,6 +410,7 @@ impl<P: PublicKey, D: Digest> certificate::Subject for AckSubject<'_, P, D> {
 /// seen and acknowledged the parent chunk, making it an essential part of the chain linking
 /// mechanism.
 #[derive(Clone, Debug)]
+#[ready(0)]
 pub struct Parent<S: Scheme, D: Digest> {
     /// Digest of the parent chunk.
     pub digest: D,
@@ -507,6 +518,7 @@ where
 /// Nodes form a linked chain from each sequencer, ensuring that new chunks can only be added
 /// after their predecessors have been properly acknowledged by the validator set.
 #[derive(Clone, Debug)]
+#[ready(0)]
 pub struct Node<P: PublicKey, S: Scheme, D: Digest> {
     /// Chunk of the node.
     pub chunk: Chunk<P, D>,
@@ -765,6 +777,7 @@ where
 /// once enough validators (a quorum) have acknowledged the chunk. This certificate
 /// serves as proof that the chunk was reliably broadcast.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[ready(0)]
 pub struct Ack<P: PublicKey, S: Scheme, D: Digest> {
     /// Chunk that is being acknowledged.
     pub chunk: Chunk<P, D>,
@@ -882,6 +895,7 @@ where
 /// and provide the appropriate information to other components.
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq)]
+#[ready(0)]
 pub enum Activity<P: PublicKey, S: Scheme, D: Digest> {
     /// A new tip for a sequencer
     ///
@@ -952,6 +966,7 @@ where
 /// broadcast to validators for acknowledgment. It contains the chunk itself and the
 /// sequencer's signature over that chunk.
 #[derive(Clone, Debug)]
+#[ready(0)]
 pub struct Proposal<P: PublicKey, D: Digest> {
     /// Chunk that is being proposed.
     pub chunk: Chunk<P, D>,
@@ -1038,6 +1053,7 @@ where
 /// 2. Allowing sequencers to build chains of chunks
 /// 3. Preventing sequencers from creating forks in their chains
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[ready(0)]
 pub struct Lock<P: PublicKey, S: Scheme, D: Digest> {
     /// Chunk that is being locked.
     pub chunk: Chunk<P, D>,

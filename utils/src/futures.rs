@@ -1,6 +1,5 @@
 //! Utilities for working with futures.
 
-commonware_macros::readiness!(2);
 
 use core::ops::{Deref, DerefMut};
 use futures::{
@@ -11,6 +10,7 @@ use futures::{
 };
 use pin_project::pin_project;
 use std::{future::Future, pin::Pin, task::Poll};
+use commonware_macros::ready;
 
 /// A future type that can be used in `Pool`.
 type PooledFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
@@ -21,6 +21,7 @@ type PooledFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
 ///
 /// **Note:** This pool is not thread-safe and should not be used across threads without external
 /// synchronization.
+#[ready(0)]
 pub struct Pool<T> {
     pool: FuturesUnordered<PooledFuture<T>>,
 }
@@ -78,6 +79,7 @@ impl<T: Send> Pool<T> {
 /// A handle that can be used to abort a specific future in an [AbortablePool].
 ///
 /// When the aborter is dropped, the associated future is aborted.
+#[ready(0)]
 pub struct Aborter {
     inner: AbortHandle,
 }
@@ -98,6 +100,7 @@ type AbortablePooledFuture<T> = Pin<Box<dyn Future<Output = Result<T, Aborted>> 
 ///
 /// **Note:** This pool is not thread-safe and should not be used across threads without external
 /// synchronization.
+#[ready(0)]
 pub struct AbortablePool<T> {
     pool: FuturesUnordered<AbortablePooledFuture<T>>,
 }
@@ -156,6 +159,7 @@ impl<T: Send> AbortablePool<T> {
 /// This future completes when the receiver end of the channel is dropped,
 /// allowing the caller to detect when the other side is no longer interested
 /// in the result.
+#[ready(0)]
 pub struct Closed<'a, T> {
     sender: &'a mut oneshot::Sender<T>,
 }
@@ -211,6 +215,7 @@ impl<T> ClosedExt<T> for oneshot::Sender<T> {
 /// Not to be confused with [futures::future::OptionFuture], which resolves to [None] immediately
 /// when the inner future is `None`.
 #[pin_project]
+#[ready(0)]
 pub struct OptionFuture<F: Future>(#[pin] Option<F>);
 
 impl<F: Future> Default for OptionFuture<F> {

@@ -4,6 +4,7 @@
 ignore_crates = [
     "commonware-conformance",
     "commonware-conformance-macros",
+    "commonware-macros",
 ]
 
 # Module paths to exclude from readiness output (glob patterns supported)

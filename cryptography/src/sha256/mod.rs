@@ -20,7 +20,6 @@
 //! println!("digest: {:?}", digest);
 //! ```
 
-commonware_macros::readiness!(2);
 
 use crate::Hasher;
 #[cfg(not(feature = "std"))]
@@ -36,14 +35,17 @@ use core::{
 use rand_core::CryptoRngCore;
 use sha2::{Digest as _, Sha256 as ISha256};
 use zeroize::Zeroize;
+use commonware_macros::ready;
 
 /// Re-export `sha2::Sha256` as `CoreSha256` for external use if needed.
+#[ready(0)]
 pub type CoreSha256 = ISha256;
 
 const DIGEST_LENGTH: usize = 32;
 
 /// SHA-256 hasher.
 #[derive(Debug, Default)]
+#[ready(0)]
 pub struct Sha256 {
     hasher: ISha256,
 }
@@ -86,6 +88,7 @@ impl Hasher for Sha256 {
 /// Digest of a SHA-256 hashing operation.
 #[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash)]
 #[repr(transparent)]
+#[ready(0)]
 pub struct Digest(pub [u8; DIGEST_LENGTH]);
 
 #[cfg(feature = "arbitrary")]

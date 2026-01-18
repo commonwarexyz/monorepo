@@ -16,11 +16,13 @@ use commonware_p2p::Recipients;
 use futures::channel::oneshot;
 use std::future::Future;
 use thiserror::Error;
+use commonware_macros::ready;
 
 pub mod p2p;
 
 /// Errors that can occur when interacting with a [Originator].
 #[derive(Error, Debug)]
+#[ready(0)]
 pub enum Error {
     #[error("send failed: {0}")]
     SendFailed(anyhow::Error),

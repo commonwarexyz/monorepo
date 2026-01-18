@@ -1,24 +1,27 @@
 //! Core networking traits and types.
 
-commonware_macros::readiness!(2);
 
 use bytes::{Buf, Bytes};
 use commonware_cryptography::PublicKey;
 use commonware_utils::ordered::Set;
 use futures::channel::mpsc;
 use std::{error::Error as StdError, fmt::Debug, future::Future, time::SystemTime};
+use commonware_macros::ready;
 
 /// Tuple representing a message received from a given public key.
 ///
 /// This message is guaranteed to adhere to the configuration of the channel and
 /// will already be decrypted and authenticated.
+#[ready(0)]
 pub type Message<P> = (P, Bytes);
 
 /// Alias for identifying communication channels.
+#[ready(0)]
 pub type Channel = u64;
 
 /// Enum indicating the set of recipients to send a message to.
 #[derive(Clone, Debug)]
+#[ready(0)]
 pub enum Recipients<P: PublicKey> {
     All,
     Some(Vec<P>),

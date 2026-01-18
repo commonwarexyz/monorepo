@@ -5,7 +5,6 @@
 //! designed with performant implementations in mind, so implementations try to
 //! use methods which don't require copying unnecessarily.
 
-commonware_macros::readiness!(2);
 
 use commonware_parallel::Strategy as ParStrategy;
 use core::{
@@ -13,6 +12,7 @@ use core::{
     ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign},
 };
 use rand_core::CryptoRngCore;
+use commonware_macros::ready;
 
 /// Yield all the bits in a u64, from lowest to highest.
 fn yield_bits_le(x: u64) -> impl Iterator<Item = bool> {
@@ -216,6 +216,7 @@ pub trait Space<R>:
 /// This is useful when implementing the trait, because for small inputs it
 /// might be worth just using the naive implementation, because faster
 /// algorithms have some overhead in terms of allocating space.
+#[ready(0)]
 pub fn msm_naive<R, K: Space<R>>(points: &[K], scalars: &[R]) -> K {
     let mut out = K::zero();
     for (s, p) in scalars.iter().zip(points.iter()) {

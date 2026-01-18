@@ -44,6 +44,7 @@ use std::{
 };
 use tokio::runtime::{Builder, Runtime};
 use tracing::{info_span, Instrument};
+use commonware_macros::ready;
 
 #[cfg(feature = "iouring-network")]
 const IOURING_NETWORK_SIZE: u32 = 1024;
@@ -77,6 +78,8 @@ impl Metrics {
 }
 
 #[derive(Clone, Debug)]
+#[ready(0)]
+
 pub struct NetworkConfig {
     /// If Some, explicitly sets TCP_NODELAY on the socket.
     /// Otherwise uses system default.
@@ -97,6 +100,7 @@ impl Default for NetworkConfig {
 
 /// Configuration for the `tokio` runtime.
 #[derive(Clone)]
+#[ready(0)]
 pub struct Config {
     /// Number of threads to use for handling async tasks.
     ///
@@ -219,6 +223,7 @@ impl Default for Config {
 }
 
 /// Runtime based on [Tokio](https://tokio.rs).
+#[ready(0)]
 pub struct Executor {
     registry: Mutex<Registry>,
     metrics: Arc<Metrics>,
@@ -228,6 +233,7 @@ pub struct Executor {
 }
 
 /// Implementation of [crate::Runner] for the `tokio` runtime.
+#[ready(0)]
 pub struct Runner {
     cfg: Config,
 }
@@ -379,6 +385,7 @@ cfg_if::cfg_if! {
 /// Implementation of [crate::Spawner], [crate::Clock],
 /// [crate::Network], and [crate::Storage] for the `tokio`
 /// runtime.
+#[ready(0)]
 pub struct Context {
     name: String,
     executor: Arc<Executor>,

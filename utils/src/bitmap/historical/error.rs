@@ -1,5 +1,6 @@
 /// Errors that can occur in Historical bitmap operations.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[ready(0)]
 pub enum Error {
     /// Commit numbers must be strictly monotonically increasing.
     #[error("commit number ({attempted}) <= previous commit ({previous})")]
@@ -13,3 +14,5 @@ pub enum Error {
     #[error("prunable error: {0}")]
     Prunable(#[from] crate::bitmap::prunable::Error),
 }
+
+use commonware_macros::ready;

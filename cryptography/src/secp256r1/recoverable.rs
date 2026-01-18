@@ -1,3 +1,4 @@
+use commonware_macros::ready;
 cfg_if::cfg_if! {
     if #[cfg(feature = "std")] {
         use std::borrow::Cow;
@@ -25,6 +26,7 @@ const SIGNATURE_LENGTH: usize = 1 + BASE_SIGNATURE_LENGTH; // RecoveryId || R ||
 
 /// Secp256r1 Private Key.
 #[derive(Clone, Eq, PartialEq)]
+#[ready(0)]
 pub struct PrivateKey(PrivateKeyInner);
 
 impl_private_key_wrapper!(PrivateKey);
@@ -75,6 +77,7 @@ impl From<PrivateKey> for PublicKey {
 /// Secp256r1 Public Key.
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[ready(0)]
 pub struct PublicKey(PublicKeyInner);
 
 impl_public_key_wrapper!(PublicKey);
@@ -99,6 +102,7 @@ impl PublicKey {
 
 /// Secp256r1 Signature with recovery ID.
 #[derive(Clone, Eq, PartialEq)]
+#[ready(0)]
 pub struct Signature {
     raw: [u8; SIGNATURE_LENGTH],
     recovery_id: RecoveryId,

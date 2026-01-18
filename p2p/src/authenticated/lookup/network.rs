@@ -21,11 +21,13 @@ use futures::channel::mpsc;
 use rand_core::CryptoRngCore;
 use std::{collections::HashSet, net::IpAddr};
 use tracing::{debug, info};
+use commonware_macros::ready;
 
 /// Unique suffix for all messages signed in a stream.
 const STREAM_SUFFIX: &[u8] = b"_STREAM";
 
 /// Implementation of an `authenticated` network.
+#[ready(0)]
 pub struct Network<E: Spawner + Clock + CryptoRngCore + RNetwork + Metrics, C: Signer> {
     context: ContextCell<E>,
     cfg: Config<C>,

@@ -3,8 +3,10 @@
 use crate::{CheckedSender, Receiver, Recipients, Sender};
 use commonware_codec::{Codec, Error};
 use std::time::SystemTime;
+use commonware_macros::ready;
 
 /// Wrap a [Sender] and [Receiver] with some [Codec].
+#[ready(0)]
 pub const fn wrap<S: Sender, R: Receiver, V: Codec>(
     config: V::Cfg,
     sender: S,
@@ -17,10 +19,12 @@ pub const fn wrap<S: Sender, R: Receiver, V: Codec>(
 }
 
 /// Tuple representing a message received from a given public key.
+#[ready(0)]
 pub type WrappedMessage<P, V> = (P, Result<V, Error>);
 
 /// Wrapper around a [Sender] that encodes messages using a [Codec].
 #[derive(Clone)]
+#[ready(0)]
 pub struct WrappedSender<S: Sender, V: Codec> {
     sender: S,
     _phantom_v: std::marker::PhantomData<V>,
@@ -63,6 +67,8 @@ impl<S: Sender, V: Codec> WrappedSender<S, V> {
 }
 
 #[derive(Debug)]
+#[ready(0)]
+
 pub struct CheckedWrappedSender<'a, S: Sender, V: Codec> {
     sender: S::Checked<'a>,
     _phantom_v: std::marker::PhantomData<V>,
@@ -80,6 +86,7 @@ impl<'a, S: Sender, V: Codec> CheckedWrappedSender<'a, S, V> {
 }
 
 /// Wrapper around a [Receiver] that decodes messages using a [Codec].
+#[ready(0)]
 pub struct WrappedReceiver<R: Receiver, V: Codec> {
     config: V::Cfg,
     receiver: R,

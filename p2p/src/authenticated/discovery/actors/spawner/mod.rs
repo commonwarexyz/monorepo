@@ -1,6 +1,7 @@
 use crate::authenticated::discovery::types::InfoVerifier;
 use commonware_cryptography::PublicKey;
 use std::time::Duration;
+use commonware_macros::ready;
 
 mod actor;
 mod ingress;
@@ -9,6 +10,7 @@ pub use actor::Actor;
 pub use ingress::Message;
 
 /// Configuration for the spawner [Actor].
+#[ready(0)]
 pub struct Config<C: PublicKey> {
     pub mailbox_size: usize,
     pub gossip_bit_vec_frequency: Duration,

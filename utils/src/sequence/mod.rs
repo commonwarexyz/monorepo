@@ -1,4 +1,3 @@
-commonware_macros::readiness!(2);
 
 use commonware_codec::{Codec, EncodeFixed};
 use core::{
@@ -9,6 +8,7 @@ use core::{
     ops::Deref,
 };
 use thiserror::Error;
+use commonware_macros::ready;
 
 pub mod fixed_bytes;
 pub use fixed_bytes::FixedBytes;
@@ -22,6 +22,7 @@ pub use unit::Unit;
 
 /// Errors returned by the `Array` trait's functions.
 #[derive(Error, Debug, PartialEq)]
+#[ready(0)]
 pub enum Error<E: CoreError + Send + Sync + 'static> {
     #[error("invalid bytes")]
     InsufficientBytes,

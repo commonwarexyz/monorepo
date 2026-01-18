@@ -150,7 +150,6 @@
 //! });
 //! ```
 
-commonware_macros::readiness!(2);
 
 mod actors;
 mod channels;
@@ -160,9 +159,11 @@ mod network;
 mod types;
 
 use thiserror::Error;
+use commonware_macros::ready;
 
 /// Errors that can occur when interacting with the network.
 #[derive(Error, Debug)]
+#[ready(0)]
 pub enum Error {
     #[error("message too large: {0}")]
     MessageTooLarge(usize),

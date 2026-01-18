@@ -58,6 +58,7 @@ use std::{
     sync::Arc,
 };
 use tracing::{debug, error, info, warn};
+use commonware_macros::ready;
 
 /// The key used to store the last processed height in the metadata store.
 const LATEST_KEY: U64 = U64::new(0xFF);
@@ -102,6 +103,7 @@ struct BlockSubscription<B: Block> {
 /// finalization for a block that is ahead of its current view, it will request the missing blocks
 /// from its peers. This ensures that the actor can catch up to the rest of the network if it falls
 /// behind.
+#[ready(0)]
 pub struct Actor<E, B, P, FC, FB, ES, T, A = Exact>
 where
     E: CryptoRngCore + Spawner + Metrics + Clock + Storage,

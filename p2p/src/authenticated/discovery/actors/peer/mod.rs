@@ -9,12 +9,15 @@ use commonware_cryptography::PublicKey;
 use prometheus_client::metrics::{counter::Counter, family::Family};
 use std::time::Duration;
 use thiserror::Error;
+use commonware_macros::ready;
 
 mod actor;
 pub use actor::Actor;
 
 mod ingress;
 pub use ingress::Message;
+
+#[ready(0)]
 
 pub struct Config<C: PublicKey> {
     pub mailbox_size: usize,
@@ -30,6 +33,8 @@ pub struct Config<C: PublicKey> {
 }
 
 #[derive(Error, Debug)]
+#[ready(0)]
+
 pub enum Error {
     #[error("peer killed: {0}")]
     PeerKilled(String),

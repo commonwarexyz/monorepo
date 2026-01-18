@@ -61,6 +61,7 @@ use commonware_cryptography::{Digest, DigestOf};
 use commonware_utils::NZUsize;
 use core::num::NonZeroUsize;
 use futures::{pin_mut, StreamExt as _};
+use commonware_macros::ready;
 use thiserror::Error;
 
 pub mod any;
@@ -79,6 +80,7 @@ pub use verify::{
 
 /// Errors that can occur when interacting with an authenticated database.
 #[derive(Error, Debug)]
+#[ready(0)]
 pub enum Error {
     #[error("mmr error: {0}")]
     Mmr(#[from] crate::mmr::Error),
@@ -123,12 +125,16 @@ impl From<crate::journal::authenticated::Error> for Error {
 }
 
 /// Type alias for merkleized state of a QMDB.
+#[ready(0)]
 pub type Merkleized<H> = crate::mmr::mem::Clean<DigestOf<H>>;
 /// Type alias for unmerkleized state of a QMDB.
+#[ready(0)]
 pub type Unmerkleized = crate::mmr::mem::Dirty;
 /// Type alias for durable state of a QMDB.
+#[ready(0)]
 pub type Durable = store::Durable;
 /// Type alias for non-durable state of a QMDB.
+#[ready(0)]
 pub type NonDurable = store::NonDurable;
 
 /// The size of the read buffer to use for replaying the operations log when rebuilding the

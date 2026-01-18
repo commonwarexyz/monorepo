@@ -199,6 +199,7 @@
 //!     cidr: 0.0.0.0/0
 //! ```
 
+use commonware_macros::ready;
 use serde::{Deserialize, Serialize};
 use std::net::IpAddr;
 
@@ -414,6 +415,7 @@ pub const METRICS_PORT: u16 = 9090;
 
 /// Host deployment information
 #[derive(Serialize, Deserialize, Clone)]
+#[ready(0)]
 pub struct Host {
     /// Name of the host
     pub name: String,
@@ -427,6 +429,7 @@ pub struct Host {
 
 /// List of hosts
 #[derive(Serialize, Deserialize, Clone)]
+#[ready(0)]
 pub struct Hosts {
     /// Private IP address of the monitoring instance
     pub monitoring: IpAddr,
@@ -437,6 +440,7 @@ pub struct Hosts {
 
 /// Port configuration
 #[derive(Serialize, Deserialize, Clone)]
+#[ready(0)]
 pub struct PortConfig {
     /// Protocol (e.g., "tcp")
     pub protocol: String,
@@ -450,6 +454,7 @@ pub struct PortConfig {
 
 /// Instance configuration
 #[derive(Serialize, Deserialize, Clone)]
+#[ready(0)]
 pub struct InstanceConfig {
     /// Name of the instance
     pub name: String,
@@ -478,6 +483,7 @@ pub struct InstanceConfig {
 
 /// Monitoring configuration
 #[derive(Serialize, Deserialize, Clone)]
+#[ready(0)]
 pub struct MonitoringConfig {
     /// Instance type (e.g., `t4g.small` for ARM64, `t3.small` for x86_64)
     pub instance_type: String,
@@ -495,6 +501,7 @@ pub struct MonitoringConfig {
 
 /// Deployer configuration
 #[derive(Serialize, Deserialize, Clone)]
+#[ready(0)]
 pub struct Config {
     /// Unique tag for the deployment
     pub tag: String,

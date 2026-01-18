@@ -19,6 +19,7 @@ use core::ops::Range;
 use futures::{future::Either, stream, Stream, StreamExt as _};
 use std::num::{NonZeroU64, NonZeroUsize};
 use tracing::{debug, info};
+use commonware_macros::ready;
 
 const REPLAY_BUFFER_SIZE: NonZeroUsize = NZUsize!(1024);
 
@@ -55,6 +56,7 @@ const fn position_to_section(position: u64, items_per_section: u64) -> u64 {
 
 /// Configuration for a [Journal].
 #[derive(Clone)]
+#[ready(0)]
 pub struct Config<C> {
     /// Base partition name. Sub-partitions will be created by appending DATA_SUFFIX and OFFSETS_SUFFIX.
     pub partition: String,
@@ -127,6 +129,7 @@ impl<C> Config<C> {
 /// Note that we don't recover from the case where offsets.oldest_retained_pos() >
 /// data.oldest_retained_pos(). This should never occur because we always prune the data journal
 /// before the offsets journal.
+#[ready(0)]
 pub struct Journal<E: Storage + Metrics, V: Codec> {
     /// The underlying variable-length data journal.
     data: variable::Journal<E, V>,

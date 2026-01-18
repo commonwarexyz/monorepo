@@ -20,7 +20,6 @@
 //! println!("digest: {:?}", digest);
 //! ```
 
-commonware_macros::readiness!(2);
 
 use crate::Hasher;
 use blake3::Hash;
@@ -34,8 +33,10 @@ use core::{
 };
 use rand_core::CryptoRngCore;
 use zeroize::Zeroize;
+use commonware_macros::ready;
 
 /// Re-export [blake3::Hasher] as `CoreBlake3` for external use if needed.
+#[ready(0)]
 pub type CoreBlake3 = blake3::Hasher;
 
 const DIGEST_LENGTH: usize = blake3::OUT_LEN;
@@ -46,6 +47,7 @@ const DIGEST_LENGTH: usize = blake3::OUT_LEN;
     doc = "When the input message is larger than 128KiB, `rayon` is used to parallelize hashing."
 )]
 #[derive(Debug, Default)]
+#[ready(0)]
 pub struct Blake3 {
     hasher: CoreBlake3,
 }
@@ -96,6 +98,7 @@ impl Hasher for Blake3 {
 /// Digest of a BLAKE3 hashing operation.
 #[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash)]
 #[repr(transparent)]
+#[ready(0)]
 pub struct Digest(pub [u8; DIGEST_LENGTH]);
 
 #[cfg(feature = "arbitrary")]

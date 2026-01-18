@@ -5,9 +5,11 @@ use prometheus_client::{
     metrics::{counter::Counter as DefaultCounter, family::Family, gauge::Gauge},
 };
 use std::sync::atomic::Ordering;
+use commonware_macros::ready;
 
 /// Metric label that indicates status.
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+#[ready(0)]
 pub struct Label {
     /// The value of the label.
     status: Status,
@@ -15,6 +17,7 @@ pub struct Label {
 
 /// Possible values for the status label.
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, EncodeLabelValue)]
+#[ready(0)]
 pub enum Status {
     /// Processed successfully.
     Success,
@@ -30,6 +33,7 @@ pub enum Status {
 }
 
 /// A counter metric with a status label.
+#[ready(0)]
 pub type Counter = Family<Label, DefaultCounter>;
 
 /// Trait providing convenience methods for `Counter`.
@@ -63,6 +67,7 @@ impl CounterExt for Counter {
 ///
 /// Can be used to ensure that counters are incremented regardless of the control flow. For example,
 /// if a function returns early, the metric will still be incremented.
+#[ready(0)]
 pub struct CounterGuard {
     /// The metric to increment.
     metric: Counter,

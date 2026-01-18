@@ -150,12 +150,14 @@
 use crate::translator::Translator;
 use commonware_runtime::buffer::PoolRef;
 use std::num::{NonZeroU64, NonZeroUsize};
+use commonware_macros::ready;
 
 mod storage;
 pub use storage::Archive;
 
 /// Configuration for [Archive] storage.
 #[derive(Clone)]
+#[ready(0)]
 pub struct Config<T: Translator, C> {
     /// Logic to transform keys into their index representation.
     ///

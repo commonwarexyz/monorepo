@@ -68,6 +68,7 @@ use commonware_cryptography::Hasher as CHasher;
 use futures::future::try_join_all;
 use std::collections::HashMap;
 use tracing::debug;
+use commonware_macros::ready;
 
 /// A hasher for computing digests in a grafted MMR, where a peak tree is grafted onto a base MMR.
 ///
@@ -76,6 +77,7 @@ use tracing::debug;
 /// Before calling any methods that compute leaf digests (such as `leaf_digest` or `add`), callers
 /// must first call Self::load_grafted_digests for all leaves that will be hashed. Failure to do
 /// so will result in a panic.
+#[ready(0)]
 pub struct Hasher<'a, H: CHasher> {
     hasher: &'a mut StandardHasher<H>,
     height: u32,
@@ -148,6 +150,7 @@ impl<'a, H: CHasher> Hasher<'a, H> {
 
 /// A lightweight, short-lived shallow copy of a Grafting hasher that can be used in parallel
 /// computations.
+#[ready(0)]
 pub struct HasherFork<'a, H: CHasher> {
     hasher: StandardHasher<H>,
     height: u32,
@@ -342,6 +345,7 @@ impl<H: CHasher> HasherTrait<H::Digest> for HasherFork<'_, H> {
 }
 
 /// A [Hasher] implementation to use when verifying proofs over GraftedStorage.
+#[ready(0)]
 pub struct Verifier<'a, H: CHasher> {
     hasher: StandardHasher<H>,
     height: u32,
@@ -460,6 +464,7 @@ impl<H: CHasher> HasherTrait<H::Digest> for Verifier<'_, H> {
 
 /// A [Storage] implementation that makes grafted trees look like a single MMR for conveniently
 /// generating inclusion proofs.
+#[ready(0)]
 pub struct Storage<'a, H: CHasher, S1: StorageTrait<H::Digest>, S2: StorageTrait<H::Digest>> {
     peak_tree: &'a S1,
     base_mmr: &'a S2,

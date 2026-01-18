@@ -3,6 +3,7 @@ use core::{
     fmt,
     ops::{Add, AddAssign, Deref, Sub, SubAssign},
 };
+use commonware_macros::ready;
 
 /// Maximum valid [Position] value that can exist in a valid MMR.
 ///
@@ -12,6 +13,7 @@ pub const MAX_POSITION: Position = Position::new(0x7FFFFFFFFFFFFFFE); // (1 << 6
 /// A [Position] is an index into an MMR's nodes.
 /// This is in contrast to a [Location], which is an index into an MMR's _leaves_.
 #[derive(Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash, Default, Debug)]
+#[ready(0)]
 pub struct Position(u64);
 
 #[cfg(feature = "arbitrary")]

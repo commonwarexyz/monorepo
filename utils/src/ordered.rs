@@ -1,6 +1,5 @@
 //! Ordered collections that guarantee sorted, deduplicated items.
 
-commonware_macros::readiness!(2);
 
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
@@ -16,6 +15,7 @@ use hashbrown::HashSet;
 #[cfg(feature = "std")]
 use std::collections::HashSet;
 use thiserror::Error;
+use commonware_macros::ready;
 
 #[cfg(not(feature = "std"))]
 type VecIntoIter<T> = alloc::vec::IntoIter<T>;
@@ -24,6 +24,7 @@ type VecIntoIter<T> = std::vec::IntoIter<T>;
 
 /// Errors that can occur when interacting with ordered collections.
 #[derive(Error, Debug, PartialEq, Eq)]
+#[ready(0)]
 pub enum Error {
     /// A key was duplicated.
     #[error("duplicate key")]
@@ -38,6 +39,7 @@ use crate::{Faults, Participant, TryFromIterator};
 
 /// An ordered, deduplicated collection of items.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[ready(0)]
 pub struct Set<T>(Vec<T>);
 
 impl<T: fmt::Debug> fmt::Debug for Set<T> {
@@ -296,6 +298,7 @@ impl<T: Ord> Quorum for Set<T> {
 
 /// An ordered, deduplicated collection of key-value pairs.
 #[derive(Clone, PartialEq, Eq, Hash)]
+#[ready(0)]
 pub struct Map<K, V> {
     keys: Set<K>,
     values: Vec<V>,
@@ -571,6 +574,7 @@ impl<'a, K, V> IntoIterator for &'a Map<K, V> {
 }
 
 /// An iterator over owned key-value pairs.
+#[ready(0)]
 pub struct MapIntoIter<K, V> {
     keys: VecIntoIter<K>,
     values: VecIntoIter<V>,
@@ -614,6 +618,7 @@ where
 
 /// An ordered, deduplicated collection of key-value pairs with unique values.
 #[derive(Clone, PartialEq, Eq, Hash)]
+#[ready(0)]
 pub struct BiMap<K, V> {
     inner: Map<K, V>,
 }

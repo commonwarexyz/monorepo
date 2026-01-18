@@ -37,6 +37,7 @@ use std::{
     collections::{BTreeSet, HashMap},
     fmt::Debug,
 };
+use commonware_macros::ready;
 
 /// The role-specific data for a BLS12-381 threshold scheme participant.
 #[derive(Clone, Debug)]
@@ -73,6 +74,7 @@ enum Role<P: PublicKey, V: Variant> {
 /// a verifier (with evaluated public polynomial), or an external verifier that
 /// only checks recovered certificates.
 #[derive(Clone, Debug)]
+#[ready(0)]
 pub struct Scheme<P: PublicKey, V: Variant> {
     role: Role<P, V>,
 }
@@ -214,6 +216,7 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
     /// The encrypted message can only be decrypted using the seed signature
     /// from a certificate of the target round (i.e. notarization, finalization,
     /// or nullification).
+    #[ready(0)]
     pub fn encrypt<R: CryptoRngCore>(
         &self,
         rng: &mut R,
@@ -236,6 +239,7 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
 /// The encrypted message can only be decrypted using the seed signature
 /// from a certificate of the target round (i.e. notarization, finalization,
 /// or nullification).
+#[ready(0)]
 pub fn encrypt<R: CryptoRngCore, V: Variant>(
     rng: &mut R,
     identity: V::Public,
@@ -254,6 +258,7 @@ pub fn encrypt<R: CryptoRngCore, V: Variant>(
 /// Returns a [`commonware_cryptography::certificate::mocks::Fixture`] whose keys and
 /// scheme instances share a consistent ordering.
 #[cfg(feature = "mocks")]
+#[ready(0)]
 pub fn fixture<V, R>(
     rng: &mut R,
     namespace: &[u8],
@@ -278,6 +283,7 @@ where
 
 /// Combined vote/seed signature pair emitted by the BLS12-381 threshold scheme.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[ready(0)]
 pub struct Signature<V: Variant> {
     /// Signature over the consensus vote message (partial or recovered aggregate).
     pub vote_signature: V::Signature,
@@ -325,6 +331,7 @@ where
 
 /// Seed represents a threshold signature over the current view.
 #[derive(Clone, Debug, PartialEq, Hash, Eq)]
+#[ready(0)]
 pub struct Seed<V: Variant> {
     /// The round for which this seed is generated
     pub round: Round,
@@ -360,6 +367,7 @@ impl<V: Variant> Seed<V> {
     ///
     /// Returns `None` if the ciphertext is invalid or encrypted for a different
     /// round than this seed.
+    #[ready(0)]
     pub fn decrypt(&self, ciphertext: &tle::Ciphertext<V>) -> Option<tle::Block> {
         decrypt(self, ciphertext)
     }
@@ -370,6 +378,7 @@ impl<V: Variant> Seed<V> {
 ///
 /// Returns `None` if the ciphertext is invalid or encrypted for a different
 /// round than the given seed.
+#[ready(0)]
 pub fn decrypt<V: Variant>(seed: &Seed<V>, ciphertext: &tle::Ciphertext<V>) -> Option<tle::Block> {
     tle::decrypt(&seed.signature, ciphertext)
 }

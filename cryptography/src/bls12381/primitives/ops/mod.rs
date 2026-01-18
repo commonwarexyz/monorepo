@@ -18,6 +18,7 @@
 //! Use [`batch`] when you need to ensure each individual signature is valid. Use [`aggregate`]
 //! when you only need to verify that the aggregate is valid (more efficient).
 
+use commonware_macros::ready;
 pub mod aggregate;
 pub mod batch;
 pub mod threshold;
@@ -34,11 +35,13 @@ use commonware_math::algebra::{CryptoGroup, HashToGroup, Random};
 use commonware_utils::union_unique;
 
 /// Computes the public key from the private key.
+#[ready(0)]
 pub fn compute_public<V: Variant>(private: &Private) -> V::Public {
     private.expose(|scalar| V::Public::generator() * scalar)
 }
 
 /// Returns a new keypair derived from the provided randomness.
+#[ready(0)]
 pub fn keypair<R: rand_core::CryptoRngCore, V: Variant>(rng: &mut R) -> (Private, V::Public) {
     let private = Private::random(rng);
     let public = compute_public::<V>(&private);
@@ -47,22 +50,26 @@ pub fn keypair<R: rand_core::CryptoRngCore, V: Variant>(rng: &mut R) -> (Private
 
 /// Hashes the provided message with the domain separation tag (DST) to
 /// the curve.
+#[ready(0)]
 pub fn hash<V: Variant>(dst: DST, message: &[u8]) -> V::Signature {
     V::Signature::hash_to_group(dst, message)
 }
 
 /// Hashes the provided message with the domain separation tag (DST) and namespace to
 /// the curve.
+#[ready(0)]
 pub fn hash_with_namespace<V: Variant>(dst: DST, namespace: &[u8], message: &[u8]) -> V::Signature {
     V::Signature::hash_to_group(dst, &union_unique(namespace, message))
 }
 
 /// Signs the provided message with the private key.
+#[ready(0)]
 pub fn sign<V: Variant>(private: &Private, dst: DST, message: &[u8]) -> V::Signature {
     private.expose(|scalar| hash::<V>(dst, message) * scalar)
 }
 
 /// Verifies the signature with the provided public key.
+#[ready(0)]
 pub fn verify<V: Variant>(
     public: &V::Public,
     dst: DST,
@@ -79,6 +86,7 @@ pub fn verify<V: Variant>(
 ///
 /// Signatures produced by this function are deterministic and are safe
 /// to use in a consensus-critical context.
+#[ready(0)]
 pub fn sign_message<V: Variant>(
     private: &Private,
     namespace: &[u8],
@@ -93,6 +101,7 @@ pub fn sign_message<V: Variant>(
 ///
 /// This function assumes a group check was already performed on
 /// `public` and `signature`.
+#[ready(0)]
 pub fn verify_message<V: Variant>(
     public: &V::Public,
     namespace: &[u8],
@@ -108,6 +117,7 @@ pub fn verify_message<V: Variant>(
 }
 
 /// Generates a proof of possession for the private key.
+#[ready(0)]
 pub fn sign_proof_of_possession<V: Variant>(private: &Private, namespace: &[u8]) -> V::Signature {
     // Get public key
     let public = compute_public::<V>(private);
@@ -117,6 +127,7 @@ pub fn sign_proof_of_possession<V: Variant>(private: &Private, namespace: &[u8])
 }
 
 /// Verifies a proof of possession for the provided public key.
+#[ready(0)]
 pub fn verify_proof_of_possession<V: Variant>(
     public: &V::Public,
     namespace: &[u8],

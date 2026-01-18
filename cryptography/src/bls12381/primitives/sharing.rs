@@ -9,6 +9,7 @@ use commonware_utils::{ordered::Set, Faults, Participant, NZU32};
 use core::{iter, num::NonZeroU32};
 #[cfg(feature = "std")]
 use std::sync::{Arc, OnceLock};
+use commonware_macros::ready;
 
 /// Configures how participants are assigned shares of a secret.
 ///
@@ -16,6 +17,7 @@ use std::sync::{Arc, OnceLock};
 /// are assigned to participant identities.
 #[derive(Copy, Clone, Default, PartialEq, Eq, Debug)]
 #[repr(u8)]
+#[ready(0)]
 pub enum Mode {
     // TODO (https://github.com/commonware-xyz/monorepo/issues/1836): Add a mode for sub O(N^2) interpolation
     #[default]
@@ -127,6 +129,7 @@ impl Read for Mode {
 ///
 /// This does not contain any secret information.
 #[derive(Clone, Debug)]
+#[ready(0)]
 pub struct Sharing<V: Variant> {
     mode: Mode,
     total: NonZeroU32,

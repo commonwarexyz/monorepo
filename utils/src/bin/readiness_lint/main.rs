@@ -1,17 +1,7 @@
 //! Readiness score linter for the Commonware Library.
 //!
-//! This tool validates that modules don't depend on less-ready modules
-//! and generates readiness.json for the documentation page.
-//!
-//! # What This Tool Tracks
-//!
-//! This tool tracks Rust **modules** (`mod` declarations), not individual types,
-//! traits, or functions. All items within a module share the same readiness level.
-//! For example, `simplex::elector` appears as a single module even though it
-//! contains multiple types like `RoundRobin` and `Random`.
-//!
-//! To track items at finer granularity, split them into separate submodules
-//! (e.g., `elector/round_robin.rs` and `elector/random.rs`).
+//! This tool validates that public items have `#[ready(N)]` annotations
+//! and that higher-readiness code only depends on equal or higher readiness items.
 //!
 //! # Readiness Levels
 //!
@@ -23,10 +13,9 @@
 //!
 //! # Usage
 //!
-//! Annotate modules with `commonware_macros::readiness!(N)` where N is 0-4.
-//! Submodules inherit their parent's readiness level unless explicitly annotated.
+//! Annotate public structs, enums, functions, and type aliases with `#[ready(N)]`.
+//! Traits and constants are excluded from this requirement.
 
-mod output;
 mod parser;
 mod validator;
 
@@ -35,7 +24,7 @@ use std::{path::PathBuf, process::ExitCode};
 
 #[derive(Parser, Debug)]
 #[command(name = "readiness-lint")]
-#[command(about = "Validate readiness score constraints and generate documentation")]
+#[command(about = "Validate readiness score constraints")]
 struct Args {
     /// Path to the repository root
     #[arg(long, default_value = ".")]
@@ -44,14 +33,6 @@ struct Args {
     /// Validate readiness constraints (exit with error if violations found)
     #[arg(long)]
     validate: bool,
-
-    /// Output path for readiness.json
-    #[arg(long)]
-    output: Option<PathBuf>,
-
-    /// Check that existing readiness.json is up-to-date
-    #[arg(long)]
-    check: Option<PathBuf>,
 }
 
 fn main() -> ExitCode {
@@ -75,22 +56,12 @@ fn main() -> ExitCode {
         }
     };
 
-    // Check for crate-level readiness (prohibited)
-    let crate_level_violations = validator::check_crate_level_readiness(&workspace);
-    if !crate_level_violations.is_empty() {
-        eprintln!("Crate-level readiness!() is prohibited. Move items to modules:");
-        for (crate_name, path) in &crate_level_violations {
-            eprintln!("  {crate_name}: {}", path.display());
-        }
-        return ExitCode::FAILURE;
-    }
-
-    // Check for nested readiness annotations (prohibited)
-    let readiness_conflicts = validator::check_readiness_conflicts(&workspace);
-    if !readiness_conflicts.is_empty() {
-        eprintln!("Readiness annotations cannot be nested:");
-        for conflict in &readiness_conflicts {
-            eprintln!("  {conflict}");
+    // Check for missing #[ready(N)] annotations on public items
+    let missing = validator::check_missing_annotations(&workspace);
+    if !missing.is_empty() {
+        eprintln!("Missing #[ready(N)] annotations on public items:");
+        for item in &missing {
+            eprintln!("  {item}");
         }
         return ExitCode::FAILURE;
     }
@@ -106,36 +77,6 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
         println!("All readiness constraints satisfied.");
-    }
-
-    // Generate output if requested
-    if let Some(output_path) = args.output {
-        if let Err(e) = output::generate(&workspace, &output_path) {
-            eprintln!("Error generating output: {e}");
-            return ExitCode::FAILURE;
-        }
-        println!("Generated {}", output_path.display());
-    }
-
-    // Check if existing output is up-to-date
-    if let Some(check_path) = args.check {
-        match output::check(&workspace, &check_path) {
-            Ok(true) => {
-                println!("{} is up-to-date.", check_path.display());
-            }
-            Ok(false) => {
-                eprintln!(
-                    "{} is out-of-date. Run with --output {} to regenerate.",
-                    check_path.display(),
-                    check_path.display()
-                );
-                return ExitCode::FAILURE;
-            }
-            Err(e) => {
-                eprintln!("Error checking {}: {e}", check_path.display());
-                return ExitCode::FAILURE;
-            }
-        }
     }
 
     ExitCode::SUCCESS

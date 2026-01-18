@@ -3,6 +3,7 @@
 //! This module provides both the generic Secp256r1 implementation and a macro to generate
 //! protocol-specific wrappers.
 
+use commonware_macros::ready;
 #[cfg(feature = "mocks")]
 pub mod mocks;
 
@@ -29,6 +30,7 @@ use std::collections::BTreeSet;
 /// context types. It can be reused across different protocols (simplex, aggregation, etc.)
 /// by wrapping it with protocol-specific trait implementations via the macro.
 #[derive(Clone, Debug)]
+#[ready(0)]
 pub struct Generic<P: crate::PublicKey, N: Namespace> {
     /// Participants in the committee.
     pub participants: BiMap<P, PublicKey>,
@@ -257,6 +259,8 @@ impl<P: crate::PublicKey, N: Namespace> Generic<P, N> {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[ready(0)]
+
 pub struct Certificate {
     /// Bitmap of participant indices that contributed signatures.
     pub signers: Signers,

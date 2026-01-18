@@ -20,12 +20,14 @@ use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage};
 use core::{marker::PhantomData, ops::Range};
 use std::num::{NonZeroU64, NonZeroUsize};
 use tracing::{debug, warn};
+use commonware_macros::ready;
 
 mod operation;
 pub use operation::Operation;
 
 /// Configuration for a [Keyless] authenticated db.
 #[derive(Clone)]
+#[ready(0)]
 pub struct Config<C> {
     /// The name of the [Storage] partition used for the MMR's backing journal.
     pub mmr_journal_partition: String,
@@ -65,6 +67,7 @@ pub struct Config<C> {
 type Journal<E, V, H, S> = authenticated::Journal<E, ContiguousJournal<E, Operation<V>>, H, S>;
 
 /// A keyless authenticated database for variable-length data.
+#[ready(0)]
 pub struct Keyless<
     E: Storage + Clock + Metrics,
     V: VariableValue,

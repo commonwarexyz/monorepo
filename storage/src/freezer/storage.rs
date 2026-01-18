@@ -14,6 +14,7 @@ use futures::future::{try_join, try_join_all};
 use prometheus_client::metrics::counter::Counter;
 use std::{cmp::Ordering, collections::BTreeSet, num::NonZeroUsize, ops::Deref};
 use tracing::debug;
+use commonware_macros::ready;
 
 /// The percentage of table entries that must reach `table_resize_frequency`
 /// before a resize is triggered.
@@ -26,6 +27,7 @@ const RESIZE_THRESHOLD: u64 = 50;
 #[derive(Hash, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[repr(transparent)]
+#[ready(0)]
 pub struct Cursor([u8; u64::SIZE + u64::SIZE + u32::SIZE]);
 
 impl Cursor {
@@ -119,6 +121,7 @@ impl std::fmt::Display for Cursor {
 /// state after shutdown.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Copy)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[ready(0)]
 pub struct Checkpoint {
     /// The epoch of the last committed operation.
     epoch: u64,
@@ -370,6 +373,7 @@ where
 }
 
 /// Implementation of [Freezer].
+#[ready(0)]
 pub struct Freezer<E: Storage + Metrics + Clock, K: Array, V: CodecShared> {
     // Context for storage operations
     context: E,

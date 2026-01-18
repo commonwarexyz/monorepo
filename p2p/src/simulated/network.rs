@@ -40,6 +40,7 @@ use std::{
     time::{Duration, SystemTime},
 };
 use tracing::{debug, error, trace, warn};
+use commonware_macros::ready;
 
 /// Task type representing a message to be sent within the network.
 type Task<P> = (Channel, P, Recipients<P>, Bytes, oneshot::Sender<Vec<P>>);
@@ -47,6 +48,7 @@ type Task<P> = (Channel, P, Recipients<P>, Bytes, oneshot::Sender<Vec<P>>);
 /// Target for a message in a split receiver.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[must_use]
+#[ready(0)]
 pub enum SplitTarget {
     None,
     Primary,
@@ -57,6 +59,7 @@ pub enum SplitTarget {
 /// Origin of a message in a split sender.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[must_use]
+#[ready(0)]
 pub enum SplitOrigin {
     Primary,
     Secondary,
@@ -89,6 +92,7 @@ impl<P: PublicKey, F> SplitRouter<P> for F where
 }
 
 /// Configuration for the simulated network.
+#[ready(0)]
 pub struct Config {
     /// Maximum size of a message that can be sent over the network.
     pub max_size: u32,
@@ -107,6 +111,7 @@ pub struct Config {
 }
 
 /// Implementation of a simulated network.
+#[ready(0)]
 pub struct Network<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> {
     context: ContextCell<E>,
 
@@ -725,6 +730,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
 ///
 /// Implements [`crate::utils::limited::Connected`] to provide peer list updates
 /// to [`crate::utils::limited::LimitedSender`].
+#[ready(0)]
 pub struct ConnectedPeerProvider<P: PublicKey, E: Clock> {
     mailbox: UnboundedMailbox<ingress::Message<P, E>>,
 }
@@ -762,6 +768,7 @@ impl<P: PublicKey, E: Clock> Connected for ConnectedPeerProvider<P, E> {
 ///
 /// This is the inner sender used by [`Sender`] which wraps it with rate limiting.
 #[derive(Clone)]
+#[ready(0)]
 pub struct UnlimitedSender<P: PublicKey> {
     me: P,
     channel: Channel,
@@ -803,6 +810,7 @@ impl<P: PublicKey> crate::UnlimitedSender for UnlimitedSender<P> {
 ///
 /// Also implements [crate::LimitedSender] to support rate-limit checking
 /// before sending messages.
+#[ready(0)]
 pub struct Sender<P: PublicKey, E: Clock> {
     limited_sender: LimitedSender<E, UnlimitedSender<P>, ConnectedPeerProvider<P, E>>,
 }
@@ -911,6 +919,7 @@ impl<P: PublicKey, E: Clock> crate::LimitedSender for Sender<P, E> {
 }
 
 /// A sender that routes recipients per message via a user-provided function.
+#[ready(0)]
 pub struct SplitSender<P: PublicKey, E: Clock, F: SplitForwarder<P>> {
     replica: SplitOrigin,
     inner: Sender<P, E>,
@@ -961,6 +970,7 @@ impl<P: PublicKey, E: Clock, F: SplitForwarder<P>> crate::LimitedSender for Spli
 ///
 /// This is necessary because [`SplitForwarder`] may examine message content to determine
 /// routing, but the message is not available at [`LimitedSender::check`] time.
+#[ready(0)]
 pub struct SplitCheckedSender<'a, P: PublicKey, E: Clock, F: SplitForwarder<P>> {
     checked: LimitedCheckedSender<'a, UnlimitedSender<P>>,
     replica: SplitOrigin,
@@ -1006,6 +1016,7 @@ type MessageReceiver<P> = mpsc::UnboundedReceiver<Message<P>>;
 
 /// Implementation of a [crate::Receiver] for the simulated network.
 #[derive(Debug)]
+#[ready(0)]
 pub struct Receiver<P: PublicKey> {
     receiver: MessageReceiver<P>,
 }

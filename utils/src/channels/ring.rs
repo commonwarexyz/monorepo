@@ -36,10 +36,12 @@ use std::{
     task::{Context, Poll, Waker},
 };
 use thiserror::Error;
+use commonware_macros::ready;
 
 /// Error returned when sending to a channel whose receiver has been dropped.
 #[derive(Debug, Error)]
 #[error("channel closed")]
+#[ready(0)]
 pub struct ChannelClosed;
 
 struct Shared<T: Send + Sync> {
@@ -57,6 +59,7 @@ struct Shared<T: Send + Sync> {
 ///
 /// This type can be cloned to create multiple producers for the same channel.
 /// The channel remains open until all senders are dropped.
+#[ready(0)]
 pub struct Sender<T: Send + Sync> {
     shared: Arc<Mutex<Shared<T>>>,
 }
@@ -159,6 +162,7 @@ impl<T: Send + Sync> Sink<T> for Sender<T> {
 ///
 /// The stream terminates (returns `None`) when all senders have been dropped
 /// and all buffered items have been consumed.
+#[ready(0)]
 pub struct Receiver<T: Send + Sync> {
     shared: Arc<Mutex<Shared<T>>>,
 }
@@ -208,6 +212,7 @@ impl<T: Send + Sync> Drop for Receiver<T> {
 ///
 /// Returns a ([`Sender`], [`Receiver`]) pair. The sender can be cloned to create
 /// multiple producers.
+#[ready(0)]
 pub fn channel<T: Send + Sync>(capacity: NonZeroUsize) -> (Sender<T>, Receiver<T>) {
     let shared = Arc::new(Mutex::new(Shared {
         buffer: VecDeque::with_capacity(capacity.get()),

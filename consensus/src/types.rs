@@ -40,6 +40,7 @@ use std::{
     marker::PhantomData,
     num::NonZeroU64,
 };
+use commonware_macros::ready;
 
 /// Represents a distinct segment of a contiguous sequence of views.
 ///
@@ -47,6 +48,7 @@ use std::{
 /// All consensus operations within an epoch use the same validator set.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[ready(0)]
 pub struct Epoch(u64);
 
 impl Epoch {
@@ -143,6 +145,7 @@ impl From<Epoch> for U64 {
 /// Height is a monotonically increasing counter.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[ready(0)]
 pub struct Height(u64);
 
 impl Height {
@@ -249,6 +252,7 @@ impl From<Height> for U64 {
 /// one attempt to reach consensus on a proposal.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[ready(0)]
 pub struct View(u64);
 
 impl View {
@@ -352,6 +356,7 @@ impl From<View> for U64 {
 /// For convenience, type aliases [`EpochDelta`] and [`ViewDelta`] are provided and should
 /// be preferred in most code.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[ready(0)]
 pub struct Delta<T>(u64, PhantomData<T>);
 
 impl<T> Delta<T> {
@@ -386,18 +391,21 @@ impl<T> Display for Delta<T> {
 ///
 /// [`EpochDelta`] represents a distance between epochs or a duration measured in epochs.
 /// It is used for epoch arithmetic operations and defining epoch bounds for data retention.
+#[ready(0)]
 pub type EpochDelta = Delta<Epoch>;
 
 /// Type alias for height offsets and durations.
 ///
 /// [`HeightDelta`] represents a distance between heights or a duration measured in heights.
 /// It is used for height arithmetic operations and defining height bounds for data retention.
+#[ready(0)]
 pub type HeightDelta = Delta<Height>;
 
 /// Type alias for view offsets and durations.
 ///
 /// [`ViewDelta`] represents a distance between views or a duration measured in views.
 /// It is commonly used for timeouts, activity tracking windows, and view arithmetic.
+#[ready(0)]
 pub type ViewDelta = Delta<View>;
 
 /// A unique identifier combining epoch and view for a consensus round.
@@ -406,6 +414,7 @@ pub type ViewDelta = Delta<View>;
 /// ordered first by epoch, then by view within that epoch.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[ready(0)]
 pub struct Round {
     epoch: Epoch,
     view: View,
@@ -461,6 +470,7 @@ impl From<Round> for (Epoch, View) {
 ///
 /// Epochs are divided into two halves with a distinct midpoint.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[ready(0)]
 pub enum EpochPhase {
     /// First half of the epoch (0 <= relative < length/2).
     Early,
@@ -472,6 +482,7 @@ pub enum EpochPhase {
 
 /// Information about an epoch relative to a specific height.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[ready(0)]
 pub struct EpochInfo {
     epoch: Epoch,
     height: Height,
@@ -555,6 +566,7 @@ pub trait Epocher: Clone + Send + Sync + 'static {
 
 /// Implementation of [`Epocher`] for fixed epoch lengths.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[ready(0)]
 pub struct FixedEpocher(u64);
 
 impl FixedEpocher {
@@ -628,6 +640,7 @@ impl Display for Round {
 /// An iterator over a range of views.
 ///
 /// Created by [`View::range`]. Iterates from start (inclusive) to end (exclusive).
+#[ready(0)]
 pub struct ViewRange {
     inner: std::ops::Range<u64>,
 }
@@ -659,6 +672,7 @@ impl ExactSizeIterator for ViewRange {
 /// An iterator over a range of heights.
 ///
 /// Created by [`Height::range`]. Iterates from start (inclusive) to end (exclusive).
+#[ready(0)]
 pub struct HeightRange {
     inner: std::ops::Range<u64>,
 }

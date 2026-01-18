@@ -20,8 +20,10 @@ use futures::{channel::mpsc, SinkExt, StreamExt};
 use prometheus_client::metrics::{counter::Counter, family::Family};
 use std::collections::BTreeMap;
 use tracing::debug;
+use commonware_macros::ready;
 
 /// Router actor that manages peer connections and routing messages.
+#[ready(0)]
 pub struct Actor<E: Spawner + Metrics, P: PublicKey> {
     context: ContextCell<E>,
 

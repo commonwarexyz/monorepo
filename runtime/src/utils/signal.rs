@@ -7,6 +7,7 @@ use std::{
     sync::Arc,
     task::{Context, Poll},
 };
+use commonware_macros::ready;
 
 /// A one-time broadcast that can be awaited by many tasks. It is often used for
 /// coordinating shutdown across many tasks.
@@ -82,6 +83,7 @@ use std::{
 /// });
 /// ```
 #[derive(Clone)]
+#[ready(0)]
 pub enum Signal {
     /// A signal that will resolve when the signaler marks it as resolved.
     Open(Receiver),
@@ -102,6 +104,7 @@ impl Future for Signal {
 
 /// An open [Signal] with completion tracking.
 #[derive(Clone)]
+#[ready(0)]
 pub struct Receiver {
     inner: Shared<oneshot::Receiver<i32>>,
     _guard: Arc<Guard>,
@@ -130,6 +133,7 @@ impl Drop for Guard {
 }
 
 /// Coordinates a one-time signal across many tasks.
+#[ready(0)]
 pub struct Signaler {
     tx: oneshot::Sender<i32>,
     completion_rx: oneshot::Receiver<()>,
@@ -160,6 +164,7 @@ impl Signaler {
 }
 
 /// Employs [Signaler] to coordinate the graceful shutdown of many tasks.
+#[ready(0)]
 pub enum Stopper {
     /// The stopper is running and stop has not been called yet.
     Running {

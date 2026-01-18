@@ -4,6 +4,7 @@ use bytes::Buf;
 use commonware_codec::FixedSize;
 use std::{collections::VecDeque, num::NonZeroU16};
 use tracing::error;
+use commonware_macros::ready;
 
 /// State for a single buffer of pages read from the blob.
 ///
@@ -273,6 +274,7 @@ impl Buf for ReplayBuf {
 ///
 /// This combines async I/O (`PageReader`) with sync buffering (`ReplayBuf`)
 /// to provide an `ensure(n)` + `Buf` interface for codec decoding.
+#[ready(0)]
 pub struct Replay<B: Blob> {
     /// Async I/O component.
     reader: PageReader<B>,

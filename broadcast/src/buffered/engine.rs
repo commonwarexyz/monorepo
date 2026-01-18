@@ -19,6 +19,7 @@ use futures::{
 };
 use std::collections::{BTreeMap, VecDeque};
 use tracing::{debug, error, trace, warn};
+use commonware_macros::ready;
 
 /// A responder waiting for a message.
 struct Waiter<P, Dd, M> {
@@ -49,6 +50,7 @@ struct Pair<Dc, Dd> {
 /// - Receiving messages from the network
 /// - Storing messages in the cache
 /// - Responding to requests from the application
+#[ready(0)]
 pub struct Engine<E: Clock + Spawner + Metrics, P: PublicKey, M: Committable + Digestible + Codec> {
     ////////////////////////////////////////
     // Interfaces

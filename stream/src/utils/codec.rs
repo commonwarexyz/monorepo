@@ -5,9 +5,11 @@ use commonware_codec::{
     Encode,
 };
 use commonware_runtime::{Sink, Stream};
+use commonware_macros::ready;
 
 /// Sends data to the sink with a varint length prefix.
 /// Returns an error if the message is too large or the stream is closed.
+#[ready(0)]
 pub async fn send_frame<S: Sink>(
     sink: &mut S,
     buf: impl Buf + Send,
@@ -28,6 +30,7 @@ pub async fn send_frame<S: Sink>(
 /// Receives data from the stream with a varint length prefix.
 /// Returns an error if the message is too large, the varint is invalid, or the
 /// stream is closed.
+#[ready(0)]
 pub async fn recv_frame<T: Stream>(stream: &mut T, max_message_size: u32) -> Result<Bytes, Error> {
     // Read and decode the varint length prefix byte-by-byte
     let mut decoder = Decoder::<u32>::new();

@@ -89,9 +89,11 @@ pub use location::{Location, LocationError, MAX_LOCATION};
 pub use position::{Position, MAX_POSITION};
 pub use proof::{Proof, MAX_PROOF_DIGESTS_PER_ELEMENT};
 use thiserror::Error;
+use commonware_macros::ready;
 
 /// Errors that can occur when interacting with an MMR.
 #[derive(Error, Debug)]
+#[ready(0)]
 pub enum Error {
     #[cfg(feature = "std")]
     #[error("metadata error: {0}")]

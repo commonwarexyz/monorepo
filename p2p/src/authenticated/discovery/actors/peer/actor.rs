@@ -22,6 +22,9 @@ use prometheus_client::metrics::{counter::Counter, family::Family};
 use rand_core::CryptoRngCore;
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use tracing::debug;
+use commonware_macros::ready;
+
+#[ready(0)]
 
 pub struct Actor<E: Spawner + Clock + Metrics, C: PublicKey> {
     context: E,

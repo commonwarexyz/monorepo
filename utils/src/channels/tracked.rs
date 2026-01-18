@@ -57,9 +57,11 @@ use std::{
     sync::{Arc, Mutex},
     task::{Context, Poll},
 };
+use commonware_macros::ready;
 
 /// A guard that tracks message delivery. When dropped, the message is marked as delivered.
 #[derive(Clone)]
+#[ready(0)]
 pub struct Guard<B: Eq + Hash + Clone> {
     sequence: u64,
     tracker: Arc<Mutex<State<B>>>,
@@ -102,6 +104,7 @@ impl<B: Eq + Hash + Clone> Drop for Guard<B> {
 }
 
 /// A message containing data and a [Guard] that tracks delivery.
+#[ready(0)]
 pub struct Message<T, B: Eq + Hash + Clone> {
     /// The data of the message.
     pub data: T,
@@ -175,6 +178,7 @@ impl<B: Eq + Hash + Clone> Tracker<B> {
 
 /// A sender that wraps `Sender` and tracks message delivery.
 #[derive(Clone)]
+#[ready(0)]
 pub struct Sender<T, B: Eq + Hash + Clone> {
     inner: FutSender<Message<T, B>>,
     tracker: Tracker<B>,
@@ -230,6 +234,7 @@ impl<T, B: Eq + Hash + Clone> Sender<T, B> {
 }
 
 /// A receiver that wraps [FutReceiver] and provides tracked messages.
+#[ready(0)]
 pub struct Receiver<T, B: Eq + Hash + Clone> {
     inner: FutReceiver<Message<T, B>>,
 }
@@ -255,6 +260,7 @@ impl<T, B: Eq + Hash + Clone> Stream for Receiver<T, B> {
 }
 
 /// Create a new bounded channel with delivery tracking.
+#[ready(0)]
 pub fn bounded<T, B: Eq + Hash + Clone>(buffer: usize) -> (Sender<T, B>, Receiver<T, B>) {
     let (tx, rx) = mpsc::channel(buffer);
     let sender = Sender {

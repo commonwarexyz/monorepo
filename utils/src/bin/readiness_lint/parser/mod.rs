@@ -1,4 +1,4 @@
-//! Parse the workspace to extract modules and readiness annotations.
+//! Parse the workspace to extract public items and readiness annotations.
 
 mod cfg_if;
 
@@ -86,52 +86,36 @@ pub struct Crate {
     pub modules: HashMap<String, Module>,
     pub dependencies: Vec<String>,
     pub dev_dependencies: Vec<String>,
-    /// Readiness level of the crate root (lib.rs) - from readiness!() macro
-    pub root_readiness: u8,
-    /// Whether the root readiness was explicitly set via readiness!()
-    pub root_is_explicit: bool,
     /// Public items defined at crate root (lib.rs) with their readiness from #[ready(N)]
     #[serde(default)]
     pub root_items: HashMap<String, u8>,
+    /// Public items at crate root that are missing #[ready(N)] annotation
+    #[serde(default)]
+    pub root_missing_items: Vec<String>,
 }
 
-/// How a module is exposed in the public API.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum Visibility {
-    /// Directly public via `pub mod`
-    #[default]
-    Public,
-    /// Private module with items reexported via `pub use`
-    Reexported,
-}
-
-/// A module with its readiness level and submodules.
+/// A module with its submodules and items.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Module {
     pub path: String,
-    pub readiness: u8,
     pub file_path: PathBuf,
     pub submodules: HashMap<String, Module>,
-    pub is_explicit: bool,
-    /// How this module is exposed in the public API
-    pub visibility: Visibility,
     /// Public items in this module with their readiness from #[ready(N)]
-    /// Only populated for items with explicit annotations different from module readiness
     #[serde(default)]
     pub items: HashMap<String, u8>,
+    /// Public items missing #[ready(N)] annotation
+    #[serde(default)]
+    pub missing_items: Vec<String>,
 }
 
 impl Default for Module {
     fn default() -> Self {
         Self {
             path: String::new(),
-            readiness: 0,
             file_path: PathBuf::new(),
             submodules: HashMap::new(),
-            is_explicit: false,
-            visibility: Visibility::Public,
             items: HashMap::new(),
+            missing_items: Vec::new(),
         }
     }
 }
@@ -192,13 +176,12 @@ fn parse_crate(path: &Path, config: &Config) -> Result<Crate, ParseError> {
 
     // Parse modules from lib.rs
     let lib_rs_path = path.join("src/lib.rs");
-    let (modules, root_readiness, root_items) = if lib_rs_path.exists() {
-        let root_readiness = extract_readiness_from_file(&lib_rs_path);
-        let modules = parse_modules(&lib_rs_path, &path.join("src"), "", root_readiness, config)?;
-        let root_items = extract_items_from_file(&lib_rs_path);
-        (modules, root_readiness, root_items)
+    let (modules, root_items, root_missing_items) = if lib_rs_path.exists() {
+        let modules = parse_modules(&lib_rs_path, &path.join("src"), "", config)?;
+        let (root_items, root_missing_items) = extract_items_from_file(&lib_rs_path);
+        (modules, root_items, root_missing_items)
     } else {
-        (HashMap::new(), 0, HashMap::new())
+        (HashMap::new(), HashMap::new(), Vec::new())
     };
 
     Ok(Crate {
@@ -207,9 +190,8 @@ fn parse_crate(path: &Path, config: &Config) -> Result<Crate, ParseError> {
         modules,
         dependencies,
         dev_dependencies,
-        root_readiness,
-        root_is_explicit: root_readiness > 0,
         root_items,
+        root_missing_items,
     })
 }
 
@@ -232,7 +214,6 @@ fn parse_modules(
     file_path: &Path,
     src_dir: &Path,
     parent_path: &str,
-    parent_readiness: u8,
     config: &Config,
 ) -> Result<HashMap<String, Module>, ParseError> {
     let content = fs::read_to_string(file_path)?;
@@ -283,35 +264,23 @@ fn parse_modules(
                 }
             };
 
-            // Check for #[readiness(N)] inside the module file
-            let explicit_readiness = extract_readiness_from_file(&mod_file_path);
-            let is_explicit = explicit_readiness > 0;
-            // Inherit from parent if no explicit readiness
-            let readiness = if is_explicit {
-                explicit_readiness
-            } else {
-                parent_readiness
-            };
-
             // Recursively parse submodules
             let submodules = if has_submodules {
                 let mod_dir = src_dir.join(&mod_name);
-                parse_modules(&mod_file_path, &mod_dir, &mod_path, readiness, config)?
+                parse_modules(&mod_file_path, &mod_dir, &mod_path, config)?
             } else {
                 HashMap::new()
             };
 
-            let items = extract_items_from_file(&mod_file_path);
+            let (items, missing_items) = extract_items_from_file(&mod_file_path);
             modules.insert(
                 mod_name.clone(),
                 Module {
                     path: mod_path,
-                    readiness,
                     file_path: mod_file_path.clone(),
                     submodules,
-                    is_explicit,
-                    visibility: Visibility::Public,
                     items,
+                    missing_items,
                 },
             );
         }
@@ -340,40 +309,22 @@ fn parse_modules(
             continue;
         };
 
-        // Check for #[readiness(N)] inside the module file
-        let explicit_readiness = extract_readiness_from_file(&mod_file_path);
-        let is_explicit = explicit_readiness > 0;
-        // Inherit from parent if no explicit readiness
-        let readiness = if is_explicit {
-            explicit_readiness
-        } else {
-            parent_readiness
-        };
-
         let submodules = if has_submodules {
             let mod_dir = src_dir.join(&mod_name);
-            parse_modules(&mod_file_path, &mod_dir, &mod_path, readiness, config)?
+            parse_modules(&mod_file_path, &mod_dir, &mod_path, config)?
         } else {
             HashMap::new()
         };
 
-        let items = extract_items_from_file(&mod_file_path);
+        let (items, missing_items) = extract_items_from_file(&mod_file_path);
         modules
             .entry(mod_name.clone())
-            .and_modify(|m| {
-                if readiness > m.readiness {
-                    m.readiness = readiness;
-                    m.is_explicit = is_explicit;
-                }
-            })
             .or_insert(Module {
                 path: mod_path,
-                readiness,
                 file_path: mod_file_path,
                 submodules,
-                is_explicit,
-                visibility: Visibility::Public,
                 items,
+                missing_items,
             });
     }
 
@@ -407,34 +358,23 @@ fn parse_modules(
             continue;
         };
 
-        // Check for readiness in the module file
-        let explicit_readiness = extract_readiness_from_file(&mod_file_path);
-        let is_explicit = explicit_readiness > 0;
-        let readiness = if is_explicit {
-            explicit_readiness
-        } else {
-            parent_readiness
-        };
-
         // Recursively parse submodules (they inherit the reexported visibility context)
         let submodules = if has_submodules {
             let mod_dir = src_dir.join(&mod_name);
-            parse_modules(&mod_file_path, &mod_dir, &mod_path, readiness, config)?
+            parse_modules(&mod_file_path, &mod_dir, &mod_path, config)?
         } else {
             HashMap::new()
         };
 
-        let items = extract_items_from_file(&mod_file_path);
+        let (items, missing_items) = extract_items_from_file(&mod_file_path);
         modules.insert(
             mod_name,
             Module {
                 path: mod_path,
-                readiness,
                 file_path: mod_file_path,
                 submodules,
-                is_explicit,
-                visibility: Visibility::Reexported,
                 items,
+                missing_items,
             },
         );
     }
@@ -491,81 +431,55 @@ fn extract_modules_from_use_tree(tree: &syn::UseTree, modules: &mut HashSet<Stri
     }
 }
 
-/// Extract readiness level from a module file.
-/// Looks for `readiness!(N)` patterns (with or without path prefix).
-fn extract_readiness_from_file(file_path: &Path) -> u8 {
-    let content = match fs::read_to_string(file_path) {
-        Ok(c) => c,
-        Err(_) => return 0,
-    };
-
-    for line in content.lines() {
-        let trimmed = line.trim();
-
-        // Skip comments (doc comments and regular comments)
-        if trimmed.starts_with("//") {
-            continue;
-        }
-
-        // Look for pattern: readiness!(N) or commonware_macros::readiness!(N)
-        if let Some(pos) = trimmed.find("readiness!(") {
-            let rest = &trimmed[pos + 11..];
-            if let Some(end) = rest.find(')') {
-                if let Ok(level) = rest[..end].trim().parse::<u8>() {
-                    return level.min(4);
-                }
-            }
-        }
-    }
-
-    0
-}
-
 /// Extract public items and their readiness from #[ready(N)] attributes.
-/// Returns a map of item_name -> readiness level.
-/// Only includes items with explicit #[ready(N)] annotations.
-fn extract_items_from_file(file_path: &Path) -> HashMap<String, u8> {
+/// Returns a tuple of (items with readiness, items missing readiness).
+/// Only checks structs, enums, functions, and type aliases (not traits or constants).
+fn extract_items_from_file(file_path: &Path) -> (HashMap<String, u8>, Vec<String>) {
     let mut items = HashMap::new();
+    let mut missing = Vec::new();
 
     let content = match fs::read_to_string(file_path) {
         Ok(c) => c,
-        Err(_) => return items,
+        Err(_) => return (items, missing),
     };
 
     let parsed = match syn::parse_file(&content) {
         Ok(f) => f,
-        Err(_) => return items,
+        Err(_) => return (items, missing),
     };
 
     for item in &parsed.items {
-        let (name, attrs) = match item {
+        let (name, attrs, requires_annotation) = match item {
             syn::Item::Struct(s) if matches!(s.vis, syn::Visibility::Public(_)) => {
-                (s.ident.to_string(), &s.attrs)
+                (s.ident.to_string(), &s.attrs, true)
             }
             syn::Item::Enum(e) if matches!(e.vis, syn::Visibility::Public(_)) => {
-                (e.ident.to_string(), &e.attrs)
-            }
-            syn::Item::Trait(t) if matches!(t.vis, syn::Visibility::Public(_)) => {
-                (t.ident.to_string(), &t.attrs)
+                (e.ident.to_string(), &e.attrs, true)
             }
             syn::Item::Fn(f) if matches!(f.vis, syn::Visibility::Public(_)) => {
-                (f.sig.ident.to_string(), &f.attrs)
+                (f.sig.ident.to_string(), &f.attrs, true)
             }
             syn::Item::Type(t) if matches!(t.vis, syn::Visibility::Public(_)) => {
-                (t.ident.to_string(), &t.attrs)
+                (t.ident.to_string(), &t.attrs, true)
+            }
+            // Traits and constants don't require annotations but we still track them
+            syn::Item::Trait(t) if matches!(t.vis, syn::Visibility::Public(_)) => {
+                (t.ident.to_string(), &t.attrs, false)
             }
             syn::Item::Const(c) if matches!(c.vis, syn::Visibility::Public(_)) => {
-                (c.ident.to_string(), &c.attrs)
+                (c.ident.to_string(), &c.attrs, false)
             }
             _ => continue,
         };
 
         if let Some(readiness) = get_ready_attribute(attrs) {
             items.insert(name, readiness);
+        } else if requires_annotation {
+            missing.push(name);
         }
     }
 
-    items
+    (items, missing)
 }
 
 /// Extract readiness level from #[ready(N)] attribute.

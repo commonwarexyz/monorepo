@@ -28,6 +28,7 @@ use std::{
     ops::Range,
 };
 use tracing::warn;
+use commonware_macros::ready;
 
 mod operation;
 pub use operation::Operation;
@@ -39,6 +40,7 @@ pub mod sync;
 
 /// Configuration for an [Immutable] authenticated db.
 #[derive(Clone)]
+#[ready(0)]
 pub struct Config<T: Translator, C> {
     /// The name of the [RStorage] partition used for the MMR's backing journal.
     pub mmr_journal_partition: String,
@@ -79,6 +81,7 @@ pub struct Config<T: Translator, C> {
 
 /// An authenticated database that only supports adding new keyed values (no updates or
 /// deletions), where values can have varying sizes.
+#[ready(0)]
 pub struct Immutable<
     E: RStorage + Clock + Metrics,
     K: Array,

@@ -33,7 +33,6 @@
 //! - Messages with timestamps too old are rejected to prevent replay attacks
 //! - Messages with timestamps too far in the future are rejected to safeguard against clock skew
 
-commonware_macros::readiness!(2);
 
 use crate::{
     transcript::{Summary, Transcript},
@@ -42,6 +41,7 @@ use crate::{
 use commonware_codec::{Encode, FixedSize, Read, ReadExt, Write};
 use core::ops::Range;
 use rand_core::CryptoRngCore;
+use commonware_macros::ready;
 
 mod error;
 pub use error::Error;
@@ -64,6 +64,7 @@ const LABEL_CONFIRMATION_D2L: &[u8] = b"confirmation_d2l";
 /// First handshake message sent by the dialer.
 /// Contains dialer's ephemeral key and timestamp signature.
 #[cfg_attr(test, derive(Debug, PartialEq))]
+#[ready(0)]
 pub struct Syn<S: Signature> {
     time_ms: u64,
     epk: EphemeralPublicKey,
@@ -114,6 +115,7 @@ where
 /// Second handshake message sent by the listener.
 /// Contains listener's ephemeral key, signature, and confirmation tag.
 #[cfg_attr(test, derive(Debug, PartialEq))]
+#[ready(0)]
 pub struct SynAck<S: Signature> {
     time_ms: u64,
     epk: EphemeralPublicKey,
@@ -169,6 +171,7 @@ where
 /// Contains dialer's confirmation tag to complete the handshake.
 #[cfg_attr(test, derive(PartialEq))]
 #[cfg_attr(feature = "arbitrary", derive(Debug, arbitrary::Arbitrary))]
+#[ready(0)]
 pub struct Ack {
     confirmation: Summary,
 }
@@ -198,6 +201,7 @@ impl Read for Ack {
 
 /// State maintained by the dialer during handshake.
 /// Tracks ephemeral secret, peer identity, and protocol transcript.
+#[ready(0)]
 pub struct DialState<P> {
     esk: SecretKey,
     peer_identity: P,
@@ -207,6 +211,7 @@ pub struct DialState<P> {
 
 /// State maintained by the listener during handshake.
 /// Tracks expected confirmation and derived ciphers.
+#[ready(0)]
 pub struct ListenState {
     confirmation: Summary,
     send: SendCipher,
@@ -215,6 +220,7 @@ pub struct ListenState {
 
 /// Handshake context containing timing and identity information.
 /// Used by both dialer and listener to initialize handshake state.
+#[ready(0)]
 pub struct Context<S, P> {
     transcript: Transcript,
     current_time: u64,
@@ -244,6 +250,7 @@ impl<S, P> Context<S, P> {
 
 /// Initiates a handshake as the dialer.
 /// Returns the dialer state and the first message to send.
+#[ready(0)]
 pub fn dial_start<S: Signer, P: PublicKey>(
     rng: impl CryptoRngCore,
     ctx: Context<S, P>,
@@ -280,6 +287,7 @@ pub fn dial_start<S: Signer, P: PublicKey>(
 
 /// Completes a handshake as the dialer.
 /// Verifies the listener's response and returns final message and ciphers.
+#[ready(0)]
 pub fn dial_end<P: PublicKey>(
     state: DialState<P>,
     msg: SynAck<<P as Verifier>::Signature>,
@@ -325,6 +333,7 @@ pub fn dial_end<P: PublicKey>(
 
 /// Processes the first handshake message as the listener.
 /// Verifies the dialer's message and returns state and response.
+#[ready(0)]
 pub fn listen_start<S: Signer, P: PublicKey>(
     rng: &mut impl CryptoRngCore,
     ctx: Context<S, P>,
@@ -383,6 +392,7 @@ pub fn listen_start<S: Signer, P: PublicKey>(
 
 /// Completes the handshake as the listener.
 /// Verifies the dialer's confirmation and returns established ciphers.
+#[ready(0)]
 pub fn listen_end(state: ListenState, msg: Ack) -> Result<(SendCipher, RecvCipher), Error> {
     if msg.confirmation != state.confirmation {
         return Err(Error::HandshakeFailed);

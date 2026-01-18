@@ -8,10 +8,12 @@ use std::{
 use thiserror::Error;
 use tracing::{field, span, Event, Level, Subscriber};
 use tracing_subscriber::{layer::Context, registry::LookupSpan, Layer};
+use commonware_macros::ready;
 
 /// An error that occurs when a trace assertion fails.
 #[derive(Error, Debug, Clone, Eq, PartialEq)]
 #[error("Trace assertion error: {0}")]
+#[ready(0)]
 pub struct TraceAssertionError(String);
 
 impl From<String> for TraceAssertionError {
@@ -22,6 +24,7 @@ impl From<String> for TraceAssertionError {
 
 /// A [tracing] event with its content and associated fields.
 #[derive(Default, Clone, Debug)]
+#[ready(0)]
 pub struct EventMetadata {
     /// The message content of the event.
     pub content: String,
@@ -134,6 +137,7 @@ impl field::Visit for EventMetadata {
 
 /// A recorded event with its [Level], target, active spans, message, and fields.
 #[derive(Debug, Clone)]
+#[ready(0)]
 pub struct RecordedEvent {
     /// The [Level] of the event.
     pub level: Level,
@@ -185,6 +189,7 @@ impl RecordedEvent {
 
 /// A collection of [RecordedEvent]s.
 #[derive(Default, Debug, Clone)]
+#[ready(0)]
 pub struct RecordedEvents(Vec<RecordedEvent>);
 
 impl RecordedEvents {
@@ -260,6 +265,7 @@ impl From<Vec<RecordedEvent>> for RecordedEvents {
 
 /// The storage for the collected traces.
 #[derive(Debug, Default, Clone)]
+#[ready(0)]
 pub struct TraceStorage(Arc<Mutex<RecordedEvents>>);
 
 impl TraceStorage {
@@ -287,6 +293,7 @@ impl TraceStorage {
 
 /// A subscriber layer for [tracing] that collects traces and their log levels.
 #[derive(Debug, Default)]
+#[ready(0)]
 pub struct CollectingLayer(TraceStorage);
 
 impl CollectingLayer {

@@ -19,8 +19,10 @@ use commonware_runtime::{Clock, Metrics, RwLock, Storage};
 use commonware_utils::Array;
 use futures::channel::oneshot;
 use std::{future::Future, num::NonZeroU64, sync::Arc};
+use commonware_macros::ready;
 
 /// Result from a fetch operation
+#[ready(0)]
 pub struct FetchResult<Op, D: Digest> {
     /// The proof for the operations
     pub proof: Proof<D>,

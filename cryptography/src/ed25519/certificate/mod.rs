@@ -3,6 +3,7 @@
 //! This module provides both the generic Ed25519 implementation and a macro to generate
 //! protocol-specific wrappers.
 
+use commonware_macros::ready;
 #[cfg(feature = "mocks")]
 pub mod mocks;
 
@@ -33,6 +34,7 @@ use std::collections::BTreeSet;
 /// context types. It can be reused across different protocols (simplex, aggregation, etc.)
 /// by wrapping it with protocol-specific trait implementations via the macro.
 #[derive(Clone, Debug)]
+#[ready(0)]
 pub struct Generic<N: Namespace> {
     /// Participants in the committee.
     pub participants: Set<PublicKey>,
@@ -405,6 +407,8 @@ impl<N: Namespace> Generic<N> {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[ready(0)]
+
 pub struct Certificate {
     /// Bitmap of participant indices that contributed signatures.
     pub signers: Signers,

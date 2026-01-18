@@ -9,6 +9,9 @@ use commonware_utils::{
 use futures::channel::{mpsc, oneshot};
 use rand_distr::Normal;
 use std::time::Duration;
+use commonware_macros::ready;
+
+#[ready(0)]
 
 pub enum Message<P: PublicKey, E: Clock> {
     Register {
@@ -95,6 +98,7 @@ impl<P: PublicKey, E: Clock> std::fmt::Debug for Message<P, E> {
 /// Links are unidirectional (and must be set up in both directions
 /// for a bidirectional connection).
 #[derive(Clone)]
+#[ready(0)]
 pub struct Link {
     /// Mean latency for the delivery of a message.
     pub latency: Duration,
@@ -111,6 +115,7 @@ pub struct Link {
 /// At any point, peers can be added/removed and links
 /// between said peers can be modified.
 #[derive(Debug)]
+#[ready(0)]
 pub struct Oracle<P: PublicKey, E: Clock> {
     sender: UnboundedMailbox<Message<P, E>>,
 }
@@ -268,6 +273,7 @@ impl<P: PublicKey, E: Clock> Oracle<P, E> {
 /// Implementation of [crate::Manager] for peers.
 ///
 /// Useful for mocking [crate::authenticated::discovery].
+#[ready(0)]
 pub struct Manager<P: PublicKey, E: Clock> {
     /// The oracle to send messages to.
     oracle: Oracle<P, E>,
@@ -315,6 +321,7 @@ impl<P: PublicKey, E: Clock> crate::Manager for Manager<P, E> {
 /// Because addresses are never exposed in [crate::simulated],
 /// there is nothing to assert submitted data against. We thus consider
 /// all addresses to be valid.
+#[ready(0)]
 pub struct SocketManager<P: PublicKey, E: Clock> {
     /// The oracle to send messages to.
     oracle: Oracle<P, E>,
@@ -356,6 +363,7 @@ impl<P: PublicKey, E: Clock> crate::Manager for SocketManager<P, E> {
 
 /// Individual control interface for a peer in the simulated network.
 #[derive(Debug)]
+#[ready(0)]
 pub struct Control<P: PublicKey, E: Clock> {
     /// The public key of the peer this control interface is for.
     me: P,

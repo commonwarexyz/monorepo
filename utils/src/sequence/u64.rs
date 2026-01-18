@@ -1,6 +1,7 @@
 use crate::{Array, Span};
 use bytes::{Buf, BufMut};
 use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
+use commonware_macros::ready;
 use core::{
     cmp::{Ord, PartialOrd},
     fmt::{Debug, Display, Formatter},
@@ -11,6 +12,7 @@ use thiserror::Error;
 
 // Errors returned by `U64` functions.
 #[derive(Error, Debug, PartialEq)]
+#[ready(0)]
 pub enum Error {
     #[error("invalid length")]
     InvalidLength,
@@ -20,6 +22,7 @@ pub enum Error {
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Default)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[repr(transparent)]
+#[ready(0)]
 pub struct U64([u8; u64::SIZE]);
 
 impl U64 {

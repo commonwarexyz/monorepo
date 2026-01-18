@@ -8,11 +8,13 @@ use crate::{
     translator::Translator,
 };
 use commonware_runtime::Metrics;
+use commonware_macros::ready;
 
 /// A partitioned index that maps translated keys to values. The first `P` bytes of the
 /// (untranslated) key are used to determine the partition, and the translator is used by the
 /// partition-specific indices on the key after stripping this prefix. The value of `P` should be
 /// small, typically 1 or 2. Anything larger than 3 will fail to compile.
+#[ready(0)]
 pub struct Index<T: Translator, V: Eq + Send + Sync, const P: usize> {
     partitions: Vec<UnorderedIndex<T, V>>,
 }

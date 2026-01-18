@@ -16,9 +16,11 @@ use commonware_utils::{union, N3f1};
 use futures::channel::oneshot;
 use rand_core::CryptoRngCore;
 use std::hash::Hash;
+use commonware_macros::ready;
 
 /// Error that may be encountered when interacting with `aggregation`.
 #[derive(Debug, thiserror::Error)]
+#[ready(0)]
 pub enum Error {
     // Proposal Errors
     /// The proposal was canceled by the application
@@ -94,6 +96,7 @@ fn ack_namespace(namespace: &[u8]) -> Vec<u8> {
 /// This type encapsulates the pre-computed namespace bytes used for signing and
 /// verifying acks.
 #[derive(Clone, Debug)]
+#[ready(0)]
 pub struct Namespace(Vec<u8>);
 
 impl certificate::Namespace for Namespace {
@@ -105,6 +108,7 @@ impl certificate::Namespace for Namespace {
 /// Item represents a single element being aggregated in the protocol.
 /// Each item has a unique height and contains a digest that validators sign.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[ready(0)]
 pub struct Item<D: Digest> {
     /// Sequential position of this item within the current epoch
     pub height: Height,
@@ -168,6 +172,7 @@ where
 /// Acknowledgment (ack) represents a validator's vote on an item.
 /// Multiple acks can be recovered into a certificate for consensus.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[ready(0)]
 pub struct Ack<S: Scheme, D: Digest> {
     /// The item being acknowledged
     pub item: Item<D>,
@@ -260,6 +265,7 @@ where
 /// Message exchanged between peers containing an acknowledgment and tip information.
 /// This combines a validator's vote with their view of consensus progress.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[ready(0)]
 pub struct TipAck<S: Scheme, D: Digest> {
     /// The peer's local view of the tip (the lowest height that is not yet confirmed).
     pub tip: Height,
@@ -306,6 +312,7 @@ where
 
 /// A recovered certificate for some [Item].
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[ready(0)]
 pub struct Certificate<S: Scheme, D: Digest> {
     /// The item that was recovered.
     pub item: Item<D>,
@@ -382,6 +389,7 @@ where
 /// aggregation. Also used to journal events that are needed to initialize the aggregation engine
 /// when the node restarts.
 #[derive(Clone, Debug, PartialEq)]
+#[ready(0)]
 pub enum Activity<S: Scheme, D: Digest> {
     /// Received an ack from a participant.
     Ack(Ack<S, D>),

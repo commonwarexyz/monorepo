@@ -23,6 +23,7 @@ use std::{
     },
     ops::Bound::{Excluded, Unbounded},
 };
+use commonware_macros::ready;
 
 /// Implementation of [IndexEntry] for [BTreeOccupiedEntry].
 impl<K: Ord + Send + Sync, V: Eq + Send + Sync> IndexEntry<V>
@@ -40,6 +41,7 @@ impl<K: Ord + Send + Sync, V: Eq + Send + Sync> IndexEntry<V>
 }
 
 /// A cursor for the ordered [Index] that wraps the shared implementation.
+#[ready(0)]
 pub struct Cursor<'a, K: Ord + Send + Sync, V: Eq + Send + Sync> {
     inner: CursorImpl<'a, V, BTreeOccupiedEntry<'a, K, Record<V>>>,
 }
@@ -85,6 +87,7 @@ impl<K: Ord + Send + Sync, V: Eq + Send + Sync> CursorTrait for Cursor<'_, K, V>
 
 /// A memory-efficient index that uses an ordered map internally to map translated keys to arbitrary
 /// values.
+#[ready(0)]
 pub struct Index<T: Translator, V: Eq + Send + Sync> {
     translator: T,
     map: BTreeMap<T::Key, Record<V>>,

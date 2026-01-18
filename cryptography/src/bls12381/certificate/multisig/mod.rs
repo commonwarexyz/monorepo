@@ -3,6 +3,7 @@
 //! This module provides both the generic BLS12-381 multisig implementation and a macro to generate
 //! protocol-specific wrappers.
 
+use commonware_macros::ready;
 #[cfg(feature = "mocks")]
 pub mod mocks;
 
@@ -34,6 +35,7 @@ use std::collections::BTreeSet;
 /// context types. It can be reused across different protocols (simplex, aggregation, etc.)
 /// by wrapping it with protocol-specific trait implementations via the macro.
 #[derive(Clone, Debug)]
+#[ready(0)]
 pub struct Generic<P: PublicKey, V: Variant, N: Namespace> {
     /// Participants in the committee.
     pub participants: BiMap<P, V::Public>,
@@ -309,6 +311,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
 /// Certificate formed by an aggregated BLS12-381 signature plus the signers that
 /// contributed to it.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[ready(0)]
 pub struct Certificate<V: Variant> {
     /// Bitmap of participant indices that contributed signatures.
     pub signers: Signers,

@@ -53,6 +53,7 @@ use prometheus_client::metrics::gauge::Gauge;
 use rand::Rng;
 use std::{sync::Arc, time::Instant};
 use tracing::{debug, warn};
+use commonware_macros::ready;
 
 /// An [Application] adapter that handles epoch transitions and validates block ancestry.
 ///
@@ -74,6 +75,7 @@ use tracing::{debug, warn};
 ///
 /// Applications do not need to re-implement these checks in their own verification logic.
 #[derive(Clone)]
+#[ready(0)]
 pub struct Marshaled<E, S, A, B, ES>
 where
     E: Rng + Spawner + Metrics + Clock,

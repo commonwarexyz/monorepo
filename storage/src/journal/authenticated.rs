@@ -24,9 +24,11 @@ use core::num::{NonZeroU64, NonZeroUsize};
 use futures::{future::try_join_all, try_join, TryFutureExt as _};
 use thiserror::Error;
 use tracing::{debug, warn};
+use commonware_macros::ready;
 
 /// Errors that can occur when interacting with an authenticated journal.
 #[derive(Error, Debug)]
+#[ready(0)]
 pub enum Error {
     #[error("mmr error: {0}")]
     Mmr(#[from] crate::mmr::Error),
@@ -38,6 +40,7 @@ pub enum Error {
 /// Mountain Range (MMR). The item at index i in the journal corresponds to the leaf at Location i
 /// in the MMR. This structure enables efficient proofs that an item is included in the journal at a
 /// specific location.
+#[ready(0)]
 pub struct Journal<E, C, H, S: State<H::Digest> + Send + Sync = Dirty>
 where
     E: Storage + Clock + Metrics,

@@ -3,12 +3,12 @@
 //! [Archive] is a key-value store designed for workloads where all data is written only once and is
 //! uniquely associated with both an `index` and a `key`.
 
-commonware_macros::readiness!(2);
 
 use commonware_codec::Codec;
 use commonware_utils::Array;
 use std::future::Future;
 use thiserror::Error;
+use commonware_macros::ready;
 
 pub mod immutable;
 pub mod prunable;
@@ -17,6 +17,7 @@ pub mod prunable;
 mod conformance;
 
 /// Subject of a `get` or `has` operation.
+#[ready(0)]
 pub enum Identifier<'a, K: Array> {
     Index(u64),
     Key(&'a K),
@@ -24,6 +25,7 @@ pub enum Identifier<'a, K: Array> {
 
 /// Errors that can occur when interacting with the archive.
 #[derive(Debug, Error)]
+#[ready(0)]
 pub enum Error {
     #[error("journal error: {0}")]
     Journal(#[from] crate::journal::Error),

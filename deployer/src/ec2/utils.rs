@@ -9,6 +9,7 @@ use tokio::{
     time::{sleep, Duration},
 };
 use tracing::{info, warn};
+use commonware_macros::ready;
 
 /// Maximum number of SSH connection attempts before failing
 pub const MAX_SSH_ATTEMPTS: usize = 30;
@@ -29,6 +30,7 @@ pub const DEPLOYER_MIN_PORT: i32 = 0;
 pub const DEPLOYER_MAX_PORT: i32 = 65535;
 
 /// Fetch the current machine's public IPv4 address
+#[ready(0)]
 pub async fn get_public_ip() -> Result<String, Error> {
     // icanhazip.com is maintained by Cloudflare as of 6/6/2021 (https://major.io/p/a-new-future-for-icanhazip/)
     let result = reqwest::get("https://ipv4.icanhazip.com")
@@ -41,6 +43,7 @@ pub async fn get_public_ip() -> Result<String, Error> {
 }
 
 /// Executes a command on a remote instance via SSH with retries
+#[ready(0)]
 pub async fn ssh_execute(key_file: &str, ip: &str, command: &str) -> Result<(), Error> {
     for _ in 0..MAX_SSH_ATTEMPTS {
         let output = Command::new("ssh")
@@ -66,6 +69,7 @@ pub async fn ssh_execute(key_file: &str, ip: &str, command: &str) -> Result<(), 
 }
 
 /// Polls the status of a systemd service on a remote instance until active
+#[ready(0)]
 pub async fn poll_service_active(key_file: &str, ip: &str, service: &str) -> Result<(), Error> {
     for _ in 0..MAX_POLL_ATTEMPTS {
         let output = Command::new("ssh")
@@ -97,6 +101,7 @@ pub async fn poll_service_active(key_file: &str, ip: &str, service: &str) -> Res
 }
 
 /// Polls the status of a systemd service on a remote instance until it becomes inactive
+#[ready(0)]
 pub async fn poll_service_inactive(key_file: &str, ip: &str, service: &str) -> Result<(), Error> {
     for _ in 0..MAX_POLL_ATTEMPTS {
         let output = Command::new("ssh")
@@ -128,6 +133,7 @@ pub async fn poll_service_inactive(key_file: &str, ip: &str, service: &str) -> R
 }
 
 /// Enables BBR on a remote instance by downloading config from S3 and applying sysctl settings.
+#[ready(0)]
 pub async fn enable_bbr(key_file: &str, ip: &str, bbr_conf_url: &str) -> Result<(), Error> {
     let download_cmd = format!(
         "wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/99-bbr.conf '{}'",
@@ -145,6 +151,7 @@ pub async fn enable_bbr(key_file: &str, ip: &str, bbr_conf_url: &str) -> Result<
 }
 
 /// Converts an IP address to a CIDR block
+#[ready(0)]
 pub fn exact_cidr(ip: &str) -> String {
     format!("{ip}/32")
 }
@@ -153,6 +160,7 @@ pub fn exact_cidr(ip: &str) -> String {
 pub const MAX_DOWNLOAD_ATTEMPTS: usize = 10;
 
 /// Downloads a file from a URL to a local path with retries
+#[ready(0)]
 pub async fn download_file(url: &str, dest: &Path) -> Result<(), Error> {
     for attempt in 1..=MAX_DOWNLOAD_ATTEMPTS {
         match download_file_once(url, dest).await {

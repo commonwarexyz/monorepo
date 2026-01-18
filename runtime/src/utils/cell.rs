@@ -11,6 +11,7 @@ use std::{
     ops::RangeInclusive,
     time::{Duration, SystemTime},
 };
+use commonware_macros::ready;
 
 const MISSING_CONTEXT: &str = "runtime context missing";
 const DUPLICATE_CONTEXT: &str = "runtime context already present";
@@ -36,6 +37,7 @@ macro_rules! spawn_cell {
 /// all interactions to unwrap (as with `Option<C>`).
 // TODO(#1833): Remove `Clone`
 #[derive(Clone, Debug)]
+#[ready(0)]
 pub enum Cell<C> {
     /// A context available for use.
     Present(C),

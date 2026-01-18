@@ -29,6 +29,7 @@ use futures::{
 use rand::Rng;
 use std::{collections::HashMap, marker::PhantomData};
 use tracing::{debug, error, trace, warn};
+use commonware_macros::ready;
 
 /// Represents a pending serve operation.
 struct Serve<E: Clock, P: PublicKey> {
@@ -39,6 +40,7 @@ struct Serve<E: Clock, P: PublicKey> {
 }
 
 /// Manages incoming and outgoing P2P requests, coordinating fetch and serve operations.
+#[ready(0)]
 pub struct Engine<
     E: Clock + Spawner + Rng + Metrics,
     P: PublicKey,

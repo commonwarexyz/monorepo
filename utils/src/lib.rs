@@ -13,6 +13,7 @@ extern crate alloc;
 use alloc::{boxed::Box, string::String, vec::Vec};
 use bytes::{Buf, BufMut, BytesMut};
 use commonware_codec::{varint::UInt, EncodeSize, Error as CodecError, Read, ReadExt, Write};
+use commonware_macros::ready;
 use core::{
     fmt::{Debug, Write as FmtWrite},
     time::Duration,
@@ -44,6 +45,7 @@ pub mod vec;
 /// validator's public key in the ordered participant set.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[ready(0)]
 pub struct Participant(u32);
 
 impl Participant {
@@ -143,6 +145,7 @@ pub mod concurrency;
 ///
 /// Uses seed 0 by default to ensure reproducible test results.
 #[cfg(feature = "std")]
+#[ready(0)]
 pub fn test_rng() -> rand::rngs::StdRng {
     rand::SeedableRng::seed_from_u64(0)
 }
@@ -152,14 +155,17 @@ pub fn test_rng() -> rand::rngs::StdRng {
 /// Use this when you need multiple independent RNG streams in the same test,
 /// or when a helper function needs its own RNG that won't collide with the caller's.
 #[cfg(feature = "std")]
+#[ready(0)]
 pub fn test_rng_seeded(seed: u64) -> rand::rngs::StdRng {
     rand::SeedableRng::seed_from_u64(seed)
 }
 
 /// Alias for boxed errors that are `Send` and `Sync`.
+#[ready(0)]
 pub type BoxedError = Box<dyn core::error::Error + Send + Sync>;
 
 /// Converts bytes to a hexadecimal string.
+#[ready(0)]
 pub fn hex(bytes: &[u8]) -> String {
     let mut hex = String::new();
     for byte in bytes.iter() {
@@ -169,6 +175,7 @@ pub fn hex(bytes: &[u8]) -> String {
 }
 
 /// Converts a hexadecimal string to bytes.
+#[ready(0)]
 pub fn from_hex(hex: &str) -> Option<Vec<u8>> {
     let bytes = hex.as_bytes();
     if !bytes.len().is_multiple_of(2) {
@@ -197,6 +204,7 @@ const fn decode_hex_digit(byte: u8) -> Option<u8> {
 
 /// Converts a hexadecimal string to bytes, stripping whitespace and/or a `0x` prefix. Commonly used
 /// in testing to encode external test vectors without modification.
+#[ready(0)]
 pub fn from_hex_formatted(hex: &str) -> Option<Vec<u8>> {
     let hex = hex.replace(['\t', '\n', '\r', ' '], "");
     let res = hex.strip_prefix("0x").unwrap_or(&hex);
@@ -204,6 +212,7 @@ pub fn from_hex_formatted(hex: &str) -> Option<Vec<u8>> {
 }
 
 /// Computes the union of two byte slices.
+#[ready(0)]
 pub fn union(a: &[u8], b: &[u8]) -> Vec<u8> {
     let mut union = Vec::with_capacity(a.len() + b.len());
     union.extend_from_slice(a);
@@ -214,6 +223,7 @@ pub fn union(a: &[u8], b: &[u8]) -> Vec<u8> {
 /// Concatenate a namespace and a message, prepended by a varint encoding of the namespace length.
 ///
 /// This produces a unique byte sequence (i.e. no collisions) for each `(namespace, msg)` pair.
+#[ready(0)]
 pub fn union_unique(namespace: &[u8], msg: &[u8]) -> Vec<u8> {
     let len_prefix = namespace.len();
     let mut buf = BytesMut::with_capacity(len_prefix.encode_size() + namespace.len() + msg.len());
@@ -230,6 +240,7 @@ pub fn union_unique(namespace: &[u8], msg: &[u8]) -> Vec<u8> {
 /// # Panics
 ///
 /// Panics if `n` is zero.
+#[ready(0)]
 pub fn modulo(bytes: &[u8], n: u64) -> u64 {
     assert_ne!(n, 0, "modulus must be non-zero");
 
@@ -316,6 +327,7 @@ macro_rules! NZU64 {
 
 /// A wrapper around `Duration` that guarantees the duration is non-zero.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[ready(0)]
 pub struct NonZeroDuration(Duration);
 
 impl NonZeroDuration {

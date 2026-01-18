@@ -16,8 +16,10 @@ use std::{
     task::{Context, Poll},
 };
 use tracing::error;
+use commonware_macros::ready;
 
 /// Handle to a spawned task.
+#[ready(0)]
 pub struct Handle<T>
 where
     T: Send + 'static,
@@ -162,6 +164,7 @@ impl MetricHandle {
 }
 
 /// A panic emitted by a spawned task.
+#[ready(0)]
 pub type Panic = Box<dyn Any + Send + 'static>;
 
 /// Notifies the runtime when a spawned task panics, so it can propagate the failure.

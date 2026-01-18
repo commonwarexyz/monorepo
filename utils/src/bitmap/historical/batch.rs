@@ -4,6 +4,7 @@ use crate::bitmap::{historical::BitMap, Prunable};
 use alloc::{collections::BTreeMap, vec::Vec};
 #[cfg(feature = "std")]
 use std::collections::BTreeMap;
+use commonware_macros::ready;
 
 /// An active batch that tracks mutations as a diff layer.
 ///
@@ -112,6 +113,7 @@ pub(super) struct Batch<const N: usize> {
 /// assert_eq!(bitmap.len(), 0);
 /// ```
 #[must_use = "batches must be committed or explicitly dropped"]
+#[ready(0)]
 pub struct BatchGuard<'a, const N: usize> {
     pub(super) bitmap: &'a mut BitMap<N>,
     pub(super) committed: bool,

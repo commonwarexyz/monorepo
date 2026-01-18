@@ -24,9 +24,11 @@ use core::ops::Range;
 use futures::future::try_join_all;
 use std::num::NonZeroU64;
 use tracing::debug;
+use commonware_macros::ready;
 
 /// A proof that a range of operations exist in the database.
 #[derive(Clone, Eq, PartialEq, Debug)]
+#[ready(0)]
 pub struct RangeProof<D: Digest> {
     /// The MMR digest material required to verify the proof.
     pub proof: Proof<D>,
@@ -229,6 +231,7 @@ impl<D: Digest> RangeProof<D> {
 
 /// A proof that a specific operation is currently active in the database.
 #[derive(Clone, Eq, PartialEq, Debug)]
+#[ready(0)]
 pub struct OperationProof<D: Digest, const N: usize> {
     /// The location of the operation in the db.
     pub loc: Location,

@@ -7,11 +7,13 @@ use opentelemetry_sdk::{
     Resource,
 };
 use std::time::Duration;
+use commonware_macros::ready;
 
 /// Timeout for the OTLP HTTP exporter.
 const TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Configuration for exporting traces to an OTLP endpoint.
+#[ready(0)]
 pub struct Config {
     /// The OTLP endpoint to export traces to.
     pub endpoint: String,
@@ -22,6 +24,7 @@ pub struct Config {
 }
 
 /// Export traces to an OTLP endpoint.
+#[ready(0)]
 pub fn export(cfg: Config) -> Result<Tracer, ExporterBuildError> {
     // Create the OTLP HTTP exporter
     let exporter = SpanExporter::builder()

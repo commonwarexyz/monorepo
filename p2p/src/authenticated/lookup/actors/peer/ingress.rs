@@ -1,8 +1,10 @@
 use crate::authenticated::Mailbox;
 use commonware_utils::channels::fallible::AsyncFallibleExt;
+use commonware_macros::ready;
 
 /// Messages that can be sent to the peer [super::Actor].
 #[derive(Clone, Debug)]
+#[ready(0)]
 pub enum Message {
     /// Kill the peer actor.
     Kill,

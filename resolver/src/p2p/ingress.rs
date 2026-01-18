@@ -2,10 +2,12 @@ use crate::Resolver;
 use commonware_cryptography::PublicKey;
 use commonware_utils::{channels::fallible::AsyncFallibleExt, vec::NonEmptyVec, Span};
 use futures::channel::mpsc;
+use commonware_macros::ready;
 
 type Predicate<K> = Box<dyn Fn(&K) -> bool + Send>;
 
 /// A request to fetch data for a key, optionally with target peers.
+#[ready(0)]
 pub struct FetchRequest<K, P> {
     /// The key to fetch.
     pub key: K,
@@ -17,6 +19,7 @@ pub struct FetchRequest<K, P> {
 }
 
 /// Messages that can be sent to the peer actor.
+#[ready(0)]
 pub enum Message<K, P> {
     /// Initiate fetch requests.
     Fetch(Vec<FetchRequest<K, P>>),
@@ -33,6 +36,7 @@ pub enum Message<K, P> {
 
 /// A way to send messages to the peer actor.
 #[derive(Clone)]
+#[ready(0)]
 pub struct Mailbox<K, P> {
     /// The channel that delivers messages to the peer actor.
     sender: mpsc::Sender<Message<K, P>>,

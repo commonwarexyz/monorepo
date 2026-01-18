@@ -294,6 +294,7 @@ use crate::{
     PublicKey, Secret, Signer,
 };
 use commonware_codec::{Encode, EncodeSize, RangeCfg, Read, ReadExt, Write};
+use commonware_macros::ready;
 use commonware_math::{
     algebra::{Additive, CryptoGroup, Random},
     poly::{Interpolator, Poly},
@@ -320,6 +321,7 @@ const SIG_LOG: &[u8] = b"log";
 /// [`Error::DkgFailed`]. Everything else only happens if you use a configuration
 /// for [`Info`] or [`Dealer`] which is invalid in some way.
 #[derive(Debug, Error)]
+#[ready(0)]
 pub enum Error {
     #[error("missing dealer's share from the previous round")]
     MissingDealerShare,
@@ -337,6 +339,7 @@ pub enum Error {
 
 /// The output of a successful DKG.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[ready(0)]
 pub struct Output<V: Variant, P> {
     summary: Summary,
     public: Sharing<V>,
@@ -468,6 +471,7 @@ where
 /// This is used to bind signatures to the current round, and to provide the
 /// information that dealers, players, and observers need to perform their actions.
 #[derive(Debug, Clone)]
+#[ready(0)]
 pub struct Info<V: Variant, P: PublicKey> {
     summary: Summary,
     round: u64,
@@ -637,6 +641,8 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
 }
 
 #[derive(Clone, Debug)]
+#[ready(0)]
+
 pub struct DealerPubMsg<V: Variant> {
     commitment: Poly<V::Public>,
 }
@@ -686,6 +692,8 @@ where
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[ready(0)]
+
 pub struct DealerPrivMsg {
     share: Secret<Scalar>,
 }
@@ -730,6 +738,8 @@ impl arbitrary::Arbitrary<'_> for DealerPrivMsg {
 }
 
 #[derive(Clone, Debug)]
+#[ready(0)]
+
 pub struct PlayerAck<P: PublicKey> {
     sig: P::Signature,
 }
@@ -943,6 +953,8 @@ where
 }
 
 #[derive(Clone, Debug)]
+#[ready(0)]
+
 pub struct DealerLog<V: Variant, P: PublicKey> {
     pub_msg: DealerPubMsg<V>,
     results: DealerResult<P>,
@@ -1031,6 +1043,7 @@ where
 /// This avoids having to trust some other party or process for knowing that a
 /// dealer actually produced a log.
 #[derive(Clone, Debug)]
+#[ready(0)]
 pub struct SignedDealerLog<V: Variant, S: Signer> {
     dealer: S::PublicKey,
     log: DealerLog<V, S::PublicKey>,
@@ -1138,6 +1151,8 @@ fn transcript_for_log<V: Variant, P: PublicKey>(
     out.commit(log.encode());
     out
 }
+
+#[ready(0)]
 
 pub struct Dealer<V: Variant, S: Signer> {
     me: S,
@@ -1401,6 +1416,7 @@ impl<V: Variant, P: PublicKey> ObserveInner<V, P> {
 /// From this log, we can (potentially, as the DKG can fail) compute the public output.
 ///
 /// This will only ever return [`Error::DkgFailed`].
+#[ready(0)]
 pub fn observe<V: Variant, P: PublicKey, M: Faults>(
     info: Info<V, P>,
     logs: BTreeMap<P, DealerLog<V, P>>,
@@ -1415,6 +1431,7 @@ pub fn observe<V: Variant, P: PublicKey, M: Faults>(
 /// The player is attempting to get a share of the key.
 ///
 /// They need not have participated in prior rounds.
+#[ready(0)]
 pub struct Player<V: Variant, S: Signer> {
     me: S,
     me_pub: S::PublicKey,
@@ -1532,9 +1549,11 @@ impl<V: Variant, S: Signer> Player<V, S> {
 }
 
 /// The result of dealing shares to players.
+#[ready(0)]
 pub type DealResult<V, P> = Result<(Output<V, P>, Map<P, Share>), Error>;
 
 /// Simply distribute shares at random, instead of performing a distributed protocol.
+#[ready(0)]
 pub fn deal<V: Variant, P: Clone + Ord, M: Faults>(
     mut rng: impl CryptoRngCore,
     mode: Mode,
@@ -1577,6 +1596,7 @@ pub fn deal<V: Variant, P: Clone + Ord, M: Faults>(
 /// This can be more convenient for testing, where you don't want to go through
 /// the trouble of generating signing keys. The downside is that the result isn't
 /// compatible with subsequent DKGs, which need an [`Output`].
+#[ready(0)]
 pub fn deal_anonymous<V: Variant, M: Faults>(
     rng: impl CryptoRngCore,
     mode: Mode,

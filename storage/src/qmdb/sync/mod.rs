@@ -2,6 +2,7 @@
 
 use crate::qmdb::sync::engine::Config;
 use commonware_codec::Encode;
+use commonware_macros::ready;
 
 pub mod engine;
 pub(crate) use engine::Engine;
@@ -25,6 +26,7 @@ pub use target::Target;
 mod requests;
 
 /// Create/open a database and sync it to a target state
+#[ready(0)]
 pub async fn sync<DB, R>(config: Config<DB, R>) -> Result<DB, Error<R::Error, DB::Digest>>
 where
     DB: Database,

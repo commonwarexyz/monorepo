@@ -91,6 +91,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tracing::{info_span, trace, Instrument};
+use commonware_macros::ready;
 
 #[derive(Debug)]
 struct Metrics {
@@ -144,6 +145,7 @@ impl Metrics {
 type Digest = [u8; 32];
 
 /// Track the state of the runtime for determinism auditing.
+#[ready(0)]
 pub struct Auditor {
     digest: Mutex<Digest>,
 }
@@ -185,9 +187,11 @@ impl Auditor {
 }
 
 /// A dynamic RNG that can safely be sent between threads.
+#[ready(0)]
 pub type BoxDynRng = Box<dyn CryptoRngCore + Send + 'static>;
 
 /// Configuration for the `deterministic` runtime.
+#[ready(0)]
 pub struct Config {
     /// Random number generator.
     rng: BoxDynRng,
@@ -280,6 +284,7 @@ impl Default for Config {
 }
 
 /// Deterministic runtime that randomly selects tasks to run based on a seed.
+#[ready(0)]
 pub struct Executor {
     registry: Mutex<Registry>,
     cycle: Duration,
@@ -369,6 +374,7 @@ impl Executor {
 /// An artifact that can be used to recover the state of the runtime.
 ///
 /// This is useful when mocking unclean shutdown (while retaining deterministic behavior).
+#[ready(0)]
 pub struct Checkpoint {
     cycle: Duration,
     deadline: Option<SystemTime>,
@@ -394,6 +400,7 @@ enum State {
 }
 
 /// Implementation of [crate::Runner] for the `deterministic` runtime.
+#[ready(0)]
 pub struct Runner {
     state: State,
 }
@@ -790,6 +797,7 @@ type Storage = MeteredStorage<AuditedStorage<MemStorage>>;
 /// Implementation of [crate::Spawner], [crate::Clock],
 /// [crate::Network], and [crate::Storage] for the `deterministic`
 /// runtime.
+#[ready(0)]
 pub struct Context {
     name: String,
     executor: Weak<Executor>,

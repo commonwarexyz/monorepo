@@ -21,8 +21,10 @@ use futures::{
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::collections::{HashMap, HashSet};
 use tracing::{debug, error, warn};
+use commonware_macros::ready;
 
 /// Engine that will disperse messages and collect responses.
+#[ready(0)]
 pub struct Engine<E, B, Rq, Rs, P, M, H>
 where
     E: Clock + Spawner,

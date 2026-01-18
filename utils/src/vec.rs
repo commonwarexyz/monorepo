@@ -1,6 +1,5 @@
 //! A vector type that guarantees at least one element.
 
-commonware_macros::readiness!(2);
 
 use crate::TryFromIterator;
 #[cfg(not(feature = "std"))]
@@ -12,9 +11,11 @@ use core::{
     ops::{Deref, DerefMut},
 };
 use thiserror::Error;
+use commonware_macros::ready;
 
 /// Errors that can occur when creating a [`NonEmptyVec`].
 #[derive(Error, Debug, PartialEq, Eq)]
+#[ready(0)]
 pub enum Error {
     /// The collection was empty.
     #[error("cannot create NonEmptyVec from empty collection")]
@@ -23,6 +24,7 @@ pub enum Error {
 
 /// A vector that is guaranteed to contain at least one element.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[ready(0)]
 pub struct NonEmptyVec<T>(Vec<T>);
 
 impl<T> NonEmptyVec<T> {

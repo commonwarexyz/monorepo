@@ -11,8 +11,10 @@ use commonware_runtime::{Clock, Metrics, Spawner};
 use futures::channel::mpsc;
 use rand::Rng;
 use std::time::Duration;
+use commonware_macros::ready;
 
 /// Configuration for the P2P [Resolver](commonware_resolver::Resolver).
+#[ready(0)]
 pub struct Config<P: PublicKey, C: Manager<PublicKey = P>, B: Blocker<PublicKey = P>> {
     /// The public key to identify this node.
     pub public_key: P,
@@ -43,6 +45,7 @@ pub struct Config<P: PublicKey, C: Manager<PublicKey = P>, B: Blocker<PublicKey 
 }
 
 /// Initialize a P2P resolver.
+#[ready(0)]
 pub fn init<E, C, Bl, B, S, R, P>(
     ctx: &E,
     config: Config<P, C, Bl>,

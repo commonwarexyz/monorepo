@@ -5,8 +5,10 @@ use crate::mmr::{
 use commonware_codec::Encode;
 use commonware_cryptography::{Digest, Hasher};
 use core::ops::Range;
+use commonware_macros::ready;
 
 /// Verify that a [Proof] is valid for a range of operations and a target root.
+#[ready(0)]
 pub fn verify_proof<Op, H, D>(
     hasher: &mut Standard<H>,
     proof: &Proof<D>,
@@ -28,6 +30,7 @@ where
 /// # Errors
 ///
 /// Returns [Error::LocationOverflow] if `start_loc + operations_len` > [crate::mmr::MAX_LOCATION].
+#[ready(0)]
 pub fn extract_pinned_nodes<D: Digest>(
     proof: &Proof<D>,
     start_loc: Location,
@@ -41,6 +44,7 @@ pub fn extract_pinned_nodes<D: Digest>(
 
 /// Verify that a [Proof] is valid for a range of operations and extract all digests (and their positions)
 /// in the range of the [Proof].
+#[ready(0)]
 pub fn verify_proof_and_extract_digests<Op, H, D>(
     hasher: &mut Standard<H>,
     proof: &Proof<D>,
@@ -66,6 +70,7 @@ where
 ///
 /// Returns [crate::mmr::Error::RangeOutOfBounds] if the last element position in `range`
 /// is out of bounds for the MMR size.
+#[ready(0)]
 pub fn digests_required_for_proof<D: Digest>(
     op_count: Location,
     range: Range<Location>,
@@ -81,6 +86,7 @@ pub fn digests_required_for_proof<D: Digest>(
 /// # Errors
 ///
 /// Returns [crate::mmr::Error::LocationOverflow] if `op_count` > [crate::mmr::MAX_LOCATION].
+#[ready(0)]
 pub fn create_proof<D: Digest>(
     op_count: Location,
     digests: Vec<D>,
@@ -92,6 +98,7 @@ pub fn create_proof<D: Digest>(
 }
 
 /// Verify a [Proof] and convert it into a [ProofStore].
+#[ready(0)]
 pub fn create_proof_store<Op, H, D>(
     hasher: &mut Standard<H>,
     proof: &Proof<D>,
@@ -114,6 +121,7 @@ where
 /// Create a [ProofStore] from a list of digests (output by [verify_proof_and_extract_digests]).
 ///
 /// If you have not yet verified the proof, use [create_proof_store] instead.
+#[ready(0)]
 pub fn create_proof_store_from_digests<D: Digest>(
     proof: &Proof<D>,
     digests: Vec<(Position, D)>,
@@ -122,6 +130,7 @@ pub fn create_proof_store_from_digests<D: Digest>(
 }
 
 /// Create a Multi-Proof for specific operations (identified by location) from a [ProofStore].
+#[ready(0)]
 pub async fn create_multi_proof<D: Digest>(
     proof_store: &ProofStore<D>,
     locations: &[Location],
@@ -131,6 +140,7 @@ pub async fn create_multi_proof<D: Digest>(
 }
 
 /// Verify a Multi-Proof for operations at specific locations.
+#[ready(0)]
 pub fn verify_multi_proof<Op, H, D>(
     hasher: &mut Standard<H>,
     proof: &Proof<D>,

@@ -3,6 +3,7 @@ use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt, Write};
 use commonware_utils::hex;
 use core::fmt::Display;
+use commonware_macros::ready;
 
 // Context byte prefixes for identifying the operation type.
 const COMMIT_CONTEXT: u8 = 0;
@@ -10,6 +11,7 @@ const APPEND_CONTEXT: u8 = 1;
 
 /// Operations for keyless stores.
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
+#[ready(0)]
 pub enum Operation<V: VariableValue> {
     /// Wraps the value appended to the database by this operation.
     Append(V),

@@ -1,6 +1,7 @@
 //! Implementation of a [commonware_p2p]-optimized `collector`.
 
 use crate::{Handler, Monitor};
+use commonware_macros::ready;
 
 mod engine;
 use commonware_p2p::Blocker;
@@ -13,6 +14,7 @@ mod mocks;
 
 /// Configuration for an [Engine].
 #[derive(Clone)]
+#[ready(0)]
 pub struct Config<B: Blocker, M: Monitor, H: Handler, RqC, RsC> {
     /// The [commonware_p2p::Blocker] that will be used to block peers from sending messages.
     pub blocker: B,

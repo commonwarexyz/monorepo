@@ -15,10 +15,12 @@ use commonware_parallel::Strategy;
 use commonware_utils::N3f1;
 use rand_core::CryptoRngCore;
 use std::{collections::HashSet, fmt::Debug, hash::Hash};
+use commonware_macros::ready;
 
 /// Context is a collection of metadata from consensus about a given payload.
 /// It provides information about the current epoch/view and the parent payload that new proposals are built on.
 #[derive(Clone, Debug)]
+#[ready(0)]
 pub struct Context<D: Digest, P: PublicKey> {
     /// Current round of consensus.
     pub round: Round,
@@ -56,6 +58,7 @@ pub trait Attributable {
 ///
 /// The key for each item is automatically inferred from [Attributable::signer()].
 /// Each signer can insert at most one item.
+#[ready(0)]
 pub struct AttributableMap<T: Attributable> {
     data: Vec<Option<T>>,
     added: usize,
@@ -122,6 +125,7 @@ impl<T: Attributable> AttributableMap<T> {
 /// Each vote type is stored in its own [`AttributableMap`] so a validator can only
 /// contribute one vote per phase. The tracker is reused across rounds/views to keep
 /// allocations stable.
+#[ready(0)]
 pub struct VoteTracker<S: Scheme, D: Digest> {
     /// Per-signer notarize votes keyed by validator index.
     notarizes: AttributableMap<Notarize<S, D>>,
@@ -235,6 +239,7 @@ impl<S: Scheme, D: Digest> VoteTracker<S, D> {
 /// Implementations use the subject to derive domain-separated message bytes for both
 /// individual votes and recovered certificates.
 #[derive(Copy, Clone, Debug)]
+#[ready(0)]
 pub enum Subject<'a, D: Digest> {
     /// Subject for notarize votes and certificates, carrying the proposal.
     Notarize { proposal: &'a Proposal<D> },
@@ -256,6 +261,7 @@ impl<D: Digest> Viewable for Subject<'_, D> {
 
 /// Vote represents individual votes ([Notarize], [Nullify], [Finalize]).
 #[derive(Clone, Debug, PartialEq)]
+#[ready(0)]
 pub enum Vote<S: Scheme, D: Digest> {
     /// A validator's notarize vote over a proposal.
     Notarize(Notarize<S, D>),
@@ -365,6 +371,7 @@ where
 
 /// Certificate represents aggregated votes ([Notarization], [Nullification], [Finalization]).
 #[derive(Clone, Debug, PartialEq)]
+#[ready(0)]
 pub enum Certificate<S: Scheme, D: Digest> {
     /// A recovered certificate for a notarization.
     Notarization(Notarization<S, D>),
@@ -477,6 +484,7 @@ where
 
 /// Artifact represents all consensus artifacts (votes and certificates) for storage.
 #[derive(Clone, Debug, PartialEq)]
+#[ready(0)]
 pub enum Artifact<S: Scheme, D: Digest> {
     /// A validator's notarize vote over a proposal.
     Notarize(Notarize<S, D>),
@@ -682,6 +690,7 @@ where
 /// Proposal represents a proposed block in the protocol.
 /// It includes the view number, the parent view, and the actual payload (typically a digest of block data).
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[ready(0)]
 pub struct Proposal<D: Digest> {
     /// The round in which this proposal is made
     pub round: Round,
@@ -762,6 +771,7 @@ where
 
 /// Validator vote that endorses a proposal for notarization.
 #[derive(Clone, Debug)]
+#[ready(0)]
 pub struct Notarize<S: Scheme, D: Digest> {
     /// Proposal being notarized.
     pub proposal: Proposal<D>,
@@ -892,6 +902,7 @@ where
 /// randomness seed in the certificate. For threshold signatures, the seed can be accessed
 /// via [`super::scheme::bls12381_threshold::Seedable::seed`].
 #[derive(Clone, Debug)]
+#[ready(0)]
 pub struct Notarization<S: Scheme, D: Digest> {
     /// The proposal that has been notarized.
     pub proposal: Proposal<D>,
@@ -1018,6 +1029,7 @@ where
 /// Validator vote for nullifying the current round, i.e. skip the current round.
 /// This is typically used when the leader is unresponsive or fails to propose a valid block.
 #[derive(Clone, Debug)]
+#[ready(0)]
 pub struct Nullify<S: Scheme> {
     /// The round to be nullified (skipped).
     pub round: Round,
@@ -1130,6 +1142,7 @@ where
 /// Aggregated nullification certificate recovered from nullify votes.
 /// When a view is nullified, the consensus moves to the next view without finalizing a block.
 #[derive(Clone, Debug)]
+#[ready(0)]
 pub struct Nullification<S: Scheme> {
     /// The round in which this nullification is made.
     pub round: Round,
@@ -1245,6 +1258,7 @@ where
 /// This happens after a proposal has been notarized, confirming it as the canonical block
 /// for this round.
 #[derive(Clone, Debug)]
+#[ready(0)]
 pub struct Finalize<S: Scheme, D: Digest> {
     /// Proposal being finalized.
     pub proposal: Proposal<D>,
@@ -1375,6 +1389,7 @@ where
 /// randomness seed in the certificate. For threshold signatures, the seed can be accessed
 /// via [`super::scheme::bls12381_threshold::Seedable::seed`].
 #[derive(Clone, Debug)]
+#[ready(0)]
 pub struct Finalization<S: Scheme, D: Digest> {
     /// The proposal that has been finalized.
     pub proposal: Proposal<D>,
@@ -1501,6 +1516,7 @@ where
 /// Backfiller is a message type for requesting and receiving missing consensus artifacts.
 /// This is used to synchronize validators that have fallen behind or just joined the network.
 #[derive(Clone, Debug, PartialEq)]
+#[ready(0)]
 pub enum Backfiller<S: Scheme, D: Digest> {
     /// Request for missing notarizations and nullifications
     Request(Request),
@@ -1581,6 +1597,7 @@ where
 /// This is used by validators who need to catch up with the consensus state.
 #[derive(Clone, Debug, PartialEq)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[ready(0)]
 pub struct Request {
     /// Unique identifier for this request (used to match responses)
     pub id: u64,
@@ -1654,6 +1671,7 @@ impl Read for Request {
 /// Response is a message containing the requested notarizations and nullifications.
 /// This is sent in response to a Request message.
 #[derive(Clone, Debug, PartialEq)]
+#[ready(0)]
 pub struct Response<S: Scheme, D: Digest> {
     /// Identifier matching the original request
     pub id: u64,
@@ -1809,6 +1827,7 @@ where
 /// Use [`crate::simplex::scheme::reporter::AttributableReporter`] to automatically filter and
 /// verify activities based on [`Scheme::is_attributable`].
 #[derive(Clone, Debug)]
+#[ready(0)]
 pub enum Activity<S: Scheme, D: Digest> {
     /// A validator's notarize vote over a proposal.
     Notarize(Notarize<S, D>),
@@ -2155,6 +2174,7 @@ where
 /// ConflictingNotarize represents evidence of a Byzantine validator sending conflicting notarizes.
 /// This is used to prove that a validator has equivocated (voted for different proposals in the same view).
 #[derive(Clone, Debug)]
+#[ready(0)]
 pub struct ConflictingNotarize<S: Scheme, D: Digest> {
     /// The first conflicting notarize
     notarize_1: Notarize<S, D>,
@@ -2271,6 +2291,7 @@ where
 /// ConflictingFinalize represents evidence of a Byzantine validator sending conflicting finalizes.
 /// Similar to ConflictingNotarize, but for finalizes.
 #[derive(Clone, Debug)]
+#[ready(0)]
 pub struct ConflictingFinalize<S: Scheme, D: Digest> {
     /// The second conflicting finalize
     finalize_1: Finalize<S, D>,
@@ -2388,6 +2409,7 @@ where
 /// for the same view, which is contradictory behavior (a validator should either try to skip a view OR
 /// finalize a proposal, not both).
 #[derive(Clone, Debug)]
+#[ready(0)]
 pub struct NullifyFinalize<S: Scheme, D: Digest> {
     /// The conflicting nullify
     nullify: Nullify<S>,

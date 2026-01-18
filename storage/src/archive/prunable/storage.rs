@@ -15,6 +15,7 @@ use futures::{future::try_join_all, pin_mut, StreamExt};
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::collections::{BTreeMap, BTreeSet};
 use tracing::debug;
+use commonware_macros::ready;
 
 /// Index entry for the archive.
 #[derive(Debug, Clone, PartialEq)]
@@ -100,6 +101,7 @@ where
 }
 
 /// Implementation of `Archive` storage.
+#[ready(0)]
 pub struct Archive<T: Translator, E: Storage + Metrics, K: Array, V: CodecShared> {
     items_per_section: u64,
 

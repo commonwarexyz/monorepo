@@ -4,8 +4,10 @@ use commonware_cryptography::{Committable, Digestible, PublicKey};
 use commonware_p2p::Recipients;
 use commonware_utils::channels::fallible::AsyncFallibleExt;
 use futures::channel::{mpsc, oneshot};
+use commonware_macros::ready;
 
 /// Message types that can be sent to the `Mailbox`
+#[ready(0)]
 pub enum Message<P: PublicKey, M: Committable + Digestible> {
     /// Broadcast a [crate::Broadcaster::Message] to the network.
     ///
@@ -39,6 +41,7 @@ pub enum Message<P: PublicKey, M: Committable + Digestible> {
 
 /// Ingress mailbox for [super::Engine].
 #[derive(Clone)]
+#[ready(0)]
 pub struct Mailbox<P: PublicKey, M: Committable + Digestible + Codec> {
     sender: mpsc::Sender<Message<P, M>>,
 }

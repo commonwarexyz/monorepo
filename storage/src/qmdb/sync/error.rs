@@ -2,8 +2,11 @@
 
 use crate::{mmr::Location, qmdb::sync::Target};
 use commonware_cryptography::Digest;
+use commonware_macros::ready;
 
 #[derive(Debug, thiserror::Error)]
+#[ready(0)]
+
 pub enum EngineError<D: Digest> {
     /// Hash mismatch after sync
     #[error("root digest mismatch - expected {expected:?}, got {actual:?}")]
@@ -36,6 +39,7 @@ pub enum EngineError<D: Digest> {
 
 /// Errors that can occur during database synchronization.
 #[derive(Debug, thiserror::Error)]
+#[ready(0)]
 pub enum Error<U, D>
 where
     U: std::error::Error + Send + 'static,

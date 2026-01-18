@@ -16,6 +16,7 @@ use std::{
     },
 };
 use tracing::{debug, error, trace};
+use commonware_macros::ready;
 
 // Type alias for the future we'll be storing for each in-flight page fetch.
 //
@@ -34,6 +35,7 @@ type PageFetchFut = Shared<Pin<Box<dyn Future<Output = Result<StableBuf, Arc<Err
 /// for replacement. When a page needs to be evicted, we start the search at `clock` within `cache`,
 /// searching for the first page with a false reference bit, and setting any skipped page's
 /// reference bit to false along the way.
+#[ready(0)]
 pub struct Pool {
     /// The page cache index, with a key composed of (blob id, page number), that maps each cached
     /// page to the index of its `cache` entry.
@@ -76,6 +78,7 @@ struct CacheEntry {
 /// size that will be used with it. Provides the API for interacting with the buffer pool in a
 /// thread-safe manner.
 #[derive(Clone)]
+#[ready(0)]
 pub struct PoolRef {
     /// The size of each page in the underlying blobs managed by this buffer pool.
     ///

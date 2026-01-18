@@ -1,6 +1,5 @@
 //! Utility functions for `std::time`.
 
-commonware_macros::readiness!(2);
 
 use rand::Rng;
 use std::time::{Duration, SystemTime};

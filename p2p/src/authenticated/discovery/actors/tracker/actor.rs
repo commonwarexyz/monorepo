@@ -19,11 +19,13 @@ use commonware_utils::{channels::fallible::FallibleExt, ordered::Set, union, Sys
 use futures::{channel::mpsc, StreamExt};
 use rand::{seq::SliceRandom, Rng};
 use tracing::debug;
+use commonware_macros::ready;
 
 // Bytes to add to the namespace to prevent replay attacks.
 const NAMESPACE_SUFFIX_IP: &[u8] = b"_IP";
 
 /// The tracker actor that manages peer discovery and connection reservations.
+#[ready(0)]
 pub struct Actor<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> {
     context: ContextCell<E>,
 

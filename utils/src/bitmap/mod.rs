@@ -3,7 +3,6 @@
 //! The bitmap is a compact representation of a sequence of bits, using chunks of bytes for a
 //! more-efficient memory layout than doing [`Vec<bool>`].
 
-commonware_macros::readiness!(2);
 
 #[cfg(not(feature = "std"))]
 use alloc::{collections::VecDeque, vec::Vec};
@@ -15,6 +14,7 @@ use core::{
 };
 #[cfg(feature = "std")]
 use std::collections::VecDeque;
+use commonware_macros::ready;
 
 mod prunable;
 pub use prunable::Prunable;
@@ -31,6 +31,7 @@ pub const DEFAULT_CHUNK_SIZE: usize = 8;
 /// Operations panic if `bit / CHUNK_SIZE_BITS > usize::MAX`. On 32-bit systems
 /// with N=32, this occurs at bit >= 1,099,511,627,776.
 #[derive(Clone, PartialEq, Eq, Hash)]
+#[ready(0)]
 pub struct BitMap<const N: usize = DEFAULT_CHUNK_SIZE> {
     /// The bitmap itself, in chunks of size N bytes. Within each byte, lowest order bits are
     /// treated as coming before higher order bits in the bit ordering.
@@ -742,6 +743,7 @@ impl<const N: usize> EncodeSize for BitMap<N> {
 }
 
 /// Iterator over bits in a [BitMap].
+#[ready(0)]
 pub struct Iterator<'a, const N: usize> {
     /// Reference to the BitMap being iterated over
     bitmap: &'a BitMap<N>,

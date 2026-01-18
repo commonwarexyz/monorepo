@@ -39,8 +39,10 @@ use commonware_runtime::{Clock, Metrics, Storage as RStorage};
 use commonware_utils::Array;
 use core::ops::Range;
 use std::num::NonZeroU64;
+use commonware_macros::ready;
 
 /// Proof information for verifying a key has a particular value in the database.
+#[ready(0)]
 pub type KeyValueProof<D, const N: usize> = OperationProof<D, N>;
 
 /// A key-value QMDB based on an MMR over its log of operations, supporting authentication of
@@ -49,6 +51,7 @@ pub type KeyValueProof<D, const N: usize> = OperationProof<D, N>;
 /// Note: The generic parameter N is not really generic, and must be manually set to double the size
 /// of the hash digest being produced by the hasher. A compile-time assertion is used to prevent any
 /// other setting.
+#[ready(0)]
 pub struct Db<
     E: RStorage + Clock + Metrics,
     K: Array,

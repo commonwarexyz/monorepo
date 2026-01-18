@@ -4,12 +4,15 @@ use crate::authenticated::lookup::metrics;
 use commonware_codec::Error as CodecError;
 use prometheus_client::metrics::{counter::Counter, family::Family};
 use thiserror::Error;
+use commonware_macros::ready;
 
 mod actor;
 pub use actor::Actor;
 
 mod ingress;
 pub use ingress::Message;
+
+#[ready(0)]
 
 pub struct Config {
     pub mailbox_size: usize,
@@ -21,6 +24,8 @@ pub struct Config {
 }
 
 #[derive(Error, Debug)]
+#[ready(0)]
+
 pub enum Error {
     #[error("peer killed: {0}")]
     PeerKilled(String),

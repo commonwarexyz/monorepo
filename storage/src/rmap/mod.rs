@@ -9,9 +9,11 @@
 //!   corresponding value represents the inclusive end of that range.
 
 use std::collections::BTreeMap;
+use commonware_macros::ready;
 
 /// A collection that manages disjoint, inclusive ranges `[start, end]`.
 #[derive(Debug, Default, PartialEq)]
+#[ready(0)]
 pub struct RMap {
     ranges: BTreeMap<u64, u64>,
 }

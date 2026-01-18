@@ -1,6 +1,7 @@
 use crate::{hex, Array, Span};
 use bytes::{Buf, BufMut};
 use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
+use commonware_macros::ready;
 use core::{
     cmp::{Ord, PartialOrd},
     fmt::{Debug, Display},
@@ -12,6 +13,7 @@ use zeroize::Zeroize;
 
 /// Errors returned by `Bytes` functions.
 #[derive(Error, Debug, PartialEq)]
+#[ready(0)]
 pub enum Error {
     #[error("invalid length")]
     InvalidLength,
@@ -21,6 +23,7 @@ pub enum Error {
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[repr(transparent)]
+#[ready(0)]
 pub struct FixedBytes<const N: usize>([u8; N]);
 
 impl<const N: usize> FixedBytes<N> {

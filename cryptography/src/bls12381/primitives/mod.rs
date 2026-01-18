@@ -43,15 +43,17 @@
 //! ops::verify_message::<MinSig>(threshold_pub, namespace, message, &threshold_sig).expect("signature should be valid");
 //! ```
 
+use thiserror::Error;
+use commonware_macros::ready;
+
 pub mod group;
 pub mod ops;
 pub mod sharing;
 pub mod variant;
 
-use thiserror::Error;
-
 /// Errors that can occur when working with BLS12-381 primitives.
 #[derive(Error, Debug)]
+#[ready(0)]
 pub enum Error {
     #[error("not enough partial signatures: {0}/{1}")]
     NotEnoughPartialSignatures(usize, usize),

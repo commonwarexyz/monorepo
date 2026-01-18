@@ -17,8 +17,10 @@ use std::{
     pin::Pin,
     task::{Context, Poll},
 };
+use commonware_macros::ready;
 
 /// An identifier for a block request.
+#[ready(0)]
 pub enum Identifier<D: Digest> {
     /// The height of the block to retrieve.
     Height(Height),
@@ -153,6 +155,7 @@ pub(crate) enum Message<S: Scheme, B: Block> {
 
 /// A mailbox for sending messages to the marshal [Actor](super::super::actor::Actor).
 #[derive(Clone)]
+#[ready(0)]
 pub struct Mailbox<S: Scheme, B: Block> {
     sender: mpsc::Sender<Message<S, B>>,
 }
@@ -328,6 +331,7 @@ fn subscribe_block_future<S: Scheme, B: Block>(
 /// TODO(clabby): Once marshal can also yield the genesis block, this stream should end
 /// at block height 0 rather than 1.
 #[pin_project]
+#[ready(0)]
 pub struct AncestorStream<S: Scheme, B: Block> {
     marshal: Mailbox<S, B>,
     buffered: Vec<B>,

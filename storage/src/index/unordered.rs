@@ -15,6 +15,7 @@ use std::collections::{
     hash_map::{Entry, OccupiedEntry, VacantEntry},
     HashMap,
 };
+use commonware_macros::ready;
 
 /// The initial capacity of the internal hashmap. This is a guess at the number of unique keys we
 /// will encounter. The hashmap will grow as needed, but this is a good starting point (covering the
@@ -35,6 +36,7 @@ impl<K: Send + Sync, V: Eq + Send + Sync> IndexEntry<V> for OccupiedEntry<'_, K,
 }
 
 /// A cursor for the unordered [Index] that wraps the shared implementation.
+#[ready(0)]
 pub struct Cursor<'a, K: Send + Sync, V: Eq + Send + Sync> {
     inner: CursorImpl<'a, V, OccupiedEntry<'a, K, Record<V>>>,
 }
@@ -80,6 +82,7 @@ impl<K: Send + Sync, V: Eq + Send + Sync> CursorTrait for Cursor<'_, K, V> {
 
 /// A memory-efficient index that uses an unordered map internally to map translated keys to
 /// arbitrary values.
+#[ready(0)]
 pub struct Index<T: Translator, V: Eq + Send + Sync> {
     translator: T,
     map: HashMap<T::Key, Record<V>, T>,

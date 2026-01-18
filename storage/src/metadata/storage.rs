@@ -10,6 +10,7 @@ use futures::future::try_join_all;
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use tracing::{debug, warn};
+use commonware_macros::ready;
 
 /// The names of the two blobs that store metadata.
 const BLOB_NAMES: [&[u8]; 2] = [b"left", b"right"];
@@ -61,6 +62,7 @@ impl<B: Blob, K: Span> Wrapper<B, K> {
 }
 
 /// Implementation of [Metadata] storage.
+#[ready(0)]
 pub struct Metadata<E: Clock + Storage + Metrics, K: Span, V: Codec> {
     context: E,
 

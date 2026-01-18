@@ -26,7 +26,6 @@
 //! assert_eq!(digest.as_u32(), checksum);
 //! ```
 
-commonware_macros::readiness!(2);
 
 use crate::Hasher;
 #[cfg(not(feature = "std"))]
@@ -40,6 +39,7 @@ use core::{
     ops::Deref,
 };
 use rand_core::CryptoRngCore;
+use commonware_macros::ready;
 
 /// Size of a CRC32 checksum in bytes.
 const SIZE: usize = 4;
@@ -51,6 +51,7 @@ const ALGORITHM: crc_fast::CrcAlgorithm = crc_fast::CrcAlgorithm::Crc32Iscsi;
 ///
 /// Uses the iSCSI polynomial (0x1EDC6F41) as specified in RFC 3720.
 #[derive(Debug)]
+#[ready(0)]
 pub struct Crc32 {
     inner: crc_fast::Digest,
 }
@@ -101,6 +102,7 @@ impl Hasher for Crc32 {
 /// Digest of a CRC32 hashing operation (4 bytes).
 #[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash)]
 #[repr(transparent)]
+#[ready(0)]
 pub struct Digest(pub [u8; SIZE]);
 
 #[cfg(feature = "arbitrary")]

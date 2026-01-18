@@ -18,12 +18,14 @@ use bytes::{Buf, BufMut};
 use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
 use commonware_math::algebra::Additive;
 use commonware_parallel::Strategy;
+use commonware_macros::ready;
 
 /// An aggregated public key from multiple individual public keys.
 ///
 /// This type is returned by [`combine_public_keys`] and ensures that
 /// aggregated public keys are not confused with individual public keys.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[ready(0)]
 pub struct PublicKey<V: Variant>(V::Public);
 
 impl<V: Variant> PublicKey<V> {
@@ -76,6 +78,7 @@ where
 /// This type is returned by [`combine_signatures`] and ensures that
 /// aggregated signatures are not confused with individual signatures.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[ready(0)]
 pub struct Signature<V: Variant>(V::Signature);
 
 impl<V: Variant> Signature<V> {
@@ -128,6 +131,7 @@ where
 /// This type is returned by [`combine_messages`] and ensures that
 /// combined message hashes are not confused with individual message hashes.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[ready(0)]
 pub struct Message<V: Variant>(V::Signature);
 
 impl<V: Variant> Message<V> {
@@ -188,6 +192,7 @@ where
 /// that each `public_key` is unique, and that the caller has a Proof-of-Possession (PoP)
 /// for each `public_key`. If any of these assumptions are violated, an attacker can
 /// exploit this function to verify an incorrect aggregate signature.
+#[ready(0)]
 pub fn combine_public_keys<'a, V, I>(public_keys: I) -> PublicKey<V>
 where
     V: Variant,
@@ -208,6 +213,7 @@ where
 /// This function assumes a group check was already performed on each `signature` and
 /// that each `signature` is unique. If any of these assumptions are violated, an attacker can
 /// exploit this function to verify an incorrect aggregate signature.
+#[ready(0)]
 pub fn combine_signatures<'a, V, I>(signatures: I) -> Signature<V>
 where
     V: Variant,
@@ -226,6 +232,7 @@ where
 /// # Warning
 ///
 /// It is not safe to provide duplicate messages.
+#[ready(0)]
 pub fn combine_messages<'a, V, I>(messages: I, strategy: &impl Strategy) -> Message<V>
 where
     V: Variant,
@@ -260,6 +267,7 @@ where
 /// This function assumes the caller has performed a group check and collected a proof-of-possession
 /// for all provided `public`. This function assumes a group check was already performed on the
 /// `signature`. It is not safe to provide duplicate public keys.
+#[ready(0)]
 pub fn verify_same_message<V: Variant>(
     public: &PublicKey<V>,
     namespace: &[u8],
@@ -283,6 +291,7 @@ pub fn verify_same_message<V: Variant>(
 /// # Warning
 ///
 /// This function assumes a group check was already performed on `public` and `signature`.
+#[ready(0)]
 pub fn verify_same_signer<V: Variant>(
     public: &V::Public,
     message: &Message<V>,

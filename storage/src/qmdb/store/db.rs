@@ -98,11 +98,13 @@ use commonware_codec::Read;
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage};
 use commonware_utils::Array;
 use core::ops::Range;
+use commonware_macros::ready;
 use std::num::{NonZeroU64, NonZeroUsize};
 use tracing::{debug, warn};
 
 /// Configuration for initializing a [Db].
 #[derive(Clone)]
+#[ready(0)]
 pub struct Config<T: Translator, C> {
     /// The name of the [Storage] partition used to persist the log of operations.
     pub log_partition: String,
@@ -127,6 +129,7 @@ pub struct Config<T: Translator, C> {
 }
 
 /// An unauthenticated key-value database based off of an append-only [Journal] of operations.
+#[ready(0)]
 pub struct Db<E, K, V, T, S = Durable>
 where
     E: Storage + Clock + Metrics,

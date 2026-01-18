@@ -22,8 +22,10 @@ use std::{
     time::Duration,
 };
 use tokio::time::sleep;
+use commonware_macros::ready;
 
 /// Creates an EC2 client for the specified AWS region
+#[ready(0)]
 pub async fn create_ec2_client(region: Region) -> Ec2Client {
     let retry = aws_config::retry::RetryConfig::adaptive()
         .with_max_attempts(10)
@@ -38,6 +40,7 @@ pub async fn create_ec2_client(region: Region) -> Ec2Client {
 }
 
 /// Imports an SSH public key into the specified region
+#[ready(0)]
 pub async fn import_key_pair(
     client: &Ec2Client,
     key_name: &str,
@@ -54,6 +57,7 @@ pub async fn import_key_pair(
 }
 
 /// Deletes an SSH key pair from the specified region
+#[ready(0)]
 pub async fn delete_key_pair(client: &Ec2Client, key_name: &str) -> Result<(), Ec2Error> {
     client.delete_key_pair().key_name(key_name).send().await?;
     Ok(())
@@ -134,6 +138,7 @@ pub(crate) async fn find_latest_ami(
 }
 
 /// Creates a VPC with the specified CIDR block and tag
+#[ready(0)]
 pub async fn create_vpc(
     client: &Ec2Client,
     cidr_block: &str,
@@ -154,6 +159,7 @@ pub async fn create_vpc(
 }
 
 /// Creates an Internet Gateway and attaches it to the specified VPC
+#[ready(0)]
 pub async fn create_and_attach_igw(
     client: &Ec2Client,
     vpc_id: &str,
@@ -184,6 +190,7 @@ pub async fn create_and_attach_igw(
 }
 
 /// Creates a route table for the VPC and sets up a default route to the Internet Gateway
+#[ready(0)]
 pub async fn create_route_table(
     client: &Ec2Client,
     vpc_id: &str,
@@ -213,6 +220,7 @@ pub async fn create_route_table(
 }
 
 /// Creates a subnet within the VPC and associates it with the route table
+#[ready(0)]
 pub async fn create_subnet(
     client: &Ec2Client,
     vpc_id: &str,
@@ -245,6 +253,7 @@ pub async fn create_subnet(
 }
 
 /// Creates a security group for the monitoring instance with access from the deployer IP
+#[ready(0)]
 pub async fn create_security_group_monitoring(
     client: &Ec2Client,
     vpc_id: &str,
@@ -283,6 +292,7 @@ pub async fn create_security_group_monitoring(
 
 /// Creates a security group for binary instances with access from deployer and custom ports
 /// Note: monitoring IP rules are added separately via `add_monitoring_ingress` after monitoring instance launches
+#[ready(0)]
 pub async fn create_security_group_binary(
     client: &Ec2Client,
     vpc_id: &str,
@@ -330,6 +340,7 @@ pub async fn create_security_group_binary(
 }
 
 /// Adds monitoring IP ingress rules to a binary security group for Prometheus scraping
+#[ready(0)]
 pub async fn add_monitoring_ingress(
     client: &Ec2Client,
     sg_id: &str,
@@ -369,6 +380,7 @@ pub async fn add_monitoring_ingress(
 
 /// Launches EC2 instances with specified configurations
 #[allow(clippy::too_many_arguments)]
+#[ready(0)]
 pub async fn launch_instances(
     client: &Ec2Client,
     ami_id: &str,
@@ -429,6 +441,7 @@ pub async fn launch_instances(
 }
 
 /// Waits for instances to reach the "running" state and returns their public IPs
+#[ready(0)]
 pub async fn wait_for_instances_running(
     client: &Ec2Client,
     instance_ids: &[String],
@@ -460,6 +473,8 @@ pub async fn wait_for_instances_running(
             .collect());
     }
 }
+
+#[ready(0)]
 
 pub async fn wait_for_instances_ready(
     client: &Ec2Client,
@@ -495,6 +510,7 @@ pub async fn wait_for_instances_ready(
 }
 
 /// Retrieves the private IP address of an instance
+#[ready(0)]
 pub async fn get_private_ip(client: &Ec2Client, instance_id: &str) -> Result<String, Ec2Error> {
     let resp = client
         .describe_instances()
@@ -507,6 +523,7 @@ pub async fn get_private_ip(client: &Ec2Client, instance_id: &str) -> Result<Str
 }
 
 /// Creates a VPC peering connection between two VPCs
+#[ready(0)]
 pub async fn create_vpc_peering_connection(
     client: &Ec2Client,
     requester_vpc_id: &str,
@@ -535,6 +552,7 @@ pub async fn create_vpc_peering_connection(
 }
 
 /// Waits for a VPC peering connection to reach the "pending-acceptance" state
+#[ready(0)]
 pub async fn wait_for_vpc_peering_connection(
     client: &Ec2Client,
     peer_id: &str,
@@ -561,6 +579,7 @@ pub async fn wait_for_vpc_peering_connection(
 }
 
 /// Accepts a VPC peering connection in the peer region
+#[ready(0)]
 pub async fn accept_vpc_peering_connection(
     client: &Ec2Client,
     peer_id: &str,
@@ -574,6 +593,7 @@ pub async fn accept_vpc_peering_connection(
 }
 
 /// Adds a route to a route table for VPC peering
+#[ready(0)]
 pub async fn add_route(
     client: &Ec2Client,
     route_table_id: &str,
@@ -591,6 +611,7 @@ pub async fn add_route(
 }
 
 /// Finds VPC peering connections by deployer tag
+#[ready(0)]
 pub async fn find_vpc_peering_by_tag(
     client: &Ec2Client,
     tag: &str,
@@ -609,6 +630,7 @@ pub async fn find_vpc_peering_by_tag(
 }
 
 /// Deletes a VPC peering connection
+#[ready(0)]
 pub async fn delete_vpc_peering(client: &Ec2Client, peering_id: &str) -> Result<(), Ec2Error> {
     client
         .delete_vpc_peering_connection()
@@ -619,6 +641,7 @@ pub async fn delete_vpc_peering(client: &Ec2Client, peering_id: &str) -> Result<
 }
 
 /// Waits for a VPC peering connection to be deleted
+#[ready(0)]
 pub async fn wait_for_vpc_peering_deletion(
     ec2_client: &Ec2Client,
     peer_id: &str,
@@ -647,6 +670,7 @@ pub async fn wait_for_vpc_peering_deletion(
 }
 
 /// Finds instances by deployer tag
+#[ready(0)]
 pub async fn find_instances_by_tag(
     ec2_client: &Ec2Client,
     tag: &str,
@@ -666,6 +690,7 @@ pub async fn find_instances_by_tag(
 }
 
 /// Terminates specified instances
+#[ready(0)]
 pub async fn terminate_instances(
     ec2_client: &Ec2Client,
     instance_ids: &[String],
@@ -682,6 +707,7 @@ pub async fn terminate_instances(
 }
 
 /// Waits for instances to be terminated
+#[ready(0)]
 pub async fn wait_for_instances_terminated(
     ec2_client: &Ec2Client,
     instance_ids: &[String],
@@ -708,6 +734,7 @@ pub async fn wait_for_instances_terminated(
 }
 
 /// Finds security groups by deployer tag
+#[ready(0)]
 pub async fn find_security_groups_by_tag(
     ec2_client: &Ec2Client,
     tag: &str,
@@ -725,6 +752,7 @@ pub async fn find_security_groups_by_tag(
 }
 
 /// Deletes a security group
+#[ready(0)]
 pub async fn delete_security_group(ec2_client: &Ec2Client, sg_id: &str) -> Result<(), Ec2Error> {
     ec2_client
         .delete_security_group()
@@ -735,6 +763,7 @@ pub async fn delete_security_group(ec2_client: &Ec2Client, sg_id: &str) -> Resul
 }
 
 /// Finds route tables by deployer tag
+#[ready(0)]
 pub async fn find_route_tables_by_tag(
     ec2_client: &Ec2Client,
     tag: &str,
@@ -753,6 +782,7 @@ pub async fn find_route_tables_by_tag(
 }
 
 /// Deletes a route table
+#[ready(0)]
 pub async fn delete_route_table(ec2_client: &Ec2Client, rt_id: &str) -> Result<(), Ec2Error> {
     ec2_client
         .delete_route_table()
@@ -763,6 +793,7 @@ pub async fn delete_route_table(ec2_client: &Ec2Client, rt_id: &str) -> Result<(
 }
 
 /// Finds Internet Gateways by deployer tag
+#[ready(0)]
 pub async fn find_igws_by_tag(ec2_client: &Ec2Client, tag: &str) -> Result<Vec<String>, Ec2Error> {
     let resp = ec2_client
         .describe_internet_gateways()
@@ -778,6 +809,7 @@ pub async fn find_igws_by_tag(ec2_client: &Ec2Client, tag: &str) -> Result<Vec<S
 }
 
 /// Finds the VPC ID attached to an Internet Gateway
+#[ready(0)]
 pub async fn find_vpc_by_igw(ec2_client: &Ec2Client, igw_id: &str) -> Result<String, Ec2Error> {
     let resp = ec2_client
         .describe_internet_gateways()
@@ -795,6 +827,7 @@ pub async fn find_vpc_by_igw(ec2_client: &Ec2Client, igw_id: &str) -> Result<Str
 }
 
 /// Detaches an Internet Gateway from a VPC
+#[ready(0)]
 pub async fn detach_igw(
     ec2_client: &Ec2Client,
     igw_id: &str,
@@ -810,6 +843,7 @@ pub async fn detach_igw(
 }
 
 /// Deletes an Internet Gateway
+#[ready(0)]
 pub async fn delete_igw(ec2_client: &Ec2Client, igw_id: &str) -> Result<(), Ec2Error> {
     ec2_client
         .delete_internet_gateway()
@@ -820,6 +854,7 @@ pub async fn delete_igw(ec2_client: &Ec2Client, igw_id: &str) -> Result<(), Ec2E
 }
 
 /// Finds subnets by deployer tag
+#[ready(0)]
 pub async fn find_subnets_by_tag(
     ec2_client: &Ec2Client,
     tag: &str,
@@ -838,6 +873,7 @@ pub async fn find_subnets_by_tag(
 }
 
 /// Deletes a subnet
+#[ready(0)]
 pub async fn delete_subnet(ec2_client: &Ec2Client, subnet_id: &str) -> Result<(), Ec2Error> {
     ec2_client
         .delete_subnet()
@@ -848,6 +884,7 @@ pub async fn delete_subnet(ec2_client: &Ec2Client, subnet_id: &str) -> Result<()
 }
 
 /// Finds VPCs by deployer tag
+#[ready(0)]
 pub async fn find_vpcs_by_tag(ec2_client: &Ec2Client, tag: &str) -> Result<Vec<String>, Ec2Error> {
     let resp = ec2_client
         .describe_vpcs()
@@ -863,12 +900,14 @@ pub async fn find_vpcs_by_tag(ec2_client: &Ec2Client, tag: &str) -> Result<Vec<S
 }
 
 /// Deletes a VPC
+#[ready(0)]
 pub async fn delete_vpc(ec2_client: &Ec2Client, vpc_id: &str) -> Result<(), Ec2Error> {
     ec2_client.delete_vpc().vpc_id(vpc_id).send().await?;
     Ok(())
 }
 
 /// Finds the availability zone that supports all required instance types
+#[ready(0)]
 pub async fn find_availability_zone(
     client: &Ec2Client,
     instance_types: &[String],
@@ -919,6 +958,7 @@ pub async fn find_availability_zone(
 }
 
 /// Waits until all network interfaces associated with a security group are deleted
+#[ready(0)]
 pub async fn wait_for_enis_deleted(ec2_client: &Ec2Client, sg_id: &str) -> Result<(), Ec2Error> {
     loop {
         let resp = ec2_client

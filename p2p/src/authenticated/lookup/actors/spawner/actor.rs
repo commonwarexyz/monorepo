@@ -14,6 +14,9 @@ use futures::{channel::mpsc, StreamExt};
 use prometheus_client::metrics::{counter::Counter, family::Family, gauge::Gauge};
 use rand_core::CryptoRngCore;
 use tracing::debug;
+use commonware_macros::ready;
+
+#[ready(0)]
 
 pub struct Actor<E: Spawner + Clock + CryptoRngCore + Metrics, Si: Sink, St: Stream, C: PublicKey> {
     context: ContextCell<E>,

@@ -41,6 +41,7 @@ use std::{
     sync::Arc,
 };
 use tracing::warn;
+use commonware_macros::ready;
 
 /// Indicates which CRC slot in a page record must not be overwritten.
 #[derive(Clone, Copy)]
@@ -65,6 +66,7 @@ struct BlobState<B: Blob> {
 /// A [Blob] wrapper that supports write-cached appending of data, with checksums for data integrity
 /// and buffer pool managed caching.
 #[derive(Clone)]
+#[ready(0)]
 pub struct Append<B: Blob> {
     /// The underlying blob being wrapped.
     blob_state: Arc<RwLock<BlobState<B>>>,

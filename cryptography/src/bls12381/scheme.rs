@@ -47,11 +47,13 @@ use core::{
 };
 use rand_core::CryptoRngCore;
 use zeroize::Zeroizing;
+use commonware_macros::ready;
 
 const CURVE_NAME: &str = "bls12381";
 
 /// BLS12-381 private key.
 #[derive(Clone, Debug)]
+#[ready(0)]
 pub struct PrivateKey {
     raw: Secret<[u8; group::PRIVATE_KEY_LENGTH]>,
     key: Private,
@@ -149,6 +151,7 @@ impl crate::Verifier for PublicKey {
 
 /// BLS12-381 public key.
 #[derive(Clone, Eq, PartialEq)]
+#[ready(0)]
 pub struct PublicKey {
     raw: [u8; <MinPk as Variant>::Public::SIZE],
     key: <MinPk as Variant>::Public,
@@ -255,6 +258,7 @@ impl arbitrary::Arbitrary<'_> for PublicKey {
 
 /// BLS12-381 signature.
 #[derive(Clone, Eq, PartialEq)]
+#[ready(0)]
 pub struct Signature {
     raw: [u8; <MinPk as Variant>::Signature::SIZE],
     signature: <MinPk as Variant>::Signature,
@@ -362,6 +366,7 @@ impl arbitrary::Arbitrary<'_> for Signature {
 }
 
 /// BLS12-381 batch verifier.
+#[ready(0)]
 pub struct Batch {
     publics: Vec<<MinPk as Variant>::Public>,
     hms: Vec<<MinPk as Variant>::Signature>,

@@ -1,8 +1,8 @@
 //! Utilities for working with IP addresses.
 
-commonware_macros::readiness!(2);
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use commonware_macros::ready;
 
 /// Bits in an IPv4 address.
 const IPV4_BITS: u8 = 32;
@@ -12,12 +12,14 @@ const IPV6_BITS: u8 = 128;
 
 /// Canonical subnet representation for an IP address.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[ready(0)]
 pub struct Subnet {
     addr: IpAddr,
 }
 
 /// Prefix lengths (in bits) used to derive canonical subnets for IPv4 and IPv6 addresses.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[ready(0)]
 pub struct SubnetMask {
     pub ipv4: u32,
     pub ipv6: u128,

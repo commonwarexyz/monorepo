@@ -17,6 +17,7 @@ use prometheus_client::metrics::counter::Counter;
 use rand_core::CryptoRngCore;
 use std::{net::SocketAddr, num::NonZeroU32};
 use tracing::debug;
+use commonware_macros::ready;
 
 /// Subnet mask of `/24` for IPv4 and `/48` for IPv6 networks.
 const SUBNET_MASK: SubnetMask = SubnetMask::new(24, 48);
@@ -25,6 +26,7 @@ const SUBNET_MASK: SubnetMask = SubnetMask::new(24, 48);
 const CLEANUP_INTERVAL: u32 = 16_384;
 
 /// Configuration for the listener actor.
+#[ready(0)]
 pub struct Config<C: Signer> {
     pub address: SocketAddr,
     pub stream_cfg: StreamConfig<C>,
@@ -33,6 +35,8 @@ pub struct Config<C: Signer> {
     pub allowed_handshake_rate_per_ip: Quota,
     pub allowed_handshake_rate_per_subnet: Quota,
 }
+
+#[ready(0)]
 
 pub struct Actor<E: Spawner + Clock + Network + CryptoRngCore + Metrics, C: Signer> {
     context: ContextCell<E>,

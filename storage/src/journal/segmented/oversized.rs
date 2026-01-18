@@ -50,6 +50,7 @@ use commonware_runtime::{Metrics, Storage};
 use futures::{future::try_join, stream::Stream};
 use std::{collections::HashSet, num::NonZeroUsize};
 use tracing::{debug, warn};
+use commonware_macros::ready;
 
 /// Trait for index entries that reference oversized values in glob storage.
 ///
@@ -67,6 +68,7 @@ pub trait Record: CodecFixed<Cfg = ()> + Clone {
 
 /// Configuration for oversized journal.
 #[derive(Clone)]
+#[ready(0)]
 pub struct Config<C> {
     /// Partition for the fixed index journal.
     pub index_partition: String,
@@ -94,6 +96,7 @@ pub struct Config<C> {
 ///
 /// Combines a fixed-size index journal with glob storage for variable-length values.
 /// Provides coordinated operations and crash recovery.
+#[ready(0)]
 pub struct Oversized<E: Storage + Metrics, I: Record, V: Codec> {
     index: FixedJournal<E, I>,
     values: Glob<E, V>,

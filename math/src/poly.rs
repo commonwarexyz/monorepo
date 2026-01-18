@@ -1,4 +1,3 @@
-commonware_macros::readiness!(2);
 
 use crate::algebra::{msm_naive, Additive, CryptoGroup, Field, Object, Random, Ring, Space};
 #[cfg(not(feature = "std"))]
@@ -13,12 +12,14 @@ use core::{
     ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign},
 };
 use rand_core::CryptoRngCore;
+use commonware_macros::ready;
 
 // SECTION: Performance knobs.
 const MIN_POINTS_FOR_MSM: usize = 2;
 
 /// A polynomial, with coefficients in `K`.
 #[derive(Clone)]
+#[ready(0)]
 pub struct Poly<K> {
     // Invariant: (1..=u32::MAX).contains(coeffs.len())
     coeffs: NonEmptyVec<K>,
@@ -387,6 +388,7 @@ impl<G: CryptoGroup> Poly<G> {
 ///     );
 /// # }
 /// ```
+#[ready(0)]
 pub struct Interpolator<I, F> {
     weights: Map<I, F>,
 }

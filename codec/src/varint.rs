@@ -29,10 +29,10 @@
 //! assert_eq!(decoded, -3);
 //! ```
 
-commonware_macros::readiness!(2);
 
 use crate::{EncodeSize, Error, FixedSize, Read, ReadExt, Write};
 use bytes::{Buf, BufMut};
+use commonware_macros::ready;
 use core::{fmt::Debug, mem::size_of};
 use sealed::{SPrim, UPrim};
 
@@ -73,6 +73,7 @@ const CONTINUATION_BIT_MASK: u8 = 0x80;
 /// assert_eq!(decoder.feed(0x02).unwrap(), Some(300)); // complete!
 /// ```
 #[derive(Debug, Clone)]
+#[ready(0)]
 pub struct Decoder<U: UPrim> {
     result: U,
     bits_read: usize,
@@ -253,6 +254,7 @@ mod sealed {
 /// An ergonomic wrapper to allow for encoding and decoding of primitive unsigned integers as
 /// varints rather than the default fixed-width integers.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[ready(0)]
 pub struct UInt<U: UPrim>(pub U);
 
 // Implements `Into<U>` for `UInt<U>` for all unsigned integer types.
@@ -303,6 +305,7 @@ where
 /// An ergonomic wrapper to allow for encoding and decoding of primitive signed integers as
 /// varints rather than the default fixed-width integers.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[ready(0)]
 pub struct SInt<S: SPrim>(pub S);
 
 // Implements `Into<U>` for `SInt<U>` for all signed integer types.

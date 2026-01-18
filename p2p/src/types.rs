@@ -5,6 +5,7 @@ use commonware_codec::{EncodeSize, Error as CodecError, FixedSize, Read, ReadExt
 use commonware_runtime::{Error as RuntimeError, Resolver};
 use commonware_utils::{Hostname, IpAddrExt};
 use std::net::{IpAddr, SocketAddr};
+use commonware_macros::ready;
 
 const INGRESS_SOCKET_PREFIX: u8 = 0;
 const INGRESS_DNS_PREFIX: u8 = 1;
@@ -14,6 +15,7 @@ const ADDRESS_ASYMMETRIC_PREFIX: u8 = 1;
 
 /// What we dial to connect to a peer.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[ready(0)]
 pub enum Ingress {
     /// IP-based ingress address.
     Socket(SocketAddr),
@@ -146,6 +148,7 @@ impl From<SocketAddr> for Ingress {
 
 /// Full address specification for peer-to-peer networking.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[ready(0)]
 pub enum Address {
     /// Same address for both ingress (dialing) and egress (IP filtering).
     Symmetric(SocketAddr),

@@ -5,10 +5,12 @@ use core::{
     fmt::{Debug, Display},
     ops::Deref,
 };
+use commonware_macros::ready;
 
 /// An `Array` implementation for the unit type `()`.
 #[derive(Clone, Copy, Default, Eq, PartialEq, Ord, PartialOrd, Hash)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[ready(0)]
 pub struct Unit;
 
 impl Write for Unit {

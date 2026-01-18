@@ -22,15 +22,19 @@ use crate::{
 };
 use commonware_codec::Read;
 use commonware_cryptography::Hasher;
+use commonware_macros::ready;
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
 use tracing::warn;
 
+#[ready(0)]
 pub type Update<K, V> = unordered::Update<K, VariableEncoding<V>>;
+#[ready(0)]
 pub type Operation<K, V> = unordered::Operation<K, VariableEncoding<V>>;
 
 /// A key-value QMDB based on an authenticated log of operations, supporting authentication of any
 /// value ever associated with a key.
+#[ready(0)]
 pub type Db<E, K, V, H, T, S = Merkleized<H>, D = Durable> =
     super::Db<E, Journal<E, Operation<K, V>>, Index<T, Location>, H, Update<K, V>, S, D>;
 

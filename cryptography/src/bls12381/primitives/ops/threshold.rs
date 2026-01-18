@@ -23,6 +23,7 @@ use commonware_codec::Encode;
 use commonware_parallel::Strategy;
 use commonware_utils::{ordered::Map, union_unique, Faults, Participant};
 use rand_core::CryptoRngCore;
+use commonware_macros::ready;
 
 /// Prepares partial signature evaluations for threshold recovery.
 fn prepare_evaluations<'a, V: Variant>(
@@ -39,6 +40,7 @@ fn prepare_evaluations<'a, V: Variant>(
 }
 
 /// Signs the provided message with the key share.
+#[ready(0)]
 pub fn sign_message<V: Variant>(
     share: &Share,
     namespace: &[u8],
@@ -57,6 +59,7 @@ pub fn sign_message<V: Variant>(
 /// This signs the *threshold* public key (not the share's individual public key)
 /// so that partial signatures can be recovered into a threshold signature
 /// verifiable with `ops::verify_proof_of_possession`.
+#[ready(0)]
 pub fn sign_proof_of_possession<V: Variant>(
     sharing: &Sharing<V>,
     share: &Share,
@@ -79,6 +82,7 @@ pub fn sign_proof_of_possession<V: Variant>(
 /// # Warning
 ///
 /// This function assumes a group check was already performed on `signature`.
+#[ready(0)]
 pub fn verify_message<V: Variant>(
     sharing: &Sharing<V>,
     namespace: &[u8],
@@ -98,6 +102,7 @@ pub fn verify_message<V: Variant>(
 /// # Warning
 ///
 /// This function assumes a group check was already performed on `signature`.
+#[ready(0)]
 pub fn verify_proof_of_possession<V: Variant>(
     sharing: &Sharing<V>,
     namespace: &[u8],
@@ -123,6 +128,7 @@ pub fn verify_proof_of_possession<V: Variant>(
 /// This function assumes a group check was already performed on each `signature`.
 /// Duplicate messages are safe because random scalar weights ensure each
 /// (message, signature) pair is verified independently.
+#[ready(0)]
 pub fn batch_verify_same_signer<'a, R, V, I>(
     rng: &mut R,
     sharing: &Sharing<V>,
@@ -203,6 +209,7 @@ where
 /// This function assumes a group check was already performed on each `signature`.
 /// Duplicate signers are safe because random scalar weights ensure each
 /// (public key, signature) pair is verified independently.
+#[ready(0)]
 pub fn batch_verify_same_message<'a, R, V, I>(
     rng: &mut R,
     sharing: &Sharing<V>,
@@ -253,6 +260,7 @@ where
 /// # Warning
 ///
 /// This function assumes that each partial signature is unique.
+#[ready(0)]
 pub fn recover<'a, V, I, M>(
     sharing: &Sharing<V>,
     partials: I,
@@ -283,6 +291,7 @@ where
 ///
 /// This function assumes that each partial signature is unique and that
 /// each set of partial signatures has the same indices.
+#[ready(0)]
 pub fn recover_multiple<'a, V, I, M>(
     sharing: &Sharing<V>,
     many_evals: Vec<I>,
@@ -325,6 +334,7 @@ where
 /// Recovers a pair of signatures from two sets of at least `threshold` partial signatures.
 ///
 /// This is just a wrapper around `recover_multiple`.
+#[ready(0)]
 pub fn recover_pair<'a, V, I, M>(
     sharing: &Sharing<V>,
     first: I,

@@ -19,6 +19,7 @@ use commonware_stream::Config as StreamConfig;
 use commonware_utils::union;
 use rand_core::CryptoRngCore;
 use tracing::{debug, info};
+use commonware_macros::ready;
 
 /// Unique suffix for all messages signed by the tracker.
 const TRACKER_SUFFIX: &[u8] = b"_TRACKER";
@@ -27,6 +28,7 @@ const TRACKER_SUFFIX: &[u8] = b"_TRACKER";
 const STREAM_SUFFIX: &[u8] = b"_STREAM";
 
 /// Implementation of an `authenticated` network.
+#[ready(0)]
 pub struct Network<E: Spawner + Clock + CryptoRngCore + RNetwork + Resolver + Metrics, C: Signer> {
     context: ContextCell<E>,
     cfg: Config<C>,

@@ -12,11 +12,12 @@
 
 use bytes::Buf;
 use commonware_codec::{Codec, FixedSize, Read, Write};
+use commonware_cryptography::Digest;
+use commonware_macros::ready;
 use commonware_parallel::Strategy;
 use std::fmt::Debug;
 
 mod reed_solomon;
-use commonware_cryptography::Digest;
 pub use reed_solomon::{Error as ReedSolomonError, ReedSolomon};
 
 mod no_coding;
@@ -28,6 +29,7 @@ pub use zoda::{Error as ZodaError, Zoda};
 /// Configuration common to all encoding schemes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[ready(0)]
 pub struct Config {
     /// The minimum number of shards needed to encode the data.
     pub minimum_shards: u16,
@@ -70,6 +72,7 @@ impl Read for Config {
 
 /// The configuration for decoding shard data.
 #[derive(Clone, Debug)]
+#[ready(0)]
 pub struct CodecConfig {
     /// The maximum number of bytes a shard is expected to contain.
     ///

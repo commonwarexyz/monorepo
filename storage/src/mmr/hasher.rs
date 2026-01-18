@@ -2,6 +2,7 @@
 
 use super::Position;
 use commonware_cryptography::{Digest, Hasher as CHasher};
+use commonware_macros::ready;
 
 /// A trait for computing the various digests of an MMR.
 pub trait Hasher<D: Digest>: Send + Sync {
@@ -31,6 +32,7 @@ pub trait Hasher<D: Digest>: Send + Sync {
 
 /// The standard hasher to use with an MMR for computing leaf, node and root digests. Leverages no
 /// external data.
+#[ready(0)]
 pub struct Standard<H: CHasher> {
     hasher: H,
 }

@@ -96,6 +96,7 @@ use commonware_math::algebra::CryptoGroup;
 use commonware_utils::sequence::FixedBytes;
 use rand_core::CryptoRngCore;
 use zeroize::Zeroizing;
+use commonware_macros::ready;
 
 /// Domain separation tag for hashing the `h3` message to a scalar.
 const DST: DST = b"TLE_BLS12381_XMD:SHA-256_SSWU_RO_H3_";
@@ -104,6 +105,7 @@ const DST: DST = b"TLE_BLS12381_XMD:SHA-256_SSWU_RO_H3_";
 const BLOCK_SIZE: usize = Digest::SIZE;
 
 /// Block type for IBE.
+#[ready(0)]
 pub type Block = FixedBytes<BLOCK_SIZE>;
 
 impl From<Digest> for Block {
@@ -114,6 +116,7 @@ impl From<Digest> for Block {
 
 /// Encrypted message.
 #[derive(Hash, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[ready(0)]
 pub struct Ciphertext<V: Variant> {
     /// First group element U = r * Public::generator().
     pub u: V::Public,
@@ -269,6 +272,7 @@ fn xor(a: &Block, b: &Block) -> Block {
 ///
 /// # Returns
 /// * `Ciphertext<V>` - The encrypted ciphertext
+#[ready(0)]
 pub fn encrypt<R: CryptoRngCore, V: Variant>(
     rng: &mut R,
     public: V::Public,
@@ -324,6 +328,7 @@ pub fn encrypt<R: CryptoRngCore, V: Variant>(
 ///
 /// # Returns
 /// * `Option<Block>` - The decrypted message
+#[ready(0)]
 pub fn decrypt<V: Variant>(signature: &V::Signature, ciphertext: &Ciphertext<V>) -> Option<Block> {
     // Compute e(U, signature)
     let gt = V::pairing(&ciphertext.u, signature);

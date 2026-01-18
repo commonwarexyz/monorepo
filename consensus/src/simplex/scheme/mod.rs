@@ -26,6 +26,7 @@ use bytes::Bytes;
 use commonware_codec::Encode;
 use commonware_cryptography::{certificate, Digest};
 use commonware_utils::union;
+use commonware_macros::ready;
 
 pub mod bls12381_multisig;
 pub mod bls12381_threshold;
@@ -39,6 +40,7 @@ pub mod reporter;
 ///
 /// This struct holds the pre-computed namespace bytes for each vote type.
 #[derive(Clone, Debug)]
+#[ready(0)]
 pub struct Namespace {
     /// Namespace for notarize votes/certificates.
     pub notarize: Vec<u8>,

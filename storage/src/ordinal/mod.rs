@@ -93,6 +93,7 @@
 //! });
 //! ```
 
+use commonware_macros::ready;
 mod storage;
 
 use std::num::{NonZeroU64, NonZeroUsize};
@@ -101,6 +102,7 @@ use thiserror::Error;
 
 /// Errors that can occur when interacting with the [Ordinal].
 #[derive(Debug, Error)]
+#[ready(0)]
 pub enum Error {
     #[error("runtime error: {0}")]
     Runtime(#[from] commonware_runtime::Error),
@@ -116,6 +118,7 @@ pub enum Error {
 
 /// Configuration for [Ordinal] storage.
 #[derive(Clone)]
+#[ready(0)]
 pub struct Config {
     /// The [commonware_runtime::Storage] partition to use for storing the index.
     pub partition: String,

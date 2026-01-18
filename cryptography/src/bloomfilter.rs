@@ -1,6 +1,5 @@
 //! An implementation of a [Bloom Filter](https://en.wikipedia.org/wiki/Bloom_filter).
 
-commonware_macros::readiness!(1);
 
 use crate::{
     sha256::{Digest, Sha256},
@@ -14,6 +13,7 @@ use commonware_codec::{
 };
 use commonware_utils::bitmap::BitMap;
 use core::num::{NonZeroU64, NonZeroU8, NonZeroUsize};
+use commonware_macros::ready;
 
 /// The length of a half of a [Digest].
 const HALF_DIGEST_LEN: usize = 16;
@@ -27,6 +27,7 @@ const FULL_DIGEST_LEN: usize = Digest::SIZE;
 /// from two hash values, which are in turn derived from a single [Digest]. This provides
 /// efficient hashing for [BloomFilter::insert] and [BloomFilter::contains] operations.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[ready(0)]
 pub struct BloomFilter {
     hashers: u8,
     bits: BitMap,

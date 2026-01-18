@@ -3,10 +3,12 @@
 use crate::Clock;
 use prometheus_client::metrics::histogram::Histogram;
 use std::{sync::Arc, time::SystemTime};
+use commonware_macros::ready;
 
 /// Holds constants for bucket sizes for histograms.
 ///
 /// The bucket sizes are in seconds.
+#[ready(0)]
 pub struct Buckets;
 
 impl Buckets {
@@ -57,6 +59,7 @@ impl HistogramExt for Histogram {
 
 /// A wrapper around a histogram that includes a clock.
 #[derive(Clone)]
+#[ready(0)]
 pub struct Timed<C: Clock> {
     /// The histogram to record durations in.
     histogram: Histogram,
@@ -94,6 +97,7 @@ impl<C: Clock> Timed<C> {
 }
 
 /// A timer that records a duration when dropped.
+#[ready(0)]
 pub struct Timer<C: Clock> {
     /// The histogram to record durations in.
     histogram: Histogram,

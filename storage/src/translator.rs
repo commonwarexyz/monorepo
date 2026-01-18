@@ -1,8 +1,8 @@
 //! Primitive implementations of [Translator].
 
-commonware_macros::readiness!(2);
 
 use std::hash::{BuildHasher, Hash, Hasher};
+use commonware_macros::ready;
 
 /// Translate keys into a new representation (often a smaller one).
 ///
@@ -38,6 +38,7 @@ pub trait Translator: Clone + BuildHasher + Send + Sync + 'static {
 /// This hasher is not suitable for general use. If the hasher is called on a byte slice longer
 /// than `size_of::<u64>()`, it will panic.
 #[derive(Default, Clone)]
+#[ready(0)]
 pub struct UintIdentity {
     value: u64,
 }
@@ -130,6 +131,7 @@ define_cap_translator!(EightCap, 8, u64);
 /// overhead of the default Array hasher which unnecessarily (for our use case) includes a length
 /// prefix.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+#[ready(0)]
 pub struct UnhashedArray<const N: usize> {
     pub inner: [u8; N],
 }
@@ -149,6 +151,7 @@ impl<const N: usize> PartialEq<[u8; N]> for UnhashedArray<N> {
 
 /// Translators for keys that are not the length of a standard integer.
 #[derive(Clone, Copy)]
+#[ready(0)]
 pub struct Cap<const N: usize>;
 
 impl<const N: usize> Cap<N> {

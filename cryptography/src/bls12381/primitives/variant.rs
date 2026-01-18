@@ -20,6 +20,7 @@ use core::{
     hash::Hash,
 };
 use rand_core::CryptoRngCore;
+use commonware_macros::ready;
 
 /// A specific instance of a signature scheme.
 pub trait Variant: Clone + Send + Sync + Hash + Eq + Debug + 'static {
@@ -71,6 +72,7 @@ pub trait Variant: Clone + Send + Sync + Hash + Eq + Debug + 'static {
 
 /// A [Variant] with a public key of type [G1] and a signature of type [G2].
 #[derive(Clone, Hash, PartialEq, Eq)]
+#[ready(0)]
 pub struct MinPk {}
 
 impl Variant for MinPk {
@@ -173,6 +175,7 @@ impl Debug for MinPk {
 
 /// A [Variant] with a public key of type [G2] and a signature of type [G1].
 #[derive(Clone, Hash, PartialEq, Eq)]
+#[ready(0)]
 pub struct MinSig {}
 
 impl Variant for MinSig {
@@ -277,6 +280,7 @@ impl Debug for MinSig {
 ///
 /// c.f. [`super::ops`] for how to manipulate these.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[ready(0)]
 pub struct PartialSignature<V: Variant> {
     pub index: Participant,
     pub value: V::Signature,

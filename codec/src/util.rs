@@ -1,12 +1,13 @@
 //! Codec utility functions
 
-commonware_macros::readiness!(2);
 
 use crate::{extensions::ReadExt as _, Error};
 use bytes::Buf;
+use commonware_macros::ready;
 
 /// Checks if the buffer has at least `len` bytes remaining. Returns an [Error::EndOfBuffer] if not.
 #[inline]
+#[ready(0)]
 pub fn at_least<B: Buf>(buf: &mut B, len: usize) -> Result<(), Error> {
     let rem = buf.remaining();
     if rem < len {
@@ -18,6 +19,7 @@ pub fn at_least<B: Buf>(buf: &mut B, len: usize) -> Result<(), Error> {
 /// Ensures the next `size` bytes are all zeroes in the provided buffer, returning an [Error]
 /// otherwise.
 #[inline]
+#[ready(0)]
 pub fn ensure_zeros<B: Buf>(buf: &mut B, size: usize) -> Result<(), Error> {
     for _ in 0..size {
         if u8::read(buf)? != 0 {

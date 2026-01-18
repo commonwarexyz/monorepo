@@ -4,8 +4,10 @@ use commonware_cryptography::{Committable, Digestible, PublicKey};
 use commonware_p2p::Recipients;
 use commonware_utils::channels::fallible::AsyncFallibleExt;
 use futures::channel::{mpsc, oneshot};
+use commonware_macros::ready;
 
 /// Messages that can be sent to a [Mailbox].
+#[ready(0)]
 pub enum Message<P: PublicKey, R: Committable + Digestible + Codec> {
     Send {
         request: R,
@@ -19,6 +21,7 @@ pub enum Message<P: PublicKey, R: Committable + Digestible + Codec> {
 
 /// A mailbox that can be used to send and receive [Message]s.
 #[derive(Clone)]
+#[ready(0)]
 pub struct Mailbox<P: PublicKey, R: Committable + Digestible + Codec> {
     sender: mpsc::Sender<Message<P, R>>,
 }

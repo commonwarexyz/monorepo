@@ -41,7 +41,6 @@
 //! RUSTFLAGS="--cfg generate_conformance_tests" cargo test
 //! ```
 
-commonware_macros::readiness!(2);
 
 pub use commonware_conformance_macros::conformance_tests;
 #[doc(hidden)]

@@ -57,8 +57,8 @@
 //! (like [bls12381_threshold]). Refer to [ed25519] for an example of a scheme that uses the
 //! same key for both purposes.
 
-commonware_macros::readiness!(2);
 
+use commonware_macros::ready;
 pub use crate::{
     bls12381::certificate::{multisig as bls12381_multisig, threshold as bls12381_threshold},
     ed25519::certificate as ed25519,
@@ -80,6 +80,7 @@ use std::{collections::BTreeSet, sync::Arc, vec::Vec};
 
 /// A participant's attestation for a certificate.
 #[derive(Clone, Debug)]
+#[ready(0)]
 pub struct Attestation<S: Scheme> {
     /// Index of the signer inside the participant set.
     pub signer: Participant,
@@ -139,6 +140,7 @@ where
 }
 
 /// Result of batch-verifying attestations.
+#[ready(0)]
 pub struct Verification<S: Scheme> {
     /// Contains the attestations accepted by the scheme.
     pub verified: Vec<Attestation<S>>,
@@ -354,6 +356,7 @@ pub trait Provider: Clone + Send + Sync + 'static {
 ///
 /// Internally, it stores bits in 1-byte chunks for compact encoding.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[ready(0)]
 pub struct Signers {
     bitmap: BitMap<1>,
 }
@@ -443,6 +446,7 @@ impl arbitrary::Arbitrary<'_> for Signers {
 
 /// A scheme provider that always returns the same scheme regardless of scope.
 #[derive(Clone, Debug)]
+#[ready(0)]
 pub struct ConstantProvider<S: Scheme, Sc = ()> {
     scheme: Arc<S>,
     _scope: core::marker::PhantomData<Sc>,

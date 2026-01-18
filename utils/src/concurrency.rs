@@ -1,6 +1,5 @@
 //! Utilities for managing concurrency.
 
-commonware_macros::readiness!(2);
 
 use core::{
     hash::Hash,
@@ -11,8 +10,10 @@ use std::{
     collections::HashSet,
     sync::{Arc, Mutex},
 };
+use commonware_macros::ready;
 
 /// Limit the concurrency of some operation without blocking.
+#[ready(0)]
 pub struct Limiter {
     max: u32,
     current: Arc<AtomicU32>,
@@ -41,6 +42,7 @@ impl Limiter {
 }
 
 /// A reservation for a slot in the [Limiter].
+#[ready(0)]
 pub struct Reservation {
     current: Arc<AtomicU32>,
 }
@@ -52,6 +54,7 @@ impl Drop for Reservation {
 }
 
 /// Limit the concurrency of some keyed operation without blocking.
+#[ready(0)]
 pub struct KeyedLimiter<K: Eq + Hash + Clone> {
     max: u32,
     current: Arc<Mutex<HashSet<K>>>,
@@ -86,6 +89,7 @@ impl<K: Eq + Hash + Clone> KeyedLimiter<K> {
 }
 
 /// A reservation for a slot in the [KeyedLimiter].
+#[ready(0)]
 pub struct KeyedReservation<K: Eq + Hash + Clone> {
     key: K,
     current: Arc<Mutex<HashSet<K>>>,

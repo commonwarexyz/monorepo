@@ -10,9 +10,11 @@ use commonware_utils::{
     NZUsize,
 };
 use futures::channel::oneshot;
+use commonware_macros::ready;
 
 /// Messages that can be processed by the router.
 #[derive(Debug)]
+#[ready(0)]
 pub enum Message<P: PublicKey> {
     /// Notify the router that a peer is ready to communicate.
     Ready {
@@ -61,6 +63,7 @@ impl<P: PublicKey> Mailbox<Message<P>> {
 
 /// Sends messages containing content to the router to send to peers.
 #[derive(Clone, Debug)]
+#[ready(0)]
 pub struct Messenger<P: PublicKey> {
     sender: Mailbox<Message<P>>,
 }

@@ -40,6 +40,7 @@ use commonware_utils::Array;
 use core::ops::Range;
 use futures::stream::Stream;
 use std::num::NonZeroU64;
+use commonware_macros::ready;
 
 /// A key-value QMDB based on an MMR over its log of operations, supporting key exclusion proofs and
 /// authentication of whether a currently has a specific value.
@@ -47,6 +48,7 @@ use std::num::NonZeroU64;
 /// Note: The generic parameter N is not really generic, and must be manually set to double the size
 /// of the hash digest being produced by the hasher. A compile-time assertion is used to prevent any
 /// other setting.
+#[ready(0)]
 pub struct Db<
     E: RStorage + Clock + Metrics,
     K: Array,
@@ -75,6 +77,7 @@ pub struct Db<
 
 /// Proof information for verifying a key has a particular value in the database.
 #[derive(Clone, Eq, PartialEq, Debug)]
+#[ready(0)]
 pub struct KeyValueProof<K: Array, D: Digest, const N: usize> {
     pub proof: OperationProof<D, N>,
     pub next_key: K,

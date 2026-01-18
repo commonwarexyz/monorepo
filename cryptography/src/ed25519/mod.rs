@@ -25,7 +25,6 @@
 //! assert!(signer.public_key().verify(namespace, msg, &signature));
 //! ```
 
-commonware_macros::readiness!(2);
 
 pub mod certificate;
 mod scheme;

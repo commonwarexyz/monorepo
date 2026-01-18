@@ -62,8 +62,8 @@
 //! - Uses [`broadcast::buffered`](`commonware_broadcast::buffered`) for broadcasting and receiving
 //!   uncertified blocks from the network.
 
-commonware_macros::readiness!(2);
 
+use commonware_macros::ready;
 pub mod actor;
 pub use actor::Actor;
 pub mod cache;
@@ -82,6 +82,7 @@ use commonware_utils::{acknowledgement::Exact, Acknowledgement};
 /// Finalized tips are reported as soon as known, whether or not we hold all blocks up to that height.
 /// Finalized blocks are reported to the application in monotonically increasing order (no gaps permitted).
 #[derive(Clone, Debug)]
+#[ready(0)]
 pub enum Update<B: Block, A: Acknowledgement = Exact> {
     /// A new finalized tip.
     Tip(Height, B::Commitment),

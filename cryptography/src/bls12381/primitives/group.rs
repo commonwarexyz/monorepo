@@ -49,6 +49,7 @@ use core::{
 use ctutils::{Choice, CtEq};
 use rand_core::CryptoRngCore;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
+use commonware_macros::ready;
 
 fn all_zero(bytes: &[u8]) -> Choice {
     bytes
@@ -59,6 +60,7 @@ fn all_zero(bytes: &[u8]) -> Choice {
 /// Domain separation tag used when hashing a message to a curve (G1 or G2).
 ///
 /// Reference: <https://datatracker.ietf.org/doc/html/draft-irtf-cfrg-bls-signature-05#name-ciphersuites>
+#[ready(0)]
 pub type DST = &'static [u8];
 
 /// Wrapper around [blst_fr] that represents an element of the BLS12‑381
@@ -73,6 +75,7 @@ pub type DST = &'static [u8];
 /// the order of the BLS12‑381 G1/G2 groups.
 #[derive(Clone, Eq, PartialEq)]
 #[repr(transparent)]
+#[ready(0)]
 pub struct Scalar(blst_fr);
 
 #[cfg(feature = "arbitrary")]
@@ -114,6 +117,7 @@ const IKM_LENGTH: usize = 64;
 /// forgery attacks in batch verification while reducing computational cost
 /// compared to full 255-bit scalars.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[ready(0)]
 pub struct SmallScalar {
     /// Stored as blst_scalar with only lower 128 bits populated.
     inner: blst_scalar,
@@ -173,6 +177,7 @@ const BLST_FR_ONE: Scalar = Scalar(blst_fr {
 /// A point on the BLS12-381 G1 curve.
 #[derive(Clone, Copy, Eq, PartialEq)]
 #[repr(transparent)]
+#[ready(0)]
 pub struct G1(blst_p1);
 
 /// The size in bytes of an encoded G1 element.
@@ -199,6 +204,7 @@ impl arbitrary::Arbitrary<'_> for G1 {
 /// A point on the BLS12-381 G2 curve.
 #[derive(Clone, Copy, Eq, PartialEq)]
 #[repr(transparent)]
+#[ready(0)]
 pub struct G2(blst_p2);
 
 /// The size in bytes of an encoded G2 element.
@@ -228,6 +234,7 @@ impl arbitrary::Arbitrary<'_> for G2 {
 /// produced as the result of a pairing operation.
 #[derive(Debug, Clone, Eq, PartialEq, Copy)]
 #[repr(transparent)]
+#[ready(0)]
 pub struct GT(blst_fp12);
 
 /// The size in bytes of an encoded GT element.
@@ -255,6 +262,7 @@ impl GT {
 
 /// The private key type.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[ready(0)]
 pub struct Private {
     scalar: Secret<Scalar>,
 }
@@ -600,6 +608,7 @@ impl Random for Scalar {
 
 /// A share of a threshold signing key.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[ready(0)]
 pub struct Share {
     /// The share's index in the polynomial.
     pub index: Participant,

@@ -71,9 +71,11 @@ use std::{
     ops::Range,
 };
 use tracing::debug;
+use commonware_macros::ready;
 
 /// Configuration for `Journal` storage.
 #[derive(Clone)]
+#[ready(0)]
 pub struct Config {
     /// The `commonware-runtime::Storage` partition to use for storing journal blobs.
     pub partition: String,
@@ -105,6 +107,7 @@ pub struct Config {
 /// the first invalid data read will be considered the new end of the journal (and the
 /// underlying blob will be truncated to the last valid item). Repair is performed
 /// by the underlying [SegmentedJournal] during init.
+#[ready(0)]
 pub struct Journal<E: Storage + Metrics, A: CodecFixedShared> {
     inner: SegmentedJournal<E, A>,
 

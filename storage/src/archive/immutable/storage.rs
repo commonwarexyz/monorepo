@@ -12,6 +12,7 @@ use futures::join;
 use prometheus_client::metrics::counter::Counter;
 use std::collections::BTreeMap;
 use tracing::debug;
+use commonware_macros::ready;
 
 /// Prefix for [Freezer] records.
 const FREEZER_PREFIX: u8 = 0;
@@ -84,6 +85,7 @@ impl EncodeSize for Record {
 }
 
 /// An immutable key-value store for ordered data with a minimal memory footprint.
+#[ready(0)]
 pub struct Archive<E: Storage + Metrics + Clock, K: Array, V: CodecShared> {
     /// Number of items per section.
     items_per_section: u64,

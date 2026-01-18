@@ -35,6 +35,7 @@ use commonware_cryptography::{
 };
 use commonware_utils::{modulo, ordered::Set};
 use std::marker::PhantomData;
+use commonware_macros::ready;
 
 /// Configuration for creating an [`Elector`].
 ///
@@ -92,6 +93,7 @@ pub trait Elector<S: Scheme>: Clone + Send + 'static {
 ///
 /// Works with any signing scheme.
 #[derive(Clone, Debug, Default)]
+#[ready(0)]
 pub struct RoundRobin<H: Hasher = Sha256> {
     seed: Option<Vec<u8>>,
     _phantom: PhantomData<H>,
@@ -140,6 +142,7 @@ impl<S: Scheme, H: Hasher> Config<S> for RoundRobin<H> {
 ///
 /// Created via [`RoundRobin::build`].
 #[derive(Clone, Debug)]
+#[ready(0)]
 pub struct RoundRobinElector<S: Scheme> {
     permutation: Vec<Participant>,
     _phantom: PhantomData<S>,
@@ -161,6 +164,7 @@ impl<S: Scheme> Elector<S> for RoundRobinElector<S> {
 ///
 /// Only works with [`bls12381_threshold`] signing scheme.
 #[derive(Clone, Debug, Default)]
+#[ready(0)]
 pub struct Random;
 
 impl Random {
@@ -204,6 +208,7 @@ where
 ///
 /// Created via [`Random::build`].
 #[derive(Clone, Debug)]
+#[ready(0)]
 pub struct RandomElector<S: Scheme> {
     n: u32,
     _phantom: PhantomData<S>,

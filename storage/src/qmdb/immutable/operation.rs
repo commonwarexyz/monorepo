@@ -11,6 +11,7 @@ use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
 use commonware_utils::{hex, Array};
 use core::fmt::Display;
+use commonware_macros::ready;
 
 // Context byte prefixes for identifying the operation type.
 const SET_CONTEXT: u8 = 0;
@@ -21,6 +22,7 @@ const COMMIT_CONTEXT: u8 = 1;
 /// Unlike mutable database operations, immutable operations only support
 /// setting new values and committing - no updates or deletions.
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
+#[ready(0)]
 pub enum Operation<K: Array, V: VariableValue> {
     /// Set a key to a value. The key must not already exist.
     Set(K, V),

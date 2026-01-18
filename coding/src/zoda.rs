@@ -121,6 +121,7 @@ use commonware_cryptography::{
     transcript::{Summary, Transcript},
     Hasher,
 };
+use commonware_macros::ready;
 use commonware_math::{
     fields::goldilocks::F,
     ntt::{EvaluationVector, Matrix},
@@ -323,6 +324,7 @@ use topology::Topology;
 
 /// A shard of data produced by the encoding scheme.
 #[derive(Clone)]
+#[ready(0)]
 pub struct Shard<H: Hasher> {
     data_bytes: usize,
     root: H::Digest,
@@ -399,6 +401,8 @@ where
 }
 
 #[derive(Clone, Debug)]
+#[ready(0)]
+
 pub struct ReShard<H: Hasher> {
     inclusion_proof: Proof<H::Digest>,
     shard: Matrix,
@@ -456,6 +460,7 @@ where
 }
 
 /// A ZODA shard that has been checked for integrity already.
+#[ready(0)]
 pub struct CheckedShard {
     index: usize,
     shard: Matrix,
@@ -490,6 +495,7 @@ fn checking_matrix(transcript: &Transcript, topology: &Topology) -> Matrix {
 
 /// Data used to check [ReShard]s.
 #[derive(Clone)]
+#[ready(0)]
 pub struct CheckingData<H: Hasher> {
     topology: Topology,
     root: H::Digest,
@@ -587,6 +593,8 @@ impl<H: Hasher> CheckingData<H> {
 }
 
 #[derive(Debug, Error)]
+#[ready(0)]
+
 pub enum Error {
     #[error("invalid shard")]
     InvalidShard,
@@ -606,6 +614,8 @@ pub enum Error {
 const NAMESPACE: &[u8] = b"commonware-zoda";
 
 #[derive(Clone, Copy)]
+#[ready(0)]
+
 pub struct Zoda<H> {
     _marker: PhantomData<H>,
 }

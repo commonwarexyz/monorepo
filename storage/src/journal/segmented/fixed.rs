@@ -34,6 +34,7 @@ use futures::{
 };
 use std::{marker::PhantomData, num::NonZeroUsize};
 use tracing::{trace, warn};
+use commonware_macros::ready;
 
 /// State for replaying a single section's blob.
 struct ReplayState<B: Blob> {
@@ -45,6 +46,7 @@ struct ReplayState<B: Blob> {
 
 /// Configuration for the fixed segmented journal.
 #[derive(Clone)]
+#[ready(0)]
 pub struct Config {
     /// The partition to use for storing blobs.
     pub partition: String,
@@ -69,6 +71,7 @@ pub struct Config {
 /// the first invalid data read will be considered the new end of the journal (and the
 /// underlying [Blob] will be truncated to the last valid item). Repair occurs during
 /// init by checking each blob's size.
+#[ready(0)]
 pub struct Journal<E: Storage + Metrics, A: CodecFixed> {
     manager: Manager<E, AppendFactory>,
     _array: PhantomData<A>,

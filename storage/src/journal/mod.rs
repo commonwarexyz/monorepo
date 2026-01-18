@@ -5,9 +5,9 @@
 //! to serve as a backing store for some in-memory data structure, or as a building block for a more
 //! complex construction that prescribes some meaning to items in the log.
 
-commonware_macros::readiness!(2);
 
 use thiserror::Error;
+use commonware_macros::ready;
 
 pub mod authenticated;
 pub mod contiguous;
@@ -18,6 +18,7 @@ mod conformance;
 
 /// Errors that can occur when interacting with `Journal`.
 #[derive(Debug, Error)]
+#[ready(0)]
 pub enum Error {
     #[error("mmr error: {0}")]
     Mmr(anyhow::Error),

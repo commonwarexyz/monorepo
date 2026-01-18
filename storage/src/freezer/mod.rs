@@ -206,10 +206,12 @@ mod storage;
 use commonware_runtime::buffer::PoolRef;
 use commonware_utils::Array;
 use std::num::NonZeroUsize;
+use commonware_macros::ready;
 pub use storage::{Checkpoint, Cursor, Freezer};
 use thiserror::Error;
 
 /// Subject of a [Freezer::get] operation.
+#[ready(0)]
 pub enum Identifier<'a, K: Array> {
     Cursor(Cursor),
     Key(&'a K),
@@ -217,6 +219,7 @@ pub enum Identifier<'a, K: Array> {
 
 /// Errors that can occur when interacting with the [Freezer].
 #[derive(Debug, Error)]
+#[ready(0)]
 pub enum Error {
     #[error("runtime error: {0}")]
     Runtime(#[from] commonware_runtime::Error),
@@ -228,6 +231,7 @@ pub enum Error {
 
 /// Configuration for [Freezer].
 #[derive(Clone)]
+#[ready(0)]
 pub struct Config<C> {
     /// The [commonware_runtime::Storage] partition for the key index journal.
     pub key_partition: String,

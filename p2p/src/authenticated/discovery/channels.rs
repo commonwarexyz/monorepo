@@ -8,11 +8,13 @@ use commonware_cryptography::PublicKey;
 use commonware_runtime::{Clock, Quota};
 use futures::{channel::mpsc, StreamExt};
 use std::{collections::BTreeMap, fmt::Debug, time::SystemTime};
+use commonware_macros::ready;
 
 /// An interior sender that enforces message size limits and
 /// supports sending arbitrary bytes to a set of recipients over
 /// a pre-defined [`Channel`].
 #[derive(Debug, Clone)]
+#[ready(0)]
 pub struct UnlimitedSender<P: PublicKey> {
     channel: Channel,
     max_size: u32,
@@ -42,6 +44,7 @@ impl<P: PublicKey> crate::UnlimitedSender for UnlimitedSender<P> {
 
 /// Sender is the mechanism used to send arbitrary bytes to a set of recipients over a pre-defined channel.
 #[derive(Clone)]
+#[ready(0)]
 pub struct Sender<P: PublicKey, C: Clock> {
     limited_sender: LimitedSender<C, UnlimitedSender<P>, Messenger<P>>,
 }
@@ -85,6 +88,7 @@ where
 
 /// Channel to asynchronously receive messages from a channel.
 #[derive(Debug)]
+#[ready(0)]
 pub struct Receiver<P: PublicKey> {
     receiver: mpsc::Receiver<Message<P>>,
 }
@@ -113,6 +117,8 @@ impl<P: PublicKey> crate::Receiver for Receiver<P> {
 }
 
 #[derive(Clone)]
+#[ready(0)]
+
 pub struct Channels<P: PublicKey> {
     messenger: Messenger<P>,
     max_size: u32,

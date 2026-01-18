@@ -6,9 +6,11 @@ use bytes::{Buf, BufMut};
 use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt as _, Write};
 use commonware_cryptography::Digest;
 use std::ops::Range;
+use commonware_macros::ready;
 
 /// Target state to sync to
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[ready(0)]
 pub struct Target<D: Digest> {
     /// The root digest we're syncing to
     pub root: D,
@@ -66,6 +68,7 @@ where
 }
 
 /// Validate a target update against the current target
+#[ready(0)]
 pub fn validate_update<U, D>(
     old_target: &Target<D>,
     new_target: &Target<D>,

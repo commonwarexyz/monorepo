@@ -36,12 +36,17 @@ use std::{
     num::{NonZeroU64, NonZeroUsize},
 };
 use tracing::{debug, error, warn};
+use commonware_macros::ready;
+
+#[ready(0)]
 
 pub type DirtyMmr<E, D> = Mmr<E, D, Dirty>;
+#[ready(0)]
 pub type CleanMmr<E, D> = Mmr<E, D, Clean<D>>;
 
 /// Configuration for a journal-backed MMR.
 #[derive(Clone)]
+#[ready(0)]
 pub struct Config {
     /// The name of the `commonware-runtime::Storage` storage partition used for the journal storing
     /// the MMR nodes.
@@ -71,6 +76,7 @@ pub struct Config {
 /// - **Fresh Start**: Existing data < range start → discard and start fresh
 /// - **Prune and Reuse**: range contains existing data → prune and reuse
 /// - **Prune and Rewind**: existing data > range end → prune and rewind to range end
+#[ready(0)]
 pub struct SyncConfig<D: Digest> {
     /// Base MMR configuration (journal, metadata, etc.)
     pub config: Config,
@@ -85,6 +91,7 @@ pub struct SyncConfig<D: Digest> {
 }
 
 /// A MMR backed by a fixed-item-length journal.
+#[ready(0)]
 pub struct Mmr<E: RStorage + Clock + Metrics, D: Digest, S: State<D> + Send + Sync = Dirty> {
     /// A memory resident MMR used to build the MMR structure and cache updates. It caches all
     /// un-synced nodes, and the pinned node set as derived from both its own pruning boundary and

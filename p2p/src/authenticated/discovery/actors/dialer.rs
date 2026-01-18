@@ -23,8 +23,10 @@ use rand::seq::SliceRandom;
 use rand_core::CryptoRngCore;
 use std::time::Duration;
 use tracing::debug;
+use commonware_macros::ready;
 
 /// Configuration for the dialer actor.
+#[ready(0)]
 pub struct Config<C: Signer> {
     /// Configuration for the stream.
     pub stream_cfg: StreamConfig<C>,
@@ -46,6 +48,7 @@ pub struct Config<C: Signer> {
 }
 
 /// Actor responsible for dialing peers and establishing outgoing connections.
+#[ready(0)]
 pub struct Actor<E: Spawner + Clock + Network + Resolver + Metrics, C: Signer> {
     context: ContextCell<E>,
 

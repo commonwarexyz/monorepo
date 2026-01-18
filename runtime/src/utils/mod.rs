@@ -1,6 +1,5 @@
 //! Utility functions for interacting with any runtime.
 
-commonware_macros::readiness!(2);
 
 #[cfg(test)]
 use crate::{Runner, Spawner};
@@ -14,6 +13,7 @@ use std::{
     sync::{Arc, Condvar, Mutex},
     task::{Context, Poll},
 };
+use commonware_macros::ready;
 
 pub mod buffer;
 pub mod signal;
@@ -29,6 +29,7 @@ pub(crate) mod supervision;
 
 /// The execution mode of a task.
 #[derive(Copy, Clone, Debug)]
+#[ready(0)]
 pub enum Execution {
     /// Task runs on a dedicated thread.
     Dedicated,
@@ -44,6 +45,7 @@ impl Default for Execution {
 }
 
 /// Yield control back to the runtime.
+#[ready(0)]
 pub async fn reschedule() {
     struct Reschedule {
         yielded: bool,
@@ -101,12 +103,15 @@ fn extract_panic_message(err: &(dyn Any + Send)) -> String {
 ///     *w += 1;
 /// });
 /// ```
+#[ready(0)]
 pub struct RwLock<T>(async_lock::RwLock<T>);
 
 /// Shared guard returned by [RwLock::read].
+#[ready(0)]
 pub type RwLockReadGuard<'a, T> = async_lock::RwLockReadGuard<'a, T>;
 
 /// Exclusive guard returned by [RwLock::write].
+#[ready(0)]
 pub type RwLockWriteGuard<'a, T> = async_lock::RwLockWriteGuard<'a, T>;
 
 impl<T> RwLock<T> {
@@ -154,6 +159,7 @@ impl<T> RwLock<T> {
 }
 
 /// Synchronization primitive that enables a thread to block until a waker delivers a signal.
+#[ready(0)]
 pub struct Blocker {
     /// Tracks whether a wake-up signal has been delivered (even if wait has not started yet).
     state: Mutex<bool>,
@@ -236,6 +242,7 @@ impl ArcWake for Blocker {
 ///     assert_eq!(count, 0, "worker task should be stopped");
 /// });
 /// ```
+#[ready(0)]
 pub fn count_running_tasks(metrics: &impl crate::Metrics, prefix: &str) -> usize {
     let encoded = metrics.encode();
     encoded
@@ -258,6 +265,7 @@ pub fn count_running_tasks(metrics: &impl crate::Metrics, prefix: &str) -> usize
 ///
 /// Panics if the label is empty, starts with a non-alphabetic character,
 /// or contains characters other than `[a-zA-Z0-9_]`.
+#[ready(0)]
 pub fn validate_label(label: &str) {
     let mut chars = label.chars();
     assert!(
@@ -279,6 +287,7 @@ async fn task(i: usize) -> usize {
 }
 
 #[cfg(test)]
+#[ready(0)]
 pub fn run_tasks(tasks: usize, runner: crate::deterministic::Runner) -> (String, Vec<usize>) {
     runner.start(|context| async move {
         // Randomly schedule tasks

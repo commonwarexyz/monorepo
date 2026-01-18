@@ -1,6 +1,5 @@
 //! Utilities for providing acknowledgement.
 
-commonware_macros::readiness!(2);
 
 use core::{
     fmt::Debug,
@@ -16,10 +15,12 @@ use std::{
         Arc,
     },
 };
+use commonware_macros::ready;
 
 /// Acknowledgement cancellation error.
 #[derive(Debug, thiserror::Error)]
 #[error("acknowledgement was cancelled")]
+#[ready(0)]
 pub struct Canceled;
 
 /// A mechanism for acknowledging the completion of a task.
@@ -40,6 +41,7 @@ pub trait Acknowledgement: Clone + Send + Sync + Debug + 'static {
 /// [Acknowledgement] that returns after all instances are acknowledged.
 ///
 /// If any acknowledgement is not handled, the acknowledgement will be cancelled.
+#[ready(0)]
 pub struct Exact {
     state: Arc<ExactState>,
     acknowledged: bool,
@@ -105,6 +107,7 @@ impl Acknowledgement for Exact {
 }
 
 /// Future that waits for an [Exact] acknowledgement to complete or be canceled.
+#[ready(0)]
 pub struct ExactWaiter {
     state: Arc<ExactState>,
 }

@@ -8,6 +8,7 @@
 //! - Require a quorum of signatures to recover the full signature
 //! - Are **non-attributable**: partial signatures can be forged by holders of enough other partials
 
+use commonware_macros::ready;
 #[cfg(feature = "mocks")]
 pub mod mocks;
 
@@ -40,6 +41,7 @@ use std::collections::BTreeSet;
 /// a verifier (with evaluated public polynomial), or an external verifier that
 /// only checks recovered certificates.
 #[derive(Clone, Debug)]
+#[ready(0)]
 pub enum Generic<P: PublicKey, V: Variant, N: Namespace> {
     Signer {
         /// Participants in the committee.

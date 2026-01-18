@@ -1,9 +1,11 @@
 use crate::authenticated::{discovery::types, Mailbox};
 use commonware_cryptography::PublicKey;
 use commonware_utils::channels::fallible::AsyncFallibleExt;
+use commonware_macros::ready;
 
 /// Messages that can be sent to the peer [super::Actor].
 #[derive(Clone, Debug)]
+#[ready(0)]
 pub enum Message<C: PublicKey> {
     /// Send a bit vector to the peer.
     BitVec(types::BitVec),

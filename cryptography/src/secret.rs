@@ -14,7 +14,6 @@
 //! metadata (pointer, length, capacity) zeroized, the referenced data remains
 //! intact. Do not use `Secret` with types that contain pointers.
 
-commonware_macros::readiness!(2);
 
 use core::{
     fmt::{Debug, Display, Formatter},
@@ -22,6 +21,7 @@ use core::{
 };
 use ctutils::CtEq;
 use zeroize::{Zeroize, ZeroizeOnDrop};
+use commonware_macros::ready;
 
 /// Zeroize memory at the given pointer using volatile writes.
 ///
@@ -44,6 +44,7 @@ unsafe fn zeroize_ptr<T>(ptr: *mut T) {
 ///
 /// Only use with flat data types that have no pointers (e.g. `[u8; N]`).
 /// See [module-level documentation](self) for details.
+#[ready(0)]
 pub struct Secret<T>(ManuallyDrop<T>);
 
 impl<T> Secret<T> {

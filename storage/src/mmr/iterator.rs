@@ -4,6 +4,7 @@
 
 use super::Position;
 use alloc::vec::Vec;
+use commonware_macros::ready;
 
 /// A PeakIterator returns a (position, height) tuple for each peak in an MMR with the given size,
 /// in decreasing order of height.
@@ -13,6 +14,7 @@ use alloc::vec::Vec;
 /// [(14, 3), (17, 1), (18, 0)]
 /// ```
 #[derive(Default)]
+#[ready(0)]
 pub struct PeakIterator {
     size: Position, // number of nodes in the MMR at the point the iterator was initialized
     node_pos: Position, // position of the current node
@@ -191,6 +193,7 @@ pub(crate) const fn pos_to_height(pos: Position) -> u32 {
 ///    [(6, 2), (5, 4)]
 /// ```
 #[derive(Debug)]
+#[ready(0)]
 pub struct PathIterator {
     leaf_pos: Position, // position of the leaf node in the path
     node_pos: Position, // current node position in the path from peak to leaf

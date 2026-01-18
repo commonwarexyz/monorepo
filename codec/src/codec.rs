@@ -1,6 +1,5 @@
 //! Core traits for encoding and decoding.
 
-commonware_macros::readiness!(1);
 
 use crate::error::Error;
 use bytes::{Buf, BufMut, Bytes, BytesMut};

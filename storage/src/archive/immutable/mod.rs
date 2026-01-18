@@ -65,6 +65,7 @@
 //!     archive.sync().await.unwrap();
 //! });
 
+use commonware_macros::ready;
 mod storage;
 use commonware_runtime::buffer::PoolRef;
 use std::num::{NonZeroU64, NonZeroUsize};
@@ -72,6 +73,7 @@ pub use storage::Archive;
 
 /// Configuration for [Archive] storage.
 #[derive(Clone)]
+#[ready(0)]
 pub struct Config<C> {
     /// The partition to use for the archive's metadata.
     pub metadata_partition: String,

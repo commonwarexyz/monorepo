@@ -14,6 +14,7 @@ use aws_sdk_s3::{
 use commonware_cryptography::{Hasher, Sha256};
 use std::{io::Read, path::Path, time::Duration};
 use tracing::{debug, info};
+use commonware_macros::ready;
 
 /// S3 bucket name for caching deployer artifacts
 pub const S3_BUCKET_NAME: &str = "commonware-deployer-cache";
@@ -31,6 +32,7 @@ pub const S3_DEPLOYMENTS_PREFIX: &str = "deployments";
 pub const PRESIGN_DURATION: Duration = Duration::from_secs(6 * 60 * 60);
 
 /// Creates an S3 client for the specified AWS region
+#[ready(0)]
 pub async fn create_s3_client(region: Region) -> S3Client {
     let retry = aws_config::retry::RetryConfig::adaptive()
         .with_max_attempts(u32::MAX)
@@ -46,6 +48,7 @@ pub async fn create_s3_client(region: Region) -> S3Client {
 }
 
 /// Ensures the S3 bucket exists, creating it if necessary
+#[ready(0)]
 pub async fn ensure_bucket_exists(
     client: &S3Client,
     bucket_name: &str,
@@ -123,6 +126,7 @@ pub async fn ensure_bucket_exists(
 }
 
 /// Checks if an object exists in S3
+#[ready(0)]
 pub async fn object_exists(client: &S3Client, bucket: &str, key: &str) -> Result<bool, Error> {
     match client.head_object().bucket(bucket).key(key).send().await {
         Ok(_) => Ok(true),
@@ -142,6 +146,7 @@ pub async fn object_exists(client: &S3Client, bucket: &str, key: &str) -> Result
 }
 
 /// Uploads a file to S3
+#[ready(0)]
 pub async fn upload_file(
     client: &S3Client,
     bucket: &str,
@@ -171,6 +176,7 @@ pub async fn upload_file(
 
 /// Uploads a file to S3 and returns a pre-signed URL for downloading it
 #[must_use = "the pre-signed URL should be used to download the file"]
+#[ready(0)]
 pub async fn upload_and_presign(
     client: &S3Client,
     bucket: &str,
@@ -184,6 +190,7 @@ pub async fn upload_and_presign(
 
 /// Caches content to S3 if it doesn't exist, then returns a pre-signed URL
 #[must_use = "the pre-signed URL should be used to download the content"]
+#[ready(0)]
 pub async fn cache_content_and_presign(
     client: &S3Client,
     bucket: &str,
@@ -211,6 +218,7 @@ pub async fn cache_content_and_presign(
 }
 
 /// Computes the SHA256 hash of a file and returns it as a hex string
+#[ready(0)]
 pub fn hash_file(path: &Path) -> Result<String, Error> {
     let mut file = std::fs::File::open(path)?;
     let mut hasher = Sha256::new();
@@ -227,6 +235,7 @@ pub fn hash_file(path: &Path) -> Result<String, Error> {
 
 /// Caches a file to S3 by digest if it doesn't exist, then returns a pre-signed URL
 #[must_use = "the pre-signed URL should be used to download the file"]
+#[ready(0)]
 pub async fn cache_file_and_presign(
     client: &S3Client,
     bucket: &str,
@@ -243,6 +252,7 @@ pub async fn cache_file_and_presign(
 
 /// Generates a pre-signed URL for downloading an object from S3
 #[must_use = "the pre-signed URL should be used to download the object"]
+#[ready(0)]
 pub async fn presign_url(
     client: &S3Client,
     bucket: &str,
@@ -262,6 +272,7 @@ pub async fn presign_url(
 }
 
 /// Deletes all objects under a prefix in S3 using batch delete (up to 1000 objects per request)
+#[ready(0)]
 pub async fn delete_prefix(client: &S3Client, bucket: &str, prefix: &str) -> Result<(), Error> {
     let mut continuation_token: Option<String> = None;
     let mut deleted_count = 0;
@@ -324,6 +335,7 @@ pub async fn delete_prefix(client: &S3Client, bucket: &str, prefix: &str) -> Res
 }
 
 /// Deletes a bucket (must be empty first)
+#[ready(0)]
 pub async fn delete_bucket(client: &S3Client, bucket: &str) -> Result<(), Error> {
     client
         .delete_bucket()
@@ -340,6 +352,7 @@ pub async fn delete_bucket(client: &S3Client, bucket: &str) -> Result<(), Error>
 }
 
 /// Deletes all objects in a bucket and then deletes the bucket itself
+#[ready(0)]
 pub async fn delete_bucket_and_contents(client: &S3Client, bucket: &str) -> Result<(), Error> {
     // First delete all objects (no prefix means all objects)
     delete_prefix(client, bucket, "").await?;
@@ -351,6 +364,7 @@ pub async fn delete_bucket_and_contents(client: &S3Client, bucket: &str) -> Resu
 }
 
 /// Checks if an error is a "bucket does not exist" error
+#[ready(0)]
 pub fn is_no_such_bucket_error(error: &Error) -> bool {
     match error {
         Error::AwsS3 { source, .. } => {
