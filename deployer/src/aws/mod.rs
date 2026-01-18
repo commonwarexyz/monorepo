@@ -470,6 +470,10 @@ cfg_if::cfg_if! {
             InstanceNotFound(String),
             #[error("symbolication failed: {0}")]
             Symbolication(String),
+            #[error("no subnet supports instance type: {0}")]
+            UnsupportedInstanceType(String),
+            #[error("no subnets available")]
+            NoSubnetsAvailable,
         }
 
         impl From<aws_sdk_s3::error::SdkError<aws_sdk_s3::operation::get_object::GetObjectError>> for Error {

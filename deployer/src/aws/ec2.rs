@@ -477,7 +477,7 @@ pub async fn launch_instances(
     count: i32,
     name: &str,
     tag: &str,
-) -> Result<Vec<String>, Ec2Error> {
+) -> Result<Vec<String>, super::Error> {
     // Filter to subnets in AZs that support this instance type
     let instance_type_str = instance_type.to_string();
     let eligible: Vec<(usize, &str)> = subnets
@@ -492,9 +492,7 @@ pub async fn launch_instances(
         .collect();
 
     if eligible.is_empty() {
-        return Err(Ec2Error::from(BuildError::other(format!(
-            "no subnet supports instance type {instance_type_str}"
-        ))));
+        return Err(super::Error::UnsupportedInstanceType(instance_type_str));
     }
 
     let len = eligible.len();
@@ -527,7 +525,7 @@ pub async fn launch_instances(
                 Ok(ids) => return Ok(ids),
                 Err(e) => {
                     if is_fatal_ec2_error(&e) {
-                        return Err(e);
+                        return Err(super::Error::AwsEc2(e));
                     }
                     if is_subnet_fallback_error(&e) {
                         // Mark this subnet as failed so other concurrent launches skip it
@@ -556,7 +554,7 @@ pub async fn launch_instances(
         }
     }
 
-    Err(last_error.unwrap_or_else(|| Ec2Error::from(BuildError::other("no subnets available"))))
+    Err(last_error.map_or(super::Error::NoSubnetsAvailable, super::Error::AwsEc2))
 }
 
 /// Waits for instances to reach the "running" state and returns their public IPs
