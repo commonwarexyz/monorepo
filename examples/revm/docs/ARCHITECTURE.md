@@ -112,6 +112,10 @@ Ledger observers subscribe to domain events, emit telemetry/log output for seed 
 
 ![REVM block lifecycle](revm_block_lifecycle.png)
 
+### Persistence flow (persist_snapshot)
+
+![REVM persistence flow](revm_persistence_flow.png)
+
 ## 6. Related Docs
 
 For the DDD vocabulary, aggregates, and bounded contexts, see `examples/revm/docs/DOMAIN_MODEL.md`.

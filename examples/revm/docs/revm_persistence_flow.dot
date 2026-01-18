@@ -1,0 +1,49 @@
+digraph revm_persistence_flow {
+  rankdir=TB;
+  splines=true;
+  nodesep=0.5;
+  ranksep=0.6;
+  fontname="Helvetica";
+  fontsize=12;
+
+  node [
+    shape=box,
+    style="rounded,filled",
+    fillcolor="white",
+    color="#666666",
+    fontname="Helvetica",
+    fontsize=10
+  ];
+  edge [
+    color="#555555",
+    fontname="Helvetica",
+    fontsize=9,
+    arrowsize=0.7
+  ];
+
+  subgraph cluster_flow {
+    label="Persistence flow (persist_snapshot)";
+    style="rounded,filled";
+    color="#D9E7FF";
+    fillcolor="#F3F7FF";
+
+    Start[label="persist_snapshot(digest)"];
+    Chain[label="Walk parents until\npersisted digest\n(build missing chain)"];
+    Check[label="Any digest already\n'persisting' ?"];
+    Mark[label="Mark chain as\n'persisting'"];
+    Merge[label="Merge change sets\n(oldest -> newest)"];
+    Commit[label="commit_changes(merged)"];
+    MarkDone[label="Mark chain as\n'persisted'"];
+    Clear[label="Clear 'persisting'\n(on error)"];
+    Done[label="Return bool: did commit?"];
+
+    Start -> Chain -> Check;
+    Check -> Done [label="yes -> false"];
+    Check -> Mark [label="no"];
+    Mark -> Merge -> Commit;
+    Commit -> MarkDone [label="ok"];
+    Commit -> Clear [label="err"];
+    MarkDone -> Done;
+    Clear -> Done;
+  }
+}
