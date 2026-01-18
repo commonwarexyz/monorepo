@@ -459,9 +459,8 @@ fn is_fatal_ec2_error(e: &Ec2Error) -> bool {
 }
 
 /// Launches EC2 instances with specified configurations.
-/// Starts with `subnet_ids[start_idx % len]` and rotates through subnets on capacity errors.
-/// Skips subnets that have already failed (tracked in `failed_subnets`).
-/// Retries on transient failures but exits on fatal errors like limit exceeded.
+/// Filters subnets to those supporting the instance type, distributes across them starting at
+/// `start_idx`, and falls back to other subnets on capacity errors.
 #[allow(clippy::too_many_arguments)]
 pub async fn launch_instances(
     client: &Ec2Client,
@@ -470,7 +469,8 @@ pub async fn launch_instances(
     storage_size: i32,
     storage_class: VolumeType,
     key_name: &str,
-    subnet_ids: &[String],
+    subnets: &[(String, String)],
+    az_support: &HashMap<String, HashSet<String>>,
     start_idx: usize,
     failed_subnets: &FailedSubnets,
     sg_id: &str,
@@ -478,19 +478,35 @@ pub async fn launch_instances(
     name: &str,
     tag: &str,
 ) -> Result<Vec<String>, Ec2Error> {
-    assert!(!subnet_ids.is_empty(), "subnet_ids must not be empty");
+    // Filter to subnets in AZs that support this instance type
+    let instance_type_str = instance_type.to_string();
+    let eligible: Vec<(usize, &str)> = subnets
+        .iter()
+        .enumerate()
+        .filter(|(_, (az, _))| {
+            az_support
+                .get(az)
+                .is_some_and(|types| types.contains(&instance_type_str))
+        })
+        .map(|(idx, (_, subnet_id))| (idx, subnet_id.as_str()))
+        .collect();
 
-    let len = subnet_ids.len();
+    if eligible.is_empty() {
+        return Err(Ec2Error::from(BuildError::other(format!(
+            "no subnet supports instance type {instance_type_str}"
+        ))));
+    }
+
+    let len = eligible.len();
     let mut last_error = None;
     for i in 0..len {
-        let subnet_idx = (start_idx + i) % len;
+        let (subnet_idx, subnet_id) = eligible[(start_idx + i) % len];
 
         // Skip subnets that have already failed with capacity errors
         if failed_subnets.read().unwrap().contains(&subnet_idx) {
             continue;
         }
 
-        let subnet_id = &subnet_ids[subnet_idx];
         let mut attempt = 0u32;
         loop {
             match try_launch_instances(
@@ -1017,12 +1033,11 @@ pub async fn delete_vpc(ec2_client: &Ec2Client, vpc_id: &str) -> Result<(), Ec2E
     Ok(())
 }
 
-/// Finds all availability zones that support all required instance types
-pub async fn find_availability_zones(
+/// Returns a map of AZ -> set of supported instance types for the given instance types.
+pub async fn find_az_instance_support(
     client: &Ec2Client,
     instance_types: &[String],
-) -> Result<Vec<String>, Ec2Error> {
-    // Retrieve all instance type offerings for availability zones in the region
+) -> Result<HashMap<String, HashSet<String>>, Ec2Error> {
     let offerings = client
         .describe_instance_type_offerings()
         .location_type("availability-zone".into())
@@ -1037,7 +1052,6 @@ pub async fn find_availability_zones(
         .instance_type_offerings
         .unwrap_or_default();
 
-    // Build a map from availability zone to the set of supported instance types
     let mut az_to_instance_types: HashMap<String, HashSet<String>> = HashMap::new();
     for offering in offerings {
         if let (Some(location), Some(instance_type)) = (
@@ -1051,25 +1065,13 @@ pub async fn find_availability_zones(
         }
     }
 
-    // Convert the required instance types to a HashSet for efficient subset checking
-    let required_instance_types: HashSet<String> = instance_types.iter().cloned().collect();
-
-    // Find all availability zones that support all required instance types
-    let mut azs: Vec<String> = az_to_instance_types
-        .into_iter()
-        .filter(|(_, supported_types)| required_instance_types.is_subset(supported_types))
-        .map(|(az, _)| az)
-        .collect();
-
-    if azs.is_empty() {
+    if az_to_instance_types.is_empty() {
         return Err(Ec2Error::from(BuildError::other(format!(
-            "no availability zone supports all required instance types: {instance_types:?}"
+            "no availability zone supports any of: {instance_types:?}"
         ))));
     }
 
-    // Sort for deterministic ordering
-    azs.sort();
-    Ok(azs)
+    Ok(az_to_instance_types)
 }
 
 /// Waits until all network interfaces associated with a security group are deleted

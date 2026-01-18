@@ -86,9 +86,10 @@
 //!
 //! ### Subnets
 //!
-//! One subnet per availability zone in each VPC (e.g., `10.<region-index>.<az-index+1>.0/24`), linked to
-//! a shared route table with an internet gateway. Instances are distributed across AZs and automatically
-//! fall back to other AZs if capacity is exhausted.
+//! One subnet per availability zone that supports any required instance type in the region
+//! (e.g., `10.<region-index>.<az-index+1>.0/24`), linked to a shared route table with an internet gateway.
+//! Each instance is placed in an AZ that supports its instance type, distributed round-robin across
+//! eligible AZs, with automatic fallback to other AZs on capacity errors.
 //!
 //! ### VPC Peering
 //!

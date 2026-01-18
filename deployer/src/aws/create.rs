@@ -43,7 +43,10 @@ pub struct RegionResources {
     pub vpc_id: String,
     pub vpc_cidr: String,
     pub route_table_id: String,
-    pub subnet_ids: Vec<String>,
+    /// (AZ name, subnet ID) pairs
+    pub subnets: Vec<(String, String)>,
+    /// Which instance types each AZ supports
+    pub az_support: HashMap<String, HashSet<String>>,
     pub binary_sg_id: Option<String>,
     pub monitoring_sg_id: Option<String>,
 }
@@ -334,8 +337,10 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
                 let ec2_client = ec2::create_client(Region::new(region.clone())).await;
                 info!(region = region.as_str(), "created EC2 client");
 
-                // Find all availability zones that support all instance types
-                let azs = find_availability_zones(&ec2_client, &instance_types).await?;
+                // Find which AZs support which instance types
+                let az_support = find_az_instance_support(&ec2_client, &instance_types).await?;
+                let mut azs: Vec<String> = az_support.keys().cloned().collect();
+                azs.sort();
                 info!(?azs, region = region.as_str(), "found availability zones");
 
                 // Create VPC, IGW, route table
@@ -390,11 +395,11 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
                                 region = region.as_str(),
                                 "created subnet"
                             );
-                            Ok::<String, Error>(subnet_id)
+                            Ok::<(String, String), Error>((az, subnet_id))
                         }
                     })
                     .collect();
-                let subnet_ids = try_join_all(subnet_futures).await?;
+                let subnets = try_join_all(subnet_futures).await?;
 
                 // Create monitoring security group in monitoring region
                 let monitoring_sg_id = if region == MONITORING_REGION {
@@ -422,7 +427,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
 
                 info!(
                     vpc = vpc_id.as_str(),
-                    subnet_count = subnet_ids.len(),
+                    subnet_count = subnets.len(),
                     region = region.as_str(),
                     "initialized resources"
                 );
@@ -434,7 +439,8 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
                         vpc_id,
                         vpc_cidr,
                         route_table_id,
-                        subnet_ids,
+                        subnets,
+                        az_support,
                         binary_sg_id: None,
                         monitoring_sg_id,
                     },
@@ -573,7 +579,8 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
         .as_ref()
         .unwrap()
         .clone();
-    let monitoring_subnet_ids = monitoring_resources.subnet_ids.clone();
+    let monitoring_subnets = monitoring_resources.subnets.clone();
+    let monitoring_az_support = monitoring_resources.az_support.clone();
 
     // Create per-region failed subnet trackers for sharing capacity errors across concurrent launches
     let failed_subnets_by_region: HashMap<String, FailedSubnets> = regions
@@ -638,7 +645,8 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
                 config.monitoring.storage_size,
                 monitoring_storage_class,
                 &key_name,
-                &monitoring_subnet_ids,
+                &monitoring_subnets,
+                &monitoring_az_support,
                 0,
                 &monitoring_failed_subnets,
                 &sg_id,
@@ -669,7 +677,8 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
             let instance_name = instance.name.clone();
             let failed_subnets = failed_subnets.clone();
             let region = instance.region.clone();
-            let subnet_ids = resources.subnet_ids.clone();
+            let subnets = resources.subnets.clone();
+            let az_support = resources.az_support.clone();
             async move {
                 let instance_id = launch_instances(
                     ec2_client,
@@ -678,7 +687,8 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
                     instance.storage_size,
                     storage_class,
                     &key_name,
-                    &subnet_ids,
+                    &subnets,
+                    &az_support,
                     idx,
                     &failed_subnets,
                     binary_sg_id,
