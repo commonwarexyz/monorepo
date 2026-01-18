@@ -411,6 +411,9 @@ where
     /// `(start_loc, end_loc]` location range of committed operations. The end of the returned range
     /// includes the commit operation itself, and hence will always be equal to `op_count`.
     ///
+    /// Note that even if no operations were added since the last commit, this is a root-state
+    /// changing operation.
+    ///
     /// Failures after commit (but before `sync` or `close`) may still require reprocessing to
     /// recover the database on restart.
     ///
@@ -571,10 +574,10 @@ where
     V: VariableValue,
     T: Translator,
 {
-    async fn write_batch(
-        &mut self,
-        iter: impl Iterator<Item = (Self::Key, Option<Self::Value>)>,
-    ) -> Result<(), Self::Error> {
+    async fn write_batch<'a, Iter>(&'a mut self, iter: Iter) -> Result<(), Self::Error>
+    where
+        Iter: Iterator<Item = (Self::Key, Option<Self::Value>)> + Send + 'a,
+    {
         for (key, value) in iter {
             if let Some(value) = value {
                 self.update(key, value).await?;
@@ -589,7 +592,16 @@ where
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::{kv::Gettable as _, translator::TwoCap};
+    use crate::{
+        kv::{
+            tests::{
+                assert_batchable, assert_deletable, assert_gettable, assert_send, assert_updatable,
+            },
+            Gettable as _,
+        },
+        qmdb::store::tests::{assert_log_store, assert_prunable_store},
+        translator::TwoCap,
+    };
     use commonware_cryptography::{
         blake3::{Blake3, Digest},
         Hasher as _,
@@ -623,7 +635,7 @@ mod test {
     pub fn test_store_construct_empty() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
-            let mut db = create_test_store(context.clone()).await;
+            let mut db = create_test_store(context.with_label("store_0")).await;
             assert_eq!(db.op_count(), 1);
             assert_eq!(db.log.oldest_retained_pos(), Some(0));
             assert_eq!(db.inactivity_floor_loc(), 0);
@@ -641,7 +653,9 @@ mod test {
             dirty.update(d1, v1).await.unwrap();
             drop(dirty);
 
-            let db = create_test_store(context.clone()).await.into_dirty();
+            let db = create_test_store(context.with_label("store_1"))
+                .await
+                .into_dirty();
             assert_eq!(db.op_count(), 1);
 
             // Test calling commit on an empty db which should make it (durably) non-empty.
@@ -653,7 +667,9 @@ mod test {
             assert!(matches!(db.prune(db.inactivity_floor_loc()).await, Ok(())));
             assert_eq!(db.get_metadata().await.unwrap(), Some(metadata.clone()));
 
-            let mut db = create_test_store(context.clone()).await.into_dirty();
+            let mut db = create_test_store(context.with_label("store_2"))
+                .await
+                .into_dirty();
             assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
 
             // Confirm the inactivity floor doesn't fall endlessly behind with multiple commits on a
@@ -679,7 +695,7 @@ mod test {
         let executor = deterministic::Runner::default();
 
         executor.start(|mut ctx| async move {
-            let mut db = create_test_store(ctx.with_label("store"))
+            let mut db = create_test_store(ctx.with_label("store_0"))
                 .await
                 .into_dirty();
 
@@ -708,7 +724,7 @@ mod test {
             drop(db);
 
             // Re-open the store
-            let mut db = create_test_store(ctx.with_label("store"))
+            let mut db = create_test_store(ctx.with_label("store_1"))
                 .await
                 .into_dirty();
 
@@ -737,7 +753,7 @@ mod test {
             assert_eq!(db.inactivity_floor_loc, 2);
 
             // Re-open the store
-            let mut db = create_test_store(ctx.with_label("store"))
+            let mut db = create_test_store(ctx.with_label("store_2"))
                 .await
                 .into_dirty();
 
@@ -775,15 +791,17 @@ mod test {
             assert_eq!(db.get(&k1).await.unwrap().unwrap(), v1);
             assert_eq!(db.get(&k2).await.unwrap().unwrap(), v2);
 
-            // Ensure upsert works for existing key.
-            db.upsert(k1, |v| v.push(7)).await.unwrap();
+            // Update existing key with modified value.
+            let mut v1_updated = db.get(&k1).await.unwrap().unwrap();
+            v1_updated.push(7);
+            db.update(k1, v1_updated).await.unwrap();
             let (db, _) = db.commit(None).await.unwrap();
             assert_eq!(db.get(&k1).await.unwrap().unwrap(), vec![2, 3, 4, 5, 6, 7]);
 
-            // Ensure upsert works for new key.
+            // Create new key.
             let mut db = db.into_dirty();
             let k3 = Digest::random(&mut ctx);
-            db.upsert(k3, |v| v.push(8)).await.unwrap();
+            db.update(k3, vec![8]).await.unwrap();
             let (db, _) = db.commit(None).await.unwrap();
             assert_eq!(db.get(&k3).await.unwrap().unwrap(), vec![8]);
 
@@ -797,7 +815,7 @@ mod test {
         let executor = deterministic::Runner::default();
 
         executor.start(|mut ctx| async move {
-            let mut db = create_test_store(ctx.with_label("store"))
+            let mut db = create_test_store(ctx.with_label("store_0"))
                 .await
                 .into_dirty();
 
@@ -817,7 +835,7 @@ mod test {
             drop(db);
 
             // Re-open the store, prune it, then ensure it replays the log correctly.
-            let mut db = create_test_store(ctx.with_label("store")).await;
+            let mut db = create_test_store(ctx.with_label("store_1")).await;
             db.prune(db.inactivity_floor_loc()).await.unwrap();
 
             let iter = db.snapshot.get(&k);
@@ -845,7 +863,7 @@ mod test {
         let executor = deterministic::Runner::default();
 
         executor.start(|mut ctx| async move {
-            let mut db = create_test_store(ctx.with_label("store"))
+            let mut db = create_test_store(ctx.with_label("store_0"))
                 .await
                 .into_dirty();
 
@@ -867,7 +885,7 @@ mod test {
 
             // Re-open the store to ensure it builds the snapshot for the conflicting
             // keys correctly.
-            let db = create_test_store(ctx.with_label("store")).await;
+            let db = create_test_store(ctx.with_label("store_1")).await;
 
             assert_eq!(db.get(&k1).await.unwrap().unwrap(), v1);
             assert_eq!(db.get(&k2).await.unwrap().unwrap(), v2);
@@ -881,7 +899,7 @@ mod test {
         let executor = deterministic::Runner::default();
 
         executor.start(|mut ctx| async move {
-            let mut db = create_test_store(ctx.with_label("store"))
+            let mut db = create_test_store(ctx.with_label("store_0"))
                 .await
                 .into_dirty();
 
@@ -908,7 +926,7 @@ mod test {
             let _ = db.commit(None).await.unwrap();
 
             // Re-open the store and ensure the key is still deleted
-            let mut db = create_test_store(ctx.with_label("store"))
+            let mut db = create_test_store(ctx.with_label("store_1"))
                 .await
                 .into_dirty();
             let fetched_value = db.get(&k).await.unwrap();
@@ -924,7 +942,7 @@ mod test {
 
             // Re-open the store and ensure the snapshot restores the key, after processing
             // the delete and the subsequent set.
-            let mut db = create_test_store(ctx.with_label("store"))
+            let mut db = create_test_store(ctx.with_label("store_2"))
                 .await
                 .into_dirty();
             let fetched_value = db.get(&k).await.unwrap();
@@ -991,7 +1009,7 @@ mod test {
         // Build a db with 1000 keys, some of which we update and some of which we delete.
         const ELEMENTS: u64 = 1000;
         executor.start(|context| async move {
-            let mut db = create_test_store(context.with_label("store"))
+            let mut db = create_test_store(context.with_label("store_0"))
                 .await
                 .into_dirty();
 
@@ -1003,7 +1021,7 @@ mod test {
 
             // Simulate a failed commit and test that we rollback to the previous root.
             drop(db);
-            let db = create_test_store(context.with_label("store")).await;
+            let db = create_test_store(context.with_label("store_1")).await;
             assert_eq!(db.op_count(), 1);
 
             // re-apply the updates and commit them this time.
@@ -1029,7 +1047,7 @@ mod test {
 
             // Simulate a failed commit and test that we rollback to the previous root.
             drop(db);
-            let mut db = create_test_store(context.with_label("store"))
+            let mut db = create_test_store(context.with_label("store_2"))
                 .await
                 .into_dirty();
             assert_eq!(db.op_count(), op_count);
@@ -1060,14 +1078,14 @@ mod test {
 
             // Simulate a failed commit and test that we rollback to the previous root.
             drop(db);
-            let db = create_test_store(context.with_label("store")).await;
+            let db = create_test_store(context.with_label("store_3")).await;
             assert_eq!(db.op_count(), op_count);
 
             // Sync and reopen the store to ensure the final commit is preserved.
             let mut db = db;
             db.sync().await.unwrap();
             drop(db);
-            let mut db = create_test_store(context.with_label("store"))
+            let mut db = create_test_store(context.with_label("store_4"))
                 .await
                 .into_dirty();
             assert_eq!(db.op_count(), op_count);
@@ -1098,7 +1116,7 @@ mod test {
         let executor = deterministic::Runner::default();
 
         executor.start(|mut ctx| async move {
-            let mut db = create_test_store(ctx.with_label("store"))
+            let mut db = create_test_store(ctx.with_label("store_0"))
                 .await
                 .into_dirty();
 
@@ -1128,7 +1146,7 @@ mod test {
             drop(db);
 
             // Re-open the store
-            let mut db = create_test_store(ctx.with_label("store"))
+            let mut db = create_test_store(ctx.with_label("store_1"))
                 .await
                 .into_dirty();
 
@@ -1153,7 +1171,7 @@ mod test {
             drop(db);
 
             // Re-open the store
-            let db = create_test_store(ctx.with_label("store")).await;
+            let db = create_test_store(ctx.with_label("store_2")).await;
 
             // Ensure the re-opened store retained the committed operations
             assert_eq!(db.op_count(), 4);
@@ -1168,45 +1186,31 @@ mod test {
         });
     }
 
-    /// Compile-time check that Db is Send + Sync when its type parameters are.
-    const _: () = {
-        const fn assert_send_sync<T: Send + Sync>() {}
-        assert_send_sync::<TestStore>();
-        assert_send_sync::<Db<deterministic::Context, Digest, Vec<u8>, TwoCap, NonDurable>>();
-    };
-
-    /// Helper to assert a future is Send at compile time.
-    fn assert_send<T: Send>(_: T) {}
-
-    /// Test that futures returned by Durable Db methods are Send.
-    /// This is a compile-time check - if it compiles, the futures are Send.
     #[allow(dead_code)]
-    fn test_durable_futures_are_send(db: &mut TestStore, key: Digest) {
-        // Read operations
-        assert_send(db.get(&key));
-        assert_send(db.get_metadata());
-
-        // Durable-specific operations
+    fn assert_durable_futures_are_send(db: &mut TestStore, key: Digest, loc: Location) {
+        assert_log_store(db);
+        assert_prunable_store(db, loc);
+        assert_gettable(db, &key);
         assert_send(db.sync());
-        assert_send(db.prune(Location::new_unchecked(0)));
     }
 
-    /// Test that futures returned by NonDurable Db methods are Send.
     #[allow(dead_code)]
-    fn test_non_durable_futures_are_send(
-        mut db: Db<deterministic::Context, Digest, Vec<u8>, TwoCap, NonDurable>,
+    fn assert_dirty_futures_are_send(
+        db: &mut Db<deterministic::Context, Digest, Vec<u8>, TwoCap, NonDurable>,
         key: Digest,
+        value: Vec<u8>,
     ) {
-        // Read operations (inherited)
-        assert_send(db.get(&key));
-        assert_send(db.get_metadata());
+        assert_log_store(db);
+        assert_gettable(db, &key);
+        assert_updatable(db, key, value.clone());
+        assert_deletable(db, key);
+        assert_batchable(db, key, value);
+    }
 
-        // Mutation operations
-        assert_send(db.update(key, vec![]));
-        assert_send(db.create(key, vec![]));
-        assert_send(db.delete(key));
-
-        // Commit (consumes self)
+    #[allow(dead_code)]
+    fn assert_dirty_commit_is_send(
+        db: Db<deterministic::Context, Digest, Vec<u8>, TwoCap, NonDurable>,
+    ) {
         assert_send(db.commit(None));
     }
 }

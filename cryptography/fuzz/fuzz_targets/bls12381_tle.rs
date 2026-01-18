@@ -10,7 +10,7 @@ use common::{
 use commonware_codec::ReadExt;
 use commonware_cryptography::bls12381::{
     primitives::{
-        group::Scalar,
+        group::Private,
         ops::{compute_public, sign_message},
         variant::{MinPk, MinSig, Variant},
     },
@@ -22,37 +22,37 @@ use rand::{rngs::StdRng, SeedableRng};
 #[derive(Debug, Clone)]
 enum FuzzOperation {
     EncryptDecryptMinPk {
-        master_secret: Scalar,
+        master_secret: Private,
         namespace: Vec<u8>,
         target: Vec<u8>,
         message: [u8; 32],
         rng_seed: u64,
     },
     EncryptDecryptMinSig {
-        master_secret: Scalar,
+        master_secret: Private,
         namespace: Vec<u8>,
         target: Vec<u8>,
         message: [u8; 32],
         rng_seed: u64,
     },
     DecryptWithWrongKeyMinPk {
-        master_secret1: Scalar,
-        master_secret2: Scalar,
+        master_secret1: Private,
+        master_secret2: Private,
         namespace: Vec<u8>,
         target: Vec<u8>,
         message: [u8; 32],
         rng_seed: u64,
     },
     DecryptWithWrongKeyMinSig {
-        master_secret1: Scalar,
-        master_secret2: Scalar,
+        master_secret1: Private,
+        master_secret2: Private,
         namespace: Vec<u8>,
         target: Vec<u8>,
         message: [u8; 32],
         rng_seed: u64,
     },
     TamperedCiphertextMinPk {
-        master_secret: Scalar,
+        master_secret: Private,
         namespace: Vec<u8>,
         target: Vec<u8>,
         message: [u8; 32],
@@ -61,7 +61,7 @@ enum FuzzOperation {
         rng_seed: u64,
     },
     TamperedCiphertextMinSig {
-        master_secret: Scalar,
+        master_secret: Private,
         namespace: Vec<u8>,
         target: Vec<u8>,
         message: [u8; 32],

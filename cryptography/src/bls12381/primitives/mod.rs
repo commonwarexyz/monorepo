@@ -16,14 +16,14 @@
 //!     primitives::{ops::{self, threshold}, variant::MinSig, sharing::Mode},
 //!     dkg,
 //! };
-//! use commonware_utils::NZU32;
+//! use commonware_utils::{NZU32, N3f1};
 //! use rand::rngs::OsRng;
 //!
 //! // Configure number of players
 //! let n = NZU32!(5);
 //!
 //! // Generate commitment and shares
-//! let (sharing, shares) = dkg::deal_anonymous::<MinSig>(&mut OsRng, Mode::default(), n);
+//! let (sharing, shares) = dkg::deal_anonymous::<MinSig, N3f1>(&mut OsRng, Mode::default(), n);
 //!
 //! // Generate partial signatures from shares
 //! let namespace = b"demo";
@@ -36,7 +36,7 @@
 //! }
 //!
 //! // Aggregate partial signatures
-//! let threshold_sig = threshold::recover::<MinSig, _, _>(&sharing, &partials, &commonware_parallel::Sequential).unwrap();
+//! let threshold_sig = threshold::recover::<MinSig, _, N3f1>(&sharing, &partials, &commonware_parallel::Sequential).unwrap();
 //!
 //! // Verify threshold signature
 //! let threshold_pub = sharing.public();

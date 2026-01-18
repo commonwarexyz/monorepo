@@ -10,14 +10,15 @@
 //!    - Reads from uncorrupted pages should succeed with correct data
 //!    - Reads from corrupted pages should either fail OR return correct data
 //!      (if the bit flip was in padding/unused bytes)
-//! 4. Test both Append.read_at() and as_blob_reader()
+//! 4. Test both Append.read_at() and Replay
 
 #![no_main]
 
 use arbitrary::{Arbitrary, Unstructured};
+use bytes::Buf;
 use commonware_runtime::{
     buffer::pool::{Append, PoolRef},
-    deterministic, Blob, Runner, Storage,
+    deterministic, Blob, Error, Runner, Storage,
 };
 use commonware_utils::{NZUsize, NZU16};
 use libfuzzer_sys::fuzz_target;
@@ -180,39 +181,75 @@ fn fuzz(input: FuzzInput) {
 
             // Determine which pages this read spans.
             let start_page = offset / page_size;
-            let end_page = (offset + len as u64 - 1) / page_size;
+            let end_page = (offset + len as u64 + READER_BUFFER_CAPACITY as u64) / page_size;
             let read_touches_corrupted_page =
                 start_page <= corrupted_page && corrupted_page <= end_page;
 
             if read_op.use_reader {
-                // Use as_blob_reader.
-                // Note: The Read wrapper buffers multiple pages at once, so corruption on ANY
-                // page in the buffer can cause a read to fail - not just the page being accessed.
-                // We can only verify that successful reads return correct data.
-                let reader_result = append.as_blob_reader(NZUsize!(READER_BUFFER_CAPACITY)).await;
-                let mut reader = match reader_result {
+                // Replay is for streaming replay, not random access.
+                // Test integrity via Replay by ensuring bytes and reading.
+                let replay_result = append.replay(NZUsize!(READER_BUFFER_CAPACITY)).await;
+                let mut replay = match replay_result {
                     Ok(r) => r,
-                    Err(_) => continue, // Reader creation failed, skip.
+                    Err(_) => continue, // Replay creation failed due to corruption, skip.
                 };
 
-                // Seek to the read offset.
-                if reader.seek_to(offset).is_err() {
-                    continue;
+                // Skip to the offset by ensuring and advancing
+                if offset > 0 {
+                    match replay.ensure(offset as usize).await {
+                        Ok(true) => replay.advance(offset as usize),
+                        Ok(false) => continue, // Not enough data, skip
+                        Err(_) => {
+                            // Error during skip - acceptable if corruption is involved
+                            assert!(
+                                read_touches_corrupted_page || offset / page_size >= corrupted_page,
+                                "Replay skip failed but didn't touch corrupted page"
+                            );
+                            continue;
+                        }
+                    }
                 }
 
-                let mut buf = vec![0u8; len];
-                let read_result = reader.read_exact(&mut buf, len).await;
+                // Ensure we have enough bytes for the read
+                match replay.ensure(len).await {
+                    Ok(true) => {
+                        // Read the data using the Buf trait
+                        let mut buf = vec![0u8; len];
+                        let mut bytes_read = 0;
+                        while bytes_read < len && replay.remaining() > 0 {
+                            let chunk = replay.chunk();
+                            let to_copy = chunk.len().min(len - bytes_read);
+                            buf[bytes_read..bytes_read + to_copy]
+                                .copy_from_slice(&chunk[..to_copy]);
+                            replay.advance(to_copy);
+                            bytes_read += to_copy;
+                        }
 
-                if let Ok(()) = read_result {
-                    // Read succeeded - data must match expected.
-                    let expected_slice = &expected_data[offset as usize..offset as usize + len];
-                    assert_eq!(
-                        &buf, expected_slice,
-                        "Read via reader returned wrong data at offset {}, len {}",
-                        offset, len
-                    );
+                        // Verify data matches expected
+                        let expected_slice =
+                            &expected_data[offset as usize..offset as usize + len];
+                        assert_eq!(
+                            &buf, expected_slice,
+                            "Read via Replay returned wrong data at offset {}, len {}",
+                            offset, len
+                        );
+                    }
+                    Ok(false) => {
+                        // Not enough data available - skip
+                        continue;
+                    }
+                    Err(Error::InvalidChecksum) => {
+                        // Ensure failed due to CRC error - acceptable if we touch corrupted page
+                        assert!(
+                            read_touches_corrupted_page,
+                            "Replay ensure failed at offset {}, len {} but didn't touch corrupted page {}",
+                            offset, len, corrupted_page
+                        );
+                    }
+                    Err(err) => {
+                        panic!("Replay ensure failed at offset {}, len {} with unexpected error: {:?}", offset, len, err);
+                    }
                 }
-                // Read failures are acceptable due to buffering behavior.
             } else {
                 // Use Append.read_at directly.
                 let buf = vec![0u8; len];

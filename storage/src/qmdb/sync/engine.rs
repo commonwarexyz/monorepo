@@ -272,13 +272,7 @@ where
         self,
         new_target: Target<DB::Digest>,
     ) -> Result<Self, Error<DB, R>> {
-        let journal = DB::resize_journal(
-            self.journal,
-            self.context.clone(),
-            &self.config,
-            new_target.range.clone(),
-        )
-        .await?;
+        let journal = DB::resize_journal(self.journal, new_target.range.clone()).await?;
 
         Ok(Self {
             outstanding_requests: Requests::new(),

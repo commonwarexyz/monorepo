@@ -1,11 +1,14 @@
 //! Utility functions for interacting with EC2 instances
 
-use crate::ec2::Error;
+use crate::aws::{s3::WGET, Error};
+use std::path::Path;
 use tokio::{
+    fs::File,
+    io::AsyncWriteExt,
     process::Command,
     time::{sleep, Duration},
 };
-use tracing::warn;
+use tracing::{info, warn};
 
 /// Maximum number of SSH connection attempts before failing
 pub const MAX_SSH_ATTEMPTS: usize = 30;
@@ -14,7 +17,7 @@ pub const MAX_SSH_ATTEMPTS: usize = 30;
 pub const MAX_POLL_ATTEMPTS: usize = 30;
 
 /// Interval between retries
-pub const RETRY_INTERVAL: Duration = Duration::from_secs(10);
+pub const RETRY_INTERVAL: Duration = Duration::from_secs(15);
 
 /// Protocol for deployer ingress
 pub const DEPLOYER_PROTOCOL: &str = "tcp";
@@ -35,33 +38,6 @@ pub async fn get_public_ip() -> Result<String, Error> {
         .trim()
         .to_string();
     Ok(result)
-}
-
-/// Copies a local file to a remote instance via rsync with retries
-pub async fn rsync_file(
-    key_file: &str,
-    local_path: &str,
-    ip: &str,
-    remote_path: &str,
-) -> Result<(), Error> {
-    for _ in 0..MAX_SSH_ATTEMPTS {
-        let output = Command::new("rsync")
-            .arg("-az")
-            .arg("-e")
-            .arg(format!(
-                "ssh -i {key_file} -o IdentitiesOnly=yes -o ServerAliveInterval=600 -o StrictHostKeyChecking=no"
-            ))
-            .arg(local_path)
-            .arg(format!("ubuntu@{ip}:{remote_path}"))
-            .output()
-            .await?;
-        if output.status.success() {
-            return Ok(());
-        }
-        warn!(error = ?String::from_utf8_lossy(&output.stderr), "SCP failed");
-        sleep(RETRY_INTERVAL).await;
-    }
-    Err(Error::ScpFailed)
 }
 
 /// Executes a command on a remote instance via SSH with retries
@@ -114,7 +90,7 @@ pub async fn poll_service_active(key_file: &str, ip: &str, service: &str) -> Res
             warn!(service, "service failed to start (check logs and update)");
             return Ok(());
         }
-        warn!(error = ?String::from_utf8_lossy(&output.stderr), service, "active status check failed");
+        warn!(status = parsed, service, "service not yet active");
         sleep(RETRY_INTERVAL).await;
     }
     Err(Error::ServiceTimeout(ip.to_string(), service.to_string()))
@@ -145,21 +121,46 @@ pub async fn poll_service_inactive(key_file: &str, ip: &str, service: &str) -> R
             warn!(service, "service was never active");
             return Ok(());
         }
-        warn!(error = ?String::from_utf8_lossy(&output.stderr), service, "inactive status check failed");
+        warn!(status = parsed, service, "service not yet inactive");
         sleep(RETRY_INTERVAL).await;
     }
     Err(Error::ServiceTimeout(ip.to_string(), service.to_string()))
 }
 
-/// Enables BBR on a remote instance by copying and applying sysctl settings.
-pub async fn enable_bbr(key_file: &str, ip: &str, bbr_conf_local_path: &str) -> Result<(), Error> {
-    rsync_file(
-        key_file,
-        bbr_conf_local_path,
-        ip,
-        "/home/ubuntu/99-bbr.conf",
-    )
-    .await?;
+/// Downloads a file from a remote instance via SCP with retries
+pub async fn scp_download(
+    key_file: &str,
+    ip: &str,
+    remote_path: &str,
+    local_path: &str,
+) -> Result<(), Error> {
+    for _ in 0..MAX_SSH_ATTEMPTS {
+        let output = Command::new("scp")
+            .arg("-i")
+            .arg(key_file)
+            .arg("-o")
+            .arg("IdentitiesOnly=yes")
+            .arg("-o")
+            .arg("ServerAliveInterval=600")
+            .arg("-o")
+            .arg("StrictHostKeyChecking=no")
+            .arg(format!("ubuntu@{ip}:{remote_path}"))
+            .arg(local_path)
+            .output()
+            .await?;
+        if output.status.success() {
+            return Ok(());
+        }
+        warn!(error = ?String::from_utf8_lossy(&output.stderr), "SCP failed");
+        sleep(RETRY_INTERVAL).await;
+    }
+    Err(Error::SshFailed)
+}
+
+/// Enables BBR on a remote instance by downloading config from S3 and applying sysctl settings.
+pub async fn enable_bbr(key_file: &str, ip: &str, bbr_conf_url: &str) -> Result<(), Error> {
+    let download_cmd = format!("{WGET} -O /home/ubuntu/99-bbr.conf '{bbr_conf_url}'");
+    ssh_execute(key_file, ip, &download_cmd).await?;
     ssh_execute(
         key_file,
         ip,
@@ -173,4 +174,55 @@ pub async fn enable_bbr(key_file: &str, ip: &str, bbr_conf_local_path: &str) -> 
 /// Converts an IP address to a CIDR block
 pub fn exact_cidr(ip: &str) -> String {
     format!("{ip}/32")
+}
+
+/// Maximum number of download attempts before failing
+pub const MAX_DOWNLOAD_ATTEMPTS: usize = 10;
+
+/// Downloads a file from a URL to a local path with retries
+pub async fn download_file(url: &str, dest: &Path) -> Result<(), Error> {
+    for attempt in 1..=MAX_DOWNLOAD_ATTEMPTS {
+        match download_file_once(url, dest).await {
+            Ok(()) => {
+                info!(url = url, dest = ?dest, "downloaded file");
+                return Ok(());
+            }
+            Err(e) => {
+                warn!(
+                    url = url,
+                    attempt = attempt,
+                    error = ?e,
+                    "download attempt failed"
+                );
+                if attempt < MAX_DOWNLOAD_ATTEMPTS {
+                    sleep(RETRY_INTERVAL).await;
+                }
+            }
+        }
+    }
+    Err(Error::DownloadFailed(url.to_string()))
+}
+
+async fn download_file_once(url: &str, dest: &Path) -> Result<(), Error> {
+    let response = reqwest::get(url).await?;
+    if !response.status().is_success() {
+        return Err(Error::DownloadFailed(format!(
+            "HTTP {}: {}",
+            response.status(),
+            url
+        )));
+    }
+
+    let bytes = response.bytes().await?;
+
+    // Create parent directory if it doesn't exist
+    if let Some(parent) = dest.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+
+    let mut file = File::create(dest).await?;
+    file.write_all(&bytes).await?;
+    file.flush().await?;
+
+    Ok(())
 }

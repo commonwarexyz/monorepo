@@ -8,7 +8,7 @@ use commonware_cryptography::{
 };
 use commonware_math::algebra::Random;
 use commonware_parallel::{Rayon, Sequential};
-use commonware_utils::{ordered::Set, quorum, NZUsize, TryCollect};
+use commonware_utils::{ordered::Set, Faults, N3f1, NZUsize, TryCollect};
 use criterion::{criterion_group, BatchSize, Criterion};
 use rand::{rngs::StdRng, SeedableRng};
 use rand_core::CryptoRngCore;
@@ -37,13 +37,13 @@ impl Bench {
 
         let (output, shares) = if reshare {
             let (o, s) =
-                deal::<V, PublicKey>(&mut rng, Default::default(), dealers.clone()).unwrap();
+                deal::<V, PublicKey, N3f1>(&mut rng, Default::default(), dealers.clone()).unwrap();
             (Some(o), Some(s))
         } else {
             (None, None)
         };
         let players = dealers.clone();
-        let info = Info::new(
+        let info = Info::new::<N3f1>(
             b"_COMMONWARE_CRYPTOGRAPHY_BLS12381_DKG_BENCH",
             0,
             output,
@@ -71,7 +71,7 @@ impl Bench {
         let mut logs = BTreeMap::new();
         for sk in private_keys {
             let pk = sk.public_key();
-            let (mut dealer, pub_msg, priv_msgs) = Dealer::start(
+            let (mut dealer, pub_msg, priv_msgs) = Dealer::start::<N3f1>(
                 &mut rng,
                 info.clone(),
                 sk,
@@ -83,13 +83,14 @@ impl Bench {
             for (target_pk, priv_msg) in priv_msgs {
                 // The only missing player should be ourselves.
                 if let Some(player) = player_states.get_mut(&target_pk) {
-                    if let Some(ack) = player.dealer_message(pk.clone(), pub_msg.clone(), priv_msg)
+                    if let Some(ack) =
+                        player.dealer_message::<N3f1>(pk.clone(), pub_msg.clone(), priv_msg)
                     {
                         dealer.receive_player_ack(target_pk.clone(), ack).unwrap();
                     }
                 }
             }
-            logs.insert(pk, dealer.finalize().check(&info).unwrap().1);
+            logs.insert(pk, dealer.finalize::<N3f1>().check(&info).unwrap().1);
         }
 
         Self { info, me, logs }
@@ -119,7 +120,7 @@ cfg_if::cfg_if! {
     }
 }
 
-fn benchmark_dkg(c: &mut Criterion, reshare: bool) {
+fn bench_dkg(c: &mut Criterion, reshare: bool) {
     let suffix = if reshare {
         "_reshare_recovery"
     } else {
@@ -127,7 +128,7 @@ fn benchmark_dkg(c: &mut Criterion, reshare: bool) {
     };
     let mut rng = StdRng::seed_from_u64(0);
     for &n in CONTRIBUTORS {
-        let t = quorum(n);
+        let t = N3f1::quorum(n);
         let bench = Bench::new(&mut rng, reshare, n);
         for &concurrency in CONCURRENCY {
             let strategy = Rayon::new(NZUsize!(concurrency)).unwrap();
@@ -145,9 +146,9 @@ fn benchmark_dkg(c: &mut Criterion, reshare: bool) {
                         || bench.pre_finalize(),
                         |(player, logs)| {
                             if concurrency > 1 {
-                                black_box(player.finalize(logs, &strategy).unwrap());
+                                black_box(player.finalize::<N3f1>(logs, &strategy).unwrap());
                             } else {
-                                black_box(player.finalize(logs, &Sequential).unwrap());
+                                black_box(player.finalize::<N3f1>(logs, &Sequential).unwrap());
                             }
                         },
                         BatchSize::SmallInput,
@@ -158,16 +159,16 @@ fn benchmark_dkg(c: &mut Criterion, reshare: bool) {
     }
 }
 
-fn benchmark_dkg_recovery(c: &mut Criterion) {
-    benchmark_dkg(c, false);
+fn bench_dkg_recovery(c: &mut Criterion) {
+    bench_dkg(c, false);
 }
 
-fn benchmark_dkg_reshare_recovery(c: &mut Criterion) {
-    benchmark_dkg(c, true);
+fn bench_dkg_reshare_recovery(c: &mut Criterion) {
+    bench_dkg(c, true);
 }
 
 criterion_group! {
     name = benches;
     config = Criterion::default().sample_size(10);
-    targets = benchmark_dkg_recovery, benchmark_dkg_reshare_recovery
+    targets = bench_dkg_recovery, bench_dkg_reshare_recovery
 }

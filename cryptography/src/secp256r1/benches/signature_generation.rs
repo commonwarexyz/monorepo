@@ -3,7 +3,7 @@ use criterion::{criterion_group, BatchSize, Criterion};
 use rand::{thread_rng, Rng};
 use std::hint::black_box;
 
-fn benchmark_signature_generation<S: PrivateKey>(variant: impl AsRef<str>, c: &mut Criterion) {
+fn bench_signature_generation<S: PrivateKey>(variant: impl AsRef<str>, c: &mut Criterion) {
     let namespace = b"namespace";
     let mut msg = [0u8; 32];
     thread_rng().fill(&mut msg);
@@ -27,16 +27,16 @@ fn benchmark_signature_generation<S: PrivateKey>(variant: impl AsRef<str>, c: &m
     );
 }
 
-fn benchmark_standard_signature_generation(c: &mut Criterion) {
-    benchmark_signature_generation::<secp256r1::standard::PrivateKey>("standard", c);
+fn bench_standard_signature_generation(c: &mut Criterion) {
+    bench_signature_generation::<secp256r1::standard::PrivateKey>("standard", c);
 }
 
-fn benchmark_recoverable_signature_generation(c: &mut Criterion) {
-    benchmark_signature_generation::<secp256r1::recoverable::PrivateKey>("recoverable", c);
+fn bench_recoverable_signature_generation(c: &mut Criterion) {
+    bench_signature_generation::<secp256r1::recoverable::PrivateKey>("recoverable", c);
 }
 
 criterion_group!(
     benches,
-    benchmark_standard_signature_generation,
-    benchmark_recoverable_signature_generation
+    bench_standard_signature_generation,
+    bench_recoverable_signature_generation
 );

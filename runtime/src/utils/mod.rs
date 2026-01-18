@@ -1,9 +1,5 @@
 //! Utility functions for interacting with any runtime.
 
-#[cfg(test)]
-use crate::{Runner, Spawner};
-#[cfg(test)]
-use futures::stream::{FuturesUnordered, StreamExt};
 use futures::task::ArcWake;
 use std::{
     any::Any,
@@ -269,38 +265,12 @@ pub fn validate_label(label: &str) {
 }
 
 #[cfg(test)]
-async fn task(i: usize) -> usize {
-    for _ in 0..5 {
-        reschedule().await;
-    }
-    i
-}
-
-#[cfg(test)]
-pub fn run_tasks(tasks: usize, runner: crate::deterministic::Runner) -> (String, Vec<usize>) {
-    runner.start(|context| async move {
-        // Randomly schedule tasks
-        let mut handles = FuturesUnordered::new();
-        for i in 0..=tasks - 1 {
-            handles.push(context.clone().spawn(move |_| task(i)));
-        }
-
-        // Collect output order
-        let mut outputs = Vec::new();
-        while let Some(result) = handles.next().await {
-            outputs.push(result.unwrap());
-        }
-        assert_eq!(outputs.len(), tasks);
-        (context.auditor().state(), outputs)
-    })
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
-    use crate::deterministic;
+    use crate::{deterministic, Metrics, Runner};
     use commonware_macros::test_traced;
     use futures::task::waker;
+    use prometheus_client::metrics::counter::Counter;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     #[test_traced]
@@ -451,6 +421,32 @@ mod tests {
                 0,
                 "all worker tasks should be stopped"
             );
+        });
+    }
+
+    #[test_traced]
+    fn test_no_duplicate_metrics() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Register metrics under different labels (no duplicates)
+            let c1 = Counter::<u64>::default();
+            context.with_label("a").register("test", "help", c1);
+            let c2 = Counter::<u64>::default();
+            context.with_label("b").register("test", "help", c2);
+        });
+        // Test passes if runtime doesn't panic on shutdown
+    }
+
+    #[test]
+    #[should_panic(expected = "duplicate metric name:")]
+    fn test_duplicate_metrics_panics() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Register metrics with the same label, causing duplicates
+            let c1 = Counter::<u64>::default();
+            context.with_label("a").register("test", "help", c1);
+            let c2 = Counter::<u64>::default();
+            context.with_label("a").register("test", "help", c2);
         });
     }
 }

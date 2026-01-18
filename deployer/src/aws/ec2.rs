@@ -1,13 +1,12 @@
 //! AWS EC2 SDK function wrappers
 
 use super::{METRICS_PORT, SYSTEM_PORT};
-use crate::ec2::{
+use crate::aws::{
     utils::{exact_cidr, DEPLOYER_MAX_PORT, DEPLOYER_MIN_PORT, DEPLOYER_PROTOCOL, RETRY_INTERVAL},
     PortConfig,
 };
 use aws_config::BehaviorVersion;
 pub use aws_config::Region;
-pub use aws_sdk_ec2::types::{InstanceType, IpPermission, IpRange, UserIdGroupPair, VolumeType};
 use aws_sdk_ec2::{
     error::BuildError,
     primitives::Blob,
@@ -15,21 +14,27 @@ use aws_sdk_ec2::{
         BlockDeviceMapping, EbsBlockDevice, Filter, InstanceStateName, ResourceType, SecurityGroup,
         SummaryStatus, Tag, TagSpecification, VpcPeeringConnectionStateReasonCode,
     },
-    Client as Ec2Client, Error as Ec2Error,
+    Error as Ec2Error,
+};
+pub use aws_sdk_ec2::{
+    types::{InstanceType, IpPermission, IpRange, UserIdGroupPair, VolumeType},
+    Client as Ec2Client,
 };
 use std::{
     collections::{HashMap, HashSet},
     time::Duration,
 };
 use tokio::time::sleep;
+use tracing::debug;
 
 /// Creates an EC2 client for the specified AWS region
-pub async fn create_ec2_client(region: Region) -> Ec2Client {
+pub async fn create_client(region: Region) -> Ec2Client {
     let retry = aws_config::retry::RetryConfig::adaptive()
-        .with_max_attempts(10)
+        .with_max_attempts(u32::MAX)
         .with_initial_backoff(Duration::from_millis(500))
-        .with_max_backoff(Duration::from_secs(30));
-    let config = aws_config::defaults(BehaviorVersion::v2025_08_07())
+        .with_max_backoff(Duration::from_secs(30))
+        .with_reconnect_mode(aws_sdk_ec2::config::retry::ReconnectMode::ReconnectOnTransientError);
+    let config = aws_config::defaults(BehaviorVersion::v2026_01_12())
         .region(region)
         .retry_config(retry)
         .load()
@@ -59,14 +64,58 @@ pub async fn delete_key_pair(client: &Ec2Client, key_name: &str) -> Result<(), E
     Ok(())
 }
 
-/// Finds the latest Ubuntu 24.04 ARM64 AMI in the region
-pub async fn find_latest_ami(client: &Ec2Client) -> Result<String, Ec2Error> {
+/// Detects the architecture of an instance type using the AWS API
+pub(crate) async fn detect_architecture(
+    client: &Ec2Client,
+    instance_type: &str,
+) -> Result<super::Architecture, Ec2Error> {
+    let response = client
+        .describe_instance_types()
+        .instance_types(InstanceType::try_parse(instance_type).expect("invalid instance type"))
+        .send()
+        .await?;
+
+    let instance_info = response
+        .instance_types
+        .and_then(|types| types.into_iter().next())
+        .ok_or_else(|| {
+            Ec2Error::from(BuildError::other(format!(
+                "instance type {instance_type} not found"
+            )))
+        })?;
+
+    let architectures = instance_info
+        .processor_info
+        .and_then(|p| p.supported_architectures)
+        .unwrap_or_default();
+
+    // EC2 instance types only support one architecture (e.g., t4g.* = arm64, t3.* = x86_64),
+    // so the check order here doesn't matter in practice.
+    if architectures.iter().any(|a| a.as_ref() == "arm64") {
+        Ok(super::Architecture::Arm64)
+    } else if architectures.iter().any(|a| a.as_ref() == "x86_64") {
+        Ok(super::Architecture::X86_64)
+    } else {
+        Err(Ec2Error::from(BuildError::other(format!(
+            "instance type {instance_type} has no supported architecture"
+        ))))
+    }
+}
+
+/// Finds the latest Ubuntu 24.04 AMI for the given architecture in the region
+pub(crate) async fn find_latest_ami(
+    client: &Ec2Client,
+    architecture: super::Architecture,
+) -> Result<String, Ec2Error> {
+    let arch = architecture.as_str();
     let resp = client
         .describe_images()
         .filters(
             Filter::builder()
                 .name("name")
-                .values("ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-arm64-server-*")
+                .values(format!(
+                    "ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-{arch}-server-*"
+                ))
                 .build(),
         )
         .filters(
@@ -237,12 +286,12 @@ pub async fn create_security_group_monitoring(
     Ok(sg_id)
 }
 
-/// Creates a security group for binary instances with access from deployer, monitoring, and custom ports
+/// Creates a security group for binary instances with access from deployer and custom ports
+/// Note: monitoring IP rules are added separately via `add_monitoring_ingress` after monitoring instance launches
 pub async fn create_security_group_binary(
     client: &Ec2Client,
     vpc_id: &str,
     deployer_ip: &str,
-    monitoring_ip: &str,
     tag: &str,
     ports: &[PortConfig],
 ) -> Result<String, Ec2Error> {
@@ -270,7 +319,30 @@ pub async fn create_security_group_binary(
                 .to_port(DEPLOYER_MAX_PORT)
                 .ip_ranges(IpRange::builder().cidr_ip(exact_cidr(deployer_ip)).build())
                 .build(),
-        )
+        );
+    for port in ports {
+        builder = builder.ip_permissions(
+            IpPermission::builder()
+                .ip_protocol(&port.protocol)
+                .from_port(port.port as i32)
+                .to_port(port.port as i32)
+                .ip_ranges(IpRange::builder().cidr_ip(&port.cidr).build())
+                .build(),
+        );
+    }
+    builder.send().await?;
+    Ok(sg_id)
+}
+
+/// Adds monitoring IP ingress rules to a binary security group for Prometheus scraping
+pub async fn add_monitoring_ingress(
+    client: &Ec2Client,
+    sg_id: &str,
+    monitoring_ip: &str,
+) -> Result<(), Ec2Error> {
+    client
+        .authorize_security_group_ingress()
+        .group_id(sg_id)
         .ip_permissions(
             IpPermission::builder()
                 .ip_protocol("tcp")
@@ -294,24 +366,15 @@ pub async fn create_security_group_binary(
                         .build(),
                 )
                 .build(),
-        );
-    for port in ports {
-        builder = builder.ip_permissions(
-            IpPermission::builder()
-                .ip_protocol(&port.protocol)
-                .from_port(port.port as i32)
-                .to_port(port.port as i32)
-                .ip_ranges(IpRange::builder().cidr_ip(&port.cidr).build())
-                .build(),
-        );
-    }
-    builder.send().await?;
-    Ok(sg_id)
+        )
+        .send()
+        .await?;
+    Ok(())
 }
 
-/// Launches EC2 instances with specified configurations
+/// Attempts to launch EC2 instances. May fail on transient errors or rate limits.
 #[allow(clippy::too_many_arguments)]
-pub async fn launch_instances(
+async fn try_launch_instances(
     client: &Ec2Client,
     ami_id: &str,
     instance_type: InstanceType,
@@ -370,36 +433,138 @@ pub async fn launch_instances(
         .collect())
 }
 
+/// Checks if an EC2 error is fatal and should not be retried.
+fn is_fatal_ec2_error(e: &Ec2Error) -> bool {
+    let error_str = e.to_string();
+    error_str.contains("VcpuLimitExceeded")
+        || error_str.contains("InstanceLimitExceeded")
+        || error_str.contains("InsufficientInstanceCapacity")
+        || error_str.contains("MaxSpotInstanceCountExceeded")
+        || error_str.contains("VolumeLimitExceeded")
+        || error_str.contains("InsufficientFreeAddressesInSubnet")
+        || error_str.contains("InvalidParameterValue")
+        || error_str.contains("InvalidAMIID")
+        || error_str.contains("InvalidSubnetID")
+        || error_str.contains("InvalidGroup")
+        || error_str.contains("InvalidKeyPair")
+}
+
+/// Launches EC2 instances with specified configurations.
+/// Retries on transient failures but exits on fatal errors like limit exceeded.
+#[allow(clippy::too_many_arguments)]
+pub async fn launch_instances(
+    client: &Ec2Client,
+    ami_id: &str,
+    instance_type: InstanceType,
+    storage_size: i32,
+    storage_class: VolumeType,
+    key_name: &str,
+    subnet_id: &str,
+    sg_id: &str,
+    count: i32,
+    name: &str,
+    tag: &str,
+) -> Result<Vec<String>, Ec2Error> {
+    let mut attempt = 0u32;
+    loop {
+        match try_launch_instances(
+            client,
+            ami_id,
+            instance_type.clone(),
+            storage_size,
+            storage_class.clone(),
+            key_name,
+            subnet_id,
+            sg_id,
+            count,
+            name,
+            tag,
+        )
+        .await
+        {
+            Ok(ids) => return Ok(ids),
+            Err(e) => {
+                if is_fatal_ec2_error(&e) {
+                    return Err(e);
+                }
+                debug!(
+                    name = name,
+                    attempt = attempt + 1,
+                    error = %e,
+                    "launch_instances failed, retrying"
+                );
+                attempt = attempt.saturating_add(1);
+                let backoff = Duration::from_millis(500 * (1 << attempt.min(10)));
+                sleep(backoff).await;
+            }
+        }
+    }
+}
+
 /// Waits for instances to reach the "running" state and returns their public IPs
+/// in the same order as the input instance IDs.
 pub async fn wait_for_instances_running(
     client: &Ec2Client,
     instance_ids: &[String],
 ) -> Result<Vec<String>, Ec2Error> {
+    // Track discovered IPs to avoid re-polling running instances
+    let mut discovered_ips: HashMap<String, String> = HashMap::new();
+    let mut pending_ids: HashSet<String> = instance_ids.iter().cloned().collect();
+    let mut attempt = 0u32;
     loop {
-        // Ask for instance details
-        let Ok(resp) = client
+        // Only query instances that haven't been discovered yet
+        let query_ids: Vec<String> = pending_ids.iter().cloned().collect();
+        let resp = match client
             .describe_instances()
-            .set_instance_ids(Some(instance_ids.to_vec()))
+            .set_instance_ids(Some(query_ids))
             .send()
             .await
-        else {
-            sleep(RETRY_INTERVAL).await;
-            continue;
+        {
+            Ok(resp) => {
+                attempt = 0;
+                resp
+            }
+            Err(e) => {
+                attempt = attempt.saturating_add(1);
+                debug!(
+                    pending = pending_ids.len(),
+                    attempt = attempt,
+                    error = %e,
+                    "describe_instances failed, retrying"
+                );
+                sleep(RETRY_INTERVAL).await;
+                continue;
+            }
         };
 
-        // Confirm all are running
-        let reservations = resp.reservations.unwrap();
-        let instances = reservations[0].instances.as_ref().unwrap();
-        if !instances.iter().all(|i| {
-            i.state.as_ref().unwrap().name.as_ref().unwrap() == &InstanceStateName::Running
-        }) {
-            sleep(RETRY_INTERVAL).await;
-            continue;
+        // Check each instance and record those that are running with IPs
+        for reservation in resp.reservations.unwrap_or_default() {
+            for instance in reservation.instances.unwrap_or_default() {
+                let id = match instance.instance_id {
+                    Some(id) => id,
+                    None => continue,
+                };
+                let is_running = instance.state.as_ref().and_then(|s| s.name.as_ref())
+                    == Some(&InstanceStateName::Running);
+                if is_running {
+                    if let Some(ip) = instance.public_ip_address {
+                        discovered_ips.insert(id.clone(), ip);
+                        pending_ids.remove(&id);
+                    }
+                }
+            }
         }
-        return Ok(instances
-            .iter()
-            .map(|i| i.public_ip_address.as_ref().unwrap().clone())
-            .collect());
+
+        // Return once all instances are discovered
+        if pending_ids.is_empty() {
+            return Ok(instance_ids
+                .iter()
+                .map(|id| discovered_ips.remove(id).unwrap())
+                .collect());
+        }
+
+        // Try again after a delay
+        sleep(RETRY_INTERVAL).await;
     }
 }
 
@@ -807,53 +972,6 @@ pub async fn find_vpcs_by_tag(ec2_client: &Ec2Client, tag: &str) -> Result<Vec<S
 /// Deletes a VPC
 pub async fn delete_vpc(ec2_client: &Ec2Client, vpc_id: &str) -> Result<(), Ec2Error> {
     ec2_client.delete_vpc().vpc_id(vpc_id).send().await?;
-    Ok(())
-}
-
-/// Enforces that all instance types are ARM64-based
-pub async fn assert_arm64_support(
-    client: &Ec2Client,
-    instance_types: &[String],
-) -> Result<(), Ec2Error> {
-    let mut next_token: Option<String> = None;
-    let mut supported_instance_types = HashSet::new();
-
-    // Loop through all pages of results
-    loop {
-        // Get the next page of instance types
-        let mut request = client.describe_instance_types().filters(
-            Filter::builder()
-                .name("processor-info.supported-architecture")
-                .values("arm64")
-                .build(),
-        );
-        if let Some(token) = next_token {
-            request = request.next_token(token);
-        }
-        let response = request.send().await?;
-
-        // Collect instance types from this page
-        for instance_type in response.instance_types.unwrap_or_default() {
-            if let Some(it) = instance_type.instance_type {
-                supported_instance_types.insert(it.to_string());
-            }
-        }
-
-        // Check if there's another page
-        next_token = response.next_token;
-        if next_token.is_none() {
-            break;
-        }
-    }
-
-    // Validate all requested instance types
-    for instance_type in instance_types {
-        if !supported_instance_types.contains(instance_type) {
-            return Err(Ec2Error::from(BuildError::other(format!(
-                "instance type {instance_type} not ARM64-based"
-            ))));
-        }
-    }
     Ok(())
 }
 

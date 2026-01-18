@@ -14,17 +14,13 @@ hash = "892ba87ed9fa60ee60f694f927de60c3ee7fcdddd5a04d330c7511533cc2ca8d"
 n_cases = 65536
 hash = "3cb6882637c1c1a929a50b3ab425311f3ef342184dc46a80b1eae616ca7b64a4"
 
-["commonware_storage::bmt::tests::conformance::CodecConformance<Bounds<Sha256Digest>>"]
-n_cases = 65536
-hash = "20f5ef35a4bbd3a40852e907df519c724e5ce24d9f929e84947fd971a2256d02"
-
 ["commonware_storage::bmt::tests::conformance::CodecConformance<Proof<Sha256Digest>>"]
 n_cases = 65536
 hash = "6d6382956289a2f706581a4b1afa08c5cd8e8a4f55b11d454425333b6537cc17"
 
-["commonware_storage::bmt::tests::conformance::CodecConformance<RangeProof<Sha256Digest>>"]
-n_cases = 65536
-hash = "6ecb0491b09443f1f93c178af5472f138ddc71b3e8c0c106f32eafca617b56af"
+["commonware_storage::bmt::tests::conformance::RootConformance"]
+n_cases = 200
+hash = "18b1108f18520078e2eb5bb29c6a4cdf3bded6b52d8efda19d45c0f10be27207"
 
 ["commonware_storage::cache::storage::conformance::CodecConformance<Record<u64>>"]
 n_cases = 65536

@@ -10,15 +10,12 @@ use commonware_cryptography::{
     certificate::{Scheme as CertificateScheme, Signers},
     sha256::Digest as Sha256Digest,
 };
-use commonware_utils::quorum;
+use commonware_utils::{Faults, N3f1};
 use rand_core::CryptoRngCore;
 use std::collections::{HashMap, HashSet};
 
-pub fn check<P: Simplex>(n: u32, replicas: Vec<ReplicaState>)
-where
-    P::Scheme: scheme::Scheme<Sha256Digest>,
-{
-    let threshold = quorum(n) as usize;
+pub fn check<P: Simplex>(n: u32, replicas: Vec<ReplicaState>) {
+    let threshold = N3f1::quorum(n) as usize;
 
     // Invariant: agreement
     // All replicas that finalized a given view must have the same digest for that view.

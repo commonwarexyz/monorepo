@@ -2,7 +2,7 @@ use crate::algebra::{msm_naive, Additive, CryptoGroup, Field, Object, Random, Ri
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
 use commonware_codec::{EncodeSize, RangeCfg, Read, Write};
-use commonware_parallel::Strategy as ParStrategy;
+use commonware_parallel::Strategy;
 use commonware_utils::{non_empty_vec, ordered::Map, vec::NonEmptyVec, TryCollect};
 use core::{
     fmt::Debug,
@@ -126,7 +126,7 @@ impl<K> Poly<K> {
     /// This method uses more scratch space, and requires cloning values of
     /// type `R` more, but should be better if [`Space::msm`] has a better algorithm
     /// for `K`.
-    pub fn eval_msm<R: Ring, S: ParStrategy>(&self, r: &R, strategy: &S) -> K
+    pub fn eval_msm<R: Ring>(&self, r: &R, strategy: &impl Strategy) -> K
     where
         K: Space<R>,
     {
@@ -318,7 +318,7 @@ impl<'a, R, K: Space<R>> Mul<&'a R> for Poly<K> {
 }
 
 impl<R: Sync, K: Space<R> + Send> Space<R> for Poly<K> {
-    fn msm(polys: &[Self], scalars: &[R], strategy: &impl ParStrategy) -> Self {
+    fn msm(polys: &[Self], scalars: &[R], strategy: &impl Strategy) -> Self {
         if polys.len() < MIN_POINTS_FOR_MSM {
             return msm_naive(polys, scalars);
         }
@@ -394,10 +394,10 @@ impl<I: PartialEq, F: Ring> Interpolator<I, F> {
     ///
     /// The indices provided here MUST match those provided to [`Self::new`] exactly,
     /// otherwise `None` will be returned.
-    pub fn interpolate<K: Space<F>, S: ParStrategy>(
+    pub fn interpolate<K: Space<F>>(
         &self,
         evals: &Map<I, K>,
-        strategy: &S,
+        strategy: &impl Strategy,
     ) -> Option<K> {
         if evals.keys() != self.weights.keys() {
             return None;
@@ -459,7 +459,7 @@ mod test {
     use crate::test::{F, G};
     use commonware_codec::Encode;
     use proptest::{
-        prelude::{Arbitrary, BoxedStrategy, Strategy},
+        prelude::{Arbitrary, BoxedStrategy, Strategy as _},
         prop_assume, proptest,
         sample::SizeRange,
     };

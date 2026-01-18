@@ -6,7 +6,7 @@
 
 use super::Error;
 use futures::Stream;
-use std::num::NonZeroUsize;
+use std::{future::Future, num::NonZeroUsize};
 use tracing::warn;
 
 pub mod fixed;
@@ -66,10 +66,7 @@ pub trait Contiguous: Send + Sync {
     ///
     /// - Returns [Error::ItemPruned] if the item at `position` has been pruned.
     /// - Returns [Error::ItemOutOfRange] if the item at `position` does not exist.
-    fn read(
-        &self,
-        position: u64,
-    ) -> impl std::future::Future<Output = Result<Self::Item, Error>> + Send;
+    fn read(&self, position: u64) -> impl Future<Output = Result<Self::Item, Error>> + Send;
 }
 
 /// A [Contiguous] journal that supports appending, rewinding, and pruning.

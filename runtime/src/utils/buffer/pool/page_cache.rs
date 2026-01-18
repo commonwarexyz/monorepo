@@ -34,22 +34,29 @@ type PageFetchFut = Shared<Pin<Box<dyn Future<Output = Result<StableBuf, Arc<Err
 /// for replacement. When a page needs to be evicted, we start the search at `clock` within `cache`,
 /// searching for the first page with a false reference bit, and setting any skipped page's
 /// reference bit to false along the way.
-pub struct Pool {
+struct Pool {
     /// The page cache index, with a key composed of (blob id, page number), that maps each cached
-    /// page to the index of its `cache` entry.
+    /// page to the index of its slot in `entries` and `arena`.
     ///
     /// # Invariants
     ///
-    /// Each `index` entry maps to exactly one `cache` entry, and that cache entry always has a
+    /// Each `index` entry maps to exactly one `entries` slot, and that entry always has a
     /// matching key.
     index: HashMap<(u64, u64), usize>,
 
-    /// The page cache.
+    /// Metadata for each cache slot.
     ///
-    /// Each `cache` entry has exactly one corresponding `index` entry.
-    cache: Vec<CacheEntry>,
+    /// Each `entries` slot has exactly one corresponding `index` entry.
+    entries: Vec<CacheEntry>,
 
-    /// The Clock replacement policy's clock hand index into `cache`.
+    /// Pre-allocated arena containing all page data contiguously.
+    /// Slot i's data is at `arena[i * page_size .. (i+1) * page_size]`.
+    arena: Vec<u8>,
+
+    /// Size of each page in bytes.
+    page_size: usize,
+
+    /// The Clock replacement policy's clock hand index into `entries`.
     clock: usize,
 
     /// The maximum number of pages that will be cached.
@@ -60,16 +67,13 @@ pub struct Pool {
     page_fetches: HashMap<(u64, u64), PageFetchFut>,
 }
 
+/// Metadata for a single cache entry (page data stored in arena).
 struct CacheEntry {
     /// The cache key which is composed of the blob id and page number of the page.
     key: (u64, u64),
 
     /// A bit indicating whether this page was recently referenced.
     referenced: AtomicBool,
-
-    /// The cached page itself. Only logical bytes are cached, so the vector will be 12 bytes shorter
-    /// than the physical page size.
-    data: Vec<u8>,
 }
 
 /// A reference to a page cache that can be shared across threads via cloning, along with the page
@@ -96,12 +100,12 @@ impl PoolRef {
     /// Returns a new [PoolRef] that will buffer up to `capacity` pages with the
     /// given `page_size`.
     pub fn new(page_size: NonZeroU16, capacity: NonZeroUsize) -> Self {
-        let page_size = page_size.get() as u64;
+        let page_size_u64 = page_size.get() as u64;
 
         Self {
-            page_size,
+            page_size: page_size_u64,
             next_id: Arc::new(AtomicU64::new(0)),
-            pool: Arc::new(RwLock::new(Pool::new(capacity.get()))),
+            pool: Arc::new(RwLock::new(Pool::new(page_size, capacity))),
         }
     }
 
@@ -133,7 +137,7 @@ impl PoolRef {
         let original_len = buf.len();
         let buffer_pool = self.pool.read().await;
         while !buf.is_empty() {
-            let count = buffer_pool.read_at(self.page_size, blob_id, buf, logical_offset);
+            let count = buffer_pool.read_at(blob_id, buf, logical_offset);
             if count == 0 {
                 // Cache miss - return how many bytes we successfully read
                 break;
@@ -159,7 +163,7 @@ impl PoolRef {
             // Read lock the buffer pool and see if we can get (some of) the data from it.
             {
                 let buffer_pool = self.pool.read().await;
-                let count = buffer_pool.read_at(self.page_size, blob_id, buf, offset);
+                let count = buffer_pool.read_at(blob_id, buf, offset);
                 if count != 0 {
                     offset += count as u64;
                     buf = &mut buf[count..];
@@ -202,7 +206,7 @@ impl PoolRef {
 
             // There's a (small) chance the page was fetched & buffered by another task before we
             // were able to acquire the write lock, so check the cache before doing anything else.
-            let count = pool.read_at(self.page_size, blob_id, buf, offset);
+            let count = pool.read_at(blob_id, buf, offset);
             if count != 0 {
                 return Ok(count);
             }
@@ -278,7 +282,7 @@ impl PoolRef {
             }
         };
 
-        pool.cache(self.page_size, blob_id, page_buf.as_ref(), page_num);
+        pool.cache(blob_id, page_buf.as_ref(), page_num);
 
         // Copy the requested portion of the page into the buffer.
         let bytes_to_copy = std::cmp::min(buf.len(), page_buf.as_ref().len() - offset_in_page);
@@ -303,7 +307,7 @@ impl PoolRef {
             let page_size = self.page_size as usize;
             let mut buffer_pool = self.pool.write().await;
             while buf.len() >= page_size {
-                buffer_pool.cache(self.page_size, blob_id, &buf[..page_size], page_num);
+                buffer_pool.cache(blob_id, &buf[..page_size], page_num);
                 buf = &buf[page_size..];
                 page_num = match page_num.checked_add(1) {
                     Some(next) => next,
@@ -318,20 +322,37 @@ impl PoolRef {
 
 impl Pool {
     /// Return a new empty buffer pool with an initial next-blob id of 0, and a max cache capacity
-    /// of `capacity` pages.
+    /// of `capacity` pages, each of size `page_size` bytes.
     ///
-    /// # Panics
-    ///
-    /// Panics if `capacity` is 0.
-    pub fn new(capacity: usize) -> Self {
-        assert!(capacity > 0);
+    /// The arena is pre-allocated to hold all pages contiguously.
+    pub fn new(page_size: NonZeroU16, capacity: NonZeroUsize) -> Self {
+        let page_size = page_size.get() as usize;
+        let capacity = capacity.get();
         Self {
             index: HashMap::new(),
-            cache: Vec::new(),
+            entries: Vec::with_capacity(capacity),
+            arena: vec![0u8; capacity * page_size],
+            page_size,
             clock: 0,
             capacity,
             page_fetches: HashMap::new(),
         }
+    }
+
+    /// Returns a slice to the page data for the given slot index.
+    #[inline]
+    fn page_slice(&self, slot: usize) -> &[u8] {
+        assert!(slot < self.capacity);
+        let start = slot * self.page_size;
+        &self.arena[start..start + self.page_size]
+    }
+
+    /// Returns a mutable slice to the page data for the given slot index.
+    #[inline]
+    fn page_slice_mut(&mut self, slot: usize) -> &mut [u8] {
+        assert!(slot < self.capacity);
+        let start = slot * self.page_size;
+        &mut self.arena[start..start + self.page_size]
     }
 
     /// Convert an offset into the number of the page it belongs to and the offset within that page.
@@ -344,19 +365,18 @@ impl Pool {
     /// never more than `self.page_size` or the length of `buf`. The returned bytes won't cross a
     /// page boundary, so multiple reads may be required even if all data in the desired range is
     /// buffered.
-    fn read_at(&self, page_size: u64, blob_id: u64, buf: &mut [u8], logical_offset: u64) -> usize {
-        let (page_num, offset_in_page) = Self::offset_to_page(page_size, logical_offset);
-        let page_index = self.index.get(&(blob_id, page_num));
-        let Some(&page_index) = page_index else {
+    fn read_at(&self, blob_id: u64, buf: &mut [u8], logical_offset: u64) -> usize {
+        let (page_num, offset_in_page) =
+            Self::offset_to_page(self.page_size as u64, logical_offset);
+        let Some(&slot) = self.index.get(&(blob_id, page_num)) else {
             return 0;
         };
-        let page = &self.cache[page_index];
-        assert_eq!(page.key, (blob_id, page_num));
-        page.referenced.store(true, Ordering::Relaxed);
-        let page = &page.data;
+        let entry = &self.entries[slot];
+        assert_eq!(entry.key, (blob_id, page_num));
+        entry.referenced.store(true, Ordering::Relaxed);
 
-        let logical_page_size = page_size as usize;
-        let bytes_to_copy = std::cmp::min(buf.len(), logical_page_size - offset_in_page as usize);
+        let page = self.page_slice(slot);
+        let bytes_to_copy = std::cmp::min(buf.len(), self.page_size - offset_in_page as usize);
         buf[..bytes_to_copy].copy_from_slice(
             &page[offset_in_page as usize..offset_in_page as usize + bytes_to_copy],
         );
@@ -365,52 +385,57 @@ impl Pool {
     }
 
     /// Put the given `page` into the buffer pool.
-    fn cache(&mut self, page_size: u64, blob_id: u64, page: &[u8], page_num: u64) {
-        assert_eq!(page.len(), page_size as usize);
+    fn cache(&mut self, blob_id: u64, page: &[u8], page_num: u64) {
+        assert_eq!(page.len(), self.page_size);
         let key = (blob_id, page_num);
-        let index_entry = self.index.entry(key);
-        if let Entry::Occupied(index_entry) = index_entry {
+
+        // Check for existing entry (update case)
+        if let Some(&slot) = self.index.get(&key) {
             // This case can result when a blob is truncated across a page boundary, and later grows
             // back to (beyond) its original size. It will also become expected behavior once we
             // allow cached pages to be writable.
             debug!(blob_id, page_num, "updating duplicate page");
 
             // Update the stale data with the new page.
-            let entry = &mut self.cache[*index_entry.get()];
+            let entry = &self.entries[slot];
             assert_eq!(entry.key, key);
             entry.referenced.store(true, Ordering::Relaxed);
-            entry.data.copy_from_slice(page);
+            self.page_slice_mut(slot).copy_from_slice(page);
             return;
         }
 
-        if self.cache.len() < self.capacity {
-            self.index.insert(key, self.cache.len());
-            self.cache.push(CacheEntry {
+        // New entry - check if we need to evict
+        if self.entries.len() < self.capacity {
+            // Still growing: use next available slot
+            let slot = self.entries.len();
+            self.index.insert(key, slot);
+            self.entries.push(CacheEntry {
                 key,
                 referenced: AtomicBool::new(true),
-                data: page.into(),
             });
+            self.page_slice_mut(slot).copy_from_slice(page);
             return;
         }
 
-        // Cache is full, find a page to evict.
-        while self.cache[self.clock].referenced.load(Ordering::Relaxed) {
-            self.cache[self.clock]
+        // Cache full: find slot to evict using Clock algorithm
+        while self.entries[self.clock].referenced.load(Ordering::Relaxed) {
+            self.entries[self.clock]
                 .referenced
                 .store(false, Ordering::Relaxed);
-            self.clock = (self.clock + 1) % self.cache.len();
+            self.clock = (self.clock + 1) % self.entries.len();
         }
 
-        // Evict the page by replacing it with the new page.
-        let entry = &mut self.cache[self.clock];
-        entry.referenced.store(true, Ordering::Relaxed);
+        // Evict and replace
+        let slot = self.clock;
+        let entry = &mut self.entries[slot];
         assert!(self.index.remove(&entry.key).is_some());
-        self.index.insert(key, self.clock);
+        self.index.insert(key, slot);
         entry.key = key;
-        entry.data.copy_from_slice(page);
+        entry.referenced.store(true, Ordering::Relaxed);
+        self.page_slice_mut(slot).copy_from_slice(page);
 
         // Move the clock forward.
-        self.clock = (self.clock + 1) % self.cache.len();
+        self.clock = (self.clock + 1) % self.entries.len();
     }
 }
 
@@ -429,34 +454,34 @@ mod tests {
 
     #[test_traced]
     fn test_pool_basic() {
-        let mut pool: Pool = Pool::new(10);
+        let mut pool: Pool = Pool::new(PAGE_SIZE, NZUsize!(10));
 
         // Cache stores logical-sized pages.
         let mut buf = vec![0; PAGE_SIZE.get() as usize];
-        let bytes_read = pool.read_at(PAGE_SIZE_U64, 0, &mut buf, 0);
+        let bytes_read = pool.read_at(0, &mut buf, 0);
         assert_eq!(bytes_read, 0);
 
-        pool.cache(PAGE_SIZE_U64, 0, &[1; PAGE_SIZE.get() as usize], 0);
-        let bytes_read = pool.read_at(PAGE_SIZE_U64, 0, &mut buf, 0);
+        pool.cache(0, &[1; PAGE_SIZE.get() as usize], 0);
+        let bytes_read = pool.read_at(0, &mut buf, 0);
         assert_eq!(bytes_read, PAGE_SIZE.get() as usize);
         assert_eq!(buf, [1; PAGE_SIZE.get() as usize]);
 
         // Test replacement -- should log a duplicate page warning but still work.
-        pool.cache(PAGE_SIZE_U64, 0, &[2; PAGE_SIZE.get() as usize], 0);
-        let bytes_read = pool.read_at(PAGE_SIZE_U64, 0, &mut buf, 0);
+        pool.cache(0, &[2; PAGE_SIZE.get() as usize], 0);
+        let bytes_read = pool.read_at(0, &mut buf, 0);
         assert_eq!(bytes_read, PAGE_SIZE.get() as usize);
         assert_eq!(buf, [2; PAGE_SIZE.get() as usize]);
 
         // Test exceeding the cache capacity.
         for i in 0u64..11 {
-            pool.cache(PAGE_SIZE_U64, 0, &[i as u8; PAGE_SIZE.get() as usize], i);
+            pool.cache(0, &[i as u8; PAGE_SIZE.get() as usize], i);
         }
         // Page 0 should have been evicted.
-        let bytes_read = pool.read_at(PAGE_SIZE_U64, 0, &mut buf, 0);
+        let bytes_read = pool.read_at(0, &mut buf, 0);
         assert_eq!(bytes_read, 0);
         // Page 1-10 should be in the cache.
         for i in 1u64..11 {
-            let bytes_read = pool.read_at(PAGE_SIZE_U64, 0, &mut buf, i * PAGE_SIZE_U64);
+            let bytes_read = pool.read_at(0, &mut buf, i * PAGE_SIZE_U64);
             assert_eq!(bytes_read, PAGE_SIZE.get() as usize);
             assert_eq!(buf, [i as u8; PAGE_SIZE.get() as usize]);
         }
@@ -464,7 +489,7 @@ mod tests {
         // Test reading from an unaligned offset by adding 2 to an aligned offset. The read
         // should be 2 bytes short of a full logical page.
         let mut buf = vec![0; PAGE_SIZE.get() as usize];
-        let bytes_read = pool.read_at(PAGE_SIZE_U64, 0, &mut buf, PAGE_SIZE_U64 + 2);
+        let bytes_read = pool.read_at(0, &mut buf, PAGE_SIZE_U64 + 2);
         assert_eq!(bytes_read, PAGE_SIZE.get() as usize - 2);
         assert_eq!(
             &buf[..PAGE_SIZE.get() as usize - 2],
@@ -550,7 +575,7 @@ mod tests {
             // Reading from the pool should return the logical bytes.
             let mut buf = vec![0u8; PAGE_SIZE.get() as usize];
             let pool = pool_ref.pool.read().await;
-            let bytes_read = pool.read_at(PAGE_SIZE_U64, 0, &mut buf, aligned_max_offset);
+            let bytes_read = pool.read_at(0, &mut buf, aligned_max_offset);
             assert_eq!(bytes_read, PAGE_SIZE.get() as usize);
             assert!(buf.iter().all(|b| *b == 42));
         });
@@ -579,14 +604,14 @@ mod tests {
             let mut buf = vec![0u8; MIN_PAGE_SIZE as usize];
             let pool = pool_ref.pool.read().await;
             assert_eq!(
-                pool.read_at(MIN_PAGE_SIZE, 0, &mut buf, high_offset),
+                pool.read_at(0, &mut buf, high_offset),
                 MIN_PAGE_SIZE as usize
             );
             assert!(buf.iter().all(|b| *b == 1));
 
             // Verify the second page was cached correctly.
             assert_eq!(
-                pool.read_at(MIN_PAGE_SIZE, 0, &mut buf, high_offset + MIN_PAGE_SIZE),
+                pool.read_at(0, &mut buf, high_offset + MIN_PAGE_SIZE),
                 MIN_PAGE_SIZE as usize
             );
             assert!(buf.iter().all(|b| *b == 1));

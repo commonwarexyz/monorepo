@@ -2,16 +2,17 @@
 
 use arbitrary::Arbitrary;
 use commonware_cryptography::{sha256, Digest, Sha256};
-use commonware_runtime::{deterministic, Runner};
+use commonware_runtime::{deterministic, Clock, Metrics, Runner, Storage};
 use commonware_storage::{CleanAuthenticatedBitMap, DirtyAuthenticatedBitMap};
+use commonware_utils::bitmap::BitMap;
 use libfuzzer_sys::fuzz_target;
 
 const MAX_OPERATIONS: usize = 100;
 const CHUNK_SIZE: usize = 32;
 
-enum Bitmap<D: Digest, const N: usize> {
-    Clean(CleanAuthenticatedBitMap<D, N>),
-    Dirty(DirtyAuthenticatedBitMap<D, N>),
+enum Bitmap<E: Clock + Storage + Metrics, D: Digest, const N: usize> {
+    Clean(CleanAuthenticatedBitMap<E, D, N>),
+    Dirty(DirtyAuthenticatedBitMap<E, D, N>),
 }
 
 #[derive(Arbitrary, Debug, Clone)]
@@ -54,12 +55,22 @@ impl<'a> Arbitrary<'a> for FuzzInput {
 
 fn fuzz(input: FuzzInput) {
     let runner = deterministic::Runner::seeded(input.seed);
+    const PARTITION: &str = "fuzz_mmr_bitmap_test_partition";
 
     runner.start(|context| async move {
         let mut hasher = commonware_storage::mmr::StandardHasher::<Sha256>::new();
-        let mut bitmap = Bitmap::Clean(CleanAuthenticatedBitMap::<_, CHUNK_SIZE>::new(&mut hasher, None));
+        let init_bitmap = CleanAuthenticatedBitMap::<_, _, CHUNK_SIZE>::init(
+            context.with_label("bitmap"),
+            PARTITION,
+            None,
+            &mut hasher,
+        )
+        .await
+        .unwrap();
+        let mut bitmap = Bitmap::Clean(init_bitmap);
         let mut bit_count = 0u64;
         let mut pruned_bits = 0u64;
+        let mut restore_count = 0usize;
 
         for op in input.operations {
             bitmap = match op {
@@ -104,9 +115,8 @@ fn fuzz(input: FuzzInput) {
                 BitmapOperation::GetChunk { bit_offset } => {
                     if bit_count > 0 {
                         let safe_offset = (bit_offset % bit_count).max(pruned_bits);
-                        let chunk_aligned = (safe_offset
-                            / CleanAuthenticatedBitMap::<sha256::Digest, CHUNK_SIZE>::CHUNK_SIZE_BITS)
-                            * CleanAuthenticatedBitMap::<sha256::Digest, CHUNK_SIZE>::CHUNK_SIZE_BITS;
+                        let chunk_aligned = (safe_offset / BitMap::<CHUNK_SIZE>::CHUNK_SIZE_BITS)
+                            * BitMap::<CHUNK_SIZE>::CHUNK_SIZE_BITS;
                         if chunk_aligned >= pruned_bits && chunk_aligned < bit_count {
                             let _ = match &bitmap {
                                 Bitmap::Clean(bitmap) => bitmap.get_chunk_containing(chunk_aligned),
@@ -123,7 +133,7 @@ fn fuzz(input: FuzzInput) {
                             Bitmap::Clean(bitmap) => bitmap.last_chunk(),
                             Bitmap::Dirty(bitmap) => bitmap.last_chunk(),
                         };
-                        assert!(bits <= CleanAuthenticatedBitMap::<sha256::Digest, CHUNK_SIZE>::CHUNK_SIZE_BITS);
+                        assert!(bits <= BitMap::<CHUNK_SIZE>::CHUNK_SIZE_BITS);
                         assert!(chunk.len() == CHUNK_SIZE);
                     }
                     bitmap
@@ -203,7 +213,11 @@ fn fuzz(input: FuzzInput) {
                         if let Ok((proof, chunk)) = bitmap.proof(&mut hasher, bit_offset).await {
                             let root = bitmap.root();
                             assert!(
-                                CleanAuthenticatedBitMap::<sha256::Digest, CHUNK_SIZE>::verify_bit_inclusion(
+                                CleanAuthenticatedBitMap::<
+                                    deterministic::Context,
+                                    sha256::Digest,
+                                    CHUNK_SIZE,
+                                >::verify_bit_inclusion(
                                     &mut hasher,
                                     &proof,
                                     &chunk,
@@ -218,14 +232,15 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 BitmapOperation::RestorePruned => {
-                    let bitmap = CleanAuthenticatedBitMap::<_, CHUNK_SIZE>::restore_pruned(
-                        context.clone(),
-                        "fuzz_mmr_bitmap_test_partition",
+                    let bitmap = CleanAuthenticatedBitMap::<_, _, CHUNK_SIZE>::init(
+                        context.with_label(&format!("restore_{restore_count}")),
+                        PARTITION,
                         None,
                         &mut hasher,
                     )
                     .await
                     .unwrap();
+                    restore_count += 1;
                     // Update tracking variables to match restored state
                     bit_count = bitmap.len();
                     pruned_bits = bitmap.pruned_bits();
@@ -233,13 +248,11 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 BitmapOperation::WritePruned => {
-                    let bitmap = match bitmap {
+                    let mut bitmap = match bitmap {
                         Bitmap::Clean(bitmap) => bitmap,
                         Bitmap::Dirty(bitmap) => bitmap.merkleize(&mut hasher).await.unwrap(),
                     };
-                    let _ = bitmap
-                        .write_pruned(context.clone(), "fuzz_mmr_bitmap_test_partition")
-                        .await;
+                    let _ = bitmap.write_pruned().await;
                     Bitmap::Clean(bitmap)
                 }
             }

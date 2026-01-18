@@ -7,6 +7,7 @@ use chacha20poly1305::{
 };
 use rand_core::CryptoRngCore;
 use std::vec::Vec;
+use zeroize::Zeroizing;
 
 /// The amount of overhead in a ciphertext, compared to the plain message.
 pub const CIPHERTEXT_OVERHEAD: usize = <ChaCha20Poly1305 as AeadCore>::TagSize::USIZE;
@@ -44,11 +45,10 @@ pub struct SendCipher {
 impl SendCipher {
     /// Creates a new sending cipher with a random key.
     pub fn new(mut rng: impl CryptoRngCore) -> Self {
+        let key = Zeroizing::new(ChaCha20Poly1305::generate_key(&mut rng));
         Self {
             nonce: CounterNonce::new(),
-            inner: Secret::new(ChaCha20Poly1305::new(&ChaCha20Poly1305::generate_key(
-                &mut rng,
-            ))),
+            inner: Secret::new(ChaCha20Poly1305::new(&key)),
         }
     }
 
@@ -69,15 +69,26 @@ pub struct RecvCipher {
 impl RecvCipher {
     /// Creates a new receiving cipher with a random key.
     pub fn new(mut rng: impl CryptoRngCore) -> Self {
+        let key = Zeroizing::new(ChaCha20Poly1305::generate_key(&mut rng));
         Self {
             nonce: CounterNonce::new(),
-            inner: Secret::new(ChaCha20Poly1305::new(&ChaCha20Poly1305::generate_key(
-                &mut rng,
-            ))),
+            inner: Secret::new(ChaCha20Poly1305::new(&key)),
         }
     }
 
     /// Decrypts ciphertext and returns the original data.
+    ///
+    /// # Errors
+    ///
+    /// This function will return an error in the following situations:
+    ///
+    /// - Too many messages have been received with this cipher.
+    /// - The ciphertext was corrupted in some way.
+    ///
+    /// In *both* cases, the `RecvCipher` will no longer be able to return
+    /// valid ciphertexts, and will always return an error on subsequent calls
+    /// to [`Self::recv`]. Terminating (and optionally reestablishing) the connection
+    /// is a simple (and safe) way to handle this scenario.
     pub fn recv(&mut self, encrypted_data: &[u8]) -> Result<Vec<u8>, Error> {
         let nonce = self.nonce.inc()?;
         self.inner

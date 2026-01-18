@@ -22,7 +22,7 @@ use commonware_cryptography::{certificate::mocks::Fixture, Sha256};
 use commonware_p2p::simulated::{Config as NetworkConfig, Link, Network};
 use commonware_parallel::Sequential;
 use commonware_runtime::{buffer::PoolRef, deterministic, Clock, Metrics, Runner, Spawner};
-use commonware_utils::{max_faults, NZUsize, NZU16};
+use commonware_utils::{Faults, N3f1, NZUsize, NZU16};
 use futures::{channel::mpsc::Receiver, future::join_all, StreamExt};
 use rand::{rngs::StdRng, RngCore, SeedableRng};
 pub use simplex::{
@@ -305,10 +305,7 @@ fn run<P: simplex::Simplex>(input: FuzzInput) {
             engine.start(pending, recovered, resolver);
         }
 
-        let expect_required_containers =
-            input.partition == Partition::Connected && max_faults(n) == f;
-
-        if expect_required_containers {
+        if input.partition == Partition::Connected && N3f1::max_faults(n) == f {
             let mut finalizers = Vec::new();
             for reporter in reporters.iter_mut() {
                 let (mut latest, mut monitor): (View, Receiver<View>) = reporter.subscribe().await;

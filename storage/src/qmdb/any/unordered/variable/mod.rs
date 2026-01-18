@@ -91,7 +91,19 @@ impl<E: Storage + Clock + Metrics, K: Array, V: VariableValue, H: Hasher, T: Tra
 #[cfg(test)]
 pub(super) mod test {
     use super::*;
-    use crate::{index::Unordered as _, qmdb::store::batch_tests, translator::TwoCap};
+    use crate::{
+        index::Unordered as _,
+        kv::tests::{assert_batchable, assert_deletable, assert_gettable, assert_send},
+        mmr::Location,
+        qmdb::{
+            store::{
+                batch_tests,
+                tests::{assert_log_store, assert_merkleized_store, assert_prunable_store},
+            },
+            NonDurable, Unmerkleized,
+        },
+        translator::TwoCap,
+    };
     use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
     use commonware_macros::test_traced;
     use commonware_math::algebra::Random;
@@ -158,7 +170,7 @@ pub(super) mod test {
     pub fn test_any_variable_db_log_replay() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut db = open_db(context.clone()).await.into_mutable();
+            let mut db = open_db(context.with_label("first")).await.into_mutable();
 
             // Update the same key many times.
             const UPDATES: u64 = 100;
@@ -172,7 +184,7 @@ pub(super) mod test {
 
             // Simulate a failed commit and test that the log replay doesn't leave behind old data.
             drop(db);
-            let db = open_db(context.clone()).await;
+            let db = open_db(context.with_label("second")).await;
             let iter = db.snapshot.get(&k);
             assert_eq!(iter.cloned().collect::<Vec<_>>().len(), 1);
             assert_eq!(db.root(), root);
@@ -202,7 +214,7 @@ pub(super) mod test {
         // Build a db with 1000 keys, some of which we update and some of which we delete.
         const ELEMENTS: u64 = 1000;
         executor.start(|context| async move {
-            let db = open_db(context.clone()).await;
+            let db = open_db(context.with_label("open1")).await;
             let root = db.root();
             let mut db = db.into_mutable();
 
@@ -214,7 +226,7 @@ pub(super) mod test {
 
             // Simulate a failure and test that we rollback to the previous root.
             drop(db);
-            let db = open_db(context.clone()).await;
+            let db = open_db(context.with_label("open2")).await;
             assert_eq!(root, db.root());
 
             // re-apply the updates and commit them this time.
@@ -240,7 +252,7 @@ pub(super) mod test {
 
             // Simulate a failure and test that we rollback to the previous root.
             drop(db);
-            let db = open_db(context.clone()).await;
+            let db = open_db(context.with_label("open3")).await;
             assert_eq!(root, db.root());
 
             // Re-apply updates for every 3rd key and commit them this time.
@@ -268,7 +280,7 @@ pub(super) mod test {
 
             // Simulate a failure and test that we rollback to the previous root.
             drop(db);
-            let db = open_db(context.clone()).await;
+            let db = open_db(context.with_label("open4")).await;
             assert_eq!(root, db.root());
 
             // Re-delete every 7th key and commit this time.
@@ -298,7 +310,7 @@ pub(super) mod test {
             drop(db);
 
             // Confirm state is preserved after reopen.
-            let db = open_db(context.clone()).await;
+            let db = open_db(context.with_label("open5")).await;
             assert_eq!(root, db.root());
             assert_eq!(db.op_count(), 1961);
             assert_eq!(
@@ -432,61 +444,48 @@ pub(super) mod test {
         }
     }
 
-    /// Compile-time check that Db is Send + Sync when its type parameters are.
-    const _: () = {
-        use crate::qmdb::NonDurable;
-        const fn assert_send_sync<T: Send + Sync>() {}
-        assert_send_sync::<AnyTest>();
-        assert_send_sync::<
-            Db<
-                deterministic::Context,
-                Digest,
-                Vec<u8>,
-                Sha256,
-                TwoCap,
-                Merkleized<Sha256>,
-                NonDurable,
-            >,
-        >();
-    };
-
-    /// Helper to assert a future is Send at compile time.
-    fn assert_send<T: Send>(_: T) {}
-
-    /// Test that futures returned by Durable Db methods are Send.
-    #[allow(dead_code)]
-    fn test_durable_futures_are_send(db: &mut AnyTest) {
-        use crate::mmr::Location;
-        use std::num::NonZeroU64;
-
-        // Durable-specific operations
-        assert_send(db.sync());
-        assert_send(db.prune(Location::new_unchecked(0)));
-
-        // Proof operations (Merkleized)
-        assert_send(db.proof(Location::new_unchecked(0), NonZeroU64::new(1).unwrap()));
-    }
-
-    /// Test that futures returned by Mutable (Dirty, NonDurable) Db methods are Send.
-    #[allow(dead_code)]
-    fn test_mutable_futures_are_send(
-        mut db: Db<
+    /// Regression test for https://github.com/commonwarexyz/monorepo/issues/2787
+    #[allow(dead_code, clippy::manual_async_fn)]
+    fn issue_2787_regression(
+        db: &crate::qmdb::immutable::Immutable<
             deterministic::Context,
             Digest,
             Vec<u8>,
             Sha256,
             TwoCap,
-            crate::qmdb::Unmerkleized,
-            crate::qmdb::NonDurable,
         >,
         key: Digest,
-    ) {
-        // Mutation operations
-        assert_send(db.update(key, vec![]));
-        assert_send(db.create(key, vec![]));
-        assert_send(db.delete(key));
+    ) -> impl std::future::Future<Output = ()> + Send + use<'_> {
+        async move {
+            let _ = db.get(&key).await;
+        }
+    }
 
-        // Commit (consumes self)
+    type MutableDb =
+        Db<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap, Unmerkleized, NonDurable>;
+
+    #[allow(dead_code)]
+    fn assert_merkleized_db_futures_are_send(db: &mut AnyTest, key: Digest, loc: Location) {
+        assert_gettable(db, &key);
+        assert_log_store(db);
+        assert_prunable_store(db, loc);
+        assert_merkleized_store(db, loc);
+        assert_send(db.sync());
+    }
+
+    #[allow(dead_code)]
+    fn assert_mutable_db_futures_are_send(db: &mut MutableDb, key: Digest, value: Vec<u8>) {
+        assert_gettable(db, &key);
+        assert_log_store(db);
+        assert_send(db.update(key, value.clone()));
+        assert_send(db.create(key, value.clone()));
+        assert_deletable(db, key);
+        assert_batchable(db, key, value);
+        assert_send(db.get_with_loc(&key));
+    }
+
+    #[allow(dead_code)]
+    fn assert_mutable_db_commit_is_send(db: MutableDb) {
         assert_send(db.commit(None));
     }
 }

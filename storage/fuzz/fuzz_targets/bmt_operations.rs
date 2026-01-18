@@ -1,9 +1,9 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use commonware_codec::{Decode, DecodeExt, Encode};
+use commonware_codec::{Decode, Encode};
 use commonware_cryptography::{sha256::Digest as Sha256Digest, Hasher as _, Sha256};
-use commonware_storage::bmt::{Builder, Proof, RangeProof};
+use commonware_storage::bmt::{Builder, Proof};
 use libfuzzer_sys::fuzz_target;
 
 #[derive(Arbitrary, Debug, Clone)]
@@ -82,6 +82,21 @@ enum BmtOperation {
     },
     VerifyMultiProofPartialElements {
         skip_count: u8,
+    },
+    VerifyMultiProofCorrect,
+    VerifyMultiProofUnsorted,
+    VerifyMultiProofOutOfBounds {
+        out_of_bounds_position: u32,
+    },
+    VerifyMultiProofEmptyElements,
+    VerifyMultiProofWrongRoot {
+        root_modifier: u64,
+    },
+    VerifyMultiProofSingleElement {
+        position: u32,
+    },
+    VerifyMultiProofDuplicatePositions {
+        position: u32,
     },
 }
 
@@ -200,7 +215,12 @@ fn fuzz(input: FuzzInput) {
 
                     // Verify range proof
                     let root = t.root();
-                    let _ = rp.verify(&mut hasher, *start_position, &leaf_digests, &root);
+                    let _ = rp.verify_range_inclusion(
+                        &mut hasher,
+                        *start_position,
+                        &leaf_digests,
+                        &root,
+                    );
                 }
             }
 
@@ -211,7 +231,8 @@ fn fuzz(input: FuzzInput) {
             }
 
             BmtOperation::DeserializeRangeProof { data } => {
-                let _ = RangeProof::<Sha256Digest>::decode(&mut data.as_slice());
+                // Use a reasonable max_items for range proof deserialization
+                let _ = Proof::<Sha256Digest>::decode_cfg(&mut data.as_slice(), &32);
             }
 
             // Range proof edge cases
@@ -258,7 +279,12 @@ fn fuzz(input: FuzzInput) {
 
                             // Verify with wrong position (verify_start instead of proof_start)
                             let root = t.root();
-                            let _ = rp.verify(&mut hasher, *verify_start, &leaf_digests, &root);
+                            let _ = rp.verify_range_inclusion(
+                                &mut hasher,
+                                *verify_start,
+                                &leaf_digests,
+                                &root,
+                            );
                         }
                     }
                 }
@@ -278,7 +304,8 @@ fn fuzz(input: FuzzInput) {
 
                     // Verify with tampered digests
                     let root = t.root();
-                    let _ = rp.verify(&mut hasher, *start, &tampered_digests, &root);
+                    let _ =
+                        rp.verify_range_inclusion(&mut hasher, *start, &tampered_digests, &root);
                 }
             }
 
@@ -358,6 +385,117 @@ fn fuzz(input: FuzzInput) {
                         let root = t.root();
                         let _ = mp.verify_multi_inclusion(&mut hasher, &partial_elements, &root);
                     }
+                }
+            }
+
+            BmtOperation::VerifyMultiProofCorrect => {
+                if let (Some(ref mp), Some(ref t)) = (&multi_proof, &tree) {
+                    if !multi_proof_positions.is_empty() && !leaf_values.is_empty() {
+                        let mut hasher = Sha256::default();
+                        // Use correct elements matching the proof positions
+                        let correct_elements: Vec<_> = multi_proof_positions
+                            .iter()
+                            .filter_map(|&pos| {
+                                leaf_values
+                                    .get(pos as usize)
+                                    .map(|v| (Sha256::hash(&v.to_be_bytes()), pos))
+                            })
+                            .collect();
+                        let root = t.root();
+                        let _ = mp.verify_multi_inclusion(&mut hasher, &correct_elements, &root);
+                    }
+                }
+            }
+
+            BmtOperation::VerifyMultiProofUnsorted => {
+                if let (Some(ref mp), Some(ref t)) = (&multi_proof, &tree) {
+                    if multi_proof_positions.len() > 1 && !leaf_values.is_empty() {
+                        let mut hasher = Sha256::default();
+                        // Collect elements and reverse them to test unsorted input
+                        let mut unsorted_elements: Vec<_> = multi_proof_positions
+                            .iter()
+                            .filter_map(|&pos| {
+                                leaf_values
+                                    .get(pos as usize)
+                                    .map(|v| (Sha256::hash(&v.to_be_bytes()), pos))
+                            })
+                            .collect();
+                        unsorted_elements.reverse();
+                        let root = t.root();
+                        let _ = mp.verify_multi_inclusion(&mut hasher, &unsorted_elements, &root);
+                    }
+                }
+            }
+
+            BmtOperation::VerifyMultiProofOutOfBounds {
+                out_of_bounds_position,
+            } => {
+                if let (Some(ref mp), Some(ref t)) = (&multi_proof, &tree) {
+                    let mut hasher = Sha256::default();
+                    // Create an element with an out-of-bounds position
+                    let fake_digest = Sha256::hash(&0u64.to_be_bytes());
+                    let elements = vec![(fake_digest, *out_of_bounds_position)];
+                    let root = t.root();
+                    let _ = mp.verify_multi_inclusion(&mut hasher, &elements, &root);
+                }
+            }
+
+            BmtOperation::VerifyMultiProofEmptyElements => {
+                if let (Some(ref mp), Some(ref t)) = (&multi_proof, &tree) {
+                    let mut hasher = Sha256::default();
+                    let root = t.root();
+                    let _ = mp.verify_multi_inclusion(&mut hasher, &[], &root);
+                }
+            }
+
+            BmtOperation::VerifyMultiProofWrongRoot { root_modifier } => {
+                if let (Some(ref mp), Some(ref t)) = (&multi_proof, &tree) {
+                    if !multi_proof_positions.is_empty() && !leaf_values.is_empty() {
+                        let mut hasher = Sha256::default();
+                        let correct_elements: Vec<_> = multi_proof_positions
+                            .iter()
+                            .filter_map(|&pos| {
+                                leaf_values
+                                    .get(pos as usize)
+                                    .map(|v| (Sha256::hash(&v.to_be_bytes()), pos))
+                            })
+                            .collect();
+                        // Create a wrong root by hashing the real root with some modifier
+                        let real_root = t.root();
+                        hasher.update(&real_root);
+                        hasher.update(&root_modifier.to_be_bytes());
+                        let wrong_root = hasher.finalize();
+                        let mut hasher = Sha256::default();
+                        let _ =
+                            mp.verify_multi_inclusion(&mut hasher, &correct_elements, &wrong_root);
+                    }
+                }
+            }
+
+            BmtOperation::VerifyMultiProofSingleElement { position } => {
+                if let Some(ref t) = tree {
+                    if !leaf_values.is_empty() {
+                        // Generate a single-element multi-proof
+                        if let Ok(mp) = t.multi_proof([*position]) {
+                            let mut hasher = Sha256::default();
+                            if let Some(v) = leaf_values.get(*position as usize) {
+                                let elements = vec![(Sha256::hash(&v.to_be_bytes()), *position)];
+                                let root = t.root();
+                                let _ = mp.verify_multi_inclusion(&mut hasher, &elements, &root);
+                            }
+                        }
+                    }
+                }
+            }
+
+            BmtOperation::VerifyMultiProofDuplicatePositions { position } => {
+                if let (Some(ref mp), Some(ref t)) = (&multi_proof, &tree) {
+                    let mut hasher = Sha256::default();
+                    // Try verifying with duplicate positions in elements
+                    let digest = Sha256::hash(&0u64.to_be_bytes());
+                    let elements = vec![(digest, *position), (digest, *position)];
+                    let root = t.root();
+                    let _ = mp.verify_multi_inclusion(&mut hasher, &elements, &root);
                 }
             }
         }

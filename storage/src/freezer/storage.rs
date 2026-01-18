@@ -1180,3 +1180,24 @@ mod conformance {
         CodecConformance<Record<U64>>
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::kv::tests::{assert_gettable, assert_send, assert_updatable};
+    use commonware_runtime::deterministic::Context;
+    use commonware_utils::sequence::U64;
+
+    type TestFreezer = Freezer<Context, U64, u64>;
+
+    #[allow(dead_code)]
+    fn assert_freezer_futures_are_send(freezer: &mut TestFreezer, key: U64) {
+        assert_gettable(freezer, &key);
+        assert_updatable(freezer, key, 0u64);
+    }
+
+    #[allow(dead_code)]
+    fn assert_freezer_destroy_is_send(freezer: TestFreezer) {
+        assert_send(freezer.destroy());
+    }
+}

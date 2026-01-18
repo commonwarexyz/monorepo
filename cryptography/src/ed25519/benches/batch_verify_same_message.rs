@@ -4,7 +4,7 @@ use criterion::{criterion_group, BatchSize, Criterion};
 use rand::{thread_rng, Rng};
 use std::hint::black_box;
 
-fn benchmark_batch_verify_same_message(c: &mut Criterion) {
+fn bench_batch_verify_same_message(c: &mut Criterion) {
     let namespace = b"namespace";
     let mut msg = [0u8; 32];
     thread_rng().fill(&mut msg);
@@ -32,5 +32,5 @@ fn benchmark_batch_verify_same_message(c: &mut Criterion) {
 criterion_group! {
     name = benches;
     config = Criterion::default().sample_size(10);
-    targets = benchmark_batch_verify_same_message
+    targets = bench_batch_verify_same_message
 }

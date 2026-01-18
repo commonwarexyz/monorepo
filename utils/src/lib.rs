@@ -18,6 +18,8 @@ use core::{
     time::Duration,
 };
 
+pub mod faults;
+pub use faults::{Faults, N3f1, N5f1};
 pub mod sequence;
 pub use sequence::{Array, Span};
 #[cfg(feature = "std")]
@@ -201,37 +203,6 @@ pub fn from_hex_formatted(hex: &str) -> Option<Vec<u8>> {
     from_hex(res)
 }
 
-/// Compute the maximum number of `f` (faults) that can be tolerated for a given set of `n`
-/// participants. This is the maximum integer `f` such that `n >= 3*f + 1`. `f` may be zero.
-pub const fn max_faults(n: u32) -> u32 {
-    n.saturating_sub(1) / 3
-}
-
-/// Compute the quorum size for a given set of `n` participants. This is the minimum integer `q`
-/// such that `3*q >= 2*n + 1`. It is also equal to `n - f`, where `f` is the maximum number of
-/// faults.
-///
-/// # Panics
-///
-/// Panics if `n` is zero.
-pub fn quorum(n: u32) -> u32 {
-    assert!(n > 0, "n must not be zero");
-    n - max_faults(n)
-}
-
-/// Compute the quorum size for a given slice.
-///
-/// # Panics
-///
-/// Panics if the slice length is greater than [u32::MAX].
-pub fn quorum_from_slice<T>(slice: &[T]) -> u32 {
-    let n: u32 = slice
-        .len()
-        .try_into()
-        .expect("slice length must be less than u32::MAX");
-    quorum(n)
-}
-
 /// Computes the union of two byte slices.
 pub fn union(a: &[u8], b: &[u8]) -> Vec<u8> {
     let mut union = Vec::with_capacity(a.len() + b.len());
@@ -388,7 +359,6 @@ mod tests {
     use super::*;
     use num_bigint::BigUint;
     use rand::{rngs::StdRng, Rng, SeedableRng};
-    use rstest::rstest;
 
     #[test]
     fn test_hex() {
@@ -475,49 +445,6 @@ mod tests {
         // Ensure that `from_hex` can handle misaligned UTF-8 character boundaries.
         let b = from_hex(MISALIGNMENT_CASE);
         assert!(b.is_none());
-    }
-
-    #[test]
-    fn test_max_faults_zero() {
-        assert_eq!(max_faults(0), 0);
-    }
-
-    #[test]
-    #[should_panic]
-    fn test_quorum_zero() {
-        quorum(0);
-    }
-
-    #[rstest]
-    #[case(1, 0, 1)]
-    #[case(2, 0, 2)]
-    #[case(3, 0, 3)]
-    #[case(4, 1, 3)]
-    #[case(5, 1, 4)]
-    #[case(6, 1, 5)]
-    #[case(7, 2, 5)]
-    #[case(8, 2, 6)]
-    #[case(9, 2, 7)]
-    #[case(10, 3, 7)]
-    #[case(11, 3, 8)]
-    #[case(12, 3, 9)]
-    #[case(13, 4, 9)]
-    #[case(14, 4, 10)]
-    #[case(15, 4, 11)]
-    #[case(16, 5, 11)]
-    #[case(17, 5, 12)]
-    #[case(18, 5, 13)]
-    #[case(19, 6, 13)]
-    #[case(20, 6, 14)]
-    #[case(21, 6, 15)]
-    fn test_quorum_and_max_faults(
-        #[case] n: u32,
-        #[case] expected_f: u32,
-        #[case] expected_q: u32,
-    ) {
-        assert_eq!(max_faults(n), expected_f);
-        assert_eq!(quorum(n), expected_q);
-        assert_eq!(n, expected_f + expected_q);
     }
 
     #[test]

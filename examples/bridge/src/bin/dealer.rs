@@ -4,7 +4,7 @@ use commonware_cryptography::{
     bls12381::{dkg::deal_anonymous, primitives::variant::MinSig},
     ed25519, Signer as _,
 };
-use commonware_utils::{hex, NZU32};
+use commonware_utils::{hex, N3f1, NZU32};
 use rand::{rngs::StdRng, SeedableRng};
 
 fn main() {
@@ -46,7 +46,7 @@ fn main() {
 
     // Generate secret
     let mut rng = StdRng::seed_from_u64(seed);
-    let (public, shares) = deal_anonymous::<MinSig>(&mut rng, Default::default(), NZU32!(n));
+    let (public, shares) = deal_anonymous::<MinSig, N3f1>(&mut rng, Default::default(), NZU32!(n));
 
     // Log secret
     println!("polynomial: {}", hex(&public.encode()));

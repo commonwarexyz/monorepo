@@ -12,7 +12,7 @@ use commonware_runtime::{
 use commonware_utils::hex;
 use futures::future::try_join_all;
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
-use std::{collections::BTreeMap, future::Future, num::NonZeroUsize};
+use std::{collections::BTreeMap, future::Future, mem::take, num::NonZeroUsize};
 use tracing::debug;
 
 /// A buffer that wraps a blob and provides size information.
@@ -303,6 +303,24 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
             Err(RError::PartitionMissing(_)) => {}
             Err(err) => return Err(Error::Runtime(err)),
         }
+        Ok(())
+    }
+
+    /// Clear all blobs, resetting the manager to an empty state.
+    ///
+    /// Unlike `destroy`, this keeps the manager alive so it can be reused.
+    pub async fn clear(&mut self) -> Result<(), Error> {
+        let blobs = take(&mut self.blobs);
+        for (section, blob) in blobs {
+            let size = blob.size().await;
+            drop(blob);
+            debug!(section, size, "cleared blob");
+            self.context
+                .remove(&self.partition, Some(&section.to_be_bytes()))
+                .await?;
+        }
+        let _ = self.tracked.try_set(0);
+        self.oldest_retained_section = 0;
         Ok(())
     }
 

@@ -104,7 +104,7 @@ mod tests {
                 partition: "test".to_string(),
                 codec_config: ((0..).into(), ()),
             };
-            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.clone(), cfg)
+            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.with_label("first"), cfg)
                 .await
                 .unwrap();
 
@@ -115,9 +115,9 @@ mod tests {
 
             // Check metrics
             let buffer = context.encode();
-            assert!(buffer.contains("sync_rewrites_total 0"));
-            assert!(buffer.contains("sync_overwrites_total 0"));
-            assert!(buffer.contains("keys 0"));
+            assert!(buffer.contains("first_sync_rewrites_total 0"));
+            assert!(buffer.contains("first_sync_overwrites_total 0"));
+            assert!(buffer.contains("first_keys 0"));
 
             // Put a key
             let hello = b"hello".to_vec();
@@ -129,18 +129,18 @@ mod tests {
 
             // Check metrics
             let buffer = context.encode();
-            assert!(buffer.contains("sync_rewrites_total 0"));
-            assert!(buffer.contains("sync_overwrites_total 0"));
-            assert!(buffer.contains("keys 1"));
+            assert!(buffer.contains("first_sync_rewrites_total 0"));
+            assert!(buffer.contains("first_sync_overwrites_total 0"));
+            assert!(buffer.contains("first_keys 1"));
 
             // Sync the metadata store
             metadata.sync().await.unwrap();
 
             // Check metrics
             let buffer = context.encode();
-            assert!(buffer.contains("sync_rewrites_total 1"));
-            assert!(buffer.contains("sync_overwrites_total 0"));
-            assert!(buffer.contains("keys 1"));
+            assert!(buffer.contains("first_sync_rewrites_total 1"));
+            assert!(buffer.contains("first_sync_overwrites_total 0"));
+            assert!(buffer.contains("first_keys 1"));
 
             // Reopen the metadata store
             drop(metadata);
@@ -148,15 +148,15 @@ mod tests {
                 partition: "test".to_string(),
                 codec_config: ((0..).into(), ()),
             };
-            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.clone(), cfg)
+            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.with_label("second"), cfg)
                 .await
                 .unwrap();
 
             // Check metrics
             let buffer = context.encode();
-            assert!(buffer.contains("sync_rewrites_total 0"));
-            assert!(buffer.contains("sync_overwrites_total 0"));
-            assert!(buffer.contains("keys 1"));
+            assert!(buffer.contains("second_sync_rewrites_total 0"));
+            assert!(buffer.contains("second_sync_overwrites_total 0"));
+            assert!(buffer.contains("second_keys 1"));
 
             // Get the key
             let value = metadata.get(&key).unwrap();
@@ -169,9 +169,63 @@ mod tests {
 
             // Check metrics
             let buffer = context.encode();
-            assert!(buffer.contains("sync_rewrites_total 1"));
-            assert!(buffer.contains("sync_overwrites_total 0"));
-            assert!(buffer.contains("keys 0"));
+            assert!(buffer.contains("second_sync_rewrites_total 0"));
+            assert!(buffer.contains("second_sync_overwrites_total 0"));
+            assert!(buffer.contains("second_keys 0"));
+
+            metadata.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_put_returns_previous_value() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test".to_string(),
+                codec_config: ((0..).into(), ()),
+            };
+            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.with_label("first"), cfg)
+                .await
+                .unwrap();
+
+            let key = U64::new(42);
+
+            // First put returns None (no previous value)
+            let previous = metadata.put(key.clone(), b"first".to_vec());
+            assert!(previous.is_none());
+
+            // Second put returns the previous value
+            let previous = metadata.put(key.clone(), b"second".to_vec());
+            assert_eq!(previous, Some(b"first".to_vec()));
+
+            // Third put returns the previous value
+            let previous = metadata.put(key.clone(), b"third".to_vec());
+            assert_eq!(previous, Some(b"second".to_vec()));
+
+            // Current value is the latest
+            assert_eq!(metadata.get(&key), Some(&b"third".to_vec()));
+
+            // Different key returns None
+            let other_key = U64::new(99);
+            let previous = metadata.put(other_key.clone(), b"other".to_vec());
+            assert!(previous.is_none());
+
+            // Sync and verify persistence
+            metadata.sync().await.unwrap();
+            drop(metadata);
+
+            let cfg = Config {
+                partition: "test".to_string(),
+                codec_config: ((0..).into(), ()),
+            };
+            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.with_label("second"), cfg)
+                .await
+                .unwrap();
+
+            // After restart, put still returns previous value
+            let previous = metadata.put(key.clone(), b"fourth".to_vec());
+            assert_eq!(previous, Some(b"third".to_vec()));
 
             metadata.destroy().await.unwrap();
         });
@@ -187,7 +241,7 @@ mod tests {
                 partition: "test".to_string(),
                 codec_config: ((0..).into(), ()),
             };
-            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.clone(), cfg)
+            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.with_label("first"), cfg)
                 .await
                 .unwrap();
 
@@ -201,9 +255,9 @@ mod tests {
 
             // Check metrics
             let buffer = context.encode();
-            assert!(buffer.contains("sync_rewrites_total 1"));
-            assert!(buffer.contains("sync_overwrites_total 0"));
-            assert!(buffer.contains("keys 1"));
+            assert!(buffer.contains("first_sync_rewrites_total 1"));
+            assert!(buffer.contains("first_sync_overwrites_total 0"));
+            assert!(buffer.contains("first_keys 1"));
 
             // Put an overlapping key and a new key
             let world = b"world".to_vec();
@@ -217,9 +271,9 @@ mod tests {
 
             // Check metrics
             let buffer = context.encode();
-            assert!(buffer.contains("sync_rewrites_total 2"));
-            assert!(buffer.contains("sync_overwrites_total 0"));
-            assert!(buffer.contains("keys 2"));
+            assert!(buffer.contains("first_sync_rewrites_total 2"));
+            assert!(buffer.contains("first_sync_overwrites_total 0"));
+            assert!(buffer.contains("first_keys 2"));
 
             // Reopen the metadata store
             drop(metadata);
@@ -227,15 +281,15 @@ mod tests {
                 partition: "test".to_string(),
                 codec_config: ((0..).into(), ()),
             };
-            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.clone(), cfg)
+            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.with_label("second"), cfg)
                 .await
                 .unwrap();
 
             // Check metrics
             let buffer = context.encode();
-            assert!(buffer.contains("sync_rewrites_total 0"));
-            assert!(buffer.contains("sync_overwrites_total 0"));
-            assert!(buffer.contains("keys 2"));
+            assert!(buffer.contains("second_sync_rewrites_total 0"));
+            assert!(buffer.contains("second_sync_overwrites_total 0"));
+            assert!(buffer.contains("second_keys 2"));
 
             // Get the key
             let value = metadata.get(&key).unwrap();
@@ -251,9 +305,9 @@ mod tests {
 
             // Check metrics
             let buffer = context.encode();
-            assert!(buffer.contains("sync_rewrites_total 1"));
-            assert!(buffer.contains("sync_overwrites_total 0"));
-            assert!(buffer.contains("keys 1"));
+            assert!(buffer.contains("second_sync_rewrites_total 1"));
+            assert!(buffer.contains("second_sync_overwrites_total 0"));
+            assert!(buffer.contains("second_keys 1"));
 
             // Reopen the metadata store
             drop(metadata);
@@ -261,15 +315,15 @@ mod tests {
                 partition: "test".to_string(),
                 codec_config: ((0..).into(), ()),
             };
-            let metadata = Metadata::<_, U64, Vec<u8>>::init(context.clone(), cfg)
+            let metadata = Metadata::<_, U64, Vec<u8>>::init(context.with_label("third"), cfg)
                 .await
                 .unwrap();
 
             // Check metrics
             let buffer = context.encode();
-            assert!(buffer.contains("sync_rewrites_total 0"));
-            assert!(buffer.contains("sync_overwrites_total 0"));
-            assert!(buffer.contains("keys 1"));
+            assert!(buffer.contains("third_sync_rewrites_total 0"));
+            assert!(buffer.contains("third_sync_overwrites_total 0"));
+            assert!(buffer.contains("third_keys 1"));
 
             // Get the key
             let value = metadata.get(&key);
@@ -291,7 +345,7 @@ mod tests {
                 partition: "test".to_string(),
                 codec_config: ((0..).into(), ()),
             };
-            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.clone(), cfg)
+            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.with_label("first"), cfg)
                 .await
                 .unwrap();
 
@@ -324,7 +378,7 @@ mod tests {
                 partition: "test".to_string(),
                 codec_config: ((0..).into(), ()),
             };
-            let metadata = Metadata::<_, U64, Vec<u8>>::init(context.clone(), cfg)
+            let metadata = Metadata::<_, U64, Vec<u8>>::init(context.with_label("second"), cfg)
                 .await
                 .unwrap();
 
@@ -346,7 +400,7 @@ mod tests {
                 partition: "test".to_string(),
                 codec_config: ((0..).into(), ()),
             };
-            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.clone(), cfg)
+            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.with_label("first"), cfg)
                 .await
                 .unwrap();
 
@@ -382,7 +436,7 @@ mod tests {
                 partition: "test".to_string(),
                 codec_config: ((0..).into(), ()),
             };
-            let metadata = Metadata::<_, U64, Vec<u8>>::init(context.clone(), cfg)
+            let metadata = Metadata::<_, U64, Vec<u8>>::init(context.with_label("second"), cfg)
                 .await
                 .unwrap();
 
@@ -392,9 +446,9 @@ mod tests {
 
             // Check metrics
             let buffer = context.encode();
-            assert!(buffer.contains("sync_rewrites_total 0"));
-            assert!(buffer.contains("sync_overwrites_total 0"));
-            assert!(buffer.contains("keys 0"));
+            assert!(buffer.contains("second_sync_rewrites_total 0"));
+            assert!(buffer.contains("second_sync_overwrites_total 0"));
+            assert!(buffer.contains("second_keys 0"));
 
             metadata.destroy().await.unwrap();
         });
@@ -410,7 +464,9 @@ mod tests {
                 partition: "test".to_string(),
                 codec_config: ((0..).into(), ()),
             };
-            let mut metadata = Metadata::init(context.clone(), cfg).await.unwrap();
+            let mut metadata = Metadata::init(context.with_label("first"), cfg)
+                .await
+                .unwrap();
 
             // Put a key
             let key = U64::new(42);
@@ -441,7 +497,7 @@ mod tests {
                 partition: "test".to_string(),
                 codec_config: ((0..).into(), ()),
             };
-            let metadata = Metadata::<_, U64, Vec<u8>>::init(context.clone(), cfg)
+            let metadata = Metadata::<_, U64, Vec<u8>>::init(context.with_label("second"), cfg)
                 .await
                 .unwrap();
 
@@ -463,7 +519,9 @@ mod tests {
                 partition: "test".to_string(),
                 codec_config: ((0..).into(), ()),
             };
-            let mut metadata = Metadata::init(context.clone(), cfg).await.unwrap();
+            let mut metadata = Metadata::init(context.with_label("first"), cfg)
+                .await
+                .unwrap();
 
             // Put a key
             let key = U64::new(42);
@@ -494,7 +552,7 @@ mod tests {
                 partition: "test".to_string(),
                 codec_config: ((0..).into(), ()),
             };
-            let metadata = Metadata::<_, U64, Vec<u8>>::init(context.clone(), cfg)
+            let metadata = Metadata::<_, U64, Vec<u8>>::init(context.with_label("second"), cfg)
                 .await
                 .unwrap();
 
@@ -519,7 +577,9 @@ mod tests {
                     partition: "test".to_string(),
                     codec_config: ((0..).into(), ()),
                 };
-                let mut metadata = Metadata::init(context.clone(), cfg).await.unwrap();
+                let mut metadata = Metadata::init(context.with_label("first"), cfg)
+                    .await
+                    .unwrap();
 
                 // Put a key
                 metadata.put(key.clone(), hello.clone());
@@ -532,7 +592,7 @@ mod tests {
                 partition: "test".to_string(),
                 codec_config: ((0..).into(), ()),
             };
-            let metadata = Metadata::<_, U64, Vec<u8>>::init(context.clone(), cfg)
+            let metadata = Metadata::<_, U64, Vec<u8>>::init(context.with_label("second"), cfg)
                 .await
                 .unwrap();
 
@@ -542,9 +602,9 @@ mod tests {
 
             // Check metrics
             let buffer = context.encode();
-            assert!(buffer.contains("sync_rewrites_total 0"));
-            assert!(buffer.contains("sync_overwrites_total 0"));
-            assert!(buffer.contains("keys 0"));
+            assert!(buffer.contains("second_sync_rewrites_total 0"));
+            assert!(buffer.contains("second_sync_overwrites_total 0"));
+            assert!(buffer.contains("second_keys 0"));
 
             metadata.destroy().await.unwrap();
         });
@@ -726,9 +786,10 @@ mod tests {
                 partition: "test".to_string(),
                 codec_config: ((0..).into(), ()),
             };
-            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.clone(), cfg.clone())
-                .await
-                .unwrap();
+            let mut metadata =
+                Metadata::<_, U64, Vec<u8>>::init(context.with_label("first"), cfg.clone())
+                    .await
+                    .unwrap();
 
             // Put initial data
             metadata.put(U64::new(1), b"hello".to_vec());
@@ -744,12 +805,12 @@ mod tests {
             // Sync should detect the modification and do a rewrite (due to recent key_order_changed)
             metadata.sync().await.unwrap();
             let buffer = context.encode();
-            assert!(buffer.contains("sync_rewrites_total 2"));
-            assert!(buffer.contains("sync_overwrites_total 1"));
+            assert!(buffer.contains("first_sync_rewrites_total 2"));
+            assert!(buffer.contains("first_sync_overwrites_total 1"));
 
             // Restart the metadata store
             drop(metadata);
-            let metadata = Metadata::<_, U64, Vec<u8>>::init(context, cfg)
+            let metadata = Metadata::<_, U64, Vec<u8>>::init(context.with_label("second"), cfg)
                 .await
                 .unwrap();
 
@@ -769,9 +830,10 @@ mod tests {
                 partition: "test".to_string(),
                 codec_config: ((0..).into(), ()),
             };
-            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.clone(), cfg.clone())
-                .await
-                .unwrap();
+            let mut metadata =
+                Metadata::<_, U64, Vec<u8>>::init(context.with_label("first"), cfg.clone())
+                    .await
+                    .unwrap();
 
             let key = U64::new(1);
 
@@ -795,7 +857,7 @@ mod tests {
 
             // Restart the metadata store
             drop(metadata);
-            let metadata = Metadata::<_, U64, Vec<u8>>::init(context, cfg)
+            let metadata = Metadata::<_, U64, Vec<u8>>::init(context.with_label("second"), cfg)
                 .await
                 .unwrap();
 
@@ -883,9 +945,10 @@ mod tests {
                 partition: "test".to_string(),
                 codec_config: ((0..).into(), ()),
             };
-            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.clone(), cfg.clone())
-                .await
-                .unwrap();
+            let mut metadata =
+                Metadata::<_, U64, Vec<u8>>::init(context.with_label("first"), cfg.clone())
+                    .await
+                    .unwrap();
 
             // Start with large data
             for i in 0..10 {
@@ -896,8 +959,8 @@ mod tests {
             // Stabilize key order
             metadata.sync().await.unwrap();
             let buffer = context.encode();
-            assert!(buffer.contains("sync_rewrites_total 2"));
-            assert!(buffer.contains("sync_overwrites_total 0"));
+            assert!(buffer.contains("first_sync_rewrites_total 2"));
+            assert!(buffer.contains("first_sync_overwrites_total 0"));
 
             // Remove most data to make blob smaller
             for i in 1..10 {
@@ -912,12 +975,12 @@ mod tests {
 
             // Check that sync properly handles blob resizing
             let buffer = context.encode();
-            assert!(buffer.contains("sync_rewrites_total 3"));
-            assert!(buffer.contains("sync_overwrites_total 0"));
+            assert!(buffer.contains("first_sync_rewrites_total 3"));
+            assert!(buffer.contains("first_sync_overwrites_total 0"));
 
             // Restart the metadata store
             drop(metadata);
-            let metadata = Metadata::<_, U64, Vec<u8>>::init(context, cfg)
+            let metadata = Metadata::<_, U64, Vec<u8>>::init(context.with_label("second"), cfg)
                 .await
                 .unwrap();
 
@@ -943,9 +1006,10 @@ mod tests {
                 partition: "test".to_string(),
                 codec_config: ((0..).into(), ()),
             };
-            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.clone(), cfg.clone())
-                .await
-                .unwrap();
+            let mut metadata =
+                Metadata::<_, U64, Vec<u8>>::init(context.with_label("first"), cfg.clone())
+                    .await
+                    .unwrap();
 
             // Initial data
             metadata.put(U64::new(1), b"first".to_vec());
@@ -962,7 +1026,7 @@ mod tests {
 
             // Restart the metadata store
             drop(metadata);
-            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context, cfg)
+            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.with_label("second"), cfg)
                 .await
                 .unwrap();
 
@@ -1127,7 +1191,7 @@ mod tests {
                 partition: "test".to_string(),
                 codec_config: ((0..).into(), ()),
             };
-            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.clone(), cfg)
+            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.with_label("first"), cfg)
                 .await
                 .unwrap();
 
@@ -1141,7 +1205,7 @@ mod tests {
 
             // Check initial metrics
             let buffer = context.encode();
-            assert!(buffer.contains("keys 6"));
+            assert!(buffer.contains("first_keys 6"));
 
             // Remove keys with prefix 0x10
             let prefix = hex!("0x00000000000010");
@@ -1149,7 +1213,7 @@ mod tests {
 
             // Check metrics after removal
             let buffer = context.encode();
-            assert!(buffer.contains("keys 3"));
+            assert!(buffer.contains("first_keys 3"));
 
             // Verify remaining keys
             assert!(metadata.get(&U64::new(0x1000)).is_none());
@@ -1166,7 +1230,7 @@ mod tests {
                 partition: "test".to_string(),
                 codec_config: ((0..).into(), ()),
             };
-            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.clone(), cfg)
+            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.with_label("second"), cfg)
                 .await
                 .unwrap();
 

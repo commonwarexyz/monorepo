@@ -65,10 +65,16 @@ arbitrary = [
 ]
 external = [ "pin-project" ]
 test-utils = []
-iouring-storage = [ "io-uring" ]
+iouring = [ "iouring-network", "iouring-storage" ]
 iouring-network = [ "io-uring" ]
+iouring-storage = [ "io-uring" ]
 tokio-console = [ "dep:console-subscriber", "tokio/tracing" ]
 
 [lib]
 bench = false
 crate-type = ["rlib", "cdylib"]
+
+[[bench]]
+name = "buffer_pool"
+harness = false
+path = "src/utils/buffer/benches/bench.rs"

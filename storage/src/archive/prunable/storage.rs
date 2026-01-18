@@ -159,7 +159,7 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: CodecShared> Archive<T, E
         let mut intervals = RMap::new();
         {
             debug!("initializing archive from index journal");
-            let stream = oversized.replay(0, cfg.replay_buffer).await?;
+            let stream = oversized.replay(0, 0, cfg.replay_buffer).await?;
             pin_mut!(stream);
             while let Some(result) = stream.next().await {
                 let (_section, position, entry) = result?;

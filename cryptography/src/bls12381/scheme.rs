@@ -26,7 +26,7 @@
 //! ```
 
 use super::primitives::{
-    group::{self, Scalar},
+    group::{self, Private},
     ops,
     variant::{MinPk, Variant},
 };
@@ -46,6 +46,7 @@ use core::{
     ops::Deref,
 };
 use rand_core::CryptoRngCore;
+use zeroize::Zeroizing;
 
 const CURVE_NAME: &str = "bls12381";
 
@@ -53,7 +54,7 @@ const CURVE_NAME: &str = "bls12381";
 #[derive(Clone, Debug)]
 pub struct PrivateKey {
     raw: Secret<[u8; group::PRIVATE_KEY_LENGTH]>,
-    key: Secret<Scalar>,
+    key: Private,
 }
 
 impl PartialEq for PrivateKey {
@@ -74,12 +75,12 @@ impl Read for PrivateKey {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        let raw = <[u8; Self::SIZE]>::read(buf)?;
-        let key = group::Private::decode(raw.as_ref())
-            .map_err(|e| CodecError::Wrapped(CURVE_NAME, e.into()))?;
+        let raw = Zeroizing::new(<[u8; Self::SIZE]>::read(buf)?);
+        let key =
+            Private::decode(raw.as_ref()).map_err(|e| CodecError::Wrapped(CURVE_NAME, e.into()))?;
         Ok(Self {
-            raw: Secret::new(raw),
-            key: Secret::new(key),
+            raw: Secret::new(*raw),
+            key,
         })
     }
 }
@@ -88,12 +89,12 @@ impl FixedSize for PrivateKey {
     const SIZE: usize = group::PRIVATE_KEY_LENGTH;
 }
 
-impl From<Scalar> for PrivateKey {
-    fn from(key: Scalar) -> Self {
-        let raw = key.encode_fixed();
+impl From<Private> for PrivateKey {
+    fn from(key: Private) -> Self {
+        let raw = Zeroizing::new(key.expose(|s| s.encode_fixed()));
         Self {
-            raw: Secret::new(raw),
-            key: Secret::new(key),
+            raw: Secret::new(*raw),
+            key,
         }
     }
 }
@@ -111,24 +112,18 @@ impl crate::Signer for PrivateKey {
     type PublicKey = PublicKey;
 
     fn public_key(&self) -> Self::PublicKey {
-        self.key
-            .expose(|key| PublicKey::from(ops::compute_public::<MinPk>(key)))
+        PublicKey::from(ops::compute_public::<MinPk>(&self.key))
     }
 
     fn sign(&self, namespace: &[u8], msg: &[u8]) -> Self::Signature {
-        self.key
-            .expose(|key| ops::sign_message::<MinPk>(key, namespace, msg).into())
+        ops::sign_message::<MinPk>(&self.key, namespace, msg).into()
     }
 }
 
 impl Random for PrivateKey {
     fn random(mut rng: impl CryptoRngCore) -> Self {
         let (private, _) = ops::keypair::<_, MinPk>(&mut rng);
-        let raw = private.encode_fixed();
-        Self {
-            raw: Secret::new(raw),
-            key: Secret::new(private),
-        }
+        private.into()
     }
 }
 
@@ -467,10 +462,10 @@ mod tests {
     }
 
     #[test]
-    fn test_from_scalar() {
+    fn test_from_private() {
         let mut rng = test_rng();
-        let scalar = Scalar::random(&mut rng);
-        let private_key = PrivateKey::from(scalar);
+        let private = Private::random(&mut rng);
+        let private_key = PrivateKey::from(private);
         // Verify the key works by signing and verifying
         let msg = b"test message";
         let sig = private_key.sign(b"ns", msg);

@@ -153,7 +153,7 @@ mod tests {
                 items_per_blob: NZU64!(DEFAULT_ITEMS_PER_BLOB),
                 buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
-            let mut cache = Cache::init(context.clone(), cfg.clone())
+            let mut cache = Cache::init(context.with_label("first"), cfg.clone())
                 .await
                 .expect("Failed to initialize cache");
 
@@ -176,7 +176,7 @@ mod tests {
                 items_per_blob: NZU64!(DEFAULT_ITEMS_PER_BLOB),
                 buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
-            let result = Cache::<_, i32>::init(context, cfg.clone()).await;
+            let result = Cache::<_, i32>::init(context.with_label("second"), cfg.clone()).await;
             assert!(matches!(
                 result,
                 Err(Error::Journal(JournalError::Codec(_)))
@@ -261,7 +261,7 @@ mod tests {
                 items_per_blob: NZU64!(items_per_blob),
                 buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
-            let mut cache = Cache::init(context.clone(), cfg.clone())
+            let mut cache = Cache::init(context.with_label("init1"), cfg.clone())
                 .await
                 .expect("Failed to initialize cache");
 
@@ -305,7 +305,7 @@ mod tests {
                 items_per_blob: NZU64!(items_per_blob),
                 buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
-            let mut cache = Cache::<_, [u8; 1024]>::init(context.clone(), cfg.clone())
+            let mut cache = Cache::<_, [u8; 1024]>::init(context.with_label("init2"), cfg.clone())
                 .await
                 .expect("Failed to initialize cache");
 
@@ -513,7 +513,7 @@ mod tests {
 
             // Insert data and sync
             {
-                let mut cache = Cache::init(context.clone(), cfg.clone())
+                let mut cache = Cache::init(context.with_label("first"), cfg.clone())
                     .await
                     .expect("Failed to initialize cache");
 
@@ -526,7 +526,7 @@ mod tests {
 
             // Reopen and verify intervals are preserved
             {
-                let cache = Cache::<_, i32>::init(context.clone(), cfg.clone())
+                let cache = Cache::<_, i32>::init(context.with_label("second"), cfg.clone())
                     .await
                     .expect("Failed to initialize cache");
 
