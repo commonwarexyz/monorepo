@@ -177,13 +177,8 @@ fn fuzz(input: FuzzInput) {
                 let mut hasher = Standard::<Sha256>::new();
                 let mut mmr = CleanMmr::new(&mut hasher);
 
-                let elements: Vec<Digest> = if !input.elements.is_empty() {
-                    input.elements.iter().map(|&v| Sha256::hash(&[v])).collect()
-                } else {
-                    return;
-                };
-
-                // Add all elements and track their locations
+                let elements: Vec<Digest> =
+                    input.elements.iter().map(|&v| Sha256::hash(&[v])).collect();
                 for element in &elements {
                     mmr.add(&mut hasher, element);
                 }
@@ -281,17 +276,13 @@ fn fuzz(input: FuzzInput) {
                 let tree = builder.build();
                 let root = tree.root();
 
-                let positions: Vec<u32> = if !digests.is_empty() {
-                    input
-                        .positions
-                        .iter()
-                        .map(|&p| (p as u32) % (digests.len() as u32))
-                        .collect::<std::collections::HashSet<_>>() // Deduplicate
-                        .into_iter()
-                        .collect()
-                } else {
-                    return;
-                };
+                let positions: Vec<u32> = input
+                    .positions
+                    .iter()
+                    .map(|&p| (p as u32) % (digests.len() as u32))
+                    .collect::<std::collections::HashSet<_>>()
+                    .into_iter()
+                    .collect();
 
                 let Ok(original_proof) = tree.multi_proof(&positions) else {
                     return;
