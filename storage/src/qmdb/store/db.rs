@@ -197,7 +197,7 @@ where
     /// if the location precedes the oldest retained location. The location is otherwise assumed
     /// valid.
     async fn get_op(&self, loc: Location) -> Result<Operation<K, V>, Error> {
-        assert!(loc < self.op_count());
+        assert!(loc < self.op_count().await);
 
         // Get the operation from the log at the specified position.
         // The journal will return ItemPruned if the location is pruned.
@@ -209,8 +209,8 @@ where
 
     /// The number of operations that have been applied to this db, including those that have been
     /// pruned and those that are not yet committed.
-    pub const fn op_count(&self) -> Location {
-        Location::new_unchecked(self.log.size())
+    pub async fn op_count(&self) -> Location {
+        Location::new_unchecked(self.log.size().await)
     }
 
     /// Return the inactivity floor location. This is the location before which all operations are
@@ -245,9 +245,11 @@ where
             return Ok(());
         }
 
+        let log_size = self.op_count().await;
+        let oldest_retained_loc = self.log.oldest_retained_pos().await;
         debug!(
-            log_size = ?self.op_count(),
-            oldest_retained_loc = ?self.log.oldest_retained_pos(),
+            ?log_size,
+            ?oldest_retained_loc,
             ?prune_loc,
             "pruned inactive ops"
         );
@@ -292,8 +294,12 @@ where
         // startup.
         log.sync().await?;
 
-        let last_commit_loc =
-            Location::new_unchecked(log.size().checked_sub(1).expect("commit should exist"));
+        let last_commit_loc = Location::new_unchecked(
+            log.size()
+                .await
+                .checked_sub(1)
+                .expect("commit should exist"),
+        );
         let op = log.read(*last_commit_loc).await?;
         let inactivity_floor_loc = op.has_floor().expect("last op should be a commit");
 
@@ -327,7 +333,7 @@ where
     /// Sync all database state to disk. While this isn't necessary to ensure durability of
     /// committed operations, periodic invocation may reduce memory usage and the time required to
     /// recover the database on restart.
-    pub async fn sync(&mut self) -> Result<(), Error> {
+    pub async fn sync(&self) -> Result<(), Error> {
         self.log.sync().await.map_err(Into::into)
     }
 
@@ -356,7 +362,7 @@ where
     /// Updates `key` to have value `value`. The operation is reflected in the snapshot, but will be
     /// subject to rollback until the next successful `commit`.
     pub async fn update(&mut self, key: K, value: V) -> Result<(), Error> {
-        let new_loc = self.op_count();
+        let new_loc = self.op_count().await;
         if update_key(&mut self.snapshot, &self.log, &key, new_loc)
             .await?
             .is_some()
@@ -377,7 +383,7 @@ where
     /// be subject to rollback until the next successful `commit`. Returns true if the key was
     /// created, false if it already existed.
     pub async fn create(&mut self, key: K, value: V) -> Result<bool, Error> {
-        let new_loc = self.op_count();
+        let new_loc = self.op_count().await;
         if !create_key(&mut self.snapshot, &self.log, &key, new_loc).await? {
             return Ok(false);
         }
@@ -427,7 +433,7 @@ where
         // Raise the inactivity floor by taking `self.state.steps` steps, plus 1 to account for the
         // previous commit becoming inactive.
         if self.is_empty() {
-            self.inactivity_floor_loc = self.op_count();
+            self.inactivity_floor_loc = self.op_count().await;
             debug!(tip = ?self.inactivity_floor_loc, "db is empty, raising floor to tip");
         } else {
             let steps_to_take = self.state.steps + 1;
@@ -444,7 +450,7 @@ where
                 .await?,
         );
 
-        let range = start_loc..self.op_count();
+        let range = start_loc..self.op_count().await;
 
         // Commit the log to ensure durability.
         self.log.commit().await?;
@@ -477,7 +483,7 @@ where
         Ok(())
     }
 
-    async fn sync(&mut self) -> Result<(), Error> {
+    async fn sync(&self) -> Result<(), Error> {
         self.sync().await
     }
 
@@ -496,11 +502,11 @@ where
 {
     type Value = V;
 
-    fn op_count(&self) -> Location {
-        self.op_count()
+    async fn op_count(&self) -> Location {
+        self.op_count().await
     }
 
-    fn inactivity_floor_loc(&self) -> Location {
+    async fn inactivity_floor_loc(&self) -> Location {
         self.inactivity_floor_loc()
     }
 
@@ -636,8 +642,8 @@ mod test {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             let mut db = create_test_store(context.with_label("store_0")).await;
-            assert_eq!(db.op_count(), 1);
-            assert_eq!(db.log.oldest_retained_pos(), Some(0));
+            assert_eq!(*db.op_count().await, 1);
+            assert_eq!(db.log.oldest_retained_pos().await, Some(0));
             assert_eq!(db.inactivity_floor_loc(), 0);
             assert!(matches!(db.prune(db.inactivity_floor_loc()).await, Ok(())));
             assert!(matches!(
@@ -656,14 +662,14 @@ mod test {
             let db = create_test_store(context.with_label("store_1"))
                 .await
                 .into_dirty();
-            assert_eq!(db.op_count(), 1);
+            assert_eq!(*db.op_count().await, 1);
 
             // Test calling commit on an empty db which should make it (durably) non-empty.
             let metadata = vec![1, 2, 3];
             let (mut db, range) = db.commit(Some(metadata.clone())).await.unwrap();
             assert_eq!(range.start, 1);
             assert_eq!(range.end, 2);
-            assert_eq!(db.op_count(), 2);
+            assert_eq!(*db.op_count().await, 2);
             assert!(matches!(db.prune(db.inactivity_floor_loc()).await, Ok(())));
             assert_eq!(db.get_metadata().await.unwrap(), Some(metadata.clone()));
 
@@ -682,7 +688,7 @@ mod test {
                 (db, _) = db.into_dirty().commit(None).await.unwrap();
                 // Distance should equal 3 after the second commit, with inactivity_floor
                 // referencing the previous commit operation.
-                assert!(db.op_count() - db.inactivity_floor_loc <= 3);
+                assert!(db.op_count().await - db.inactivity_floor_loc <= 3);
                 assert!(db.get_metadata().await.unwrap().is_none());
             }
 
@@ -700,7 +706,7 @@ mod test {
                 .into_dirty();
 
             // Ensure the store is empty
-            assert_eq!(db.op_count(), 1);
+            assert_eq!(*db.op_count().await, 1);
             assert_eq!(db.inactivity_floor_loc, 0);
 
             let key = Digest::random(&mut ctx);
@@ -713,7 +719,7 @@ mod test {
             // Insert a key-value pair
             db.update(key, value.clone()).await.unwrap();
 
-            assert_eq!(db.op_count(), 2);
+            assert_eq!(*db.op_count().await, 2);
             assert_eq!(db.inactivity_floor_loc, 0);
 
             // Fetch the value
@@ -729,14 +735,14 @@ mod test {
                 .into_dirty();
 
             // Ensure the re-opened store removed the uncommitted operations
-            assert_eq!(db.op_count(), 1);
+            assert_eq!(*db.op_count().await, 1);
             assert_eq!(db.inactivity_floor_loc, 0);
             assert!(db.get_metadata().await.unwrap().is_none());
 
             // Insert a key-value pair
             db.update(key, value.clone()).await.unwrap();
 
-            assert_eq!(db.op_count(), 2);
+            assert_eq!(*db.op_count().await, 2);
             assert_eq!(db.inactivity_floor_loc, 0);
 
             // Persist the changes
@@ -749,7 +755,7 @@ mod test {
             // Even though the store was pruned, the inactivity floor was raised by 2, and
             // the old operations remain in the same blob as an active operation, so they're
             // retained.
-            assert_eq!(db.op_count(), 4);
+            assert_eq!(*db.op_count().await, 4);
             assert_eq!(db.inactivity_floor_loc, 2);
 
             // Re-open the store
@@ -758,7 +764,7 @@ mod test {
                 .into_dirty();
 
             // Ensure the re-opened store retained the committed operations
-            assert_eq!(db.op_count(), 4);
+            assert_eq!(*db.op_count().await, 4);
             assert_eq!(db.inactivity_floor_loc, 2);
 
             // Fetch the value, ensuring it is still present
@@ -771,7 +777,7 @@ mod test {
             db.update(k1, v1.clone()).await.unwrap();
             db.update(k2, v2.clone()).await.unwrap();
 
-            assert_eq!(db.op_count(), 6);
+            assert_eq!(*db.op_count().await, 6);
             assert_eq!(db.inactivity_floor_loc, 2);
 
             // Make sure we can still get metadata.
@@ -779,11 +785,11 @@ mod test {
 
             let (db, range) = db.commit(None).await.unwrap();
             assert_eq!(range.start, 4);
-            assert_eq!(range.end, db.op_count());
+            assert_eq!(range.end, db.op_count().await);
             assert_eq!(db.get_metadata().await.unwrap(), None);
             let mut db = db.into_dirty();
 
-            assert_eq!(db.op_count(), 8);
+            assert_eq!(*db.op_count().await, 8);
             assert_eq!(db.inactivity_floor_loc, 3);
 
             // Ensure all keys can be accessed, despite the first section being pruned.
@@ -830,7 +836,7 @@ mod test {
             let iter = db.snapshot.get(&k);
             assert_eq!(iter.count(), 1);
 
-            let (mut db, _) = db.commit(None).await.unwrap();
+            let (db, _) = db.commit(None).await.unwrap();
             db.sync().await.unwrap();
             drop(db);
 
@@ -842,7 +848,7 @@ mod test {
             assert_eq!(iter.count(), 1);
 
             // 100 operations were applied, each triggering one step, plus the commit op.
-            assert_eq!(db.op_count(), UPDATES * 2 + 2);
+            assert_eq!(*db.op_count().await, UPDATES * 2 + 2);
             // Only the highest `Update` operation is active, plus the commit operation above it.
             let expected_floor = UPDATES * 2;
             assert_eq!(db.inactivity_floor_loc, expected_floor);
@@ -850,7 +856,7 @@ mod test {
             // All blobs prior to the inactivity floor are pruned, so the oldest retained location
             // is the first in the last retained blob.
             assert_eq!(
-                db.log.oldest_retained_pos(),
+                db.log.oldest_retained_pos().await,
                 Some(expected_floor - expected_floor % 7)
             );
 
@@ -879,7 +885,7 @@ mod test {
             assert_eq!(db.get(&k1).await.unwrap().unwrap(), v1);
             assert_eq!(db.get(&k2).await.unwrap().unwrap(), v2);
 
-            let (mut db, _) = db.commit(None).await.unwrap();
+            let (db, _) = db.commit(None).await.unwrap();
             db.sync().await.unwrap();
             drop(db);
 
@@ -985,7 +991,7 @@ mod test {
             db.update(k_b, v_b.clone()).await.unwrap();
 
             let (db, _) = db.commit(None).await.unwrap();
-            assert_eq!(db.op_count(), 5);
+            assert_eq!(*db.op_count().await, 5);
             assert_eq!(db.inactivity_floor_loc, 2);
             assert_eq!(db.get(&k_a).await.unwrap().unwrap(), v_a);
 
@@ -994,7 +1000,7 @@ mod test {
             db.update(k_a, v_c.clone()).await.unwrap();
 
             let (db, _) = db.commit(None).await.unwrap();
-            assert_eq!(db.op_count(), 11);
+            assert_eq!(*db.op_count().await, 11);
             assert_eq!(db.inactivity_floor_loc, 8);
             assert_eq!(db.get(&k_a).await.unwrap().unwrap(), v_c);
             assert_eq!(db.get(&k_b).await.unwrap().unwrap(), v_a);
@@ -1022,7 +1028,7 @@ mod test {
             // Simulate a failed commit and test that we rollback to the previous root.
             drop(db);
             let db = create_test_store(context.with_label("store_1")).await;
-            assert_eq!(db.op_count(), 1);
+            assert_eq!(*db.op_count().await, 1);
 
             // re-apply the updates and commit them this time.
             let mut db = db.into_dirty();
@@ -1032,7 +1038,7 @@ mod test {
                 db.update(k, v.clone()).await.unwrap();
             }
             let (db, _) = db.commit(None).await.unwrap();
-            let op_count = db.op_count();
+            let op_count = db.op_count().await;
 
             // Update every 3rd key
             let mut db = db.into_dirty();
@@ -1050,7 +1056,7 @@ mod test {
             let mut db = create_test_store(context.with_label("store_2"))
                 .await
                 .into_dirty();
-            assert_eq!(db.op_count(), op_count);
+            assert_eq!(*db.op_count().await, op_count);
 
             // Re-apply updates for every 3rd key and commit them this time.
             for i in 0u64..ELEMENTS {
@@ -1062,7 +1068,7 @@ mod test {
                 db.update(k, v.clone()).await.unwrap();
             }
             let (db, _) = db.commit(None).await.unwrap();
-            let op_count = db.op_count();
+            let op_count = db.op_count().await;
             assert_eq!(op_count, 1673);
             assert_eq!(db.snapshot.items(), 1000);
 
@@ -1079,16 +1085,15 @@ mod test {
             // Simulate a failed commit and test that we rollback to the previous root.
             drop(db);
             let db = create_test_store(context.with_label("store_3")).await;
-            assert_eq!(db.op_count(), op_count);
+            assert_eq!(*db.op_count().await, op_count);
 
             // Sync and reopen the store to ensure the final commit is preserved.
-            let mut db = db;
             db.sync().await.unwrap();
             drop(db);
             let mut db = create_test_store(context.with_label("store_4"))
                 .await
                 .into_dirty();
-            assert_eq!(db.op_count(), op_count);
+            assert_eq!(*db.op_count().await, op_count);
 
             // Re-delete every 7th key and commit this time.
             for i in 0u64..ELEMENTS {
@@ -1100,11 +1105,14 @@ mod test {
             }
             let (mut db, _) = db.commit(None).await.unwrap();
 
-            assert_eq!(db.op_count(), 1961);
+            assert_eq!(*db.op_count().await, 1961);
             assert_eq!(db.inactivity_floor_loc, 756);
 
             db.prune(db.inactivity_floor_loc()).await.unwrap();
-            assert_eq!(db.log.oldest_retained_pos(), Some(756 /*- 756 % 7 == 0*/));
+            assert_eq!(
+                db.log.oldest_retained_pos().await,
+                Some(756 /*- 756 % 7 == 0*/)
+            );
             assert_eq!(db.snapshot.items(), 857);
 
             db.destroy().await.unwrap();
@@ -1121,7 +1129,7 @@ mod test {
                 .into_dirty();
 
             // Ensure the store is empty
-            assert_eq!(db.op_count(), 1);
+            assert_eq!(*db.op_count().await, 1);
             assert_eq!(db.inactivity_floor_loc, 0);
 
             let key = Digest::random(&mut ctx);
@@ -1136,7 +1144,7 @@ mod test {
             // Insert a key-value pair
             batch.update(key, value.clone()).await.unwrap();
 
-            assert_eq!(db.op_count(), 1); // The batch is not applied yet
+            assert_eq!(*db.op_count().await, 1); // The batch is not applied yet
             assert_eq!(db.inactivity_floor_loc, 0);
 
             // Fetch the value
@@ -1151,7 +1159,7 @@ mod test {
                 .into_dirty();
 
             // Ensure the batch was not applied since we didn't commit.
-            assert_eq!(db.op_count(), 1);
+            assert_eq!(*db.op_count().await, 1);
             assert_eq!(db.inactivity_floor_loc, 0);
             assert!(db.get_metadata().await.unwrap().is_none());
 
@@ -1161,7 +1169,7 @@ mod test {
 
             // Persist the changes
             db.write_batch(batch.into_iter()).await.unwrap();
-            assert_eq!(db.op_count(), 2);
+            assert_eq!(*db.op_count().await, 2);
             assert_eq!(db.inactivity_floor_loc, 0);
             let metadata = vec![99, 100];
             let (db, range) = db.commit(Some(metadata.clone())).await.unwrap();
@@ -1174,7 +1182,7 @@ mod test {
             let db = create_test_store(ctx.with_label("store_2")).await;
 
             // Ensure the re-opened store retained the committed operations
-            assert_eq!(db.op_count(), 4);
+            assert_eq!(*db.op_count().await, 4);
             assert_eq!(db.inactivity_floor_loc, 2);
 
             // Fetch the value, ensuring it is still present

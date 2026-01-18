@@ -111,16 +111,17 @@ where
         panic!("operations should end with a commit");
     }
 
-    fn root(&self) -> Key {
+    fn root(&self) -> impl Future<Output = Key> + Send {
         self.root()
     }
 
-    fn op_count(&self) -> Location {
+    fn op_count(&self) -> impl Future<Output = Location> + Send {
         self.op_count()
     }
 
-    fn lower_bound(&self) -> Location {
-        self.inactivity_floor_loc()
+    fn lower_bound(&self) -> impl Future<Output = Location> + Send {
+        let loc = self.inactivity_floor_loc();
+        async move { loc }
     }
 
     fn historical_proof(

@@ -112,15 +112,15 @@ where
         unreachable!("operations must end with a commit");
     }
 
-    fn root(&self) -> Key {
+    fn root(&self) -> impl Future<Output = Key> + Send {
         self.root()
     }
 
-    fn op_count(&self) -> Location {
+    fn op_count(&self) -> impl Future<Output = Location> + Send {
         self.op_count()
     }
 
-    fn lower_bound(&self) -> Location {
+    fn lower_bound(&self) -> impl Future<Output = Location> + Send {
         self.oldest_retained_loc()
     }
 

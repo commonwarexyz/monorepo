@@ -74,7 +74,7 @@ where
     }
 
     async fn size(&self) -> u64 {
-        Self::size(self)
+        Self::size(self).await
     }
 
     async fn append(&mut self, op: Self::Op) -> Result<(), Self::Error> {
@@ -113,7 +113,7 @@ where
     }
 
     async fn size(&self) -> u64 {
-        Self::size(self)
+        Self::size(self).await
     }
 
     async fn append(&mut self, op: Self::Op) -> Result<(), Self::Error> {

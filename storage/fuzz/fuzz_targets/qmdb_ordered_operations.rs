@@ -105,7 +105,7 @@ fn fuzz(data: FuzzInput) {
                         // Account for the previous key update
                         uncommitted_ops += 1;
                     }
-                    let actual_count = db.op_count();
+                    let actual_count = db.op_count().await;
                     let expected_count = last_known_op_count + uncommitted_ops;
                     assert_eq!(actual_count, expected_count,
                         "Operation count mismatch: expected {expected_count} (last_known={last_known_op_count} + uncommitted={uncommitted_ops}), got {actual_count}");
@@ -123,7 +123,7 @@ fn fuzz(data: FuzzInput) {
                 }
 
                 QmdbOperation::OpCount => {
-                    let actual_count = db.op_count();
+                    let actual_count = db.op_count().await;
                     // The count should have increased by the number of uncommitted operations
                     let expected_count = last_known_op_count + uncommitted_ops;
                     assert_eq!(actual_count, expected_count,
@@ -133,7 +133,7 @@ fn fuzz(data: FuzzInput) {
                 QmdbOperation::Commit => {
                     let (durable_db, _) = db.commit(None).await.expect("commit should not fail");
                     // After commit, update our last known count since commit may add more operations
-                    last_known_op_count = durable_db.op_count();
+                    last_known_op_count = durable_db.op_count().await;
                     uncommitted_ops = 0; // Reset uncommitted operations counter
                     db = durable_db.into_mutable();
                 }
@@ -141,17 +141,17 @@ fn fuzz(data: FuzzInput) {
                 QmdbOperation::Root => {
                     // root requires merkleization but not commit
                     let clean_db = db.into_merkleized();
-                    clean_db.root();
+                    clean_db.root().await;
                     db = clean_db.into_mutable();
                 }
 
                 QmdbOperation::Proof { start_loc, max_ops } => {
-                    let actual_op_count = db.op_count();
+                    let actual_op_count = db.op_count().await;
 
                     // Only generate proof if QMDB has operations and valid parameters
                     if actual_op_count > 0 {
                         let clean_db = db.into_merkleized();
-                        let current_root = clean_db.root();
+                        let current_root = clean_db.root().await;
                         // Adjust start_loc to be within valid range
                         // Locations are 0-indexed (first operation is at location 0)
                         let adjusted_start = Location::new(*start_loc % *actual_op_count).unwrap();
@@ -175,7 +175,7 @@ fn fuzz(data: FuzzInput) {
                 }
 
                 QmdbOperation::ArbitraryProof { start_loc, max_ops , proof_leaves, digests} => {
-                    let actual_op_count = db.op_count();
+                    let actual_op_count = db.op_count().await;
 
                     let proof = Proof {
                         leaves: *proof_leaves,
@@ -185,7 +185,7 @@ fn fuzz(data: FuzzInput) {
                     // Only generate proof if QMDB has operations and valid parameters
                     if actual_op_count > 0 {
                         let clean_db = db.into_merkleized();
-                        let current_root = clean_db.root();
+                        let current_root = clean_db.root().await;
                         let adjusted_start = Location::new(*start_loc % *actual_op_count).unwrap();
 
                         if let Ok(res) = clean_db

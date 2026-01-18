@@ -58,13 +58,13 @@ pub trait Syncable: Sized {
     ) -> impl Future<Output = Result<Self, qmdb::Error>>;
 
     /// Get the database's root digest.
-    fn root(&self) -> Key;
+    fn root(&self) -> impl Future<Output = Key> + Send;
 
     /// Get the operation count of the database.
-    fn op_count(&self) -> Location;
+    fn op_count(&self) -> impl Future<Output = Location> + Send;
 
     /// Get the lower bound for operations (inactivity floor or oldest retained location).
-    fn lower_bound(&self) -> Location;
+    fn lower_bound(&self) -> impl Future<Output = Location> + Send;
 
     /// Get historical proof and operations.
     fn historical_proof(

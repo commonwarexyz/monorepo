@@ -170,8 +170,9 @@ where
         };
         let height = Self::grafting_height();
         let mmr = &self.any.log.mmr;
-        let proof =
-            OperationProof::<H::Digest, N>::new(hasher, &self.status, height, mmr, loc).await?;
+        let status = self.status.read().await;
+
+        let proof = OperationProof::<H::Digest, N>::new(hasher, &*status, height, mmr, loc).await?;
 
         Ok(KeyValueProof {
             proof,
@@ -190,8 +191,8 @@ where
         key: &K,
     ) -> Result<super::ExclusionProof<K, V, H::Digest, N>, Error> {
         let height = Self::grafting_height();
-        let grafted_mmr =
-            GraftingStorage::<'_, H, _, _>::new(&self.status, &self.any.log.mmr, height);
+        let status = self.status.read().await;
+        let grafted_mmr = GraftingStorage::<'_, H, _, _>::new(&*status, &self.any.log.mmr, height);
 
         let span = self.any.get_span(key).await?;
         let loc = match &span {
@@ -204,12 +205,13 @@ where
             }
             None => self
                 .op_count()
+                .await
                 .checked_sub(1)
                 .expect("db shouldn't be empty"),
         };
 
         let op_proof =
-            OperationProof::<H::Digest, N>::new(hasher, &self.status, height, &grafted_mmr, loc)
+            OperationProof::<H::Digest, N>::new(hasher, &*status, height, &grafted_mmr, loc)
                 .await?;
 
         Ok(match span {
@@ -242,11 +244,12 @@ where
     /// Updates `key` to have value `value`. The operation is reflected in the snapshot, but will be
     /// subject to rollback until the next successful `commit`.
     pub async fn update(&mut self, key: K, value: V::Value) -> Result<(), Error> {
+        let status = self.status.get_mut();
         self.any
             .update_with_callback(key, value, |loc| {
-                self.status.push(true);
+                status.push(true);
                 if let Some(loc) = loc {
-                    self.status.set_bit(*loc, false);
+                    status.set_bit(*loc, false);
                 }
             })
             .await
@@ -256,11 +259,12 @@ where
     /// be subject to rollback until the next successful `commit`. Returns true if the key was
     /// created, false if it already existed.
     pub async fn create(&mut self, key: K, value: V::Value) -> Result<bool, Error> {
+        let status = self.status.get_mut();
         self.any
             .create_with_callback(key, value, |loc| {
-                self.status.push(true);
+                status.push(true);
                 if let Some(loc) = loc {
-                    self.status.set_bit(*loc, false);
+                    status.set_bit(*loc, false);
                 }
             })
             .await
@@ -271,12 +275,13 @@ where
     /// successful `commit`. Returns true if the key was deleted, false if it was already inactive.
     pub async fn delete(&mut self, key: K) -> Result<bool, Error> {
         let mut r = false;
+        let status = self.status.get_mut();
         self.any
             .delete_with_callback(key, |append, loc| {
                 if let Some(loc) = loc {
-                    self.status.set_bit(*loc, false);
+                    status.set_bit(*loc, false);
                 }
-                self.status.push(append);
+                status.push(append);
                 r = true;
             })
             .await?;
@@ -365,7 +370,7 @@ where
     where
         Iter: Iterator<Item = (K, Option<V::Value>)> + Send + 'a,
     {
-        let status = &mut self.status;
+        let status = self.status.get_mut();
         self.any
             .write_batch_with_callback(iter, move |append: bool, loc: Option<Location>| {
                 status.push(append);

@@ -131,7 +131,7 @@ async fn test_sync<
     };
 
     if let Ok(synced) = sync::sync(sync_config).await {
-        let actual_root = synced.root();
+        let actual_root = synced.root().await;
         assert_eq!(
             actual_root, expected_root,
             "Synced root must match target root"
@@ -201,7 +201,7 @@ fn fuzz(mut input: FuzzInput) {
                 }
 
                 Operation::SyncFull { fetch_batch_size } => {
-                    if db.op_count() == 0 {
+                    if db.op_count().await == 0 {
                         continue;
                     }
                     input.commit_counter += 1;
@@ -214,8 +214,8 @@ fn fuzz(mut input: FuzzInput) {
                     let clean_db = durable_db.into_merkleized();
 
                     let target = sync::Target {
-                        root: clean_db.root(),
-                        range: clean_db.inactivity_floor_loc()..clean_db.op_count(),
+                        root: clean_db.root().await,
+                        range: clean_db.inactivity_floor_loc()..clean_db.op_count().await,
                     };
 
                     let wrapped_src = Arc::new(RwLock::new(clean_db));
