@@ -9,7 +9,7 @@ use commonware_bridge::{
 };
 use commonware_codec::{DecodeExt, Encode};
 use commonware_consensus::{
-    simplex::{scheme::bls12381_threshold::vrf as bls12381_threshold_vrf, types::Finalization},
+    simplex::{scheme::bls12381_threshold::standard as bls12381_threshold, types::Finalization},
     types::View,
     Viewable,
 };
@@ -37,7 +37,7 @@ use std::{
 };
 use tracing::{debug, info};
 
-type Scheme = bls12381_threshold_vrf::Scheme<PublicKey, MinSig>;
+type Scheme = bls12381_threshold::Scheme<PublicKey, MinSig>;
 
 #[allow(clippy::large_enum_variant)]
 enum Message<D: Digest> {
@@ -144,7 +144,7 @@ fn main() {
             let namespace = union(APPLICATION_NAMESPACE, CONSENSUS_SUFFIX);
             verifiers.insert(
                 public,
-                bls12381_threshold_vrf::Scheme::certificate_verifier(&namespace, public),
+                bls12381_threshold::Scheme::certificate_verifier(&namespace, public),
             );
             blocks.insert(public, HashMap::new());
             finalizations.insert(public, BTreeMap::new());
