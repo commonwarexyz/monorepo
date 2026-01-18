@@ -14,7 +14,7 @@
 //! * Lazy Message Verification
 //! * Application-Defined Block Format
 //! * Pluggable Hashing and Cryptography
-//! * Embedded VRF (via [scheme::bls12381_threshold])
+//! * Embedded VRF (via [scheme::bls12381_threshold::vrf])
 //!
 //! # Design
 //!
@@ -181,13 +181,18 @@
 //!
 //! ### [scheme::bls12381_threshold]
 //!
-//! Last but not least, [scheme::bls12381_threshold] employs threshold cryptography (specifically BLS12-381 threshold signatures
-//! with a `2f+1` of `3f+1` quorum) to generate both a bias-resistant beacon (for leader election and post-facto execution randomness)
-//! and succinct consensus certificates (any certificate can be verified with just the static public key of the consensus instance) for each view
-//! with zero message overhead (natively integrated). While powerful, this scheme requires both instantiating the shared secret
-//! via [commonware_cryptography::bls12381::dkg] and performing a resharing procedure whenever participants are added or removed.
+//! [scheme::bls12381_threshold] employs threshold cryptography (BLS12-381 threshold signatures with a `2f+1` of `3f+1` quorum)
+//! to generate succinct consensus certificates (verifiable with just the static public key). This scheme requires instantiating
+//! the shared secret via [commonware_cryptography::bls12381::dkg] and resharing whenever participants change.
 //!
-//! #### Embedded VRF
+//! Two variants are provided:
+//!
+//! - [scheme::bls12381_threshold::standard]: Standard threshold signatures. Certificates contain only a vote signature.
+//!
+//! - [scheme::bls12381_threshold::vrf]: Threshold VRF that also produces per-round seed signatures for randomness
+//!   (leader election, execution randomness). Use with [`elector::Random`] for unpredictable leader selection.
+//!
+//! #### Embedded VRF (VRF Variant Only)
 //!
 //! Every `notarize(c,v)` or `nullify(v)` message includes an `attestation(v)` (a partial signature over the view `v`). After `2f+1`
 //! `notarize(c,v)` or `nullify(v)` messages are collected from unique participants, `seed(v)` can be recovered. Because `attestation(v)` is

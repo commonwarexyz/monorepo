@@ -8,9 +8,10 @@
 //! - [`RoundRobin`]/[`RoundRobinElector`]: Deterministic rotation through participants
 //!   based on view number. Optionally shuffled using a seed. Works with any signing scheme.
 //!
-//! - [`Random`]/[`RandomElector`]: Uses randomness derived from BLS threshold signatures
+//! - [`Random`]/[`RandomElector`]: Uses randomness derived from BLS threshold VRF signatures
 //!   for unpredictable leader selection. Falls back to round-robin for the first view
-//!   (no certificate available). Only works with [`bls12381_threshold`].
+//!   (no certificate available). Requires [`super::scheme::bls12381_threshold::vrf`]
+//!   (implements [`super::scheme::bls12381_threshold::vrf::Seedable`]).
 //!
 //! # Custom Electors
 //!
@@ -159,7 +160,8 @@ impl<S: Scheme> Elector<S> for RoundRobinElector<S> {
 /// leader selection. Falls back to standard round-robin for view 1 when no
 /// certificate is available.
 ///
-/// Only works with [`bls12381_threshold`] signing scheme.
+/// Only works with [`super::scheme::bls12381_threshold::vrf`]
+/// (implements [`super::scheme::bls12381_threshold::vrf::Seedable`]).
 #[derive(Clone, Debug, Default)]
 pub struct Random;
 
