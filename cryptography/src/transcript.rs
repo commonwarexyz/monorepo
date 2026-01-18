@@ -100,7 +100,7 @@ enum StartTag {
 /// - domain separating different uses of tags and randomness,
 /// - making sure that secret state is zeroized as necessary.
 #[derive(ZeroizeOnDrop)]
-#[ready(0)]
+#[ready(2)]
 pub struct Transcript {
     hasher: blake3::Hasher,
     pending: u64,

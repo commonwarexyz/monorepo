@@ -254,7 +254,7 @@ mod sealed {
 /// An ergonomic wrapper to allow for encoding and decoding of primitive unsigned integers as
 /// varints rather than the default fixed-width integers.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[ready(0)]
+#[ready(2)]
 pub struct UInt<U: UPrim>(pub U);
 
 // Implements `Into<U>` for `UInt<U>` for all unsigned integer types.

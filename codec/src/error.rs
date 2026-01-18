@@ -8,7 +8,7 @@ use commonware_macros::ready;
 
 /// Error type for codec operations
 #[derive(Error, Debug)]
-#[ready(0)]
+#[ready(2)]
 pub enum Error {
     /// Indicates that the input buffer (`Buf`) did not contain enough bytes to read
     /// the next piece of data required by a [crate::Read] implementation.

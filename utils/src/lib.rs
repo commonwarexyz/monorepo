@@ -165,7 +165,7 @@ pub fn test_rng_seeded(seed: u64) -> rand::rngs::StdRng {
 pub type BoxedError = Box<dyn core::error::Error + Send + Sync>;
 
 /// Converts bytes to a hexadecimal string.
-#[ready(0)]
+#[ready(2)]
 pub fn hex(bytes: &[u8]) -> String {
     let mut hex = String::new();
     for byte in bytes.iter() {

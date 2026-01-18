@@ -24,7 +24,7 @@ pub enum Error {
 
 /// A vector that is guaranteed to contain at least one element.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[ready(0)]
+#[ready(2)]
 pub struct NonEmptyVec<T>(Vec<T>);
 
 impl<T> NonEmptyVec<T> {
