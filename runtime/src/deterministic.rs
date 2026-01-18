@@ -87,7 +87,7 @@ use rayon::{ThreadPoolBuildError, ThreadPoolBuilder};
 use sha2::{Digest as _, Sha256};
 use std::{
     borrow::Cow,
-    collections::{BTreeMap, BinaryHeap, HashMap, HashSet},
+    collections::{BTreeMap, BinaryHeap, HashMap},
     mem::{replace, take},
     net::{IpAddr, SocketAddr},
     num::NonZeroUsize,
@@ -290,7 +290,6 @@ impl Default for Config {
 /// Deterministic runtime that randomly selects tasks to run based on a seed.
 pub struct Executor {
     registry: Mutex<Registry>,
-    registered_metrics: Mutex<HashSet<String>>,
     cycle: Duration,
     deadline: Option<SystemTime>,
     metrics: Arc<Metrics>,
@@ -852,7 +851,6 @@ impl Context {
 
         let executor = Arc::new(Executor {
             registry: Mutex::new(registry),
-            registered_metrics: Mutex::new(HashSet::new()),
             cycle: cfg.cycle,
             deadline,
             metrics,
@@ -918,7 +916,6 @@ impl Context {
 
             // New state for the new runtime
             registry: Mutex::new(registry),
-            registered_metrics: Mutex::new(HashSet::new()),
             metrics,
             tasks: Arc::new(Tasks::new()),
             sleeping: Mutex::new(BinaryHeap::new()),
@@ -1157,33 +1154,17 @@ impl crate::Metrics for Context {
             }
         };
 
-        // Build unique key including tags for duplicate detection
-        let unique_key = if self.tags.is_empty() {
-            prefixed_name.clone()
-        } else {
-            let tags_str: String = self
-                .tags
-                .iter()
-                .map(|(k, v)| format!("{}={}", k, v))
-                .collect::<Vec<_>>()
-                .join(",");
-            format!("{}_{{{}}}", prefixed_name, tags_str)
-        };
-
-        // Register metric (panics if name+tags already registered)
-        let is_new = executor
-            .registered_metrics
-            .lock()
-            .unwrap()
-            .insert(unique_key.clone());
-        assert!(is_new, "duplicate metric: {}", unique_key);
-
         // Apply tags via sub_registry_with_label and register
         let mut registry = executor.registry.lock().unwrap();
         let sub_registry = self.tags.iter().fold(&mut *registry, |reg, (k, v)| {
             reg.sub_registry_with_label((Cow::Owned(k.clone()), Cow::Owned(v.clone())))
         });
         sub_registry.register(prefixed_name, help, metric);
+
+        // Check for duplicate data lines in encoded output
+        let mut buffer = String::new();
+        encode(&mut buffer, &registry).expect("encoding failed");
+        crate::utils::assert_no_duplicate_metric_data(&buffer);
     }
 
     fn encode(&self) -> String {
