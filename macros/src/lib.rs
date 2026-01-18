@@ -567,11 +567,13 @@ pub fn select_loop(input: TokenStream) -> TokenStream {
 ///
 /// # Readiness Levels
 ///
-/// - 0: Experimental/little testing (default if not specified)
-/// - 1: Decent test coverage, breaking format changes possible with no migration path
-/// - 2: Decent test coverage, wire/storage format stable
-/// - 3: Levels 1+2, API stable
-/// - 4: Deployed in production without issue, audited multiple times
+/// | Level | Description |
+/// |-------|-------------|
+/// | 0 | Experimental/little testing |
+/// | 1 | Decent test coverage, breaking format changes possible with no migration path |
+/// | 2 | Wire/storage format stable, decent test coverage |
+/// | 3 | API stable, wire/storage format stable, decent test coverage |
+/// | 4 | Deployed in production without issue, audited multiple times |
 ///
 /// # Example
 ///
