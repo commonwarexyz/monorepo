@@ -25,7 +25,7 @@ use std::{
     time::Duration,
 };
 use tokio::time::sleep;
-use tracing::{debug, info};
+use tracing::debug;
 
 /// Creates an EC2 client for the specified AWS region
 pub async fn create_client(region: Region) -> Ec2Client {
@@ -517,7 +517,7 @@ pub async fn launch_instances(
                     }
                     if is_subnet_fallback_error(&e) {
                         // Capacity error in this AZ, try next subnet
-                        info!(
+                        debug!(
                             name = name,
                             subnets_remaining = len - i - 1,
                             error = %e,
