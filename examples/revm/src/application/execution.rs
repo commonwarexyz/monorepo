@@ -112,6 +112,7 @@ pub struct ExecutionOutcome {
 /// Notes:
 /// - Uses `transact_raw` so the state diff is available for downstream processing.
 /// - Commits the diff into the DB after each transaction.
+/// - Returns an error if a transaction reverts or halts.
 pub fn execute_txs<DB>(db: DB, env: EvmEnv, txs: &[Tx]) -> anyhow::Result<(DB, ExecutionOutcome)>
 where
     DB: AlloyDatabase + DatabaseCommit,
@@ -127,7 +128,10 @@ where
     for tx in txs {
         let tx_env = tx_env_from_db(evm.db_mut(), tx, chain_id).context("build tx env")?;
 
-        let ResultAndState { result: _, state } = evm.transact_raw(tx_env).context("execute tx")?;
+        let ResultAndState { result, state } = evm.transact_raw(tx_env).context("execute tx")?;
+        if !result.is_success() {
+            return Err(anyhow::anyhow!("tx execution failed: {result:?}"));
+        }
 
         let changes = state_changes_from_evm_state(&state);
         apply_evm_state_to_qmdb_changes(&mut qmdb_changes, &state);
