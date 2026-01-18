@@ -1,4 +1,4 @@
-use super::{adapter::QmdbRefDb, Error, QmdbChanges, QmdbConfig, QmdbState};
+use super::{adapter::QmdbRefDb, Error, QmdbChangeSet, QmdbConfig, QmdbState};
 use crate::domain::StateRoot;
 use alloy_evm::revm::primitives::{Address, U256};
 use commonware_runtime::tokio::Context;
@@ -28,13 +28,13 @@ impl QmdbLedger {
         self.state.database()
     }
 
-    /// Computes the preview root for a change set without committing.
-    pub(crate) async fn preview_root(&self, changes: QmdbChanges) -> Result<StateRoot, Error> {
-        self.state.preview_root(changes).await
+    /// Computes the root for a change set without committing.
+    pub(crate) async fn compute_root(&self, changes: QmdbChangeSet) -> Result<StateRoot, Error> {
+        self.state.compute_root(changes).await
     }
 
     /// Commits the provided changes to QMDB and returns the resulting root.
-    pub(crate) async fn commit_changes(&self, changes: QmdbChanges) -> Result<StateRoot, Error> {
+    pub(crate) async fn commit_changes(&self, changes: QmdbChangeSet) -> Result<StateRoot, Error> {
         self.state.commit_changes(changes).await
     }
 

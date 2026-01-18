@@ -23,7 +23,7 @@ mod store;
 mod types;
 
 pub(crate) use adapter::QmdbRefDb;
-pub(crate) use changes::{AccountUpdate, QmdbChanges};
+pub(crate) use changes::{AccountUpdate, QmdbChangeSet};
 pub(crate) use config::QmdbConfig;
 pub(crate) use error::Error;
 pub(crate) use service::QmdbLedger;

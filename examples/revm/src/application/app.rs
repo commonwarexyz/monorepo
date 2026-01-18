@@ -70,7 +70,7 @@ where
         txs,
     };
     child.state_root = state
-        .preview_root(parent_digest, outcome.qmdb_changes.clone())
+        .compute_root(parent_digest, outcome.qmdb_changes.clone())
         .await
         .ok()?;
 
@@ -115,7 +115,7 @@ where
         Err(_) => return false,
     };
     let state_root = match state
-        .preview_root(parent_digest, outcome.qmdb_changes.clone())
+        .compute_root(parent_digest, outcome.qmdb_changes.clone())
         .await
     {
         Ok(root) => root,

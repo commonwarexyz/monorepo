@@ -27,9 +27,9 @@ async fn finalized_report_inner(state: LedgerService, update: Update<Block>) {
                         .expect("execute finalized block");
                 block = next_block;
                 let state_root = state
-                    .preview_root(parent_digest, outcome.qmdb_changes.clone())
+                    .compute_root(parent_digest, outcome.qmdb_changes.clone())
                     .await
-                    .expect("preview qmdb root");
+                    .expect("compute qmdb root");
                 assert_eq!(state_root, block.state_root, "state root mismatch");
                 state
                     .insert_snapshot(digest, parent_digest, db, state_root, outcome.qmdb_changes)

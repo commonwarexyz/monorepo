@@ -2,7 +2,7 @@ use super::{
     adapter::QmdbAsyncDb,
     config::open_stores,
     store::{QmdbInner, Stores},
-    Error, QmdbChanges, QmdbConfig, QmdbRefDb,
+    Error, QmdbChangeSet, QmdbConfig, QmdbRefDb,
 };
 use crate::domain::StateRoot;
 use alloy_evm::revm::{
@@ -61,7 +61,7 @@ impl QmdbState {
     ///
     /// This does not make changes durable. The commitment is derived from the authenticated roots
     /// of the accounts, storage, and code partitions.
-    pub(crate) async fn preview_root(&self, changes: QmdbChanges) -> Result<StateRoot, Error> {
+    pub(crate) async fn compute_root(&self, changes: QmdbChangeSet) -> Result<StateRoot, Error> {
         let _guard = self.gate.lock().await;
         if changes.accounts.is_empty() {
             let inner = self.inner.lock().await;
@@ -69,14 +69,14 @@ impl QmdbState {
         }
 
         let stores = open_stores(self.context.clone(), self.config.clone()).await?;
-        stores.preview_root(changes).await
+        stores.compute_root(changes).await
     }
 
     /// Applies state changes to QMDB and commits them to durable storage.
     ///
     /// The commitment is derived from the authenticated roots of the accounts,
     /// storage, and code partitions.
-    pub(crate) async fn commit_changes(&self, changes: QmdbChanges) -> Result<StateRoot, Error> {
+    pub(crate) async fn commit_changes(&self, changes: QmdbChangeSet) -> Result<StateRoot, Error> {
         let _guard = self.gate.lock().await;
         if changes.accounts.is_empty() {
             let inner = self.inner.lock().await;

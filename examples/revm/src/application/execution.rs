@@ -6,6 +6,214 @@
 //! The example also installs a small precompile that returns `block.prevrandao` (EIP-4399), which
 //! is sourced from the threshold-simplex seed.
 
+use crate::{
+    domain::{AccountChange, StateChanges, Tx},
+    qmdb::{AccountUpdate, QmdbChangeSet},
+};
+use alloy_evm::{
+    eth::EthEvmBuilder,
+    precompiles::{DynPrecompile, PrecompilesMap},
+    revm::{
+        context::TxEnv,
+        context_interface::result::ResultAndState,
+        precompile::{PrecompileId, PrecompileOutput, PrecompileSpecId, Precompiles},
+        primitives::{hardfork::SpecId, Address, Bytes, TxKind, B256, KECCAK_EMPTY, U256},
+        state::{Account, EvmState},
+        DatabaseCommit,
+    },
+    Database as AlloyDatabase, Evm, EvmEnv,
+};
+use anyhow::Context as _;
+use std::collections::BTreeMap;
+
+/// Example chain id used by the simulation.
+pub const CHAIN_ID: u64 = 1337;
+pub const SEED_PRECOMPILE_ADDRESS_BYTES: [u8; 20] = [
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0xFF,
+];
+
+/// Address of the example "seed" precompile.
+pub fn seed_precompile_address() -> Address {
+    Address::from(SEED_PRECOMPILE_ADDRESS_BYTES)
+}
+
+/// Build an `EvmEnv` for a given block height and `prevrandao`.
+pub fn evm_env(height: u64, prevrandao: B256) -> EvmEnv {
+    let mut env: EvmEnv = EvmEnv::default();
+    env.cfg_env.chain_id = CHAIN_ID;
+    env.block_env.number = U256::from(height);
+    env.block_env.timestamp = U256::from(height);
+    env.block_env.prevrandao = Some(prevrandao);
+    env
+}
+
+pub(crate) fn precompiles_with_seed(spec: SpecId) -> PrecompilesMap {
+    let mut precompiles =
+        PrecompilesMap::from_static(Precompiles::new(PrecompileSpecId::from_spec_id(spec)));
+
+    let address = seed_precompile_address();
+    // This precompile is stateful (not pure) because it depends on the current block env.
+    precompiles.apply_precompile(&address, |_| {
+        Some(DynPrecompile::new_stateful(
+            PrecompileId::Custom("commonware_seed".into()),
+            |input| {
+                use alloy_evm::revm::context_interface::Block as _;
+                let seed = input
+                    .internals
+                    .block_env()
+                    .prevrandao()
+                    .unwrap_or(B256::ZERO);
+                Ok(PrecompileOutput::new(
+                    0,
+                    Bytes::copy_from_slice(seed.as_slice()),
+                ))
+            },
+        ))
+    });
+
+    precompiles
+}
+
+pub(crate) fn tx_env_from_db<DB>(db: &mut DB, tx: &Tx, chain_id: u64) -> anyhow::Result<TxEnv>
+where
+    DB: AlloyDatabase,
+{
+    let nonce = match db.basic(tx.from).context("read sender account")? {
+        Some(info) => info.nonce,
+        None => 0,
+    };
+
+    Ok(TxEnv {
+        caller: tx.from,
+        kind: TxKind::Call(tx.to),
+        value: tx.value,
+        gas_limit: tx.gas_limit,
+        data: tx.data.clone(),
+        nonce,
+        chain_id: Some(chain_id),
+        gas_price: 0,
+        gas_priority_fee: None,
+        ..Default::default()
+    })
+}
+
+#[derive(Debug, Clone)]
+/// Result of executing a batch of transactions.
+pub struct ExecutionOutcome {
+    /// Canonical per-transaction state deltas observed during execution.
+    pub tx_changes: Vec<StateChanges>,
+    /// Per-account changes used to persist finalized blocks to QMDB.
+    pub(crate) qmdb_changes: QmdbChangeSet,
+}
+
+/// Execute a batch of transactions and commit them to the provided DB.
+///
+/// Notes:
+/// - Uses `transact_raw` so the state diff is available for downstream processing.
+/// - Commits the diff into the DB after each transaction.
+pub fn execute_txs<DB>(db: DB, env: EvmEnv, txs: &[Tx]) -> anyhow::Result<(DB, ExecutionOutcome)>
+where
+    DB: AlloyDatabase + DatabaseCommit,
+{
+    let spec = env.cfg_env.spec;
+    let precompiles = precompiles_with_seed(spec);
+    let mut evm = EthEvmBuilder::new(db, env).precompiles(precompiles).build();
+    let chain_id = evm.chain_id();
+
+    let mut tx_changes = Vec::with_capacity(txs.len());
+    let mut qmdb_changes = QmdbChangeSet::default();
+
+    for tx in txs {
+        let tx_env = tx_env_from_db(evm.db_mut(), tx, chain_id).context("build tx env")?;
+
+        let ResultAndState { result: _, state } = evm.transact_raw(tx_env).context("execute tx")?;
+
+        let changes = state_changes_from_evm_state(&state);
+        apply_evm_state_to_qmdb_changes(&mut qmdb_changes, &state);
+        evm.db_mut().commit(state);
+        tx_changes.push(changes);
+    }
+
+    let (db, _) = evm.finish();
+    Ok((
+        db,
+        ExecutionOutcome {
+            tx_changes,
+            qmdb_changes,
+        },
+    ))
+}
+
+pub(crate) fn state_changes_from_evm_state(state: &EvmState) -> StateChanges {
+    let mut changes = StateChanges::default();
+    for (address, account) in state.iter() {
+        if !account.is_touched() {
+            continue;
+        }
+        changes
+            .accounts
+            .insert(*address, account_change_from_evm_account(account));
+    }
+    changes
+}
+
+pub(crate) fn apply_evm_state_to_qmdb_changes(changes: &mut QmdbChangeSet, state: &EvmState) {
+    // Translate REVM's per-tx diff into a persistence-oriented QMDB delta.
+    for (address, account) in state.iter() {
+        if !account.is_touched() {
+            continue;
+        }
+        let update = account_update_from_evm_account(account);
+        changes.apply_update(*address, update);
+    }
+}
+
+fn account_change_from_evm_account(account: &Account) -> AccountChange {
+    let mut storage = BTreeMap::new();
+    for (slot, slot_value) in account.changed_storage_slots() {
+        storage.insert(*slot, slot_value.present_value());
+    }
+
+    AccountChange {
+        touched: account.is_touched(),
+        created: account.is_created(),
+        selfdestructed: account.is_selfdestructed(),
+        nonce: account.info.nonce,
+        balance: account.info.balance,
+        code_hash: account.info.code_hash,
+        storage,
+    }
+}
+
+fn account_update_from_evm_account(account: &Account) -> AccountUpdate {
+    let mut storage = BTreeMap::new();
+    for (slot, slot_value) in account.changed_storage_slots() {
+        storage.insert(*slot, slot_value.present_value());
+    }
+
+    let code = account
+        .info
+        .code
+        .as_ref()
+        .map(|code| code.original_byte_slice().to_vec());
+    let code_hash = if account.info.code_hash == B256::ZERO {
+        KECCAK_EMPTY
+    } else {
+        account.info.code_hash
+    };
+
+    AccountUpdate {
+        created: account.is_created(),
+        selfdestructed: account.is_selfdestructed(),
+        nonce: account.info.nonce,
+        balance: account.info.balance,
+        code_hash,
+        code,
+        storage,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -116,7 +324,7 @@ mod tests {
         // Execute
         let chain_id = evm.chain_id();
         let tx_env = tx_env_from_db(evm.db_mut(), &tx, chain_id).unwrap();
-        let alloy_evm::revm::context_interface::result::ResultAndState { result, state: _ } =
+        let revm::context_interface::result::ResultAndState { result, state: _ } =
             evm.transact_raw(tx_env).unwrap();
 
         // Assert
@@ -240,212 +448,5 @@ mod tests {
         bytecode.extend_from_slice(&[0x60, 0x00, 0xf3]);
         bytecode.extend_from_slice(runtime.as_ref());
         Bytes::from(bytecode)
-    }
-}
-
-use crate::{
-    domain::{AccountChange, StateChanges, Tx},
-    qmdb::{AccountUpdate, QmdbChanges},
-};
-use alloy_evm::{
-    eth::EthEvmBuilder,
-    precompiles::{DynPrecompile, PrecompilesMap},
-    revm::{
-        context::TxEnv,
-        context_interface::result::ResultAndState,
-        precompile::{PrecompileId, PrecompileOutput, PrecompileSpecId, Precompiles},
-        primitives::{hardfork::SpecId, Address, Bytes, TxKind, B256, KECCAK_EMPTY, U256},
-        state::{Account, EvmState},
-        DatabaseCommit,
-    },
-    Database as AlloyDatabase, Evm, EvmEnv,
-};
-use anyhow::Context as _;
-use std::collections::BTreeMap;
-
-/// Example chain id used by the simulation.
-pub const CHAIN_ID: u64 = 1337;
-pub const SEED_PRECOMPILE_ADDRESS_BYTES: [u8; 20] = [
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0xFF,
-];
-
-/// Address of the example "seed" precompile.
-pub fn seed_precompile_address() -> Address {
-    Address::from(SEED_PRECOMPILE_ADDRESS_BYTES)
-}
-
-/// Build an `EvmEnv` for a given block height and `prevrandao`.
-pub fn evm_env(height: u64, prevrandao: B256) -> EvmEnv {
-    let mut env: EvmEnv = EvmEnv::default();
-    env.cfg_env.chain_id = CHAIN_ID;
-    env.block_env.number = U256::from(height);
-    env.block_env.timestamp = U256::from(height);
-    env.block_env.prevrandao = Some(prevrandao);
-    env
-}
-
-pub(crate) fn precompiles_with_seed(spec: SpecId) -> PrecompilesMap {
-    let mut precompiles =
-        PrecompilesMap::from_static(Precompiles::new(PrecompileSpecId::from_spec_id(spec)));
-
-    let address = seed_precompile_address();
-    // This precompile is stateful (not pure) because it depends on the current block env.
-    precompiles.apply_precompile(&address, |_| {
-        Some(DynPrecompile::new_stateful(
-            PrecompileId::Custom("commonware_seed".into()),
-            |input| {
-                use alloy_evm::revm::context_interface::Block as _;
-                let seed = input
-                    .internals
-                    .block_env()
-                    .prevrandao()
-                    .unwrap_or(B256::ZERO);
-                Ok(PrecompileOutput::new(
-                    0,
-                    Bytes::copy_from_slice(seed.as_slice()),
-                ))
-            },
-        ))
-    });
-
-    precompiles
-}
-
-pub(crate) fn tx_env_from_db<DB>(db: &mut DB, tx: &Tx, chain_id: u64) -> anyhow::Result<TxEnv>
-where
-    DB: AlloyDatabase,
-{
-    let nonce = match db.basic(tx.from).context("read sender account")? {
-        Some(info) => info.nonce,
-        None => 0,
-    };
-
-    Ok(TxEnv {
-        caller: tx.from,
-        kind: TxKind::Call(tx.to),
-        value: tx.value,
-        gas_limit: tx.gas_limit,
-        data: tx.data.clone(),
-        nonce,
-        chain_id: Some(chain_id),
-        gas_price: 0,
-        gas_priority_fee: None,
-        ..Default::default()
-    })
-}
-
-#[derive(Debug, Clone)]
-/// Result of executing a batch of transactions.
-pub struct ExecutionOutcome {
-    /// Canonical per-transaction state deltas observed during execution.
-    pub tx_changes: Vec<StateChanges>,
-    /// Per-account changes used to persist finalized blocks to QMDB.
-    pub(crate) qmdb_changes: QmdbChanges,
-}
-
-/// Execute a batch of transactions and commit them to the provided DB.
-///
-/// Notes:
-/// - Uses `transact_raw` so the state diff is available for downstream processing.
-/// - Commits the diff into the DB after each transaction.
-pub fn execute_txs<DB>(db: DB, env: EvmEnv, txs: &[Tx]) -> anyhow::Result<(DB, ExecutionOutcome)>
-where
-    DB: AlloyDatabase + DatabaseCommit,
-{
-    let spec = env.cfg_env.spec;
-    let precompiles = precompiles_with_seed(spec);
-    let mut evm = EthEvmBuilder::new(db, env).precompiles(precompiles).build();
-    let chain_id = evm.chain_id();
-
-    let mut tx_changes = Vec::with_capacity(txs.len());
-    let mut qmdb_changes = QmdbChanges::default();
-
-    for tx in txs {
-        let tx_env = tx_env_from_db(evm.db_mut(), tx, chain_id).context("build tx env")?;
-
-        let ResultAndState { result: _, state } = evm.transact_raw(tx_env).context("execute tx")?;
-
-        let changes = state_changes_from_evm_state(&state);
-        apply_evm_state_to_qmdb_changes(&mut qmdb_changes, &state);
-        evm.db_mut().commit(state);
-        tx_changes.push(changes);
-    }
-
-    let (db, _) = evm.finish();
-    Ok((
-        db,
-        ExecutionOutcome {
-            tx_changes,
-            qmdb_changes,
-        },
-    ))
-}
-
-pub(crate) fn state_changes_from_evm_state(state: &EvmState) -> StateChanges {
-    let mut changes = StateChanges::default();
-    for (address, account) in state.iter() {
-        if !account.is_touched() {
-            continue;
-        }
-        changes
-            .accounts
-            .insert(*address, account_change_from_evm_account(account));
-    }
-    changes
-}
-
-pub(crate) fn apply_evm_state_to_qmdb_changes(changes: &mut QmdbChanges, state: &EvmState) {
-    for (address, account) in state.iter() {
-        if !account.is_touched() {
-            continue;
-        }
-        let update = account_update_from_evm_account(account);
-        changes.apply_update(*address, update);
-    }
-}
-
-fn account_change_from_evm_account(account: &Account) -> AccountChange {
-    let mut storage = BTreeMap::new();
-    for (slot, slot_value) in account.changed_storage_slots() {
-        storage.insert(*slot, slot_value.present_value());
-    }
-
-    AccountChange {
-        touched: account.is_touched(),
-        created: account.is_created(),
-        selfdestructed: account.is_selfdestructed(),
-        nonce: account.info.nonce,
-        balance: account.info.balance,
-        code_hash: account.info.code_hash,
-        storage,
-    }
-}
-
-fn account_update_from_evm_account(account: &Account) -> AccountUpdate {
-    let mut storage = BTreeMap::new();
-    for (slot, slot_value) in account.changed_storage_slots() {
-        storage.insert(*slot, slot_value.present_value());
-    }
-
-    let code = account
-        .info
-        .code
-        .as_ref()
-        .map(|code| code.original_byte_slice().to_vec());
-    let code_hash = if account.info.code_hash == B256::ZERO {
-        KECCAK_EMPTY
-    } else {
-        account.info.code_hash
-    };
-
-    AccountUpdate {
-        created: account.is_created(),
-        selfdestructed: account.is_selfdestructed(),
-        nonce: account.info.nonce,
-        balance: account.info.balance,
-        code_hash,
-        code,
-        storage,
     }
 }

@@ -19,7 +19,7 @@ This document walks through the REVM simulation example with a top-down view tha
 | **Block** | Parent pointer, height, prevrandao seed, state root, transactions. Blocks are encoded/decoded via `examples/revm/src/domain/types.rs` and committed via the simplex digest. | `examples/revm/src/domain/types.rs` |
 | **Tx** | Minimal transaction (from, to, value, gas limit, calldata) with deterministic codec for gossip. | `examples/revm/src/domain/types.rs` |
 | **BootstrapConfig** | Genesis allocation plus bootstrap transactions applied before consensus starts. | `examples/revm/src/domain/types.rs` |
-| **StateChanges & QmdbChanges** | Deterministic encodings of touched accounts/storage used for execution tracing and QMDB persistence. | `examples/revm/src/domain/commitment.rs`, `examples/revm/src/qmdb/changes.rs` |
+| **StateChanges & QmdbChangeSet** | Deterministic encodings of touched accounts/storage used for execution tracing and QMDB persistence. | `examples/revm/src/domain/commitment.rs`, `examples/revm/src/qmdb/changes.rs` |
 | **StateRoot** | Hash combining QMDB partition roots plus a namespace tag, ensuring authenticated state. | `examples/revm/src/qmdb/mod.rs`, `examples/revm/src/domain/types.rs` |
 
 ## 3. Core Components
@@ -27,25 +27,25 @@ This document walks through the REVM simulation example with a top-down view tha
 ### Ledger View (`examples/revm/src/application/ledger/mod.rs`)
 
 - Holds the mempool, per-digest snapshots, seed cache, and persisted digest set.
-- Stores snapshots as `LedgerSnapshot` (parent digest, `RevmDb`, `StateRoot`, `QmdbChanges`) in `examples/revm/src/application/ledger/snapshot_store.rs`.
-- Provides helpers to preview roots (without durably writing) and to persist snapshots via `QmdbLedger`.
+- Stores snapshots as `LedgerSnapshot` (parent digest, `RevmDb`, `StateRoot`, `QmdbChangeSet`) in `examples/revm/src/application/ledger/snapshot_store.rs`.
+- Provides helpers to compute roots (without durably writing) and to persist snapshots via `QmdbLedger`.
 
 ### QMDB Adapter & Persistence
 
 - `QmdbLedger` (`examples/revm/src/qmdb/service.rs`) orchestrates partitioned stores (`accounts`, `storage`, `code`) through `QmdbState` (`examples/revm/src/qmdb/state.rs`) and exposes:
   - `database()` → a `QmdbRefDb` adapter (`examples/revm/src/qmdb/adapter.rs`) to satisfy REVM's sync API.
-  - `preview_root()` → computes the state commitment that would result from staged changes.
+  - `compute_root()` → computes the state commitment that would result from staged changes.
   - `commit_changes()` → applies the batch, updates the in-memory stores, and returns the new root.
-- `QmdbChanges`, `AccountUpdate`, and `AccountRecord` live in `examples/revm/src/qmdb/changes.rs` and `examples/revm/src/qmdb/model.rs` and translate REVM's `EvmState` into authenticated batches keyed by addresses, storage slots, and code hashes.
+- `QmdbChangeSet`, `AccountUpdate`, and `AccountRecord` live in `examples/revm/src/qmdb/changes.rs` and `examples/revm/src/qmdb/model.rs` and translate REVM's `EvmState` into authenticated batches keyed by addresses, storage slots, and code hashes.
 
 ### Execution Layer (`examples/revm/src/application/execution.rs`)
 
 - `execute_txs` uses Alloy/REVM with a custom seed precompile to run each tx in the provided `RevmDb`.
 - After each transaction it:
   1. Builds deterministic `StateChanges` for tracing and tests.
-  2. Applies touched accounts to a `QmdbChanges` batch.
+  2. Applies touched accounts to a `QmdbChangeSet` batch.
   3. Commits the changes back to `RevmDb`.
-- The `ExecutionOutcome` contains both the per-tx `StateChanges` and the aggregated `QmdbChanges`.
+- The `ExecutionOutcome` contains both the per-tx `StateChanges` and the aggregated `QmdbChangeSet`.
 
 ### Application (`examples/revm/src/application/app.rs`)
 
@@ -53,7 +53,7 @@ This document walks through the REVM simulation example with a top-down view tha
 - On `propose`, it:
   1. Collects mempool transactions while avoiding duplicates via ancestor scanning.
   2. Executes the transactions using the shared `RevmDb`.
-  3. Previews the resulting QMDB root and updates the ledger view with the snapshot.
+  3. Computes the resulting QMDB root and updates the ledger view with the snapshot.
 - On `verify`, it replays the block to recompute the root and ensures it matches the declared `state_root`.
 
 ### Reporters (`examples/revm/src/application/reporters/seed.rs`, `examples/revm/src/application/reporters/finalized.rs`)
@@ -68,9 +68,9 @@ This document walks through the REVM simulation example with a top-down view tha
 ### Ledger Aggregates & Services (`examples/revm/src/application/ledger/mod.rs`)
 
 - **Mempool**: owns pending transactions and exposes insert/build/prune commands so proposals and finalizers work against a consistent queue (`examples/revm/src/application/ledger/mempool.rs`).
-- **SnapshotStore**: maintains `LedgerSnapshot`s plus the persisted digest set, handles ancestor lookups, merges pending `QmdbChanges`, and tracks which digests have been committed (`examples/revm/src/application/ledger/snapshot_store.rs`).
+- **SnapshotStore**: maintains `LedgerSnapshot`s plus the persisted digest set, handles ancestor lookups, merges pending `QmdbChangeSet`, and tracks which digests have been committed (`examples/revm/src/application/ledger/snapshot_store.rs`).
 - **SeedCache**: keeps per-digest seed hashes so the deterministic `prevrandao` values are pulled from a shared source (`examples/revm/src/application/ledger/seed_cache.rs`).
-- **LedgerService**: domain service that wraps `LedgerView` and exposes high-level commands (`submit_tx`, `build_txs`, `parent_snapshot`, `preview_root`, `insert_snapshot`, `persist_snapshot`, `prune_mempool`, `seed_for_parent`, `set_seed`, `query_state_root`). The application and reporters talk to `LedgerService` instead of mutating the aggregates directly.
+- **LedgerService**: domain service that wraps `LedgerView` and exposes high-level commands (`submit_tx`, `build_txs`, `parent_snapshot`, `compute_root`, `insert_snapshot`, `persist_snapshot`, `prune_mempool`, `seed_for_parent`, `set_seed`, `query_state_root`). The application and reporters talk to `LedgerService` instead of mutating the aggregates directly.
 
 
 ### Domain Events
@@ -90,7 +90,7 @@ Ledger observers subscribe to domain events, emit telemetry/log output for seed 
 
 1. **Proposal Flow**:
    - CLI invokes simulation → `LedgerService` ingests submitted transactions and keeps them in the `Mempool`.
-   - `RevmApplication` asks the service for the parent snapshot, builds a proposal batch, executes it, previews the root via `SnapshotStore`, and records a new `LedgerSnapshot`.
+   - `RevmApplication` asks the service for the parent snapshot, builds a proposal batch, executes it, computes the root via `SnapshotStore`, and records a new `LedgerSnapshot`.
    - The computed state root travels with the proposed block, while the snapshot remains available for replay and persistence.
 
 2. **Finalization Flow**:
@@ -102,9 +102,15 @@ Ledger observers subscribe to domain events, emit telemetry/log output for seed 
    - `SeedReporter` listens to simplex notarizations/finalizations, hashes each seed, and stores it in the `SeedCache` through `LedgerService`.
    - `RevmApplication` reuses the cached seed when computing `prevrandao` for future proposals.
 
-## 5. Diagram
+## 5. Diagrams
+
+### Architecture overview
 
 ![REVM example architecture](revm_architecture.png)
+
+### Block lifecycle (one height)
+
+![REVM block lifecycle](revm_block_lifecycle.png)
 
 ## 6. Related Docs
 

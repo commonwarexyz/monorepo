@@ -7,7 +7,7 @@ use super::{
     keys::{account_key, code_key, storage_key, AccountKey, CodeKey, StorageKey},
     model::{AccountRecord, StorageRecord},
     state_root_from_roots, AccountStore, AccountStoreDirty, CodeStore, CodeStoreDirty, Error,
-    QmdbChanges, StorageStore, StorageStoreDirty,
+    QmdbChangeSet, StorageStore, StorageStoreDirty,
 };
 use crate::domain::StateRoot;
 use alloy_evm::revm::primitives::{Address, KECCAK_EMPTY, U256};
@@ -106,7 +106,7 @@ impl Stores {
     }
 
     /// Applies a finalized change set and returns updated durable stores.
-    pub(crate) async fn apply_changes(self, changes: QmdbChanges) -> Result<Self, Error> {
+    pub(crate) async fn apply_changes(self, changes: QmdbChangeSet) -> Result<Self, Error> {
         let dirty = self.into_dirty();
         let (mut dirty, batches) = dirty.build_batches(changes).await?;
         dirty.apply_batches(batches).await?;
@@ -148,7 +148,7 @@ impl Stores {
     }
 
     /// Computes the state commitment after applying changes without committing durability.
-    pub(crate) async fn preview_root(self, changes: QmdbChanges) -> Result<StateRoot, Error> {
+    pub(crate) async fn compute_root(self, changes: QmdbChangeSet) -> Result<StateRoot, Error> {
         let dirty = self.into_dirty();
         let (mut dirty, batches) = dirty.build_batches(changes).await?;
         dirty.apply_batches(batches).await?;
@@ -167,7 +167,7 @@ impl Stores {
 impl DirtyStores {
     /// Builds batched QMDB operations from a finalized change set.
     ///
-    /// Takes ownership of `DirtyStores` and `QmdbChanges` to avoid holding references
+    /// Takes ownership of `DirtyStores` and `QmdbChangeSet` to avoid holding references
     /// across await points, which would trigger RPITIT cross-crate Send bound issues.
     ///
     /// The function is structured to:
@@ -175,8 +175,9 @@ impl DirtyStores {
     /// 2. Build all batch operations synchronously without await in the loop
     pub(super) async fn build_batches(
         self,
-        changes: QmdbChanges,
+        changes: QmdbChangeSet,
     ) -> Result<(Self, StoreBatches), Error> {
+        // Prefetch existing account records to avoid await points during batch assembly.
         let stores = self;
         // Convert changes to owned Vec to avoid holding BTreeMap iterator across await
         let account_updates: Vec<_> = changes.accounts.into_iter().collect();

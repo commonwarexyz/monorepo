@@ -1,18 +1,33 @@
+//! Snapshot storage for per-digest execution state and pending QMDB deltas.
+//!
+//! The store keeps:
+//! - cached execution snapshots keyed by consensus digest, and
+//! - a set of digests already persisted to QMDB.
+//!
+//! When computing a root for a new proposal, we must merge all unpersisted
+//! ancestor deltas so the computed root reflects the full chain.
+
 use crate::{
-    qmdb::{QmdbChanges, RevmDb},
+    qmdb::{QmdbChangeSet, RevmDb},
     ConsensusDigest, StateRoot,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone)]
+/// Cached execution snapshot for a specific digest.
 pub(crate) struct LedgerSnapshot {
+    /// Parent digest used to walk back through unpersisted ancestors.
     pub(crate) parent: Option<ConsensusDigest>,
+    /// REVM overlay database after executing the block.
     pub(crate) db: RevmDb,
+    /// State root computed for this snapshot.
     pub(crate) state_root: StateRoot,
-    pub(crate) qmdb_changes: QmdbChanges,
+    /// QMDB delta produced by executing the block.
+    pub(crate) qmdb_changes: QmdbChangeSet,
 }
 
 #[derive(Clone)]
+/// Stores snapshots and tracks which digests are already persisted.
 pub(crate) struct SnapshotStore {
     snapshots: BTreeMap<ConsensusDigest, LedgerSnapshot>,
     persisted: BTreeSet<ConsensusDigest>,
@@ -49,11 +64,14 @@ impl SnapshotStore {
         self.persisted.contains(digest)
     }
 
+    /// Merge unpersisted ancestor deltas with new changes for a consistent root computation.
+    ///
+    /// The merge order is oldest ancestor first, then the provided `changes` last.
     pub(crate) fn merged_changes_from(
         &self,
         mut parent: ConsensusDigest,
-        changes: QmdbChanges,
-    ) -> anyhow::Result<QmdbChanges> {
+        changes: QmdbChangeSet,
+    ) -> anyhow::Result<QmdbChangeSet> {
         let mut chain = Vec::new();
         while !self.persisted.contains(&parent) {
             let snapshot = self
@@ -67,7 +85,7 @@ impl SnapshotStore {
             parent = next;
         }
 
-        let mut merged = QmdbChanges::default();
+        let mut merged = QmdbChangeSet::default();
         for delta in chain.into_iter().rev() {
             merged.merge(delta);
         }

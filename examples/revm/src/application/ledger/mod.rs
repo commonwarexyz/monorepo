@@ -15,7 +15,7 @@ mod snapshot_store;
 
 use crate::{
     domain::{Block, LedgerEvent, LedgerEvents, StateRoot, Tx, TxId},
-    qmdb::{QmdbChanges, QmdbConfig, QmdbLedger, RevmDb},
+    qmdb::{QmdbChangeSet, QmdbConfig, QmdbLedger, RevmDb},
     ConsensusDigest,
 };
 use alloy_evm::revm::{
@@ -85,7 +85,7 @@ impl LedgerView {
                         parent: None,
                         db,
                         state_root: genesis_block.state_root,
-                        qmdb_changes: QmdbChanges::default(),
+                        qmdb_changes: QmdbChangeSet::default(),
                     },
                 ),
                 seeds: SeedCache::new(genesis_digest),
@@ -154,7 +154,7 @@ impl LedgerView {
         parent: ConsensusDigest,
         db: RevmDb,
         root: StateRoot,
-        qmdb_changes: QmdbChanges,
+        qmdb_changes: QmdbChangeSet,
     ) {
         let mut inner = self.inner.lock().await;
         inner.snapshots.insert(
@@ -168,10 +168,10 @@ impl LedgerView {
         );
     }
 
-    pub(crate) async fn preview_qmdb_root(
+    pub(crate) async fn compute_qmdb_root(
         &self,
         parent: ConsensusDigest,
-        changes: QmdbChanges,
+        changes: QmdbChangeSet,
     ) -> anyhow::Result<StateRoot> {
         // Get the handle and release the lock before awaiting
         let (changes, qmdb) = {
@@ -179,7 +179,7 @@ impl LedgerView {
             let changes = inner.merged_changes_from(parent, changes)?;
             (changes, inner.qmdb.clone())
         };
-        qmdb.preview_root(changes).await.map_err(Into::into)
+        qmdb.compute_root(changes).await.map_err(Into::into)
     }
 
     pub(crate) async fn persist_snapshot(&self, digest: ConsensusDigest) -> anyhow::Result<()> {
@@ -215,8 +215,8 @@ impl LedgerState {
     fn merged_changes_from(
         &self,
         parent: ConsensusDigest,
-        changes: QmdbChanges,
-    ) -> anyhow::Result<QmdbChanges> {
+        changes: QmdbChangeSet,
+    ) -> anyhow::Result<QmdbChangeSet> {
         self.snapshots.merged_changes_from(parent, changes)
     }
 }
@@ -293,19 +293,19 @@ impl LedgerService {
         parent: ConsensusDigest,
         db: RevmDb,
         root: StateRoot,
-        changes: QmdbChanges,
+        changes: QmdbChangeSet,
     ) {
         self.view
             .insert_snapshot(digest, parent, db, root, changes)
             .await;
     }
 
-    pub(crate) async fn preview_root(
+    pub(crate) async fn compute_root(
         &self,
         parent: ConsensusDigest,
-        changes: QmdbChanges,
+        changes: QmdbChangeSet,
     ) -> anyhow::Result<StateRoot> {
-        self.view.preview_qmdb_root(parent, changes).await
+        self.view.compute_qmdb_root(parent, changes).await
     }
 
     pub(crate) async fn persist_snapshot(&self, digest: ConsensusDigest) -> anyhow::Result<()> {

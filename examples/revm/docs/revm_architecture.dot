@@ -96,6 +96,6 @@ digraph revm_architecture {
   App -> Ledger [label="build txs, snapshots"];
   Ledger -> Exec [label="parent snapshot"];
   Exec -> Ledger [label="state changes"];
-  Ledger -> QMDB [label="commit changes / preview root"];
+  Ledger -> QMDB [label="commit changes / compute root"];
   QMDB -> Ledger [label="read root, balances"];
 }
