@@ -491,6 +491,8 @@ pub async fn launch_instances(
 
     let len = eligible.len();
     let mut last_error = None;
+
+    // Try each subnet starting at start_idx offset (for round-robin distribution across instances)
     for i in 0..len {
         let subnet_id = eligible[(start_idx + i) % len];
 
@@ -517,6 +519,7 @@ pub async fn launch_instances(
                         return Err(super::Error::AwsEc2(e));
                     }
                     if is_subnet_fallback_error(&e) {
+                        // Capacity error in this AZ, try next subnet
                         info!(
                             name = name,
                             subnets_remaining = len - i - 1,
