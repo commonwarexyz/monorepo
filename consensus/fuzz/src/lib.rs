@@ -123,7 +123,7 @@ impl Arbitrary<'_> for FuzzInput {
             _ => N4C1F3,       // 5%
         };
 
-        // Bias degraded networking - 3%
+        // Bias degraded networking - 1%
         let degraded_network_node = partition == Partition::Connected
             && configuration == N4C3F1
             && u.int_in_range(0..=99)? == 1;
