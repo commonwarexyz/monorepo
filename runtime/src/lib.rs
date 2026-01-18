@@ -2232,33 +2232,6 @@ mod tests {
         });
     }
 
-    #[test]
-    fn test_tokio_metrics_duplicate_tag_replaces() {
-        let runner = tokio::Runner::default();
-        runner.start(|context| async move {
-            let ctx = context
-                .with_label("test")
-                .with_tag("epoch", "old")
-                .with_tag("epoch", "new");
-
-            let counter = Counter::<u64>::default();
-            ctx.register("metric", "help", counter.clone());
-            counter.inc();
-
-            let buffer = context.encode();
-            assert!(
-                buffer.contains("test_metric_total{epoch=\"new\"} 1"),
-                "Expected new epoch value, got: {}",
-                buffer
-            );
-            assert!(
-                !buffer.contains("epoch=\"old\""),
-                "Should not contain old epoch value, got: {}",
-                buffer
-            );
-        });
-    }
-
     fn test_metrics_latest<R: Runner>(runner: R)
     where
         R::Context: Metrics,

@@ -602,11 +602,7 @@ impl crate::Metrics for Context {
         validate_label(value);
 
         let mut tags = self.tags.clone();
-        if let Some(existing) = tags.iter_mut().find(|(k, _)| k == key) {
-            existing.1 = value.to_string();
-        } else {
-            tags.push((key.to_string(), value.to_string()));
-        }
+        tags.push((key.to_string(), value.to_string()));
 
         Self {
             tags,
