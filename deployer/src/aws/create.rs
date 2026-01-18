@@ -621,7 +621,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
         let tag = tag.clone();
         let sg_id = monitoring_sg_id.clone();
         async move {
-            let instance_id = launch_instances(
+            let (mut ids, az) = launch_instances(
                 monitoring_ec2_client,
                 &monitoring_ami_id,
                 monitoring_instance_type,
@@ -636,10 +636,11 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
                 MONITORING_NAME,
                 &tag,
             )
-            .await?
-            .remove(0);
+            .await?;
+            let instance_id = ids.remove(0);
             info!(
                 instance_id = instance_id.as_str(),
+                az = az.as_str(),
                 "launched monitoring instance"
             );
             Ok::<String, Error>(instance_id)
@@ -661,7 +662,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
             let subnets = resources.subnets.clone();
             let az_support = resources.az_support.clone();
             async move {
-                let instance_id = launch_instances(
+                let (mut ids, az) = launch_instances(
                     ec2_client,
                     ami_id,
                     instance_type,
@@ -676,11 +677,12 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
                     &instance.name,
                     &tag,
                 )
-                .await?
-                .remove(0);
+                .await?;
+                let instance_id = ids.remove(0);
                 info!(
                     instance_id = instance_id.as_str(),
                     instance = instance_name.as_str(),
+                    az = az.as_str(),
                     "launched instance"
                 );
                 Ok::<(String, String, InstanceConfig), Error>((

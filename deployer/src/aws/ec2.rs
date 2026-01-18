@@ -472,30 +472,27 @@ pub async fn launch_instances(
     count: i32,
     name: &str,
     tag: &str,
-) -> Result<Vec<String>, super::Error> {
+) -> Result<(Vec<String>, String), super::Error> {
     // Filter to subnets in AZs that support this instance type
     let instance_type_str = instance_type.to_string();
-    let eligible: Vec<&str> = subnets
+    let eligible: Vec<(&str, &str)> = subnets
         .iter()
         .filter(|(az, _)| {
             az_support
                 .get(az)
                 .is_some_and(|types| types.contains(&instance_type_str))
         })
-        .map(|(_, subnet_id)| subnet_id.as_str())
+        .map(|(az, subnet_id)| (az.as_str(), subnet_id.as_str()))
         .collect();
-
     if eligible.is_empty() {
         return Err(super::Error::UnsupportedInstanceType(instance_type_str));
     }
 
     let len = eligible.len();
     let mut last_error = None;
-
     // Try each subnet starting at start_idx offset (for round-robin distribution across instances)
     for i in 0..len {
-        let subnet_id = eligible[(start_idx + i) % len];
-
+        let (az, subnet_id) = eligible[(start_idx + i) % len];
         let mut attempt = 0u32;
         loop {
             match try_launch_instances(
@@ -513,7 +510,7 @@ pub async fn launch_instances(
             )
             .await
             {
-                Ok(ids) => return Ok(ids),
+                Ok(ids) => return Ok((ids, az.to_string())),
                 Err(e) => {
                     if is_fatal_ec2_error(&e) {
                         return Err(super::Error::AwsEc2(e));
@@ -1039,6 +1036,7 @@ pub async fn find_az_instance_support(
         .instance_type_offerings
         .unwrap_or_default();
 
+    // Build map of AZ -> supported instance types
     let mut az_to_instance_types: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for offering in offerings {
         if let (Some(location), Some(instance_type)) = (
@@ -1051,7 +1049,6 @@ pub async fn find_az_instance_support(
                 .insert(instance_type);
         }
     }
-
     if az_to_instance_types.is_empty() {
         return Err(Ec2Error::from(BuildError::other(format!(
             "no availability zone supports any of: {instance_types:?}"
