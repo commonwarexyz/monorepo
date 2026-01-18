@@ -3340,6 +3340,7 @@ mod tests {
         use crate::simplex::scheme::bls12381_threshold::vrf as bls12381_threshold_vrf;
         use commonware_codec::conformance::CodecConformance;
         use commonware_cryptography::{ed25519::PublicKey, sha256::Digest as Sha256Digest};
+
         type Scheme = bls12381_threshold_vrf::Scheme<PublicKey, MinSig>;
 
         commonware_conformance::conformance_tests! {
