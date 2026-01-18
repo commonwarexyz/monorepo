@@ -43,7 +43,8 @@ pub struct RegionResources {
     pub vpc_id: String,
     pub vpc_cidr: String,
     pub route_table_id: String,
-    pub subnet_id: String,
+    /// Subnet IDs in this region, one per availability zone
+    pub subnet_ids: Vec<String>,
     pub binary_sg_id: Option<String>,
     pub monitoring_sg_id: Option<String>,
 }
@@ -334,15 +335,11 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
                 let ec2_client = ec2::create_client(Region::new(region.clone())).await;
                 info!(region = region.as_str(), "created EC2 client");
 
-                // Find availability zone that supports all instance types
-                let az = find_availability_zone(&ec2_client, &instance_types).await?;
-                info!(
-                    az = az.as_str(),
-                    region = region.as_str(),
-                    "selected availability zone"
-                );
+                // Find all availability zones that support all instance types
+                let azs = find_availability_zones(&ec2_client, &instance_types).await?;
+                info!(?azs, region = region.as_str(), "found availability zones");
 
-                // Create VPC, IGW, route table, subnet, security groups, and key pair
+                // Create VPC, IGW, route table
                 let vpc_cidr = format!("10.{idx}.0.0/16");
                 let vpc_id = create_vpc(&ec2_client, &vpc_cidr, &tag).await?;
                 info!(
@@ -365,22 +362,40 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
                     region = region.as_str(),
                     "created route table"
                 );
-                let subnet_cidr = format!("10.{idx}.1.0/24");
-                let subnet_id = create_subnet(
-                    &ec2_client,
-                    &vpc_id,
-                    &route_table_id,
-                    &subnet_cidr,
-                    &az,
-                    &tag,
-                )
-                .await?;
-                info!(
-                    subnet = subnet_id.as_str(),
-                    vpc = vpc_id.as_str(),
-                    region = region.as_str(),
-                    "created subnet"
-                );
+
+                // Create a subnet in each AZ concurrently (use /24 subnets: 10.{idx}.{az_idx+1}.0/24)
+                let subnet_futures: Vec<_> = azs
+                    .iter()
+                    .enumerate()
+                    .map(|(az_idx, az)| {
+                        let ec2_client = ec2_client.clone();
+                        let vpc_id = vpc_id.clone();
+                        let route_table_id = route_table_id.clone();
+                        let tag = tag.clone();
+                        let az = az.clone();
+                        let region = region.clone();
+                        async move {
+                            let subnet_cidr = format!("10.{idx}.{}.0/24", az_idx + 1);
+                            let subnet_id = create_subnet(
+                                &ec2_client,
+                                &vpc_id,
+                                &route_table_id,
+                                &subnet_cidr,
+                                &az,
+                                &tag,
+                            )
+                            .await?;
+                            info!(
+                                subnet = subnet_id.as_str(),
+                                az = az.as_str(),
+                                region = region.as_str(),
+                                "created subnet"
+                            );
+                            Ok::<String, Error>(subnet_id)
+                        }
+                    })
+                    .collect();
+                let subnet_ids = try_join_all(subnet_futures).await?;
 
                 // Create monitoring security group in monitoring region
                 let monitoring_sg_id = if region == MONITORING_REGION {
@@ -408,8 +423,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
 
                 info!(
                     vpc = vpc_id.as_str(),
-                    subnet = subnet_id.as_str(),
-                    subnet_cidr = subnet_cidr.as_str(),
+                    subnet_count = subnet_ids.len(),
                     region = region.as_str(),
                     "initialized resources"
                 );
@@ -421,7 +435,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
                         vpc_id,
                         vpc_cidr,
                         route_table_id,
-                        subnet_id,
+                        subnet_ids,
                         binary_sg_id: None,
                         monitoring_sg_id,
                     },
@@ -560,7 +574,14 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
         .as_ref()
         .unwrap()
         .clone();
-    let monitoring_subnet_id = monitoring_resources.subnet_id.clone();
+    let monitoring_subnet_ids = monitoring_resources.subnet_ids.clone();
+
+    // Create per-region failed subnet trackers for sharing capacity errors across concurrent launches
+    let failed_subnets_by_region: HashMap<String, FailedSubnets> = regions
+        .iter()
+        .map(|r| (r.clone(), FailedSubnets::default()))
+        .collect();
+    let monitoring_failed_subnets = failed_subnets_by_region[&monitoring_region].clone();
 
     // Lookup AMI IDs for binary instances
     let mut ami_cache: HashMap<(String, Architecture), String> = HashMap::new();
@@ -594,10 +615,18 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
                 id
             }
         };
-        binary_launch_configs.push((instance, ec2_client, resources, ami_id, arch));
+        let failed_subnets = failed_subnets_by_region[&region].clone();
+        binary_launch_configs.push((
+            instance,
+            ec2_client,
+            resources,
+            ami_id,
+            arch,
+            failed_subnets,
+        ));
     }
 
-    // Launch monitoring instance
+    // Launch monitoring instance (uses start_idx=0 since there's only one)
     let monitoring_launch_future = {
         let key_name = key_name.clone();
         let tag = tag.clone();
@@ -610,7 +639,9 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
                 config.monitoring.storage_size,
                 monitoring_storage_class,
                 &key_name,
-                &monitoring_subnet_id,
+                &monitoring_subnet_ids,
+                0,
+                &monitoring_failed_subnets,
                 &sg_id,
                 1,
                 MONITORING_NAME,
@@ -626,48 +657,51 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
         }
     };
 
-    // Launch binary instances (returns instance IDs only, no waiting)
-    let binary_launch_futures =
-        binary_launch_configs
-            .iter()
-            .map(|(instance, ec2_client, resources, ami_id, _arch)| {
-                let key_name = key_name.clone();
-                let instance_type = InstanceType::try_parse(&instance.instance_type)
-                    .expect("Invalid instance type");
-                let storage_class =
-                    VolumeType::try_parse(&instance.storage_class).expect("Invalid storage class");
-                let binary_sg_id = resources.binary_sg_id.as_ref().unwrap();
-                let tag = tag.clone();
-                let instance_name = instance.name.clone();
-                let region = instance.region.clone();
-                async move {
-                    let instance_id = launch_instances(
-                        ec2_client,
-                        ami_id,
-                        instance_type,
-                        instance.storage_size,
-                        storage_class,
-                        &key_name,
-                        &resources.subnet_id,
-                        binary_sg_id,
-                        1,
-                        &instance.name,
-                        &tag,
-                    )
-                    .await?
-                    .remove(0);
-                    info!(
-                        instance_id = instance_id.as_str(),
-                        instance = instance_name.as_str(),
-                        "launched instance"
-                    );
-                    Ok::<(String, String, InstanceConfig), Error>((
-                        instance_id,
-                        region,
-                        (*instance).clone(),
-                    ))
-                }
-            });
+    // Launch binary instances, distributing across AZs by using instance index as start_idx
+    let binary_launch_futures = binary_launch_configs.iter().enumerate().map(
+        |(idx, (instance, ec2_client, resources, ami_id, _arch, failed_subnets))| {
+            let key_name = key_name.clone();
+            let instance_type =
+                InstanceType::try_parse(&instance.instance_type).expect("Invalid instance type");
+            let storage_class =
+                VolumeType::try_parse(&instance.storage_class).expect("Invalid storage class");
+            let binary_sg_id = resources.binary_sg_id.as_ref().unwrap();
+            let tag = tag.clone();
+            let instance_name = instance.name.clone();
+            let failed_subnets = failed_subnets.clone();
+            let region = instance.region.clone();
+            let subnet_ids = resources.subnet_ids.clone();
+            async move {
+                let instance_id = launch_instances(
+                    ec2_client,
+                    ami_id,
+                    instance_type,
+                    instance.storage_size,
+                    storage_class,
+                    &key_name,
+                    &subnet_ids,
+                    idx,
+                    &failed_subnets,
+                    binary_sg_id,
+                    1,
+                    &instance.name,
+                    &tag,
+                )
+                .await?
+                .remove(0);
+                info!(
+                    instance_id = instance_id.as_str(),
+                    instance = instance_name.as_str(),
+                    "launched instance"
+                );
+                Ok::<(String, String, InstanceConfig), Error>((
+                    instance_id,
+                    region,
+                    (*instance).clone(),
+                ))
+            }
+        },
+    );
 
     // Wait for all launches to complete (get instance IDs)
     let (monitoring_instance_id, binary_launches) = tokio::try_join!(

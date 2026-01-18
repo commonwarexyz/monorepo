@@ -22,10 +22,14 @@ pub use aws_sdk_ec2::{
 };
 use std::{
     collections::{HashMap, HashSet},
+    sync::{Arc, RwLock},
     time::Duration,
 };
 use tokio::time::sleep;
-use tracing::debug;
+use tracing::{debug, info};
+
+/// Tracks subnets that have failed with capacity errors, shared across concurrent launches.
+pub type FailedSubnets = Arc<RwLock<HashSet<usize>>>;
 
 /// Creates an EC2 client for the specified AWS region
 pub async fn create_client(region: Region) -> Ec2Client {
@@ -433,15 +437,20 @@ async fn try_launch_instances(
         .collect())
 }
 
+/// Checks if an EC2 error can be resolved by trying a different subnet/AZ.
+fn is_subnet_fallback_error(e: &Ec2Error) -> bool {
+    let error_str = e.to_string();
+    error_str.contains("InsufficientInstanceCapacity")
+        || error_str.contains("InsufficientFreeAddressesInSubnet")
+}
+
 /// Checks if an EC2 error is fatal and should not be retried.
 fn is_fatal_ec2_error(e: &Ec2Error) -> bool {
     let error_str = e.to_string();
     error_str.contains("VcpuLimitExceeded")
         || error_str.contains("InstanceLimitExceeded")
-        || error_str.contains("InsufficientInstanceCapacity")
         || error_str.contains("MaxSpotInstanceCountExceeded")
         || error_str.contains("VolumeLimitExceeded")
-        || error_str.contains("InsufficientFreeAddressesInSubnet")
         || error_str.contains("InvalidParameterValue")
         || error_str.contains("InvalidAMIID")
         || error_str.contains("InvalidSubnetID")
@@ -450,6 +459,8 @@ fn is_fatal_ec2_error(e: &Ec2Error) -> bool {
 }
 
 /// Launches EC2 instances with specified configurations.
+/// Starts with `subnet_ids[start_idx % len]` and rotates through subnets on capacity errors.
+/// Skips subnets that have already failed (tracked in `failed_subnets`).
 /// Retries on transient failures but exits on fatal errors like limit exceeded.
 #[allow(clippy::too_many_arguments)]
 pub async fn launch_instances(
@@ -459,46 +470,77 @@ pub async fn launch_instances(
     storage_size: i32,
     storage_class: VolumeType,
     key_name: &str,
-    subnet_id: &str,
+    subnet_ids: &[String],
+    start_idx: usize,
+    failed_subnets: &FailedSubnets,
     sg_id: &str,
     count: i32,
     name: &str,
     tag: &str,
 ) -> Result<Vec<String>, Ec2Error> {
-    let mut attempt = 0u32;
-    loop {
-        match try_launch_instances(
-            client,
-            ami_id,
-            instance_type.clone(),
-            storage_size,
-            storage_class.clone(),
-            key_name,
-            subnet_id,
-            sg_id,
-            count,
-            name,
-            tag,
-        )
-        .await
-        {
-            Ok(ids) => return Ok(ids),
-            Err(e) => {
-                if is_fatal_ec2_error(&e) {
-                    return Err(e);
+    assert!(!subnet_ids.is_empty(), "subnet_ids must not be empty");
+
+    let len = subnet_ids.len();
+    let mut last_error = None;
+    for i in 0..len {
+        let subnet_idx = (start_idx + i) % len;
+
+        // Skip subnets that have already failed with capacity errors
+        if failed_subnets.read().unwrap().contains(&subnet_idx) {
+            continue;
+        }
+
+        let subnet_id = &subnet_ids[subnet_idx];
+        let mut attempt = 0u32;
+        loop {
+            match try_launch_instances(
+                client,
+                ami_id,
+                instance_type.clone(),
+                storage_size,
+                storage_class.clone(),
+                key_name,
+                subnet_id,
+                sg_id,
+                count,
+                name,
+                tag,
+            )
+            .await
+            {
+                Ok(ids) => return Ok(ids),
+                Err(e) => {
+                    if is_fatal_ec2_error(&e) {
+                        return Err(e);
+                    }
+                    if is_subnet_fallback_error(&e) {
+                        // Mark this subnet as failed so other concurrent launches skip it
+                        failed_subnets.write().unwrap().insert(subnet_idx);
+                        info!(
+                            name = name,
+                            subnet_idx = subnet_idx,
+                            subnets_remaining = len - i - 1,
+                            error = %e,
+                            "capacity error, trying next subnet"
+                        );
+                        last_error = Some(e);
+                        break;
+                    }
+                    debug!(
+                        name = name,
+                        attempt = attempt + 1,
+                        error = %e,
+                        "launch_instances failed, retrying"
+                    );
+                    attempt = attempt.saturating_add(1);
+                    let backoff = Duration::from_millis(500 * (1 << attempt.min(10)));
+                    sleep(backoff).await;
                 }
-                debug!(
-                    name = name,
-                    attempt = attempt + 1,
-                    error = %e,
-                    "launch_instances failed, retrying"
-                );
-                attempt = attempt.saturating_add(1);
-                let backoff = Duration::from_millis(500 * (1 << attempt.min(10)));
-                sleep(backoff).await;
             }
         }
     }
+
+    Err(last_error.unwrap_or_else(|| Ec2Error::from(BuildError::other("no subnets available"))))
 }
 
 /// Waits for instances to reach the "running" state and returns their public IPs
@@ -975,11 +1017,11 @@ pub async fn delete_vpc(ec2_client: &Ec2Client, vpc_id: &str) -> Result<(), Ec2E
     Ok(())
 }
 
-/// Finds the availability zone that supports all required instance types
-pub async fn find_availability_zone(
+/// Finds all availability zones that support all required instance types
+pub async fn find_availability_zones(
     client: &Ec2Client,
     instance_types: &[String],
-) -> Result<String, Ec2Error> {
+) -> Result<Vec<String>, Ec2Error> {
     // Retrieve all instance type offerings for availability zones in the region
     let offerings = client
         .describe_instance_type_offerings()
@@ -1000,7 +1042,7 @@ pub async fn find_availability_zone(
     for offering in offerings {
         if let (Some(location), Some(instance_type)) = (
             offering.location,
-            offering.instance_type.map(|it| it.to_string()), // Convert enum to String if necessary
+            offering.instance_type.map(|it| it.to_string()),
         ) {
             az_to_instance_types
                 .entry(location)
@@ -1012,17 +1054,22 @@ pub async fn find_availability_zone(
     // Convert the required instance types to a HashSet for efficient subset checking
     let required_instance_types: HashSet<String> = instance_types.iter().cloned().collect();
 
-    // Find an availability zone that supports all required instance types
-    for (az, supported_types) in az_to_instance_types {
-        if required_instance_types.is_subset(&supported_types) {
-            return Ok(az); // Return the first matching availability zone
-        }
+    // Find all availability zones that support all required instance types
+    let mut azs: Vec<String> = az_to_instance_types
+        .into_iter()
+        .filter(|(_, supported_types)| required_instance_types.is_subset(supported_types))
+        .map(|(az, _)| az)
+        .collect();
+
+    if azs.is_empty() {
+        return Err(Ec2Error::from(BuildError::other(format!(
+            "no availability zone supports all required instance types: {instance_types:?}"
+        ))));
     }
 
-    // If no availability zone supports all instance types, return an error
-    Err(Ec2Error::from(BuildError::other(format!(
-        "no availability zone supports all required instance types: {instance_types:?}"
-    ))))
+    // Sort for deterministic ordering
+    azs.sort();
+    Ok(azs)
 }
 
 /// Waits until all network interfaces associated with a security group are deleted
