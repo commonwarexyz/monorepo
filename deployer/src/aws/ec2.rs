@@ -22,14 +22,10 @@ pub use aws_sdk_ec2::{
 };
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
-    sync::{Arc, RwLock},
     time::Duration,
 };
 use tokio::time::sleep;
 use tracing::{debug, info};
-
-/// Tracks subnets that have failed with capacity errors, shared across concurrent launches.
-pub type FailedSubnets = Arc<RwLock<HashSet<usize>>>;
 
 /// Creates an EC2 client for the specified AWS region
 pub async fn create_client(region: Region) -> Ec2Client {
@@ -472,7 +468,6 @@ pub async fn launch_instances(
     subnets: &[(String, String)],
     az_support: &BTreeMap<String, BTreeSet<String>>,
     start_idx: usize,
-    failed_subnets: &FailedSubnets,
     sg_id: &str,
     count: i32,
     name: &str,
@@ -480,15 +475,14 @@ pub async fn launch_instances(
 ) -> Result<Vec<String>, super::Error> {
     // Filter to subnets in AZs that support this instance type
     let instance_type_str = instance_type.to_string();
-    let eligible: Vec<(usize, &str)> = subnets
+    let eligible: Vec<&str> = subnets
         .iter()
-        .enumerate()
-        .filter(|(_, (az, _))| {
+        .filter(|(az, _)| {
             az_support
                 .get(az)
                 .is_some_and(|types| types.contains(&instance_type_str))
         })
-        .map(|(idx, (_, subnet_id))| (idx, subnet_id.as_str()))
+        .map(|(_, subnet_id)| subnet_id.as_str())
         .collect();
 
     if eligible.is_empty() {
@@ -498,12 +492,7 @@ pub async fn launch_instances(
     let len = eligible.len();
     let mut last_error = None;
     for i in 0..len {
-        let (subnet_idx, subnet_id) = eligible[(start_idx + i) % len];
-
-        // Skip subnets that have already failed with capacity errors
-        if failed_subnets.read().unwrap().contains(&subnet_idx) {
-            continue;
-        }
+        let subnet_id = eligible[(start_idx + i) % len];
 
         let mut attempt = 0u32;
         loop {
@@ -528,11 +517,8 @@ pub async fn launch_instances(
                         return Err(super::Error::AwsEc2(e));
                     }
                     if is_subnet_fallback_error(&e) {
-                        // Mark this subnet as failed so other concurrent launches skip it
-                        failed_subnets.write().unwrap().insert(subnet_idx);
                         info!(
                             name = name,
-                            subnet_idx = subnet_idx,
                             subnets_remaining = len - i - 1,
                             error = %e,
                             "capacity error, trying next subnet"

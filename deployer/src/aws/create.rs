@@ -580,13 +580,6 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
     let monitoring_subnets = monitoring_resources.subnets.clone();
     let monitoring_az_support = monitoring_resources.az_support.clone();
 
-    // Create per-region failed subnet trackers for sharing capacity errors across concurrent launches
-    let failed_subnets_by_region: HashMap<String, FailedSubnets> = regions
-        .iter()
-        .map(|r| (r.clone(), FailedSubnets::default()))
-        .collect();
-    let monitoring_failed_subnets = failed_subnets_by_region[&monitoring_region].clone();
-
     // Lookup AMI IDs for binary instances
     let mut ami_cache: HashMap<(String, Architecture), String> = HashMap::new();
     ami_cache.insert(
@@ -619,15 +612,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
                 id
             }
         };
-        let failed_subnets = failed_subnets_by_region[&region].clone();
-        binary_launch_configs.push((
-            instance,
-            ec2_client,
-            resources,
-            ami_id,
-            arch,
-            failed_subnets,
-        ));
+        binary_launch_configs.push((instance, ec2_client, resources, ami_id, arch));
     }
 
     // Launch monitoring instance (uses start_idx=0 since there's only one)
@@ -646,7 +631,6 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
                 &monitoring_subnets,
                 &monitoring_az_support,
                 0,
-                &monitoring_failed_subnets,
                 &sg_id,
                 1,
                 MONITORING_NAME,
@@ -664,7 +648,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
 
     // Launch binary instances, distributing across AZs by using instance index as start_idx
     let binary_launch_futures = binary_launch_configs.iter().enumerate().map(
-        |(idx, (instance, ec2_client, resources, ami_id, _arch, failed_subnets))| {
+        |(idx, (instance, ec2_client, resources, ami_id, _arch))| {
             let key_name = key_name.clone();
             let instance_type =
                 InstanceType::try_parse(&instance.instance_type).expect("Invalid instance type");
@@ -673,7 +657,6 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
             let binary_sg_id = resources.binary_sg_id.as_ref().unwrap();
             let tag = tag.clone();
             let instance_name = instance.name.clone();
-            let failed_subnets = failed_subnets.clone();
             let region = instance.region.clone();
             let subnets = resources.subnets.clone();
             let az_support = resources.az_support.clone();
@@ -688,7 +671,6 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
                     &subnets,
                     &az_support,
                     idx,
-                    &failed_subnets,
                     binary_sg_id,
                     1,
                     &instance.name,
