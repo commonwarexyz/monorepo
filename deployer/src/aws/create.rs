@@ -43,10 +43,8 @@ pub struct RegionResources {
     pub vpc_id: String,
     pub vpc_cidr: String,
     pub route_table_id: String,
-    /// (AZ name, subnet ID) pairs
     pub subnets: Vec<(String, String)>,
-    /// Which instance types each AZ supports
-    pub az_support: HashMap<String, HashSet<String>>,
+    pub az_support: BTreeMap<String, BTreeSet<String>>,
     pub binary_sg_id: Option<String>,
     pub monitoring_sg_id: Option<String>,
 }

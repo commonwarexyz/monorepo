@@ -21,7 +21,7 @@ pub use aws_sdk_ec2::{
     Client as Ec2Client,
 };
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     sync::{Arc, RwLock},
     time::Duration,
 };
@@ -470,7 +470,7 @@ pub async fn launch_instances(
     storage_class: VolumeType,
     key_name: &str,
     subnets: &[(String, String)],
-    az_support: &HashMap<String, HashSet<String>>,
+    az_support: &BTreeMap<String, BTreeSet<String>>,
     start_idx: usize,
     failed_subnets: &FailedSubnets,
     sg_id: &str,
@@ -1037,7 +1037,7 @@ pub async fn delete_vpc(ec2_client: &Ec2Client, vpc_id: &str) -> Result<(), Ec2E
 pub async fn find_az_instance_support(
     client: &Ec2Client,
     instance_types: &[String],
-) -> Result<HashMap<String, HashSet<String>>, Ec2Error> {
+) -> Result<BTreeMap<String, BTreeSet<String>>, Ec2Error> {
     let offerings = client
         .describe_instance_type_offerings()
         .location_type("availability-zone".into())
@@ -1052,7 +1052,7 @@ pub async fn find_az_instance_support(
         .instance_type_offerings
         .unwrap_or_default();
 
-    let mut az_to_instance_types: HashMap<String, HashSet<String>> = HashMap::new();
+    let mut az_to_instance_types: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for offering in offerings {
         if let (Some(location), Some(instance_type)) = (
             offering.location,
