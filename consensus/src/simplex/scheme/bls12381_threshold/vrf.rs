@@ -1,10 +1,28 @@
-//! BLS12-381 threshold implementation of the [`Scheme`] trait for `simplex`.
+//! BLS12-381 threshold VRF implementation of the [`Scheme`] trait for `simplex`.
 //!
-//! [`Scheme`] is **non-attributable**: exposing partial signatures
-//! as evidence of either liveness or of committing a fault is not safe. With threshold signatures,
-//! any `t` valid partial signatures can be used to forge a partial signature for any other player,
-//! enabling equivocation attacks. Because peer connections are authenticated, evidence can be used locally
-//! (as it must be sent by said participant) but can't be used by an external observer.
+//! This variant produces both vote signatures and per-round seed signatures.
+//! The seed can be used for randomness (e.g., leader election, timelock encryption).
+//!
+//! # Security Warning
+//!
+//! It is **not safe** to use a round's randomness to drive execution in that same
+//! round. A malicious leader can selectively distribute blocks to gain early visibility
+//! of the randomness output, then choose nullification if the outcome is unfavorable
+//! (similar to a lottery where the proposer withholds votes if they lose).
+//!
+//! Applications should employ a "commit-then-reveal" pattern by requesting randomness
+//! in advance:
+//! - Bind randomness requests in finalized blocks **before** the reveal occurs
+//! - Example: `draw(view+100)` means execution uses VRF output 100 views later
+//!
+//! # Non-Attributable Signatures
+//!
+//! [`Scheme`] is **non-attributable**: exposing partial signatures as evidence of
+//! either liveness or of committing a fault is not safe. With threshold signatures,
+//! any `t` valid partial signatures can be used to forge a partial signature for any
+//! other player, enabling equivocation attacks. Because peer connections are
+//! authenticated, evidence can be used locally (as it must be sent by said participant)
+//! but can't be used by an external observer.
 
 use crate::{
     simplex::{
@@ -67,7 +85,10 @@ enum Role<P: PublicKey, V: Variant> {
     },
 }
 
-/// BLS12-381 threshold implementation of the [`certificate::Scheme`] trait.
+/// BLS12-381 threshold VRF implementation of the [`certificate::Scheme`] trait.
+///
+/// This scheme produces both vote signatures and per-round seed signatures.
+/// The seed can be extracted from certificates using the [`Seedable`] trait.
 ///
 /// It is possible for a node to play one of the following roles: a signer (with its share),
 /// a verifier (with evaluated public polynomial), or an external verifier that
@@ -276,7 +297,7 @@ where
     )
 }
 
-/// Combined vote/seed signature pair emitted by the BLS12-381 threshold scheme.
+/// Combined vote/seed signature pair emitted by the BLS12-381 threshold VRF scheme.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Signature<V: Variant> {
     /// Signature over the consensus vote message (partial or recovered aggregate).
@@ -757,7 +778,7 @@ mod tests {
     use super::*;
     use crate::{
         simplex::{
-            scheme::{bls12381_threshold, notarize_namespace, seed_namespace},
+            scheme::{notarize_namespace, seed_namespace},
             types::{Finalization, Finalize, Notarization, Notarize, Proposal, Subject},
         },
         types::{Round, View},
@@ -792,7 +813,7 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(seed);
         let Fixture {
             schemes, verifier, ..
-        } = bls12381_threshold::fixture::<V, _>(&mut rng, NAMESPACE, n);
+        } = fixture::<V, _>(&mut rng, NAMESPACE, n);
 
         (schemes, verifier)
     }
