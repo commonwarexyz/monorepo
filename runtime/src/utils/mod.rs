@@ -265,39 +265,74 @@ pub fn validate_label(label: &str) {
     );
 }
 
-/// Deduplicates HELP and TYPE metadata lines in Prometheus exposition format.
+/// A writer that deduplicates HELP and TYPE metadata lines during Prometheus encoding.
 ///
 /// When the same metric is registered multiple times with different attribute values
 /// (via `sub_registry_with_label`), prometheus_client outputs duplicate HELP/TYPE
-/// lines. This function merges them to produce canonical Prometheus format.
+/// lines. This writer filters them in a single pass to produce canonical Prometheus format.
 ///
 /// Uses "first wins" semantics: keeps the first HELP/TYPE description encountered
-/// for each metric name and discards subsequent duplicates. If the same metric is
-/// registered with different help texts, only the first one appears in output.
-pub fn deduplicate_metric_metadata(buffer: &str) -> String {
-    let mut seen_help: HashSet<&str> = HashSet::new();
-    let mut seen_type: HashSet<&str> = HashSet::new();
-    let mut result = String::with_capacity(buffer.len());
-    for line in buffer.lines() {
-        if let Some(rest) = line.strip_prefix("# HELP ") {
-            let metric_name = rest.split_whitespace().next().unwrap_or("");
-            if seen_help.insert(metric_name) {
-                result.push_str(line);
-                result.push('\n');
-            }
-        } else if let Some(rest) = line.strip_prefix("# TYPE ") {
-            let metric_name = rest.split_whitespace().next().unwrap_or("");
-            if seen_type.insert(metric_name) {
-                result.push_str(line);
-                result.push('\n');
-            }
-        } else {
-            result.push_str(line);
-            result.push('\n');
+/// for each metric name and discards subsequent duplicates.
+pub struct MetricEncoder {
+    output: String,
+    line_buffer: String,
+    seen_help: HashSet<String>,
+    seen_type: HashSet<String>,
+}
+
+impl MetricEncoder {
+    pub fn new() -> Self {
+        Self {
+            output: String::new(),
+            line_buffer: String::new(),
+            seen_help: HashSet::new(),
+            seen_type: HashSet::new(),
         }
     }
 
-    result
+    pub fn into_string(mut self) -> String {
+        if !self.line_buffer.is_empty() {
+            self.flush_line();
+        }
+        self.output
+    }
+
+    fn flush_line(&mut self) {
+        let line = &self.line_buffer;
+        let should_write = if let Some(rest) = line.strip_prefix("# HELP ") {
+            let metric_name = rest.split_whitespace().next().unwrap_or("");
+            self.seen_help.insert(metric_name.to_string())
+        } else if let Some(rest) = line.strip_prefix("# TYPE ") {
+            let metric_name = rest.split_whitespace().next().unwrap_or("");
+            self.seen_type.insert(metric_name.to_string())
+        } else {
+            true
+        };
+        if should_write {
+            self.output.push_str(line);
+            self.output.push('\n');
+        }
+        self.line_buffer.clear();
+    }
+}
+
+impl Default for MetricEncoder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl std::fmt::Write for MetricEncoder {
+    fn write_str(&mut self, s: &str) -> std::fmt::Result {
+        for ch in s.chars() {
+            if ch == '\n' {
+                self.flush_line();
+            } else {
+                self.line_buffer.push(ch);
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Panics if the Prometheus-formatted buffer contains duplicate data lines.
@@ -326,14 +361,21 @@ mod tests {
     use prometheus_client::metrics::counter::Counter;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-    #[test]
-    fn test_deduplicate_metric_metadata_empty() {
-        assert_eq!(deduplicate_metric_metadata(""), "");
-        assert_eq!(deduplicate_metric_metadata("# EOF\n"), "# EOF\n");
+    fn encode_dedup(input: &str) -> String {
+        use std::fmt::Write;
+        let mut encoder = MetricEncoder::new();
+        encoder.write_str(input).unwrap();
+        encoder.into_string()
     }
 
     #[test]
-    fn test_deduplicate_metric_metadata_no_duplicates() {
+    fn test_metric_encoder_empty() {
+        assert_eq!(encode_dedup(""), "");
+        assert_eq!(encode_dedup("# EOF\n"), "# EOF\n");
+    }
+
+    #[test]
+    fn test_metric_encoder_no_duplicates() {
         let input = r#"# HELP foo_total A counter.
 # TYPE foo_total counter
 foo_total 1
@@ -342,12 +384,12 @@ foo_total 1
 bar_gauge 42
 # EOF
 "#;
-        let output = deduplicate_metric_metadata(input);
+        let output = encode_dedup(input);
         assert_eq!(output, input);
     }
 
     #[test]
-    fn test_deduplicate_metric_metadata_with_duplicates() {
+    fn test_metric_encoder_with_duplicates() {
         let input = r#"# HELP votes_total vote count.
 # TYPE votes_total counter
 votes_total{epoch="e5"} 1
@@ -362,12 +404,12 @@ votes_total{epoch="e5"} 1
 votes_total{epoch="e6"} 2
 # EOF
 "#;
-        let output = deduplicate_metric_metadata(input);
+        let output = encode_dedup(input);
         assert_eq!(output, expected);
     }
 
     #[test]
-    fn test_deduplicate_metric_metadata_multiple_metrics() {
+    fn test_metric_encoder_multiple_metrics() {
         let input = r#"# HELP a_total First.
 # TYPE a_total counter
 a_total{tag="x"} 1
@@ -388,12 +430,12 @@ b_total 5
 a_total{tag="y"} 2
 # EOF
 "#;
-        let output = deduplicate_metric_metadata(input);
+        let output = encode_dedup(input);
         assert_eq!(output, expected);
     }
 
     #[test]
-    fn test_deduplicate_metric_metadata_preserves_order() {
+    fn test_metric_encoder_preserves_order() {
         let input = r#"# HELP z First alphabetically last.
 # TYPE z counter
 z_total 1
@@ -402,7 +444,7 @@ z_total 1
 a_total 2
 # EOF
 "#;
-        let output = deduplicate_metric_metadata(input);
+        let output = encode_dedup(input);
         assert_eq!(output, input);
     }
 

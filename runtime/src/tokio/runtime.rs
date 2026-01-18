@@ -17,7 +17,7 @@ use crate::{
     signal::Signal,
     storage::metered::Storage as MeteredStorage,
     telemetry::metrics::task::Label,
-    utils::{deduplicate_metric_metadata, signal::Stopper, supervision::Tree, Panicker},
+    utils::{signal::Stopper, supervision::Tree, MetricEncoder, Panicker},
     Clock, Error, Execution, Handle, Metrics as _, SinkOf, Spawner as _, StreamOf, METRICS_PREFIX,
 };
 use commonware_macros::select;
@@ -585,9 +585,9 @@ impl crate::Metrics for Context {
     }
 
     fn encode(&self) -> String {
-        let mut buffer = String::new();
-        encode(&mut buffer, &self.executor.registry.lock().unwrap()).expect("encoding failed");
-        deduplicate_metric_metadata(&buffer)
+        let mut encoder = MetricEncoder::new();
+        encode(&mut encoder, &self.executor.registry.lock().unwrap()).expect("encoding failed");
+        encoder.into_string()
     }
 
     fn with_attribute(&self, key: &str, value: impl std::fmt::Display) -> Self {

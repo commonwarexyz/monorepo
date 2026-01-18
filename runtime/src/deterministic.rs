@@ -53,7 +53,7 @@ use crate::{
     },
     telemetry::metrics::task::Label,
     utils::{
-        assert_unique_metrics, deduplicate_metric_metadata,
+        assert_unique_metrics, MetricEncoder,
         signal::{Signal, Stopper},
         supervision::Tree,
         Panicker,
@@ -1188,9 +1188,9 @@ impl crate::Metrics for Context {
     fn encode(&self) -> String {
         let executor = self.executor();
         executor.auditor.event(b"encode", |_| {});
-        let mut buffer = String::new();
-        encode(&mut buffer, &executor.registry.lock().unwrap()).expect("encoding failed");
-        deduplicate_metric_metadata(&buffer)
+        let mut encoder = MetricEncoder::new();
+        encode(&mut encoder, &executor.registry.lock().unwrap()).expect("encoding failed");
+        encoder.into_string()
     }
 }
 
