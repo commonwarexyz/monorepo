@@ -31,6 +31,7 @@ pub(crate) struct LedgerSnapshot {
 pub(crate) struct SnapshotStore {
     snapshots: BTreeMap<ConsensusDigest, LedgerSnapshot>,
     persisted: BTreeSet<ConsensusDigest>,
+    persisting: BTreeSet<ConsensusDigest>,
 }
 
 impl SnapshotStore {
@@ -38,9 +39,11 @@ impl SnapshotStore {
         let mut snapshots = BTreeMap::new();
         snapshots.insert(genesis_digest, genesis_snapshot);
         let persisted = BTreeSet::from([genesis_digest]);
+        let persisting = BTreeSet::new();
         Self {
             snapshots,
             persisted,
+            persisting,
         }
     }
 
@@ -62,6 +65,66 @@ impl SnapshotStore {
 
     pub(crate) fn is_persisted(&self, digest: &ConsensusDigest) -> bool {
         self.persisted.contains(digest)
+    }
+
+    pub(crate) fn can_persist_chain(&self, chain: &[ConsensusDigest]) -> bool {
+        chain
+            .iter()
+            .all(|digest| !self.persisted.contains(digest) && !self.persisting.contains(digest))
+    }
+
+    pub(crate) fn mark_persisting_chain(&mut self, chain: &[ConsensusDigest]) {
+        for digest in chain {
+            self.persisting.insert(*digest);
+        }
+    }
+
+    pub(crate) fn clear_persisting_chain(&mut self, chain: &[ConsensusDigest]) {
+        for digest in chain {
+            self.persisting.remove(digest);
+        }
+    }
+
+    pub(crate) fn mark_persisted_chain(&mut self, chain: &[ConsensusDigest]) {
+        for digest in chain {
+            self.persisted.insert(*digest);
+        }
+    }
+
+    /// Merge unpersisted ancestor deltas up to the last persisted digest.
+    ///
+    /// Returns the ordered chain (oldest to newest) and the merged change set.
+    pub(crate) fn merged_changes_for_persist(
+        &self,
+        mut digest: ConsensusDigest,
+    ) -> anyhow::Result<(Vec<ConsensusDigest>, QmdbChangeSet)> {
+        let mut chain = Vec::new();
+        while !self.persisted.contains(&digest) {
+            let snapshot = self
+                .snapshots
+                .get(&digest)
+                .ok_or_else(|| anyhow::anyhow!("missing snapshot"))?;
+            chain.push(digest);
+            let Some(parent) = snapshot.parent else {
+                return Err(anyhow::anyhow!("missing parent snapshot"));
+            };
+            digest = parent;
+        }
+
+        if chain.is_empty() {
+            return Ok((Vec::new(), QmdbChangeSet::default()));
+        }
+
+        chain.reverse();
+        let mut merged = QmdbChangeSet::default();
+        for digest in &chain {
+            let snapshot = self
+                .snapshots
+                .get(digest)
+                .ok_or_else(|| anyhow::anyhow!("missing snapshot"))?;
+            merged.merge(snapshot.qmdb_changes.clone());
+        }
+        Ok((chain, merged))
     }
 
     /// Merge unpersisted ancestor deltas with new changes for a consistent root computation.
