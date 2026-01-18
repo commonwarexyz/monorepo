@@ -309,10 +309,10 @@ pub trait Metrics: Clone + Send + Sync + 'static {
     /// namespaced).
     fn encode(&self) -> String;
 
-    /// Create a new instance of `Metrics` with an additional tag (Prometheus label) applied
+    /// Create a new instance of `Metrics` with an additional attribute (Prometheus label) applied
     /// to all metrics registered in this context.
     ///
-    /// Unlike [`Metrics::with_label`] which affects the metric name prefix, `with_tag` adds
+    /// Unlike [`Metrics::with_label`] which affects the metric name prefix, `with_attribute` adds
     /// a Prometheus label that appears as a separate dimension in the metric output. This is
     /// useful for tracking epoch-specific or instance-specific metrics without causing metric
     /// name cardinality explosion.
@@ -325,7 +325,7 @@ pub trait Metrics: Clone + Send + Sync + 'static {
     /// storage_reads_total 500
     /// ```
     ///
-    /// Use `with_tag` for dynamic dimensions that change at runtime (e.g., epochs):
+    /// Use `with_attribute` for dynamic dimensions that change at runtime (e.g., epochs):
     /// ```text
     /// consensus_votes_total{epoch="5"} 100
     /// consensus_votes_total{epoch="6"} 200
@@ -338,23 +338,23 @@ pub trait Metrics: Clone + Send + Sync + 'static {
     /// let ctx = context.with_label(&format!("consensus_engine_{}", epoch));
     /// // Produces: consensus_engine_5_votes_total, consensus_engine_6_votes_total, ...
     ///
-    /// // Use tags to add epoch as a label dimension:
-    /// let ctx = context.with_label("consensus_engine").with_tag("epoch", epoch);
+    /// // Use attributes to add epoch as a label dimension:
+    /// let ctx = context.with_label("consensus_engine").with_attribute("epoch", epoch);
     /// // Produces: consensus_engine_votes_total{epoch="5"}, consensus_engine_votes_total{epoch="6"}, ...
     /// ```
     ///
-    /// Multiple tags can be chained:
+    /// Multiple attributes can be chained:
     /// ```ignore
     /// let ctx = context
     ///     .with_label("engine")
-    ///     .with_tag("region", "us_east")
-    ///     .with_tag("instance", "i1");
+    ///     .with_attribute("region", "us_east")
+    ///     .with_attribute("instance", "i1");
     /// // Produces: engine_requests_total{region="us_east",instance="i1"} 42
     /// ```
     ///
     /// # Grafana Integration
     ///
-    /// To query metrics for a specific tag value:
+    /// To query metrics for a specific attribute value:
     /// ```text
     /// consensus_engine_votes_total{epoch="5"}
     /// ```
@@ -373,7 +373,7 @@ pub trait Metrics: Clone + Send + Sync + 'static {
     /// 2. Use in panel queries: `consensus_engine_votes_total{epoch="$latest_epoch"}`
     ///
     /// Keys must start with `[a-zA-Z]` and contain only `[a-zA-Z0-9_]`. Values can be any string.
-    fn with_tag(&self, key: &str, value: impl std::fmt::Display) -> Self;
+    fn with_attribute(&self, key: &str, value: impl std::fmt::Display) -> Self;
 }
 
 /// Re-export of [governor::Quota] for rate limiting configuration.
@@ -2120,29 +2120,29 @@ mod tests {
         });
     }
 
-    fn test_metrics_with_tag<R: Runner>(runner: R)
+    fn test_metrics_with_attribute<R: Runner>(runner: R)
     where
         R::Context: Metrics,
     {
         runner.start(|context| async move {
-            // Create context with a tag
-            let ctx_epoch5 = context.with_label("consensus").with_tag("epoch", "e5");
+            // Create context with a attribute
+            let ctx_epoch5 = context.with_label("consensus").with_attribute("epoch", "e5");
 
-            // Register a metric with the tag
+            // Register a metric with the attribute
             let counter = Counter::<u64>::default();
             ctx_epoch5.register("votes", "vote count", counter.clone());
             counter.inc();
 
-            // Encode and verify the tag appears as a label
+            // Encode and verify the attribute appears as a label
             let buffer = context.encode();
             assert!(
                 buffer.contains("consensus_votes_total{epoch=\"e5\"} 1"),
-                "Expected metric with epoch tag, got: {}",
+                "Expected metric with epoch attribute, got: {}",
                 buffer
             );
 
-            // Create context with different epoch tag (same metric name)
-            let ctx_epoch6 = context.with_label("consensus").with_tag("epoch", "e6");
+            // Create context with different epoch attribute (same metric name)
+            let ctx_epoch6 = context.with_label("consensus").with_attribute("epoch", "e6");
             let counter2 = Counter::<u64>::default();
             ctx_epoch6.register("votes", "vote count", counter2.clone());
             counter2.inc();
@@ -2175,11 +2175,11 @@ mod tests {
                 buffer
             );
 
-            // Multiple tags
+            // Multiple attributes
             let ctx_multi = context
                 .with_label("engine")
-                .with_tag("region", "us")
-                .with_tag("instance", "i1");
+                .with_attribute("region", "us")
+                .with_attribute("instance", "i1");
             let counter3 = Counter::<u64>::default();
             ctx_multi.register("requests", "request count", counter3.clone());
             counter3.inc();
@@ -2187,7 +2187,7 @@ mod tests {
             let buffer = context.encode();
             assert!(
                 buffer.contains("engine_requests_total{") && buffer.contains("region=\"us\""),
-                "Expected metric with region tag, got: {}",
+                "Expected metric with region attribute, got: {}",
                 buffer
             );
 
@@ -2195,14 +2195,14 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "duplicate tag key: epoch")]
-    fn test_deterministic_metrics_duplicate_tag_panics() {
+    #[should_panic(expected = "duplicate attribute key: epoch")]
+    fn test_deterministic_metrics_duplicate_attribute_panics() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let _ = context
                 .with_label("test")
-                .with_tag("epoch", "old")
-                .with_tag("epoch", "new");
+                .with_attribute("epoch", "old")
+                .with_attribute("epoch", "new");
         });
     }
 
@@ -2211,13 +2211,13 @@ mod tests {
         peer: String,
     }
 
-    fn test_metrics_family_with_tag<R: Runner>(runner: R)
+    fn test_metrics_family_with_attribute<R: Runner>(runner: R)
     where
         R::Context: Metrics,
     {
         runner.start(|context| async move {
-            // Create context with a tag, then register a Family metric
-            let ctx = context.with_label("p2p").with_tag("region", "us");
+            // Create context with a attribute, then register a Family metric
+            let ctx = context.with_label("p2p").with_attribute("region", "us");
 
             // Register a Family metric (like p2p does)
             let family = Family::<PeerLabels, Counter>::default();
@@ -2240,15 +2240,15 @@ mod tests {
                 })
                 .inc();
 
-            // Encode and verify both tag (region) and family labels (peer) appear
+            // Encode and verify both attribute (region) and family labels (peer) appear
             let buffer = context.encode();
 
-            // Should have region tag from with_tag AND peer label from Family
+            // Should have region attribute from with_attribute AND peer label from Family
             assert!(
                 buffer.contains("p2p_messages_sent_total{")
                     && buffer.contains("region=\"us\"")
                     && buffer.contains("peer=\"alice\""),
-                "Expected metric with both region tag and alice peer label, got: {}",
+                "Expected metric with both region attribute and alice peer label, got: {}",
                 buffer
             );
             assert!(
@@ -2280,26 +2280,26 @@ mod tests {
     }
 
     #[test]
-    fn test_deterministic_metrics_family_with_tag() {
+    fn test_deterministic_metrics_family_with_attribute() {
         let executor = deterministic::Runner::default();
-        test_metrics_family_with_tag(executor);
+        test_metrics_family_with_attribute(executor);
     }
 
     #[test]
-    fn test_tokio_metrics_family_with_tag() {
+    fn test_tokio_metrics_family_with_attribute() {
         let runner = tokio::Runner::default();
-        test_metrics_family_with_tag(runner);
+        test_metrics_family_with_attribute(runner);
     }
 
-    fn test_metrics_tag_with_nested_label<R: Runner>(runner: R)
+    fn test_metrics_attribute_with_nested_label<R: Runner>(runner: R)
     where
         R::Context: Metrics,
     {
         runner.start(|context| async move {
-            // Create context with tag, then nest a label
+            // Create context with attribute, then nest a label
             let ctx = context
                 .with_label("orchestrator")
-                .with_tag("epoch", "e5")
+                .with_attribute("epoch", "e5")
                 .with_label("engine");
 
             // Register a metric
@@ -2307,20 +2307,20 @@ mod tests {
             ctx.register("votes", "vote count", counter.clone());
             counter.inc();
 
-            // Verify the tag is preserved through the nested label
+            // Verify the attribute is preserved through the nested label
             let buffer = context.encode();
             assert!(
                 buffer.contains("orchestrator_engine_votes_total{epoch=\"e5\"} 1"),
-                "Expected metric with preserved epoch tag, got: {}",
+                "Expected metric with preserved epoch attribute, got: {}",
                 buffer
             );
 
-            // Multiple levels of nesting with tags at different levels
+            // Multiple levels of nesting with attributes at different levels
             let ctx2 = context
                 .with_label("outer")
-                .with_tag("region", "us")
+                .with_attribute("region", "us")
                 .with_label("middle")
-                .with_tag("az", "east")
+                .with_attribute("az", "east")
                 .with_label("inner");
 
             let counter2 = Counter::<u64>::default();
@@ -2333,22 +2333,22 @@ mod tests {
                 buffer.contains("outer_middle_inner_requests_total{")
                     && buffer.contains("region=\"us\"")
                     && buffer.contains("az=\"east\""),
-                "Expected metric with all tags preserved, got: {}",
+                "Expected metric with all attributes preserved, got: {}",
                 buffer
             );
         });
     }
 
     #[test]
-    fn test_deterministic_metrics_tag_with_nested_label() {
+    fn test_deterministic_metrics_attribute_with_nested_label() {
         let executor = deterministic::Runner::default();
-        test_metrics_tag_with_nested_label(executor);
+        test_metrics_attribute_with_nested_label(executor);
     }
 
     #[test]
-    fn test_tokio_metrics_tag_with_nested_label() {
+    fn test_tokio_metrics_attribute_with_nested_label() {
         let runner = tokio::Runner::default();
-        test_metrics_tag_with_nested_label(runner);
+        test_metrics_attribute_with_nested_label(runner);
     }
 
     #[test]
@@ -2616,9 +2616,9 @@ mod tests {
     }
 
     #[test]
-    fn test_deterministic_metrics_with_tag() {
+    fn test_deterministic_metrics_with_attribute() {
         let executor = deterministic::Runner::default();
-        test_metrics_with_tag(executor);
+        test_metrics_with_attribute(executor);
     }
 
     #[test_collect_traces]
@@ -2965,9 +2965,9 @@ mod tests {
     }
 
     #[test]
-    fn test_tokio_metrics_with_tag() {
+    fn test_tokio_metrics_with_attribute() {
         let executor = tokio::Runner::default();
-        test_metrics_with_tag(executor);
+        test_metrics_with_attribute(executor);
     }
 
     #[test]

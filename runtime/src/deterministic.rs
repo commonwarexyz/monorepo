@@ -1195,12 +1195,12 @@ impl crate::Metrics for Context {
         crate::utils::deduplicate_metric_metadata(&buffer)
     }
 
-    fn with_tag(&self, key: &str, value: impl std::fmt::Display) -> Self {
+    fn with_attribute(&self, key: &str, value: impl std::fmt::Display) -> Self {
         validate_label(key);
 
         assert!(
             !self.tags.iter().any(|(k, _)| k == key),
-            "duplicate tag key: {key}"
+            "duplicate attribute key: {key}"
         );
 
         let mut tags = self.tags.clone();
