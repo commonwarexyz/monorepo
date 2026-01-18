@@ -77,7 +77,7 @@ mod tests {
     use super::*;
     use commonware_codec::{DecodeExt, Encode, FixedSize};
     use commonware_consensus::{
-        simplex::{scheme::bls12381_threshold, types::Proposal},
+        simplex::{scheme::bls12381_threshold::vrf as bls12381_threshold_vrf, types::Proposal},
         types::{Epoch, Round, View},
     };
     use commonware_cryptography::{
@@ -110,7 +110,7 @@ mod tests {
                 parent: View::new(54321),
                 payload: new_digest(),
             },
-            certificate: bls12381_threshold::Signature::<MinSig> {
+            certificate: bls12381_threshold_vrf::Signature::<MinSig> {
                 vote_signature: proposal_signature,
                 seed_signature,
             },

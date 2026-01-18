@@ -26,7 +26,7 @@
 //! 4. The resulting [`Elector`] can only be created by consensus, preventing misuse
 
 use crate::{
-    simplex::scheme::bls12381_threshold,
+    simplex::scheme::bls12381_threshold::vrf as bls12381_threshold_vrf,
     types::{Participant, Round, View},
 };
 use commonware_codec::Encode;
@@ -184,14 +184,14 @@ impl Random {
     }
 }
 
-impl<P, V> Config<bls12381_threshold::Scheme<P, V>> for Random
+impl<P, V> Config<bls12381_threshold_vrf::Scheme<P, V>> for Random
 where
     P: PublicKey,
     V: Variant,
 {
-    type Elector = RandomElector<bls12381_threshold::Scheme<P, V>>;
+    type Elector = RandomElector<bls12381_threshold_vrf::Scheme<P, V>>;
 
-    fn build(self, participants: &Set<P>) -> RandomElector<bls12381_threshold::Scheme<P, V>> {
+    fn build(self, participants: &Set<P>) -> RandomElector<bls12381_threshold_vrf::Scheme<P, V>> {
         assert!(!participants.is_empty(), "no participants");
         RandomElector {
             n: participants.len() as u32,
@@ -209,8 +209,8 @@ pub struct RandomElector<S: Scheme> {
     _phantom: PhantomData<S>,
 }
 
-impl<P, V> Elector<bls12381_threshold::Scheme<P, V>>
-    for RandomElector<bls12381_threshold::Scheme<P, V>>
+impl<P, V> Elector<bls12381_threshold_vrf::Scheme<P, V>>
+    for RandomElector<bls12381_threshold_vrf::Scheme<P, V>>
 where
     P: PublicKey,
     V: Variant,
@@ -218,7 +218,7 @@ where
     fn elect(
         &self,
         round: Round,
-        certificate: Option<&bls12381_threshold::Signature<V>>,
+        certificate: Option<&bls12381_threshold_vrf::Signature<V>>,
     ) -> Participant {
         Random::select_leader::<V>(round, self.n, certificate.map(|c| c.seed_signature))
     }
@@ -229,7 +229,7 @@ mod tests {
     use super::*;
     use crate::{
         simplex::{
-            scheme::{bls12381_threshold, ed25519},
+            scheme::{bls12381_threshold::vrf as bls12381_threshold_vrf, ed25519},
             types::Subject,
         },
         types::{Epoch, View},
@@ -244,7 +244,7 @@ mod tests {
     const NAMESPACE: &[u8] = b"test";
 
     type ThresholdScheme =
-        bls12381_threshold::Scheme<commonware_cryptography::ed25519::PublicKey, MinPk>;
+        bls12381_threshold_vrf::Scheme<commonware_cryptography::ed25519::PublicKey, MinPk>;
 
     #[test]
     fn round_robin_rotates_through_participants() {
@@ -384,7 +384,7 @@ mod tests {
     fn random_falls_back_to_round_robin_for_view_1() {
         let mut rng = test_rng();
         let Fixture { participants, .. } =
-            bls12381_threshold::fixture::<MinPk, _>(&mut rng, NAMESPACE, 5);
+            bls12381_threshold_vrf::fixture::<MinPk, _>(&mut rng, NAMESPACE, 5);
         let participants = Set::try_from_iter(participants).unwrap();
         let n = participants.len();
         let elector: RandomElector<ThresholdScheme> = Random.build(&participants);
@@ -413,7 +413,7 @@ mod tests {
             participants,
             schemes,
             ..
-        } = bls12381_threshold::fixture::<MinPk, _>(&mut rng, NAMESPACE, 5);
+        } = bls12381_threshold_vrf::fixture::<MinPk, _>(&mut rng, NAMESPACE, 5);
         let participants = Set::try_from_iter(participants).unwrap();
         let elector: RandomElector<ThresholdScheme> = Random.build(&participants);
         let quorum = N3f1::quorum_from_slice(&schemes) as usize;
@@ -472,7 +472,7 @@ mod tests {
     fn random_panics_on_none_certificate_after_view_1() {
         let mut rng = test_rng();
         let Fixture { participants, .. } =
-            bls12381_threshold::fixture::<MinPk, _>(&mut rng, NAMESPACE, 5);
+            bls12381_threshold_vrf::fixture::<MinPk, _>(&mut rng, NAMESPACE, 5);
         let participants = Set::try_from_iter(participants).unwrap();
         let elector: RandomElector<ThresholdScheme> = Random.build(&participants);
 
@@ -534,7 +534,7 @@ mod tests {
                     participants,
                     schemes,
                     ..
-                } = bls12381_threshold::fixture::<MinPk, _>(&mut rng, NAMESPACE, n);
+                } = bls12381_threshold_vrf::fixture::<MinPk, _>(&mut rng, NAMESPACE, n);
                 let participants = Set::try_from_iter(participants).unwrap();
                 let elector: RandomElector<ThresholdScheme> = Random.build(&participants);
                 let quorum = N3f1::quorum_from_slice(&schemes) as usize;

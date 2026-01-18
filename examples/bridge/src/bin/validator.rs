@@ -4,7 +4,7 @@ use commonware_bridge::{
 };
 use commonware_codec::{Decode, DecodeExt};
 use commonware_consensus::{
-    simplex::{self, elector::Random, scheme::bls12381_threshold::Scheme, Engine},
+    simplex::{self, elector::Random, scheme::bls12381_threshold::vrf::Scheme, Engine},
     types::{Epoch, ViewDelta},
 };
 use commonware_cryptography::{

@@ -31,9 +31,3 @@
 
 pub mod standard;
 pub mod vrf;
-
-// Re-export VRF variant items for backward compatibility.
-// Code that needs only standard threshold signatures should use `standard::Scheme`.
-#[cfg(feature = "mocks")]
-pub use vrf::fixture;
-pub use vrf::{decrypt, encrypt, Scheme, Seed, Seedable, Signature};

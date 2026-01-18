@@ -121,7 +121,7 @@ mod tests {
     use super::*;
     use crate::{
         simplex::{
-            scheme::{bls12381_threshold, ed25519},
+            scheme::{bls12381_threshold::vrf as bls12381_threshold_vrf, ed25519},
             types::{Notarization, Notarize, Proposal, Subject},
         },
         types::{Epoch, Round, View},
@@ -269,10 +269,10 @@ mod tests {
         let mut rng = test_rng();
         let Fixture {
             schemes, verifier, ..
-        } = bls12381_threshold::fixture::<MinPk, _>(&mut rng, NAMESPACE, 4);
+        } = bls12381_threshold_vrf::fixture::<MinPk, _>(&mut rng, NAMESPACE, 4);
 
         assert!(
-            !bls12381_threshold::Scheme::<Ed25519PublicKey, MinPk>::is_attributable(),
+            !bls12381_threshold_vrf::Scheme::<Ed25519PublicKey, MinPk>::is_attributable(),
             "BLS threshold must be non-attributable"
         );
 
@@ -316,10 +316,10 @@ mod tests {
         let mut rng = test_rng();
         let Fixture {
             schemes, verifier, ..
-        } = bls12381_threshold::fixture::<MinPk, _>(&mut rng, NAMESPACE, 4);
+        } = bls12381_threshold_vrf::fixture::<MinPk, _>(&mut rng, NAMESPACE, 4);
 
         assert!(
-            !bls12381_threshold::Scheme::<Ed25519PublicKey, MinPk>::is_attributable(),
+            !bls12381_threshold_vrf::Scheme::<Ed25519PublicKey, MinPk>::is_attributable(),
             "BLS threshold must be non-attributable"
         );
 

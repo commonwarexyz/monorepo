@@ -299,8 +299,9 @@ mod tests {
             elector::{Config as Elector, Random, RoundRobin},
             mocks::twins::Strategy,
             scheme::{
-                bls12381_multisig, bls12381_threshold, bls12381_threshold::Seedable, ed25519,
-                secp256r1, Scheme,
+                bls12381_multisig,
+                bls12381_threshold::vrf::{self as bls12381_threshold_vrf, Seedable},
+                ed25519, secp256r1, Scheme,
             },
             types::{
                 Certificate, Finalization as TFinalization, Finalize as TFinalize,
@@ -788,8 +789,8 @@ mod tests {
 
     #[test_traced]
     fn test_all_online() {
-        all_online::<_, _, Random>(bls12381_threshold::fixture::<MinPk, _>);
-        all_online::<_, _, Random>(bls12381_threshold::fixture::<MinSig, _>);
+        all_online::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        all_online::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinSig, _>);
         all_online::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>);
         all_online::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>);
         all_online::<_, _, RoundRobin>(ed25519::fixture);
@@ -953,8 +954,8 @@ mod tests {
 
     #[test_traced]
     fn test_observer() {
-        observer::<_, _, Random>(bls12381_threshold::fixture::<MinPk, _>);
-        observer::<_, _, Random>(bls12381_threshold::fixture::<MinSig, _>);
+        observer::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        observer::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinSig, _>);
         observer::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>);
         observer::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>);
         observer::<_, _, RoundRobin>(ed25519::fixture);
@@ -1151,8 +1152,8 @@ mod tests {
     #[test_group("slow")]
     #[test_traced]
     fn test_unclean_shutdown() {
-        unclean_shutdown::<_, _, Random>(bls12381_threshold::fixture::<MinPk, _>);
-        unclean_shutdown::<_, _, Random>(bls12381_threshold::fixture::<MinSig, _>);
+        unclean_shutdown::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        unclean_shutdown::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinSig, _>);
         unclean_shutdown::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>);
         unclean_shutdown::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>);
         unclean_shutdown::<_, _, RoundRobin>(ed25519::fixture);
@@ -1410,8 +1411,8 @@ mod tests {
 
     #[test_traced]
     fn test_backfill() {
-        backfill::<_, _, Random>(bls12381_threshold::fixture::<MinPk, _>);
-        backfill::<_, _, Random>(bls12381_threshold::fixture::<MinSig, _>);
+        backfill::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        backfill::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinSig, _>);
         backfill::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>);
         backfill::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>);
         backfill::<_, _, RoundRobin>(ed25519::fixture);
@@ -1673,8 +1674,8 @@ mod tests {
 
     #[test_traced]
     fn test_one_offline() {
-        one_offline::<_, _, Random>(bls12381_threshold::fixture::<MinPk, _>);
-        one_offline::<_, _, Random>(bls12381_threshold::fixture::<MinSig, _>);
+        one_offline::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        one_offline::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinSig, _>);
         one_offline::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>);
         one_offline::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>);
         one_offline::<_, _, RoundRobin>(ed25519::fixture);
@@ -1862,8 +1863,8 @@ mod tests {
 
     #[test_traced]
     fn test_slow_validator() {
-        slow_validator::<_, _, Random>(bls12381_threshold::fixture::<MinPk, _>);
-        slow_validator::<_, _, Random>(bls12381_threshold::fixture::<MinSig, _>);
+        slow_validator::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        slow_validator::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinSig, _>);
         slow_validator::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>);
         slow_validator::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>);
         slow_validator::<_, _, RoundRobin>(ed25519::fixture);
@@ -2076,8 +2077,8 @@ mod tests {
 
     #[test_traced]
     fn test_all_recovery() {
-        all_recovery::<_, _, Random>(bls12381_threshold::fixture::<MinPk, _>);
-        all_recovery::<_, _, Random>(bls12381_threshold::fixture::<MinSig, _>);
+        all_recovery::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        all_recovery::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinSig, _>);
         all_recovery::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>);
         all_recovery::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>);
         all_recovery::<_, _, RoundRobin>(ed25519::fixture);
@@ -2278,8 +2279,8 @@ mod tests {
     #[test_group("slow")]
     #[test_traced]
     fn test_partition() {
-        partition::<_, _, Random>(bls12381_threshold::fixture::<MinPk, _>);
-        partition::<_, _, Random>(bls12381_threshold::fixture::<MinSig, _>);
+        partition::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        partition::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinSig, _>);
         partition::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>);
         partition::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>);
         partition::<_, _, RoundRobin>(ed25519::fixture);
@@ -2439,8 +2440,8 @@ mod tests {
 
     #[test_traced]
     fn test_slow_and_lossy_links() {
-        slow_and_lossy_links::<_, _, Random>(0, bls12381_threshold::fixture::<MinPk, _>);
-        slow_and_lossy_links::<_, _, Random>(0, bls12381_threshold::fixture::<MinSig, _>);
+        slow_and_lossy_links::<_, _, Random>(0, bls12381_threshold_vrf::fixture::<MinPk, _>);
+        slow_and_lossy_links::<_, _, Random>(0, bls12381_threshold_vrf::fixture::<MinSig, _>);
         slow_and_lossy_links::<_, _, RoundRobin>(0, bls12381_multisig::fixture::<MinPk, _>);
         slow_and_lossy_links::<_, _, RoundRobin>(0, bls12381_multisig::fixture::<MinSig, _>);
         slow_and_lossy_links::<_, _, RoundRobin>(0, ed25519::fixture);
@@ -2453,19 +2454,23 @@ mod tests {
         // We use slow and lossy links as the deterministic test
         // because it is the most complex test.
         for seed in 1..6 {
-            let ts_pk_state_1 =
-                slow_and_lossy_links::<_, _, Random>(seed, bls12381_threshold::fixture::<MinPk, _>);
-            let ts_pk_state_2 =
-                slow_and_lossy_links::<_, _, Random>(seed, bls12381_threshold::fixture::<MinPk, _>);
+            let ts_pk_state_1 = slow_and_lossy_links::<_, _, Random>(
+                seed,
+                bls12381_threshold_vrf::fixture::<MinPk, _>,
+            );
+            let ts_pk_state_2 = slow_and_lossy_links::<_, _, Random>(
+                seed,
+                bls12381_threshold_vrf::fixture::<MinPk, _>,
+            );
             assert_eq!(ts_pk_state_1, ts_pk_state_2);
 
             let ts_sig_state_1 = slow_and_lossy_links::<_, _, Random>(
                 seed,
-                bls12381_threshold::fixture::<MinSig, _>,
+                bls12381_threshold_vrf::fixture::<MinSig, _>,
             );
             let ts_sig_state_2 = slow_and_lossy_links::<_, _, Random>(
                 seed,
-                bls12381_threshold::fixture::<MinSig, _>,
+                bls12381_threshold_vrf::fixture::<MinSig, _>,
             );
             assert_eq!(ts_sig_state_1, ts_sig_state_2);
 
@@ -2695,8 +2700,8 @@ mod tests {
     #[test_traced]
     fn test_conflicter() {
         for seed in 0..5 {
-            conflicter::<_, _, Random>(seed, bls12381_threshold::fixture::<MinPk, _>);
-            conflicter::<_, _, Random>(seed, bls12381_threshold::fixture::<MinSig, _>);
+            conflicter::<_, _, Random>(seed, bls12381_threshold_vrf::fixture::<MinPk, _>);
+            conflicter::<_, _, Random>(seed, bls12381_threshold_vrf::fixture::<MinSig, _>);
             conflicter::<_, _, RoundRobin>(seed, bls12381_multisig::fixture::<MinPk, _>);
             conflicter::<_, _, RoundRobin>(seed, bls12381_multisig::fixture::<MinSig, _>);
             conflicter::<_, _, RoundRobin>(seed, ed25519::fixture);
@@ -2874,8 +2879,8 @@ mod tests {
     #[test_traced]
     fn test_invalid() {
         for seed in 0..5 {
-            invalid::<_, _, Random>(seed, bls12381_threshold::fixture::<MinPk, _>);
-            invalid::<_, _, Random>(seed, bls12381_threshold::fixture::<MinSig, _>);
+            invalid::<_, _, Random>(seed, bls12381_threshold_vrf::fixture::<MinPk, _>);
+            invalid::<_, _, Random>(seed, bls12381_threshold_vrf::fixture::<MinSig, _>);
             invalid::<_, _, RoundRobin>(seed, bls12381_multisig::fixture::<MinPk, _>);
             invalid::<_, _, RoundRobin>(seed, bls12381_multisig::fixture::<MinSig, _>);
             invalid::<_, _, RoundRobin>(seed, ed25519::fixture);
@@ -3045,8 +3050,8 @@ mod tests {
     #[test_traced]
     fn test_impersonator() {
         for seed in 0..5 {
-            impersonator::<_, _, Random>(seed, bls12381_threshold::fixture::<MinPk, _>);
-            impersonator::<_, _, Random>(seed, bls12381_threshold::fixture::<MinSig, _>);
+            impersonator::<_, _, Random>(seed, bls12381_threshold_vrf::fixture::<MinPk, _>);
+            impersonator::<_, _, Random>(seed, bls12381_threshold_vrf::fixture::<MinSig, _>);
             impersonator::<_, _, RoundRobin>(seed, bls12381_multisig::fixture::<MinPk, _>);
             impersonator::<_, _, RoundRobin>(seed, bls12381_multisig::fixture::<MinSig, _>);
             impersonator::<_, _, RoundRobin>(seed, ed25519::fixture);
@@ -3294,8 +3299,9 @@ mod tests {
     #[test_group("slow")]
     #[test_traced]
     fn test_equivocator_bls12381_threshold_min_pk() {
-        let detected = (0..5)
-            .any(|seed| equivocator::<_, _, Random>(seed, bls12381_threshold::fixture::<MinPk, _>));
+        let detected = (0..5).any(|seed| {
+            equivocator::<_, _, Random>(seed, bls12381_threshold_vrf::fixture::<MinPk, _>)
+        });
         assert!(
             detected,
             "expected at least one seed to detect equivocation"
@@ -3306,7 +3312,7 @@ mod tests {
     #[test_traced]
     fn test_equivocator_bls12381_threshold_min_sig() {
         let detected = (0..5).any(|seed| {
-            equivocator::<_, _, Random>(seed, bls12381_threshold::fixture::<MinSig, _>)
+            equivocator::<_, _, Random>(seed, bls12381_threshold_vrf::fixture::<MinSig, _>)
         });
         assert!(
             detected,
@@ -3519,8 +3525,8 @@ mod tests {
     #[test_traced]
     fn test_reconfigurer() {
         for seed in 0..5 {
-            reconfigurer::<_, _, Random>(seed, bls12381_threshold::fixture::<MinPk, _>);
-            reconfigurer::<_, _, Random>(seed, bls12381_threshold::fixture::<MinSig, _>);
+            reconfigurer::<_, _, Random>(seed, bls12381_threshold_vrf::fixture::<MinPk, _>);
+            reconfigurer::<_, _, Random>(seed, bls12381_threshold_vrf::fixture::<MinSig, _>);
             reconfigurer::<_, _, RoundRobin>(seed, bls12381_multisig::fixture::<MinPk, _>);
             reconfigurer::<_, _, RoundRobin>(seed, bls12381_multisig::fixture::<MinSig, _>);
             reconfigurer::<_, _, RoundRobin>(seed, ed25519::fixture);
@@ -3699,8 +3705,8 @@ mod tests {
     #[test_traced]
     fn test_nuller() {
         for seed in 0..5 {
-            nuller::<_, _, Random>(seed, bls12381_threshold::fixture::<MinPk, _>);
-            nuller::<_, _, Random>(seed, bls12381_threshold::fixture::<MinSig, _>);
+            nuller::<_, _, Random>(seed, bls12381_threshold_vrf::fixture::<MinPk, _>);
+            nuller::<_, _, Random>(seed, bls12381_threshold_vrf::fixture::<MinSig, _>);
             nuller::<_, _, RoundRobin>(seed, bls12381_multisig::fixture::<MinPk, _>);
             nuller::<_, _, RoundRobin>(seed, bls12381_multisig::fixture::<MinSig, _>);
             nuller::<_, _, RoundRobin>(seed, ed25519::fixture);
@@ -3862,8 +3868,8 @@ mod tests {
     #[test_traced]
     fn test_outdated() {
         for seed in 0..5 {
-            outdated::<_, _, Random>(seed, bls12381_threshold::fixture::<MinPk, _>);
-            outdated::<_, _, Random>(seed, bls12381_threshold::fixture::<MinSig, _>);
+            outdated::<_, _, Random>(seed, bls12381_threshold_vrf::fixture::<MinPk, _>);
+            outdated::<_, _, Random>(seed, bls12381_threshold_vrf::fixture::<MinSig, _>);
             outdated::<_, _, RoundRobin>(seed, bls12381_multisig::fixture::<MinPk, _>);
             outdated::<_, _, RoundRobin>(seed, bls12381_multisig::fixture::<MinSig, _>);
             outdated::<_, _, RoundRobin>(seed, ed25519::fixture);
@@ -4015,13 +4021,13 @@ mod tests {
     #[test_group("slow")]
     #[test_traced]
     fn test_1k_bls12381_threshold_min_pk() {
-        run_1k::<_, _, Random>(bls12381_threshold::fixture::<MinPk, _>);
+        run_1k::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinPk, _>);
     }
 
     #[test_group("slow")]
     #[test_traced]
     fn test_1k_bls12381_threshold_min_sig() {
-        run_1k::<_, _, Random>(bls12381_threshold::fixture::<MinSig, _>);
+        run_1k::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinSig, _>);
     }
 
     #[test_group("slow")]
@@ -4189,8 +4195,16 @@ mod tests {
     #[test_traced]
     fn test_children_shutdown_on_engine_abort() {
         for seed in 0..10 {
-            engine_shutdown::<_, _, Random>(seed, bls12381_threshold::fixture::<MinPk, _>, false);
-            engine_shutdown::<_, _, Random>(seed, bls12381_threshold::fixture::<MinSig, _>, false);
+            engine_shutdown::<_, _, Random>(
+                seed,
+                bls12381_threshold_vrf::fixture::<MinPk, _>,
+                false,
+            );
+            engine_shutdown::<_, _, Random>(
+                seed,
+                bls12381_threshold_vrf::fixture::<MinSig, _>,
+                false,
+            );
             engine_shutdown::<_, _, RoundRobin>(
                 seed,
                 bls12381_multisig::fixture::<MinPk, _>,
@@ -4209,8 +4223,16 @@ mod tests {
     #[test_traced]
     fn test_graceful_shutdown() {
         for seed in 0..10 {
-            engine_shutdown::<_, _, Random>(seed, bls12381_threshold::fixture::<MinPk, _>, true);
-            engine_shutdown::<_, _, Random>(seed, bls12381_threshold::fixture::<MinSig, _>, true);
+            engine_shutdown::<_, _, Random>(
+                seed,
+                bls12381_threshold_vrf::fixture::<MinPk, _>,
+                true,
+            );
+            engine_shutdown::<_, _, Random>(
+                seed,
+                bls12381_threshold_vrf::fixture::<MinSig, _>,
+                true,
+            );
             engine_shutdown::<_, _, RoundRobin>(seed, bls12381_multisig::fixture::<MinPk, _>, true);
             engine_shutdown::<_, _, RoundRobin>(
                 seed,
@@ -4413,8 +4435,12 @@ mod tests {
 
     #[test_traced]
     fn test_attributable_reporter_filtering() {
-        attributable_reporter_filtering::<_, _, Random>(bls12381_threshold::fixture::<MinPk, _>);
-        attributable_reporter_filtering::<_, _, Random>(bls12381_threshold::fixture::<MinSig, _>);
+        attributable_reporter_filtering::<_, _, Random>(
+            bls12381_threshold_vrf::fixture::<MinPk, _>,
+        );
+        attributable_reporter_filtering::<_, _, Random>(
+            bls12381_threshold_vrf::fixture::<MinSig, _>,
+        );
         attributable_reporter_filtering::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>);
         attributable_reporter_filtering::<_, _, RoundRobin>(
             bls12381_multisig::fixture::<MinSig, _>,
@@ -4787,8 +4813,8 @@ mod tests {
 
     #[test_traced]
     fn test_split_views_no_lockup() {
-        split_views_no_lockup::<_, _, Random>(bls12381_threshold::fixture::<MinPk, _>);
-        split_views_no_lockup::<_, _, Random>(bls12381_threshold::fixture::<MinSig, _>);
+        split_views_no_lockup::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        split_views_no_lockup::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinSig, _>);
         split_views_no_lockup::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>);
         split_views_no_lockup::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>);
         split_views_no_lockup::<_, _, RoundRobin>(ed25519::fixture);
@@ -4798,7 +4824,7 @@ mod tests {
     fn tle<V, L>()
     where
         V: Variant,
-        L: Elector<bls12381_threshold::Scheme<PublicKey, V>>,
+        L: Elector<bls12381_threshold_vrf::Scheme<PublicKey, V>>,
     {
         // Create context
         let n = 4;
@@ -4825,7 +4851,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold::fixture::<V, _>(&mut context, &namespace, n);
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, &namespace, n);
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -5269,13 +5295,13 @@ mod tests {
                 0,
                 10,
                 ViewDelta::new(15),
-                bls12381_threshold::fixture::<MinPk, _>
+                bls12381_threshold_vrf::fixture::<MinPk, _>
             ),
             hailstorm::<_, _, Random>(
                 0,
                 10,
                 ViewDelta::new(15),
-                bls12381_threshold::fixture::<MinPk, _>
+                bls12381_threshold_vrf::fixture::<MinPk, _>
             ),
         );
     }
@@ -5288,13 +5314,13 @@ mod tests {
                 0,
                 10,
                 ViewDelta::new(15),
-                bls12381_threshold::fixture::<MinSig, _>
+                bls12381_threshold_vrf::fixture::<MinSig, _>
             ),
             hailstorm::<_, _, Random>(
                 0,
                 10,
                 ViewDelta::new(15),
-                bls12381_threshold::fixture::<MinSig, _>
+                bls12381_threshold_vrf::fixture::<MinSig, _>
             ),
         );
     }
@@ -5720,13 +5746,13 @@ mod tests {
     #[test_group("slow")]
     #[test_traced]
     fn test_twins_threshold_min_pk() {
-        test_twins::<_, _, Random>(bls12381_threshold::fixture::<MinPk, _>);
+        test_twins::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinPk, _>);
     }
 
     #[test_group("slow")]
     #[test_traced]
     fn test_twins_threshold_min_sig() {
-        test_twins::<_, _, Random>(bls12381_threshold::fixture::<MinSig, _>);
+        test_twins::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinSig, _>);
     }
 
     #[test_group("slow")]
@@ -5753,7 +5779,7 @@ mod tests {
                 jitter: Duration::from_millis(150),
                 success_rate: 0.75,
             },
-            bls12381_threshold::fixture::<MinPk, _>,
+            bls12381_threshold_vrf::fixture::<MinPk, _>,
         );
     }
 
@@ -5769,7 +5795,7 @@ mod tests {
                 jitter: Duration::from_millis(150),
                 success_rate: 0.75,
             },
-            bls12381_threshold::fixture::<MinPk, _>,
+            bls12381_threshold_vrf::fixture::<MinPk, _>,
         );
     }
 }

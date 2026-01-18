@@ -17,7 +17,8 @@ use std::{
 };
 
 /// The BLS12-381 threshold signing scheme used in simplex.
-pub type ThresholdScheme<V> = simplex::scheme::bls12381_threshold::Scheme<ed25519::PublicKey, V>;
+pub type ThresholdScheme<V> =
+    simplex::scheme::bls12381_threshold::vrf::Scheme<ed25519::PublicKey, V>;
 
 /// The ED25519 signing scheme used in simplex.
 pub type EdScheme = simplex::scheme::ed25519::Scheme;
