@@ -488,9 +488,9 @@ pub async fn launch_instances(
         return Err(super::Error::UnsupportedInstanceType(instance_type_str));
     }
 
+    // Try each subnet starting at start_idx offset (for round-robin distribution across instances)
     let len = eligible.len();
     let mut last_error = None;
-    // Try each subnet starting at start_idx offset (for round-robin distribution across instances)
     for i in 0..len {
         let (az, subnet_id) = eligible[(start_idx + i) % len];
         let mut attempt = 0u32;
