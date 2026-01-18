@@ -296,7 +296,8 @@ where
         let elector = L::default();
         let engine = simplex::Engine::new(
             self.context
-                .with_label(&format!("consensus_engine_{}", epoch)),
+                .with_label("consensus_engine")
+                .with_tag("epoch", &epoch.to_string()),
             simplex::Config {
                 scheme,
                 elector,
