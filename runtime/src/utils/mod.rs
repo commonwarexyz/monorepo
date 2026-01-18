@@ -3,6 +3,7 @@
 use futures::task::ArcWake;
 use std::{
     any::Any,
+    collections::HashSet,
     future::Future,
     pin::Pin,
     sync::{Arc, Condvar, Mutex},
@@ -266,12 +267,14 @@ pub fn validate_label(label: &str) {
 
 /// Deduplicates HELP and TYPE metadata lines in Prometheus exposition format.
 ///
-/// When the same metric is registered multiple times with different tag values
+/// When the same metric is registered multiple times with different attribute values
 /// (via `sub_registry_with_label`), prometheus_client outputs duplicate HELP/TYPE
 /// lines. This function merges them to produce canonical Prometheus format.
+///
+/// Uses "first wins" semantics: keeps the first HELP/TYPE description encountered
+/// for each metric name and discards subsequent duplicates. If the same metric is
+/// registered with different help texts, only the first one appears in output.
 pub fn deduplicate_metric_metadata(buffer: &str) -> String {
-    use std::collections::HashSet;
-
     let mut seen_help: HashSet<&str> = HashSet::new();
     let mut seen_type: HashSet<&str> = HashSet::new();
     let mut result = String::with_capacity(buffer.len());

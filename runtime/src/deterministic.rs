@@ -1025,11 +1025,10 @@ impl crate::Spawner for Context {
 
         // Spawn the task (we don't care about Model)
         let executor = self.executor();
-        let tags = self.tags.clone();
         let future: BoxFuture<'_, T> = if is_instrumented {
             let span = info_span!(parent: None, "task", name = %label.name());
-            for (key, value) in tags {
-                span.set_attribute(key, value);
+            for (key, value) in &self.tags {
+                span.set_attribute(key.clone(), value.clone());
             }
             f(self).instrument(span).boxed()
         } else {
