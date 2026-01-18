@@ -563,7 +563,7 @@ pub fn select_loop(input: TokenStream) -> TokenStream {
 ///
 /// This attribute macro marks individual items (traits, structs, enums, functions,
 /// type aliases, constants) with their readiness level. It injects a documentation
-/// table showing the readiness level and description.
+/// line linking to the readiness level definitions.
 ///
 /// # Readiness Levels
 ///
@@ -576,7 +576,6 @@ pub fn select_loop(input: TokenStream) -> TokenStream {
 /// # Example
 ///
 /// ```rust
-///
 /// #[ready(2)]
 /// pub trait MyTrait {
 ///     fn do_something(&self);
@@ -604,22 +603,15 @@ pub fn ready(attr: TokenStream, item: TokenStream) -> TokenStream {
             .into();
     }
 
-    let description = match value {
-        0 => "Experimental/little testing",
-        1 => "Decent test coverage, breaking format changes possible",
-        2 => "Wire/storage format stable, decent test coverage",
-        3 => "API stable, wire/storage format stable, decent test coverage",
-        4 => "Production-deployed, audited multiple times",
-        _ => unreachable!(),
-    };
-
     let item2: proc_macro2::TokenStream = item.into();
+    let doc_string = format!(
+        "**Readiness: {}** ([what does this mean?](https://github.com/commonwarexyz/monorepo#readiness))",
+        value
+    );
 
     let expanded = quote! {
         #[doc = ""]
-        #[doc = "| Readiness | Description |"]
-        #[doc = "|-----------|-------------|"]
-        #[doc = concat!("| ", #value, " | ", #description, " |")]
+        #[doc = #doc_string]
         #item2
     };
 

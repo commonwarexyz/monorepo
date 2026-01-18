@@ -28,6 +28,18 @@ _Primitives are designed for deployment in adversarial environments. If you find
 * [storage](./storage/README.md): Persist and retrieve data from an abstract store.
 * [stream](./stream/README.md): Exchange messages over arbitrary transport.
 
+## Readiness
+
+Each public item in the Commonware Library is annotated with a readiness level (0-4) that indicates its maturity. Higher readiness code can only depend on code with equal or higher readiness.
+
+| Level | Description |
+|-------|-------------|
+| 0 | Experimental/little testing |
+| 1 | Decent test coverage, breaking format changes possible with no migration path |
+| 2 | Wire/storage format stable, decent test coverage |
+| 3 | API stable, wire/storage format stable, decent test coverage |
+| 4 | Deployed in production without issue, audited multiple times |
+
 ## Examples
 
 _Examples may include insecure code (i.e. deriving keypairs from an integer arguments) to make them easier to run. Examples are not intended to be used directly in production._
