@@ -171,6 +171,10 @@ where
     fn encode(&self) -> String {
         self.as_present().encode()
     }
+
+    fn with_attribute(&self, key: &str, value: impl std::fmt::Display) -> Self {
+        Self::Present(self.as_present().with_attribute(key, value))
+    }
 }
 
 impl<C> crate::Clock for Cell<C>

@@ -63,6 +63,10 @@ impl Metrics for DummyMetrics {
     }
 
     fn register<N: Into<String>, H: Into<String>>(&self, _: N, _: H, _: impl Metric) {}
+
+    fn with_attribute(&self, _: &str, _: impl std::fmt::Display) -> Self {
+        Self
+    }
 }
 
 fn bench_insert(c: &mut Criterion) {

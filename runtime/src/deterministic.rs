@@ -53,9 +53,10 @@ use crate::{
     },
     telemetry::metrics::task::Label,
     utils::{
+        add_attribute,
         signal::{Signal, Stopper},
         supervision::Tree,
-        Panicker,
+        MetricEncoder, Panicker,
     },
     validate_label, Clock, Error, Execution, Handle, ListenerOf, Metrics as _, Panicked,
     Spawner as _, METRICS_PREFIX,
@@ -86,6 +87,7 @@ use rand_core::CryptoRngCore;
 use rayon::{ThreadPoolBuildError, ThreadPoolBuilder};
 use sha2::{Digest as _, Sha256};
 use std::{
+    borrow::Cow,
     collections::{BTreeMap, BinaryHeap, HashMap, HashSet},
     mem::{replace, take},
     net::{IpAddr, SocketAddr},
@@ -97,6 +99,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tracing::{info_span, trace, Instrument};
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 #[derive(Debug)]
 struct Metrics {
@@ -285,10 +288,13 @@ impl Default for Config {
     }
 }
 
+/// Key for detecting duplicate metric registrations: (metric_name, attributes).
+type MetricKey = (String, Vec<(String, String)>);
+
 /// Deterministic runtime that randomly selects tasks to run based on a seed.
 pub struct Executor {
     registry: Mutex<Registry>,
-    registered_metrics: Mutex<HashSet<String>>,
+    registered_metrics: Mutex<HashSet<MetricKey>>,
     cycle: Duration,
     deadline: Option<SystemTime>,
     metrics: Arc<Metrics>,
@@ -799,6 +805,7 @@ type Storage = MeteredStorage<AuditedStorage<MemStorage>>;
 /// runtime.
 pub struct Context {
     name: String,
+    attributes: Vec<(String, String)>,
     executor: Weak<Executor>,
     network: Arc<Network>,
     storage: Arc<Storage>,
@@ -812,6 +819,7 @@ impl Clone for Context {
         let (child, _) = Tree::child(&self.tree);
         Self {
             name: self.name.clone(),
+            attributes: self.attributes.clone(),
             executor: self.executor.clone(),
             network: self.network.clone(),
             storage: self.storage.clone(),
@@ -865,6 +873,7 @@ impl Context {
         (
             Self {
                 name: String::new(),
+                attributes: Vec::new(),
                 executor: Arc::downgrade(&executor),
                 network: Arc::new(network),
                 storage: Arc::new(storage),
@@ -923,6 +932,7 @@ impl Context {
         (
             Self {
                 name: String::new(),
+                attributes: Vec::new(),
                 executor: Arc::downgrade(&executor),
                 network: Arc::new(network),
                 storage: checkpoint.storage,
@@ -1020,9 +1030,11 @@ impl crate::Spawner for Context {
         // Spawn the task (we don't care about Model)
         let executor = self.executor();
         let future: BoxFuture<'_, T> = if is_instrumented {
-            f(self)
-                .instrument(info_span!(parent: None, "task", name = %label.name()))
-                .boxed()
+            let span = info_span!(parent: None, "task", name = %label.name());
+            for (key, value) in &self.attributes {
+                span.set_attribute(key.clone(), value.clone());
+            }
+            f(self).instrument(span).boxed()
         } else {
             f(self).boxed()
         };
@@ -1120,6 +1132,22 @@ impl crate::Metrics for Context {
         }
     }
 
+    fn with_attribute(&self, key: &str, value: impl std::fmt::Display) -> Self {
+        // Validate label format (must match [a-zA-Z][a-zA-Z0-9_]*)
+        validate_label(key);
+
+        // Add the attribute to the list of attributes
+        let mut attributes = self.attributes.clone();
+        assert!(
+            add_attribute(&mut attributes, key, value),
+            "duplicate attribute key: {key}"
+        );
+        Self {
+            attributes,
+            ..self.clone()
+        }
+    }
+
     fn label(&self) -> String {
         self.name.clone()
     }
@@ -1134,6 +1162,10 @@ impl crate::Metrics for Context {
         executor.auditor.event(b"register", |hasher| {
             hasher.update(name.as_bytes());
             hasher.update(help.as_bytes());
+            for (k, v) in &self.attributes {
+                hasher.update(k.as_bytes());
+                hasher.update(v.as_bytes());
+            }
         });
         let prefixed_name = {
             let prefix = &self.name;
@@ -1144,26 +1176,33 @@ impl crate::Metrics for Context {
             }
         };
 
-        // Register metric (panics if name already registered)
+        // Check for duplicate registration (O(1) lookup)
+        let metric_key = (prefixed_name.clone(), self.attributes.clone());
         let is_new = executor
             .registered_metrics
             .lock()
             .unwrap()
-            .insert(prefixed_name.clone());
-        assert!(is_new, "duplicate metric name: {}", prefixed_name);
-        executor
-            .registry
-            .lock()
-            .unwrap()
-            .register(prefixed_name, help, metric);
+            .insert(metric_key);
+        assert!(
+            is_new,
+            "duplicate metric: {} with attributes {:?}",
+            prefixed_name, self.attributes
+        );
+
+        // Apply attributes to the registry (in sorted order)
+        let mut registry = executor.registry.lock().unwrap();
+        let sub_registry = self.attributes.iter().fold(&mut *registry, |reg, (k, v)| {
+            reg.sub_registry_with_label((Cow::Owned(k.clone()), Cow::Owned(v.clone())))
+        });
+        sub_registry.register(prefixed_name, help, metric);
     }
 
     fn encode(&self) -> String {
         let executor = self.executor();
         executor.auditor.event(b"encode", |_| {});
-        let mut buffer = String::new();
-        encode(&mut buffer, &executor.registry.lock().unwrap()).expect("encoding failed");
-        buffer
+        let mut encoder = MetricEncoder::new();
+        encode(&mut encoder, &executor.registry.lock().unwrap()).expect("encoding failed");
+        encoder.into_string()
     }
 }
 
@@ -1923,6 +1962,18 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             context.with_label(METRICS_PREFIX);
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "duplicate attribute key: epoch")]
+    fn test_metrics_duplicate_attribute_panics() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let _ = context
+                .with_label("test")
+                .with_attribute("epoch", "old")
+                .with_attribute("epoch", "new");
         });
     }
 }

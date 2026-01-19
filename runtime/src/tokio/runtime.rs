@@ -17,7 +17,7 @@ use crate::{
     signal::Signal,
     storage::metered::Storage as MeteredStorage,
     telemetry::metrics::task::Label,
-    utils::{signal::Stopper, supervision::Tree, Panicker},
+    utils::{add_attribute, signal::Stopper, supervision::Tree, MetricEncoder, Panicker},
     Clock, Error, Execution, Handle, Metrics as _, SinkOf, Spawner as _, StreamOf, METRICS_PREFIX,
 };
 use commonware_macros::select;
@@ -32,6 +32,7 @@ use prometheus_client::{
 use rand::{rngs::OsRng, CryptoRng, RngCore};
 use rayon::{ThreadPoolBuildError, ThreadPoolBuilder};
 use std::{
+    borrow::Cow,
     env,
     future::Future,
     net::{IpAddr, SocketAddr},
@@ -43,6 +44,7 @@ use std::{
 };
 use tokio::runtime::{Builder, Runtime};
 use tracing::{info_span, Instrument};
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 #[cfg(feature = "iouring-network")]
 const IOURING_NETWORK_SIZE: u32 = 1024;
@@ -346,6 +348,7 @@ impl crate::Runner for Runner {
         let context = Context {
             storage,
             name: label.name(),
+            attributes: Vec::new(),
             executor: executor.clone(),
             network,
             tree: Tree::root(),
@@ -380,6 +383,7 @@ cfg_if::cfg_if! {
 /// runtime.
 pub struct Context {
     name: String,
+    attributes: Vec<(String, String)>,
     executor: Arc<Executor>,
     storage: Storage,
     network: Network,
@@ -393,6 +397,7 @@ impl Clone for Context {
         let (child, _) = Tree::child(&self.tree);
         Self {
             name: self.name.clone(),
+            attributes: self.attributes.clone(),
             executor: self.executor.clone(),
             storage: self.storage.clone(),
             network: self.network.clone(),
@@ -451,9 +456,11 @@ impl crate::Spawner for Context {
         // Spawn the task
         let executor = self.executor.clone();
         let future: BoxFuture<'_, T> = if is_instrumented {
-            f(self)
-                .instrument(info_span!("task", name = %label.name()))
-                .boxed()
+            let span = info_span!("task", name = %label.name());
+            for (key, value) in &self.attributes {
+                span.set_attribute(key.clone(), value.clone());
+            }
+            f(self).instrument(span).boxed()
         } else {
             f(self).boxed()
         };
@@ -567,17 +574,29 @@ impl crate::Metrics for Context {
                 format!("{}_{}", *prefix, name)
             }
         };
-        self.executor
-            .registry
-            .lock()
-            .unwrap()
-            .register(prefixed_name, help, metric)
+
+        // Apply attributes to the registry (in sorted order)
+        let mut registry = self.executor.registry.lock().unwrap();
+        let sub_registry = self.attributes.iter().fold(&mut *registry, |reg, (k, v)| {
+            reg.sub_registry_with_label((Cow::Owned(k.clone()), Cow::Owned(v.clone())))
+        });
+        sub_registry.register(prefixed_name, help, metric);
     }
 
     fn encode(&self) -> String {
-        let mut buffer = String::new();
-        encode(&mut buffer, &self.executor.registry.lock().unwrap()).expect("encoding failed");
-        buffer
+        let mut encoder = MetricEncoder::new();
+        encode(&mut encoder, &self.executor.registry.lock().unwrap()).expect("encoding failed");
+        encoder.into_string()
+    }
+
+    fn with_attribute(&self, key: &str, value: impl std::fmt::Display) -> Self {
+        // Add the attribute to the list of attributes
+        let mut attributes = self.attributes.clone();
+        add_attribute(&mut attributes, key, value);
+        Self {
+            attributes,
+            ..self.clone()
+        }
     }
 }
 

@@ -1024,7 +1024,8 @@ impl<
         };
         let journal = Journal::<_, Node<C::PublicKey, P::Scheme, D>>::init(
             self.context
-                .with_label(&format!("journal_{sequencer}"))
+                .with_label("journal")
+                .with_attribute("sequencer", sequencer)
                 .into_present(),
             cfg,
         )
