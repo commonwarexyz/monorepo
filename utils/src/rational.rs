@@ -1,9 +1,87 @@
 //! Utilities for working with `num_rational::BigRational`.
 
-use num_bigint::BigInt;
+use num_bigint::{BigInt, BigUint};
 use num_integer::Integer;
 use num_rational::BigRational;
 use num_traits::{One, ToPrimitive, Zero};
+
+/// Computes log2 of a rational number with specified binary precision.
+///
+/// Returns `(numerator, has_remainder)` where the result is `numerator / 2^binary_digits`
+/// and `has_remainder` indicates whether there's additional precision beyond what was computed.
+fn log2(numer: BigUint, denom: BigUint, binary_digits: usize) -> (BigInt, bool) {
+    // Compute the integer part of log2(numer/denom) by comparing bit lengths.
+    // Since log2(numer/denom) = log2(numer) - log2(denom), and bits() gives us
+    // floor(log2(x)) + 1, we can compute the integer part directly.
+    let numer_bits = numer.bits();
+    let denom_bits = denom.bits();
+    let mut integer_part = numer_bits as i128 - denom_bits as i128;
+
+    // Align the most significant bits of numerator and denominator to bring
+    // the ratio into the range [1, 2). By shifting both values to have the same bit
+    // length, we normalize the ratio in a single operation.
+    let mut normalized_numer = numer;
+    if denom_bits > numer_bits {
+        normalized_numer <<= denom_bits - numer_bits;
+    }
+    let mut normalized_denom = denom;
+    if numer_bits > denom_bits {
+        normalized_denom <<= numer_bits - denom_bits;
+    }
+
+    // After alignment, we may need one additional shift to ensure normalized value is in [1, 2).
+    if normalized_numer < normalized_denom {
+        normalized_numer <<= 1;
+        integer_part -= 1;
+    }
+
+    // Handle the special case where the value is exactly a power of 2.
+    // In this case, log2(x) is exact and has no fractional component.
+    if normalized_numer == normalized_denom {
+        return (BigInt::from(integer_part) << binary_digits, false);
+    }
+
+    // Extract binary fractional digits using the square-and-compare method.
+    // At this point, normalized is in (1, 2), so log2(normalized) is in (0, 1).
+    // We use integer-only arithmetic to avoid BigRational division overhead:
+    // Instead of squaring the rational and comparing to 2, we square the numerator
+    // and denominator separately and check if numer^2 >= 2 * denom^2.
+    let mut fractional_bits = BigInt::zero();
+    let one = BigInt::one();
+
+    for _ in 0..binary_digits {
+        // Square both numerator and denominator to shift the next binary digit into position.
+        let numer_squared = &normalized_numer * &normalized_numer;
+        let denom_squared = &normalized_denom * &normalized_denom;
+
+        // Left-shift the fractional bits accumulator to make room for the new bit.
+        fractional_bits <<= 1;
+
+        // If squared value >= 2, the next binary digit is 1.
+        // We renormalize by dividing by 2, which is equivalent to multiplying the denominator by 2.
+        let two_denom_squared = &denom_squared << 1;
+        if numer_squared >= two_denom_squared {
+            fractional_bits |= &one;
+            normalized_numer = numer_squared;
+            normalized_denom = two_denom_squared;
+        } else {
+            normalized_numer = numer_squared;
+            normalized_denom = denom_squared;
+        }
+    }
+
+    // Combine integer and fractional parts.
+    // We return a single rational number with denominator 2^binary_digits.
+    // By left-shifting the integer part, we convert it to the same "units" as fractional_bits,
+    // allowing us to add them: numerator = (integer_part * 2^binary_digits) + fractional_bits.
+    // This represents: integer_part + fractional_bits / (2^binary_digits)
+    let numerator = (BigInt::from(integer_part) << binary_digits) + fractional_bits;
+
+    // has_remainder is true if there's any leftover mass in the normalized value
+    // after extracting all digits. This happens when normalized_numer > normalized_denom.
+    let has_remainder = normalized_numer > normalized_denom;
+    (numerator, has_remainder)
+}
 
 /// Extension trait adding convenience constructors for [`BigRational`].
 pub trait BigRationalExt {
@@ -62,6 +140,29 @@ pub trait BigRationalExt {
     /// assert!(result <= BigRational::from_u64(2));
     /// ```
     fn log2_ceil(&self, binary_digits: usize) -> BigRational;
+
+    /// Computes the floor of log2 of this rational number with specified binary precision.
+    ///
+    /// Returns log2(x) rounded down to the nearest value representable with `binary_digits`
+    /// fractional bits in binary representation.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the rational number is non-positive.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use num_rational::BigRational;
+    /// use commonware_utils::rational::BigRationalExt;
+    ///
+    /// let x = BigRational::from_frac_u64(3, 1); // 3
+    /// let result = x.log2_floor(4);
+    /// // log2(3) ≈ 1.585, the algorithm computes a floor approximation
+    /// assert!(result >= BigRational::from_u64(1));
+    /// assert!(result <= BigRational::from_u64(2));
+    /// ```
+    fn log2_floor(&self, binary_digits: usize) -> BigRational;
 }
 
 impl BigRationalExt for BigRational {
@@ -112,89 +213,25 @@ impl BigRationalExt for BigRational {
             panic!("log2 undefined for non-positive numbers");
         }
 
-        // Step 1: Extract numerator and denominator as unsigned integers for efficient computation.
         let numer = self.numer().to_biguint().expect("positive");
         let denom = self.denom().to_biguint().expect("positive");
-
-        // Step 2: Compute the integer part of log2(numer/denom) by comparing bit lengths.
-        // Since log2(numer/denom) = log2(numer) - log2(denom), and bits() gives us
-        // floor(log2(x)) + 1, we can compute the integer part directly.
-        let numer_bits = numer.bits();
-        let denom_bits = denom.bits();
-        let mut integer_part = numer_bits as i128 - denom_bits as i128;
-
-        // Step 3: Align the most significant bits of numerator and denominator to bring
-        // the ratio into the range [1, 2). By shifting both values to have the same bit
-        // length, we normalize the ratio in a single operation.
-        let mut normalized_numer = numer;
-        if denom_bits > numer_bits {
-            normalized_numer <<= denom_bits - numer_bits;
+        let (mut numerator, has_remainder) = log2(numer, denom, binary_digits);
+        if has_remainder {
+            numerator += 1;
         }
-        let mut normalized_denom = denom;
-        if numer_bits > denom_bits {
-            normalized_denom <<= numer_bits - denom_bits;
+        let denominator = BigInt::one() << binary_digits;
+        Self::new(numerator, denominator)
+    }
+
+    fn log2_floor(&self, binary_digits: usize) -> BigRational {
+        if self <= &Self::zero() {
+            panic!("log2 undefined for non-positive numbers");
         }
 
-        // After alignment, we may need one additional shift to ensure normalized value is in [1, 2).
-        if normalized_numer < normalized_denom {
-            normalized_numer <<= 1;
-            integer_part -= 1;
-        }
-        assert!(
-            normalized_numer >= normalized_denom && normalized_numer < (&normalized_denom << 1)
-        );
-
-        // Step 4: Handle the special case where the value is exactly a power of 2.
-        // In this case, log2(x) is exact and has no fractional component.
-        if normalized_numer == normalized_denom {
-            let numerator = BigInt::from(integer_part) << binary_digits;
-            let denominator = BigInt::one() << binary_digits;
-            return Self::new(numerator, denominator);
-        }
-
-        // Step 5: Extract binary fractional digits using the square-and-compare method.
-        // At this point, normalized is in (1, 2), so log2(normalized) is in (0, 1).
-        // We use integer-only arithmetic to avoid BigRational division overhead:
-        // Instead of squaring the rational and comparing to 2, we square the numerator
-        // and denominator separately and check if numer^2 >= 2 * denom^2.
-        let mut fractional_bits = BigInt::zero();
-        let one = BigInt::one();
-
-        for _ in 0..binary_digits {
-            // Square both numerator and denominator to shift the next binary digit into position.
-            let numer_squared = &normalized_numer * &normalized_numer;
-            let denom_squared = &normalized_denom * &normalized_denom;
-
-            // Left-shift the fractional bits accumulator to make room for the new bit.
-            fractional_bits <<= 1;
-
-            // If squared value >= 2, the next binary digit is 1.
-            // We renormalize by dividing by 2, which is equivalent to multiplying the denominator by 2.
-            let two_denom_squared = &denom_squared << 1;
-            if numer_squared >= two_denom_squared {
-                fractional_bits |= &one;
-                normalized_numer = numer_squared;
-                normalized_denom = two_denom_squared;
-            } else {
-                normalized_numer = numer_squared;
-                normalized_denom = denom_squared;
-            }
-        }
-
-        // Step 6: Combine integer and fractional parts, then apply ceiling operation.
-        // We need to return a single rational number with denominator 2^binary_digits.
-        // By left-shifting the integer part, we convert it to the same "units" as fractional_bits,
-        // allowing us to add them: numerator = (integer_part * 2^binary_digits) + fractional_bits.
-        // This represents: integer_part + fractional_bits / (2^binary_digits)
-        let mut numerator = (BigInt::from(integer_part) << binary_digits) + fractional_bits;
-
-        // If there's any leftover mass in the normalized value after extracting all digits,
-        // we need to round up (ceiling operation). This happens when normalized_numer > normalized_denom.
-        if normalized_numer > normalized_denom {
-            numerator += &one;
-        }
-
-        let denominator = one << binary_digits;
+        let numer = self.numer().to_biguint().expect("positive");
+        let denom = self.denom().to_biguint().expect("positive");
+        let (numerator, _) = log2(numer, denom, binary_digits);
+        let denominator = BigInt::one() << binary_digits;
         Self::new(numerator, denominator)
     }
 }
@@ -426,5 +463,215 @@ mod tests {
         let den = BigInt::from(16u32) << 30;
         let x = BigRational::new(num, den);
         assert_eq!(x.log2_ceil(8), BigRational::from_frac_u64(23, 256));
+    }
+
+    #[test]
+    #[should_panic(expected = "log2 undefined for non-positive numbers")]
+    fn log2_floor_negative_panics() {
+        <BigRational as num_traits::FromPrimitive>::from_i64(-1)
+            .unwrap()
+            .log2_floor(8);
+    }
+
+    #[test]
+    fn log2_floor_exact_powers_of_two() {
+        // Test exact powers of 2: log2(2^n) = n (same as ceil)
+        let value = BigRational::from_u64(1); // 2^0
+        assert_eq!(value.log2_floor(4), BigRational::from_u64(0));
+
+        let value = BigRational::from_u64(2); // 2^1
+        assert_eq!(value.log2_floor(4), BigRational::from_u64(1));
+
+        let value = BigRational::from_u64(8); // 2^3
+        assert_eq!(value.log2_floor(4), BigRational::from_u64(3));
+
+        let value = BigRational::from_u64(1024); // 2^10
+        assert_eq!(value.log2_floor(4), BigRational::from_u64(10));
+    }
+
+    #[test]
+    fn log2_floor_fractional_powers_of_two() {
+        // Test fractional powers of 2: log2(1/2) = -1, log2(1/4) = -2 (same as ceil)
+        let value = BigRational::from_frac_u64(1, 2); // 2^(-1)
+        let result = value.log2_floor(4);
+        assert_eq!(result, BigRational::from_integer(BigInt::from(-1)));
+
+        let value = BigRational::from_frac_u64(1, 4); // 2^(-2)
+        let result = value.log2_floor(4);
+        assert_eq!(result, BigRational::from_integer(BigInt::from(-2)));
+
+        // log2(3/8) ≈ -1.415, floor(-1.415 * 16) / 16 = -23/16
+        let value = BigRational::from_frac_u64(3, 8);
+        let result = value.log2_floor(4);
+        assert_eq!(
+            result,
+            BigRational::new(BigInt::from(-23), BigInt::from(16))
+        );
+    }
+
+    #[test]
+    fn log2_floor_simple_values() {
+        // log2(3) ≈ 1.585, with binary_digits=0 we get floor(1.585) = 1
+        let value = BigRational::from_u64(3);
+        let result = value.log2_floor(0);
+        assert_eq!(result, BigRational::from_u64(1));
+
+        // log2(5) ≈ 2.322, with binary_digits=0 we get floor(2.322) = 2
+        let value = BigRational::from_u64(5);
+        let result = value.log2_floor(0);
+        assert_eq!(result, BigRational::from_u64(2));
+
+        // With 4 bits precision
+        // log2(3) ≈ 1.585, floor(1.585 * 16) / 16 = 25/16
+        let value = BigRational::from_u64(3);
+        let result = value.log2_floor(4);
+        assert_eq!(result, BigRational::from_frac_u64(25, 16));
+    }
+
+    #[test]
+    fn log2_floor_rational_values() {
+        // log2(3/2) ≈ 0.585, floor(0.585 * 16) / 16 = 9/16
+        let value = BigRational::from_frac_u64(3, 2);
+        let result = value.log2_floor(4);
+        assert_eq!(result, BigRational::from_frac_u64(9, 16));
+
+        // log2(7/4) ≈ 0.807, floor(0.807 * 16) / 16 = 12/16
+        let value = BigRational::from_frac_u64(7, 4);
+        let result = value.log2_floor(4);
+        assert_eq!(result, BigRational::from_frac_u64(12, 16));
+    }
+
+    #[test]
+    fn log2_floor_different_precisions() {
+        let value = BigRational::from_u64(3);
+
+        // Test different precisions give reasonable results
+        let result0 = value.log2_floor(0);
+        let result1 = value.log2_floor(1);
+        let result4 = value.log2_floor(4);
+        let result8 = value.log2_floor(8);
+
+        assert_eq!(result0, BigRational::from_u64(1));
+        assert_eq!(result1, BigRational::from_frac_u64(3, 2));
+        assert_eq!(result4, BigRational::from_frac_u64(25, 16));
+        assert_eq!(
+            result8,
+            BigRational::new(BigInt::from(405), BigInt::from(256))
+        );
+    }
+
+    #[test]
+    fn log2_floor_large_values() {
+        // log2(1000) ≈ 9.966, floor = 9
+        let value = BigRational::from_u64(1000);
+        let result = value.log2_floor(4);
+        assert_eq!(result, BigRational::from_frac_u64(159, 16));
+    }
+
+    #[test]
+    fn log2_floor_very_small_values() {
+        // log2(1/1000) ≈ -9.966
+        let value = BigRational::from_frac_u64(1, 1000);
+        let result = value.log2_floor(4);
+        assert_eq!(
+            result,
+            BigRational::new(BigInt::from(-160), BigInt::from(16))
+        );
+    }
+
+    #[test]
+    fn log2_floor_edge_cases() {
+        // -- Just above a power of two
+        // log2(17/16) ≈ 0.087462, k=8 → floor(0.087462 * 256) = 22 → 22/256
+        let x = BigRational::from_frac_u64(17, 16);
+        assert_eq!(x.log2_floor(8), BigRational::from_frac_u64(22, 256));
+
+        // log2(129/128) ≈ 0.011227, k=8 → floor(0.011227 * 256) = 2 → 2/256
+        let x = BigRational::from_frac_u64(129, 128);
+        assert_eq!(x.log2_floor(8), BigRational::from_frac_u64(2, 256));
+
+        // log2(33/32) ≈ 0.044394, k=10 → floor(0.044394 * 1024) = 45 → 45/1024
+        let x = BigRational::from_frac_u64(33, 32);
+        assert_eq!(x.log2_floor(10), BigRational::from_frac_u64(45, 1024));
+
+        // -- Just below a power of two (negative, but tiny in magnitude)
+        // log2(255/256) ≈ -0.00565, k=8 → floor(-0.00565 * 256) = -2 → -2/256
+        let x = BigRational::from_frac_u64(255, 256);
+        assert_eq!(
+            x.log2_floor(8),
+            BigRational::new((-2).into(), 256u32.into())
+        );
+
+        // log2(1023/1024) ≈ -0.00141, k=9 → floor(-0.00141 * 512) = -1 → -1/512
+        let x = BigRational::from_frac_u64(1023, 1024);
+        assert_eq!(
+            x.log2_floor(9),
+            BigRational::new((-1).into(), 512u32.into())
+        );
+
+        // -- k = 0 (integer floor of log2)
+        // log2(3/2) ≈ 0.585 ⇒ floor = 0
+        let x = BigRational::from_frac_u64(3, 2);
+        assert_eq!(x.log2_floor(0), BigRational::from_integer(0.into()));
+
+        // log2(3/4) ≈ -0.415 ⇒ floor = -1
+        let x = BigRational::from_frac_u64(3, 4);
+        assert_eq!(x.log2_floor(0), BigRational::from_integer((-1).into()));
+
+        // -- x < 1 with fractional bits (negative dyadic output)
+        // log2(3/4) ≈ -0.415, k=4 → floor(-0.415 * 16) = -7 → -7/16
+        let x = BigRational::from_frac_u64(3, 4);
+        assert_eq!(x.log2_floor(4), BigRational::new((-7).into(), 16u32.into()));
+
+        // -- Monotonic with k: increasing k refines the dyadic downwards
+        // For 257/256: k=8 → floor(0.00563*256) = 1 → 1/256
+        //              k=9 → floor(0.00563*512) = 2 → 2/512
+        let x = BigRational::from_frac_u64(257, 256);
+        assert_eq!(x.log2_floor(8), BigRational::new(1.into(), 256u32.into()));
+        assert_eq!(x.log2_floor(9), BigRational::new(2.into(), 512u32.into()));
+
+        // -- Scale invariance (multiply numerator and denominator by same factor, result unchanged)
+        // (17/16) * (2^30 / 2^30) has the same log2, the dyadic result should match 22/256 at k=8.
+        let num = BigInt::from(17u32) << 30;
+        let den = BigInt::from(16u32) << 30;
+        let x = BigRational::new(num, den);
+        assert_eq!(x.log2_floor(8), BigRational::from_frac_u64(22, 256));
+    }
+
+    #[test]
+    fn log2_floor_ceil_relationship() {
+        // For any non-power-of-2 value, floor < ceil
+        // For exact powers of 2, floor == ceil
+        let test_values = [
+            BigRational::from_u64(3),
+            BigRational::from_u64(5),
+            BigRational::from_frac_u64(3, 2),
+            BigRational::from_frac_u64(7, 8),
+            BigRational::from_frac_u64(1, 3),
+        ];
+
+        for value in test_values {
+            let floor = value.log2_floor(8);
+            let ceil = value.log2_ceil(8);
+            assert!(
+                floor < ceil,
+                "floor should be less than ceil for non-power-of-2"
+            );
+        }
+
+        // Exact powers of 2
+        let powers_of_two = [
+            BigRational::from_u64(1),
+            BigRational::from_u64(2),
+            BigRational::from_u64(4),
+            BigRational::from_frac_u64(1, 2),
+            BigRational::from_frac_u64(1, 4),
+        ];
+
+        for value in powers_of_two {
+            let floor = value.log2_floor(8);
+            let ceil = value.log2_ceil(8);
+            assert_eq!(floor, ceil, "floor should equal ceil for power of 2");
+        }
     }
 }

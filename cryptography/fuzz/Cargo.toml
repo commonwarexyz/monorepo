@@ -16,9 +16,10 @@ commonware-codec = { workspace = true, features = ["std"] }
 commonware-cryptography = { workspace = true, features = ["std", "arbitrary"] }
 commonware-math.workspace = true
 commonware-parallel = { workspace = true, features = ["std"] }
-commonware-utils = { workspace = true, features = ["std", "arbitrary"] }
+commonware-utils = { workspace = true, features = ["std"] }
 ed25519-zebra.workspace = true
 libfuzzer-sys.workspace = true
+num-rational.workspace = true
 p256 = { workspace = true, features = ["ecdsa"] }
 rand.workspace = true
 sha2.workspace = true
