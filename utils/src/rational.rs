@@ -503,7 +503,10 @@ mod tests {
         // log2(3/8) ≈ -1.415, floor(-1.415 * 16) / 16 = -23/16
         let value = BigRational::from_frac_u64(3, 8);
         let result = value.log2_floor(4);
-        assert_eq!(result, BigRational::new(BigInt::from(-23), BigInt::from(16)));
+        assert_eq!(
+            result,
+            BigRational::new(BigInt::from(-23), BigInt::from(16))
+        );
     }
 
     #[test]
@@ -594,11 +597,17 @@ mod tests {
         // -- Just below a power of two (negative, but tiny in magnitude)
         // log2(255/256) ≈ -0.00565, k=8 → floor(-0.00565 * 256) = -2 → -2/256
         let x = BigRational::from_frac_u64(255, 256);
-        assert_eq!(x.log2_floor(8), BigRational::new((-2).into(), 256u32.into()));
+        assert_eq!(
+            x.log2_floor(8),
+            BigRational::new((-2).into(), 256u32.into())
+        );
 
         // log2(1023/1024) ≈ -0.00141, k=9 → floor(-0.00141 * 512) = -1 → -1/512
         let x = BigRational::from_frac_u64(1023, 1024);
-        assert_eq!(x.log2_floor(9), BigRational::new((-1).into(), 512u32.into()));
+        assert_eq!(
+            x.log2_floor(9),
+            BigRational::new((-1).into(), 512u32.into())
+        );
 
         // -- k = 0 (integer floor of log2)
         // log2(3/2) ≈ 0.585 ⇒ floor = 0
@@ -644,7 +653,10 @@ mod tests {
         for value in test_values {
             let floor = value.log2_floor(8);
             let ceil = value.log2_ceil(8);
-            assert!(floor < ceil, "floor should be less than ceil for non-power-of-2");
+            assert!(
+                floor < ceil,
+                "floor should be less than ceil for non-power-of-2"
+            );
         }
 
         // Exact powers of 2
