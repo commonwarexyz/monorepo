@@ -7,13 +7,11 @@
 //! [lookup] operates under the assumption that peer addresses are known in advance,
 //! and that they can be looked up by their identifiers.
 
+use commonware_utils::ready_mod;
+
 mod data;
-#[cfg(not(min_readiness_3))]
-#[cfg(not(min_readiness_4))]
-pub mod discovery;
-#[cfg(not(min_readiness_3))]
-#[cfg(not(min_readiness_4))]
-pub mod lookup;
+ready_mod!(2, pub mod discovery);
+ready_mod!(2, pub mod lookup);
 mod mailbox;
 pub use mailbox::{Mailbox, UnboundedMailbox};
 mod relay;

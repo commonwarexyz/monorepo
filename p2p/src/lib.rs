@@ -12,16 +12,13 @@
 
 use bytes::{Buf, Bytes};
 use commonware_cryptography::PublicKey;
+use commonware_utils::ready_mod;
 use commonware_utils::ordered::Set;
 use futures::channel::mpsc;
 use std::{error::Error as StdError, fmt::Debug, future::Future, time::SystemTime};
 
 pub mod authenticated;
-#[cfg(not(min_readiness_1))]
-#[cfg(not(min_readiness_2))]
-#[cfg(not(min_readiness_3))]
-#[cfg(not(min_readiness_4))]
-pub mod simulated;
+ready_mod!(0, pub mod simulated);
 pub mod types;
 pub mod utils;
 
