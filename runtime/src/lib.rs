@@ -48,6 +48,8 @@ cfg_if::cfg_if! {
         pub mod benchmarks;
     }
 }
+pub mod iobuf;
+pub use iobuf::{IoBuf, IoBufMut, IoBufs};
 mod network;
 mod process;
 mod storage;
