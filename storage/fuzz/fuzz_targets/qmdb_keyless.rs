@@ -2,7 +2,7 @@
 
 use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
-use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
+use commonware_runtime::{buffer::PoolRef, deterministic, Metrics, Runner};
 use commonware_storage::{
     mmr::{hasher::Standard, Location},
     qmdb::{
@@ -148,7 +148,7 @@ fn fuzz(input: FuzzInput) {
             .await
             .expect("Failed to init keyless db")
             .into_mutable();
-
+        let mut restarts = 0usize;
 
         for op in &input.ops {
             match op {
@@ -262,10 +262,11 @@ fn fuzz(input: FuzzInput) {
                 Operation::SimulateFailure{} => {
                     drop(db);
 
-                    db = CleanDb::init(context.clone(), test_config("keyless_fuzz_test"))
+                    db = CleanDb::init(context.with_label("db").with_attribute("instance", restarts), test_config("keyless_fuzz_test"))
                         .await
                         .expect("Failed to init keyless db")
                         .into_mutable();
+                    restarts += 1;
                 }
             }
         }

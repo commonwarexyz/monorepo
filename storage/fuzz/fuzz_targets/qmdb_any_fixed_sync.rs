@@ -2,7 +2,7 @@
 
 use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
-use commonware_runtime::{buffer::PoolRef, deterministic, Runner, RwLock};
+use commonware_runtime::{buffer::PoolRef, deterministic, Metrics, Runner, RwLock};
 use commonware_storage::{
     qmdb::{
         any::{
@@ -152,6 +152,7 @@ fn fuzz(mut input: FuzzInput) {
             .await
             .expect("Failed to init source db")
             .into_mutable();
+        let mut restarts = 0usize;
 
         let mut sync_id = 0;
 
@@ -236,10 +237,16 @@ fn fuzz(mut input: FuzzInput) {
                     // Simulate unclean shutdown by dropping the db without committing
                     drop(db);
 
-                    db = FixedDb::init(context.clone(), test_config(TEST_NAME))
-                        .await
-                        .expect("Failed to init source db")
-                        .into_mutable();
+                    db = FixedDb::init(
+                        context
+                            .with_label("db")
+                            .with_attribute("instance", restarts),
+                        test_config(TEST_NAME),
+                    )
+                    .await
+                    .expect("Failed to init source db")
+                    .into_mutable();
+                    restarts += 1;
                 }
             }
         }
