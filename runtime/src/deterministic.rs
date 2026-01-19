@@ -53,7 +53,6 @@ use crate::{
     },
     telemetry::metrics::task::Label,
     utils::{
-        assert_unique_metrics,
         signal::{Signal, Stopper},
         supervision::Tree,
         MetricEncoder, Panicker,
@@ -88,7 +87,7 @@ use rayon::{ThreadPoolBuildError, ThreadPoolBuilder};
 use sha2::{Digest as _, Sha256};
 use std::{
     borrow::Cow,
-    collections::{BTreeMap, BinaryHeap, HashMap},
+    collections::{BTreeMap, BinaryHeap, HashMap, HashSet},
     mem::{replace, take},
     net::{IpAddr, SocketAddr},
     num::NonZeroUsize,
@@ -291,6 +290,7 @@ impl Default for Config {
 /// Deterministic runtime that randomly selects tasks to run based on a seed.
 pub struct Executor {
     registry: Mutex<Registry>,
+    registered_metrics: Mutex<HashSet<String>>,
     cycle: Duration,
     deadline: Option<SystemTime>,
     metrics: Arc<Metrics>,
@@ -852,6 +852,7 @@ impl Context {
 
         let executor = Arc::new(Executor {
             registry: Mutex::new(registry),
+            registered_metrics: Mutex::new(HashSet::new()),
             cycle: cfg.cycle,
             deadline,
             metrics,
@@ -917,6 +918,7 @@ impl Context {
 
             // New state for the new runtime
             registry: Mutex::new(registry),
+            registered_metrics: Mutex::new(HashSet::new()),
             metrics,
             tasks: Arc::new(Tasks::new()),
             sleeping: Mutex::new(BinaryHeap::new()),
@@ -1173,17 +1175,32 @@ impl crate::Metrics for Context {
             }
         };
 
+        // Build a unique key including attributes for duplicate detection
+        let metric_key = if self.attributes.is_empty() {
+            prefixed_name.clone()
+        } else {
+            let attrs: Vec<_> = self
+                .attributes
+                .iter()
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect();
+            format!("{}{{{}}}", prefixed_name, attrs.join(","))
+        };
+
+        // Check for duplicate registration (O(1) lookup)
+        let is_new = executor
+            .registered_metrics
+            .lock()
+            .unwrap()
+            .insert(metric_key.clone());
+        assert!(is_new, "duplicate metric: {}", metric_key);
+
         // Apply attributes via sub_registry_with_label and register
         let mut registry = executor.registry.lock().unwrap();
         let sub_registry = self.attributes.iter().fold(&mut *registry, |reg, (k, v)| {
             reg.sub_registry_with_label((Cow::Owned(k.clone()), Cow::Owned(v.clone())))
         });
         sub_registry.register(prefixed_name, help, metric);
-
-        // Check for duplicate data lines in encoded output
-        let mut buffer = String::new();
-        encode(&mut buffer, &registry).expect("encoding failed");
-        assert_unique_metrics(&buffer);
     }
 
     fn encode(&self) -> String {

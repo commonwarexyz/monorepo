@@ -324,13 +324,13 @@ impl Default for MetricEncoder {
 
 impl std::fmt::Write for MetricEncoder {
     fn write_str(&mut self, s: &str) -> std::fmt::Result {
-        for ch in s.chars() {
-            if ch == '\n' {
-                self.flush_line();
-            } else {
-                self.line_buffer.push(ch);
-            }
+        let mut remaining = s;
+        while let Some(pos) = remaining.find('\n') {
+            self.line_buffer.push_str(&remaining[..pos]);
+            self.flush_line();
+            remaining = &remaining[pos + 1..];
         }
+        self.line_buffer.push_str(remaining);
         Ok(())
     }
 }
