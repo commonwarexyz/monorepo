@@ -378,27 +378,11 @@ impl<E: Clock + Storage + Metrics, K: Span, V: Codec> Metadata<E, K, V> {
             for key in target.modified.iter() {
                 let info = target.lengths.get(key).expect("key must exist");
                 let new_value = self.map.get(key).expect("key must exist");
-                if info.length == new_value.encode_size() {
-                    // Overwrite existing value
-                    let encoded = new_value.encode_mut();
-                    target.data[info.start..info.start + info.length].copy_from_slice(&encoded);
-                    writes.push(target.blob.write_at(encoded, info.start as u64));
-                } else {
-                    // Rewrite all
-                    overwrite = false;
-                    break;
-                }
+                let encoded = new_value.encode_mut();
+                target.data[info.start..info.start + info.length].copy_from_slice(&encoded);
+                writes.push(target.blob.write_at(encoded, info.start as u64));
             }
-        } else {
-            // If the key order has changed, we need to rewrite all data
-            overwrite = false;
-        }
 
-        // Clear modified keys to avoid writing the same data
-        target.modified.clear();
-
-        // Overwrite existing data
-        if overwrite {
             // Update version
             let version = next_version.to_be_bytes();
             target.data[0..8].copy_from_slice(&version);
@@ -421,7 +405,37 @@ impl<E: Clock + Storage + Metrics, K: Span, V: Codec> Metadata<E, K, V> {
             // Update state
             target.version = next_version;
             self.sync_overwrites.inc();
-            return Ok(());
+        } else {
+            // Rewrite path: rewrite the entire blob
+            let target = &mut state.blobs[target_cursor];
+            target.modified.clear();
+
+            // Build new data
+            let mut lengths = HashMap::new();
+            let mut next_data = Vec::with_capacity(target.data.len());
+            next_data.put_u64(next_version);
+            for (key, value) in &self.map {
+                key.write(&mut next_data);
+                let start = next_data.len();
+                value.write(&mut next_data);
+                lengths.insert(key.clone(), Info::new(start, value.encode_size()));
+            }
+            next_data.put_u32(Crc32::checksum(&next_data[..]));
+
+            // Persist changes
+            let old_data_len = target.data.len();
+            target.blob.write_at(next_data.clone(), 0).await?;
+            if next_data.len() < old_data_len {
+                target.blob.resize(next_data.len() as u64).await?;
+            }
+            target.blob.sync().await?;
+
+            // Update state
+            target.version = next_version;
+            target.lengths = lengths;
+            target.data = next_data;
+
+            self.sync_rewrites.inc();
         }
 
         // Since we can't overwrite in place, we rewrite the entire blob.
