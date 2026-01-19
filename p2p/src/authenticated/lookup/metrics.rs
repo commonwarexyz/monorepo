@@ -1,4 +1,5 @@
 use crate::Channel;
+use commonware_macros::ready;
 use commonware_utils::Array;
 use prometheus_client::encoding::{EncodeLabelSet, EncodeLabelValue, LabelValueEncoder};
 use std::fmt::Write;
@@ -33,6 +34,7 @@ impl EncodeLabelValue for MessageType {
     }
 }
 
+#[ready(2)]
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub struct Message {
     pub peer: String,

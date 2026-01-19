@@ -12,6 +12,7 @@
 
 use bytes::{Buf, Bytes};
 use commonware_cryptography::PublicKey;
+use commonware_macros::ready;
 use commonware_utils::ordered::Set;
 use futures::channel::mpsc;
 use std::{error::Error as StdError, fmt::Debug, future::Future, time::SystemTime};
@@ -27,12 +28,15 @@ pub use types::{Address, Ingress};
 ///
 /// This message is guaranteed to adhere to the configuration of the channel and
 /// will already be decrypted and authenticated.
+#[ready(2)]
 pub type Message<P> = (P, Bytes);
 
 /// Alias for identifying communication channels.
+#[ready(2)]
 pub type Channel = u64;
 
 /// Enum indicating the set of recipients to send a message to.
+#[ready(2)]
 #[derive(Clone, Debug)]
 pub enum Recipients<P: PublicKey> {
     All,

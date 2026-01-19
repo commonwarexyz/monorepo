@@ -2,6 +2,7 @@
 
 use crate::Manager;
 use commonware_cryptography::PublicKey;
+use commonware_macros::ready;
 use commonware_utils::{channels::fallible::FallibleExt, ordered::Set};
 use futures::channel::mpsc::{unbounded, UnboundedReceiver, UnboundedSender};
 
@@ -10,6 +11,7 @@ pub mod limited;
 pub mod mux;
 
 /// A [Manager] over a static set of peers.
+#[ready(2)]
 #[derive(Debug, Clone)]
 pub struct StaticManager<P: PublicKey> {
     id: u64,

@@ -13,6 +13,7 @@ use std::{collections::BTreeMap, fmt::Debug, time::SystemTime};
 /// An interior sender that enforces message size limits and
 /// supports sending arbitrary bytes to a set of recipients over
 /// a pre-defined [`Channel`].
+#[ready(2)]
 #[derive(Debug, Clone)]
 pub struct UnlimitedSender<P: PublicKey> {
     channel: Channel,
@@ -115,6 +116,7 @@ impl<P: PublicKey> crate::Receiver for Receiver<P> {
     }
 }
 
+#[ready(2)]
 #[derive(Clone)]
 pub struct Channels<P: PublicKey> {
     messenger: Messenger<P>,

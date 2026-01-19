@@ -1,5 +1,7 @@
+use commonware_macros::ready;
 use futures::channel::mpsc;
 
+#[ready(2)]
 #[derive(Clone, Debug)]
 pub struct Relay<T> {
     low: mpsc::Sender<T>,

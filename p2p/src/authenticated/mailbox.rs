@@ -1,6 +1,8 @@
+use commonware_macros::ready;
 use futures::channel::mpsc;
 
 /// A mailbox wraps a sender for messages of type `T`.
+#[ready(2)]
 #[derive(Debug)]
 pub struct Mailbox<T>(pub(crate) mpsc::Sender<T>);
 
@@ -19,6 +21,7 @@ impl<T> Clone for Mailbox<T> {
 }
 
 /// A mailbox wraps an unbounded sender for messages of type `T`.
+#[ready(2)]
 #[derive(Debug)]
 pub struct UnboundedMailbox<T>(pub(crate) mpsc::UnboundedSender<T>);
 

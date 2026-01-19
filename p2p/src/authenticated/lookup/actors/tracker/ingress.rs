@@ -18,6 +18,7 @@ use futures::channel::{mpsc, oneshot};
 use std::net::IpAddr;
 
 /// Messages that can be sent to the tracker actor.
+#[ready(2)]
 #[derive(Debug)]
 pub enum Message<C: PublicKey> {
     // ---------- Used by oracle ----------
@@ -167,6 +168,7 @@ impl<C: PublicKey> UnboundedMailbox<Message<C>> {
 }
 
 /// Allows releasing reservations
+#[ready(2)]
 #[derive(Clone)]
 pub struct Releaser<C: PublicKey> {
     sender: UnboundedMailbox<Message<C>>,

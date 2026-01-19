@@ -3,6 +3,7 @@
 use crate::{Recipients, UnlimitedSender};
 use bytes::Buf;
 use commonware_cryptography::PublicKey;
+use commonware_macros::ready;
 use commonware_runtime::{Clock, KeyedRateLimiter, Quota};
 use commonware_utils::channels::ring;
 use futures::{lock::Mutex, Future, FutureExt, StreamExt};
@@ -25,6 +26,7 @@ pub trait Connected: Clone + Send + Sync + 'static {
 }
 
 /// A wrapper around a [`UnlimitedSender`] that provides rate limiting with retry-time feedback.
+#[ready(2)]
 pub struct LimitedSender<E, S, P>
 where
     E: Clock,
@@ -179,6 +181,7 @@ where
 /// recipients that are not currently rate-limited.
 ///
 /// A [`CheckedSender`] can only be acquired via [`LimitedSender::check`].
+#[ready(2)]
 #[derive(Debug)]
 pub struct CheckedSender<'a, S: UnlimitedSender> {
     sender: &'a mut S,

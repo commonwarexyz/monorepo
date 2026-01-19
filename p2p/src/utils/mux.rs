@@ -11,7 +11,7 @@
 use crate::{Channel, CheckedSender, LimitedSender, Message, Receiver, Recipients, Sender};
 use bytes::{Buf, Bytes};
 use commonware_codec::{varint::UInt, Encode, Error as CodecError, ReadExt};
-use commonware_macros::select_loop;
+use commonware_macros::{ready, select_loop};
 use commonware_runtime::{spawn_cell, ContextCell, Handle, Spawner};
 use commonware_utils::channels::fallible::FallibleExt;
 use futures::{
@@ -23,6 +23,7 @@ use thiserror::Error;
 use tracing::debug;
 
 /// Errors that can occur when interacting with a [SubReceiver] or [MuxHandle].
+#[ready(2)]
 #[derive(Error, Debug)]
 pub enum Error {
     #[error("subchannel already registered: {0}")]
@@ -58,6 +59,7 @@ type Routes<P> = HashMap<Channel, mpsc::Sender<Message<P>>>;
 type BackupResponse<P> = (Channel, Message<P>);
 
 /// A multiplexer of p2p channels into subchannels.
+#[ready(2)]
 pub struct Muxer<E: Spawner, S: Sender, R: Receiver> {
     context: ContextCell<E>,
     sender: S,
@@ -189,6 +191,7 @@ impl<E: Spawner, S: Sender, R: Receiver> Muxer<E, S, R> {
 }
 
 /// A clonable handle that allows registering routes at any time, even after the [Muxer] is running.
+#[ready(2)]
 #[derive(Clone)]
 pub struct MuxHandle<S: Sender, R: Receiver> {
     sender: S,
@@ -229,6 +232,7 @@ impl<S: Sender, R: Receiver> MuxHandle<S, R> {
 }
 
 /// Sender that routes messages to the `subchannel`.
+#[ready(2)]
 #[derive(Clone, Debug)]
 pub struct SubSender<S: Sender> {
     inner: GlobalSender<S>,
@@ -251,6 +255,7 @@ impl<S: Sender> LimitedSender for SubSender<S> {
 }
 
 /// Receiver that yields messages for a specific subchannel.
+#[ready(2)]
 pub struct SubReceiver<R: Receiver> {
     receiver: mpsc::Receiver<Message<R::PublicKey>>,
     control_tx: Option<mpsc::UnboundedSender<Control<R>>>,
@@ -288,6 +293,7 @@ impl<R: Receiver> Drop for SubReceiver<R> {
 }
 
 /// Sender that can send messages over any sub [Channel].
+#[ready(2)]
 #[derive(Clone, Debug)]
 pub struct GlobalSender<S: Sender> {
     inner: S,
@@ -338,6 +344,7 @@ impl<S: Sender> LimitedSender for GlobalSender<S> {
 }
 
 /// A checked sender for a [GlobalSender].
+#[ready(2)]
 pub struct CheckedGlobalSender<'a, S: Sender> {
     subchannel: Option<Channel>,
     inner: S::Checked<'a>,
@@ -377,6 +384,7 @@ pub trait Builder {
 }
 
 /// A builder that constructs a [Muxer].
+#[ready(2)]
 pub struct MuxerBuilder<E: Spawner, S: Sender, R: Receiver> {
     mux: Muxer<E, S, R>,
     mux_handle: MuxHandle<S, R>,
@@ -416,6 +424,7 @@ impl<E: Spawner, S: Sender, R: Receiver> MuxerBuilder<E, S, R> {
 }
 
 /// A builder that constructs a [Muxer] with a backup channel.
+#[ready(2)]
 pub struct MuxerBuilderWithBackup<E: Spawner, S: Sender, R: Receiver> {
     mux: Muxer<E, S, R>,
     mux_handle: MuxHandle<S, R>,
@@ -449,6 +458,7 @@ impl<E: Spawner, S: Sender, R: Receiver> Builder for MuxerBuilderWithBackup<E, S
 }
 
 /// A builder that constructs a [Muxer] with a [GlobalSender].
+#[ready(2)]
 pub struct MuxerBuilderWithGlobalSender<E: Spawner, S: Sender, R: Receiver> {
     mux: Muxer<E, S, R>,
     mux_handle: MuxHandle<S, R>,
@@ -479,6 +489,7 @@ impl<E: Spawner, S: Sender, R: Receiver> Builder for MuxerBuilderWithGlobalSende
 }
 
 /// A builder that constructs a [Muxer] with a [GlobalSender] and backup channel.
+#[ready(2)]
 pub struct MuxerBuilderAllOpts<E: Spawner, S: Sender, R: Receiver> {
     mux: Muxer<E, S, R>,
     mux_handle: MuxHandle<S, R>,
