@@ -225,6 +225,7 @@ mod tests {
     };
     use crate::domain::Tx;
     use alloy_evm::{
+        eth::EthEvmBuilder,
         revm::{
             database::InMemoryDB,
             primitives::{Address, Bytes, B256, U256},
@@ -234,98 +235,115 @@ mod tests {
         Evm as _,
     };
 
-    fn addr(byte: u8) -> Address {
+    const HEIGHT: u64 = 1;
+    const INITIAL_BALANCE: u64 = 1_000_000;
+    const INITIAL_NONCE: u64 = 0;
+    const TRANSFER_AMOUNT: u64 = 100;
+    const GAS_LIMIT_TRANSFER: u64 = 21_000;
+    const GAS_LIMIT_PRECOMPILE: u64 = 100_000;
+    const GAS_LIMIT_CREATE: u64 = 500_000;
+    const GAS_LIMIT_CALL: u64 = 200_000;
+    const STATICCALL_GAS: u16 = 0xFFFF;
+    const SEED_A_BYTES: [u8; 32] = [7u8; 32];
+    const SEED_B_BYTES: [u8; 32] = [9u8; 32];
+    const SENDER_BYTE: u8 = 0x11;
+    const RECIPIENT_BYTE: u8 = 0x22;
+    const SEED_OUTPUT_LEN: u8 = 32;
+    const INIT_RUNTIME_OFFSET: u8 = 14;
+
+    fn address_from_byte(byte: u8) -> Address {
         Address::from([byte; 20])
     }
 
-    fn fund(db: &mut InMemoryDB, address: Address, balance: U256, nonce: u64) {
+    fn fund_account(db: &mut InMemoryDB, address: Address, balance: u64, nonce: u64) {
         db.insert_account_info(
             address,
             AccountInfo {
-                balance,
+                balance: U256::from(balance),
                 nonce,
                 ..Default::default()
             },
         );
     }
 
-    fn nonce(db: &mut InMemoryDB, address: Address) -> u64 {
+    fn account_nonce(db: &mut InMemoryDB, address: Address) -> u64 {
         db.basic(address)
             .unwrap()
             .map(|info| info.nonce)
             .unwrap_or(0)
     }
 
-    #[test]
-    fn test_execute_single_transfer() {
-        // Prepare
-        let sender = addr(0x11);
-        let recipient = addr(0x22);
-        let seed = B256::from([7u8; 32]);
-        let height = 1;
-        let mut db = InMemoryDB::default();
-        fund(
-            &mut db,
-            sender,
-            U256::from(1_000_000u64),
-            /* nonce */ 0,
-        );
-        let tx = Tx {
-            from: sender,
-            to: recipient,
-            value: U256::from(100),
-            gas_limit: 21_000,
+    fn transfer_tx(from: Address, to: Address, value: u64) -> Tx {
+        Tx {
+            from,
+            to,
+            value: U256::from(value),
+            gas_limit: GAS_LIMIT_TRANSFER,
             data: Bytes::new(),
-        };
+        }
+    }
 
-        // Execute
-        let (mut db, outcome) = execute_txs(db, evm_env(height, seed), &[tx]).unwrap();
+    fn build_seeded_evm(
+        db: InMemoryDB,
+        height: u64,
+        seed: B256,
+    ) -> alloy_evm::eth::EthEvm<
+        InMemoryDB,
+        alloy_evm::revm::inspector::NoOpInspector,
+        alloy_evm::precompiles::PrecompilesMap,
+    > {
+        let env = evm_env(height, seed);
+        let precompiles = precompiles_with_seed(env.cfg_env.spec);
+        EthEvmBuilder::new(db, env).precompiles(precompiles).build()
+    }
 
-        // Assert (outcome)
+    #[test]
+    fn execute_txs_transfers_value_and_increments_nonce() {
+        // Arrange
+        let sender = address_from_byte(SENDER_BYTE);
+        let recipient = address_from_byte(RECIPIENT_BYTE);
+        let seed = B256::from(SEED_A_BYTES);
+        let mut db = InMemoryDB::default();
+        fund_account(&mut db, sender, INITIAL_BALANCE, INITIAL_NONCE);
+        let tx = transfer_tx(sender, recipient, TRANSFER_AMOUNT);
+
+        // Act
+        let (mut db, outcome) =
+            execute_txs(db, evm_env(HEIGHT, seed), &[tx]).expect("execute transfer");
+
+        // Assert
         assert_eq!(outcome.tx_changes.len(), 1);
         assert!(!outcome.tx_changes[0].is_empty());
-
-        // Assert (state)
         let sender_info = db.basic(sender).unwrap().unwrap();
         let recipient_info = db.basic(recipient).unwrap().unwrap();
-        assert_eq!(sender_info.balance, U256::from(1_000_000u64 - 100));
+        assert_eq!(
+            sender_info.balance,
+            U256::from(INITIAL_BALANCE - TRANSFER_AMOUNT)
+        );
         assert_eq!(sender_info.nonce, 1);
-        assert_eq!(recipient_info.balance, U256::from(100u64));
+        assert_eq!(recipient_info.balance, U256::from(TRANSFER_AMOUNT));
         assert_eq!(recipient_info.nonce, 0);
     }
 
     #[test]
-    fn test_seed_precompile_returns_block_prevrandao() {
+    fn seed_precompile_returns_block_prevrandao() {
         use alloy_evm::revm::context_interface::result::ExecutionResult;
 
-        // Prepare
-        let caller = addr(0x11);
-        let seed = B256::from([7u8; 32]);
-        let height = 1;
+        // Arrange
+        let caller = address_from_byte(SENDER_BYTE);
+        let seed = B256::from(SEED_A_BYTES);
         let mut db = InMemoryDB::default();
-        fund(
-            &mut db,
-            caller,
-            U256::from(1_000_000u64),
-            /* nonce */ 0,
-        );
-
-        let env = evm_env(height, seed);
-        let spec = env.cfg_env.spec;
-        let precompiles = precompiles_with_seed(spec);
-        let mut evm = alloy_evm::eth::EthEvmBuilder::new(db, env)
-            .precompiles(precompiles)
-            .build();
-
+        fund_account(&mut db, caller, INITIAL_BALANCE, INITIAL_NONCE);
+        let mut evm = build_seeded_evm(db, HEIGHT, seed);
         let tx = Tx {
             from: caller,
             to: seed_precompile_address(),
             value: U256::ZERO,
-            gas_limit: 100_000,
+            gas_limit: GAS_LIMIT_PRECOMPILE,
             data: Bytes::new(),
         };
 
-        // Execute
+        // Act
         let chain_id = evm.chain_id();
         let tx_env = tx_env_from_db(evm.db_mut(), &tx, chain_id).unwrap();
         let revm::context_interface::result::ResultAndState { result, state: _ } =
@@ -341,39 +359,27 @@ mod tests {
     }
 
     #[test]
-    fn test_contract_can_read_seed_precompile() {
+    fn seed_reader_contract_reads_precompile_value() {
         use alloy_evm::revm::context_interface::result::{ExecutionResult, Output};
 
-        // Prepare
-        let caller = addr(0x11);
-        let seed = B256::from([9u8; 32]);
-        let height = 1;
+        // Arrange
+        let caller = address_from_byte(SENDER_BYTE);
+        let seed = B256::from(SEED_B_BYTES);
         let mut db = InMemoryDB::default();
-        fund(
-            &mut db,
-            caller,
-            U256::from(1_000_000u64),
-            /* nonce */ 0,
-        );
-
-        let env = evm_env(height, seed);
-        let spec = env.cfg_env.spec;
-        let precompiles = precompiles_with_seed(spec);
-        let mut evm = alloy_evm::eth::EthEvmBuilder::new(db, env)
-            .precompiles(precompiles)
-            .build();
+        fund_account(&mut db, caller, INITIAL_BALANCE, INITIAL_NONCE);
+        let mut evm = build_seeded_evm(db, HEIGHT, seed);
 
         let runtime = seed_reader_runtime();
         let init = seed_reader_init(&runtime);
 
-        // Execute (deploy contract)
-        let create_nonce = nonce(evm.db_mut(), caller);
+        // Act (deploy contract)
+        let create_nonce = account_nonce(evm.db_mut(), caller);
 
         let create = alloy_evm::revm::context::TxEnv {
             caller,
             kind: alloy_evm::revm::primitives::TxKind::Create,
             value: U256::ZERO,
-            gas_limit: 500_000,
+            gas_limit: GAS_LIMIT_CREATE,
             data: init,
             nonce: create_nonce,
             chain_id: Some(evm.chain_id()),
@@ -395,14 +401,14 @@ mod tests {
         };
         evm.db_mut().commit(create_state);
 
-        // Execute (call deployed contract)
-        let call_nonce = nonce(evm.db_mut(), caller);
+        // Act (call deployed contract)
+        let call_nonce = account_nonce(evm.db_mut(), caller);
 
         let call = alloy_evm::revm::context::TxEnv {
             caller,
             kind: alloy_evm::revm::primitives::TxKind::Call(deployed),
             value: U256::ZERO,
-            gas_limit: 200_000,
+            gas_limit: GAS_LIMIT_CALL,
             data: Bytes::new(),
             nonce: call_nonce,
             chain_id: Some(evm.chain_id()),
@@ -432,9 +438,29 @@ mod tests {
         let address = seed_precompile_address();
 
         let mut bytecode = Vec::new();
-        bytecode.extend_from_slice(&[0x60, 0x20, 0x60, 0x00, 0x60, 0x00, 0x60, 0x00, 0x73]);
+        bytecode.extend_from_slice(&[
+            0x60,
+            SEED_OUTPUT_LEN,
+            0x60,
+            0x00,
+            0x60,
+            0x00,
+            0x60,
+            0x00,
+            0x73,
+        ]);
         bytecode.extend_from_slice(address.as_slice());
-        bytecode.extend_from_slice(&[0x61, 0xFF, 0xFF, 0xFA, 0x50, 0x60, 0x20, 0x60, 0x00, 0xF3]);
+        bytecode.extend_from_slice(&[0x61]);
+        bytecode.extend_from_slice(&STATICCALL_GAS.to_be_bytes());
+        bytecode.extend_from_slice(&[
+            0xFA,
+            0x50,
+            0x60,
+            SEED_OUTPUT_LEN,
+            0x60,
+            0x00,
+            0xF3,
+        ]);
 
         Bytes::from(bytecode)
     }
@@ -447,7 +473,7 @@ mod tests {
         let mut bytecode = Vec::new();
         bytecode.extend_from_slice(&[0x61]);
         bytecode.extend_from_slice(&runtime_len.to_be_bytes());
-        bytecode.extend_from_slice(&[0x60, 0x0c, 0x60, 0x00, 0x39, 0x61]);
+        bytecode.extend_from_slice(&[0x60, INIT_RUNTIME_OFFSET, 0x60, 0x00, 0x39, 0x61]);
         bytecode.extend_from_slice(&runtime_len.to_be_bytes());
         bytecode.extend_from_slice(&[0x60, 0x00, 0xf3]);
         bytecode.extend_from_slice(runtime.as_ref());

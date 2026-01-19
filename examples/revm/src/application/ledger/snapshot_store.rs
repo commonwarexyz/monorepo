@@ -31,6 +31,7 @@ pub(crate) struct LedgerSnapshot {
 pub(crate) struct SnapshotStore {
     snapshots: BTreeMap<ConsensusDigest, LedgerSnapshot>,
     persisted: BTreeSet<ConsensusDigest>,
+    /// Digests currently being committed to QMDB to avoid duplicate concurrent commits.
     persisting: BTreeSet<ConsensusDigest>,
 }
 
@@ -59,14 +60,12 @@ impl SnapshotStore {
         self.snapshots.insert(digest, snapshot);
     }
 
-    pub(crate) fn mark_persisted(&mut self, digest: ConsensusDigest) {
-        self.persisted.insert(digest);
-    }
-
+    #[cfg(test)]
     pub(crate) fn is_persisted(&self, digest: &ConsensusDigest) -> bool {
         self.persisted.contains(digest)
     }
 
+    /// Returns true if every digest in the chain is neither persisted nor in-flight.
     pub(crate) fn can_persist_chain(&self, chain: &[ConsensusDigest]) -> bool {
         chain
             .iter()
@@ -93,7 +92,8 @@ impl SnapshotStore {
 
     /// Merge unpersisted ancestor deltas up to the last persisted digest.
     ///
-    /// Returns the ordered chain (oldest to newest) and the merged change set.
+    /// Returns the ordered chain (oldest to newest) and the merged change set so commits
+    /// apply in strict height order.
     pub(crate) fn merged_changes_for_persist(
         &self,
         mut digest: ConsensusDigest,

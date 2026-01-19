@@ -25,7 +25,7 @@ pub struct Block {
     pub height: u64,
     /// Seed-derived randomness used for future prevrandao.
     pub prevrandao: B256,
-    /// State commitment resulting from this block.
+    /// State commitment resulting from this block (pre-commit QMDB root).
     pub state_root: StateRoot,
     /// Transactions included in the block.
     pub txs: Vec<Tx>,

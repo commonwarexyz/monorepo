@@ -26,7 +26,7 @@ While the public API never mutates these, they carry the data that commands and 
 
 - **Block / Tx** (`examples/revm/src/domain/types.rs`): deterministic structures consumed and produced by proposals/verifications.
 - **BootstrapConfig** (`examples/revm/src/domain/types.rs`): static inputs for genesis allocation and pre-consensus transactions.
-- **ConsensusDigest / StateRoot** (`examples/revm/src/domain/types.rs` / `examples/revm/src/qmdb/mod.rs`): opaque hashes that identify snapshots and prove authentication.
+- **ConsensusDigest / StateRoot** (`examples/revm/src/domain/types.rs` / `examples/revm/src/qmdb/mod.rs`): opaque hashes that identify snapshots and prove authentication. `StateRoot` is computed from merkleized, non-durable QMDB partitions (pre-commit); the post-commit QMDB root can differ because commit ops are part of the log.
 - **SeedHash (`B256`)**: deterministic randomness reused in `prevrandao`.
 
 ## 4. Aggregates

@@ -52,6 +52,12 @@ The main glue points are `src/sim/node.rs` (wiring) and `src/application/` (appl
 - The next block uses the parent digest's stored seed hash as `prevrandao` (EIP-4399).
 - The seed precompile returns the current block's `prevrandao` so contracts can read it.
 
+### State Root Semantics
+
+- Block headers publish the pre-commit QMDB root computed after merkleization but before durability is enforced.
+- QMDB commit operations append to the authenticated log, so the post-commit root can differ even when state does not.
+- Treat the header `state_root` as the consensus commitment and do not compare it to the post-commit QMDB root.
+
 ## Run (Tokio Simulation)
 
 ```sh

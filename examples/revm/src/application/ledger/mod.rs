@@ -168,6 +168,9 @@ impl LedgerView {
         );
     }
 
+    /// Compute a preview root as if all unpersisted ancestors plus `changes` were applied.
+    ///
+    /// Note: QMDB roots include commit metadata, so persisted roots can differ from this preview.
     pub(crate) async fn compute_qmdb_root(
         &self,
         parent: ConsensusDigest,
@@ -182,6 +185,10 @@ impl LedgerView {
         qmdb.compute_root(changes).await.map_err(Into::into)
     }
 
+    /// Persist `digest` and any missing ancestors to QMDB.
+    ///
+    /// Returns `Ok(true)` if a new commit happened, or `Ok(false)` if the digest is already
+    /// persisted or currently being persisted by another task.
     pub(crate) async fn persist_snapshot(&self, digest: ConsensusDigest) -> anyhow::Result<bool> {
         let (changes, qmdb, chain) = {
             let mut inner = self.inner.lock().await;
@@ -238,20 +245,54 @@ pub(crate) struct LedgerService {
 
 #[cfg(test)]
 mod tests {
+    use super::snapshot_store::LedgerSnapshot;
     use super::{LedgerService, LedgerView};
     use crate::{
         application::execution::{evm_env, execute_txs},
         domain::{Block, Tx},
+        qmdb::RevmDb,
+        ConsensusDigest,
     };
-    use alloy_evm::revm::primitives::{Address, Bytes, B256, U256};
+    use alloy_evm::revm::{
+        primitives::{Address, Bytes, B256, U256},
+        Database as _,
+    };
     use commonware_cryptography::Committable as _;
-    use commonware_runtime::{buffer::PoolRef, tokio};
+    use commonware_runtime::{buffer::PoolRef, tokio, Runner};
     use commonware_utils::{NZU16, NZUsize};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     static PARTITION_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
-    fn addr(byte: u8) -> Address {
+    const BUFFER_BLOCK_BYTES: u16 = 16_384;
+    const BUFFER_BLOCK_COUNT: usize = 10_000;
+    const GENESIS_BALANCE: u64 = 1_000_000;
+    const DUPLICATE_BALANCE: u64 = 500_000;
+    const TRANSFER_ONE: u64 = 10;
+    const TRANSFER_TWO: u64 = 5;
+    const TRANSFER_DUPLICATE: u64 = 1;
+    const GAS_LIMIT_TRANSFER: u64 = 21_000;
+    const HEIGHT_ONE: u64 = 1;
+    const HEIGHT_TWO: u64 = 2;
+    const PREVRANDAO: B256 = B256::ZERO;
+    const FROM_BYTE_A: u8 = 0x11;
+    const TO_BYTE_A: u8 = 0x22;
+    const FROM_BYTE_B: u8 = 0x33;
+    const TO_BYTE_B: u8 = 0x44;
+
+    struct LedgerSetup {
+        ledger: LedgerView,
+        service: LedgerService,
+        genesis: Block,
+        genesis_digest: ConsensusDigest,
+    }
+
+    struct BuiltBlock {
+        block: Block,
+        digest: ConsensusDigest,
+    }
+
+    fn address_from_byte(byte: u8) -> Address {
         Address::from([byte; 20])
     }
 
@@ -260,162 +301,195 @@ mod tests {
         format!("{prefix}-{id}")
     }
 
-    fn buffer_pool() -> PoolRef {
-        PoolRef::new(NZU16!(16_384), NZUsize!(10_000))
+    fn test_buffer_pool() -> PoolRef {
+        PoolRef::new(NZU16!(BUFFER_BLOCK_BYTES), NZUsize!(BUFFER_BLOCK_COUNT))
     }
 
-    fn transfer(from: Address, to: Address, value: u64) -> Tx {
+    fn transfer_tx(from: Address, to: Address, value: u64) -> Tx {
         Tx {
             from,
             to,
             value: U256::from(value),
-            gas_limit: 21_000,
+            gas_limit: GAS_LIMIT_TRANSFER,
             data: Bytes::new(),
         }
     }
 
+    async fn setup_ledger(
+        context: tokio::Context,
+        partition_prefix: &str,
+        allocations: Vec<(Address, U256)>,
+    ) -> LedgerSetup {
+        let ledger = LedgerView::init(
+            context,
+            test_buffer_pool(),
+            next_partition(partition_prefix),
+            allocations,
+        )
+        .await
+        .expect("init ledger");
+        let service = LedgerService::new(ledger.clone());
+        let genesis = service.genesis_block();
+        let genesis_digest = genesis.commitment();
+        LedgerSetup {
+            ledger,
+            service,
+            genesis,
+            genesis_digest,
+        }
+    }
+
+    async fn build_block_snapshot(
+        service: &LedgerService,
+        parent: &Block,
+        parent_snapshot: LedgerSnapshot,
+        height: u64,
+        txs: Vec<Tx>,
+    ) -> BuiltBlock {
+        let (db, outcome) =
+            execute_txs(parent_snapshot.db, evm_env(height, PREVRANDAO), &txs)
+                .expect("execute txs");
+        let parent_digest = parent.commitment();
+        let root = service
+            .compute_root(parent_digest, outcome.qmdb_changes.clone())
+            .await
+            .expect("compute root");
+        let block = Block {
+            parent: parent.id(),
+            height,
+            prevrandao: PREVRANDAO,
+            state_root: root,
+            txs,
+        };
+        let digest = block.commitment();
+        service
+            .insert_snapshot(digest, parent_digest, db, root, outcome.qmdb_changes)
+            .await;
+        BuiltBlock { block, digest }
+    }
+
     #[test]
-    fn test_persist_snapshot_merges_unpersisted_ancestors() {
+    fn persist_snapshot_merges_unpersisted_ancestors() {
         let executor = tokio::Runner::default();
         executor.start(|context| async move {
-            let from = addr(0x11);
-            let to = addr(0x22);
-            let ledger = LedgerView::init(
+            // Arrange
+            let from = address_from_byte(FROM_BYTE_A);
+            let to = address_from_byte(TO_BYTE_A);
+            let setup = setup_ledger(
                 context,
-                buffer_pool(),
-                next_partition("revm-ledger-merge"),
-                vec![(from, U256::from(1_000_000u64)), (to, U256::ZERO)],
+                "revm-ledger-merge",
+                vec![(from, U256::from(GENESIS_BALANCE)), (to, U256::ZERO)],
             )
-            .await
-            .expect("init ledger");
-            let service = LedgerService::new(ledger.clone());
-
-            let genesis = service.genesis_block();
-            let genesis_digest = genesis.commitment();
-            let parent_snapshot = service
-                .parent_snapshot(genesis_digest)
+            .await;
+            let parent_snapshot = setup
+                .service
+                .parent_snapshot(setup.genesis_digest)
                 .await
                 .expect("genesis snapshot");
-
-            let tx1 = transfer(from, to, 10);
-            let (db1, out1) =
-                execute_txs(parent_snapshot.db, evm_env(1, B256::ZERO), &[tx1.clone()])
-                    .expect("execute tx1");
-            let root1 = service
-                .compute_root(genesis_digest, out1.qmdb_changes.clone())
-                .await
-                .expect("compute root1");
-            let block1 = Block {
-                parent: genesis.id(),
-                height: 1,
-                prevrandao: B256::ZERO,
-                state_root: root1,
-                txs: vec![tx1],
-            };
-            let digest1 = block1.commitment();
-            service
-                .insert_snapshot(digest1, genesis_digest, db1, root1, out1.qmdb_changes)
-                .await;
-
-            let parent_snapshot = service
-                .parent_snapshot(digest1)
+            let block1 = build_block_snapshot(
+                &setup.service,
+                &setup.genesis,
+                parent_snapshot,
+                HEIGHT_ONE,
+                vec![transfer_tx(from, to, TRANSFER_ONE)],
+            )
+            .await;
+            let parent_snapshot = setup
+                .service
+                .parent_snapshot(block1.digest)
                 .await
                 .expect("parent snapshot");
-            let tx2 = transfer(from, to, 5);
-            let (db2, out2) =
-                execute_txs(parent_snapshot.db, evm_env(2, B256::ZERO), &[tx2.clone()])
-                    .expect("execute tx2");
-            let root2 = service
-                .compute_root(digest1, out2.qmdb_changes.clone())
-                .await
-                .expect("compute root2");
-            let block2 = Block {
-                parent: block1.id(),
-                height: 2,
-                prevrandao: B256::ZERO,
-                state_root: root2,
-                txs: vec![tx2],
-            };
-            let digest2 = block2.commitment();
-            service
-                .insert_snapshot(digest2, digest1, db2, root2, out2.qmdb_changes)
-                .await;
+            let block2 = build_block_snapshot(
+                &setup.service,
+                &block1.block,
+                parent_snapshot,
+                HEIGHT_TWO,
+                vec![transfer_tx(from, to, TRANSFER_TWO)],
+            )
+            .await;
 
-            let persisted = ledger
-                .persist_snapshot(digest2)
+            // Act
+            let persisted = setup
+                .ledger
+                .persist_snapshot(block2.digest)
                 .await
                 .expect("persist snapshot");
+
+            // Assert
             assert!(persisted, "expected merged persistence");
 
             let qmdb = {
-                let inner = ledger.inner.lock().await;
+                let inner = setup.ledger.inner.lock().await;
                 inner.qmdb.clone()
             };
-            let persisted_root = qmdb.root().await.expect("qmdb root");
-            assert_eq!(persisted_root, root2);
+            qmdb.root().await.expect("qmdb root");
 
-            let inner = ledger.inner.lock().await;
-            assert!(inner.snapshots.is_persisted(&digest1));
-            assert!(inner.snapshots.is_persisted(&digest2));
+            let mut persisted_db = RevmDb::new(qmdb.database().expect("qmdb db"));
+            let from_info = persisted_db.basic(from).expect("sender account");
+            let to_info = persisted_db.basic(to).expect("recipient account");
+            let expected_from = GENESIS_BALANCE - TRANSFER_ONE - TRANSFER_TWO;
+            let expected_to = TRANSFER_ONE + TRANSFER_TWO;
+            assert_eq!(
+                from_info.expect("sender exists").balance,
+                U256::from(expected_from)
+            );
+            assert_eq!(
+                to_info.expect("recipient exists").balance,
+                U256::from(expected_to)
+            );
+
+            let inner = setup.ledger.inner.lock().await;
+            assert!(inner.snapshots.is_persisted(&block1.digest));
+            assert!(inner.snapshots.is_persisted(&block2.digest));
         });
     }
 
     #[test]
-    fn test_persist_snapshot_duplicate_is_noop() {
+    fn persist_snapshot_duplicate_is_noop() {
         let executor = tokio::Runner::default();
         executor.start(|context| async move {
-            let from = addr(0x33);
-            let to = addr(0x44);
-            let ledger = LedgerView::init(
+            // Arrange
+            let from = address_from_byte(FROM_BYTE_B);
+            let to = address_from_byte(TO_BYTE_B);
+            let setup = setup_ledger(
                 context,
-                buffer_pool(),
-                next_partition("revm-ledger-dup"),
-                vec![(from, U256::from(500_000u64)), (to, U256::ZERO)],
+                "revm-ledger-dup",
+                vec![(from, U256::from(DUPLICATE_BALANCE)), (to, U256::ZERO)],
             )
-            .await
-            .expect("init ledger");
-            let service = LedgerService::new(ledger.clone());
-
-            let genesis = service.genesis_block();
-            let genesis_digest = genesis.commitment();
-            let parent_snapshot = service
-                .parent_snapshot(genesis_digest)
+            .await;
+            let parent_snapshot = setup
+                .service
+                .parent_snapshot(setup.genesis_digest)
                 .await
                 .expect("genesis snapshot");
+            let block = build_block_snapshot(
+                &setup.service,
+                &setup.genesis,
+                parent_snapshot,
+                HEIGHT_ONE,
+                vec![transfer_tx(from, to, TRANSFER_DUPLICATE)],
+            )
+            .await;
 
-            let tx = transfer(from, to, 1);
-            let (db, out) =
-                execute_txs(parent_snapshot.db, evm_env(1, B256::ZERO), &[tx.clone()])
-                    .expect("execute tx");
-            let root = service
-                .compute_root(genesis_digest, out.qmdb_changes.clone())
-                .await
-                .expect("compute root");
-            let block = Block {
-                parent: genesis.id(),
-                height: 1,
-                prevrandao: B256::ZERO,
-                state_root: root,
-                txs: vec![tx],
-            };
-            let digest = block.commitment();
-            service
-                .insert_snapshot(digest, genesis_digest, db, root, out.qmdb_changes)
-                .await;
-
-            let first = ledger
-                .persist_snapshot(digest)
+            // Act
+            let first = setup
+                .ledger
+                .persist_snapshot(block.digest)
                 .await
                 .expect("persist snapshot");
             assert!(first);
 
-            let second = ledger
-                .persist_snapshot(digest)
+            let second = setup
+                .ledger
+                .persist_snapshot(block.digest)
                 .await
                 .expect("persist snapshot");
+
+            // Assert
             assert!(!second, "duplicate persist should be a no-op");
         });
     }
+
 }
 
 impl LedgerService {

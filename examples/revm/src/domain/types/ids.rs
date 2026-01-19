@@ -11,7 +11,7 @@ pub struct BlockId(pub B256);
 pub struct TxId(pub B256);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-/// State commitment (32 bytes).
+/// State commitment (32 bytes) computed from merkleized, non-durable QMDB partition roots.
 pub struct StateRoot(pub B256);
 
 impl FixedSize for BlockId {

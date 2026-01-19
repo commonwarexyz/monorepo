@@ -20,7 +20,7 @@ This document walks through the REVM simulation example with a top-down view tha
 | **Tx** | Minimal transaction (from, to, value, gas limit, calldata) with deterministic codec for gossip. | `examples/revm/src/domain/types.rs` |
 | **BootstrapConfig** | Genesis allocation plus bootstrap transactions applied before consensus starts. | `examples/revm/src/domain/types.rs` |
 | **StateChanges & QmdbChangeSet** | Deterministic encodings of touched accounts/storage used for execution tracing and QMDB persistence. | `examples/revm/src/domain/commitment.rs`, `examples/revm/src/qmdb/changes.rs` |
-| **StateRoot** | Hash combining QMDB partition roots plus a namespace tag, ensuring authenticated state. | `examples/revm/src/qmdb/mod.rs`, `examples/revm/src/domain/types.rs` |
+| **StateRoot** | Hash combining QMDB partition roots (merkleized, non-durable, pre-commit). The post-commit root can differ because commit ops are part of the authenticated log. | `examples/revm/src/qmdb/mod.rs`, `examples/revm/src/domain/types.rs` |
 
 ## 3. Core Components
 
@@ -34,8 +34,8 @@ This document walks through the REVM simulation example with a top-down view tha
 
 - `QmdbLedger` (`examples/revm/src/qmdb/service.rs`) orchestrates partitioned stores (`accounts`, `storage`, `code`) through `QmdbState` (`examples/revm/src/qmdb/state.rs`) and exposes:
   - `database()` → a `QmdbRefDb` adapter (`examples/revm/src/qmdb/adapter.rs`) to satisfy REVM's sync API.
-  - `compute_root()` → computes the state commitment that would result from staged changes.
-  - `commit_changes()` → applies the batch, updates the in-memory stores, and returns the new root.
+  - `compute_root()` → computes the pre-commit root used in block headers without persisting.
+  - `commit_changes()` → applies the batch, updates the in-memory stores, and returns the post-commit root (which can differ because commit ops are authenticated).
 - `QmdbChangeSet`, `AccountUpdate`, and `AccountRecord` live in `examples/revm/src/qmdb/changes.rs` and `examples/revm/src/qmdb/model.rs` and translate REVM's `EvmState` into authenticated batches keyed by addresses, storage slots, and code hashes.
 
 ### Execution Layer (`examples/revm/src/application/execution.rs`)
