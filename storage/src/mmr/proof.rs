@@ -82,7 +82,7 @@ impl<D: Digest> EncodeSize for Proof<D> {
 
 impl<D: Digest> Write for Proof<D> {
     fn write(&self, buf: &mut impl BufMut) {
-        // Write the number of leaves in the MMR as a varint
+        // Write the number of leaves in the MMR
         self.leaves.write(buf);
 
         // Write the digests

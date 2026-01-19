@@ -8,7 +8,7 @@ use commonware_conformance::{conformance_tests, Conformance};
 use commonware_cryptography::{sha256, Hasher, Sha256};
 
 /// Build a test MMR by adding `elements` elements using the provided hasher.
-pub fn build_test_mmr<H: MmrHasher<sha256::Digest>>(
+pub fn build_test_mmr<H: MmrHasher<Digest = sha256::Digest>>(
     hasher: &mut H,
     mut mmr: CleanMmr<sha256::Digest>,
     elements: u64,

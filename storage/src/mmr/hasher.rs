@@ -22,7 +22,11 @@ pub trait Hasher: Send + Sync {
 
     /// Computes the root for an MMR given its size and an iterator over the digests of its peaks in
     /// decreasing order of height.
-    fn root<'a>(&mut self, leaves: Location, peak_digests: impl Iterator<Item = &'a D>) -> D;
+    fn root<'a>(
+        &mut self,
+        leaves: Location,
+        peak_digests: impl Iterator<Item = &'a Self::Digest>,
+    ) -> Self::Digest;
 
     /// Compute the digest of a byte slice.
     fn digest(&mut self, data: &[u8]) -> Self::Digest;
