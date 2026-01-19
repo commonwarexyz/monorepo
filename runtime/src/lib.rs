@@ -278,13 +278,14 @@ pub trait Metrics: Clone + Send + Sync + 'static {
     /// any implementation to use `METRICS_PREFIX` as the start of a label (reserved for metrics for the runtime).
     fn with_label(&self, label: &str) -> Self;
 
-    /// Create a new instance of `Metrics` with an additional attribute (Prometheus label) applied
+    /// Create a new instance of `Metrics` with an additional attribute (key-value pair) applied
     /// to all metrics registered in this context and any child contexts.
     ///
     /// Unlike [`Metrics::with_label`] which affects the metric name prefix, `with_attribute` adds
-    /// a Prometheus label that appears as a separate dimension in the metric output. This is
-    /// useful for tracking epoch-specific or instance-specific metrics without causing metric
-    /// name cardinality explosion.
+    /// a key-value pair that appears as a separate dimension in the metric output. This is
+    /// useful for instrumenting n-ary data structures in a way that is easy to manage downstream.
+    ///
+    /// Keys must start with `[a-zA-Z]` and contain only `[a-zA-Z0-9_]`. Values can be any string.
     ///
     /// # Subtree Labeling
     ///
@@ -305,24 +306,25 @@ pub trait Metrics: Clone + Send + Sync + 'static {
     /// This pattern avoids wrapping every metric in a `Family` and avoids polluting metric
     /// names with dynamic values like `orchestrator_epoch_5_votes`.
     ///
-    /// # When to Use Attributes vs Labels vs Family
+    /// # Family Label Conflicts
     ///
-    /// Use [`Metrics::with_label`] for static, structural grouping (e.g., component names):
-    /// ```text
-    /// consensus_votes_total 100
-    /// storage_reads_total 500
-    /// ```
+    /// When using `Family` metrics, avoid using attribute keys that match the Family's label field names.
+    /// If a conflict occurs, the encoded output will contain duplicate labels (e.g., `{env="prod",env="staging"}`),
+    /// which is invalid Prometheus format and may cause scraping issues.
     ///
-    /// Use `with_attribute` for labels that apply to a subtree of metrics (e.g., epoch, region):
-    /// ```text
-    /// consensus_votes_total{epoch="5"} 100
-    /// consensus_votes_total{epoch="6"} 200
-    /// ```
+    /// ```ignore
+    /// #[derive(EncodeLabelSet)]
+    /// struct Labels { env: String }
     ///
-    /// Use `Family` for per-sample labels that vary within a single metric (e.g., peer_id, method):
-    /// ```text
-    /// requests_total{method="GET",status="200"} 100
-    /// requests_total{method="POST",status="201"} 50
+    /// // BAD: attribute "env" conflicts with Family field "env"
+    /// let ctx = context.with_attribute("env", "prod");
+    /// let family: Family<Labels, Counter> = Family::default();
+    /// ctx.register("requests", "help", family);
+    /// // Produces invalid: requests_total{env="prod",env="staging"}
+    ///
+    /// // GOOD: use distinct names
+    /// let ctx = context.with_attribute("region", "us_east");
+    /// // Produces valid: requests_total{region="us_east",env="staging"}
     /// ```
     ///
     /// # Example
@@ -348,12 +350,7 @@ pub trait Metrics: Clone + Send + Sync + 'static {
     ///
     /// # Querying The Latest Attribute
     ///
-    /// To query metrics for a specific attribute value:
-    /// ```text
-    /// consensus_engine_votes_total{epoch="5"}
-    /// ```
-    ///
-    /// To query the latest epoch dynamically, create a gauge to track the current value:
+    /// To query the latest attribute value dynamically, create a gauge to track the current value:
     /// ```ignore
     /// // Create a gauge to track the current epoch
     /// let latest_epoch = Gauge::<i64>::default();
@@ -364,30 +361,6 @@ pub trait Metrics: Clone + Send + Sync + 'static {
     ///
     /// Then create a dashboard variable `$latest_epoch` with query `max(orchestrator_latest_epoch)`
     /// and use it in panel queries: `consensus_engine_votes_total{epoch="$latest_epoch"}`
-    ///
-    /// Keys must start with `[a-zA-Z]` and contain only `[a-zA-Z0-9_]`. Values can be any string.
-    ///
-    /// # Warning: Family Label Conflicts
-    ///
-    /// When using prometheus `Family` metrics, avoid using attribute keys that match the
-    /// Family's label field names. If a conflict occurs, the encoded output will contain
-    /// duplicate labels (e.g., `{env="prod",env="staging"}`), which is invalid Prometheus
-    /// format and may cause scraping issues.
-    ///
-    /// ```ignore
-    /// #[derive(EncodeLabelSet)]
-    /// struct Labels { env: String }
-    ///
-    /// // BAD: attribute "env" conflicts with Family field "env"
-    /// let ctx = context.with_attribute("env", "prod");
-    /// let family: Family<Labels, Counter> = Family::default();
-    /// ctx.register("requests", "help", family);
-    /// // Produces invalid: requests_total{env="prod",env="staging"}
-    ///
-    /// // GOOD: use distinct names
-    /// let ctx = context.with_attribute("region", "us_east");
-    /// // Produces valid: requests_total{region="us_east",env="staging"}
-    /// ```
     fn with_attribute(&self, key: &str, value: impl std::fmt::Display) -> Self;
 
     /// Prefix the given label with the current context's label.
