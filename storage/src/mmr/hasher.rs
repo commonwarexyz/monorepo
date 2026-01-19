@@ -4,21 +4,31 @@ use super::Position;
 use commonware_cryptography::{Digest, Hasher as CHasher};
 
 /// A trait for computing the various digests of an MMR.
-pub trait Hasher<D: Digest>: Send + Sync {
-    type Inner: commonware_cryptography::Hasher<Digest = D>;
+pub trait Hasher: Send + Sync {
+    type Digest: Digest;
+    type Inner: commonware_cryptography::Hasher<Digest = Self::Digest>;
 
     /// Computes the digest for a leaf given its position and the element it represents.
-    fn leaf_digest(&mut self, pos: Position, element: &[u8]) -> D;
+    fn leaf_digest(&mut self, pos: Position, element: &[u8]) -> Self::Digest;
 
     /// Computes the digest for a node given its position and the digests of its children.
-    fn node_digest(&mut self, pos: Position, left: &D, right: &D) -> D;
+    fn node_digest(
+        &mut self,
+        pos: Position,
+        left: &Self::Digest,
+        right: &Self::Digest,
+    ) -> Self::Digest;
 
     /// Computes the root for an MMR given its size and an iterator over the digests of its peaks in
     /// decreasing order of height.
-    fn root<'a>(&mut self, size: Position, peak_digests: impl Iterator<Item = &'a D>) -> D;
+    fn root<'a>(
+        &mut self,
+        size: Position,
+        peak_digests: impl Iterator<Item = &'a Self::Digest>,
+    ) -> Self::Digest;
 
     /// Compute the digest of a byte slice.
-    fn digest(&mut self, data: &[u8]) -> D;
+    fn digest(&mut self, data: &[u8]) -> Self::Digest;
 
     /// Access the inner [CHasher] hasher.
     fn inner(&mut self) -> &mut Self::Inner;
@@ -26,7 +36,7 @@ pub trait Hasher<D: Digest>: Send + Sync {
     /// Fork the hasher to provide equivalent functionality in another thread. This is different
     /// than [Clone::clone] because the forked hasher need not be a deep copy, and may share non-mutable
     /// state with the hasher from which it was forked.
-    fn fork(&self) -> impl Hasher<D>;
+    fn fork(&self) -> impl Hasher<Digest = Self::Digest>;
 }
 
 /// The standard hasher to use with an MMR for computing leaf, node and root digests. Leverages no
@@ -65,14 +75,15 @@ impl<H: CHasher> Default for Standard<H> {
     }
 }
 
-impl<H: CHasher> Hasher<H::Digest> for Standard<H> {
+impl<H: CHasher> Hasher for Standard<H> {
+    type Digest = H::Digest;
     type Inner = H;
 
     fn inner(&mut self) -> &mut H {
         &mut self.hasher
     }
 
-    fn fork(&self) -> impl Hasher<H::Digest> {
+    fn fork(&self) -> impl Hasher<Digest = H::Digest> {
         Self { hasher: H::new() }
     }
 

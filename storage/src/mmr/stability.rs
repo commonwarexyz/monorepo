@@ -4,7 +4,7 @@ use commonware_cryptography::{sha256, Hasher as _};
 /// Build an MMR for testing with 199 elements whose root should always equal
 /// `ROOTS[199]` if the MMR is built with the StandardHasher.
 pub fn build_test_mmr(
-    hasher: &mut impl Hasher<sha256::Digest>,
+    hasher: &mut impl Hasher<Digest = sha256::Digest>,
     mut mmr: CleanMmr<sha256::Digest>,
 ) -> CleanMmr<sha256::Digest> {
     for i in 0u64..199 {

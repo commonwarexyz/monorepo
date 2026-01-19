@@ -184,7 +184,11 @@ impl<E: RStorage + Clock + Metrics, D: Digest, S: State<D> + Send + Sync> Mmr<E,
 
     /// Add an element to the MMR and return its position in the MMR. Elements added to the MMR
     /// aren't persisted to disk until `sync` is called.
-    pub async fn add(&mut self, h: &mut impl Hasher<D>, element: &[u8]) -> Result<Position, Error> {
+    pub async fn add(
+        &mut self,
+        h: &mut impl Hasher<Digest = D>,
+        element: &[u8],
+    ) -> Result<Position, Error> {
         Ok(self.mem_mmr.add(h, element))
     }
 
@@ -224,7 +228,11 @@ impl<E: RStorage + Clock + Metrics, D: Digest, S: State<D> + Send + Sync> Mmr<E,
 
 impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
     /// Initialize a new `Mmr` instance.
-    pub async fn init(context: E, hasher: &mut impl Hasher<D>, cfg: Config) -> Result<Self, Error> {
+    pub async fn init(
+        context: E,
+        hasher: &mut impl Hasher<Digest = D>,
+        cfg: Config,
+    ) -> Result<Self, Error> {
         let journal_cfg = JConfig {
             partition: cfg.journal_partition,
             items_per_blob: cfg.items_per_blob,
@@ -367,7 +375,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
     pub async fn init_sync(
         context: E,
         cfg: SyncConfig<D>,
-        hasher: &mut impl Hasher<D>,
+        hasher: &mut impl Hasher<Digest = D>,
     ) -> Result<Self, crate::qmdb::Error> {
         let journal: Journal<E, D> = Journal::init_sync(
             context.with_label("mmr_journal"),
@@ -534,7 +542,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
     /// returning.
     pub async fn pop(
         &mut self,
-        hasher: &mut impl Hasher<D>,
+        hasher: &mut impl Hasher<Digest = D>,
         mut leaves_to_pop: usize,
     ) -> Result<(), Error> {
         // See if the elements are still cached in which case we can just pop them from the in-mem
@@ -714,7 +722,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
 
 impl<E: RStorage + Clock + Metrics, D: Digest> DirtyMmr<E, D> {
     /// Merkleize the MMR and compute the root digest.
-    pub fn merkleize(self, h: &mut impl Hasher<D>) -> CleanMmr<E, D> {
+    pub fn merkleize(self, h: &mut impl Hasher<Digest = D>) -> CleanMmr<E, D> {
         CleanMmr {
             mem_mmr: self.mem_mmr.merkleize(h, self.pool.clone()),
             journal: self.journal,
@@ -785,7 +793,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> DirtyMmr<E, D> {
     /// a partial write for testing failure scenarios.
     pub async fn simulate_partial_sync(
         self,
-        hasher: &mut impl Hasher<D>,
+        hasher: &mut impl Hasher<Digest = D>,
         write_limit: usize,
     ) -> Result<(), Error> {
         if write_limit == 0 {
