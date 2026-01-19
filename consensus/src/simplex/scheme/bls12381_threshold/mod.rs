@@ -2,24 +2,11 @@
 //!
 //! This module provides two variants of threshold signing:
 //!
-//! - [`standard`]: Standard threshold signatures using the certificate macro.
-//!   Certificates contain only a vote signature recovered from partial signatures.
+//! - [`standard`]: Certificates contain only a vote signature (requires half the computation to verify
+//!   partial signatures and recover threshold signatures as [`vrf`]).
 //!
-//! - [`vrf`]: Threshold VRF (Verifiable Random Function) implementation that produces
-//!   both vote signatures and per-round seed signatures. The seed can be used for
-//!   randomness (e.g., leader election, timelock encryption).
-//!
-//! # Security Warning for VRF Usage
-//!
-//! When using the [`vrf`] variant, it is **not safe** to use a round's randomness
-//! to drive execution in that same round. A malicious leader can selectively
-//! distribute blocks to gain early visibility of the randomness output, then
-//! choose nullification if the outcome is unfavorable.
-//!
-//! Applications should employ a "commit-then-reveal" pattern by requesting
-//! randomness in advance:
-//! - Bind randomness requests in finalized blocks **before** the reveal occurs
-//! - Example: `draw(view+100)` means execution uses VRF output 100 views later
+//! - [`vrf`]: Certificates contain a vote signature and a view signature (a seed that can be used
+//!   as a VRF).
 //!
 //! # Non-Attributable Signatures
 //!

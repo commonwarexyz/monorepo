@@ -1,7 +1,7 @@
 //! Standard BLS12-381 threshold implementation of the [`Scheme`] trait for `simplex`.
 //!
-//! This variant uses the standard threshold certificate implementation without
-//! VRF seed generation. Certificates contain only the recovered vote signature.
+//! Certificates contain only a vote signature (requires half the computation to verify
+//! partial signatures and recover threshold signatures as [super::vrf]).
 //!
 //! [`Scheme`] is **non-attributable**: exposing partial signatures as evidence
 //! of either liveness or of committing a fault is not safe. With threshold signatures,

@@ -1,19 +1,25 @@
 //! BLS12-381 threshold VRF implementation of the [`Scheme`] trait for `simplex`.
 //!
-//! This variant produces both vote signatures and per-round seed signatures.
-//! The seed can be used for randomness (e.g., leader election, timelock encryption).
+//! Certificates contain a vote signature and a view signature (a seed that can be used
+//! as a VRF).
 //!
-//! # Security Warning
+//! # Using the VRF
 //!
-//! It is **not safe** to use a round's randomness to drive execution in that same
-//! round. A malicious leader can selectively distribute blocks to gain early visibility
-//! of the randomness output, then choose nullification if the outcome is unfavorable
-//! (similar to a lottery where the proposer withholds votes if they lose).
+//! A malicious leader (colluding with at least 1 Byzantine validator) can observe the output of the
+//! VRF before deciding whether to publish their block to all participants (they uniquely see `2f` other
+//! partial signatures and can recover the seed by combining their own partial signature). As a result,
+//! it is **not safe** to use a round's randomness to affect execution in that same round (as the leader can
+//! bias execution to their advantage by deciding whether or not to publish their block).
 //!
-//! Applications should employ a "commit-then-reveal" pattern by requesting randomness
-//! in advance:
-//! - Bind randomness requests in finalized blocks **before** the reveal occurs
-//! - Example: `draw(view+100)` means execution uses VRF output 100 views later
+//! Applications that want to incorporate this embedded VRF into execution should employ a "commit-then-reveal" pattern
+//! and require users to bind to the output of randomness in advance (i.e. `draw(view+k)` means execution uses VRF output
+//! `k` views later). The larger `k`, the more likely that the transaction is finalized before the randomness is revealed (recall, Simplex
+//! is streamlined). The safest approach (if you're willing to wait) is to bound the outcome to a future epoch (which ensures a
+//! transaction is finalized before the VRF it relies on is revealed).
+//!
+//! _For applications willing to accept additional overhead, a more robust (and instant) VRF can be implemented
+//! by requiring validators to emit their contribution to the seed for some height `h` only after they have observed `h` is finalized.
+//! This permits transactions to use the VRF output immediately but requires an extra message broadcast per finalized height._
 //!
 //! # Non-Attributable Signatures
 //!

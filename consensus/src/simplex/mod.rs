@@ -185,14 +185,15 @@
 //! to generate succinct consensus certificates (verifiable with just the static public key). This scheme requires instantiating
 //! the shared secret via [commonware_cryptography::bls12381::dkg] and resharing whenever participants change.
 //!
-//! Two variants are provided:
+//! Two (non-attributable) variants are provided:
 //!
-//! - [scheme::bls12381_threshold::standard]: Standard threshold signatures. Certificates contain only a vote signature.
+//! - [scheme::bls12381_threshold::standard]: Certificates contain only a vote signature.
 //!
-//! - [scheme::bls12381_threshold::vrf]: Threshold VRF that also produces per-round seed signatures for randomness
-//!   (leader election, execution randomness). Use with [`elector::Random`] for unpredictable leader selection.
+//! - [scheme::bls12381_threshold::vrf]: Certificates contain a vote signature and a view signature (i.e. a seed that can be used
+//!   as a VRF). This variant can be configured for random leader election (via [elector::Random]) and/or incorporate this randomness
+//!   into execution.
 //!
-//! #### Embedded VRF (VRF Variant Only)
+//! #### Embedded VRF ([scheme::bls12381_threshold::vrf])
 //!
 //! Every `notarize(c,v)` or `nullify(v)` message includes an `attestation(v)` (a partial signature over the view `v`). After `2f+1`
 //! `notarize(c,v)` or `nullify(v)` messages are collected from unique participants, `seed(v)` can be recovered. Because `attestation(v)` is
