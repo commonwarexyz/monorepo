@@ -2576,6 +2576,113 @@ mod tests {
         test_metrics_nested_labels_with_attributes(runner);
     }
 
+    fn test_metrics_family_with_attributes<R: Runner>(runner: R)
+    where
+        R::Context: Metrics,
+    {
+        runner.start(|context| async move {
+            #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+            struct RequestLabels {
+                method: String,
+                status: u16,
+            }
+
+            // Create context with attribute
+            let ctx = context
+                .with_label("api")
+                .with_attribute("region", "us_east")
+                .with_attribute("env", "prod");
+
+            // Register a Family metric
+            let requests: Family<RequestLabels, Counter<u64>> = Family::default();
+            ctx.register("requests", "HTTP requests", requests.clone());
+
+            // Increment counters for different label combinations
+            requests
+                .get_or_create(&RequestLabels {
+                    method: "GET".to_string(),
+                    status: 200,
+                })
+                .inc();
+            requests
+                .get_or_create(&RequestLabels {
+                    method: "POST".to_string(),
+                    status: 201,
+                })
+                .inc();
+            requests
+                .get_or_create(&RequestLabels {
+                    method: "GET".to_string(),
+                    status: 404,
+                })
+                .inc();
+
+            let output = context.encode();
+
+            // Context attributes appear first (alphabetically sorted), then Family labels
+            // Context attributes: env="prod", region="us_east"
+            // Family labels: method, status
+            assert!(
+                output.contains(
+                    "api_requests_total{env=\"prod\",region=\"us_east\",method=\"GET\",status=\"200\"} 1"
+                ),
+                "GET 200 should have merged labels: {output}"
+            );
+            assert!(
+                output.contains(
+                    "api_requests_total{env=\"prod\",region=\"us_east\",method=\"POST\",status=\"201\"} 1"
+                ),
+                "POST 201 should have merged labels: {output}"
+            );
+            assert!(
+                output.contains(
+                    "api_requests_total{env=\"prod\",region=\"us_east\",method=\"GET\",status=\"404\"} 1"
+                ),
+                "GET 404 should have merged labels: {output}"
+            );
+
+            // Create another context WITHOUT attributes to verify isolation
+            let ctx_plain = context.with_label("api_plain");
+            let plain_requests: Family<RequestLabels, Counter<u64>> = Family::default();
+            ctx_plain.register("requests", "HTTP requests", plain_requests.clone());
+
+            plain_requests
+                .get_or_create(&RequestLabels {
+                    method: "DELETE".to_string(),
+                    status: 204,
+                })
+                .inc();
+
+            let output = context.encode();
+
+            // Plain context should have Family labels but no context attributes
+            assert!(
+                output.contains("api_plain_requests_total{method=\"DELETE\",status=\"204\"} 1"),
+                "plain DELETE should have only family labels: {output}"
+            );
+            assert!(
+                !output.contains("api_plain_requests_total{env="),
+                "plain should not have env attribute: {output}"
+            );
+            assert!(
+                !output.contains("api_plain_requests_total{region="),
+                "plain should not have region attribute: {output}"
+            );
+        });
+    }
+
+    #[test]
+    fn test_deterministic_metrics_family_with_attributes() {
+        let executor = deterministic::Runner::default();
+        test_metrics_family_with_attributes(executor);
+    }
+
+    #[test]
+    fn test_tokio_metrics_family_with_attributes() {
+        let runner = tokio::Runner::default();
+        test_metrics_family_with_attributes(runner);
+    }
+
     #[test]
     fn test_deterministic_future() {
         let runner = deterministic::Runner::default();
