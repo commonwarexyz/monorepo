@@ -1130,7 +1130,10 @@ impl crate::Metrics for Context {
     }
 
     fn with_attribute(&self, key: &str, value: impl std::fmt::Display) -> Self {
+        // Validate label format (must match [a-zA-Z][a-zA-Z0-9_]*)
         validate_label(key);
+
+        // Add the attribute to the list of attributes
         let mut attributes = self.attributes.clone();
         assert!(
             add_attribute(&mut attributes, key, value),
@@ -1190,7 +1193,7 @@ impl crate::Metrics for Context {
             .insert(metric_key.clone());
         assert!(is_new, "duplicate metric: {}", metric_key);
 
-        // Apply attributes via sub_registry_with_label and register
+        // Apply attributes to the registry (in sorted order)
         let mut registry = executor.registry.lock().unwrap();
         let sub_registry = self.attributes.iter().fold(&mut *registry, |reg, (k, v)| {
             reg.sub_registry_with_label((Cow::Owned(k.clone()), Cow::Owned(v.clone())))
