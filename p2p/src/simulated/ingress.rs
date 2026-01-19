@@ -128,11 +128,13 @@ impl<P: PublicKey, E: Clock> Clone for Oracle<P, E> {
 
 impl<P: PublicKey, E: Clock> Oracle<P, E> {
     /// Create a new instance of the oracle.
+    #[ready(2)]
     pub(crate) const fn new(sender: UnboundedMailbox<Message<P, E>>) -> Self {
         Self { sender }
     }
 
     /// Create a new [Control] interface for some peer.
+    #[ready(2)]
     pub fn control(&self, me: P) -> Control<P, E> {
         Control {
             me,
@@ -143,6 +145,7 @@ impl<P: PublicKey, E: Clock> Oracle<P, E> {
     /// Create a new [Manager].
     ///
     /// Useful for mocking [crate::authenticated::discovery].
+    #[ready(2)]
     pub fn manager(&self) -> Manager<P, E> {
         Manager {
             oracle: self.clone(),
@@ -152,6 +155,7 @@ impl<P: PublicKey, E: Clock> Oracle<P, E> {
     /// Create a new [SocketManager].
     ///
     /// Useful for mocking [crate::authenticated::lookup].
+    #[ready(2)]
     pub fn socket_manager(&self) -> SocketManager<P, E> {
         SocketManager {
             oracle: self.clone(),
@@ -159,6 +163,7 @@ impl<P: PublicKey, E: Clock> Oracle<P, E> {
     }
 
     /// Return a list of all blocked peers.
+    #[ready(2)]
     pub async fn blocked(&self) -> Result<Vec<(P, P)>, Error> {
         self.sender
             .0
@@ -173,6 +178,7 @@ impl<P: PublicKey, E: Clock> Oracle<P, E> {
     /// rates in bytes per second. Use `None` for unlimited bandwidth.
     ///
     /// Bandwidth can be specified before a peer is registered or linked.
+    #[ready(2)]
     pub async fn limit_bandwidth(
         &self,
         public_key: P,
@@ -197,6 +203,7 @@ impl<P: PublicKey, E: Clock> Oracle<P, E> {
     /// setting will be used.
     ///
     /// Link can be called before a peer is registered or bandwidth is specified.
+    #[ready(2)]
     pub async fn add_link(&self, sender: P, receiver: P, config: Link) -> Result<(), Error> {
         // Sanity checks
         if sender == receiver {
@@ -229,6 +236,7 @@ impl<P: PublicKey, E: Clock> Oracle<P, E> {
     /// Remove a unidirectional link between two peers.
     ///
     /// If no link exists, this will return an error.
+    #[ready(2)]
     pub async fn remove_link(&self, sender: P, receiver: P) -> Result<(), Error> {
         // Sanity checks
         if sender == receiver {
@@ -386,6 +394,7 @@ impl<P: PublicKey, E: Clock> Control<P, E> {
     ///
     /// The `quota` parameter specifies the rate limit for outbound messages to each peer.
     /// Recipients that exceed their rate limit will be skipped when sending.
+    #[ready(2)]
     pub async fn register(
         &self,
         channel: Channel,

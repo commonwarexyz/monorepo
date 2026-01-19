@@ -51,6 +51,7 @@ impl<E: Spawner + Clock + CryptoRngCore + RNetwork + Resolver + Metrics, C: Sign
     ///
     /// * A tuple containing the network instance and the oracle that
     ///   can be used by a developer to configure which peers are authorized.
+    #[ready(2)]
     pub fn new(context: E, cfg: Config<C>) -> (Self, tracker::Oracle<C::PublicKey>) {
         let (tracker, tracker_mailbox, oracle, info_verifier) = tracker::Actor::new(
             context.with_label("tracker"),
@@ -107,6 +108,7 @@ impl<E: Spawner + Clock + CryptoRngCore + RNetwork + Resolver + Metrics, C: Sign
     /// * A tuple containing the sender and receiver for the channel (how to communicate
     ///   with external peers on the network). It is safe to close either the sender or receiver
     ///   without impacting the ability to process messages on other channels.
+    #[ready(2)]
     #[allow(clippy::type_complexity)]
     pub fn register(
         &mut self,
@@ -128,6 +130,7 @@ impl<E: Spawner + Clock + CryptoRngCore + RNetwork + Resolver + Metrics, C: Sign
     /// Starts the network.
     ///
     /// After the network is started, it is not possible to add more channels.
+    #[ready(2)]
     pub fn start(mut self) -> Handle<()> {
         spawn_cell!(self.context, self.run().await)
     }

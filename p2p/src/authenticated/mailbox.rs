@@ -8,6 +8,7 @@ pub struct Mailbox<T>(pub(crate) mpsc::Sender<T>);
 
 impl<T> Mailbox<T> {
     /// Returns a new mailbox with the given sender.
+    #[ready(2)]
     pub fn new(size: usize) -> (Self, mpsc::Receiver<T>) {
         let (sender, receiver) = mpsc::channel(size);
         (Self(sender), receiver)
@@ -27,6 +28,7 @@ pub struct UnboundedMailbox<T>(pub(crate) mpsc::UnboundedSender<T>);
 
 impl<T> UnboundedMailbox<T> {
     /// Returns a new mailbox with the given sender.
+    #[ready(2)]
     pub fn new() -> (Self, mpsc::UnboundedReceiver<T>) {
         let (sender, receiver) = mpsc::unbounded();
         (Self(sender), receiver)

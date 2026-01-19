@@ -105,6 +105,7 @@ pub struct Config<C: Signer> {
 
 impl<C: Signer> Config<C> {
     /// Generates a configuration with reasonable defaults for usage in production.
+    #[ready(2)]
     pub fn recommended(
         crypto: C,
         namespace: &[u8],
@@ -142,6 +143,7 @@ impl<C: Signer> Config<C> {
     /// # Warning
     ///
     /// It is not recommended to use this configuration in production.
+    #[ready(2)]
     pub fn local(crypto: C, namespace: &[u8], listen: SocketAddr, max_message_size: u32) -> Self {
         Self {
             crypto,

@@ -159,6 +159,7 @@ pub struct Config<S> {
 
 impl<S> Config<S> {
     /// Computes current time and acceptable timestamp range.
+    #[ready(2)]
     pub fn time_information(&self, ctx: &impl Clock) -> (u64, Range<u64>) {
         fn duration_to_u64(d: Duration) -> u64 {
             u64::try_from(d.as_millis()).expect("duration ms should fit in an u64")
@@ -307,6 +308,7 @@ pub struct Sender<O> {
 
 impl<O: Sink> Sender<O> {
     /// Encrypts and sends a message to the peer.
+    #[ready(2)]
     pub async fn send(&mut self, mut buf: impl Buf) -> Result<(), Error> {
         // Copy the buffer to ensure contiguous memory for encryption.
         let msg = buf.copy_to_bytes(buf.remaining());
@@ -332,6 +334,7 @@ pub struct Receiver<I> {
 
 impl<I: Stream> Receiver<I> {
     /// Receives and decrypts a message from the peer.
+    #[ready(2)]
     pub async fn recv(&mut self) -> Result<Bytes, Error> {
         let c = recv_frame(
             &mut self.stream,

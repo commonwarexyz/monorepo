@@ -74,11 +74,13 @@ pub struct Muxer<E: Spawner, S: Sender, R: Receiver> {
 impl<E: Spawner, S: Sender, R: Receiver> Muxer<E, S, R> {
     /// Create a multiplexed wrapper around a [Sender] and [Receiver] pair, and return a ([Muxer],
     /// [MuxHandle]) pair that can be used to register routes dynamically.
+    #[ready(2)]
     pub fn new(context: E, sender: S, receiver: R, mailbox_size: usize) -> (Self, MuxHandle<S, R>) {
         Self::builder(context, sender, receiver, mailbox_size).build()
     }
 
     /// Creates a [MuxerBuilder] that can be used to configure and build a [Muxer].
+    #[ready(2)]
     pub fn builder(
         context: E,
         sender: S,
@@ -105,6 +107,7 @@ impl<E: Spawner, S: Sender, R: Receiver> Muxer<E, S, R> {
     }
 
     /// Start the demuxer using the given spawner.
+    #[ready(2)]
     pub fn start(mut self) -> Handle<Result<(), R::Error>> {
         spawn_cell!(self.context, self.run().await)
     }
@@ -113,6 +116,7 @@ impl<E: Spawner, S: Sender, R: Receiver> Muxer<E, S, R> {
     ///
     /// Callers should run this in a background task for as long as the underlying `Receiver` is
     /// expected to receive traffic.
+    #[ready(2)]
     pub async fn run(mut self) -> Result<(), R::Error> {
         select_loop! {
             self.context,
@@ -204,6 +208,7 @@ impl<S: Sender, R: Receiver> MuxHandle<S, R> {
     /// and receive messages for that subchannel.
     ///
     /// Panics if the subchannel is already registered at any point.
+    #[ready(2)]
     pub async fn register(
         &mut self,
         subchannel: Channel,
@@ -304,11 +309,13 @@ pub struct GlobalSender<S: Sender> {
 
 impl<S: Sender> GlobalSender<S> {
     /// Create a new [GlobalSender] wrapping the given [Sender].
+    #[ready(2)]
     pub const fn new(inner: S) -> Self {
         Self { inner }
     }
 
     /// Send a message over the given `subchannel`.
+    #[ready(2)]
     pub async fn send(
         &mut self,
         subchannel: Channel,
@@ -356,6 +363,7 @@ pub struct CheckedGlobalSender<'a, S: Sender> {
 
 impl<'a, S: Sender> CheckedGlobalSender<'a, S> {
     /// Set the subchannel for this sender.
+    #[ready(2)]
     pub const fn with_subchannel(mut self, subchannel: Channel) -> Self {
         self.subchannel = Some(subchannel);
         self
@@ -406,6 +414,7 @@ impl<E: Spawner, S: Sender, R: Receiver> Builder for MuxerBuilder<E, S, R> {
 
 impl<E: Spawner, S: Sender, R: Receiver> MuxerBuilder<E, S, R> {
     /// Registers a backup channel with the muxer.
+    #[ready(2)]
     pub fn with_backup(mut self) -> MuxerBuilderWithBackup<E, S, R> {
         let (tx, rx) = mpsc::channel(self.mux.mailbox_size);
         self.mux.backup = Some(tx);
@@ -418,6 +427,7 @@ impl<E: Spawner, S: Sender, R: Receiver> MuxerBuilder<E, S, R> {
     }
 
     /// Registers a global sender with the muxer.
+    #[ready(2)]
     pub fn with_global_sender(self) -> MuxerBuilderWithGlobalSender<E, S, R> {
         let global_sender = GlobalSender::new(self.mux.sender.clone());
 
@@ -439,6 +449,7 @@ pub struct MuxerBuilderWithBackup<E: Spawner, S: Sender, R: Receiver> {
 
 impl<E: Spawner, S: Sender, R: Receiver> MuxerBuilderWithBackup<E, S, R> {
     /// Registers a global sender with the muxer.
+    #[ready(2)]
     pub fn with_global_sender(self) -> MuxerBuilderAllOpts<E, S, R> {
         let global_sender = GlobalSender::new(self.mux.sender.clone());
 
@@ -474,6 +485,7 @@ pub struct MuxerBuilderWithGlobalSender<E: Spawner, S: Sender, R: Receiver> {
 
 impl<E: Spawner, S: Sender, R: Receiver> MuxerBuilderWithGlobalSender<E, S, R> {
     /// Registers a backup channel with the muxer.
+    #[ready(2)]
     pub fn with_backup(mut self) -> MuxerBuilderAllOpts<E, S, R> {
         let (tx, rx) = mpsc::channel(self.mux.mailbox_size);
         self.mux.backup = Some(tx);

@@ -176,6 +176,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
     ///
     /// Returns a tuple containing the network instance and the oracle that can
     /// be used to modify the state of the network during context.
+    #[ready(2)]
     pub fn new(mut context: E, cfg: Config) -> (Self, Oracle<P, E>) {
         let (sender, receiver) = mpsc::unbounded();
         let (oracle_mailbox, oracle_receiver) = UnboundedMailbox::new();
@@ -688,6 +689,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
     ///
     /// It is not necessary to invoke this method before modifying the network topology, however,
     /// no messages will be sent until this method is called.
+    #[ready(2)]
     pub fn start(mut self) -> Handle<()> {
         spawn_cell!(self.context, self.run().await)
     }
@@ -883,6 +885,7 @@ impl<P: PublicKey, E: Clock> Sender<P, E> {
     }
 
     /// Split this [Sender] into a [SplitOrigin::Primary] and [SplitOrigin::Secondary] sender.
+    #[ready(2)]
     pub fn split_with<F: SplitForwarder<P>>(
         self,
         forwarder: F,
@@ -1030,6 +1033,7 @@ impl<P: PublicKey> crate::Receiver for Receiver<P> {
 
 impl<P: PublicKey> Receiver<P> {
     /// Split this [Receiver] into a [SplitTarget::Primary] and [SplitTarget::Secondary] receiver.
+    #[ready(2)]
     pub fn split_with<E: Spawner, R: SplitRouter<P>>(
         mut self,
         context: E,

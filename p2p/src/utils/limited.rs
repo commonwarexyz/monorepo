@@ -77,6 +77,7 @@ where
     P: Connected<PublicKey = S::PublicKey>,
 {
     /// Create a new [`LimitedSender`] with the given sender, [`Quota`], and peer source.
+    #[ready(2)]
     pub fn new(sender: S, quota: Quota, clock: E, peers: P) -> Self {
         let rate_limit = Arc::new(Mutex::new(KeyedRateLimiter::hashmap_with_clock(
             quota, clock,
@@ -95,6 +96,7 @@ where
     /// Returns a [`CheckedSender`] with only the recipients that are not
     /// currently rate-limited. If _all_ recipients are rate-limited, returns
     /// the earliest instant at which all recipients will be available.
+    #[ready(2)]
     pub async fn check(
         &mut self,
         recipients: Recipients<S::PublicKey>,
@@ -195,6 +197,7 @@ impl<'a, S: UnlimitedSender> CheckedSender<'a, S> {
     ///
     /// Rate limiting has already been applied to the original recipients. Any
     /// messages sent via the extracted sender will bypass the rate limiter.
+    #[ready(2)]
     pub(crate) fn into_inner(self) -> &'a mut S {
         self.sender
     }

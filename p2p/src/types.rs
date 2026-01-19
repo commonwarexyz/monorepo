@@ -30,6 +30,7 @@ pub enum Ingress {
 
 impl Ingress {
     /// Returns the port number for this ingress address.
+    #[ready(2)]
     pub const fn port(&self) -> u16 {
         match self {
             Self::Socket(addr) => addr.port(),
@@ -38,6 +39,7 @@ impl Ingress {
     }
 
     /// Returns the IP address if this is a Socket variant.
+    #[ready(2)]
     pub const fn ip(&self) -> Option<IpAddr> {
         match self {
             Self::Socket(addr) => Some(addr.ip()),
@@ -52,6 +54,7 @@ impl Ingress {
     ///
     /// Note: For `Dns` addresses, private IP checks are performed after resolution in
     /// [`resolve_filtered`](Self::resolve_filtered).
+    #[ready(2)]
     pub fn is_valid(&self, allow_private_ips: bool, allow_dns: bool) -> bool {
         match self {
             Self::Socket(addr) => allow_private_ips || IpAddrExt::is_global(&addr.ip()),
@@ -63,6 +66,7 @@ impl Ingress {
     ///
     /// For `Socket` variants, returns a single-element iterator.
     /// For `Dns` variants, performs DNS resolution and returns all resolved addresses.
+    #[ready(2)]
     pub async fn resolve(
         &self,
         resolver: &impl Resolver,
@@ -84,6 +88,7 @@ impl Ingress {
     }
 
     /// [`resolve`](Self::resolve) and filter by private IP policy.
+    #[ready(2)]
     pub async fn resolve_filtered(
         &self,
         resolver: &impl Resolver,
@@ -163,6 +168,7 @@ pub enum Address {
 
 impl Address {
     /// Returns the ingress address for dialing.
+    #[ready(2)]
     pub fn ingress(&self) -> Ingress {
         match self {
             Self::Symmetric(addr) => Ingress::Socket(*addr),
@@ -171,6 +177,7 @@ impl Address {
     }
 
     /// Returns the egress IP address for filtering.
+    #[ready(2)]
     pub const fn egress_ip(&self) -> IpAddr {
         match self {
             Self::Symmetric(addr) => addr.ip(),
@@ -179,6 +186,7 @@ impl Address {
     }
 
     /// Returns the egress socket address.
+    #[ready(2)]
     pub const fn egress(&self) -> SocketAddr {
         match self {
             Self::Symmetric(addr) => *addr,

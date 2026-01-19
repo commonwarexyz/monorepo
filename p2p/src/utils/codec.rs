@@ -32,6 +32,7 @@ pub struct WrappedSender<S: Sender, V: Codec> {
 
 impl<S: Sender, V: Codec> WrappedSender<S, V> {
     /// Create a new [WrappedSender] with the given [Sender].
+    #[ready(2)]
     pub const fn new(sender: S) -> Self {
         Self {
             sender,
@@ -40,6 +41,7 @@ impl<S: Sender, V: Codec> WrappedSender<S, V> {
     }
 
     /// Send a message to a set of recipients.
+    #[ready(2)]
     pub async fn send(
         &mut self,
         recipients: Recipients<S::PublicKey>,
@@ -52,6 +54,7 @@ impl<S: Sender, V: Codec> WrappedSender<S, V> {
 
     /// Check if a message can be sent to a set of recipients, returning a [CheckedWrappedSender]
     /// or the time at which the send can be retried.
+    #[ready(2)]
     pub async fn check(
         &mut self,
         recipients: Recipients<S::PublicKey>,
@@ -75,6 +78,7 @@ pub struct CheckedWrappedSender<'a, S: Sender, V: Codec> {
 }
 
 impl<'a, S: Sender, V: Codec> CheckedWrappedSender<'a, S, V> {
+    #[ready(2)]
     pub async fn send(
         self,
         message: V,
@@ -94,11 +98,13 @@ pub struct WrappedReceiver<R: Receiver, V: Codec> {
 
 impl<R: Receiver, V: Codec> WrappedReceiver<R, V> {
     /// Create a new [WrappedReceiver] with the given [Receiver].
+    #[ready(2)]
     pub const fn new(config: V::Cfg, receiver: R) -> Self {
         Self { config, receiver }
     }
 
     /// Receive a message from an arbitrary recipient.
+    #[ready(2)]
     pub async fn recv(&mut self) -> Result<WrappedMessage<R::PublicKey, V>, R::Error> {
         let (pk, bytes) = self.receiver.recv().await?;
         let decoded = match V::decode_cfg(bytes.as_ref(), &self.config) {

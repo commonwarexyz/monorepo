@@ -5,6 +5,7 @@ use crate::{
 };
 use bytes::{Buf, Bytes};
 use commonware_cryptography::PublicKey;
+use commonware_macros::ready;
 use commonware_utils::{
     channels::{fallible::AsyncFallibleExt, ring},
     NZUsize,
@@ -40,6 +41,7 @@ impl<P: PublicKey> Mailbox<Message<P>> {
     /// Notify the router that a peer is ready to communicate.
     ///
     /// Returns `None` if the router has shut down.
+    #[ready(2)]
     pub async fn ready(&mut self, peer: P, relay: Relay<Data>) -> Option<Channels<P>> {
         self.0
             .request(|channels| Message::Ready {
@@ -54,6 +56,7 @@ impl<P: PublicKey> Mailbox<Message<P>> {
     ///
     /// This may fail during shutdown if the router has already exited,
     /// which is harmless since the router no longer tracks any peers.
+    #[ready(2)]
     pub async fn release(&mut self, peer: P) {
         self.0.send_lossy(Message::Release { peer }).await;
     }

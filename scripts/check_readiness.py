@@ -215,6 +215,74 @@ def check_trait_impls(index, paths, public_module_paths):
     return missing
 
 
+def check_inherent_impl_methods(index, paths, public_module_paths, reexported_ids):
+    """
+    Check that all public methods on inherent impls (not trait impls) have readiness annotations.
+
+    A method is considered public if:
+    - The implementing type is publicly accessible (direct or re-exported)
+    - The method itself has public visibility
+    """
+    missing = []
+
+    for item_id, item in index.items():
+        inner = item.get("inner", {})
+        if "impl" not in inner:
+            continue
+
+        impl_data = inner.get("impl", {})
+
+        # Skip trait impls - we handle those separately
+        if impl_data.get("trait"):
+            continue
+
+        # Get the implementing type's path
+        for_type = impl_data.get("for")
+        type_path = get_type_path(for_type, paths)
+
+        # Skip if we can't determine the type path
+        if not type_path:
+            continue
+
+        # Check if the type is from this crate and publicly accessible
+        if for_type and "resolved_path" in for_type:
+            type_id = str(for_type["resolved_path"].get("id", ""))
+            type_path_info = paths.get(type_id, {})
+            if type_path_info.get("crate_id") != 0:
+                continue
+
+            # Check if type is publicly accessible
+            is_direct_public = is_publicly_accessible(type_path, public_module_paths)
+            is_reexported = type_id in reexported_ids
+            if not is_direct_public and not is_reexported:
+                continue
+        else:
+            continue
+
+        # Check each method in this impl
+        for method_id in impl_data.get("items", []):
+            method = index.get(str(method_id))
+            if not method:
+                continue
+
+            # Skip non-public methods
+            if method.get("visibility") != "public":
+                continue
+
+            method_inner = method.get("inner", {})
+            if "function" not in method_inner:
+                continue
+
+            # Check for readiness annotation
+            docs = method.get("docs") or ""
+            if "**Readiness:" not in docs:
+                method_name = method.get("name", "?")
+                type_name = type_path[-1] if type_path else "?"
+                missing.append(("method", f"{type_name}::{method_name}", "::".join(type_path)))
+
+    return missing
+
+
 def check_unnecessary_annotations(index, paths, public_module_paths, reexported_ids):
     """
     Check that private items do NOT have #[ready(N)] annotations.
@@ -240,6 +308,11 @@ def check_unnecessary_annotations(index, paths, public_module_paths, reexported_
         # Get the item's path
         path_info = paths.get(item_id, {})
         item_path = path_info.get("path", [])
+
+        # Skip functions without paths - these are methods on impl blocks,
+        # which are checked separately by check_inherent_impl_methods
+        if kind == "function" and not item_path:
+            continue
 
         # Check if item is publicly accessible (direct path or re-export)
         is_direct_public = is_publicly_accessible(item_path, public_module_paths)
@@ -330,6 +403,11 @@ def check_readiness(path):
 
     # Check trait implementations
     missing.extend(check_trait_impls(index, paths, public_module_paths))
+
+    # Check public methods on inherent impls
+    missing.extend(
+        check_inherent_impl_methods(index, paths, public_module_paths, reexported_ids)
+    )
 
     # Check for unnecessary annotations on private items
     unnecessary = check_unnecessary_annotations(

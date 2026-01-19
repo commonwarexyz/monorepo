@@ -110,6 +110,7 @@ pub enum Message<C: PublicKey> {
 
 impl<C: PublicKey> UnboundedMailbox<Message<C>> {
     /// Send a `Connect` message to the tracker.
+    #[ready(2)]
     pub fn connect(&mut self, public_key: C, peer: Mailbox<peer::Message>) {
         self.0.send_lossy(Message::Connect { public_key, peer });
     }
@@ -117,6 +118,7 @@ impl<C: PublicKey> UnboundedMailbox<Message<C>> {
     /// Request a list of dialable peers from the tracker.
     ///
     /// Returns an empty list if the tracker is shut down.
+    #[ready(2)]
     pub async fn dialable(&mut self) -> Vec<C> {
         self.0
             .request_or_default(|responder| Message::Dialable { responder })
@@ -126,6 +128,7 @@ impl<C: PublicKey> UnboundedMailbox<Message<C>> {
     /// Send a `Dial` message to the tracker.
     ///
     /// Returns `None` if the tracker is shut down.
+    #[ready(2)]
     pub async fn dial(&mut self, public_key: C) -> Option<(Reservation<C>, Ingress)> {
         self.0
             .request(|reservation| Message::Dial {
@@ -139,6 +142,7 @@ impl<C: PublicKey> UnboundedMailbox<Message<C>> {
     /// Send an `Acceptable` message to the tracker.
     ///
     /// Returns `false` if the tracker is shut down.
+    #[ready(2)]
     pub async fn acceptable(&mut self, public_key: C, source_ip: IpAddr) -> bool {
         self.0
             .request_or(
@@ -155,6 +159,7 @@ impl<C: PublicKey> UnboundedMailbox<Message<C>> {
     /// Send a `Listen` message to the tracker.
     ///
     /// Returns `None` if the tracker is shut down.
+    #[ready(2)]
     pub async fn listen(&mut self, public_key: C) -> Option<Reservation<C>> {
         self.0
             .request(|reservation| Message::Listen {
