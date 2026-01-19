@@ -29,6 +29,7 @@ num-rational = { workspace = true, optional = true }
 num-traits.workspace = true
 pin-project.workspace = true
 rand.workspace = true
+regex = { workspace = true, optional = true }
 serde = { workspace = true, optional = true, features = ["derive"] }
 serde_json = { workspace = true, optional = true }
 syn = { workspace = true, optional = true, features = ["full", "parsing", "visit"] }
@@ -76,9 +77,9 @@ arbitrary = [
 lint = [
 	"dep:chrono",
 	"dep:clap",
+	"dep:regex",
 	"dep:serde",
 	"dep:serde_json",
-	"dep:syn",
 	"dep:toml",
 	"dep:walkdir",
 	"std",

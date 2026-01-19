@@ -140,6 +140,7 @@ rand_distr = "0.4.3"
 ratatui = "0.29.0"
 rayon = { version = "1.10.0", default-features = false }
 reed-solomon-simd = "3.1.0"
+regex = "1.11"
 reqwest = "0.12.12"
 rstest = "0.26.1"
 serde = "1.0.218"
