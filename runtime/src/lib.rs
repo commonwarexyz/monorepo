@@ -279,14 +279,33 @@ pub trait Metrics: Clone + Send + Sync + 'static {
     fn with_label(&self, label: &str) -> Self;
 
     /// Create a new instance of `Metrics` with an additional attribute (Prometheus label) applied
-    /// to all metrics registered in this context.
+    /// to all metrics registered in this context and any child contexts.
     ///
     /// Unlike [`Metrics::with_label`] which affects the metric name prefix, `with_attribute` adds
     /// a Prometheus label that appears as a separate dimension in the metric output. This is
     /// useful for tracking epoch-specific or instance-specific metrics without causing metric
     /// name cardinality explosion.
     ///
-    /// # When to Use Attributes vs Labels
+    /// # Subtree Labeling
+    ///
+    /// Attributes apply to the entire subtree of contexts. When you call `with_attribute`, the
+    /// label is automatically added to all metrics registered in that context and any child
+    /// contexts created via `with_label`:
+    ///
+    /// ```text
+    /// context
+    ///   |-- with_label("orchestrator")
+    ///         |-- with_attribute("epoch", "5")
+    ///               |-- counter: votes        -> orchestrator_votes{epoch="5"}
+    ///               |-- counter: proposals    -> orchestrator_proposals{epoch="5"}
+    ///               |-- with_label("engine")
+    ///                     |-- gauge: height   -> orchestrator_engine_height{epoch="5"}
+    /// ```
+    ///
+    /// This pattern avoids wrapping every metric in a `Family` and avoids polluting metric
+    /// names with dynamic values like `orchestrator_epoch_5_votes`.
+    ///
+    /// # When to Use Attributes vs Labels vs Family
     ///
     /// Use [`Metrics::with_label`] for static, structural grouping (e.g., component names):
     /// ```text
@@ -294,10 +313,16 @@ pub trait Metrics: Clone + Send + Sync + 'static {
     /// storage_reads_total 500
     /// ```
     ///
-    /// Use `with_attribute` for dynamic dimensions that change at runtime (e.g., epochs):
+    /// Use `with_attribute` for labels that apply to a subtree of metrics (e.g., epoch, region):
     /// ```text
     /// consensus_votes_total{epoch="5"} 100
     /// consensus_votes_total{epoch="6"} 200
+    /// ```
+    ///
+    /// Use `Family` for per-sample labels that vary within a single metric (e.g., peer_id, method):
+    /// ```text
+    /// requests_total{method="GET",status="200"} 100
+    /// requests_total{method="POST",status="201"} 50
     /// ```
     ///
     /// # Example
