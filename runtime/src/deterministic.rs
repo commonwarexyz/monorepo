@@ -1124,7 +1124,6 @@ impl crate::Metrics for Context {
         );
         Self {
             name,
-            attributes: self.attributes.clone(),
             ..self.clone()
         }
     }

@@ -335,23 +335,6 @@ impl std::fmt::Write for MetricEncoder {
     }
 }
 
-/// Panics if the Prometheus-formatted buffer contains duplicate data lines.
-///
-/// Data lines are non-comment, non-empty lines (e.g., `metric_total 42` or
-/// `metric{label="value"} 1`). Duplicate data lines indicate the same metric
-/// was registered twice with identical labels.
-pub fn assert_unique_metrics(buffer: &str) {
-    let mut seen = HashSet::new();
-    for line in buffer.lines() {
-        if !line.starts_with('#') && !line.is_empty() {
-            let metric_name = line.split_once([' ', '{']).map(|(n, _)| n);
-            if let Some(name) = metric_name {
-                assert!(seen.insert(line.to_string()), "duplicate metric: {}", name);
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -446,30 +429,6 @@ a_total 2
 "#;
         let output = encode_dedup(input);
         assert_eq!(output, input);
-    }
-
-    #[test]
-    fn test_assert_unique_metrics_passes() {
-        let input = r#"# HELP test A metric.
-# TYPE test counter
-test_total 1
-test_total{label="a"} 2
-test_total{label="b"} 3
-# EOF
-"#;
-        assert_unique_metrics(input);
-    }
-
-    #[test]
-    #[should_panic(expected = "duplicate metric:")]
-    fn test_assert_unique_metrics_panics() {
-        let input = r#"# HELP test A metric.
-# TYPE test counter
-test_total 1
-test_total 1
-# EOF
-"#;
-        assert_unique_metrics(input);
     }
 
     #[test_traced]
