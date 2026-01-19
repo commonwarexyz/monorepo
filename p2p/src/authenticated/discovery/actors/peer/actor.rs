@@ -435,7 +435,7 @@ mod tests {
             let local_pk_clone = local_pk.clone();
             let listener_handle = context.clone().spawn({
                 move |ctx| async move {
-                    commonware_stream::listen(
+                    commonware_stream::encrypted::listen(
                         ctx,
                         |_| async { true },
                         remote_config,
@@ -450,7 +450,7 @@ mod tests {
                 }
             });
 
-            let (mut local_sender, _local_receiver) = commonware_stream::dial(
+            let (mut local_sender, _local_receiver) = commonware_stream::encrypted::dial(
                 context.clone(),
                 local_config,
                 remote_pk.clone(),
@@ -534,7 +534,7 @@ mod tests {
             let local_pk_clone = local_pk.clone();
             let listener_handle = context.clone().spawn({
                 move |ctx| async move {
-                    commonware_stream::listen(
+                    commonware_stream::encrypted::listen(
                         ctx,
                         |_| async { true },
                         remote_config,
@@ -549,7 +549,7 @@ mod tests {
                 }
             });
 
-            let (mut local_sender, _local_receiver) = commonware_stream::dial(
+            let (mut local_sender, _local_receiver) = commonware_stream::encrypted::dial(
                 context.clone(),
                 local_config,
                 remote_pk.clone(),
@@ -639,7 +639,7 @@ mod tests {
             let local_pk_clone = local_pk.clone();
             let listener_handle = context.clone().spawn({
                 move |ctx| async move {
-                    commonware_stream::listen(
+                    commonware_stream::encrypted::listen(
                         ctx,
                         |_| async { true },
                         remote_config,
@@ -654,7 +654,7 @@ mod tests {
                 }
             });
 
-            let (mut local_sender, _local_receiver) = commonware_stream::dial(
+            let (mut local_sender, _local_receiver) = commonware_stream::encrypted::dial(
                 context.clone(),
                 local_config,
                 remote_pk.clone(),
@@ -742,7 +742,7 @@ mod tests {
             let local_pk_clone = local_pk.clone();
             let listener_handle = context.clone().spawn({
                 move |ctx| async move {
-                    commonware_stream::listen(
+                    commonware_stream::encrypted::listen(
                         ctx,
                         |_| async { true },
                         remote_config,
@@ -757,7 +757,7 @@ mod tests {
                 }
             });
 
-            let (mut local_sender, _local_receiver) = commonware_stream::dial(
+            let (mut local_sender, _local_receiver) = commonware_stream::encrypted::dial(
                 context.clone(),
                 local_config,
                 remote_pk.clone(),
