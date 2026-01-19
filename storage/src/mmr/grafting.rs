@@ -225,7 +225,8 @@ pub(super) fn source_pos(base_node_pos: Position, height: u32) -> Option<Positio
     Some(Position::new(peak_pos))
 }
 
-impl<H: CHasher> HasherTrait<H::Digest> for Hasher<'_, H> {
+impl<H: CHasher> HasherTrait for Hasher<'_, H> {
+    type Digest = H::Digest;
     type Inner = H;
 
     /// Computes the digest of a leaf in the peak_tree of a grafted MMR.
@@ -247,7 +248,7 @@ impl<H: CHasher> HasherTrait<H::Digest> for Hasher<'_, H> {
         self.hasher.finalize()
     }
 
-    fn fork(&self) -> impl HasherTrait<H::Digest> {
+    fn fork(&self) -> impl HasherTrait<Digest = H::Digest> {
         HasherFork::<H> {
             hasher: StandardHasher::new(),
             height: self.height,
@@ -283,7 +284,8 @@ impl<H: CHasher> HasherTrait<H::Digest> for Hasher<'_, H> {
     }
 }
 
-impl<H: CHasher> HasherTrait<H::Digest> for HasherFork<'_, H> {
+impl<H: CHasher> HasherTrait for HasherFork<'_, H> {
+    type Digest = H::Digest;
     type Inner = H;
 
     /// Computes the digest of a leaf in the peak_tree of a grafted MMR.
@@ -305,7 +307,7 @@ impl<H: CHasher> HasherTrait<H::Digest> for HasherFork<'_, H> {
         self.hasher.finalize()
     }
 
-    fn fork(&self) -> impl HasherTrait<H::Digest> {
+    fn fork(&self) -> impl HasherTrait<Digest = H::Digest> {
         HasherFork::<H> {
             hasher: StandardHasher::<H>::new(),
             height: self.height,
@@ -374,14 +376,15 @@ impl<'a, H: CHasher> Verifier<'a, H> {
     }
 }
 
-impl<H: CHasher> HasherTrait<H::Digest> for Verifier<'_, H> {
+impl<H: CHasher> HasherTrait for Verifier<'_, H> {
+    type Digest = H::Digest;
     type Inner = H;
 
     fn leaf_digest(&mut self, pos: Position, element: &[u8]) -> H::Digest {
         self.hasher.leaf_digest(pos, element)
     }
 
-    fn fork(&self) -> impl HasherTrait<H::Digest> {
+    fn fork(&self) -> impl HasherTrait<Digest = H::Digest> {
         Verifier::<H> {
             hasher: StandardHasher::new(),
             height: self.height,

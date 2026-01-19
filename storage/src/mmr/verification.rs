@@ -36,7 +36,7 @@ impl<D: Digest> ProofStore<D> {
         root: &D,
     ) -> Result<Self, Error>
     where
-        H: Hasher<D>,
+        H: Hasher<Digest = D>,
         E: AsRef<[u8]>,
     {
         let digests =

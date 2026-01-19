@@ -146,7 +146,7 @@ impl<D: Digest> Proof<D> {
         root: &D,
     ) -> bool
     where
-        H: Hasher<D>,
+        H: Hasher<Digest = D>,
     {
         self.verify_range_inclusion(hasher, &[element], loc, root)
     }
@@ -162,7 +162,7 @@ impl<D: Digest> Proof<D> {
         root: &D,
     ) -> bool
     where
-        H: Hasher<D>,
+        H: Hasher<Digest = D>,
         E: AsRef<[u8]>,
     {
         if !self.size.is_mmr_size() {
@@ -192,7 +192,7 @@ impl<D: Digest> Proof<D> {
         root: &D,
     ) -> bool
     where
-        H: Hasher<D>,
+        H: Hasher<Digest = D>,
         E: AsRef<[u8]>,
     {
         // Empty proof is valid for an empty MMR
@@ -347,7 +347,7 @@ impl<D: Digest> Proof<D> {
         root: &D,
     ) -> Result<Vec<(Position, D)>, super::Error>
     where
-        H: Hasher<D>,
+        H: Hasher<Digest = D>,
         E: AsRef<[u8]>,
     {
         let mut collected_digests = Vec::new();
@@ -376,7 +376,7 @@ impl<D: Digest> Proof<D> {
         start_loc: Location,
     ) -> Result<D, ReconstructionError>
     where
-        H: Hasher<D>,
+        H: Hasher<Digest = D>,
         E: AsRef<[u8]>,
     {
         if !self.size.is_mmr_size() {
@@ -399,7 +399,7 @@ impl<D: Digest> Proof<D> {
         mut collected_digests: Option<&mut Vec<(Position, D)>>,
     ) -> Result<Vec<D>, ReconstructionError>
     where
-        H: Hasher<D>,
+        H: Hasher<Digest = D>,
         E: AsRef<[u8]>,
     {
         if elements.is_empty() {
@@ -621,7 +621,7 @@ fn peak_digest_from_range<'a, D, H, E, S>(
 ) -> Result<D, ReconstructionError>
 where
     D: Digest,
-    H: Hasher<D>,
+    H: Hasher<Digest = D>,
     E: Iterator<Item: AsRef<[u8]>>,
     S: Iterator<Item = &'a D>,
 {
