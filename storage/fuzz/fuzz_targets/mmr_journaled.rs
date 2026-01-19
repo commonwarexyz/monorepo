@@ -441,6 +441,7 @@ fn fuzz(input: FuzzInput) {
                     .await
                     .unwrap();
                     restarts += 1;
+
                     // Truncate tracking variables to match recovered state
                     let recovered_leaves = new_mmr.leaves().as_u64() as usize;
                     leaves.truncate(recovered_leaves);
