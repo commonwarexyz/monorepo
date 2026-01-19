@@ -319,7 +319,7 @@ fn fuzz(input: FuzzInput) {
         let mut mailboxes: HashMap<usize, Mailbox<PublicKey, FuzzRequest>> = HashMap::new();
         let mut handlers: HashMap<usize, FuzzHandler> = HashMap::new();
         let mut monitors: HashMap<usize, FuzzMonitor> = HashMap::new();
-        let mut instance_count = 0usize;
+        let mut restarts = 0usize;
 
         for i in 2..5 {
             let seed = rng.gen();
@@ -433,10 +433,10 @@ fn fuzz(input: FuzzInput) {
                     let (engine, mailbox) = Engine::new(
                         context
                             .with_label("engine")
-                            .with_attribute("instance", instance_count),
+                            .with_attribute("instance", restarts),
                         config,
                     );
-                    instance_count += 1;
+                    restarts += 1;
                     mailboxes.insert(idx, mailbox);
 
                     let (_tx, _rx) = mpsc::unbounded();

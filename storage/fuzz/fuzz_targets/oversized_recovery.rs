@@ -178,7 +178,7 @@ fn fuzz(input: FuzzInput) {
 
     runner.start(|context| async move {
         let cfg = test_cfg();
-        let mut instance_count = 0usize;
+        let mut restarts = 0usize;
 
         // Phase 1: Create valid data
         let mut oversized: Oversized<_, TestEntry, TestValue> =
@@ -295,13 +295,13 @@ fn fuzz(input: FuzzInput) {
         let mut recovered: Oversized<_, TestEntry, TestValue> = Oversized::init(
             context
                 .with_label("oversized")
-                .with_attribute("instance", instance_count),
+                .with_attribute("instance", restarts),
             cfg.clone(),
         )
         .await
         .expect("Recovery should not fail");
-        instance_count += 1;
-        let _ = instance_count;
+        restarts += 1;
+        let _ = restarts;
 
         // Phase 4: Verify get operations don't panic
         // Note: Value checksums are verified lazily on read, not during recovery.

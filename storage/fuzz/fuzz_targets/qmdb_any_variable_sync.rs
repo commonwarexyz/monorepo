@@ -163,7 +163,7 @@ fn fuzz(input: FuzzInput) {
         .await
         .expect("Failed to init source db")
         .into_mutable();
-        let mut instance_count = 0usize;
+        let mut restarts = 0usize;
 
         let mut historical_roots: HashMap<
             Location,
@@ -284,13 +284,13 @@ fn fuzz(input: FuzzInput) {
                     db = Db::<_, Key, Vec<u8>, Sha256, TwoCap, _, _>::init(
                         context
                             .with_label("db")
-                            .with_attribute("instance", instance_count),
+                            .with_attribute("instance", restarts),
                         test_config("qmdb_any_variable_fuzz_test"),
                     )
                     .await
                     .expect("Failed to init source db")
                     .into_mutable();
-                    instance_count += 1;
+                    restarts += 1;
                 }
             }
         }

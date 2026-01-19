@@ -110,7 +110,7 @@ fn fuzz(input: FuzzInput) {
             .await
             .expect("Failed to init db")
             .into_dirty();
-        let mut instance_count = 0usize;
+        let mut restarts = 0usize;
 
         for op in &input.ops {
             match op {
@@ -168,13 +168,13 @@ fn fuzz(input: FuzzInput) {
                     db = StoreDb::init(
                         context
                             .with_label("db")
-                            .with_attribute("instance", instance_count),
+                            .with_attribute("instance", restarts),
                         test_config("store_fuzz_test"),
                     )
                     .await
                     .expect("Failed to init db")
                     .into_dirty();
-                    instance_count += 1;
+                    restarts += 1;
                 }
             }
         }

@@ -71,7 +71,7 @@ fn fuzz(input: FuzzInput) {
         let mut next_value = 0u64;
         let mut journal_size = 0u64;
         let mut oldest_retained_pos = 0u64;
-        let mut instance_count = 0usize;
+        let mut restarts = 0usize;
 
         for op in input.operations.iter() {
             match op {
@@ -139,12 +139,12 @@ fn fuzz(input: FuzzInput) {
                     journal = Journal::init(
                         context
                             .with_label("journal")
-                            .with_attribute("instance", instance_count),
+                            .with_attribute("instance", restarts),
                         cfg.clone(),
                     )
                     .await
                     .unwrap();
-                    instance_count += 1;
+                    restarts += 1;
                     // Reset tracking variables to match recovered state
                     journal_size = journal.size();
                     oldest_retained_pos = journal.oldest_retained_pos().unwrap_or(0);

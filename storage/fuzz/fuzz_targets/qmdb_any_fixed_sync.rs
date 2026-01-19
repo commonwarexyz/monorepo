@@ -152,7 +152,7 @@ fn fuzz(mut input: FuzzInput) {
             .await
             .expect("Failed to init source db")
             .into_mutable();
-        let mut instance_count = 0usize;
+        let mut restarts = 0usize;
 
         let mut sync_id = 0;
 
@@ -240,13 +240,13 @@ fn fuzz(mut input: FuzzInput) {
                     db = FixedDb::init(
                         context
                             .with_label("db")
-                            .with_attribute("instance", instance_count),
+                            .with_attribute("instance", restarts),
                         test_config(TEST_NAME),
                     )
                     .await
                     .expect("Failed to init source db")
                     .into_mutable();
-                    instance_count += 1;
+                    restarts += 1;
                 }
             }
         }

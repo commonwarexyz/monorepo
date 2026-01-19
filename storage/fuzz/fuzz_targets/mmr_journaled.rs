@@ -117,7 +117,7 @@ fn fuzz(input: FuzzInput) {
 
         let mut historical_sizes = Vec::new();
         let mut mmr = MmrState::Clean(mmr);
-        let mut instance_count = 0usize;
+        let mut restarts = 0usize;
 
         for op in input.operations {
             mmr = match op {
@@ -434,13 +434,13 @@ fn fuzz(input: FuzzInput) {
                     let new_mmr = Mmr::init(
                         context
                             .with_label("mmr")
-                            .with_attribute("instance", instance_count),
+                            .with_attribute("instance", restarts),
                         &mut hasher,
                         test_config("fuzz_test_mmr_journaled"),
                     )
                     .await
                     .unwrap();
-                    instance_count += 1;
+                    restarts += 1;
                     // Truncate tracking variables to match recovered state
                     let recovered_leaves = new_mmr.leaves().as_u64() as usize;
                     leaves.truncate(recovered_leaves);
@@ -469,7 +469,7 @@ fn fuzz(input: FuzzInput) {
                     if let Ok(sync_mmr) = CleanMmr::init_sync(
                         context
                             .with_label("sync")
-                            .with_attribute("instance", instance_count),
+                            .with_attribute("instance", restarts),
                         sync_config,
                         &mut hasher,
                     )
@@ -479,7 +479,7 @@ fn fuzz(input: FuzzInput) {
                         assert_eq!(sync_mmr.pruned_to_pos(), lower_bound_pos);
                         sync_mmr.destroy().await.unwrap();
                     }
-                    instance_count += 1;
+                    restarts += 1;
                     mmr
                 }
             };
