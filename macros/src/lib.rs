@@ -12,10 +12,58 @@ use proc_macro_crate::{crate_name, FoundCrate};
 use quote::{format_ident, quote, ToTokens};
 use syn::{
     parse::{Parse, ParseStream, Result},
-    parse_macro_input, Block, Error, Expr, Ident, ItemFn, LitStr, Pat, Token,
+    parse_macro_input, Block, Error, Expr, Ident, ItemFn, LitInt, LitStr, Pat, Token,
 };
 
 mod nextest;
+
+/// Marks an item with a readiness level (0-4).
+///
+/// When building with `RUSTFLAGS="--cfg min_readiness_N"`, items with readiness
+/// less than N are excluded. This enforces that higher-readiness code cannot
+/// depend on lower-readiness code at compile time.
+///
+/// # Example
+/// ```rust,ignore
+/// use commonware_macros::ready;
+///
+/// #[ready(2)]
+/// pub fn stable_format_fn() { }
+/// ```
+#[proc_macro_attribute]
+pub fn ready(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let level = parse_macro_input!(attr as LitInt);
+    let level_value: u8 = match level.base10_parse() {
+        Ok(v) if v <= 4 => v,
+        _ => {
+            return Error::new(level.span(), "readiness level must be 0, 1, 2, 3, or 4")
+                .to_compile_error()
+                .into();
+        }
+    };
+
+    // Generate cfg attributes: ready(N) excludes item when min_readiness_(N+1..=4) is set
+    let mut cfg_attrs = Vec::new();
+    for exclude_level in (level_value + 1)..=4 {
+        let cfg_name = format_ident!("min_readiness_{}", exclude_level);
+        cfg_attrs.push(quote! { #[cfg(not(#cfg_name))] });
+    }
+
+    let doc_string = format!(
+        "**Readiness: {}** ([what does this mean?](https://github.com/commonwarexyz/monorepo#readiness))",
+        level_value
+    );
+
+    let item2: proc_macro2::TokenStream = item.into();
+    let expanded = quote! {
+        #(#cfg_attrs)*
+        #[doc = ""]
+        #[doc = #doc_string]
+        #item2
+    };
+
+    TokenStream::from(expanded)
+}
 
 /// Run a test function asynchronously.
 ///

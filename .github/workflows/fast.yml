@@ -134,23 +134,48 @@ jobs:
     - name: Run subset doc tests
       run: just test-docs ${{ matrix.flags }} -p ${{ matrix.package }}
 
+  Readiness:
+    name: "Readiness (min_readiness_${{ matrix.level }})"
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      matrix:
+        level: [1, 2, 3, 4]
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
+    - name: Clear disk space
+      uses: ./.github/actions/disk
+    - name: Run setup
+      uses: ./.github/actions/setup
+      with:
+        additional-cache-key: readiness-${{ matrix.level }}
+    - name: Build with min_readiness_${{ matrix.level }}
+      env:
+        RUSTFLAGS: "--cfg min_readiness_${{ matrix.level }}"
+      run: cargo build --workspace --all-targets
+
   Tests-Gate:
     name: "Fast-Tests"
     runs-on: ubuntu-latest
-    needs: [Tests, Tests-Subset]
+    needs: [Tests, Tests-Subset, Readiness]
     if: always()
     steps:
       - name: Check test results
         run: |
           if [ "${{ needs.Tests.result }}" != "success" ]; then
-            echo "Tests failed or were cancelled"
+            echo "Tests failed"
             exit 1
           fi
           if [ "${{ needs.Tests-Subset.result }}" != "success" ]; then
-            echo "Tests-Subset failed or were cancelled"
+            echo "Tests-Subset failed"
             exit 1
           fi
-          echo "All tests passed successfully!"
+          if [ "${{ needs.Readiness.result }}" != "success" ]; then
+            echo "Readiness checks failed"
+            exit 1
+          fi
+          echo "All tests passed!"
 
   Dependencies:
     runs-on: ubuntu-latest

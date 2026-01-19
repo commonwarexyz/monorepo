@@ -12,6 +12,25 @@
 
 _Primitives are designed for deployment in adversarial environments. If you find an exploit, please refer to our [security policy](./SECURITY.md) before disclosing it publicly (an exploit may equip a malicious party to attack users of a primitive)._
 
+## Readiness
+
+Each public API item in the Commonware Library is annotated with a readiness level (0-4) indicating its maturity:
+
+| Level | Description |
+|-------|-------------|
+| **0** | Experimental with little testing. Breaking changes expected. |
+| **1** | Decent test coverage. Breaking wire/storage format changes possible with no migration path. |
+| **2** | Wire/storage format stable. Decent test coverage. Breaking API changes possible. |
+| **3** | API stable. Wire/storage format stable. Decent test coverage. |
+| **4** | Deployed in production without issue. Audited multiple times. |
+
+Higher readiness code can only depend on code with equal or higher readiness. This is enforced at compile time:
+
+```bash
+# Build only code with readiness >= 2
+RUSTFLAGS="--cfg min_readiness_2" cargo build
+```
+
 * [broadcast](./broadcast/README.md): Disseminate data over a wide-area network.
 * [codec](./codec/README.md): Serialize structured data.
 * [coding](./coding/README.md): Encode data to enable recovery from a subset of fragments.

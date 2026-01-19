@@ -93,3 +93,20 @@ test-conformance *args='':
 # Regenerate conformance fixtures (optionally for specific crates: just regenerate-conformance -p commonware-codec)
 regenerate-conformance *args='':
     RUSTFLAGS="--cfg generate_conformance_tests" just test --features arbitrary --profile conformance {{ args }}
+
+# Build with minimum readiness level (1-4)
+build-readiness level *args='':
+    RUSTFLAGS="--cfg min_readiness_{{ level }}" cargo build {{ args }}
+
+# Test with minimum readiness level (1-4)
+test-readiness level *args='':
+    RUSTFLAGS="--cfg min_readiness_{{ level }}" cargo nextest run {{ args }}
+
+# Check all readiness levels build
+check-readiness:
+    #!/usr/bin/env bash
+    for level in 1 2 3 4; do
+        echo "Checking min_readiness_$level..."
+        RUSTFLAGS="--cfg min_readiness_$level" cargo build --workspace --all-targets || exit 1
+    done
+    echo "All readiness levels pass!"
