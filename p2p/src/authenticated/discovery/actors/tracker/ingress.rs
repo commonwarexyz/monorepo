@@ -8,6 +8,7 @@ use crate::authenticated::{
     Mailbox,
 };
 use commonware_cryptography::PublicKey;
+use commonware_macros::ready;
 use commonware_utils::{channels::fallible::FallibleExt, ordered::Set};
 use futures::channel::{mpsc, oneshot};
 
@@ -238,6 +239,7 @@ impl<C: PublicKey> Releaser<C> {
 ///
 /// Peers that are not explicitly authorized
 /// will be blocked by commonware-p2p.
+#[ready(2)]
 #[derive(Debug, Clone)]
 pub struct Oracle<C: PublicKey> {
     sender: UnboundedMailbox<Message<C>>,

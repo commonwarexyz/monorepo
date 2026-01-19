@@ -1,10 +1,12 @@
 use crate::Ingress;
 use commonware_cryptography::Signer;
+use commonware_macros::ready;
 use commonware_runtime::Quota;
 use commonware_utils::NZU32;
 use std::{net::SocketAddr, num::NonZeroU32, time::Duration};
 
 /// Known peer and its accompanying ingress address that will be dialed on startup.
+#[ready(2)]
 pub type Bootstrapper<P> = (P, Ingress);
 
 /// Configuration for the peer-to-peer instance.
@@ -14,6 +16,7 @@ pub type Bootstrapper<P> = (P, Ingress);
 /// exception of `crypto`, `listen`, `bootstrappers`, `allow_private_ips`, and `mailbox_size`).
 /// If this is not synchronized, connections could be unnecessarily dropped, messages could be parsed incorrectly,
 /// and/or peers will rate limit each other during normal operation.
+#[ready(2)]
 #[derive(Clone)]
 pub struct Config<C: Signer> {
     /// Cryptographic primitives.
