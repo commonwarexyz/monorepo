@@ -73,10 +73,9 @@ use commonware_cryptography::{
     transcript::Transcript,
     Signer,
 };
-use commonware_macros::select;
+use commonware_macros::{ready, select};
 use commonware_runtime::{Clock, Error as RuntimeError, Sink, Stream};
 use commonware_utils::{hex, SystemTimeExt};
-use commonware_macros::ready;
 use rand_core::CryptoRngCore;
 use std::{future::Future, ops::Range, time::Duration};
 use thiserror::Error;
