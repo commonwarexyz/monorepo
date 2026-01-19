@@ -13,7 +13,7 @@ import sys
 
 # Item kinds that require readiness annotations (keys in the 'inner' field)
 # Note: traits are excluded - they define interfaces, not implementation maturity
-REQUIRED_KINDS = {"struct", "enum", "type_alias", "constant"}
+REQUIRED_KINDS = {"struct", "enum", "type_alias", "constant", "function"}
 
 
 def get_kind(item):

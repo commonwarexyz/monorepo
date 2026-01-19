@@ -173,6 +173,7 @@ impl<S> Config<S> {
 
 /// Establishes an authenticated connection to a peer as the dialer.
 /// Returns sender and receiver for encrypted communication.
+#[ready(2)]
 pub async fn dial<R: CryptoRngCore + Clock, S: Signer, I: Stream, O: Sink>(
     mut ctx: R,
     config: Config<S>,
@@ -230,6 +231,7 @@ pub async fn dial<R: CryptoRngCore + Clock, S: Signer, I: Stream, O: Sink>(
 
 /// Accepts an authenticated connection from a peer as the listener.
 /// Returns the peer's identity, sender, and receiver for encrypted communication.
+#[ready(2)]
 pub async fn listen<
     R: CryptoRngCore + Clock,
     S: Signer,

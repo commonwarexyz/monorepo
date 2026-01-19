@@ -35,6 +35,7 @@ pub enum Error {
 }
 
 /// Parse a muxed message into its subchannel and payload.
+#[ready(2)]
 pub fn parse(mut bytes: Bytes) -> Result<(Channel, Bytes), CodecError> {
     let subchannel: Channel = UInt::read(&mut bytes)?.into();
     Ok((subchannel, bytes))
