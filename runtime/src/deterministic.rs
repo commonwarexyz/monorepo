@@ -291,7 +291,7 @@ impl Default for Config {
 /// Deterministic runtime that randomly selects tasks to run based on a seed.
 pub struct Executor {
     registry: Mutex<Registry>,
-    registered_metrics: Mutex<HashSet<String>>,
+    registered_metrics: Mutex<HashSet<(String, Vec<(String, String)>)>>,
     cycle: Duration,
     deadline: Option<SystemTime>,
     metrics: Arc<Metrics>,
@@ -1173,25 +1173,18 @@ impl crate::Metrics for Context {
             }
         };
 
-        // Build a unique key including attributes for duplicate detection
-        let metric_key = if self.attributes.is_empty() {
-            prefixed_name.clone()
-        } else {
-            let attrs: Vec<_> = self
-                .attributes
-                .iter()
-                .map(|(k, v)| format!("{k}={v}"))
-                .collect();
-            format!("{}{{{}}}", prefixed_name, attrs.join(","))
-        };
-
         // Check for duplicate registration (O(1) lookup)
+        let metric_key = (prefixed_name.clone(), self.attributes.clone());
         let is_new = executor
             .registered_metrics
             .lock()
             .unwrap()
-            .insert(metric_key.clone());
-        assert!(is_new, "duplicate metric: {}", metric_key);
+            .insert(metric_key);
+        assert!(
+            is_new,
+            "duplicate metric: {} with attributes {:?}",
+            prefixed_name, self.attributes
+        );
 
         // Apply attributes to the registry (in sorted order)
         let mut registry = executor.registry.lock().unwrap();
