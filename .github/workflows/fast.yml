@@ -154,6 +154,10 @@ jobs:
       env:
         RUSTFLAGS: "--cfg min_readiness_${{ matrix.level }}"
       run: cargo build --workspace --all-targets
+    - name: Test macros with min_readiness_${{ matrix.level }}
+      env:
+        RUSTFLAGS: "--cfg min_readiness_${{ matrix.level }}"
+      run: cargo test -p commonware-macros
 
   Tests-Gate:
     name: "Fast-Tests"
