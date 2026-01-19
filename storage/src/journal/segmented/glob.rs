@@ -31,10 +31,10 @@ use crate::journal::Error;
 use bytes::BufMut;
 use commonware_codec::{Codec, CodecShared, FixedSize};
 use commonware_cryptography::{crc32, Crc32};
+use commonware_macros::ready;
 use commonware_runtime::{Blob as _, Error as RError, Metrics, Storage};
 use std::{io::Cursor, num::NonZeroUsize};
 use zstd::{bulk::compress, decode_all};
-use commonware_macros::ready;
 
 /// Configuration for blob storage.
 #[derive(Clone)]

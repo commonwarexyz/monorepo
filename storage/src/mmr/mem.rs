@@ -12,8 +12,8 @@ use alloc::{
     vec::Vec,
 };
 use commonware_cryptography::Digest;
-use core::{mem, ops::Range};
 use commonware_macros::ready;
+use core::{mem, ops::Range};
 cfg_if::cfg_if! {
     if #[cfg(feature = "std")] {
         use commonware_parallel::ThreadPool;

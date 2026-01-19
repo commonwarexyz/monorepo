@@ -1,6 +1,7 @@
 //! Utility functions for interacting with EC2 instances
 
 use crate::ec2::Error;
+use commonware_macros::ready;
 use std::path::Path;
 use tokio::{
     fs::File,
@@ -9,7 +10,6 @@ use tokio::{
     time::{sleep, Duration},
 };
 use tracing::{info, warn};
-use commonware_macros::ready;
 
 /// Maximum number of SSH connection attempts before failing
 pub const MAX_SSH_ATTEMPTS: usize = 30;

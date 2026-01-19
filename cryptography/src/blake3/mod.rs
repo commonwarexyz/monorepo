@@ -20,11 +20,11 @@
 //! println!("digest: {:?}", digest);
 //! ```
 
-
 use crate::Hasher;
 use blake3::Hash;
 use bytes::{Buf, BufMut};
 use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
+use commonware_macros::ready;
 use commonware_math::algebra::Random;
 use commonware_utils::{hex, Array, Span};
 use core::{
@@ -33,7 +33,6 @@ use core::{
 };
 use rand_core::CryptoRngCore;
 use zeroize::Zeroize;
-use commonware_macros::ready;
 
 /// Re-export [blake3::Hasher] as `CoreBlake3` for external use if needed.
 #[ready(0)]

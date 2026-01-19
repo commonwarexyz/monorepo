@@ -1,11 +1,11 @@
 use crate::{Array, Span};
 use bytes::{Buf, BufMut};
 use commonware_codec::{FixedSize, Read, Write};
+use commonware_macros::ready;
 use core::{
     fmt::{Debug, Display},
     ops::Deref,
 };
-use commonware_macros::ready;
 
 /// An `Array` implementation for the unit type `()`.
 #[derive(Clone, Copy, Default, Eq, PartialEq, Ord, PartialOrd, Hash)]

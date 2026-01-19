@@ -35,13 +35,13 @@ use crate::{
     Blob, Error, RwLock, RwLockWriteGuard,
 };
 use commonware_cryptography::Crc32;
+use commonware_macros::ready;
 use commonware_utils::StableBuf;
 use std::{
     num::{NonZeroU16, NonZeroUsize},
     sync::Arc,
 };
 use tracing::warn;
-use commonware_macros::ready;
 
 /// Indicates which CRC slot in a page record must not be overwritten.
 #[derive(Clone, Copy)]

@@ -1,10 +1,10 @@
 //! Record the OTLP status of a span.
 
+use commonware_macros::ready;
 use opentelemetry::trace::Status;
 use std::fmt::Debug;
 use tracing::Span;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
-use commonware_macros::ready;
 
 /// Set the status of a span to `Ok`.
 #[ready(0)]

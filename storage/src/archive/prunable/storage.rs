@@ -9,13 +9,13 @@ use crate::{
 };
 use bytes::{Buf, BufMut};
 use commonware_codec::{CodecShared, FixedSize, Read, ReadExt, Write};
+use commonware_macros::ready;
 use commonware_runtime::{telemetry::metrics::status::GaugeExt, Metrics, Storage};
 use commonware_utils::Array;
 use futures::{future::try_join_all, pin_mut, StreamExt};
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::collections::{BTreeMap, BTreeSet};
 use tracing::debug;
-use commonware_macros::ready;
 
 /// Index entry for the archive.
 #[derive(Debug, Clone, PartialEq)]

@@ -5,14 +5,13 @@
 //! designed with performant implementations in mind, so implementations try to
 //! use methods which don't require copying unnecessarily.
 
-
+use commonware_macros::ready;
 use commonware_parallel::Strategy as ParStrategy;
 use core::{
     fmt::Debug,
     ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign},
 };
 use rand_core::CryptoRngCore;
-use commonware_macros::ready;
 
 /// Yield all the bits in a u64, from lowest to highest.
 fn yield_bits_le(x: u64) -> impl Iterator<Item = bool> {

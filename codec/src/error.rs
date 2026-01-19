@@ -1,10 +1,9 @@
 //! Error types for codec operations.
 
-
 #[cfg(not(feature = "std"))]
 use alloc::boxed::Box;
-use thiserror::Error;
 use commonware_macros::ready;
+use thiserror::Error;
 
 /// Error type for codec operations
 #[derive(Error, Debug)]

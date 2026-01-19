@@ -1,4 +1,5 @@
 use crate::{supervision::Tree, utils::extract_panic_message, Error};
+use commonware_macros::ready;
 use futures::{
     channel::oneshot,
     future::{select, Either},
@@ -16,7 +17,6 @@ use std::{
     task::{Context, Poll},
 };
 use tracing::error;
-use commonware_macros::ready;
 
 /// Handle to a spawned task.
 #[ready(0)]

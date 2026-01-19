@@ -1,7 +1,7 @@
 use crate::{Blob, Error};
+use commonware_macros::ready;
 use commonware_utils::StableBuf;
 use std::num::NonZeroUsize;
-use commonware_macros::ready;
 
 /// A reader that buffers content from a [Blob] to optimize the performance
 /// of a full scan of contents.

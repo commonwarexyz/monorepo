@@ -72,7 +72,6 @@
 //! * <https://github.com/facebook/folly/blob/main/folly/crypto/LtHash.cpp>: An open-source C++ library developed and used at Facebook.
 //! * <https://github.com/solana-foundation/solana-improvement-documents/blob/main/proposals/0215-accounts-lattice-hash.md>: Homomorphic Hashing of Account State
 
-
 use crate::{
     blake3::{Blake3, CoreBlake3, Digest},
     Hasher as _,

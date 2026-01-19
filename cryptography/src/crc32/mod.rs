@@ -26,12 +26,12 @@
 //! assert_eq!(digest.as_u32(), checksum);
 //! ```
 
-
 use crate::Hasher;
 #[cfg(not(feature = "std"))]
 use alloc::vec;
 use bytes::{Buf, BufMut};
 use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
+use commonware_macros::ready;
 use commonware_math::algebra::Random;
 use commonware_utils::{hex, Array, Span};
 use core::{
@@ -39,7 +39,6 @@ use core::{
     ops::Deref,
 };
 use rand_core::CryptoRngCore;
-use commonware_macros::ready;
 
 /// Size of a CRC32 checksum in bytes.
 const SIZE: usize = 4;

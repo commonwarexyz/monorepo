@@ -1,8 +1,8 @@
-
 use crate::algebra::{msm_naive, Additive, CryptoGroup, Field, Object, Random, Ring, Space};
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
 use commonware_codec::{EncodeSize, RangeCfg, Read, Write};
+use commonware_macros::ready;
 use commonware_parallel::Strategy;
 use commonware_utils::{non_empty_vec, ordered::Map, vec::NonEmptyVec, TryCollect};
 use core::{
@@ -12,7 +12,6 @@ use core::{
     ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign},
 };
 use rand_core::CryptoRngCore;
-use commonware_macros::ready;
 
 // SECTION: Performance knobs.
 const MIN_POINTS_FOR_MSM: usize = 2;

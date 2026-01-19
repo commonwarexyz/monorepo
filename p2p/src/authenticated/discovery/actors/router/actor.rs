@@ -13,14 +13,13 @@ use crate::{
 };
 use bytes::Bytes;
 use commonware_cryptography::PublicKey;
-use commonware_macros::select_loop;
+use commonware_macros::{ready, select_loop};
 use commonware_runtime::{spawn_cell, ContextCell, Handle, Metrics, Spawner};
 use commonware_utils::{channels::ring, NZUsize};
 use futures::{channel::mpsc, SinkExt, StreamExt};
 use prometheus_client::metrics::{counter::Counter, family::Family};
 use std::collections::BTreeMap;
 use tracing::debug;
-use commonware_macros::ready;
 
 /// Router actor that manages peer connections and routing messages.
 #[ready(0)]

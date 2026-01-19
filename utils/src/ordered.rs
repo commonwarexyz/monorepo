@@ -1,10 +1,10 @@
 //! Ordered collections that guarantee sorted, deduplicated items.
 
-
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, RangeCfg, Read, Write};
+use commonware_macros::ready;
 use core::{
     fmt,
     hash::Hash,
@@ -15,7 +15,6 @@ use hashbrown::HashSet;
 #[cfg(feature = "std")]
 use std::collections::HashSet;
 use thiserror::Error;
-use commonware_macros::ready;
 
 #[cfg(not(feature = "std"))]
 type VecIntoIter<T> = alloc::vec::IntoIter<T>;

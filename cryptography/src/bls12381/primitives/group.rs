@@ -33,6 +33,7 @@ use commonware_codec::{
     Error::{self, Invalid},
     FixedSize, Read, ReadExt, Write,
 };
+use commonware_macros::ready;
 use commonware_math::algebra::{
     Additive, CryptoGroup, Field, HashToGroup, Multiplicative, Object, Random, Ring, Space,
 };
@@ -49,7 +50,6 @@ use core::{
 use ctutils::{Choice, CtEq};
 use rand_core::CryptoRngCore;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
-use commonware_macros::ready;
 
 fn all_zero(bytes: &[u8]) -> Choice {
     bytes

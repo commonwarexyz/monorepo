@@ -11,7 +11,7 @@ use crate::{
     Channel,
 };
 use commonware_cryptography::Signer;
-use commonware_macros::select;
+use commonware_macros::{ready, select};
 use commonware_runtime::{
     spawn_cell, Clock, ContextCell, Handle, Metrics, Network as RNetwork, Quota, Resolver, Spawner,
 };
@@ -21,7 +21,6 @@ use futures::channel::mpsc;
 use rand_core::CryptoRngCore;
 use std::{collections::HashSet, net::IpAddr};
 use tracing::{debug, info};
-use commonware_macros::ready;
 
 /// Unique suffix for all messages signed in a stream.
 const STREAM_SUFFIX: &[u8] = b"_STREAM";

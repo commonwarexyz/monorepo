@@ -1,17 +1,16 @@
 //! A vector type that guarantees at least one element.
 
-
 use crate::TryFromIterator;
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, RangeCfg, Read, Write};
+use commonware_macros::ready;
 use core::{
     num::NonZeroUsize,
     ops::{Deref, DerefMut},
 };
 use thiserror::Error;
-use commonware_macros::ready;
 
 /// Errors that can occur when creating a [`NonEmptyVec`].
 #[derive(Error, Debug, PartialEq, Eq)]

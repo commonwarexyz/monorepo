@@ -1,6 +1,5 @@
 //! Utility functions for `std::time`.
 
-
 use rand::Rng;
 use std::time::{Duration, SystemTime};
 

@@ -5,10 +5,10 @@ use crate::{
 };
 use bytes::Buf;
 use commonware_cryptography::PublicKey;
+use commonware_macros::ready;
 use commonware_runtime::{Clock, Quota};
 use futures::{channel::mpsc, StreamExt};
 use std::{collections::BTreeMap, fmt::Debug, time::SystemTime};
-use commonware_macros::ready;
 
 /// An interior sender that enforces message size limits and
 /// supports sending arbitrary bytes to a set of recipients over
@@ -118,7 +118,6 @@ impl<P: PublicKey> crate::Receiver for Receiver<P> {
 
 #[derive(Clone)]
 #[ready(0)]
-
 pub struct Channels<P: PublicKey> {
     messenger: Messenger<P>,
     max_size: u32,

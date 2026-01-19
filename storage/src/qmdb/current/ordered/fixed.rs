@@ -35,12 +35,12 @@ use crate::{
 };
 use commonware_codec::FixedSize;
 use commonware_cryptography::{Digest, DigestOf, Hasher};
+use commonware_macros::ready;
 use commonware_runtime::{Clock, Metrics, Storage as RStorage};
 use commonware_utils::Array;
 use core::ops::Range;
 use futures::stream::Stream;
 use std::num::NonZeroU64;
-use commonware_macros::ready;
 
 /// A key-value QMDB based on an MMR over its log of operations, supporting key exclusion proofs and
 /// authentication of whether a currently has a specific value.

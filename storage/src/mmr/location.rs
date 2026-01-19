@@ -1,12 +1,12 @@
 use super::position::Position;
 use crate::mmr::MAX_POSITION;
+use commonware_macros::ready;
 use core::{
     convert::TryFrom,
     fmt,
     ops::{Add, AddAssign, Deref, Range, Sub, SubAssign},
 };
 use thiserror::Error;
-use commonware_macros::ready;
 
 /// Maximum valid [Location] value that can exist in a valid MMR.
 ///

@@ -3,18 +3,17 @@
 //! The bitmap is a compact representation of a sequence of bits, using chunks of bytes for a
 //! more-efficient memory layout than doing [`Vec<bool>`].
 
-
 #[cfg(not(feature = "std"))]
 use alloc::{collections::VecDeque, vec::Vec};
 use bytes::{Buf, BufMut};
 use commonware_codec::{util::at_least, EncodeSize, Error as CodecError, Read, ReadExt, Write};
+use commonware_macros::ready;
 use core::{
     fmt::{self, Formatter, Write as _},
     ops::{BitAnd, BitOr, BitXor, Index},
 };
 #[cfg(feature = "std")]
 use std::collections::VecDeque;
-use commonware_macros::ready;
 
 mod prunable;
 pub use prunable::Prunable;

@@ -13,10 +13,10 @@
 
 use crate::mmr::{hasher::Hasher, proof, storage::Storage, Error, Location, Position, Proof};
 use commonware_cryptography::Digest;
+use commonware_macros::ready;
 use core::ops::Range;
 use futures::future::try_join_all;
 use std::collections::{BTreeSet, HashMap};
-use commonware_macros::ready;
 
 /// A store derived from a [Proof] that can be used to generate proofs over any sub-range of the
 /// original range.

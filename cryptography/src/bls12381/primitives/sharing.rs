@@ -3,13 +3,13 @@ use crate::bls12381::primitives::{group::Scalar, variant::Variant, Error};
 use alloc::sync::Arc;
 use cfg_if::cfg_if;
 use commonware_codec::{EncodeSize, FixedSize, RangeCfg, Read, ReadExt, Write};
+use commonware_macros::ready;
 use commonware_math::poly::{Interpolator, Poly};
 use commonware_parallel::Sequential;
 use commonware_utils::{ordered::Set, Faults, Participant, NZU32};
 use core::{iter, num::NonZeroU32};
 #[cfg(feature = "std")]
 use std::sync::{Arc, OnceLock};
-use commonware_macros::ready;
 
 /// Configures how participants are assigned shares of a secret.
 ///

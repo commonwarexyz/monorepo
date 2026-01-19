@@ -7,8 +7,8 @@ use crate::{
     },
     translator::Translator,
 };
-use commonware_runtime::Metrics;
 use commonware_macros::ready;
+use commonware_runtime::Metrics;
 
 /// A partitioned index that maps translated keys to values. The first `P` bytes of the
 /// (untranslated) key are used to determine the partition, and the translator is used by the

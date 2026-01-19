@@ -12,8 +12,8 @@ use crate::qmdb::{
     current::proof::OperationProof,
 };
 use commonware_cryptography::Digest;
-use commonware_utils::Array;
 use commonware_macros::ready;
+use commonware_utils::Array;
 
 pub mod fixed;
 

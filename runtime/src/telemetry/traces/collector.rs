@@ -1,5 +1,6 @@
 //! In-memory [tracing_subscriber::Layer] to collect spans and events for testing purposes.
 
+use commonware_macros::ready;
 use std::{
     fmt,
     ops::{Deref, DerefMut},
@@ -8,7 +9,6 @@ use std::{
 use thiserror::Error;
 use tracing::{field, span, Event, Level, Subscriber};
 use tracing_subscriber::{layer::Context, registry::LookupSpan, Layer};
-use commonware_macros::ready;
 
 /// An error that occurs when a trace assertion fails.
 #[derive(Error, Debug, Clone, Eq, PartialEq)]

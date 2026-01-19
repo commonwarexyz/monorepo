@@ -1,6 +1,5 @@
 //! An implementation of a [Bloom Filter](https://en.wikipedia.org/wiki/Bloom_filter).
 
-
 use crate::{
     sha256::{Digest, Sha256},
     Hasher,
@@ -11,9 +10,9 @@ use commonware_codec::{
     error::Error as CodecError,
     EncodeSize, FixedSize,
 };
+use commonware_macros::ready;
 use commonware_utils::bitmap::BitMap;
 use core::num::{NonZeroU64, NonZeroU8, NonZeroUsize};
-use commonware_macros::ready;
 
 /// The length of a half of a [Digest].
 const HALF_DIGEST_LEN: usize = 16;

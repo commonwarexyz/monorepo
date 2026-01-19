@@ -41,6 +41,7 @@ use crate::{
     VerifyingApplication,
 };
 use commonware_cryptography::certificate::Scheme;
+use commonware_macros::ready;
 use commonware_runtime::{telemetry::metrics::status::GaugeExt, Clock, Metrics, Spawner};
 use commonware_utils::{channels::fallible::OneshotExt, futures::ClosedExt};
 use futures::{
@@ -53,7 +54,6 @@ use prometheus_client::metrics::gauge::Gauge;
 use rand::Rng;
 use std::{sync::Arc, time::Instant};
 use tracing::{debug, warn};
-use commonware_macros::ready;
 
 /// An [Application] adapter that handles epoch transitions and validates block ancestry.
 ///

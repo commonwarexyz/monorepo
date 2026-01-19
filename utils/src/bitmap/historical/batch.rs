@@ -2,9 +2,9 @@ use super::Error;
 use crate::bitmap::{historical::BitMap, Prunable};
 #[cfg(not(feature = "std"))]
 use alloc::{collections::BTreeMap, vec::Vec};
+use commonware_macros::ready;
 #[cfg(feature = "std")]
 use std::collections::BTreeMap;
-use commonware_macros::ready;
 
 /// An active batch that tracks mutations as a diff layer.
 ///

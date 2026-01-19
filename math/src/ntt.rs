@@ -5,10 +5,10 @@ use crate::{
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
 use commonware_codec::{EncodeSize, RangeCfg, Read, Write};
+use commonware_macros::ready;
 use commonware_utils::bitmap::{BitMap, DEFAULT_CHUNK_SIZE};
 use core::ops::{Index, IndexMut};
 use rand_core::CryptoRngCore;
-use commonware_macros::ready;
 
 /// Reverse the first `bit_width` bits of `i`.
 ///
@@ -624,7 +624,6 @@ impl NTTPolynomial {
 
 #[derive(Clone, Debug, PartialEq)]
 #[ready(0)]
-
 pub struct PolynomialVector {
     // Each column of this matrix contains the coefficients of a polynomial,
     // in reverse bit order. So, the ith coefficient appears at index i.reverse_bits().

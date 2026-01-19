@@ -21,7 +21,7 @@ use crate::{
     validate_label, Clock, Error, Execution, Handle, Metrics as _, SinkOf, Spawner as _, StreamOf,
     METRICS_PREFIX,
 };
-use commonware_macros::select;
+use commonware_macros::{ready, select};
 use commonware_parallel::ThreadPool;
 use futures::{future::BoxFuture, FutureExt};
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
@@ -44,7 +44,6 @@ use std::{
 };
 use tokio::runtime::{Builder, Runtime};
 use tracing::{info_span, Instrument};
-use commonware_macros::ready;
 
 #[cfg(feature = "iouring-network")]
 const IOURING_NETWORK_SIZE: u32 = 1024;
@@ -79,7 +78,6 @@ impl Metrics {
 
 #[derive(Clone, Debug)]
 #[ready(0)]
-
 pub struct NetworkConfig {
     /// If Some, explicitly sets TCP_NODELAY on the socket.
     /// Otherwise uses system default.

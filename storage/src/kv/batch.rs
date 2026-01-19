@@ -3,9 +3,9 @@
 use super::{Deletable, Gettable, Updatable};
 use crate::qmdb::Error;
 use commonware_codec::CodecShared;
+use commonware_macros::ready;
 use commonware_utils::Array;
 use std::{collections::BTreeMap, future::Future};
-use commonware_macros::ready;
 
 /// A batch of changes which may be written to an underlying store with [Batchable::write_batch].
 /// Writes and deletes to a batch are not applied to the store until the batch is written but

@@ -4,6 +4,7 @@ use crate::{
     Block, Heightable, Reporter,
 };
 use commonware_cryptography::{certificate::Scheme, Digest};
+use commonware_macros::ready;
 use commonware_storage::archive;
 use commonware_utils::{channels::fallible::AsyncFallibleExt, vec::NonEmptyVec};
 use futures::{
@@ -17,7 +18,6 @@ use std::{
     pin::Pin,
     task::{Context, Poll},
 };
-use commonware_macros::ready;
 
 /// An identifier for a block request.
 #[ready(0)]

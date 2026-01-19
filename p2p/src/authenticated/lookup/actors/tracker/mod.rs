@@ -2,9 +2,9 @@
 
 use crate::authenticated::Mailbox;
 use commonware_cryptography::Signer;
+use commonware_macros::ready;
 use commonware_runtime::Quota;
 use std::{collections::HashSet, net::IpAddr, time::Duration};
-use commonware_macros::ready;
 
 pub mod actor;
 mod directory;
@@ -21,7 +21,6 @@ pub use reservation::Reservation;
 
 #[derive(Clone, Debug)]
 #[ready(0)]
-
 pub struct Config<C: Signer> {
     pub crypto: C,
     pub tracked_peer_sets: usize,

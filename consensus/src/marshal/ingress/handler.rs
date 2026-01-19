@@ -4,6 +4,7 @@ use crate::{
 };
 use bytes::{Buf, BufMut, Bytes};
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt, Write};
+use commonware_macros::ready;
 use commonware_resolver::{p2p::Producer, Consumer};
 use commonware_utils::Span;
 use futures::{
@@ -15,7 +16,6 @@ use std::{
     hash::{Hash, Hasher},
 };
 use tracing::error;
-use commonware_macros::ready;
 
 /// The subject of a backfill request.
 const BLOCK_REQUEST: u8 = 0;

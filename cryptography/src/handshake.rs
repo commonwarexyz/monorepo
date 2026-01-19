@@ -33,15 +33,14 @@
 //! - Messages with timestamps too old are rejected to prevent replay attacks
 //! - Messages with timestamps too far in the future are rejected to safeguard against clock skew
 
-
 use crate::{
     transcript::{Summary, Transcript},
     PublicKey, Signature, Signer, Verifier,
 };
 use commonware_codec::{Encode, FixedSize, Read, ReadExt, Write};
+use commonware_macros::ready;
 use core::ops::Range;
 use rand_core::CryptoRngCore;
-use commonware_macros::ready;
 
 mod error;
 pub use error::Error;

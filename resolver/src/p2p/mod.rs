@@ -40,7 +40,6 @@
 //! The peer supports arbitrarily many concurrent fetch requests, but resource usage generally
 //! depends on the rate-limiting configuration of the underlying P2P network.
 
-
 use bytes::Bytes;
 use commonware_utils::Span;
 use futures::channel::oneshot;

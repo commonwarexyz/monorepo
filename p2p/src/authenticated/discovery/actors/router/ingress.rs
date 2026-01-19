@@ -5,12 +5,12 @@ use crate::{
 };
 use bytes::{Buf, Bytes};
 use commonware_cryptography::PublicKey;
+use commonware_macros::ready;
 use commonware_utils::{
     channels::{fallible::AsyncFallibleExt, ring},
     NZUsize,
 };
 use futures::channel::oneshot;
-use commonware_macros::ready;
 
 /// Messages that can be processed by the router.
 #[derive(Debug)]

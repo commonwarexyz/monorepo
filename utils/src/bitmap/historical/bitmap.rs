@@ -2,9 +2,9 @@ use super::{batch::Batch, Error};
 use crate::bitmap::{historical::BatchGuard, Prunable};
 #[cfg(not(feature = "std"))]
 use alloc::{collections::BTreeMap, vec::Vec};
+use commonware_macros::ready;
 #[cfg(feature = "std")]
 use std::collections::BTreeMap;
-use commonware_macros::ready;
 
 /// Type of change to a chunk.
 #[derive(Clone, Debug)]

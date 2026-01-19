@@ -37,6 +37,7 @@ use bytes::{Buf, BufMut};
 use commonware_codec::{
     DecodeExt, EncodeFixed, Error as CodecError, FixedSize, Read, ReadExt, Write,
 };
+use commonware_macros::ready;
 use commonware_math::algebra::Random;
 use commonware_parallel::Sequential;
 use commonware_utils::{hex, Array, Span};
@@ -47,7 +48,6 @@ use core::{
 };
 use rand_core::CryptoRngCore;
 use zeroize::Zeroizing;
-use commonware_macros::ready;
 
 const CURVE_NAME: &str = "bls12381";
 

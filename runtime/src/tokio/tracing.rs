@@ -1,5 +1,6 @@
 //! Utilities to export traces to an OTLP endpoint.
 
+use commonware_macros::ready;
 use opentelemetry::{global, trace::TracerProvider};
 use opentelemetry_otlp::{ExporterBuildError, SpanExporter, WithExportConfig};
 use opentelemetry_sdk::{
@@ -7,7 +8,6 @@ use opentelemetry_sdk::{
     Resource,
 };
 use std::time::Duration;
-use commonware_macros::ready;
 
 /// Timeout for the OTLP HTTP exporter.
 const TIMEOUT: Duration = Duration::from_secs(15);

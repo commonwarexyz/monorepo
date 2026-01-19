@@ -642,7 +642,6 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
 
 #[derive(Clone, Debug)]
 #[ready(0)]
-
 pub struct DealerPubMsg<V: Variant> {
     commitment: Poly<V::Public>,
 }
@@ -693,7 +692,6 @@ where
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[ready(0)]
-
 pub struct DealerPrivMsg {
     share: Secret<Scalar>,
 }
@@ -739,7 +737,6 @@ impl arbitrary::Arbitrary<'_> for DealerPrivMsg {
 
 #[derive(Clone, Debug)]
 #[ready(0)]
-
 pub struct PlayerAck<P: PublicKey> {
     sig: P::Signature,
 }
@@ -954,7 +951,6 @@ where
 
 #[derive(Clone, Debug)]
 #[ready(0)]
-
 pub struct DealerLog<V: Variant, P: PublicKey> {
     pub_msg: DealerPubMsg<V>,
     results: DealerResult<P>,
@@ -1153,7 +1149,6 @@ fn transcript_for_log<V: Variant, P: PublicKey>(
 }
 
 #[ready(0)]
-
 pub struct Dealer<V: Variant, S: Signer> {
     me: S,
     info: Info<V, S::PublicKey>,

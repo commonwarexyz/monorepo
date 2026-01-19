@@ -44,9 +44,9 @@ use alloc::collections::btree_set::BTreeSet;
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Read, ReadExt, ReadRangeExt, Write};
 use commonware_cryptography::{Digest, Hasher};
+use commonware_macros::ready;
 use commonware_utils::{non_empty_vec, vec::NonEmptyVec};
 use thiserror::Error;
-use commonware_macros::ready;
 
 /// There should never be more than 255 levels in a proof (would mean the Binary Merkle Tree
 /// has more than 2^255 leaves).

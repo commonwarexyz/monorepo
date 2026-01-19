@@ -146,8 +146,8 @@ mod metrics;
 mod network;
 mod transmitter;
 
-use thiserror::Error;
 use commonware_macros::ready;
+use thiserror::Error;
 
 /// Errors that can occur when interacting with the network.
 #[derive(Debug, Error)]

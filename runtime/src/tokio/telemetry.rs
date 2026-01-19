@@ -12,11 +12,11 @@ use axum::{
     serve, Extension, Router,
 };
 use cfg_if::cfg_if;
+use commonware_macros::ready;
 use std::net::SocketAddr;
 use tokio::net::TcpListener;
 use tracing::Level;
 use tracing_subscriber::{layer::SubscriberExt, Layer, Registry};
-use commonware_macros::ready;
 
 /// Logging configuration.
 #[ready(0)]

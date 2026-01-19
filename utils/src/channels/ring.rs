@@ -27,6 +27,7 @@
 //! });
 //! ```
 
+use commonware_macros::ready;
 use core::num::NonZeroUsize;
 use futures::{stream::FusedStream, Sink, Stream};
 use std::{
@@ -36,7 +37,6 @@ use std::{
     task::{Context, Poll, Waker},
 };
 use thiserror::Error;
-use commonware_macros::ready;
 
 /// Error returned when sending to a channel whose receiver has been dropped.
 #[derive(Debug, Error)]

@@ -1,5 +1,5 @@
-
 use commonware_codec::{Codec, EncodeFixed};
+use commonware_macros::ready;
 use core::{
     cmp::{Ord, PartialOrd},
     error::Error as CoreError,
@@ -8,7 +8,6 @@ use core::{
     ops::Deref,
 };
 use thiserror::Error;
-use commonware_macros::ready;
 
 pub mod fixed_bytes;
 pub use fixed_bytes::FixedBytes;

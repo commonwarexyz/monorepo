@@ -1,9 +1,9 @@
 use crate::qmdb::{any::VariableValue, operation::Committable};
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt, Write};
+use commonware_macros::ready;
 use commonware_utils::hex;
 use core::fmt::Display;
-use commonware_macros::ready;
 
 // Context byte prefixes for identifying the operation type.
 const COMMIT_CONTEXT: u8 = 0;

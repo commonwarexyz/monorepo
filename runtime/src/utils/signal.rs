@@ -1,5 +1,6 @@
 //! Mechanisms for coordinating actions across many tasks.
 
+use commonware_macros::ready;
 use futures::{channel::oneshot, future::Shared, FutureExt};
 use std::{
     future::Future,
@@ -7,7 +8,6 @@ use std::{
     sync::Arc,
     task::{Context, Poll},
 };
-use commonware_macros::ready;
 
 /// A one-time broadcast that can be awaited by many tasks. It is often used for
 /// coordinating shutdown across many tasks.

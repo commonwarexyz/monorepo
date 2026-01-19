@@ -24,6 +24,7 @@ use super::manager::{AppendFactory, Config as ManagerConfig, Manager};
 use crate::journal::Error;
 use bytes::Buf;
 use commonware_codec::{CodecFixed, CodecFixedShared, DecodeExt as _, ReadExt as _};
+use commonware_macros::ready;
 use commonware_runtime::{
     buffer::pool::{PoolRef, Replay},
     Blob, Metrics, Storage,
@@ -34,7 +35,6 @@ use futures::{
 };
 use std::{marker::PhantomData, num::NonZeroUsize};
 use tracing::{trace, warn};
-use commonware_macros::ready;
 
 /// State for replaying a single section's blob.
 struct ReplayState<B: Blob> {

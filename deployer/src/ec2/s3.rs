@@ -12,9 +12,9 @@ use aws_sdk_s3::{
     Client as S3Client,
 };
 use commonware_cryptography::{Hasher, Sha256};
+use commonware_macros::ready;
 use std::{io::Read, path::Path, time::Duration};
 use tracing::{debug, info};
-use commonware_macros::ready;
 
 /// S3 bucket name for caching deployer artifacts
 pub const S3_BUCKET_NAME: &str = "commonware-deployer-cache";

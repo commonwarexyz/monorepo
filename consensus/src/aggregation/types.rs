@@ -11,12 +11,12 @@ use commonware_cryptography::{
     certificate::{self, Attestation, Scheme, Subject},
     Digest,
 };
+use commonware_macros::ready;
 use commonware_parallel::Strategy;
 use commonware_utils::{union, N3f1};
 use futures::channel::oneshot;
 use rand_core::CryptoRngCore;
 use std::hash::Hash;
-use commonware_macros::ready;
 
 /// Error that may be encountered when interacting with `aggregation`.
 #[derive(Debug, thiserror::Error)]

@@ -25,7 +25,7 @@ use commonware_cryptography::{
     certificate::{Provider, Scheme as CertificateScheme},
     PublicKey,
 };
-use commonware_macros::select;
+use commonware_macros::{ready, select};
 use commonware_p2p::Recipients;
 use commonware_parallel::Strategy;
 use commonware_resolver::Resolver;
@@ -58,7 +58,6 @@ use std::{
     sync::Arc,
 };
 use tracing::{debug, error, info, warn};
-use commonware_macros::ready;
 
 /// The key used to store the last processed height in the metadata store.
 const LATEST_KEY: U64 = U64::new(0xFF);

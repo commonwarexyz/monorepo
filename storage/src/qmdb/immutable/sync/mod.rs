@@ -9,10 +9,10 @@ use crate::{
     translator::Translator,
 };
 use commonware_cryptography::Hasher;
+use commonware_macros::ready;
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
 use std::ops::Range;
-use commonware_macros::ready;
 
 impl<E, K, V, H, T> sync::Database for immutable::Immutable<E, K, V, H, T>
 where

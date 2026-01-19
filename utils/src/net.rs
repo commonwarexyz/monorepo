@@ -1,8 +1,7 @@
 //! Utilities for working with IP addresses.
 
-
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use commonware_macros::ready;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 /// Bits in an IPv4 address.
 const IPV4_BITS: u8 = 32;

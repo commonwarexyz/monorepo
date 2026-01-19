@@ -14,7 +14,7 @@ use crate::{
 use bytes::{Buf, Bytes};
 use commonware_codec::{DecodeExt, FixedSize};
 use commonware_cryptography::PublicKey;
-use commonware_macros::{select, select_loop};
+use commonware_macros::{ready, select, select_loop};
 use commonware_runtime::{
     spawn_cell, Clock, ContextCell, Handle, Listener as _, Metrics, Network as RNetwork, Quota,
     Spawner,
@@ -40,7 +40,6 @@ use std::{
     time::{Duration, SystemTime},
 };
 use tracing::{debug, error, trace, warn};
-use commonware_macros::ready;
 
 /// Task type representing a message to be sent within the network.
 type Task<P> = (Channel, P, Recipients<P>, Bytes, oneshot::Sender<Vec<P>>);

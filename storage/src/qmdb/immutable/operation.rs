@@ -9,9 +9,9 @@ use crate::{
 };
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
+use commonware_macros::ready;
 use commonware_utils::{hex, Array};
 use core::fmt::Display;
-use commonware_macros::ready;
 
 // Context byte prefixes for identifying the operation type.
 const SET_CONTEXT: u8 = 0;

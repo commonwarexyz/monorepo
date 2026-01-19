@@ -4,11 +4,11 @@
 //! randomness from it. The API evades common footguns when doing these things
 //! in an ad hoc way.
 
-
 use crate::{Signer, Verifier};
 use blake3::BLOCK_LEN;
 use bytes::Buf;
 use commonware_codec::{varint::UInt, EncodeSize, FixedSize, Read, ReadExt, Write};
+use commonware_macros::ready;
 use commonware_math::algebra::Random;
 use commonware_utils::{Array, Span};
 use core::{fmt::Display, ops::Deref};
@@ -17,7 +17,6 @@ use rand_core::{
     CryptoRng, CryptoRngCore, RngCore,
 };
 use zeroize::ZeroizeOnDrop;
-use commonware_macros::ready;
 
 /// Provides an implementation of [CryptoRngCore].
 ///

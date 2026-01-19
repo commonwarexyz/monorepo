@@ -3,8 +3,8 @@
 use super::BitMap;
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt, Write};
-use thiserror::Error;
 use commonware_macros::ready;
+use thiserror::Error;
 
 /// Errors that can occur when working with a prunable bitmap.
 #[derive(Debug, Error, Clone, PartialEq, Eq)]

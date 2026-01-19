@@ -19,12 +19,12 @@ use crate::{
 };
 use commonware_codec::Codec;
 use commonware_cryptography::{Digest, Hasher as CHasher};
+use commonware_macros::ready;
 use commonware_runtime::{Clock, Metrics, Storage as RStorage};
 use core::ops::Range;
 use futures::future::try_join_all;
 use std::num::NonZeroU64;
 use tracing::debug;
-use commonware_macros::ready;
 
 /// A proof that a range of operations exist in the database.
 #[derive(Clone, Eq, PartialEq, Debug)]

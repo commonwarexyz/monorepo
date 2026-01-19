@@ -23,9 +23,9 @@ use crate::{
     Reporter,
 };
 use commonware_cryptography::{certificate, Digest};
+use commonware_macros::ready;
 use commonware_parallel::Strategy;
 use rand_core::CryptoRngCore;
-use commonware_macros::ready;
 
 /// Reporter wrapper that filters and verifies activities based on scheme attributability.
 ///

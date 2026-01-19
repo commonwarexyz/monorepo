@@ -2,9 +2,9 @@ use super::Checksum;
 use crate::{Blob, Error};
 use bytes::Buf;
 use commonware_codec::FixedSize;
+use commonware_macros::ready;
 use std::{collections::VecDeque, num::NonZeroU16};
 use tracing::error;
-use commonware_macros::ready;
 
 /// State for a single buffer of pages read from the blob.
 ///

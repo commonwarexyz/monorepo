@@ -6,8 +6,8 @@ use bytes::{Buf, BufMut};
 use commonware_codec::{
     EncodeSize, Error as CodecError, RangeCfg, Read as CodecRead, Write as CodecWrite,
 };
-use thiserror::Error;
 use commonware_macros::ready;
+use thiserror::Error;
 
 /// Maximum length of a hostname (253 characters per RFC 1035).
 ///

@@ -1,6 +1,7 @@
 use super::{Error, Receiver, Sender};
 use crate::{authenticated::UnboundedMailbox, Address, Channel};
 use commonware_cryptography::PublicKey;
+use commonware_macros::ready;
 use commonware_runtime::{Clock, Quota};
 use commonware_utils::{
     channels::{fallible::FallibleExt, ring},
@@ -9,7 +10,6 @@ use commonware_utils::{
 use futures::channel::{mpsc, oneshot};
 use rand_distr::Normal;
 use std::time::Duration;
-use commonware_macros::ready;
 
 #[ready(0)]
 

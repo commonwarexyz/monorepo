@@ -13,13 +13,13 @@ use crate::{
     Persistable,
 };
 use commonware_codec::{Codec, CodecShared};
+use commonware_macros::ready;
 use commonware_runtime::{buffer::PoolRef, Metrics, Storage};
 use commonware_utils::NZUsize;
 use core::ops::Range;
 use futures::{future::Either, stream, Stream, StreamExt as _};
 use std::num::{NonZeroU64, NonZeroUsize};
 use tracing::{debug, info};
-use commonware_macros::ready;
 
 const REPLAY_BUFFER_SIZE: NonZeroUsize = NZUsize!(1024);
 

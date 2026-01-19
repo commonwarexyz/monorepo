@@ -46,6 +46,7 @@
 //! });
 //! ```
 
+use commonware_macros::ready;
 use futures::{
     channel::mpsc::{self, Receiver as FutReceiver, SendError, Sender as FutSender, TrySendError},
     SinkExt, Stream, StreamExt,
@@ -57,7 +58,6 @@ use std::{
     sync::{Arc, Mutex},
     task::{Context, Poll},
 };
-use commonware_macros::ready;
 
 /// A guard that tracks message delivery. When dropped, the message is marked as delivered.
 #[derive(Clone)]

@@ -408,7 +408,6 @@ impl<N: Namespace> Generic<N> {
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 #[ready(0)]
-
 pub struct Certificate {
     /// Bitmap of participant indices that contributed signatures.
     pub signers: Signers,

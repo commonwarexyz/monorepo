@@ -94,67 +94,56 @@ pub(crate) fn promtail_bin_s3_key(version: &str, architecture: Architecture) -> 
 // Convention: {S3_TOOLS_CONFIGS_PREFIX}/{deployer_version}/{component}/{file}
 
 #[ready(0)]
-
 pub fn prometheus_service_s3_key() -> String {
     format!("{S3_TOOLS_CONFIGS_PREFIX}/{DEPLOYER_VERSION}/prometheus/service")
 }
 
 #[ready(0)]
-
 pub fn grafana_datasources_s3_key() -> String {
     format!("{S3_TOOLS_CONFIGS_PREFIX}/{DEPLOYER_VERSION}/grafana/datasources.yml")
 }
 
 #[ready(0)]
-
 pub fn grafana_dashboards_s3_key() -> String {
     format!("{S3_TOOLS_CONFIGS_PREFIX}/{DEPLOYER_VERSION}/grafana/all.yml")
 }
 
 #[ready(0)]
-
 pub fn loki_config_s3_key() -> String {
     format!("{S3_TOOLS_CONFIGS_PREFIX}/{DEPLOYER_VERSION}/loki/config.yml")
 }
 
 #[ready(0)]
-
 pub fn loki_service_s3_key() -> String {
     format!("{S3_TOOLS_CONFIGS_PREFIX}/{DEPLOYER_VERSION}/loki/service")
 }
 
 #[ready(0)]
-
 pub fn pyroscope_config_s3_key() -> String {
     format!("{S3_TOOLS_CONFIGS_PREFIX}/{DEPLOYER_VERSION}/pyroscope/config.yml")
 }
 
 #[ready(0)]
-
 pub fn pyroscope_service_s3_key() -> String {
     format!("{S3_TOOLS_CONFIGS_PREFIX}/{DEPLOYER_VERSION}/pyroscope/service")
 }
 
 #[ready(0)]
-
 pub fn tempo_config_s3_key() -> String {
     format!("{S3_TOOLS_CONFIGS_PREFIX}/{DEPLOYER_VERSION}/tempo/config.yml")
 }
 
 #[ready(0)]
-
 pub fn tempo_service_s3_key() -> String {
     format!("{S3_TOOLS_CONFIGS_PREFIX}/{DEPLOYER_VERSION}/tempo/service")
 }
 
 #[ready(0)]
-
 pub fn node_exporter_service_s3_key() -> String {
     format!("{S3_TOOLS_CONFIGS_PREFIX}/{DEPLOYER_VERSION}/node-exporter/service")
 }
 
 #[ready(0)]
-
 pub fn promtail_service_s3_key() -> String {
     format!("{S3_TOOLS_CONFIGS_PREFIX}/{DEPLOYER_VERSION}/promtail/service")
 }
@@ -162,13 +151,11 @@ pub fn promtail_service_s3_key() -> String {
 // S3 key functions for pyroscope agent (lives with pyroscope component)
 
 #[ready(0)]
-
 pub fn pyroscope_agent_service_s3_key() -> String {
     format!("{S3_TOOLS_CONFIGS_PREFIX}/{DEPLOYER_VERSION}/pyroscope/agent.service")
 }
 
 #[ready(0)]
-
 pub fn pyroscope_agent_timer_s3_key() -> String {
     format!("{S3_TOOLS_CONFIGS_PREFIX}/{DEPLOYER_VERSION}/pyroscope/agent.timer")
 }
@@ -176,13 +163,11 @@ pub fn pyroscope_agent_timer_s3_key() -> String {
 // S3 key functions for system configs
 
 #[ready(0)]
-
 pub fn bbr_config_s3_key() -> String {
     format!("{S3_TOOLS_CONFIGS_PREFIX}/{DEPLOYER_VERSION}/system/bbr.conf")
 }
 
 #[ready(0)]
-
 pub fn logrotate_config_s3_key() -> String {
     format!("{S3_TOOLS_CONFIGS_PREFIX}/{DEPLOYER_VERSION}/system/logrotate.conf")
 }

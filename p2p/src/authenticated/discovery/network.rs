@@ -11,7 +11,7 @@ use crate::{
     Channel,
 };
 use commonware_cryptography::Signer;
-use commonware_macros::select;
+use commonware_macros::{ready, select};
 use commonware_runtime::{
     spawn_cell, Clock, ContextCell, Handle, Metrics, Network as RNetwork, Quota, Resolver, Spawner,
 };
@@ -19,7 +19,6 @@ use commonware_stream::Config as StreamConfig;
 use commonware_utils::union;
 use rand_core::CryptoRngCore;
 use tracing::{debug, info};
-use commonware_macros::ready;
 
 /// Unique suffix for all messages signed by the tracker.
 const TRACKER_SUFFIX: &[u8] = b"_TRACKER";

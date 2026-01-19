@@ -1,5 +1,5 @@
-use futures::channel::mpsc;
 use commonware_macros::ready;
+use futures::channel::mpsc;
 
 /// A mailbox wraps a sender for messages of type `T`.
 #[derive(Debug)]

@@ -206,7 +206,6 @@
 //! });
 //! ```
 
-
 mod actors;
 mod channels;
 mod config;
@@ -214,8 +213,8 @@ mod metrics;
 mod network;
 mod types;
 
-use thiserror::Error;
 use commonware_macros::ready;
+use thiserror::Error;
 
 /// Errors that can occur when interacting with the network.
 #[derive(Error, Debug)]

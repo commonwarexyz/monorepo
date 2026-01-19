@@ -64,6 +64,7 @@ use crate::{
     Persistable,
 };
 use commonware_codec::CodecFixedShared;
+use commonware_macros::ready;
 use commonware_runtime::{buffer::PoolRef, Metrics, Storage};
 use futures::{stream::Stream, StreamExt};
 use std::{
@@ -71,7 +72,6 @@ use std::{
     ops::Range,
 };
 use tracing::debug;
-use commonware_macros::ready;
 
 /// Configuration for `Journal` storage.
 #[derive(Clone)]

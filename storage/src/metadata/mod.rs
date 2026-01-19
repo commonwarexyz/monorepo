@@ -63,7 +63,6 @@
 //! });
 //! ```
 
-
 use commonware_macros::ready;
 mod storage;
 pub use storage::Metadata;

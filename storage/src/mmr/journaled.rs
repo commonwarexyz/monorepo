@@ -27,6 +27,7 @@ use crate::{
 };
 use commonware_codec::DecodeExt;
 use commonware_cryptography::Digest;
+use commonware_macros::ready;
 use commonware_parallel::ThreadPool;
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage as RStorage};
 use commonware_utils::sequence::prefixed_u64::U64;
@@ -36,7 +37,6 @@ use std::{
     num::{NonZeroU64, NonZeroUsize},
 };
 use tracing::{debug, error, warn};
-use commonware_macros::ready;
 
 #[ready(0)]
 

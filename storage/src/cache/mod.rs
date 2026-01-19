@@ -76,10 +76,10 @@
 //! });
 //! ```
 
+use commonware_macros::ready;
 use commonware_runtime::buffer::PoolRef;
 use std::num::{NonZeroU64, NonZeroUsize};
 use thiserror::Error;
-use commonware_macros::ready;
 
 mod storage;
 pub use storage::Cache;

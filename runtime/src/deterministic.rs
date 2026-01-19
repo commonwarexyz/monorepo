@@ -57,7 +57,7 @@ use crate::{
 #[cfg(feature = "external")]
 use crate::{Blocker, Pacer};
 use commonware_codec::Encode;
-use commonware_macros::select;
+use commonware_macros::{ready, select};
 use commonware_parallel::ThreadPool;
 use commonware_utils::{hex, time::SYSTEM_TIME_PRECISION, SystemTimeExt};
 #[cfg(feature = "external")]
@@ -91,7 +91,6 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tracing::{info_span, trace, Instrument};
-use commonware_macros::ready;
 
 #[derive(Debug)]
 struct Metrics {

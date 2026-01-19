@@ -3,6 +3,7 @@
 use crate::{Array, Span};
 use bytes::{Buf, BufMut};
 use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
+use commonware_macros::ready;
 use core::{
     cmp::{Ord, PartialOrd},
     fmt::{Debug, Display, Formatter},
@@ -10,7 +11,6 @@ use core::{
     ops::Deref,
 };
 use thiserror::Error;
-use commonware_macros::ready;
 
 // Errors returned by `U64` functions.
 #[derive(Error, Debug, PartialEq)]

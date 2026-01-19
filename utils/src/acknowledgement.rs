@@ -1,6 +1,6 @@
 //! Utilities for providing acknowledgement.
 
-
+use commonware_macros::ready;
 use core::{
     fmt::Debug,
     pin::Pin,
@@ -15,7 +15,6 @@ use std::{
         Arc,
     },
 };
-use commonware_macros::ready;
 
 /// Acknowledgement cancellation error.
 #[derive(Debug, thiserror::Error)]

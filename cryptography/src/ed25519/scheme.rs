@@ -6,6 +6,7 @@ use alloc::{
 };
 use bytes::{Buf, BufMut};
 use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
+use commonware_macros::ready;
 use commonware_math::algebra::Random;
 use commonware_utils::{hex, union_unique, Array, Span};
 use core::{
@@ -18,7 +19,6 @@ use rand_core::CryptoRngCore;
 #[cfg(feature = "std")]
 use std::borrow::{Cow, ToOwned};
 use zeroize::Zeroizing;
-use commonware_macros::ready;
 
 const CURVE_NAME: &str = "ed25519";
 const PRIVATE_KEY_LENGTH: usize = 32;

@@ -12,11 +12,11 @@
 
 use commonware_codec::Codec;
 use commonware_cryptography::{Committable, Digestible, PublicKey};
+use commonware_macros::ready;
 use commonware_p2p::Recipients;
 use futures::channel::oneshot;
 use std::future::Future;
 use thiserror::Error;
-use commonware_macros::ready;
 
 pub mod p2p;
 

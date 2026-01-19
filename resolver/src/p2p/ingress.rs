@@ -1,8 +1,8 @@
 use crate::Resolver;
 use commonware_cryptography::PublicKey;
+use commonware_macros::ready;
 use commonware_utils::{channels::fallible::AsyncFallibleExt, vec::NonEmptyVec, Span};
 use futures::channel::mpsc;
-use commonware_macros::ready;
 
 type Predicate<K> = Box<dyn Fn(&K) -> bool + Send>;
 

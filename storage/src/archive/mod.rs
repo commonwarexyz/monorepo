@@ -3,12 +3,11 @@
 //! [Archive] is a key-value store designed for workloads where all data is written only once and is
 //! uniquely associated with both an `index` and a `key`.
 
-
 use commonware_codec::Codec;
+use commonware_macros::ready;
 use commonware_utils::Array;
 use std::future::Future;
 use thiserror::Error;
-use commonware_macros::ready;
 
 pub mod immutable;
 pub mod prunable;

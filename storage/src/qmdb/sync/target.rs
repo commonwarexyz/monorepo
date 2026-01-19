@@ -5,8 +5,8 @@ use crate::{
 use bytes::{Buf, BufMut};
 use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt as _, Write};
 use commonware_cryptography::Digest;
-use std::ops::Range;
 use commonware_macros::ready;
+use std::ops::Range;
 
 /// Target state to sync to
 #[derive(Debug, Clone, PartialEq, Eq)]

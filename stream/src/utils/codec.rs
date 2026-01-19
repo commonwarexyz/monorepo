@@ -4,8 +4,8 @@ use commonware_codec::{
     varint::{Decoder, UInt},
     Encode,
 };
-use commonware_runtime::{Sink, Stream};
 use commonware_macros::ready;
+use commonware_runtime::{Sink, Stream};
 
 /// Sends data to the sink with a varint length prefix.
 /// Returns an error if the message is too large or the stream is closed.

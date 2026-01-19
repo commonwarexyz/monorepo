@@ -1,12 +1,11 @@
 //! Core networking traits and types.
 
-
 use bytes::{Buf, Bytes};
 use commonware_cryptography::PublicKey;
+use commonware_macros::ready;
 use commonware_utils::ordered::Set;
 use futures::channel::mpsc;
 use std::{error::Error as StdError, fmt::Debug, future::Future, time::SystemTime};
-use commonware_macros::ready;
 
 /// Tuple representing a message received from a given public key.
 ///

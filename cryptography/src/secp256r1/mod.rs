@@ -33,7 +33,6 @@
 //! assert_eq!(signature.recover_signer(namespace, msg).unwrap(), signer.public_key());
 //! ```
 
-
 pub mod certificate;
 mod common;
 pub mod recoverable;

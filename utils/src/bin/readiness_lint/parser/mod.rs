@@ -317,15 +317,13 @@ fn parse_modules(
         };
 
         let (items, missing_items) = extract_items_from_file(&mod_file_path);
-        modules
-            .entry(mod_name.clone())
-            .or_insert(Module {
-                path: mod_path,
-                file_path: mod_file_path,
-                submodules,
-                items,
-                missing_items,
-            });
+        modules.entry(mod_name.clone()).or_insert(Module {
+            path: mod_path,
+            file_path: mod_file_path,
+            submodules,
+            items,
+            missing_items,
+        });
     }
 
     // Parse pub use statements to find reexported private modules

@@ -4,8 +4,8 @@ use crate::mmr::{
 };
 use commonware_codec::Encode;
 use commonware_cryptography::{Digest, Hasher};
-use core::ops::Range;
 use commonware_macros::ready;
+use core::ops::Range;
 
 /// Verify that a [Proof] is valid for a range of operations and a target root.
 #[ready(0)]

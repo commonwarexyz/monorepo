@@ -17,12 +17,12 @@ use aws_sdk_ec2::{
     },
     Client as Ec2Client, Error as Ec2Error,
 };
+use commonware_macros::ready;
 use std::{
     collections::{HashMap, HashSet},
     time::Duration,
 };
 use tokio::time::sleep;
-use commonware_macros::ready;
 
 /// Creates an EC2 client for the specified AWS region
 #[ready(0)]
@@ -475,7 +475,6 @@ pub async fn wait_for_instances_running(
 }
 
 #[ready(0)]
-
 pub async fn wait_for_instances_ready(
     client: &Ec2Client,
     instance_ids: &[String],

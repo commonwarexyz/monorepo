@@ -19,10 +19,10 @@ use alloc::{
 use bytes::{Buf, BufMut};
 use commonware_codec::{varint::UInt, EncodeSize, Read, ReadExt, ReadRangeExt, Write};
 use commonware_cryptography::Digest;
+use commonware_macros::ready;
 use core::ops::Range;
 #[cfg(feature = "std")]
 use tracing::debug;
-use commonware_macros::ready;
 
 /// The maximum number of digests in a proof per element being proven.
 ///

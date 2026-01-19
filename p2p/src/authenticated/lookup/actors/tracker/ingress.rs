@@ -9,13 +9,13 @@ use crate::{
     Ingress,
 };
 use commonware_cryptography::PublicKey;
+use commonware_macros::ready;
 use commonware_utils::{
     channels::fallible::FallibleExt,
     ordered::{Map, Set},
 };
 use futures::channel::{mpsc, oneshot};
 use std::net::IpAddr;
-use commonware_macros::ready;
 
 /// Messages that can be sent to the tracker actor.
 #[derive(Debug)]

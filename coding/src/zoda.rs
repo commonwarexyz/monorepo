@@ -402,7 +402,6 @@ where
 
 #[derive(Clone, Debug)]
 #[ready(0)]
-
 pub struct ReShard<H: Hasher> {
     inclusion_proof: Proof<H::Digest>,
     shard: Matrix,
@@ -594,7 +593,6 @@ impl<H: Hasher> CheckingData<H> {
 
 #[derive(Debug, Error)]
 #[ready(0)]
-
 pub enum Error {
     #[error("invalid shard")]
     InvalidShard,

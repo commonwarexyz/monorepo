@@ -46,11 +46,11 @@ use super::{
 };
 use crate::journal::Error;
 use commonware_codec::{Codec, CodecFixed, CodecShared};
+use commonware_macros::ready;
 use commonware_runtime::{Metrics, Storage};
 use futures::{future::try_join, stream::Stream};
 use std::{collections::HashSet, num::NonZeroUsize};
 use tracing::{debug, warn};
-use commonware_macros::ready;
 
 /// Trait for index entries that reference oversized values in glob storage.
 ///

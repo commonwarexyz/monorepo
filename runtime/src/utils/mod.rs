@@ -1,8 +1,8 @@
 //! Utility functions for interacting with any runtime.
 
-
 #[cfg(test)]
 use crate::{Runner, Spawner};
+use commonware_macros::ready;
 #[cfg(test)]
 use futures::stream::{FuturesUnordered, StreamExt};
 use futures::task::ArcWake;
@@ -13,7 +13,6 @@ use std::{
     sync::{Arc, Condvar, Mutex},
     task::{Context, Poll},
 };
-use commonware_macros::ready;
 
 pub mod buffer;
 pub mod signal;

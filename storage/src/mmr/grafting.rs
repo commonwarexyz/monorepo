@@ -65,10 +65,10 @@ use crate::mmr::{
     Error, Location, Position, StandardHasher,
 };
 use commonware_cryptography::Hasher as CHasher;
+use commonware_macros::ready;
 use futures::future::try_join_all;
 use std::collections::HashMap;
 use tracing::debug;
-use commonware_macros::ready;
 
 /// A hasher for computing digests in a grafted MMR, where a peak tree is grafted onto a base MMR.
 ///

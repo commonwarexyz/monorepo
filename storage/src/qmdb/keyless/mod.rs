@@ -15,12 +15,12 @@ use crate::{
     },
 };
 use commonware_cryptography::{DigestOf, Hasher};
+use commonware_macros::ready;
 use commonware_parallel::ThreadPool;
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage};
 use core::{marker::PhantomData, ops::Range};
 use std::num::{NonZeroU64, NonZeroUsize};
 use tracing::{debug, warn};
-use commonware_macros::ready;
 
 mod operation;
 pub use operation::Operation;

@@ -8,13 +8,12 @@ use crate::authenticated::{
     Mailbox,
 };
 use commonware_cryptography::PublicKey;
-use commonware_macros::select_loop;
+use commonware_macros::{ready, select_loop};
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Sink, Spawner, Stream};
 use futures::{channel::mpsc, StreamExt};
 use prometheus_client::metrics::{counter::Counter, family::Family, gauge::Gauge};
 use rand_core::CryptoRngCore;
 use tracing::debug;
-use commonware_macros::ready;
 
 #[ready(0)]
 

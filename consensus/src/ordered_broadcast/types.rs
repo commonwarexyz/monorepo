@@ -11,6 +11,7 @@ use commonware_cryptography::{
     certificate::{self, Attestation, Namespace, Provider, Scheme},
     Digest, PublicKey, Signer,
 };
+use commonware_macros::ready;
 use commonware_parallel::Strategy;
 use commonware_utils::{ordered::Set, union, N3f1};
 use futures::channel::oneshot;
@@ -19,7 +20,6 @@ use std::{
     hash::{Hash, Hasher},
     sync::Arc,
 };
-use commonware_macros::ready;
 
 /// Error that may be encountered when interacting with `ordered-broadcast`.
 ///

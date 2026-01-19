@@ -34,13 +34,13 @@
 use crate::{Epochable, Viewable};
 use bytes::{Buf, BufMut};
 use commonware_codec::{varint::UInt, EncodeSize, Error, Read, ReadExt, Write};
+use commonware_macros::ready;
 use commonware_utils::sequence::U64;
 use std::{
     fmt::{self, Display, Formatter},
     marker::PhantomData,
     num::NonZeroU64,
 };
-use commonware_macros::ready;
 
 /// Represents a distinct segment of a contiguous sequence of views.
 ///

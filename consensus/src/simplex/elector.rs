@@ -33,9 +33,9 @@ use commonware_codec::Encode;
 use commonware_cryptography::{
     bls12381::primitives::variant::Variant, certificate::Scheme, Hasher, PublicKey, Sha256,
 };
+use commonware_macros::ready;
 use commonware_utils::{modulo, ordered::Set};
 use std::marker::PhantomData;
-use commonware_macros::ready;
 
 /// Configuration for creating an [`Elector`].
 ///

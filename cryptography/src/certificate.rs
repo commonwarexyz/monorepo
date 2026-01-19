@@ -57,8 +57,6 @@
 //! (like [bls12381_threshold]). Refer to [ed25519] for an example of a scheme that uses the
 //! same key for both purposes.
 
-
-use commonware_macros::ready;
 pub use crate::{
     bls12381::certificate::{multisig as bls12381_multisig, threshold as bls12381_threshold},
     ed25519::certificate as ed25519,
@@ -71,6 +69,7 @@ use crate::{Digest, PublicKey};
 use alloc::{collections::BTreeSet, sync::Arc, vec::Vec};
 use bytes::{Buf, BufMut, Bytes};
 use commonware_codec::{Codec, CodecFixed, EncodeSize, Error, Read, ReadExt, Write};
+use commonware_macros::ready;
 use commonware_parallel::Strategy;
 use commonware_utils::{bitmap::BitMap, ordered::Set, Faults, Participant};
 use core::{fmt::Debug, hash::Hash};

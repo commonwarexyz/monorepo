@@ -20,6 +20,7 @@ use crate::{
 };
 use commonware_codec::Read;
 use commonware_cryptography::{DigestOf, Hasher as CHasher};
+use commonware_macros::ready;
 use commonware_parallel::ThreadPool;
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage as RStorage};
 use commonware_utils::Array;
@@ -28,7 +29,6 @@ use std::{
     ops::Range,
 };
 use tracing::warn;
-use commonware_macros::ready;
 
 mod operation;
 pub use operation::Operation;

@@ -1,4 +1,5 @@
 use crate::{signal, Error, Handle, SinkOf, StreamOf};
+use commonware_macros::ready;
 use commonware_parallel::ThreadPool;
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use prometheus_client::registry::Metric;
@@ -11,7 +12,6 @@ use std::{
     ops::RangeInclusive,
     time::{Duration, SystemTime},
 };
-use commonware_macros::ready;
 
 const MISSING_CONTEXT: &str = "runtime context missing";
 const DUPLICATE_CONTEXT: &str = "runtime context already present";

@@ -89,12 +89,7 @@ pub fn validate(workspace: &Workspace) -> Vec<Violation> {
         }
 
         // Check module items
-        check_module_items(
-            &krate.modules,
-            crate_name,
-            &item_readiness,
-            &mut violations,
-        );
+        check_module_items(&krate.modules, crate_name, &item_readiness, &mut violations);
     }
 
     // Deduplicate violations

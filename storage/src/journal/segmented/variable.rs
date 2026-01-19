@@ -83,6 +83,7 @@ use bytes::{Buf, BufMut, Bytes};
 use commonware_codec::{
     varint::UInt, Codec, CodecShared, EncodeSize, ReadExt, Write as CodecWrite,
 };
+use commonware_macros::ready;
 use commonware_runtime::{
     buffer::pool::{Append, PoolRef, Replay},
     Blob, Metrics, Storage,
@@ -91,7 +92,6 @@ use futures::stream::{self, Stream, StreamExt};
 use std::{io::Cursor, num::NonZeroUsize};
 use tracing::{trace, warn};
 use zstd::{bulk::compress, decode_all};
-use commonware_macros::ready;
 
 /// Maximum size of a varint for u32 (also the minimum useful read size for parsing item headers).
 const MAX_VARINT_SIZE: usize = 5;

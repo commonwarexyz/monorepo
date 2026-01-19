@@ -2,8 +2,8 @@
 
 use crate::{CheckedSender, Receiver, Recipients, Sender};
 use commonware_codec::{Codec, Error};
-use std::time::SystemTime;
 use commonware_macros::ready;
+use std::time::SystemTime;
 
 /// Wrap a [Sender] and [Receiver] with some [Codec].
 #[ready(0)]
@@ -68,7 +68,6 @@ impl<S: Sender, V: Codec> WrappedSender<S, V> {
 
 #[derive(Debug)]
 #[ready(0)]
-
 pub struct CheckedWrappedSender<'a, S: Sender, V: Codec> {
     sender: S::Checked<'a>,
     _phantom_v: std::marker::PhantomData<V>,

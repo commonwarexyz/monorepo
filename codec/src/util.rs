@@ -1,6 +1,5 @@
 //! Codec utility functions
 
-
 use crate::{extensions::ReadExt as _, Error};
 use bytes::Buf;
 use commonware_macros::ready;

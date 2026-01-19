@@ -7,7 +7,7 @@ use super::{
 use crate::Consumer;
 use bytes::Bytes;
 use commonware_cryptography::PublicKey;
-use commonware_macros::select;
+use commonware_macros::{ready, select};
 use commonware_p2p::{
     utils::codec::{wrap, WrappedSender},
     Blocker, Manager, Receiver, Recipients, Sender,
@@ -29,7 +29,6 @@ use futures::{
 use rand::Rng;
 use std::{collections::HashMap, marker::PhantomData};
 use tracing::{debug, error, trace, warn};
-use commonware_macros::ready;
 
 /// Represents a pending serve operation.
 struct Serve<E: Clock, P: PublicKey> {

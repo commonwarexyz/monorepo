@@ -1,6 +1,6 @@
 //! Utilities for managing concurrency.
 
-
+use commonware_macros::ready;
 use core::{
     hash::Hash,
     num::NonZeroU32,
@@ -10,7 +10,6 @@ use std::{
     collections::HashSet,
     sync::{Arc, Mutex},
 };
-use commonware_macros::ready;
 
 /// Limit the concurrency of some operation without blocking.
 #[ready(0)]

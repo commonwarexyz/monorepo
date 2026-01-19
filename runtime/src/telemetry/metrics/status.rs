@@ -1,11 +1,11 @@
 //! Recording metrics with a status.
 
+use commonware_macros::ready;
 use prometheus_client::{
     encoding::{EncodeLabelSet, EncodeLabelValue},
     metrics::{counter::Counter as DefaultCounter, family::Family, gauge::Gauge},
 };
 use std::sync::atomic::Ordering;
-use commonware_macros::ready;
 
 /// Metric label that indicates status.
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]

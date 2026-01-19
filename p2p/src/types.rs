@@ -2,10 +2,10 @@
 
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error as CodecError, FixedSize, Read, ReadExt, Write};
+use commonware_macros::ready;
 use commonware_runtime::{Error as RuntimeError, Resolver};
 use commonware_utils::{Hostname, IpAddrExt};
 use std::net::{IpAddr, SocketAddr};
-use commonware_macros::ready;
 
 const INGRESS_SOCKET_PREFIX: u8 = 0;
 const INGRESS_DNS_PREFIX: u8 = 1;

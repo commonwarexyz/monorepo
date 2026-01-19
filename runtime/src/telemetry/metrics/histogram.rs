@@ -1,9 +1,9 @@
 //! Utilities for working with histograms.
 
 use crate::Clock;
+use commonware_macros::ready;
 use prometheus_client::metrics::histogram::Histogram;
 use std::{sync::Arc, time::SystemTime};
-use commonware_macros::ready;
 
 /// Holds constants for bucket sizes for histograms.
 ///

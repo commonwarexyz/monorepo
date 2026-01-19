@@ -14,15 +14,14 @@ use crate::{
     translator::Translator,
 };
 use commonware_cryptography::Hasher;
+use commonware_macros::ready;
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
 use tracing::warn;
-use commonware_macros::ready;
 
 pub mod sync;
 
 #[ready(0)]
-
 pub type Update<K, V> = unordered::Update<K, FixedEncoding<V>>;
 #[ready(0)]
 pub type Operation<K, V> = unordered::Operation<K, FixedEncoding<V>>;

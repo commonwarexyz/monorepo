@@ -203,10 +203,10 @@
 //! ```
 
 mod storage;
+use commonware_macros::ready;
 use commonware_runtime::buffer::PoolRef;
 use commonware_utils::Array;
 use std::num::NonZeroUsize;
-use commonware_macros::ready;
 pub use storage::{Checkpoint, Cursor, Freezer};
 use thiserror::Error;
 

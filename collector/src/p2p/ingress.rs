@@ -1,10 +1,10 @@
 use crate::{Error, Originator};
 use commonware_codec::Codec;
 use commonware_cryptography::{Committable, Digestible, PublicKey};
+use commonware_macros::ready;
 use commonware_p2p::Recipients;
 use commonware_utils::channels::fallible::AsyncFallibleExt;
 use futures::channel::{mpsc, oneshot};
-use commonware_macros::ready;
 
 /// Messages that can be sent to a [Mailbox].
 #[ready(0)]

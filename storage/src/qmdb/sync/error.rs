@@ -6,7 +6,6 @@ use commonware_macros::ready;
 
 #[derive(Debug, thiserror::Error)]
 #[ready(0)]
-
 pub enum EngineError<D: Digest> {
     /// Hash mismatch after sync
     #[error("root digest mismatch - expected {expected:?}, got {actual:?}")]

@@ -20,10 +20,10 @@ use crate::{
 };
 use commonware_codec::CodecFixedShared;
 use commonware_cryptography::Hasher;
+use commonware_macros::ready;
 use commonware_parallel::ThreadPool;
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage};
 use std::num::{NonZeroU64, NonZeroUsize};
-use commonware_macros::ready;
 
 pub(crate) mod db;
 mod operation;

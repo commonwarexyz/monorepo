@@ -58,10 +58,10 @@ use crate::{
     DirtyAuthenticatedBitMap,
 };
 use commonware_cryptography::{Digest, DigestOf};
+use commonware_macros::ready;
 use commonware_utils::NZUsize;
 use core::num::NonZeroUsize;
 use futures::{pin_mut, StreamExt as _};
-use commonware_macros::ready;
 use thiserror::Error;
 
 pub mod any;

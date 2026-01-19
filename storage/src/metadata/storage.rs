@@ -2,6 +2,7 @@ use super::{Config, Error};
 use bytes::BufMut;
 use commonware_codec::{Codec, FixedSize, ReadExt};
 use commonware_cryptography::{crc32, Crc32};
+use commonware_macros::ready;
 use commonware_runtime::{
     telemetry::metrics::status::GaugeExt, Blob, Clock, Error as RError, Metrics, Storage,
 };
@@ -10,7 +11,6 @@ use futures::future::try_join_all;
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use tracing::{debug, warn};
-use commonware_macros::ready;
 
 /// The names of the two blobs that store metadata.
 const BLOB_NAMES: [&[u8]; 2] = [b"left", b"right"];

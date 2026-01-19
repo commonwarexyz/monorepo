@@ -16,9 +16,9 @@ use super::{
 use alloc::vec::Vec;
 use bytes::{Buf, BufMut};
 use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
+use commonware_macros::ready;
 use commonware_math::algebra::Additive;
 use commonware_parallel::Strategy;
-use commonware_macros::ready;
 
 /// An aggregated public key from multiple individual public keys.
 ///

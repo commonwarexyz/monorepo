@@ -8,8 +8,8 @@
 //! - Each key in the [BTreeMap] represents the inclusive start of a range, and its
 //!   corresponding value represents the inclusive end of that range.
 
-use std::collections::BTreeMap;
 use commonware_macros::ready;
+use std::collections::BTreeMap;
 
 /// A collection that manages disjoint, inclusive ranges `[start, end]`.
 #[derive(Debug, Default, PartialEq)]

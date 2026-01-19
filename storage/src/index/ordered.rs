@@ -11,6 +11,7 @@ use crate::{
     },
     translator::Translator,
 };
+use commonware_macros::ready;
 use commonware_runtime::Metrics;
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::{
@@ -23,7 +24,6 @@ use std::{
     },
     ops::Bound::{Excluded, Unbounded},
 };
-use commonware_macros::ready;
 
 /// Implementation of [IndexEntry] for [BTreeOccupiedEntry].
 impl<K: Ord + Send + Sync, V: Eq + Send + Sync> IndexEntry<V>

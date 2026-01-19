@@ -1,7 +1,7 @@
 use crate::authenticated::{discovery::types, Mailbox};
 use commonware_cryptography::PublicKey;
-use commonware_utils::channels::fallible::AsyncFallibleExt;
 use commonware_macros::ready;
+use commonware_utils::channels::fallible::AsyncFallibleExt;
 
 /// Messages that can be sent to the peer [super::Actor].
 #[derive(Clone, Debug)]

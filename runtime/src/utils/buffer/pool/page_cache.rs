@@ -3,6 +3,7 @@
 
 use super::get_page_from_blob;
 use crate::{Blob, Error, RwLock};
+use commonware_macros::ready;
 use commonware_utils::StableBuf;
 use futures::{future::Shared, FutureExt};
 use std::{
@@ -16,7 +17,6 @@ use std::{
     },
 };
 use tracing::{debug, error, trace};
-use commonware_macros::ready;
 
 // Type alias for the future we'll be storing for each in-flight page fetch.
 //

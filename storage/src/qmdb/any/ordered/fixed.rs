@@ -18,10 +18,10 @@ use crate::{
     translator::Translator,
 };
 use commonware_cryptography::Hasher;
+use commonware_macros::ready;
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
 use tracing::warn;
-use commonware_macros::ready;
 
 #[ready(0)]
 

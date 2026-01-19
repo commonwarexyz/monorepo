@@ -1,7 +1,7 @@
 use crate::{buffer::tip::Buffer, Blob, Error, RwLock};
+use commonware_macros::ready;
 use commonware_utils::StableBuf;
 use std::{num::NonZeroUsize, sync::Arc};
-use commonware_macros::ready;
 
 /// A writer that buffers the raw content of a [Blob] to optimize the performance of appending or
 /// updating data.

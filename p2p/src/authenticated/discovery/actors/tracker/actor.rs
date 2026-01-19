@@ -11,7 +11,7 @@ use crate::authenticated::{
     mailbox::UnboundedMailbox,
 };
 use commonware_cryptography::Signer;
-use commonware_macros::select_loop;
+use commonware_macros::{ready, select_loop};
 use commonware_runtime::{
     spawn_cell, Clock, ContextCell, Handle, Metrics as RuntimeMetrics, Spawner,
 };
@@ -19,7 +19,6 @@ use commonware_utils::{channels::fallible::FallibleExt, ordered::Set, union, Sys
 use futures::{channel::mpsc, StreamExt};
 use rand::{seq::SliceRandom, Rng};
 use tracing::debug;
-use commonware_macros::ready;
 
 // Bytes to add to the namespace to prevent replay attacks.
 const NAMESPACE_SUFFIX_IP: &[u8] = b"_IP";

@@ -12,9 +12,9 @@ use crate::{
 };
 use commonware_codec::CodecShared;
 use commonware_cryptography::Digest;
+use commonware_macros::ready;
 use core::future::Future;
 use std::num::NonZeroU64;
-use commonware_macros::ready;
 
 mod batch;
 pub mod db;

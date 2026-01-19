@@ -62,7 +62,6 @@
 //! - Uses [`broadcast::buffered`](`commonware_broadcast::buffered`) for broadcasting and receiving
 //!   uncertified blocks from the network.
 
-
 use commonware_macros::ready;
 pub mod actor;
 pub use actor::Actor;

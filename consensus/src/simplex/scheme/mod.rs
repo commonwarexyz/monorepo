@@ -25,8 +25,8 @@ use crate::simplex::types::Subject;
 use bytes::Bytes;
 use commonware_codec::Encode;
 use commonware_cryptography::{certificate, Digest};
-use commonware_utils::union;
 use commonware_macros::ready;
+use commonware_utils::union;
 
 pub mod bls12381_multisig;
 pub mod bls12381_threshold;

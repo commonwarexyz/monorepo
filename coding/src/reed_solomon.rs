@@ -2,12 +2,12 @@ use crate::{Config, Scheme};
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, FixedSize, Read, ReadExt, ReadRangeExt, Write};
 use commonware_cryptography::Hasher;
+use commonware_macros::ready;
 use commonware_parallel::Strategy;
 use commonware_storage::bmt::{self, Builder};
 use reed_solomon_simd::{Error as RsError, ReedSolomonDecoder, ReedSolomonEncoder};
 use std::{collections::HashSet, marker::PhantomData};
 use thiserror::Error;
-use commonware_macros::ready;
 
 /// Errors that can occur when interacting with the Reed-Solomon coder.
 #[derive(Error, Debug)]

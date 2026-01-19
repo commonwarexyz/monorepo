@@ -14,14 +14,13 @@
 //! metadata (pointer, length, capacity) zeroized, the referenced data remains
 //! intact. Do not use `Secret` with types that contain pointers.
 
-
+use commonware_macros::ready;
 use core::{
     fmt::{Debug, Display, Formatter},
     mem::ManuallyDrop,
 };
 use ctutils::CtEq;
 use zeroize::{Zeroize, ZeroizeOnDrop};
-use commonware_macros::ready;
 
 /// Zeroize memory at the given pointer using volatile writes.
 ///

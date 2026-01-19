@@ -5,6 +5,7 @@ use commonware_codec::{
     CodecFixed, CodecFixedShared, Encode, FixedSize, Read, ReadExt, Write as CodecWrite,
 };
 use commonware_cryptography::{crc32, Crc32};
+use commonware_macros::ready;
 use commonware_runtime::{
     buffer::{Read as ReadBuffer, Write},
     Blob, Clock, Error as RError, Metrics, Storage,
@@ -17,7 +18,6 @@ use std::{
     marker::PhantomData,
 };
 use tracing::{debug, warn};
-use commonware_macros::ready;
 
 /// Value stored in the index file.
 #[derive(Debug, Clone)]

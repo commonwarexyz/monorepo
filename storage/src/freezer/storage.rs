@@ -8,13 +8,13 @@ use crate::{
 use bytes::{Buf, BufMut};
 use commonware_codec::{CodecShared, Encode, FixedSize, Read, ReadExt, Write as CodecWrite};
 use commonware_cryptography::{crc32, Crc32, Hasher};
+use commonware_macros::ready;
 use commonware_runtime::{buffer, Blob, Clock, Metrics, Storage};
 use commonware_utils::{Array, Span};
 use futures::future::{try_join, try_join_all};
 use prometheus_client::metrics::counter::Counter;
 use std::{cmp::Ordering, collections::BTreeSet, num::NonZeroUsize, ops::Deref};
 use tracing::debug;
-use commonware_macros::ready;
 
 /// The percentage of table entries that must reach `table_resize_frequency`
 /// before a resize is triggered.

@@ -19,12 +19,12 @@ use crate::{
 };
 use commonware_codec::{CodecFixedShared, CodecShared, Encode, EncodeShared};
 use commonware_cryptography::{DigestOf, Hasher};
+use commonware_macros::ready;
 use commonware_runtime::{Clock, Metrics, Storage};
 use core::num::{NonZeroU64, NonZeroUsize};
 use futures::{future::try_join_all, try_join, TryFutureExt as _};
 use thiserror::Error;
 use tracing::{debug, warn};
-use commonware_macros::ready;
 
 /// Errors that can occur when interacting with an authenticated journal.
 #[derive(Error, Debug)]

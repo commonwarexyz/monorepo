@@ -29,6 +29,7 @@ use commonware_cryptography::{
     certificate::{self, Attestation, Subject as CertificateSubject, Verification},
     Digest, PublicKey,
 };
+use commonware_macros::ready;
 use commonware_parallel::Strategy;
 use commonware_utils::{ordered::Set, Faults};
 use rand::{rngs::StdRng, SeedableRng};
@@ -37,7 +38,6 @@ use std::{
     collections::{BTreeSet, HashMap},
     fmt::Debug,
 };
-use commonware_macros::ready;
 
 /// The role-specific data for a BLS12-381 threshold scheme participant.
 #[derive(Clone, Debug)]

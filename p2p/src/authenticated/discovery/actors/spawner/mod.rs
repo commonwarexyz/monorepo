@@ -1,7 +1,7 @@
 use crate::authenticated::discovery::types::InfoVerifier;
 use commonware_cryptography::PublicKey;
-use std::time::Duration;
 use commonware_macros::ready;
+use std::time::Duration;
 
 mod actor;
 mod ingress;

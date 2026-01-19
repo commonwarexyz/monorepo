@@ -43,8 +43,8 @@
 //! ops::verify_message::<MinSig>(threshold_pub, namespace, message, &threshold_sig).expect("signature should be valid");
 //! ```
 
-use thiserror::Error;
 use commonware_macros::ready;
+use thiserror::Error;
 
 pub mod group;
 pub mod ops;

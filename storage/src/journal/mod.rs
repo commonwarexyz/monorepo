@@ -5,9 +5,8 @@
 //! to serve as a backing store for some in-memory data structure, or as a building block for a more
 //! complex construction that prescribes some meaning to items in the log.
 
-
-use thiserror::Error;
 use commonware_macros::ready;
+use thiserror::Error;
 
 pub mod authenticated;
 pub mod contiguous;

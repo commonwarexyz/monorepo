@@ -20,12 +20,12 @@
 //! println!("digest: {:?}", digest);
 //! ```
 
-
 use crate::Hasher;
 #[cfg(not(feature = "std"))]
 use alloc::vec;
 use bytes::{Buf, BufMut};
 use commonware_codec::{DecodeExt, Error as CodecError, FixedSize, Read, ReadExt, Write};
+use commonware_macros::ready;
 use commonware_math::algebra::Random;
 use commonware_utils::{hex, Array, Span};
 use core::{
@@ -35,7 +35,6 @@ use core::{
 use rand_core::CryptoRngCore;
 use sha2::{Digest as _, Sha256 as ISha256};
 use zeroize::Zeroize;
-use commonware_macros::ready;
 
 /// Re-export `sha2::Sha256` as `CoreSha256` for external use if needed.
 #[ready(0)]

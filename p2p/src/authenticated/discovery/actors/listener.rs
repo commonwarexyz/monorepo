@@ -6,7 +6,7 @@ use crate::authenticated::{
     Mailbox,
 };
 use commonware_cryptography::Signer;
-use commonware_macros::select_loop;
+use commonware_macros::{ready, select_loop};
 use commonware_runtime::{
     spawn_cell, Clock, ContextCell, Handle, KeyedRateLimiter, Listener, Metrics, Network, Quota,
     SinkOf, Spawner, StreamOf,
@@ -17,7 +17,6 @@ use prometheus_client::metrics::counter::Counter;
 use rand_core::CryptoRngCore;
 use std::{net::SocketAddr, num::NonZeroU32};
 use tracing::debug;
-use commonware_macros::ready;
 
 /// Subnet mask of `/24` for IPv4 and `/48` for IPv6 networks.
 const SUBNET_MASK: SubnetMask = SubnetMask::new(24, 48);
@@ -37,7 +36,6 @@ pub struct Config<C: Signer> {
 }
 
 #[ready(0)]
-
 pub struct Actor<E: Spawner + Clock + Network + CryptoRngCore + Metrics, C: Signer> {
     context: ContextCell<E>,
 

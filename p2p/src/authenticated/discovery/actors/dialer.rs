@@ -12,7 +12,7 @@ use crate::authenticated::{
     Mailbox,
 };
 use commonware_cryptography::Signer;
-use commonware_macros::select_loop;
+use commonware_macros::{ready, select_loop};
 use commonware_runtime::{
     spawn_cell, Clock, ContextCell, Handle, Metrics, Network, Resolver, SinkOf, Spawner, StreamOf,
 };
@@ -23,7 +23,6 @@ use rand::seq::SliceRandom;
 use rand_core::CryptoRngCore;
 use std::time::Duration;
 use tracing::debug;
-use commonware_macros::ready;
 
 /// Configuration for the dialer actor.
 #[ready(0)]

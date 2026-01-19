@@ -35,11 +35,11 @@ use crate::{
 };
 use commonware_codec::FixedSize;
 use commonware_cryptography::{DigestOf, Hasher};
+use commonware_macros::ready;
 use commonware_runtime::{Clock, Metrics, Storage as RStorage};
 use commonware_utils::Array;
 use core::ops::Range;
 use std::num::NonZeroU64;
-use commonware_macros::ready;
 
 /// Proof information for verifying a key has a particular value in the database.
 #[ready(0)]

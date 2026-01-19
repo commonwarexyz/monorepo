@@ -79,7 +79,6 @@
 //! * <https://github.com/thibmeu/tlock-rs>: tlock-rs: Practical Timelock Encryption/Decryption in Rust
 //! * <https://github.com/drand/tlock> tlock: Timelock Encryption/Decryption Made Practical
 
-
 use crate::{
     bls12381::primitives::{
         group::{Scalar, DST, GT},
@@ -92,11 +91,11 @@ use crate::{
 use alloc::vec::Vec;
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, FixedSize, Read, ReadExt, Write};
+use commonware_macros::ready;
 use commonware_math::algebra::CryptoGroup;
 use commonware_utils::sequence::FixedBytes;
 use rand_core::CryptoRngCore;
 use zeroize::Zeroizing;
-use commonware_macros::ready;
 
 /// Domain separation tag for hashing the `h3` message to a scalar.
 const DST: DST = b"TLE_BLS12381_XMD:SHA-256_SSWU_RO_H3_";

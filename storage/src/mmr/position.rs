@@ -1,9 +1,9 @@
 use super::location::Location;
+use commonware_macros::ready;
 use core::{
     fmt,
     ops::{Add, AddAssign, Deref, Sub, SubAssign},
 };
-use commonware_macros::ready;
 
 /// Maximum valid [Position] value that can exist in a valid MMR.
 ///

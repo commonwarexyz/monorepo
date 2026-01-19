@@ -11,7 +11,7 @@
 use crate::{Channel, CheckedSender, LimitedSender, Message, Receiver, Recipients, Sender};
 use bytes::{Buf, Bytes};
 use commonware_codec::{varint::UInt, Encode, Error as CodecError, ReadExt};
-use commonware_macros::select_loop;
+use commonware_macros::{ready, select_loop};
 use commonware_runtime::{spawn_cell, ContextCell, Handle, Spawner};
 use commonware_utils::channels::fallible::FallibleExt;
 use futures::{
@@ -21,7 +21,6 @@ use futures::{
 use std::{collections::HashMap, fmt::Debug, time::SystemTime};
 use thiserror::Error;
 use tracing::debug;
-use commonware_macros::ready;
 
 /// Errors that can occur when interacting with a [SubReceiver] or [MuxHandle].
 #[derive(Error, Debug)]

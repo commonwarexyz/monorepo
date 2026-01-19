@@ -2,7 +2,7 @@ use super::{metrics, Config, Mailbox, Message};
 use crate::buffered::metrics::SequencerLabel;
 use commonware_codec::Codec;
 use commonware_cryptography::{Committable, Digestible, PublicKey};
-use commonware_macros::select;
+use commonware_macros::{ready, select};
 use commonware_p2p::{
     utils::codec::{wrap, WrappedSender},
     Receiver, Recipients, Sender,
@@ -19,7 +19,6 @@ use futures::{
 };
 use std::collections::{BTreeMap, VecDeque};
 use tracing::{debug, error, trace, warn};
-use commonware_macros::ready;
 
 /// A responder waiting for a message.
 struct Waiter<P, Dd, M> {

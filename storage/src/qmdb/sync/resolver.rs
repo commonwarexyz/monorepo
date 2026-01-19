@@ -15,11 +15,11 @@ use crate::{
     translator::Translator,
 };
 use commonware_cryptography::{Digest, Hasher};
+use commonware_macros::ready;
 use commonware_runtime::{Clock, Metrics, RwLock, Storage};
 use commonware_utils::Array;
 use futures::channel::oneshot;
 use std::{future::Future, num::NonZeroU64, sync::Arc};
-use commonware_macros::ready;
 
 /// Result from a fetch operation
 #[ready(0)]

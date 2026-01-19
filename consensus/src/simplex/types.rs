@@ -11,11 +11,11 @@ use commonware_cryptography::{
     certificate::{Attestation, Scheme},
     Digest, PublicKey,
 };
+use commonware_macros::ready;
 use commonware_parallel::Strategy;
 use commonware_utils::N3f1;
 use rand_core::CryptoRngCore;
 use std::{collections::HashSet, fmt::Debug, hash::Hash};
-use commonware_macros::ready;
 
 /// Context is a collection of metadata from consensus about a given payload.
 /// It provides information about the current epoch/view and the parent payload that new proposals are built on.

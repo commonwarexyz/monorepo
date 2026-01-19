@@ -20,10 +20,10 @@ use super::{
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
 use commonware_codec::Encode;
+use commonware_macros::ready;
 use commonware_parallel::Strategy;
 use commonware_utils::{ordered::Map, union_unique, Faults, Participant};
 use rand_core::CryptoRngCore;
-use commonware_macros::ready;
 
 /// Prepares partial signature evaluations for threshold recovery.
 fn prepare_evaluations<'a, V: Variant>(

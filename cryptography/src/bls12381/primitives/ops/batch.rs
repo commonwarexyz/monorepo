@@ -19,10 +19,10 @@ use super::{
 };
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
+use commonware_macros::ready;
 use commonware_math::algebra::Space;
 use commonware_parallel::Strategy;
 use rand_core::CryptoRngCore;
-use commonware_macros::ready;
 
 /// Segment tree for batch verification bisection.
 ///

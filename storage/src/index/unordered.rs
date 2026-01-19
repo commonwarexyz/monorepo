@@ -9,13 +9,13 @@ use crate::{
     },
     translator::Translator,
 };
+use commonware_macros::ready;
 use commonware_runtime::Metrics;
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::collections::{
     hash_map::{Entry, OccupiedEntry, VacantEntry},
     HashMap,
 };
-use commonware_macros::ready;
 
 /// The initial capacity of the internal hashmap. This is a guess at the number of unique keys we
 /// will encounter. The hashmap will grow as needed, but this is a good starting point (covering the

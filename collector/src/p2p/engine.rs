@@ -8,7 +8,7 @@ use crate::{
 };
 use commonware_codec::Codec;
 use commonware_cryptography::{Committable, Digestible, PublicKey};
-use commonware_macros::select_loop;
+use commonware_macros::{ready, select_loop};
 use commonware_p2p::{utils::codec::wrap, Blocker, Receiver, Recipients, Sender};
 use commonware_runtime::{
     spawn_cell, telemetry::metrics::status::GaugeExt, Clock, ContextCell, Handle, Metrics, Spawner,
@@ -21,7 +21,6 @@ use futures::{
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::collections::{HashMap, HashSet};
 use tracing::{debug, error, warn};
-use commonware_macros::ready;
 
 /// Engine that will disperse messages and collect responses.
 #[ready(0)]
