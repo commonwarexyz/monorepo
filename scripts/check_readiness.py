@@ -253,6 +253,34 @@ def check_unnecessary_annotations(index, paths, public_module_paths, reexported_
     return unnecessary
 
 
+def check_unnecessary_trait_annotations(index, paths):
+    """
+    Check that traits do NOT have #[ready(N)] annotations.
+    Traits define interfaces, not implementation maturity, so they should not have readiness.
+    """
+    unnecessary = []
+
+    for item_id, item in index.items():
+        # Only check traits
+        kind = get_kind(item)
+        if kind != "trait":
+            continue
+
+        # Check for readiness annotation in docs
+        docs = item.get("docs") or ""
+        if "**Readiness:" not in docs:
+            continue
+
+        # This trait has a readiness annotation - flag it
+        name = item.get("name", item_id)
+        path_info = paths.get(item_id, {})
+        item_path = path_info.get("path", [])
+        path_str = "::".join(item_path) if item_path else name
+        unnecessary.append(("trait", name, path_str))
+
+    return unnecessary
+
+
 def check_readiness(path):
     with open(path) as f:
         data = json.load(f)
@@ -308,6 +336,9 @@ def check_readiness(path):
         index, paths, public_module_paths, reexported_ids
     )
 
+    # Check for unnecessary annotations on traits
+    unnecessary.extend(check_unnecessary_trait_annotations(index, paths))
+
     if missing:
         print(f"Missing #[ready(N)] annotation ({len(missing)} items):")
         for kind, name, path_str in sorted(missing):
@@ -315,7 +346,8 @@ def check_readiness(path):
         errors = True
 
     if unnecessary:
-        print(f"\nUnnecessary #[ready(N)] on private items ({len(unnecessary)} items):")
+        print(f"\nUnnecessary #[ready(N)] annotations ({len(unnecessary)} items):")
+        print("  (private items should not have annotations; traits never need them)")
         for kind, name, path_str in sorted(unnecessary):
             print(f"  {kind}: {name} ({path_str})")
         errors = True
