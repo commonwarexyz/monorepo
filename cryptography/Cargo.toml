@@ -91,6 +91,7 @@ std = [
 	"getrandom/std",
 	"num-rational",
 	"num-traits",
+	"num-traits?/std",
 	"p256/std",
 	"rand/std",
 	"rand/std_rng",

@@ -213,6 +213,7 @@ impl<H: Hasher> BloomFilter<H> {
         }
 
         // k = (m/n) * ln(2) using Q16.16 fixed-point
+        // Use saturating arithmetic to prevent overflow (n << 16 wraps to 0 for n >= 2^48)
         let n_scaled = (expected_items as u64).saturating_mul(1 << 16);
         let k = (bits as u64).saturating_mul(LN2_Q16) / n_scaled;
         k.clamp(1, 16) as u8
