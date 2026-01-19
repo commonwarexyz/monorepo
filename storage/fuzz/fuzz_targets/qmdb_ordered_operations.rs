@@ -4,7 +4,7 @@ use arbitrary::Arbitrary;
 use commonware_cryptography::{sha256::Digest, Sha256};
 use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
 use commonware_storage::{
-    mmr::{Location, Proof, StandardHasher as Standard, MAX_LOCATION},
+    mmr::{Location, Proof, StandardHasher as Standard},
     qmdb::{
         any::{ordered::fixed::Db, FixedConfig as Config},
         verify_proof,
@@ -44,7 +44,7 @@ enum QmdbOperation {
     ArbitraryProof {
         start_loc: u64,
         max_ops: NonZeroU64,
-        proof_leaves: u64,
+        proof_leaves: Location,
         digests: Vec<[u8; 32]>,
     },
     Get {
@@ -176,10 +176,9 @@ fn fuzz(data: FuzzInput) {
 
                 QmdbOperation::ArbitraryProof { start_loc, max_ops , proof_leaves, digests} => {
                     let actual_op_count = db.op_count();
-                    let clamped_leaves = (*proof_leaves).clamp(0, MAX_LOCATION);
 
                     let proof = Proof {
-                        leaves: Location::new(clamped_leaves).unwrap(),
+                        leaves: *proof_leaves,
                         digests: digests.iter().map(|d| Digest::from(*d)).collect(),
                     };
 
