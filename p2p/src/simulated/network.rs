@@ -969,7 +969,6 @@ impl<P: PublicKey, E: Clock, F: SplitForwarder<P>> crate::LimitedSender for Spli
 ///
 /// This is necessary because [`SplitForwarder`] may examine message content to determine
 /// routing, but the message is not available at [`LimitedSender::check`] time.
-#[ready(2)]
 pub struct SplitCheckedSender<'a, P: PublicKey, E: Clock, F: SplitForwarder<P>> {
     checked: LimitedCheckedSender<'a, UnlimitedSender<P>>,
     replica: SplitOrigin,

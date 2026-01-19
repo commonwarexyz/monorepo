@@ -1,11 +1,9 @@
 use super::Metadata;
 use crate::authenticated::lookup::actors::tracker::ingress::Releaser;
 use commonware_cryptography::PublicKey;
-use commonware_macros::ready;
 
 /// Reservation for a peer in the network. This is used to ensure that the peer is reserved only
 /// once, and that the reservation is released when the peer connection fails or is closed.
-#[ready(2)]
 pub struct Reservation<P: PublicKey> {
     /// Metadata about the reservation.
     metadata: Metadata<P>,

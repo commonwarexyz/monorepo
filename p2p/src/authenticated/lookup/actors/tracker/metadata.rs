@@ -1,8 +1,6 @@
 use commonware_cryptography::PublicKey;
-use commonware_macros::ready;
 
 /// Metadata for a peer connection.
-#[ready(2)]
 #[derive(Clone, Debug)]
 pub enum Metadata<P: PublicKey> {
     /// We are the Dialer.

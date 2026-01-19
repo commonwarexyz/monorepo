@@ -5,7 +5,6 @@ use crate::{
 };
 use bytes::{Buf, Bytes};
 use commonware_cryptography::PublicKey;
-use commonware_macros::ready;
 use commonware_utils::{
     channels::{fallible::AsyncFallibleExt, ring},
     NZUsize,
@@ -13,7 +12,6 @@ use commonware_utils::{
 use futures::channel::oneshot;
 
 /// Messages that can be processed by the router.
-#[ready(2)]
 #[derive(Debug)]
 pub enum Message<P: PublicKey> {
     /// Notify the router that a peer is ready to communicate.
@@ -62,7 +60,6 @@ impl<P: PublicKey> Mailbox<Message<P>> {
 }
 
 /// Sends messages containing content to the router to send to peers.
-#[ready(2)]
 #[derive(Clone, Debug)]
 pub struct Messenger<P: PublicKey> {
     sender: Mailbox<Message<P>>,

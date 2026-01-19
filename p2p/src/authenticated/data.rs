@@ -1,9 +1,7 @@
 use bytes::{Buf, BufMut, Bytes};
 use commonware_codec::{varint::UInt, EncodeSize, Error, RangeCfg, Read, ReadExt as _, Write};
-use commonware_macros::ready;
 
 /// Data is an arbitrary message sent between peers.
-#[ready(2)]
 #[derive(Clone, Debug, PartialEq)]
 pub struct Data {
     /// A unique identifier for the channel the message is sent on.
