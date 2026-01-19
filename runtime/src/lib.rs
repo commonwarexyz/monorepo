@@ -287,7 +287,7 @@ pub trait Metrics: Clone + Send + Sync + 'static {
     ///
     /// Keys must start with `[a-zA-Z]` and contain only `[a-zA-Z0-9_]`. Values can be any string.
     ///
-    /// # Subtree Labeling
+    /// # Labeling Children
     ///
     /// Attributes apply to the entire subtree of contexts. When you call `with_attribute`, the
     /// label is automatically added to all metrics registered in that context and any child
@@ -2216,6 +2216,18 @@ mod tests {
         });
     }
 
+    #[test]
+    fn test_deterministic_metrics_with_attribute() {
+        let executor = deterministic::Runner::default();
+        test_metrics_with_attribute(executor);
+    }
+
+    #[test]
+    fn test_tokio_metrics_with_attribute() {
+        let runner = tokio::Runner::default();
+        test_metrics_with_attribute(runner);
+    }
+
     fn test_metrics_attribute_with_nested_label<R: Runner>(runner: R)
     where
         R::Context: Metrics,
@@ -2880,12 +2892,6 @@ mod tests {
         test_metrics(executor);
     }
 
-    #[test]
-    fn test_deterministic_metrics_with_attribute() {
-        let executor = deterministic::Runner::default();
-        test_metrics_with_attribute(executor);
-    }
-
     #[test_collect_traces]
     fn test_deterministic_instrument_tasks(traces: TraceStorage) {
         let executor = deterministic::Runner::new(deterministic::Config::default());
@@ -3227,12 +3233,6 @@ mod tests {
     fn test_tokio_metrics() {
         let executor = tokio::Runner::default();
         test_metrics(executor);
-    }
-
-    #[test]
-    fn test_tokio_metrics_with_attribute() {
-        let executor = tokio::Runner::default();
-        test_metrics_with_attribute(executor);
     }
 
     #[test]
