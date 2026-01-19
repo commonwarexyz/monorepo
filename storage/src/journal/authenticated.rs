@@ -265,7 +265,7 @@ where
     /// # Errors
     ///
     /// - Returns [Error::Mmr] with [crate::mmr::Error::RangeOutOfBounds] if `start_loc` >=
-    ///   `historical_size` or `historical_size` > number of items in the journal.
+    ///   `historical_leaves` or `historical_leaves` > number of items in the journal.
     /// - Returns [Error::Journal] with [crate::journal::Error::ItemPruned] if `start_loc` has been
     ///   pruned.
     pub async fn historical_proof(

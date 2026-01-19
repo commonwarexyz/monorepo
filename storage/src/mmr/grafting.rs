@@ -537,7 +537,7 @@ mod tests {
 
     /// For a variety of grafting heights and node positions, check that destination_pos and
     /// source_pos are inverse functions.
-    #[test]
+    #[test_traced]
     fn test_hasher_dest_source_pos_conversion() {
         for grafting_height in 1..10 {
             for pos in 0..10000 {
@@ -549,7 +549,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[test_traced]
     fn test_hasher_source_dest_pos_conversion() {
         for grafting_height in 1..10 {
             for pos in 0..10000 {
@@ -567,7 +567,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[test_traced]
     fn test_hasher_grafting() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {

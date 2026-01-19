@@ -207,7 +207,10 @@ impl Read for Location {
     #[inline]
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, commonware_codec::Error> {
         let value: u64 = commonware_codec::varint::UInt::read(buf)?.into();
-        Ok(Self::new_unchecked(value))
+        Self::new(value).ok_or(commonware_codec::Error::Invalid(
+            "Location",
+            "value exceeds MAX_LOCATION",
+        ))
     }
 }
 
