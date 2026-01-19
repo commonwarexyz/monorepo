@@ -1,4 +1,5 @@
 use super::location::Location;
+use commonware_codec::ReadExt;
 use core::{
     fmt,
     ops::{Add, AddAssign, Deref, Sub, SubAssign},
@@ -302,6 +303,38 @@ impl SubAssign<u64> for Position {
     }
 }
 
+// Codec implementations using varint encoding for efficient storage
+impl commonware_codec::Write for Position {
+    #[inline]
+    fn write(&self, buf: &mut impl bytes::BufMut) {
+        commonware_codec::varint::UInt(self.0).write(buf);
+    }
+}
+
+impl commonware_codec::EncodeSize for Position {
+    #[inline]
+    fn encode_size(&self) -> usize {
+        commonware_codec::varint::UInt(self.0).encode_size()
+    }
+}
+
+impl commonware_codec::Read for Position {
+    type Cfg = ();
+
+    #[inline]
+    fn read_cfg(buf: &mut impl bytes::Buf, _: &()) -> Result<Self, commonware_codec::Error> {
+        let value: u64 = commonware_codec::varint::UInt::read(buf)?.into();
+        if value <= MAX_POSITION.0 {
+            Ok(Self(value))
+        } else {
+            Err(commonware_codec::Error::Invalid(
+                "Position",
+                "value exceeds MAX_POSITION",
+            ))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Location, Position};
@@ -499,5 +532,52 @@ mod tests {
         assert!(Position::new(u64::MAX >> 1).is_mmr_size());
         assert!(!Position::new((u64::MAX >> 1) + 1).is_mmr_size());
         assert!(!MAX_POSITION.is_mmr_size());
+    }
+
+    #[test]
+    fn test_read_cfg_valid_values() {
+        use commonware_codec::{Encode, ReadExt};
+
+        // Test zero
+        let pos = Position::new(0);
+        let encoded = pos.encode();
+        let decoded = Position::read(&mut encoded.as_ref()).unwrap();
+        assert_eq!(decoded, pos);
+
+        // Test middle value
+        let pos = Position::new(12345);
+        let encoded = pos.encode();
+        let decoded = Position::read(&mut encoded.as_ref()).unwrap();
+        assert_eq!(decoded, pos);
+
+        // Test MAX_POSITION (boundary)
+        let pos = MAX_POSITION;
+        let encoded = pos.encode();
+        let decoded = Position::read(&mut encoded.as_ref()).unwrap();
+        assert_eq!(decoded, pos);
+    }
+
+    #[test]
+    fn test_read_cfg_invalid_values() {
+        use commonware_codec::{Encode, ReadExt};
+
+        // Encode MAX_POSITION + 1 as a raw varint, then try to decode as Position
+        let invalid_value = *MAX_POSITION + 1;
+        let encoded = commonware_codec::varint::UInt(invalid_value).encode();
+        let result = Position::read(&mut encoded.as_ref());
+        assert!(result.is_err());
+        assert!(matches!(
+            result,
+            Err(commonware_codec::Error::Invalid("Position", _))
+        ));
+
+        // Encode u64::MAX as a raw varint
+        let encoded = commonware_codec::varint::UInt(u64::MAX).encode();
+        let result = Position::read(&mut encoded.as_ref());
+        assert!(result.is_err());
+        assert!(matches!(
+            result,
+            Err(commonware_codec::Error::Invalid("Position", _))
+        ));
     }
 }

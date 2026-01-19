@@ -624,4 +624,51 @@ mod tests {
             _ => panic!("expected LocationOverflow error"),
         }
     }
+
+    #[test]
+    fn test_read_cfg_valid_values() {
+        use commonware_codec::{Encode, ReadExt};
+
+        // Test zero
+        let loc = Location::new(0).unwrap();
+        let encoded = loc.encode();
+        let decoded = Location::read(&mut encoded.as_ref()).unwrap();
+        assert_eq!(decoded, loc);
+
+        // Test middle value
+        let loc = Location::new(12345).unwrap();
+        let encoded = loc.encode();
+        let decoded = Location::read(&mut encoded.as_ref()).unwrap();
+        assert_eq!(decoded, loc);
+
+        // Test MAX_LOCATION (boundary)
+        let loc = Location::new(MAX_LOCATION).unwrap();
+        let encoded = loc.encode();
+        let decoded = Location::read(&mut encoded.as_ref()).unwrap();
+        assert_eq!(decoded, loc);
+    }
+
+    #[test]
+    fn test_read_cfg_invalid_values() {
+        use commonware_codec::{Encode, ReadExt};
+
+        // Encode MAX_LOCATION + 1 as a raw varint, then try to decode as Location
+        let invalid_value = MAX_LOCATION + 1;
+        let encoded = commonware_codec::varint::UInt(invalid_value).encode();
+        let result = Location::read(&mut encoded.as_ref());
+        assert!(result.is_err());
+        assert!(matches!(
+            result,
+            Err(commonware_codec::Error::Invalid("Location", _))
+        ));
+
+        // Encode u64::MAX as a raw varint
+        let encoded = commonware_codec::varint::UInt(u64::MAX).encode();
+        let result = Location::read(&mut encoded.as_ref());
+        assert!(result.is_err());
+        assert!(matches!(
+            result,
+            Err(commonware_codec::Error::Invalid("Location", _))
+        ));
+    }
 }
