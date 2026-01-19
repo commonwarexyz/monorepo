@@ -56,7 +56,6 @@ impl Conformance for RationalOptimalBits {
             BigRational::from_frac_u64(1, 50),    // Between 1% and 10%
             BigRational::from_frac_u64(3, 100),   // 3%
         ];
-
         for fp_rate in &boundary_rates {
             let bits = BloomFilter::<Sha256>::optimal_bits(expected_items, fp_rate);
             log.extend((bits as u64).to_be_bytes());
