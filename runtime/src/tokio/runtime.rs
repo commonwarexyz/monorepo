@@ -17,7 +17,7 @@ use crate::{
     signal::Signal,
     storage::metered::Storage as MeteredStorage,
     telemetry::metrics::task::Label,
-    utils::{signal::Stopper, supervision::Tree, MetricEncoder, Panicker},
+    utils::{add_attribute, signal::Stopper, supervision::Tree, MetricEncoder, Panicker},
     Clock, Error, Execution, Handle, Metrics as _, SinkOf, Spawner as _, StreamOf, METRICS_PREFIX,
 };
 use commonware_macros::select;
@@ -591,9 +591,7 @@ impl crate::Metrics for Context {
 
     fn with_attribute(&self, key: &str, value: impl std::fmt::Display) -> Self {
         let mut attributes = self.attributes.clone();
-        attributes.push((key.to_string(), value.to_string()));
-        attributes.sort_by(|(a, _), (b, _)| a.cmp(b));
-
+        add_attribute(&mut attributes, key, value);
         Self {
             attributes,
             ..self.clone()

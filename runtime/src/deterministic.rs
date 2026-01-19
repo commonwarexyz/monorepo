@@ -53,6 +53,7 @@ use crate::{
     },
     telemetry::metrics::task::Label,
     utils::{
+        add_attribute,
         signal::{Signal, Stopper},
         supervision::Tree,
         MetricEncoder, Panicker,
@@ -1130,16 +1131,11 @@ impl crate::Metrics for Context {
 
     fn with_attribute(&self, key: &str, value: impl std::fmt::Display) -> Self {
         validate_label(key);
-
+        let mut attributes = self.attributes.clone();
         assert!(
-            !self.attributes.iter().any(|(k, _)| k == key),
+            add_attribute(&mut attributes, key, value),
             "duplicate attribute key: {key}"
         );
-
-        let mut attributes = self.attributes.clone();
-        attributes.push((key.to_string(), value.to_string()));
-        attributes.sort_by(|(a, _), (b, _)| a.cmp(b));
-
         Self {
             attributes,
             ..self.clone()
