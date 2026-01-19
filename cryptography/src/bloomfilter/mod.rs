@@ -179,7 +179,7 @@ impl<H: Hasher> BloomFilter<H> {
     /// Uses the formula `n = -(m/k) * ln(1 - x/m)` where `m` is the number of bits,
     /// `k` is the number of hash functions, and `x` is the number of bits set to 1.
     ///
-    /// Returns a [`BigRational`] using a Taylor series approximation for ln().
+    /// Returns a [`BigRational`] using `log2_ceil` for the logarithm computation.
     #[cfg(feature = "std")]
     pub fn estimated_count(&self) -> BigRational {
         let m = self.bits.len();
@@ -190,14 +190,11 @@ impl<H: Hasher> BloomFilter<H> {
             return BigRational::from_usize(usize::MAX);
         }
 
-        // ln(1 - y) = -y - y^2/2 - y^3/3 - ... where y = x/m
-        let y = BigRational::new(x.into(), m.into());
-        let mut ln_result = BigRational::zero();
-        let mut y_power = y.clone();
-        for n in 1..=20usize {
-            ln_result -= &y_power / BigRational::from_usize(n);
-            y_power = &y_power * &y;
-        }
+        // ln(1 - x/m) = log2(1 - x/m) * ln(2)
+        let one_minus_fill = BigRational::new((m - x).into(), m.into());
+        let log2_val = one_minus_fill.log2_ceil(16);
+        let ln2 = BigRational::from_frac_u64(14397, 20769);
+        let ln_result = &log2_val * &ln2;
 
         // n = -(m/k) * ln(1 - x/m)
         let m_over_k = BigRational::new(m.into(), k.into());
