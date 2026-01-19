@@ -367,7 +367,7 @@ mod tests {
         Signer,
     };
     use commonware_runtime::{deterministic, mocks, Runner, Spawner};
-    use commonware_stream::encrypted::{self, Config as StreamConfig};
+    use commonware_stream::encrypted::Config as StreamConfig;
     use commonware_utils::{bitmap::BitMap, SystemTimeExt};
     use prometheus_client::metrics::{counter::Counter, family::Family};
     use std::{
