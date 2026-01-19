@@ -233,7 +233,9 @@ fn fuzz(input: FuzzInput) {
 
                 BitmapOperation::RestorePruned => {
                     let bitmap = CleanAuthenticatedBitMap::<_, _, CHUNK_SIZE>::init(
-                        context.with_label(&format!("restore_{restore_count}")),
+                        context
+                            .with_label("bitmap")
+                            .with_attribute("instance", restore_count),
                         PARTITION,
                         None,
                         &mut hasher,
