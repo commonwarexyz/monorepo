@@ -2209,8 +2209,8 @@ mod tests {
 
             let buffer = context.encode();
             assert!(
-                buffer.contains("engine_requests_total{") && buffer.contains("region=\"us\""),
-                "Expected metric with region attribute, got: {}",
+                buffer.contains("engine_requests_total{instance=\"i1\",region=\"us\"} 1"),
+                "Expected metric with sorted attributes, got: {}",
                 buffer
             );
         });
@@ -2255,10 +2255,8 @@ mod tests {
 
             let buffer = context.encode();
             assert!(
-                buffer.contains("outer_middle_inner_requests_total{")
-                    && buffer.contains("region=\"us\"")
-                    && buffer.contains("az=\"east\""),
-                "Expected metric with all attributes preserved, got: {}",
+                buffer.contains("outer_middle_inner_requests_total{az=\"east\",region=\"us\"} 2"),
+                "Expected metric with all attributes preserved and sorted, got: {}",
                 buffer
             );
         });
