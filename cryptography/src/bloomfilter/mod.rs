@@ -137,7 +137,10 @@ impl<H: Hasher> BloomFilter<H> {
         let digest = H::hash(item);
         let h1 = u64::from_be_bytes(digest[0..8].try_into().unwrap());
         let mut h2 = u64::from_be_bytes(digest[8..16].try_into().unwrap());
-        h2 |= 1; // make sure h2 is non-zero
+
+        // Ensure h2 is odd (non-zero). If h2 were 0, all k hash functions would
+        // produce the same index (h1), defeating the purpose of multiple hashers.
+        h2 |= 1;
 
         // Generate `hashers` hashes using the Kirsch-Mitzenmacher optimization:
         //
@@ -187,7 +190,7 @@ impl<H: Hasher> BloomFilter<H> {
     /// Uses the formula `n = -(m/k) * ln(1 - x/m)` where `m` is the number of bits,
     /// `k` is the number of hash functions, and `x` is the number of bits set to 1.
     ///
-    /// Returns a [`BigRational`] using `log2_ceil` for the logarithm computation.
+    /// Returns a [`BigRational`] using `log2_floor` for the logarithm computation.
     #[cfg(feature = "std")]
     pub fn estimated_count(&self) -> BigRational {
         let m = self.bits.len();
@@ -199,7 +202,7 @@ impl<H: Hasher> BloomFilter<H> {
 
         // ln(1 - x/m) = log2(1 - x/m) * ln(2)
         let one_minus_fill = BigRational::new((m - x).into(), m.into());
-        let log2_val = one_minus_fill.log2_ceil(16);
+        let log2_val = one_minus_fill.log2_floor(16);
         let ln2 = BigRational::from_frac_u64(LN2.0, LN2.1);
         let ln_result = &log2_val * &ln2;
 
@@ -242,8 +245,9 @@ impl<H: Hasher> BloomFilter<H> {
             "false positive rate must be in (0, 1)"
         );
 
-        // log2(p) is negative for p < 1, use 16 bits of precision
-        let log2_p = fp_rate.log2_ceil(16);
+        // log2(p) is negative for p < 1. Use floor to get a more negative value,
+        // which results in more bits (conservative choice to not exceed target FP rate).
+        let log2_p = fp_rate.log2_floor(16);
 
         // m = -n * log2(p) / ln(2) = -n * log2(p) * (1/ln(2))
         // Since log2(p) < 0 for p < 1, -log2(p) > 0
