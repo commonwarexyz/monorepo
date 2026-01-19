@@ -1,7 +1,10 @@
 use commonware_codec::Read;
 use commonware_consensus::simplex::{
     elector::{Config as ElectorConfig, RoundRobin},
-    scheme::{bls12381_multisig, bls12381_threshold, ed25519, secp256r1, Scheme},
+    scheme::{
+        bls12381_multisig, bls12381_threshold::vrf as bls12381_threshold_vrf, ed25519, secp256r1,
+        Scheme,
+    },
 };
 use commonware_cryptography::{
     bls12381::primitives::variant::{MinPk, MinSig},
@@ -72,7 +75,7 @@ impl Simplex for SimplexBls12381MultisigMinSig {
 pub struct SimplexBls12381MinPk;
 
 impl Simplex for SimplexBls12381MinPk {
-    type Scheme = bls12381_threshold::Scheme<Ed25519PublicKey, MinPk>;
+    type Scheme = bls12381_threshold_vrf::Scheme<Ed25519PublicKey, MinPk>;
     type Elector = RoundRobin;
 
     fn fixture(
@@ -80,14 +83,14 @@ impl Simplex for SimplexBls12381MinPk {
         namespace: &[u8],
         n: u32,
     ) -> Fixture<Self::Scheme> {
-        bls12381_threshold::fixture::<MinPk, _>(context, namespace, n)
+        bls12381_threshold_vrf::fixture::<MinPk, _>(context, namespace, n)
     }
 }
 
 pub struct SimplexBls12381MinSig;
 
 impl Simplex for SimplexBls12381MinSig {
-    type Scheme = bls12381_threshold::Scheme<Ed25519PublicKey, MinSig>;
+    type Scheme = bls12381_threshold_vrf::Scheme<Ed25519PublicKey, MinSig>;
     type Elector = RoundRobin;
 
     fn fixture(
@@ -95,7 +98,7 @@ impl Simplex for SimplexBls12381MinSig {
         namespace: &[u8],
         n: u32,
     ) -> Fixture<Self::Scheme> {
-        bls12381_threshold::fixture::<MinSig, _>(context, namespace, n)
+        bls12381_threshold_vrf::fixture::<MinSig, _>(context, namespace, n)
     }
 }
 

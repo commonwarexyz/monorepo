@@ -86,7 +86,10 @@
 //!
 //! ### Subnets
 //!
-//! Single subnet per VPC (e.g., `10.<region-index>.1.0/24`), linked to a route table with an internet gateway.
+//! One subnet per availability zone that supports any required instance type in the region
+//! (e.g., `10.<region-index>.<az-index>.0/24`), linked to a shared route table with an internet gateway.
+//! Each instance is placed in an AZ that supports its instance type, distributed round-robin across
+//! eligible AZs, with automatic fallback to other AZs on capacity errors.
 //!
 //! ### VPC Peering
 //!
@@ -467,6 +470,10 @@ cfg_if::cfg_if! {
             InstanceNotFound(String),
             #[error("symbolication failed: {0}")]
             Symbolication(String),
+            #[error("no subnet supports instance type: {0}")]
+            UnsupportedInstanceType(String),
+            #[error("no subnets available")]
+            NoSubnetsAvailable,
         }
 
         impl From<aws_sdk_s3::error::SdkError<aws_sdk_s3::operation::get_object::GetObjectError>> for Error {

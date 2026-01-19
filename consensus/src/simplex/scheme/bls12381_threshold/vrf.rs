@@ -1,10 +1,34 @@
-//! BLS12-381 threshold implementation of the [`Scheme`] trait for `simplex`.
+//! BLS12-381 threshold VRF implementation of the [`Scheme`] trait for `simplex`.
 //!
-//! [`Scheme`] is **non-attributable**: exposing partial signatures
-//! as evidence of either liveness or of committing a fault is not safe. With threshold signatures,
-//! any `t` valid partial signatures can be used to forge a partial signature for any other player,
-//! enabling equivocation attacks. Because peer connections are authenticated, evidence can be used locally
-//! (as it must be sent by said participant) but can't be used by an external observer.
+//! Certificates contain a vote signature and a view signature (a seed that can be used
+//! as a VRF).
+//!
+//! # Using the VRF
+//!
+//! A malicious leader (colluding with at least 1 Byzantine validator) can observe the output of the
+//! VRF before deciding whether to publish their block to all participants (they uniquely see `2f` other
+//! partial signatures and can recover the seed by combining their own partial signature). As a result,
+//! it is **not safe** to use a round's randomness to affect execution in that same round (as the leader can
+//! bias execution to their advantage by deciding whether or not to publish their block).
+//!
+//! Applications that want to incorporate this embedded VRF into execution should employ a "commit-then-reveal" pattern
+//! and require users to bind to the output of randomness in advance (i.e. `draw(view+k)` means execution uses VRF output
+//! `k` views later). The larger `k`, the more likely that the transaction is finalized before the randomness is revealed (recall, Simplex
+//! is streamlined). The safest approach (if you're willing to wait) is to bound the outcome to a future epoch (which ensures a
+//! transaction is finalized before the VRF it relies on is revealed).
+//!
+//! _For applications willing to accept additional overhead, a more robust (and instant) VRF can be implemented
+//! by requiring validators to emit their contribution to the seed for some height `h` only after they have observed `h` is finalized.
+//! This permits transactions to use the VRF output immediately but requires an extra message broadcast per finalized height._
+//!
+//! # Non-Attributable Signatures
+//!
+//! [`Scheme`] is **non-attributable**: exposing partial signatures as evidence of
+//! either liveness or of committing a fault is not safe. With threshold signatures,
+//! any `t` valid partial signatures can be used to forge a partial signature for any
+//! other player, enabling equivocation attacks. Because peer connections are
+//! authenticated, evidence can be used locally (as it must be sent by said participant)
+//! but can't be used by an external observer.
 
 use crate::{
     simplex::{
@@ -67,7 +91,10 @@ enum Role<P: PublicKey, V: Variant> {
     },
 }
 
-/// BLS12-381 threshold implementation of the [`certificate::Scheme`] trait.
+/// BLS12-381 threshold VRF implementation of the [`certificate::Scheme`] trait.
+///
+/// This scheme produces both vote signatures and per-round seed signatures.
+/// The seed can be extracted from certificates using the [`Seedable`] trait.
 ///
 /// It is possible for a node to play one of the following roles: a signer (with its share),
 /// a verifier (with evaluated public polynomial), or an external verifier that
@@ -276,7 +303,7 @@ where
     )
 }
 
-/// Combined vote/seed signature pair emitted by the BLS12-381 threshold scheme.
+/// Combined vote/seed signature pair emitted by the BLS12-381 threshold VRF scheme.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Signature<V: Variant> {
     /// Signature over the consensus vote message (partial or recovered aggregate).
@@ -757,7 +784,7 @@ mod tests {
     use super::*;
     use crate::{
         simplex::{
-            scheme::{bls12381_threshold, notarize_namespace, seed_namespace},
+            scheme::{notarize_namespace, seed_namespace},
             types::{Finalization, Finalize, Notarization, Notarize, Proposal, Subject},
         },
         types::{Round, View},
@@ -792,7 +819,7 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(seed);
         let Fixture {
             schemes, verifier, ..
-        } = bls12381_threshold::fixture::<V, _>(&mut rng, NAMESPACE, n);
+        } = fixture::<V, _>(&mut rng, NAMESPACE, n);
 
         (schemes, verifier)
     }

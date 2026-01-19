@@ -202,7 +202,9 @@ impl<R: Rng + Spawner + Metrics + Clock + Storage, B: Block, S: Scheme> Manager<
             value_write_buffer: self.cfg.value_write_buffer,
         };
         let archive = prunable::Archive::init(
-            self.context.with_label(&format!("cache_{name}_{epoch}")),
+            self.context
+                .with_label(&format!("cache_{name}"))
+                .with_attribute("epoch", epoch),
             cfg,
         )
         .await

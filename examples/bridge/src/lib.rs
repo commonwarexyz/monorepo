@@ -6,7 +6,7 @@
 //! `indexer` and send a digest of the block to other participants. Participants in the network will fetch the block
 //! from the `indexer` and verify it contains a 16-byte message or a valid consensus certificate from the other network.
 //! Once a block is finalized, all participants attempt to post the emitted succinct consensus certificate to the `indexer`.
-//! Leader election is performed using the embedded VRF provided by [commonware_consensus::simplex].
+//! Leader election is performed using round-robin.
 //!
 //! # Architecture
 //!
@@ -153,7 +153,7 @@
     html_favicon_url = "https://commonware.xyz/favicon.ico"
 )]
 
-use commonware_consensus::simplex::scheme::bls12381_threshold;
+use commonware_consensus::simplex::scheme::bls12381_threshold::standard as bls12381_threshold;
 use commonware_cryptography::{bls12381::primitives::variant::MinSig, ed25519::PublicKey};
 pub type Scheme = bls12381_threshold::Scheme<PublicKey, MinSig>;
 
