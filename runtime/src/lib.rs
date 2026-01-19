@@ -25,7 +25,7 @@
 use bytes::{Buf, BufMut};
 use commonware_macros::select;
 use commonware_parallel::{Rayon, ThreadPool};
-use commonware_utils::StableBuf;
+use commonware_utils::{ready_mod, StableBuf};
 use prometheus_client::registry::Metric;
 use rayon::ThreadPoolBuildError;
 use std::{
@@ -40,12 +40,12 @@ use thiserror::Error;
 #[macro_use]
 mod macros;
 
-pub mod deterministic;
+ready_mod!(0, pub mod deterministic);
 pub mod mocks;
 cfg_if::cfg_if! {
     if #[cfg(not(target_arch = "wasm32"))] {
-        pub mod tokio;
-        pub mod benchmarks;
+        ready_mod!(2, pub mod tokio);
+        ready_mod!(2, pub mod benchmarks);
     }
 }
 mod network;

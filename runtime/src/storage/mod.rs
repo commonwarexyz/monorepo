@@ -2,7 +2,7 @@
 
 use bytes::{Buf, BufMut};
 use commonware_codec::{DecodeExt, FixedSize, Read as CodecRead, Write as CodecWrite};
-use commonware_utils::hex;
+use commonware_utils::{hex, ready_mod};
 use std::ops::RangeInclusive;
 
 /// Errors that can occur when validating a blob header.
@@ -43,7 +43,7 @@ impl HeaderError {
     }
 }
 
-pub mod audited;
+ready_mod!(0, pub mod audited);
 #[cfg(feature = "iouring-storage")]
 pub mod iouring;
 pub mod memory;

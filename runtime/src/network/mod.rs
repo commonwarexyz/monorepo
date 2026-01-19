@@ -1,5 +1,7 @@
-pub(crate) mod audited;
-pub(crate) mod deterministic;
+use commonware_utils::ready_mod;
+
+ready_mod!(0, pub(crate) mod audited);
+ready_mod!(0, pub(crate) mod deterministic);
 pub(crate) mod metered;
 
 #[cfg(all(not(target_arch = "wasm32"), not(feature = "iouring-network")))]

@@ -2,7 +2,7 @@
 
 use commonware_cryptography::{ed25519::PrivateKey, Signer};
 use commonware_runtime::{deterministic, mocks, Handle, Runner as _, Spawner};
-use commonware_stream::{
+use commonware_stream::encrypted::{
     dial, listen,
     utils::codec::{recv_frame, send_frame},
     Config, Error, Receiver, Sender,

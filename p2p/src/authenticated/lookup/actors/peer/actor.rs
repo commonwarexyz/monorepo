@@ -9,7 +9,7 @@ use commonware_codec::{Decode, Encode};
 use commonware_cryptography::PublicKey;
 use commonware_macros::{select, select_loop};
 use commonware_runtime::{Clock, Handle, Metrics, Quota, RateLimiter, Sink, Spawner, Stream};
-use commonware_stream::{Receiver, Sender};
+use commonware_stream::encrypted::{Receiver, Sender};
 use commonware_utils::time::SYSTEM_TIME_PRECISION;
 use futures::{channel::mpsc, StreamExt};
 use prometheus_client::metrics::{counter::Counter, family::Family};

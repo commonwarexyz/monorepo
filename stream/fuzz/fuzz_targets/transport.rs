@@ -2,7 +2,7 @@
 
 use commonware_cryptography::{ed25519::PrivateKey, Signer};
 use commonware_runtime::{deterministic, mocks, Runner, Spawner};
-use commonware_stream::{dial, listen, Config};
+use commonware_stream::encrypted::{dial, listen, Config};
 use libfuzzer_sys::fuzz_target;
 use std::time::Duration;
 

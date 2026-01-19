@@ -15,7 +15,7 @@ use commonware_codec::{Decode, Encode};
 use commonware_cryptography::PublicKey;
 use commonware_macros::{select, select_loop};
 use commonware_runtime::{Clock, Handle, Metrics, Quota, RateLimiter, Sink, Spawner, Stream};
-use commonware_stream::{Receiver, Sender};
+use commonware_stream::encrypted::{Receiver, Sender};
 use commonware_utils::time::SYSTEM_TIME_PRECISION;
 use futures::{channel::mpsc, StreamExt};
 use prometheus_client::metrics::{counter::Counter, family::Family};
@@ -367,7 +367,7 @@ mod tests {
         Signer,
     };
     use commonware_runtime::{deterministic, mocks, Runner, Spawner};
-    use commonware_stream::{self, Config as StreamConfig};
+    use commonware_stream::encrypted::{self, Config as StreamConfig};
     use commonware_utils::{bitmap::BitMap, SystemTimeExt};
     use prometheus_client::metrics::{counter::Counter, family::Family};
     use std::{

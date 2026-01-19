@@ -1,4 +1,4 @@
-use crate::Error;
+use crate::encrypted::Error;
 use bytes::{Buf, Bytes, BytesMut};
 use commonware_codec::{
     varint::{Decoder, UInt},
