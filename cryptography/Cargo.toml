@@ -27,6 +27,8 @@ commonware-parallel.workspace = true
 commonware-utils.workspace = true
 ecdsa.workspace = true
 ed25519-consensus = { workspace = true, default-features = false }
+num-rational = { workspace = true, optional = true }
+num-traits = { workspace = true, optional = true }
 p256 = { workspace = true, features = ["ecdsa"] }
 rand.workspace = true
 rand_chacha.workspace = true
@@ -83,6 +85,8 @@ std = [
 	"ecdsa/std",
 	"ed25519-consensus/std",
 	"getrandom/std",
+	"num-rational",
+	"num-traits",
 	"p256/std",
 	"rand/std",
 	"rand/std_rng",

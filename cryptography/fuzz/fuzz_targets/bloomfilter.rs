@@ -3,7 +3,9 @@
 use arbitrary::Arbitrary;
 use commonware_codec::{Decode, Encode, EncodeSize};
 use commonware_cryptography::{sha256::Sha256, BloomFilter};
+use commonware_utils::rational::BigRationalExt;
 use libfuzzer_sys::fuzz_target;
+use num_rational::BigRational;
 use std::{
     collections::HashSet,
     num::{NonZeroU16, NonZeroU8, NonZeroUsize},
@@ -26,7 +28,8 @@ enum Constructor {
     },
     WithRate {
         expected_items: NonZeroU16,
-        fp_rate: f64,
+        fp_numerator: u32,
+        fp_denominator: u32,
     },
 }
 
@@ -43,11 +46,13 @@ impl<'a> Arbitrary<'a> for Constructor {
             Ok(Constructor::New { hashers, bits })
         } else {
             let expected_items = u.arbitrary::<NonZeroU16>()?;
-            // Generate f64 in range (0.0, 1.0) exclusive
-            let fp_rate = u.int_in_range(1u32..=u32::MAX - 1)? as f64 / u32::MAX as f64;
+            // Generate FP rate as rational: numerator in [1, denominator-1] to ensure (0, 1)
+            let fp_denominator = u.int_in_range(2u32..=10_000)?;
+            let fp_numerator = u.int_in_range(1u32..=fp_denominator - 1)?;
             Ok(Constructor::WithRate {
                 expected_items,
-                fp_rate,
+                fp_numerator,
+                fp_denominator,
             })
         }
     }
@@ -77,11 +82,15 @@ fn fuzz(input: FuzzInput) {
         Constructor::New { hashers, bits } => BloomFilter::<Sha256>::new(hashers, bits.into()),
         Constructor::WithRate {
             expected_items,
-            fp_rate,
-        } => BloomFilter::<Sha256>::with_rate(
-            NonZeroUsize::new(expected_items.get() as usize).unwrap(),
-            fp_rate,
-        ),
+            fp_numerator,
+            fp_denominator,
+        } => {
+            let fp_rate = BigRational::from_frac_u64(fp_numerator as u64, fp_denominator as u64);
+            BloomFilter::<Sha256>::with_rate(
+                NonZeroUsize::new(expected_items.get() as usize).unwrap(),
+                fp_rate,
+            )
+        }
     };
 
     let cfg = (bf.hashers(), bf.bits().try_into().unwrap());

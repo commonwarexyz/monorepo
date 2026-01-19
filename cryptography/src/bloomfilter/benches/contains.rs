@@ -1,11 +1,19 @@
 use commonware_cryptography::{blake3::Blake3, sha256::Sha256, BloomFilter, Hasher};
+use commonware_utils::rational::BigRationalExt;
 use criterion::{criterion_group, Criterion};
+use num_rational::BigRational;
 use rand::{rngs::StdRng, RngCore, SeedableRng};
 use std::{collections::HashSet, hint::black_box, num::NonZeroUsize};
 
 const ITEM_SIZES: [usize; 3] = [32, 2048, 4096];
 const NUM_ITEMS: usize = 10000;
-const FP_RATES: [f64; 2] = [0.1, 0.001];
+
+fn fp_rates() -> [(BigRational, &'static str); 2] {
+    [
+        (BigRational::from_frac_u64(1, 10), "10%"),
+        (BigRational::from_frac_u64(1, 1000), "0.1%"),
+    ]
+}
 
 fn run_contains_bench<H: Hasher>(c: &mut Criterion, hasher: &str, query_inserted: bool) {
     let query_type = if query_inserted {
@@ -14,7 +22,7 @@ fn run_contains_bench<H: Hasher>(c: &mut Criterion, hasher: &str, query_inserted
         "negative"
     };
     for item_size in ITEM_SIZES {
-        for fp_rate in FP_RATES {
+        for (fp_rate, fp_label) in fp_rates() {
             // Create and populate the bloom filter
             let mut rng = StdRng::seed_from_u64(42);
             let mut bf =
@@ -52,7 +60,7 @@ fn run_contains_bench<H: Hasher>(c: &mut Criterion, hasher: &str, query_inserted
                     module_path!(),
                     hasher,
                     item_size,
-                    fp_rate,
+                    fp_label,
                     query_type
                 ),
                 |b| {

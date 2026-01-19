@@ -15,63 +15,16 @@ use core::{
     marker::PhantomData,
     num::{NonZeroU64, NonZeroU8, NonZeroUsize},
 };
+#[cfg(feature = "std")]
+use {
+    commonware_utils::rational::BigRationalExt,
+    num_rational::BigRational,
+    num_traits::{One, Zero},
+};
 
 /// ln(2) in Q16.16 fixed-point format.
 /// Used for computing optimal number of hash functions.
 const LN2_Q16: u64 = 45_426;
-
-/// Scale factor for false positive rate normalization (4 decimal places).
-const FP_RATE_SCALE: u64 = 10_000;
-
-/// Bits-per-element constants in Q16.16 fixed-point format.
-/// Pre-computed as `bpe = round(-ln(p) / (ln(2))^2 * 65536)` for common false positive
-/// rates. See `test_q16_constants` for verification.
-mod bpe {
-    pub const FP_1E1: u64 = 314_083; // ~10% FP rate (4.79 bits/element)
-    pub const FP_1E2: u64 = 628_166; // ~1% FP rate (9.59 bits/element)
-    pub const FP_1E3: u64 = 942_250; // ~0.1% FP rate (14.38 bits/element)
-    pub const FP_1E4: u64 = 1_256_333; // ~0.01% FP rate (19.17 bits/element)
-}
-
-/// Convert false positive rate to normalized integer (4 decimal places).
-/// Uses explicit round-half-up for determinism.
-///
-/// # Determinism
-///
-/// This function is deterministic across platforms because:
-/// - Clamping to 0.0001-0.9999 keeps values in a safe range where f64 arithmetic
-///   is well-behaved (no subnormals, no precision loss near 0 or 1)
-/// - After scaling by 10000, results are in range 1-9999 which are all exactly
-///   representable as f64 (integers up to 2^53 are exact)
-/// - All operations (*, +, floor) are IEEE 754 basic operations, which are
-///   required to be correctly rounded to the same result on all compliant systems
-/// - We use round-half-up (`+ 0.5` then `floor`) instead of `f64::round()` which
-///   uses "round half to even" (banker's rounding) that could theoretically vary
-///
-/// # Panics
-///
-/// Panics if `p` is not between 0.0 and 1.0 (exclusive).
-#[inline]
-#[cfg(feature = "std")]
-fn normalize_fp_rate(p: f64) -> u64 {
-    assert!(p > 0.0 && p < 1.0);
-    // Clamp to supported bucket range
-    let p = p.clamp(0.0001, 0.9999);
-    // Round-half-up: add 0.5 then floor
-    ((p * FP_RATE_SCALE as f64) + 0.5).floor() as u64
-}
-
-/// Map normalized false positive rate to bits-per-element bucket.
-/// Uses discrete buckets for simplicity and robustness.
-#[inline]
-const fn bpe_for_rate(p_normalized: u64) -> u64 {
-    match p_normalized {
-        0..=1 => bpe::FP_1E4,    // <= 0.0001
-        2..=10 => bpe::FP_1E3,   // <= 0.001
-        11..=100 => bpe::FP_1E2, // <= 0.01
-        _ => bpe::FP_1E1,        // > 0.01 (loose filter)
-    }
-}
 
 /// A [Bloom Filter](https://en.wikipedia.org/wiki/Bloom_filter).
 ///
@@ -140,15 +93,19 @@ impl<H: Hasher> BloomFilter<H> {
     /// Creates a new [BloomFilter] with optimal parameters for the expected number
     /// of items and desired false positive rate.
     ///
-    /// The false positive rate is quantized to one of four buckets (~10%, ~1%, ~0.1%, ~0.01%)
-    /// using integer math for determinism across all platforms.
+    /// Uses exact rational arithmetic for full determinism across all platforms.
+    ///
+    /// # Arguments
+    ///
+    /// * `expected_items` - Number of items expected to be inserted
+    /// * `fp_rate` - False positive rate as a rational (e.g., `BigRational::from_frac_u64(1, 100)` for 1%)
     ///
     /// # Panics
     ///
-    /// Panics if `false_positive_rate` is not between 0.0 and 1.0 (exclusive).
+    /// Panics if `fp_rate` is not in (0, 1).
     #[cfg(feature = "std")]
-    pub fn with_rate(expected_items: NonZeroUsize, false_positive_rate: f64) -> Self {
-        let bits = Self::optimal_bits(expected_items.get(), false_positive_rate);
+    pub fn with_rate(expected_items: NonZeroUsize, fp_rate: BigRational) -> Self {
+        let bits = Self::optimal_bits(expected_items.get(), &fp_rate);
         let hashers = Self::optimal_hashers(expected_items.get(), bits);
         Self {
             hashers,
@@ -263,24 +220,36 @@ impl<H: Hasher> BloomFilter<H> {
 
     /// Calculates the optimal number of bits for a given capacity and false positive rate.
     ///
-    /// Uses pre-computed bits-per-element values and integer math for determinism. The
-    /// false positive rate is quantized to one of four buckets (~10%, ~1%, ~0.1%, ~0.01%).
+    /// Uses exact rational arithmetic for full determinism across all platforms.
     /// The result is rounded up to the next power of 2. If that would overflow, the maximum
     /// power of 2 for the platform (2^63 on 64-bit) is used.
     ///
+    /// Formula: m = -n * log2(p) / ln(2)
+    ///
     /// # Panics
     ///
-    /// Panics if `false_positive_rate` is not between 0.0 and 1.0 (exclusive).
+    /// Panics if `fp_rate` is not in (0, 1).
     #[cfg(feature = "std")]
-    pub fn optimal_bits(expected_items: usize, false_positive_rate: f64) -> usize {
-        let fp_normalized = normalize_fp_rate(false_positive_rate);
-        let bpe = bpe_for_rate(fp_normalized);
-        // ceil(n * bpe) using Q16.16 fixed-point, with overflow protection
-        let raw = (expected_items as u64)
-            .saturating_mul(bpe)
-            .saturating_add(0xFFFF)
-            >> 16;
-        (raw as usize)
+    pub fn optimal_bits(expected_items: usize, fp_rate: &BigRational) -> usize {
+        assert!(
+            fp_rate > &BigRational::zero() && fp_rate < &BigRational::one(),
+            "false positive rate must be in (0, 1)"
+        );
+
+        let n = BigRational::from_usize(expected_items);
+
+        // log2(p) is negative for p < 1, use 16 bits of precision
+        let log2_p = fp_rate.log2_ceil(16);
+
+        // 1/ln(2) approximation: 29145/20201 (6 digits precision)
+        let ln2_inv = BigRational::from_frac_u64(29145, 20201);
+
+        // m = -n * log2(p) / ln(2) = -n * log2(p) * (1/ln(2))
+        // Since log2(p) < 0 for p < 1, -log2(p) > 0
+        let bits_rational = -(&n * &log2_p * &ln2_inv);
+
+        let raw = bits_rational.ceil_to_u128().unwrap_or(1) as usize;
+        raw.max(1)
             .checked_next_power_of_two()
             .unwrap_or(1 << (usize::BITS - 1))
     }
@@ -521,10 +490,11 @@ mod tests {
     #[test]
     fn test_with_rate() {
         // Create a filter for 1000 items with 1% false positive rate
-        let mut bf = BloomFilter::<Sha256>::with_rate(NZUsize!(1000), 0.01);
+        let fp_rate = BigRational::from_frac_u64(1, 100);
+        let mut bf = BloomFilter::<Sha256>::with_rate(NZUsize!(1000), fp_rate.clone());
 
         // Verify getters return expected values
-        let expected_bits = BloomFilter::<Sha256>::optimal_bits(1000, 0.01);
+        let expected_bits = BloomFilter::<Sha256>::optimal_bits(1000, &fp_rate);
         let expected_hashers = BloomFilter::<Sha256>::optimal_hashers(1000, expected_bits);
         assert_eq!(bf.bits().get(), expected_bits);
         assert_eq!(bf.hashers().get(), expected_hashers);
@@ -589,56 +559,64 @@ mod tests {
         // For 1000 items with 1% FP rate
         // Formula: m = -n * ln(p) / (ln(2))^2 = -1000 * ln(0.01) / 0.4804 = 9585
         // Rounded to next power of 2 = 16384
-        let bits = BloomFilter::<Sha256>::optimal_bits(1000, 0.01);
+        let fp_1pct = BigRational::from_frac_u64(1, 100);
+        let bits = BloomFilter::<Sha256>::optimal_bits(1000, &fp_1pct);
         assert_eq!(bits, 16384);
         assert!(bits.is_power_of_two());
 
         // For 10000 items with 0.001% FP rate (need significantly more bits)
         // Formula: m = -10000 * ln(0.00001) / 0.4804 = 239627
         // Rounded to next power of 2 = 262144
-        let bits_lower_fp = BloomFilter::<Sha256>::optimal_bits(10000, 0.00001);
+        let fp_001pct = BigRational::from_frac_u64(1, 100_000);
+        let bits_lower_fp = BloomFilter::<Sha256>::optimal_bits(10000, &fp_001pct);
         assert_eq!(bits_lower_fp, 262144);
         assert!(bits_lower_fp.is_power_of_two());
     }
 
     #[test]
     fn test_bits_extreme_values() {
-        // Very large expected_items, uses saturation arithmetic
-        let bits = BloomFilter::<Sha256>::optimal_bits(usize::MAX / 2, 0.0001);
+        let fp_001pct = BigRational::from_frac_u64(1, 10_000);
+        let fp_1pct = BigRational::from_frac_u64(1, 100);
+
+        // Very large expected_items
+        let bits = BloomFilter::<Sha256>::optimal_bits(usize::MAX / 2, &fp_001pct);
         assert!(bits.is_power_of_two());
         assert!(bits > 0);
 
         // Large but reasonable values
-        let bits = BloomFilter::<Sha256>::optimal_bits(1_000_000_000, 0.0001);
+        let bits = BloomFilter::<Sha256>::optimal_bits(1_000_000_000, &fp_001pct);
         assert!(bits.is_power_of_two());
 
         // Zero items
-        let bits = BloomFilter::<Sha256>::optimal_bits(0, 0.01);
+        let bits = BloomFilter::<Sha256>::optimal_bits(0, &fp_1pct);
         assert!(bits.is_power_of_two());
         assert_eq!(bits, 1); // 0 * bpe rounds up to 1
     }
 
     #[test]
-    fn test_q16_constants() {
-        // Verify Q16.16 fixed-point constants match the formulas
-
-        // LN2_Q16 = ln(2) * 65536
+    fn test_q16_ln2_constant() {
+        // Verify Q16.16 fixed-point constant for ln(2) matches the formula
         let ln2 = core::f64::consts::LN_2;
         let expected_ln2_q16 = (ln2 * 65536.0).round() as u64;
         assert_eq!(LN2_Q16, expected_ln2_q16);
+    }
 
-        // bpe = -ln(p) / (ln(2))^2
-        // bpe_q16 = bpe * 65536
-        let ln2_sq = ln2 * ln2;
+    #[test]
+    fn test_with_rate_deterministic() {
+        let fp_rate = BigRational::from_frac_u64(1, 100);
+        let bf1 = BloomFilter::<Sha256>::with_rate(NZUsize!(1000), fp_rate.clone());
+        let bf2 = BloomFilter::<Sha256>::with_rate(NZUsize!(1000), fp_rate);
+        assert_eq!(bf1.bits(), bf2.bits());
+        assert_eq!(bf1.hashers(), bf2.hashers());
+    }
 
-        let bpe_1e1 = -0.1_f64.ln() / ln2_sq;
-        let bpe_1e2 = -0.01_f64.ln() / ln2_sq;
-        let bpe_1e3 = -0.001_f64.ln() / ln2_sq;
-        let bpe_1e4 = -0.0001_f64.ln() / ln2_sq;
-
-        assert_eq!(bpe::FP_1E1, (bpe_1e1 * 65536.0).round() as u64);
-        assert_eq!(bpe::FP_1E2, (bpe_1e2 * 65536.0).round() as u64);
-        assert_eq!(bpe::FP_1E3, (bpe_1e3 * 65536.0).round() as u64);
-        assert_eq!(bpe::FP_1E4, (bpe_1e4 * 65536.0).round() as u64);
+    #[test]
+    fn test_optimal_bits_matches_formula() {
+        // For 1000 items at 1% FP rate
+        // m = -1000 * log2(0.01) / ln(2) = 9585
+        // Rounded to power of 2 = 16384
+        let fp_rate = BigRational::from_frac_u64(1, 100);
+        let bits = BloomFilter::<Sha256>::optimal_bits(1000, &fp_rate);
+        assert_eq!(bits, 16384);
     }
 }
