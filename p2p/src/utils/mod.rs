@@ -31,6 +31,7 @@ impl<P: PublicKey> StaticManager<P> {
     }
 }
 
+#[ready(2)]
 impl<P: PublicKey> Manager for StaticManager<P> {
     type PublicKey = P;
     type Peers = Set<P>;

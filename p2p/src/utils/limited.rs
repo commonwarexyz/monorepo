@@ -200,6 +200,7 @@ impl<'a, S: UnlimitedSender> CheckedSender<'a, S> {
     }
 }
 
+#[ready(2)]
 impl<'a, S: UnlimitedSender> crate::CheckedSender for CheckedSender<'a, S> {
     type PublicKey = S::PublicKey;
     type Error = S::Error;

@@ -84,6 +84,95 @@ def is_publicly_accessible(item_path, public_module_paths):
     return True
 
 
+def get_type_path(type_info, paths):
+    """Extract the path for a type from rustdoc JSON type representation."""
+    if not type_info:
+        return None
+
+    # Handle resolved_path (most common for concrete types)
+    if "resolved_path" in type_info:
+        resolved = type_info["resolved_path"]
+        type_id = str(resolved.get("id", ""))
+        path_info = paths.get(type_id, {})
+        return path_info.get("path", [])
+
+    # Handle generic types (we skip these as they're not concrete)
+    if "generic" in type_info:
+        return None
+
+    return None
+
+
+def check_trait_impls(index, paths, public_module_paths):
+    """
+    Check that all public trait implementations have readiness annotations.
+
+    A trait impl is considered public if:
+    - The trait is defined in this crate (crate_id 0) and publicly accessible
+    - The implementing type is defined in this crate and publicly accessible
+    """
+    missing = []
+
+    for item_id, item in index.items():
+        inner = item.get("inner", {})
+        if "impl" not in inner:
+            continue
+
+        impl_data = inner.get("impl", {})
+        trait_info = impl_data.get("trait")
+
+        # Skip inherent impls (no trait)
+        if not trait_info:
+            continue
+
+        # Skip blanket impls
+        if impl_data.get("blanket_impl"):
+            continue
+
+        # Get trait path
+        trait_id = str(trait_info.get("id", ""))
+        trait_path_info = paths.get(trait_id, {})
+
+        # Skip if trait is not from this crate
+        if trait_path_info.get("crate_id") != 0:
+            continue
+
+        trait_path = trait_path_info.get("path", [])
+
+        # Skip if trait is not publicly accessible
+        if not is_publicly_accessible(trait_path, public_module_paths):
+            continue
+
+        # Get the implementing type's path
+        for_type = impl_data.get("for")
+        type_path = get_type_path(for_type, paths)
+
+        # Skip if we can't determine the type path (e.g., generic types)
+        if not type_path:
+            continue
+
+        # Check if the type is from this crate
+        if for_type and "resolved_path" in for_type:
+            type_id = str(for_type["resolved_path"].get("id", ""))
+            type_path_info = paths.get(type_id, {})
+            if type_path_info.get("crate_id") != 0:
+                continue
+
+        # Skip if type is not publicly accessible
+        if not is_publicly_accessible(type_path, public_module_paths):
+            continue
+
+        # Check for readiness annotation in docs
+        docs = item.get("docs") or ""
+        if "**Readiness:" not in docs:
+            trait_name = trait_path[-1] if trait_path else "?"
+            type_name = type_path[-1] if type_path else "?"
+            impl_str = f"impl {trait_name} for {type_name}"
+            missing.append(("impl", impl_str, f"{' :: '.join(type_path)}"))
+
+    return missing
+
+
 def check_readiness(path):
     with open(path) as f:
         data = json.load(f)
@@ -96,6 +185,8 @@ def check_readiness(path):
     public_module_paths = get_public_module_paths(index, root_id)
 
     missing = []
+
+    # Check structs, enums, type aliases, constants
     for item_id, item in index.items():
         # Skip non-public items
         if item.get("visibility") != "public":
@@ -121,6 +212,9 @@ def check_readiness(path):
             # Include path for debugging
             path_str = "::".join(item_path) if item_path else name
             missing.append((kind, name, path_str))
+
+    # Check trait implementations
+    missing.extend(check_trait_impls(index, paths, public_module_paths))
 
     if missing:
         print(f"Missing #[ready(N)] annotation ({len(missing)} items):")

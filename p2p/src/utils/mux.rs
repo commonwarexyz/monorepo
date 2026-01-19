@@ -239,6 +239,7 @@ pub struct SubSender<S: Sender> {
     subchannel: Channel,
 }
 
+#[ready(2)]
 impl<S: Sender> LimitedSender for SubSender<S> {
     type PublicKey = S::PublicKey;
     type Checked<'a> = CheckedGlobalSender<'a, S>;
@@ -262,6 +263,7 @@ pub struct SubReceiver<R: Receiver> {
     subchannel: Channel,
 }
 
+#[ready(2)]
 impl<R: Receiver> Receiver for SubReceiver<R> {
     type Error = Error;
     type PublicKey = R::PublicKey;
@@ -325,6 +327,7 @@ impl<S: Sender> GlobalSender<S> {
     }
 }
 
+#[ready(2)]
 impl<S: Sender> LimitedSender for GlobalSender<S> {
     type PublicKey = S::PublicKey;
     type Checked<'a> = CheckedGlobalSender<'a, S>;
@@ -358,6 +361,7 @@ impl<'a, S: Sender> CheckedGlobalSender<'a, S> {
     }
 }
 
+#[ready(2)]
 impl<'a, S: Sender> CheckedSender for CheckedGlobalSender<'a, S> {
     type PublicKey = S::PublicKey;
     type Error = <S::Checked<'a> as CheckedSender>::Error;
@@ -390,6 +394,7 @@ pub struct MuxerBuilder<E: Spawner, S: Sender, R: Receiver> {
     mux_handle: MuxHandle<S, R>,
 }
 
+#[ready(2)]
 impl<E: Spawner, S: Sender, R: Receiver> Builder for MuxerBuilder<E, S, R> {
     type Output = (Muxer<E, S, R>, MuxHandle<S, R>);
 
@@ -445,6 +450,7 @@ impl<E: Spawner, S: Sender, R: Receiver> MuxerBuilderWithBackup<E, S, R> {
     }
 }
 
+#[ready(2)]
 impl<E: Spawner, S: Sender, R: Receiver> Builder for MuxerBuilderWithBackup<E, S, R> {
     type Output = (
         Muxer<E, S, R>,
@@ -480,6 +486,7 @@ impl<E: Spawner, S: Sender, R: Receiver> MuxerBuilderWithGlobalSender<E, S, R> {
     }
 }
 
+#[ready(2)]
 impl<E: Spawner, S: Sender, R: Receiver> Builder for MuxerBuilderWithGlobalSender<E, S, R> {
     type Output = (Muxer<E, S, R>, MuxHandle<S, R>, GlobalSender<S>);
 
@@ -497,6 +504,7 @@ pub struct MuxerBuilderAllOpts<E: Spawner, S: Sender, R: Receiver> {
     global_sender: GlobalSender<S>,
 }
 
+#[ready(2)]
 impl<E: Spawner, S: Sender, R: Receiver> Builder for MuxerBuilderAllOpts<E, S, R> {
     type Output = (
         Muxer<E, S, R>,
