@@ -45,7 +45,7 @@ pub mod mocks;
 cfg_if::cfg_if! {
     if #[cfg(not(target_arch = "wasm32"))] {
         ready_mod!(2, pub mod tokio);
-        ready_mod!(2, pub mod benchmarks);
+        pub mod benchmarks;
     }
 }
 mod network;
