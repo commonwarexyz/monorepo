@@ -22,6 +22,14 @@ use {
     num_traits::{One, ToPrimitive, Zero},
 };
 
+/// Rational approximation of ln(2) with 6 digits of precision: 14397/20769.
+#[cfg(feature = "std")]
+const LN2: (u64, u64) = (14397, 20769);
+
+/// Rational approximation of 1/ln(2) with 6 digits of precision: 29145/20201.
+#[cfg(feature = "std")]
+const LN2_INV: (u64, u64) = (29145, 20201);
+
 /// A [Bloom Filter](https://en.wikipedia.org/wiki/Bloom_filter).
 ///
 /// This implementation uses the Kirsch-Mitzenmacher optimization to derive `k` hash functions
@@ -185,7 +193,6 @@ impl<H: Hasher> BloomFilter<H> {
         let m = self.bits.len();
         let x = self.bits.count_ones();
         let k = self.hashers as u64;
-
         if x >= m {
             return BigRational::from_usize(usize::MAX);
         }
@@ -193,7 +200,7 @@ impl<H: Hasher> BloomFilter<H> {
         // ln(1 - x/m) = log2(1 - x/m) * ln(2)
         let one_minus_fill = BigRational::new((m - x).into(), m.into());
         let log2_val = one_minus_fill.log2_ceil(16);
-        let ln2 = BigRational::from_frac_u64(14397, 20769);
+        let ln2 = BigRational::from_frac_u64(LN2.0, LN2.1);
         let ln_result = &log2_val * &ln2;
 
         // n = -(m/k) * ln(1 - x/m)
@@ -212,8 +219,7 @@ impl<H: Hasher> BloomFilter<H> {
         }
 
         // k = (m/n) * ln(2)
-        // ln(2) approximation: 14397/20769 (6 digits precision)
-        let ln2 = BigRational::from_frac_u64(14397, 20769);
+        let ln2 = BigRational::from_frac_u64(LN2.0, LN2.1);
         let k_ratio = BigRational::from_usize(bits) * ln2 / BigRational::from_usize(expected_items);
         k_ratio.to_integer().to_u8().unwrap_or(16).clamp(1, 16)
     }
@@ -236,16 +242,13 @@ impl<H: Hasher> BloomFilter<H> {
             "false positive rate must be in (0, 1)"
         );
 
-        let n = BigRational::from_usize(expected_items);
-
         // log2(p) is negative for p < 1, use 16 bits of precision
         let log2_p = fp_rate.log2_ceil(16);
 
-        // 1/ln(2) approximation: 29145/20201 (6 digits precision)
-        let ln2_inv = BigRational::from_frac_u64(29145, 20201);
-
         // m = -n * log2(p) / ln(2) = -n * log2(p) * (1/ln(2))
         // Since log2(p) < 0 for p < 1, -log2(p) > 0
+        let n = BigRational::from_usize(expected_items);
+        let ln2_inv = BigRational::from_frac_u64(LN2_INV.0, LN2_INV.1);
         let bits_rational = -(&n * &log2_p * &ln2_inv);
 
         let raw = bits_rational.ceil_to_u128().unwrap_or(1) as usize;
