@@ -58,11 +58,11 @@ hash = "4df7290375d7ae3b005cfad96dc5fc091bdce4a246665f94b79acf34159a3945"
 n_cases = 512
 hash = "d6232310a3adc5cc8bf0767d095251f25211f165419372a5fe6b4ed7b06dd765"
 
-["commonware_consensus::simplex::scheme::bls12381_threshold::tests::conformance::CodecConformance<Seed<MinSig>>"]
+["commonware_consensus::simplex::scheme::bls12381_threshold::vrf::tests::conformance::CodecConformance<Seed<MinSig>>"]
 n_cases = 65536
 hash = "a9fce1350322f848f62aaa67572eb6d510d88ebfa272b6b13371084aae1c3e51"
 
-["commonware_consensus::simplex::scheme::bls12381_threshold::tests::conformance::CodecConformance<Signature<MinSig>>"]
+["commonware_consensus::simplex::scheme::bls12381_threshold::vrf::tests::conformance::CodecConformance<Signature<MinSig>>"]
 n_cases = 65536
 hash = "16b2dec188a1bd12146d62909bffdbb560f5a54e81de57aec8ec4aef2e8a5e88"
 
