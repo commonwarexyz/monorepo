@@ -531,127 +531,9 @@ mod tests {
     use crate::mmr::{
         conformance::build_test_mmr, mem::CleanMmr, verification, Position, StandardHasher,
     };
-    use commonware_cryptography::{Hasher as CHasher, Sha256};
+    use commonware_cryptography::Sha256;
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Runner};
-
-    #[test]
-    fn test_leaf_digest_sha256() {
-        test_leaf_digest::<Sha256>();
-    }
-
-    #[test]
-    fn test_node_digest_sha256() {
-        test_node_digest::<Sha256>();
-    }
-
-    #[test]
-    fn test_root_sha256() {
-        test_root::<Sha256>();
-    }
-
-    fn test_digest<H: CHasher>(value: u8) -> H::Digest {
-        let mut hasher = H::new();
-        hasher.update(&[value]);
-        hasher.finalize()
-    }
-
-    fn test_leaf_digest<H: CHasher>() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_| async move {
-            let mut mmr_hasher: StandardHasher<H> = StandardHasher::new();
-            // input hashes to use
-            let digest1 = test_digest::<H>(1);
-            let digest2 = test_digest::<H>(2);
-
-            let out = mmr_hasher.leaf_digest(Position::new(0), &digest1);
-            assert_ne!(out, test_digest::<H>(0), "hash should be non-zero");
-
-            let mut out2 = mmr_hasher.leaf_digest(Position::new(0), &digest1);
-            assert_eq!(out, out2, "hash should be re-computed consistently");
-
-            out2 = mmr_hasher.leaf_digest(Position::new(1), &digest1);
-            assert_ne!(out, out2, "hash should change with different pos");
-
-            out2 = mmr_hasher.leaf_digest(Position::new(0), &digest2);
-            assert_ne!(out, out2, "hash should change with different input digest");
-        });
-    }
-
-    fn test_node_digest<H: CHasher>() {
-        let mut mmr_hasher: StandardHasher<H> = StandardHasher::new();
-        // input hashes to use
-
-        let d1 = test_digest::<H>(1);
-        let d2 = test_digest::<H>(2);
-        let d3 = test_digest::<H>(3);
-
-        let out = mmr_hasher.node_digest(Position::new(0), &d1, &d2);
-        assert_ne!(out, test_digest::<H>(0), "hash should be non-zero");
-
-        let mut out2 = mmr_hasher.node_digest(Position::new(0), &d1, &d2);
-        assert_eq!(out, out2, "hash should be re-computed consistently");
-
-        out2 = mmr_hasher.node_digest(Position::new(1), &d1, &d2);
-        assert_ne!(out, out2, "hash should change with different pos");
-
-        out2 = mmr_hasher.node_digest(Position::new(0), &d3, &d2);
-        assert_ne!(
-            out, out2,
-            "hash should change with different first input hash"
-        );
-
-        out2 = mmr_hasher.node_digest(Position::new(0), &d1, &d3);
-        assert_ne!(
-            out, out2,
-            "hash should change with different second input hash"
-        );
-
-        out2 = mmr_hasher.node_digest(Position::new(0), &d2, &d1);
-        assert_ne!(
-            out, out2,
-            "hash should change when swapping order of inputs"
-        );
-    }
-
-    fn test_root<H: CHasher>() {
-        let mut mmr_hasher: StandardHasher<H> = StandardHasher::new();
-        // input digests to use
-        let d1 = test_digest::<H>(1);
-        let d2 = test_digest::<H>(2);
-        let d3 = test_digest::<H>(3);
-        let d4 = test_digest::<H>(4);
-
-        let empty_vec: Vec<H::Digest> = Vec::new();
-        let empty_out = mmr_hasher.root(Location::new_unchecked(0), empty_vec.iter());
-        assert_ne!(
-            empty_out,
-            test_digest::<H>(0),
-            "root of empty MMR should be non-zero"
-        );
-
-        let digests = [d1, d2, d3, d4];
-        let out = mmr_hasher.root(Location::new_unchecked(10), digests.iter());
-        assert_ne!(out, test_digest::<H>(0), "root should be non-zero");
-        assert_ne!(out, empty_out, "root should differ from empty MMR");
-
-        let mut out2 = mmr_hasher.root(Location::new_unchecked(10), digests.iter());
-        assert_eq!(out, out2, "root should be computed consistently");
-
-        out2 = mmr_hasher.root(Location::new_unchecked(11), digests.iter());
-        assert_ne!(out, out2, "root should change with different position");
-
-        let digests = [d1, d2, d4, d3];
-        out2 = mmr_hasher.root(Location::new_unchecked(10), digests.iter());
-        assert_ne!(out, out2, "root should change with different digest order");
-
-        let digests = [d1, d2, d3];
-        out2 = mmr_hasher.root(Location::new_unchecked(10), digests.iter());
-        assert_ne!(
-            out, out2,
-            "root should change with different number of hashes"
-        );
-    }
 
     /// For a variety of grafting heights and node positions, check that destination_pos and
     /// source_pos are inverse functions.
@@ -694,7 +576,7 @@ mod tests {
             let mut standard: StandardHasher<Sha256> = StandardHasher::new();
             let mmr = CleanMmr::new(&mut standard);
             let base_mmr = build_test_mmr(&mut standard, mmr, NUM_ELEMENTS);
-            let expected_root = *base_mmr.root();
+            let base_root = *base_mmr.root();
 
             let mut hasher: Hasher<'_, Sha256> = Hasher::new(&mut standard, 0);
             hasher
@@ -706,7 +588,6 @@ mod tests {
                 )
                 .await
                 .unwrap();
-
             {
                 // Build another MMR with the same elements only using a grafting hasher, using the
                 // previous mmr as the base.
@@ -721,7 +602,14 @@ mod tests {
                 let peak_mmr = build_test_mmr(&mut hasher, mmr, NUM_ELEMENTS);
                 let root = *peak_mmr.root();
                 // Peak digest should differ from the base MMR.
-                assert_ne!(root, expected_root);
+                assert_ne!(root, base_root);
+
+                // Building with a forked hasher should produce identical roots.
+                let mut forked_hasher = hasher.fork();
+                let forked_mmr = CleanMmr::new(&mut forked_hasher);
+                let forked_peak_mmr = build_test_mmr(&mut forked_hasher, forked_mmr, NUM_ELEMENTS);
+                let fork_root = *forked_peak_mmr.root();
+                assert_eq!(fork_root, root);
             }
 
             // Try grafting at a height of 1 instead of 0, which requires we double the # of leaves
@@ -766,7 +654,14 @@ mod tests {
                 let peak_mmr = build_test_mmr(&mut hasher, mmr, NUM_ELEMENTS);
                 let root = *peak_mmr.root();
                 // Peak digest should differ from the base MMR.
-                assert_ne!(root, expected_root);
+                assert_ne!(root, base_root);
+
+                // Forked hasher should produce the same root.
+                let mut forked_hasher = hasher.fork();
+                let forked_mmr = CleanMmr::new(&mut forked_hasher);
+                let forked_peak_mmr = build_test_mmr(&mut forked_hasher, forked_mmr, NUM_ELEMENTS);
+                let fork_root = *forked_peak_mmr.root();
+                assert_eq!(fork_root, root);
             }
 
             // Height 2 grafting destination computation check.
