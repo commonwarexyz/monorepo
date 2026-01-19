@@ -8,7 +8,9 @@
 use arbitrary::{Arbitrary, Result, Unstructured};
 use bytes::{Buf, BufMut};
 use commonware_codec::{FixedSize, Read, ReadExt, Write};
-use commonware_runtime::{buffer::PoolRef, deterministic, Blob as _, Runner, Storage as _};
+use commonware_runtime::{
+    buffer::PoolRef, deterministic, Blob as _, Metrics, Runner, Storage as _,
+};
 use commonware_storage::journal::segmented::oversized::{Config, Oversized, Record};
 use commonware_utils::{NZUsize, NZU16};
 use libfuzzer_sys::fuzz_target;
@@ -176,6 +178,7 @@ fn fuzz(input: FuzzInput) {
 
     runner.start(|context| async move {
         let cfg = test_cfg();
+        let mut instance_count = 0usize;
 
         // Phase 1: Create valid data
         let mut oversized: Oversized<_, TestEntry, TestValue> =
@@ -289,10 +292,16 @@ fn fuzz(input: FuzzInput) {
         }
 
         // Phase 3: Recovery - this should not panic
-        let mut recovered: Oversized<_, TestEntry, TestValue> =
-            Oversized::init(context.clone(), cfg.clone())
-                .await
-                .expect("Recovery should not fail");
+        let mut recovered: Oversized<_, TestEntry, TestValue> = Oversized::init(
+            context
+                .with_label("oversized")
+                .with_attribute("instance", instance_count),
+            cfg.clone(),
+        )
+        .await
+        .expect("Recovery should not fail");
+        instance_count += 1;
+        let _ = instance_count;
 
         // Phase 4: Verify get operations don't panic
         // Note: Value checksums are verified lazily on read, not during recovery.
