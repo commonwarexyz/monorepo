@@ -360,14 +360,14 @@ macro_rules! NZDuration {
 /// be applied due to Rust limitations on proc macros with file modules.
 ///
 /// When building with `RUSTFLAGS="--cfg min_readiness_N"`, modules with readiness
-/// less than N are excluded.
+/// less than N are excluded. Unmarked modules are always included.
 ///
 /// # Example
 /// ```rust,ignore
 /// use commonware_utils::ready_mod;
 ///
-/// ready_mod!(2, pub mod discovery);
-/// ready_mod!(0, pub mod experimental);
+/// ready_mod!(2, pub mod discovery);  // excluded at levels 3, 4
+/// ready_mod!(0, pub mod experimental); // excluded at levels 1, 2, 3, 4
 /// ```
 #[macro_export]
 macro_rules! ready_mod {

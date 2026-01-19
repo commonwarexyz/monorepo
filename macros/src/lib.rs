@@ -20,14 +20,13 @@ mod nextest;
 /// Marks an item with a readiness level (0-4).
 ///
 /// When building with `RUSTFLAGS="--cfg min_readiness_N"`, items with readiness
-/// less than N are excluded. Apply at whatever granularity makes sense
-/// (individual items, impl blocks, or modules).
+/// less than N are excluded. Unmarked items are always included.
 ///
 /// # Example
 /// ```rust,ignore
 /// use commonware_macros::ready;
 ///
-/// #[ready(2)]
+/// #[ready(2)]  // excluded at levels 3, 4
 /// pub struct StableApi { }
 /// ```
 #[proc_macro_attribute]
