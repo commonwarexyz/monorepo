@@ -335,10 +335,7 @@ impl<H: CHasher> HasherTrait for HasherFork<'_, H> {
         leaves: Location,
         peak_digests: impl Iterator<Item = &'a H::Digest>,
     ) -> H::Digest {
-        let size = Position::try_from(leaves).expect("invalid number of leaves");
-        let dest_pos = destination_pos(size, self.height);
-        let dest_leaves = Location::try_from(dest_pos).expect("dest_pos should be valid size");
-        self.hasher.root(dest_leaves, peak_digests)
+        self.hasher.root(leaves, peak_digests)
     }
 
     fn digest(&mut self, data: &[u8]) -> H::Digest {
