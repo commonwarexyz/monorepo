@@ -12,16 +12,20 @@
 
 use commonware_codec::Codec;
 use commonware_cryptography::{Committable, Digestible};
+use commonware_macros::ready;
+use commonware_utils::ready_mod;
 
-pub mod aggregation;
-pub mod ordered_broadcast;
-pub mod simplex;
-pub mod types;
+ready_mod!(1, pub mod aggregation);
+ready_mod!(1, pub mod ordered_broadcast);
+ready_mod!(2, pub mod simplex);
+ready_mod!(2, pub mod types);
 
+#[ready(2)]
 use types::{Epoch, Height, View};
 
 /// Epochable is a trait that provides access to the epoch number.
 /// Any consensus message or object that is associated with a specific epoch should implement this.
+#[ready(2)]
 pub trait Epochable {
     /// Returns the epoch associated with this object.
     fn epoch(&self) -> Epoch;
@@ -29,6 +33,7 @@ pub trait Epochable {
 
 /// Heightable is a trait that provides access to the height.
 /// Any consensus message or object that is associated with a specific height should implement this.
+#[ready(2)]
 pub trait Heightable {
     /// Returns the height associated with this object.
     fn height(&self) -> Height;
@@ -36,6 +41,7 @@ pub trait Heightable {
 
 /// Viewable is a trait that provides access to the view (round) number.
 /// Any consensus message or object that is associated with a specific view should implement this.
+#[ready(2)]
 pub trait Viewable {
     /// Returns the view associated with this object.
     fn view(&self) -> View;
@@ -44,6 +50,7 @@ pub trait Viewable {
 /// Block is the interface for a block in the blockchain.
 ///
 /// Blocks are used to track the progress of the consensus engine.
+#[ready(2)]
 pub trait Block: Heightable + Codec + Digestible + Committable + Send + Sync + 'static {
     /// Get the parent block's digest.
     fn parent(&self) -> Self::Commitment;
@@ -57,11 +64,13 @@ cfg_if::cfg_if! {
         use std::future::Future;
         use commonware_runtime::{Spawner, Metrics, Clock};
         use rand::Rng;
-        use crate::marshal::ingress::mailbox::AncestorStream;
         use commonware_cryptography::certificate::Scheme;
 
-        pub mod application;
-        pub mod marshal;
+        ready_mod!(1, pub mod application);
+        ready_mod!(2, pub mod marshal);
+
+        #[ready(2)]
+        use crate::marshal::ingress::mailbox::AncestorStream;
         mod reporter;
         pub use reporter::*;
 
@@ -73,6 +82,7 @@ cfg_if::cfg_if! {
 
         /// Automaton is the interface responsible for driving the consensus forward by proposing new payloads
         /// and verifying payloads proposed by other participants.
+        #[ready(2)]
         pub trait Automaton: Clone + Send + 'static {
             /// Context is metadata provided by the consensus engine associated with a given payload.
             ///
@@ -111,6 +121,7 @@ cfg_if::cfg_if! {
         /// This trait is required by consensus implementations (like Simplex) that support a certification
         /// phase between notarization and finalization. Applications that do not need custom certification
         /// logic can use the default implementation which always certifies.
+        #[ready(2)]
         pub trait CertifiableAutomaton: Automaton {
             /// Determine whether a verified payload is safe to commit.
             ///
@@ -135,6 +146,7 @@ cfg_if::cfg_if! {
 
         /// Application is a minimal interface for standard implementations that operate over a stream
         /// of epoched blocks.
+        #[ready(1)]
         pub trait Application<E>: Clone + Send + 'static
         where
             E: Rng + Spawner + Metrics + Clock
@@ -168,6 +180,7 @@ cfg_if::cfg_if! {
         /// erasure coding, for example, verification only serves to verify the integrity of the
         /// received shard relative to the consensus commitment, and can therefore be
         /// hidden from the application.
+        #[ready(1)]
         pub trait VerifyingApplication<E>: Application<E>
         where
             E: Rng + Spawner + Metrics + Clock
