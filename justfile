@@ -111,10 +111,3 @@ check-readiness:
     done
     echo "All readiness levels pass!"
 
-# Check that all public items in a crate have #[ready(N)] annotations
-check-readiness-annotations crate:
-    #!/usr/bin/env bash
-    set -e
-    RUSTDOCFLAGS="-Z unstable-options --output-format json" cargo {{ nightly_version }} doc -p {{ crate }}
-    crate_name=$(echo "{{ crate }}" | tr '-' '_')
-    python3 scripts/check_readiness.py "target/doc/${crate_name}.json"

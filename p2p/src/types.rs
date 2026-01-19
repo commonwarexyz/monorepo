@@ -2,7 +2,6 @@
 
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error as CodecError, FixedSize, Read, ReadExt, Write};
-use commonware_macros::ready;
 use commonware_runtime::{Error as RuntimeError, Resolver};
 use commonware_utils::{Hostname, IpAddrExt};
 use std::net::{IpAddr, SocketAddr};
@@ -14,7 +13,6 @@ const ADDRESS_SYMMETRIC_PREFIX: u8 = 0;
 const ADDRESS_ASYMMETRIC_PREFIX: u8 = 1;
 
 /// What we dial to connect to a peer.
-#[ready(2)]
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Ingress {
     /// IP-based ingress address.
@@ -30,7 +28,6 @@ pub enum Ingress {
 
 impl Ingress {
     /// Returns the port number for this ingress address.
-    #[ready(2)]
     pub const fn port(&self) -> u16 {
         match self {
             Self::Socket(addr) => addr.port(),
@@ -39,7 +36,6 @@ impl Ingress {
     }
 
     /// Returns the IP address if this is a Socket variant.
-    #[ready(2)]
     pub const fn ip(&self) -> Option<IpAddr> {
         match self {
             Self::Socket(addr) => Some(addr.ip()),
@@ -54,7 +50,6 @@ impl Ingress {
     ///
     /// Note: For `Dns` addresses, private IP checks are performed after resolution in
     /// [`resolve_filtered`](Self::resolve_filtered).
-    #[ready(2)]
     pub fn is_valid(&self, allow_private_ips: bool, allow_dns: bool) -> bool {
         match self {
             Self::Socket(addr) => allow_private_ips || IpAddrExt::is_global(&addr.ip()),
@@ -66,7 +61,6 @@ impl Ingress {
     ///
     /// For `Socket` variants, returns a single-element iterator.
     /// For `Dns` variants, performs DNS resolution and returns all resolved addresses.
-    #[ready(2)]
     pub async fn resolve(
         &self,
         resolver: &impl Resolver,
@@ -88,7 +82,6 @@ impl Ingress {
     }
 
     /// [`resolve`](Self::resolve) and filter by private IP policy.
-    #[ready(2)]
     pub async fn resolve_filtered(
         &self,
         resolver: &impl Resolver,
@@ -152,7 +145,6 @@ impl From<SocketAddr> for Ingress {
 }
 
 /// Full address specification for peer-to-peer networking.
-#[ready(2)]
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Address {
     /// Same address for both ingress (dialing) and egress (IP filtering).
@@ -168,7 +160,6 @@ pub enum Address {
 
 impl Address {
     /// Returns the ingress address for dialing.
-    #[ready(2)]
     pub fn ingress(&self) -> Ingress {
         match self {
             Self::Symmetric(addr) => Ingress::Socket(*addr),
@@ -177,7 +168,6 @@ impl Address {
     }
 
     /// Returns the egress IP address for filtering.
-    #[ready(2)]
     pub const fn egress_ip(&self) -> IpAddr {
         match self {
             Self::Symmetric(addr) => addr.ip(),
@@ -186,7 +176,6 @@ impl Address {
     }
 
     /// Returns the egress socket address.
-    #[ready(2)]
     pub const fn egress(&self) -> SocketAddr {
         match self {
             Self::Symmetric(addr) => *addr,

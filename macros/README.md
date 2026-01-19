@@ -13,29 +13,18 @@ Augment the development of primitives with procedural macros.
 
 ### `#[ready(N)]`
 
-Marks a public item with a readiness level (0-4). This annotation:
-
-1. Adds a doc comment showing the readiness level with a link to the definition
-2. Enables compile-time filtering via `--cfg min_readiness_N`
+Marks an item with a readiness level (0-4). When building with `RUSTFLAGS="--cfg min_readiness_N"`, items with readiness less than N are excluded.
 
 ```rust
 use commonware_macros::ready;
 
 #[ready(2)]
-pub struct StableApi {
-    // ...
-}
-
-#[ready(2)]
-impl StableApi {
-    #[ready(2)]
-    pub fn new() -> Self {
-        // ...
-    }
+pub mod stable_api {
+    // All items in this module are at readiness level 2
 }
 ```
 
-When building with `RUSTFLAGS="--cfg min_readiness_2"`, items with readiness < 2 are excluded. This enforces that stable code cannot depend on experimental code at compile time.
+Apply at whatever granularity makes sense (individual items, impl blocks, or modules). Building with `min_readiness_3` will exclude items marked `#[ready(0)]`, `#[ready(1)]`, or `#[ready(2)]`.
 
 See the [Readiness section](https://github.com/commonwarexyz/monorepo#readiness) in the main README for level definitions.
 

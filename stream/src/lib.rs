@@ -73,7 +73,7 @@ use commonware_cryptography::{
     transcript::Transcript,
     Signer,
 };
-use commonware_macros::{ready, select};
+use commonware_macros::select;
 use commonware_runtime::{Clock, Error as RuntimeError, Sink, Stream};
 use commonware_utils::{hex, SystemTimeExt};
 use rand_core::CryptoRngCore;
@@ -86,7 +86,6 @@ const CIPHERTEXT_OVERHEAD: u32 = {
 };
 
 /// Errors that can occur when interacting with a stream.
-#[ready(2)]
 #[derive(Error, Debug)]
 pub enum Error {
     #[error("handshake error: {0}")]
@@ -131,7 +130,6 @@ impl From<HandshakeError> for Error {
 ///
 /// Synchronize this configuration across all peers.
 /// Mismatched configurations may cause dropped connections or parsing errors.
-#[ready(2)]
 #[derive(Clone)]
 pub struct Config<S> {
     /// The private key used for signing messages.
@@ -158,7 +156,6 @@ pub struct Config<S> {
 
 impl<S> Config<S> {
     /// Computes current time and acceptable timestamp range.
-    #[ready(2)]
     pub fn time_information(&self, ctx: &impl Clock) -> (u64, Range<u64>) {
         fn duration_to_u64(d: Duration) -> u64 {
             u64::try_from(d.as_millis()).expect("duration ms should fit in an u64")
@@ -173,7 +170,6 @@ impl<S> Config<S> {
 
 /// Establishes an authenticated connection to a peer as the dialer.
 /// Returns sender and receiver for encrypted communication.
-#[ready(2)]
 pub async fn dial<R: CryptoRngCore + Clock, S: Signer, I: Stream, O: Sink>(
     mut ctx: R,
     config: Config<S>,
@@ -231,7 +227,6 @@ pub async fn dial<R: CryptoRngCore + Clock, S: Signer, I: Stream, O: Sink>(
 
 /// Accepts an authenticated connection from a peer as the listener.
 /// Returns the peer's identity, sender, and receiver for encrypted communication.
-#[ready(2)]
 pub async fn listen<
     R: CryptoRngCore + Clock,
     S: Signer,
@@ -298,7 +293,6 @@ pub async fn listen<
 }
 
 /// Sends encrypted messages to a peer.
-#[ready(2)]
 pub struct Sender<O> {
     cipher: SendCipher,
     sink: O,
@@ -307,7 +301,6 @@ pub struct Sender<O> {
 
 impl<O: Sink> Sender<O> {
     /// Encrypts and sends a message to the peer.
-    #[ready(2)]
     pub async fn send(&mut self, mut buf: impl Buf) -> Result<(), Error> {
         // Copy the buffer to ensure contiguous memory for encryption.
         let msg = buf.copy_to_bytes(buf.remaining());
@@ -324,7 +317,6 @@ impl<O: Sink> Sender<O> {
 }
 
 /// Receives encrypted messages from a peer.
-#[ready(2)]
 pub struct Receiver<I> {
     cipher: RecvCipher,
     stream: I,
@@ -333,7 +325,6 @@ pub struct Receiver<I> {
 
 impl<I: Stream> Receiver<I> {
     /// Receives and decrypts a message from the peer.
-    #[ready(2)]
     pub async fn recv(&mut self) -> Result<Bytes, Error> {
         let c = recv_frame(
             &mut self.stream,

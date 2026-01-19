@@ -20,15 +20,15 @@ mod nextest;
 /// Marks an item with a readiness level (0-4).
 ///
 /// When building with `RUSTFLAGS="--cfg min_readiness_N"`, items with readiness
-/// less than N are excluded. This enforces that higher-readiness code cannot
-/// depend on lower-readiness code at compile time.
+/// less than N are excluded. Apply at whatever granularity makes sense
+/// (individual items, impl blocks, or modules).
 ///
 /// # Example
 /// ```rust,ignore
 /// use commonware_macros::ready;
 ///
 /// #[ready(2)]
-/// pub fn stable_format_fn() { }
+/// pub struct StableApi { }
 /// ```
 #[proc_macro_attribute]
 pub fn ready(attr: TokenStream, item: TokenStream) -> TokenStream {
@@ -49,16 +49,9 @@ pub fn ready(attr: TokenStream, item: TokenStream) -> TokenStream {
         cfg_attrs.push(quote! { #[cfg(not(#cfg_name))] });
     }
 
-    let doc_string = format!(
-        "**Readiness: {}** ([what does this mean?](https://github.com/commonwarexyz/monorepo#readiness))",
-        level_value
-    );
-
     let item2: proc_macro2::TokenStream = item.into();
     let expanded = quote! {
         #(#cfg_attrs)*
-        #[doc = ""]
-        #[doc = #doc_string]
         #item2
     };
 

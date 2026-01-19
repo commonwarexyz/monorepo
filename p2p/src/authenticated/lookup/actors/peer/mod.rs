@@ -2,7 +2,6 @@
 
 use crate::authenticated::lookup::metrics;
 use commonware_codec::Error as CodecError;
-use commonware_macros::ready;
 use prometheus_client::metrics::{counter::Counter, family::Family};
 use thiserror::Error;
 
@@ -21,7 +20,6 @@ pub struct Config {
     pub rate_limited: Family<metrics::Message, Counter>,
 }
 
-#[ready(2)]
 #[derive(Error, Debug)]
 pub enum Error {
     #[error("peer killed: {0}")]

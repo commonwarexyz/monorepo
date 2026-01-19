@@ -1,6 +1,5 @@
 use crate::authenticated::{lookup::actors::tracker::Reservation, Mailbox};
 use commonware_cryptography::PublicKey;
-use commonware_macros::ready;
 use commonware_runtime::{Sink, Stream};
 use commonware_stream::{Receiver, Sender};
 use commonware_utils::channels::fallible::AsyncFallibleExt;
@@ -23,7 +22,6 @@ impl<Si: Sink, St: Stream, P: PublicKey> Mailbox<Message<Si, St, P>> {
     ///
     /// This may fail during shutdown if the spawner has already exited,
     /// which is harmless since no new connections need to be spawned.
-    #[ready(2)]
     pub async fn spawn(
         &mut self,
         connection: (Sender<Si>, Receiver<St>),

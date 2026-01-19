@@ -5,7 +5,6 @@ use crate::{
 };
 use bytes::Buf;
 use commonware_cryptography::PublicKey;
-use commonware_macros::ready;
 use commonware_runtime::{Clock, Quota};
 use futures::{channel::mpsc, StreamExt};
 use std::{collections::BTreeMap, fmt::Debug, time::SystemTime};
@@ -42,7 +41,6 @@ impl<P: PublicKey> crate::UnlimitedSender for UnlimitedSender<P> {
 }
 
 /// Sender is the mechanism used to send arbitrary bytes to a set of recipients over a pre-defined channel.
-#[ready(2)]
 #[derive(Clone)]
 pub struct Sender<P: PublicKey, C: Clock> {
     limited_sender: LimitedSender<C, UnlimitedSender<P>, Messenger<P>>,
@@ -86,7 +84,6 @@ where
 }
 
 /// Channel to asynchronously receive messages from a channel.
-#[ready(2)]
 #[derive(Debug)]
 pub struct Receiver<P: PublicKey> {
     receiver: mpsc::Receiver<Message<P>>,

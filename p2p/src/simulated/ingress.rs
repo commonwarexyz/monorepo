@@ -1,7 +1,6 @@
 use super::{Error, Receiver, Sender};
 use crate::{authenticated::UnboundedMailbox, Address, Channel};
 use commonware_cryptography::PublicKey;
-use commonware_macros::ready;
 use commonware_runtime::{Clock, Quota};
 use commonware_utils::{
     channels::{fallible::FallibleExt, ring},
@@ -95,7 +94,6 @@ impl<P: PublicKey, E: Clock> std::fmt::Debug for Message<P, E> {
 ///
 /// Links are unidirectional (and must be set up in both directions
 /// for a bidirectional connection).
-#[ready(2)]
 #[derive(Clone)]
 pub struct Link {
     /// Mean latency for the delivery of a message.
@@ -112,7 +110,6 @@ pub struct Link {
 ///
 /// At any point, peers can be added/removed and links
 /// between said peers can be modified.
-#[ready(2)]
 #[derive(Debug)]
 pub struct Oracle<P: PublicKey, E: Clock> {
     sender: UnboundedMailbox<Message<P, E>>,
@@ -128,13 +125,11 @@ impl<P: PublicKey, E: Clock> Clone for Oracle<P, E> {
 
 impl<P: PublicKey, E: Clock> Oracle<P, E> {
     /// Create a new instance of the oracle.
-    #[ready(2)]
     pub(crate) const fn new(sender: UnboundedMailbox<Message<P, E>>) -> Self {
         Self { sender }
     }
 
     /// Create a new [Control] interface for some peer.
-    #[ready(2)]
     pub fn control(&self, me: P) -> Control<P, E> {
         Control {
             me,
@@ -145,7 +140,6 @@ impl<P: PublicKey, E: Clock> Oracle<P, E> {
     /// Create a new [Manager].
     ///
     /// Useful for mocking [crate::authenticated::discovery].
-    #[ready(2)]
     pub fn manager(&self) -> Manager<P, E> {
         Manager {
             oracle: self.clone(),
@@ -155,7 +149,6 @@ impl<P: PublicKey, E: Clock> Oracle<P, E> {
     /// Create a new [SocketManager].
     ///
     /// Useful for mocking [crate::authenticated::lookup].
-    #[ready(2)]
     pub fn socket_manager(&self) -> SocketManager<P, E> {
         SocketManager {
             oracle: self.clone(),
@@ -163,7 +156,6 @@ impl<P: PublicKey, E: Clock> Oracle<P, E> {
     }
 
     /// Return a list of all blocked peers.
-    #[ready(2)]
     pub async fn blocked(&self) -> Result<Vec<(P, P)>, Error> {
         self.sender
             .0
@@ -178,7 +170,6 @@ impl<P: PublicKey, E: Clock> Oracle<P, E> {
     /// rates in bytes per second. Use `None` for unlimited bandwidth.
     ///
     /// Bandwidth can be specified before a peer is registered or linked.
-    #[ready(2)]
     pub async fn limit_bandwidth(
         &self,
         public_key: P,
@@ -203,7 +194,6 @@ impl<P: PublicKey, E: Clock> Oracle<P, E> {
     /// setting will be used.
     ///
     /// Link can be called before a peer is registered or bandwidth is specified.
-    #[ready(2)]
     pub async fn add_link(&self, sender: P, receiver: P, config: Link) -> Result<(), Error> {
         // Sanity checks
         if sender == receiver {
@@ -236,7 +226,6 @@ impl<P: PublicKey, E: Clock> Oracle<P, E> {
     /// Remove a unidirectional link between two peers.
     ///
     /// If no link exists, this will return an error.
-    #[ready(2)]
     pub async fn remove_link(&self, sender: P, receiver: P) -> Result<(), Error> {
         // Sanity checks
         if sender == receiver {
@@ -279,7 +268,6 @@ impl<P: PublicKey, E: Clock> Oracle<P, E> {
 /// Implementation of [crate::Manager] for peers.
 ///
 /// Useful for mocking [crate::authenticated::discovery].
-#[ready(2)]
 pub struct Manager<P: PublicKey, E: Clock> {
     /// The oracle to send messages to.
     oracle: Oracle<P, E>,
@@ -327,7 +315,6 @@ impl<P: PublicKey, E: Clock> crate::Manager for Manager<P, E> {
 /// Because addresses are never exposed in [crate::simulated],
 /// there is nothing to assert submitted data against. We thus consider
 /// all addresses to be valid.
-#[ready(2)]
 pub struct SocketManager<P: PublicKey, E: Clock> {
     /// The oracle to send messages to.
     oracle: Oracle<P, E>,
@@ -368,7 +355,6 @@ impl<P: PublicKey, E: Clock> crate::Manager for SocketManager<P, E> {
 }
 
 /// Individual control interface for a peer in the simulated network.
-#[ready(2)]
 #[derive(Debug)]
 pub struct Control<P: PublicKey, E: Clock> {
     /// The public key of the peer this control interface is for.
@@ -394,7 +380,6 @@ impl<P: PublicKey, E: Clock> Control<P, E> {
     ///
     /// The `quota` parameter specifies the rate limit for outbound messages to each peer.
     /// Recipients that exceed their rate limit will be skipped when sending.
-    #[ready(2)]
     pub async fn register(
         &self,
         channel: Channel,

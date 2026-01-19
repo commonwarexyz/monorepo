@@ -146,11 +146,9 @@ mod metrics;
 mod network;
 mod transmitter;
 
-use commonware_macros::ready;
 use thiserror::Error;
 
 /// Errors that can occur when interacting with the network.
-#[ready(2)]
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("message too large: {0}")]

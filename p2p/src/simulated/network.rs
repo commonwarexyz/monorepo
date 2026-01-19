@@ -14,7 +14,7 @@ use crate::{
 use bytes::{Buf, Bytes};
 use commonware_codec::{DecodeExt, FixedSize};
 use commonware_cryptography::PublicKey;
-use commonware_macros::{ready, select, select_loop};
+use commonware_macros::{select, select_loop};
 use commonware_runtime::{
     spawn_cell, Clock, ContextCell, Handle, Listener as _, Metrics, Network as RNetwork, Quota,
     Spawner,
@@ -45,7 +45,6 @@ use tracing::{debug, error, trace, warn};
 type Task<P> = (Channel, P, Recipients<P>, Bytes, oneshot::Sender<Vec<P>>);
 
 /// Target for a message in a split receiver.
-#[ready(2)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[must_use]
 pub enum SplitTarget {
@@ -56,7 +55,6 @@ pub enum SplitTarget {
 }
 
 /// Origin of a message in a split sender.
-#[ready(2)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[must_use]
 pub enum SplitOrigin {
@@ -91,7 +89,6 @@ impl<P: PublicKey, F> SplitRouter<P> for F where
 }
 
 /// Configuration for the simulated network.
-#[ready(2)]
 pub struct Config {
     /// Maximum size of a message that can be sent over the network.
     pub max_size: u32,
@@ -110,7 +107,6 @@ pub struct Config {
 }
 
 /// Implementation of a simulated network.
-#[ready(2)]
 pub struct Network<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> {
     context: ContextCell<E>,
 
@@ -176,7 +172,6 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
     ///
     /// Returns a tuple containing the network instance and the oracle that can
     /// be used to modify the state of the network during context.
-    #[ready(2)]
     pub fn new(mut context: E, cfg: Config) -> (Self, Oracle<P, E>) {
         let (sender, receiver) = mpsc::unbounded();
         let (oracle_mailbox, oracle_receiver) = UnboundedMailbox::new();
@@ -689,7 +684,6 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
     ///
     /// It is not necessary to invoke this method before modifying the network topology, however,
     /// no messages will be sent until this method is called.
-    #[ready(2)]
     pub fn start(mut self) -> Handle<()> {
         spawn_cell!(self.context, self.run().await)
     }
@@ -731,7 +725,6 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
 ///
 /// Implements [`crate::utils::limited::Connected`] to provide peer list updates
 /// to [`crate::utils::limited::LimitedSender`].
-#[ready(2)]
 pub struct ConnectedPeerProvider<P: PublicKey, E: Clock> {
     mailbox: UnboundedMailbox<ingress::Message<P, E>>,
 }
@@ -768,7 +761,6 @@ impl<P: PublicKey, E: Clock> Connected for ConnectedPeerProvider<P, E> {
 /// Implementation of a [crate::Sender] for the simulated network without rate limiting.
 ///
 /// This is the inner sender used by [`Sender`] which wraps it with rate limiting.
-#[ready(2)]
 #[derive(Clone)]
 pub struct UnlimitedSender<P: PublicKey> {
     me: P,
@@ -811,7 +803,6 @@ impl<P: PublicKey> crate::UnlimitedSender for UnlimitedSender<P> {
 ///
 /// Also implements [crate::LimitedSender] to support rate-limit checking
 /// before sending messages.
-#[ready(2)]
 pub struct Sender<P: PublicKey, E: Clock> {
     limited_sender: LimitedSender<E, UnlimitedSender<P>, ConnectedPeerProvider<P, E>>,
 }
@@ -885,7 +876,6 @@ impl<P: PublicKey, E: Clock> Sender<P, E> {
     }
 
     /// Split this [Sender] into a [SplitOrigin::Primary] and [SplitOrigin::Secondary] sender.
-    #[ready(2)]
     pub fn split_with<F: SplitForwarder<P>>(
         self,
         forwarder: F,
@@ -921,7 +911,6 @@ impl<P: PublicKey, E: Clock> crate::LimitedSender for Sender<P, E> {
 }
 
 /// A sender that routes recipients per message via a user-provided function.
-#[ready(2)]
 pub struct SplitSender<P: PublicKey, E: Clock, F: SplitForwarder<P>> {
     replica: SplitOrigin,
     inner: Sender<P, E>,
@@ -1016,7 +1005,6 @@ impl<'a, P: PublicKey, E: Clock, F: SplitForwarder<P>> crate::CheckedSender
 type MessageReceiver<P> = mpsc::UnboundedReceiver<Message<P>>;
 
 /// Implementation of a [crate::Receiver] for the simulated network.
-#[ready(2)]
 #[derive(Debug)]
 pub struct Receiver<P: PublicKey> {
     receiver: MessageReceiver<P>,
@@ -1033,7 +1021,6 @@ impl<P: PublicKey> crate::Receiver for Receiver<P> {
 
 impl<P: PublicKey> Receiver<P> {
     /// Split this [Receiver] into a [SplitTarget::Primary] and [SplitTarget::Secondary] receiver.
-    #[ready(2)]
     pub fn split_with<E: Spawner, R: SplitRouter<P>>(
         mut self,
         context: E,

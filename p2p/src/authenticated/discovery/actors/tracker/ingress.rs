@@ -8,7 +8,6 @@ use crate::authenticated::{
     Mailbox,
 };
 use commonware_cryptography::PublicKey;
-use commonware_macros::ready;
 use commonware_utils::{channels::fallible::FallibleExt, ordered::Set};
 use futures::channel::{mpsc, oneshot};
 
@@ -141,7 +140,6 @@ impl<C: PublicKey> UnboundedMailbox<Message<C>> {
     ///
     /// Returns `Some(info)` if the peer is eligible, `None` if the channel was
     /// dropped (peer not eligible or tracker shut down).
-    #[ready(2)]
     pub async fn connect(&mut self, public_key: C, dialer: bool) -> Option<types::Info<C>> {
         self.0
             .request(|responder| Message::Connect {
@@ -153,19 +151,16 @@ impl<C: PublicKey> UnboundedMailbox<Message<C>> {
     }
 
     /// Send a `Construct` message to the tracker.
-    #[ready(2)]
     pub fn construct(&mut self, public_key: C, peer: Mailbox<peer::Message<C>>) {
         self.0.send_lossy(Message::Construct { public_key, peer });
     }
 
     /// Send a `BitVec` message to the tracker.
-    #[ready(2)]
     pub fn bit_vec(&mut self, bit_vec: types::BitVec, peer: Mailbox<peer::Message<C>>) {
         self.0.send_lossy(Message::BitVec { bit_vec, peer });
     }
 
     /// Send a `Peers` message to the tracker.
-    #[ready(2)]
     pub fn peers(&mut self, peers: Vec<types::Info<C>>) {
         self.0.send_lossy(Message::Peers { peers });
     }
@@ -173,7 +168,6 @@ impl<C: PublicKey> UnboundedMailbox<Message<C>> {
     /// Request a list of dialable peers from the tracker.
     ///
     /// Returns an empty list if the tracker is shut down.
-    #[ready(2)]
     pub async fn dialable(&mut self) -> Vec<C> {
         self.0
             .request_or_default(|responder| Message::Dialable { responder })
@@ -183,7 +177,6 @@ impl<C: PublicKey> UnboundedMailbox<Message<C>> {
     /// Send a `Dial` message to the tracker.
     ///
     /// Returns `None` if the tracker is shut down.
-    #[ready(2)]
     pub async fn dial(&mut self, public_key: C) -> Option<Reservation<C>> {
         self.0
             .request(|reservation| Message::Dial {
@@ -197,7 +190,6 @@ impl<C: PublicKey> UnboundedMailbox<Message<C>> {
     /// Send an `Acceptable` message to the tracker.
     ///
     /// Returns `false` if the tracker is shut down.
-    #[ready(2)]
     pub async fn acceptable(&mut self, public_key: C) -> bool {
         self.0
             .request_or(
@@ -213,7 +205,6 @@ impl<C: PublicKey> UnboundedMailbox<Message<C>> {
     /// Send a `Listen` message to the tracker.
     ///
     /// Returns `None` if the tracker is shut down.
-    #[ready(2)]
     pub async fn listen(&mut self, public_key: C) -> Option<Reservation<C>> {
         self.0
             .request(|reservation| Message::Listen {
@@ -247,7 +238,6 @@ impl<C: PublicKey> Releaser<C> {
 ///
 /// Peers that are not explicitly authorized
 /// will be blocked by commonware-p2p.
-#[ready(2)]
 #[derive(Debug, Clone)]
 pub struct Oracle<C: PublicKey> {
     sender: UnboundedMailbox<Message<C>>,

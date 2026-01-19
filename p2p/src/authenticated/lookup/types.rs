@@ -1,7 +1,6 @@
 use crate::authenticated::data::Data;
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error, Read, ReadExt, Write};
-use commonware_macros::ready;
 
 /// The maximum overhead (in bytes) when encoding a [Data].
 ///
@@ -18,7 +17,6 @@ pub const DATA_PREFIX: u8 = 0;
 pub const PING_PREFIX: u8 = 1;
 
 /// The messages that can be sent between peers.
-#[ready(2)]
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub enum Message {
