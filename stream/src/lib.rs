@@ -76,6 +76,7 @@ use commonware_cryptography::{
 use commonware_macros::select;
 use commonware_runtime::{Clock, Error as RuntimeError, Sink, Stream};
 use commonware_utils::{hex, SystemTimeExt};
+use commonware_macros::ready;
 use rand_core::CryptoRngCore;
 use std::{future::Future, ops::Range, time::Duration};
 use thiserror::Error;
@@ -86,6 +87,7 @@ const CIPHERTEXT_OVERHEAD: u32 = {
 };
 
 /// Errors that can occur when interacting with a stream.
+#[ready(2)]
 #[derive(Error, Debug)]
 pub enum Error {
     #[error("handshake error: {0}")]
@@ -130,6 +132,7 @@ impl From<HandshakeError> for Error {
 ///
 /// Synchronize this configuration across all peers.
 /// Mismatched configurations may cause dropped connections or parsing errors.
+#[ready(2)]
 #[derive(Clone)]
 pub struct Config<S> {
     /// The private key used for signing messages.
@@ -293,6 +296,7 @@ pub async fn listen<
 }
 
 /// Sends encrypted messages to a peer.
+#[ready(2)]
 pub struct Sender<O> {
     cipher: SendCipher,
     sink: O,
@@ -317,6 +321,7 @@ impl<O: Sink> Sender<O> {
 }
 
 /// Receives encrypted messages from a peer.
+#[ready(2)]
 pub struct Receiver<I> {
     cipher: RecvCipher,
     stream: I,
