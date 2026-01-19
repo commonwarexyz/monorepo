@@ -8,12 +8,13 @@ use commonware_storage::mmr::{
     location::{Location, LocationRangeExt},
     Position, StandardHasher as Standard,
 };
-use commonware_utils::{NZUsize, NZU64};
+use commonware_utils::{NZUsize, NZU16, NZU64};
 use libfuzzer_sys::fuzz_target;
+use std::num::NonZeroU16;
 
 const MAX_OPERATIONS: usize = 200;
 const MAX_DATA_SIZE: usize = 64;
-const PAGE_SIZE: usize = 111;
+const PAGE_SIZE: NonZeroU16 = NZU16!(111);
 const PAGE_CACHE_SIZE: usize = 5;
 const ITEMS_PER_BLOB: u64 = 7;
 
@@ -88,7 +89,7 @@ fn test_config(partition_suffix: &str) -> Config {
         items_per_blob: NZU64!(ITEMS_PER_BLOB),
         write_buffer: NZUsize!(1024),
         thread_pool: None,
-        buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+        buffer_pool: PoolRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
     }
 }
 
@@ -436,9 +437,10 @@ fn fuzz(input: FuzzInput) {
                     )
                     .await
                     .unwrap();
-                    // Reset tracking variables to match recovered state
-                    leaves.clear();
-                    historical_sizes.clear();
+                    // Truncate tracking variables to match recovered state
+                    let recovered_leaves = new_mmr.leaves().as_u64() as usize;
+                    leaves.truncate(recovered_leaves);
+                    historical_sizes.truncate(recovered_leaves);
                     MmrState::Clean(new_mmr)
                 }
 

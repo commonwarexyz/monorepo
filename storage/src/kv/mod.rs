@@ -6,58 +6,61 @@ use std::future::Future;
 
 /// A readable key-value store.
 pub trait Gettable {
-    type Key;
-    type Value;
+    type Key: Send + Sync;
+    type Value: Send + Sync;
     type Error;
 
     /// Get the value of a key.
-    fn get(
-        &self,
-        key: &Self::Key,
-    ) -> impl Future<Output = Result<Option<Self::Value>, Self::Error>>;
+    fn get<'a>(
+        &'a self,
+        key: &'a Self::Key,
+    ) -> impl Future<Output = Result<Option<Self::Value>, Self::Error>> + Send + use<'a, Self>;
 }
 
 /// A mutable key-value store.
 pub trait Updatable: Gettable {
     /// Update the value of a key.
-    fn update(
-        &mut self,
+    fn update<'a>(
+        &'a mut self,
         key: Self::Key,
         value: Self::Value,
-    ) -> impl Future<Output = Result<(), Self::Error>>;
-
-    /// Updates the value associated with the given key in the store, inserting a default value if
-    /// the key does not already exist.
-    fn upsert(
-        &mut self,
-        key: Self::Key,
-        update: impl FnOnce(&mut Self::Value),
-    ) -> impl Future<Output = Result<(), Self::Error>>
-    where
-        Self::Value: Default,
-    {
-        async {
-            let mut value = self.get(&key).await?.unwrap_or_default();
-            update(&mut value);
-
-            self.update(key, value).await
-        }
-    }
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send + use<'a, Self>;
 
     /// Creates a new key-value pair in the db. Returns true if the key was created, false if it
     /// already existed. The key is not modified if it already existed.
-    fn create(
-        &mut self,
+    fn create<'a>(
+        &'a mut self,
         key: Self::Key,
         value: Self::Value,
-    ) -> impl Future<Output = Result<bool, Self::Error>> {
+    ) -> impl Future<Output = Result<bool, Self::Error>> + Send + use<'a, Self>
+    where
+        Self: Send,
+    {
         async {
             if self.get(&key).await?.is_some() {
                 return Ok(false);
             }
-
             self.update(key, value).await?;
             Ok(true)
+        }
+    }
+
+    /// Updates the value associated with the given key in the store, inserting a default value if
+    /// the key does not already exist.
+    fn upsert<'a, F>(
+        &'a mut self,
+        key: Self::Key,
+        update: F,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send + use<'a, Self, F>
+    where
+        Self: Send,
+        Self::Value: Default,
+        F: FnOnce(&mut Self::Value) + Send + 'a,
+    {
+        async move {
+            let mut value = self.get(&key).await?.unwrap_or_default();
+            update(&mut value);
+            self.update(key, value).await
         }
     }
 }
@@ -67,5 +70,41 @@ pub trait Deletable: Updatable {
     /// Delete the value of a key.
     ///
     /// Returns `true` if the key existed and was deleted, `false` if it did not exist.
-    fn delete(&mut self, key: Self::Key) -> impl Future<Output = Result<bool, Self::Error>>;
+    fn delete<'a>(
+        &'a mut self,
+        key: Self::Key,
+    ) -> impl Future<Output = Result<bool, Self::Error>> + Send + use<'a, Self>;
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::{Batchable, Deletable, Gettable, Updatable};
+
+    pub fn assert_send<T: Send>(_: T) {}
+
+    #[allow(dead_code)]
+    pub fn assert_gettable<T: Gettable + Send>(db: &T, key: &T::Key) {
+        assert_send(db.get(key));
+    }
+
+    #[allow(dead_code)]
+    pub fn assert_updatable<T: Updatable + Send>(db: &mut T, key: T::Key, value: T::Value)
+    where
+        T::Key: Clone,
+        T::Value: Default + Clone,
+    {
+        assert_send(db.update(key.clone(), value.clone()));
+        assert_send(db.create(key.clone(), value));
+        assert_send(db.upsert(key, |_| {}));
+    }
+
+    #[allow(dead_code)]
+    pub fn assert_deletable<T: Deletable + Send>(db: &mut T, key: T::Key) {
+        assert_send(db.delete(key));
+    }
+
+    #[allow(dead_code)]
+    pub fn assert_batchable<T: Batchable + Send>(db: &mut T, key: T::Key, value: T::Value) {
+        assert_send(db.write_batch(vec![(key, Some(value))].into_iter()));
+    }
 }

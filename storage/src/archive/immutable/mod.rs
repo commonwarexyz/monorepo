@@ -32,7 +32,7 @@
 //!         immutable::{Archive, Config},
 //!     },
 //! };
-//! use commonware_utils::{NZUsize, NZU64};
+//! use commonware_utils::{NZUsize, NZU16, NZU64};
 //!
 //! let executor = deterministic::Runner::default();
 //! executor.start(|context| async move {
@@ -43,13 +43,16 @@
 //!         freezer_table_initial_size: 65_536,
 //!         freezer_table_resize_frequency: 4,
 //!         freezer_table_resize_chunk_size: 16_384,
-//!         freezer_journal_partition: "journal".into(),
-//!         freezer_journal_target_size: 1024,
-//!         freezer_journal_compression: Some(3),
-//!         freezer_journal_buffer_pool: PoolRef::new(NZUsize!(1024), NZUsize!(10)),
+//!         freezer_key_partition: "key".into(),
+//!         freezer_key_buffer_pool: PoolRef::new(NZU16!(1024), NZUsize!(10)),
+//!         freezer_value_partition: "value".into(),
+//!         freezer_value_target_size: 1024,
+//!         freezer_value_compression: Some(3),
 //!         ordinal_partition: "ordinal".into(),
 //!         items_per_section: NZU64!(1024),
-//!         write_buffer: NZUsize!(1024),
+//!         freezer_key_write_buffer: NZUsize!(1024),
+//!         freezer_value_write_buffer: NZUsize!(1024),
+//!         ordinal_write_buffer: NZUsize!(1024),
 //!         replay_buffer: NZUsize!(1024),
 //!         codec_config: (),
 //!     };
@@ -85,17 +88,20 @@ pub struct Config<C> {
     /// The number of items to move during each resize operation (many may be required to complete a resize).
     pub freezer_table_resize_chunk_size: u32,
 
-    /// The partition to use for the archive's freezer journal.
-    pub freezer_journal_partition: String,
+    /// The partition to use for the archive's freezer keys.
+    pub freezer_key_partition: String,
 
-    /// The target size of the archive's freezer journal.
-    pub freezer_journal_target_size: u64,
+    /// The buffer pool to use for the archive's freezer keys.
+    pub freezer_key_buffer_pool: PoolRef,
 
-    /// The compression level to use for the archive's freezer journal.
-    pub freezer_journal_compression: Option<u8>,
+    /// The partition to use for the archive's freezer values.
+    pub freezer_value_partition: String,
 
-    /// The buffer pool to use for the archive's freezer journal.
-    pub freezer_journal_buffer_pool: PoolRef,
+    /// The target size of the archive's freezer value sections.
+    pub freezer_value_target_size: u64,
+
+    /// The compression level to use for the archive's freezer values.
+    pub freezer_value_compression: Option<u8>,
 
     /// The partition to use for the archive's ordinal.
     pub ordinal_partition: String,
@@ -103,9 +109,17 @@ pub struct Config<C> {
     /// The number of items per section.
     pub items_per_section: NonZeroU64,
 
-    /// The amount of bytes that can be buffered in a section before being written to a
-    /// [commonware_runtime::Blob].
-    pub write_buffer: NonZeroUsize,
+    /// The amount of bytes that can be buffered for the freezer key journal before being
+    /// written to a [commonware_runtime::Blob].
+    pub freezer_key_write_buffer: NonZeroUsize,
+
+    /// The amount of bytes that can be buffered for the freezer value journal before being
+    /// written to a [commonware_runtime::Blob].
+    pub freezer_value_write_buffer: NonZeroUsize,
+
+    /// The amount of bytes that can be buffered for the ordinal journal before being
+    /// written to a [commonware_runtime::Blob].
+    pub ordinal_write_buffer: NonZeroUsize,
 
     /// The buffer size to use when replaying a [commonware_runtime::Blob].
     pub replay_buffer: NonZeroUsize,
@@ -119,10 +133,11 @@ mod tests {
     use super::*;
     use crate::archive::Archive as ArchiveTrait;
     use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
-    use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
-    use commonware_utils::{NZUsize, NZU64};
+    use commonware_runtime::{buffer::PoolRef, deterministic, Metrics, Runner};
+    use commonware_utils::{NZUsize, NZU16, NZU64};
+    use std::num::NonZeroU16;
 
-    const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
+    const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
 
     #[test]
@@ -135,24 +150,31 @@ mod tests {
                 freezer_table_initial_size: 8192, // Must be power of 2
                 freezer_table_resize_frequency: 4,
                 freezer_table_resize_chunk_size: 8192,
-                freezer_journal_partition: "test_journal2".into(),
-                freezer_journal_target_size: 1024 * 1024,
-                freezer_journal_compression: Some(3),
-                freezer_journal_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                freezer_key_partition: "test_key2".into(),
+                freezer_key_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                freezer_value_partition: "test_value2".into(),
+                freezer_value_target_size: 1024 * 1024,
+                freezer_value_compression: Some(3),
                 ordinal_partition: "test_ordinal2".into(),
                 items_per_section: NZU64!(512),
-                write_buffer: NZUsize!(1024),
+                freezer_key_write_buffer: NZUsize!(1024),
+                freezer_value_write_buffer: NZUsize!(1024),
+                ordinal_write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
                 codec_config: (),
             };
 
             // First initialization
             let archive: Archive<_, Digest, i32> =
-                Archive::init(context.clone(), cfg.clone()).await.unwrap();
+                Archive::init(context.with_label("first"), cfg.clone())
+                    .await
+                    .unwrap();
             drop(archive);
 
             // Second initialization
-            let mut archive = Archive::init(context.clone(), cfg.clone()).await.unwrap();
+            let mut archive = Archive::init(context.with_label("second"), cfg.clone())
+                .await
+                .unwrap();
 
             // Add some data
             let key1 = Sha256::hash(b"key1");
@@ -165,7 +187,9 @@ mod tests {
             drop(archive);
 
             // Re-initialize archive (should load from checkpoint)
-            let archive = Archive::init(context, cfg).await.unwrap();
+            let archive = Archive::init(context.with_label("third"), cfg)
+                .await
+                .unwrap();
 
             // Verify data persisted
             assert_eq!(

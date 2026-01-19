@@ -81,19 +81,22 @@ fn bench_variable_init(c: &mut Criterion) {
                     |b| {
                         b.to_async(&runner).iter_custom(|iters| async move {
                             let ctx = context::get::<commonware_runtime::tokio::Context>();
+                            let pool = ctx.clone().create_pool(THREADS).unwrap();
+                            let any_cfg = any_cfg(pool);
+
+                            // Start the timer here to avoid including time to allocate buffer pool,
+                            // thread pool, and other shared structures.
                             let start = Instant::now();
                             for _ in 0..iters {
                                 match variant {
                                     Variant::AnyUnordered => {
-                                        let pool = ctx.clone().create_pool(THREADS).unwrap();
-                                        let db = UVariableDb::init(ctx.clone(), any_cfg(pool))
+                                        let db = UVariableDb::init(ctx.clone(), any_cfg.clone())
                                             .await
                                             .unwrap();
                                         assert_ne!(db.op_count(), 0);
                                     }
                                     Variant::AnyOrdered => {
-                                        let pool = ctx.clone().create_pool(THREADS).unwrap();
-                                        let db = OVariableDb::init(ctx.clone(), any_cfg(pool))
+                                        let db = OVariableDb::init(ctx.clone(), any_cfg.clone())
                                             .await
                                             .unwrap();
                                         assert_ne!(db.op_count(), 0);

@@ -50,9 +50,9 @@ impl PrivateKey {
         let payload = namespace.map_or(Cow::Borrowed(msg), |namespace| {
             Cow::Owned(union_unique(namespace, msg))
         });
-        let signature: p256::ecdsa::Signature = self.0.key.sign(&payload);
+        let signature: p256::ecdsa::Signature = self.0.key.expose(|key| key.sign(&payload));
         let signature = signature.normalize_s().unwrap_or(signature);
-        Signature::from(signature)
+        Signature::try_from(signature).expect("freshly signed signature is valid")
     }
 }
 
@@ -106,6 +106,24 @@ pub struct Signature {
     signature: p256::ecdsa::Signature,
 }
 
+impl TryFrom<[u8; SIGNATURE_LENGTH]> for Signature {
+    type Error = CodecError;
+
+    fn try_from(raw: [u8; SIGNATURE_LENGTH]) -> Result<Self, Self::Error> {
+        let result = p256::ecdsa::Signature::from_slice(&raw);
+        #[cfg(feature = "std")]
+        let signature = result.map_err(|e| CodecError::Wrapped(CURVE_NAME, e.into()))?;
+        #[cfg(not(feature = "std"))]
+        let signature = result
+            .map_err(|e| CodecError::Wrapped(CURVE_NAME, alloc::format!("{:?}", e).into()))?;
+        // Reject any signatures with a `s` value in the upper half of the curve order.
+        if signature.s().is_high().into() {
+            return Err(CodecError::Invalid(CURVE_NAME, "Signature S is high"));
+        }
+        Ok(Self { raw, signature })
+    }
+}
+
 impl crate::Signature for Signature {}
 
 impl Write for Signature {
@@ -118,18 +136,7 @@ impl Read for Signature {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        let raw = <[u8; Self::SIZE]>::read(buf)?;
-        let result = p256::ecdsa::Signature::from_slice(&raw);
-        #[cfg(feature = "std")]
-        let signature = result.map_err(|e| CodecError::Wrapped(CURVE_NAME, e.into()))?;
-        #[cfg(not(feature = "std"))]
-        let signature = result
-            .map_err(|e| CodecError::Wrapped(CURVE_NAME, alloc::format!("{:?}", e).into()))?;
-        // Reject any signatures with a `s` value in the upper half of the curve order.
-        if signature.s().is_high().into() {
-            return Err(CodecError::Invalid(CURVE_NAME, "Signature S is high"));
-        }
-        Ok(Self { raw, signature })
+        <[u8; Self::SIZE]>::read(buf)?.try_into()
     }
 }
 
@@ -172,10 +179,12 @@ impl Deref for Signature {
     }
 }
 
-impl From<p256::ecdsa::Signature> for Signature {
-    fn from(signature: p256::ecdsa::Signature) -> Self {
-        let raw = signature.to_bytes().into();
-        Self { raw, signature }
+impl TryFrom<p256::ecdsa::Signature> for Signature {
+    type Error = CodecError;
+
+    fn try_from(value: p256::ecdsa::Signature) -> Result<Self, Self::Error> {
+        let raw: [u8; _] = value.to_bytes().into();
+        Self::try_from(raw)
     }
 }
 
@@ -556,7 +565,7 @@ mod tests {
                     ecdsa_signature = normalized_sig;
                 }
             }
-            let signature = Signature::from(ecdsa_signature);
+            let signature = Signature::try_from(ecdsa_signature).unwrap();
             public_key.verify_inner(None, &message, &signature)
         } else {
             let tf_res = Signature::decode(sig.as_ref());

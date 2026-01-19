@@ -3,7 +3,7 @@ use crate::{
     types::{Epoch, Round, View},
     Block,
 };
-use commonware_codec::Codec;
+use commonware_codec::CodecShared;
 use commonware_cryptography::certificate::Scheme;
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Spawner, Storage};
 use commonware_storage::{
@@ -28,8 +28,9 @@ pub(crate) struct Config {
     pub partition_prefix: String,
     pub prunable_items_per_section: NonZero<u64>,
     pub replay_buffer: NonZeroUsize,
-    pub write_buffer: NonZeroUsize,
-    pub freezer_journal_buffer_pool: PoolRef,
+    pub key_write_buffer: NonZeroUsize,
+    pub value_write_buffer: NonZeroUsize,
+    pub key_buffer_pool: PoolRef,
 }
 
 /// Prunable archives for a single epoch.
@@ -181,7 +182,7 @@ impl<R: Rng + Spawner + Metrics + Clock + Storage, B: Block, S: Scheme> Manager<
     }
 
     /// Helper to initialize an archive.
-    async fn init_archive<T: Codec>(
+    async fn init_archive<T: CodecShared>(
         &self,
         epoch: Epoch,
         name: &str,
@@ -189,18 +190,25 @@ impl<R: Rng + Spawner + Metrics + Clock + Storage, B: Block, S: Scheme> Manager<
     ) -> prunable::Archive<TwoCap, R, B::Commitment, T> {
         let start = Instant::now();
         let cfg = prunable::Config {
-            partition: format!("{}-cache-{epoch}-{name}", self.cfg.partition_prefix),
             translator: TwoCap,
+            key_partition: format!("{}-cache-{epoch}-{name}-key", self.cfg.partition_prefix),
+            key_buffer_pool: self.cfg.key_buffer_pool.clone(),
+            value_partition: format!("{}-cache-{epoch}-{name}-value", self.cfg.partition_prefix),
             items_per_section: self.cfg.prunable_items_per_section,
             compression: None,
             codec_config,
-            buffer_pool: self.cfg.freezer_journal_buffer_pool.clone(),
             replay_buffer: self.cfg.replay_buffer,
-            write_buffer: self.cfg.write_buffer,
+            key_write_buffer: self.cfg.key_write_buffer,
+            value_write_buffer: self.cfg.value_write_buffer,
         };
-        let archive = prunable::Archive::init(self.context.with_label(name), cfg)
-            .await
-            .unwrap_or_else(|_| panic!("failed to initialize {name} archive"));
+        let archive = prunable::Archive::init(
+            self.context
+                .with_label(&format!("cache_{name}"))
+                .with_attribute("epoch", epoch),
+            cfg,
+        )
+        .await
+        .unwrap_or_else(|_| panic!("failed to initialize {name} archive"));
         info!(elapsed = ?start.elapsed(), "restored {name} archive");
         archive
     }

@@ -11,6 +11,9 @@ use thiserror::Error;
 pub mod immutable;
 pub mod prunable;
 
+#[cfg(all(test, feature = "arbitrary"))]
+mod conformance;
+
 /// Subject of a `get` or `has` operation.
 pub enum Identifier<'a, K: Array> {
     Index(u64),
@@ -37,12 +40,12 @@ pub enum Error {
 }
 
 /// A write-once key-value store where each key is associated with a unique index.
-pub trait Archive {
+pub trait Archive: Send {
     /// The type of the key.
     type Key: Array;
 
     /// The type of the value.
-    type Value: Codec;
+    type Value: Codec + Send;
 
     /// Store an item in [Archive]. Both indices and keys are assumed to both be globally unique.
     ///
@@ -53,7 +56,7 @@ pub trait Archive {
         index: u64,
         key: Self::Key,
         value: Self::Value,
-    ) -> impl Future<Output = Result<(), Error>>;
+    ) -> impl Future<Output = Result<(), Error>> + Send;
 
     /// Perform a [Archive::put] and [Archive::sync] in a single operation.
     fn put_sync(
@@ -61,7 +64,7 @@ pub trait Archive {
         index: u64,
         key: Self::Key,
         value: Self::Value,
-    ) -> impl Future<Output = Result<(), Error>> {
+    ) -> impl Future<Output = Result<(), Error>> + Send {
         async move {
             self.put(index, key, value).await?;
             self.sync().await
@@ -69,16 +72,16 @@ pub trait Archive {
     }
 
     /// Retrieve an item from [Archive].
-    fn get(
-        &self,
-        identifier: Identifier<'_, Self::Key>,
-    ) -> impl Future<Output = Result<Option<Self::Value>, Error>>;
+    fn get<'a>(
+        &'a self,
+        identifier: Identifier<'a, Self::Key>,
+    ) -> impl Future<Output = Result<Option<Self::Value>, Error>> + Send + use<'a, Self>;
 
     /// Check if an item exists in [Archive].
-    fn has(
-        &self,
-        identifier: Identifier<'_, Self::Key>,
-    ) -> impl Future<Output = Result<bool, Error>>;
+    fn has<'a>(
+        &'a self,
+        identifier: Identifier<'a, Self::Key>,
+    ) -> impl Future<Output = Result<bool, Error>> + Send + use<'a, Self>;
 
     /// Retrieve the end of the current range including `index` (inclusive) and
     /// the start of the next range after `index` (if it exists).
@@ -102,10 +105,10 @@ pub trait Archive {
     fn last_index(&self) -> Option<u64>;
 
     /// Sync all pending writes.
-    fn sync(&mut self) -> impl Future<Output = Result<(), Error>>;
+    fn sync(&mut self) -> impl Future<Output = Result<(), Error>> + Send;
 
     /// Remove all persistent data created by this [Archive].
-    fn destroy(self) -> impl Future<Output = Result<(), Error>>;
+    fn destroy(self) -> impl Future<Output = Result<(), Error>> + Send;
 }
 
 #[cfg(test)]
@@ -117,13 +120,16 @@ mod tests {
     use commonware_runtime::{
         buffer::PoolRef,
         deterministic::{self, Context},
-        Runner,
+        Metrics, Runner,
     };
-    use commonware_utils::{sequence::FixedBytes, NZUsize, NZU64};
+    use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
     use rand::Rng;
-    use std::{collections::BTreeMap, num::NonZeroUsize};
+    use std::{
+        collections::BTreeMap,
+        num::{NonZeroU16, NonZeroUsize},
+    };
 
-    const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
+    const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
 
     fn test_key(key: &str) -> FixedBytes<64> {
@@ -139,14 +145,16 @@ mod tests {
         compression: Option<u8>,
     ) -> impl Archive<Key = FixedBytes<64>, Value = i32> {
         let cfg = prunable::Config {
-            partition: "test".into(),
             translator: TwoCap,
+            key_partition: "test_key".into(),
+            key_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            value_partition: "test_value".into(),
             compression,
             codec_config: (),
             items_per_section: NZU64!(1024),
-            write_buffer: NZUsize!(1024),
+            key_write_buffer: NZUsize!(1024),
+            value_write_buffer: NZUsize!(1024),
             replay_buffer: NZUsize!(1024),
-            buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
         };
         prunable::Archive::init(context, cfg).await.unwrap()
     }
@@ -161,13 +169,16 @@ mod tests {
             freezer_table_initial_size: 64,
             freezer_table_resize_frequency: 2,
             freezer_table_resize_chunk_size: 32,
-            freezer_journal_partition: "test_journal".into(),
-            freezer_journal_target_size: 1024 * 1024,
-            freezer_journal_compression: compression,
-            freezer_journal_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            freezer_key_partition: "test_key".into(),
+            freezer_key_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            freezer_value_partition: "test_value".into(),
+            freezer_value_target_size: 1024 * 1024,
+            freezer_value_compression: compression,
             ordinal_partition: "test_ordinal".into(),
             items_per_section: NZU64!(1024),
-            write_buffer: NZUsize!(1024 * 1024),
+            freezer_key_write_buffer: NZUsize!(1024 * 1024),
+            freezer_value_write_buffer: NZUsize!(1024 * 1024),
+            ordinal_write_buffer: NZUsize!(1024 * 1024),
             replay_buffer: NZUsize!(1024 * 1024),
             codec_config: (),
         };
@@ -395,7 +406,7 @@ mod tests {
     {
         // Create and populate archive
         {
-            let mut archive = creator(context.clone(), compression).await;
+            let mut archive = creator(context.with_label("first"), compression).await;
 
             // Insert multiple keys
             let keys = vec![
@@ -417,7 +428,7 @@ mod tests {
 
         // Reopen and verify data
         {
-            let archive = creator(context, compression).await;
+            let archive = creator(context.with_label("second"), compression).await;
 
             // Verify all keys are still present
             let keys = vec![
@@ -484,7 +495,7 @@ mod tests {
     {
         let mut keys = BTreeMap::new();
         {
-            let mut archive = creator(context.clone(), compression).await;
+            let mut archive = creator(context.with_label("first"), compression).await;
 
             // Insert 100 keys with gaps
             let mut last_index = 0u64;
@@ -513,7 +524,7 @@ mod tests {
         }
 
         {
-            let archive = creator(context, compression).await;
+            let archive = creator(context.with_label("second"), compression).await;
             let sorted_indices: Vec<u64> = keys.keys().cloned().collect();
 
             // Check gap before the first element
@@ -608,7 +619,7 @@ mod tests {
         // Insert many keys
         let mut keys = BTreeMap::new();
         {
-            let mut archive = creator(context.clone(), compression).await;
+            let mut archive = creator(context.with_label("first"), compression).await;
             while keys.len() < num {
                 let index = keys.len() as u64;
                 let mut key = [0u8; 64];
@@ -648,7 +659,7 @@ mod tests {
 
         // Reinitialize and verify
         {
-            let archive = creator(context.clone(), compression).await;
+            let archive = creator(context.with_label("second"), compression).await;
 
             // Ensure all keys can be retrieved
             for (key, (index, data)) in &keys {
@@ -717,5 +728,62 @@ mod tests {
     #[test_traced]
     fn test_many_keys_immutable_large() {
         test_many_keys_determinism(create_immutable, None, 50_000);
+    }
+
+    fn assert_send<T: Send>(_: T) {}
+
+    #[allow(dead_code)]
+    fn assert_archive_futures_are_send<T: super::Archive>(
+        archive: &mut T,
+        key: T::Key,
+        value: T::Value,
+    ) where
+        T::Key: Clone,
+        T::Value: Clone,
+    {
+        assert_send(archive.put(1, key.clone(), value.clone()));
+        assert_send(archive.put_sync(2, key.clone(), value));
+        assert_send(archive.get(Identifier::Index(1)));
+        assert_send(archive.get(Identifier::Key(&key)));
+        assert_send(archive.has(Identifier::Index(1)));
+        assert_send(archive.has(Identifier::Key(&key)));
+        assert_send(archive.sync());
+    }
+
+    #[allow(dead_code)]
+    fn assert_archive_destroy_is_send<T: super::Archive>(archive: T) {
+        assert_send(archive.destroy());
+    }
+
+    #[allow(dead_code)]
+    fn assert_prunable_archive_futures_are_send(
+        archive: &mut prunable::Archive<TwoCap, Context, FixedBytes<64>, i32>,
+        key: FixedBytes<64>,
+        value: i32,
+    ) {
+        assert_archive_futures_are_send(archive, key, value);
+    }
+
+    #[allow(dead_code)]
+    fn assert_prunable_archive_destroy_is_send(
+        archive: prunable::Archive<TwoCap, Context, FixedBytes<64>, i32>,
+    ) {
+        assert_archive_destroy_is_send(archive);
+    }
+
+    #[allow(dead_code)]
+    fn assert_immutable_archive_futures_are_send(
+        archive: &mut immutable::Archive<Context, FixedBytes<64>, i32>,
+        key: FixedBytes<64>,
+        value: i32,
+    ) {
+        assert_archive_futures_are_send(archive, key, value);
+    }
+
+    #[allow(dead_code)]
+    fn assert_immutable_archive_destroy_is_send(
+        archive: immutable::Archive<Context, FixedBytes<64>, i32>,
+    ) {
+        assert_archive_destroy_is_send(archive);
     }
 }

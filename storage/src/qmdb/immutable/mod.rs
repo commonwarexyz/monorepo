@@ -85,7 +85,7 @@ pub struct Immutable<
     V: VariableValue,
     H: CHasher,
     T: Translator,
-    M: MerkleizationState<DigestOf<H>> = Merkleized<H>,
+    M: MerkleizationState<DigestOf<H>> + Send + Sync = Merkleized<H>,
     D: DurabilityState = Durable,
 > {
     /// Authenticated journal of operations.
@@ -112,7 +112,7 @@ impl<
         V: VariableValue,
         H: CHasher,
         T: Translator,
-        M: MerkleizationState<DigestOf<H>>,
+        M: MerkleizationState<DigestOf<H>> + Send + Sync,
         D: DurabilityState,
     > Immutable<E, K, V, H, T, M, D>
 {
@@ -461,7 +461,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: T
 
     /// Commit any pending operations to the database, ensuring their durability upon return from
     /// this function. Caller can associate an arbitrary `metadata` value with the commit.
-    /// Returns the committed database and the range of committed locations.
+    /// Returns the committed database and the range of committed locations. Note that even if no
+    /// operations were added since the last commit, this is a root-state changing operation.
     pub async fn commit(
         mut self,
         metadata: Option<V>,
@@ -504,7 +505,7 @@ impl<
         V: VariableValue,
         H: CHasher,
         T: Translator,
-        M: MerkleizationState<DigestOf<H>>,
+        M: MerkleizationState<DigestOf<H>> + Send + Sync,
         D: DurabilityState,
     > kv::Gettable for Immutable<E, K, V, H, T, M, D>
 {
@@ -523,7 +524,7 @@ impl<
         V: VariableValue,
         H: CHasher,
         T: Translator,
-        M: MerkleizationState<DigestOf<H>>,
+        M: MerkleizationState<DigestOf<H>> + Send + Sync,
         D: DurabilityState,
     > crate::qmdb::store::LogStore for Immutable<E, K, V, H, T, M, D>
 {
@@ -598,10 +599,11 @@ pub(super) mod test {
         deterministic::{self},
         Runner as _,
     };
-    use commonware_utils::{NZUsize, NZU64};
+    use commonware_utils::{NZUsize, NZU16, NZU64};
+    use std::num::NonZeroU16;
 
-    const PAGE_SIZE: usize = 77;
-    const PAGE_CACHE_SIZE: usize = 9;
+    const PAGE_SIZE: NonZeroU16 = NZU16!(77);
+    const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(9);
     const ITEMS_PER_SECTION: u64 = 5;
 
     pub(crate) fn db_config(
@@ -619,16 +621,15 @@ pub(super) mod test {
             log_write_buffer: NZUsize!(1024),
             translator: TwoCap,
             thread_pool: None,
-            buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+            buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
 
-    /// A type alias for the concrete [Immutable] type used in these unit tests.
-    type ImmutableTest = Immutable<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap>;
-
     /// Return an [Immutable] database initialized with a fixed config.
-    async fn open_db(context: deterministic::Context) -> ImmutableTest {
-        ImmutableTest::init(context, db_config("partition"))
+    async fn open_db(
+        context: deterministic::Context,
+    ) -> Immutable<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap> {
+        Immutable::init(context, db_config("partition"))
             .await
             .unwrap()
     }
@@ -637,7 +638,7 @@ pub(super) mod test {
     pub fn test_immutable_db_empty() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let db = open_db(context.clone()).await;
+            let db = open_db(context.with_label("first")).await;
             assert_eq!(db.op_count(), 1);
             assert_eq!(db.oldest_retained_loc(), Location::new_unchecked(0));
             assert!(db.get_metadata().await.unwrap().is_none());
@@ -649,7 +650,7 @@ pub(super) mod test {
             let mut db = db.into_mutable();
             db.set(k1, v1).await.unwrap();
             drop(db); // Simulate failed commit
-            let db = open_db(context.clone()).await;
+            let db = open_db(context.with_label("second")).await;
             assert_eq!(db.root(), root);
             assert_eq!(db.op_count(), 1);
 
@@ -661,7 +662,7 @@ pub(super) mod test {
             let root = db.root();
             drop(db);
 
-            let db = open_db(context.clone()).await;
+            let db = open_db(context.with_label("third")).await;
             assert_eq!(db.root(), root);
 
             db.destroy().await.unwrap();
@@ -673,7 +674,7 @@ pub(super) mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Build a db with 2 keys.
-            let db = open_db(context.clone()).await;
+            let db = open_db(context.with_label("first")).await;
 
             let k1 = Sha256::fill(1u8);
             let k2 = Sha256::fill(2u8);
@@ -725,7 +726,7 @@ pub(super) mod test {
 
             // Reopen, make sure state is restored to last commit point.
             drop(db); // Simulate failed commit
-            let db = open_db(context.clone()).await;
+            let db = open_db(context.with_label("second")).await;
             assert!(db.get(&k3).await.unwrap().is_none());
             assert_eq!(db.op_count(), 5);
             assert_eq!(db.root(), root);
@@ -743,7 +744,7 @@ pub(super) mod test {
         const ELEMENTS: u64 = 2_000;
         executor.start(|context| async move {
             let mut hasher = Standard::<Sha256>::new();
-            let db = open_db(context.clone()).await;
+            let db = open_db(context.with_label("first")).await;
             let mut db = db.into_mutable();
 
             for i in 0u64..ELEMENTS {
@@ -762,7 +763,7 @@ pub(super) mod test {
             let root = db.root();
             drop(db);
 
-            let db = open_db(context.clone()).await;
+            let db = open_db(context.with_label("second")).await;
             assert_eq!(root, db.root());
             assert_eq!(db.op_count(), ELEMENTS + 2);
             for i in 0u64..ELEMENTS {
@@ -795,7 +796,7 @@ pub(super) mod test {
         executor.start(|context| async move {
             // Insert 1000 keys then sync.
             const ELEMENTS: u64 = 1000;
-            let db = open_db(context.clone()).await;
+            let db = open_db(context.with_label("first")).await;
             let mut db = db.into_mutable();
 
             for i in 0u64..ELEMENTS {
@@ -825,14 +826,14 @@ pub(super) mod test {
 
             // Recovery should replay the log to regenerate the MMR.
             // op_count = 1002 (first batch + commit) + 1000 (second batch) + 1 (second commit) = 2003
-            let db = open_db(context.clone()).await;
+            let db = open_db(context.with_label("second")).await;
             assert_eq!(db.op_count(), 2003);
             let root = db.root();
             assert_ne!(root, halfway_root);
 
             // Drop & reopen could preserve the final commit.
             drop(db);
-            let db = open_db(context.clone()).await;
+            let db = open_db(context.with_label("third")).await;
             assert_eq!(db.op_count(), 2003);
             assert_eq!(db.root(), root);
 
@@ -844,7 +845,7 @@ pub(super) mod test {
     pub fn test_immutable_db_recovery_from_failed_log_sync() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut db = open_db(context.clone()).await.into_mutable();
+            let mut db = open_db(context.with_label("first")).await.into_mutable();
 
             // Insert a single key and then commit to create a first commit point.
             let k1 = Sha256::fill(1u8);
@@ -877,7 +878,7 @@ pub(super) mod test {
             drop(db);
 
             // Recovery should back up to previous commit point.
-            let db = open_db(context.clone()).await;
+            let db = open_db(context.with_label("second")).await;
             assert_eq!(db.op_count(), 3);
             let root = db.root();
             assert_eq!(root, first_commit_root);
@@ -892,7 +893,7 @@ pub(super) mod test {
         // Build a db with `ELEMENTS` key/value pairs then prune some of them.
         const ELEMENTS: u64 = 2_000;
         executor.start(|context| async move {
-            let db = open_db(context.clone()).await;
+            let db = open_db(context.with_label("first")).await;
             let mut db = db.into_mutable();
 
             for i in 1u64..ELEMENTS+1 {
@@ -932,7 +933,7 @@ pub(super) mod test {
             db.sync().await.unwrap();
             drop(db);
 
-            let mut db = open_db(context.clone()).await;
+            let mut db = open_db(context.with_label("second")).await;
             assert_eq!(root, db.root());
             assert_eq!(db.op_count(), ELEMENTS + 2);
             let oldest_retained_loc = db.oldest_retained_loc();
@@ -951,7 +952,7 @@ pub(super) mod test {
             // Confirm boundary persists across restart.
             db.sync().await.unwrap();
             drop(db);
-            let db = open_db(context.clone()).await;
+            let db = open_db(context.with_label("third")).await;
             let oldest_retained_loc = db.oldest_retained_loc();
             assert_eq!(
                 oldest_retained_loc,
@@ -985,7 +986,7 @@ pub(super) mod test {
     pub fn test_immutable_db_prune_beyond_commit() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut db = open_db(context.clone()).await;
+            let mut db = open_db(context.with_label("test")).await;
 
             // Test pruning empty database (no commits)
             let result = db.prune(Location::new_unchecked(1)).await;
@@ -1029,5 +1030,43 @@ pub(super) mod test {
 
             db.destroy().await.unwrap();
         });
+    }
+
+    use crate::{
+        kv::tests::{assert_gettable, assert_send},
+        qmdb::store::tests::{assert_log_store, assert_merkleized_store, assert_prunable_store},
+    };
+
+    type MerkleizedDb =
+        Immutable<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap, Merkleized<Sha256>>;
+    type MutableDb = Immutable<
+        deterministic::Context,
+        Digest,
+        Vec<u8>,
+        Sha256,
+        TwoCap,
+        Unmerkleized,
+        NonDurable,
+    >;
+
+    #[allow(dead_code)]
+    fn assert_merkleized_db_futures_are_send(db: &mut MerkleizedDb, key: Digest, loc: Location) {
+        assert_gettable(db, &key);
+        assert_log_store(db);
+        assert_prunable_store(db, loc);
+        assert_merkleized_store(db, loc);
+        assert_send(db.sync());
+    }
+
+    #[allow(dead_code)]
+    fn assert_mutable_db_futures_are_send(db: &mut MutableDb, key: Digest, value: Vec<u8>) {
+        assert_gettable(db, &key);
+        assert_log_store(db);
+        assert_send(db.set(key, value));
+    }
+
+    #[allow(dead_code)]
+    fn assert_mutable_db_commit_is_send(db: MutableDb) {
+        assert_send(db.commit(None));
     }
 }

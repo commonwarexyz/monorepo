@@ -3,7 +3,7 @@ use criterion::{criterion_group, BatchSize, Criterion};
 use rand::thread_rng;
 use std::hint::black_box;
 
-fn benchmark_combine_public_keys(c: &mut Criterion) {
+fn bench_combine_public_keys(c: &mut Criterion) {
     for n in [10, 100, 1000, 10000].into_iter() {
         c.bench_function(&format!("{}/pks={}", module_path!(), n), |b| {
             b.iter_batched(
@@ -29,5 +29,5 @@ fn benchmark_combine_public_keys(c: &mut Criterion) {
 criterion_group! {
     name = benches;
     config = Criterion::default().sample_size(10);
-    targets = benchmark_combine_public_keys
+    targets = bench_combine_public_keys
 }

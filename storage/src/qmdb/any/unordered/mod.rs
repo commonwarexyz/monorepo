@@ -19,7 +19,7 @@ use crate::{
     qmdb::any::states::{CleanAny, MerkleizedNonDurableAny, MutableAny, UnmerkleizedDurableAny},
     Persistable,
 };
-use commonware_codec::Codec;
+use commonware_codec::{Codec, CodecShared};
 use commonware_cryptography::{DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
@@ -41,7 +41,7 @@ impl<
         C: Contiguous<Item = Operation<K, V>>,
         I: Index<Value = Location>,
         H: Hasher,
-        M: MerkleizationState<DigestOf<H>>,
+        M: MerkleizationState<DigestOf<H>> + Send + Sync,
         D: DurabilityState,
     > Db<E, C, I, H, Update<K, V>, M, D>
 where
@@ -52,8 +52,9 @@ where
         &self,
         key: &K,
     ) -> Result<Option<(V::Value, Location)>, Error> {
-        let iter = self.snapshot.get(key);
-        for &loc in iter {
+        // Collect to avoid holding a borrow across await points (rust-lang/rust#100013).
+        let locs: Vec<Location> = self.snapshot.get(key).copied().collect();
+        for loc in locs {
             let op = self.log.read(loc).await?;
             match &op {
                 Operation::Update(Update(k, value)) => {
@@ -86,6 +87,7 @@ impl<
     > Db<E, C, I, H, Update<K, V>, Unmerkleized, NonDurable>
 where
     Operation<K, V>: Codec,
+    V::Value: Send + Sync,
 {
     /// Appends the given delete operation to the log, updating the snapshot and other state to
     /// reflect the deletion.
@@ -243,6 +245,7 @@ impl<
     > Db<E, C, I, H, Update<K, V>, Merkleized<H>, Durable>
 where
     Operation<K, V>: Codec,
+    V::Value: Send + Sync,
 {
     /// Returns an [Db] initialized directly from the given components. The log is
     /// replayed from `inactivity_floor_loc` to build the snapshot, and that value is used as the
@@ -274,13 +277,14 @@ impl<
         K: Array,
         V: ValueEncoding,
         C: Contiguous<Item = Operation<K, V>>,
-        I: Index<Value = Location>,
+        I: Index<Value = Location> + Send + Sync + 'static,
         H: Hasher,
-        M: MerkleizationState<DigestOf<H>>,
+        M: MerkleizationState<DigestOf<H>> + Send + Sync,
         D: DurabilityState,
     > kv::Gettable for Db<E, C, I, H, Update<K, V>, M, D>
 where
     Operation<K, V>: Codec,
+    V::Value: Send + Sync,
 {
     type Key = K;
     type Value = V::Value;
@@ -296,11 +300,12 @@ impl<
         K: Array,
         V: ValueEncoding,
         C: MutableContiguous<Item = Operation<K, V>>,
-        I: Index<Value = Location>,
+        I: Index<Value = Location> + Send + Sync + 'static,
         H: Hasher,
     > kv::Updatable for Db<E, C, I, H, Update<K, V>, Unmerkleized, NonDurable>
 where
     Operation<K, V>: Codec,
+    V::Value: Send + Sync,
 {
     async fn update(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
         self.update(key, value).await
@@ -312,11 +317,11 @@ impl<
         K: Array,
         V: ValueEncoding,
         C: MutableContiguous<Item = Operation<K, V>>,
-        I: Index<Value = Location>,
+        I: Index<Value = Location> + Send + Sync + 'static,
         H: Hasher,
     > kv::Deletable for Db<E, C, I, H, Update<K, V>, Unmerkleized, NonDurable>
 where
-    Operation<K, V>: Codec,
+    Operation<K, V>: CodecShared,
 {
     async fn delete(&mut self, key: Self::Key) -> Result<bool, Self::Error> {
         self.delete(key).await
@@ -329,14 +334,14 @@ where
     K: Array,
     V: ValueEncoding,
     C: MutableContiguous<Item = Operation<K, V>>,
-    I: Index<Value = Location>,
+    I: Index<Value = Location> + Send + Sync + 'static,
     H: Hasher,
-    Operation<K, V>: Codec,
+    Operation<K, V>: CodecShared,
 {
-    async fn write_batch(
-        &mut self,
-        iter: impl Iterator<Item = (K, Option<V::Value>)>,
-    ) -> Result<(), Error> {
+    async fn write_batch<'a, Iter>(&'a mut self, iter: Iter) -> Result<(), Error>
+    where
+        Iter: Iterator<Item = (K, Option<V::Value>)> + Send + 'a,
+    {
         self.write_batch_with_callback(iter, |_, _| {}).await
     }
 }
@@ -348,9 +353,9 @@ where
     K: Array,
     V: ValueEncoding,
     C: MutableContiguous<Item = Operation<K, V>> + Persistable<Error = crate::journal::Error>,
-    I: Index<Value = Location>,
+    I: Index<Value = Location> + Send + Sync + 'static,
     H: Hasher,
-    Operation<K, V>: Codec,
+    Operation<K, V>: CodecShared,
 {
     type Mutable = Db<E, C, I, H, Update<K, V>, Unmerkleized, NonDurable>;
 
@@ -367,9 +372,10 @@ where
     K: Array,
     V: ValueEncoding,
     C: MutableContiguous<Item = Operation<K, V>> + Persistable<Error = crate::journal::Error>,
-    I: Index<Value = Location>,
+    I: Index<Value = Location> + Send + Sync + 'static,
     H: Hasher,
     Operation<K, V>: Codec,
+    V::Value: Send + Sync,
 {
     type Digest = H::Digest;
     type Operation = Operation<K, V>;
@@ -393,19 +399,12 @@ where
     K: Array,
     V: ValueEncoding,
     C: MutableContiguous<Item = Operation<K, V>> + Persistable<Error = crate::journal::Error>,
-    I: Index<Value = Location>,
+    I: Index<Value = Location> + Send + Sync + 'static,
     H: Hasher,
     Operation<K, V>: Codec,
+    V::Value: Send + Sync,
 {
     type Mutable = Db<E, C, I, H, Update<K, V>, Unmerkleized, NonDurable>;
-    type Durable = Db<E, C, I, H, Update<K, V>, Merkleized<H>, Durable>;
-
-    async fn commit(
-        self,
-        metadata: Option<V::Value>,
-    ) -> Result<(Self::Durable, core::ops::Range<Location>), Error> {
-        self.commit(metadata).await
-    }
 
     fn into_mutable(self) -> Self::Mutable {
         self.into_mutable()
@@ -419,9 +418,10 @@ where
     K: Array,
     V: ValueEncoding,
     C: MutableContiguous<Item = Operation<K, V>> + Persistable<Error = crate::journal::Error>,
-    I: Index<Value = Location>,
+    I: Index<Value = Location> + Send + Sync + 'static,
     H: Hasher,
     Operation<K, V>: Codec,
+    V::Value: Send + Sync,
 {
     type Digest = H::Digest;
     type Operation = Operation<K, V>;
@@ -500,11 +500,21 @@ pub(super) mod test {
             .unwrap()
     }
 
+    /// Test an empty database.
+    ///
+    /// The `reopen_db` closure receives a unique index for each invocation to enable
+    /// unique metric labels (the deterministic runtime panics on duplicates).
     async fn test_any_db_empty<D: TestableAnyDb<Digest>>(
-        context: Context,
         mut db: D,
-        reopen_db: impl Fn(Context) -> Pin<Box<dyn std::future::Future<Output = D> + Send>>,
+        mut reopen_db: impl FnMut(usize) -> Pin<Box<dyn std::future::Future<Output = D> + Send>>,
     ) {
+        let mut reopen_counter = 0usize;
+        let mut next_db = || {
+            let idx = reopen_counter;
+            reopen_counter += 1;
+            reopen_db(idx)
+        };
+
         assert_eq!(db.op_count(), 1);
         assert!(matches!(db.prune(db.inactivity_floor_loc()).await, Ok(())));
         assert!(db.get_metadata().await.unwrap().is_none());
@@ -518,31 +528,25 @@ pub(super) mod test {
         let mut db = db.into_mutable();
         db.update(k1, v1).await.unwrap();
         drop(db);
-        let db = reopen_db(context.clone()).await;
+        let db = next_db().await;
         assert_eq!(db.op_count(), 1);
         assert_eq!(db.root(), empty_root);
 
         // Test calling commit on an empty db.
         let metadata = Sha256::fill(3u8);
         let db = db.into_mutable();
-        // into_merkleized() -> MerkleizedNonDurable, then commit() -> MerkleizedDurable
-        let (mut db, range) = db
-            .into_merkleized()
-            .await
-            .unwrap()
-            .commit(Some(metadata))
-            .await
-            .unwrap();
+        let (db, range) = db.commit(Some(metadata)).await.unwrap();
         assert_eq!(range.start, 1);
         assert_eq!(range.end, 2);
         assert_eq!(db.op_count(), 2); // another commit op added
         assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
+        let mut db = db.into_merkleized().await.unwrap();
         let root = db.root();
         assert!(matches!(db.prune(db.inactivity_floor_loc()).await, Ok(())));
 
         // Re-opening the DB without a clean shutdown should still recover the correct state.
         drop(db);
-        let db = reopen_db(context.clone()).await;
+        let db = next_db().await;
         assert_eq!(db.op_count(), 2);
         assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
         assert_eq!(db.root(), root);
@@ -552,13 +556,7 @@ pub(super) mod test {
         let mut db = db.into_mutable();
         db.update(k1, v1).await.unwrap();
         for _ in 1..100 {
-            let (clean_db, _) = db
-                .into_merkleized()
-                .await
-                .unwrap()
-                .commit(None)
-                .await
-                .unwrap();
+            let (clean_db, _) = db.commit(None).await.unwrap();
             // Distance should equal 3 after the second commit, with inactivity_floor
             // referencing the previous commit operation.
             assert!(clean_db.op_count() - clean_db.inactivity_floor_loc() <= 3);
@@ -568,16 +566,11 @@ pub(super) mod test {
 
         // Confirm the inactivity floor is raised to tip when the db becomes empty.
         db.delete(k1).await.unwrap();
-        let (db, _) = db
-            .into_merkleized()
-            .await
-            .unwrap()
-            .commit(None)
-            .await
-            .unwrap();
+        let (db, _) = db.commit(None).await.unwrap();
         assert!(db.is_empty());
         assert_eq!(db.op_count() - 1, db.inactivity_floor_loc());
 
+        let db = db.into_merkleized().await.unwrap();
         db.destroy().await.unwrap();
     }
 
@@ -585,8 +578,13 @@ pub(super) mod test {
     fn test_any_fixed_db_empty() {
         let executor = Runner::default();
         executor.start(|context| async move {
-            let db = open_fixed_db(context.clone()).await;
-            test_any_db_empty(context, db, |ctx| Box::pin(open_fixed_db(ctx))).await;
+            let db = open_fixed_db(context.with_label("db_0")).await;
+            let ctx = context.clone();
+            test_any_db_empty(db, move |idx| {
+                let ctx = ctx.with_label(&format!("db_{}", idx + 1));
+                Box::pin(open_fixed_db(ctx))
+            })
+            .await;
         });
     }
 
@@ -594,8 +592,13 @@ pub(super) mod test {
     fn test_any_variable_db_empty() {
         let executor = Runner::default();
         executor.start(|context| async move {
-            let db = open_variable_db(context.clone()).await;
-            test_any_db_empty(context, db, |ctx| Box::pin(open_variable_db(ctx))).await;
+            let db = open_variable_db(context.with_label("db_0")).await;
+            let ctx = context.clone();
+            test_any_db_empty(db, move |idx| {
+                let ctx = ctx.with_label(&format!("db_{}", idx + 1));
+                Box::pin(open_variable_db(ctx))
+            })
+            .await;
         });
     }
 
@@ -657,7 +660,7 @@ pub(super) mod test {
         let root = db.root();
         db.sync().await.unwrap();
         drop(db);
-        let db = reopen_db(context.clone()).await;
+        let db = reopen_db(context.with_label("reopened")).await;
         assert_eq!(root, db.root());
         assert_eq!(db.op_count(), Location::new_unchecked(1957));
         assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(838));
@@ -686,11 +689,20 @@ pub(super) mod test {
     }
 
     /// Test basic CRUD and commit behavior.
+    ///
+    /// The `reopen_db` closure receives a unique index for each invocation to enable
+    /// unique metric labels (the deterministic runtime panics on duplicates).
     pub(crate) async fn test_any_db_basic<D: TestableAnyDb<Digest>>(
-        context: Context,
         db: D,
-        reopen_db: impl Fn(Context) -> Pin<Box<dyn Future<Output = D> + Send>>,
+        mut reopen_db: impl FnMut(usize) -> Pin<Box<dyn Future<Output = D> + Send>>,
     ) {
+        let mut reopen_counter = 0usize;
+        let mut next_db = || {
+            let idx = reopen_counter;
+            reopen_counter += 1;
+            reopen_db(idx)
+        };
+
         let mut db = db.into_mutable();
 
         // Build a db with 2 keys and make sure updates and deletions of those keys work as
@@ -768,7 +780,7 @@ pub(super) mod test {
         assert_eq!(db.op_count(), 14);
         let root = db.root();
         drop(db);
-        let db = reopen_db(context.clone()).await;
+        let db = next_db().await;
         assert_eq!(db.op_count(), 14);
         assert_eq!(db.root(), root);
         let mut db = db.into_mutable();
@@ -793,7 +805,7 @@ pub(super) mod test {
         // Confirm close/reopen gets us back to the same state.
         assert_eq!(db.op_count(), 23);
         let root = db.root();
-        let db = reopen_db(context.clone()).await;
+        let db = next_db().await;
 
         assert_eq!(db.root(), root);
         assert_eq!(db.op_count(), 23);
@@ -824,8 +836,13 @@ pub(super) mod test {
     fn test_any_fixed_db_basic() {
         let executor = Runner::default();
         executor.start(|context| async move {
-            let db = open_fixed_db(context.clone()).await;
-            test_any_db_basic(context, db, |ctx| Box::pin(open_fixed_db(ctx))).await;
+            let db = open_fixed_db(context.with_label("db_0")).await;
+            let ctx = context.clone();
+            test_any_db_basic(db, move |idx| {
+                let ctx = ctx.with_label(&format!("db_{}", idx + 1));
+                Box::pin(open_fixed_db(ctx))
+            })
+            .await;
         });
     }
 
@@ -833,8 +850,13 @@ pub(super) mod test {
     fn test_any_variable_db_basic() {
         let executor = Runner::default();
         executor.start(|context| async move {
-            let db = open_variable_db(context.clone()).await;
-            test_any_db_basic(context, db, |ctx| Box::pin(open_variable_db(ctx))).await;
+            let db = open_variable_db(context.with_label("db_0")).await;
+            let ctx = context.clone();
+            test_any_db_basic(db, move |idx| {
+                let ctx = ctx.with_label(&format!("db_{}", idx + 1));
+                Box::pin(open_variable_db(ctx))
+            })
+            .await;
         });
     }
 
@@ -866,7 +888,7 @@ pub(super) mod test {
         let op_count = db.op_count();
         let inactivity_floor_loc = db.inactivity_floor_loc();
 
-        let db = reopen_db(context.clone()).await;
+        let db = reopen_db(context.with_label("reopen1")).await;
         assert_eq!(db.op_count(), op_count);
         assert_eq!(db.inactivity_floor_loc(), inactivity_floor_loc);
         assert_eq!(db.root(), root);
@@ -877,7 +899,7 @@ pub(super) mod test {
             let v = make_value((i + 1) * 10000);
             db.update(k, v).await.unwrap();
         }
-        let db = reopen_db(context.clone()).await;
+        let db = reopen_db(context.with_label("reopen2")).await;
         assert_eq!(db.op_count(), op_count);
         assert_eq!(db.inactivity_floor_loc(), inactivity_floor_loc);
         assert_eq!(db.root(), root);
@@ -888,7 +910,7 @@ pub(super) mod test {
             let v = make_value((i + 1) * 10000);
             dirty.update(k, v).await.unwrap();
         }
-        let db = reopen_db(context.clone()).await;
+        let db = reopen_db(context.with_label("reopen3")).await;
         assert_eq!(db.op_count(), op_count);
         assert_eq!(db.root(), root);
 
@@ -900,7 +922,7 @@ pub(super) mod test {
                 db.update(k, v).await.unwrap();
             }
         }
-        let db = reopen_db(context.clone()).await;
+        let db = reopen_db(context.with_label("reopen4")).await;
         assert_eq!(db.op_count(), op_count);
         assert_eq!(db.root(), root);
 
@@ -911,7 +933,7 @@ pub(super) mod test {
             db.update(k, v).await.unwrap();
         }
         let _ = db.commit(None).await.unwrap();
-        let db = reopen_db(context.clone()).await;
+        let db = reopen_db(context.with_label("reopen5")).await;
         assert!(db.op_count() > op_count);
         assert_ne!(db.inactivity_floor_loc(), inactivity_floor_loc);
         assert_ne!(db.root(), root);
@@ -928,7 +950,7 @@ pub(super) mod test {
     ) {
         let root = db.root();
 
-        let db = reopen_db(context.clone()).await;
+        let db = reopen_db(context.with_label("reopen1")).await;
         assert_eq!(db.op_count(), 1);
         assert_eq!(db.root(), root);
 
@@ -938,7 +960,7 @@ pub(super) mod test {
             let v = make_value((i + 1) * 10000);
             db.update(k, v).await.unwrap();
         }
-        let db = reopen_db(context.clone()).await;
+        let db = reopen_db(context.with_label("reopen2")).await;
         assert_eq!(db.op_count(), 1);
         assert_eq!(db.root(), root);
 
@@ -949,7 +971,7 @@ pub(super) mod test {
             db.update(k, v).await.unwrap();
         }
         drop(db);
-        let db = reopen_db(context.clone()).await;
+        let db = reopen_db(context.with_label("reopen3")).await;
         assert_eq!(db.op_count(), 1);
         assert_eq!(db.root(), root);
 
@@ -962,7 +984,7 @@ pub(super) mod test {
             }
         }
         drop(db);
-        let db = reopen_db(context.clone()).await;
+        let db = reopen_db(context.with_label("reopen4")).await;
         assert_eq!(db.op_count(), 1);
         assert_eq!(db.root(), root);
 
@@ -981,7 +1003,7 @@ pub(super) mod test {
             .await
             .unwrap();
         drop(db);
-        let db = reopen_db(context.clone()).await;
+        let db = reopen_db(context.with_label("reopen5")).await;
         assert!(db.op_count() > 1);
         assert_ne!(db.root(), root);
 
@@ -1023,7 +1045,7 @@ pub(super) mod test {
 
         let root = db.root();
         drop(db);
-        let db = reopen_db(context.clone()).await;
+        let db = reopen_db(context.with_label("reopened")).await;
         assert_eq!(root, db.root());
         assert_eq!(db.get_metadata().await.unwrap(), None);
         assert!(db.get(&k).await.unwrap().is_none());

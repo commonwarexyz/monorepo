@@ -215,7 +215,7 @@ mod tests {
     use super::*;
     use commonware_codec::{DecodeExt, Encode};
     use commonware_consensus::{
-        simplex::{scheme::bls12381_threshold, types::Proposal},
+        simplex::types::Proposal,
         types::{Epoch, Round, View},
     };
     use commonware_cryptography::{
@@ -242,20 +242,15 @@ mod tests {
 
     fn new_finalization() -> Finalization<Scheme, Sha256Digest> {
         let scalar = group::Scalar::random(&mut test_rng());
-        let mut proposal_signature = <MinSig as Variant>::Signature::generator();
-        proposal_signature *= &scalar;
-        let mut seed_signature = <MinSig as Variant>::Signature::generator();
-        seed_signature *= &scalar;
+        let mut signature = <MinSig as Variant>::Signature::generator();
+        signature *= &scalar;
         Finalization {
             proposal: Proposal {
                 round: Round::new(Epoch::new(333), View::new(12345)),
                 parent: View::new(54321),
                 payload: new_digest(),
             },
-            certificate: bls12381_threshold::Signature::<MinSig> {
-                vote_signature: proposal_signature,
-                seed_signature,
-            },
+            certificate: signature,
         }
     }
 

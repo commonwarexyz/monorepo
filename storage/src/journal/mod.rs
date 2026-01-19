@@ -29,8 +29,6 @@ pub enum Error {
     InvalidBlobName(String),
     #[error("invalid blob size: index={0} size={1}")]
     InvalidBlobSize(u64, u64),
-    #[error("checksum mismatch: expected={0} actual={1}")]
-    ChecksumMismatch(u32, u32),
     #[error("item too large: size={0}")]
     ItemTooLarge(usize),
     #[error("already pruned to section: {0}")]
@@ -55,8 +53,12 @@ pub enum Error {
     CompressionFailed,
     #[error("decompression failed")]
     DecompressionFailed,
+    #[error("value too large (> u32::MAX)")]
+    ValueTooLarge,
     #[error("corruption detected: {0}")]
     Corruption(String),
     #[error("invalid configuration: {0}")]
     InvalidConfiguration(String),
+    #[error("checksum mismatch: expected={0}, found={1}")]
+    ChecksumMismatch(u32, u32),
 }

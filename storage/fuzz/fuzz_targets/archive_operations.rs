@@ -9,9 +9,9 @@ use commonware_storage::{
     },
     translator::EightCap,
 };
-use commonware_utils::{sequence::FixedBytes, NZUsize, NZU64};
+use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
 use libfuzzer_sys::fuzz_target;
-use std::num::NonZeroUsize;
+use std::num::{NonZeroU16, NonZeroUsize};
 
 type Key = FixedBytes<16>;
 type Value = FixedBytes<32>;
@@ -40,7 +40,7 @@ struct FuzzInput {
     operations: Vec<ArchiveOperation>,
 }
 
-const PAGE_SIZE: NonZeroUsize = NZUsize!(555);
+const PAGE_SIZE: NonZeroU16 = NZU16!(456);
 const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(100);
 
 fn fuzz(data: FuzzInput) {
@@ -48,14 +48,16 @@ fn fuzz(data: FuzzInput) {
 
     runner.start(|context| async move {
         let cfg = Config {
-            partition: "test".into(),
-            items_per_section: NZU64!(1024),
-            write_buffer: NZUsize!(1024),
             translator: EightCap,
-            replay_buffer: NZUsize!(1024*1024),
+            key_partition: "test_key".into(),
+            key_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            value_partition: "test_value".into(),
+            items_per_section: NZU64!(1024),
+            key_write_buffer: NZUsize!(1024),
+            value_write_buffer: NZUsize!(1024),
+            replay_buffer: NZUsize!(1024 * 1024),
             compression: None,
             codec_config: (),
-            buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
         };
 
         let mut archive = Archive::<_, _, Key, Value>::init(context.clone(), cfg.clone()).await.expect("init failed");

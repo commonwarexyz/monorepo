@@ -23,10 +23,11 @@ hashbrown.workspace = true
 num-bigint = { workspace = true, optional = true }
 num-integer = { workspace = true, optional = true }
 num-rational = { workspace = true, optional = true }
-num-traits = { workspace = true, optional = true }
+num-traits.workspace = true
 pin-project.workspace = true
 rand.workspace = true
 thiserror.workspace = true
+zeroize.workspace = true
 
 [target.'cfg(target_arch = "wasm32")'.dependencies.getrandom]
 # Enable "js" feature when WASM is target
@@ -35,8 +36,10 @@ features = ["js"]
 
 [dev-dependencies]
 commonware-conformance.workspace = true
+commonware-macros.workspace = true
 criterion.workspace = true
 num-bigint = { workspace = true, default-features = false }
+proptest.workspace = true
 rstest.workspace = true
 
 [features]
@@ -50,10 +53,11 @@ std = [
 	"num-bigint?/std",
 	"num-integer",
 	"num-rational",
-	"num-traits",
+	"num-traits/std",
 	"rand/std",
 	"rand/std_rng",
 	"thiserror/std",
+	"zeroize/std",
 ]
 arbitrary = [
 	"commonware-codec/arbitrary",

@@ -1,8 +1,12 @@
-use crate::simplex::{
-    scheme::Scheme,
-    types::{Attributable, Finalize, Notarize, Nullify, Proposal, Subject, Vote},
+use crate::{
+    simplex::{
+        scheme::Scheme,
+        types::{Attributable, Finalize, Notarize, Nullify, Proposal, Subject, Vote},
+    },
+    types::Participant,
 };
 use commonware_cryptography::{certificate::Verification, Digest};
+use commonware_parallel::Strategy;
 use rand_core::CryptoRngCore;
 
 /// `Verifier` is a utility for tracking and verifying consensus messages.
@@ -28,7 +32,7 @@ pub struct Verifier<S: Scheme<D>, D: Digest> {
     quorum: usize,
 
     /// Current leader index.
-    leader: Option<u32>,
+    leader: Option<Participant>,
     /// Proposal associated with the current leader.
     leader_proposal: Option<Proposal<D>>,
 
@@ -90,7 +94,7 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
     }
 
     /// Returns the leader proposal, if it is set.
-    pub fn get_leader_proposal(&self) -> Option<(u32, Proposal<D>)> {
+    pub fn get_leader_proposal(&self) -> Option<(Participant, Proposal<D>)> {
         self.leader_proposal
             .as_ref()
             .map(|proposal| (self.leader.unwrap(), proposal.clone()))
@@ -170,7 +174,7 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
     /// If a notarize vote from the leader has already been received, this will
     /// also set the leader's proposal, filtering out any pending votes for other
     /// proposals.
-    pub fn set_leader(&mut self, leader: u32) {
+    pub fn set_leader(&mut self, leader: Participant) {
         assert!(self.leader.is_none());
         self.leader = Some(leader);
 
@@ -193,11 +197,12 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
     ///
     /// A tuple containing:
     /// * A `Vec<Vote<S, D>>` of successfully verified [Vote::Notarize] messages.
-    /// * A `Vec<u32>` of signer indices for whom verification failed.
+    /// * A `Vec<Participant>` of signer indices for whom verification failed.
     pub fn verify_notarizes<R: CryptoRngCore>(
         &mut self,
         rng: &mut R,
-    ) -> (Vec<Vote<S, D>>, Vec<u32>) {
+        strategy: &impl Strategy,
+    ) -> (Vec<Vote<S, D>>, Vec<Participant>) {
         let notarizes = std::mem::take(&mut self.notarizes);
 
         // Early return if there are no notarizes to verify
@@ -216,6 +221,7 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
             rng,
             Subject::Notarize { proposal },
             attestations,
+            strategy,
         );
 
         self.notarizes_verified += verified.len();
@@ -285,11 +291,12 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
     ///
     /// A tuple containing:
     /// * A `Vec<Vote<S, D>>` of successfully verified [Vote::Nullify] messages.
-    /// * A `Vec<u32>` of signer indices for whom verification failed.
+    /// * A `Vec<Participant>` of signer indices for whom verification failed.
     pub fn verify_nullifies<R: CryptoRngCore>(
         &mut self,
         rng: &mut R,
-    ) -> (Vec<Vote<S, D>>, Vec<u32>) {
+        strategy: &impl Strategy,
+    ) -> (Vec<Vote<S, D>>, Vec<Participant>) {
         let nullifies = std::mem::take(&mut self.nullifies);
 
         // Early return if there are no nullifies to verify
@@ -303,6 +310,7 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
             rng,
             Subject::Nullify { round },
             nullifies.into_iter().map(|nullify| nullify.attestation),
+            strategy,
         );
 
         self.nullifies_verified += verified.len();
@@ -359,11 +367,12 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
     ///
     /// A tuple containing:
     /// * A `Vec<Vote<S, D>>` of successfully verified [Vote::Finalize] messages.
-    /// * A `Vec<u32>` of signer indices for whom verification failed.
+    /// * A `Vec<Participant>` of signer indices for whom verification failed.
     pub fn verify_finalizes<R: CryptoRngCore>(
         &mut self,
         rng: &mut R,
-    ) -> (Vec<Vote<S, D>>, Vec<u32>) {
+        strategy: &impl Strategy,
+    ) -> (Vec<Vote<S, D>>, Vec<Participant>) {
         let finalizes = std::mem::take(&mut self.finalizes);
 
         // Early return if there are no finalizes to verify
@@ -382,6 +391,7 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
             rng,
             Subject::Finalize { proposal },
             attestations,
+            strategy,
         );
 
         self.finalizes_verified += verified.len();
@@ -444,7 +454,13 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
 mod tests {
     use super::*;
     use crate::{
-        simplex::scheme::{bls12381_multisig, bls12381_threshold, ed25519, secp256r1},
+        simplex::scheme::{
+            bls12381_multisig,
+            bls12381_threshold::{
+                standard as bls12381_threshold_std, vrf as bls12381_threshold_vrf,
+            },
+            ed25519, secp256r1,
+        },
         types::{Epoch, Round, View},
     };
     use commonware_cryptography::{
@@ -453,7 +469,8 @@ mod tests {
         ed25519::PublicKey,
         sha256::Digest as Sha256,
     };
-    use commonware_utils::{quorum_from_slice, test_rng};
+    use commonware_parallel::Sequential;
+    use commonware_utils::{test_rng, Faults, N3f1};
     use rand::rngs::StdRng;
 
     const NAMESPACE: &[u8] = b"test";
@@ -497,7 +514,7 @@ mod tests {
     {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 5);
-        let quorum = quorum_from_slice(&schemes);
+        let quorum = N3f1::quorum_from_slice(&schemes);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
 
         let round = Round::new(Epoch::new(0), View::new(1));
@@ -548,8 +565,10 @@ mod tests {
 
     #[test]
     fn test_add_notarize() {
-        add_notarize(bls12381_threshold::fixture::<MinSig, _>);
-        add_notarize(bls12381_threshold::fixture::<MinPk, _>);
+        add_notarize(bls12381_threshold_vrf::fixture::<MinSig, _>);
+        add_notarize(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        add_notarize(bls12381_threshold_std::fixture::<MinSig, _>);
+        add_notarize(bls12381_threshold_std::fixture::<MinPk, _>);
         add_notarize(bls12381_multisig::fixture::<MinSig, _>);
         add_notarize(bls12381_multisig::fixture::<MinPk, _>);
         add_notarize(ed25519::fixture);
@@ -563,7 +582,7 @@ mod tests {
     {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 5);
-        let quorum = quorum_from_slice(&schemes);
+        let quorum = N3f1::quorum_from_slice(&schemes);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
 
         let round = Round::new(Epoch::new(0), View::new(1));
@@ -590,8 +609,10 @@ mod tests {
 
     #[test]
     fn test_set_leader() {
-        set_leader(bls12381_threshold::fixture::<MinSig, _>);
-        set_leader(bls12381_threshold::fixture::<MinPk, _>);
+        set_leader(bls12381_threshold_vrf::fixture::<MinSig, _>);
+        set_leader(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        set_leader(bls12381_threshold_std::fixture::<MinSig, _>);
+        set_leader(bls12381_threshold_std::fixture::<MinPk, _>);
         set_leader(bls12381_multisig::fixture::<MinSig, _>);
         set_leader(bls12381_multisig::fixture::<MinPk, _>);
         set_leader(ed25519::fixture);
@@ -605,7 +626,7 @@ mod tests {
     {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 5);
-        let quorum = quorum_from_slice(&schemes);
+        let quorum = N3f1::quorum_from_slice(&schemes);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let round = Round::new(Epoch::new(0), View::new(1));
         let notarizes: Vec<_> = schemes
@@ -629,7 +650,7 @@ mod tests {
         assert!(verifier.ready_notarizes());
         assert_eq!(verifier.notarizes.len(), 4);
 
-        let (verified_bulk, failed_bulk) = verifier.verify_notarizes(&mut rng);
+        let (verified_bulk, failed_bulk) = verifier.verify_notarizes(&mut rng, &Sequential);
         assert_eq!(verified_bulk.len(), 4);
         assert!(failed_bulk.is_empty());
         assert_eq!(verifier.notarizes_verified, 4);
@@ -642,7 +663,7 @@ mod tests {
         let mut faulty_vote = create_notarize(&schemes[1], round2, View::new(1), 10);
         verifier2.set_leader(leader_vote.signer());
         verifier2.add(Vote::Notarize(leader_vote.clone()), false);
-        faulty_vote.attestation.signer = (schemes.len() as u32) + 10;
+        faulty_vote.attestation.signer = Participant::from_usize(schemes.len() + 10);
         verifier2.add(Vote::Notarize(faulty_vote.clone()), false);
 
         for scheme in schemes.iter().skip(2).take(quorum as usize - 2) {
@@ -653,7 +674,7 @@ mod tests {
         }
         assert!(verifier2.ready_notarizes());
 
-        let (verified_second, failed_second) = verifier2.verify_notarizes(&mut rng);
+        let (verified_second, failed_second) = verifier2.verify_notarizes(&mut rng, &Sequential);
         assert!(verified_second
             .iter()
             .any(|v| matches!(v, Vote::Notarize(ref n) if n == &leader_vote)));
@@ -662,8 +683,10 @@ mod tests {
 
     #[test]
     fn test_ready_and_verify_notarizes() {
-        ready_and_verify_notarizes(bls12381_threshold::fixture::<MinSig, _>);
-        ready_and_verify_notarizes(bls12381_threshold::fixture::<MinPk, _>);
+        ready_and_verify_notarizes(bls12381_threshold_vrf::fixture::<MinSig, _>);
+        ready_and_verify_notarizes(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        ready_and_verify_notarizes(bls12381_threshold_std::fixture::<MinSig, _>);
+        ready_and_verify_notarizes(bls12381_threshold_std::fixture::<MinPk, _>);
         ready_and_verify_notarizes(bls12381_multisig::fixture::<MinSig, _>);
         ready_and_verify_notarizes(bls12381_multisig::fixture::<MinPk, _>);
         ready_and_verify_notarizes(ed25519::fixture);
@@ -677,7 +700,7 @@ mod tests {
     {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 5);
-        let quorum = quorum_from_slice(&schemes);
+        let quorum = N3f1::quorum_from_slice(&schemes);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let round = Round::new(Epoch::new(0), View::new(1));
         let nullify = create_nullify(&schemes[0], round);
@@ -693,8 +716,10 @@ mod tests {
 
     #[test]
     fn test_add_nullify() {
-        add_nullify(bls12381_threshold::fixture::<MinSig, _>);
-        add_nullify(bls12381_threshold::fixture::<MinPk, _>);
+        add_nullify(bls12381_threshold_vrf::fixture::<MinSig, _>);
+        add_nullify(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        add_nullify(bls12381_threshold_std::fixture::<MinSig, _>);
+        add_nullify(bls12381_threshold_std::fixture::<MinPk, _>);
         add_nullify(bls12381_multisig::fixture::<MinSig, _>);
         add_nullify(bls12381_multisig::fixture::<MinPk, _>);
         add_nullify(ed25519::fixture);
@@ -708,7 +733,7 @@ mod tests {
     {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 5);
-        let quorum = quorum_from_slice(&schemes);
+        let quorum = N3f1::quorum_from_slice(&schemes);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let round = Round::new(Epoch::new(0), View::new(1));
         let nullifies: Vec<_> = schemes
@@ -728,7 +753,7 @@ mod tests {
         assert!(verifier.ready_nullifies());
         assert_eq!(verifier.nullifies.len(), 3);
 
-        let (verified, failed) = verifier.verify_nullifies(&mut rng);
+        let (verified, failed) = verifier.verify_nullifies(&mut rng, &Sequential);
         assert_eq!(verified.len(), 3);
         assert!(failed.is_empty());
         assert_eq!(verifier.nullifies_verified, 4);
@@ -738,8 +763,10 @@ mod tests {
 
     #[test]
     fn test_ready_and_verify_nullifies() {
-        ready_and_verify_nullifies(bls12381_threshold::fixture::<MinSig, _>);
-        ready_and_verify_nullifies(bls12381_threshold::fixture::<MinPk, _>);
+        ready_and_verify_nullifies(bls12381_threshold_vrf::fixture::<MinSig, _>);
+        ready_and_verify_nullifies(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        ready_and_verify_nullifies(bls12381_threshold_std::fixture::<MinSig, _>);
+        ready_and_verify_nullifies(bls12381_threshold_std::fixture::<MinPk, _>);
         ready_and_verify_nullifies(bls12381_multisig::fixture::<MinSig, _>);
         ready_and_verify_nullifies(bls12381_multisig::fixture::<MinPk, _>);
         ready_and_verify_nullifies(ed25519::fixture);
@@ -753,7 +780,7 @@ mod tests {
     {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 5);
-        let quorum = quorum_from_slice(&schemes);
+        let quorum = N3f1::quorum_from_slice(&schemes);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let round = Round::new(Epoch::new(0), View::new(1));
         let finalize_a = create_finalize(&schemes[0], round, View::new(0), 1);
@@ -784,8 +811,10 @@ mod tests {
 
     #[test]
     fn test_add_finalize() {
-        add_finalize(bls12381_threshold::fixture::<MinSig, _>);
-        add_finalize(bls12381_threshold::fixture::<MinPk, _>);
+        add_finalize(bls12381_threshold_vrf::fixture::<MinSig, _>);
+        add_finalize(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        add_finalize(bls12381_threshold_std::fixture::<MinSig, _>);
+        add_finalize(bls12381_threshold_std::fixture::<MinPk, _>);
         add_finalize(bls12381_multisig::fixture::<MinSig, _>);
         add_finalize(bls12381_multisig::fixture::<MinPk, _>);
         add_finalize(ed25519::fixture);
@@ -799,7 +828,7 @@ mod tests {
     {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 5);
-        let quorum = quorum_from_slice(&schemes);
+        let quorum = N3f1::quorum_from_slice(&schemes);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let round = Round::new(Epoch::new(0), View::new(1));
         let finalizes: Vec<_> = schemes
@@ -824,7 +853,7 @@ mod tests {
         verifier.add(Vote::Finalize(finalizes[3].clone()), false);
         assert!(verifier.ready_finalizes());
 
-        let (verified, failed) = verifier.verify_finalizes(&mut rng);
+        let (verified, failed) = verifier.verify_finalizes(&mut rng, &Sequential);
         assert_eq!(verified.len(), 3);
         assert!(failed.is_empty());
         assert_eq!(verifier.finalizes_verified, 4);
@@ -834,8 +863,10 @@ mod tests {
 
     #[test]
     fn test_ready_and_verify_finalizes() {
-        ready_and_verify_finalizes(bls12381_threshold::fixture::<MinSig, _>);
-        ready_and_verify_finalizes(bls12381_threshold::fixture::<MinPk, _>);
+        ready_and_verify_finalizes(bls12381_threshold_vrf::fixture::<MinSig, _>);
+        ready_and_verify_finalizes(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        ready_and_verify_finalizes(bls12381_threshold_std::fixture::<MinSig, _>);
+        ready_and_verify_finalizes(bls12381_threshold_std::fixture::<MinPk, _>);
         ready_and_verify_finalizes(bls12381_multisig::fixture::<MinSig, _>);
         ready_and_verify_finalizes(bls12381_multisig::fixture::<MinPk, _>);
         ready_and_verify_finalizes(ed25519::fixture);
@@ -849,7 +880,7 @@ mod tests {
     {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 3);
-        let quorum = quorum_from_slice(&schemes);
+        let quorum = N3f1::quorum_from_slice(&schemes);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let round = Round::new(Epoch::new(0), View::new(1));
         let proposal_a = Proposal::new(round, View::new(0), sample_digest(10));
@@ -878,8 +909,10 @@ mod tests {
 
     #[test]
     fn test_leader_proposal_filters_messages() {
-        leader_proposal_filters_messages(bls12381_threshold::fixture::<MinSig, _>);
-        leader_proposal_filters_messages(bls12381_threshold::fixture::<MinPk, _>);
+        leader_proposal_filters_messages(bls12381_threshold_vrf::fixture::<MinSig, _>);
+        leader_proposal_filters_messages(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        leader_proposal_filters_messages(bls12381_threshold_std::fixture::<MinSig, _>);
+        leader_proposal_filters_messages(bls12381_threshold_std::fixture::<MinPk, _>);
         leader_proposal_filters_messages(bls12381_multisig::fixture::<MinSig, _>);
         leader_proposal_filters_messages(bls12381_multisig::fixture::<MinPk, _>);
         leader_proposal_filters_messages(ed25519::fixture);
@@ -894,20 +927,32 @@ mod tests {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 3);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), 3);
-        verifier.set_leader(0);
-        verifier.set_leader(1);
+        verifier.set_leader(Participant::new(0));
+        verifier.set_leader(Participant::new(1));
     }
 
     #[test]
     #[should_panic(expected = "self.leader.is_none()")]
     fn test_set_leader_twice_panics_bls_threshold_minsig() {
-        set_leader_twice_panics(bls12381_threshold::fixture::<MinSig, _>);
+        set_leader_twice_panics(bls12381_threshold_vrf::fixture::<MinSig, _>);
     }
 
     #[test]
     #[should_panic(expected = "self.leader.is_none()")]
     fn test_set_leader_twice_panics_bls_threshold_minpk() {
-        set_leader_twice_panics(bls12381_threshold::fixture::<MinPk, _>);
+        set_leader_twice_panics(bls12381_threshold_vrf::fixture::<MinPk, _>);
+    }
+
+    #[test]
+    #[should_panic(expected = "self.leader.is_none()")]
+    fn test_set_leader_twice_panics_bls_threshold_std_minsig() {
+        set_leader_twice_panics(bls12381_threshold_std::fixture::<MinSig, _>);
+    }
+
+    #[test]
+    #[should_panic(expected = "self.leader.is_none()")]
+    fn test_set_leader_twice_panics_bls_threshold_std_minpk() {
+        set_leader_twice_panics(bls12381_threshold_std::fixture::<MinPk, _>);
     }
 
     #[test]
@@ -941,7 +986,7 @@ mod tests {
     {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 5);
-        let quorum = quorum_from_slice(&schemes);
+        let quorum = N3f1::quorum_from_slice(&schemes);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let round = Round::new(Epoch::new(0), View::new(1));
         let leader_vote = create_notarize(&schemes[0], round, View::new(0), 1);
@@ -963,15 +1008,17 @@ mod tests {
         }
         assert!(verifier.ready_notarizes(), "Should be ready at quorum");
 
-        let (verified, _) = verifier.verify_notarizes(&mut rng);
+        let (verified, _) = verifier.verify_notarizes(&mut rng, &Sequential);
         assert_eq!(verified.len(), quorum as usize);
         assert!(!verifier.ready_notarizes());
     }
 
     #[test]
     fn test_notarizes_wait_for_quorum() {
-        notarizes_wait_for_quorum(bls12381_threshold::fixture::<MinSig, _>);
-        notarizes_wait_for_quorum(bls12381_threshold::fixture::<MinPk, _>);
+        notarizes_wait_for_quorum(bls12381_threshold_vrf::fixture::<MinSig, _>);
+        notarizes_wait_for_quorum(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        notarizes_wait_for_quorum(bls12381_threshold_std::fixture::<MinSig, _>);
+        notarizes_wait_for_quorum(bls12381_threshold_std::fixture::<MinPk, _>);
         notarizes_wait_for_quorum(bls12381_multisig::fixture::<MinSig, _>);
         notarizes_wait_for_quorum(bls12381_multisig::fixture::<MinPk, _>);
         notarizes_wait_for_quorum(ed25519::fixture);
@@ -985,7 +1032,7 @@ mod tests {
     {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 3);
-        let quorum = quorum_from_slice(&schemes);
+        let quorum = N3f1::quorum_from_slice(&schemes);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let round = Round::new(Epoch::new(0), View::new(1));
 
@@ -1013,8 +1060,10 @@ mod tests {
 
     #[test]
     fn test_ready_notarizes_without_leader_or_proposal() {
-        ready_notarizes_without_leader(bls12381_threshold::fixture::<MinSig, _>);
-        ready_notarizes_without_leader(bls12381_threshold::fixture::<MinPk, _>);
+        ready_notarizes_without_leader(bls12381_threshold_vrf::fixture::<MinSig, _>);
+        ready_notarizes_without_leader(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        ready_notarizes_without_leader(bls12381_threshold_std::fixture::<MinSig, _>);
+        ready_notarizes_without_leader(bls12381_threshold_std::fixture::<MinPk, _>);
         ready_notarizes_without_leader(bls12381_multisig::fixture::<MinSig, _>);
         ready_notarizes_without_leader(bls12381_multisig::fixture::<MinPk, _>);
         ready_notarizes_without_leader(ed25519::fixture);
@@ -1028,7 +1077,7 @@ mod tests {
     {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 3);
-        let quorum = quorum_from_slice(&schemes);
+        let quorum = N3f1::quorum_from_slice(&schemes);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let round = Round::new(Epoch::new(0), View::new(1));
         let finalizes: Vec<_> = schemes
@@ -1055,8 +1104,10 @@ mod tests {
 
     #[test]
     fn test_ready_finalizes_without_leader_or_proposal() {
-        ready_finalizes_without_leader(bls12381_threshold::fixture::<MinSig, _>);
-        ready_finalizes_without_leader(bls12381_threshold::fixture::<MinPk, _>);
+        ready_finalizes_without_leader(bls12381_threshold_vrf::fixture::<MinSig, _>);
+        ready_finalizes_without_leader(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        ready_finalizes_without_leader(bls12381_threshold_std::fixture::<MinSig, _>);
+        ready_finalizes_without_leader(bls12381_threshold_std::fixture::<MinPk, _>);
         ready_finalizes_without_leader(bls12381_multisig::fixture::<MinSig, _>);
         ready_finalizes_without_leader(bls12381_multisig::fixture::<MinPk, _>);
         ready_finalizes_without_leader(ed25519::fixture);
@@ -1070,7 +1121,7 @@ mod tests {
     {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 3);
-        let quorum = quorum_from_slice(&schemes);
+        let quorum = N3f1::quorum_from_slice(&schemes);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let round = Round::new(Epoch::new(0), View::new(1));
         let leader_proposal = Proposal::new(round, View::new(0), sample_digest(1));
@@ -1081,8 +1132,10 @@ mod tests {
 
     #[test]
     fn test_verify_notarizes_empty_pending_when_forced() {
-        verify_notarizes_empty(bls12381_threshold::fixture::<MinSig, _>);
-        verify_notarizes_empty(bls12381_threshold::fixture::<MinPk, _>);
+        verify_notarizes_empty(bls12381_threshold_vrf::fixture::<MinSig, _>);
+        verify_notarizes_empty(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        verify_notarizes_empty(bls12381_threshold_std::fixture::<MinSig, _>);
+        verify_notarizes_empty(bls12381_threshold_std::fixture::<MinPk, _>);
         verify_notarizes_empty(bls12381_multisig::fixture::<MinSig, _>);
         verify_notarizes_empty(bls12381_multisig::fixture::<MinPk, _>);
         verify_notarizes_empty(ed25519::fixture);
@@ -1096,11 +1149,11 @@ mod tests {
     {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 3);
-        let quorum = quorum_from_slice(&schemes);
+        let quorum = N3f1::quorum_from_slice(&schemes);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         assert!(verifier.nullifies.is_empty());
         assert!(!verifier.ready_nullifies());
-        let (verified, failed) = verifier.verify_nullifies(&mut rng);
+        let (verified, failed) = verifier.verify_nullifies(&mut rng, &Sequential);
         assert!(verified.is_empty());
         assert!(failed.is_empty());
         assert_eq!(verifier.nullifies_verified, 0);
@@ -1108,8 +1161,10 @@ mod tests {
 
     #[test]
     fn test_verify_nullifies_empty_pending() {
-        verify_nullifies_empty(bls12381_threshold::fixture::<MinSig, _>);
-        verify_nullifies_empty(bls12381_threshold::fixture::<MinPk, _>);
+        verify_nullifies_empty(bls12381_threshold_vrf::fixture::<MinSig, _>);
+        verify_nullifies_empty(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        verify_nullifies_empty(bls12381_threshold_std::fixture::<MinSig, _>);
+        verify_nullifies_empty(bls12381_threshold_std::fixture::<MinPk, _>);
         verify_nullifies_empty(bls12381_multisig::fixture::<MinSig, _>);
         verify_nullifies_empty(bls12381_multisig::fixture::<MinPk, _>);
         verify_nullifies_empty(ed25519::fixture);
@@ -1123,12 +1178,12 @@ mod tests {
     {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 3);
-        let quorum = quorum_from_slice(&schemes);
+        let quorum = N3f1::quorum_from_slice(&schemes);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
-        verifier.set_leader(0);
+        verifier.set_leader(Participant::new(0));
         assert!(verifier.finalizes.is_empty());
         assert!(!verifier.ready_finalizes());
-        let (verified, failed) = verifier.verify_finalizes(&mut rng);
+        let (verified, failed) = verifier.verify_finalizes(&mut rng, &Sequential);
         assert!(verified.is_empty());
         assert!(failed.is_empty());
         assert_eq!(verifier.finalizes_verified, 0);
@@ -1136,8 +1191,10 @@ mod tests {
 
     #[test]
     fn test_verify_finalizes_empty_pending() {
-        verify_finalizes_empty(bls12381_threshold::fixture::<MinSig, _>);
-        verify_finalizes_empty(bls12381_threshold::fixture::<MinPk, _>);
+        verify_finalizes_empty(bls12381_threshold_vrf::fixture::<MinSig, _>);
+        verify_finalizes_empty(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        verify_finalizes_empty(bls12381_threshold_std::fixture::<MinSig, _>);
+        verify_finalizes_empty(bls12381_threshold_std::fixture::<MinPk, _>);
         verify_finalizes_empty(bls12381_multisig::fixture::<MinSig, _>);
         verify_finalizes_empty(bls12381_multisig::fixture::<MinPk, _>);
         verify_finalizes_empty(ed25519::fixture);
@@ -1151,7 +1208,7 @@ mod tests {
     {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 5);
-        let quorum = quorum_from_slice(&schemes);
+        let quorum = N3f1::quorum_from_slice(&schemes);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let round = Round::new(Epoch::new(0), View::new(1));
 
@@ -1180,7 +1237,7 @@ mod tests {
             }
         }
 
-        let (verified, failed) = verifier.verify_notarizes(&mut rng);
+        let (verified, failed) = verifier.verify_notarizes(&mut rng, &Sequential);
         assert_eq!(verified.len(), quorum as usize - 1);
         assert!(failed.is_empty());
         assert_eq!(verifier.notarizes_verified, quorum as usize);
@@ -1189,8 +1246,10 @@ mod tests {
 
     #[test]
     fn test_ready_notarizes_exact_quorum() {
-        ready_notarizes_exact_quorum(bls12381_threshold::fixture::<MinSig, _>);
-        ready_notarizes_exact_quorum(bls12381_threshold::fixture::<MinPk, _>);
+        ready_notarizes_exact_quorum(bls12381_threshold_vrf::fixture::<MinSig, _>);
+        ready_notarizes_exact_quorum(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        ready_notarizes_exact_quorum(bls12381_threshold_std::fixture::<MinSig, _>);
+        ready_notarizes_exact_quorum(bls12381_threshold_std::fixture::<MinPk, _>);
         ready_notarizes_exact_quorum(bls12381_multisig::fixture::<MinSig, _>);
         ready_notarizes_exact_quorum(bls12381_multisig::fixture::<MinPk, _>);
         ready_notarizes_exact_quorum(ed25519::fixture);
@@ -1204,7 +1263,7 @@ mod tests {
     {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 5);
-        let quorum = quorum_from_slice(&schemes);
+        let quorum = N3f1::quorum_from_slice(&schemes);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let round = Round::new(Epoch::new(0), View::new(1));
 
@@ -1229,8 +1288,10 @@ mod tests {
 
     #[test]
     fn test_ready_nullifies_exact_quorum() {
-        ready_nullifies_exact_quorum(bls12381_threshold::fixture::<MinSig, _>);
-        ready_nullifies_exact_quorum(bls12381_threshold::fixture::<MinPk, _>);
+        ready_nullifies_exact_quorum(bls12381_threshold_vrf::fixture::<MinSig, _>);
+        ready_nullifies_exact_quorum(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        ready_nullifies_exact_quorum(bls12381_threshold_std::fixture::<MinSig, _>);
+        ready_nullifies_exact_quorum(bls12381_threshold_std::fixture::<MinPk, _>);
         ready_nullifies_exact_quorum(bls12381_multisig::fixture::<MinSig, _>);
         ready_nullifies_exact_quorum(bls12381_multisig::fixture::<MinPk, _>);
         ready_nullifies_exact_quorum(ed25519::fixture);
@@ -1244,7 +1305,7 @@ mod tests {
     {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 5);
-        let quorum = quorum_from_slice(&schemes);
+        let quorum = N3f1::quorum_from_slice(&schemes);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let round = Round::new(Epoch::new(0), View::new(1));
         let leader_finalize = create_finalize(&schemes[0], round, View::new(0), 1);
@@ -1274,8 +1335,10 @@ mod tests {
 
     #[test]
     fn test_ready_finalizes_exact_quorum() {
-        ready_finalizes_exact_quorum(bls12381_threshold::fixture::<MinSig, _>);
-        ready_finalizes_exact_quorum(bls12381_threshold::fixture::<MinPk, _>);
+        ready_finalizes_exact_quorum(bls12381_threshold_vrf::fixture::<MinSig, _>);
+        ready_finalizes_exact_quorum(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        ready_finalizes_exact_quorum(bls12381_threshold_std::fixture::<MinSig, _>);
+        ready_finalizes_exact_quorum(bls12381_threshold_std::fixture::<MinPk, _>);
         ready_finalizes_exact_quorum(bls12381_multisig::fixture::<MinSig, _>);
         ready_finalizes_exact_quorum(bls12381_multisig::fixture::<MinPk, _>);
         ready_finalizes_exact_quorum(ed25519::fixture);
@@ -1289,7 +1352,7 @@ mod tests {
     {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 5);
-        let quorum = quorum_from_slice(&schemes);
+        let quorum = N3f1::quorum_from_slice(&schemes);
         assert!(
             schemes.len() > quorum as usize,
             "test requires more validators than the quorum"
@@ -1326,8 +1389,14 @@ mod tests {
 
     #[test]
     fn test_ready_notarizes_quorum_already_met_by_verified() {
-        ready_notarizes_quorum_already_met_by_verified(bls12381_threshold::fixture::<MinSig, _>);
-        ready_notarizes_quorum_already_met_by_verified(bls12381_threshold::fixture::<MinPk, _>);
+        ready_notarizes_quorum_already_met_by_verified(
+            bls12381_threshold_vrf::fixture::<MinSig, _>,
+        );
+        ready_notarizes_quorum_already_met_by_verified(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        ready_notarizes_quorum_already_met_by_verified(
+            bls12381_threshold_std::fixture::<MinSig, _>,
+        );
+        ready_notarizes_quorum_already_met_by_verified(bls12381_threshold_std::fixture::<MinPk, _>);
         ready_notarizes_quorum_already_met_by_verified(bls12381_multisig::fixture::<MinSig, _>);
         ready_notarizes_quorum_already_met_by_verified(bls12381_multisig::fixture::<MinPk, _>);
         ready_notarizes_quorum_already_met_by_verified(ed25519::fixture);
@@ -1341,7 +1410,7 @@ mod tests {
     {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 5);
-        let quorum = quorum_from_slice(&schemes);
+        let quorum = N3f1::quorum_from_slice(&schemes);
         assert!(
             schemes.len() > quorum as usize,
             "test requires more validators than the quorum"
@@ -1370,8 +1439,14 @@ mod tests {
 
     #[test]
     fn test_ready_nullifies_quorum_already_met_by_verified() {
-        ready_nullifies_quorum_already_met_by_verified(bls12381_threshold::fixture::<MinSig, _>);
-        ready_nullifies_quorum_already_met_by_verified(bls12381_threshold::fixture::<MinPk, _>);
+        ready_nullifies_quorum_already_met_by_verified(
+            bls12381_threshold_vrf::fixture::<MinSig, _>,
+        );
+        ready_nullifies_quorum_already_met_by_verified(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        ready_nullifies_quorum_already_met_by_verified(
+            bls12381_threshold_std::fixture::<MinSig, _>,
+        );
+        ready_nullifies_quorum_already_met_by_verified(bls12381_threshold_std::fixture::<MinPk, _>);
         ready_nullifies_quorum_already_met_by_verified(bls12381_multisig::fixture::<MinSig, _>);
         ready_nullifies_quorum_already_met_by_verified(bls12381_multisig::fixture::<MinPk, _>);
         ready_nullifies_quorum_already_met_by_verified(ed25519::fixture);
@@ -1385,7 +1460,7 @@ mod tests {
     {
         let mut rng = test_rng();
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 5);
-        let quorum = quorum_from_slice(&schemes);
+        let quorum = N3f1::quorum_from_slice(&schemes);
         assert!(
             schemes.len() > quorum as usize,
             "test requires more validators than the quorum"
@@ -1422,8 +1497,14 @@ mod tests {
 
     #[test]
     fn test_ready_finalizes_quorum_already_met_by_verified() {
-        ready_finalizes_quorum_already_met_by_verified(bls12381_threshold::fixture::<MinSig, _>);
-        ready_finalizes_quorum_already_met_by_verified(bls12381_threshold::fixture::<MinPk, _>);
+        ready_finalizes_quorum_already_met_by_verified(
+            bls12381_threshold_vrf::fixture::<MinSig, _>,
+        );
+        ready_finalizes_quorum_already_met_by_verified(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        ready_finalizes_quorum_already_met_by_verified(
+            bls12381_threshold_std::fixture::<MinSig, _>,
+        );
+        ready_finalizes_quorum_already_met_by_verified(bls12381_threshold_std::fixture::<MinPk, _>);
         ready_finalizes_quorum_already_met_by_verified(bls12381_multisig::fixture::<MinSig, _>);
         ready_finalizes_quorum_already_met_by_verified(bls12381_multisig::fixture::<MinPk, _>);
         ready_finalizes_quorum_already_met_by_verified(ed25519::fixture);

@@ -58,6 +58,7 @@ use crate::{
     DirtyAuthenticatedBitMap,
 };
 use commonware_cryptography::{Digest, DigestOf};
+use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::NZUsize;
 use core::num::NonZeroUsize;
 use futures::{pin_mut, StreamExt as _};
@@ -402,9 +403,13 @@ where
     /// # Panics
     ///
     /// Panics if there is not at least one active operation above the inactivity floor.
-    pub(crate) async fn raise_floor_with_bitmap<D: Digest, const N: usize>(
+    pub(crate) async fn raise_floor_with_bitmap<
+        E: Storage + Clock + Metrics,
+        D: Digest,
+        const N: usize,
+    >(
         &mut self,
-        status: &mut DirtyAuthenticatedBitMap<D, N>,
+        status: &mut DirtyAuthenticatedBitMap<E, D, N>,
         mut inactivity_floor_loc: Location,
     ) -> Result<Location, Error>
     where

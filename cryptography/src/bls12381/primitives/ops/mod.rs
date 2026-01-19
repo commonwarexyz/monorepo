@@ -23,7 +23,7 @@ pub mod batch;
 pub mod threshold;
 
 use super::{
-    group::{self, Scalar, DST},
+    group::{Private, DST},
     variant::Variant,
     Error,
 };
@@ -34,15 +34,13 @@ use commonware_math::algebra::{CryptoGroup, HashToGroup, Random};
 use commonware_utils::union_unique;
 
 /// Computes the public key from the private key.
-pub fn compute_public<V: Variant>(private: &Scalar) -> V::Public {
-    V::Public::generator() * private
+pub fn compute_public<V: Variant>(private: &Private) -> V::Public {
+    private.expose(|scalar| V::Public::generator() * scalar)
 }
 
 /// Returns a new keypair derived from the provided randomness.
-pub fn keypair<R: rand_core::CryptoRngCore, V: Variant>(
-    rng: &mut R,
-) -> (group::Private, V::Public) {
-    let private = group::Private::random(rng);
+pub fn keypair<R: rand_core::CryptoRngCore, V: Variant>(rng: &mut R) -> (Private, V::Public) {
+    let private = Private::random(rng);
     let public = compute_public::<V>(&private);
     (private, public)
 }
@@ -60,8 +58,8 @@ pub fn hash_with_namespace<V: Variant>(dst: DST, namespace: &[u8], message: &[u8
 }
 
 /// Signs the provided message with the private key.
-pub fn sign<V: Variant>(private: &Scalar, dst: DST, message: &[u8]) -> V::Signature {
-    hash::<V>(dst, message) * private
+pub fn sign<V: Variant>(private: &Private, dst: DST, message: &[u8]) -> V::Signature {
+    private.expose(|scalar| hash::<V>(dst, message) * scalar)
 }
 
 /// Verifies the signature with the provided public key.
@@ -82,7 +80,7 @@ pub fn verify<V: Variant>(
 /// Signatures produced by this function are deterministic and are safe
 /// to use in a consensus-critical context.
 pub fn sign_message<V: Variant>(
-    private: &group::Private,
+    private: &Private,
     namespace: &[u8],
     message: &[u8],
 ) -> V::Signature {
@@ -110,14 +108,12 @@ pub fn verify_message<V: Variant>(
 }
 
 /// Generates a proof of possession for the private key.
-pub fn sign_proof_of_possession<V: Variant>(
-    private: &group::Private,
-    namespace: &[u8],
-) -> V::Signature {
+pub fn sign_proof_of_possession<V: Variant>(private: &Private, namespace: &[u8]) -> V::Signature {
     // Get public key
     let public = compute_public::<V>(private);
+    let hm = hash_with_namespace::<V>(V::PROOF_OF_POSSESSION, namespace, &public.encode());
 
-    hash_with_namespace::<V>(V::PROOF_OF_POSSESSION, namespace, &public.encode()) * private
+    private.expose(|scalar| hm * scalar)
 }
 
 /// Verifies a proof of possession for the provided public key.
@@ -135,7 +131,7 @@ pub fn verify_proof_of_possession<V: Variant>(
 mod tests {
     use super::*;
     use crate::bls12381::primitives::{
-        group::{self, G1_MESSAGE, G2_MESSAGE},
+        group::{G1_MESSAGE, G2_MESSAGE},
         variant::{MinPk, MinSig},
     };
     use blst::BLST_ERROR;
@@ -143,7 +139,6 @@ mod tests {
     use commonware_math::algebra::CryptoGroup;
     use commonware_parallel::Sequential;
     use commonware_utils::{from_hex_formatted, test_rng, union_unique};
-    use rand::rngs::OsRng;
     use rstest::rstest;
 
     fn codec<V: Variant>() {
@@ -151,7 +146,7 @@ mod tests {
         let (private_bytes, public_bytes) = (private.encode(), public.encode());
 
         let (private_decoded, public_decoded) = (
-            group::Private::decode(private_bytes.clone()).unwrap(),
+            Private::decode(private_bytes.clone()).unwrap(),
             V::Public::decode(public_bytes.clone()).unwrap(),
         );
 
@@ -298,8 +293,8 @@ mod tests {
         let mut signatures = Vec::new();
         for line in MIN_SIG_TESTS.lines() {
             let parts: Vec<_> = line.split(':').collect();
-            let private = from_hex_formatted(parts[0]).unwrap();
-            let private = Scalar::read(&mut private.as_ref()).unwrap();
+            let private_bytes = from_hex_formatted(parts[0]).unwrap();
+            let private = Private::read(&mut private_bytes.as_ref()).unwrap();
             let message = from_hex_formatted(parts[1]).unwrap();
             let signature = from_hex_formatted(parts[2]).unwrap();
             let mut signature =
@@ -319,11 +314,14 @@ mod tests {
             assert!(verify::<MinSig>(&public, DST, &message, &signature).is_err());
         }
 
-        assert!(MinSig::batch_verify(&mut OsRng, &publics, &hms, &signatures, &Sequential).is_ok());
+        assert!(
+            MinSig::batch_verify(&mut test_rng(), &publics, &hms, &signatures, &Sequential).is_ok()
+        );
 
         signatures[0] += &<MinSig as Variant>::Signature::generator();
         assert!(
-            MinSig::batch_verify(&mut OsRng, &publics, &hms, &signatures, &Sequential).is_err()
+            MinSig::batch_verify(&mut test_rng(), &publics, &hms, &signatures, &Sequential)
+                .is_err()
         );
     }
 
@@ -339,8 +337,8 @@ mod tests {
         let mut signatures = Vec::new();
         for line in MIN_PK_TESTS.lines() {
             let parts: Vec<_> = line.split(':').collect();
-            let private = from_hex_formatted(parts[0]).unwrap();
-            let private = Scalar::read(&mut private.as_ref()).unwrap();
+            let private_bytes = from_hex_formatted(parts[0]).unwrap();
+            let private = Private::read(&mut private_bytes.as_ref()).unwrap();
             let message = from_hex_formatted(parts[1]).unwrap();
             let signature = from_hex_formatted(parts[2]).unwrap();
             let mut signature =
@@ -360,17 +358,21 @@ mod tests {
             assert!(verify::<MinPk>(&public, DST, &message, &signature).is_err());
         }
 
-        assert!(MinPk::batch_verify(&mut OsRng, &publics, &hms, &signatures, &Sequential).is_ok());
+        assert!(
+            MinPk::batch_verify(&mut test_rng(), &publics, &hms, &signatures, &Sequential).is_ok()
+        );
 
         signatures[0] += &<MinPk as Variant>::Signature::generator();
-        assert!(MinPk::batch_verify(&mut OsRng, &publics, &hms, &signatures, &Sequential).is_err());
+        assert!(
+            MinPk::batch_verify(&mut test_rng(), &publics, &hms, &signatures, &Sequential).is_err()
+        );
     }
 
     fn parse_sign_vector(
         private_key: &str,
         msg: &str,
         signature: &str,
-    ) -> (group::Private, Vec<u8>, <MinPk as Variant>::Signature) {
+    ) -> (Private, Vec<u8>, <MinPk as Variant>::Signature) {
         (
             parse_private_key(private_key).unwrap(),
             commonware_utils::from_hex_formatted(msg).unwrap(),
@@ -378,9 +380,9 @@ mod tests {
         )
     }
 
-    fn parse_private_key(private_key: &str) -> Result<group::Private, CodecError> {
+    fn parse_private_key(private_key: &str) -> Result<Private, CodecError> {
         let bytes = commonware_utils::from_hex_formatted(private_key).unwrap();
-        group::Private::decode(bytes.as_ref())
+        Private::decode(bytes.as_ref())
     }
 
     fn parse_public_key(public_key: &str) -> Result<<MinPk as Variant>::Public, CodecError> {
@@ -428,11 +430,7 @@ mod tests {
     #[case(vector_sign_8())]
     #[case(vector_sign_9())]
     fn test_eth_sign(
-        #[case] (private_key, message, expected): (
-            group::Private,
-            Vec<u8>,
-            <MinPk as Variant>::Signature,
-        ),
+        #[case] (private_key, message, expected): (Private, Vec<u8>, <MinPk as Variant>::Signature),
     ) {
         let signature = sign::<MinPk>(&private_key, MinPk::MESSAGE, &message);
         assert_eq!(signature, expected);
@@ -590,7 +588,7 @@ mod tests {
     }
 
     // sign_case_8cd3d4d0d9a5b265
-    fn vector_sign_1() -> (group::Private, Vec<u8>, <MinPk as Variant>::Signature) {
+    fn vector_sign_1() -> (Private, Vec<u8>, <MinPk as Variant>::Signature) {
         parse_sign_vector(
             "0x263dbd792f5b1be47ed85f8938c0f29586af0d3ac7b977f21c278fe1462040e3",
             "0x5656565656565656565656565656565656565656565656565656565656565656",
@@ -599,7 +597,7 @@ mod tests {
     }
 
     // sign_case_11b8c7cad5238946
-    fn vector_sign_2() -> (group::Private, Vec<u8>, <MinPk as Variant>::Signature) {
+    fn vector_sign_2() -> (Private, Vec<u8>, <MinPk as Variant>::Signature) {
         parse_sign_vector(
             "0x47b8192d77bf871b62e87859d653922725724a5c031afeabc60bcef5ff665138",
             "0x0000000000000000000000000000000000000000000000000000000000000000",
@@ -608,7 +606,7 @@ mod tests {
     }
 
     // sign_case_84d45c9c7cca6b92
-    fn vector_sign_3() -> (group::Private, Vec<u8>, <MinPk as Variant>::Signature) {
+    fn vector_sign_3() -> (Private, Vec<u8>, <MinPk as Variant>::Signature) {
         parse_sign_vector(
             "0x328388aff0d4a5b7dc9205abd374e7e98f3cd9f3418edb4eafda5fb16473d216",
             "0xabababababababababababababababababababababababababababababababab",
@@ -617,7 +615,7 @@ mod tests {
     }
 
     // sign_case_142f678a8d05fcd1
-    fn vector_sign_4() -> (group::Private, Vec<u8>, <MinPk as Variant>::Signature) {
+    fn vector_sign_4() -> (Private, Vec<u8>, <MinPk as Variant>::Signature) {
         parse_sign_vector(
             "0x47b8192d77bf871b62e87859d653922725724a5c031afeabc60bcef5ff665138",
             "0x5656565656565656565656565656565656565656565656565656565656565656",
@@ -626,7 +624,7 @@ mod tests {
     }
 
     // sign_case_37286e1a6d1f6eb3
-    fn vector_sign_5() -> (group::Private, Vec<u8>, <MinPk as Variant>::Signature) {
+    fn vector_sign_5() -> (Private, Vec<u8>, <MinPk as Variant>::Signature) {
         parse_sign_vector(
             "0x47b8192d77bf871b62e87859d653922725724a5c031afeabc60bcef5ff665138",
             "0xabababababababababababababababababababababababababababababababab",
@@ -635,7 +633,7 @@ mod tests {
     }
 
     // sign_case_7055381f640f2c1d
-    fn vector_sign_6() -> (group::Private, Vec<u8>, <MinPk as Variant>::Signature) {
+    fn vector_sign_6() -> (Private, Vec<u8>, <MinPk as Variant>::Signature) {
         parse_sign_vector(
             "0x328388aff0d4a5b7dc9205abd374e7e98f3cd9f3418edb4eafda5fb16473d216",
             "0x0000000000000000000000000000000000000000000000000000000000000000",
@@ -644,7 +642,7 @@ mod tests {
     }
 
     // sign_case_c82df61aa3ee60fb
-    fn vector_sign_7() -> (group::Private, Vec<u8>, <MinPk as Variant>::Signature) {
+    fn vector_sign_7() -> (Private, Vec<u8>, <MinPk as Variant>::Signature) {
         parse_sign_vector(
             "0x263dbd792f5b1be47ed85f8938c0f29586af0d3ac7b977f21c278fe1462040e3",
             "0x0000000000000000000000000000000000000000000000000000000000000000",
@@ -653,7 +651,7 @@ mod tests {
     }
 
     // sign_case_d0e28d7e76eb6e9c
-    fn vector_sign_8() -> (group::Private, Vec<u8>, <MinPk as Variant>::Signature) {
+    fn vector_sign_8() -> (Private, Vec<u8>, <MinPk as Variant>::Signature) {
         parse_sign_vector(
             "0x263dbd792f5b1be47ed85f8938c0f29586af0d3ac7b977f21c278fe1462040e3",
             "0x5656565656565656565656565656565656565656565656565656565656565656",
@@ -662,7 +660,7 @@ mod tests {
     }
 
     // sign_case_f2ae1097e7d0e18b
-    fn vector_sign_9() -> (group::Private, Vec<u8>, <MinPk as Variant>::Signature) {
+    fn vector_sign_9() -> (Private, Vec<u8>, <MinPk as Variant>::Signature) {
         parse_sign_vector(
             "0x263dbd792f5b1be47ed85f8938c0f29586af0d3ac7b977f21c278fe1462040e3",
             "0xabababababababababababababababababababababababababababababababab",

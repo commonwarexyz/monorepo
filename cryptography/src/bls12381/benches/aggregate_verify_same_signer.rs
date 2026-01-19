@@ -4,7 +4,7 @@ use criterion::{criterion_group, BatchSize, Criterion};
 use rand::{thread_rng, Rng};
 use std::num::NonZeroUsize;
 
-fn benchmark_aggregate_verify_same_signer(c: &mut Criterion) {
+fn bench_aggregate_verify_same_signer(c: &mut Criterion) {
     let namespace = b"namespace";
     for n in [2, 10, 100, 1000, 10000].into_iter() {
         let mut msgs = Vec::with_capacity(n);
@@ -60,5 +60,5 @@ fn benchmark_aggregate_verify_same_signer(c: &mut Criterion) {
 criterion_group! {
     name = benches;
     config = Criterion::default().sample_size(10);
-    targets = benchmark_aggregate_verify_same_signer
+    targets = bench_aggregate_verify_same_signer
 }

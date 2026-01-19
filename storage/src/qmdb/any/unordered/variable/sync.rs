@@ -5,7 +5,7 @@ use crate::{
     index::unordered::Index,
     journal::{authenticated, contiguous::variable},
     mmr::{mem::Clean, Location, Position, StandardHasher},
-    qmdb::{self, any::VariableValue, Durable, Merkleized},
+    qmdb::{self, any::VariableValue, sync::Journal, Durable, Merkleized},
     translator::Translator,
 };
 use commonware_codec::Read;
@@ -102,16 +102,14 @@ where
 
     async fn resize_journal(
         mut journal: Self::Journal,
-        context: Self::Context,
-        config: &Self::Config,
         range: Range<Location>,
     ) -> Result<Self::Journal, qmdb::Error> {
         let size = journal.size();
 
         if size <= range.start {
-            // Create a new journal with the new bounds
-            journal.destroy().await?;
-            Self::create_journal(context, config, range).await
+            // Clear and reuse the journal
+            journal.clear(*range.start).await?;
+            Ok(journal)
         } else {
             // Just prune to the lower bound
             journal.prune(*range.start).await?;
@@ -137,13 +135,13 @@ mod tests {
         buffer::PoolRef,
         deterministic::{self, Context},
     };
-    use commonware_utils::{NZUsize, NZU64};
-    use rand::{rngs::StdRng, RngCore as _, SeedableRng as _};
+    use commonware_utils::{test_rng_seeded, NZUsize, NZU16, NZU64};
+    use rand::RngCore as _;
     use rstest::rstest;
-    use std::num::NonZeroU64;
+    use std::num::{NonZeroU16, NonZeroU64, NonZeroUsize};
 
-    const PAGE_SIZE: usize = 99;
-    const PAGE_CACHE_SIZE: usize = 3;
+    const PAGE_SIZE: NonZeroU16 = NZU16!(99);
+    const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(3);
 
     type VarConfig = qmdb::any::VariableConfig<TwoCap, (commonware_codec::RangeCfg<usize>, ())>;
 
@@ -160,7 +158,7 @@ mod tests {
             log_codec_config: ((0..=10000).into(), ()),
             translator: TwoCap,
             thread_pool: None,
-            buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+            buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
 
@@ -180,9 +178,16 @@ mod tests {
         AnyTest::init(context, config).await.unwrap()
     }
 
-    /// Create n random operations. Some portion of the updates are deletes.
+    /// Create n random operations using the default seed (0).
+    /// Some portion of the updates are deletes.
     fn create_test_ops(n: usize) -> Vec<Operation<Digest, Vec<u8>>> {
-        let mut rng = StdRng::seed_from_u64(1337);
+        create_test_ops_seeded(n, 0)
+    }
+
+    /// Create n random operations using a specific seed.
+    /// Use different seeds when you need non-overlapping keys in the same test.
+    fn create_test_ops_seeded(n: usize, seed: u64) -> Vec<Operation<Digest, Vec<u8>>> {
+        let mut rng = test_rng_seeded(seed);
         let mut prev_key = Digest::random(&mut rng);
         let mut ops = Vec::new();
         for i in 0..n {
@@ -238,6 +243,10 @@ mod tests {
 
         fn create_ops(n: usize) -> Vec<Operation<Digest, Vec<u8>>> {
             create_test_ops(n)
+        }
+
+        fn create_ops_seeded(n: usize, seed: u64) -> Vec<Operation<Digest, Vec<u8>>> {
+            create_test_ops_seeded(n, seed)
         }
 
         async fn init_db(ctx: Context) -> Self::Db {

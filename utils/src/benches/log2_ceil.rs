@@ -2,7 +2,7 @@ use commonware_utils::rational::BigRationalExt;
 use criterion::{criterion_group, Criterion};
 use num_rational::BigRational;
 
-fn benchmark_log2_ceil(c: &mut Criterion) {
+fn bench_log2_ceil(c: &mut Criterion) {
     let cases = [
         BigRational::from_frac_u64(1, 2),
         BigRational::from_frac_u64(1, 4),
@@ -35,5 +35,5 @@ fn benchmark_log2_ceil(c: &mut Criterion) {
 criterion_group! {
     name = benches;
     config = Criterion::default().sample_size(10);
-    targets = benchmark_log2_ceil,
+    targets = bench_log2_ceil,
 }

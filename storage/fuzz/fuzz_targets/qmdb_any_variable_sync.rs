@@ -11,10 +11,13 @@ use commonware_storage::{
     },
     translator::TwoCap,
 };
-use commonware_utils::{sequence::FixedBytes, NZUsize, NZU64};
+use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
 use libfuzzer_sys::fuzz_target;
 use mmr::location::Location;
-use std::{collections::HashMap, num::NonZeroU64};
+use std::{
+    collections::HashMap,
+    num::{NonZeroU16, NonZeroU64},
+};
 
 const MAX_OPERATIONS: usize = 50;
 
@@ -129,7 +132,7 @@ impl<'a> Arbitrary<'a> for FuzzInput {
     }
 }
 
-const PAGE_SIZE: usize = 128;
+const PAGE_SIZE: NonZeroU16 = NZU16!(128);
 
 fn test_config(test_name: &str) -> Config<TwoCap, (commonware_codec::RangeCfg<usize>, ())> {
     Config {
@@ -144,7 +147,7 @@ fn test_config(test_name: &str) -> Config<TwoCap, (commonware_codec::RangeCfg<us
         log_codec_config: ((0..=100000).into(), ()),
         translator: TwoCap,
         thread_pool: None,
-        buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(1)),
+        buffer_pool: PoolRef::new(PAGE_SIZE, NZUsize!(1)),
     }
 }
 

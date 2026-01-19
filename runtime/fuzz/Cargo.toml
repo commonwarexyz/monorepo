@@ -10,6 +10,7 @@ cargo-fuzz = true
 
 [dependencies]
 arbitrary = { workspace = true, features = ["derive"] }
+bytes.workspace = true
 commonware-runtime.workspace = true
 commonware-utils.workspace = true
 libfuzzer-sys.workspace = true
@@ -17,5 +18,11 @@ libfuzzer-sys.workspace = true
 [[bin]]
 name = "buffer"
 path = "fuzz_targets/buffer.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "blob_integrity"
+path = "fuzz_targets/blob_integrity.rs"
 test = false
 doc = false

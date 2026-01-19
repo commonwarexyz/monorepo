@@ -30,8 +30,6 @@ pub trait CleanAny:
             Key = Self::Key,
             Digest = <Self as MerkleizedStore>::Digest,
             Operation = <Self as MerkleizedStore>::Operation,
-            // Cycle constraint for path: into_merkleized() then commit()
-            Merkleized: MerkleizedNonDurableAny<Durable = Self>,
             // Cycle constraint for path: commit() then into_merkleized() or into_mutable()
             Durable: UnmerkleizedDurableAny<Merkleized = Self, Mutable = Self::Mutable>,
         > + LogStore<Value = <Self as LogStore>::Value>;
@@ -69,7 +67,7 @@ pub trait UnmerkleizedDurableAny:
     fn into_mutable(self) -> Self::Mutable;
 
     /// Convert this database into the provable (Merkleized,Durable) state.
-    fn into_merkleized(self) -> impl Future<Output = Result<Self::Merkleized, Error>>;
+    fn into_merkleized(self) -> impl Future<Output = Result<Self::Merkleized, Error>> + Send;
 }
 
 /// Trait for the (Merkleized,NonDurable) state.
@@ -83,21 +81,6 @@ pub trait MerkleizedNonDurableAny:
 {
     /// The mutable state type (Unmerkleized,NonDurable).
     type Mutable: MutableAny<Key = Self::Key>;
-
-    /// The durable state type (Merkleized,Durable).
-    type Durable: CleanAny<Key = Self::Key>
-        + MerkleizedStore<
-            Value = <Self as LogStore>::Value,
-            Digest = <Self as MerkleizedStore>::Digest,
-            Operation = <Self as MerkleizedStore>::Operation,
-        >;
-
-    /// Commit any pending operations to the database, ensuring their durability. Returns the
-    /// durable state and the location range of committed operations.
-    fn commit(
-        self,
-        metadata: Option<<Self as LogStore>::Value>,
-    ) -> impl Future<Output = Result<(Self::Durable, Range<Location>), Error>>;
 
     /// Convert this database into the mutable (Unmerkleized, NonDurable) state.
     fn into_mutable(self) -> Self::Mutable;
@@ -129,15 +112,16 @@ pub trait MutableAny:
             Operation = Self::Operation,
         >;
 
-    /// Commit any pending operations to the database, ensuring their durability. Returns the
-    /// durable state and the location range of committed operations.
+    /// Commit any pending operations to the database, ensuring their durability. Returns the db in
+    /// its durable state and the location range of committed operations. Note that even if no
+    /// operations were added since the last commit, this a root-state changing operation.
     fn commit(
         self,
         metadata: Option<<Self as LogStore>::Value>,
-    ) -> impl Future<Output = Result<(Self::Durable, Range<Location>), Error>>;
+    ) -> impl Future<Output = Result<(Self::Durable, Range<Location>), Error>> + Send;
 
     /// Convert this database into the provable (Merkleized, Non-durable) state.
-    fn into_merkleized(self) -> impl Future<Output = Result<Self::Merkleized, Error>>;
+    fn into_merkleized(self) -> impl Future<Output = Result<Self::Merkleized, Error>> + Send;
 
     /// Returns the number of steps to raise the inactivity floor on the next commit.
     fn steps(&self) -> u64;

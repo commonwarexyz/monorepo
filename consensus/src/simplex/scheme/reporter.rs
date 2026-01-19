@@ -23,6 +23,7 @@ use crate::{
     Reporter,
 };
 use commonware_cryptography::{certificate, Digest};
+use commonware_parallel::Strategy;
 use rand_core::CryptoRngCore;
 
 /// Reporter wrapper that filters and verifies activities based on scheme attributability.
@@ -35,6 +36,7 @@ pub struct AttributableReporter<
     E: Clone + CryptoRngCore + Send + 'static,
     S: certificate::Scheme,
     D: Digest,
+    T: Strategy,
     R: Reporter<Activity = Activity<S, D>>,
 > {
     /// RNG for certificate verification
@@ -43,6 +45,8 @@ pub struct AttributableReporter<
     scheme: S,
     /// Inner reporter that receives filtered activities
     reporter: R,
+    /// Strategy for parallel operations.
+    strategy: T,
     /// Whether to always verify peer activities
     verify: bool,
 }
@@ -51,15 +55,17 @@ impl<
         E: Clone + CryptoRngCore + Send + 'static,
         S: certificate::Scheme,
         D: Digest,
+        T: Strategy,
         R: Reporter<Activity = Activity<S, D>>,
-    > AttributableReporter<E, S, D, R>
+    > AttributableReporter<E, S, D, T, R>
 {
     /// Creates a new `AttributableReporter` that wraps an inner reporter.
-    pub const fn new(rng: E, scheme: S, reporter: R, verify: bool) -> Self {
+    pub const fn new(rng: E, scheme: S, reporter: R, strategy: T, verify: bool) -> Self {
         Self {
             rng,
             scheme,
             reporter,
+            strategy,
             verify,
         }
     }
@@ -69,14 +75,18 @@ impl<
         E: Clone + CryptoRngCore + Send + 'static,
         S: Scheme<D>,
         D: Digest,
+        T: Strategy,
         R: Reporter<Activity = Activity<S, D>>,
-    > Reporter for AttributableReporter<E, S, D, R>
+    > Reporter for AttributableReporter<E, S, D, T, R>
 {
     type Activity = Activity<S, D>;
 
     async fn report(&mut self, activity: Self::Activity) {
         // Verify peer activities if verification is enabled
-        if self.verify && !activity.verified() && !activity.verify(&mut self.rng, &self.scheme) {
+        if self.verify
+            && !activity.verified()
+            && !activity.verify(&mut self.rng, &self.scheme, &self.strategy)
+        {
             // Drop unverified peer activity
             return;
         }
@@ -111,7 +121,7 @@ mod tests {
     use super::*;
     use crate::{
         simplex::{
-            scheme::{bls12381_threshold, ed25519},
+            scheme::{bls12381_threshold::vrf as bls12381_threshold_vrf, ed25519},
             types::{Notarization, Notarize, Proposal, Subject},
         },
         types::{Epoch, Round, View},
@@ -123,8 +133,9 @@ mod tests {
         sha256::Digest as Sha256Digest,
         Hasher, Sha256,
     };
+    use commonware_parallel::Sequential;
+    use commonware_utils::{test_rng, N3f1};
     use futures::executor::block_on;
-    use rand::{rngs::StdRng, SeedableRng};
     use std::sync::{Arc, Mutex};
 
     const NAMESPACE: &[u8] = b"test-reporter";
@@ -169,7 +180,7 @@ mod tests {
     #[test]
     fn test_invalid_peer_activity_dropped() {
         // Invalid peer activities should be dropped when verification is enabled
-        let mut rng = StdRng::seed_from_u64(42);
+        let mut rng = test_rng();
         let Fixture { verifier, .. } = ed25519::fixture(&mut rng, NAMESPACE, 4);
 
         // Create a scheme with wrong namespace to generate invalid signatures
@@ -184,7 +195,7 @@ mod tests {
         );
 
         let mock = MockReporter::new();
-        let mut reporter = AttributableReporter::new(rng, verifier, mock.clone(), true);
+        let mut reporter = AttributableReporter::new(rng, verifier, mock.clone(), Sequential, true);
 
         // Create an invalid activity (signed with wrong namespace scheme)
         let proposal = create_proposal(0, 1);
@@ -208,7 +219,7 @@ mod tests {
     #[test]
     fn test_skip_verification() {
         // When verification is disabled, invalid activities pass through
-        let mut rng = StdRng::seed_from_u64(42);
+        let mut rng = test_rng();
         let Fixture { verifier, .. } = ed25519::fixture(&mut rng, NAMESPACE, 4);
 
         // Create a scheme with wrong namespace to generate invalid signatures
@@ -227,6 +238,7 @@ mod tests {
             rng,
             verifier,
             mock.clone(),
+            Sequential,
             false, // Disable verification
         );
 
@@ -254,18 +266,18 @@ mod tests {
     #[test]
     fn test_certificates_always_reported() {
         // Certificates should always be reported, even for non-attributable schemes
-        let mut rng = StdRng::seed_from_u64(42);
+        let mut rng = test_rng();
         let Fixture {
             schemes, verifier, ..
-        } = bls12381_threshold::fixture::<MinPk, _>(&mut rng, NAMESPACE, 4);
+        } = bls12381_threshold_vrf::fixture::<MinPk, _>(&mut rng, NAMESPACE, 4);
 
         assert!(
-            !bls12381_threshold::Scheme::<Ed25519PublicKey, MinPk>::is_attributable(),
+            !bls12381_threshold_vrf::Scheme::<Ed25519PublicKey, MinPk>::is_attributable(),
             "BLS threshold must be non-attributable"
         );
 
         let mock = MockReporter::new();
-        let mut reporter = AttributableReporter::new(rng, verifier, mock.clone(), true);
+        let mut reporter = AttributableReporter::new(rng, verifier, mock.clone(), Sequential, true);
 
         // Create a certificate from multiple validators
         let proposal = create_proposal(0, 1);
@@ -281,7 +293,7 @@ mod tests {
             .collect();
 
         let certificate = schemes[0]
-            .assemble(votes)
+            .assemble::<_, N3f1>(votes, &Sequential)
             .expect("failed to assemble certificate");
 
         let notarization = Notarization {
@@ -301,18 +313,18 @@ mod tests {
     #[test]
     fn test_non_attributable_filters_peer_activities() {
         // Non-attributable schemes (like BLS threshold) must filter peer per-validator activities
-        let mut rng = StdRng::seed_from_u64(42);
+        let mut rng = test_rng();
         let Fixture {
             schemes, verifier, ..
-        } = bls12381_threshold::fixture::<MinPk, _>(&mut rng, NAMESPACE, 4);
+        } = bls12381_threshold_vrf::fixture::<MinPk, _>(&mut rng, NAMESPACE, 4);
 
         assert!(
-            !bls12381_threshold::Scheme::<Ed25519PublicKey, MinPk>::is_attributable(),
+            !bls12381_threshold_vrf::Scheme::<Ed25519PublicKey, MinPk>::is_attributable(),
             "BLS threshold must be non-attributable"
         );
 
         let mock = MockReporter::new();
-        let mut reporter = AttributableReporter::new(rng, verifier, mock.clone(), true);
+        let mut reporter = AttributableReporter::new(rng, verifier, mock.clone(), Sequential, true);
 
         // Create peer activity (from validator 1)
         let proposal = create_proposal(0, 1);
@@ -337,7 +349,7 @@ mod tests {
     #[test]
     fn test_attributable_scheme_reports_peer_activities() {
         // Ed25519 (attributable) should report peer per-validator activities
-        let mut rng = StdRng::seed_from_u64(42);
+        let mut rng = test_rng();
         let Fixture {
             schemes, verifier, ..
         } = ed25519::fixture(&mut rng, NAMESPACE, 4);
@@ -348,7 +360,7 @@ mod tests {
         );
 
         let mock = MockReporter::new();
-        let mut reporter = AttributableReporter::new(rng, verifier, mock.clone(), true);
+        let mut reporter = AttributableReporter::new(rng, verifier, mock.clone(), Sequential, true);
 
         // Create a peer activity (from validator 1)
         let proposal = create_proposal(0, 1);

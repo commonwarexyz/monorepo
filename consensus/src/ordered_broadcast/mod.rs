@@ -92,21 +92,22 @@ mod tests {
     };
     use commonware_macros::{select, test_group, test_traced};
     use commonware_p2p::simulated::{Link, Network, Oracle, Receiver, Sender};
+    use commonware_parallel::Sequential;
     use commonware_runtime::{
         buffer::PoolRef,
         deterministic::{self, Context},
         Clock, Metrics, Quota, Runner, Spawner,
     };
-    use commonware_utils::NZUsize;
+    use commonware_utils::{channels::fallible::OneshotExt, NZUsize, NZU16, NZU64};
     use futures::{channel::oneshot, future::join_all};
     use std::{
         collections::{BTreeMap, HashMap},
-        num::{NonZeroU32, NonZeroUsize},
+        num::{NonZeroU16, NonZeroU32, NonZeroUsize},
         time::Duration,
     };
     use tracing::debug;
 
-    const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
+    const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
     const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
     const TEST_NAMESPACE: &[u8] = b"ordered_broadcast_test";
@@ -125,7 +126,7 @@ mod tests {
     ) -> Registrations<PublicKey> {
         let mut registrations = BTreeMap::new();
         for participant in participants.iter() {
-            let mut control = oracle.control(participant.clone());
+            let control = oracle.control(participant.clone());
             let (a1, a2) = control.register(0, TEST_QUOTA).await.unwrap();
             let (b1, b2) = control.register(1, TEST_QUOTA).await.unwrap();
             registrations.insert(participant.clone(), ((a1, a2), (b1, b2)));
@@ -253,12 +254,13 @@ mod tests {
                     rebroadcast_timeout,
                     epoch_bounds: (EpochDelta::new(1), EpochDelta::new(1)),
                     height_bound: HeightDelta::new(2),
-                    journal_heights_per_section: 10,
+                    journal_heights_per_section: NZU64!(10),
                     journal_replay_buffer: NZUsize!(4096),
                     journal_write_buffer: NZUsize!(4096),
                     journal_name_prefix: format!("ordered-broadcast-seq-{validator}-"),
                     journal_compression: Some(3),
                     journal_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                    strategy: Sequential,
                 },
             );
 
@@ -305,7 +307,7 @@ mod tests {
                                 && epoch >= threshold_epoch
                                 && (!require_contiguous || contiguous_height >= threshold_height)
                             {
-                                let _ = tx.send(sequencer.clone());
+                                tx.send_lossy(sequencer.clone());
                                 break;
                             }
                             context.sleep(Duration::from_millis(100)).await;
@@ -358,7 +360,7 @@ mod tests {
                     .await;
 
             let reporters = spawn_validator_engines(
-                context.with_label("validator"),
+                context.with_label("validators"),
                 &fixture,
                 &fixture.participants,
                 &mut registrations,
@@ -492,7 +494,7 @@ mod tests {
                 initialize_simulation(context.with_label("simulation"), &fixture, RELIABLE_LINK)
                     .await;
             let mut reporters = spawn_validator_engines(
-                context.with_label("validator"),
+                context.with_label("validators"),
                 &fixture,
                 &fixture.participants,
                 &mut registrations,
@@ -574,7 +576,7 @@ mod tests {
             .await;
 
             let reporters = spawn_validator_engines(
-                context.with_label("validator"),
+                context.with_label("validators"),
                 &fixture,
                 &fixture.participants,
                 &mut registrations,
@@ -683,7 +685,7 @@ mod tests {
                     .await;
 
             let reporters = spawn_validator_engines(
-                context.with_label("validator"),
+                context.with_label("validators"),
                 &fixture,
                 &fixture.participants,
                 &mut registrations,
@@ -778,12 +780,13 @@ mod tests {
                         rebroadcast_timeout: Duration::from_secs(1),
                         priority_acks: false,
                         priority_proposals: false,
-                        journal_heights_per_section: 10,
+                        journal_heights_per_section: NZU64!(10),
                         journal_replay_buffer: NZUsize!(4096),
                         journal_write_buffer: NZUsize!(4096),
                         journal_name_prefix: format!("ordered-broadcast-seq-{validator}-"),
                         journal_compression: Some(3),
                         journal_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                        strategy: Sequential,
                     },
                 );
 
@@ -935,12 +938,13 @@ mod tests {
                         rebroadcast_timeout: Duration::from_secs(5),
                         priority_acks: false,
                         priority_proposals: false,
-                        journal_heights_per_section: 10,
+                        journal_heights_per_section: NZU64!(10),
                         journal_replay_buffer: NZUsize!(4096),
                         journal_write_buffer: NZUsize!(4096),
                         journal_name_prefix: format!("ordered-broadcast-seq-{validator}-"),
                         journal_compression: Some(3),
                         journal_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                        strategy: Sequential,
                     },
                 );
 
@@ -985,7 +989,7 @@ mod tests {
                         rebroadcast_timeout: Duration::from_secs(5),
                         priority_acks: false,
                         priority_proposals: false,
-                        journal_heights_per_section: 10,
+                        journal_heights_per_section: NZU64!(10),
                         journal_replay_buffer: NZUsize!(4096),
                         journal_write_buffer: NZUsize!(4096),
                         journal_name_prefix: format!(
@@ -994,6 +998,7 @@ mod tests {
                         ),
                         journal_compression: Some(3),
                         journal_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                        strategy: Sequential,
                     },
                 );
 
@@ -1059,7 +1064,7 @@ mod tests {
                 fixture.participants[0..num_validators as usize / 2].to_vec();
 
             let reporters = spawn_validator_engines(
-                context.with_label("validator"),
+                context.with_label("validators"),
                 &fixture,
                 &sequencers,
                 &mut registrations,

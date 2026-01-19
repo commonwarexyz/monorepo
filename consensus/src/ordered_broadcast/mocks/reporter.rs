@@ -7,6 +7,7 @@ use crate::{
 };
 use commonware_codec::{Decode, DecodeExt, Encode};
 use commonware_cryptography::{certificate::Scheme, Digest, PublicKey};
+use commonware_parallel::Sequential;
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt, StreamExt,
@@ -101,7 +102,7 @@ where
                 }
                 Message::Locked(lock) => {
                     // Verify properly constructed (not needed in production)
-                    if !lock.verify(&mut self.rng, &self.scheme) {
+                    if !lock.verify(&mut self.rng, &self.scheme, &Sequential) {
                         panic!("Invalid proof");
                     }
 

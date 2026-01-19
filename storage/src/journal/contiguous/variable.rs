@@ -12,7 +12,7 @@ use crate::{
     mmr::Location,
     Persistable,
 };
-use commonware_codec::Codec;
+use commonware_codec::{Codec, CodecShared};
 use commonware_runtime::{buffer::PoolRef, Metrics, Storage};
 use commonware_utils::NZUsize;
 use core::ops::Range;
@@ -90,10 +90,20 @@ impl<C> Config<C> {
     }
 }
 
-/// A position-based journal for variable-length items.
+/// A contiguous journal with variable-size entries.
 ///
 /// This journal manages section assignment automatically, allowing callers to append items
 /// sequentially without manually tracking section numbers.
+///
+/// # Repair
+///
+/// Like
+/// [sqlite](https://github.com/sqlite/sqlite/blob/8658a8df59f00ec8fcfea336a2a6a4b5ef79d2ee/src/wal.c#L1504-L1505)
+/// and
+/// [rocksdb](https://github.com/facebook/rocksdb/blob/0c533e61bc6d89fdf1295e8e0bcee4edb3aef401/include/rocksdb/options.h#L441-L445),
+/// the first invalid data read will be considered the new end of the journal (and the
+/// underlying [Blob](commonware_runtime::Blob) will be truncated to the last valid item). Repair occurs during
+/// init via the underlying segmented journals.
 ///
 /// # Invariants
 ///
@@ -119,11 +129,11 @@ impl<C> Config<C> {
 /// before the offsets journal.
 pub struct Journal<E: Storage + Metrics, V: Codec> {
     /// The underlying variable-length data journal.
-    pub(crate) data: variable::Journal<E, V>,
+    data: variable::Journal<E, V>,
 
     /// Index mapping positions to byte offsets within the data journal.
     /// The section can be calculated from the position using items_per_section.
-    pub(crate) offsets: fixed::Journal<E, u32>,
+    offsets: fixed::Journal<E, u64>,
 
     /// The number of items per section.
     ///
@@ -149,7 +159,7 @@ pub struct Journal<E: Storage + Metrics, V: Codec> {
     oldest_retained_pos: u64,
 }
 
-impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
+impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
     /// Initialize a contiguous variable journal.
     ///
     /// # Crash Recovery
@@ -163,7 +173,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
 
         // Initialize underlying variable data journal
         let mut data = variable::Journal::init(
-            context.clone(),
+            context.with_label("data"),
             variable::Config {
                 partition: data_partition,
                 compression: cfg.compression,
@@ -176,7 +186,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
 
         // Initialize offsets journal
         let mut offsets = fixed::Journal::init(
-            context,
+            context.with_label("offsets"),
             fixed::Config {
                 partition: offsets_partition,
                 items_per_blob: cfg.items_per_section,
@@ -222,7 +232,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
     pub async fn init_at_size(context: E, cfg: Config<V::Cfg>, size: u64) -> Result<Self, Error> {
         // Initialize empty data journal
         let data = variable::Journal::init(
-            context.clone(),
+            context.with_label("data"),
             variable::Config {
                 partition: cfg.data_partition(),
                 compression: cfg.compression,
@@ -234,8 +244,8 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         .await?;
 
         // Initialize offsets journal at the target size
-        let offsets = crate::qmdb::any::unordered::fixed::sync::init_journal_at_size(
-            context,
+        let offsets = fixed::Journal::init_at_size(
+            context.with_label("offsets"),
             fixed::Config {
                 partition: cfg.offsets_partition(),
                 items_per_blob: cfg.items_per_section,
@@ -581,6 +591,19 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         self.offsets.destroy().await
     }
 
+    /// Clear all data and reset the journal to a new starting position.
+    ///
+    /// Unlike `destroy`, this keeps the journal alive so it can be reused.
+    /// After clearing, the journal will behave as if initialized with `init_at_size(new_size)`.
+    pub(crate) async fn clear_to_size(&mut self, new_size: u64) -> Result<(), Error> {
+        self.data.clear().await?;
+
+        self.offsets.clear_to_size(new_size).await?;
+        self.size = new_size;
+        self.oldest_retained_pos = new_size;
+        Ok(())
+    }
+
     /// Return the section number where the next append will write.
     const fn current_section(&self) -> u64 {
         position_to_section(self.size, self.items_per_section)
@@ -597,13 +620,13 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
     /// Returns `(oldest_retained_pos, size)` for the contiguous journal.
     async fn align_journals(
         data: &mut variable::Journal<E, V>,
-        offsets: &mut fixed::Journal<E, u32>,
+        offsets: &mut fixed::Journal<E, u64>,
         items_per_section: u64,
     ) -> Result<(u64, u64), Error> {
         // === Handle empty data journal case ===
-        let items_in_last_section = match data.blobs.last_key_value() {
-            Some((last_section, _)) => {
-                let stream = data.replay(*last_section, 0, REPLAY_BUFFER_SIZE).await?;
+        let items_in_last_section = match data.newest_section() {
+            Some(last_section) => {
+                let stream = data.replay(last_section, 0, REPLAY_BUFFER_SIZE).await?;
                 futures::pin_mut!(stream);
                 let mut count = 0u64;
                 while let Some(result) = stream.next().await {
@@ -619,16 +642,17 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         // The latter should only occur if a crash occured after opening a data journal blob but
         // before writing to it.
         let data_empty =
-            data.blobs.is_empty() || (data.blobs.len() == 1 && items_in_last_section == 0);
+            data.is_empty() || (data.num_sections() == 1 && items_in_last_section == 0);
         if data_empty {
             let size = offsets.size();
 
-            if !data.blobs.is_empty() {
+            if !data.is_empty() {
                 // A section exists but contains 0 items. This can happen in two cases:
                 // 1. Rewind crash: we rewound the data journal but crashed before rewinding offsets
                 // 2. First append crash: we opened the first section blob but crashed before writing to it
                 // In both cases, calculate target position from the first remaining section
-                let first_section = *data.blobs.first_key_value().unwrap().0;
+                // SAFETY: data is non-empty (checked above)
+                let first_section = data.oldest_section().unwrap();
                 let target_pos = first_section * items_per_section;
 
                 info!("crash repair: rewinding offsets from {size} to {target_pos}");
@@ -655,9 +679,9 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
 
         // === Handle non-empty data journal case ===
         let (data_oldest_pos, data_size) = {
-            // Data exists -- count items
-            let first_section = *data.blobs.first_key_value().unwrap().0;
-            let last_section = *data.blobs.last_key_value().unwrap().0;
+            // SAFETY: data is non-empty (empty case returns early above)
+            let first_section = data.oldest_section().unwrap();
+            let last_section = data.newest_section().unwrap();
 
             let oldest_pos = first_section * items_per_section;
 
@@ -733,16 +757,16 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
     ///
     /// # Warning
     ///
-    /// - Panics if `data.blobs` is empty
+    /// - Panics if data journal is empty
     /// - Panics if `offsets_size` >= `data.size()`
     async fn add_missing_offsets(
         data: &variable::Journal<E, V>,
-        offsets: &mut fixed::Journal<E, u32>,
+        offsets: &mut fixed::Journal<E, u64>,
         offsets_size: u64,
         items_per_section: u64,
     ) -> Result<(), Error> {
         assert!(
-            !data.blobs.is_empty(),
+            !data.is_empty(),
             "rebuild_offsets called with empty data journal"
         );
 
@@ -756,14 +780,14 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
                     (last_section, last_offset, true)
                 } else {
                     // Offsets fully pruned but data has items -- start from first data section
-                    // SAFETY: data.blobs is non-empty (checked above)
-                    let first_section = *data.blobs.first_key_value().unwrap().0;
+                    // SAFETY: data is non-empty (checked above)
+                    let first_section = data.oldest_section().unwrap();
                     (first_section, 0, false)
                 }
             } else {
                 // Offsets empty -- start from first data section
-                // SAFETY: data.blobs is non-empty (checked above)
-                let first_section = *data.blobs.first_key_value().unwrap().0;
+                // SAFETY: data is non-empty (checked above)
+                let first_section = data.oldest_section().unwrap();
                 (first_section, 0, false)
             };
 
@@ -793,7 +817,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
 }
 
 // Implement Contiguous trait for variable-length items
-impl<E: Storage + Metrics, V: Codec> Contiguous for Journal<E, V> {
+impl<E: Storage + Metrics, V: CodecShared> Contiguous for Journal<E, V> {
     type Item = V;
 
     fn size(&self) -> u64 {
@@ -821,7 +845,7 @@ impl<E: Storage + Metrics, V: Codec> Contiguous for Journal<E, V> {
     }
 }
 
-impl<E: Storage + Metrics, V: Codec> MutableContiguous for Journal<E, V> {
+impl<E: Storage + Metrics, V: CodecShared> MutableContiguous for Journal<E, V> {
     async fn append(&mut self, item: Self::Item) -> Result<u64, Error> {
         Self::append(self, item).await
     }
@@ -835,7 +859,7 @@ impl<E: Storage + Metrics, V: Codec> MutableContiguous for Journal<E, V> {
     }
 }
 
-impl<E: Storage + Metrics, V: Codec> Persistable for Journal<E, V> {
+impl<E: Storage + Metrics, V: CodecShared> Persistable for Journal<E, V> {
     type Error = Error;
 
     async fn commit(&mut self) -> Result<(), Error> {
@@ -855,13 +879,17 @@ mod tests {
     use super::*;
     use crate::journal::contiguous::tests::run_contiguous_tests;
     use commonware_macros::test_traced;
-    use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
-    use commonware_utils::{NZUsize, NZU64};
+    use commonware_runtime::{buffer::pool::PoolRef, deterministic, Metrics, Runner};
+    use commonware_utils::{NZUsize, NZU16, NZU64};
     use futures::FutureExt as _;
+    use std::num::NonZeroU16;
 
     // Use some jank sizes to exercise boundary conditions.
-    const PAGE_SIZE: usize = 101;
+    const PAGE_SIZE: NonZeroU16 = NZU16!(101);
     const PAGE_CACHE_SIZE: usize = 2;
+    // Larger page sizes for tests that need more buffer space.
+    const LARGE_PAGE_SIZE: NonZeroU16 = NZU16!(1024);
+    const SMALL_PAGE_SIZE: NonZeroU16 = NZU16!(512);
 
     /// Test that complete offsets partition loss after pruning is detected as unrecoverable.
     ///
@@ -877,12 +905,12 @@ mod tests {
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
-                buffer_pool: PoolRef::new(NZUsize!(1024), NZUsize!(10)),
+                buffer_pool: PoolRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
                 write_buffer: NZUsize!(1024),
             };
 
             // === Phase 1: Create journal with data and prune ===
-            let mut journal = Journal::<_, u64>::init(context.clone(), cfg.clone())
+            let mut journal = Journal::<_, u64>::init(context.with_label("first"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -906,7 +934,7 @@ mod tests {
                 .expect("Failed to remove offsets partition");
 
             // === Phase 3: Verify this is detected as unrecoverable ===
-            let result = Journal::<_, u64>::init(context.clone(), cfg.clone()).await;
+            let result = Journal::<_, u64>::init(context.with_label("second"), cfg.clone()).await;
             assert!(matches!(result, Err(Error::Corruption(_))));
         });
     }
@@ -927,12 +955,12 @@ mod tests {
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
-                buffer_pool: PoolRef::new(NZUsize!(1024), NZUsize!(10)),
+                buffer_pool: PoolRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
                 write_buffer: NZUsize!(1024),
             };
 
             // === Setup: Create journal with data ===
-            let mut variable = Journal::<_, u64>::init(context.clone(), cfg.clone())
+            let mut variable = Journal::<_, u64>::init(context.with_label("first"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -951,7 +979,7 @@ mod tests {
                 .expect("Failed to remove data partition");
 
             // === Verify init aligns the mismatch ===
-            let mut journal = Journal::<_, u64>::init(context.clone(), cfg.clone())
+            let mut journal = Journal::<_, u64>::init(context.with_label("second"), cfg.clone())
                 .await
                 .expect("Should align offsets to match empty data");
 
@@ -982,8 +1010,8 @@ mod tests {
     fn test_variable_contiguous() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            run_contiguous_tests(move |test_name: String| {
-                let context = context.clone();
+            run_contiguous_tests(move |test_name: String, idx: usize| {
+                let context = context.with_label(&format!("{test_name}_{idx}"));
                 async move {
                     Journal::<_, u64>::init(
                         context,
@@ -992,7 +1020,7 @@ mod tests {
                             items_per_section: NZU64!(10),
                             compression: None,
                             codec_config: (),
-                            buffer_pool: PoolRef::new(NZUsize!(1024), NZUsize!(10)),
+                            buffer_pool: PoolRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
                             write_buffer: NZUsize!(1024),
                         },
                     )
@@ -1014,7 +1042,7 @@ mod tests {
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
-                buffer_pool: PoolRef::new(NZUsize!(1024), NZUsize!(10)),
+                buffer_pool: PoolRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -1102,12 +1130,12 @@ mod tests {
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
-                buffer_pool: PoolRef::new(NZUsize!(1024), NZUsize!(10)),
+                buffer_pool: PoolRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
                 write_buffer: NZUsize!(1024),
             };
 
             // === Phase 1: Create journal and append data ===
-            let mut journal = Journal::<_, u64>::init(context.clone(), cfg.clone())
+            let mut journal = Journal::<_, u64>::init(context.with_label("first"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -1138,7 +1166,7 @@ mod tests {
             drop(journal);
 
             // === Phase 3: Re-init and verify position preserved ===
-            let mut journal = Journal::<_, u64>::init(context.clone(), cfg.clone())
+            let mut journal = Journal::<_, u64>::init(context.with_label("second"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -1185,11 +1213,11 @@ mod tests {
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
-                buffer_pool: PoolRef::new(NZUsize!(1024), NZUsize!(10)),
+                buffer_pool: PoolRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
                 write_buffer: NZUsize!(1024),
             };
 
-            let mut variable = Journal::<_, u64>::init(context.clone(), cfg.clone())
+            let mut variable = Journal::<_, u64>::init(context.with_label("first"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -1211,7 +1239,7 @@ mod tests {
             drop(variable);
 
             // === Verify recovery ===
-            let variable = Journal::<_, u64>::init(context.clone(), cfg.clone())
+            let variable = Journal::<_, u64>::init(context.with_label("second"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -1247,11 +1275,11 @@ mod tests {
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
-                buffer_pool: PoolRef::new(NZUsize!(1024), NZUsize!(10)),
+                buffer_pool: PoolRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
                 write_buffer: NZUsize!(1024),
             };
 
-            let mut variable = Journal::<_, u64>::init(context.clone(), cfg.clone())
+            let mut variable = Journal::<_, u64>::init(context.with_label("first"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -1268,7 +1296,7 @@ mod tests {
             drop(variable);
 
             // === Verify corruption detected ===
-            let result = Journal::<_, u64>::init(context.clone(), cfg.clone()).await;
+            let result = Journal::<_, u64>::init(context.with_label("second"), cfg.clone()).await;
             assert!(matches!(result, Err(Error::Corruption(_))));
         });
     }
@@ -1284,11 +1312,11 @@ mod tests {
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
-                buffer_pool: PoolRef::new(NZUsize!(1024), NZUsize!(10)),
+                buffer_pool: PoolRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
                 write_buffer: NZUsize!(1024),
             };
 
-            let mut variable = Journal::<_, u64>::init(context.clone(), cfg.clone())
+            let mut variable = Journal::<_, u64>::init(context.with_label("first"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -1309,7 +1337,7 @@ mod tests {
             drop(variable);
 
             // === Verify recovery ===
-            let variable = Journal::<_, u64>::init(context.clone(), cfg.clone())
+            let variable = Journal::<_, u64>::init(context.with_label("second"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -1340,11 +1368,11 @@ mod tests {
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
-                buffer_pool: PoolRef::new(NZUsize!(1024), NZUsize!(10)),
+                buffer_pool: PoolRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
                 write_buffer: NZUsize!(1024),
             };
 
-            let mut variable = Journal::<_, u64>::init(context.clone(), cfg.clone())
+            let mut variable = Journal::<_, u64>::init(context.with_label("first"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -1366,7 +1394,7 @@ mod tests {
             drop(variable);
 
             // === Verify recovery ===
-            let variable = Journal::<_, u64>::init(context.clone(), cfg.clone())
+            let variable = Journal::<_, u64>::init(context.with_label("second"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -1408,11 +1436,11 @@ mod tests {
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
-                buffer_pool: PoolRef::new(NZUsize!(1024), NZUsize!(10)),
+                buffer_pool: PoolRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
                 write_buffer: NZUsize!(1024),
             };
 
-            let mut variable = Journal::<_, u64>::init(context.clone(), cfg.clone())
+            let mut variable = Journal::<_, u64>::init(context.with_label("first"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -1432,7 +1460,7 @@ mod tests {
             drop(variable);
 
             // === Verify recovery ===
-            let mut variable = Journal::<_, u64>::init(context.clone(), cfg.clone())
+            let mut variable = Journal::<_, u64>::init(context.with_label("second"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -1468,12 +1496,12 @@ mod tests {
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
-                buffer_pool: PoolRef::new(NZUsize!(1024), NZUsize!(10)),
+                buffer_pool: PoolRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
                 write_buffer: NZUsize!(1024),
             };
 
             // === Phase 1: Create journal with one full section ===
-            let mut journal = Journal::<_, u64>::init(context.clone(), cfg.clone())
+            let mut journal = Journal::<_, u64>::init(context.with_label("first"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -1503,7 +1531,7 @@ mod tests {
             drop(journal);
 
             // === Phase 4: Verify recovery succeeds ===
-            let journal = Journal::<_, u64>::init(context.clone(), cfg.clone())
+            let journal = Journal::<_, u64>::init(context.with_label("second"), cfg.clone())
                 .await
                 .expect("Should recover from crash after data sync but before offsets sync");
 
@@ -1535,11 +1563,11 @@ mod tests {
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
-                buffer_pool: PoolRef::new(NZUsize!(1024), NZUsize!(10)),
+                buffer_pool: PoolRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
                 write_buffer: NZUsize!(1024),
             };
 
-            let mut journal = Journal::<_, u64>::init(context.clone(), cfg.clone())
+            let mut journal = Journal::<_, u64>::init(context.with_label("first"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -1554,7 +1582,7 @@ mod tests {
             // Simulate a crash (offsets not synced)
             drop(journal);
 
-            let journal = Journal::<_, u64>::init(context.clone(), cfg.clone())
+            let journal = Journal::<_, u64>::init(context.with_label("second"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -1577,7 +1605,7 @@ mod tests {
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
-                buffer_pool: PoolRef::new(NZUsize!(512), NZUsize!(2)),
+                buffer_pool: PoolRef::new(SMALL_PAGE_SIZE, NZUsize!(2)),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -1610,7 +1638,7 @@ mod tests {
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
-                buffer_pool: PoolRef::new(NZUsize!(512), NZUsize!(2)),
+                buffer_pool: PoolRef::new(SMALL_PAGE_SIZE, NZUsize!(2)),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -1649,7 +1677,7 @@ mod tests {
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
-                buffer_pool: PoolRef::new(NZUsize!(512), NZUsize!(2)),
+                buffer_pool: PoolRef::new(SMALL_PAGE_SIZE, NZUsize!(2)),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -1683,14 +1711,15 @@ mod tests {
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
-                buffer_pool: PoolRef::new(NZUsize!(512), NZUsize!(2)),
+                buffer_pool: PoolRef::new(SMALL_PAGE_SIZE, NZUsize!(2)),
                 write_buffer: NZUsize!(1024),
             };
 
             // Initialize at position 15
-            let mut journal = Journal::<_, u64>::init_at_size(context.clone(), cfg.clone(), 15)
-                .await
-                .unwrap();
+            let mut journal =
+                Journal::<_, u64>::init_at_size(context.with_label("first"), cfg.clone(), 15)
+                    .await
+                    .unwrap();
 
             // Append some items
             for i in 0..5u64 {
@@ -1704,7 +1733,7 @@ mod tests {
             journal.sync().await.unwrap();
             drop(journal);
 
-            let mut journal = Journal::<_, u64>::init(context.clone(), cfg.clone())
+            let mut journal = Journal::<_, u64>::init(context.with_label("second"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -1727,6 +1756,48 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_init_at_size_persistence_without_data() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "init_at_size_persist_empty".to_string(),
+                items_per_section: NZU64!(5),
+                compression: None,
+                codec_config: (),
+                buffer_pool: PoolRef::new(SMALL_PAGE_SIZE, NZUsize!(2)),
+                write_buffer: NZUsize!(1024),
+            };
+
+            // Initialize at position 15
+            let journal =
+                Journal::<_, u64>::init_at_size(context.with_label("first"), cfg.clone(), 15)
+                    .await
+                    .unwrap();
+
+            assert_eq!(journal.size(), 15);
+            assert_eq!(journal.oldest_retained_pos(), None);
+
+            // Drop without writing any data
+            drop(journal);
+
+            // Reopen and verify size persisted
+            let mut journal = Journal::<_, u64>::init(context.with_label("second"), cfg.clone())
+                .await
+                .unwrap();
+
+            assert_eq!(journal.size(), 15);
+            assert_eq!(journal.oldest_retained_pos(), None);
+
+            // Can append starting at position 15
+            let pos = journal.append(1500).await.unwrap();
+            assert_eq!(pos, 15);
+            assert_eq!(journal.read(15).await.unwrap(), 1500);
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
     fn test_init_at_size_large_offset() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -1735,7 +1806,7 @@ mod tests {
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
-                buffer_pool: PoolRef::new(NZUsize!(512), NZUsize!(2)),
+                buffer_pool: PoolRef::new(SMALL_PAGE_SIZE, NZUsize!(2)),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -1766,7 +1837,7 @@ mod tests {
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
-                buffer_pool: PoolRef::new(NZUsize!(512), NZUsize!(2)),
+                buffer_pool: PoolRef::new(SMALL_PAGE_SIZE, NZUsize!(2)),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -1812,7 +1883,7 @@ mod tests {
                 compression: None,
                 codec_config: (),
                 write_buffer: NZUsize!(1024),
-                buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+                buffer_pool: PoolRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
             };
 
             // Initialize journal with sync boundaries when no existing data exists
@@ -1850,7 +1921,7 @@ mod tests {
                 compression: None,
                 codec_config: (),
                 write_buffer: NZUsize!(1024),
-                buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+                buffer_pool: PoolRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
             };
 
             // Create initial journal with data in multiple sections
@@ -1920,7 +1991,7 @@ mod tests {
                 compression: None,
                 codec_config: (),
                 write_buffer: NZUsize!(1024),
-                buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+                buffer_pool: PoolRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
             };
 
             #[allow(clippy::reversed_empty_ranges)]
@@ -1945,7 +2016,7 @@ mod tests {
                 compression: None,
                 codec_config: (),
                 write_buffer: NZUsize!(1024),
-                buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+                buffer_pool: PoolRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
             };
 
             // Create initial journal with data exactly matching sync range
@@ -2015,14 +2086,16 @@ mod tests {
                 compression: None,
                 codec_config: (),
                 write_buffer: NZUsize!(1024),
-                buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+                buffer_pool: PoolRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
             };
 
             // Create initial journal with data beyond sync range
-            let mut journal =
-                Journal::<deterministic::Context, u64>::init(context.clone(), cfg.clone())
-                    .await
-                    .expect("Failed to create initial journal");
+            let mut journal = Journal::<deterministic::Context, u64>::init(
+                context.with_label("initial"),
+                cfg.clone(),
+            )
+            .await
+            .expect("Failed to create initial journal");
 
             // Add data at positions 0-29 (sections 0-5 with items_per_section=5)
             for i in 0..30u64 {
@@ -2033,9 +2106,9 @@ mod tests {
 
             // Initialize with sync boundaries that are exceeded by existing data
             let lower_bound = 8; // section 1
-            for upper_bound in 9..29 {
+            for (i, upper_bound) in (9..29).enumerate() {
                 let result = Journal::<deterministic::Context, u64>::init_sync(
-                    context.clone(),
+                    context.with_label(&format!("sync_{i}")),
                     cfg.clone(),
                     lower_bound..upper_bound,
                 )
@@ -2059,14 +2132,16 @@ mod tests {
                 compression: None,
                 codec_config: (),
                 write_buffer: NZUsize!(1024),
-                buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+                buffer_pool: PoolRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
             };
 
             // Create initial journal with stale data
-            let mut journal =
-                Journal::<deterministic::Context, u64>::init(context.clone(), cfg.clone())
-                    .await
-                    .expect("Failed to create initial journal");
+            let mut journal = Journal::<deterministic::Context, u64>::init(
+                context.with_label("first"),
+                cfg.clone(),
+            )
+            .await
+            .expect("Failed to create initial journal");
 
             // Add data at positions 0-9 (sections 0-1 with items_per_section=5)
             for i in 0..10u64 {
@@ -2079,7 +2154,7 @@ mod tests {
             let lower_bound = 15; // section 3
             let upper_bound = 26; // last element in section 5
             let journal = Journal::<deterministic::Context, u64>::init_sync(
-                context.clone(),
+                context.with_label("second"),
                 cfg.clone(),
                 lower_bound..upper_bound,
             )
@@ -2112,7 +2187,7 @@ mod tests {
                 compression: None,
                 codec_config: (),
                 write_buffer: NZUsize!(1024),
-                buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+                buffer_pool: PoolRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
             };
 
             // Create journal with data at section boundaries
@@ -2181,7 +2256,7 @@ mod tests {
                 compression: None,
                 codec_config: (),
                 write_buffer: NZUsize!(1024),
-                buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+                buffer_pool: PoolRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
             };
 
             // Create journal with data in multiple sections
@@ -2234,6 +2309,273 @@ mod tests {
             let pos = journal.append(999).await.unwrap();
             assert_eq!(pos, 15);
             assert_eq!(journal.read(15).await.unwrap(), 999);
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// Test contiguous variable journal with items_per_section=1.
+    ///
+    /// This is a regression test for a bug where reading from size()-1 fails
+    /// when using items_per_section=1, particularly after pruning and restart.
+    #[test_traced]
+    fn test_single_item_per_section() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "single_item_per_section".to_string(),
+                items_per_section: NZU64!(1),
+                compression: None,
+                codec_config: (),
+                buffer_pool: PoolRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
+                write_buffer: NZUsize!(1024),
+            };
+
+            // === Test 1: Basic single item operation ===
+            let mut journal = Journal::<_, u64>::init(context.with_label("first"), cfg.clone())
+                .await
+                .unwrap();
+
+            // Verify empty state
+            assert_eq!(journal.size(), 0);
+            assert_eq!(journal.oldest_retained_pos(), None);
+
+            // Append 1 item (value = position * 100, so position 0 has value 0)
+            let pos = journal.append(0).await.unwrap();
+            assert_eq!(pos, 0);
+            assert_eq!(journal.size(), 1);
+
+            // Sync
+            journal.sync().await.unwrap();
+
+            // Read from size() - 1
+            let value = journal.read(journal.size() - 1).await.unwrap();
+            assert_eq!(value, 0);
+
+            // === Test 2: Multiple items with single item per section ===
+            for i in 1..10u64 {
+                let pos = journal.append(i * 100).await.unwrap();
+                assert_eq!(pos, i);
+                assert_eq!(journal.size(), i + 1);
+
+                // Verify we can read the just-appended item at size() - 1
+                let value = journal.read(journal.size() - 1).await.unwrap();
+                assert_eq!(value, i * 100);
+            }
+
+            // Verify all items can be read
+            for i in 0..10u64 {
+                assert_eq!(journal.read(i).await.unwrap(), i * 100);
+            }
+
+            journal.sync().await.unwrap();
+
+            // === Test 3: Pruning with single item per section ===
+            // Prune to position 5 (removes positions 0-4)
+            let pruned = journal.prune(5).await.unwrap();
+            assert!(pruned);
+
+            // Size should still be 10
+            assert_eq!(journal.size(), 10);
+
+            // oldest_retained_pos should be 5
+            assert_eq!(journal.oldest_retained_pos(), Some(5));
+
+            // Reading from size() - 1 (position 9) should still work
+            let value = journal.read(journal.size() - 1).await.unwrap();
+            assert_eq!(value, 900);
+
+            // Reading from pruned positions should return ItemPruned
+            for i in 0..5 {
+                assert!(matches!(
+                    journal.read(i).await,
+                    Err(crate::journal::Error::ItemPruned(_))
+                ));
+            }
+
+            // Reading from retained positions should work
+            for i in 5..10u64 {
+                assert_eq!(journal.read(i).await.unwrap(), i * 100);
+            }
+
+            // Append more items after pruning
+            for i in 10..15u64 {
+                let pos = journal.append(i * 100).await.unwrap();
+                assert_eq!(pos, i);
+
+                // Verify we can read from size() - 1
+                let value = journal.read(journal.size() - 1).await.unwrap();
+                assert_eq!(value, i * 100);
+            }
+
+            journal.sync().await.unwrap();
+            drop(journal);
+
+            // === Test 4: Restart persistence with single item per section ===
+            let journal = Journal::<_, u64>::init(context.with_label("second"), cfg.clone())
+                .await
+                .unwrap();
+
+            // Verify size is preserved
+            assert_eq!(journal.size(), 15);
+
+            // Verify oldest_retained_pos is preserved
+            assert_eq!(journal.oldest_retained_pos(), Some(5));
+
+            // Reading from size() - 1 should work after restart
+            let value = journal.read(journal.size() - 1).await.unwrap();
+            assert_eq!(value, 1400);
+
+            // Reading all retained positions should work
+            for i in 5..15u64 {
+                assert_eq!(journal.read(i).await.unwrap(), i * 100);
+            }
+
+            journal.destroy().await.unwrap();
+
+            // === Test 5: Restart after pruning with non-zero index (KEY SCENARIO) ===
+            // Fresh journal for this test
+            let mut journal = Journal::<_, u64>::init(context.with_label("third"), cfg.clone())
+                .await
+                .unwrap();
+
+            // Append 10 items (positions 0-9)
+            for i in 0..10u64 {
+                journal.append(i * 1000).await.unwrap();
+            }
+
+            // Prune to position 5 (removes positions 0-4)
+            journal.prune(5).await.unwrap();
+            assert_eq!(journal.size(), 10);
+            assert_eq!(journal.oldest_retained_pos(), Some(5));
+
+            // Sync and restart
+            journal.sync().await.unwrap();
+            drop(journal);
+
+            // Re-open journal
+            let journal = Journal::<_, u64>::init(context.with_label("fourth"), cfg.clone())
+                .await
+                .unwrap();
+
+            // Verify state after restart
+            assert_eq!(journal.size(), 10);
+            assert_eq!(journal.oldest_retained_pos(), Some(5));
+
+            // KEY TEST: Reading from size() - 1 (position 9) should work
+            let value = journal.read(journal.size() - 1).await.unwrap();
+            assert_eq!(value, 9000);
+
+            // Verify all retained positions (5-9) work
+            for i in 5..10u64 {
+                assert_eq!(journal.read(i).await.unwrap(), i * 1000);
+            }
+
+            journal.destroy().await.unwrap();
+
+            // === Test 6: Prune all items (edge case) ===
+            // This tests the scenario where prune removes everything.
+            // Callers must check oldest_retained_pos() before reading.
+            let mut journal = Journal::<_, u64>::init(context.with_label("fifth"), cfg.clone())
+                .await
+                .unwrap();
+
+            for i in 0..5u64 {
+                journal.append(i * 100).await.unwrap();
+            }
+            journal.sync().await.unwrap();
+
+            // Prune all items
+            journal.prune(5).await.unwrap();
+            assert_eq!(journal.size(), 5); // Size unchanged
+            assert_eq!(journal.oldest_retained_pos(), None); // All pruned
+
+            // size() - 1 = 4, but position 4 is pruned
+            let result = journal.read(journal.size() - 1).await;
+            assert!(matches!(result, Err(crate::journal::Error::ItemPruned(4))));
+
+            // After appending, reading works again
+            journal.append(500).await.unwrap();
+            assert_eq!(journal.oldest_retained_pos(), Some(5));
+            assert_eq!(journal.read(journal.size() - 1).await.unwrap(), 500);
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_variable_journal_clear_to_size() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "clear_test".to_string(),
+                items_per_section: NZU64!(10),
+                compression: None,
+                codec_config: (),
+                buffer_pool: PoolRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
+                write_buffer: NZUsize!(1024),
+            };
+
+            let mut journal = Journal::<_, u64>::init(context.with_label("journal"), cfg.clone())
+                .await
+                .unwrap();
+
+            // Append 25 items (spanning multiple sections)
+            for i in 0..25u64 {
+                journal.append(i * 100).await.unwrap();
+            }
+            assert_eq!(journal.size(), 25);
+            assert_eq!(journal.oldest_retained_pos(), Some(0));
+            journal.sync().await.unwrap();
+
+            // Clear to position 100, effectively resetting the journal
+            journal.clear_to_size(100).await.unwrap();
+            assert_eq!(journal.size(), 100);
+            assert_eq!(journal.oldest_retained_pos(), None);
+
+            // Old positions should fail
+            for i in 0..25 {
+                assert!(matches!(
+                    journal.read(i).await,
+                    Err(crate::journal::Error::ItemPruned(_))
+                ));
+            }
+
+            // Verify size persists after restart without writing any data
+            drop(journal);
+            let mut journal =
+                Journal::<_, u64>::init(context.with_label("journal_after_clear"), cfg.clone())
+                    .await
+                    .unwrap();
+            assert_eq!(journal.size(), 100);
+            assert_eq!(journal.oldest_retained_pos(), None);
+
+            // Append new data starting at position 100
+            for i in 100..105u64 {
+                let pos = journal.append(i * 100).await.unwrap();
+                assert_eq!(pos, i);
+            }
+            assert_eq!(journal.size(), 105);
+            assert_eq!(journal.oldest_retained_pos(), Some(100));
+
+            // New positions should be readable
+            for i in 100..105u64 {
+                assert_eq!(journal.read(i).await.unwrap(), i * 100);
+            }
+
+            // Sync and re-init to verify persistence
+            journal.sync().await.unwrap();
+            drop(journal);
+
+            let journal = Journal::<_, u64>::init(context.with_label("journal_reopened"), cfg)
+                .await
+                .unwrap();
+
+            assert_eq!(journal.size(), 105);
+            assert_eq!(journal.oldest_retained_pos(), Some(100));
+            for i in 100..105u64 {
+                assert_eq!(journal.read(i).await.unwrap(), i * 100);
+            }
 
             journal.destroy().await.unwrap();
         });

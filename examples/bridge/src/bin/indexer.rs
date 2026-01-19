@@ -9,7 +9,7 @@ use commonware_bridge::{
 };
 use commonware_codec::{DecodeExt, Encode};
 use commonware_consensus::{
-    simplex::{scheme::bls12381_threshold, types::Finalization},
+    simplex::{scheme::bls12381_threshold::standard as bls12381_threshold, types::Finalization},
     types::View,
     Viewable,
 };
@@ -22,10 +22,10 @@ use commonware_cryptography::{
     sha256::Digest as Sha256Digest,
     Digest, Hasher, Sha256, Signer as _,
 };
-use commonware_parallel::Rayon;
-use commonware_runtime::{tokio, Listener, Metrics, Network, RayonPoolSpawner, Runner, Spawner};
+use commonware_parallel::Sequential;
+use commonware_runtime::{tokio, Listener, Metrics, Network, Runner, Spawner};
 use commonware_stream::{listen, Config as StreamConfig};
-use commonware_utils::{from_hex, ordered::Set, union, NZUsize, TryCollect};
+use commonware_utils::{from_hex, ordered::Set, union, TryCollect};
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt, StreamExt,
@@ -37,7 +37,7 @@ use std::{
 };
 use tracing::{debug, info};
 
-type Scheme = bls12381_threshold::Scheme<PublicKey, MinSig, Rayon>;
+type Scheme = bls12381_threshold::Scheme<PublicKey, MinSig>;
 
 #[allow(clippy::large_enum_variant)]
 enum Message<D: Digest> {
@@ -137,8 +137,6 @@ fn main() {
     // Create context
     let executor = tokio::Runner::default();
     executor.start(|context| async move {
-        let strategy = context.clone().create_strategy(NZUsize!(2)).unwrap();
-
         for network in networks {
             let network = from_hex(network).expect("Network not well-formed");
             let public = <MinSig as Variant>::Public::decode(network.as_ref())
@@ -146,11 +144,7 @@ fn main() {
             let namespace = union(APPLICATION_NAMESPACE, CONSENSUS_SUFFIX);
             verifiers.insert(
                 public,
-                bls12381_threshold::Scheme::certificate_verifier(
-                    &namespace,
-                    public,
-                    strategy.clone(),
-                ),
+                bls12381_threshold::Scheme::certificate_verifier(&namespace, public),
             );
             blocks.insert(public, HashMap::new());
             finalizations.insert(public, BTreeMap::new());
@@ -204,7 +198,10 @@ fn main() {
                             let _ = response.send(false);
                             continue;
                         };
-                        if !incoming.finalization.verify(&mut ctx, verifier) {
+                        if !incoming
+                            .finalization
+                            .verify(&mut ctx, verifier, &Sequential)
+                        {
                             let _ = response.send(false);
                             continue;
                         }
