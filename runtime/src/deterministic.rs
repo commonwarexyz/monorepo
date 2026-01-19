@@ -288,10 +288,13 @@ impl Default for Config {
     }
 }
 
+/// Key for detecting duplicate metric registrations: (metric_name, attributes).
+type MetricKey = (String, Vec<(String, String)>);
+
 /// Deterministic runtime that randomly selects tasks to run based on a seed.
 pub struct Executor {
     registry: Mutex<Registry>,
-    registered_metrics: Mutex<HashSet<(String, Vec<(String, String)>)>>,
+    registered_metrics: Mutex<HashSet<MetricKey>>,
     cycle: Duration,
     deadline: Option<SystemTime>,
     metrics: Arc<Metrics>,
