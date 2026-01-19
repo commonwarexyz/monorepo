@@ -17,6 +17,10 @@ use futures::channel::mpsc;
 use std::{error::Error as StdError, fmt::Debug, future::Future, time::SystemTime};
 
 pub mod authenticated;
+#[cfg(not(min_readiness_1))]
+#[cfg(not(min_readiness_2))]
+#[cfg(not(min_readiness_3))]
+#[cfg(not(min_readiness_4))]
 pub mod simulated;
 pub mod types;
 pub mod utils;

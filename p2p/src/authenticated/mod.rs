@@ -8,7 +8,11 @@
 //! and that they can be looked up by their identifiers.
 
 mod data;
+#[cfg(not(min_readiness_3))]
+#[cfg(not(min_readiness_4))]
 pub mod discovery;
+#[cfg(not(min_readiness_3))]
+#[cfg(not(min_readiness_4))]
 pub mod lookup;
 mod mailbox;
 pub use mailbox::{Mailbox, UnboundedMailbox};
