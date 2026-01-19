@@ -178,11 +178,10 @@ fn fuzz(input: FuzzInput) {
 
     runner.start(|context| async move {
         let cfg = test_cfg();
-        let mut restarts = 0usize;
 
         // Phase 1: Create valid data
         let mut oversized: Oversized<_, TestEntry, TestValue> =
-            Oversized::init(context.clone(), cfg.clone())
+            Oversized::init(context.with_label("initial"), cfg.clone())
                 .await
                 .expect("Failed to init");
 
@@ -292,16 +291,10 @@ fn fuzz(input: FuzzInput) {
         }
 
         // Phase 3: Recovery - this should not panic
-        let mut recovered: Oversized<_, TestEntry, TestValue> = Oversized::init(
-            context
-                .with_label("oversized")
-                .with_attribute("instance", restarts),
-            cfg.clone(),
-        )
-        .await
-        .expect("Recovery should not fail");
-        restarts += 1;
-        let _ = restarts;
+        let mut recovered: Oversized<_, TestEntry, TestValue> =
+            Oversized::init(context.with_label("recovered"), cfg.clone())
+                .await
+                .expect("Recovery should not fail");
 
         // Phase 4: Verify get operations don't panic
         // Note: Value checksums are verified lazily on read, not during recovery.
