@@ -19,12 +19,8 @@ use core::{
 use {
     commonware_utils::rational::BigRationalExt,
     num_rational::BigRational,
-    num_traits::{One, Zero},
+    num_traits::{One, ToPrimitive, Zero},
 };
-
-/// ln(2) in Q16.16 fixed-point format.
-/// Used for computing optimal number of hash functions.
-const LN2_Q16: u64 = 45_426;
 
 /// A [Bloom Filter](https://en.wikipedia.org/wiki/Bloom_filter).
 ///
@@ -169,16 +165,13 @@ impl<H: Hasher> BloomFilter<H> {
     /// This approximates the false positive rate as `f^k` where `f` is the fill ratio
     /// (proportion of bits set to 1) and `k` is the number of hash functions.
     ///
-    /// # Determinism
-    ///
-    /// This method is deterministic across platforms because:
-    /// - Integer to f64 conversion is exact for values < 2^53 (our bit counts qualify)
-    /// - Division is an IEEE 754 basic operation (correctly rounded, deterministic)
-    /// - `powi` is repeated multiplication of IEEE 754 basic operations
+    /// Returns a [`BigRational`] for exact representation and cross-platform determinism.
     #[cfg(feature = "std")]
-    pub fn estimated_false_positive_rate(&self) -> f64 {
-        let fill_ratio = self.bits.count_ones() as f64 / self.bits.len() as f64;
-        fill_ratio.powi(self.hashers as i32)
+    pub fn estimated_false_positive_rate(&self) -> BigRational {
+        let ones = self.bits.count_ones();
+        let len = self.bits.len();
+        let fill_ratio = BigRational::new(ones.into(), len.into());
+        fill_ratio.pow(self.hashers as i32)
     }
 
     /// Estimates the number of items that have been inserted.
@@ -186,37 +179,46 @@ impl<H: Hasher> BloomFilter<H> {
     /// Uses the formula `n = -(m/k) * ln(1 - x/m)` where `m` is the number of bits,
     /// `k` is the number of hash functions, and `x` is the number of bits set to 1.
     ///
-    /// # Warning
-    ///
-    /// This method uses `ln()` which is NOT an IEEE 754 basic operation. Results may differ
-    /// across platforms/architectures. Do not use in consensus-critical code paths.
+    /// Returns a [`BigRational`] using a Taylor series approximation for ln().
     #[cfg(feature = "std")]
-    pub fn estimated_count(&self) -> f64 {
-        let m = self.bits.len() as f64;
-        let x = self.bits.count_ones() as f64;
-        let k = self.hashers as f64;
+    pub fn estimated_count(&self) -> BigRational {
+        let m = self.bits.len();
+        let x = self.bits.count_ones();
+        let k = self.hashers as u64;
+
         if x >= m {
-            return f64::INFINITY;
+            return BigRational::from_usize(usize::MAX);
         }
-        -(m / k) * (1.0 - x / m).ln()
+
+        // ln(1 - y) = -y - y^2/2 - y^3/3 - ... where y = x/m
+        let y = BigRational::new(x.into(), m.into());
+        let mut ln_result = BigRational::zero();
+        let mut y_power = y.clone();
+        for n in 1..=20usize {
+            ln_result -= &y_power / BigRational::from_usize(n);
+            y_power = &y_power * &y;
+        }
+
+        // n = -(m/k) * ln(1 - x/m)
+        let m_over_k = BigRational::new(m.into(), k.into());
+        -m_over_k * ln_result
     }
 
     /// Calculates the optimal number of hash functions for a given capacity and bit count.
     ///
-    /// Uses integer math with Q16.16 fixed-point for determinism. The result is clamped to
-    /// [1, 16] since beyond ~10-12 hashes provides negligible improvement while increasing
-    /// CPU cost.
+    /// Uses [`BigRational`] for determinism. The result is clamped to [1, 16] since
+    /// beyond ~10-12 hashes provides negligible improvement while increasing CPU cost.
     #[cfg(feature = "std")]
     pub fn optimal_hashers(expected_items: usize, bits: usize) -> u8 {
         if expected_items == 0 {
             return 1;
         }
 
-        // k = (m/n) * ln(2) using Q16.16 fixed-point
-        // Use saturating arithmetic to prevent overflow (n << 16 wraps to 0 for n >= 2^48)
-        let n_scaled = (expected_items as u64).saturating_mul(1 << 16);
-        let k = (bits as u64).saturating_mul(LN2_Q16) / n_scaled;
-        k.clamp(1, 16) as u8
+        // k = (m/n) * ln(2)
+        // ln(2) approximation: 14397/20769 (6 digits precision)
+        let ln2 = BigRational::from_frac_u64(14397, 20769);
+        let k_ratio = BigRational::from_usize(bits) * ln2 / BigRational::from_usize(expected_items);
+        k_ratio.to_integer().to_u8().unwrap_or(16).clamp(1, 16)
     }
 
     /// Calculates the optimal number of bits for a given capacity and false positive rate.
@@ -310,13 +312,9 @@ impl<H: Hasher> arbitrary::Arbitrary<'_> for BloomFilter<H> {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         // Ensure at least 1 hasher
         let hashers = u8::arbitrary(u)?.max(1);
-        // Fallback to highest power of two in u16 on overflow,
-        // we restrict to u16 to avoid OOM
-        let bits_len = u
-            .arbitrary::<u16>()?
-            .checked_next_power_of_two()
-            .unwrap_or(1 << 15) as usize;
-        let mut bits = BitMap::with_capacity(bits_len as u64);
+        // Generate u64 in u16 range to avoid OOM, then round to power of two
+        let bits_len = u.int_in_range(0..=u16::MAX as u64)?.next_power_of_two();
+        let mut bits = BitMap::with_capacity(bits_len);
         for _ in 0..bits_len {
             bits.push(u.arbitrary::<bool>()?);
         }
@@ -471,8 +469,8 @@ mod tests {
         let mut bf = BloomFilter::<Sha256>::new(NZU8!(7), NZUsize!(1024));
 
         // Empty filter should have 0 estimated count and FP rate
-        assert_eq!(bf.estimated_count(), 0.0);
-        assert_eq!(bf.estimated_false_positive_rate(), 0.0);
+        assert_eq!(bf.estimated_count(), BigRational::zero());
+        assert_eq!(bf.estimated_false_positive_rate(), BigRational::zero());
 
         // Insert some items
         for i in 0..100usize {
@@ -481,11 +479,13 @@ mod tests {
 
         // Estimated count should be reasonably close to 100
         let estimated = bf.estimated_count();
-        assert!(estimated > 75.0 && estimated < 125.0);
+        let lower = BigRational::from_usize(75);
+        let upper = BigRational::from_usize(125);
+        assert!(estimated > lower && estimated < upper);
 
         // FP rate should be non-zero after insertions
-        assert!(bf.estimated_false_positive_rate() > 0.0);
-        assert!(bf.estimated_false_positive_rate() < 1.0);
+        assert!(bf.estimated_false_positive_rate() > BigRational::zero());
+        assert!(bf.estimated_false_positive_rate() < BigRational::one());
     }
 
     #[test]
@@ -592,14 +592,6 @@ mod tests {
         let bits = BloomFilter::<Sha256>::optimal_bits(0, &fp_1pct);
         assert!(bits.is_power_of_two());
         assert_eq!(bits, 1); // 0 * bpe rounds up to 1
-    }
-
-    #[test]
-    fn test_q16_ln2_constant() {
-        // Verify Q16.16 fixed-point constant for ln(2) matches the formula
-        let ln2 = core::f64::consts::LN_2;
-        let expected_ln2_q16 = (ln2 * 65536.0).round() as u64;
-        assert_eq!(LN2_Q16, expected_ln2_q16);
     }
 
     #[test]

@@ -31,23 +31,22 @@ impl Conformance for RationalOptimalBits {
             BigRational::from_frac_u64(1, 100),    // 1%
             BigRational::from_frac_u64(1, 10),     // 10%
         ];
-
         for fp_rate in &fp_rates {
             // Test individual functions
             let bits = BloomFilter::<Sha256>::optimal_bits(expected_items, fp_rate);
             let hashers = BloomFilter::<Sha256>::optimal_hashers(expected_items, bits);
 
-            log.extend((expected_items as u64).to_le_bytes());
-            log.extend((bits as u64).to_le_bytes());
-            log.extend(hashers.to_le_bytes());
+            log.extend((expected_items as u64).to_be_bytes());
+            log.extend((bits as u64).to_be_bytes());
+            log.extend(hashers.to_be_bytes());
 
             // Test with_rate constructor produces same results
             let filter = BloomFilter::<Sha256>::with_rate(
                 NonZeroUsize::new(expected_items).unwrap(),
                 fp_rate.clone(),
             );
-            log.extend((filter.bits().get() as u64).to_le_bytes());
-            log.extend(filter.hashers().get().to_le_bytes());
+            log.extend((filter.bits().get() as u64).to_be_bytes());
+            log.extend(filter.hashers().get().to_be_bytes());
         }
 
         // Test some boundary values
@@ -60,7 +59,7 @@ impl Conformance for RationalOptimalBits {
 
         for fp_rate in &boundary_rates {
             let bits = BloomFilter::<Sha256>::optimal_bits(expected_items, fp_rate);
-            log.extend((bits as u64).to_le_bytes());
+            log.extend((bits as u64).to_be_bytes());
         }
 
         log

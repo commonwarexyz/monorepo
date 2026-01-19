@@ -28,8 +28,8 @@ enum Constructor {
     },
     WithRate {
         expected_items: NonZeroU16,
-        fp_numerator: u32,
-        fp_denominator: u32,
+        fp_numerator: u64,
+        fp_denominator: u64,
     },
 }
 
@@ -47,8 +47,8 @@ impl<'a> Arbitrary<'a> for Constructor {
         } else {
             let expected_items = u.arbitrary::<NonZeroU16>()?;
             // Generate FP rate as rational: numerator in [1, denominator-1] to ensure (0, 1)
-            let fp_denominator = u.int_in_range(2u32..=10_000)?;
-            let fp_numerator = u.int_in_range(1u32..=fp_denominator - 1)?;
+            let fp_denominator = u.int_in_range(2u64..=10_000)?;
+            let fp_numerator = u.int_in_range(1u64..=fp_denominator - 1)?;
             Ok(Constructor::WithRate {
                 expected_items,
                 fp_numerator,
@@ -85,7 +85,7 @@ fn fuzz(input: FuzzInput) {
             fp_numerator,
             fp_denominator,
         } => {
-            let fp_rate = BigRational::from_frac_u64(fp_numerator as u64, fp_denominator as u64);
+            let fp_rate = BigRational::from_frac_u64(fp_numerator, fp_denominator);
             BloomFilter::<Sha256>::with_rate(
                 NonZeroUsize::new(expected_items.get() as usize).unwrap(),
                 fp_rate,
