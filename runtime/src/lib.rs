@@ -341,6 +341,28 @@ pub trait Metrics: Clone + Send + Sync + 'static {
     /// and use it in panel queries: `consensus_engine_votes_total{epoch="$latest_epoch"}`
     ///
     /// Keys must start with `[a-zA-Z]` and contain only `[a-zA-Z0-9_]`. Values can be any string.
+    ///
+    /// # Warning: Family Label Conflicts
+    ///
+    /// When using prometheus `Family` metrics, avoid using attribute keys that match the
+    /// Family's label field names. If a conflict occurs, the encoded output will contain
+    /// duplicate labels (e.g., `{env="prod",env="staging"}`), which is invalid Prometheus
+    /// format and may cause scraping issues.
+    ///
+    /// ```ignore
+    /// #[derive(EncodeLabelSet)]
+    /// struct Labels { env: String }
+    ///
+    /// // BAD: attribute "env" conflicts with Family field "env"
+    /// let ctx = context.with_attribute("env", "prod");
+    /// let family: Family<Labels, Counter> = Family::default();
+    /// ctx.register("requests", "help", family);
+    /// // Produces invalid: requests_total{env="prod",env="staging"}
+    ///
+    /// // GOOD: use distinct names
+    /// let ctx = context.with_attribute("region", "us_east");
+    /// // Produces valid: requests_total{region="us_east",env="staging"}
+    /// ```
     fn with_attribute(&self, key: &str, value: impl std::fmt::Display) -> Self;
 
     /// Prefix the given label with the current context's label.
