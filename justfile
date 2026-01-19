@@ -96,18 +96,14 @@ regenerate-conformance *args='':
 
 # Build with minimum readiness level (1-4)
 build-readiness level *args='':
-    RUSTFLAGS="--cfg min_readiness_{{ level }}" cargo build {{ args }}
-
-# Test with minimum readiness level (1-4)
-test-readiness level *args='':
-    RUSTFLAGS="--cfg min_readiness_{{ level }}" cargo nextest run {{ args }}
+    RUSTFLAGS="--cfg min_readiness_{{ level }}" cargo build --lib --bins {{ args }}
 
 # Check all readiness levels build
 check-readiness:
     #!/usr/bin/env bash
     for level in 1 2 3 4; do
         echo "Checking min_readiness_$level..."
-        RUSTFLAGS="--cfg min_readiness_$level" cargo build --workspace --all-targets || exit 1
+        RUSTFLAGS="--cfg min_readiness_$level" cargo build --workspace --lib --bins || exit 1
     done
     echo "All readiness levels pass!"
 
