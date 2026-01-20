@@ -925,7 +925,6 @@ impl G1 {
         // Compute all tiles in parallel
         // SAFETY: blst_p1s_mult_pippenger_scratch_sizeof(0) returns base scratch size.
         let scratch_size = unsafe { blst_p1s_mult_pippenger_scratch_sizeof(0) } / 8;
-
         let tile_results: Vec<(usize, usize, blst_p1)> =
             strategy.map_collect_vec(tiles.iter().enumerate(), |(idx, tile)| {
                 let mut scratch = vec![0u64; scratch_size << (window - 1)];
@@ -1363,7 +1362,6 @@ impl G2 {
         // Compute all tiles in parallel
         // SAFETY: blst_p2s_mult_pippenger_scratch_sizeof(0) returns base scratch size.
         let scratch_size = unsafe { blst_p2s_mult_pippenger_scratch_sizeof(0) } / 8;
-
         let tile_results: Vec<(usize, usize, blst_p2)> =
             strategy.map_collect_vec(tiles.iter().enumerate(), |(idx, tile)| {
                 let mut scratch = vec![0u64; scratch_size << (window - 1)];
