@@ -2,13 +2,13 @@ use commonware_macros::ready_mod;
 
 ready_mod!(0, pub(crate) mod audited);
 ready_mod!(0, pub(crate) mod deterministic);
-pub(crate) mod metered;
+ready_mod!(0, pub(crate) mod metered);
 
 #[cfg(all(not(target_arch = "wasm32"), not(feature = "iouring-network")))]
-pub(crate) mod tokio;
+ready_mod!(2, pub(crate) mod tokio);
 
 #[cfg(all(not(target_arch = "wasm32"), feature = "iouring-network"))]
-pub(crate) mod iouring;
+ready_mod!(1, pub(crate) mod iouring);
 
 #[cfg(test)]
 mod tests {
