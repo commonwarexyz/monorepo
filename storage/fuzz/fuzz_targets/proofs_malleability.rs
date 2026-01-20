@@ -173,8 +173,7 @@ fn fuzz(input: FuzzInput) {
             let Ok(original_proof) = mmr.range_proof(start_loc..end_loc + 1) else {
                 return;
             };
-            let range_elements: Vec<Digest> =
-                (start_idx..=end_idx).map(|i| digests[i]).collect();
+            let range_elements: Vec<Digest> = (start_idx..=end_idx).map(|i| digests[i]).collect();
             assert!(original_proof.verify_range_inclusion(
                 &mut hasher,
                 &range_elements,
@@ -240,8 +239,10 @@ fn fuzz(input: FuzzInput) {
             let Ok(original_proof) = tree.multi_proof(&positions) else {
                 return;
             };
-            let elements: Vec<(Digest, u32)> =
-                positions.iter().map(|&p| (digests[p as usize], p)).collect();
+            let elements: Vec<(Digest, u32)> = positions
+                .iter()
+                .map(|&p| (digests[p as usize], p))
+                .collect();
 
             let mut hasher = Sha256::default();
             assert!(original_proof
