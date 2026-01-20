@@ -10,7 +10,9 @@
     html_favicon_url = "https://commonware.xyz/favicon.ico"
 )]
 
+#[cfg(not(any(min_readiness_3, min_readiness_4)))]
 use commonware_codec::Codec;
+#[cfg(not(any(min_readiness_3, min_readiness_4)))]
 use commonware_cryptography::{Committable, Digestible};
 use commonware_macros::{ready, ready_mod};
 
@@ -19,12 +21,12 @@ ready_mod!(1, pub mod ordered_broadcast);
 ready_mod!(2, pub mod simplex);
 ready_mod!(2, pub mod types);
 
-#[ready(2)]
+#[cfg(not(any(min_readiness_3, min_readiness_4)))]
 use types::{Epoch, Height, View};
 
 /// Epochable is a trait that provides access to the epoch number.
 /// Any consensus message or object that is associated with a specific epoch should implement this.
-#[ready(2)]
+#[cfg(not(any(min_readiness_3, min_readiness_4)))]
 pub trait Epochable {
     /// Returns the epoch associated with this object.
     fn epoch(&self) -> Epoch;
@@ -32,7 +34,7 @@ pub trait Epochable {
 
 /// Heightable is a trait that provides access to the height.
 /// Any consensus message or object that is associated with a specific height should implement this.
-#[ready(2)]
+#[cfg(not(any(min_readiness_3, min_readiness_4)))]
 pub trait Heightable {
     /// Returns the height associated with this object.
     fn height(&self) -> Height;
@@ -40,7 +42,7 @@ pub trait Heightable {
 
 /// Viewable is a trait that provides access to the view (round) number.
 /// Any consensus message or object that is associated with a specific view should implement this.
-#[ready(2)]
+#[cfg(not(any(min_readiness_3, min_readiness_4)))]
 pub trait Viewable {
     /// Returns the view associated with this object.
     fn view(&self) -> View;
@@ -49,14 +51,14 @@ pub trait Viewable {
 /// Block is the interface for a block in the blockchain.
 ///
 /// Blocks are used to track the progress of the consensus engine.
-#[ready(2)]
+#[cfg(not(any(min_readiness_3, min_readiness_4)))]
 pub trait Block: Heightable + Codec + Digestible + Committable + Send + Sync + 'static {
     /// Get the parent block's digest.
     fn parent(&self) -> Self::Commitment;
 }
 
 cfg_if::cfg_if! {
-    if #[cfg(not(target_arch = "wasm32"))] {
+    if #[cfg(all(not(target_arch = "wasm32"), not(any(min_readiness_3, min_readiness_4))))] {
         use commonware_cryptography::Digest;
         use commonware_utils::channels::fallible::OneshotExt;
         use futures::channel::{oneshot, mpsc};

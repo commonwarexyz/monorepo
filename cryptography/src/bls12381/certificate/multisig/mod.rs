@@ -575,7 +575,7 @@ mod macros {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(min_readiness_3), not(min_readiness_4)))]
 mod tests {
     use super::*;
     use crate::{

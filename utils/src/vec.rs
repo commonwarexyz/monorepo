@@ -3,7 +3,11 @@
 use crate::TryFromIterator;
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
-use bytes::{Buf, BufMut};
+#[cfg(not(any(min_readiness_3, min_readiness_4)))]
+use bytes::Buf;
+#[cfg(not(any(min_readiness_3, min_readiness_4)))]
+use bytes::BufMut;
+#[cfg(not(any(min_readiness_3, min_readiness_4)))]
 use commonware_codec::{EncodeSize, RangeCfg, Read, Write};
 use core::{
     num::NonZeroUsize,
@@ -316,18 +320,21 @@ impl<'a, T> IntoIterator for &'a mut NonEmptyVec<T> {
     }
 }
 
+#[cfg(not(any(min_readiness_3, min_readiness_4)))]
 impl<T: Write> Write for NonEmptyVec<T> {
     fn write(&self, buf: &mut impl BufMut) {
         self.0.write(buf);
     }
 }
 
+#[cfg(not(any(min_readiness_3, min_readiness_4)))]
 impl<T: EncodeSize> EncodeSize for NonEmptyVec<T> {
     fn encode_size(&self) -> usize {
         self.0.encode_size()
     }
 }
 
+#[cfg(not(any(min_readiness_3, min_readiness_4)))]
 impl<T: Read> Read for NonEmptyVec<T> {
     type Cfg = (RangeCfg<NonZeroUsize>, T::Cfg);
 
@@ -443,7 +450,8 @@ macro_rules! non_empty_vec {
 mod tests {
     use super::*;
     use crate::{NZUsize, TryCollect};
-    use commonware_codec::Error as CodecError;
+    #[cfg(not(any(min_readiness_3, min_readiness_4)))]
+    use commonware_codec::{Error as CodecError, RangeCfg};
     use std::num::NonZeroUsize;
 
     #[test]
@@ -779,8 +787,10 @@ mod tests {
         assert_eq!(&*v, &[11, 12, 13]);
     }
 
+    #[cfg(not(any(min_readiness_3, min_readiness_4)))]
     #[test]
     fn test_codec_roundtrip() {
+        use commonware_codec::{EncodeSize, Read, Write};
         let v = non_empty_vec![1u8, 2, 3];
 
         let mut buf = Vec::with_capacity(v.encode_size());
@@ -795,8 +805,10 @@ mod tests {
         assert_eq!(v, decoded);
     }
 
+    #[cfg(not(any(min_readiness_3, min_readiness_4)))]
     #[test]
     fn test_codec_rejects_empty() {
+        use commonware_codec::{Read, Write};
         let empty: Vec<u8> = vec![];
         let mut buf = Vec::new();
         empty.write(&mut buf);

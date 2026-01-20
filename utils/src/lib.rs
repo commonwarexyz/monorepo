@@ -11,7 +11,10 @@ extern crate alloc;
 
 #[cfg(not(feature = "std"))]
 use alloc::{boxed::Box, string::String, vec::Vec};
-use bytes::{Buf, BufMut, BytesMut};
+use bytes::{BufMut, BytesMut};
+#[cfg(not(any(min_readiness_3, min_readiness_4)))]
+use bytes::Buf;
+#[cfg(not(any(min_readiness_3, min_readiness_4)))]
 use commonware_codec::{varint::UInt, EncodeSize, Error as CodecError, Read, ReadExt, Write};
 use core::{
     fmt::{Debug, Write as FmtWrite},
@@ -20,20 +23,26 @@ use core::{
 
 pub mod faults;
 pub use faults::{Faults, N3f1, N5f1};
+#[cfg(not(any(min_readiness_3, min_readiness_4)))]
 pub mod sequence;
+#[cfg(not(any(min_readiness_3, min_readiness_4)))]
 pub use sequence::{Array, Span};
 #[cfg(feature = "std")]
 pub mod acknowledgement;
 #[cfg(feature = "std")]
 pub use acknowledgement::Acknowledgement;
+#[cfg(not(any(min_readiness_3, min_readiness_4)))]
 pub mod bitmap;
 #[cfg(feature = "std")]
 pub mod channels;
 pub mod hex_literal;
+#[cfg(not(any(min_readiness_3, min_readiness_4)))]
 pub mod hostname;
+#[cfg(not(any(min_readiness_3, min_readiness_4)))]
 pub use hostname::Hostname;
 #[cfg(feature = "std")]
 pub mod net;
+#[cfg(not(any(min_readiness_3, min_readiness_4)))]
 pub mod ordered;
 pub mod vec;
 
@@ -79,6 +88,7 @@ impl core::fmt::Display for Participant {
     }
 }
 
+#[cfg(not(any(min_readiness_3, min_readiness_4)))]
 impl Read for Participant {
     type Cfg = ();
 
@@ -88,12 +98,14 @@ impl Read for Participant {
     }
 }
 
+#[cfg(not(any(min_readiness_3, min_readiness_4)))]
 impl Write for Participant {
     fn write(&self, buf: &mut impl BufMut) {
         UInt(self.0).write(buf);
     }
 }
 
+#[cfg(not(any(min_readiness_3, min_readiness_4)))]
 impl EncodeSize for Participant {
     fn encode_size(&self) -> usize {
         UInt(self.0).encode_size()
@@ -214,7 +226,9 @@ pub fn union(a: &[u8], b: &[u8]) -> Vec<u8> {
 /// Concatenate a namespace and a message, prepended by a varint encoding of the namespace length.
 ///
 /// This produces a unique byte sequence (i.e. no collisions) for each `(namespace, msg)` pair.
+#[cfg(not(any(min_readiness_3, min_readiness_4)))]
 pub fn union_unique(namespace: &[u8], msg: &[u8]) -> Vec<u8> {
+    use commonware_codec::EncodeSize;
     let len_prefix = namespace.len();
     let mut buf = BytesMut::with_capacity(len_prefix.encode_size() + namespace.len() + msg.len());
     len_prefix.write(&mut buf);

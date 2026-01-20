@@ -5,15 +5,18 @@
     html_favicon_url = "https://commonware.xyz/favicon.ico"
 )]
 
+#[cfg(not(any(min_readiness_3, min_readiness_4)))]
 use commonware_codec::Codec;
 use commonware_macros::{ready, ready_mod};
+#[cfg(not(any(min_readiness_3, min_readiness_4)))]
 use futures::channel::oneshot;
+#[cfg(not(any(min_readiness_3, min_readiness_4)))]
 use std::future::Future;
 
 ready_mod!(2, pub mod buffered);
 
 /// Broadcaster is the interface responsible for attempting replication of messages across a network.
-#[ready(2)]
+#[cfg(not(any(min_readiness_3, min_readiness_4)))]
 pub trait Broadcaster: Clone + Send + 'static {
     /// The type of recipients that can receive messages.
     type Recipients;

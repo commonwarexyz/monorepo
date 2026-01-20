@@ -63,8 +63,10 @@ use crate::{
 };
 #[cfg(feature = "external")]
 use crate::{Blocker, Pacer};
+#[cfg(not(any(min_readiness_3, min_readiness_4)))]
 use commonware_codec::Encode;
 use commonware_macros::select;
+#[cfg(not(any(min_readiness_3, min_readiness_4)))]
 use commonware_parallel::ThreadPool;
 use commonware_utils::{hex, time::SYSTEM_TIME_PRECISION, SystemTimeExt};
 #[cfg(feature = "external")]
@@ -84,6 +86,7 @@ use prometheus_client::{
 };
 use rand::{prelude::SliceRandom, rngs::StdRng, CryptoRng, RngCore, SeedableRng};
 use rand_core::CryptoRngCore;
+#[cfg(not(any(min_readiness_3, min_readiness_4)))]
 use rayon::{ThreadPoolBuildError, ThreadPoolBuilder};
 use sha2::{Digest as _, Sha256};
 use std::{
@@ -1088,6 +1091,7 @@ impl crate::Spawner for Context {
     }
 }
 
+#[cfg(not(any(min_readiness_3, min_readiness_4)))]
 impl crate::RayonPoolSpawner for Context {
     fn create_pool(&self, concurrency: NonZeroUsize) -> Result<ThreadPool, ThreadPoolBuildError> {
         let mut builder = ThreadPoolBuilder::new().num_threads(concurrency.get());

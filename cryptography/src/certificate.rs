@@ -548,7 +548,7 @@ mod tests {
         assert!(Signers::decode_cfg(encoded, &10).is_ok());
     }
 
-    #[cfg(feature = "arbitrary")]
+    #[cfg(all(feature = "arbitrary", not(min_readiness_3), not(min_readiness_4)))]
     mod conformance {
         use super::*;
         use commonware_codec::conformance::CodecConformance;

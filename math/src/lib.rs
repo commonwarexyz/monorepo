@@ -11,7 +11,7 @@ extern crate alloc;
 use commonware_macros::ready_mod;
 
 ready_mod!(2, pub mod algebra);
-#[cfg(not(min_readiness_2))]
+#[cfg(not(any(min_readiness_2, min_readiness_3, min_readiness_4)))]
 pub mod fields {
     pub mod goldilocks;
 }

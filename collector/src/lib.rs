@@ -10,18 +10,24 @@
     html_favicon_url = "https://commonware.xyz/favicon.ico"
 )]
 
+#[cfg(not(any(min_readiness_2, min_readiness_3, min_readiness_4)))]
 use commonware_codec::Codec;
+#[cfg(not(any(min_readiness_2, min_readiness_3, min_readiness_4)))]
 use commonware_cryptography::{Committable, Digestible, PublicKey};
 use commonware_macros::{ready, ready_mod};
+#[cfg(not(any(min_readiness_2, min_readiness_3, min_readiness_4)))]
 use commonware_p2p::Recipients;
+#[cfg(not(any(min_readiness_2, min_readiness_3, min_readiness_4)))]
 use futures::channel::oneshot;
+#[cfg(not(any(min_readiness_2, min_readiness_3, min_readiness_4)))]
 use std::future::Future;
+#[cfg(not(any(min_readiness_2, min_readiness_3, min_readiness_4)))]
 use thiserror::Error;
 
 ready_mod!(1, pub mod p2p);
 
 /// Errors that can occur when interacting with a [Originator].
-#[ready(1)]
+#[cfg(not(any(min_readiness_2, min_readiness_3, min_readiness_4)))]
 #[derive(Error, Debug)]
 pub enum Error {
     #[error("send failed: {0}")]
@@ -31,7 +37,7 @@ pub enum Error {
 }
 
 /// An [Originator] sends requests out to a set of [Handler]s and collects replies.
-#[ready(1)]
+#[cfg(not(any(min_readiness_2, min_readiness_3, min_readiness_4)))]
 pub trait Originator: Clone + Send + 'static {
     /// The [PublicKey] of a recipient.
     type PublicKey: PublicKey;
@@ -57,7 +63,7 @@ pub trait Originator: Clone + Send + 'static {
 }
 
 /// A [Handler] receives requests and (optionally) sends replies.
-#[ready(1)]
+#[cfg(not(any(min_readiness_2, min_readiness_3, min_readiness_4)))]
 pub trait Handler: Clone + Send + 'static {
     /// The [PublicKey] of the [Originator].
     type PublicKey: PublicKey;
@@ -82,7 +88,7 @@ pub trait Handler: Clone + Send + 'static {
 }
 
 /// A [Monitor] collects responses from [Handler]s.
-#[ready(1)]
+#[cfg(not(any(min_readiness_2, min_readiness_3, min_readiness_4)))]
 pub trait Monitor: Clone + Send + 'static {
     /// The [PublicKey] of the [Handler].
     type PublicKey: PublicKey;
