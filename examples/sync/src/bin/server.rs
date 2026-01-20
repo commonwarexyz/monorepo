@@ -313,7 +313,7 @@ where
             match incoming {
                 Ok(message_data) => {
                     // Parse the message.
-                    let message = match wire::Message::decode(&message_data[..]) {
+                    let message = match wire::Message::decode(message_data.coalesce().as_ref()) {
                         Ok(msg) => msg,
                         Err(err) => {
                             warn!(client_addr = %client_addr, ?err, "failed to parse message");

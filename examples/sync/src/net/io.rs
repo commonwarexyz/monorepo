@@ -59,7 +59,7 @@ async fn run_loop<E, Si, St, M>(
         incoming = recv_frame(&mut stream, MAX_MESSAGE_SIZE) => {
             match incoming {
                 Ok(response_data) => {
-                    match M::decode(&response_data[..]) {
+                    match M::decode(response_data.coalesce().as_ref()) {
                         Ok(message) => {
                             let request_id = message.request_id();
                             if let Some(sender) = pending_requests.remove(&request_id) {
