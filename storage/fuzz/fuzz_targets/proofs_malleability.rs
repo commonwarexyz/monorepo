@@ -38,7 +38,7 @@ struct FuzzInput {
 
 impl<'a> Arbitrary<'a> for FuzzInput {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
-        let num_elements = u.int_in_range(1..=u8::MAX)?;
+        let num_elements: u8 = u.arbitrary()?;
         let proof = u.arbitrary()?;
         let num_mutations = u.int_in_range(1..=MAX_MUTATIONS)?;
         let mutations = (0..num_mutations)
@@ -153,10 +153,6 @@ fn fuzz(input: FuzzInput) {
             }
         }
         ProofType::MmrMulti => {
-            if input.positions.len() < 2 {
-                return;
-            }
-
             let mut hasher = Standard::<Sha256>::new();
             let mut mmr = CleanMmr::new(&mut hasher);
             for digest in &digests {
@@ -164,16 +160,27 @@ fn fuzz(input: FuzzInput) {
             }
             let root = mmr.root();
 
-            let idx1 = (input.positions[0] as usize) % digests.len();
-            let idx2 = (input.positions[1] as usize) % digests.len();
-            let (start_idx, end_idx) = (idx1.min(idx2), idx1.max(idx2));
+            let indices: Vec<usize> = input
+                .positions
+                .iter()
+                .take(2)
+                .filter(|_| !digests.is_empty())
+                .map(|&p| (p as usize) % digests.len())
+                .collect();
+            let (start_idx, end_idx) = match indices.as_slice() {
+                [] => (0, 0),
+                [i] => (*i, *i),
+                [i1, i2] => ((*i1).min(*i2), (*i1).max(*i2)),
+                _ => unreachable!(),
+            };
             let start_loc = Location::new(start_idx as u64).unwrap();
-            let end_loc = Location::new(end_idx as u64).unwrap();
 
-            let Ok(original_proof) = mmr.range_proof(start_loc..end_loc + 1) else {
+            let Ok(original_proof) = mmr.range_proof(start_loc..start_loc + (end_idx - start_idx + 1) as u64) else {
                 return;
             };
-            let range_elements: Vec<Digest> = (start_idx..=end_idx).map(|i| digests[i]).collect();
+            let range_elements: Vec<Digest> = (start_idx..=end_idx)
+                .filter_map(|i| digests.get(i).copied())
+                .collect();
             assert!(original_proof.verify_range_inclusion(
                 &mut hasher,
                 &range_elements,
@@ -231,6 +238,7 @@ fn fuzz(input: FuzzInput) {
             let positions: Vec<u32> = input
                 .positions
                 .iter()
+                .filter(|_| !digests.is_empty())
                 .map(|&p| (p as u32) % (digests.len() as u32))
                 .collect::<std::collections::HashSet<_>>()
                 .into_iter()
@@ -241,7 +249,7 @@ fn fuzz(input: FuzzInput) {
             };
             let elements: Vec<(Digest, u32)> = positions
                 .iter()
-                .map(|&p| (digests[p as usize], p))
+                .filter_map(|&p| digests.get(p as usize).map(|d| (*d, p)))
                 .collect();
 
             let mut hasher = Sha256::default();
