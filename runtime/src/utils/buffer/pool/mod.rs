@@ -32,7 +32,6 @@ use commonware_utils::StableBuf;
 mod append;
 mod page_cache;
 mod read;
-
 pub use append::Append;
 pub use page_cache::PoolRef;
 pub use read::Replay;

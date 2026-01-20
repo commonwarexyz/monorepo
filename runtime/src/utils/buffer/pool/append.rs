@@ -483,7 +483,6 @@ impl<B: Blob> Append<B> {
                 .write_at(physical_pages, write_at_offset)
                 .await?;
         }
-
         Ok(())
     }
 
@@ -530,7 +529,7 @@ impl<B: Blob> Append<B> {
     pub async fn read_into(&self, buf: &mut [u8], logical_offset: u64) -> Result<(), Error> {
         // Ensure the read doesn't overflow.
         let end_offset = logical_offset
-            .checked_add(buf.len() as u64)
+            .checked_add(buf.len() as u64) //is there a need for this
             .ok_or(Error::OffsetOverflow)?;
 
         // Acquire a read lock on the buffer.
@@ -799,11 +798,119 @@ impl<B: Blob> Blob for Append<B> {
         blob_state.blob.sync().await
     }
 
-    /// This [Blob] trait method is unimplemented by [Append] and unconditionally panics.
-    async fn write_at(&self, _buf: impl Into<StableBuf> + Send, _offset: u64) -> Result<(), Error> {
-        // TODO(<https://github.com/commonwarexyz/monorepo/issues/1207>): Extend the buffer pool to
-        // support arbitrary writes.
-        unimplemented!("append-only blob type does not support write_at")
+    /// Write data at an arbitrary offset in the blob.
+    ///
+    /// This method supports random writes to any offset within the blob using the atomic
+    /// double-buffered CRC mechanism. Each page has two CRC slots, and writes update the
+    /// alternate slot to ensure crash consistency.
+    ///
+    /// # Behavior
+    ///
+    /// - Writes to the buffered region (current partial page) will modify the buffer directly
+    /// - Writes to committed pages will read-modify-write with CRC flip-flop
+    /// - Writes that span both regions are handled correctly
+    /// - Cache is updated to reflect the new data
+    ///
+    /// # Errors
+    ///
+    /// - `Error::ImmutableBlob` - The blob is in the immutable state
+    /// - `Error::WriteFailed` - Underlying storage write failed
+    async fn write_at(&self, buf: impl Into<StableBuf> + Send, offset: u64) -> Result<(), Error> {
+        let buf: StableBuf = buf.into();
+        let buf_slice = buf.as_ref();
+
+        if buf_slice.is_empty() {
+            return Ok(());
+        }
+
+        // Check immutability
+        {
+            let buffer = self.buffer.read().await;
+            if buffer.immutable {
+                return Err(Error::ImmutableBlob);
+            }
+        }
+
+        let logical_page_size = self.pool_ref.page_size();
+
+        // Determine which pages are affected
+        let start_page = offset / logical_page_size;
+        let end_offset = offset + buf_slice.len() as u64;
+        let end_page = (end_offset - 1) / logical_page_size;
+
+        {
+            // Check if write extends beyond current size and update buffer size if needed
+            let mut buffer_guard = self.buffer.write().await;
+            let current_size = buffer_guard.size();
+            if end_offset > current_size {
+                // If the write extends beyond the buffer, update the offset to reflect the new size
+                // We round up to the next page boundary to ensure the offset is page-aligned
+
+                // Calculate the page that contains end_offset and set offset to start of that page
+                let page_containing_end = (end_offset + logical_page_size - 1) / logical_page_size;
+                buffer_guard.offset = page_containing_end * logical_page_size;
+                buffer_guard.data.clear();
+            }
+        }
+
+        // Process each affected page
+        for page_num in start_page..=end_page {
+            let page_start_offset = page_num * logical_page_size;
+            let page_end_offset = page_start_offset + logical_page_size;
+
+            // Calculate the range within this page that needs to be written
+            // Todo: add likely and unlikely hints
+            let write_start_in_page = if offset > page_start_offset {
+                (offset - page_start_offset) as usize
+            } else {
+                0
+            };
+
+            let write_end_in_page = if end_offset < page_end_offset {
+                (end_offset - page_start_offset) as usize
+            } else {
+                logical_page_size as usize
+            };
+
+            // Calculate the range within the input buffer
+            let buf_start = if page_start_offset > offset {
+                (page_start_offset - offset) as usize
+            } else {
+                0
+            };
+            let buf_end = buf_start + (write_end_in_page - write_start_in_page);
+
+            // Check if this write affects the buffered region
+            let mut buffer_guard = self.buffer.write().await;
+            let buffer_start = buffer_guard.offset;
+            let buffer_end = buffer_start + buffer_guard.data.len() as u64;
+
+            if page_start_offset >= buffer_start && page_start_offset < buffer_end {
+                // Writing to buffered data - modify buffer directly
+                let offset_in_buffer = (offset.max(buffer_start) - buffer_start) as usize;
+                let write_len = (buf_slice.len()).min((buffer_end - offset) as usize);
+                buffer_guard.data[offset_in_buffer..offset_in_buffer + write_len]
+                    .copy_from_slice(&buf_slice[..write_len]);
+                drop(buffer_guard);
+
+                // Invalidate partial_page_state since buffer was modified
+                let mut blob_guard = self.blob_state.write().await;
+                blob_guard.partial_page_state = None;
+            } else {
+                drop(buffer_guard);
+                // Writing to committed page - use CRC flip-flop
+                self.write_page_at(
+                    page_num,
+                    &buf_slice[buf_start..buf_end],
+                    write_start_in_page,
+                    write_end_in_page,
+                )
+                .await?;
+                self.sync().await.unwrap();
+            }
+        }
+
+        Ok(())
     }
 
     /// Resize the blob to the provided logical `size`.
@@ -889,6 +996,147 @@ impl<B: Blob> Blob for Append<B> {
             // No partial page - all pages are full or blob is empty.
             buf_guard.data = vec![];
         }
+
+        Ok(())
+    }
+}
+
+impl<B: Blob> Append<B> {
+    /// Write data to a specific page using the CRC flip-flop mechanism.
+    ///
+    /// This reads the existing page (if it exists), modifies the specified range,
+    /// and writes it back with the alternate CRC slot updated.
+    async fn write_page_at(
+        &self,
+        page_num: u64,
+        data: &[u8],
+        start_in_page: usize,
+        end_in_page: usize,
+    ) -> Result<(), Error> {
+        let logical_page_size = self.pool_ref.page_size() as usize;
+        let physical_page_size = logical_page_size + CHECKSUM_SIZE as usize;
+
+        // Read the existing page or create a new zero-filled page
+        let mut page_data = vec![0u8; logical_page_size];
+
+        let blob_guard = self.blob_state.read().await;
+        let physical_offset = page_num * physical_page_size as u64;
+
+        // Try to read existing page
+        let old_crc_record = match blob_guard
+            .blob
+            .read_at(vec![0u8; physical_page_size], physical_offset)
+            .await
+        {
+            Ok(physical_page) => {
+                let physical_page_slice = physical_page.as_ref();
+                // Validate and extract the page
+                if let Some(crc_record) = Checksum::validate_page(physical_page_slice) {
+                    let (len, _) = crc_record.get_crc();
+                    page_data[..len as usize].copy_from_slice(&physical_page_slice[..len as usize]);
+                    Some(crc_record)
+                } else {
+                    None
+                }
+            }
+            Err(_) => None,
+        };
+
+        // Apply the write
+        page_data[start_in_page..end_in_page].copy_from_slice(data);
+
+        // Compute new CRC for the entire page (write_at always writes full pages)
+        let new_len = logical_page_size as u16;
+        let new_crc = Crc32::checksum(&page_data);
+
+        // Build CRC record with flip-flop if old CRC exists
+        let crc_record = if let Some(ref old_crc) = old_crc_record {
+            Self::build_crc_record_preserving_old(new_len, new_crc, old_crc)
+        } else {
+            Checksum::new(new_len, new_crc)
+        };
+
+        // Prepare physical page
+        let mut physical_page = page_data.clone();
+        physical_page.extend_from_slice(&crc_record.to_bytes());
+
+        // Ensure blob is large enough for this write
+        let required_size = physical_offset + physical_page_size as u64;
+        {
+            drop(blob_guard);
+            let blob_guard_write = self.blob_state.write().await;
+            // Check if blob needs to be extended by trying to read at the end of required range
+            let test_read = blob_guard_write
+                .blob
+                .read_at(vec![0u8; 1], required_size.saturating_sub(1))
+                .await;
+            if test_read.is_err() {
+                blob_guard_write.blob.resize(required_size).await?;
+            }
+        }
+
+        // Re-acquire read guard for the writes
+        let blob_guard = self.blob_state.read().await;
+
+        // Determine which CRC slot to protect (if any)
+        // For write_at, we always write the full page, but preserve one CRC slot for crash recovery
+        let protected_regions = if let Some(old_crc) = old_crc_record.as_ref() {
+            // Determine which CRC slot to protect based on which one is authoritative
+            let protected_crc = if old_crc.len1 >= old_crc.len2 {
+                ProtectedCrc::First
+            } else {
+                ProtectedCrc::Second
+            };
+            Some((0, protected_crc)) // prefix_len is 0 because we're writing the full page
+        } else {
+            None
+        };
+
+        // Write the page with proper CRC protection
+        if let Some((_prefix_len, protected_crc)) = protected_regions {
+            match protected_crc {
+                ProtectedCrc::First => {
+                    // Protected CRC is first: [page_size..page_size+6]
+                    // Write 1: All data + second CRC [0..page_size+12, skipping first CRC]
+                    // Write data + second CRC, protecting first CRC
+                    blob_guard
+                        .blob
+                        .write_at(physical_page[..logical_page_size].to_vec(), physical_offset)
+                        .await?;
+                    let second_crc_start = logical_page_size + 6;
+                    blob_guard
+                        .blob
+                        .write_at(
+                            physical_page[second_crc_start..].to_vec(),
+                            physical_offset + second_crc_start as u64,
+                        )
+                        .await?;
+                }
+                ProtectedCrc::Second => {
+                    // Protected CRC is second: [page_size+6..page_size+12]
+                    // Write 1: All data + first CRC [0..page_size+6]
+                    let first_crc_end = logical_page_size + 6;
+                    blob_guard
+                        .blob
+                        .write_at(physical_page[..first_crc_end].to_vec(), physical_offset)
+                        .await?;
+                }
+            }
+        } else {
+            // No protected region, write everything in one operation
+            blob_guard
+                .blob
+                .write_at(physical_page, physical_offset)
+                .await?;
+        }
+
+        drop(blob_guard);
+
+        // Update cache with the new page data
+        let logical_page_size_u64 = self.pool_ref.page_size();
+        self.pool_ref
+            .cache(self.id, &page_data, page_num * logical_page_size_u64)
+            .await;
 
         Ok(())
     }
@@ -2089,6 +2337,326 @@ mod tests {
                     );
                 }
             }
+        });
+    }
+
+    #[test_traced]
+    fn test_write_at_basic() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let pool_ref = PoolRef::new(PAGE_SIZE, NZUsize!(10));
+            let (blob, size) = context.open("test", "blob".as_bytes()).await.unwrap();
+            assert_eq!(size, 0);
+
+            let append = Append::new(blob.clone(), size, BUFFER_SIZE, pool_ref.clone())
+                .await
+                .unwrap();
+
+            // Append initial data
+            append.append(&[4u8; 100]).await.unwrap();
+            append.sync().await.unwrap();
+
+            // Use write_at to modify data at offset 10
+            // append.write_at(vec![99u8; 20], 10).await.unwrap();
+            append.write_at(vec![10u8; 70], 40).await.unwrap();
+            append.write_at(vec![99u8; 20], 10).await.unwrap();
+            append.sync().await.unwrap();
+
+            // Verify the write
+            let mut buf = vec![0u8; 100];
+            append.read_into(&mut buf, 0).await.unwrap();
+            assert_eq!(&buf[0..10], &[4u8; 10]);
+            assert_eq!(&buf[10..30], &[99u8; 20]);
+            assert_eq!(&buf[40..100], &[10u8; 60]);
+
+            // Crash recovery test: re-open the blob
+            drop(append);
+            let (blob, size) = context.open("test", "blob".as_bytes()).await.unwrap();
+            let append = Append::new(blob, size, BUFFER_SIZE, pool_ref)
+                .await
+                .unwrap();
+            assert_eq!(append.size().await, 100);
+
+            // Verify data persisted
+            let mut buf = vec![0u8; 100];
+            append.read_into(&mut buf, 0).await.unwrap();
+            assert_eq!(&buf[0..10], &[4u8; 10]);
+            assert_eq!(&buf[10..30], &[99u8; 20]);
+            assert_eq!(&buf[40..100], &[10u8; 60]);
+        });
+    }
+
+    #[test_traced]
+    fn test_write_at_across_page_boundary() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let pool_ref = PoolRef::new(PAGE_SIZE, NZUsize!(10));
+            let (blob, size) = context.open("test", "blob".as_bytes()).await.unwrap();
+
+            let append = Append::new(blob.clone(), size, BUFFER_SIZE, pool_ref.clone())
+                .await
+                .unwrap();
+
+            // Write 2 pages of data
+            let page_size = PAGE_SIZE.get() as usize;
+            append.append(&vec![1u8; page_size * 2]).await.unwrap();
+            append.sync().await.unwrap();
+
+            // Write across page boundary
+            let offset = page_size - 50;
+            append
+                .write_at(vec![99u8; 100], offset as u64)
+                .await
+                .unwrap();
+            append.sync().await.unwrap();
+
+            // Verify the write
+            let mut buf = vec![0u8; page_size * 2];
+            append.read_into(&mut buf, 0).await.unwrap();
+            assert_eq!(&buf[0..offset], &vec![1u8; offset][..]);
+            assert_eq!(&buf[offset..offset + 100], &[99u8; 100]);
+            assert_eq!(
+                &buf[offset + 100..],
+                &vec![1u8; page_size * 2 - offset - 100][..]
+            );
+
+            // Crash recovery
+            drop(append);
+            let (blob, size) = context.open("test", "blob".as_bytes()).await.unwrap();
+            let append = Append::new(blob, size, BUFFER_SIZE, pool_ref)
+                .await
+                .unwrap();
+
+            // Verify data persisted across page boundary
+            let mut buf = vec![0u8; page_size * 2];
+            append.read_into(&mut buf, 0).await.unwrap();
+            assert_eq!(&buf[offset..offset + 100], &[99u8; 100]);
+        });
+    }
+
+    #[test_traced]
+    fn test_write_at_multiple_random_writes() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let pool_ref = PoolRef::new(PAGE_SIZE, NZUsize!(20));
+            let (blob, size) = context.open("test", "blob".as_bytes()).await.unwrap();
+
+            let append = Append::new(blob.clone(), size, BUFFER_SIZE, pool_ref.clone())
+                .await
+                .unwrap();
+
+            // Create 5 pages of data
+            let page_size = PAGE_SIZE.get() as usize;
+            append.append(&vec![0u8; page_size * 5]).await.unwrap();
+            append.sync().await.unwrap();
+
+            // Perform multiple random writes
+            append.write_at(vec![1u8; 50], 100).await.unwrap();
+            append.write_at(vec![2u8; 50], 500).await.unwrap();
+            append.write_at(vec![3u8; 50], 1500).await.unwrap();
+            append.write_at(vec![4u8; 50], 3000).await.unwrap();
+            append.sync().await.unwrap();
+
+            // Crash recovery
+            drop(append);
+            let (blob, size) = context.open("test", "blob".as_bytes()).await.unwrap();
+            let append = Append::new(blob, size, BUFFER_SIZE, pool_ref)
+                .await
+                .unwrap();
+
+            // Verify all writes persisted
+            let mut buf = vec![0u8; 50];
+            append.read_into(&mut buf, 100).await.unwrap();
+            assert_eq!(&buf, &[1u8; 50]);
+
+            append.read_into(&mut buf, 500).await.unwrap();
+            assert_eq!(&buf, &[2u8; 50]);
+
+            append.read_into(&mut buf, 1500).await.unwrap();
+            assert_eq!(&buf, &[3u8; 50]);
+
+            append.read_into(&mut buf, 3000).await.unwrap();
+            assert_eq!(&buf, &[4u8; 50]);
+        });
+    }
+
+    #[test_traced]
+    fn test_write_at_crc_flip_flop_protection() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let pool_ref = PoolRef::new(PAGE_SIZE, NZUsize!(10));
+            let (blob, size) = context.open("test", "blob".as_bytes()).await.unwrap();
+
+            let append = Append::new(blob.clone(), size, BUFFER_SIZE, pool_ref.clone())
+                .await
+                .unwrap();
+
+            let page_size = PAGE_SIZE.get() as usize;
+            let physical_page_size = page_size + CHECKSUM_SIZE as usize;
+
+            // Write initial page
+            append.append(&vec![1u8; page_size]).await.unwrap();
+            append.sync().await.unwrap();
+
+            // Read the physical page to verify initial CRC structure
+            let physical_page1 = blob
+                .read_at(vec![0u8; physical_page_size], 0)
+                .await
+                .unwrap();
+            let crc1 = Checksum::validate_page(physical_page1.as_ref()).unwrap();
+            let (len1, _) = crc1.get_crc();
+            assert_eq!(len1 as usize, page_size);
+
+            // Perform write_at to same page
+            append.write_at(vec![2u8; page_size], 0).await.unwrap();
+            append.sync().await.unwrap();
+
+            // Read physical page again
+            let physical_page2 = blob
+                .read_at(vec![0u8; physical_page_size], 0)
+                .await
+                .unwrap();
+            let crc2 = Checksum::validate_page(physical_page2.as_ref()).unwrap();
+
+            // Verify CRC flip-flop: one slot should have old CRC, one should have new
+            // The CRC values should be different because data changed
+            let old_preserved = crc1.crc1 == crc2.crc1
+                || crc1.crc1 == crc2.crc2
+                || crc1.crc2 == crc2.crc1
+                || crc1.crc2 == crc2.crc2;
+            assert!(
+                old_preserved,
+                "Old CRC should be preserved in alternate slot"
+            );
+
+            // Crash recovery: verify we read the correct (newer) data
+            drop(append);
+            let (blob, size) = context.open("test", "blob".as_bytes()).await.unwrap();
+            let append = Append::new(blob, size, BUFFER_SIZE, pool_ref)
+                .await
+                .unwrap();
+
+            let mut buf = vec![0u8; page_size];
+            append.read_into(&mut buf, 0).await.unwrap();
+            assert_eq!(&buf, &vec![2u8; page_size]);
+        });
+    }
+
+    #[test_traced]
+    fn test_write_at_to_buffered_region() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let pool_ref = PoolRef::new(PAGE_SIZE, NZUsize!(10));
+            let (blob, _) = context.open("test", "blob".as_bytes()).await.unwrap();
+
+            let append = Append::new(blob, 0, BUFFER_SIZE, pool_ref).await.unwrap();
+
+            // Append data (will be buffered)
+            append.append(&[1u8; 100]).await.unwrap();
+
+            // Write to buffered region (should modify buffer directly)
+            append.write_at(vec![99u8; 20], 50).await.unwrap();
+
+            // Read back (should see modification immediately without sync)
+            let mut buf = vec![0u8; 100];
+            append.read_into(&mut buf, 0).await.unwrap();
+            assert_eq!(&buf[0..50], &[1u8; 50]);
+            assert_eq!(&buf[50..70], &[99u8; 20]);
+            assert_eq!(&buf[70..100], &[1u8; 30]);
+        });
+    }
+
+    #[test_traced]
+    fn test_write_at_mixed_with_append() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let pool_ref = PoolRef::new(PAGE_SIZE, NZUsize!(10));
+            let (blob, size) = context.open("test", "blob".as_bytes()).await.unwrap();
+
+            let append = Append::new(blob.clone(), size, BUFFER_SIZE, pool_ref.clone())
+                .await
+                .unwrap();
+
+            // Append some data
+            append.append(&[1u8; 100]).await.unwrap();
+            append.sync().await.unwrap();
+
+            // Write at an offset
+            append.write_at(vec![2u8; 50], 25).await.unwrap();
+
+            // Append more data
+            append.append(&[3u8; 100]).await.unwrap();
+            append.sync().await.unwrap();
+
+            // Write to middle of the blob
+            append.write_at(vec![4u8; 50], 150).await.unwrap();
+            append.sync().await.unwrap();
+            assert_eq!(append.size().await, 200);
+
+            // Verify mixed operations
+            let mut buf = vec![0u8; 200];
+            append.read_into(&mut buf, 0).await.unwrap();
+
+            assert_eq!(&buf[0..25], &[1u8; 25]);
+            assert_eq!(&buf[25..75], &[2u8; 50]);
+            assert_eq!(&buf[75..100], &[1u8; 25]);
+            assert_eq!(&buf[100..150], &[3u8; 50]);
+            assert_eq!(&buf[150..200], &[4u8; 50]);
+
+            // Crash recovery
+            drop(append);
+            let (blob, size) = context.open("test", "blob".as_bytes()).await.unwrap();
+            let append = Append::new(blob, size, BUFFER_SIZE, pool_ref)
+                .await
+                .unwrap();
+            assert_eq!(append.size().await, 200);
+
+            // Verify data persisted
+            let mut buf = vec![0u8; 200];
+            append.read_into(&mut buf, 0).await.unwrap();
+            assert_eq!(&buf[25..75], &[2u8; 50]);
+            assert_eq!(&buf[150..200], &[4u8; 50]);
+        });
+    }
+
+    #[test_traced]
+    fn test_write_at_empty_buffer() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let pool_ref = PoolRef::new(PAGE_SIZE, NZUsize!(10));
+            let (blob, _) = context.open("test", "blob".as_bytes()).await.unwrap();
+
+            let append = Append::new(blob, 0, BUFFER_SIZE, pool_ref).await.unwrap();
+
+            // write_at on empty blob should succeed (creates zero-filled page)
+            append.write_at(vec![42u8; 10], 0).await.unwrap();
+            append.sync().await.unwrap();
+
+            let mut buf = vec![0u8; 10];
+            append.read_into(&mut buf, 0).await.unwrap();
+            println!("buf: {:?}", buf);
+            assert_eq!(&buf, &[42u8; 10]);
+        });
+    }
+
+    #[test_traced]
+    fn test_write_at_immutable_blob() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let pool_ref = PoolRef::new(PAGE_SIZE, NZUsize!(10));
+            let (blob, _) = context.open("test", "blob".as_bytes()).await.unwrap();
+
+            let append = Append::new(blob, 0, BUFFER_SIZE, pool_ref).await.unwrap();
+
+            append.append(&[1u8; 100]).await.unwrap();
+            append.sync().await.unwrap();
+
+            // Make immutable
+            append.to_immutable().await.unwrap();
+
+            // write_at should fail on immutable blob
+            let result = append.write_at(vec![99u8; 10], 0).await;
+            assert!(matches!(result, Err(crate::Error::ImmutableBlob)));
         });
     }
 }

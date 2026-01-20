@@ -32,6 +32,7 @@ impl Buffer {
     }
 
     /// Returns the current logical size of the blob including any buffered data.
+    #[inline]
     pub(super) const fn size(&self) -> u64 {
         self.offset + self.data.len() as u64
     }
