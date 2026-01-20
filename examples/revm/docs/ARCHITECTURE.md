@@ -1,121 +1,137 @@
 # REVM Example Architecture
 
-This document walks through the REVM simulation example with a top-down view that emphasizes the domain model (blocks, transactions, QMDB-rooted state) and the runtime components that operate on it. The diagram in `examples/revm/docs/revm_architecture.png` is the recommended starting point; its source lives in `examples/revm/docs/revm_architecture.dot`.
+This document explains how the REVM example works end to end. It is written so a reader can choose
+between a quick high-level scan and a deeper technical pass.
 
-## 1. High-Level Workflow
+## Status and scope
 
-1. **CLI entry point** (`examples/revm/src/main.rs`): Parses `nodes`, `blocks`, and `seed` flags, then calls `simulate(cfg)`.
-2. **Simulation harness** (`examples/revm/src/simulation/mod.rs`): Runs on a deterministic Tokio executor, derives threshold schemes, builds the `BootstrapConfig`, sets up the network, then starts `N` nodes and waits for a finalized head. This is the orchestration layer that keeps the demo deterministic and observable.
-3. **Nodes**: Each node wires together:
-   - **Consensus (Threshold Simplex)**: Orders block commitments and emits notarization/finalization events.
-   - **Marshal**: Delivers blocks over the simulated network and requests ancestors when needed.
-   - **Application** (`examples/revm/src/application/app.rs`): Handles proposing/verifying full REVM blocks and maintains local state snapshots.
-4. **Reporters**: The `SeedReporter` captures seeds from simplex activity, and the `FinalizedReporter` replays finalized blocks, verifies execution via QMDB, persists snapshots, and notifies the harness when a block is processed.
+- This is an example chain, not a production client.
+- It demonstrates how Commonware consensus, marshal, and QMDB persistence can drive REVM execution.
+- It intentionally omits signatures, fee markets, Ethereum MPT state roots, and many other features.
 
-## 2. Domain Model
+## How to read this
 
-| Term | Description | File |
-|------|-------------|------|
-| **Block** | Parent pointer, height, prevrandao seed, state root, transactions. Blocks are encoded/decoded via `examples/revm/src/domain/types.rs` and committed via the simplex digest. | `examples/revm/src/domain/types.rs` |
-| **Tx** | Minimal transaction (from, to, value, gas limit, calldata) with deterministic codec for gossip. | `examples/revm/src/domain/types.rs` |
-| **BootstrapConfig** | Genesis allocation plus bootstrap transactions applied before consensus starts. | `examples/revm/src/domain/types.rs` |
-| **StateChanges & QmdbChangeSet** | Deterministic encodings of touched accounts/storage used for execution tracing and QMDB persistence. | `examples/revm/src/domain/commitment.rs`, `examples/revm/src/qmdb/changes.rs` |
-| **StateRoot** | Hash combining QMDB partition roots (merkleized, non-durable, pre-commit). The post-commit root can differ because commit ops are part of the authenticated log. | `examples/revm/src/qmdb/mod.rs`, `examples/revm/src/domain/types.rs` |
+- Quick scan: read "System overview" and "Data flow by stage".
+- Deep dive: also read "State and persistence semantics" and "Safety and invariants".
+- If you want domain vocabulary, see DOMAIN_MODEL.md.
 
-## 3. Core Components
+## System overview
 
-### Ledger View (`examples/revm/src/application/ledger/mod.rs`)
+At a high level, the example does this:
 
-- Holds the mempool, per-digest snapshots, seed cache, and persisted digest set.
-- Stores snapshots as `LedgerSnapshot` (parent digest, `RevmDb`, `StateRoot`, `QmdbChangeSet`) in `examples/revm/src/application/ledger/snapshot_store.rs`.
-- Provides helpers to compute roots (without durably writing) and to persist snapshots via `QmdbLedger`.
+1. Consensus orders 32-byte digests, not full blocks.
+2. Full blocks are disseminated and backfilled by marshal.
+3. Each block is verified by re-executing its transactions in REVM.
+4. The resulting state changes are translated into a QMDB change set.
+5. Finalized blocks are persisted in QMDB in batch order.
 
-### QMDB Adapter & Persistence
+The architecture diagram is in `revm_architecture.png` (source: `revm_architecture.dot`).
 
-- `QmdbLedger` (`examples/revm/src/qmdb/service.rs`) orchestrates partitioned stores (`accounts`, `storage`, `code`) through `QmdbState` (`examples/revm/src/qmdb/state.rs`) and exposes:
-  - `database()` → a `QmdbRefDb` adapter (`examples/revm/src/qmdb/adapter.rs`) to satisfy REVM's sync API.
-  - `compute_root()` → computes the pre-commit root used in block headers without persisting.
-  - `commit_changes()` → applies the batch, updates the in-memory stores, and returns the post-commit root (which can differ because commit ops are authenticated).
-- `QmdbChangeSet`, `AccountUpdate`, and `AccountRecord` live in `examples/revm/src/qmdb/changes.rs` and `examples/revm/src/qmdb/model.rs` and translate REVM's `EvmState` into authenticated batches keyed by addresses, storage slots, and code hashes.
+## Component map (what owns what)
 
-### Execution Layer (`examples/revm/src/application/execution.rs`)
+| Component | Responsibility | Key files |
+| --- | --- | --- |
+| CLI | Parses flags, starts a simulation | `examples/revm/src/main.rs` |
+| Simulation | Orchestrates N nodes, waits for finalization | `examples/revm/src/simulation/mod.rs` |
+| Node wiring | Connects consensus, marshal, application, and storage | `examples/revm/src/application/node/` |
+| Consensus (simplex) | Orders digests and emits notarization and finalization events | `commonware_consensus` |
+| Marshal | Disseminates blocks and serves backfill requests | `examples/revm/src/application/node/marshal.rs` |
+| Application | Propose and verify full blocks | `examples/revm/src/application/app.rs` |
+| Execution | Runs REVM and extracts state changes | `examples/revm/src/application/execution.rs` |
+| Ledger view | Mempool, snapshots, seeds, persistence coordination | `examples/revm/src/application/ledger/` |
+| QMDB | Authenticated storage for accounts, storage, and code | `examples/revm/src/qmdb/` |
+| Reporters | React to consensus and marshal events | `examples/revm/src/application/reporters/` |
+| Observers | Log domain events (non-mutating) | `examples/revm/src/application/observers.rs` |
 
-- `execute_txs` uses Alloy/REVM with a custom seed precompile to run each tx in the provided `RevmDb`.
-- After each transaction it:
-  1. Builds deterministic `StateChanges` for tracing and tests.
-  2. Applies touched accounts to a `QmdbChangeSet` batch.
-  3. Commits the changes back to `RevmDb`.
-- The `ExecutionOutcome` contains both the per-tx `StateChanges` and the aggregated `QmdbChangeSet`.
+## Data flow by stage
 
-### Application (`examples/revm/src/application/app.rs`)
+### 1) Propose
 
-- `RevmApplication` implements `Application`/`VerifyingApplication` for consensus integration.
-- On `propose`, it:
-  1. Collects mempool transactions while avoiding duplicates via ancestor scanning.
-  2. Executes the transactions using the shared `RevmDb`.
-  3. Computes the resulting QMDB root and updates the ledger view with the snapshot.
-- On `verify`, it replays the block to recompute the root and ensures it matches the declared `state_root`.
+- Simplex asks the application to propose a block.
+- The application gathers transactions from the mempool, skipping any already included in pending
+  ancestors.
+- REVM executes the batch using a parent snapshot and a prevrandao seed.
+- The application computes a QMDB state root for the change set.
+- The block is produced with the advertised `state_root` and cached as a local snapshot.
 
-### Reporters (`examples/revm/src/application/reporters/seed.rs`, `examples/revm/src/application/reporters/finalized.rs`)
+### 2) Verify
 
-- `SeedReporter` watches simplex activity and writes hashed seeds into the ledger view so `RevmApplication` can populate future `prevrandao`.
-- `FinalizedReporter` reacts to `marshal::Update::Block`:
-  1. Replays the block via `execute_txs` if it's not already finalized.
-  2. Validates the computed root against the block.
-  3. Persists the snapshot through `QmdbLedger`.
-  4. Prunes the mempool, acknowledges Marshal, and emits finalized events to the simulation harness.
+- Validators receive a full block and re-execute it against the parent snapshot.
+- The computed `state_root` must match the block header.
+- If it matches, the validator caches the snapshot. If it does not match, the block is rejected.
 
-### Ledger Aggregates & Services (`examples/revm/src/application/ledger/mod.rs`)
+### 3) Finalize and persist
 
-- **Mempool**: owns pending transactions and exposes insert/build/prune commands so proposals and finalizers work against a consistent queue (`examples/revm/src/application/ledger/mempool.rs`).
-- **SnapshotStore**: maintains `LedgerSnapshot`s plus the persisted digest set, handles ancestor lookups, merges pending `QmdbChangeSet`, and tracks which digests have been committed (`examples/revm/src/application/ledger/snapshot_store.rs`).
-- **SeedCache**: keeps per-digest seed hashes so the deterministic `prevrandao` values are pulled from a shared source (`examples/revm/src/application/ledger/seed_cache.rs`).
-- **LedgerService**: domain service that wraps `LedgerView` and exposes high-level commands (`submit_tx`, `build_txs`, `parent_snapshot`, `compute_root`, `insert_snapshot`, `persist_snapshot`, `prune_mempool`, `seed_for_parent`, `set_seed`, `query_state_root`). The application and reporters talk to `LedgerService` instead of mutating the aggregates directly.
+- Marshal delivers finalized blocks to `FinalizedReporter`.
+- If the snapshot already exists, we reuse it. If not, we re-execute to rebuild it.
+- We recompute the root and ensure it matches the block header.
+- We commit the aggregated change set to QMDB and mark the digest as persisted.
+- We prune the mempool and acknowledge marshal so delivery can continue.
 
+The block lifecycle diagram is in `revm_block_lifecycle.png`.
+The persistence flow diagram is in `revm_persistence_flow.png`.
 
-### Domain Events
+## State and persistence semantics
 
-`LedgerService` publishes `LedgerEvent`s through a broadcast channel whenever meaningful operations occur:
-1. `TransactionSubmitted(TxId)` when the mempool accepts a new transaction.
-2. `SnapshotPersisted(ConsensusDigest)` when QMDB commits a finalized digest.
-3. `SeedUpdated(ConsensusDigest, B256)` when the per-digest seed cache is refreshed.
+### Digest and root definitions
 
-Consumers can call `LedgerService::subscribe()` to obtain a listener and react to these events (e.g., instrumentation, metrics, or simulation probes) without touching the aggregates directly.
+- `BlockId` is `keccak256(Encode(Block))`.
+- The consensus digest is `sha256(BlockId)`.
+- `StateRoot` is a commitment over QMDB partition roots for accounts, storage, and code.
 
-### Ledger Observers (`examples/revm/src/application/observers.rs`)
+### Pre-commit vs post-commit root
 
-Ledger observers subscribe to domain events, emit telemetry/log output for seed refreshes and transaction submissions, and keep the observation context decoupled from the aggregates.
+- The block header uses a pre-commit root computed by merkleizing partition roots.
+- QMDB commit operations append authenticated log entries, so the post-commit root can differ.
+- Treat the header `state_root` as the consensus commitment.
 
-## 4. Flows Illustrated
+### Snapshots
 
-1. **Proposal Flow**:
-   - CLI invokes simulation → `LedgerService` ingests submitted transactions and keeps them in the `Mempool`.
-   - `RevmApplication` asks the service for the parent snapshot, builds a proposal batch, executes it, computes the root via `SnapshotStore`, and records a new `LedgerSnapshot`.
-   - The computed state root travels with the proposed block, while the snapshot remains available for replay and persistence.
+- Each executed block produces a `LedgerSnapshot` with:
+  - Parent digest
+  - REVM overlay database (`RevmDb`)
+  - `StateRoot`
+  - `QmdbChangeSet`
+- Snapshots are cached to avoid re-executing on finalization.
 
-2. **Finalization Flow**:
-   - Marshal delivers a finalized block to `FinalizedReporter`.
-   - The reporter replays the block, validates the root, and commands `LedgerService` to persist the authenticated updates (marking the digest in `SnapshotStore` and committing via `QmdbLedger`).
-   - `LedgerService` prunes the `Mempool`, and the simulation harness observes the `finalized` domain event so other nodes can progress.
+## Runtime and determinism
 
-3. **Seed Flow**:
-   - `SeedReporter` listens to simplex notarizations/finalizations, hashes each seed, and stores it in the `SeedCache` through `LedgerService`.
-   - `RevmApplication` reuses the cached seed when computing `prevrandao` for future proposals.
+- The example uses the tokio runtime because REVM requires a tokio runtime to bridge the async QMDB
+  adapter into REVM's sync database interface.
+- Determinism is achieved by seeded key generation and a simulated network with fixed configuration.
+- Runtime scheduling is not guaranteed deterministic. The tests focus on stable outcomes for fixed
+  seeds, not on exact message ordering.
 
-## 5. Diagrams
+## Safety and invariants
 
-### Architecture overview
+These are the main correctness checks and invariants:
 
-![REVM example architecture](revm_architecture.png)
+- A block is only accepted if re-execution yields the advertised `state_root`.
+- QMDB changes for a digest are merged in order, ancestor to child, before persistence.
+- Persisting a digest is idempotent. Duplicate persist calls are a no-op.
+- The mempool is pruned only after successful persistence of the finalized block.
 
-### Block lifecycle (one height)
+## Failure handling
 
-![REVM block lifecycle](revm_block_lifecycle.png)
+- If a finalized block arrives without a cached snapshot, we re-execute it to rebuild the snapshot.
+- If re-execution or root computation fails, we log and acknowledge the update to avoid stalling
+  marshal delivery.
+- Errors returned by mutable QMDB methods are treated as fatal for that database instance.
+  Callers must not use the database after such an error.
 
-### Persistence flow (persist_snapshot)
+## Performance considerations
 
-![REVM persistence flow](revm_persistence_flow.png)
+- Executing and committing per block is expensive. This example batches QMDB commits per finalized
+  block for simplicity.
+- Snapshot caching avoids re-execution for proposers and validators.
+- The simulated network uses fixed link latency and message size caps.
 
-## 6. Related Docs
+## Extension points
 
-For the DDD vocabulary, aggregates, and bounded contexts, see `examples/revm/docs/DOMAIN_MODEL.md`.
+This example is intentionally minimal. Common extension points include:
+
+- Adding transaction signatures and nonce validation.
+- Implementing a fee market and gas price handling.
+- Replacing `StateRoot` with an Ethereum-compatible trie.
+- Adding richer transaction generation for the simulation.
+- Introducing byzantine behavior in the simulated network to stress consensus.

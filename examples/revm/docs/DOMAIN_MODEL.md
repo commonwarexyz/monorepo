@@ -1,80 +1,132 @@
 # REVM Domain Model
 
-This document exposes the REVM example through a domain-driven lens so that contributors can reason about the
-core entities, aggregates, services, and events before diving into the concrete implementation.
+This document describes the example using domain-driven design (DDD) terms. It is meant to be
+read alongside ARCHITECTURE.md. Use it when you want to reason about invariants and how state
+changes move through the system.
 
-## 1. Ubiquitous Language
-- **Node** – a simulated participant that wires consensus, marshal, and application logic (`examples/revm/src/application/node/mod.rs`).
-- **LedgerSnapshot** – a captured execution result (parent digest, `RevmDb`, `StateRoot`, `QmdbChangeSet`) tied to a digest (`examples/revm/src/application/ledger/snapshot_store.rs`).
-- **LedgerView** – the aggregate that owns the mempool, snapshot store, seed cache, and persistence driver.
-- **LedgerService** – the domain service that exposes high-level ledger commands and emits `LedgerEvent`s (`examples/revm/src/application/ledger/mod.rs`).
-- **QmdbLedger** – the persistence service that owns the QMDB partitions, computes potential roots, and commits finalized `QmdbChangeSet` (`examples/revm/src/qmdb/service.rs`).
-- **Block** – a value object with parent pointer, height, `prevrandao`, `state_root`, and transactions (`examples/revm/src/domain/types.rs`).
-- **Transaction (Tx)** – the value object placed in the mempool and executed inside the REVM (`examples/revm/src/domain/types.rs`).
-- **BootstrapConfig** – genesis allocation plus bootstrap transactions applied before consensus starts (`examples/revm/src/domain/types.rs`).
-- **StateRoot / ConsensusDigest** – authenticated identifiers derived from `QmdbChangeSet` and the block commitment.
-- **SeedReporter / FinalizedReporter** – services that react to consensus events and interact with the ledger (`examples/revm/src/application/reporters/seed.rs`, `examples/revm/src/application/reporters/finalized.rs`).
+## Status
 
-## 2. Entities
-Entities represent mutable objects with identity that survive across commands:
+This is an example chain. The domain model is intentionally small and optimized for clarity.
 
-- **LedgerSnapshot** (`examples/revm/src/application/ledger/snapshot_store.rs`): identified by the digest it came from, it tracks the `RevmDb` state, the digest's `parent`, and the `QmdbChangeSet` needed to rebuild the snapshot.
-- **LedgerService** (`examples/revm/src/application/ledger/mod.rs`): while it wraps the `LedgerView` aggregate, it behaves as a rich entity that carries listeners/subscribers and orchestrates ledger commands.
+## Ubiquitous language
 
-## 3. Value Objects
-While the public API never mutates these, they carry the data that commands and queries operate on:
+| Term | Meaning | Notes |
+| --- | --- | --- |
+| Node | A simulated participant that runs consensus, marshal, and the application | One process per node in the simulation |
+| Block | Parent pointer, height, prevrandao, state_root, transactions | Deterministic encoding |
+| Tx | Minimal transaction (from, to, value, gas_limit, calldata) | Not a signed Ethereum tx |
+| ConsensusDigest | `sha256(BlockId)` | The consensus payload |
+| StateRoot | Commitment over QMDB partition roots | Pre-commit root |
+| LedgerSnapshot | Cached execution state for a digest | Used for replay and persistence |
+| LedgerView | Aggregate root for mempool, snapshots, seeds, and QMDB | Mutex protected |
+| LedgerService | Domain service that orchestrates ledger commands and emits events | Uses LedgerView |
+| QmdbLedger | Persistence service for authenticated state | Owns QMDB partitions |
+| Seed | Threshold-simplex randomness hashed into `prevrandao` | Stored per digest |
 
-- **Block / Tx** (`examples/revm/src/domain/types.rs`): deterministic structures consumed and produced by proposals/verifications.
-- **BootstrapConfig** (`examples/revm/src/domain/types.rs`): static inputs for genesis allocation and pre-consensus transactions.
-- **ConsensusDigest / StateRoot** (`examples/revm/src/domain/types.rs` / `examples/revm/src/qmdb/mod.rs`): opaque hashes that identify snapshots and prove authentication. `StateRoot` is computed from merkleized, non-durable QMDB partitions (pre-commit); the post-commit QMDB root can differ because commit ops are part of the log.
-- **SeedHash (`B256`)**: deterministic randomness reused in `prevrandao`.
+## Value objects
 
-## 4. Aggregates
-Aggregates are self-consistent clusters of entities/value objects that handle consistency and invariants:
+Value objects are immutable and compared by value:
 
-- **LedgerView** (`examples/revm/src/application/ledger/mod.rs`): the root aggregate that owns the mutable state (`LedgerState`) protected by a mutex. Its responsibilities include:
-  - `Mempool` – accepts, builds, and prunes transactions while ensuring no duplicates (`examples/revm/src/application/ledger/mempool.rs`).
-  - `SnapshotStore` – stores recorded `LedgerSnapshot`s, tracks which digests were persisted, and can merge cached `QmdbChangeSet` when replaying ancestors (`examples/revm/src/application/ledger/snapshot_store.rs`).
-  - `SeedCache` – retains the per-digest randomness used to derive `prevrandao` (`examples/revm/src/application/ledger/seed_cache.rs`).
-- `QmdbLedger` – the persistence backend that computes and commits `QmdbChangeSet` (`examples/revm/src/qmdb/service.rs`).
+- `Block`, `Tx`, `BlockId`, `TxId`, `ConsensusDigest`, `StateRoot`
+- `BootstrapConfig` (genesis allocation and bootstrap txs)
+- `QmdbChangeSet` and `AccountUpdate` (change batches derived from execution)
 
-## 5. Domain Services
-Domain services express operations that span aggregates:
+## Entities
 
-- **LedgerService** (`examples/revm/src/application/ledger/mod.rs`): exposes commands such as `submit_tx`, `parent_snapshot`, `compute_root`, `persist_snapshot`, and `set_seed`. It holds an observer list for domain events, keeping proposals, verifications, and reporters synchronized.
-- **RevmApplication** (`examples/revm/src/application/app.rs`): offers the `Application`/`VerifyingApplication` implementation that consensus calls during propose/verify. It relies on `LedgerService` for ledger commands and ensures blocks only advance after `QmdbChangeSet` are committed.
-- **SeedReporter / FinalizedReporter** (`examples/revm/src/application/reporters/seed.rs`, `examples/revm/src/application/reporters/finalized.rs`): respond to marshal events, update the ledger, persist snapshots, refresh seeds, and emit `finalized` signals to the harness.
+Entities have identity and evolve over time:
 
-## 6. Domain Events
-`LedgerService` emits `LedgerEvent`s (`examples/revm/src/domain/events.rs`) so other services can react without tightly coupling to the aggregates:
+- `LedgerSnapshot` is identified by its digest and holds the execution overlay and change set.
+- `LedgerView` owns mutable state and is the root entity for local state.
+- `LedgerService` is the domain service that carries subscribers and orchestrates commands.
 
-1. `TransactionSubmitted(TxId)` – emitted when the mempool admits a new transaction.
-2. `SnapshotPersisted(ConsensusDigest)` – emitted after a snapshot is successfully persisted via `QmdbLedger`.
-3. `SeedUpdated(ConsensusDigest, B256)` – emitted whenever the cached seed hash is refreshed.
+## Aggregates and boundaries
 
-Consumers subscribe via `LedgerService::subscribe()` to instrument, log, or drive auxiliary behavior (e.g., the harness noting proposal readiness).
+### LedgerView aggregate
 
-## 7. Bounded Contexts
-DDD thrives when contexts are explicit:
+`LedgerView` is the main aggregate. It owns:
 
-- **Consensus & Marshal** (`commonware_consensus`, `examples/revm/src/application/node/marshal.rs`): orders blocks, delivers ancestors, and expects the application to prove payloads. This context owns the signing/verification logic.
-- **Application Execution** (`RevmApplication`, `execute_txs`, `QmdbChangeSet`): handles REVM execution, root computation, and snapshot caching.
-- **Persistence / QMDB** (`examples/revm/src/qmdb`): exposes `QmdbLedger`, `RevmDb`, and atomic commit/compute helpers.
-- **Simulation Harness** (`examples/revm/src/simulation`): orchestrates nodes, deterministically steps the runtime, and interprets domain events for logging/termination.
+- `Mempool` (pending txs)
+- `SnapshotStore` (cached snapshots and persisted digests)
+- `SeedCache` (digest -> seed hash)
+- `QmdbLedger` (persistence driver)
 
-### Aggregate Reference
+The aggregate boundary ensures that proposal, verification, and finalization all operate on a
+consistent snapshot of state.
 
-| Aggregate | Primary File | Responsibilities |
-|-----------|--------------|------------------|
-| `LedgerView` | `examples/revm/src/application/ledger/mod.rs` | Hosts mutexed mempool, snapshot store, seed cache, and `QmdbLedger`, and exposes `compute_root`, `insert_snapshot`, and `persist_snapshot`. |
-| `SnapshotStore` | `examples/revm/src/application/ledger/snapshot_store.rs` | Stores cached `LedgerSnapshot`s, tracks persisted digests, and rebuilds `QmdbChangeSet` chains when replaying missed ancestors. |
-| `LedgerService` | `examples/revm/src/application/ledger/mod.rs` | Orchestrates ledger commands, publishes `LedgerEvent`s, and keeps observer listeners synchronized. |
-| `RevmApplication` | `examples/revm/src/application/app.rs` | Implements `Application`/`VerifyingApplication`, using `LedgerService` for proposal/verification logic and deterministic execution. |
-| `SeedReporter` / `FinalizedReporter` | `examples/revm/src/application/reporters` | React to simplex/marshal events to refresh seeds and persist snapshots while delegating the heavy work to `LedgerService`. |
-| `LedgerObservers` | `examples/revm/src/application/observers.rs` | Subscribes to `LedgerEvent`s and surfaces telemetry/logging for transaction submissions, seed updates, and persistence. |
+## Commands and queries
 
-## 8. Notes
+Commands mutate state:
 
-This document is intentionally focused on the domain vocabulary, aggregates, and services. For end-to-end runtime flows (simulation wiring and node startup), see `examples/revm/docs/ARCHITECTURE.md`.
+- `submit_tx` adds a tx to the mempool.
+- `insert_snapshot` stores a new snapshot after successful execution.
+- `set_seed` stores seed hashes from consensus activity.
+- `persist_snapshot` commits QMDB changes for a digest.
+- `prune_mempool` removes txs included in finalized blocks.
 
-Linking these flows back to the aggregates ensures the application remains understandable and the DDD vocabulary stays consistent across the example.
+Queries read state:
+
+- `parent_snapshot`, `query_state_root`, `query_balance`, `query_seed`.
+
+## Events
+
+`LedgerService` emits `LedgerEvent` for observation without mutating state:
+
+- `TransactionSubmitted(TxId)`
+- `SnapshotPersisted(ConsensusDigest)`
+- `SeedUpdated(ConsensusDigest, B256)`
+
+Observers can subscribe and emit telemetry or drive simulation control.
+
+## Invariants
+
+The core invariants the model relies on:
+
+- A block is only accepted if re-execution yields the advertised `state_root`.
+- `StateRoot` is derived from merkleized QMDB partitions and is treated as the consensus
+  commitment (pre-commit).
+- A digest is persisted at most once. Repeated persist calls are no-ops.
+- Mempool entries are only removed after the corresponding block is finalized and persisted.
+
+## Consistency and concurrency
+
+- `LedgerView` uses a mutex to serialize access to aggregate state.
+- Snapshot merges and persistence happen in digest order to preserve causal correctness.
+- Errors from mutable QMDB operations are treated as fatal for that database instance.
+
+## Bounded contexts
+
+| Context | Responsibility | Key files |
+| --- | --- | --- |
+| Consensus and marshal | Orders digests, disseminates blocks, emits finalizations | `commonware_consensus`, `application/node/` |
+| Execution | REVM execution and change set extraction | `application/execution.rs` |
+| Ledger | Mempool, snapshots, seeds, persistence orchestration | `application/ledger/` |
+| Persistence | QMDB partitions and authenticated roots | `qmdb/` |
+| Simulation | Orchestrates nodes and checks convergence | `simulation/` |
+
+## Typical scenarios
+
+### Propose
+
+- Mempool provides a batch of txs not present in pending ancestors.
+- Execution produces `QmdbChangeSet` and a new `StateRoot`.
+- A `LedgerSnapshot` is stored so finalization can reuse it.
+
+### Verify
+
+- The block is re-executed against the parent snapshot.
+- The computed root must match the header or the block is rejected.
+
+### Finalize
+
+- If a cached snapshot exists, reuse it. Otherwise re-execute to rebuild it.
+- Persist the change set in QMDB.
+- Emit `SnapshotPersisted` and prune the mempool.
+
+## Extension guidelines
+
+If you extend the model, keep these rules in mind:
+
+- Update the ubiquitous language to keep terms precise and shared.
+- Keep value objects deterministic and bounded in size.
+- Prefer explicit invariants over implicit assumptions.
+- Treat persistence errors as fatal and avoid partial reuse of state after failure.
