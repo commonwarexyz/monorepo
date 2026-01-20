@@ -1075,14 +1075,73 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_fixed_journal_read_with_missing_historical_blob() {
+    fn test_fixed_journal_init_with_corrupted_historical_blobs() {
+        // Initialize the deterministic context
+        let executor = deterministic::Runner::default();
+        // Start the test within the executor
+        const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(7);
+        executor.start(|context| async move {
+            // Initialize the journal, allowing a max of 7 items per blob.
+            let cfg = test_cfg(ITEMS_PER_BLOB);
+            let mut journal = Journal::init(context.with_label("first"), cfg.clone())
+                .await
+                .expect("failed to initialize journal");
+
+            // Append many items, filling 100 blobs and part of the 101st
+            for i in 0u64..(ITEMS_PER_BLOB.get() * 100 + ITEMS_PER_BLOB.get() / 2) {
+                let pos = journal
+                    .append(test_digest(i))
+                    .await
+                    .expect("failed to append data");
+                assert_eq!(pos, i);
+            }
+            journal.sync().await.expect("Failed to sync journal");
+            drop(journal);
+
+            // Manually truncate a non-tail blob to make sure it's detected during initialization.
+            // The segmented journal will trim the incomplete blob on init, resulting in the blob
+            // missing one item. This should be detected during init because all non-tail blobs
+            // must be full.
+            let (blob, size) = context
+                .open(&cfg.partition, &40u64.to_be_bytes())
+                .await
+                .expect("Failed to open blob");
+            blob.resize(size - 1).await.expect("Failed to corrupt blob");
+            blob.sync().await.expect("Failed to sync blob");
+
+            // The segmented journal will trim the incomplete blob on init, resulting in the blob
+            // missing one item. This should be detected as corruption during replay.
+            let journal = Journal::<_, Digest>::init(context.with_label("second"), cfg.clone())
+                .await
+                .expect("failed to initialize journal");
+
+            // Journal size is computed from the tail section, so it's unchanged
+            // despite the corruption in section 40.
+            let expected_size = ITEMS_PER_BLOB.get() * 100 + ITEMS_PER_BLOB.get() / 2;
+            assert_eq!(journal.size(), expected_size);
+
+            // Replay should detect corruption (incomplete section) in section 40
+            match journal.replay(NZUsize!(1024), 0).await {
+                Err(Error::Corruption(msg)) => {
+                    assert!(
+                        msg.contains("section 40"),
+                        "Error should mention section 40, got: {msg}"
+                    );
+                }
+                Err(e) => panic!("Expected Corruption error for section 40, got: {:?}", e),
+                Ok(_) => panic!("Expected replay to fail with corruption"),
+            };
+        });
+    }
+
+    #[test_traced]
+    fn test_fixed_journal_replay_with_missing_historical_blob() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(NZU64!(2));
             let mut journal = Journal::init(context.with_label("first"), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
-
             for i in 0u64..5 {
                 journal
                     .append(test_digest(i))
@@ -1092,24 +1151,29 @@ mod tests {
             journal.sync().await.expect("failed to sync journal");
             drop(journal);
 
-            // Remove middle blob (section 1)
             context
                 .remove(&cfg.partition, Some(&1u64.to_be_bytes()))
                 .await
                 .expect("failed to remove blob");
 
-            // Init succeeds (missing middle sections not validated upfront)
-            let journal = Journal::<_, Digest>::init(context.with_label("second"), cfg.clone())
+            // Init won't detect the corruption.
+            let result = Journal::<_, Digest>::init(context.with_label("second"), cfg.clone())
                 .await
-                .expect("init should succeed");
+                .expect("init shouldn't fail");
 
-            // Reading from section 0 should work
-            let item = journal.read(0).await.expect("should read position 0");
-            assert_eq!(item, test_digest(0));
+            // But replay will.
+            match result.replay(NZUsize!(1024), 0).await {
+                Err(Error::Corruption(_)) => {}
+                Err(err) => panic!("expected Corruption, got: {err}"),
+                Ok(_) => panic!("expected Corruption, got ok"),
+            };
 
-            // Reading from missing section 1 should fail
-            let result = journal.read(2).await;
-            assert!(result.is_err(), "reading from missing section should fail");
+            // As will trying to read an item that was in the deleted blob.
+            match result.read(2).await {
+                Err(Error::Corruption(_)) => {}
+                Err(err) => panic!("expected Corruption, got: {err}"),
+                Ok(_) => panic!("expected Corruption, got ok"),
+            };
         });
     }
 
