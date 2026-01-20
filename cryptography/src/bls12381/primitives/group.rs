@@ -108,6 +108,43 @@ fn msm_breakdown(nbits: usize, window: usize, ncpus: usize) -> (usize, usize, us
     (nx, ny, final_wnd)
 }
 
+/// A tile in the parallel MSM grid.
+struct Tile {
+    /// Starting point index in the input array.
+    x: usize,
+    /// Number of points to process in this tile.
+    dx: usize,
+    /// Starting bit position for scalar window.
+    y: usize,
+}
+
+/// Build a grid of tiles for parallel MSM computation.
+/// Tiles are ordered from highest bit row to lowest.
+fn build_tiles(npoints: usize, nx: usize, ny: usize, window: usize) -> Vec<Tile> {
+    let mut tiles = Vec::with_capacity(nx * ny);
+    let dx = npoints / nx;
+
+    // First row (highest bits)
+    let mut y = window * (ny - 1);
+    for i in 0..nx {
+        let x = i * dx;
+        let tile_dx = if i == nx - 1 { npoints - x } else { dx };
+        tiles.push(Tile { x, dx: tile_dx, y });
+    }
+
+    // Remaining rows
+    while y != 0 {
+        y -= window;
+        for i in 0..nx {
+            let x = i * dx;
+            let tile_dx = if i == nx - 1 { npoints - x } else { dx };
+            tiles.push(Tile { x, dx: tile_dx, y });
+        }
+    }
+
+    tiles
+}
+
 /// Domain separation tag used when hashing a message to a curve (G1 or G2).
 ///
 /// Reference: <https://datatracker.ietf.org/doc/html/draft-irtf-cfrg-bls-signature-05#name-ciphersuites>
@@ -839,14 +876,14 @@ impl G1 {
 
         // For small inputs or single CPU, use single-threaded path
         if ncpus < 2 || npoints < MIN_PARALLEL_POINTS {
-            return Self::msm_single_threaded(&affine_points, &scalar_bytes, nbits);
+            return Self::msm_sequential(&affine_points, &scalar_bytes, nbits);
         }
 
         // Parallel MSM using tile_pippenger
         Self::msm_parallel(&affine_points, &scalar_bytes, nbits, ncpus, strategy)
     }
 
-    fn msm_single_threaded(affine_points: &[blst_p1_affine], scalars: &[u8], nbits: usize) -> Self {
+    fn msm_sequential(affine_points: &[blst_p1_affine], scalars: &[u8], nbits: usize) -> Self {
         let npoints = affine_points.len();
 
         // SAFETY: blst_p1s_mult_pippenger_scratch_sizeof returns size in bytes for valid input.
@@ -883,34 +920,7 @@ impl G1 {
         let npoints = affine_points.len();
         let nbytes = nbits.div_ceil(8);
         let (nx, ny, window) = msm_breakdown(nbits, pippenger_window_size(npoints), ncpus);
-
-        // Build grid of tiles
-        struct Tile {
-            x: usize,
-            dx: usize,
-            y: usize,
-        }
-
-        let mut tiles = Vec::with_capacity(nx * ny);
-        let dx = npoints / nx;
-
-        // First row (highest bits)
-        let mut y = window * (ny - 1);
-        for i in 0..nx {
-            let x = i * dx;
-            let tile_dx = if i == nx - 1 { npoints - x } else { dx };
-            tiles.push(Tile { x, dx: tile_dx, y });
-        }
-
-        // Remaining rows
-        while y != 0 {
-            y -= window;
-            for i in 0..nx {
-                let x = i * dx;
-                let tile_dx = if i == nx - 1 { npoints - x } else { dx };
-                tiles.push(Tile { x, dx: tile_dx, y });
-            }
-        }
+        let tiles = build_tiles(npoints, nx, ny, window);
 
         // Compute all tiles in parallel
         // SAFETY: blst_p1s_mult_pippenger_scratch_sizeof(0) returns base scratch size.
@@ -1304,14 +1314,14 @@ impl G2 {
 
         // For small inputs or single CPU, use single-threaded path
         if ncpus < 2 || npoints < MIN_PARALLEL_POINTS {
-            return Self::msm_single_threaded(&affine_points, &scalar_bytes, nbits);
+            return Self::msm_sequential(&affine_points, &scalar_bytes, nbits);
         }
 
         // Parallel MSM using tile_pippenger
         Self::msm_parallel(&affine_points, &scalar_bytes, nbits, ncpus, strategy)
     }
 
-    fn msm_single_threaded(affine_points: &[blst_p2_affine], scalars: &[u8], nbits: usize) -> Self {
+    fn msm_sequential(affine_points: &[blst_p2_affine], scalars: &[u8], nbits: usize) -> Self {
         let npoints = affine_points.len();
 
         // SAFETY: blst_p2s_mult_pippenger_scratch_sizeof returns size in bytes for valid input.
@@ -1348,34 +1358,7 @@ impl G2 {
         let npoints = affine_points.len();
         let nbytes = nbits.div_ceil(8);
         let (nx, ny, window) = msm_breakdown(nbits, pippenger_window_size(npoints), ncpus);
-
-        // Build grid of tiles
-        struct Tile {
-            x: usize,
-            dx: usize,
-            y: usize,
-        }
-
-        let mut tiles = Vec::with_capacity(nx * ny);
-        let dx = npoints / nx;
-
-        // First row (highest bits)
-        let mut y = window * (ny - 1);
-        for i in 0..nx {
-            let x = i * dx;
-            let tile_dx = if i == nx - 1 { npoints - x } else { dx };
-            tiles.push(Tile { x, dx: tile_dx, y });
-        }
-
-        // Remaining rows
-        while y != 0 {
-            y -= window;
-            for i in 0..nx {
-                let x = i * dx;
-                let tile_dx = if i == nx - 1 { npoints - x } else { dx };
-                tiles.push(Tile { x, dx: tile_dx, y });
-            }
-        }
+        let tiles = build_tiles(npoints, nx, ny, window);
 
         // Compute all tiles in parallel
         // SAFETY: blst_p2s_mult_pippenger_scratch_sizeof(0) returns base scratch size.
