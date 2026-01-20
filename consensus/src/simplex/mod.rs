@@ -190,7 +190,7 @@
 //! - [scheme::bls12381_threshold::standard]: Certificates contain only a vote signature.
 //!
 //! - [scheme::bls12381_threshold::vrf]: Certificates contain a vote signature and a view signature (i.e. a seed that can be used
-//!   as a VRF). This variant can be configured for random leader election (via [elector::Random]) and/or incorporate this randomness
+//!   as a VRF). This variant can be configured for random leader election (via [`crate::elector::Random`]) and/or incorporate this randomness
 //!   into execution.
 //!
 //! #### Embedded VRF ([scheme::bls12381_threshold::vrf])

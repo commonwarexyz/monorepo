@@ -1,7 +1,7 @@
 #![no_main]
 
 use commonware_consensus::{
-    elector::Random,  simplex::scheme::bls12381_threshold::vrf as bls12381_threshold_vrf,
+    elector::Random, simplex::scheme::bls12381_threshold::vrf as bls12381_threshold_vrf,
 };
 use commonware_consensus_fuzz::{fuzz, FuzzInput, Simplex};
 use commonware_cryptography::{

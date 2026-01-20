@@ -10,7 +10,7 @@
 //!
 //! - [`Random`]/[`RandomElector`]: Uses randomness derived from BLS threshold signatures
 //!   for unpredictable leader selection. Falls back to round-robin for the first view
-//!   (no certificate available). Only works with [`bls12381_threshold`].
+//!   (no certificate available). Only works with `simplex::scheme::bls12381_threshold::vrf`.
 //!
 //! # Custom Electors
 //!
@@ -26,7 +26,6 @@
 //! 4. The resulting [`Elector`] can only be created by consensus, preventing misuse
 
 use crate::{
-    minimmit::scheme::bls12381_threshold as minimmit_bls12381_threshold,
     simplex::scheme::bls12381_threshold::vrf as bls12381_threshold_vrf,
     types::{Participant, Round, View},
 };
@@ -160,7 +159,7 @@ impl<S: Scheme> Elector<S> for RoundRobinElector<S> {
 /// leader selection. Falls back to standard round-robin for view 1 when no
 /// certificate is available.
 ///
-/// Only works with [`bls12381_threshold`] signing scheme.
+/// Only works with `simplex::scheme::bls12381_threshold::vrf` signing scheme.
 #[derive(Clone, Debug, Default)]
 pub struct Random;
 
@@ -233,47 +232,14 @@ where
     }
 }
 
-// Minimmit bls12381_threshold support
+// Minimmit bls12381_threshold does NOT support Random election.
 //
-// In minimmit, the advancing certificate (M-notarization or Nullification) uses
-// a Threshold certificate which contains a seed. Finalization uses an Aggregated
-// certificate without a seed, but Finalization is not the advancing certificate.
-
-impl<P, V> Config<minimmit_bls12381_threshold::Scheme<P, V>> for Random
-where
-    P: PublicKey,
-    V: Variant,
-{
-    type Elector = RandomElector<minimmit_bls12381_threshold::Scheme<P, V>>;
-
-    fn build(
-        self,
-        participants: &Set<P>,
-    ) -> RandomElector<minimmit_bls12381_threshold::Scheme<P, V>> {
-        assert!(!participants.is_empty(), "no participants");
-        RandomElector {
-            n: participants.len() as u32,
-            _phantom: PhantomData,
-        }
-    }
-}
-
-impl<P, V> Elector<minimmit_bls12381_threshold::Scheme<P, V>>
-    for RandomElector<minimmit_bls12381_threshold::Scheme<P, V>>
-where
-    P: PublicKey,
-    V: Variant,
-{
-    fn elect(
-        &self,
-        round: Round,
-        certificate: Option<&minimmit_bls12381_threshold::Certificate<V>>,
-    ) -> Participant {
-        // Both Threshold and Aggregated certificates have seeds
-        let seed = certificate.map(|c| *c.seed_signature());
-        Random::select_leader::<V>(round, self.n, seed)
-    }
-}
+// The minimmit BLS12-381 threshold scheme uses:
+// - Aggregated certificates for M-notarization (2f+1): no seed/VRF
+// - Threshold certificates for L-notarization (n-f): no seed/VRF
+//
+// This design prioritizes security (unforgeable M-notarization, secure finalization)
+// over random leader election. Minimmit should use RoundRobin election instead.
 
 #[cfg(test)]
 mod tests {

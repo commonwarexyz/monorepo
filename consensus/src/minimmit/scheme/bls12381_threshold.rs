@@ -1,42 +1,41 @@
 //! BLS12-381 threshold implementation of the [`Scheme`] trait for `minimmit`.
 //!
-//! [`Scheme`] is **non-attributable**: exposing partial signatures
-//! as evidence of either liveness or of committing a fault is not safe. With threshold signatures,
-//! any `t` valid partial signatures can be used to forge a partial signature for any other player,
-//! enabling equivocation attacks. Because peer connections are authenticated, evidence can be used locally
-//! (as it must be sent by said participant) but can't be used by an external observer.
+//! This scheme uses different certificate types for M-notarization vs L-notarization:
+//!
+//! - **M-notarization (2f+1)**: Uses aggregated signatures with explicit signers bitmap.
+//!   Each partial signature is individually verifiable and combined via BLS point addition.
+//!   This is unforgeable - you cannot create valid signatures without the actual private keys.
+//!
+//! - **L-notarization/Finalization (n-f)**: Uses threshold signature recovery.
+//!   The polynomial threshold is set to n-f, so threshold recovery only succeeds at L-quorum.
+//!   This prevents the security issue where 2f+1 partials could forge additional signatures.
+//!
+//! [`Scheme`] is **non-attributable**: exposing partial signatures as evidence of either liveness
+//! or of committing a fault is not safe. With threshold signatures, any `t` valid partial signatures
+//! can be used to forge a partial signature for any other player, enabling equivocation attacks.
+//! Because peer connections are authenticated, evidence can be used locally (as it must be sent by
+//! said participant) but can't be used by an external observer.
 
 use crate::{
-    minimmit::{
-        scheme::{seed_namespace, Namespace},
-        types::{Finalization, MNotarization, Subject},
-    },
-    types::{Epoch, Participant, Round, View},
-    Epochable, Viewable,
+    minimmit::{scheme::Namespace, types::Subject},
+    types::Participant,
 };
 use bytes::{Buf, BufMut};
-use commonware_codec::{Encode, EncodeSize, Error, FixedSize, Read, ReadExt, Write};
+use commonware_codec::{EncodeSize, Error, Read, ReadExt as _, Write};
 use commonware_cryptography::{
-    bls12381::{
-        primitives::{
-            group::Share,
-            ops::{self, aggregate, batch, threshold},
-            sharing::Sharing,
-            variant::{PartialSignature, Variant},
-        },
-        tle,
+    bls12381::primitives::{
+        group::Share,
+        ops::{self, aggregate, batch, threshold},
+        sharing::Sharing,
+        variant::{PartialSignature, Variant},
     },
     certificate::{self, Attestation, Signers, Subject as CertificateSubject, Verification},
     Digest, PublicKey,
 };
 use commonware_parallel::Strategy;
 use commonware_utils::{ordered::Set, Faults, N5f1};
-use rand::{rngs::StdRng, SeedableRng};
 use rand_core::CryptoRngCore;
-use std::{
-    collections::{BTreeSet, HashMap},
-    fmt::Debug,
-};
+use std::{collections::BTreeSet, fmt::Debug};
 
 /// The role-specific data for a BLS12-381 threshold scheme participant.
 #[derive(Clone, Debug)]
@@ -48,7 +47,7 @@ enum Role<P: PublicKey, V: Variant> {
         polynomial: Sharing<V>,
         /// Local share used to generate partial signatures.
         share: Share,
-        /// Pre-computed namespaces for domain separation.
+        /// Pre-computed namespace for domain separation.
         namespace: Namespace,
     },
     Verifier {
@@ -56,13 +55,13 @@ enum Role<P: PublicKey, V: Variant> {
         participants: Set<P>,
         /// The public polynomial, used for the group identity, and partial signatures.
         polynomial: Sharing<V>,
-        /// Pre-computed namespaces for domain separation.
+        /// Pre-computed namespace for domain separation.
         namespace: Namespace,
     },
     CertificateVerifier {
         /// Public identity of the committee (constant across reshares).
         identity: V::Public,
-        /// Pre-computed namespaces for domain separation.
+        /// Pre-computed namespace for domain separation.
         namespace: Namespace,
     },
 }
@@ -200,7 +199,7 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
         }
     }
 
-    /// Returns the pre-computed namespaces.
+    /// Returns the pre-computed namespace.
     const fn namespace(&self) -> &Namespace {
         match &self.role {
             Role::Signer { namespace, .. } => namespace,
@@ -208,45 +207,6 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
             Role::CertificateVerifier { namespace, .. } => namespace,
         }
     }
-
-    /// Encrypts a message for a target round using Timelock Encryption ([TLE](tle)).
-    ///
-    /// The encrypted message can only be decrypted using the seed signature
-    /// from a certificate of the target round (i.e. M-notarization, finalization,
-    /// or nullification).
-    pub fn encrypt<R: CryptoRngCore>(
-        &self,
-        rng: &mut R,
-        target: Round,
-        message: impl Into<tle::Block>,
-    ) -> tle::Ciphertext<V> {
-        let block = message.into();
-        let target_message = target.encode();
-        tle::encrypt(
-            rng,
-            *self.identity(),
-            (&self.namespace().seed, &target_message),
-            &block,
-        )
-    }
-}
-
-/// Encrypts a message for a future round using Timelock Encryption ([TLE](tle)).
-///
-/// The encrypted message can only be decrypted using the seed signature
-/// from a certificate of the target round (i.e. M-notarization, finalization,
-/// or nullification).
-pub fn encrypt<R: CryptoRngCore, V: Variant>(
-    rng: &mut R,
-    identity: V::Public,
-    namespace: &[u8],
-    target: Round,
-    message: impl Into<tle::Block>,
-) -> tle::Ciphertext<V> {
-    let block = message.into();
-    let seed_ns = seed_namespace(namespace);
-    let target_message = target.encode();
-    tle::encrypt(rng, identity, (&seed_ns, &target_message), &block)
 }
 
 /// Generates a test fixture with Ed25519 identities and BLS12-381 threshold schemes.
@@ -254,9 +214,8 @@ pub fn encrypt<R: CryptoRngCore, V: Variant>(
 /// Returns a [`commonware_cryptography::certificate::mocks::Fixture`] whose keys and
 /// scheme instances share a consistent ordering.
 ///
-/// Unlike the simplex fixture, this uses M5f1 for the polynomial threshold so that
-/// M-notarization (2f+1 votes) can recover signatures. Finalization (n-f votes) will
-/// have more than enough.
+/// Uses N5f1 (n-f) for the polynomial threshold so that only L-quorum can recover
+/// threshold signatures. M-notarization uses aggregated signatures instead.
 #[cfg(feature = "mocks")]
 pub fn fixture<V, R>(
     rng: &mut R,
@@ -270,7 +229,6 @@ where
     R: rand::RngCore + rand::CryptoRng,
 {
     use commonware_cryptography::{bls12381::dkg::deal, certificate::mocks::Fixture, ed25519};
-    use commonware_utils::M5f1;
 
     assert!(n > 0);
 
@@ -287,8 +245,9 @@ where
         })
         .collect();
 
-    // Use M5f1 for the polynomial threshold so M-notarization (2f+1) can recover
-    let (output, shares) = deal::<V, _, M5f1>(rng, Default::default(), participants.clone())
+    // Use N5f1 (n-f) for the polynomial threshold so only L-quorum can recover
+    // threshold signatures. M-notarization uses aggregated signatures instead.
+    let (output, shares) = deal::<V, _, N5f1>(rng, Default::default(), participants.clone())
         .expect("deal should succeed");
     let polynomial = output.public().clone();
 
@@ -309,92 +268,48 @@ where
     }
 }
 
-/// Combined vote/seed signature pair emitted by the BLS12-381 threshold scheme.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct Signature<V: Variant> {
-    /// Signature over the consensus vote message (partial or recovered aggregate).
-    pub vote_signature: V::Signature,
-    /// Signature over the per-view seed (partial or recovered aggregate).
-    pub seed_signature: V::Signature,
-}
-
-impl<V: Variant> Write for Signature<V> {
-    fn write(&self, writer: &mut impl BufMut) {
-        self.vote_signature.write(writer);
-        self.seed_signature.write(writer);
-    }
-}
-
-impl<V: Variant> Read for Signature<V> {
-    type Cfg = ();
-
-    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let vote_signature = V::Signature::read(reader)?;
-        let seed_signature = V::Signature::read(reader)?;
-
-        Ok(Self {
-            vote_signature,
-            seed_signature,
-        })
-    }
-}
-
-impl<V: Variant> FixedSize for Signature<V> {
-    const SIZE: usize = V::Signature::SIZE * 2;
-}
-
-#[cfg(feature = "arbitrary")]
-impl<V: Variant> arbitrary::Arbitrary<'_> for Signature<V>
-where
-    V::Signature: for<'a> arbitrary::Arbitrary<'a>,
-{
-    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        Ok(Self {
-            vote_signature: u.arbitrary()?,
-            seed_signature: u.arbitrary()?,
-        })
-    }
-}
+/// Partial signature emitted by the BLS12-381 threshold scheme.
+///
+/// This is a partial signature over the vote message that can be:
+/// - Verified individually against the signer's partial public key
+/// - Aggregated with other partial signatures via BLS point addition (for M-notarization)
+/// - Combined via threshold recovery when we have n-f partials (for L-notarization)
+pub type Signature<V> = <V as Variant>::Signature;
 
 /// Certificate type for the BLS12-381 threshold scheme in minimmit.
 ///
-/// This enum supports two forms:
-/// - `Threshold`: Recovered threshold signature (for M-notarization, Nullification)
-/// - `Aggregated`: Aggregated signatures with signers bitmap (for Finalization)
+/// This enum supports two forms with SWAPPED semantics for security:
 ///
-/// The distinction exists because:
-/// - M-notarization/Nullification (2f+1 quorum) uses recovered threshold signatures
-///   that can be verified against the group public key
-/// - Finalization (n-f quorum) uses aggregated signatures with explicit signers
-///   to prove exactly which validators signed (unforgeable even though 2f+1 partials
-///   could forge additional threshold signatures)
+/// - `Aggregated`: Used for M-notarization/Nullification (2f+1 quorum).
+///   Contains aggregated signatures with explicit signers bitmap. Each partial
+///   signature is individually verifiable and combined via BLS point addition.
+///   This is unforgeable - you cannot create valid signatures without private keys.
 ///
-/// Both forms include a seed signature for TLE support.
+/// - `Threshold`: Used for Finalization (n-f quorum).
+///   Contains a recovered threshold signature. The polynomial threshold is set to
+///   n-f, so threshold recovery ONLY succeeds at L-quorum. This prevents the
+///   security issue where 2f+1 partials could forge additional signatures.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Certificate<V: Variant> {
-    /// Recovered threshold signature.
-    ///
-    /// Used for M-notarization and Nullification (2f+1 quorum).
-    /// Can be verified against the group public key.
-    Threshold {
-        /// The recovered threshold signature over the vote message.
-        vote_signature: V::Signature,
-        /// The recovered threshold signature over the seed (for TLE/randomness).
-        seed_signature: V::Signature,
-    },
     /// Aggregated signatures with explicit signers.
     ///
-    /// Used for Finalization (n-f quorum). The vote signature is an aggregation
-    /// of partial signatures that can be verified against the aggregated public
-    /// keys of the signers. The seed signature is still recovered via threshold
-    /// cryptography (since we have >= 2f+1 partials).
+    /// Used for M-notarization and Nullification (2f+1 quorum).
+    /// The vote signature is an aggregation of partial signatures that can be
+    /// verified against the aggregated public keys of the signers.
     Aggregated {
         /// Bitmap of which participants contributed signatures.
         signers: Signers,
         /// Aggregated BLS signature from the partial vote signatures.
         vote_signature: V::Signature,
-        /// The recovered threshold signature over the seed (for TLE/randomness).
-        seed_signature: V::Signature,
+    },
+    /// Recovered threshold signature.
+    ///
+    /// Used for Finalization (n-f quorum).
+    /// Can only be recovered with n-f partials (polynomial threshold = n-f).
+    /// Verified against the group public key.
+    Threshold {
+        /// The recovered threshold signature over the vote message.
+        vote_signature: V::Signature,
     },
 }
 
@@ -402,50 +317,36 @@ impl<V: Variant> Certificate<V> {
     /// Returns the vote signature regardless of certificate type.
     pub const fn vote_signature(&self) -> &V::Signature {
         match self {
-            Self::Threshold { vote_signature, .. } => vote_signature,
             Self::Aggregated { vote_signature, .. } => vote_signature,
+            Self::Threshold { vote_signature, .. } => vote_signature,
         }
     }
 
-    /// Returns the seed signature (available for both certificate types).
-    pub const fn seed_signature(&self) -> &V::Signature {
-        match self {
-            Self::Threshold { seed_signature, .. } => seed_signature,
-            Self::Aggregated { seed_signature, .. } => seed_signature,
-        }
-    }
-
-    /// Returns true if this is a Threshold certificate.
-    pub const fn is_threshold(&self) -> bool {
-        matches!(self, Self::Threshold { .. })
-    }
-
-    /// Returns true if this is an Aggregated certificate.
+    /// Returns true if this is an Aggregated certificate (M-notarization/Nullification).
     pub const fn is_aggregated(&self) -> bool {
         matches!(self, Self::Aggregated { .. })
+    }
+
+    /// Returns true if this is a Threshold certificate (Finalization).
+    pub const fn is_threshold(&self) -> bool {
+        matches!(self, Self::Threshold { .. })
     }
 }
 
 impl<V: Variant> Write for Certificate<V> {
     fn write(&self, writer: &mut impl BufMut) {
         match self {
-            Self::Threshold {
-                vote_signature,
-                seed_signature,
-            } => {
-                writer.put_u8(0); // Tag for Threshold
-                vote_signature.write(writer);
-                seed_signature.write(writer);
-            }
             Self::Aggregated {
                 signers,
                 vote_signature,
-                seed_signature,
             } => {
-                writer.put_u8(1); // Tag for Aggregated
+                writer.put_u8(0); // Tag for Aggregated
                 signers.write(writer);
                 vote_signature.write(writer);
-                seed_signature.write(writer);
+            }
+            Self::Threshold { vote_signature } => {
+                writer.put_u8(1); // Tag for Threshold
+                vote_signature.write(writer);
             }
         }
     }
@@ -455,17 +356,11 @@ impl<V: Variant> EncodeSize for Certificate<V> {
     fn encode_size(&self) -> usize {
         1 + match self {
             // 1 byte tag
-            Self::Threshold {
-                vote_signature,
-                seed_signature,
-            } => vote_signature.encode_size() + seed_signature.encode_size(),
             Self::Aggregated {
                 signers,
                 vote_signature,
-                seed_signature,
-            } => {
-                signers.encode_size() + vote_signature.encode_size() + seed_signature.encode_size()
-            }
+            } => signers.encode_size() + vote_signature.encode_size(),
+            Self::Threshold { vote_signature } => vote_signature.encode_size(),
         }
     }
 }
@@ -482,24 +377,18 @@ impl<V: Variant> Read for Certificate<V> {
         let tag = reader.get_u8();
         match tag {
             0 => {
-                // Threshold
-                let vote_signature = V::Signature::read(reader)?;
-                let seed_signature = V::Signature::read(reader)?;
-                Ok(Self::Threshold {
-                    vote_signature,
-                    seed_signature,
-                })
-            }
-            1 => {
                 // Aggregated
                 let signers = Signers::read_cfg(reader, max_participants)?;
                 let vote_signature = V::Signature::read(reader)?;
-                let seed_signature = V::Signature::read(reader)?;
                 Ok(Self::Aggregated {
                     signers,
                     vote_signature,
-                    seed_signature,
                 })
+            }
+            1 => {
+                // Threshold
+                let vote_signature = V::Signature::read(reader)?;
+                Ok(Self::Threshold { vote_signature })
             }
             _ => Err(Error::Invalid("Certificate", "unknown tag")),
         }
@@ -512,147 +401,17 @@ where
     V::Signature: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        // Randomly choose between Threshold and Aggregated
+        // Randomly choose between Aggregated and Threshold
         if u.arbitrary::<bool>()? {
-            Ok(Self::Threshold {
-                vote_signature: u.arbitrary()?,
-                seed_signature: u.arbitrary()?,
-            })
-        } else {
             Ok(Self::Aggregated {
                 signers: u.arbitrary()?,
                 vote_signature: u.arbitrary()?,
-                seed_signature: u.arbitrary()?,
+            })
+        } else {
+            Ok(Self::Threshold {
+                vote_signature: u.arbitrary()?,
             })
         }
-    }
-}
-
-/// Seed represents a threshold signature over the current view.
-#[derive(Clone, Debug, PartialEq, Hash, Eq)]
-pub struct Seed<V: Variant> {
-    /// The round for which this seed is generated
-    pub round: Round,
-    /// The threshold signature on the seed.
-    pub signature: V::Signature,
-}
-
-impl<V: Variant> Seed<V> {
-    /// Creates a new seed with the given view and signature.
-    pub const fn new(round: Round, signature: V::Signature) -> Self {
-        Self { round, signature }
-    }
-
-    /// Verifies the threshold signature on this [Seed].
-    pub fn verify<P: PublicKey>(&self, scheme: &Scheme<P, V>) -> bool {
-        let seed_message = self.round.encode();
-
-        ops::verify_message::<V>(
-            scheme.identity(),
-            &scheme.namespace().seed,
-            &seed_message,
-            &self.signature,
-        )
-        .is_ok()
-    }
-
-    /// Returns the round associated with this seed.
-    pub const fn round(&self) -> Round {
-        self.round
-    }
-
-    /// Decrypts a [TLE](tle) ciphertext using this seed.
-    ///
-    /// Returns `None` if the ciphertext is invalid or encrypted for a different
-    /// round than this seed.
-    pub fn decrypt(&self, ciphertext: &tle::Ciphertext<V>) -> Option<tle::Block> {
-        decrypt(self, ciphertext)
-    }
-}
-
-/// Decrypts a [TLE](tle) ciphertext using the seed from a certificate (i.e.
-/// M-notarization, finalization, or nullification).
-///
-/// Returns `None` if the ciphertext is invalid or encrypted for a different
-/// round than the given seed.
-pub fn decrypt<V: Variant>(seed: &Seed<V>, ciphertext: &tle::Ciphertext<V>) -> Option<tle::Block> {
-    tle::decrypt(&seed.signature, ciphertext)
-}
-
-impl<V: Variant> Epochable for Seed<V> {
-    fn epoch(&self) -> Epoch {
-        self.round.epoch()
-    }
-}
-
-impl<V: Variant> Viewable for Seed<V> {
-    fn view(&self) -> View {
-        self.round.view()
-    }
-}
-
-impl<V: Variant> Write for Seed<V> {
-    fn write(&self, writer: &mut impl BufMut) {
-        self.round.write(writer);
-        self.signature.write(writer);
-    }
-}
-
-impl<V: Variant> Read for Seed<V> {
-    type Cfg = ();
-
-    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let round = Round::read(reader)?;
-        let signature = V::Signature::read(reader)?;
-
-        Ok(Self { round, signature })
-    }
-}
-
-impl<V: Variant> EncodeSize for Seed<V> {
-    fn encode_size(&self) -> usize {
-        self.round.encode_size() + self.signature.encode_size()
-    }
-}
-
-#[cfg(feature = "arbitrary")]
-impl<V: Variant> arbitrary::Arbitrary<'_> for Seed<V>
-where
-    V::Signature: for<'a> arbitrary::Arbitrary<'a>,
-{
-    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        Ok(Self {
-            round: u.arbitrary()?,
-            signature: u.arbitrary()?,
-        })
-    }
-}
-
-/// Seedable is a trait that provides access to the seed associated with a message.
-pub trait Seedable<V: Variant> {
-    /// Returns the seed associated with this object.
-    fn seed(&self) -> Seed<V>;
-}
-
-impl<P: PublicKey, V: Variant, D: Digest> Seedable<V> for MNotarization<Scheme<P, V>, D> {
-    fn seed(&self) -> Seed<V> {
-        Seed::new(self.proposal.round, *self.certificate.seed_signature())
-    }
-}
-
-impl<P: PublicKey, V: Variant, D: Digest> Seedable<V> for Finalization<Scheme<P, V>, D> {
-    fn seed(&self) -> Seed<V> {
-        Seed::new(self.proposal.round, *self.certificate.seed_signature())
-    }
-}
-
-/// Extracts the seed message bytes from a Subject.
-///
-/// The seed message is the round encoded as bytes, used for per-view randomness.
-fn seed_message_from_subject<D: Digest>(subject: &Subject<'_, D>) -> bytes::Bytes {
-    match subject {
-        Subject::Notarize { proposal } => proposal.round.encode(),
-        Subject::Nullify { round } => round.encode(),
     }
 }
 
@@ -679,17 +438,7 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
         let namespace = self.namespace();
         let vote_namespace = subject.namespace(namespace);
         let vote_message = subject.message();
-        let vote_signature =
-            threshold::sign_message::<V>(share, vote_namespace, &vote_message).value;
-
-        let seed_message = seed_message_from_subject(&subject);
-        let seed_signature =
-            threshold::sign_message::<V>(share, &namespace.seed, &seed_message).value;
-
-        let signature = Signature {
-            vote_signature,
-            seed_signature,
-        };
+        let signature = threshold::sign_message::<V>(share, vote_namespace, &vote_message).value;
 
         Some(Attestation {
             signer: share.index,
@@ -699,10 +448,10 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
 
     fn verify_attestation<R, D>(
         &self,
-        rng: &mut R,
+        _rng: &mut R,
         subject: Subject<'_, D>,
         attestation: &Attestation<Self>,
-        strategy: &impl Strategy,
+        _strategy: &impl Strategy,
     ) -> bool
     where
         R: CryptoRngCore,
@@ -715,21 +464,14 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
         let namespace = self.namespace();
         let vote_namespace = subject.namespace(namespace);
         let vote_message = subject.message();
-        let seed_message = seed_message_from_subject(&subject);
 
-        let entries = &[
-            (
-                vote_namespace,
-                vote_message.as_ref(),
-                attestation.signature.vote_signature,
-            ),
-            (
-                &namespace.seed,
-                seed_message.as_ref(),
-                attestation.signature.seed_signature,
-            ),
-        ];
-        batch::verify_same_signer::<_, V, _>(rng, &evaluated, entries, strategy).is_ok()
+        ops::verify_message::<V>(
+            &evaluated,
+            vote_namespace,
+            &vote_message,
+            &attestation.signature,
+        )
+        .is_ok()
     }
 
     fn verify_attestations<R, D, I>(
@@ -745,76 +487,35 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
         I: IntoIterator<Item = Attestation<Self>>,
     {
         let namespace = self.namespace();
-        let (vote_partials, seed_partials): (Vec<_>, Vec<_>) = attestations
+        let vote_partials: Vec<_> = attestations
             .into_iter()
-            .map(|attestation| {
-                (
-                    PartialSignature::<V> {
-                        index: attestation.signer,
-                        value: attestation.signature.vote_signature,
-                    },
-                    PartialSignature::<V> {
-                        index: attestation.signer,
-                        value: attestation.signature.seed_signature,
-                    },
-                )
+            .map(|attestation| PartialSignature::<V> {
+                index: attestation.signer,
+                value: attestation.signature,
             })
-            .unzip();
+            .collect();
 
         let polynomial = self.polynomial();
         let vote_namespace = subject.namespace(namespace);
         let vote_message = subject.message();
-        let seed_message = seed_message_from_subject(&subject);
 
-        // Generate independent RNG seeds for concurrent verification
-        let mut vote_rng_seed = [0u8; 32];
-        let mut seed_rng_seed = [0u8; 32];
-        rng.fill_bytes(&mut vote_rng_seed);
-        rng.fill_bytes(&mut seed_rng_seed);
-
-        // Verify vote and seed signatures concurrently.
-        let (vote_invalid, seed_invalid) = strategy.join(
-            || {
-                let mut vote_rng = StdRng::from_seed(vote_rng_seed);
-                match threshold::batch_verify_same_message::<_, V, _>(
-                    &mut vote_rng,
-                    polynomial,
-                    vote_namespace,
-                    &vote_message,
-                    vote_partials.iter(),
-                    strategy,
-                ) {
-                    Ok(()) => BTreeSet::new(),
-                    Err(errs) => errs.into_iter().map(|p| p.index).collect(),
-                }
-            },
-            || {
-                let mut seed_rng = StdRng::from_seed(seed_rng_seed);
-                match threshold::batch_verify_same_message::<_, V, _>(
-                    &mut seed_rng,
-                    polynomial,
-                    &namespace.seed,
-                    &seed_message,
-                    seed_partials.iter(),
-                    strategy,
-                ) {
-                    Ok(()) => BTreeSet::new(),
-                    Err(errs) => errs.into_iter().map(|p| p.index).collect(),
-                }
-            },
-        );
-        // Merge invalid sets
-        let invalid: BTreeSet<_> = vote_invalid.union(&seed_invalid).copied().collect();
+        let invalid: BTreeSet<_> = match threshold::batch_verify_same_message::<_, V, _>(
+            rng,
+            polynomial,
+            vote_namespace,
+            &vote_message,
+            vote_partials.iter(),
+            strategy,
+        ) {
+            Ok(()) => BTreeSet::new(),
+            Err(errs) => errs.into_iter().map(|p| p.index).collect(),
+        };
 
         let verified = vote_partials
             .into_iter()
-            .zip(seed_partials)
-            .map(|(vote, seed)| Attestation {
-                signer: vote.index,
-                signature: Signature {
-                    vote_signature: vote.value,
-                    seed_signature: seed.value,
-                },
+            .map(|partial| Attestation {
+                signer: partial.index,
+                signature: partial.value,
             })
             .filter(|attestation| !invalid.contains(&attestation.signer))
             .collect();
@@ -828,23 +529,15 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
         M: Faults,
     {
         let attestations: Vec<_> = attestations.into_iter().collect();
-        let (vote_partials, seed_partials): (Vec<_>, Vec<_>) = attestations
+        let vote_partials: Vec<_> = attestations
             .iter()
-            .map(|attestation| {
-                (
-                    PartialSignature::<V> {
-                        index: attestation.signer,
-                        value: attestation.signature.vote_signature,
-                    },
-                    PartialSignature::<V> {
-                        index: attestation.signer,
-                        value: attestation.signature.seed_signature,
-                    },
-                )
+            .map(|attestation| PartialSignature::<V> {
+                index: attestation.signer,
+                value: attestation.signature,
             })
-            .unzip();
+            .collect();
 
-        let quorum = self.polynomial();
+        let polynomial = self.polynomial();
         let n = self.participants().len() as u32;
         let m_required = M::quorum(n) as usize;
 
@@ -852,15 +545,21 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
             return None;
         }
 
-        // Determine which certificate type to produce based on whether we can
-        // recover a threshold signature. The polynomial threshold is 2f+1 (M5f1),
-        // so we can only recover if we have at least that many signatures.
-        // For L-quorum (n-f) where we can't trust threshold recovery (signatures
-        // could be forged from 2f+1 partials), we use aggregation instead.
+        // The polynomial threshold is n-f (N5f1), so we can only recover a threshold
+        // signature when we have at least L-quorum (n-f) partials.
+        // For M-quorum (2f+1), we use aggregation instead (unforgeable).
         let l_quorum = N5f1::quorum(n) as usize;
 
         if vote_partials.len() >= l_quorum {
-            // L-quorum: Use aggregated signature with explicit signers.
+            // L-quorum: Recover threshold signature.
+            // Safe because polynomial threshold = n-f = L-quorum.
+            let vote_signature =
+                threshold::recover::<V, _, N5f1>(polynomial, vote_partials.iter(), strategy)
+                    .ok()?;
+
+            Some(Certificate::Threshold { vote_signature })
+        } else {
+            // M-quorum: Use aggregated signature with explicit signers.
             // This proves exactly which validators signed (unforgeable).
             let signers = Signers::from(n as usize, attestations.iter().map(|a| a.signer));
 
@@ -868,29 +567,9 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
             let aggregated_vote =
                 aggregate::combine_signatures::<V, _>(vote_partials.iter().map(|p| &p.value));
 
-            // Recover the seed signature via threshold recovery (we have >= 2f+1 partials)
-            let seed_signature =
-                threshold::recover::<V, _, M>(quorum, seed_partials.iter(), strategy).ok()?;
-
             Some(Certificate::Aggregated {
                 signers,
                 vote_signature: *aggregated_vote.inner(),
-                seed_signature,
-            })
-        } else {
-            // M-quorum: Recover threshold signature.
-            // Safe because threshold = 2f+1 = M-quorum.
-            let (vote_signature, seed_signature) = threshold::recover_pair::<V, _, M>(
-                quorum,
-                vote_partials.iter(),
-                seed_partials.iter(),
-                strategy,
-            )
-            .ok()?;
-
-            Some(Certificate::Threshold {
-                vote_signature,
-                seed_signature,
             })
         }
     }
@@ -900,7 +579,7 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
         rng: &mut R,
         subject: Subject<'_, D>,
         certificate: &Self::Certificate,
-        strategy: &impl Strategy,
+        _strategy: &impl Strategy,
     ) -> bool
     where
         R: CryptoRngCore,
@@ -912,24 +591,20 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
         let vote_message = subject.message();
 
         match certificate {
-            Certificate::Threshold {
-                vote_signature,
-                seed_signature,
-            } => {
-                // Verify recovered threshold signatures against group identity
+            Certificate::Threshold { vote_signature } => {
+                // Verify recovered threshold signature against group identity
                 let identity = self.identity();
-                let seed_message = seed_message_from_subject(&subject);
-
-                let entries = &[
-                    (vote_namespace, vote_message.as_ref(), *vote_signature),
-                    (&namespace.seed, seed_message.as_ref(), *seed_signature),
-                ];
-                batch::verify_same_signer::<_, V, _>(rng, identity, entries, strategy).is_ok()
+                batch::verify_same_signer::<_, V, _>(
+                    rng,
+                    identity,
+                    &[(vote_namespace, vote_message.as_ref(), *vote_signature)],
+                    &commonware_parallel::Sequential,
+                )
+                .is_ok()
             }
             Certificate::Aggregated {
                 signers,
                 vote_signature,
-                seed_signature,
             } => {
                 // Verify aggregated vote signature against aggregated public keys.
                 let polynomial = self.polynomial();
@@ -953,22 +628,13 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
                 let aggregated_sig = aggregate::Signature::<V>::from_raw(*vote_signature);
 
                 // Verify the aggregated vote signature
-                if aggregate::verify_same_message::<V>(
+                aggregate::verify_same_message::<V>(
                     &aggregated_public,
                     vote_namespace,
                     &vote_message,
                     &aggregated_sig,
                 )
-                .is_err()
-                {
-                    return false;
-                }
-
-                // Verify the recovered seed signature against group identity
-                let identity = self.identity();
-                let seed_message = seed_message_from_subject(&subject);
-                ops::verify_message::<V>(identity, &namespace.seed, &seed_message, seed_signature)
-                    .is_ok()
+                .is_ok()
             }
         }
     }
@@ -989,7 +655,6 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
         let namespace = self.namespace();
 
         // Separate Threshold and Aggregated certificates for different verification paths
-        let mut seeds = HashMap::new();
         let mut threshold_entries: Vec<_> = Vec::new();
         let mut aggregated_certs: Vec<_> = Vec::new();
 
@@ -997,22 +662,8 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
             let vote_namespace = context.namespace(namespace);
             let vote_message = context.message();
 
-            // All certificates (both Threshold and Aggregated) have seed signatures
-            // that can be batch-verified against the group identity. Seed signatures
-            // are per-view, so multiple certificates for the same view share the same seed.
-            let seed_signature = certificate.seed_signature();
-            if let Some(previous) = seeds.get(&context.view()) {
-                if previous != seed_signature {
-                    return false;
-                }
-            } else {
-                let seed_message = seed_message_from_subject(&context);
-                threshold_entries.push((namespace.seed.clone(), seed_message, *seed_signature));
-                seeds.insert(context.view(), *seed_signature);
-            }
-
             match certificate {
-                Certificate::Threshold { vote_signature, .. } => {
+                Certificate::Threshold { vote_signature } => {
                     // Vote signature can be batch-verified against group identity
                     threshold_entries.push((
                         vote_namespace.to_vec(),
@@ -1023,7 +674,6 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
                 Certificate::Aggregated {
                     signers,
                     vote_signature,
-                    ..
                 } => {
                     // Vote signature needs per-certificate verification against aggregated public keys
                     aggregated_certs.push((vote_namespace, vote_message, signers, vote_signature));
@@ -1031,7 +681,7 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
             }
         }
 
-        // Batch verify all Threshold vote signatures and all seed signatures against the group identity
+        // Batch verify all Threshold vote signatures against the group identity
         if !threshold_entries.is_empty() {
             let entries_refs: Vec<_> = threshold_entries
                 .iter()
@@ -1105,19 +755,16 @@ mod tests {
     use super::*;
     use crate::{
         minimmit::{
-            scheme::{bls12381_threshold, notarize_namespace, seed_namespace},
-            types::{Finalization, MNotarization, Notarize, Proposal, Subject},
+            scheme::{bls12381_threshold, notarize_namespace},
+            types::{Proposal, Subject},
         },
-        types::{Round, View},
+        types::{Epoch, Round, View},
     };
     use commonware_codec::{Decode, Encode};
     use commonware_cryptography::{
         bls12381::{
             dkg::{self, deal_anonymous},
-            primitives::{
-                ops::threshold,
-                variant::{MinPk, MinSig, Variant},
-            },
+            primitives::variant::{MinPk, MinSig, Variant},
         },
         certificate::{mocks::Fixture, Scheme as _},
         ed25519,
@@ -1126,7 +773,7 @@ mod tests {
         Hasher, Sha256,
     };
     use commonware_parallel::Sequential;
-    use commonware_utils::{test_rng, Faults, M5f1, N5f1, NZU32};
+    use commonware_utils::{test_rng, M5f1, N5f1, NZU32};
     use rand::{rngs::StdRng, SeedableRng};
 
     const NAMESPACE: &[u8] = b"minimmit-bls-threshold";
@@ -1366,54 +1013,7 @@ mod tests {
         finalization_requires_l_quorum::<MinSig>();
     }
 
-    fn seedable<V: Variant>() {
-        let (schemes, _) = setup_signers::<V>(6, 5);
-        let m_quorum = M5f1::quorum_from_slice(&schemes) as usize;
-        let proposal = sample_proposal(Epoch::new(0), View::new(1), 0);
-
-        // Build M-notarization from M-quorum notarizes
-        let notarizes: Vec<_> = schemes
-            .iter()
-            .take(m_quorum)
-            .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
-            .collect();
-
-        let m_notarization =
-            MNotarization::from_notarizes(&schemes[0], &notarizes, &Sequential).unwrap();
-
-        // M-notarization should have a valid seed (it uses Threshold certificate)
-        assert_eq!(m_notarization.seed().round, proposal.round);
-        assert!(m_notarization.seed().verify(&schemes[0]));
-
-        // Build Finalization from L-quorum notarizes
-        let l_quorum = N5f1::quorum_from_slice(&schemes) as usize;
-        let notarizes: Vec<_> = schemes
-            .iter()
-            .take(l_quorum)
-            .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
-            .collect();
-
-        let finalization =
-            Finalization::from_notarizes(&schemes[0], &notarizes, &Sequential).unwrap();
-
-        // Finalization should also have a valid seed (Aggregated certificate includes recovered seed)
-        assert_eq!(finalization.seed().round, proposal.round);
-        assert!(finalization.seed().verify(&schemes[0]));
-
-        // Both should have the same seed signature (same round, same polynomial)
-        assert_eq!(
-            m_notarization.seed().signature,
-            finalization.seed().signature
-        );
-    }
-
-    #[test]
-    fn test_seedable() {
-        seedable::<MinPk>();
-        seedable::<MinSig>();
-    }
-
-    fn certificate_codec_roundtrip_threshold<V: Variant>() {
+    fn certificate_codec_roundtrip_aggregated_m_quorum<V: Variant>() {
         let (schemes, _) = setup_signers::<V>(6, 29);
         let m_quorum = M5f1::quorum_from_slice(&schemes) as usize;
         let proposal = sample_proposal(Epoch::new(0), View::new(13), 7);
@@ -1434,8 +1034,8 @@ mod tests {
             .assemble::<_, M5f1>(votes, &Sequential)
             .expect("assemble certificate");
 
-        // M-quorum should produce Threshold certificate
-        assert!(certificate.is_threshold());
+        // M-quorum produces Aggregated certificate (unforgeable individual signatures)
+        assert!(certificate.is_aggregated());
 
         let encoded = certificate.encode();
         let n = schemes[0].participants().len();
@@ -1443,7 +1043,7 @@ mod tests {
         assert_eq!(decoded, certificate);
     }
 
-    fn certificate_codec_roundtrip_aggregated<V: Variant>() {
+    fn certificate_codec_roundtrip_threshold_l_quorum<V: Variant>() {
         let (schemes, _) = setup_signers::<V>(6, 31);
         let l_quorum = N5f1::quorum_from_slice(&schemes) as usize;
         let proposal = sample_proposal(Epoch::new(0), View::new(15), 8);
@@ -1464,8 +1064,8 @@ mod tests {
             .assemble::<_, N5f1>(votes, &Sequential)
             .expect("assemble certificate");
 
-        // L-quorum should produce Aggregated certificate
-        assert!(certificate.is_aggregated());
+        // L-quorum produces Threshold certificate (recovery requires n-f partials)
+        assert!(certificate.is_threshold());
 
         let encoded = certificate.encode();
         let n = schemes[0].participants().len();
@@ -1475,10 +1075,10 @@ mod tests {
 
     #[test]
     fn test_certificate_codec_roundtrip() {
-        certificate_codec_roundtrip_threshold::<MinPk>();
-        certificate_codec_roundtrip_threshold::<MinSig>();
-        certificate_codec_roundtrip_aggregated::<MinPk>();
-        certificate_codec_roundtrip_aggregated::<MinSig>();
+        certificate_codec_roundtrip_aggregated_m_quorum::<MinPk>();
+        certificate_codec_roundtrip_aggregated_m_quorum::<MinSig>();
+        certificate_codec_roundtrip_threshold_l_quorum::<MinPk>();
+        certificate_codec_roundtrip_threshold_l_quorum::<MinSig>();
     }
 
     fn sign_vote_partial_matches_share<V: Variant>() {
@@ -1495,22 +1095,15 @@ mod tests {
 
         let notarize_namespace = notarize_namespace(NAMESPACE);
         let notarize_message = proposal.encode();
-        let expected_message = threshold::sign_message::<V>(
+        let expected_signature = threshold::sign_message::<V>(
             share,
             notarize_namespace.as_ref(),
             notarize_message.as_ref(),
         )
         .value;
 
-        let seed_namespace = seed_namespace(NAMESPACE);
-        let seed_message = proposal.round.encode();
-        let expected_seed =
-            threshold::sign_message::<V>(share, seed_namespace.as_ref(), seed_message.as_ref())
-                .value;
-
         assert_eq!(vote.signer, share.index);
-        assert_eq!(vote.signature.vote_signature, expected_message);
-        assert_eq!(vote.signature.seed_signature, expected_seed);
+        assert_eq!(vote.signature, expected_signature);
     }
 
     #[test]

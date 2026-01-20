@@ -22,14 +22,16 @@ pub mod secp256r1;
 /// This struct holds the pre-computed namespace bytes for each vote type.
 /// Unlike Simplex, Minimmit has no finalize namespace since finalization
 /// uses the same notarize votes (just with a higher threshold).
+///
+/// Unlike Simplex, Minimmit does not use seed signatures for VRF-based leader
+/// election. The BLS threshold scheme uses aggregated signatures for M-quorum
+/// and threshold recovery for L-quorum, prioritizing security over random election.
 #[derive(Clone, Debug)]
 pub struct Namespace {
     /// Namespace for notarize votes/certificates.
     pub notarize: Vec<u8>,
     /// Namespace for nullify votes/certificates.
     pub nullify: Vec<u8>,
-    /// Namespace for seed signatures (used by threshold schemes).
-    pub seed: Vec<u8>,
 }
 
 impl Namespace {
@@ -38,7 +40,6 @@ impl Namespace {
         Self {
             notarize: notarize_namespace(namespace),
             nullify: nullify_namespace(namespace),
-            seed: seed_namespace(namespace),
         }
     }
 }
@@ -81,16 +82,8 @@ impl<D: Digest, S> Scheme<D> for S where
 
 // Constants for domain separation in signature verification
 // These are used to prevent cross-protocol attacks and message-type confusion
-const SEED_SUFFIX: &[u8] = b"_MINIMMIT_SEED";
 const NOTARIZE_SUFFIX: &[u8] = b"_MINIMMIT_NOTARIZE";
 const NULLIFY_SUFFIX: &[u8] = b"_MINIMMIT_NULLIFY";
-
-/// Creates a namespace for seed messages by appending the SEED_SUFFIX
-/// The seed is used for leader election and randomness generation
-#[inline]
-pub(crate) fn seed_namespace(namespace: &[u8]) -> Vec<u8> {
-    union(namespace, SEED_SUFFIX)
-}
 
 /// Creates a namespace for notarize messages by appending the NOTARIZE_SUFFIX
 /// Domain separation prevents cross-protocol attacks
@@ -115,7 +108,6 @@ mod tests {
         let ns = Namespace::new(b"test");
         assert_eq!(ns.notarize, b"test_MINIMMIT_NOTARIZE");
         assert_eq!(ns.nullify, b"test_MINIMMIT_NULLIFY");
-        assert_eq!(ns.seed, b"test_MINIMMIT_SEED");
     }
 
     #[test]
@@ -126,6 +118,5 @@ mod tests {
 
         assert_ne!(minimmit_ns.notarize, simplex_ns.notarize);
         assert_ne!(minimmit_ns.nullify, simplex_ns.nullify);
-        assert_ne!(minimmit_ns.seed, simplex_ns.seed);
     }
 }
