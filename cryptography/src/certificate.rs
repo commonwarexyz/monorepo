@@ -572,6 +572,7 @@ mod tests {
             }
         }
 
+        // Use the macro to generate the test scheme (signer/verifier are unused in conformance tests)
         impl_certificate_ed25519!(TestSubject, Vec<u8>);
 
         commonware_conformance::conformance_tests! {
