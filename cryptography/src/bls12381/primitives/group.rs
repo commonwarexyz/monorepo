@@ -2184,7 +2184,7 @@ mod tests {
         );
 
         // Test with mixed zero/non-zero
-        let mut mixed_points = points.clone();
+        let mut mixed_points = points;
         let mut mixed_scalars: Vec<Scalar> = (0..n).map(|_| Scalar::random(&mut rng)).collect();
         mixed_points[10] = G1::zero();
         mixed_scalars[20] = Scalar::zero();
