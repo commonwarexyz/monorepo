@@ -30,7 +30,7 @@ impl<K> Poly<K> {
             .expect("Impossible: polynomial length not in 1..=u32::MAX")
     }
 
-    fn len_usize(&self) -> usize {
+    const fn len_usize(&self) -> usize {
         self.coeffs.len().get()
     }
 
@@ -252,31 +252,31 @@ impl<K: Additive> Object for Poly<K> {}
 
 // SECTION: implementing Additive
 
-impl<'a, K: Additive> AddAssign<&'a Poly<K>> for Poly<K> {
-    fn add_assign(&mut self, rhs: &'a Poly<K>) {
+impl<'a, K: Additive> AddAssign<&'a Self> for Poly<K> {
+    fn add_assign(&mut self, rhs: &'a Self) {
         self.merge_with(rhs, |a, b| *a += b);
     }
 }
 
-impl<'a, K: Additive> Add<&'a Poly<K>> for Poly<K> {
+impl<'a, K: Additive> Add<&'a Self> for Poly<K> {
     type Output = Self;
 
-    fn add(mut self, rhs: &'a Poly<K>) -> Self::Output {
+    fn add(mut self, rhs: &'a Self) -> Self::Output {
         self += rhs;
         self
     }
 }
 
-impl<'a, K: Additive> SubAssign<&'a Poly<K>> for Poly<K> {
-    fn sub_assign(&mut self, rhs: &'a Poly<K>) {
+impl<'a, K: Additive> SubAssign<&'a Self> for Poly<K> {
+    fn sub_assign(&mut self, rhs: &'a Self) {
         self.merge_with(rhs, |a, b| *a -= b);
     }
 }
 
-impl<'a, K: Additive> Sub<&'a Poly<K>> for Poly<K> {
+impl<'a, K: Additive> Sub<&'a Self> for Poly<K> {
     type Output = Self;
 
-    fn sub(mut self, rhs: &'a Poly<K>) -> Self::Output {
+    fn sub(mut self, rhs: &'a Self) -> Self::Output {
         self -= rhs;
         self
     }
@@ -344,7 +344,7 @@ impl<R: Sync, K: Space<R> + Send> Space<R> for Poly<K> {
                 K::msm(row, scalars, strategy)
             },
         );
-        Poly::from_iter_unchecked(coeffs)
+        Self::from_iter_unchecked(coeffs)
     }
 }
 
