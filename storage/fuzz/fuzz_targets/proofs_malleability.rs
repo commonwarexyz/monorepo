@@ -118,12 +118,12 @@ where
     }
 }
 
-fn hash_elements(elements: &[u8]) -> Vec<Digest> {
-    elements.iter().map(|&v| Sha256::hash(&[v])).collect()
-}
-
 fn fuzz(input: FuzzInput) {
-    let digests = hash_elements(&input.elements);
+    let digests: Vec<Digest> = input
+        .elements
+        .iter()
+        .map(|&v| Sha256::hash(&[v]))
+        .collect();
 
     match input.proof {
         ProofType::Mmr => {
