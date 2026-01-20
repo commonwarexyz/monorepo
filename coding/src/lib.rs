@@ -12,17 +12,22 @@
 
 use bytes::Buf;
 use commonware_codec::{Codec, FixedSize, Read, Write};
+use commonware_macros::ready;
 use commonware_parallel::Strategy;
+use commonware_utils::ready_mod;
 use std::fmt::Debug;
 
-mod reed_solomon;
+ready_mod!(1, mod reed_solomon);
 use commonware_cryptography::Digest;
+#[ready(1)]
 pub use reed_solomon::{Error as ReedSolomonError, ReedSolomon};
 
-mod no_coding;
+ready_mod!(0, mod no_coding);
+#[ready(0)]
 pub use no_coding::{Error as NoCodingError, NoCoding};
 
-mod zoda;
+ready_mod!(1, mod zoda);
+#[ready(1)]
 pub use zoda::{Error as ZodaError, Zoda};
 
 /// Configuration common to all encoding schemes.
