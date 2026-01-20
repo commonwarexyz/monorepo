@@ -10,6 +10,9 @@ homepage.workspace = true
 repository = "https://github.com/commonwarexyz/monorepo/tree/main/math"
 documentation = "https://docs.rs/commonware-math"
 
+[lints]
+workspace = true
+
 [features]
 arbitrary = [
 	"commonware-codec/arbitrary",
