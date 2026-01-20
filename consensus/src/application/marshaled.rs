@@ -15,24 +15,26 @@
 //!
 //! # Deferred Verification
 //!
-//! By default, [`Marshaled`] uses deferred verification, optimistically voting in favor
-//! of the proposed block but waiting to finalize until verification is complete. In
-//! [`Automaton::verify`], verification is started, and in [`CertifiableAutomaton::certify`],
-//! we wait on the result (before voting to finalize.)
+//! [`Marshaled`] uses deferred verification. Before casting a notarize vote, it waits
+//! for the block to become available (DA) and verifies that the block's embedded context
+//! matches the consensus context. This ensures that at least f+1 honest validators in the
+//! notarizing quorum have verified the context is valid, preventing a Byzantine proposer
+//! from embedding a malicious context. Once the context is validated, verification of block
+//! contents begins asynchronously. In [`CertifiableAutomaton::certify`], we wait on the
+//! verification result before voting to finalize.
 //!
 //! # Usage
 //!
-//! Wrap your [`Application`] implementation with [`Marshaled::init`] and provide it to your
+//! Wrap your [`Application`] implementation with [`Marshaled::new`] and provide it to your
 //! consensus engine for the [`Automaton`] and [`Relay`]. The wrapper handles all epoch logic transparently.
 //!
 //! ```rust,ignore
-//! let application = Marshaled::init(
+//! let application = Marshaled::new(
 //!     context,
 //!     my_application,
 //!     marshal_mailbox,
 //!     epocher,
-//!     partition_prefix
-//! ).await;
+//! );
 //! ```
 //!
 //! # Implementation Notes
@@ -40,6 +42,14 @@
 //! - Genesis blocks are handled specially: epoch 0 returns the application's genesis block,
 //!   while subsequent epochs use the last block of the previous epoch as genesis
 //! - Blocks are automatically verified to be within the current epoch
+//!
+//! # Future Work
+//!
+//! - It is possible to not wait for data availability during notarization by caching the consensus
+//!   context at proposal and verification time. This optimization adds complexity from the perspective
+//!   that Notarization certificates no longer imply data availability, so it is deferred for now. However,
+//!   by updating marshal and other components to meet this assumption, we can improve view latency with
+//!   this technique.
 
 use crate::{
     marshal::{self, ingress::mailbox::AncestorStream, Update},
@@ -48,31 +58,21 @@ use crate::{
     Application, Automaton, Block, CertifiableAutomaton, CertifiableBlock, Epochable, Relay,
     Reporter, VerifyingApplication,
 };
-use commonware_codec::RangeCfg;
 use commonware_cryptography::{certificate::Scheme, Committable};
-use commonware_runtime::{telemetry::metrics::status::GaugeExt, Clock, Metrics, Spawner, Storage};
-use commonware_storage::metadata::{self, Metadata};
+use commonware_runtime::{telemetry::metrics::status::GaugeExt, Clock, Metrics, Spawner};
 use commonware_utils::{channels::fallible::OneshotExt, futures::ClosedExt};
 use futures::{
     channel::oneshot::{self, Canceled},
-    future::{ready, select, try_join, Either, Ready},
+    future::{ready, select, Either, Ready},
     lock::Mutex,
     pin_mut,
 };
 use prometheus_client::metrics::gauge::Gauge;
 use rand::Rng;
-use std::{
-    collections::{BTreeMap, HashMap},
-    sync::Arc,
-    time::Instant,
-};
+use std::{collections::HashMap, sync::Arc, time::Instant};
 use tracing::{debug, warn};
 
-type VerificationContexts<E, B, S> = Metadata<
-    E,
-    <B as Committable>::Commitment,
-    BTreeMap<Round, Context<<B as Committable>::Commitment, <S as Scheme>::PublicKey>>,
->;
+type TasksMap<B> = HashMap<(Round, <B as Committable>::Commitment), oneshot::Receiver<bool>>;
 
 /// An [`Application`] adapter that handles epoch transitions and validates block ancestry.
 ///
@@ -96,27 +96,21 @@ type VerificationContexts<E, B, S> = Metadata<
 ///
 /// # Verification Context Recovery
 ///
-/// With deferred verification, validators vote optimistically before verification completes.
+/// With deferred verification, validators wait for DA and verify the context before voting.
 /// If a validator crashes after voting but before certification, they lose their in-memory
-/// verification task. To handle this, verification contexts are recovered from two sources:
+/// verification task. When recovering, validators use the block-embedded context.
 ///
-/// 1. Metadata storage: Contexts are stored durably when [`Automaton::verify`] is called,
-///    allowing validators who participated in notarization to recover after a crash. This is
-///    critical: the security guarantee that the block-embedded context is trustworthy depends
-///    on f+1 honest notarizing validators verifying against the context from consensus. If they
-///    instead fell back to trusting the block's context, they would become consumers rather
-///    than verifiers, breaking this guarantee.
-///
-/// 2. Block-embedded context: Blocks implement [`CertifiableBlock`] which embeds the
-///    consensus context. This allows validators who never participated in notarization to help
-///    complete finalization when Byzantine validators withhold their finalize votes. If a
-///    Byzantine proposer embeds a malicious context, the f+1 honest validators from the
-///    notarizing quorum will verify against their stored context and reject the mismatch,
-///    preventing a 2f+1 finalization quorum from forming.
+/// Blocks implement [`CertifiableBlock`] which embeds the consensus context. This embedded
+/// context is trustworthy because the notarizing quorum (which contains at least f+1 honest
+/// validators) verified that the block's context matched the consensus context before voting.
+/// This allows validators who crashed or never participated in notarization to use the
+/// block-embedded context for finalization. If a Byzantine proposer had embedded a malicious
+/// context, the f+1 honest validators would have rejected the mismatch during notarization,
+/// preventing the block from being notarized.
 #[derive(Clone)]
 pub struct Marshaled<E, S, A, B, ES>
 where
-    E: Rng + Storage + Spawner + Metrics + Clock,
+    E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
     A: Application<E>,
     B: CertifiableBlock,
@@ -127,15 +121,14 @@ where
     marshal: marshal::Mailbox<S, B>,
     epocher: ES,
     last_built: Arc<Mutex<Option<(Round, B)>>>,
-    verification_contexts: Arc<Mutex<VerificationContexts<E, B, S>>>,
-    verification_tasks: Arc<Mutex<HashMap<Round, oneshot::Receiver<bool>>>>,
+    verification_tasks: Arc<Mutex<TasksMap<B>>>,
 
     build_duration: Gauge,
 }
 
 impl<E, S, A, B, ES> Marshaled<E, S, A, B, ES>
 where
-    E: Rng + Storage + Spawner + Metrics + Clock,
+    E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
     A: VerifyingApplication<
         E,
@@ -147,17 +140,7 @@ where
     ES: Epocher,
 {
     /// Creates a new [`Marshaled`] wrapper.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the verification contexts [`Metadata`] store cannot be initialized.
-    pub async fn init(
-        context: E,
-        application: A,
-        marshal: marshal::Mailbox<S, B>,
-        epocher: ES,
-        partition_prefix: String,
-    ) -> Self {
+    pub fn new(context: E, application: A, marshal: marshal::Mailbox<S, B>, epocher: ES) -> Self {
         let build_duration = Gauge::default();
         context.register(
             "build_duration",
@@ -165,23 +148,12 @@ where
             build_duration.clone(),
         );
 
-        let verification_contexts = Metadata::init(
-            context.with_label("verification_contexts_metadata"),
-            metadata::Config {
-                partition: format!("{partition_prefix}-verification-contexts"),
-                codec_config: (RangeCfg::from(..), ((), ())),
-            },
-        )
-        .await
-        .expect("must initialize verification contexts metadata");
-
         Self {
             context,
             application,
             marshal,
             epocher,
             last_built: Arc::new(Mutex::new(None)),
-            verification_contexts: Arc::new(Mutex::new(verification_contexts)),
             verification_tasks: Arc::new(Mutex::new(HashMap::new())),
 
             build_duration,
@@ -206,8 +178,7 @@ where
     async fn verify(
         &mut self,
         context: <Self as Automaton>::Context,
-        digest: B::Commitment,
-        block: Option<B>,
+        block: B,
     ) -> oneshot::Receiver<bool> {
         let mut marshal = self.marshal.clone();
         let mut application = self.application.clone();
@@ -230,16 +201,10 @@ where
                     &mut marshal,
                 )
                 .await;
-                let block_request = match block {
-                    Some(block) => Either::Left(ready(Ok(block))),
-                    None => Either::Right(marshal.subscribe(None, digest).await),
-                };
-                let block_requests = try_join(parent_request, block_request);
-                pin_mut!(block_requests);
 
                 // If consensus drops the receiver, we can stop work early.
-                let (parent, block) = match select(block_requests, &mut tx_closed).await {
-                    Either::Left((Ok((parent, block)), _)) => (parent, block),
+                let parent = match select(parent_request, &mut tx_closed).await {
+                    Either::Left((Ok(parent), _)) => parent,
                     Either::Left((Err(_), _)) => {
                         debug!(
                             reason = "failed to fetch parent or block",
@@ -347,32 +312,11 @@ where
 
         rx
     }
-
-    /// Acquire a lock to the verification contexts and store the given context.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the verification context cannot be persisted.
-    #[inline]
-    async fn store_verification_context(
-        contexts_lock: &Arc<Mutex<VerificationContexts<E, B, S>>>,
-        context: <Self as Automaton>::Context,
-        digest: B::Commitment,
-    ) {
-        contexts_lock
-            .lock()
-            .await
-            .upsert_sync(digest, |map| {
-                map.insert(context.round, context);
-            })
-            .await
-            .expect("must persist verification context");
-    }
 }
 
 impl<E, S, A, B, ES> Automaton for Marshaled<E, S, A, B, ES>
 where
-    E: Rng + Storage + Spawner + Metrics + Clock,
+    E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
     A: VerifyingApplication<
         E,
@@ -432,7 +376,6 @@ where
         let mut application = self.application.clone();
         let last_built = self.last_built.clone();
         let epocher = self.epocher.clone();
-        let verification_contexts = self.verification_contexts.clone();
 
         // Metrics
         let build_duration = self.build_duration.clone();
@@ -485,13 +428,6 @@ where
                         *lock = Some((consensus_context.round, parent));
                     }
 
-                    Self::store_verification_context(
-                        &verification_contexts,
-                        consensus_context.clone(),
-                        digest,
-                    )
-                    .await;
-
                     let success = tx.send_lossy(digest);
                     debug!(
                         round = ?consensus_context.round,
@@ -536,13 +472,6 @@ where
                     *lock = Some((consensus_context.round, built_block));
                 }
 
-                Self::store_verification_context(
-                    &verification_contexts,
-                    consensus_context.clone(),
-                    digest,
-                )
-                .await;
-
                 let success = tx.send_lossy(digest);
                 debug!(
                     round = ?consensus_context.round,
@@ -559,23 +488,77 @@ where
         context: Context<Self::Digest, S::PublicKey>,
         digest: Self::Digest,
     ) -> oneshot::Receiver<bool> {
-        Self::store_verification_context(&self.verification_contexts, context.clone(), digest)
-            .await;
+        let mut marshal = self.marshal.clone();
+        let mut marshaled = self.clone();
 
-        // Begin the verification process.
-        let round = context.round;
-        let task = self.verify(context, digest, None).await;
-        self.verification_tasks.lock().await.insert(round, task);
+        let (mut tx, rx) = oneshot::channel();
+        self.context
+            .with_label("optimistic_verify")
+            .spawn(move |_| async move {
+                // Create a future for tracking if the receiver is dropped, which could allow
+                // us to cancel work early.
+                let tx_closed = tx.closed();
+                pin_mut!(tx_closed);
 
-        let (tx, rx) = oneshot::channel();
-        tx.send_lossy(true);
+                let block_request = marshal.subscribe(Some(context.round), digest).await;
+                let block = match select(block_request, &mut tx_closed).await {
+                    Either::Left((Ok(block), _)) => block,
+                    Either::Left((Err(_), _)) => {
+                        debug!(
+                            ?digest,
+                            reason = "failed to fetch block for optimistic verification",
+                            "skipping optimistic verification"
+                        );
+                        return;
+                    }
+                    Either::Right(_) => {
+                        debug!(
+                            reason = "consensus dropped receiver",
+                            "skipping optimistic verification"
+                        );
+                        return;
+                    }
+                };
+
+                // Check if this is a re-proposal (the block commitment matches the parent from
+                // the context). Re-proposals at epoch boundaries retain their original embedded
+                // context, so we skip the context check for them.
+                let is_reproposal = context.parent.1 == digest;
+
+                // Before casting a notarize vote, ensure the block's embedded context matches
+                // the consensus context. This is a critical step - the notarize quorum is
+                // guaranteed to have at least f+1 honest validators who will verify against this
+                // context, preventing a Byzantine proposer from embedding a malicious context.
+                // The other f honest validators who did not vote will later use the block-embedded
+                // context to help finalize if Byzantine validators withhold their finalize votes.
+                if !is_reproposal && block.context() != context {
+                    debug!(
+                        ?context,
+                        block_context = ?block.context(),
+                        "block-embedded context does not match consensus context during optimistic verification"
+                    );
+                    tx.send_lossy(false);
+                    return;
+                }
+
+                // Begin the rest of the verification process asynchronously.
+                let round = context.round;
+                let task = marshaled.verify(context, block).await;
+                marshaled
+                    .verification_tasks
+                    .lock()
+                    .await
+                    .insert((round, digest), task);
+
+                tx.send_lossy(true);
+            });
         rx
     }
 }
 
 impl<E, S, A, B, ES> CertifiableAutomaton for Marshaled<E, S, A, B, ES>
 where
-    E: Rng + Storage + Spawner + Metrics + Clock,
+    E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
     A: VerifyingApplication<
         E,
@@ -587,34 +570,19 @@ where
     ES: Epocher,
 {
     async fn certify(&mut self, round: Round, payload: Self::Digest) -> oneshot::Receiver<bool> {
-        // Attempt to retrieve the existing verification task for this round.
+        // Attempt to retrieve the existing verification task for this (round, payload).
         let mut tasks_guard = self.verification_tasks.lock().await;
-        let task = tasks_guard.remove(&round);
+        let task = tasks_guard.remove(&(round, payload));
         drop(tasks_guard);
 
         if let Some(task) = task {
             return task;
         }
 
-        // Look up context by (payload, round) to get the exact verification context.
-        // This is necessary because the same block may be proposed in multiple rounds
-        // (e.g., re-proposals at epoch boundaries), and each round has its own context.
-        // We clone rather than remove so the context remains available for crash recovery.
-        // Contexts are cleaned up when finalization advances past them (see report()).
-        let contexts_guard = self.verification_contexts.lock().await;
-        let context = contexts_guard
-            .get(&payload)
-            .and_then(|map| map.get(&round).cloned());
-        drop(contexts_guard);
-
-        if let Some(context) = context {
-            return self.verify(context, payload, None).await;
-        }
-
-        // No stored context means we never verified this proposal locally. We can use the
+        // No in-progress task means we never verified this proposal locally. We can use the
         // block's embedded context to help complete finalization when Byzantine validators
         // withhold their finalize votes. If a Byzantine proposer embedded a malicious context,
-        // the f+1 honest validators from the notarizing quorum will verify against their stored
+        // the f+1 honest validators from the notarizing quorum will verify against the proper
         // context and reject the mismatch, preventing a 2f+1 finalization quorum.
         //
         // Subscribe to the block and verify using its embedded context once available.
@@ -625,16 +593,36 @@ where
         );
         let block_rx = self.marshal.subscribe(Some(round), payload).await;
         let mut marshaled = self.clone();
-        let (tx, rx) = oneshot::channel();
+        let (mut tx, rx) = oneshot::channel();
         self.context
             .with_label("certify")
             .spawn(move |_| async move {
-                let Ok(block) = block_rx.await else {
-                    // Subscription was cancelled, just drop tx to signal failure
-                    return;
+                // Create a future for tracking if the receiver is dropped, which could allow
+                // us to cancel work early.
+                let tx_closed = tx.closed();
+                pin_mut!(tx_closed);
+
+                let block = match select(block_rx, &mut tx_closed).await {
+                    Either::Left((Ok(block), _)) => block,
+                    Either::Left((Err(_), _)) => {
+                        debug!(
+                            ?payload,
+                            reason = "failed to fetch block for certification",
+                            "skipping certification"
+                        );
+                        return;
+                    }
+                    Either::Right(_) => {
+                        debug!(
+                            reason = "consensus dropped receiver",
+                            "skipping certification"
+                        );
+                        return;
+                    }
                 };
+
                 let context = block.context();
-                let verify_rx = marshaled.verify(context, payload, Some(block)).await;
+                let verify_rx = marshaled.verify(context, block).await;
                 if let Ok(result) = verify_rx.await {
                     tx.send_lossy(result);
                 }
@@ -645,7 +633,7 @@ where
 
 impl<E, S, A, B, ES> Relay for Marshaled<E, S, A, B, ES>
 where
-    E: Rng + Storage + Spawner + Metrics + Clock,
+    E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
     A: Application<E, Block = B, Context = Context<B::Commitment, S::PublicKey>>,
     B: CertifiableBlock<Context = <A as Application<E>>::Context>,
@@ -685,7 +673,7 @@ where
 
 impl<E, S, A, B, ES> Reporter for Marshaled<E, S, A, B, ES>
 where
-    E: Rng + Storage + Spawner + Metrics + Clock,
+    E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
     A: Application<E, Block = B, Context = Context<B::Commitment, S::PublicKey>>
         + Reporter<Activity = Update<B>>,
@@ -694,24 +682,12 @@ where
 {
     type Activity = A::Activity;
 
-    /// Relays a report to the underlying [`Application`] and cleans up old verification contexts.
+    /// Relays a report to the underlying [`Application`] and cleans up old verification tasks.
     async fn report(&mut self, update: Self::Activity) {
-        // Clean up verification contexts for rounds <= the finalized round.
-        // This only modifies in-memory state; sync is called later when a new context is added.
+        // Clean up verification tasks for rounds <= the finalized round.
         if let Update::Tip(_, _, round) = &update {
-            let mut contexts_guard = self.verification_contexts.lock().await;
-            let keys: Vec<_> = contexts_guard.keys().cloned().collect();
-            for key in keys {
-                if let Some(map) = contexts_guard.get_mut(&key) {
-                    map.retain(|ctx_round, _| ctx_round > round);
-                    if map.is_empty() {
-                        contexts_guard.remove(&key);
-                    }
-                }
-            }
-
             let mut tasks_guard = self.verification_tasks.lock().await;
-            tasks_guard.retain(|ctx_round, _| *ctx_round > *round);
+            tasks_guard.retain(|(task_round, _), _| task_round > round);
         }
         self.application.report(update).await
     }
@@ -733,7 +709,7 @@ async fn fetch_parent<E, S, A, B>(
     marshal: &mut marshal::Mailbox<S, B>,
 ) -> Either<Ready<Result<B, Canceled>>, oneshot::Receiver<B>>
 where
-    E: Rng + Storage + Spawner + Metrics + Clock,
+    E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
     A: Application<E, Block = B, Context = Context<B::Commitment, S::PublicKey>>,
     B: Block,
