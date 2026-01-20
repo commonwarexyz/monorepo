@@ -80,7 +80,7 @@ fn msm_breakdown(nbits: usize, window: usize, ncpus: usize) -> (usize, usize, us
     let (nx, wnd) = if nbits > window * ncpus {
         let mut wnd = num_bits(ncpus / 4);
         if (window + wnd) > 18 {
-            wnd = window - wnd;
+            wnd = window.saturating_sub(wnd).max(1);
         } else {
             wnd = (nbits / window).div_ceil(ncpus);
             if (nbits / (window + 1)).div_ceil(ncpus) < wnd {
@@ -92,13 +92,17 @@ fn msm_breakdown(nbits: usize, window: usize, ncpus: usize) -> (usize, usize, us
         (1, wnd)
     } else {
         let mut nx = 2usize;
-        let mut wnd = window - 2;
+        let mut wnd = window.saturating_sub(2).max(1);
         while (nbits / wnd + 1) * nx < ncpus {
             nx += 1;
-            wnd = window - num_bits(3 * nx / 2);
+            let new_wnd = window.saturating_sub(num_bits(3 * nx / 2));
+            if new_wnd == 0 {
+                break;
+            }
+            wnd = new_wnd;
         }
         nx -= 1;
-        wnd = window - num_bits(3 * nx / 2);
+        wnd = window.saturating_sub(num_bits(3 * nx / 2)).max(1);
         (nx, wnd)
     };
 
@@ -2259,6 +2263,22 @@ mod tests {
                 "G1 MSM mismatch for ncpus={}",
                 ncpus
             );
+        }
+    }
+
+    #[test]
+    fn test_msm_breakdown_high_parallelism() {
+        // Verify msm_breakdown doesn't panic with extreme parallelism values.
+        // This tests the fix for division-by-zero when ncpus is very high
+        // relative to point count.
+        for npoints in [32, 50, 100, 200] {
+            let window = pippenger_window_size(npoints);
+            for ncpus in [64, 128, 256, 512, 1024, 2048] {
+                let (nx, ny, final_wnd) = msm_breakdown(SCALAR_BITS, window, ncpus);
+                assert!(nx >= 1, "nx must be >= 1");
+                assert!(ny >= 1, "ny must be >= 1");
+                assert!(final_wnd >= 1, "final_wnd must be >= 1");
+            }
         }
     }
 
