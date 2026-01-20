@@ -198,7 +198,7 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Journal<E, V> {
         )
         .await?;
 
-        // Validate and align offsets journal to match data journal.
+        // Validate and align offsets journal to match data journal
         let (oldest_retained_pos, size) =
             Self::align_journals(&mut data, &mut offsets, items_per_section).await?;
 
@@ -689,9 +689,7 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Journal<E, V> {
         // We always prune data before offsets, so offsets should never be "ahead" by a section.
         match offsets.oldest_retained_pos() {
             Some(oldest_retained_pos) if oldest_retained_pos < data_oldest_pos => {
-                // Offsets behind on pruning (crash after pruning data, before pruning offsets).
-                // Since data_oldest_pos is section-aligned and oldest_retained_pos < data_oldest_pos,
-                // they must be in different sections. Prune offsets to catch up.
+                // Offsets behind on pruning -- prune to catch up
                 info!("crash repair: pruning offsets journal to {data_oldest_pos}");
                 offsets.prune(data_oldest_pos).await?;
             }
