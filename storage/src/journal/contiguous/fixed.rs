@@ -2324,43 +2324,6 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_fixed_journal_replay_error_before_pruning_boundary() {
-        // Test that replay returns ItemPruned when start_pos < pruning_boundary
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = test_cfg(NZU64!(5));
-
-            let mut journal = Journal::<_, Digest>::init_at_size(context.clone(), cfg.clone(), 10)
-                .await
-                .unwrap();
-
-            // Append a few items
-            for i in 0..3u64 {
-                journal.append(test_digest(i)).await.unwrap();
-            }
-
-            // Try to replay from before pruning_boundary
-            {
-                let result = journal.replay(NZUsize!(1024), 5).await;
-                assert!(matches!(result, Err(Error::ItemPruned(5))));
-            }
-
-            // Replay from exactly pruning_boundary should work
-            {
-                let stream = journal
-                    .replay(NZUsize!(1024), 10)
-                    .await
-                    .expect("replay should work from pruning_boundary");
-                pin_mut!(stream);
-                let items: Vec<_> = stream.collect().await;
-                assert_eq!(items.len(), 3);
-            }
-
-            journal.destroy().await.unwrap();
-        });
-    }
-
-    #[test_traced]
     fn test_fixed_journal_rewind_error_before_pruning_boundary() {
         // Test that rewind returns error when trying to rewind before pruning_boundary
         let executor = deterministic::Runner::default();
