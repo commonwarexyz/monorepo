@@ -175,12 +175,15 @@ fn fuzz(input: FuzzInput) {
             };
             let start_loc = Location::new(start_idx as u64).unwrap();
 
-            let Ok(original_proof) = mmr.range_proof(start_loc..start_loc + (end_idx - start_idx + 1) as u64) else {
+            let range_len = if indices.is_empty() {
+                0
+            } else {
+                end_idx - start_idx + 1
+            };
+            let Ok(original_proof) = mmr.range_proof(start_loc..start_loc + range_len as u64) else {
                 return;
             };
-            let range_elements: Vec<Digest> = (start_idx..=end_idx)
-                .filter_map(|i| digests.get(i).copied())
-                .collect();
+            let range_elements: Vec<Digest> = digests[start_idx..start_idx + range_len].to_vec();
             assert!(original_proof.verify_range_inclusion(
                 &mut hasher,
                 &range_elements,
@@ -247,10 +250,8 @@ fn fuzz(input: FuzzInput) {
             let Ok(original_proof) = tree.multi_proof(&positions) else {
                 return;
             };
-            let elements: Vec<(Digest, u32)> = positions
-                .iter()
-                .filter_map(|&p| digests.get(p as usize).map(|d| (*d, p)))
-                .collect();
+            let elements: Vec<(Digest, u32)> =
+                positions.iter().map(|&p| (digests[p as usize], p)).collect();
 
             let mut hasher = Sha256::default();
             assert!(original_proof
