@@ -1,5 +1,5 @@
 use super::Header;
-use crate::{Error, IoBufMut, IoBufs, IoBufsMut};
+use crate::{Error, IoBufs, IoBufsMut};
 use commonware_utils::hex;
 use std::{io::SeekFrom, sync::Arc};
 use tokio::{
