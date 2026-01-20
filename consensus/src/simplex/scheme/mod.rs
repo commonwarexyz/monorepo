@@ -42,12 +42,12 @@ use crate::simplex::types::Subject;
 use bytes::Bytes;
 use commonware_codec::Encode;
 use commonware_cryptography::{certificate, Digest};
-use commonware_utils::union;
+use commonware_utils::{ready_mod, union};
 
 pub mod bls12381_multisig;
 pub mod bls12381_threshold;
 pub mod ed25519;
-pub mod secp256r1;
+ready_mod!(1, pub mod secp256r1);
 
 #[cfg(not(target_arch = "wasm32"))]
 pub mod reporter;

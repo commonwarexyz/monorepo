@@ -1,5 +1,6 @@
 //! Utility functions for interacting with any runtime.
 
+use commonware_utils::ready_mod;
 use futures::task::ArcWake;
 use std::{
     any::Any,
@@ -10,7 +11,7 @@ use std::{
     task::{Context, Poll},
 };
 
-pub mod buffer;
+ready_mod!(2, pub mod buffer);
 pub mod signal;
 
 mod handle;

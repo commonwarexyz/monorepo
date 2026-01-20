@@ -11,25 +11,31 @@
 )]
 #![cfg_attr(not(feature = "std"), no_std)]
 
+#[commonware_macros::ready(1)]
 extern crate alloc;
-pub mod mmr;
+
+use commonware_macros::ready;
+use commonware_utils::ready_mod;
+
+ready_mod!(1, pub mod mmr);
 
 cfg_if::cfg_if! {
     if #[cfg(feature = "std")] {
-        pub mod qmdb;
-        pub mod archive;
-        mod bitmap;
-        pub use bitmap::{BitMap as AuthenticatedBitMap, CleanBitMap as CleanAuthenticatedBitMap, DirtyBitMap as DirtyAuthenticatedBitMap};
-        pub mod bmt;
-        pub mod cache;
-        pub mod freezer;
-        pub mod index;
-        pub mod journal;
-        pub mod kv;
-        pub mod metadata;
-        pub mod ordinal;
-        pub mod rmap;
-        pub mod translator;
+        ready_mod!(1, pub mod qmdb);
+        ready_mod!(2, pub mod archive);
+        ready_mod!(1, mod bitmap);
+        #[ready(1)]
+        pub use crate::bitmap::{BitMap as AuthenticatedBitMap, CleanBitMap as CleanAuthenticatedBitMap, DirtyBitMap as DirtyAuthenticatedBitMap};
+        ready_mod!(1, pub mod bmt);
+        ready_mod!(2, pub mod cache);
+        ready_mod!(2, pub mod freezer);
+        ready_mod!(2, pub mod index);
+        ready_mod!(2, pub mod journal);
+        ready_mod!(2, pub mod kv);
+        ready_mod!(2, pub mod metadata);
+        ready_mod!(2, pub mod ordinal);
+        ready_mod!(2, pub mod rmap);
+        ready_mod!(2, pub mod translator);
     }
 }
 

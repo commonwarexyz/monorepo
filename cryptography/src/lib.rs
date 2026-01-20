@@ -15,31 +15,38 @@
 extern crate alloc;
 
 use commonware_codec::{Encode, ReadExt};
+use commonware_macros::ready;
 use commonware_math::algebra::Random;
-use commonware_utils::Array;
+use commonware_utils::{ready_mod, Array};
 use rand::SeedableRng as _;
 use rand_chacha::ChaCha20Rng;
-
-pub mod bls12381;
-pub mod certificate;
-pub mod ed25519;
-pub mod sha256;
 use rand_core::CryptoRngCore;
-pub use sha256::{CoreSha256, Sha256};
-pub mod blake3;
-pub use blake3::{Blake3, CoreBlake3};
-pub mod crc32;
-pub use crc32::Crc32;
-pub mod bloomfilter;
-pub use bloomfilter::BloomFilter;
+
+ready_mod!(2, pub mod bls12381);
+ready_mod!(2, pub mod certificate);
+ready_mod!(2, pub mod ed25519);
+ready_mod!(2, pub mod sha256);
+#[ready(2)]
+pub use crate::sha256::{CoreSha256, Sha256};
+ready_mod!(2, pub mod blake3);
+#[ready(2)]
+pub use crate::blake3::{Blake3, CoreBlake3};
+ready_mod!(2, pub mod crc32);
+#[ready(2)]
+pub use crate::crc32::Crc32;
+ready_mod!(1, pub mod bloomfilter);
+#[ready(1)]
+pub use crate::bloomfilter::BloomFilter;
 #[cfg(feature = "std")]
-pub mod handshake;
-pub mod lthash;
-pub use lthash::LtHash;
-pub mod secp256r1;
-pub mod secret;
-pub use secret::Secret;
-pub mod transcript;
+ready_mod!(2, pub mod handshake);
+ready_mod!(1, pub mod lthash);
+#[ready(1)]
+pub use crate::lthash::LtHash;
+ready_mod!(1, pub mod secp256r1);
+ready_mod!(2, pub mod secret);
+#[ready(2)]
+pub use crate::secret::Secret;
+ready_mod!(2, pub mod transcript);
 
 /// Produces [Signature]s over messages that can be verified with a corresponding [PublicKey].
 pub trait Signer: Random + Send + Sync + Clone + 'static {

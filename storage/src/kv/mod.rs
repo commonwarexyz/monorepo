@@ -1,6 +1,10 @@
 //! Traits for interacting with a key/value store.
 
-mod batch;
+use commonware_macros::ready;
+use commonware_utils::ready_mod;
+
+ready_mod!(1, mod batch);
+#[ready(1)]
 pub use batch::{Batch, Batchable};
 use std::future::Future;
 

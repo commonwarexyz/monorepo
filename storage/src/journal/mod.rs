@@ -5,9 +5,10 @@
 //! to serve as a backing store for some in-memory data structure, or as a building block for a more
 //! complex construction that prescribes some meaning to items in the log.
 
+use commonware_utils::ready_mod;
 use thiserror::Error;
 
-pub mod authenticated;
+ready_mod!(1, pub mod authenticated);
 pub mod contiguous;
 pub mod segmented;
 

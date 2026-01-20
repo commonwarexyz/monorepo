@@ -64,6 +64,7 @@ cfg_if::cfg_if! {
         use std::future::Future;
         use commonware_runtime::{Spawner, Metrics, Clock};
         use rand::Rng;
+        #[commonware_macros::ready(2)]
         use commonware_cryptography::certificate::Scheme;
 
         ready_mod!(1, pub mod application);

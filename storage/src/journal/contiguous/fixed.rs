@@ -60,9 +60,10 @@ use crate::{
         segmented::fixed::{Config as SegmentedConfig, Journal as SegmentedJournal},
         Error,
     },
-    mmr::Location,
     Persistable,
 };
+#[commonware_macros::ready(1)]
+use crate::mmr::Location;
 use commonware_codec::CodecFixedShared;
 use commonware_runtime::{buffer::PoolRef, Metrics, Storage};
 use futures::{stream::Stream, StreamExt};
@@ -218,6 +219,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     /// 2. **Data within range**: Prunes to `range.start` and reuses existing data
     /// 3. **Data exceeds range**: Returns error
     /// 4. **Stale data**: Destroys and recreates at `range.start`
+    #[commonware_macros::ready(1)]
     pub(crate) async fn init_sync(
         context: E,
         cfg: Config,

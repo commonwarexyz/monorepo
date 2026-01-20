@@ -9,9 +9,10 @@ use crate::{
         segmented::variable,
         Error,
     },
-    mmr::Location,
     Persistable,
 };
+#[commonware_macros::ready(1)]
+use crate::mmr::Location;
 use commonware_codec::{Codec, CodecShared};
 use commonware_runtime::{buffer::PoolRef, Metrics, Storage};
 use commonware_utils::NZUsize;
@@ -289,6 +290,7 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
     ///
     /// # Errors
     /// Returns [crate::qmdb::Error::UnexpectedData] if existing data extends beyond `range.end`.
+    #[commonware_macros::ready(1)]
     pub(crate) async fn init_sync(
         context: E,
         cfg: Config<V::Cfg>,

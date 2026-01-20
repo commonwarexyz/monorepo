@@ -99,11 +99,11 @@ build-readiness level *args='':
     RUSTFLAGS="--cfg min_readiness_{{ level }}" cargo build --lib --bins {{ args }}
 
 # Check all readiness levels build
-check-readiness:
+check-readiness *args='--workspace':
     #!/usr/bin/env bash
     for level in 1 2 3 4; do
         echo "Checking min_readiness_$level..."
-        RUSTFLAGS="--cfg min_readiness_$level" cargo build --workspace --lib --bins || exit 1
+        RUSTFLAGS="--cfg min_readiness_$level" cargo build --lib --bins {{ args }} || exit 1
     done
     echo "All readiness levels pass!"
 
