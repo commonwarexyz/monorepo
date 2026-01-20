@@ -1874,14 +1874,12 @@ mod tests {
             let mock_app = MockVerifyingApp {
                 genesis: genesis.clone(),
             };
-            let mut marshaled = Marshaled::init(
+            let mut marshaled = Marshaled::new(
                 context.clone(),
                 mock_app,
                 marshal.clone(),
                 FixedEpocher::new(BLOCKS_PER_EPOCH),
-                "test-marshaled".to_string(),
-            )
-            .await;
+            );
 
             // Test case 1: Non-contiguous height
             //
@@ -2285,14 +2283,8 @@ mod tests {
                 inner: FixedEpocher::new(BLOCKS_PER_EPOCH),
                 max_epoch: 0,
             };
-            let mut marshaled = Marshaled::init(
-                context.clone(),
-                mock_app,
-                marshal.clone(),
-                limited_epocher,
-                "test-marshaled".to_string(),
-            )
-            .await;
+            let mut marshaled =
+                Marshaled::new(context.clone(), mock_app, marshal.clone(), limited_epocher);
 
             // Create a parent block at height 19 (last block in epoch 0, which is supported)
             let parent = make_block(genesis.commitment(), Height::new(19), 1000);
@@ -2330,19 +2322,17 @@ mod tests {
         })
     }
 
-    /// Regression test for cleanup bug.
+    /// Regression test for verification task cleanup.
     ///
-    /// The bug: when certifying a block at view V+K, the cleanup logic would
-    /// remove verification contexts for ALL digests that don't have any entry
-    /// with round > V+K. This incorrectly deletes contexts for other blocks
-    /// at lower views that haven't been certified yet.
+    /// Verifies that certifying blocks out of order works correctly. When multiple
+    /// blocks are verified at different views, certifying a higher-view block should
+    /// not interfere with certifying a lower-view block that was verified earlier.
     ///
     /// Scenario:
-    /// 1. Verify block A at view V (stores context)
-    /// 2. Verify block B at view V+K (stores context)
-    /// 3. Certify block B at view V+K (cleanup runs)
-    /// 4. Certify block A at view V - should succeed, but previously would fail
-    ///    because cleanup deleted A's context (V < V+K)
+    /// 1. Verify block A at view V
+    /// 2. Verify block B at view V+K
+    /// 3. Certify block B at view V+K
+    /// 4. Certify block A at view V - should succeed
     #[test_traced("INFO")]
     fn test_certify_lower_view_after_higher_view() {
         #[derive(Clone)]
@@ -2385,7 +2375,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             let me = participants[0].clone();
             let (_base_app, marshal, _processed_height) = setup_validator(
@@ -2401,14 +2391,12 @@ mod tests {
             let mock_app = MockVerifyingApp {
                 genesis: genesis.clone(),
             };
-            let mut marshaled = Marshaled::init(
+            let mut marshaled = Marshaled::new(
                 context.clone(),
                 mock_app,
                 marshal.clone(),
                 FixedEpocher::new(BLOCKS_PER_EPOCH),
-                "test-marshaled".to_string(),
-            )
-            .await;
+            );
 
             // Create parent block at height 1
             let parent = make_block(genesis.commitment(), Height::new(1), 100);
@@ -2423,12 +2411,10 @@ mod tests {
                 leader: me.clone(),
                 parent: (View::new(1), parent_commitment),
             };
-            let block_a = B::new::<Sha256>(parent_commitment, Height::new(2), context_a.clone(), 200);
+            let block_a =
+                B::new::<Sha256>(parent_commitment, Height::new(2), context_a.clone(), 200);
             let commitment_a = block_a.commitment();
-            marshal
-                .clone()
-                .proposed(round_a, block_a)
-                .await;
+            marshal.clone().proposed(round_a, block_a).await;
 
             // Block B at view 10 (height 2, different block same height - could happen with
             // different proposers or re-proposals)
@@ -2438,12 +2424,10 @@ mod tests {
                 leader: me.clone(),
                 parent: (View::new(1), parent_commitment),
             };
-            let block_b = B::new::<Sha256>(parent_commitment, Height::new(2), context_b.clone(), 300);
+            let block_b =
+                B::new::<Sha256>(parent_commitment, Height::new(2), context_b.clone(), 300);
             let commitment_b = block_b.commitment();
-            marshal
-                .clone()
-                .proposed(round_b, block_b)
-                .await;
+            marshal.clone().proposed(round_b, block_b).await;
 
             context.sleep(Duration::from_millis(10)).await;
 
@@ -2454,16 +2438,13 @@ mod tests {
             let _ = marshaled.verify(context_b, commitment_b).await.await;
 
             // Step 3: Certify block B at view 10 FIRST
-            // Previously, this cleanup would delete context for block A because view 5 < view 10
             let certify_b = marshaled.certify(round_b, commitment_b).await;
             assert!(
                 certify_b.await.unwrap(),
                 "Block B certification should succeed"
             );
 
-            // Step 4: Certify block A at view 5
-            // Previously, this would return a never-resolving receiver (context deleted)
-            // After the fix, this should succeed because cleanup is deferred to finalization
+            // Step 4: Certify block A at view 5 - should succeed
             let certify_a = marshaled.certify(round_a, commitment_a).await;
 
             // Use select with timeout to detect never-resolving receiver
@@ -2475,10 +2456,7 @@ mod tests {
                     );
                 },
                 _ = context.sleep(Duration::from_secs(5)) => {
-                    panic!(
-                        "Block A certification timed out - context was incorrectly deleted \
-                        (regression: cleanup bug where certifying view 10 deleted context for view 5)"
-                    );
+                    panic!("Block A certification timed out");
                 },
             }
         })

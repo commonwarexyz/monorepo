@@ -3488,10 +3488,10 @@ mod tests {
     #[test_traced]
     fn test_future_notarization_does_not_rescue_stuck_validator() {
         future_notarization_does_not_rescue_stuck_validator::<_, _>(
-            bls12381_threshold::fixture::<MinPk, _>,
+            bls12381_threshold_vrf::fixture::<MinPk, _>,
         );
         future_notarization_does_not_rescue_stuck_validator::<_, _>(
-            bls12381_threshold::fixture::<MinSig, _>,
+            bls12381_threshold_vrf::fixture::<MinSig, _>,
         );
         future_notarization_does_not_rescue_stuck_validator::<_, _>(
             bls12381_multisig::fixture::<MinPk, _>,

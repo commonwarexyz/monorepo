@@ -278,14 +278,12 @@ where
         )
         .await;
 
-        let application = Marshaled::init(
+        let application = Marshaled::new(
             context.with_label("application"),
             Application::new(dkg_mailbox.clone()),
             marshal_mailbox.clone(),
             FixedEpocher::new(BLOCKS_PER_EPOCH),
-            format!("{}_marshaled", config.partition_prefix),
-        )
-        .await;
+        );
 
         let (orchestrator, orchestrator_mailbox) = orchestrator::Actor::new(
             context.with_label("orchestrator"),
