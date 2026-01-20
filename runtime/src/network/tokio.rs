@@ -1,5 +1,4 @@
-use crate::Error;
-use bytes::{Buf, BufMut};
+use crate::{Error, IoBuf, IoBufMut, IoBufs};
 use std::{net::SocketAddr, time::Duration};
 use tokio::{
     io::{AsyncReadExt as _, AsyncWriteExt as _, BufReader},
@@ -18,9 +17,9 @@ pub struct Sink {
 }
 
 impl crate::Sink for Sink {
-    async fn send(&mut self, mut msg: impl Buf + Send) -> Result<(), Error> {
+    async fn send(&mut self, buf: impl Into<IoBufs> + Send) -> Result<(), Error> {
         // Time out if we take too long to write
-        timeout(self.write_timeout, self.sink.write_all_buf(&mut msg))
+        timeout(self.write_timeout, self.sink.write_all_buf(&mut buf.into()))
             .await
             .map_err(|_| Error::Timeout)?
             .map_err(|_| Error::SendFailed)?;
@@ -38,10 +37,11 @@ pub struct Stream {
 }
 
 impl crate::Stream for Stream {
-    async fn recv(&mut self, mut buf: impl BufMut + Send) -> Result<(), Error> {
+    async fn recv(&mut self, len: u64) -> Result<IoBufs, Error> {
+        let len = len as usize;
         let read_fut = async {
+            let mut buf = IoBufMut::with_capacity(len);
             let mut read = 0;
-            let len = buf.remaining_mut();
             while read < len {
                 let n = self
                     .stream
@@ -55,13 +55,23 @@ impl crate::Stream for Stream {
 
                 read += n;
             }
-            Ok(())
+            Ok(IoBufs::from(buf.freeze()))
         };
 
         // Time out if we take too long to read
         timeout(self.read_timeout, read_fut)
             .await
             .map_err(|_| Error::Timeout)?
+    }
+
+    fn peek(&self, max_len: u64) -> Option<IoBuf> {
+        let max_len = max_len as usize;
+        let buffered = self.stream.buffer();
+        if buffered.is_empty() {
+            return None;
+        }
+        let len = std::cmp::min(buffered.len(), max_len);
+        Some(IoBuf::copy_from_slice(&buffered[..len]))
     }
 }
 
@@ -301,23 +311,22 @@ mod tests {
 
             // Read a small message (much smaller than the 64KB buffer)
             let start = Instant::now();
-            let mut buf = vec![0u8; 10];
-            stream.recv(&mut buf[..]).await.unwrap();
+            let received = stream.recv(10).await.unwrap();
             let elapsed = start.elapsed();
 
-            (buf, elapsed)
+            (received, elapsed)
         });
 
         // Connect and send a small message
         let (mut sink, _stream) = network.dial(addr).await.unwrap();
         let msg = vec![1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10];
-        sink.send(msg.as_slice()).await.unwrap();
+        sink.send(msg.clone()).await.unwrap();
 
         // Wait for the reader to complete
         let (received, elapsed) = reader.await.unwrap();
 
         // Verify we got the right data
-        assert_eq!(received, &msg[..]);
+        assert_eq!(received.coalesce().as_ref(), msg.as_slice());
 
         // Verify it completed quickly (well under the read timeout)
         // Should complete in milliseconds, not seconds
@@ -343,8 +352,7 @@ mod tests {
 
             // Try to read 100 bytes, but only 5 will be sent
             let start = Instant::now();
-            let mut buf = [0u8; 100];
-            let result = stream.recv(&mut buf[..]).await;
+            let result = stream.recv(100).await;
             let elapsed = start.elapsed();
 
             (result, elapsed)
@@ -383,10 +391,8 @@ mod tests {
             let (_addr, _sink, mut stream) = listener.accept().await.unwrap();
 
             // Read messages without buffering
-            let mut buf1 = vec![0u8; 5];
-            let mut buf2 = vec![0u8; 5];
-            stream.recv(&mut buf1[..]).await.unwrap();
-            stream.recv(&mut buf2[..]).await.unwrap();
+            let buf1 = stream.recv(5).await.unwrap();
+            let buf2 = stream.recv(5).await.unwrap();
             (buf1, buf2)
         });
 
@@ -399,7 +405,7 @@ mod tests {
         let (buf1, buf2) = reader.await.unwrap();
 
         // Verify we got the right data
-        assert_eq!(buf1.as_slice(), &[1u8, 2, 3, 4, 5]);
-        assert_eq!(buf2.as_slice(), &[6u8, 7, 8, 9, 10]);
+        assert_eq!(buf1.coalesce().as_ref(), &[1u8, 2, 3, 4, 5]);
+        assert_eq!(buf2.coalesce().as_ref(), &[6u8, 7, 8, 9, 10]);
     }
 }

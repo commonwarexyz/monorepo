@@ -1,5 +1,4 @@
-use crate::{SinkOf, StreamOf};
-use bytes::{Buf, BufMut};
+use crate::{IoBuf, IoBufs, SinkOf, StreamOf};
 use prometheus_client::{metrics::counter::Counter, registry::Registry};
 use std::{net::SocketAddr, sync::Arc};
 
@@ -55,9 +54,10 @@ pub struct Sink<S: crate::Sink> {
 }
 
 impl<S: crate::Sink> crate::Sink for Sink<S> {
-    async fn send(&mut self, data: impl Buf + Send) -> Result<(), crate::Error> {
-        let len = data.remaining();
-        self.inner.send(data).await?;
+    async fn send(&mut self, data: impl Into<IoBufs> + Send) -> Result<(), crate::Error> {
+        let bufs = data.into();
+        let len = bufs.len();
+        self.inner.send(bufs).await?;
         self.metrics.outbound_bandwidth.inc_by(len as u64);
         Ok(())
     }
@@ -70,11 +70,14 @@ pub struct Stream<S: crate::Stream> {
 }
 
 impl<S: crate::Stream> crate::Stream for Stream<S> {
-    async fn recv(&mut self, buf: impl BufMut + Send) -> Result<(), crate::Error> {
-        let size = buf.remaining_mut();
-        self.inner.recv(buf).await?;
-        self.metrics.inbound_bandwidth.inc_by(size as u64);
-        Ok(())
+    async fn recv(&mut self, len: u64) -> Result<IoBufs, crate::Error> {
+        let bufs = self.inner.recv(len).await?;
+        self.metrics.inbound_bandwidth.inc_by(len);
+        Ok(bufs)
+    }
+
+    fn peek(&self, max_len: u64) -> Option<IoBuf> {
+        self.inner.peek(max_len)
     }
 }
 
@@ -171,7 +174,7 @@ mod tests {
             deterministic::Network as DeterministicNetwork, metered::Network as MeteredNetwork,
             tests,
         },
-        Listener as _, Network as _, Sink as _, Stream as _,
+        IoBuf, Listener as _, Network as _, Sink as _, Stream as _,
     };
     use commonware_macros::test_group;
     use prometheus_client::registry::Registry;
@@ -217,9 +220,10 @@ mod tests {
         // Create a server task that accepts one connection and echoes data
         let server = tokio::spawn(async move {
             let (_, mut sink, mut stream) = listener.accept().await.unwrap();
-            let mut buf = vec![0; MSG_SIZE as usize];
-            stream.recv(&mut buf[..]).await.unwrap();
-            sink.send(&buf[..]).await.unwrap();
+            let received = stream.recv(MSG_SIZE).await.unwrap();
+            sink.send(IoBuf::copy_from_slice(received.coalesce().as_ref()))
+                .await
+                .unwrap();
         });
 
         // Send and receive data as client
@@ -227,12 +231,12 @@ mod tests {
 
         // Send fixed-size data and receive response
         let msg = vec![42u8; MSG_SIZE as usize];
-        client_sink.send(msg.as_slice()).await.unwrap();
+        client_sink.send(msg.clone()).await.unwrap();
 
-        let mut response = vec![0u8; MSG_SIZE as usize];
-        client_stream.recv(&mut response[..]).await.unwrap();
-        assert_eq!(response.len(), MSG_SIZE as usize);
-        assert_eq!(&response[..], &msg[..]);
+        let response = client_stream.recv(MSG_SIZE).await.unwrap();
+        let response = response.coalesce();
+        assert_eq!(response.as_ref().len(), MSG_SIZE as usize);
+        assert_eq!(response.as_ref(), msg);
 
         // Wait for server to complete
         server.await.unwrap();

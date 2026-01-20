@@ -1,5 +1,4 @@
-use crate::{deterministic::Auditor, Error};
-use commonware_utils::StableBuf;
+use crate::{deterministic::Auditor, Error, IoBufs, IoBufsMut};
 use sha2::digest::Update;
 use std::sync::Arc;
 
@@ -79,26 +78,31 @@ pub struct Blob<B: crate::Blob> {
 }
 
 impl<B: crate::Blob> crate::Blob for Blob<B> {
-    async fn read_at(&self, buf: impl Into<StableBuf>, offset: u64) -> Result<StableBuf, Error> {
+    async fn read_at(
+        &self,
+        offset: u64,
+        buf: impl Into<IoBufsMut> + Send,
+    ) -> Result<IoBufsMut, Error> {
         let buf = buf.into();
+        let len = buf.len() as u64;
         self.auditor.event(b"read_at", |hasher| {
             hasher.update(self.partition.as_bytes());
             hasher.update(&self.name);
-            hasher.update(buf.as_ref());
             hasher.update(&offset.to_be_bytes());
+            hasher.update(&len.to_be_bytes());
         });
-        self.inner.read_at(buf, offset).await
+        self.inner.read_at(offset, buf).await
     }
 
-    async fn write_at(&self, buf: impl Into<StableBuf>, offset: u64) -> Result<(), Error> {
-        let buf = buf.into();
+    async fn write_at(&self, offset: u64, buf: impl Into<IoBufs> + Send) -> Result<(), Error> {
+        let buf = buf.into().coalesce();
         self.auditor.event(b"write_at", |hasher| {
             hasher.update(self.partition.as_bytes());
             hasher.update(&self.name);
-            hasher.update(buf.as_ref());
             hasher.update(&offset.to_be_bytes());
+            hasher.update(buf.as_ref());
         });
-        self.inner.write_at(buf, offset).await
+        self.inner.write_at(offset, buf).await
     }
 
     async fn resize(&self, len: u64) -> Result<(), Error> {
@@ -126,7 +130,7 @@ mod tests {
             audited::Storage as AuditedStorage, memory::Storage as MemStorage,
             tests::run_storage_tests,
         },
-        Blob as _, Storage as _,
+        Blob as _, IoBufMut, Storage as _,
     };
     use std::sync::Arc;
 
@@ -158,8 +162,8 @@ mod tests {
         let (blob2, _) = storage2.open("partition", b"test_blob").await.unwrap();
 
         // Write data to the blobs
-        blob1.write_at(b"hello world".to_vec(), 0).await.unwrap();
-        blob2.write_at(b"hello world".to_vec(), 0).await.unwrap();
+        blob1.write_at(0, b"hello world").await.unwrap();
+        blob2.write_at(0, b"hello world").await.unwrap();
         assert_eq!(
             auditor1.state(),
             auditor2.state(),
@@ -167,15 +171,15 @@ mod tests {
         );
 
         // Read data from the blobs
-        let read = blob1.read_at(vec![0; 11], 0).await.unwrap();
+        let read = blob1.read_at(0, IoBufMut::zeroed(11)).await.unwrap();
         assert_eq!(
-            read.as_ref(),
+            read.coalesce().as_ref(),
             b"hello world",
             "Blob1 content does not match"
         );
-        let read = blob2.read_at(vec![0; 11], 0).await.unwrap();
+        let read = blob2.read_at(0, IoBufMut::zeroed(11)).await.unwrap();
         assert_eq!(
-            read.as_ref(),
+            read.coalesce().as_ref(),
             b"hello world",
             "Blob2 content does not match"
         );

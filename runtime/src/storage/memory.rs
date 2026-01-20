@@ -1,6 +1,7 @@
 use super::Header;
+use crate::{IoBufs, IoBufsMut};
 use commonware_codec::Encode;
-use commonware_utils::{hex, StableBuf};
+use commonware_utils::hex;
 use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
@@ -148,10 +149,11 @@ impl Blob {
 impl crate::Blob for Blob {
     async fn read_at(
         &self,
-        buf: impl Into<StableBuf> + Send,
         offset: u64,
-    ) -> Result<StableBuf, crate::Error> {
+        buf: impl Into<IoBufsMut> + Send,
+    ) -> Result<IoBufsMut, crate::Error> {
         let mut buf = buf.into();
+        let len = buf.len();
         let offset = offset
             .checked_add(Header::SIZE_U64)
             .ok_or(crate::Error::OffsetOverflow)?;
@@ -160,19 +162,20 @@ impl crate::Blob for Blob {
             .map_err(|_| crate::Error::OffsetOverflow)?;
         let content = self.content.read().unwrap();
         let content_len = content.len();
-        if offset + buf.len() > content_len {
+        if offset + len > content_len {
             return Err(crate::Error::BlobInsufficientLength);
         }
-        buf.put_slice(&content[offset..offset + buf.len()]);
+        buf.copy_from_slice(&content[offset..offset + len]);
         Ok(buf)
     }
 
     async fn write_at(
         &self,
-        buf: impl Into<StableBuf> + Send,
         offset: u64,
+        buf: impl Into<IoBufs> + Send,
     ) -> Result<(), crate::Error> {
-        let buf = buf.into();
+        let buf = buf.into().coalesce();
+        let buf_len = buf.len();
         let offset = offset
             .checked_add(Header::SIZE_U64)
             .ok_or(crate::Error::OffsetOverflow)?;
@@ -180,11 +183,11 @@ impl crate::Blob for Blob {
             .try_into()
             .map_err(|_| crate::Error::OffsetOverflow)?;
         let mut content = self.content.write().unwrap();
-        let required = offset + buf.len();
+        let required = offset + buf_len;
         if required > content.len() {
             content.resize(required, 0);
         }
-        content[offset..offset + buf.len()].copy_from_slice(buf.as_ref());
+        content[offset..offset + buf_len].copy_from_slice(buf.as_ref());
         Ok(())
     }
 
@@ -221,7 +224,7 @@ impl crate::Blob for Blob {
 #[cfg(test)]
 mod tests {
     use super::{Header, *};
-    use crate::{storage::tests::run_storage_tests, Blob, Storage as _};
+    use crate::{storage::tests::run_storage_tests, Blob, IoBufMut, Storage as _};
 
     #[tokio::test]
     async fn test_memory_storage() {
@@ -251,7 +254,7 @@ mod tests {
 
         // Write at logical offset 0 stores at raw offset 8
         let data = b"hello world";
-        blob.write_at(data.to_vec(), 0).await.unwrap();
+        blob.write_at(0, data).await.unwrap();
         blob.sync().await.unwrap();
 
         // Verify raw storage layout
@@ -265,8 +268,8 @@ mod tests {
         }
 
         // Read at logical offset 0 returns data from raw offset 8
-        let read_buf = blob.read_at(vec![0u8; data.len()], 0).await.unwrap();
-        assert_eq!(read_buf.as_ref(), data);
+        let read_buf = blob.read_at(0, IoBufMut::zeroed(data.len())).await.unwrap();
+        assert_eq!(read_buf.coalesce().as_ref(), data);
 
         // Corrupted blob recovery (0 < raw_size < 8)
         {

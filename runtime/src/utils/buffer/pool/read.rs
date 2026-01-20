@@ -1,5 +1,5 @@
 use super::Checksum;
-use crate::{Blob, Error};
+use crate::{Blob, Error, IoBufMut};
 use bytes::Buf;
 use commonware_codec::FixedSize;
 use std::{collections::VecDeque, num::NonZeroU16};
@@ -109,11 +109,9 @@ impl<B: Blob> PageReader<B> {
         let bytes_to_read = pages_to_read * self.page_size;
 
         // Read physical data
-        let physical_buf: Vec<u8> = self
-            .blob
-            .read_at(vec![0u8; bytes_to_read], start_offset)
-            .await?
-            .into();
+        let buf = IoBufMut::zeroed(bytes_to_read);
+        let physical_buf_iobufs = self.blob.read_at(start_offset, buf).await?;
+        let physical_buf: Vec<u8> = physical_buf_iobufs.coalesce().as_ref().to_vec();
 
         // Validate CRCs and compute total logical bytes
         let mut total_logical = 0usize;

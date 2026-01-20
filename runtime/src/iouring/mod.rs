@@ -57,7 +57,7 @@
 //! 3. If `shutdown_timeout` is configured, abandons remaining operations after the timeout
 //! 4. Cleans up and exits
 
-use commonware_utils::StableBuf;
+use crate::{IoBuf, IoBufMut};
 use futures::{
     channel::{mpsc, oneshot},
     StreamExt as _,
@@ -75,16 +75,29 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 /// Reserved ID for a CQE that indicates an operation timed out.
 const TIMEOUT_WORK_ID: u64 = u64::MAX;
 
+/// Buffer for io_uring operations.
+///
+/// The variant must match the operation type:
+/// - `Read`: For operations where the kernel writes INTO the buffer (e.g., recv, read)
+/// - `Write`: For operations where the kernel reads FROM the buffer (e.g., send, write)
+#[derive(Debug)]
+pub enum OpBuffer {
+    /// Buffer for read operations - kernel writes into this.
+    Read(IoBufMut),
+    /// Buffer for write operations - kernel reads from this.
+    Write(IoBuf),
+}
+
 /// Active operations keyed by their work id.
 ///
-/// Each entry keeps the caller's oneshot sender, the `StableBuf` that must stay
+/// Each entry keeps the caller's oneshot sender, the buffer that must stay
 /// alive until the kernel finishes touching it, and when op_timeout is enabled,
 /// the boxed `Timespec` used when we link in an IOSQE_IO_LINK timeout.
 type Waiters = HashMap<
     u64,
     (
-        oneshot::Sender<(i32, Option<StableBuf>)>,
-        Option<StableBuf>,
+        oneshot::Sender<(i32, Option<OpBuffer>)>,
+        Option<OpBuffer>,
         Option<Box<Timespec>>,
     ),
 >;
@@ -206,13 +219,15 @@ pub struct Op {
     /// Its user data field will be overwritten. Users shouldn't rely on it.
     pub work: SqueueEntry,
     /// Sends the result of the operation and `buffer`.
-    pub sender: oneshot::Sender<(i32, Option<StableBuf>)>,
+    pub sender: oneshot::Sender<(i32, Option<OpBuffer>)>,
     /// The buffer used for the operation, if any.
-    /// E.g. For read, this is the buffer being read into.
-    /// If None, the operation doesn't use a buffer (e.g. a sync operation).
+    /// - For reads: `OpBuffer::Read(IoBufMut)` - kernel writes into this
+    /// - For writes: `OpBuffer::Write(IoBuf)` - kernel reads from this
+    /// - None for operations that don't use a buffer (e.g. sync, timeout)
+    ///
     /// We hold the buffer here so it's guaranteed to live until the operation
-    /// completes, preventing write-after-free issues.
-    pub buffer: Option<StableBuf>,
+    /// completes, preventing use-after-free issues.
+    pub buffer: Option<OpBuffer>,
 }
 
 // Returns false iff we received a shutdown timeout
@@ -441,7 +456,7 @@ pub const fn should_retry(return_value: i32) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use crate::iouring::{Config, Op};
+    use crate::iouring::{Config, Op, OpBuffer};
     use futures::{
         channel::{
             mpsc::channel,
@@ -471,15 +486,16 @@ mod tests {
 
         // Submit a read
         let msg = b"hello".to_vec();
-        let mut buf = vec![0; msg.len()];
+        let msg_len = msg.len();
+        let mut buf = crate::IoBufMut::with_capacity(msg_len);
         let recv =
-            opcode::Recv::new(Fd(left_pipe.as_raw_fd()), buf.as_mut_ptr(), buf.len() as _).build();
+            opcode::Recv::new(Fd(left_pipe.as_raw_fd()), buf.as_mut_ptr(), msg_len as _).build();
         let (recv_tx, recv_rx) = oneshot::channel();
         submitter
             .send(crate::iouring::Op {
                 work: recv,
                 sender: recv_tx,
-                buffer: Some(buf.into()),
+                buffer: Some(OpBuffer::Read(buf)),
             })
             .await
             .expect("failed to send work");
@@ -490,14 +506,19 @@ mod tests {
         }
 
         // Submit a write that satisfies the read.
-        let write =
-            opcode::Write::new(Fd(right_pipe.as_raw_fd()), msg.as_ptr(), msg.len() as _).build();
+        let msg_buf = crate::IoBuf::from(msg.clone());
+        let write = opcode::Write::new(
+            Fd(right_pipe.as_raw_fd()),
+            msg_buf.as_ptr(),
+            msg_buf.len() as _,
+        )
+        .build();
         let (write_tx, write_rx) = oneshot::channel();
         submitter
             .send(crate::iouring::Op {
                 work: write,
                 sender: write_tx,
-                buffer: Some(msg.into()),
+                buffer: Some(OpBuffer::Write(msg_buf)),
             })
             .await
             .expect("failed to send work");
@@ -558,15 +579,16 @@ mod tests {
 
         // Submit a work item that will time out (because we don't write to the pipe)
         let (pipe_left, _pipe_right) = UnixStream::pair().unwrap();
-        let mut buf = vec![0; 8];
+        let buf_len = 8;
+        let mut buf = crate::IoBufMut::with_capacity(buf_len);
         let work =
-            opcode::Recv::new(Fd(pipe_left.as_raw_fd()), buf.as_mut_ptr(), buf.len() as _).build();
+            opcode::Recv::new(Fd(pipe_left.as_raw_fd()), buf.as_mut_ptr(), buf_len as _).build();
         let (tx, rx) = oneshot::channel();
         submitter
             .send(crate::iouring::Op {
                 work,
                 sender: tx,
-                buffer: Some(buf.into()),
+                buffer: Some(OpBuffer::Read(buf)),
             })
             .await
             .expect("failed to send work");
