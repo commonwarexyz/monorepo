@@ -180,7 +180,7 @@ mod tests {
             leader: default_leader(),
             parent: (parent_view, parent),
         };
-        B::new::<Sha256>(parent, height, context, timestamp)
+        B::new::<Sha256>(context, parent, height, timestamp)
     }
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
@@ -2412,7 +2412,7 @@ mod tests {
                 parent: (View::new(1), parent_commitment),
             };
             let block_a =
-                B::new::<Sha256>(parent_commitment, Height::new(2), context_a.clone(), 200);
+                B::new::<Sha256>(context_a.clone(), parent_commitment, Height::new(2), 200);
             let commitment_a = block_a.commitment();
             marshal.clone().proposed(round_a, block_a).await;
 
@@ -2425,7 +2425,7 @@ mod tests {
                 parent: (View::new(1), parent_commitment),
             };
             let block_b =
-                B::new::<Sha256>(parent_commitment, Height::new(2), context_b.clone(), 300);
+                B::new::<Sha256>(context_b.clone(), parent_commitment, Height::new(2), 300);
             let commitment_b = block_b.commitment();
             marshal.clone().proposed(round_b, block_b).await;
 
