@@ -185,12 +185,12 @@ where
             select! {
                 result = vote_receiver.recv().fuse() => {
                     if let Ok((_, msg)) = result {
-                        self.handle_vote(&mut vote_sender, msg.to_vec()).await;
+                        self.handle_vote(&mut vote_sender, msg.into()).await;
                     }
                 },
                 result = cert_receiver.recv().fuse() => {
                     if let Ok((_, msg)) = result {
-                        self.handle_certificate(&mut cert_sender, msg.to_vec()).await;
+                        self.handle_certificate(&mut cert_sender, msg.into()).await;
                     }
                 },
                 // We ignore resolver messages
@@ -216,7 +216,7 @@ where
             Vote::Notarize(notarize) => {
                 if self.fuzz_input.random_bool() {
                     let mutated = self.mutate_bytes(&msg);
-                    let _ = sender.send(Recipients::All, &mutated[..], true).await;
+                    let _ = sender.send(Recipients::All, mutated, true).await;
                 } else {
                     let proposal = self.mutate_proposal(&notarize.proposal);
                     if let Some(v) = Notarize::sign(&self.scheme, proposal) {
@@ -228,7 +228,7 @@ where
             Vote::Finalize(finalize) => {
                 if self.fuzz_input.random_bool() {
                     let mutated = self.mutate_bytes(&msg);
-                    let _ = sender.send(Recipients::All, &mutated[..], true).await;
+                    let _ = sender.send(Recipients::All, mutated, true).await;
                 } else {
                     let proposal = self.mutate_proposal(&finalize.proposal);
                     if let Some(v) = Finalize::sign(&self.scheme, proposal) {
@@ -240,7 +240,7 @@ where
             Vote::Nullify(_) => {
                 if self.fuzz_input.random_bool() {
                     let mutated = self.mutate_bytes(&msg);
-                    let _ = sender.send(Recipients::All, &mutated[..], true).await;
+                    let _ = sender.send(Recipients::All, mutated, true).await;
                 } else {
                     let v = self.random_view(self.last_vote);
                     let round = Round::new(Epoch::new(EPOCH), View::new(v));
@@ -280,7 +280,7 @@ where
         // Optionally send mutated certificate
         if self.fuzz_input.random_bool() {
             let mutated = self.mutate_bytes(&msg);
-            let _ = sender.send(Recipients::All, &mutated[..], true).await;
+            let _ = sender.send(Recipients::All, mutated, true).await;
         }
     }
 
@@ -327,7 +327,7 @@ where
 
         if self.participants.index(&self.validator).is_none() {
             let bytes = self.bytes();
-            let _ = sender.send(Recipients::All, &bytes[..], true).await;
+            let _ = sender.send(Recipients::All, bytes, true).await;
             return;
         }
 
@@ -356,7 +356,7 @@ where
             }
             Message::Random => {
                 let bytes = self.bytes();
-                let _ = sender.send(Recipients::All, &bytes[..], true).await;
+                let _ = sender.send(Recipients::All, bytes, true).await;
             }
         }
     }
