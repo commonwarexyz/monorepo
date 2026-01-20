@@ -120,7 +120,7 @@ where
 /// Configuration for syncing an [immutable::Immutable] to a target state.
 pub struct Config<E, K, V, T, D, C>
 where
-    E: Storage + Metrics,
+    E: Clock + Storage + Metrics,
     K: Array,
     V: VariableValue,
     T: Translator,

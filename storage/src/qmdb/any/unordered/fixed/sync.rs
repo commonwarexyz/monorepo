@@ -609,24 +609,19 @@ mod tests {
                         .expect("Failed to initialize journal at size 7");
 
                 assert_eq!(journal.size(), 7);
-                // Tail blob should have 2 items worth of space (7 % 5 = 2)
-                assert_eq!(journal.oldest_retained_pos(), Some(5)); // First item in tail blob
+                // No data exists yet
+                assert_eq!(journal.oldest_retained_pos(), None);
 
-                // Operations 0-4 should be pruned (blob 0 doesn't exist)
-                for i in 0..5 {
+                // Operations 0-6 should all be pruned (no data exists)
+                for i in 0..7 {
                     let result = journal.read(i).await;
                     assert!(matches!(result, Err(journal::Error::ItemPruned(_))));
-                }
-
-                // Operations 5-6 should be unreadable (dummy data in tail blob)
-                for i in 5..7 {
-                    let result = journal.read(i).await;
-                    assert_eq!(result.unwrap(), Sha256::fill(0)); // dummy data is all 0s
                 }
 
                 // Should be able to append from position 7
                 let append_pos = journal.append(test_digest(7)).await.unwrap();
                 assert_eq!(append_pos, 7);
+                assert_eq!(journal.oldest_retained_pos(), Some(7));
                 assert_eq!(journal.read(7).await.unwrap(), test_digest(7));
 
                 journal.destroy().await.unwrap();
@@ -640,23 +635,19 @@ mod tests {
                         .expect("Failed to initialize journal at size 23");
 
                 assert_eq!(journal.size(), 23);
-                assert_eq!(journal.oldest_retained_pos(), Some(20)); // First item in tail blob
+                // No data exists yet
+                assert_eq!(journal.oldest_retained_pos(), None);
 
-                // Operations 0-19 should be pruned (blobs 0-3 don't exist)
-                for i in 0..20 {
+                // Operations 0-22 should all be pruned (no data exists)
+                for i in 0..23 {
                     let result = journal.read(i).await;
                     assert!(matches!(result, Err(journal::Error::ItemPruned(_))));
-                }
-
-                // Operations 20-22 should be all 0s (dummy data in tail blob)
-                for i in 20..23 {
-                    let result = journal.read(i).await.unwrap();
-                    assert_eq!(result, Sha256::fill(0));
                 }
 
                 // Should be able to append from position 23
                 let append_pos = journal.append(test_digest(23)).await.unwrap();
                 assert_eq!(append_pos, 23);
+                assert_eq!(journal.oldest_retained_pos(), Some(23));
                 assert_eq!(journal.read(23).await.unwrap(), test_digest(23));
 
                 // Continue appending to test normal operation
