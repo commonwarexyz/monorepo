@@ -1199,17 +1199,11 @@ mod tests {
                     .expect("failed to append data");
             }
             assert_eq!(journal.size(), item_count);
-            // Sync data only to simulate a crash before metadata is updated.
-            let tail_section = journal.size / journal.items_per_blob;
-            journal
-                .inner
-                .sync(tail_section)
-                .await
-                .expect("Failed to sync data");
+            journal.sync().await.expect("Failed to sync journal");
             drop(journal);
 
-            // Truncate the tail blob by one byte. Metadata was not synced, so init should
-            // recover using blobs and accept the truncated tail.
+            // Truncate the tail blob by one byte, which should result in the last item being
+            // discarded during replay (detected via corruption).
             let (blob, size) = context
                 .open(&cfg.partition, &1u64.to_be_bytes())
                 .await
@@ -1314,13 +1308,7 @@ mod tests {
                     .expect("failed to append data");
             }
             assert_eq!(journal.size(), 5);
-            // Sync data only to simulate a crash before metadata is updated.
-            let tail_section = journal.size / journal.items_per_blob;
-            journal
-                .inner
-                .sync(tail_section)
-                .await
-                .expect("Failed to sync data");
+            journal.sync().await.expect("Failed to sync journal");
             drop(journal);
 
             // Manually truncate most recent blob to simulate a partial write.
@@ -1341,22 +1329,11 @@ mod tests {
             assert_eq!(journal.size(), 4);
             drop(journal);
 
-            // Delete the second blob and revert metadata (which was fixed by init())
-            // as though it was never written
+            // Delete the second blob and re-init
             context
                 .remove(&cfg.partition, Some(&1u64.to_be_bytes()))
                 .await
                 .expect("Failed to remove blob");
-            let meta_cfg = MetadataConfig {
-                partition: format!("{}{}", cfg.partition, META_SUFFIX),
-                codec_config: ((0..).into(), ()),
-            };
-            let mut metadata =
-                Metadata::<_, u64, Vec<u8>>::init(context.with_label("meta"), meta_cfg)
-                    .await
-                    .unwrap();
-            metadata.clear();
-            metadata.sync().await.unwrap();
 
             let journal = Journal::<_, Digest>::init(context.with_label("third"), cfg.clone())
                 .await
@@ -1383,13 +1360,7 @@ mod tests {
                 .await
                 .expect("failed to append data");
             assert_eq!(journal.size(), 1);
-            // Sync data only to simulate a crash before metadata is updated.
-            let tail_section = journal.size / journal.items_per_blob;
-            journal
-                .inner
-                .sync(tail_section)
-                .await
-                .expect("Failed to sync data");
+            journal.sync().await.expect("Failed to sync journal");
             drop(journal);
 
             // Manually truncate most recent blob to simulate a partial write.
