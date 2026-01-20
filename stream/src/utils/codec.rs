@@ -1,40 +1,41 @@
 use crate::Error;
-use bytes::{Buf, Bytes, BytesMut};
+use bytes::Buf;
 use commonware_codec::{
     varint::{Decoder, UInt},
     Encode,
 };
-use commonware_runtime::{Sink, Stream};
+use commonware_runtime::{IoBuf, IoBufs, Sink, Stream};
 
 /// Sends data to the sink with a varint length prefix.
 /// Returns an error if the message is too large or the stream is closed.
 pub async fn send_frame<S: Sink>(
     sink: &mut S,
-    buf: impl Buf + Send,
+    buf: impl Into<IoBufs> + Send,
     max_message_size: u32,
 ) -> Result<(), Error> {
+    let mut bufs = buf.into();
+
     // Validate frame size
-    let n = buf.remaining();
+    let n = bufs.remaining();
     if n > max_message_size as usize {
         return Err(Error::SendTooLarge(n));
     }
 
-    // Prefix `buf` with its varint-encoded length and send it
+    // Prepend varint-encoded length
     let len = UInt(n as u32);
-    let data = len.encode().chain(buf);
-    sink.send(data).await.map_err(Error::SendFailed)
+    bufs.prepend(IoBuf::from(len.encode()));
+    sink.send(bufs).await.map_err(Error::SendFailed)
 }
 
 /// Receives data from the stream with a varint length prefix.
 /// Returns an error if the message is too large, the varint is invalid, or the
 /// stream is closed.
-pub async fn recv_frame<T: Stream>(stream: &mut T, max_message_size: u32) -> Result<Bytes, Error> {
+pub async fn recv_frame<T: Stream>(stream: &mut T, max_message_size: u32) -> Result<IoBufs, Error> {
     // Read and decode the varint length prefix byte-by-byte
     let mut decoder = Decoder::<u32>::new();
-    let mut buf = [0u8; 1];
     let len = loop {
-        stream.recv(&mut buf[..]).await.map_err(Error::RecvFailed)?;
-        match decoder.feed(buf[0]) {
+        let buf = stream.recv(1).await.map_err(Error::RecvFailed)?;
+        match decoder.feed(buf.chunk()[0]) {
             Ok(Some(len)) => break len as usize,
             Ok(None) => continue,
             Err(_) => return Err(Error::InvalidVarint),
@@ -45,19 +46,14 @@ pub async fn recv_frame<T: Stream>(stream: &mut T, max_message_size: u32) -> Res
     }
 
     // Read the rest of the message
-    let mut read = BytesMut::zeroed(len);
-    stream
-        .recv(&mut read[..])
-        .await
-        .map_err(Error::RecvFailed)?;
-    Ok(read.freeze())
+    stream.recv(len as u64).await.map_err(Error::RecvFailed)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bytes::{BufMut, BytesMut};
-    use commonware_runtime::{deterministic, mocks, Runner};
+    use bytes::BufMut;
+    use commonware_runtime::{deterministic, mocks, IoBufMut, Runner};
     use rand::Rng;
 
     const MAX_MESSAGE_SIZE: u32 = 1024;
@@ -71,12 +67,12 @@ mod tests {
             let mut buf = [0u8; MAX_MESSAGE_SIZE as usize];
             context.fill(&mut buf);
 
-            let result = send_frame(&mut sink, buf.as_slice(), MAX_MESSAGE_SIZE).await;
+            let result = send_frame(&mut sink, buf.to_vec(), MAX_MESSAGE_SIZE).await;
             assert!(result.is_ok());
 
             let data = recv_frame(&mut stream, MAX_MESSAGE_SIZE).await.unwrap();
             assert_eq!(data.len(), buf.len());
-            assert_eq!(data, Bytes::from(buf.to_vec()));
+            assert_eq!(data.coalesce().as_ref(), buf.as_ref());
         });
     }
 
@@ -92,18 +88,18 @@ mod tests {
             context.fill(&mut buf2);
 
             // Send two messages of different sizes
-            let result = send_frame(&mut sink, buf1.as_slice(), MAX_MESSAGE_SIZE).await;
+            let result = send_frame(&mut sink, buf1.to_vec(), MAX_MESSAGE_SIZE).await;
             assert!(result.is_ok());
-            let result = send_frame(&mut sink, buf2.as_slice(), MAX_MESSAGE_SIZE).await;
+            let result = send_frame(&mut sink, buf2.to_vec(), MAX_MESSAGE_SIZE).await;
             assert!(result.is_ok());
 
             // Read both messages in order
             let data = recv_frame(&mut stream, MAX_MESSAGE_SIZE).await.unwrap();
             assert_eq!(data.len(), buf1.len());
-            assert_eq!(data, Bytes::from(buf1.to_vec()));
+            assert_eq!(data.coalesce().as_ref(), buf1.as_ref());
             let data = recv_frame(&mut stream, MAX_MESSAGE_SIZE).await.unwrap();
             assert_eq!(data.len(), buf2.len());
-            assert_eq!(data, Bytes::from(buf2.to_vec()));
+            assert_eq!(data.coalesce().as_ref(), buf2.as_ref());
         });
     }
 
@@ -116,17 +112,15 @@ mod tests {
             let mut buf = [0u8; MAX_MESSAGE_SIZE as usize];
             context.fill(&mut buf);
 
-            let result = send_frame(&mut sink, buf.as_slice(), MAX_MESSAGE_SIZE).await;
+            let result = send_frame(&mut sink, buf.to_vec(), MAX_MESSAGE_SIZE).await;
             assert!(result.is_ok());
 
             // Do the reading manually without using recv_frame
             // 1024 (MAX_MESSAGE_SIZE) encodes as varint: [0x80, 0x08] (2 bytes)
-            let mut read = [0u8; 2];
-            stream.recv(&mut read[..]).await.unwrap();
-            assert_eq!(read.as_ref(), &[0x80, 0x08]); // 1024 as varint
-            let mut read = vec![0u8; MAX_MESSAGE_SIZE as usize];
-            stream.recv(&mut read[..]).await.unwrap();
-            assert_eq!(read, buf);
+            let read = stream.recv(2).await.unwrap();
+            assert_eq!(read.coalesce().as_ref(), &[0x80, 0x08]); // 1024 as varint
+            let read = stream.recv(MAX_MESSAGE_SIZE as u64).await.unwrap();
+            assert_eq!(read.coalesce().as_ref(), buf.as_ref());
         });
     }
 
@@ -139,7 +133,7 @@ mod tests {
             let mut buf = [0u8; MAX_MESSAGE_SIZE as usize];
             context.fill(&mut buf);
 
-            let result = send_frame(&mut sink, buf.as_slice(), MAX_MESSAGE_SIZE - 1).await;
+            let result = send_frame(&mut sink, buf.to_vec(), MAX_MESSAGE_SIZE - 1).await;
             assert!(
                 matches!(&result, Err(Error::SendTooLarge(n)) if *n == MAX_MESSAGE_SIZE as usize)
             );
@@ -157,15 +151,15 @@ mod tests {
             context.fill(&mut msg);
 
             // 1024 (MAX_MESSAGE_SIZE) encodes as varint: [0x80, 0x08]
-            let mut buf = BytesMut::with_capacity(2 + msg.len());
+            let mut buf = IoBufMut::with_capacity(2 + msg.len());
             buf.put_u8(0x80);
             buf.put_u8(0x08);
-            buf.extend_from_slice(&msg);
-            sink.send(buf).await.unwrap();
+            buf.put_slice(&msg);
+            sink.send(buf.freeze()).await.unwrap();
 
             let data = recv_frame(&mut stream, MAX_MESSAGE_SIZE).await.unwrap();
             assert_eq!(data.len(), MAX_MESSAGE_SIZE as usize);
-            assert_eq!(data, msg.as_ref());
+            assert_eq!(data.coalesce().as_ref(), msg.as_ref());
         });
     }
 
@@ -177,10 +171,10 @@ mod tests {
         executor.start(|_| async move {
             // Manually insert a frame that gives MAX_MESSAGE_SIZE as the size
             // 1024 (MAX_MESSAGE_SIZE) encodes as varint: [0x80, 0x08]
-            let mut buf = BytesMut::with_capacity(2);
+            let mut buf = IoBufMut::with_capacity(2);
             buf.put_u8(0x80);
             buf.put_u8(0x08);
-            sink.send(buf).await.unwrap();
+            sink.send(buf.freeze()).await.unwrap();
 
             let result = recv_frame(&mut stream, MAX_MESSAGE_SIZE - 1).await;
             assert!(
@@ -196,10 +190,10 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             // Send incomplete varint (continuation bit set but no following byte)
-            let mut buf = BytesMut::with_capacity(1);
+            let mut buf = IoBufMut::with_capacity(1);
             buf.put_u8(0x80); // Continuation bit set, expects more bytes
 
-            sink.send(buf).await.unwrap();
+            sink.send(buf.freeze()).await.unwrap();
             drop(sink); // Close the sink to simulate a closed stream
 
             // Expect an error because varint is incomplete
@@ -215,7 +209,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             // Send a varint that overflows u32 (more than 5 bytes with continuation bits)
-            let mut buf = BytesMut::with_capacity(6);
+            let mut buf = IoBufMut::with_capacity(6);
             buf.put_u8(0xFF); // 7 bits + continue
             buf.put_u8(0xFF); // 7 bits + continue
             buf.put_u8(0xFF); // 7 bits + continue
@@ -223,7 +217,7 @@ mod tests {
             buf.put_u8(0xFF); // 5th byte with overflow bits set + continue
             buf.put_u8(0x01); // 6th byte
 
-            sink.send(buf).await.unwrap();
+            sink.send(buf.freeze()).await.unwrap();
 
             // Expect an error because varint overflows u32
             let result = recv_frame(&mut stream, MAX_MESSAGE_SIZE).await;

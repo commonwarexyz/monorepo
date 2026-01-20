@@ -92,10 +92,14 @@ fn fuzz(data: &[u8]) {
         };
 
         for chunk in data.chunks(1024) {
-            block_on(transport.dialer_sender.send(chunk)).unwrap();
+            block_on(transport.dialer_sender.send(chunk.to_vec())).unwrap();
 
             let received = block_on(transport.listener_receiver.recv()).unwrap();
-            assert_eq!(&received[..], chunk, "Data corruption detected");
+            assert_eq!(
+                received.coalesce().as_ref(),
+                chunk,
+                "Data corruption detected"
+            );
         }
     });
 }

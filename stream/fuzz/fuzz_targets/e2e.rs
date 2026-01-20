@@ -140,6 +140,8 @@ fn fuzz(input: FuzzInput) {
 
                 let mut m1 = recv_frame(&mut adversary_d_stream, MAX_MESSAGE_SIZE)
                     .await?
+                    .coalesce()
+                    .as_ref()
                     .to_vec();
                 for byte in m1.iter_mut() {
                     if corruption_i < setup_corruption.len() {
@@ -147,10 +149,12 @@ fn fuzz(input: FuzzInput) {
                         corruption_i += 1;
                     }
                 }
-                send_frame(&mut adversary_d_sink, m1.as_slice(), MAX_MESSAGE_SIZE).await?;
+                send_frame(&mut adversary_d_sink, m1, MAX_MESSAGE_SIZE).await?;
 
                 let mut m2 = recv_frame(&mut adversary_l_stream, MAX_MESSAGE_SIZE)
                     .await?
+                    .coalesce()
+                    .as_ref()
                     .to_vec();
                 for byte in m2.iter_mut() {
                     if corruption_i < setup_corruption.len() {
@@ -158,10 +162,12 @@ fn fuzz(input: FuzzInput) {
                         corruption_i += 1;
                     }
                 }
-                send_frame(&mut adversary_l_sink, m2.as_slice(), MAX_MESSAGE_SIZE).await?;
+                send_frame(&mut adversary_l_sink, m2, MAX_MESSAGE_SIZE).await?;
 
                 let mut m3 = recv_frame(&mut adversary_d_stream, MAX_MESSAGE_SIZE)
                     .await?
+                    .coalesce()
+                    .as_ref()
                     .to_vec();
                 for byte in m3.iter_mut() {
                     if corruption_i < setup_corruption.len() {
@@ -171,7 +177,7 @@ fn fuzz(input: FuzzInput) {
                 }
                 let sent_corrupted_data =
                     setup_corruption.iter().take(corruption_i).any(|x| *x != 0);
-                send_frame(&mut adversary_d_sink, m3.as_slice(), MAX_MESSAGE_SIZE).await?;
+                send_frame(&mut adversary_d_sink, m3, MAX_MESSAGE_SIZE).await?;
                 Ok((
                     sent_corrupted_data,
                     adversary_d_stream,
@@ -236,11 +242,15 @@ fn fuzz(input: FuzzInput) {
                             &mut d_receiver,
                         ),
                     };
-                    sender.send(data.as_slice()).await.unwrap();
+                    sender.send(data.clone()).await.unwrap();
                     let frame = recv_frame(a_in, MAX_MESSAGE_SIZE).await.unwrap();
                     send_frame(a_out, frame, MAX_MESSAGE_SIZE).await.unwrap();
                     let data2 = receiver.recv().await.unwrap();
-                    assert_eq!(data, data2, "expected data to match");
+                    assert_eq!(
+                        data.as_slice(),
+                        data2.coalesce().as_ref(),
+                        "expected data to match"
+                    );
                 }
                 Message::Unauthenticated(direction, data) => {
                     let (sender, a_in, a_out, receiver): (
@@ -262,11 +272,9 @@ fn fuzz(input: FuzzInput) {
                             &mut d_receiver,
                         ),
                     };
-                    sender.send([].as_slice()).await.unwrap();
+                    sender.send(Vec::new()).await.unwrap();
                     let _ = recv_frame(a_in, MAX_MESSAGE_SIZE).await.unwrap();
-                    send_frame(a_out, data.as_slice(), MAX_MESSAGE_SIZE)
-                        .await
-                        .unwrap();
+                    send_frame(a_out, data, MAX_MESSAGE_SIZE).await.unwrap();
                     let res = receiver.recv().await;
                     assert!(res.is_err());
                 }
