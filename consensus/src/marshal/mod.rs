@@ -122,9 +122,9 @@ mod tests {
     use commonware_cryptography::{
         bls12381::primitives::variant::MinPk,
         certificate::{mocks::Fixture, ConstantProvider, Scheme as _},
-        ed25519::PublicKey,
+        ed25519::{PrivateKey, PublicKey},
         sha256::{Digest as Sha256Digest, Sha256},
-        Committable, Digestible, Hasher as _,
+        Committable, Digestible, Hasher as _, Signer,
     };
     use commonware_macros::{select, test_traced};
     use commonware_p2p::{
@@ -160,7 +160,6 @@ mod tests {
 
     /// Default leader key for tests.
     fn default_leader() -> K {
-        use commonware_cryptography::{ed25519::PrivateKey, Signer as _};
         PrivateKey::from_seed(0).public_key()
     }
 
