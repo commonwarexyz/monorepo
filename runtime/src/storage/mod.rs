@@ -211,7 +211,7 @@ pub fn validate_partition_name(partition: &str) -> Result<(), crate::Error> {
     Ok(())
 }
 
-#[cfg(all(test, not(any(min_readiness_3, min_readiness_4))))]
+#[cfg(test)]
 pub(crate) mod tests {
     use super::{Header, HeaderError};
     use crate::{Blob, Storage};

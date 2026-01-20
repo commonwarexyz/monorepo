@@ -264,7 +264,7 @@ pub trait Hasher: Default + Clone + Send + Sync + 'static {
     }
 }
 
-#[cfg(all(test, not(any(min_readiness_3, min_readiness_4))))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use commonware_codec::{DecodeExt, FixedSize};
