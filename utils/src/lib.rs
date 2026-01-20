@@ -11,9 +11,9 @@ extern crate alloc;
 
 #[cfg(not(feature = "std"))]
 use alloc::{boxed::Box, string::String, vec::Vec};
-use bytes::{BufMut, BytesMut};
 #[cfg(not(any(min_readiness_3, min_readiness_4)))]
 use bytes::Buf;
+use bytes::{BufMut, BytesMut};
 #[cfg(not(any(min_readiness_3, min_readiness_4)))]
 use commonware_codec::{varint::UInt, EncodeSize, Error as CodecError, Read, ReadExt, Write};
 use commonware_macros::ready;

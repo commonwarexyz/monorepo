@@ -51,13 +51,20 @@ impl HeaderError {
 }
 
 ready_mod!(0, pub mod audited);
-#[cfg(all(feature = "iouring-storage", not(any(min_readiness_3, min_readiness_4))))]
+#[cfg(all(
+    feature = "iouring-storage",
+    not(any(min_readiness_3, min_readiness_4))
+))]
 pub mod iouring;
 #[cfg(not(any(min_readiness_3, min_readiness_4)))]
 pub mod memory;
 #[cfg(not(any(min_readiness_3, min_readiness_4)))]
 pub mod metered;
-#[cfg(all(not(target_arch = "wasm32"), not(feature = "iouring-storage"), not(any(min_readiness_3, min_readiness_4))))]
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    not(feature = "iouring-storage"),
+    not(any(min_readiness_3, min_readiness_4))
+))]
 pub mod tokio;
 
 /// Fixed-size header at the start of each [crate::Blob].
