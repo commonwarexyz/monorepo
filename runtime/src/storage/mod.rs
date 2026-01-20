@@ -51,21 +51,12 @@ impl HeaderError {
 }
 
 ready_mod!(0, pub mod audited);
-// Compound cfg: feature + readiness (can't use ready_mod!)
-#[cfg(all(
-    feature = "iouring-storage",
-    not(any(min_readiness_3, min_readiness_4))
-))]
-pub mod iouring;
+#[cfg(feature = "iouring-storage")]
+ready_mod!(2, pub mod iouring);
 ready_mod!(2, pub mod memory);
 ready_mod!(2, pub mod metered);
-// Compound cfg: arch + feature + readiness (can't use ready_mod!)
-#[cfg(all(
-    not(target_arch = "wasm32"),
-    not(feature = "iouring-storage"),
-    not(any(min_readiness_3, min_readiness_4))
-))]
-pub mod tokio;
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "iouring-storage")))]
+ready_mod!(2, pub mod tokio);
 
 /// Fixed-size header at the start of each [crate::Blob].
 ///
@@ -188,7 +179,8 @@ impl CodecRead for Header {
     }
 }
 
-#[cfg(all(feature = "arbitrary", not(any(min_readiness_3, min_readiness_4))))]
+#[cfg(feature = "arbitrary")]
+#[ready(2)]
 impl arbitrary::Arbitrary<'_> for Header {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let version: u16 = u.arbitrary()?;

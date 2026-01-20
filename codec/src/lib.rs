@@ -219,10 +219,11 @@ pub use error::Error;
 #[ready(2)]
 pub use extensions::*;
 
-#[cfg(all(feature = "arbitrary", not(min_readiness_3), not(min_readiness_4)))]
-pub mod conformance;
+#[cfg(feature = "arbitrary")]
+ready_mod!(2, pub mod conformance);
 
 // Re-export paste for use in conformance macros
-#[cfg(all(feature = "arbitrary", not(min_readiness_3), not(min_readiness_4)))]
+#[cfg(feature = "arbitrary")]
+#[ready(2)]
 #[doc(hidden)]
 pub use paste;
