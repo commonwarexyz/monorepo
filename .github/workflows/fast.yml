@@ -150,10 +150,12 @@ jobs:
       uses: ./.github/actions/setup
       with:
         additional-cache-key: readiness-${{ matrix.level }}
+    - name: Install just
+      uses: taiki-e/install-action@0c5db7f7f897c03b771660e91d065338615679f4 # v2.60.0
+      with:
+        tool: just@1.43.0
     - name: Build with min_readiness_${{ matrix.level }}
-      env:
-        RUSTFLAGS: "--cfg min_readiness_${{ matrix.level }}"
-      run: cargo build --workspace --lib --bins
+      run: just check-readiness ${{ matrix.level }}
 
   Tests-Gate:
     name: "Fast-Tests"

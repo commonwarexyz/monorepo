@@ -94,16 +94,21 @@ test-conformance *args='':
 regenerate-conformance *args='':
     RUSTFLAGS="--cfg generate_conformance_tests" just test --features arbitrary --profile conformance {{ args }}
 
-# Build with minimum readiness level (1-4)
-build-readiness level *args='':
-    RUSTFLAGS="--cfg min_readiness_{{ level }}" cargo build --lib --bins {{ args }}
+# Packages to exclude from readiness checks (examples, fuzz targets, deployer)
+readiness_excludes := "--exclude commonware-deployer --exclude commonware-bridge --exclude commonware-chat --exclude commonware-estimator --exclude commonware-flood --exclude commonware-log --exclude commonware-sync --exclude commonware-broadcast-fuzz --exclude commonware-codec-fuzz --exclude commonware-coding-fuzz --exclude commonware-collector-fuzz --exclude commonware-consensus-fuzz --exclude commonware-cryptography-fuzz --exclude commonware-p2p-fuzz --exclude commonware-runtime-fuzz --exclude commonware-storage-fuzz --exclude commonware-stream-fuzz --exclude commonware-utils-fuzz"
 
-# Check all readiness levels build
-check-readiness *args='--workspace':
+# Check readiness builds. Optionally specify level (1-4) and/or crate (-p <crate>).
+# Examples: just check-readiness, just check-readiness 3, just check-readiness 2 -p commonware-cryptography
+check-readiness level='' *args='':
     #!/usr/bin/env bash
-    for level in 1 2 3 4; do
-        echo "Checking min_readiness_$level..."
-        RUSTFLAGS="--cfg min_readiness_$level" cargo build --lib --bins {{ args }} || exit 1
-    done
-    echo "All readiness levels pass!"
+    if [ -z "{{ level }}" ]; then
+        for l in 1 2 3 4; do
+            echo "Checking min_readiness_$l..."
+            RUSTFLAGS="--cfg min_readiness_$l" cargo build --workspace --lib {{ readiness_excludes }} {{ args }} || exit 1
+        done
+        echo "All readiness levels pass!"
+    else
+        echo "Checking min_readiness_{{ level }}..."
+        RUSTFLAGS="--cfg min_readiness_{{ level }}" cargo build --workspace --lib {{ readiness_excludes }} {{ args }}
+    fi
 
