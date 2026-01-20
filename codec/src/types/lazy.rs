@@ -178,6 +178,11 @@ impl<T: Read + FixedSize> Read for Lazy<T> {
     type Cfg = T::Cfg;
 
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, crate::Error> {
+        // In this case, we can be a bit more helpful, and fail earlier, rather
+        // than deferring this error until later.
+        if buf.remaining() < T::SIZE {
+            return Err(crate::Error::EndOfBuffer);
+        }
         Ok(Self::deferred(&mut buf.take(T::SIZE), cfg.clone()))
     }
 }
