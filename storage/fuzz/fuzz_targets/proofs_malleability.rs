@@ -161,26 +161,17 @@ fn fuzz(input: FuzzInput) {
             }
             let root = mmr.root();
 
-            let indices: Vec<usize> = input
-                .positions
-                .iter()
-                .take(2)
-                .filter(|_| !digests.is_empty())
-                .map(|&p| (p as usize) % digests.len())
-                .collect();
-            let (start_idx, end_idx) = match indices.as_slice() {
-                [] => (0, 0),
-                [i] => (*i, *i),
-                [i1, i2] => ((*i1).min(*i2), (*i1).max(*i2)),
-                _ => unreachable!(),
+            let (start_idx, range_len) = if digests.is_empty() || input.positions.is_empty() {
+                (0, 0)
+            } else if input.positions.len() == 1 {
+                let i = (input.positions[0] as usize) % digests.len();
+                (i, 1)
+            } else {
+                let i1 = (input.positions[0] as usize) % digests.len();
+                let i2 = (input.positions[1] as usize) % digests.len();
+                (i1.min(i2), i1.abs_diff(i2) + 1)
             };
             let start_loc = Location::new(start_idx as u64).unwrap();
-
-            let range_len = if indices.is_empty() {
-                0
-            } else {
-                end_idx - start_idx + 1
-            };
             let Ok(original_proof) = mmr.range_proof(start_loc..start_loc + range_len as u64)
             else {
                 return;
