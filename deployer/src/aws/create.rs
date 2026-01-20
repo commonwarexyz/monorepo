@@ -6,8 +6,9 @@ use crate::aws::{
     s3::{self, *},
     services::*,
     utils::*,
-    Architecture, Config, Error, Host, Hosts, InstanceConfig, CREATED_FILE_NAME, LOGS_PORT,
-    MONITORING_NAME, MONITORING_REGION, PROFILES_PORT, TRACES_PORT,
+    Architecture, Config, DeploymentMetadata, Error, Host, Hosts, InstanceConfig,
+    CREATED_FILE_NAME, LOGS_PORT, METADATA_FILE_NAME, MONITORING_NAME, MONITORING_REGION,
+    PROFILES_PORT, TRACES_PORT,
 };
 use commonware_cryptography::{Hasher as _, Sha256};
 use futures::{
@@ -1229,6 +1230,19 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
         }
     }
     info!("updated monitoring security group");
+
+    // Persist deployment metadata
+    let metadata = DeploymentMetadata {
+        tag: tag.clone(),
+        created_at: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+        regions: regions.iter().cloned().collect(),
+        instance_names: config.instances.iter().map(|i| i.name.clone()).collect(),
+    };
+    let metadata_file = File::create(tag_directory.join(METADATA_FILE_NAME))?;
+    serde_yaml::to_writer(metadata_file, &metadata)?;
 
     // Mark deployment as complete
     File::create(tag_directory.join(CREATED_FILE_NAME))?;

@@ -113,7 +113,8 @@
 //! 8. Caches all static config files and uploads per-instance configs (hosts.yaml, promtail, pyroscope) to S3.
 //! 9. Configures monitoring and binary instances in parallel via SSH (BBR, service installation, service startup).
 //! 10. Updates the monitoring security group to allow telemetry traffic from binary instances.
-//! 11. Marks completion with `$HOME/.commonware_deployer/{tag}/created`.
+//! 11. Persists deployment metadata (tag, regions, instance names) to `$HOME/.commonware_deployer/{tag}/metadata.yaml`.
+//! 12. Marks completion with `$HOME/.commonware_deployer/{tag}/created`.
 //!
 //! ## `aws update`
 //!
@@ -136,6 +137,10 @@
 //!
 //! ## `aws destroy`
 //!
+//! Can be invoked with either `--config <path>` or `--tag <tag>`. When using `--tag`, the command
+//! reads regions from the persisted `metadata.yaml` file, allowing destruction without the original
+//! config file.
+//!
 //! 1. Terminates all instances across regions.
 //! 2. Deletes security groups, subnets, route tables, VPC peering connections, internet gateways, key pairs, and VPCs in dependency order.
 //! 3. Deletes deployment-specific data from S3 (cached tools remain for future deployments).
@@ -145,6 +150,12 @@
 //!
 //! 1. Deletes the shared S3 bucket and all its contents (cached tools and any remaining deployment data).
 //! 2. Use this to fully clean up when you no longer need the deployer cache.
+//!
+//! ## `aws list`
+//!
+//! Lists all active deployments (created but not destroyed). For each deployment, displays the tag,
+//! creation timestamp, regions, and number of instances. Reads from `metadata.yaml` if available,
+//! otherwise falls back to showing only the tag.
 //!
 //! ## `aws profile`
 //!
@@ -199,8 +210,12 @@
 //!
 //! # Persistence
 //!
-//! * A directory `$HOME/.commonware_deployer/{tag}` stores the SSH private key and status files (`created`, `destroyed`).
+//! * A directory `$HOME/.commonware_deployer/{tag}` stores:
+//!   * SSH private key (`id_rsa_{tag}`)
+//!   * Deployment metadata (`metadata.yaml`) containing tag, creation timestamp, regions, and instance names
+//!   * Status files (`created`, `destroyed`)
 //! * The deployment state is tracked via these files, ensuring operations respect prior create/destroy actions.
+//! * The `metadata.yaml` file enables `aws destroy --tag` and `aws list` to work without the original config file.
 //!
 //! ## S3 Caching
 //!
@@ -299,6 +314,15 @@ cfg_if::cfg_if! {
             }
         }
 
+        /// Metadata persisted during deployment creation
+        #[derive(Serialize, Deserialize)]
+        pub struct DeploymentMetadata {
+            pub tag: String,
+            pub created_at: u64,
+            pub regions: Vec<String>,
+            pub instance_names: Vec<String>,
+        }
+
         pub mod ec2;
         mod create;
         pub mod services;
@@ -313,6 +337,8 @@ cfg_if::cfg_if! {
         pub use clean::clean;
         mod profile;
         pub use profile::profile;
+        mod list;
+        pub use list::list;
         pub mod utils;
         pub mod s3;
 
@@ -327,6 +353,9 @@ cfg_if::cfg_if! {
 
         /// File name that indicates the deployment was destroyed
         const DESTROYED_FILE_NAME: &str = "destroyed";
+
+        /// File name for deployment metadata
+        const METADATA_FILE_NAME: &str = "metadata.yaml";
 
         /// Port on instance where system metrics are exposed
         const SYSTEM_PORT: u16 = 9100;
@@ -363,6 +392,9 @@ cfg_if::cfg_if! {
 
         /// Profile subcommand name
         pub const PROFILE_CMD: &str = "profile";
+
+        /// List subcommand name
+        pub const LIST_CMD: &str = "list";
 
         /// Directory where deployer files are stored
         fn deployer_directory(tag: &str) -> PathBuf {
@@ -474,6 +506,10 @@ cfg_if::cfg_if! {
             UnsupportedInstanceType(String),
             #[error("no subnets available")]
             NoSubnetsAvailable,
+            #[error("metadata not found for deployment: {0}")]
+            MetadataNotFound(String),
+            #[error("must specify either --config or --tag")]
+            MissingTagOrConfig,
         }
 
         impl From<aws_sdk_s3::error::SdkError<aws_sdk_s3::operation::get_object::GetObjectError>> for Error {
