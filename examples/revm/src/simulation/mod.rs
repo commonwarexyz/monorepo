@@ -137,6 +137,7 @@ fn raise_open_file_limit() {}
 /// Run the multi-node simulation and return the final outcome.
 pub fn simulate(cfg: SimConfig) -> anyhow::Result<SimOutcome> {
     raise_open_file_limit();
+    // Tokio runtime required for WrapDatabaseAsync in the QMDB adapter.
     let executor = tokio::Runner::default();
     executor.start(|context| async move { run_sim(context, cfg).await })
 }
@@ -353,6 +354,7 @@ mod tests {
 
     #[test]
     fn test_sim_smoke() {
+        // Tokio runtime required for WrapDatabaseAsync in the QMDB adapter.
         let outcome = simulate(SimConfig {
             nodes: 4,
             blocks: 3,

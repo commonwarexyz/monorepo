@@ -16,11 +16,11 @@ REVM-based example chain driven by threshold-simplex (`commonware_consensus::sim
 
 ## Components
 
-- `src/types.rs`: canonical block/tx types and digest mapping (`ConsensusDigest = sha256(BlockId)`).
+- `src/domain/`: canonical block/tx types, commitment mapping, and deterministic state-change encoding.
 - `src/application/`: proposal/verification logic (marshaled), shared state (mempool + DB snapshots), reporters, and query handle.
-- `src/execution.rs`: EVM execution (`EthEvmBuilder`) and the seed precompile.
-- `src/commitment.rs`: canonical `StateChanges` encoding.
-- `src/sim/`: tokio, single-process simulation harness (N nodes, simulated P2P).
+- `src/application/execution.rs`: EVM execution (`EthEvmBuilder`) and the seed precompile.
+- `src/qmdb/`: QMDB-backed persistence and REVM database adapter.
+- `src/simulation/`: tokio, single-process simulation harness (N nodes, simulated P2P).
 
 ## How It Works
 
@@ -43,7 +43,7 @@ This example is intentionally "digest-first":
 5. Finalize: marshal delivers finalized blocks to the node, the simulation records the digest, and stops after the configured
    number of finalizations per node.
 
-The main glue points are `src/sim/node.rs` (wiring) and `src/application/` (application logic).
+The main glue points are `src/application/node/start.rs` (wiring) and `src/application/` (application logic).
 
 ### Seed Lifecycle
 

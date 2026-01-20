@@ -88,10 +88,7 @@ where
 }
 
 /// Helper function for verify that owns all its inputs.
-async fn verify_inner<S>(
-    state: LedgerService,
-    mut ancestry: AncestorStream<S, Block>,
-) -> bool
+async fn verify_inner<S>(state: LedgerService, mut ancestry: AncestorStream<S, Block>) -> bool
 where
     S: CertScheme,
 {

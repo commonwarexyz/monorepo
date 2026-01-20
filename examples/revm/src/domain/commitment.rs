@@ -180,8 +180,7 @@ fn read_u256(buf: &mut impl Buf) -> Result<U256, CodecError> {
 mod tests {
     use super::*;
     use alloy_evm::revm::primitives::{Address, B256, U256};
-    use commonware_codec::Encode as _;
-    use commonware_codec::Decode as _;
+    use commonware_codec::{Decode as _, Encode as _};
     use std::collections::BTreeMap;
 
     fn cfg() -> StateChangesCfg {

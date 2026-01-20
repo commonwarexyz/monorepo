@@ -452,15 +452,7 @@ mod tests {
         bytecode.extend_from_slice(address.as_slice());
         bytecode.extend_from_slice(&[0x61]);
         bytecode.extend_from_slice(&STATICCALL_GAS.to_be_bytes());
-        bytecode.extend_from_slice(&[
-            0xFA,
-            0x50,
-            0x60,
-            SEED_OUTPUT_LEN,
-            0x60,
-            0x00,
-            0xF3,
-        ]);
+        bytecode.extend_from_slice(&[0xFA, 0x50, 0x60, SEED_OUTPUT_LEN, 0x60, 0x00, 0xF3]);
 
         Bytes::from(bytecode)
     }
