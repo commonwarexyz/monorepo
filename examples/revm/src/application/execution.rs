@@ -348,6 +348,7 @@ mod tests {
         let tx_env = tx_env_from_db(evm.db_mut(), &tx, chain_id).unwrap();
         let revm::context_interface::result::ResultAndState { result, state: _ } =
             evm.transact_raw(tx_env).unwrap();
+        let _ = evm.finish();
 
         // Assert
         match result {
