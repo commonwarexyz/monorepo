@@ -586,7 +586,6 @@ mod tests {
         },
         certificate::{Attestation, Scheme as _},
         ed25519::{self, PrivateKey as Ed25519PrivateKey},
-        impl_certificate_bls12381_multisig,
         sha256::Digest as Sha256Digest,
         Signer as _,
     };
