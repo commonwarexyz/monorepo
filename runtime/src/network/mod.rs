@@ -2,7 +2,7 @@ use commonware_macros::ready_mod;
 
 ready_mod!(0, pub(crate) mod audited);
 ready_mod!(0, pub(crate) mod deterministic);
-ready_mod!(0, pub(crate) mod metered);
+ready_mod!(2, pub(crate) mod metered);
 
 #[cfg(all(not(target_arch = "wasm32"), not(feature = "iouring-network")))]
 ready_mod!(2, pub(crate) mod tokio);
