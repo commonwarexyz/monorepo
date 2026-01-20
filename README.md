@@ -27,8 +27,11 @@ Each public API item in the Commonware Library is annotated with a readiness lev
 Higher readiness code can only depend on code with equal or higher readiness. This is enforced at compile time:
 
 ```bash
-# Build only code with readiness >= 2
-RUSTFLAGS="--cfg min_readiness_2" cargo build
+# Generate docs for only code with readiness >= 2
+RUSTFLAGS="--cfg min_readiness_2" RUSTDOCFLAGS="--cfg min_readiness_2" cargo doc
+
+# Check if your application only uses commonware APIs with readiness >= 2
+RUSTFLAGS="--cfg min_readiness_2" cargo build -p my-app
 ```
 
 * [broadcast](./broadcast/README.md): Disseminate data over a wide-area network.
