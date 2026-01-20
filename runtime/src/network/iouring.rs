@@ -24,7 +24,7 @@
 
 use crate::{
     iouring::{self, should_retry, OpBuffer},
-    IoBuf, IoBufMut, IoBufs,
+    IoBufMut, IoBufs,
 };
 use futures::{
     channel::{mpsc, oneshot},
@@ -448,18 +448,6 @@ impl crate::Stream for Stream {
         }
 
         Ok(IoBufs::from(owned_buf.freeze()))
-    }
-
-    fn peek(&self, max_len: u64) -> Option<IoBuf> {
-        let max_len = max_len as usize;
-        let buffered = self.buffer_len - self.buffer_pos;
-        if buffered == 0 {
-            return None;
-        }
-        let len = std::cmp::min(buffered, max_len);
-        Some(IoBuf::copy_from_slice(
-            &self.buffer.as_ref()[self.buffer_pos..self.buffer_pos + len],
-        ))
     }
 }
 

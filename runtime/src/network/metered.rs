@@ -1,4 +1,4 @@
-use crate::{IoBuf, IoBufs, SinkOf, StreamOf};
+use crate::{IoBufs, SinkOf, StreamOf};
 use prometheus_client::{metrics::counter::Counter, registry::Registry};
 use std::{net::SocketAddr, sync::Arc};
 
@@ -74,10 +74,6 @@ impl<S: crate::Stream> crate::Stream for Stream<S> {
         let bufs = self.inner.recv(len).await?;
         self.metrics.inbound_bandwidth.inc_by(len);
         Ok(bufs)
-    }
-
-    fn peek(&self, max_len: u64) -> Option<IoBuf> {
-        self.inner.peek(max_len)
     }
 }
 

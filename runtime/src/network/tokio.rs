@@ -1,4 +1,4 @@
-use crate::{Error, IoBuf, IoBufMut, IoBufs};
+use crate::{Error, IoBufMut, IoBufs};
 use std::{net::SocketAddr, time::Duration};
 use tokio::{
     io::{AsyncReadExt as _, AsyncWriteExt as _, BufReader},
@@ -62,16 +62,6 @@ impl crate::Stream for Stream {
         timeout(self.read_timeout, read_fut)
             .await
             .map_err(|_| Error::Timeout)?
-    }
-
-    fn peek(&self, max_len: u64) -> Option<IoBuf> {
-        let max_len = max_len as usize;
-        let buffered = self.stream.buffer();
-        if buffered.is_empty() {
-            return None;
-        }
-        let len = std::cmp::min(buffered.len(), max_len);
-        Some(IoBuf::copy_from_slice(&buffered[..len]))
     }
 }
 

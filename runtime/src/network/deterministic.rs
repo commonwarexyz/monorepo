@@ -1,4 +1,4 @@
-use crate::{mocks, Error, IoBuf, IoBufs};
+use crate::{mocks, Error, IoBufs};
 use futures::{channel::mpsc, SinkExt as _, StreamExt as _};
 use std::{
     collections::HashMap,
@@ -29,10 +29,6 @@ pub struct Stream {
 impl crate::Stream for Stream {
     async fn recv(&mut self, len: u64) -> Result<IoBufs, Error> {
         self.receiver.recv(len).await.map_err(|_| Error::RecvFailed)
-    }
-
-    fn peek(&self, max_len: u64) -> Option<IoBuf> {
-        self.receiver.peek(max_len)
     }
 }
 

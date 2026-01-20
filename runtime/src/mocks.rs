@@ -1,6 +1,6 @@
 //! A mock implementation of a channel that implements the Sink and Stream traits.
 
-use crate::{Error, IoBuf, IoBufs, Sink as SinkTrait, Stream as StreamTrait};
+use crate::{Error, IoBufs, Sink as SinkTrait, Stream as StreamTrait};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use futures::channel::oneshot;
 use std::sync::{Arc, Mutex};
@@ -125,16 +125,6 @@ impl StreamTrait for Stream {
         let data = os_recv.await.map_err(|_| Error::Closed)?;
         assert_eq!(data.len(), len);
         Ok(IoBufs::from(data))
-    }
-
-    fn peek(&self, max_len: u64) -> Option<IoBuf> {
-        let max_len = max_len as usize;
-        let channel = self.channel.lock().unwrap();
-        if channel.buffer.is_empty() {
-            return None;
-        }
-        let len = std::cmp::min(channel.buffer.len(), max_len);
-        Some(IoBuf::copy_from_slice(&channel.buffer[..len]))
     }
 }
 

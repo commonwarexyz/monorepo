@@ -1,4 +1,4 @@
-use crate::{deterministic::Auditor, Error, IoBuf, IoBufs, SinkOf, StreamOf};
+use crate::{deterministic::Auditor, Error, IoBufs, SinkOf, StreamOf};
 use sha2::Digest;
 use std::{net::SocketAddr, sync::Arc};
 
@@ -62,10 +62,6 @@ impl<S: crate::Stream> crate::Stream for Stream<S> {
         });
 
         Ok(buf.into())
-    }
-
-    fn peek(&self, max_len: u64) -> Option<IoBuf> {
-        self.inner.peek(max_len)
     }
 }
 
