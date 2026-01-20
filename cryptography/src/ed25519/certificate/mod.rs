@@ -206,6 +206,7 @@ impl<N: Namespace> Generic<N> {
                 continue;
             };
             let Some(signature) = attestation.signature.get() else {
+                invalid.insert(attestation.signer);
                 continue;
             };
 
