@@ -386,8 +386,7 @@ impl Strategy for Sequential {
 cfg_if! {
     if #[cfg(feature = "std")] {
         /// A clone-able wrapper around a [rayon]-compatible thread pool.
-        #[cfg(not(min_readiness_3))]
-        #[cfg(not(min_readiness_4))]
+        #[ready(2)]
         pub type ThreadPool = Arc<RThreadPool>;
 
         /// A parallel execution strategy backed by a rayon thread pool.
@@ -427,15 +426,13 @@ cfg_if! {
         /// let sum = strategy.fold(&data, || 0i64, |acc, &n| acc + n, |a, b| a + b);
         /// assert_eq!(sum, 499500);
         /// ```
-        #[cfg(not(min_readiness_3))]
-        #[cfg(not(min_readiness_4))]
+        #[ready(2)]
         #[derive(Debug, Clone)]
         pub struct Rayon {
             thread_pool: ThreadPool,
         }
 
-        #[cfg(not(min_readiness_3))]
-        #[cfg(not(min_readiness_4))]
+        #[ready(2)]
         impl Rayon {
             /// Creates a [`Rayon`] strategy with a [`ThreadPool`] that is configured with the given
             /// number of threads.
@@ -452,8 +449,7 @@ cfg_if! {
             }
         }
 
-        #[cfg(not(min_readiness_3))]
-        #[cfg(not(min_readiness_4))]
+        #[ready(2)]
         impl Strategy for Rayon {
             fn fold_init<I, INIT, T, R, ID, F, RD>(
                 &self,

@@ -14,12 +14,12 @@
 #[cfg(not(feature = "std"))]
 extern crate alloc;
 
-#[cfg(not(any(min_readiness_3, min_readiness_4)))]
+#[ready(2)]
 use commonware_codec::{Encode, ReadExt};
 use commonware_macros::{ready, ready_mod};
-#[cfg(not(any(min_readiness_3, min_readiness_4)))]
+#[ready(2)]
 use commonware_math::algebra::Random;
-#[cfg(not(any(min_readiness_3, min_readiness_4)))]
+#[ready(2)]
 use commonware_utils::Array;
 use rand::SeedableRng as _;
 use rand_chacha::ChaCha20Rng;

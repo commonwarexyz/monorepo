@@ -24,11 +24,11 @@
 
 use bytes::{Buf, BufMut};
 use commonware_macros::{ready, ready_mod, select};
-#[cfg(not(any(min_readiness_3, min_readiness_4)))]
+#[ready(2)]
 use commonware_parallel::{Rayon, ThreadPool};
 use commonware_utils::StableBuf;
 use prometheus_client::registry::Metric;
-#[cfg(not(any(min_readiness_3, min_readiness_4)))]
+#[ready(2)]
 use rayon::ThreadPoolBuildError;
 use std::{
     future::Future,

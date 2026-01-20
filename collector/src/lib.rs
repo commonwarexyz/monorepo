@@ -10,18 +10,18 @@
     html_favicon_url = "https://commonware.xyz/favicon.ico"
 )]
 
-#[cfg(not(any(min_readiness_2, min_readiness_3, min_readiness_4)))]
+#[ready(1)]
 use commonware_codec::Codec;
-#[cfg(not(any(min_readiness_2, min_readiness_3, min_readiness_4)))]
+#[ready(1)]
 use commonware_cryptography::{Committable, Digestible, PublicKey};
 use commonware_macros::{ready, ready_mod};
-#[cfg(not(any(min_readiness_2, min_readiness_3, min_readiness_4)))]
+#[ready(1)]
 use commonware_p2p::Recipients;
-#[cfg(not(any(min_readiness_2, min_readiness_3, min_readiness_4)))]
+#[ready(1)]
 use futures::channel::oneshot;
-#[cfg(not(any(min_readiness_2, min_readiness_3, min_readiness_4)))]
+#[ready(1)]
 use std::future::Future;
-#[cfg(not(any(min_readiness_2, min_readiness_3, min_readiness_4)))]
+#[ready(1)]
 use thiserror::Error;
 
 ready_mod!(1, pub mod p2p);

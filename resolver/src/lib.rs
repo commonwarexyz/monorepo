@@ -5,12 +5,12 @@
     html_favicon_url = "https://commonware.xyz/favicon.ico"
 )]
 
-#[cfg(not(any(min_readiness_3, min_readiness_4)))]
+#[ready(2)]
 use commonware_cryptography::PublicKey;
 use commonware_macros::{ready, ready_mod};
-#[cfg(not(any(min_readiness_3, min_readiness_4)))]
+#[ready(2)]
 use commonware_utils::{vec::NonEmptyVec, Span};
-#[cfg(not(any(min_readiness_3, min_readiness_4)))]
+#[ready(2)]
 use std::future::Future;
 
 ready_mod!(2, pub mod p2p);

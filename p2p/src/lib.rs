@@ -10,16 +10,16 @@
     html_favicon_url = "https://commonware.xyz/favicon.ico"
 )]
 
-#[cfg(not(any(min_readiness_3, min_readiness_4)))]
+#[ready(2)]
 use bytes::{Buf, Bytes};
-#[cfg(not(any(min_readiness_3, min_readiness_4)))]
+#[ready(2)]
 use commonware_cryptography::PublicKey;
 use commonware_macros::{ready, ready_mod};
-#[cfg(not(any(min_readiness_3, min_readiness_4)))]
+#[ready(2)]
 use commonware_utils::ordered::Set;
-#[cfg(not(any(min_readiness_3, min_readiness_4)))]
+#[ready(2)]
 use futures::channel::mpsc;
-#[cfg(not(any(min_readiness_3, min_readiness_4)))]
+#[ready(2)]
 use std::{error::Error as StdError, fmt::Debug, future::Future, time::SystemTime};
 
 ready_mod!(2, pub mod authenticated);
@@ -27,7 +27,7 @@ ready_mod!(0, pub mod simulated);
 ready_mod!(2, pub mod types);
 ready_mod!(2, pub mod utils);
 
-#[cfg(not(any(min_readiness_3, min_readiness_4)))]
+#[ready(2)]
 pub use types::{Address, Ingress};
 
 /// Tuple representing a message received from a given public key.

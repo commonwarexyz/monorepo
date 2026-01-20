@@ -1,10 +1,11 @@
 use crate::{signal, Error, Handle, SinkOf, StreamOf};
-#[cfg(not(any(min_readiness_3, min_readiness_4)))]
+use commonware_macros::ready;
+#[ready(2)]
 use commonware_parallel::ThreadPool;
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use prometheus_client::registry::Metric;
 use rand::{CryptoRng, RngCore};
-#[cfg(not(any(min_readiness_3, min_readiness_4)))]
+#[ready(2)]
 use rayon::ThreadPoolBuildError;
 use std::{
     future::Future,
@@ -145,7 +146,7 @@ where
     }
 }
 
-#[cfg(not(any(min_readiness_3, min_readiness_4)))]
+#[ready(2)]
 impl<C> crate::RayonPoolSpawner for Cell<C>
 where
     C: crate::RayonPoolSpawner,

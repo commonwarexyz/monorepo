@@ -10,19 +10,19 @@
     html_favicon_url = "https://commonware.xyz/favicon.ico"
 )]
 
-#[cfg(not(any(min_readiness_3, min_readiness_4)))]
+#[ready(2)]
 use bytes::Buf;
-#[cfg(not(any(min_readiness_3, min_readiness_4)))]
+#[ready(2)]
 use commonware_codec::{Codec, FixedSize, Read, Write};
+#[ready(2)]
+use commonware_cryptography::Digest;
 use commonware_macros::{ready, ready_mod};
-#[cfg(not(any(min_readiness_3, min_readiness_4)))]
+#[ready(2)]
 use commonware_parallel::Strategy;
-#[cfg(not(any(min_readiness_3, min_readiness_4)))]
+#[ready(2)]
 use std::fmt::Debug;
 
 ready_mod!(1, mod reed_solomon);
-#[cfg(not(any(min_readiness_3, min_readiness_4)))]
-use commonware_cryptography::Digest;
 #[ready(1)]
 pub use reed_solomon::{Error as ReedSolomonError, ReedSolomon};
 

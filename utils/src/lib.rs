@@ -11,12 +11,12 @@ extern crate alloc;
 
 #[cfg(not(feature = "std"))]
 use alloc::{boxed::Box, string::String, vec::Vec};
-#[cfg(not(any(min_readiness_3, min_readiness_4)))]
+#[ready(2)]
 use bytes::Buf;
 use bytes::{BufMut, BytesMut};
-#[cfg(not(any(min_readiness_3, min_readiness_4)))]
+#[ready(2)]
 use commonware_codec::{varint::UInt, EncodeSize, Error as CodecError, Read, ReadExt, Write};
-use commonware_macros::ready;
+use commonware_macros::{ready, ready_mod};
 use core::{
     fmt::{Debug, Write as FmtWrite},
     time::Duration,
@@ -24,27 +24,23 @@ use core::{
 
 pub mod faults;
 pub use faults::{Faults, N3f1, N5f1};
-#[cfg(not(any(min_readiness_3, min_readiness_4)))]
-pub mod sequence;
-#[cfg(not(any(min_readiness_3, min_readiness_4)))]
+ready_mod!(2, pub mod sequence);
+#[ready(2)]
 pub use sequence::{Array, Span};
 #[cfg(feature = "std")]
 pub mod acknowledgement;
 #[cfg(feature = "std")]
 pub use acknowledgement::Acknowledgement;
-#[cfg(not(any(min_readiness_3, min_readiness_4)))]
-pub mod bitmap;
+ready_mod!(2, pub mod bitmap);
 #[cfg(feature = "std")]
 pub mod channels;
 pub mod hex_literal;
-#[cfg(not(any(min_readiness_3, min_readiness_4)))]
-pub mod hostname;
-#[cfg(not(any(min_readiness_3, min_readiness_4)))]
+ready_mod!(2, pub mod hostname);
+#[ready(2)]
 pub use hostname::Hostname;
 #[cfg(feature = "std")]
 pub mod net;
-#[cfg(not(any(min_readiness_3, min_readiness_4)))]
-pub mod ordered;
+ready_mod!(2, pub mod ordered);
 pub mod vec;
 
 /// Represents a participant/validator index within a consensus committee.

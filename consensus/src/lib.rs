@@ -10,9 +10,9 @@
     html_favicon_url = "https://commonware.xyz/favicon.ico"
 )]
 
-#[cfg(not(any(min_readiness_3, min_readiness_4)))]
+#[ready(2)]
 use commonware_codec::Codec;
-#[cfg(not(any(min_readiness_3, min_readiness_4)))]
+#[ready(2)]
 use commonware_cryptography::{Committable, Digestible};
 use commonware_macros::{ready, ready_mod};
 
@@ -21,7 +21,7 @@ ready_mod!(1, pub mod ordered_broadcast);
 ready_mod!(2, pub mod simplex);
 ready_mod!(2, pub mod types);
 
-#[cfg(not(any(min_readiness_3, min_readiness_4)))]
+#[ready(2)]
 use types::{Epoch, Height, View};
 
 /// Epochable is a trait that provides access to the epoch number.

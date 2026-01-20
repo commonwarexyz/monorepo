@@ -1,17 +1,17 @@
 //! Implementations of the `Storage` trait that can be used by the runtime.
 
-#[cfg(not(any(min_readiness_3, min_readiness_4)))]
+#[ready(2)]
 use bytes::{Buf, BufMut};
-#[cfg(not(any(min_readiness_3, min_readiness_4)))]
+#[ready(2)]
 use commonware_codec::{DecodeExt, FixedSize, Read as CodecRead, Write as CodecWrite};
-use commonware_macros::ready_mod;
-#[cfg(not(any(min_readiness_3, min_readiness_4)))]
+use commonware_macros::{ready, ready_mod};
+#[ready(2)]
 use commonware_utils::hex;
-#[cfg(not(any(min_readiness_3, min_readiness_4)))]
+#[ready(2)]
 use std::ops::RangeInclusive;
 
 /// Errors that can occur when validating a blob header.
-#[cfg(not(any(min_readiness_3, min_readiness_4)))]
+#[ready(2)]
 #[derive(Debug)]
 pub(crate) enum HeaderError {
     InvalidMagic {
@@ -28,7 +28,7 @@ pub(crate) enum HeaderError {
     },
 }
 
-#[cfg(not(any(min_readiness_3, min_readiness_4)))]
+#[ready(2)]
 impl HeaderError {
     /// Converts this error into an [`Error`](enum@crate::Error) with partition and name context.
     pub(crate) fn into_error(self, partition: &str, name: &[u8]) -> crate::Error {
@@ -51,15 +51,15 @@ impl HeaderError {
 }
 
 ready_mod!(0, pub mod audited);
+// Compound cfg: feature + readiness (can't use ready_mod!)
 #[cfg(all(
     feature = "iouring-storage",
     not(any(min_readiness_3, min_readiness_4))
 ))]
 pub mod iouring;
-#[cfg(not(any(min_readiness_3, min_readiness_4)))]
-pub mod memory;
-#[cfg(not(any(min_readiness_3, min_readiness_4)))]
-pub mod metered;
+ready_mod!(2, pub mod memory);
+ready_mod!(2, pub mod metered);
+// Compound cfg: arch + feature + readiness (can't use ready_mod!)
 #[cfg(all(
     not(target_arch = "wasm32"),
     not(feature = "iouring-storage"),
@@ -73,7 +73,7 @@ pub mod tokio;
 /// - Bytes 0-3: [Header::MAGIC]
 /// - Bytes 4-5: Runtime Version (u16)
 /// - Bytes 6-7: Blob Version (u16)
-#[cfg(not(any(min_readiness_3, min_readiness_4)))]
+#[ready(2)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Header {
     magic: [u8; Self::MAGIC_LENGTH],
@@ -81,7 +81,7 @@ pub(crate) struct Header {
     pub(crate) blob_version: u16,
 }
 
-#[cfg(not(any(min_readiness_3, min_readiness_4)))]
+#[ready(2)]
 impl Header {
     /// Size of the header in bytes.
     pub(crate) const SIZE: usize = 8;
@@ -155,12 +155,12 @@ impl Header {
     }
 }
 
-#[cfg(not(any(min_readiness_3, min_readiness_4)))]
+#[ready(2)]
 impl FixedSize for Header {
     const SIZE: usize = Self::SIZE;
 }
 
-#[cfg(not(any(min_readiness_3, min_readiness_4)))]
+#[ready(2)]
 impl CodecWrite for Header {
     fn write(&self, buf: &mut impl BufMut) {
         buf.put_slice(&self.magic);
@@ -169,7 +169,7 @@ impl CodecWrite for Header {
     }
 }
 
-#[cfg(not(any(min_readiness_3, min_readiness_4)))]
+#[ready(2)]
 impl CodecRead for Header {
     type Cfg = ();
     fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
