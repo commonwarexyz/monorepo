@@ -93,7 +93,7 @@ pub async fn range_proof<D: Digest, S: Storage<D>>(
 }
 
 /// Analogous to range_proof but for a previous database state. Specifically, the state when the MMR
-/// had `leaves` leafs.
+/// had `leaves` leaves.
 ///
 /// # Errors
 ///

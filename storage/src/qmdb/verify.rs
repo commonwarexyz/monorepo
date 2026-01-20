@@ -1,10 +1,9 @@
 use crate::mmr::{
-    proof, verification, verification::ProofStore, Error, Location, Position, Proof,
+    verification, verification::ProofStore, Error, Location, Position, Proof,
     StandardHasher as Standard,
 };
 use commonware_codec::Encode;
 use commonware_cryptography::{Digest, Hasher};
-use core::ops::Range;
 
 /// Verify that a [Proof] is valid for a range of operations and a target root.
 pub fn verify_proof<Op, H, D>(
@@ -55,22 +54,6 @@ where
 {
     let elements = operations.iter().map(|op| op.encode()).collect::<Vec<_>>();
     proof.verify_range_inclusion_and_extract_digests(hasher, &elements, start_loc, target_root)
-}
-
-/// Calculate the digests required to construct a [Proof] for a range of operations.
-///
-/// # Errors
-///
-/// Returns [crate::mmr::Error::LocationOverflow] if `op_count` or an element in `range` >
-/// [crate::mmr::MAX_LOCATION].
-///
-/// Returns [crate::mmr::Error::RangeOutOfBounds] if the last element position in `range`
-/// is out of bounds for the MMR size.
-pub fn digests_required_for_proof<D: Digest>(
-    op_count: Location,
-    range: Range<Location>,
-) -> Result<Vec<Position>, crate::mmr::Error> {
-    proof::nodes_required_for_range_proof(op_count, range)
 }
 
 /// Verify a [Proof] and convert it into a [ProofStore].
