@@ -493,14 +493,15 @@ mod tests {
         // Test Data
         let original = Data {
             channel: 12345,
-            message: Bytes::from("Hello, world!"),
+            message: Bytes::from("Hello, world!").into(),
         };
         let encoded = Payload::<PublicKey>::Data(original.clone()).encode();
         let decoded = match Payload::<PublicKey>::decode_cfg(encoded, &cfg) {
             Ok(Payload::<PublicKey>::Data(d)) => d,
             _ => panic!(),
         };
-        assert_eq!(original, decoded);
+        assert_eq!(original.channel, decoded.channel);
+        assert_eq!(original.message, decoded.message);
     }
 
     #[test]
@@ -555,7 +556,7 @@ mod tests {
         };
         let encoded = Payload::<PublicKey>::Data(Data {
             channel: 1,
-            message: Bytes::from_static(b"hello"),
+            message: Bytes::from_static(b"hello").into(),
         })
         .encode();
         let err = Payload::<PublicKey>::decode_cfg(encoded, &cfg).unwrap_err();
@@ -568,7 +569,7 @@ mod tests {
         let message_len = message.len();
         let payload = Payload::<PublicKey>::Data(Data {
             channel: u64::MAX,
-            message,
+            message: message.into(),
         });
         assert_eq!(
             payload.encode_size(),

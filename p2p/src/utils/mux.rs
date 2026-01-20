@@ -9,10 +9,10 @@
 //!   even if the muxer is already running.
 
 use crate::{Channel, CheckedSender, LimitedSender, Message, Receiver, Recipients, Sender};
-use bytes::{Buf, Bytes};
+use bytes::BufMut;
 use commonware_codec::{varint::UInt, Encode, Error as CodecError, ReadExt};
 use commonware_macros::select_loop;
-use commonware_runtime::{spawn_cell, ContextCell, Handle, Spawner};
+use commonware_runtime::{spawn_cell, ContextCell, Handle, IoBuf, IoBufMut, Spawner};
 use commonware_utils::channels::fallible::FallibleExt;
 use futures::{
     channel::{mpsc, oneshot},
@@ -34,9 +34,12 @@ pub enum Error {
 }
 
 /// Parse a muxed message into its subchannel and payload.
-pub fn parse(mut bytes: Bytes) -> Result<(Channel, Bytes), CodecError> {
-    let subchannel: Channel = UInt::read(&mut bytes)?.into();
-    Ok((subchannel, bytes))
+///
+/// Takes an immutable `IoBuf` (received from p2p layer) and returns
+/// the subchannel and remaining payload bytes.
+pub fn parse(mut buf: IoBuf) -> Result<(Channel, IoBuf), CodecError> {
+    let subchannel: Channel = UInt::read(&mut buf)?.into();
+    Ok((subchannel, buf))
 }
 
 /// Control messages for the [Muxer].
@@ -304,7 +307,7 @@ impl<S: Sender> GlobalSender<S> {
         &mut self,
         subchannel: Channel,
         recipients: Recipients<S::PublicKey>,
-        payload: impl Buf + Send,
+        payload: impl Into<IoBufMut> + Send,
         priority: bool,
     ) -> Result<Vec<S::PublicKey>, <S::Checked<'_> as CheckedSender>::Error> {
         match self.check(recipients).await {
@@ -357,13 +360,16 @@ impl<'a, S: Sender> CheckedSender for CheckedGlobalSender<'a, S> {
 
     async fn send(
         self,
-        message: impl Buf + Send,
+        message: impl Into<IoBufMut> + Send,
         priority: bool,
     ) -> Result<Vec<Self::PublicKey>, Self::Error> {
         let subchannel = UInt(self.subchannel.expect("subchannel not set"));
-        self.inner
-            .send(subchannel.encode().chain(message), priority)
-            .await
+        let subchannel_bytes = subchannel.encode();
+        let message = message.into();
+        let mut combined = IoBufMut::with_capacity(subchannel_bytes.len() + message.len());
+        combined.put_slice(subchannel_bytes.as_ref());
+        combined.put_slice(message.as_ref());
+        self.inner.send(combined, priority).await
     }
 }
 
@@ -690,7 +696,7 @@ mod tests {
                 .unwrap();
             let (from, bytes) = sub_rx1.recv().await.unwrap();
             assert_eq!(from, pk2);
-            assert_eq!(bytes, payload);
+            assert_eq!(bytes, IoBuf::from(payload));
         });
     }
 
@@ -724,11 +730,11 @@ mod tests {
 
             let (from_a, bytes_a) = rx_a.recv().await.unwrap();
             assert_eq!(from_a, pk2);
-            assert_eq!(bytes_a, payload_a);
+            assert_eq!(bytes_a, IoBuf::from(payload_a));
 
             let (from_b, bytes_b) = rx_b.recv().await.unwrap();
             assert_eq!(from_b, pk2);
-            assert_eq!(bytes_b, payload_b);
+            assert_eq!(bytes_b, IoBuf::from(payload_b));
         });
     }
 
@@ -871,7 +877,7 @@ mod tests {
             assert_eq!(subchannel, 1);
             assert_eq!(from, pk1);
             global_sender2
-                .send(subchannel, Recipients::One(pk1), &b"TEST"[..], true)
+                .send(subchannel, Recipients::One(pk1), b"TEST", true)
                 .await
                 .unwrap();
 

@@ -1,5 +1,7 @@
+use crate::Channel;
 use bytes::{Buf, BufMut, Bytes};
 use commonware_codec::{varint::UInt, EncodeSize, Error, RangeCfg, Read, ReadExt as _, Write};
+use commonware_runtime::IoBuf;
 
 /// Data is an arbitrary message sent between peers.
 #[derive(Clone, Debug, PartialEq)]
@@ -10,19 +12,19 @@ pub struct Data {
     pub channel: u64,
 
     /// The payload of the message.
-    pub message: Bytes,
+    pub message: IoBuf,
 }
 
 impl EncodeSize for Data {
     fn encode_size(&self) -> usize {
-        UInt(self.channel).encode_size() + self.message.encode_size()
+        UInt(self.channel).encode_size() + self.message.as_ref().encode_size()
     }
 }
 
 impl Write for Data {
     fn write(&self, buf: &mut impl BufMut) {
         UInt(self.channel).write(buf);
-        self.message.write(buf);
+        self.message.as_ref().write(buf);
     }
 }
 
@@ -32,8 +34,25 @@ impl Read for Data {
     fn read_cfg(buf: &mut impl Buf, range: &Self::Cfg) -> Result<Self, Error> {
         let channel = UInt::read(buf)?.into();
         let message = Bytes::read_cfg(buf, range)?;
-        Ok(Self { channel, message })
+        Ok(Self {
+            channel,
+            message: IoBuf::from(message),
+        })
     }
+}
+
+/// Pre-encoded data ready for transmission.
+///
+/// Contains the channel ID (for metrics) and the pre-encoded payload bytes.
+/// The `payload` field contains the fully encoded `Payload::Data(...)` bytes,
+/// ready to be sent directly to the stream layer.
+#[derive(Clone, Debug)]
+pub struct EncodedData {
+    /// The channel this data belongs to (used for metrics/logging).
+    pub channel: Channel,
+
+    /// Pre-encoded `Payload::Data(...)` bytes ready for transmission.
+    pub payload: IoBuf,
 }
 
 #[cfg(feature = "arbitrary")]
@@ -43,7 +62,7 @@ impl arbitrary::Arbitrary<'_> for Data {
         let message = {
             let size = u.int_in_range(0..=1024)?;
             let bytes = u.bytes(size)?;
-            Bytes::from(bytes.to_vec())
+            IoBuf::copy_from_slice(bytes)
         };
         Ok(Self { channel, message })
     }
@@ -51,24 +70,32 @@ impl arbitrary::Arbitrary<'_> for Data {
 
 #[cfg(test)]
 mod tests {
-    use crate::authenticated::data::Data;
-    use bytes::Bytes;
+    use super::*;
     use commonware_codec::{Decode as _, Encode as _, Error};
 
     #[test]
     fn test_data_codec() {
         let original = Data {
             channel: 12345,
-            message: Bytes::from("Hello, world!"),
+            message: IoBuf::from(b"Hello, world!".as_slice()),
         };
         let encoded = original.encode();
         let decoded = Data::decode_cfg(encoded, &(13..=13).into()).unwrap();
-        assert_eq!(original, decoded);
+        assert_eq!(decoded.channel, 12345);
+        assert_eq!(decoded.message.as_ref(), b"Hello, world!");
 
-        let too_short = Data::decode_cfg(original.encode(), &(0..13).into());
+        let original2 = Data {
+            channel: 12345,
+            message: IoBuf::from(b"Hello, world!".as_slice()),
+        };
+        let too_short = Data::decode_cfg(original2.encode(), &(0..13).into());
         assert!(matches!(too_short, Err(Error::InvalidLength(13))));
 
-        let too_long = Data::decode_cfg(original.encode(), &(14..).into());
+        let original3 = Data {
+            channel: 12345,
+            message: IoBuf::from(b"Hello, world!".as_slice()),
+        };
+        let too_long = Data::decode_cfg(original3.encode(), &(14..).into());
         assert!(matches!(too_long, Err(Error::InvalidLength(13))));
     }
 
@@ -81,7 +108,7 @@ mod tests {
 
     #[cfg(feature = "arbitrary")]
     mod conformance {
-        use super::*;
+        use super::Data;
         use commonware_codec::conformance::CodecConformance;
 
         commonware_conformance::conformance_tests! {

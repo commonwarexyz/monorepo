@@ -323,7 +323,7 @@ mod tests {
                                                 let sent = sender
                                                     .send(
                                                         Recipients::One(pub_key.clone()),
-                                                        public_key.as_ref(),
+                                                        public_key.as_ref().to_vec(),
                                                         true,
                                                     )
                                                     .await
@@ -348,7 +348,7 @@ mod tests {
                                             let mut sent = sender
                                                 .send(
                                                     Recipients::Some(public_keys.clone()),
-                                                    public_key.as_ref(),
+                                                    public_key.as_ref().to_vec(),
                                                     true,
                                                 )
                                                 .await
@@ -373,7 +373,11 @@ mod tests {
                                         // Loop until all peer sends successful
                                         loop {
                                             let mut sent = sender
-                                                .send(Recipients::All, public_key.as_ref(), true)
+                                                .send(
+                                                    Recipients::All,
+                                                    public_key.as_ref().to_vec(),
+                                                    true,
+                                                )
                                                 .await
                                                 .unwrap();
                                             if sent.len() != n - 1 {
@@ -548,7 +552,7 @@ mod tests {
                             // Loop until success
                             loop {
                                 if sender
-                                    .send(Recipients::All, msg.as_ref(), true)
+                                    .send(Recipients::All, msg.as_ref().to_vec(), true)
                                     .await
                                     .unwrap()
                                     .len()
@@ -630,7 +634,7 @@ mod tests {
 
             // Send message
             let recipient = Recipients::One(peers[1].clone());
-            let result = sender.send(recipient, &msg[..], true).await;
+            let result = sender.send(recipient, msg, true).await;
             assert!(matches!(result, Err(Error::MessageTooLarge(_))));
         });
     }
@@ -681,7 +685,7 @@ mod tests {
             loop {
                 // Confirm message is sent to peer
                 let sent = sender0
-                    .send(Recipients::One(pk1.clone()), &msg[..], true)
+                    .send(Recipients::One(pk1.clone()), msg.clone(), true)
                     .await
                     .unwrap();
                 if !sent.is_empty() {
@@ -696,10 +700,7 @@ mod tests {
             // Immediately send the second message to trigger the rate limit.
             // With partial sends, rate-limited recipients return empty vec (not error).
             // Outbound rate limiting skips the peer, returns empty vec.
-            let sent = sender0
-                .send(Recipients::One(pk1), &msg[..], true)
-                .await
-                .unwrap();
+            let sent = sender0.send(Recipients::One(pk1), msg, true).await.unwrap();
             assert!(sent.is_empty());
 
             // Give the metrics time to reflect the rate-limited message.
@@ -820,7 +821,7 @@ mod tests {
                         // Send a message
                         loop {
                             let sent = sender
-                                .send(Recipients::All, pk.as_ref(), true)
+                                .send(Recipients::All, pk.as_ref().to_vec(), true)
                                 .await
                                 .unwrap();
                             if sent.len() >= expected_connections {
@@ -1127,7 +1128,7 @@ mod tests {
 
                                         loop {
                                             let mut sent = sender
-                                                .send(Recipients::All, pk.as_ref(), true)
+                                                .send(Recipients::All, pk.as_ref().to_vec(), true)
                                                 .await
                                                 .unwrap();
                                             if sent.len() != n - 1 {
@@ -1257,7 +1258,7 @@ mod tests {
 
                                         loop {
                                             let mut sent = sender
-                                                .send(Recipients::All, pk.as_ref(), true)
+                                                .send(Recipients::All, pk.as_ref().to_vec(), true)
                                                 .await
                                                 .unwrap();
                                             if sent.len() != n - 1 {
@@ -1352,7 +1353,7 @@ mod tests {
 
             // Try to send from peer 1 - should not reach anyone since private IPs are blocked
             let sent = sender1
-                .send(Recipients::All, peer1.public_key().as_ref(), true)
+                .send(Recipients::All, peer1.public_key().as_ref().to_vec(), true)
                 .await
                 .unwrap();
             assert!(
@@ -1455,7 +1456,7 @@ mod tests {
                     let sent = sender1
                         .send(
                             Recipients::One(pk0.clone()),
-                            peer1.public_key().as_ref(),
+                            peer1.public_key().as_ref().to_vec(),
                             true,
                         )
                         .await
@@ -1542,7 +1543,11 @@ mod tests {
                 let sender = sender.as_mut().unwrap();
                 loop {
                     let sent = sender
-                        .send(Recipients::All, peers[i].public_key().as_ref(), true)
+                        .send(
+                            Recipients::All,
+                            peers[i].public_key().as_ref().to_vec(),
+                            true,
+                        )
                         .await
                         .unwrap();
                     if sent.len() == n - 1 {
@@ -1641,7 +1646,7 @@ mod tests {
                         let sent = restarted_sender
                             .send(
                                 Recipients::All,
-                                peers[restart_peer_idx].public_key().as_ref(),
+                                peers[restart_peer_idx].public_key().as_ref().to_vec(),
                                 true,
                             )
                             .await
@@ -1662,7 +1667,7 @@ mod tests {
                             let sent = sender
                                 .send(
                                     Recipients::One(addresses[restart_peer_idx].clone()),
-                                    peers[i].public_key().as_ref(),
+                                    peers[i].public_key().as_ref().to_vec(),
                                     true,
                                 )
                                 .await
@@ -1758,7 +1763,11 @@ mod tests {
                 let sender = sender.as_mut().unwrap();
                 loop {
                     let sent = sender
-                        .send(Recipients::All, peers[i].public_key().as_ref(), true)
+                        .send(
+                            Recipients::All,
+                            peers[i].public_key().as_ref().to_vec(),
+                            true,
+                        )
                         .await
                         .unwrap();
                     if sent.len() == n - 1 {
@@ -1849,7 +1858,11 @@ mod tests {
                 let sender = sender.as_mut().unwrap();
                 loop {
                     let sent = sender
-                        .send(Recipients::All, peers[i].public_key().as_ref(), true)
+                        .send(
+                            Recipients::All,
+                            peers[i].public_key().as_ref().to_vec(),
+                            true,
+                        )
                         .await
                         .unwrap();
                     if sent.len() == n - 1 {
@@ -1913,7 +1926,7 @@ mod tests {
 
             // Sender operations should not panic even after shutdown
             let sent = sender
-                .send(Recipients::All, address.as_ref(), true)
+                .send(Recipients::All, address.as_ref().to_vec(), true)
                 .await
                 .unwrap();
             assert!(sent.is_empty());

@@ -1,6 +1,6 @@
 use super::{Config, Error, Message};
 use crate::authenticated::{
-    data::Data,
+    data::EncodedData,
     discovery::{
         actors::tracker,
         channels::Channels,
@@ -14,7 +14,9 @@ use crate::authenticated::{
 use commonware_codec::{Decode, Encode};
 use commonware_cryptography::PublicKey;
 use commonware_macros::{select, select_loop};
-use commonware_runtime::{Clock, Handle, Metrics, Quota, RateLimiter, Sink, Spawner, Stream};
+use commonware_runtime::{
+    Clock, Handle, IoBuf, Metrics, Quota, RateLimiter, Sink, Spawner, Stream,
+};
 use commonware_stream::{Receiver, Sender};
 use commonware_utils::time::SYSTEM_TIME_PRECISION;
 use futures::{channel::mpsc, StreamExt};
@@ -34,8 +36,8 @@ pub struct Actor<E: Spawner + Clock + Metrics, C: PublicKey> {
 
     mailbox: Mailbox<Message<C>>,
     control: mpsc::Receiver<Message<C>>,
-    high: mpsc::Receiver<Data>,
-    low: mpsc::Receiver<Data>,
+    high: mpsc::Receiver<EncodedData>,
+    low: mpsc::Receiver<EncodedData>,
 
     sent_messages: Family<metrics::Message, Counter>,
     received_messages: Family<metrics::Message, Counter>,
@@ -44,7 +46,7 @@ pub struct Actor<E: Spawner + Clock + Metrics, C: PublicKey> {
 }
 
 impl<E: Spawner + Clock + CryptoRngCore + Metrics, C: PublicKey> Actor<E, C> {
-    pub fn new(context: E, cfg: Config<C>) -> (Self, Relay<Data>) {
+    pub fn new(context: E, cfg: Config<C>) -> (Self, Relay<EncodedData>) {
         let (control_sender, control_receiver) = Mailbox::new(cfg.mailbox_size);
         let (high_sender, high_receiver) = mpsc::channel(cfg.mailbox_size);
         let (low_sender, low_receiver) = mpsc::channel(cfg.mailbox_size);
@@ -70,22 +72,22 @@ impl<E: Spawner + Clock + CryptoRngCore + Metrics, C: PublicKey> Actor<E, C> {
 
     /// Unpack outbound `msg` and assert the underlying `channel` is registered.
     fn validate_outbound_msg<V>(
-        msg: Option<Data>,
+        msg: Option<EncodedData>,
         rate_limits: &HashMap<u64, V>,
-    ) -> Result<Data, Error> {
-        let data = match msg {
-            Some(data) => data,
+    ) -> Result<EncodedData, Error> {
+        let encoded = match msg {
+            Some(encoded) => encoded,
             None => return Err(Error::PeerDisconnected),
         };
         assert!(
-            rate_limits.contains_key(&data.channel),
+            rate_limits.contains_key(&encoded.channel),
             "outbound message on invalid channel"
         );
-        Ok(data)
+        Ok(encoded)
     }
 
     /// Creates a message from a payload, then sends and increments metrics.
-    async fn send<Si: Sink>(
+    async fn send_payload<Si: Sink>(
         sender: &mut Sender<Si>,
         sent_messages: &Family<metrics::Message, Counter>,
         metric: metrics::Message,
@@ -93,6 +95,18 @@ impl<E: Spawner + Clock + CryptoRngCore + Metrics, C: PublicKey> Actor<E, C> {
     ) -> Result<(), Error> {
         let msg = payload.encode();
         sender.send(msg).await.map_err(Error::SendFailed)?;
+        sent_messages.get_or_create(&metric).inc();
+        Ok(())
+    }
+
+    /// Sends pre-encoded bytes directly to the stream.
+    async fn send_encoded<Si: Sink>(
+        sender: &mut Sender<Si>,
+        sent_messages: &Family<metrics::Message, Counter>,
+        metric: metrics::Message,
+        payload: IoBuf,
+    ) -> Result<(), Error> {
+        sender.send(payload).await.map_err(Error::SendFailed)?;
         sent_messages.get_or_create(&metric).inc();
         Ok(())
     }
@@ -116,7 +130,7 @@ impl<E: Spawner + Clock + CryptoRngCore + Metrics, C: PublicKey> Actor<E, C> {
         let rate_limits = Arc::new(rate_limits);
 
         // Send greeting first before any other messages
-        Self::send(
+        Self::send_payload(
             &mut conn_sender,
             &self.sent_messages,
             metrics::Message::new_greeting(&peer),
@@ -159,17 +173,19 @@ impl<E: Spawner + Clock + CryptoRngCore + Metrics, C: PublicKey> Actor<E, C> {
                                 return Err(Error::PeerKilled(peer.to_string()))
                             }
                         };
-                        Self::send(&mut conn_sender, &self.sent_messages, metric, payload)
+                        Self::send_payload(&mut conn_sender, &self.sent_messages, metric, payload)
                             .await?;
                     },
                     msg_high = self.high.next() => {
-                        let msg = Self::validate_outbound_msg(msg_high, &rate_limits)?;
-                        Self::send(&mut conn_sender, &self.sent_messages, metrics::Message::new_data(&peer, msg.channel), types::Payload::Data(msg))
+                        // Data is already pre-encoded, just forward to stream
+                        let encoded = Self::validate_outbound_msg(msg_high, &rate_limits)?;
+                        Self::send_encoded(&mut conn_sender, &self.sent_messages, metrics::Message::new_data(&peer, encoded.channel), encoded.payload)
                             .await?;
                     },
                     msg_low = self.low.next() => {
-                        let msg = Self::validate_outbound_msg(msg_low, &rate_limits)?;
-                        Self::send(&mut conn_sender, &self.sent_messages, metrics::Message::new_data(&peer, msg.channel), types::Payload::Data(msg))
+                        // Data is already pre-encoded, just forward to stream
+                        let encoded = Self::validate_outbound_msg(msg_low, &rate_limits)?;
+                        Self::send_encoded(&mut conn_sender, &self.sent_messages, metrics::Message::new_data(&peer, encoded.channel), encoded.payload)
                             .await?;
                     }
                 }
@@ -840,7 +856,7 @@ mod tests {
                     let data =
                         types::Payload::<PublicKey>::Data(crate::authenticated::data::Data {
                             channel: channel_id,
-                            message: bytes::Bytes::from(vec![i as u8; 100]),
+                            message: bytes::Bytes::from(vec![i as u8; 100]).into(),
                         });
                     let _ = local_sender.send(data.encode()).await;
                 }

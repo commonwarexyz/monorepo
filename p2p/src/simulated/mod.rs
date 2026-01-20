@@ -367,7 +367,7 @@ mod tests {
             let mut msg = vec![0u8; 1024 * 1024 + 1];
             context.fill(&mut msg[..]);
             let result = message_sender
-                .send(Recipients::All, &msg[..], false)
+                .send(Recipients::All, msg, false)
                 .await
                 .unwrap_err();
 
@@ -484,14 +484,14 @@ mod tests {
                 .unwrap();
             let (from, message) = other_receiver.recv().await.unwrap();
             assert_eq!(from, my_pk);
-            assert_eq!(message, msg);
+            assert_eq!(message, msg.clone().into());
             other_sender
                 .send(Recipients::One(my_pk.clone()), msg.clone(), false)
                 .await
                 .unwrap();
             let (from, message) = my_receiver.recv().await.unwrap();
             assert_eq!(from, other_pk);
-            assert_eq!(message, msg);
+            assert_eq!(message, msg.into());
 
             // Update channel
             let (mut my_sender_2, mut my_receiver_2) = oracle
@@ -508,14 +508,14 @@ mod tests {
                 .unwrap();
             let (from, message) = other_receiver.recv().await.unwrap();
             assert_eq!(from, my_pk);
-            assert_eq!(message, msg);
+            assert_eq!(message, msg.clone().into());
             other_sender
                 .send(Recipients::One(my_pk.clone()), msg.clone(), false)
                 .await
                 .unwrap();
             let (from, message) = my_receiver_2.recv().await.unwrap();
             assert_eq!(from, other_pk);
-            assert_eq!(message, msg);
+            assert_eq!(message, msg.clone().into());
 
             // Listen on original
             assert!(matches!(
@@ -525,7 +525,7 @@ mod tests {
 
             // Send on original (gracefully handles closed channel)
             assert!(my_sender
-                .send(Recipients::One(other_pk.clone()), msg.clone(), false)
+                .send(Recipients::One(other_pk.clone()), msg, false)
                 .await
                 .is_ok());
         });
@@ -639,7 +639,7 @@ mod tests {
                 .unwrap();
             let (from, received) = receiver2.recv().await.unwrap();
             assert_eq!(from, pk1);
-            assert_eq!(received, msg1);
+            assert_eq!(received, msg1.into());
         });
     }
 
@@ -727,10 +727,10 @@ mod tests {
             // Confirm message delivery
             let (sender, message) = receiver1.recv().await.unwrap();
             assert_eq!(sender, pk2);
-            assert_eq!(message, msg2);
+            assert_eq!(message, msg2.into());
             let (sender, message) = receiver2.recv().await.unwrap();
             assert_eq!(sender, pk1);
-            assert_eq!(message, msg1);
+            assert_eq!(message, msg1.into());
         });
     }
 
@@ -868,10 +868,10 @@ mod tests {
             // Confirm message delivery
             let (sender, message) = receiver1.recv().await.unwrap();
             assert_eq!(sender, pk2);
-            assert_eq!(message, msg2);
+            assert_eq!(message, msg2.into());
             let (sender, message) = receiver2.recv().await.unwrap();
             assert_eq!(sender, pk1);
-            assert_eq!(message, msg1);
+            assert_eq!(message, msg1.into());
         });
     }
 
@@ -970,10 +970,10 @@ mod tests {
             // Confirm message delivery
             let (sender, message) = receiver1.recv().await.unwrap();
             assert_eq!(sender, pk2);
-            assert_eq!(message, msg2);
+            assert_eq!(message, msg2.into());
             let (sender, message) = receiver2.recv().await.unwrap();
             assert_eq!(sender, pk1);
-            assert_eq!(message, msg1);
+            assert_eq!(message, msg1.into());
 
             // Remove links
             oracle.remove_link(pk1.clone(), pk2.clone()).await.unwrap();
@@ -1068,7 +1068,7 @@ mod tests {
         let elapsed = context.current().duration_since(start).unwrap();
 
         assert_eq!(origin, pk1);
-        assert_eq!(received, msg);
+        assert_eq!(received, msg.into());
         assert!(
             elapsed >= Duration::from_millis(expected_duration_ms),
             "Message arrived too quickly: {elapsed:?} (expected >= {expected_duration_ms}ms)"
@@ -1389,7 +1389,7 @@ mod tests {
             for expected_msg in messages {
                 let (origin, received_msg) = receiver.recv().await.unwrap();
                 assert_eq!(origin, pk1);
-                assert_eq!(received_msg, expected_msg);
+                assert_eq!(received_msg, expected_msg.into());
             }
         })
     }
@@ -1468,13 +1468,13 @@ mod tests {
             let start = context.current();
             let (origin1, message1) = receiver.recv().await.unwrap();
             assert_eq!(origin1, pk1);
-            assert_eq!(message1, slow);
+            assert_eq!(message1, slow.into());
             let first_elapsed = context.current().duration_since(start).unwrap();
 
             let (origin2, message2) = receiver.recv().await.unwrap();
             let second_elapsed = context.current().duration_since(start).unwrap();
             assert_eq!(origin2, pk1);
-            assert_eq!(message2, fast);
+            assert_eq!(message2, fast.into());
 
             let egress_time = Duration::from_secs(1);
             let slow_latency = Duration::from_millis(5_000);
@@ -1671,7 +1671,7 @@ mod tests {
             // Each receiver should receive their 10KB message in ~1s (10KB at 10KB/s)
             for (i, mut rx) in receiver_rxs.into_iter().enumerate() {
                 let (_, msg) = rx.recv().await.unwrap();
-                assert_eq!(msg[0], i as u8);
+                assert_eq!(msg.as_ref()[0], i as u8);
                 let recv_time = context.current().duration_since(start).unwrap();
 
                 // All messages should be received around 1s
@@ -1890,7 +1890,7 @@ mod tests {
             // Message 0: starts at t=0, shares bandwidth after 0.5s,
             // and completes at t=1.5s (plus link latency)
             let (_, msg0) = receiver_rx.recv().await.unwrap();
-            assert_eq!(msg0[0], 0);
+            assert_eq!(msg0.as_ref()[0], 0);
             let t0 = context.current().duration_since(start).unwrap();
             assert!(
                 t0 >= Duration::from_millis(1490) && t0 <= Duration::from_millis(1600),
@@ -1907,14 +1907,14 @@ mod tests {
             let t_b = context.current().duration_since(start).unwrap();
 
             // Figure out which message is which based on content
-            let (msg1, t1, msg2, t2) = if msg_a[0] == 1 {
+            let (msg1, t1, msg2, t2) = if msg_a.as_ref()[0] == 1 {
                 (msg_a, t_a, msg_b, t_b)
             } else {
                 (msg_b, t_b, msg_a, t_a)
             };
 
-            assert_eq!(msg1[0], 1);
-            assert_eq!(msg2[0], 2);
+            assert_eq!(msg1.as_ref()[0], 1);
+            assert_eq!(msg2.as_ref()[0], 2);
 
             // Message 1 (30KB) started at t=0.5s
             // Message 2 (15KB) started at t=1.5s
@@ -2018,7 +2018,7 @@ mod tests {
             for _ in 0..3 {
                 let (_, msg) = receiver_rx.recv().await.unwrap();
                 let t = context.current().duration_since(start).unwrap();
-                messages.push((msg[0] as usize, msg.len(), t));
+                messages.push((msg.as_ref()[0] as usize, msg.len(), t));
             }
 
             // When all start at once, they'll reserve bandwidth slots
@@ -2119,7 +2119,7 @@ mod tests {
             for i in 0..3 {
                 let (_, received) = receiver_rx.recv().await.unwrap();
                 receive_times.push(context.current().duration_since(start).unwrap());
-                assert_eq!(received[0], i);
+                assert_eq!(received.as_ref()[0], i);
             }
 
             // Messages should be received at:
@@ -2733,7 +2733,7 @@ mod tests {
             assert_eq!(sent.len(), 1);
             assert_eq!(sent[0], recipient_pk);
             let (_pk, received) = receiver.recv().await.unwrap();
-            assert_eq!(received, initial_msg);
+            assert_eq!(received, initial_msg.clone().into());
 
             // Register another peer set
             let other_pk = PrivateKey::from_seed(3).public_key();
@@ -2786,7 +2786,7 @@ mod tests {
             assert_eq!(sent.len(), 1);
             assert_eq!(sent[0], recipient_pk);
             let (_pk, received) = receiver.recv().await.unwrap();
-            assert_eq!(received, initial_msg);
+            assert_eq!(received, initial_msg.into());
         });
     }
 
@@ -3071,7 +3071,7 @@ mod tests {
 
             // Verify first message is received
             let (_, received1) = receiver.recv().await.unwrap();
-            assert_eq!(received1, msg1);
+            assert_eq!(received1, msg1.into());
 
             // Second message should be rate-limited (quota is 1/sec, no time has passed)
             let msg2 = Bytes::from_static(b"message2");
@@ -3098,7 +3098,7 @@ mod tests {
 
             // Verify third message is received
             let (_, received3) = receiver.recv().await.unwrap();
-            assert_eq!(received3, msg3);
+            assert_eq!(received3, msg3.into());
         });
     }
 
@@ -3236,7 +3236,7 @@ mod tests {
             assert_eq!(result.len(), 1, "message should be sent");
 
             let (_, received) = receiver.recv().await.unwrap();
-            assert_eq!(received, msg, "message should be received");
+            assert_eq!(received, msg.into(), "message should be received");
 
             // Abort the network
             handle.abort();

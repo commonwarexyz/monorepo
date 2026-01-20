@@ -81,7 +81,7 @@ mod tests {
         let message_len = message.len();
         let payload = Message::Data(Data {
             channel: u64::MAX,
-            message,
+            message: message.into(),
         });
         assert_eq!(
             payload.encode_size(),
@@ -93,7 +93,7 @@ mod tests {
     fn test_decode_data_within_limit() {
         let payload = Message::Data(Data {
             channel: 7,
-            message: Bytes::from_static(b"ping"),
+            message: Bytes::from_static(b"ping").into(),
         });
         let encoded = payload.encode();
 
@@ -101,7 +101,7 @@ mod tests {
         match decoded {
             Message::Data(data) => {
                 assert_eq!(data.channel, 7);
-                assert_eq!(data.message, Bytes::from_static(b"ping"));
+                assert_eq!(data.message, Bytes::from_static(b"ping").into());
             }
             other => panic!("unexpected message variant: {other:?}"),
         }
@@ -111,7 +111,7 @@ mod tests {
     fn test_decode_data_exceeding_limit() {
         let payload = Message::Data(Data {
             channel: 9,
-            message: Bytes::from_static(b"hello"),
+            message: Bytes::from_static(b"hello").into(),
         });
         let encoded = payload.encode();
 

@@ -1,10 +1,16 @@
 use crate::{
-    authenticated::{data::Data, lookup::channels::Channels, relay::Relay, Mailbox},
+    authenticated::{
+        data::{Data, EncodedData},
+        lookup::{channels::Channels, types},
+        relay::Relay,
+        Mailbox,
+    },
     utils::limited::Connected,
     Channel, Recipients,
 };
-use bytes::{Buf, Bytes};
+use commonware_codec::Encode;
 use commonware_cryptography::PublicKey;
+use commonware_runtime::IoBufMut;
 use commonware_utils::{
     channels::{fallible::AsyncFallibleExt, ring},
     NZUsize,
@@ -17,16 +23,16 @@ pub enum Message<P: PublicKey> {
     /// Notify the router that a peer is ready to communicate.
     Ready {
         peer: P,
-        relay: Relay<Data>,
+        relay: Relay<EncodedData>,
         channels: oneshot::Sender<Channels<P>>,
     },
     /// Notify the router that a peer is no longer available.
     Release { peer: P },
-    /// Send a message to one or more recipients.
+    /// Send pre-encoded data to one or more recipients.
     Content {
         recipients: Recipients<P>,
-        channel: Channel,
-        message: Bytes,
+        /// Pre-encoded payload ready for transmission.
+        encoded: EncodedData,
         priority: bool,
         success: oneshot::Sender<Vec<P>>,
     },
@@ -40,7 +46,7 @@ impl<P: PublicKey> Mailbox<Message<P>> {
     /// Notify the router that a peer is ready to communicate.
     ///
     /// Returns `None` if the router has shut down.
-    pub async fn ready(&mut self, peer: P, relay: Relay<Data>) -> Option<Channels<P>> {
+    pub async fn ready(&mut self, peer: P, relay: Relay<EncodedData>) -> Option<Channels<P>> {
         self.0
             .request(|channels| Message::Ready {
                 peer,
@@ -74,21 +80,31 @@ impl<P: PublicKey> Messenger<P> {
 
     /// Sends a message to the given `recipients`.
     ///
+    /// Encodes the message once and shares the encoded bytes across all recipients.
     /// Returns an empty list if the router has shut down.
     pub async fn content(
         &mut self,
         recipients: Recipients<P>,
         channel: Channel,
-        mut message: impl Buf + Send,
+        message: IoBufMut,
         priority: bool,
     ) -> Vec<P> {
-        let message = message.copy_to_bytes(message.remaining());
+        // Build Data and encode Message::Data once for all recipients
+        let data = Data {
+            channel,
+            message: message.freeze(),
+        };
+        let payload_bytes = types::Message::Data(data).encode();
+        let encoded = EncodedData {
+            channel,
+            payload: payload_bytes.into(),
+        };
+
         self.sender
             .0
             .request_or_default(|success| Message::Content {
                 recipients,
-                channel,
-                message,
+                encoded,
                 priority,
                 success,
             })
