@@ -16,6 +16,7 @@ use bytes::{BufMut, BytesMut};
 use bytes::Buf;
 #[cfg(not(any(min_readiness_3, min_readiness_4)))]
 use commonware_codec::{varint::UInt, EncodeSize, Error as CodecError, Read, ReadExt, Write};
+use commonware_macros::ready;
 use core::{
     fmt::{Debug, Write as FmtWrite},
     time::Duration,
@@ -88,7 +89,7 @@ impl core::fmt::Display for Participant {
     }
 }
 
-#[cfg(not(any(min_readiness_3, min_readiness_4)))]
+#[ready(2)]
 impl Read for Participant {
     type Cfg = ();
 
@@ -98,14 +99,14 @@ impl Read for Participant {
     }
 }
 
-#[cfg(not(any(min_readiness_3, min_readiness_4)))]
+#[ready(2)]
 impl Write for Participant {
     fn write(&self, buf: &mut impl BufMut) {
         UInt(self.0).write(buf);
     }
 }
 
-#[cfg(not(any(min_readiness_3, min_readiness_4)))]
+#[ready(2)]
 impl EncodeSize for Participant {
     fn encode_size(&self) -> usize {
         UInt(self.0).encode_size()
@@ -226,7 +227,7 @@ pub fn union(a: &[u8], b: &[u8]) -> Vec<u8> {
 /// Concatenate a namespace and a message, prepended by a varint encoding of the namespace length.
 ///
 /// This produces a unique byte sequence (i.e. no collisions) for each `(namespace, msg)` pair.
-#[cfg(not(any(min_readiness_3, min_readiness_4)))]
+#[ready(2)]
 pub fn union_unique(namespace: &[u8], msg: &[u8]) -> Vec<u8> {
     use commonware_codec::EncodeSize;
     let len_prefix = namespace.len();
