@@ -694,13 +694,7 @@ unsafe impl BufMut for IoBufsMut {
                     }
                 }
                 // Return empty slice if all buffers are exhausted
-                // SAFETY: Empty slice is always valid
-                unsafe {
-                    bytes::buf::UninitSlice::from_raw_parts_mut(
-                        std::ptr::NonNull::dangling().as_ptr(),
-                        0,
-                    )
-                }
+                bytes::buf::UninitSlice::new(&mut [])
             }
         }
     }
