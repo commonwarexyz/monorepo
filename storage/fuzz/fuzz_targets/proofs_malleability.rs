@@ -8,6 +8,7 @@ use commonware_storage::{
     mmr::{mem::CleanMmr, Location, StandardHasher as Standard},
 };
 use libfuzzer_sys::fuzz_target;
+use std::collections::HashSet;
 
 const MAX_MUTATIONS: usize = 50;
 
@@ -180,7 +181,8 @@ fn fuzz(input: FuzzInput) {
             } else {
                 end_idx - start_idx + 1
             };
-            let Ok(original_proof) = mmr.range_proof(start_loc..start_loc + range_len as u64) else {
+            let Ok(original_proof) = mmr.range_proof(start_loc..start_loc + range_len as u64)
+            else {
                 return;
             };
             let range_elements: Vec<Digest> = digests[start_idx..start_idx + range_len].to_vec();
@@ -243,15 +245,17 @@ fn fuzz(input: FuzzInput) {
                 .iter()
                 .filter(|_| !digests.is_empty())
                 .map(|&p| (p as u32) % (digests.len() as u32))
-                .collect::<std::collections::HashSet<_>>()
+                .collect::<HashSet<_>>()
                 .into_iter()
                 .collect();
 
             let Ok(original_proof) = tree.multi_proof(&positions) else {
                 return;
             };
-            let elements: Vec<(Digest, u32)> =
-                positions.iter().map(|&p| (digests[p as usize], p)).collect();
+            let elements: Vec<(Digest, u32)> = positions
+                .iter()
+                .map(|&p| (digests[p as usize], p))
+                .collect();
 
             let mut hasher = Sha256::default();
             assert!(original_proof
