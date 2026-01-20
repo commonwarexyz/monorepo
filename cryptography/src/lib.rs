@@ -25,9 +25,13 @@ use rand::SeedableRng as _;
 use rand_chacha::ChaCha20Rng;
 use rand_core::CryptoRngCore;
 
-ready_mod!(2, pub mod bls12381);
+// Use raw cfg for modules containing #[macro_export] macros to avoid
+// "macro-expanded macro_export macros cannot be referred to by absolute paths" error
+#[cfg(not(any(min_readiness_3, min_readiness_4)))]
+pub mod bls12381;
 ready_mod!(2, pub mod certificate);
-ready_mod!(2, pub mod ed25519);
+#[cfg(not(any(min_readiness_3, min_readiness_4)))]
+pub mod ed25519;
 ready_mod!(2, pub mod sha256);
 #[ready(2)]
 pub use crate::sha256::{CoreSha256, Sha256};
@@ -45,7 +49,9 @@ ready_mod!(2, pub mod handshake);
 ready_mod!(1, pub mod lthash);
 #[ready(1)]
 pub use crate::lthash::LtHash;
-ready_mod!(1, pub mod secp256r1);
+// Use raw cfg for modules containing #[macro_export] macros
+#[cfg(not(any(min_readiness_2, min_readiness_3, min_readiness_4)))]
+pub mod secp256r1;
 ready_mod!(2, pub mod secret);
 #[ready(2)]
 pub use crate::secret::Secret;

@@ -522,7 +522,9 @@ mod macros {
 #[cfg(all(test, not(min_readiness_3), not(min_readiness_4)))]
 mod tests {
     use super::*;
-    use crate::{certificate::Scheme as _, sha256::Digest as Sha256Digest};
+    use crate::{
+        certificate::Scheme as _, impl_certificate_secp256r1, sha256::Digest as Sha256Digest,
+    };
     use bytes::Bytes;
     use commonware_codec::{Decode, Encode};
     use commonware_math::algebra::Random;
