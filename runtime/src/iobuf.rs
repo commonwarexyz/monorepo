@@ -693,7 +693,6 @@ unsafe impl BufMut for IoBufsMut {
                         return buf.chunk_mut();
                     }
                 }
-                // Return empty slice if all buffers are exhausted
                 bytes::buf::UninitSlice::new(&mut [])
             }
         }
@@ -1345,5 +1344,156 @@ mod tests {
     fn test_iobufsmut_copy_from_slice_wrong_length() {
         let mut bufs = IoBufsMut::from(IoBufMut::zeroed(5));
         bufs.copy_from_slice(b"hello world"); // 11 bytes into 5-byte buffer
+    }
+
+    #[test]
+    fn test_iobufsmut_matches_bytesmut_chain() {
+        use bytes::BytesMut;
+
+        // Create three BytesMut with capacity
+        let mut bm1 = BytesMut::with_capacity(5);
+        let mut bm2 = BytesMut::with_capacity(6);
+        let mut bm3 = BytesMut::with_capacity(7);
+
+        // Create matching IoBufsMut
+        let mut iobufs = IoBufsMut::from(vec![
+            IoBufMut::with_capacity(5),
+            IoBufMut::with_capacity(6),
+            IoBufMut::with_capacity(7),
+        ]);
+
+        // Test initial chunk_mut length matches (spare capacity)
+        let chain_len = (&mut bm1)
+            .chain_mut(&mut bm2)
+            .chain_mut(&mut bm3)
+            .chunk_mut()
+            .len();
+        let iobufs_len = iobufs.chunk_mut().len();
+        assert_eq!(chain_len, iobufs_len);
+
+        // Write some data
+        (&mut bm1)
+            .chain_mut(&mut bm2)
+            .chain_mut(&mut bm3)
+            .put_slice(b"hel");
+        iobufs.put_slice(b"hel");
+
+        // Verify chunk_mut matches after partial write
+        let chain_len = (&mut bm1)
+            .chain_mut(&mut bm2)
+            .chain_mut(&mut bm3)
+            .chunk_mut()
+            .len();
+        let iobufs_len = iobufs.chunk_mut().len();
+        assert_eq!(chain_len, iobufs_len);
+
+        // Write more data
+        (&mut bm1)
+            .chain_mut(&mut bm2)
+            .chain_mut(&mut bm3)
+            .put_slice(b"lo world!");
+        iobufs.put_slice(b"lo world!");
+
+        // Verify chunk_mut matches after more writes
+        let chain_len = (&mut bm1)
+            .chain_mut(&mut bm2)
+            .chain_mut(&mut bm3)
+            .chunk_mut()
+            .len();
+        let iobufs_len = iobufs.chunk_mut().len();
+        assert_eq!(chain_len, iobufs_len);
+
+        // Verify final content matches
+        let frozen = iobufs.freeze().coalesce();
+        let mut chain_content = bm1.to_vec();
+        chain_content.extend_from_slice(&bm2);
+        chain_content.extend_from_slice(&bm3);
+        assert_eq!(frozen.as_ref(), chain_content.as_slice());
+        assert_eq!(frozen.as_ref(), b"hello world!");
+    }
+
+    #[test]
+    fn test_iobufsmut_buf_matches_bytes_chain() {
+        // Create pre-filled Bytes buffers
+        let mut b1 = Bytes::from_static(b"hello");
+        let mut b2 = Bytes::from_static(b" world");
+        let b3 = Bytes::from_static(b"!");
+
+        // Create matching IoBufsMut
+        let mut iobufs = IoBufsMut::from(vec![
+            IoBufMut::from(b"hello".as_ref()),
+            IoBufMut::from(b" world".as_ref()),
+            IoBufMut::from(b"!".as_ref()),
+        ]);
+
+        // Test Buf::remaining matches
+        let chain_remaining = b1.clone().chain(b2.clone()).chain(b3.clone()).remaining();
+        assert_eq!(chain_remaining, iobufs.remaining());
+
+        // Test Buf::chunk matches
+        let chain_chunk = b1
+            .clone()
+            .chain(b2.clone())
+            .chain(b3.clone())
+            .chunk()
+            .to_vec();
+        assert_eq!(chain_chunk, iobufs.chunk().to_vec());
+
+        // Advance and test again
+        b1.advance(3);
+        iobufs.advance(3);
+
+        let chain_remaining = b1.clone().chain(b2.clone()).chain(b3.clone()).remaining();
+        assert_eq!(chain_remaining, iobufs.remaining());
+
+        let chain_chunk = b1
+            .clone()
+            .chain(b2.clone())
+            .chain(b3.clone())
+            .chunk()
+            .to_vec();
+        assert_eq!(chain_chunk, iobufs.chunk().to_vec());
+
+        // Advance past first buffer boundary into second
+        b1.advance(2);
+        iobufs.advance(2);
+
+        let chain_remaining = b1.clone().chain(b2.clone()).chain(b3.clone()).remaining();
+        assert_eq!(chain_remaining, iobufs.remaining());
+
+        // Now we should be in the second buffer
+        let chain_chunk = b1
+            .clone()
+            .chain(b2.clone())
+            .chain(b3.clone())
+            .chunk()
+            .to_vec();
+        assert_eq!(chain_chunk, iobufs.chunk().to_vec());
+
+        // Advance past second buffer boundary into third
+        b2.advance(6);
+        iobufs.advance(6);
+
+        let chain_remaining = b1.clone().chain(b2.clone()).chain(b3.clone()).remaining();
+        assert_eq!(chain_remaining, iobufs.remaining());
+
+        // Now we should be in the third buffer
+        let chain_chunk = b1.chain(b2).chain(b3).chunk().to_vec();
+        assert_eq!(chain_chunk, iobufs.chunk().to_vec());
+
+        // Test copy_to_bytes
+        let b1 = Bytes::from_static(b"hello");
+        let b2 = Bytes::from_static(b" world");
+        let b3 = Bytes::from_static(b"!");
+        let mut iobufs = IoBufsMut::from(vec![
+            IoBufMut::from(b"hello".as_ref()),
+            IoBufMut::from(b" world".as_ref()),
+            IoBufMut::from(b"!".as_ref()),
+        ]);
+
+        let chain_bytes = b1.chain(b2).chain(b3).copy_to_bytes(8);
+        let iobufs_bytes = iobufs.copy_to_bytes(8);
+        assert_eq!(chain_bytes, iobufs_bytes);
+        assert_eq!(chain_bytes.as_ref(), b"hello wo");
     }
 }
