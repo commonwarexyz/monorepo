@@ -1,45 +1,72 @@
 digraph revm_block_lifecycle {
-  rankdir=LR;
-  splines=true;
-  nodesep=0.5;
-  ranksep=0.6;
-  fontname="Helvetica";
-  fontsize=12;
+  graph [
+    rankdir=LR,
+    bgcolor="white",
+    pad="0.2",
+    nodesep=0.5,
+    ranksep=0.6,
+    fontname="Helvetica",
+    fontsize=12
+  ];
 
   node [
     shape=box,
     style="rounded,filled",
     fillcolor="white",
-    color="#666666",
+    color="#4B5563",
     fontname="Helvetica",
     fontsize=10
   ];
   edge [
-    color="#555555",
+    color="#6B7280",
     fontname="Helvetica",
     fontsize=9,
     arrowsize=0.7
   ];
 
-  subgraph cluster_flow {
-    label="Block lifecycle (one height)";
+  Start[shape=circle, label="start", width=0.3, height=0.3, fixedsize=true, fillcolor="#E5E7EB"];
+  Done[shape=doublecircle, label="done", width=0.4, height=0.4, fixedsize=true, fillcolor="#E5E7EB"];
+
+  Propose[label="Build proposal\n(mempool + parent snapshot)"];
+  Exec[label="execute_txs\n(REVM)"];
+  Root[label="compute_root\n+ cache snapshot"];
+  Disseminate[label="Marshal disseminates\nblock + backfill"];
+  Order[label="Simplex orders digest"];
+
+  Finalized[label="Finalized update\nfrom marshal"];
+  HasSnapshot[shape=diamond, label="snapshot cached?"];
+  ReExec[label="re-execute txs\n(rebuild snapshot)"];
+  RootMatch[shape=diamond, label="root matches?"];
+  Persist[label="persist_snapshot\n(commit QMDB changes)"];
+  Prune[label="prune mempool\nack marshal"];
+  Reject[label="log warning\nack marshal"];
+
+  Start -> Propose -> Exec -> Root -> Disseminate;
+  Root -> Order;
+  Disseminate -> Finalized;
+  Order -> Finalized;
+
+  Finalized -> HasSnapshot;
+  HasSnapshot -> Persist [label="yes"];
+  HasSnapshot -> ReExec [label="no"];
+  ReExec -> RootMatch;
+  RootMatch -> Persist [label="yes"];
+  RootMatch -> Reject [label="no"];
+  Persist -> Prune -> Done;
+  Reject -> Done;
+
+  NoteVerify[shape=note, fillcolor="white", label="Verify path: validators\nre-exec blocks before\naccepting snapshots"];
+  Exec -> NoteVerify [style=dashed];
+
+  subgraph cluster_legend {
+    label="Legend";
     style="rounded,filled";
-    color="#D9E7FF";
-    fillcolor="#F3F7FF";
+    color="#E5E7EB";
+    fillcolor="#F9FAFB";
 
-    P1[label="1. Build proposal\n(mempool + parent snapshot)"];
-    P2[label="2. execute_txs\n(REVM)"];
-    P3[label="3. compute_root + cache snapshot"];
-    M1[label="4. Marshal disseminates\nblock + backfill"];
-    C1[label="5. Simplex orders digest"];
-    F1[label="6. FinalizedReporter\nreplays + validates"];
-    S1[label="7. Persist to QMDB\n+ prune mempool"];
+    LegendSolid[label="solid edge: main flow", shape=note, fillcolor="white"];
+    LegendDashed[label="dashed edge: annotation", shape=note, fillcolor="white"];
 
-    P1 -> P2 -> P3;
-    P3 -> M1;
-    P3 -> C1;
-    M1 -> F1;
-    C1 -> F1;
-    F1 -> S1;
+    LegendSolid -> LegendDashed [style=dashed];
   }
 }
