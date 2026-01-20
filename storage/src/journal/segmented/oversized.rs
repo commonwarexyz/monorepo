@@ -946,7 +946,7 @@ mod tests {
             // Last page CRC starts at offset 160 - 12 = 148
             assert_eq!(size, 160);
             let last_page_crc_offset = size - 12;
-            blob.write_at(vec![0xFF; 12], last_page_crc_offset)
+            blob.write_at(last_page_crc_offset, vec![0xFF; 12])
                 .await
                 .expect("Failed to corrupt");
             blob.sync().await.expect("Failed to sync");
@@ -2394,7 +2394,7 @@ mod tests {
 
             // Write 100 bytes of garbage (simulating partial/failed value write)
             let garbage = vec![0xDE; 100];
-            blob.write_at(garbage, size)
+            blob.write_at(size, garbage)
                 .await
                 .expect("Failed to write garbage");
             blob.sync().await.expect("Failed to sync");
@@ -2503,7 +2503,7 @@ mod tests {
             // Write the complete physical page: entry_data + crc_record
             let mut page = entry_data;
             page.extend_from_slice(&crc_record);
-            blob.write_at(page, 0)
+            blob.write_at(0, page)
                 .await
                 .expect("Failed to write corrupted page");
             blob.sync().await.expect("Failed to sync");

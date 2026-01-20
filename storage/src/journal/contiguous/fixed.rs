@@ -815,7 +815,7 @@ mod tests {
                 .expect("Failed to open blob");
             // Write junk bytes.
             let bad_bytes = 123456789u32;
-            blob.write_at(bad_bytes.to_be_bytes().to_vec(), 1)
+            blob.write_at(1, bad_bytes.to_be_bytes().to_vec())
                 .await
                 .expect("Failed to write bad bytes");
             blob.sync().await.expect("Failed to sync blob");
@@ -1201,7 +1201,7 @@ mod tests {
                 .open(&cfg.partition, &0u64.to_be_bytes())
                 .await
                 .expect("Failed to open blob");
-            blob.write_at(vec![0u8; PAGE_SIZE.get() as usize * 3], size)
+            blob.write_at(size, vec![0u8; PAGE_SIZE.get() as usize * 3])
                 .await
                 .expect("Failed to extend blob");
             blob.sync().await.expect("Failed to sync blob");

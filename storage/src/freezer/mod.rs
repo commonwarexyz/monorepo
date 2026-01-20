@@ -275,7 +275,7 @@ mod tests {
     use super::*;
     use commonware_codec::DecodeExt;
     use commonware_macros::{test_group, test_traced};
-    use commonware_runtime::{deterministic, Blob, Metrics, Runner, Storage};
+    use commonware_runtime::{deterministic, Blob, IoBufMut, Metrics, Runner, Storage};
     use commonware_utils::{hex, sequence::FixedBytes, NZUsize, NZU16};
     use rand::{Rng, RngCore};
     use std::num::NonZeroU16;
@@ -763,7 +763,7 @@ mod tests {
             {
                 let (blob, _) = context.open(&cfg.table_partition, b"table").await.unwrap();
                 // Write incomplete table entry (only 10 bytes instead of 24)
-                blob.write_at(vec![0xFF; 10], 0).await.unwrap();
+                blob.write_at(0, vec![0xFF; 10]).await.unwrap();
                 blob.sync().await.unwrap();
             }
 
@@ -827,11 +827,11 @@ mod tests {
             {
                 let (blob, _) = context.open(&cfg.table_partition, b"table").await.unwrap();
                 // Read the first entry
-                let entry_data = blob.read_at(vec![0u8; 24], 0).await.unwrap();
-                let mut corrupted = entry_data.as_ref().to_vec();
+                let entry_data = blob.read_at(0, IoBufMut::zeroed(24)).await.unwrap();
+                let mut corrupted = entry_data.coalesce();
                 // Corrupt the CRC (last 4 bytes of the entry)
-                corrupted[20] ^= 0xFF;
-                blob.write_at(corrupted, 0).await.unwrap();
+                corrupted.as_mut()[20] ^= 0xFF;
+                blob.write_at(0, corrupted).await.unwrap();
                 blob.sync().await.unwrap();
             }
 
@@ -895,7 +895,7 @@ mod tests {
             {
                 let (blob, size) = context.open(&cfg.table_partition, b"table").await.unwrap();
                 // Append garbage data
-                blob.write_at(hex!("0xdeadbeef").to_vec(), size)
+                blob.write_at(size, hex!("0xdeadbeef").to_vec())
                     .await
                     .unwrap();
                 blob.sync().await.unwrap();

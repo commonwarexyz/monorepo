@@ -26,7 +26,7 @@ use bytes::Buf;
 use commonware_codec::{CodecFixed, CodecFixedShared, DecodeExt as _, ReadExt as _};
 use commonware_runtime::{
     buffer::pool::{PoolRef, Replay},
-    Blob, Metrics, Storage,
+    Blob, IoBufMut, Metrics, Storage,
 };
 use futures::{
     stream::{self, Stream},
@@ -158,8 +158,10 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
             return Err(Error::ItemOutOfRange(position));
         }
 
-        let buf = blob.read_at(vec![0u8; Self::CHUNK_SIZE], offset).await?;
-        A::decode(buf.as_ref()).map_err(Error::Codec)
+        let buf = blob
+            .read_at(offset, IoBufMut::zeroed(Self::CHUNK_SIZE))
+            .await?;
+        A::decode(buf.coalesce().as_ref()).map_err(Error::Codec)
     }
 
     /// Read the last item in a section, if any.
@@ -176,8 +178,12 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
 
         let last_position = (size / Self::CHUNK_SIZE_U64) - 1;
         let offset = last_position * Self::CHUNK_SIZE_U64;
-        let buf = blob.read_at(vec![0u8; Self::CHUNK_SIZE], offset).await?;
-        A::decode(buf.as_ref()).map_err(Error::Codec).map(Some)
+        let buf = blob
+            .read_at(offset, IoBufMut::zeroed(Self::CHUNK_SIZE))
+            .await?;
+        A::decode(buf.coalesce().as_ref())
+            .map_err(Error::Codec)
+            .map(Some)
     }
 
     /// Returns a stream of all items starting from the given section.
