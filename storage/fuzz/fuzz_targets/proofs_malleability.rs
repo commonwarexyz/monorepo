@@ -31,16 +31,15 @@ enum ProofType {
 
 #[derive(Debug)]
 struct FuzzInput {
-    num_elements: u8,
     proof: ProofType,
     mutations: Vec<Mutation>,
     positions: Vec<u8>,
-    elements: Vec<u8>, // Element values for MMR/BMT
+    elements: Vec<u8>,
 }
 
 impl<'a> Arbitrary<'a> for FuzzInput {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
-        let num_elements = u.arbitrary()?;
+        let num_elements = u.int_in_range(1..=u8::MAX)?;
         let proof = u.arbitrary()?;
         let num_mutations = u.int_in_range(1..=MAX_MUTATIONS)?;
         let mutations = (0..num_mutations)
@@ -57,7 +56,6 @@ impl<'a> Arbitrary<'a> for FuzzInput {
             .collect::<Result<Vec<_>, _>>()?;
 
         Ok(FuzzInput {
-            num_elements,
             proof,
             mutations,
             positions,
@@ -133,27 +131,25 @@ where
 fn fuzz(input: FuzzInput) {
     let executor = deterministic::Runner::default();
     executor.start(|_| async move {
-        let num_elements = input.num_elements as u64;
-
         match input.proof {
             ProofType::Mmr => {
                 let mut hasher = Standard::<Sha256>::new();
                 let mut mmr = CleanMmr::new(&mut hasher);
-                let element = Digest::from(*b"01234567012345670123456701234567");
 
-                let mut leaves = Vec::new();
-                for _ in 0u64..num_elements {
-                    leaves.push(mmr.add(&mut hasher, &element));
+                let elements: Vec<Digest> =
+                    input.elements.iter().map(|&v| Sha256::hash(&[v])).collect();
+                for element in &elements {
+                    mmr.add(&mut hasher, element);
                 }
 
                 let root = mmr.root();
 
-                for leaf in 0u64..num_elements {
-                    let loc = Location::new(leaf).unwrap();
+                for (leaf, element) in elements.iter().enumerate() {
+                    let loc = Location::new(leaf as u64).unwrap();
                     let original_proof = mmr.proof(loc).unwrap();
 
                     assert!(
-                        original_proof.verify_element_inclusion(&mut hasher, &element, loc, root),
+                        original_proof.verify_element_inclusion(&mut hasher, element, loc, root),
                         "Original MMR proof must be valid"
                     );
 
@@ -164,7 +160,7 @@ fn fuzz(input: FuzzInput) {
                         if mutated_proof != original_proof {
                             let is_valid = mutated_proof.verify_element_inclusion(
                                 &mut hasher,
-                                &element,
+                                element,
                                 loc,
                                 root,
                             );
@@ -198,9 +194,8 @@ fn fuzz(input: FuzzInput) {
                         return;
                     };
 
-                    let range_elements: Vec<Digest> = (start_idx..=end_idx.min(elements.len() - 1))
-                        .map(|i| elements[i])
-                        .collect();
+                    let range_elements: Vec<Digest> =
+                        (start_idx..=end_idx).map(|i| elements[i]).collect();
 
                     assert!(
                         original_proof.verify_range_inclusion(
@@ -229,9 +224,8 @@ fn fuzz(input: FuzzInput) {
                 }
             }
             ProofType::Bmt => {
-                let digests: Vec<Digest> = (0..num_elements)
-                    .map(|i| Digest::from([(i as u8); 32]))
-                    .collect();
+                let digests: Vec<Digest> =
+                    input.elements.iter().map(|&v| Sha256::hash(&[v])).collect();
 
                 let mut builder = BmtBuilder::<Sha256>::new(digests.len());
                 for digest in &digests {
@@ -265,9 +259,8 @@ fn fuzz(input: FuzzInput) {
                 }
             }
             ProofType::BmtMulti => {
-                let digests: Vec<Digest> = (0..num_elements)
-                    .map(|i| Digest::from([(i as u8); 32]))
-                    .collect();
+                let digests: Vec<Digest> =
+                    input.elements.iter().map(|&v| Sha256::hash(&[v])).collect();
 
                 let mut builder = BmtBuilder::<Sha256>::new(digests.len());
                 for digest in &digests {
