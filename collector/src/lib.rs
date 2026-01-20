@@ -27,7 +27,7 @@ use thiserror::Error;
 ready_mod!(1, pub mod p2p);
 
 /// Errors that can occur when interacting with a [Originator].
-#[cfg(not(any(min_readiness_2, min_readiness_3, min_readiness_4)))]
+#[ready(1)]
 #[derive(Error, Debug)]
 pub enum Error {
     #[error("send failed: {0}")]
@@ -37,7 +37,7 @@ pub enum Error {
 }
 
 /// An [Originator] sends requests out to a set of [Handler]s and collects replies.
-#[cfg(not(any(min_readiness_2, min_readiness_3, min_readiness_4)))]
+#[ready(1)]
 pub trait Originator: Clone + Send + 'static {
     /// The [PublicKey] of a recipient.
     type PublicKey: PublicKey;
@@ -63,7 +63,7 @@ pub trait Originator: Clone + Send + 'static {
 }
 
 /// A [Handler] receives requests and (optionally) sends replies.
-#[cfg(not(any(min_readiness_2, min_readiness_3, min_readiness_4)))]
+#[ready(1)]
 pub trait Handler: Clone + Send + 'static {
     /// The [PublicKey] of the [Originator].
     type PublicKey: PublicKey;
@@ -88,7 +88,7 @@ pub trait Handler: Clone + Send + 'static {
 }
 
 /// A [Monitor] collects responses from [Handler]s.
-#[cfg(not(any(min_readiness_2, min_readiness_3, min_readiness_4)))]
+#[ready(1)]
 pub trait Monitor: Clone + Send + 'static {
     /// The [PublicKey] of the [Handler].
     type PublicKey: PublicKey;

@@ -16,7 +16,7 @@ use std::future::Future;
 ready_mod!(2, pub mod buffered);
 
 /// Broadcaster is the interface responsible for attempting replication of messages across a network.
-#[cfg(not(any(min_readiness_3, min_readiness_4)))]
+#[ready(2)]
 pub trait Broadcaster: Clone + Send + 'static {
     /// The type of recipients that can receive messages.
     type Recipients;

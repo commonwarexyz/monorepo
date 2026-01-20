@@ -14,7 +14,7 @@
 use bytes::{Buf, Bytes};
 #[cfg(not(any(min_readiness_3, min_readiness_4)))]
 use commonware_cryptography::PublicKey;
-use commonware_macros::ready_mod;
+use commonware_macros::{ready, ready_mod};
 #[cfg(not(any(min_readiness_3, min_readiness_4)))]
 use commonware_utils::ordered::Set;
 #[cfg(not(any(min_readiness_3, min_readiness_4)))]
@@ -22,13 +22,10 @@ use futures::channel::mpsc;
 #[cfg(not(any(min_readiness_3, min_readiness_4)))]
 use std::{error::Error as StdError, fmt::Debug, future::Future, time::SystemTime};
 
-#[cfg(not(any(min_readiness_3, min_readiness_4)))]
-pub mod authenticated;
+ready_mod!(2, pub mod authenticated);
 ready_mod!(0, pub mod simulated);
-#[cfg(not(any(min_readiness_3, min_readiness_4)))]
-pub mod types;
-#[cfg(not(any(min_readiness_3, min_readiness_4)))]
-pub mod utils;
+ready_mod!(2, pub mod types);
+ready_mod!(2, pub mod utils);
 
 #[cfg(not(any(min_readiness_3, min_readiness_4)))]
 pub use types::{Address, Ingress};
@@ -37,15 +34,15 @@ pub use types::{Address, Ingress};
 ///
 /// This message is guaranteed to adhere to the configuration of the channel and
 /// will already be decrypted and authenticated.
-#[cfg(not(any(min_readiness_3, min_readiness_4)))]
+#[ready(2)]
 pub type Message<P> = (P, Bytes);
 
 /// Alias for identifying communication channels.
-#[cfg(not(any(min_readiness_3, min_readiness_4)))]
+#[ready(2)]
 pub type Channel = u64;
 
 /// Enum indicating the set of recipients to send a message to.
-#[cfg(not(any(min_readiness_3, min_readiness_4)))]
+#[ready(2)]
 #[derive(Clone, Debug)]
 pub enum Recipients<P: PublicKey> {
     All,
@@ -53,8 +50,8 @@ pub enum Recipients<P: PublicKey> {
     One(P),
 }
 
-#[cfg(not(any(min_readiness_3, min_readiness_4)))]
 /// Interface for sending messages to a set of recipients without rate-limiting restrictions.
+#[ready(2)]
 pub trait UnlimitedSender: Clone + Send + Sync + 'static {
     /// Public key type used to identify recipients.
     type PublicKey: PublicKey;
@@ -93,9 +90,9 @@ pub trait UnlimitedSender: Clone + Send + Sync + 'static {
     ) -> impl Future<Output = Result<Vec<Self::PublicKey>, Self::Error>> + Send;
 }
 
-#[cfg(not(any(min_readiness_3, min_readiness_4)))]
 /// Interface for constructing a [`CheckedSender`] from a set of [`Recipients`],
 /// filtering out any that are currently rate-limited.
+#[ready(2)]
 pub trait LimitedSender: Clone + Send + Sync + 'static {
     /// Public key type used to identify recipients.
     type PublicKey: PublicKey;
@@ -124,8 +121,8 @@ pub trait LimitedSender: Clone + Send + Sync + 'static {
     ) -> impl Future<Output = Result<Self::Checked<'a>, SystemTime>> + Send;
 }
 
-#[cfg(not(any(min_readiness_3, min_readiness_4)))]
 /// Interface for sending messages to [`Recipients`] that are not currently rate-limited.
+#[ready(2)]
 pub trait CheckedSender: Send {
     /// Public key type used to identify [`Recipients`].
     type PublicKey: PublicKey;
@@ -163,8 +160,8 @@ pub trait CheckedSender: Send {
     ) -> impl Future<Output = Result<Vec<Self::PublicKey>, Self::Error>> + Send;
 }
 
-#[cfg(not(any(min_readiness_3, min_readiness_4)))]
 /// Interface for sending messages to a set of recipients.
+#[ready(2)]
 pub trait Sender: LimitedSender {
     /// Sends a message to a set of recipients.
     ///
@@ -212,12 +209,12 @@ pub trait Sender: LimitedSender {
     }
 }
 
-#[cfg(not(any(min_readiness_3, min_readiness_4)))]
 // Blanket implementation of `Sender` for all `LimitedSender`s.
+#[ready(2)]
 impl<S: LimitedSender> Sender for S {}
 
-#[cfg(not(any(min_readiness_3, min_readiness_4)))]
 /// Interface for receiving messages from arbitrary recipients.
+#[ready(2)]
 pub trait Receiver: Debug + Send + 'static {
     /// Error that can occur when receiving a message.
     type Error: Debug + StdError + Send + Sync;
@@ -231,8 +228,8 @@ pub trait Receiver: Debug + Send + 'static {
     ) -> impl Future<Output = Result<Message<Self::PublicKey>, Self::Error>> + Send;
 }
 
-#[cfg(not(any(min_readiness_3, min_readiness_4)))]
 /// Interface for registering new peer sets as well as fetching an ordered list of connected peers, given a set id.
+#[ready(2)]
 pub trait Manager: Debug + Clone + Send + 'static {
     /// Public key type used to identify peers.
     type PublicKey: PublicKey;
@@ -261,8 +258,8 @@ pub trait Manager: Debug + Clone + Send + 'static {
     > + Send;
 }
 
-#[cfg(not(any(min_readiness_3, min_readiness_4)))]
 /// Interface for blocking other peers.
+#[ready(2)]
 pub trait Blocker: Clone + Send + 'static {
     /// Public key type used to identify peers.
     type PublicKey: PublicKey;

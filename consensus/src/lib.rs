@@ -26,7 +26,7 @@ use types::{Epoch, Height, View};
 
 /// Epochable is a trait that provides access to the epoch number.
 /// Any consensus message or object that is associated with a specific epoch should implement this.
-#[cfg(not(any(min_readiness_3, min_readiness_4)))]
+#[ready(2)]
 pub trait Epochable {
     /// Returns the epoch associated with this object.
     fn epoch(&self) -> Epoch;
@@ -34,7 +34,7 @@ pub trait Epochable {
 
 /// Heightable is a trait that provides access to the height.
 /// Any consensus message or object that is associated with a specific height should implement this.
-#[cfg(not(any(min_readiness_3, min_readiness_4)))]
+#[ready(2)]
 pub trait Heightable {
     /// Returns the height associated with this object.
     fn height(&self) -> Height;
@@ -42,7 +42,7 @@ pub trait Heightable {
 
 /// Viewable is a trait that provides access to the view (round) number.
 /// Any consensus message or object that is associated with a specific view should implement this.
-#[cfg(not(any(min_readiness_3, min_readiness_4)))]
+#[ready(2)]
 pub trait Viewable {
     /// Returns the view associated with this object.
     fn view(&self) -> View;
@@ -51,7 +51,7 @@ pub trait Viewable {
 /// Block is the interface for a block in the blockchain.
 ///
 /// Blocks are used to track the progress of the consensus engine.
-#[cfg(not(any(min_readiness_3, min_readiness_4)))]
+#[ready(2)]
 pub trait Block: Heightable + Codec + Digestible + Committable + Send + Sync + 'static {
     /// Get the parent block's digest.
     fn parent(&self) -> Self::Commitment;

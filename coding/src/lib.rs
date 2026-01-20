@@ -35,7 +35,7 @@ ready_mod!(1, mod zoda);
 pub use zoda::{Error as ZodaError, Zoda};
 
 /// Configuration common to all encoding schemes.
-#[cfg(not(any(min_readiness_3, min_readiness_4)))]
+#[ready(2)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub struct Config {
@@ -49,7 +49,7 @@ pub struct Config {
     pub extra_shards: u16,
 }
 
-#[cfg(not(any(min_readiness_3, min_readiness_4)))]
+#[ready(2)]
 impl Config {
     /// Returns the total number of shards produced by this configuration.
     pub fn total_shards(&self) -> u32 {
@@ -57,12 +57,12 @@ impl Config {
     }
 }
 
-#[cfg(not(any(min_readiness_3, min_readiness_4)))]
+#[ready(2)]
 impl FixedSize for Config {
     const SIZE: usize = 2 * <u16 as FixedSize>::SIZE;
 }
 
-#[cfg(not(any(min_readiness_3, min_readiness_4)))]
+#[ready(2)]
 impl Write for Config {
     fn write(&self, buf: &mut impl bytes::BufMut) {
         self.minimum_shards.write(buf);
@@ -70,7 +70,7 @@ impl Write for Config {
     }
 }
 
-#[cfg(not(any(min_readiness_3, min_readiness_4)))]
+#[ready(2)]
 impl Read for Config {
     type Cfg = ();
 
@@ -83,7 +83,7 @@ impl Read for Config {
 }
 
 /// The configuration for decoding shard data.
-#[cfg(not(any(min_readiness_3, min_readiness_4)))]
+#[ready(2)]
 #[derive(Clone, Debug)]
 pub struct CodecConfig {
     /// The maximum number of bytes a shard is expected to contain.
@@ -137,7 +137,7 @@ pub struct CodecConfig {
 /// let data3 = RS::decode(&config, &commitment, checking_data, &checked_shards[1..], &STRATEGY).unwrap();
 /// assert_eq!(&data[..], &data3[..]);
 /// ```
-#[cfg(not(any(min_readiness_3, min_readiness_4)))]
+#[ready(2)]
 pub trait Scheme: Debug + Clone + Send + Sync + 'static {
     /// A commitment attesting to the shards of data.
     type Commitment: Digest;
@@ -224,7 +224,7 @@ pub trait Scheme: Debug + Clone + Send + Sync + 'static {
 /// In more detail, this means that upon a successful call to [Scheme::check],
 /// guarantees that the shard results from a valid encoding of the data, and thus,
 /// if other participants also call check, then the data is guaranteed to be reconstructable.
-#[cfg(not(any(min_readiness_3, min_readiness_4)))]
+#[ready(2)]
 pub trait ValidatingScheme: Scheme {}
 
 #[cfg(test)]

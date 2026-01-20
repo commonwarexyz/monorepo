@@ -16,7 +16,7 @@ use std::future::Future;
 ready_mod!(2, pub mod p2p);
 
 /// Notified when data is available, and must validate it.
-#[cfg(not(any(min_readiness_3, min_readiness_4)))]
+#[ready(2)]
 pub trait Consumer: Clone + Send + 'static {
     /// Type used to uniquely identify data.
     type Key: Span;
@@ -40,7 +40,7 @@ pub trait Consumer: Clone + Send + 'static {
 }
 
 /// Responsible for fetching data and notifying a `Consumer`.
-#[cfg(not(any(min_readiness_3, min_readiness_4)))]
+#[ready(2)]
 pub trait Resolver: Clone + Send + 'static {
     /// Type used to uniquely identify data.
     type Key: Span;
