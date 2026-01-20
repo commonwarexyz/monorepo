@@ -394,6 +394,7 @@ impl<E: Clock + Storage + Metrics, K: Span, V: Codec> Metadata<E, K, V> {
             overwrite = false;
         }
 
+        // Clear modified keys to avoid writing the same data
         target.modified.clear();
 
         // Overwrite existing data
