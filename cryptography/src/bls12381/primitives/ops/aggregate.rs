@@ -184,10 +184,10 @@ where
 ///
 /// # Warning
 ///
-/// This function assumes a group check was already performed on all `public_keys`,
-/// that each `public_key` is unique, and that the caller has a Proof-of-Possession (PoP)
-/// for each `public_key`. If any of these assumptions are violated, an attacker can
-/// exploit this function to verify an incorrect aggregate signature.
+/// This function assumes each `public_key` is unique and that the caller has a
+/// Proof-of-Possession (PoP) for each `public_key`. If any of these assumptions
+/// are violated, an attacker can exploit this function to verify an incorrect
+/// aggregate signature.
 pub fn combine_public_keys<'a, V, I>(public_keys: I) -> PublicKey<V>
 where
     V: Variant,
@@ -205,9 +205,8 @@ where
 ///
 /// # Warning
 ///
-/// This function assumes a group check was already performed on each `signature` and
-/// that each `signature` is unique. If any of these assumptions are violated, an attacker can
-/// exploit this function to verify an incorrect aggregate signature.
+/// This function assumes each `signature` is unique. If this assumption is violated,
+/// an attacker can exploit this function to verify an incorrect aggregate signature.
 pub fn combine_signatures<'a, V, I>(signatures: I) -> Signature<V>
 where
     V: Variant,
@@ -257,9 +256,8 @@ where
 ///
 /// # Warning
 ///
-/// This function assumes the caller has performed a group check and collected a proof-of-possession
-/// for all provided `public`. This function assumes a group check was already performed on the
-/// `signature`. It is not safe to provide duplicate public keys.
+/// This function assumes the caller has collected a proof-of-possession for all public keys
+/// that were combined into `public`. It is not safe to provide duplicate public keys.
 pub fn verify_same_message<V: Variant>(
     public: &PublicKey<V>,
     namespace: &[u8],
@@ -269,7 +267,7 @@ pub fn verify_same_message<V: Variant>(
     let hm = hash_with_namespace::<V>(V::MESSAGE, namespace, message);
 
     // Verify the signature
-    V::verify(public.inner(), &hm, signature.inner())
+    V::verify(public.inner(), &hm, signature.inner(), true)
 }
 
 /// Verifies the aggregate signature over multiple messages from a single public key.
@@ -279,16 +277,12 @@ pub fn verify_same_message<V: Variant>(
 /// Instead of requiring all messages that participated in the aggregate signature (and generating
 /// the combined message on-demand), this function accepts a precomputed combined message to allow
 /// the caller to cache previous constructions and/or perform parallel combination.
-///
-/// # Warning
-///
-/// This function assumes a group check was already performed on `public` and `signature`.
 pub fn verify_same_signer<V: Variant>(
     public: &V::Public,
     message: &Message<V>,
     signature: &Signature<V>,
 ) -> Result<(), Error> {
-    V::verify(public, message.inner(), signature.inner())
+    V::verify(public, message.inner(), signature.inner(), true)
 }
 
 #[cfg(test)]
