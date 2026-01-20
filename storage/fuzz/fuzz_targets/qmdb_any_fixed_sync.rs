@@ -114,12 +114,13 @@ async fn test_sync<
     target: sync::Target<commonware_cryptography::sha256::Digest>,
     fetch_batch_size: u64,
     test_name: &str,
+    sync_id: usize,
 ) -> bool {
     let db_config = test_config(test_name);
     let expected_root = target.root;
 
     let sync_config: sync::engine::Config<FixedDb, R> = sync::engine::Config {
-        context,
+        context: context.with_label("sync").with_attribute("id", sync_id),
         update_rx: None,
         db_config,
         fetch_batch_size: NZU64!((fetch_batch_size % 100) + 1),
@@ -224,6 +225,7 @@ fn fuzz(mut input: FuzzInput) {
                         target,
                         *fetch_batch_size,
                         &format!("full_{sync_id}"),
+                        sync_id,
                     )
                     .await;
                     db = Arc::try_unwrap(wrapped_src)
