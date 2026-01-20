@@ -344,7 +344,7 @@ pub trait Strategy: Clone + Send + Sync + fmt::Debug + 'static {
 #[derive(Default, Debug, Clone)]
 pub struct Sequential;
 
-#[cfg(not(any(min_readiness_3, min_readiness_4)))]
+#[ready(2)]
 impl Strategy for Sequential {
     fn fold_init<I, INIT, T, R, ID, F, RD>(
         &self,

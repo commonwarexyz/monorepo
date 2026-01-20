@@ -23,7 +23,7 @@
 )]
 
 use bytes::{Buf, BufMut};
-use commonware_macros::{ready_mod, select};
+use commonware_macros::{ready, ready_mod, select};
 #[cfg(not(any(min_readiness_3, min_readiness_4)))]
 use commonware_parallel::{Rayon, ThreadPool};
 use commonware_utils::StableBuf;
@@ -242,7 +242,7 @@ pub trait Spawner: Clone + Send + Sync + 'static {
 
 /// Trait for creating [rayon]-compatible thread pools with each worker thread
 /// placed on dedicated threads via [Spawner].
-#[cfg(not(any(min_readiness_3, min_readiness_4)))]
+#[ready(2)]
 pub trait RayonPoolSpawner: Spawner + Metrics {
     /// Creates a clone-able [rayon]-compatible thread pool with [Spawner::spawn].
     ///
