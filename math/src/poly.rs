@@ -471,7 +471,7 @@ mod test {
         fn arbitrary_with(size: Self::Parameters) -> Self::Strategy {
             let nonempty_size = if size.start() == 0 { size + 1 } else { size };
             proptest::collection::vec(F::arbitrary(), nonempty_size)
-                .prop_map(Poly::from_iter_unchecked)
+                .prop_map(Self::from_iter_unchecked)
                 .boxed()
         }
     }
