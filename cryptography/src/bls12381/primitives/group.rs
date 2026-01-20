@@ -1657,7 +1657,10 @@ mod tests {
     use commonware_utils::test_rng;
     use proptest::{prelude::*, strategy::Strategy};
     use rand::{rngs::StdRng, SeedableRng};
-    use std::collections::{BTreeSet, HashMap};
+    use std::{
+        collections::{BTreeSet, HashMap},
+        num::NonZeroUsize,
+    };
 
     impl Arbitrary for Scalar {
         type Parameters = ();
@@ -2087,8 +2090,6 @@ mod tests {
 
     #[test]
     fn test_msm_parallel_matches_sequential_g1() {
-        use std::num::NonZeroUsize;
-
         let mut rng = test_rng();
         let par = Rayon::new(NonZeroUsize::new(8).unwrap()).unwrap();
 
@@ -2107,8 +2108,6 @@ mod tests {
 
     #[test]
     fn test_msm_parallel_matches_sequential_g2() {
-        use std::num::NonZeroUsize;
-
         let mut rng = test_rng();
         let par = Rayon::new(NonZeroUsize::new(8).unwrap()).unwrap();
 
@@ -2127,8 +2126,6 @@ mod tests {
 
     #[test]
     fn test_msm_parallel_edge_cases() {
-        use std::num::NonZeroUsize;
-
         let mut rng = test_rng();
         let par = Rayon::new(NonZeroUsize::new(8).unwrap()).unwrap();
 
@@ -2202,8 +2199,6 @@ mod tests {
 
     #[test]
     fn test_msm_parallel_small_scalar() {
-        use std::num::NonZeroUsize;
-
         let mut rng = test_rng();
         let par = Rayon::new(NonZeroUsize::new(8).unwrap()).unwrap();
 
@@ -2244,8 +2239,6 @@ mod tests {
 
     #[test]
     fn test_msm_parallel_varying_parallelism() {
-        use std::num::NonZeroUsize;
-
         let mut rng = test_rng();
         let n = 200;
 
@@ -2271,8 +2264,6 @@ mod tests {
 
     #[test]
     fn test_msm_parallel_single_nonzero() {
-        use std::num::NonZeroUsize;
-
         let mut rng = test_rng();
         let par = Rayon::new(NonZeroUsize::new(8).unwrap()).unwrap();
 
@@ -2296,8 +2287,6 @@ mod tests {
 
     #[test]
     fn test_msm_parallel_g2_edge_cases() {
-        use std::num::NonZeroUsize;
-
         let mut rng = test_rng();
         let par = Rayon::new(NonZeroUsize::new(8).unwrap()).unwrap();
 
