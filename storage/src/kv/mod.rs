@@ -1,7 +1,7 @@
 //! Traits for interacting with a key/value store.
 
 use commonware_macros::ready;
-use commonware_utils::ready_mod;
+use commonware_macros::ready_mod;
 
 ready_mod!(1, mod batch);
 #[ready(1)]

@@ -15,9 +15,9 @@
 extern crate alloc;
 
 use commonware_codec::{Encode, ReadExt};
-use commonware_macros::ready;
+use commonware_macros::{ready, ready_mod};
 use commonware_math::algebra::Random;
-use commonware_utils::{ready_mod, Array};
+use commonware_utils::Array;
 use rand::SeedableRng as _;
 use rand_chacha::ChaCha20Rng;
 use rand_core::CryptoRngCore;

@@ -1,6 +1,6 @@
 //! Utility functions for interacting with any runtime.
 
-use commonware_utils::ready_mod;
+use commonware_macros::ready_mod;
 use futures::task::ArcWake;
 use std::{
     any::Any,

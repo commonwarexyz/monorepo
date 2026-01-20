@@ -199,18 +199,28 @@
 #[cfg(not(feature = "std"))]
 extern crate alloc;
 
-pub mod codec;
-pub mod config;
-pub mod error;
-pub mod extensions;
-pub mod types;
-pub mod util;
-pub mod varint;
+use commonware_macros::ready_mod;
+
+ready_mod!(2, pub mod codec);
+ready_mod!(2, pub mod config);
+ready_mod!(2, pub mod error);
+ready_mod!(2, pub mod extensions);
+ready_mod!(2, pub mod types);
+ready_mod!(2, pub mod util);
+ready_mod!(2, pub mod varint);
 
 // Re-export main types and traits
+#[cfg(not(min_readiness_3))]
+#[cfg(not(min_readiness_4))]
 pub use codec::*;
+#[cfg(not(min_readiness_3))]
+#[cfg(not(min_readiness_4))]
 pub use config::RangeCfg;
+#[cfg(not(min_readiness_3))]
+#[cfg(not(min_readiness_4))]
 pub use error::Error;
+#[cfg(not(min_readiness_3))]
+#[cfg(not(min_readiness_4))]
 pub use extensions::*;
 
 #[cfg(feature = "arbitrary")]

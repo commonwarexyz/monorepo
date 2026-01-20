@@ -6,12 +6,14 @@
 )]
 
 use commonware_cryptography::PublicKey;
+use commonware_macros::{ready, ready_mod};
 use commonware_utils::{vec::NonEmptyVec, Span};
 use std::future::Future;
 
-pub mod p2p;
+ready_mod!(2, pub mod p2p);
 
 /// Notified when data is available, and must validate it.
+#[ready(2)]
 pub trait Consumer: Clone + Send + 'static {
     /// Type used to uniquely identify data.
     type Key: Span;
@@ -35,6 +37,7 @@ pub trait Consumer: Clone + Send + 'static {
 }
 
 /// Responsible for fetching data and notifying a `Consumer`.
+#[ready(2)]
 pub trait Resolver: Clone + Send + 'static {
     /// Type used to uniquely identify data.
     type Key: Span;

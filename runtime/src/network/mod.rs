@@ -1,4 +1,4 @@
-use commonware_utils::ready_mod;
+use commonware_macros::ready_mod;
 
 ready_mod!(0, pub(crate) mod audited);
 ready_mod!(0, pub(crate) mod deterministic);

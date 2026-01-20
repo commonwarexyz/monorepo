@@ -23,9 +23,9 @@
 )]
 
 use bytes::{Buf, BufMut};
-use commonware_macros::select;
+use commonware_macros::{ready_mod, select};
 use commonware_parallel::{Rayon, ThreadPool};
-use commonware_utils::{ready_mod, StableBuf};
+use commonware_utils::StableBuf;
 use prometheus_client::registry::Metric;
 use rayon::ThreadPoolBuildError;
 use std::{

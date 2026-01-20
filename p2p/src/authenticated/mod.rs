@@ -7,7 +7,7 @@
 //! [lookup] operates under the assumption that peer addresses are known in advance,
 //! and that they can be looked up by their identifiers.
 
-use commonware_utils::ready_mod;
+use commonware_macros::ready_mod;
 
 mod data;
 ready_mod!(2, pub mod discovery);

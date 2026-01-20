@@ -1082,6 +1082,7 @@ dependencies = [
  "arbitrary",
  "bytes",
  "commonware-conformance",
+ "commonware-macros",
  "paste",
  "rand 0.8.5",
  "rand_chacha 0.3.1",
@@ -1319,6 +1320,7 @@ dependencies = [
  "cfg-if",
  "clap",
  "commonware-cryptography",
+ "commonware-macros",
  "futures",
  "reqwest",
  "serde",
@@ -1423,6 +1425,7 @@ dependencies = [
  "bytes",
  "commonware-codec",
  "commonware-conformance",
+ "commonware-macros",
  "commonware-parallel",
  "commonware-utils",
  "proptest",
@@ -1482,6 +1485,7 @@ name = "commonware-parallel"
 version = "0.0.65"
 dependencies = [
  "cfg-if",
+ "commonware-macros",
  "proptest",
  "rayon",
 ]

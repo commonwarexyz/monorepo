@@ -230,6 +230,7 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
     /// * `size()` returns `size`
     /// * `oldest_retained_pos()` returns `None` (fully pruned)
     /// * Next append receives position `size`
+    #[commonware_macros::ready(1)]
     pub async fn init_at_size(context: E, cfg: Config<V::Cfg>, size: u64) -> Result<Self, Error> {
         // Initialize empty data journal
         let data = variable::Journal::init(

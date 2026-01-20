@@ -183,6 +183,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     ///
     /// # Invariants
     /// - The directory given by `cfg.partition` should be empty
+    #[commonware_macros::ready(1)]
     pub async fn init_at_size(context: E, cfg: Config, size: u64) -> Result<Self, Error> {
         let items_per_blob = cfg.items_per_blob.get();
 

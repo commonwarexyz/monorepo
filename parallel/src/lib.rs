@@ -55,6 +55,7 @@
 #![cfg_attr(not(any(test, feature = "std")), no_std)]
 
 use cfg_if::cfg_if;
+use commonware_macros::ready;
 use core::fmt;
 
 cfg_if! {
@@ -76,6 +77,7 @@ cfg_if! {
 /// This trait abstracts over sequential and parallel execution, allowing algorithms
 /// to be written generically and then executed with different strategies depending
 /// on the use case (e.g., sequential for testing/debugging, parallel for production).
+#[ready(2)]
 pub trait Strategy: Clone + Send + Sync + fmt::Debug + 'static {
     /// Reduces a collection to a single value with per-partition initialization.
     ///
@@ -338,6 +340,7 @@ pub trait Strategy: Clone + Send + Sync + fmt::Debug + 'static {
 /// let sum = strategy.fold(&data, || 0, |a, &b| a + b, |a, b| a + b);
 /// assert_eq!(sum, 15);
 /// ```
+#[ready(2)]
 #[derive(Default, Debug, Clone)]
 pub struct Sequential;
 
@@ -382,6 +385,8 @@ impl Strategy for Sequential {
 cfg_if! {
     if #[cfg(feature = "std")] {
         /// A clone-able wrapper around a [rayon]-compatible thread pool.
+        #[cfg(not(min_readiness_3))]
+        #[cfg(not(min_readiness_4))]
         pub type ThreadPool = Arc<RThreadPool>;
 
         /// A parallel execution strategy backed by a rayon thread pool.
@@ -421,11 +426,15 @@ cfg_if! {
         /// let sum = strategy.fold(&data, || 0i64, |acc, &n| acc + n, |a, b| a + b);
         /// assert_eq!(sum, 499500);
         /// ```
+        #[cfg(not(min_readiness_3))]
+        #[cfg(not(min_readiness_4))]
         #[derive(Debug, Clone)]
         pub struct Rayon {
             thread_pool: ThreadPool,
         }
 
+        #[cfg(not(min_readiness_3))]
+        #[cfg(not(min_readiness_4))]
         impl Rayon {
             /// Creates a [`Rayon`] strategy with a [`ThreadPool`] that is configured with the given
             /// number of threads.
@@ -442,6 +451,8 @@ cfg_if! {
             }
         }
 
+        #[cfg(not(min_readiness_3))]
+        #[cfg(not(min_readiness_4))]
         impl Strategy for Rayon {
             fn fold_init<I, INIT, T, R, ID, F, RD>(
                 &self,

@@ -35,6 +35,7 @@ aws-config = { workspace = true, optional = true }
 aws-sdk-ec2 = { workspace = true, optional = true }
 aws-sdk-s3 = { workspace = true, optional = true }
 cfg-if.workspace = true
+commonware-macros.workspace = true
 clap = { workspace = true, optional = true }
 commonware-cryptography = { workspace = true, optional = true }
 futures = { workspace = true, optional = true }

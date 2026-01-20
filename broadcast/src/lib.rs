@@ -6,12 +6,15 @@
 )]
 
 use commonware_codec::Codec;
+use commonware_macros::ready;
+use commonware_macros::ready_mod;
 use futures::channel::oneshot;
 use std::future::Future;
 
-pub mod buffered;
+ready_mod!(2, pub mod buffered);
 
 /// Broadcaster is the interface responsible for attempting replication of messages across a network.
+#[ready(2)]
 pub trait Broadcaster: Clone + Send + 'static {
     /// The type of recipients that can receive messages.
     type Recipients;

@@ -8,11 +8,14 @@
 #[cfg(not(feature = "std"))]
 extern crate alloc;
 
-pub mod algebra;
+use commonware_macros::ready_mod;
+
+ready_mod!(2, pub mod algebra);
+#[cfg(not(min_readiness_2))]
 pub mod fields {
     pub mod goldilocks;
 }
-pub mod ntt;
-pub mod poly;
+ready_mod!(1, pub mod ntt);
+ready_mod!(2, pub mod poly);
 #[cfg(test)]
 pub mod test;

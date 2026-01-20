@@ -12,7 +12,8 @@
 
 use bytes::{Buf, Bytes};
 use commonware_cryptography::PublicKey;
-use commonware_utils::{ordered::Set, ready_mod};
+use commonware_macros::ready_mod;
+use commonware_utils::ordered::Set;
 use futures::channel::mpsc;
 use std::{error::Error as StdError, fmt::Debug, future::Future, time::SystemTime};
 

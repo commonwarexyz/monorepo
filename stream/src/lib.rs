@@ -60,7 +60,7 @@
     html_favicon_url = "https://commonware.xyz/favicon.ico"
 )]
 
-use commonware_utils::ready_mod;
+use commonware_macros::ready_mod;
 
 ready_mod!(2, pub mod encrypted);
 ready_mod!(2, pub mod utils);

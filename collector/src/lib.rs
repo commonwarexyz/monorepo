@@ -12,14 +12,17 @@
 
 use commonware_codec::Codec;
 use commonware_cryptography::{Committable, Digestible, PublicKey};
+use commonware_macros::ready;
 use commonware_p2p::Recipients;
+use commonware_macros::ready_mod;
 use futures::channel::oneshot;
 use std::future::Future;
 use thiserror::Error;
 
-pub mod p2p;
+ready_mod!(1, pub mod p2p);
 
 /// Errors that can occur when interacting with a [Originator].
+#[ready(1)]
 #[derive(Error, Debug)]
 pub enum Error {
     #[error("send failed: {0}")]
@@ -29,6 +32,7 @@ pub enum Error {
 }
 
 /// An [Originator] sends requests out to a set of [Handler]s and collects replies.
+#[ready(1)]
 pub trait Originator: Clone + Send + 'static {
     /// The [PublicKey] of a recipient.
     type PublicKey: PublicKey;
@@ -54,6 +58,7 @@ pub trait Originator: Clone + Send + 'static {
 }
 
 /// A [Handler] receives requests and (optionally) sends replies.
+#[ready(1)]
 pub trait Handler: Clone + Send + 'static {
     /// The [PublicKey] of the [Originator].
     type PublicKey: PublicKey;
@@ -78,6 +83,7 @@ pub trait Handler: Clone + Send + 'static {
 }
 
 /// A [Monitor] collects responses from [Handler]s.
+#[ready(1)]
 pub trait Monitor: Clone + Send + 'static {
     /// The [PublicKey] of the [Handler].
     type PublicKey: PublicKey;
