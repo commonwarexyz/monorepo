@@ -73,9 +73,8 @@ pub mod store;
 pub mod sync;
 pub mod verify;
 pub use verify::{
-    create_multi_proof, create_proof, create_proof_store, create_proof_store_from_digests,
-    digests_required_for_proof, extract_pinned_nodes, verify_multi_proof, verify_proof,
-    verify_proof_and_extract_digests,
+    create_multi_proof, create_proof_store, create_proof_store_from_digests, extract_pinned_nodes,
+    verify_multi_proof, verify_proof, verify_proof_and_extract_digests,
 };
 
 /// Errors that can occur when interacting with an authenticated database.

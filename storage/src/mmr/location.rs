@@ -1,5 +1,7 @@
 use super::position::Position;
 use crate::mmr::MAX_POSITION;
+use bytes::Buf;
+use commonware_codec::{Read, ReadExt};
 use core::{
     convert::TryFrom,
     fmt,
@@ -181,6 +183,34 @@ impl From<Location> for u64 {
     #[inline]
     fn from(loc: Location) -> Self {
         *loc
+    }
+}
+
+// Codec implementations using varint encoding for efficient storage
+impl commonware_codec::Write for Location {
+    #[inline]
+    fn write(&self, buf: &mut impl bytes::BufMut) {
+        commonware_codec::varint::UInt(self.0).write(buf);
+    }
+}
+
+impl commonware_codec::EncodeSize for Location {
+    #[inline]
+    fn encode_size(&self) -> usize {
+        commonware_codec::varint::UInt(self.0).encode_size()
+    }
+}
+
+impl Read for Location {
+    type Cfg = ();
+
+    #[inline]
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, commonware_codec::Error> {
+        let value: u64 = commonware_codec::varint::UInt::read(buf)?.into();
+        Self::new(value).ok_or(commonware_codec::Error::Invalid(
+            "Location",
+            "value exceeds MAX_LOCATION",
+        ))
     }
 }
 
@@ -593,5 +623,52 @@ mod tests {
             }
             _ => panic!("expected LocationOverflow error"),
         }
+    }
+
+    #[test]
+    fn test_read_cfg_valid_values() {
+        use commonware_codec::{Encode, ReadExt};
+
+        // Test zero
+        let loc = Location::new(0).unwrap();
+        let encoded = loc.encode();
+        let decoded = Location::read(&mut encoded.as_ref()).unwrap();
+        assert_eq!(decoded, loc);
+
+        // Test middle value
+        let loc = Location::new(12345).unwrap();
+        let encoded = loc.encode();
+        let decoded = Location::read(&mut encoded.as_ref()).unwrap();
+        assert_eq!(decoded, loc);
+
+        // Test MAX_LOCATION (boundary)
+        let loc = Location::new(MAX_LOCATION).unwrap();
+        let encoded = loc.encode();
+        let decoded = Location::read(&mut encoded.as_ref()).unwrap();
+        assert_eq!(decoded, loc);
+    }
+
+    #[test]
+    fn test_read_cfg_invalid_values() {
+        use commonware_codec::{Encode, ReadExt};
+
+        // Encode MAX_LOCATION + 1 as a raw varint, then try to decode as Location
+        let invalid_value = MAX_LOCATION + 1;
+        let encoded = commonware_codec::varint::UInt(invalid_value).encode();
+        let result = Location::read(&mut encoded.as_ref());
+        assert!(result.is_err());
+        assert!(matches!(
+            result,
+            Err(commonware_codec::Error::Invalid("Location", _))
+        ));
+
+        // Encode u64::MAX as a raw varint
+        let encoded = commonware_codec::varint::UInt(u64::MAX).encode();
+        let result = Location::read(&mut encoded.as_ref());
+        assert!(result.is_err());
+        assert!(matches!(
+            result,
+            Err(commonware_codec::Error::Invalid("Location", _))
+        ));
     }
 }

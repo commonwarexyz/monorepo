@@ -42,17 +42,17 @@ impl<D: Digest> ProofStore<D> {
         let digests =
             proof.verify_range_inclusion_and_extract_digests(hasher, elements, start_loc, root)?;
 
-        Ok(Self::new_from_digests(proof.size, digests))
+        Self::new_from_digests(proof.leaves, digests)
     }
 
     /// Create a new [ProofStore] from the result of calling
     /// [Proof::verify_range_inclusion_and_extract_digests]. The resulting store can be used to
     /// generate proofs over any sub-range of the original range.
-    pub fn new_from_digests(size: Position, digests: Vec<(Position, D)>) -> Self {
-        Self {
-            size,
+    pub fn new_from_digests(leaves: Location, digests: Vec<(Position, D)>) -> Result<Self, Error> {
+        Ok(Self {
+            size: Position::try_from(leaves)?,
             digests: digests.into_iter().collect(),
-        }
+        })
     }
 
     /// Return a range proof for the nodes corresponding to the given location range.
@@ -88,25 +88,26 @@ pub async fn range_proof<D: Digest, S: Storage<D>>(
     mmr: &S,
     range: Range<Location>,
 ) -> Result<Proof<D>, Error> {
-    historical_range_proof(mmr, mmr.size(), range).await
+    let leaves = Location::try_from(mmr.size())?;
+    historical_range_proof(mmr, leaves, range).await
 }
 
 /// Analogous to range_proof but for a previous database state. Specifically, the state when the MMR
-/// had `size` nodes.
+/// had `leaves` leaves.
 ///
 /// # Errors
 ///
 /// Returns [Error::LocationOverflow] if any location in `range` > [crate::mmr::MAX_LOCATION]
-/// Returns [Error::RangeOutOfBounds] if any location in `range` > `size`
+/// Returns [Error::RangeOutOfBounds] if any location in `range` > `leaves`
 /// Returns [Error::ElementPruned] if some element needed to generate the proof has been pruned
 /// Returns [Error::Empty] if the requested range is empty
 pub async fn historical_range_proof<D: Digest, S: Storage<D>>(
     mmr: &S,
-    size: Position,
+    leaves: Location,
     range: Range<Location>,
 ) -> Result<Proof<D>, Error> {
     // Get the positions of all nodes needed to generate the proof.
-    let positions = proof::nodes_required_for_range_proof(size, range)?;
+    let positions = proof::nodes_required_for_range_proof(leaves, range)?;
 
     // Fetch the digest of each.
     let mut digests: Vec<D> = Vec::new();
@@ -120,7 +121,7 @@ pub async fn historical_range_proof<D: Digest, S: Storage<D>>(
         };
     }
 
-    Ok(Proof { size, digests })
+    Ok(Proof { leaves, digests })
 }
 
 /// Return an inclusion proof for the elements at the specified locations. This is analogous to
@@ -145,7 +146,8 @@ pub async fn multi_proof<D: Digest, S: Storage<D>>(
 
     // Collect all required node positions
     let size = mmr.size();
-    let node_positions: BTreeSet<_> = proof::nodes_required_for_multi_proof(size, locations)?;
+    let leaves = Location::try_from(size)?;
+    let node_positions: BTreeSet<_> = proof::nodes_required_for_multi_proof(leaves, locations)?;
 
     // Fetch all required digests in parallel and collect with positions
     let node_futures: Vec<_> = node_positions
@@ -163,7 +165,7 @@ pub async fn multi_proof<D: Digest, S: Storage<D>>(
         }
     }
 
-    Ok(Proof { size, digests })
+    Ok(Proof { leaves, digests })
 }
 
 #[cfg(test)]
