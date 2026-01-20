@@ -98,17 +98,31 @@ regenerate-conformance *args='':
 readiness_excludes := "--exclude commonware-deployer --exclude commonware-bridge --exclude commonware-chat --exclude commonware-estimator --exclude commonware-flood --exclude commonware-log --exclude commonware-sync --exclude commonware-broadcast-fuzz --exclude commonware-codec-fuzz --exclude commonware-coding-fuzz --exclude commonware-collector-fuzz --exclude commonware-consensus-fuzz --exclude commonware-cryptography-fuzz --exclude commonware-p2p-fuzz --exclude commonware-runtime-fuzz --exclude commonware-storage-fuzz --exclude commonware-stream-fuzz --exclude commonware-utils-fuzz"
 
 # Check readiness builds. Optionally specify level (1-4) and/or crate (-p <crate>).
-# Examples: just check-readiness, just check-readiness 3, just check-readiness 2 -p commonware-cryptography
-check-readiness level='' *args='':
+# Examples: just check-readiness, just check-readiness 3, just check-readiness 2 -p commonware-cryptography, just check-readiness -p commonware-codec
+check-readiness *args='':
     #!/usr/bin/env bash
-    if [ -z "{{ level }}" ]; then
+    all_args="{{ args }}"
+    level=""
+    extra_args=""
+    # Check if first arg is a number 1-4
+    if [[ "$all_args" =~ ^[1-4](\ |$) ]]; then
+        level="${all_args%% *}"
+        extra_args="${all_args#* }"
+        # Handle case where level is the only arg
+        if [ "$extra_args" = "$level" ]; then
+            extra_args=""
+        fi
+    else
+        extra_args="$all_args"
+    fi
+    if [ -z "$level" ]; then
         for l in 1 2 3 4; do
             echo "Checking min_readiness_$l..."
-            RUSTFLAGS="--cfg min_readiness_$l" cargo build --workspace --lib {{ readiness_excludes }} {{ args }} || exit 1
+            RUSTFLAGS="--cfg min_readiness_$l" cargo build --workspace --lib {{ readiness_excludes }} $extra_args || exit 1
         done
         echo "All readiness levels pass!"
     else
-        echo "Checking min_readiness_{{ level }}..."
-        RUSTFLAGS="--cfg min_readiness_{{ level }}" cargo build --workspace --lib {{ readiness_excludes }} {{ args }}
+        echo "Checking min_readiness_$level..."
+        RUSTFLAGS="--cfg min_readiness_$level" cargo build --workspace --lib {{ readiness_excludes }} $extra_args
     fi
 

@@ -220,10 +220,9 @@ pub use error::Error;
 pub use extensions::*;
 
 #[cfg(feature = "arbitrary")]
-ready_mod!(2, pub mod conformance);
+pub mod conformance;
 
 // Re-export paste for use in conformance macros
 #[cfg(feature = "arbitrary")]
-#[ready(2)]
 #[doc(hidden)]
 pub use paste;
