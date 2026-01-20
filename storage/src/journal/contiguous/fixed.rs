@@ -1576,13 +1576,7 @@ mod tests {
                     .expect("failed to append data");
             }
             assert_eq!(journal.size(), 10);
-            // Sync data only to simulate a crash before metadata is updated.
-            let tail_section = journal.size / journal.items_per_blob;
-            journal
-                .inner
-                .sync(tail_section)
-                .await
-                .expect("Failed to sync data");
+            journal.sync().await.expect("Failed to sync journal");
             drop(journal);
 
             // Open the blob directly and truncate to a page boundary.

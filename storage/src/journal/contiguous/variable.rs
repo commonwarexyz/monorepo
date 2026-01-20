@@ -153,7 +153,7 @@ pub struct Journal<E: Clock + Storage + Metrics, V: Codec> {
     /// The position of the first item that remains after pruning.
     ///
     /// After normal operation and pruning, `oldest_retained_pos` is section-aligned.
-    /// After `init_at_size(N)`, `oldest_retained_pos` may be mid-section (N % items_per_section != 0).
+    /// After `init_at_size(N)`, `oldest_retained_pos` may be mid-section.
     ///
     /// # Invariant
     ///
