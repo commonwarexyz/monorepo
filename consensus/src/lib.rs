@@ -12,8 +12,7 @@
 
 use commonware_codec::Codec;
 use commonware_cryptography::{Committable, Digestible};
-use commonware_macros::ready;
-use commonware_macros::ready_mod;
+use commonware_macros::{ready, ready_mod};
 
 ready_mod!(1, pub mod aggregation);
 ready_mod!(1, pub mod ordered_broadcast);

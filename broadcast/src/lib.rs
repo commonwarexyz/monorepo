@@ -6,8 +6,7 @@
 )]
 
 use commonware_codec::Codec;
-use commonware_macros::ready;
-use commonware_macros::ready_mod;
+use commonware_macros::{ready, ready_mod};
 use futures::channel::oneshot;
 use std::future::Future;
 

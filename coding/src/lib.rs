@@ -12,9 +12,8 @@
 
 use bytes::Buf;
 use commonware_codec::{Codec, FixedSize, Read, Write};
-use commonware_macros::ready;
+use commonware_macros::{ready, ready_mod};
 use commonware_parallel::Strategy;
-use commonware_macros::ready_mod;
 use std::fmt::Debug;
 
 ready_mod!(1, mod reed_solomon);
