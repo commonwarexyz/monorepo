@@ -442,9 +442,8 @@ impl<E: Clock + Storage + Metrics, K: Span, V: Codec> Metadata<E, K, V> {
         next_data.put_u32(Crc32::checksum(&next_data[..]));
 
         // Write & persist the new data
-        let old_data_len = target.data.len();
         target.blob.write_at(next_data.clone(), 0).await?;
-        if next_data.len() < old_data_len {
+        if next_data.len() < target.data.len() {
             target.blob.resize(next_data.len() as u64).await?;
         }
         target.blob.sync().await?;
