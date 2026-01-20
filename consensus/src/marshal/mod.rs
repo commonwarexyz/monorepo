@@ -2461,6 +2461,187 @@ mod tests {
         })
     }
 
+    /// Regression test for re-proposal validation in optimistic_verify.
+    ///
+    /// Verifies that:
+    /// 1. Valid re-proposals at epoch boundaries are accepted
+    /// 2. Invalid re-proposals (not at epoch boundary) are rejected
+    ///
+    /// A re-proposal occurs when the parent commitment equals the block being verified,
+    /// meaning the same block is being proposed again in a new view.
+    #[test_traced("INFO")]
+    fn test_reproposal_validation() {
+        #[derive(Clone)]
+        struct MockVerifyingApp {
+            genesis: B,
+        }
+
+        impl crate::Application<deterministic::Context> for MockVerifyingApp {
+            type Block = B;
+            type Context = Context<D, K>;
+            type SigningScheme = S;
+
+            async fn genesis(&mut self) -> Self::Block {
+                self.genesis.clone()
+            }
+
+            async fn propose(
+                &mut self,
+                _context: (deterministic::Context, Self::Context),
+                _ancestry: AncestorStream<Self::SigningScheme, Self::Block>,
+            ) -> Option<Self::Block> {
+                None
+            }
+        }
+
+        impl VerifyingApplication<deterministic::Context> for MockVerifyingApp {
+            async fn verify(
+                &mut self,
+                _context: (deterministic::Context, Self::Context),
+                _ancestry: AncestorStream<Self::SigningScheme, Self::Block>,
+            ) -> bool {
+                true
+            }
+        }
+
+        let runner = deterministic::Runner::timed(Duration::from_secs(60));
+        runner.start(|mut context| async move {
+            let mut oracle = setup_network(context.clone(), None);
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+
+            let me = participants[0].clone();
+            let (_base_app, marshal, _processed_height) = setup_validator(
+                context.with_label("validator_0"),
+                &mut oracle,
+                me.clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+
+            let genesis = make_block(Sha256::hash(b""), Height::zero(), 0);
+
+            let mock_app = MockVerifyingApp {
+                genesis: genesis.clone(),
+            };
+            let mut marshaled = Marshaled::new(
+                context.clone(),
+                mock_app,
+                marshal.clone(),
+                FixedEpocher::new(BLOCKS_PER_EPOCH),
+            );
+
+            // Build a chain up to the epoch boundary (height 19 is the last block in epoch 0
+            // with BLOCKS_PER_EPOCH=20, since epoch 0 covers heights 0-19)
+            let mut parent = genesis.commitment();
+            let mut last_view = View::zero();
+            for i in 1..BLOCKS_PER_EPOCH.get() {
+                let round = Round::new(Epoch::new(0), View::new(i));
+                let ctx = Context {
+                    round,
+                    leader: me.clone(),
+                    parent: (last_view, parent),
+                };
+                let block = B::new::<Sha256>(ctx.clone(), parent, Height::new(i), i * 100);
+                marshal.clone().verified(round, block.clone()).await;
+                parent = block.commitment();
+                last_view = View::new(i);
+            }
+
+            // Create the epoch boundary block (height 19, last block in epoch 0)
+            let boundary_height = Height::new(BLOCKS_PER_EPOCH.get() - 1);
+            let boundary_round = Round::new(Epoch::new(0), View::new(boundary_height.get()));
+            let boundary_context = Context {
+                round: boundary_round,
+                leader: me.clone(),
+                parent: (last_view, parent),
+            };
+            let boundary_block = B::new::<Sha256>(
+                boundary_context.clone(),
+                parent,
+                boundary_height,
+                boundary_height.get() * 100,
+            );
+            let boundary_commitment = boundary_block.commitment();
+            marshal
+                .clone()
+                .verified(boundary_round, boundary_block.clone())
+                .await;
+
+            // Make the boundary block available for subscription
+            marshal
+                .clone()
+                .proposed(boundary_round, boundary_block.clone())
+                .await;
+
+            context.sleep(Duration::from_millis(10)).await;
+
+            // Test 1: Valid re-proposal at epoch boundary should be accepted
+            // Re-proposal context: parent commitment equals the block being verified
+            let reproposal_round = Round::new(Epoch::new(1), View::new(20));
+            let reproposal_context = Context {
+                round: reproposal_round,
+                leader: me.clone(),
+                parent: (View::new(boundary_height.get()), boundary_commitment), // Parent IS the boundary block
+            };
+
+            // Call verify (which calls optimistic_verify internally via Automaton trait)
+            let verify_result = marshaled
+                .verify(reproposal_context.clone(), boundary_commitment)
+                .await
+                .await;
+            assert!(
+                verify_result.unwrap(),
+                "Valid re-proposal at epoch boundary should be accepted"
+            );
+
+            // Test 2: Invalid re-proposal (not at epoch boundary) should be rejected
+            // Create a block at height 10 (not at epoch boundary)
+            let non_boundary_height = Height::new(10);
+            let non_boundary_round = Round::new(Epoch::new(0), View::new(10));
+            let non_boundary_context = Context {
+                round: non_boundary_round,
+                leader: me.clone(),
+                parent: (View::new(9), parent),
+            };
+            let non_boundary_block = B::new::<Sha256>(
+                non_boundary_context.clone(),
+                parent,
+                non_boundary_height,
+                1000,
+            );
+            let non_boundary_commitment = non_boundary_block.commitment();
+
+            // Make the non-boundary block available
+            marshal
+                .clone()
+                .proposed(non_boundary_round, non_boundary_block.clone())
+                .await;
+
+            context.sleep(Duration::from_millis(10)).await;
+
+            // Attempt to re-propose the non-boundary block
+            let invalid_reproposal_round = Round::new(Epoch::new(0), View::new(15));
+            let invalid_reproposal_context = Context {
+                round: invalid_reproposal_round,
+                leader: me.clone(),
+                parent: (View::new(10), non_boundary_commitment),
+            };
+
+            let verify_result = marshaled
+                .verify(invalid_reproposal_context, non_boundary_commitment)
+                .await
+                .await;
+            assert!(
+                !verify_result.unwrap(),
+                "Invalid re-proposal (not at epoch boundary) should be rejected"
+            );
+        })
+    }
+
     #[test_traced("INFO")]
     fn test_broadcast_caches_block() {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));

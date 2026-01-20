@@ -221,12 +221,17 @@ where
                     }
                 };
 
-                // You can only re-propose the same block if it's the last height in the epoch.
+                // You can only re-propose the same block if it's the last height in its epoch.
                 if parent.commitment() == block.commitment() {
-                    let last_in_epoch = epocher
-                        .last(context.epoch())
-                        .expect("current epoch should exist");
-                    let is_valid = block.height() == last_in_epoch;
+                    let Some(block_bounds) = epocher.containing(block.height()) else {
+                        debug!(
+                            height = %block.height(),
+                            "re-proposal block height not in any known epoch"
+                        );
+                        tx.send_lossy(false);
+                        return;
+                    };
+                    let is_valid = block.height() == block_bounds.last();
                     if is_valid {
                         marshal.verified(context.round, block).await;
                     }
@@ -521,24 +526,46 @@ where
                 };
 
                 // Check if this is a re-proposal (the block commitment matches the parent from
-                // the context). Re-proposals at epoch boundaries retain their original embedded
-                // context, so we skip the context check for them.
+                // the context). Re-proposals are only valid at epoch boundaries.
                 let is_reproposal = context.parent.1 == digest;
-
-                // Before casting a notarize vote, ensure the block's embedded context matches
-                // the consensus context. This is a critical step - the notarize quorum is
-                // guaranteed to have at least f+1 honest validators who will verify against this
-                // context, preventing a Byzantine proposer from embedding a malicious context.
-                // The other f honest validators who did not vote will later use the block-embedded
-                // context to help finalize if Byzantine validators withhold their finalize votes.
-                if !is_reproposal && block.context() != context {
-                    debug!(
-                        ?context,
-                        block_context = ?block.context(),
-                        "block-embedded context does not match consensus context during optimistic verification"
-                    );
-                    tx.send_lossy(false);
-                    return;
+                if is_reproposal {
+                    // Use the block's epoch (not context's epoch) since the block being
+                    // re-proposed was created in the previous epoch.
+                    let Some(block_bounds) = marshaled.epocher.containing(block.height()) else {
+                        debug!(
+                            height = %block.height(),
+                            "re-proposal block height not in any known epoch"
+                        );
+                        tx.send_lossy(false);
+                        return;
+                    };
+                    if block.height() != block_bounds.last() {
+                        debug!(
+                            height = %block.height(),
+                            last_in_epoch = %block_bounds.last(),
+                            "re-proposal is not at epoch boundary"
+                        );
+                        tx.send_lossy(false);
+                        return;
+                    }
+                    // Valid re-proposal at epoch boundary - skip context check since
+                    // the block retains its original embedded context.
+                } else {
+                    // Before casting a notarize vote, ensure the block's embedded context matches
+                    // the consensus context. This is a critical step - the notarize quorum is
+                    // guaranteed to have at least f+1 honest validators who will verify against this
+                    // context, preventing a Byzantine proposer from embedding a malicious context.
+                    // The other f honest validators who did not vote will later use the block-embedded
+                    // context to help finalize if Byzantine validators withhold their finalize votes.
+                    if block.context() != context {
+                        debug!(
+                            ?context,
+                            block_context = ?block.context(),
+                            "block-embedded context does not match consensus context during optimistic verification"
+                        );
+                        tx.send_lossy(false);
+                        return;
+                    }
                 }
 
                 // Begin the rest of the verification process asynchronously.
