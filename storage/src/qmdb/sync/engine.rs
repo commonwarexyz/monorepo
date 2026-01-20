@@ -443,8 +443,8 @@ where
     /// 3. Handles different event types (target updates, fetch results)
     /// 4. Coordinates request scheduling and operation application
     ///
-    /// Returns `StepResult::Complete(database)` when sync is finished, or
-    /// `StepResult::Continue(self)` when more work remains.
+    /// Returns `NextStep::Complete(database)` when sync is finished, or
+    /// `NextStep::Continue(self)` when more work remains.
     pub(crate) async fn step(mut self) -> Result<NextStep<Self, DB>, Error<DB, R>> {
         // Check if sync is complete
         if self.is_complete().await? {
