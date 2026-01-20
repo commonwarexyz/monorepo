@@ -8,13 +8,14 @@ use crate::{
 use commonware_consensus::{
     elector::Config as Elector,
     marshal,
-    simplex::{self, scheme, types::Context},
+    simplex::{
+        self, scheme,
+        types::{Context, SimplexConsensus},
+    },
     types::{Epoch, Epocher, FixedEpocher, ViewDelta},
     CertifiableAutomaton, Relay,
 };
-use commonware_cryptography::{
-    bls12381::primitives::variant::Variant, certificate::Scheme, Hasher, Signer,
-};
+use commonware_cryptography::{bls12381::primitives::variant::Variant, Hasher, Signer};
 use commonware_macros::select_loop;
 use commonware_p2p::{
     utils::mux::{Builder, MuxHandle, Muxer},
@@ -41,14 +42,14 @@ where
     H: Hasher,
     A: CertifiableAutomaton<Context = Context<H::Digest, C::PublicKey>, Digest = H::Digest>
         + Relay<Digest = H::Digest>,
-    S: Scheme,
+    S: scheme::Scheme<H::Digest>,
     L: Elector<S>,
     T: Strategy,
 {
     pub oracle: B,
     pub application: A,
     pub provider: Provider<S, C>,
-    pub marshal: marshal::Mailbox<S, Block<H, C, V>>,
+    pub marshal: marshal::Mailbox<SimplexConsensus<S, H::Digest>, Block<H, C, V>>,
     pub strategy: T,
 
     pub muxer_size: usize,
@@ -69,7 +70,7 @@ where
     H: Hasher,
     A: CertifiableAutomaton<Context = Context<H::Digest, C::PublicKey>, Digest = H::Digest>
         + Relay<Digest = H::Digest>,
-    S: Scheme,
+    S: scheme::Scheme<H::Digest>,
     L: Elector<S>,
     T: Strategy,
     Provider<S, C>: EpochProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
@@ -79,7 +80,7 @@ where
     application: A,
 
     oracle: B,
-    marshal: marshal::Mailbox<S, Block<H, C, V>>,
+    marshal: marshal::Mailbox<SimplexConsensus<S, H::Digest>, Block<H, C, V>>,
     provider: Provider<S, C>,
     strategy: T,
 

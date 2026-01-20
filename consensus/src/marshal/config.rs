@@ -1,4 +1,5 @@
 use crate::{
+    marshal::consensus::{MarshalConsensus, MarshalFinalization, MarshalNotarization},
     types::{Epoch, Epocher, ViewDelta},
     Block,
 };
@@ -8,10 +9,11 @@ use commonware_runtime::buffer::PoolRef;
 use std::num::{NonZeroU64, NonZeroUsize};
 
 /// Marshal configuration.
-pub struct Config<B, P, ES, T>
+pub struct Config<B, C, P, ES, T>
 where
     B: Block,
-    P: Provider<Scope = Epoch>,
+    C: MarshalConsensus<Digest = B::Commitment>,
+    P: Provider<Scope = Epoch, Scheme = C::Scheme>,
     ES: Epocher,
     T: Strategy,
 {
@@ -49,6 +51,14 @@ where
 
     /// Codec configuration for block type.
     pub block_codec_config: B::Cfg,
+
+    /// Codec configuration for notarization certificates.
+    pub notarization_codec_config:
+        <C::Notarization as MarshalNotarization<C::Scheme, C::Digest>>::Cfg,
+
+    /// Codec configuration for finalization certificates.
+    pub finalization_codec_config:
+        <C::Finalization as MarshalFinalization<C::Scheme, C::Digest>>::Cfg,
 
     /// Maximum number of blocks to repair at once.
     pub max_repair: NonZeroUsize,

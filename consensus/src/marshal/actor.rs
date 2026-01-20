@@ -8,13 +8,10 @@ use super::{
 };
 use crate::{
     marshal::{
+        consensus::{MarshalConsensus, MarshalFinalization, MarshalNotarization},
         ingress::mailbox::Identifier as BlockID,
         store::{Blocks, Certificates},
         Update,
-    },
-    simplex::{
-        scheme::Scheme,
-        types::{Finalization, Notarization},
     },
     types::{Epoch, Epocher, Height, Round, ViewDelta},
     Block, Reporter,
@@ -102,12 +99,13 @@ struct BlockSubscription<B: Block> {
 /// finalization for a block that is ahead of its current view, it will request the missing blocks
 /// from its peers. This ensures that the actor can catch up to the rest of the network if it falls
 /// behind.
-pub struct Actor<E, B, P, FC, FB, ES, T, A = Exact>
+pub struct Actor<E, B, C, P, FC, FB, ES, T, A = Exact>
 where
     E: CryptoRngCore + Spawner + Metrics + Clock + Storage,
     B: Block,
-    P: Provider<Scope = Epoch, Scheme: Scheme<B::Commitment>>,
-    FC: Certificates<Commitment = B::Commitment, Scheme = P::Scheme>,
+    C: MarshalConsensus<Digest = B::Commitment>,
+    P: Provider<Scope = Epoch, Scheme = C::Scheme>,
+    FC: Certificates<Commitment = B::Commitment, Finalization = C::Finalization>,
     FB: Blocks<Block = B>,
     ES: Epocher,
     T: Strategy,
@@ -118,7 +116,7 @@ where
 
     // ---------- Message Passing ----------
     // Mailbox
-    mailbox: mpsc::Receiver<Message<P::Scheme, B>>,
+    mailbox: mpsc::Receiver<Message<C, B>>,
 
     // ---------- Configuration ----------
     // Provider for epoch-specific signing schemes
@@ -131,6 +129,10 @@ where
     max_repair: NonZeroUsize,
     // Codec configuration for block type
     block_codec_config: B::Cfg,
+    // Codec configuration for notarization certificates
+    notarization_codec_config: <C::Notarization as MarshalNotarization<C::Scheme, C::Digest>>::Cfg,
+    // Codec configuration for finalization certificates
+    finalization_codec_config: <C::Finalization as MarshalFinalization<C::Scheme, C::Digest>>::Cfg,
     // Strategy for parallel operations
     strategy: T,
 
@@ -148,7 +150,7 @@ where
 
     // ---------- Storage ----------
     // Prunable cache
-    cache: cache::Manager<E, B, P::Scheme>,
+    cache: cache::Manager<E, B, C>,
     // Metadata tracking application progress
     application_metadata: Metadata<E, U64, Height>,
     // Finalizations stored by height
@@ -163,12 +165,13 @@ where
     processed_height: Gauge,
 }
 
-impl<E, B, P, FC, FB, ES, T, A> Actor<E, B, P, FC, FB, ES, T, A>
+impl<E, B, C, P, FC, FB, ES, T, A> Actor<E, B, C, P, FC, FB, ES, T, A>
 where
     E: CryptoRngCore + Spawner + Metrics + Clock + Storage,
     B: Block,
-    P: Provider<Scope = Epoch, Scheme: Scheme<B::Commitment>>,
-    FC: Certificates<Commitment = B::Commitment, Scheme = P::Scheme>,
+    C: MarshalConsensus<Digest = B::Commitment>,
+    P: Provider<Scope = Epoch, Scheme = C::Scheme>,
+    FC: Certificates<Commitment = B::Commitment, Finalization = C::Finalization>,
     FB: Blocks<Block = B>,
     ES: Epocher,
     T: Strategy,
@@ -179,8 +182,8 @@ where
         context: E,
         finalizations_by_height: FC,
         finalized_blocks: FB,
-        config: Config<B, P, ES, T>,
-    ) -> (Self, Mailbox<P::Scheme, B>, Height) {
+        config: Config<B, C, P, ES, T>,
+    ) -> (Self, Mailbox<C, B>, Height) {
         // Initialize cache
         let prunable_config = cache::Config {
             partition_prefix: format!("{}-cache", config.partition_prefix.clone()),
@@ -194,6 +197,8 @@ where
             context.with_label("cache"),
             prunable_config,
             config.block_codec_config.clone(),
+            config.notarization_codec_config.clone(),
+            config.finalization_codec_config.clone(),
         )
         .await;
 
@@ -238,6 +243,8 @@ where
                 view_retention_timeout: config.view_retention_timeout,
                 max_repair: config.max_repair,
                 block_codec_config: config.block_codec_config,
+                notarization_codec_config: config.notarization_codec_config,
+                finalization_codec_config: config.finalization_codec_config,
                 strategy: config.strategy,
                 last_processed_round: Round::zero(),
                 last_processed_height,
@@ -266,7 +273,7 @@ where
     where
         R: Resolver<
             Key = handler::Request<B>,
-            PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
+            PublicKey = <C::Scheme as CertificateScheme>::PublicKey,
         >,
         K: PublicKey,
     {
@@ -282,7 +289,7 @@ where
     ) where
         R: Resolver<
             Key = handler::Request<B>,
-            PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
+            PublicKey = <C::Scheme as CertificateScheme>::PublicKey,
         >,
         K: PublicKey,
     {
@@ -371,7 +378,7 @@ where
                                 .await
                                 .ok()
                                 .flatten()
-                                .map(|f| (height, f.proposal.payload)),
+                                .map(|f| (height, MarshalFinalization::payload(&f))),
                             BlockID::Latest => self
                             .get_latest()
                             .await
@@ -387,8 +394,8 @@ where
                         self.cache_verified(round, block.commitment(), block).await;
                     }
                     Message::Notarization { notarization } => {
-                        let round = notarization.round();
-                        let commitment = notarization.proposal.payload;
+                        let round = MarshalNotarization::round(&notarization);
+                        let commitment = MarshalNotarization::payload(&notarization);
 
                         // Store notarization by view
                         self.cache.put_notarization(round, commitment, notarization.clone()).await;
@@ -404,8 +411,8 @@ where
                     }
                     Message::Finalization { finalization } => {
                         // Cache finalization by round
-                        let round = finalization.round();
-                        let commitment = finalization.proposal.payload;
+                        let round = MarshalFinalization::round(&finalization);
+                        let commitment = MarshalFinalization::payload(&finalization);
                         self.cache.put_finalization(round, commitment, finalization.clone()).await;
 
                         // Search for block locally, otherwise fetch it remotely
@@ -596,7 +603,7 @@ where
                                 };
 
                                 // Get block
-                                let commitment = notarization.proposal.payload;
+                                let commitment = MarshalNotarization::payload(&notarization);
                                 let Some(block) = self.find_block(&mut buffer, commitment).await else {
                                     debug!(?commitment, "block missing on request");
                                     continue;
@@ -648,9 +655,9 @@ where
 
                                 // Parse finalization
                                 let Ok((finalization, block)) =
-                                    <(Finalization<P::Scheme, B::Commitment>, B)>::decode_cfg(
+                                    <(C::Finalization, B)>::decode_cfg(
                                         value,
-                                        &(scheme.certificate_codec_config(), self.block_codec_config.clone()),
+                                        &(self.finalization_codec_config.clone(), self.block_codec_config.clone()),
                                     )
                                 else {
                                     response.send_lossy(false);
@@ -659,8 +666,8 @@ where
 
                                 // Validation
                                 if block.height() != height
-                                    || finalization.proposal.payload != block.commitment()
-                                    || !finalization.verify(&mut self.context, &scheme, &self.strategy)
+                                    || MarshalFinalization::payload(&finalization) != block.commitment()
+                                    || !C::verify_finalization(&finalization, &mut self.context, &scheme, &self.strategy)
                                 {
                                     response.send_lossy(false);
                                     continue;
@@ -688,9 +695,9 @@ where
 
                                 // Parse notarization
                                 let Ok((notarization, block)) =
-                                    <(Notarization<P::Scheme, B::Commitment>, B)>::decode_cfg(
+                                    <(C::Notarization, B)>::decode_cfg(
                                         value,
-                                        &(scheme.certificate_codec_config(), self.block_codec_config.clone()),
+                                        &(self.notarization_codec_config.clone(), self.block_codec_config.clone()),
                                     )
                                 else {
                                     response.send_lossy(false);
@@ -698,9 +705,9 @@ where
                                 };
 
                                 // Validation
-                                if notarization.round() != round
-                                    || notarization.proposal.payload != block.commitment()
-                                    || !notarization.verify(&mut self.context, &scheme, &self.strategy)
+                                if MarshalNotarization::round(&notarization) != round
+                                    || MarshalNotarization::payload(&notarization) != block.commitment()
+                                    || !C::verify_notarization(&notarization, &mut self.context, &scheme, &self.strategy)
                                 {
                                     response.send_lossy(false);
                                     continue;
@@ -817,7 +824,7 @@ where
             self.cache.prune(prune_round).await;
 
             // Update the last processed round
-            let round = finalization.round();
+            let round = MarshalFinalization::round(&finalization);
             self.last_processed_round = round;
 
             // Cancel useless requests
@@ -858,10 +865,7 @@ where
     }
 
     /// Get a finalization from the archive by height.
-    async fn get_finalization_by_height(
-        &self,
-        height: Height,
-    ) -> Option<Finalization<P::Scheme, B::Commitment>> {
+    async fn get_finalization_by_height(&self, height: Height) -> Option<C::Finalization> {
         match self
             .finalizations_by_height
             .get(ArchiveID::Index(height.get()))
@@ -880,7 +884,7 @@ where
         height: Height,
         commitment: B::Commitment,
         block: B,
-        finalization: Option<Finalization<P::Scheme, B::Commitment>>,
+        finalization: Option<C::Finalization>,
         application: &mut impl Reporter<Activity = Update<B, A>>,
         buffer: &mut buffered::Mailbox<impl PublicKey, B>,
         resolver: &mut impl Resolver<Key = Request<B>>,
@@ -900,7 +904,7 @@ where
         height: Height,
         commitment: B::Commitment,
         block: B,
-        finalization: Option<Finalization<P::Scheme, B::Commitment>>,
+        finalization: Option<C::Finalization>,
         application: &mut impl Reporter<Activity = Update<B, A>>,
     ) {
         self.notify_subscribers(commitment, &block).await;
@@ -959,7 +963,7 @@ where
             .get_finalization_by_height(height)
             .await
             .expect("finalization missing");
-        Some((height, finalization.proposal.payload, finalization.round()))
+        Some((height, MarshalFinalization::payload(&finalization), MarshalFinalization::round(&finalization)))
     }
 
     // -------------------- Mixed Storage --------------------

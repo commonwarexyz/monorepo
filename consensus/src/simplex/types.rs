@@ -2391,6 +2391,116 @@ where
     }
 }
 
+// -----------------------------------------------------------------------------
+// Marshal Trait Implementations
+// -----------------------------------------------------------------------------
+
+use crate::marshal::consensus::{
+    MarshalActivity, MarshalConsensus, MarshalFinalization, MarshalNotarization,
+};
+use std::marker::PhantomData;
+
+impl<S: Scheme, D: Digest> MarshalNotarization<S, D> for Notarization<S, D> {
+    type Cfg = <S::Certificate as Read>::Cfg;
+
+    fn round(&self) -> Round {
+        Notarization::round(self)
+    }
+
+    fn payload(&self) -> D {
+        self.proposal.payload
+    }
+
+    fn decode_cfg_notarization(
+        bytes: impl AsRef<[u8]>,
+        cfg: &<Self as MarshalNotarization<S, D>>::Cfg,
+    ) -> Result<Self, commonware_codec::Error> {
+        <Self as Read>::read_cfg(&mut bytes.as_ref(), cfg)
+    }
+}
+
+impl<S: Scheme, D: Digest> MarshalFinalization<S, D> for Finalization<S, D> {
+    type Cfg = <S::Certificate as Read>::Cfg;
+
+    fn round(&self) -> Round {
+        Finalization::round(self)
+    }
+
+    fn parent(&self) -> View {
+        self.proposal.parent
+    }
+
+    fn payload(&self) -> D {
+        self.proposal.payload
+    }
+
+    fn decode_cfg_finalization(
+        bytes: impl AsRef<[u8]>,
+        cfg: &<Self as MarshalFinalization<S, D>>::Cfg,
+    ) -> Result<Self, commonware_codec::Error> {
+        <Self as Read>::read_cfg(&mut bytes.as_ref(), cfg)
+    }
+}
+
+/// Marker type for simplex consensus protocol.
+///
+/// This type implements [`MarshalConsensus`] to allow marshal to work with
+/// simplex-specific types generically.
+#[derive(Clone, Copy)]
+pub struct SimplexConsensus<S: Scheme, D: Digest>(PhantomData<(S, D)>);
+
+impl<S, D> MarshalActivity<SimplexConsensus<S, D>> for Activity<S, D>
+where
+    S: Scheme,
+    D: Digest,
+    S: scheme::Scheme<D>,
+{
+    fn into_notarization(self) -> Option<Notarization<S, D>> {
+        match self {
+            Activity::Notarization(n) => Some(n),
+            _ => None,
+        }
+    }
+
+    fn into_finalization(self) -> Option<Finalization<S, D>> {
+        match self {
+            Activity::Finalization(f) => Some(f),
+            _ => None,
+        }
+    }
+}
+
+impl<S, D> MarshalConsensus for SimplexConsensus<S, D>
+where
+    S: Scheme,
+    D: Digest,
+    S: scheme::Scheme<D>,
+{
+    type Scheme = S;
+    type Digest = D;
+    type Notarization = Notarization<S, D>;
+    type Finalization = Finalization<S, D>;
+    type Activity = Activity<S, D>;
+
+    fn verify_notarization<R: CryptoRngCore>(
+        notarization: &Self::Notarization,
+        rng: &mut R,
+        scheme: &Self::Scheme,
+        strategy: &impl commonware_parallel::Strategy,
+    ) -> bool {
+        Notarization::verify(notarization, rng, scheme, strategy)
+    }
+
+    fn verify_finalization<R: CryptoRngCore>(
+        finalization: &Self::Finalization,
+        rng: &mut R,
+        scheme: &Self::Scheme,
+        strategy: &impl commonware_parallel::Strategy,
+    ) -> bool {
+        Finalization::verify(finalization, rng, scheme, strategy)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

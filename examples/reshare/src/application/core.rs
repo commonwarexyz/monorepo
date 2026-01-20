@@ -6,12 +6,15 @@ use crate::{
 };
 use commonware_consensus::{
     marshal::ingress::mailbox::AncestorStream,
-    simplex::types::Context,
     types::{Epoch, Round, View},
+    simplex::{
+        scheme::Scheme,
+        types::{Context, SimplexConsensus},
+    },
     Heightable, VerifyingApplication,
 };
 use commonware_cryptography::{
-    bls12381::primitives::variant::Variant, certificate::Scheme, Committable, Digest, Hasher,
+    bls12381::primitives::variant::Variant, Committable, Digest, Hasher,
     Signer,
 };
 use commonware_runtime::{Clock, Metrics, Spawner};
@@ -23,7 +26,7 @@ use std::marker::PhantomData;
 pub struct Application<E, S, H, C, V>
 where
     E: Rng + Spawner + Metrics + Clock,
-    S: Scheme,
+    S: Scheme<H::Digest>,
     H: Hasher,
     C: Signer,
     V: Variant,
@@ -35,7 +38,7 @@ where
 impl<E, S, H, C, V> Application<E, S, H, C, V>
 where
     E: Rng + Spawner + Metrics + Clock,
-    S: Scheme,
+    S: Scheme<H::Digest>,
     H: Hasher,
     C: Signer,
     V: Variant,
@@ -51,13 +54,13 @@ where
 impl<E, S, H, C, V> commonware_consensus::Application<E> for Application<E, S, H, C, V>
 where
     E: Rng + Spawner + Metrics + Clock,
-    S: Scheme,
+    S: Scheme<H::Digest>,
     H: Hasher,
     C: Signer,
     V: Variant,
 {
     type Context = Context<H::Digest, C::PublicKey>;
-    type SigningScheme = S;
+    type Consensus = SimplexConsensus<S, H::Digest>;
     type Block = Block<H, C, V>;
 
     async fn genesis(&mut self) -> Self::Block {
@@ -74,7 +77,7 @@ where
     async fn propose(
         &mut self,
         (_, context): (E, Self::Context),
-        mut ancestry: AncestorStream<Self::SigningScheme, Self::Block>,
+        mut ancestry: AncestorStream<Self::Consensus, Self::Block>,
     ) -> Option<Self::Block> {
         // Fetch the parent block from the ancestry stream.
         let parent_block = ancestry.next().await?;
@@ -100,7 +103,7 @@ where
 impl<E, S, H, C, V> VerifyingApplication<E> for Application<E, S, H, C, V>
 where
     E: Rng + Spawner + Metrics + Clock,
-    S: Scheme,
+    S: Scheme<H::Digest>,
     H: Hasher,
     C: Signer,
     V: Variant,
@@ -108,7 +111,7 @@ where
     async fn verify(
         &mut self,
         _: (E, Self::Context),
-        _: AncestorStream<Self::SigningScheme, Self::Block>,
+        _: AncestorStream<Self::Consensus, Self::Block>,
     ) -> bool {
         // We wrap this application with `Marshaled`, which handles ancestry
         // verification (parent commitment and height contiguity).

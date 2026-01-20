@@ -12,7 +12,10 @@ use commonware_consensus::{
     application::marshaled::Marshaled,
     elector::Config as Elector,
     marshal::{self, ingress::handler},
-    simplex::{scheme::Scheme, types::Finalization},
+    simplex::{
+        scheme::Scheme,
+        types::{Finalization, SimplexConsensus},
+    },
     types::{FixedEpocher, ViewDelta},
 };
 use commonware_cryptography::{
@@ -97,6 +100,7 @@ where
     marshal: marshal::Actor<
         E,
         Block<H, C, V>,
+        SimplexConsensus<S, H::Digest>,
         Provider<S, C>,
         immutable::Archive<E, H::Digest, Finalization<S, H::Digest>>,
         immutable::Archive<E, H::Digest, Block<H, C, V>>,
@@ -110,7 +114,13 @@ where
         V,
         C,
         H,
-        Marshaled<E, S, Application<E, S, H, C, V>, Block<H, C, V>, FixedEpocher>,
+        Marshaled<
+            E,
+            SimplexConsensus<S, H::Digest>,
+            Application<E, S, H, C, V>,
+            Block<H, C, V>,
+            FixedEpocher,
+        >,
         S,
         L,
         T,
@@ -273,6 +283,8 @@ where
                 key_write_buffer: WRITE_BUFFER,
                 value_write_buffer: WRITE_BUFFER,
                 block_codec_config: num_participants,
+                notarization_codec_config: S::certificate_codec_config_unbounded(),
+                finalization_codec_config: S::certificate_codec_config_unbounded(),
                 max_repair: MAX_REPAIR,
                 strategy: config.strategy.clone(),
             },

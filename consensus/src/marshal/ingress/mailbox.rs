@@ -1,5 +1,5 @@
 use crate::{
-    simplex::types::{Activity, Finalization, Notarization},
+    marshal::consensus::{MarshalActivity, MarshalConsensus},
     types::{Height, Round},
     Block, Heightable, Reporter,
 };
@@ -57,7 +57,7 @@ impl<D: Digest> From<archive::Identifier<'_, D>> for Identifier<D> {
 ///
 /// These messages are sent from the consensus engine and other parts of the
 /// system to drive the state of the marshal.
-pub(crate) enum Message<S: Scheme, B: Block> {
+pub(crate) enum Message<C: MarshalConsensus, B: Block> {
     // -------------------- Application Messages --------------------
     /// A request to retrieve the (height, commitment) of a block by its identifier.
     /// The block must be finalized; returns `None` if the block is not finalized.
@@ -82,7 +82,7 @@ pub(crate) enum Message<S: Scheme, B: Block> {
         /// The height of the finalization to retrieve.
         height: Height,
         /// A channel to send the retrieved finalization.
-        response: oneshot::Sender<Option<Finalization<S, B::Commitment>>>,
+        response: oneshot::Sender<Option<C::Finalization>>,
     },
     /// A hint that a finalized block may be available at a given height.
     ///
@@ -98,7 +98,7 @@ pub(crate) enum Message<S: Scheme, B: Block> {
         /// The height of the finalization to fetch.
         height: Height,
         /// Target peers to fetch from. Added to any existing targets for this height.
-        targets: NonEmptyVec<S::PublicKey>,
+        targets: NonEmptyVec<<C::Scheme as Scheme>::PublicKey>,
     },
     /// A request to retrieve a block by its commitment.
     Subscribe {
@@ -151,24 +151,32 @@ pub(crate) enum Message<S: Scheme, B: Block> {
     /// A notarization from the consensus engine.
     Notarization {
         /// The notarization.
-        notarization: Notarization<S, B::Commitment>,
+        notarization: C::Notarization,
     },
     /// A finalization from the consensus engine.
     Finalization {
         /// The finalization.
-        finalization: Finalization<S, B::Commitment>,
+        finalization: C::Finalization,
     },
 }
 
 /// A mailbox for sending messages to the marshal [Actor](super::super::actor::Actor).
-#[derive(Clone)]
-pub struct Mailbox<S: Scheme, B: Block> {
-    sender: mpsc::Sender<Message<S, B>>,
+pub struct Mailbox<C: MarshalConsensus, B: Block> {
+    sender: mpsc::Sender<Message<C, B>>,
 }
 
-impl<S: Scheme, B: Block> Mailbox<S, B> {
+// Manual Clone implementation to avoid requiring C: Clone
+impl<C: MarshalConsensus, B: Block> Clone for Mailbox<C, B> {
+    fn clone(&self) -> Self {
+        Self {
+            sender: self.sender.clone(),
+        }
+    }
+}
+
+impl<C: MarshalConsensus, B: Block> Mailbox<C, B> {
     /// Creates a new mailbox.
-    pub(crate) const fn new(sender: mpsc::Sender<Message<S, B>>) -> Self {
+    pub(crate) const fn new(sender: mpsc::Sender<Message<C, B>>) -> Self {
         Self { sender }
     }
 
@@ -203,12 +211,9 @@ impl<S: Scheme, B: Block> Mailbox<S, B> {
             .flatten()
     }
 
-    /// A best-effort attempt to retrieve a given [Finalization] from local
-    /// storage. It is not an indication to go fetch the [Finalization] from the network.
-    pub async fn get_finalization(
-        &mut self,
-        height: Height,
-    ) -> Option<Finalization<S, B::Commitment>> {
+    /// A best-effort attempt to retrieve a given finalization from local
+    /// storage. It is not an indication to go fetch the finalization from the network.
+    pub async fn get_finalization(&mut self, height: Height) -> Option<C::Finalization> {
         self.sender
             .request(|response| Message::GetFinalization { height, response })
             .await
@@ -230,7 +235,11 @@ impl<S: Scheme, B: Block> Mailbox<S, B> {
     ///
     /// This is fire-and-forget: the finalization will be stored in marshal and delivered
     /// via the normal finalization flow when available.
-    pub async fn hint_finalized(&mut self, height: Height, targets: NonEmptyVec<S::PublicKey>) {
+    pub async fn hint_finalized(
+        &mut self,
+        height: Height,
+        targets: NonEmptyVec<<C::Scheme as Scheme>::PublicKey>,
+    ) {
         self.sender
             .send_lossy(Message::HintFinalized { height, targets })
             .await;
@@ -267,7 +276,7 @@ impl<S: Scheme, B: Block> Mailbox<S, B> {
     pub async fn ancestry(
         &mut self,
         (start_round, start_commitment): (Option<Round>, B::Commitment),
-    ) -> Option<AncestorStream<S, B>> {
+    ) -> Option<AncestorStream<C, B>> {
         self.subscribe(start_round, start_commitment)
             .await
             .await
@@ -310,28 +319,43 @@ impl<S: Scheme, B: Block> Mailbox<S, B> {
     pub async fn prune(&mut self, height: Height) {
         self.sender.send_lossy(Message::Prune { height }).await;
     }
+
+    /// Sends a notarization message to the marshal actor.
+    pub async fn send_notarization(&mut self, notarization: C::Notarization) {
+        self.sender
+            .send_lossy(Message::Notarization { notarization })
+            .await;
+    }
+
+    /// Sends a finalization message to the marshal actor.
+    pub async fn send_finalization(&mut self, finalization: C::Finalization) {
+        self.sender
+            .send_lossy(Message::Finalization { finalization })
+            .await;
+    }
 }
 
-impl<S: Scheme, B: Block> Reporter for Mailbox<S, B> {
-    type Activity = Activity<S, B::Commitment>;
+impl<C, B> Reporter for Mailbox<C, B>
+where
+    C: MarshalConsensus,
+    B: Block<Commitment = C::Digest>,
+{
+    type Activity = C::Activity;
 
     async fn report(&mut self, activity: Self::Activity) {
-        let message = match activity {
-            Activity::Notarization(notarization) => Message::Notarization { notarization },
-            Activity::Finalization(finalization) => Message::Finalization { finalization },
-            _ => {
-                // Ignore other activity types
-                return;
-            }
-        };
-        self.sender.send_lossy(message).await;
+        if let Some(notarization) = activity.clone().into_notarization() {
+            self.send_notarization(notarization).await;
+        } else if let Some(finalization) = activity.into_finalization() {
+            self.send_finalization(finalization).await;
+        }
+        // Other activity types are ignored
     }
 }
 
 /// Returns a boxed subscription future for a block.
 #[inline]
-fn subscribe_block_future<S: Scheme, B: Block>(
-    mut marshal: Mailbox<S, B>,
+fn subscribe_block_future<C: MarshalConsensus, B: Block>(
+    mut marshal: Mailbox<C, B>,
     commitment: B::Commitment,
 ) -> BoxFuture<'static, Option<B>> {
     async move {
@@ -346,20 +370,20 @@ fn subscribe_block_future<S: Scheme, B: Block>(
 /// TODO(clabby): Once marshal can also yield the genesis block, this stream should end
 /// at block height 0 rather than 1.
 #[pin_project]
-pub struct AncestorStream<S: Scheme, B: Block> {
-    marshal: Mailbox<S, B>,
+pub struct AncestorStream<C: MarshalConsensus, B: Block> {
+    marshal: Mailbox<C, B>,
     buffered: Vec<B>,
     #[pin]
     pending: FuturesOrdered<BoxFuture<'static, Option<B>>>,
 }
 
-impl<S: Scheme, B: Block> AncestorStream<S, B> {
+impl<C: MarshalConsensus, B: Block> AncestorStream<C, B> {
     /// Creates a new [AncestorStream] starting from the given ancestry.
     ///
     /// # Panics
     ///
     /// Panics if the initial blocks are not contiguous in height.
-    pub(crate) fn new(marshal: Mailbox<S, B>, initial: impl IntoIterator<Item = B>) -> Self {
+    pub(crate) fn new(marshal: Mailbox<C, B>, initial: impl IntoIterator<Item = B>) -> Self {
         let mut buffered = initial.into_iter().collect::<Vec<B>>();
         buffered.sort_by_key(Heightable::height);
 
@@ -380,7 +404,7 @@ impl<S: Scheme, B: Block> AncestorStream<S, B> {
     }
 }
 
-impl<S: Scheme, B: Block> Stream for AncestorStream<S, B> {
+impl<C: MarshalConsensus, B: Block> Stream for AncestorStream<C, B> {
     type Item = B;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {

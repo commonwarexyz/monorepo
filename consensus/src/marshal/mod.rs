@@ -67,6 +67,8 @@ pub use actor::Actor;
 pub mod cache;
 pub mod config;
 pub use config::Config;
+pub mod consensus;
+pub use consensus::{MarshalActivity, MarshalConsensus, MarshalFinalization, MarshalNotarization};
 pub mod ingress;
 pub use ingress::mailbox::Mailbox;
 pub mod resolver;
@@ -105,15 +107,27 @@ mod tests {
     use super::{
         actor,
         config::Config,
+        consensus::{MarshalConsensus, MarshalFinalization},
         mocks::{application::Application, block::Block},
         resolver::p2p as resolver,
     };
     use crate::{
         application::marshaled::Marshaled,
         marshal::ingress::mailbox::{AncestorStream, Identifier},
+        minimmit::{
+            scheme::bls12381_threshold as minimmit_bls12381_threshold,
+            types::{
+                Activity as MinimmitActivity, Finalization as MinimmitFinalization, MNotarization,
+                MinimmitConsensus, Notarize as MinimmitNotarize, Proposal as MinimmitProposal,
+            },
+        },
         simplex::{
-            scheme::bls12381_threshold::vrf as bls12381_threshold_vrf,
-            types::{Activity, Context, Finalization, Finalize, Notarization, Notarize, Proposal},
+            scheme::bls12381_threshold::vrf as simplex_bls12381_threshold,
+            types::{
+                Activity as SimplexActivity, Context, Finalization as SimplexFinalization,
+                Finalize as SimplexFinalize, Notarization as SimplexNotarization,
+                Notarize as SimplexNotarize, Proposal as SimplexProposal, SimplexConsensus,
+            },
         },
         types::{Epoch, Epocher, FixedEpocher, Height, Round, View, ViewDelta},
         Automaton, CertifiableAutomaton, Heightable, Reporter, VerifyingApplication,
@@ -155,8 +169,298 @@ mod tests {
     type Ctx = crate::simplex::types::Context<D, K>;
     type B = Block<D, Ctx>;
     type V = MinPk;
-    type S = bls12381_threshold_vrf::Scheme<K, V>;
-    type P = ConstantProvider<S, Epoch>;
+
+    // Simplex types
+    type SimplexS = simplex_bls12381_threshold::Scheme<K, V>;
+    type SimplexP = ConstantProvider<SimplexS, Epoch>;
+    type SimplexC = SimplexConsensus<SimplexS, D>;
+
+    // Minimmit types
+    type MinimmitS = minimmit_bls12381_threshold::Scheme<K, V>;
+    type MinimmitP = ConstantProvider<MinimmitS, Epoch>;
+    type MinimmitC = MinimmitConsensus<MinimmitS, D>;
+
+    /// Trait for abstracting over consensus protocol specifics in tests.
+    ///
+    /// This allows tests to be parameterized over different consensus implementations
+    /// (simplex, minimmit) while sharing the same test logic.
+    trait ConsensusTestHarness: Sized {
+        /// The consensus marker type implementing MarshalConsensus.
+        type Consensus: MarshalConsensus<Digest = D, Scheme = Self::Scheme>;
+
+        /// The signing scheme type.
+        type Scheme: commonware_cryptography::certificate::Scheme<PublicKey = K>;
+
+        /// The provider type for the scheme.
+        type Provider: commonware_cryptography::certificate::Provider<Scheme = Self::Scheme, Scope = Epoch>
+            + Clone
+            + Send
+            + Sync
+            + 'static;
+
+        /// Creates a fixture with the given number of validators.
+        fn fixture(
+            context: &mut deterministic::Context,
+            namespace: &[u8],
+            n: u32,
+        ) -> Fixture<Self::Scheme>;
+
+        /// Creates a provider from a scheme.
+        fn provider(scheme: Self::Scheme) -> Self::Provider;
+
+        /// Returns the L-quorum (finalization quorum) for n validators.
+        ///
+        /// For simplex, this is n-f where n=3f+1 (so L-quorum = 2f+1 for n=4 is 3).
+        /// For minimmit, this is n-f where n=5f+1 (so L-quorum = n-f for n=4 is 4).
+        fn l_quorum(n: u32) -> u32;
+
+        /// Returns the codec config for the notarization type.
+        fn notarization_codec_config(
+        ) -> <<Self::Consensus as MarshalConsensus>::Notarization as commonware_codec::Read>::Cfg;
+
+        /// Returns the codec config for the finalization type.
+        fn finalization_codec_config(
+        ) -> <<Self::Consensus as MarshalConsensus>::Finalization as commonware_codec::Read>::Cfg;
+
+        /// Creates a notarization from a proposal.
+        fn make_notarization(
+            round: Round,
+            parent_view: View,
+            parent_payload: D,
+            payload: D,
+            schemes: &[Self::Scheme],
+            quorum: u32,
+        ) -> <Self::Consensus as MarshalConsensus>::Notarization;
+
+        /// Creates a finalization from a proposal.
+        fn make_finalization(
+            round: Round,
+            parent_view: View,
+            parent_payload: D,
+            payload: D,
+            schemes: &[Self::Scheme],
+            quorum: u32,
+        ) -> <Self::Consensus as MarshalConsensus>::Finalization;
+
+        /// Wraps a notarization in an Activity for reporting.
+        fn notarization_activity(
+            notarization: <Self::Consensus as MarshalConsensus>::Notarization,
+        ) -> <Self::Consensus as MarshalConsensus>::Activity;
+
+        /// Wraps a finalization in an Activity for reporting.
+        fn finalization_activity(
+            finalization: <Self::Consensus as MarshalConsensus>::Finalization,
+        ) -> <Self::Consensus as MarshalConsensus>::Activity;
+
+        /// Returns the certificate codec config for unbounded certificates.
+        fn certificate_codec_config_unbounded(
+        ) -> <<Self::Consensus as MarshalConsensus>::Finalization as commonware_codec::Read>::Cfg;
+    }
+
+    /// Simplex consensus test harness implementation.
+    struct SimplexHarness;
+
+    impl ConsensusTestHarness for SimplexHarness {
+        type Consensus = SimplexC;
+        type Scheme = SimplexS;
+        type Provider = SimplexP;
+
+        fn fixture(
+            context: &mut deterministic::Context,
+            namespace: &[u8],
+            n: u32,
+        ) -> Fixture<Self::Scheme> {
+            simplex_bls12381_threshold::fixture::<V, _>(context, namespace, n)
+        }
+
+        fn provider(scheme: Self::Scheme) -> Self::Provider {
+            ConstantProvider::new(scheme)
+        }
+
+        fn l_quorum(n: u32) -> u32 {
+            // Simplex uses N3f1 model: f = (n-1)/3, L-quorum = n-f
+            use commonware_utils::Faults;
+            commonware_utils::N3f1::quorum(n)
+        }
+
+        fn notarization_codec_config(
+        ) -> <<Self::Consensus as MarshalConsensus>::Notarization as commonware_codec::Read>::Cfg
+        {
+            SimplexS::certificate_codec_config_unbounded()
+        }
+
+        fn finalization_codec_config(
+        ) -> <<Self::Consensus as MarshalConsensus>::Finalization as commonware_codec::Read>::Cfg
+        {
+            SimplexS::certificate_codec_config_unbounded()
+        }
+
+        fn make_notarization(
+            round: Round,
+            parent_view: View,
+            _parent_payload: D, // Simplex doesn't use parent_payload in proposals
+            payload: D,
+            schemes: &[Self::Scheme],
+            quorum: u32,
+        ) -> SimplexNotarization<SimplexS, D> {
+            let proposal = SimplexProposal {
+                round,
+                parent: parent_view,
+                payload,
+            };
+            let notarizes: Vec<_> = schemes
+                .iter()
+                .take(quorum as usize)
+                .map(|scheme| SimplexNotarize::sign(scheme, proposal.clone()).unwrap())
+                .collect();
+            SimplexNotarization::from_notarizes(&schemes[0], &notarizes, &Sequential).unwrap()
+        }
+
+        fn make_finalization(
+            round: Round,
+            parent_view: View,
+            _parent_payload: D,
+            payload: D,
+            schemes: &[Self::Scheme],
+            quorum: u32,
+        ) -> SimplexFinalization<SimplexS, D> {
+            let proposal = SimplexProposal {
+                round,
+                parent: parent_view,
+                payload,
+            };
+            let finalizes: Vec<_> = schemes
+                .iter()
+                .take(quorum as usize)
+                .map(|scheme| SimplexFinalize::sign(scheme, proposal.clone()).unwrap())
+                .collect();
+            SimplexFinalization::from_finalizes(&schemes[0], &finalizes, &Sequential).unwrap()
+        }
+
+        fn notarization_activity(
+            notarization: SimplexNotarization<SimplexS, D>,
+        ) -> SimplexActivity<SimplexS, D> {
+            SimplexActivity::Notarization(notarization)
+        }
+
+        fn finalization_activity(
+            finalization: SimplexFinalization<SimplexS, D>,
+        ) -> SimplexActivity<SimplexS, D> {
+            SimplexActivity::Finalization(finalization)
+        }
+
+        fn certificate_codec_config_unbounded(
+        ) -> <<Self::Consensus as MarshalConsensus>::Finalization as commonware_codec::Read>::Cfg
+        {
+            SimplexS::certificate_codec_config_unbounded()
+        }
+    }
+
+    /// Minimmit consensus test harness implementation.
+    struct MinimmitHarness;
+
+    impl ConsensusTestHarness for MinimmitHarness {
+        type Consensus = MinimmitC;
+        type Scheme = MinimmitS;
+        type Provider = MinimmitP;
+
+        fn fixture(
+            context: &mut deterministic::Context,
+            namespace: &[u8],
+            n: u32,
+        ) -> Fixture<Self::Scheme> {
+            minimmit_bls12381_threshold::fixture::<V, _>(context, namespace, n)
+        }
+
+        fn provider(scheme: Self::Scheme) -> Self::Provider {
+            ConstantProvider::new(scheme)
+        }
+
+        fn l_quorum(n: u32) -> u32 {
+            // Minimmit uses N5f1 model: f = (n-1)/5, L-quorum = n-f
+            use commonware_utils::Faults;
+            commonware_utils::N5f1::quorum(n)
+        }
+
+        fn notarization_codec_config(
+        ) -> <<Self::Consensus as MarshalConsensus>::Notarization as commonware_codec::Read>::Cfg
+        {
+            MinimmitS::certificate_codec_config_unbounded()
+        }
+
+        fn finalization_codec_config(
+        ) -> <<Self::Consensus as MarshalConsensus>::Finalization as commonware_codec::Read>::Cfg
+        {
+            MinimmitS::certificate_codec_config_unbounded()
+        }
+
+        fn make_notarization(
+            round: Round,
+            parent_view: View,
+            parent_payload: D,
+            payload: D,
+            schemes: &[Self::Scheme],
+            quorum: u32,
+        ) -> MNotarization<MinimmitS, D> {
+            let proposal = MinimmitProposal {
+                round,
+                parent: parent_view,
+                parent_payload,
+                payload,
+            };
+            let notarizes: Vec<_> = schemes
+                .iter()
+                .take(quorum as usize)
+                .map(|scheme| MinimmitNotarize::sign(scheme, proposal.clone()).unwrap())
+                .collect();
+            MNotarization::from_notarizes(&schemes[0], &notarizes, &Sequential).unwrap()
+        }
+
+        fn make_finalization(
+            round: Round,
+            parent_view: View,
+            parent_payload: D,
+            payload: D,
+            schemes: &[Self::Scheme],
+            _quorum: u32,
+        ) -> MinimmitFinalization<MinimmitS, D> {
+            // In minimmit, finalization is achieved through L consecutive notarizations,
+            // not separate finalize votes like simplex. Finalization uses notarize votes.
+            // L-quorum for N5f1 model is n-f, which for n=4 is 4 (all validators).
+            let proposal = MinimmitProposal {
+                round,
+                parent: parent_view,
+                parent_payload,
+                payload,
+            };
+            // Use L-quorum (n-f) for finalization, ignoring the quorum parameter
+            let l_quorum = Self::l_quorum(schemes.len() as u32) as usize;
+            let notarizes: Vec<_> = schemes
+                .iter()
+                .take(l_quorum)
+                .map(|scheme| MinimmitNotarize::sign(scheme, proposal.clone()).unwrap())
+                .collect();
+            MinimmitFinalization::from_notarizes(&schemes[0], &notarizes, &Sequential).unwrap()
+        }
+
+        fn notarization_activity(
+            notarization: MNotarization<MinimmitS, D>,
+        ) -> MinimmitActivity<MinimmitS, D> {
+            MinimmitActivity::MNotarization(notarization)
+        }
+
+        fn finalization_activity(
+            finalization: MinimmitFinalization<MinimmitS, D>,
+        ) -> MinimmitActivity<MinimmitS, D> {
+            MinimmitActivity::Finalization(finalization)
+        }
+
+        fn certificate_codec_config_unbounded(
+        ) -> <<Self::Consensus as MarshalConsensus>::Finalization as commonware_codec::Read>::Cfg
+        {
+            MinimmitS::certificate_codec_config_unbounded()
+        }
+    }
 
     /// Default leader key for tests.
     fn default_leader() -> K {
@@ -201,14 +505,14 @@ mod tests {
     };
     const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
 
-    async fn setup_validator(
+    async fn setup_validator<H: ConsensusTestHarness>(
         context: deterministic::Context,
         oracle: &mut Oracle<K, deterministic::Context>,
         validator: K,
-        provider: P,
+        provider: H::Provider,
     ) -> (
         Application<B>,
-        crate::marshal::ingress::mailbox::Mailbox<S, B>,
+        crate::marshal::ingress::mailbox::Mailbox<H::Consensus, B>,
         Height,
     ) {
         let config = Config {
@@ -218,6 +522,8 @@ mod tests {
             view_retention_timeout: ViewDelta::new(10),
             max_repair: NZUsize!(10),
             block_codec_config: (),
+            notarization_codec_config: H::notarization_codec_config(),
+            finalization_codec_config: H::finalization_codec_config(),
             partition_prefix: format!("validator-{}", validator.clone()),
             prunable_items_per_section: NZU64!(10),
             replay_buffer: NZUsize!(1024),
@@ -287,7 +593,7 @@ mod tests {
                     config.partition_prefix
                 ),
                 items_per_section: NZU64!(10),
-                codec_config: S::certificate_codec_config_unbounded(),
+                codec_config: H::certificate_codec_config_unbounded(),
                 replay_buffer: config.replay_buffer,
                 freezer_key_write_buffer: config.key_write_buffer,
                 freezer_value_write_buffer: config.value_write_buffer,
@@ -353,30 +659,6 @@ mod tests {
         (application, mailbox, processed_height)
     }
 
-    fn make_finalization(proposal: Proposal<D>, schemes: &[S], quorum: u32) -> Finalization<S, D> {
-        // Generate proposal signature
-        let finalizes: Vec<_> = schemes
-            .iter()
-            .take(quorum as usize)
-            .map(|scheme| Finalize::sign(scheme, proposal.clone()).unwrap())
-            .collect();
-
-        // Generate certificate signatures
-        Finalization::from_finalizes(&schemes[0], &finalizes, &Sequential).unwrap()
-    }
-
-    fn make_notarization(proposal: Proposal<D>, schemes: &[S], quorum: u32) -> Notarization<S, D> {
-        // Generate proposal signature
-        let notarizes: Vec<_> = schemes
-            .iter()
-            .take(quorum as usize)
-            .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
-            .collect();
-
-        // Generate certificate signatures
-        Notarization::from_notarizes(&schemes[0], &notarizes, &Sequential).unwrap()
-    }
-
     fn setup_network(
         context: deterministic::Context,
         tracked_peer_sets: Option<usize>,
@@ -408,51 +690,89 @@ mod tests {
         }
     }
 
-    #[test_traced("WARN")]
-    fn test_finalize_good_links() {
-        for seed in 0..5 {
-            let result1 = finalize(seed, LINK, false);
-            let result2 = finalize(seed, LINK, false);
+    // ==================== Simplex Tests ====================
 
-            // Ensure determinism
+    #[test_traced("WARN")]
+    fn test_finalize_good_links_simplex() {
+        for seed in 0..5 {
+            let result1 = finalize::<SimplexHarness>(seed, LINK, false);
+            let result2 = finalize::<SimplexHarness>(seed, LINK, false);
             assert_eq!(result1, result2);
         }
     }
 
     #[test_traced("WARN")]
-    fn test_finalize_bad_links() {
+    fn test_finalize_bad_links_simplex() {
         for seed in 0..5 {
-            let result1 = finalize(seed, UNRELIABLE_LINK, false);
-            let result2 = finalize(seed, UNRELIABLE_LINK, false);
-
-            // Ensure determinism
+            let result1 = finalize::<SimplexHarness>(seed, UNRELIABLE_LINK, false);
+            let result2 = finalize::<SimplexHarness>(seed, UNRELIABLE_LINK, false);
             assert_eq!(result1, result2);
         }
     }
 
     #[test_traced("WARN")]
-    fn test_finalize_good_links_quorum_sees_finalization() {
+    fn test_finalize_good_links_quorum_sees_finalization_simplex() {
         for seed in 0..5 {
-            let result1 = finalize(seed, LINK, true);
-            let result2 = finalize(seed, LINK, true);
-
-            // Ensure determinism
+            let result1 = finalize::<SimplexHarness>(seed, LINK, true);
+            let result2 = finalize::<SimplexHarness>(seed, LINK, true);
             assert_eq!(result1, result2);
         }
     }
 
     #[test_traced("DEBUG")]
-    fn test_finalize_bad_links_quorum_sees_finalization() {
+    fn test_finalize_bad_links_quorum_sees_finalization_simplex() {
         for seed in 0..5 {
-            let result1 = finalize(seed, UNRELIABLE_LINK, true);
-            let result2 = finalize(seed, UNRELIABLE_LINK, true);
-
-            // Ensure determinism
+            let result1 = finalize::<SimplexHarness>(seed, UNRELIABLE_LINK, true);
+            let result2 = finalize::<SimplexHarness>(seed, UNRELIABLE_LINK, true);
             assert_eq!(result1, result2);
         }
     }
 
-    fn finalize(seed: u64, link: Link, quorum_sees_finalization: bool) -> String {
+    // ==================== Minimmit Tests ====================
+
+    #[test_traced("WARN")]
+    fn test_finalize_good_links_minimmit() {
+        for seed in 0..5 {
+            let result1 = finalize::<MinimmitHarness>(seed, LINK, false);
+            let result2 = finalize::<MinimmitHarness>(seed, LINK, false);
+            assert_eq!(result1, result2);
+        }
+    }
+
+    #[test_traced("WARN")]
+    fn test_finalize_bad_links_minimmit() {
+        for seed in 0..5 {
+            let result1 = finalize::<MinimmitHarness>(seed, UNRELIABLE_LINK, false);
+            let result2 = finalize::<MinimmitHarness>(seed, UNRELIABLE_LINK, false);
+            assert_eq!(result1, result2);
+        }
+    }
+
+    #[test_traced("WARN")]
+    fn test_finalize_good_links_quorum_sees_finalization_minimmit() {
+        for seed in 0..5 {
+            let result1 = finalize::<MinimmitHarness>(seed, LINK, true);
+            let result2 = finalize::<MinimmitHarness>(seed, LINK, true);
+            assert_eq!(result1, result2);
+        }
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_finalize_bad_links_quorum_sees_finalization_minimmit() {
+        for seed in 0..5 {
+            let result1 = finalize::<MinimmitHarness>(seed, UNRELIABLE_LINK, true);
+            let result2 = finalize::<MinimmitHarness>(seed, UNRELIABLE_LINK, true);
+            assert_eq!(result1, result2);
+        }
+    }
+
+    // ==================== Generic Test Functions ====================
+
+    fn finalize<H: ConsensusTestHarness>(
+        seed: u64,
+        link: Link,
+        quorum_sees_finalization: bool,
+    ) -> String {
         let runner = deterministic::Runner::new(
             deterministic::Config::new()
                 .with_seed(seed)
@@ -464,7 +784,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            } = H::fixture(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             // Initialize applications and actors
             let mut applications = BTreeMap::new();
@@ -476,11 +796,11 @@ mod tests {
                 .update(0, participants.clone().try_into().unwrap())
                 .await;
             for (i, validator) in participants.iter().enumerate() {
-                let (application, actor, _processed_height) = setup_validator(
+                let (application, actor, _processed_height) = setup_validator::<H>(
                     context.with_label(&format!("validator_{i}")),
                     &mut oracle,
                     validator.clone(),
-                    ConstantProvider::new(schemes[i].clone()),
+                    H::provider(schemes[i].clone()),
                 )
                 .await;
                 applications.insert(validator.clone(), application);
@@ -491,11 +811,17 @@ mod tests {
             setup_network_links(&mut oracle, &participants, link.clone()).await;
 
             // Generate blocks, skipping the genesis block.
+            // We need to track parent payloads for minimmit compatibility.
             let mut blocks = Vec::<B>::new();
-            let mut parent = Sha256::hash(b"");
+            let mut parent_payloads = BTreeMap::<Height, D>::new();
+            let genesis_digest = Sha256::hash(b"");
+            parent_payloads.insert(Height::new(0), genesis_digest);
+
+            let mut parent = genesis_digest;
             for i in 1..=NUM_BLOCKS {
                 let block = make_block(parent, Height::new(i), i);
                 parent = block.digest();
+                parent_payloads.insert(Height::new(i), parent);
                 blocks.push(block);
             }
 
@@ -513,6 +839,9 @@ mod tests {
                 // Calculate the epoch and round for the block
                 let bounds = epocher.containing(height).unwrap();
                 let round = Round::new(bounds.epoch(), View::new(height.get()));
+                let parent_view = View::new(height.previous().unwrap().get());
+                let parent_payload = *parent_payloads.get(&height.previous().unwrap()).unwrap();
+                let payload = block.digest();
 
                 // Broadcast block by one validator
                 let actor_index: usize = (height.get() % (NUM_VALIDATORS as u64)) as usize;
@@ -525,19 +854,26 @@ mod tests {
                 context.sleep(link.latency).await;
 
                 // Notarize block by the validator that broadcasted it
-                let proposal = Proposal {
+                let notarization = H::make_notarization(
                     round,
-                    parent: View::new(height.previous().unwrap().get()),
-                    payload: block.digest(),
-                };
-                let notarization = make_notarization(proposal.clone(), &schemes, QUORUM);
-                actor
-                    .report(Activity::Notarization(notarization.clone()))
-                    .await;
+                    parent_view,
+                    parent_payload,
+                    payload,
+                    &schemes,
+                    QUORUM,
+                );
+                actor.report(H::notarization_activity(notarization)).await;
 
                 // Finalize block by all validators
                 // Always finalize 1) the last block in each epoch 2) the last block in the chain.
-                let fin = make_finalization(proposal, &schemes, QUORUM);
+                let fin = H::make_finalization(
+                    round,
+                    parent_view,
+                    parent_payload,
+                    payload,
+                    &schemes,
+                    QUORUM,
+                );
                 if quorum_sees_finalization {
                     // If `quorum_sees_finalization` is set, ensure at least `QUORUM` sees a finalization 20%
                     // of the time.
@@ -552,7 +888,7 @@ mod tests {
                             || height == Height::new(NUM_BLOCKS)
                             || height == bounds.last()
                         {
-                            actor.report(Activity::Finalization(fin.clone())).await;
+                            actor.report(H::finalization_activity(fin.clone())).await;
                         }
                     }
                 } else {
@@ -563,7 +899,7 @@ mod tests {
                             || height == Height::new(NUM_BLOCKS)
                             || height == bounds.last()
                         {
-                            actor.report(Activity::Finalization(fin.clone())).await;
+                            actor.report(H::finalization_activity(fin.clone())).await;
                         }
                     }
                 }
@@ -602,7 +938,16 @@ mod tests {
     }
 
     #[test_traced("WARN")]
-    fn test_sync_height_floor() {
+    fn test_sync_height_floor_simplex() {
+        sync_height_floor::<SimplexHarness>();
+    }
+
+    #[test_traced("WARN")]
+    fn test_sync_height_floor_minimmit() {
+        sync_height_floor::<MinimmitHarness>();
+    }
+
+    fn sync_height_floor<H: ConsensusTestHarness>() {
         let runner = deterministic::Runner::new(
             deterministic::Config::new()
                 .with_seed(0xFF)
@@ -614,7 +959,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            } = H::fixture(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             // Initialize applications and actors
             let mut applications = BTreeMap::new();
@@ -626,11 +971,11 @@ mod tests {
                 .update(0, participants.clone().try_into().unwrap())
                 .await;
             for (i, validator) in participants.iter().enumerate().skip(1) {
-                let (application, actor, _processed_height) = setup_validator(
+                let (application, actor, _processed_height) = setup_validator::<H>(
                     context.with_label(&format!("validator_{i}")),
                     &mut oracle,
                     validator.clone(),
-                    ConstantProvider::new(schemes[i].clone()),
+                    H::provider(schemes[i].clone()),
                 )
                 .await;
                 applications.insert(validator.clone(), application);
@@ -643,10 +988,15 @@ mod tests {
 
             // Generate blocks, skipping the genesis block.
             let mut blocks = Vec::<B>::new();
-            let mut parent = Sha256::hash(b"");
+            let mut parent_payloads = BTreeMap::<Height, D>::new();
+            let genesis_digest = Sha256::hash(b"");
+            parent_payloads.insert(Height::new(0), genesis_digest);
+
+            let mut parent = genesis_digest;
             for i in 1..=NUM_BLOCKS {
                 let block = make_block(parent, Height::new(i), i);
                 parent = block.digest();
+                parent_payloads.insert(Height::new(i), parent);
                 blocks.push(block);
             }
 
@@ -663,6 +1013,9 @@ mod tests {
                 // Calculate the epoch and round for the block
                 let bounds = epocher.containing(height).unwrap();
                 let round = Round::new(bounds.epoch(), View::new(height.get()));
+                let parent_view = View::new(height.previous().unwrap().get());
+                let parent_payload = *parent_payloads.get(&height.previous().unwrap()).unwrap();
+                let payload = block.digest();
 
                 // Broadcast block by one validator
                 let actor_index: usize = (height.get() % (applications.len() as u64)) as usize;
@@ -675,20 +1028,27 @@ mod tests {
                 context.sleep(LINK.latency).await;
 
                 // Notarize block by the validator that broadcasted it
-                let proposal = Proposal {
+                let notarization = H::make_notarization(
                     round,
-                    parent: View::new(height.previous().unwrap().get()),
-                    payload: block.digest(),
-                };
-                let notarization = make_notarization(proposal.clone(), &schemes, QUORUM);
-                actor
-                    .report(Activity::Notarization(notarization.clone()))
-                    .await;
+                    parent_view,
+                    parent_payload,
+                    payload,
+                    &schemes,
+                    QUORUM,
+                );
+                actor.report(H::notarization_activity(notarization)).await;
 
                 // Finalize block by all validators except for the first.
-                let fin = make_finalization(proposal, &schemes, QUORUM);
+                let fin = H::make_finalization(
+                    round,
+                    parent_view,
+                    parent_payload,
+                    payload,
+                    &schemes,
+                    QUORUM,
+                );
                 for actor in actors.iter_mut() {
-                    actor.report(Activity::Finalization(fin.clone())).await;
+                    actor.report(H::finalization_activity(fin.clone())).await;
                 }
             }
 
@@ -718,11 +1078,11 @@ mod tests {
 
             // Create the first validator now that all blocks have been finalized by the others.
             let validator = participants.first().unwrap();
-            let (app, mut actor, _processed_height) = setup_validator(
+            let (app, mut actor, _processed_height) = setup_validator::<H>(
                 context.with_label("validator_0"),
                 &mut oracle,
                 validator.clone(),
-                ConstantProvider::new(schemes[0].clone()),
+                H::provider(schemes[0].clone()),
             )
             .await;
 
@@ -742,7 +1102,7 @@ mod tests {
             // Notify the first actor of the latest finalization to the first actor to trigger backfill.
             // The sync should only reach the sync height floor.
             actor
-                .report(Activity::Finalization(latest_finalization))
+                .report(H::finalization_activity(latest_finalization))
                 .await;
 
             // Wait until the first actor has backfilled to the sync height floor.
@@ -781,7 +1141,16 @@ mod tests {
     }
 
     #[test_traced("WARN")]
-    fn test_prune_finalized_archives() {
+    fn test_prune_finalized_archives_simplex() {
+        prune_finalized_archives::<SimplexHarness>();
+    }
+
+    #[test_traced("WARN")]
+    fn test_prune_finalized_archives_minimmit() {
+        prune_finalized_archives::<MinimmitHarness>();
+    }
+
+    fn prune_finalized_archives<H: ConsensusTestHarness>() {
         let runner = deterministic::Runner::new(
             deterministic::Config::new().with_timeout(Some(Duration::from_secs(120))),
         );
@@ -791,145 +1160,164 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            } = H::fixture(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             let validator = participants[0].clone();
             let partition_prefix = format!("prune-test-{}", validator.clone());
             let buffer_pool = PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
             let control = oracle.control(validator.clone());
 
-            // Closure to initialize marshal with prunable archives
-            let init_marshal = |label: &str| {
-                let ctx = context.with_label(label);
-                let validator = validator.clone();
-                let schemes = schemes.clone();
-                let partition_prefix = partition_prefix.clone();
-                let buffer_pool = buffer_pool.clone();
-                let control = control.clone();
-                let oracle_manager = oracle.manager();
-                async move {
-                    let provider = ConstantProvider::new(schemes[0].clone());
-                    let config = Config {
-                        provider,
-                        epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
-                        mailbox_size: 100,
-                        view_retention_timeout: ViewDelta::new(10),
-                        max_repair: NZUsize!(10),
-                        block_codec_config: (),
-                        partition_prefix: partition_prefix.clone(),
-                        prunable_items_per_section: NZU64!(10),
-                        replay_buffer: NZUsize!(1024),
-                        key_write_buffer: NZUsize!(1024),
-                        value_write_buffer: NZUsize!(1024),
-                        buffer_pool: buffer_pool.clone(),
-                        strategy: Sequential,
-                    };
+            // Helper function to initialize marshal with prunable archives
+            async fn init_marshal_inner<H2: ConsensusTestHarness>(
+                ctx: deterministic::Context,
+                validator: K,
+                schemes: Vec<H2::Scheme>,
+                partition_prefix: String,
+                buffer_pool: PoolRef,
+                control: commonware_p2p::simulated::Control<K, deterministic::Context>,
+                oracle_manager: commonware_p2p::simulated::Manager<K, deterministic::Context>,
+            ) -> (
+                crate::marshal::ingress::mailbox::Mailbox<H2::Consensus, B>,
+                Application<B>,
+            ) {
+                let provider = H2::provider(schemes[0].clone());
+                let config = Config {
+                    provider,
+                    epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+                    mailbox_size: 100,
+                    view_retention_timeout: ViewDelta::new(10),
+                    max_repair: NZUsize!(10),
+                    block_codec_config: (),
+                    notarization_codec_config: H2::notarization_codec_config(),
+                    finalization_codec_config: H2::finalization_codec_config(),
+                    partition_prefix: partition_prefix.clone(),
+                    prunable_items_per_section: NZU64!(10),
+                    replay_buffer: NZUsize!(1024),
+                    key_write_buffer: NZUsize!(1024),
+                    value_write_buffer: NZUsize!(1024),
+                    buffer_pool: buffer_pool.clone(),
+                    strategy: Sequential,
+                };
 
-                    // Create resolver
-                    let backfill = control.register(0, TEST_QUOTA).await.unwrap();
-                    let resolver_cfg = resolver::Config {
-                        public_key: validator.clone(),
-                        manager: oracle_manager,
-                        blocker: control.clone(),
-                        mailbox_size: config.mailbox_size,
-                        initial: Duration::from_secs(1),
-                        timeout: Duration::from_secs(2),
-                        fetch_retry_timeout: Duration::from_millis(100),
-                        priority_requests: false,
-                        priority_responses: false,
-                    };
-                    let resolver = resolver::init(&ctx, resolver_cfg, backfill);
+                // Create resolver
+                let backfill = control.register(0, TEST_QUOTA).await.unwrap();
+                let resolver_cfg = resolver::Config {
+                    public_key: validator.clone(),
+                    manager: oracle_manager,
+                    blocker: control.clone(),
+                    mailbox_size: config.mailbox_size,
+                    initial: Duration::from_secs(1),
+                    timeout: Duration::from_secs(2),
+                    fetch_retry_timeout: Duration::from_millis(100),
+                    priority_requests: false,
+                    priority_responses: false,
+                };
+                let resolver = resolver::init(&ctx, resolver_cfg, backfill);
 
-                    // Create buffered broadcast engine
-                    let broadcast_config = buffered::Config {
-                        public_key: validator.clone(),
-                        mailbox_size: config.mailbox_size,
-                        deque_size: 10,
-                        priority: false,
-                        codec_config: (),
-                    };
-                    let (broadcast_engine, buffer) =
-                        buffered::Engine::new(ctx.clone(), broadcast_config);
-                    let network = control.register(1, TEST_QUOTA).await.unwrap();
-                    broadcast_engine.start(network);
+                // Create buffered broadcast engine
+                let broadcast_config = buffered::Config {
+                    public_key: validator.clone(),
+                    mailbox_size: config.mailbox_size,
+                    deque_size: 10,
+                    priority: false,
+                    codec_config: (),
+                };
+                let (broadcast_engine, buffer) =
+                    buffered::Engine::new(ctx.clone(), broadcast_config);
+                let network = control.register(1, TEST_QUOTA).await.unwrap();
+                broadcast_engine.start(network);
 
-                    // Initialize prunable archives
-                    let finalizations_by_height = prunable::Archive::init(
-                        ctx.with_label("finalizations_by_height"),
-                        prunable::Config {
-                            translator: EightCap,
-                            key_partition: format!(
-                                "{}-finalizations-by-height-key",
-                                partition_prefix
-                            ),
-                            key_buffer_pool: buffer_pool.clone(),
-                            value_partition: format!(
-                                "{}-finalizations-by-height-value",
-                                partition_prefix
-                            ),
-                            compression: None,
-                            codec_config: S::certificate_codec_config_unbounded(),
-                            items_per_section: NZU64!(10),
-                            key_write_buffer: config.key_write_buffer,
-                            value_write_buffer: config.value_write_buffer,
-                            replay_buffer: config.replay_buffer,
-                        },
-                    )
-                    .await
-                    .expect("failed to initialize finalizations by height archive");
+                // Initialize prunable archives
+                let finalizations_by_height = prunable::Archive::init(
+                    ctx.with_label("finalizations_by_height"),
+                    prunable::Config {
+                        translator: EightCap,
+                        key_partition: format!("{}-finalizations-by-height-key", partition_prefix),
+                        key_buffer_pool: buffer_pool.clone(),
+                        value_partition: format!(
+                            "{}-finalizations-by-height-value",
+                            partition_prefix
+                        ),
+                        compression: None,
+                        codec_config: H2::certificate_codec_config_unbounded(),
+                        items_per_section: NZU64!(10),
+                        key_write_buffer: config.key_write_buffer,
+                        value_write_buffer: config.value_write_buffer,
+                        replay_buffer: config.replay_buffer,
+                    },
+                )
+                .await
+                .expect("failed to initialize finalizations by height archive");
 
-                    let finalized_blocks = prunable::Archive::init(
-                        ctx.with_label("finalized_blocks"),
-                        prunable::Config {
-                            translator: EightCap,
-                            key_partition: format!("{}-finalized-blocks-key", partition_prefix),
-                            key_buffer_pool: buffer_pool.clone(),
-                            value_partition: format!("{}-finalized-blocks-value", partition_prefix),
-                            compression: None,
-                            codec_config: config.block_codec_config,
-                            items_per_section: NZU64!(10),
-                            key_write_buffer: config.key_write_buffer,
-                            value_write_buffer: config.value_write_buffer,
-                            replay_buffer: config.replay_buffer,
-                        },
-                    )
-                    .await
-                    .expect("failed to initialize finalized blocks archive");
+                let finalized_blocks = prunable::Archive::init(
+                    ctx.with_label("finalized_blocks"),
+                    prunable::Config {
+                        translator: EightCap,
+                        key_partition: format!("{}-finalized-blocks-key", partition_prefix),
+                        key_buffer_pool: buffer_pool.clone(),
+                        value_partition: format!("{}-finalized-blocks-value", partition_prefix),
+                        compression: None,
+                        codec_config: config.block_codec_config,
+                        items_per_section: NZU64!(10),
+                        key_write_buffer: config.key_write_buffer,
+                        value_write_buffer: config.value_write_buffer,
+                        replay_buffer: config.replay_buffer,
+                    },
+                )
+                .await
+                .expect("failed to initialize finalized blocks archive");
 
-                    let (actor, mailbox, _processed_height) = actor::Actor::init(
-                        ctx.clone(),
-                        finalizations_by_height,
-                        finalized_blocks,
-                        config,
-                    )
-                    .await;
-                    let application = Application::<B>::default();
-                    actor.start(application.clone(), buffer, resolver);
+                let (actor, mailbox, _processed_height) = actor::Actor::init(
+                    ctx.clone(),
+                    finalizations_by_height,
+                    finalized_blocks,
+                    config,
+                )
+                .await;
+                let application = Application::<B>::default();
+                actor.start(application.clone(), buffer, resolver);
 
-                    (mailbox, application)
-                }
-            };
+                (mailbox, application)
+            }
 
             // Initial setup
-            let (mut mailbox, application) = init_marshal("init").await;
+            let (mut mailbox, application) = init_marshal_inner::<H>(
+                context.with_label("init"),
+                validator.clone(),
+                schemes.clone(),
+                partition_prefix.clone(),
+                buffer_pool.clone(),
+                control.clone(),
+                oracle.manager(),
+            )
+            .await;
 
             // Finalize blocks 1-20
-            let mut parent = Sha256::hash(b"");
+            let mut parent_payloads = BTreeMap::<Height, D>::new();
+            let genesis_digest = Sha256::hash(b"");
+            parent_payloads.insert(Height::new(0), genesis_digest);
+
+            let mut parent = genesis_digest;
             let epocher = FixedEpocher::new(BLOCKS_PER_EPOCH);
             for i in 1..=20u64 {
                 let block = make_block(parent, Height::new(i), i);
                 let commitment = block.digest();
+                parent_payloads.insert(Height::new(i), commitment);
                 let bounds = epocher.containing(Height::new(i)).unwrap();
                 let round = Round::new(bounds.epoch(), View::new(i));
+                let parent_view = View::new(i - 1);
+                let parent_payload = *parent_payloads.get(&Height::new(i - 1)).unwrap();
 
                 mailbox.verified(round, block.clone()).await;
-                let proposal = Proposal {
+                let finalization = H::make_finalization(
                     round,
-                    parent: View::new(i - 1),
-                    payload: commitment,
-                };
-                let finalization = make_finalization(proposal, &schemes, QUORUM);
-                mailbox.report(Activity::Finalization(finalization)).await;
+                    parent_view,
+                    parent_payload,
+                    commitment,
+                    &schemes,
+                    QUORUM,
+                );
+                mailbox.report(H::finalization_activity(finalization)).await;
 
                 parent = commitment;
             }
@@ -1014,7 +1402,16 @@ mod tests {
 
             // Restart to verify pruning persisted to storage (not just in-memory)
             drop(mailbox);
-            let (mut mailbox, _application) = init_marshal("restart").await;
+            let (mut mailbox, _application) = init_marshal_inner::<H>(
+                context.with_label("restart"),
+                validator.clone(),
+                schemes.clone(),
+                partition_prefix.clone(),
+                buffer_pool.clone(),
+                control.clone(),
+                oracle.manager(),
+            )
+            .await;
 
             // Verify blocks 1-19 are still pruned after restart
             for i in 1..20u64 {
@@ -1041,7 +1438,16 @@ mod tests {
     }
 
     #[test_traced("WARN")]
-    fn test_subscribe_basic_block_delivery() {
+    fn test_subscribe_basic_block_delivery_simplex() {
+        subscribe_basic_block_delivery::<SimplexHarness>();
+    }
+
+    #[test_traced("WARN")]
+    fn test_subscribe_basic_block_delivery_minimmit() {
+        subscribe_basic_block_delivery::<MinimmitHarness>();
+    }
+
+    fn subscribe_basic_block_delivery<H: ConsensusTestHarness>() {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
             let mut oracle = setup_network(context.clone(), None);
@@ -1049,15 +1455,15 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            } = H::fixture(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             let mut actors = Vec::new();
             for (i, validator) in participants.iter().enumerate() {
-                let (_application, actor, _processed_height) = setup_validator(
+                let (_application, actor, _processed_height) = setup_validator::<H>(
                     context.with_label(&format!("validator_{i}")),
                     &mut oracle,
                     validator.clone(),
-                    ConstantProvider::new(schemes[i].clone()),
+                    H::provider(schemes[i].clone()),
                 )
                 .await;
                 actors.push(actor);
@@ -1066,8 +1472,8 @@ mod tests {
 
             setup_network_links(&mut oracle, &participants, LINK).await;
 
-            let parent = Sha256::hash(b"");
-            let block = make_block(parent, Height::new(1), 1);
+            let genesis_digest = Sha256::hash(b"");
+            let block = make_block(genesis_digest, Height::new(1), 1);
             let commitment = block.digest();
 
             let subscription_rx = actor
@@ -1078,16 +1484,26 @@ mod tests {
                 .verified(Round::new(Epoch::new(0), View::new(1)), block.clone())
                 .await;
 
-            let proposal = Proposal {
-                round: Round::new(Epoch::new(0), View::new(1)),
-                parent: View::new(0),
-                payload: commitment,
-            };
-            let notarization = make_notarization(proposal.clone(), &schemes, QUORUM);
-            actor.report(Activity::Notarization(notarization)).await;
+            let round = Round::new(Epoch::new(0), View::new(1));
+            let notarization = H::make_notarization(
+                round,
+                View::new(0),
+                genesis_digest,
+                commitment,
+                &schemes,
+                QUORUM,
+            );
+            actor.report(H::notarization_activity(notarization)).await;
 
-            let finalization = make_finalization(proposal, &schemes, QUORUM);
-            actor.report(Activity::Finalization(finalization)).await;
+            let finalization = H::make_finalization(
+                round,
+                View::new(0),
+                genesis_digest,
+                commitment,
+                &schemes,
+                QUORUM,
+            );
+            actor.report(H::finalization_activity(finalization)).await;
 
             let received_block = subscription_rx.await.unwrap();
             assert_eq!(received_block.digest(), block.digest());
@@ -1096,7 +1512,16 @@ mod tests {
     }
 
     #[test_traced("WARN")]
-    fn test_subscribe_multiple_subscriptions() {
+    fn test_subscribe_multiple_subscriptions_simplex() {
+        subscribe_multiple_subscriptions::<SimplexHarness>();
+    }
+
+    #[test_traced("WARN")]
+    fn test_subscribe_multiple_subscriptions_minimmit() {
+        subscribe_multiple_subscriptions::<MinimmitHarness>();
+    }
+
+    fn subscribe_multiple_subscriptions<H: ConsensusTestHarness>() {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
             let mut oracle = setup_network(context.clone(), None);
@@ -1104,15 +1529,15 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            } = H::fixture(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             let mut actors = Vec::new();
             for (i, validator) in participants.iter().enumerate() {
-                let (_application, actor, _processed_height) = setup_validator(
+                let (_application, actor, _processed_height) = setup_validator::<H>(
                     context.with_label(&format!("validator_{i}")),
                     &mut oracle,
                     validator.clone(),
-                    ConstantProvider::new(schemes[i].clone()),
+                    H::provider(schemes[i].clone()),
                 )
                 .await;
                 actors.push(actor);
@@ -1121,8 +1546,8 @@ mod tests {
 
             setup_network_links(&mut oracle, &participants, LINK).await;
 
-            let parent = Sha256::hash(b"");
-            let block1 = make_block(parent, Height::new(1), 1);
+            let genesis_digest = Sha256::hash(b"");
+            let block1 = make_block(genesis_digest, Height::new(1), 1);
             let block2 = make_block(block1.digest(), Height::new(2), 2);
             let commitment1 = block1.digest();
             let commitment2 = block2.digest();
@@ -1144,18 +1569,37 @@ mod tests {
                 .verified(Round::new(Epoch::new(0), View::new(2)), block2.clone())
                 .await;
 
-            for (view, block) in [(1, block1.clone()), (2, block2.clone())] {
+            // Track parent payloads for minimmit compatibility
+            let parent_payloads = [genesis_digest, commitment1];
+            for (i, (view, block)) in [(1u64, block1.clone()), (2u64, block2.clone())]
+                .into_iter()
+                .enumerate()
+            {
                 let view = View::new(view);
-                let proposal = Proposal {
-                    round: Round::new(Epoch::zero(), view),
-                    parent: view.previous().unwrap(),
-                    payload: block.digest(),
-                };
-                let notarization = make_notarization(proposal.clone(), &schemes, QUORUM);
-                actor.report(Activity::Notarization(notarization)).await;
+                let round = Round::new(Epoch::zero(), view);
+                let parent_view = view.previous().unwrap();
+                let parent_payload = parent_payloads[i];
+                let payload = block.digest();
 
-                let finalization = make_finalization(proposal, &schemes, QUORUM);
-                actor.report(Activity::Finalization(finalization)).await;
+                let notarization = H::make_notarization(
+                    round,
+                    parent_view,
+                    parent_payload,
+                    payload,
+                    &schemes,
+                    QUORUM,
+                );
+                actor.report(H::notarization_activity(notarization)).await;
+
+                let finalization = H::make_finalization(
+                    round,
+                    parent_view,
+                    parent_payload,
+                    payload,
+                    &schemes,
+                    QUORUM,
+                );
+                actor.report(H::finalization_activity(finalization)).await;
             }
 
             let received1_sub1 = sub1_rx.await.unwrap();
@@ -1172,7 +1616,16 @@ mod tests {
     }
 
     #[test_traced("WARN")]
-    fn test_subscribe_canceled_subscriptions() {
+    fn test_subscribe_canceled_subscriptions_simplex() {
+        subscribe_canceled_subscriptions::<SimplexHarness>();
+    }
+
+    #[test_traced("WARN")]
+    fn test_subscribe_canceled_subscriptions_minimmit() {
+        subscribe_canceled_subscriptions::<MinimmitHarness>();
+    }
+
+    fn subscribe_canceled_subscriptions<H: ConsensusTestHarness>() {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
             let mut oracle = setup_network(context.clone(), None);
@@ -1180,15 +1633,15 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            } = H::fixture(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             let mut actors = Vec::new();
             for (i, validator) in participants.iter().enumerate() {
-                let (_application, actor, _processed_height) = setup_validator(
+                let (_application, actor, _processed_height) = setup_validator::<H>(
                     context.with_label(&format!("validator_{i}")),
                     &mut oracle,
                     validator.clone(),
-                    ConstantProvider::new(schemes[i].clone()),
+                    H::provider(schemes[i].clone()),
                 )
                 .await;
                 actors.push(actor);
@@ -1197,8 +1650,8 @@ mod tests {
 
             setup_network_links(&mut oracle, &participants, LINK).await;
 
-            let parent = Sha256::hash(b"");
-            let block1 = make_block(parent, Height::new(1), 1);
+            let genesis_digest = Sha256::hash(b"");
+            let block1 = make_block(genesis_digest, Height::new(1), 1);
             let block2 = make_block(block1.digest(), Height::new(2), 2);
             let commitment1 = block1.digest();
             let commitment2 = block2.digest();
@@ -1219,18 +1672,37 @@ mod tests {
                 .verified(Round::new(Epoch::new(0), View::new(2)), block2.clone())
                 .await;
 
-            for (view, block) in [(1, block1.clone()), (2, block2.clone())] {
+            // Track parent payloads for minimmit compatibility
+            let parent_payloads = [genesis_digest, commitment1];
+            for (i, (view, block)) in [(1u64, block1.clone()), (2u64, block2.clone())]
+                .into_iter()
+                .enumerate()
+            {
                 let view = View::new(view);
-                let proposal = Proposal {
-                    round: Round::new(Epoch::zero(), view),
-                    parent: view.previous().unwrap(),
-                    payload: block.digest(),
-                };
-                let notarization = make_notarization(proposal.clone(), &schemes, QUORUM);
-                actor.report(Activity::Notarization(notarization)).await;
+                let round = Round::new(Epoch::zero(), view);
+                let parent_view = view.previous().unwrap();
+                let parent_payload = parent_payloads[i];
+                let payload = block.digest();
 
-                let finalization = make_finalization(proposal, &schemes, QUORUM);
-                actor.report(Activity::Finalization(finalization)).await;
+                let notarization = H::make_notarization(
+                    round,
+                    parent_view,
+                    parent_payload,
+                    payload,
+                    &schemes,
+                    QUORUM,
+                );
+                actor.report(H::notarization_activity(notarization)).await;
+
+                let finalization = H::make_finalization(
+                    round,
+                    parent_view,
+                    parent_payload,
+                    payload,
+                    &schemes,
+                    QUORUM,
+                );
+                actor.report(H::finalization_activity(finalization)).await;
             }
 
             let received2 = sub2_rx.await.unwrap();
@@ -1240,7 +1712,16 @@ mod tests {
     }
 
     #[test_traced("WARN")]
-    fn test_subscribe_blocks_from_different_sources() {
+    fn test_subscribe_blocks_from_different_sources_simplex() {
+        subscribe_blocks_from_different_sources::<SimplexHarness>();
+    }
+
+    #[test_traced("WARN")]
+    fn test_subscribe_blocks_from_different_sources_minimmit() {
+        subscribe_blocks_from_different_sources::<MinimmitHarness>();
+    }
+
+    fn subscribe_blocks_from_different_sources<H: ConsensusTestHarness>() {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
             let mut oracle = setup_network(context.clone(), None);
@@ -1248,15 +1729,15 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            } = H::fixture(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             let mut actors = Vec::new();
             for (i, validator) in participants.iter().enumerate() {
-                let (_application, actor, _processed_height) = setup_validator(
+                let (_application, actor, _processed_height) = setup_validator::<H>(
                     context.with_label(&format!("validator_{i}")),
                     &mut oracle,
                     validator.clone(),
-                    ConstantProvider::new(schemes[i].clone()),
+                    H::provider(schemes[i].clone()),
                 )
                 .await;
                 actors.push(actor);
@@ -1265,8 +1746,8 @@ mod tests {
 
             setup_network_links(&mut oracle, &participants, LINK).await;
 
-            let parent = Sha256::hash(b"");
-            let block1 = make_block(parent, Height::new(1), 1);
+            let genesis_digest = Sha256::hash(b"");
+            let block1 = make_block(genesis_digest, Height::new(1), 1);
             let block2 = make_block(block1.digest(), Height::new(2), 2);
             let block3 = make_block(block2.digest(), Height::new(3), 3);
             let block4 = make_block(block3.digest(), Height::new(4), 4);
@@ -1300,13 +1781,15 @@ mod tests {
             assert_eq!(received2.height(), Height::new(2));
 
             // Block3: Notarized by the actor
-            let proposal3 = Proposal {
-                round: Round::new(Epoch::new(0), View::new(3)),
-                parent: View::new(2),
-                payload: block3.digest(),
-            };
-            let notarization3 = make_notarization(proposal3.clone(), &schemes, QUORUM);
-            actor.report(Activity::Notarization(notarization3)).await;
+            let notarization3 = H::make_notarization(
+                Round::new(Epoch::new(0), View::new(3)),
+                View::new(2),
+                block2.digest(),
+                block3.digest(),
+                &schemes,
+                QUORUM,
+            );
+            actor.report(H::notarization_activity(notarization3)).await;
             actor
                 .verified(Round::new(Epoch::new(0), View::new(3)), block3.clone())
                 .await;
@@ -1317,16 +1800,15 @@ mod tests {
             assert_eq!(received3.height(), Height::new(3));
 
             // Block4: Finalized by the actor
-            let finalization4 = make_finalization(
-                Proposal {
-                    round: Round::new(Epoch::new(0), View::new(4)),
-                    parent: View::new(3),
-                    payload: block4.digest(),
-                },
+            let finalization4 = H::make_finalization(
+                Round::new(Epoch::new(0), View::new(4)),
+                View::new(3),
+                block3.digest(),
+                block4.digest(),
                 &schemes,
                 QUORUM,
             );
-            actor.report(Activity::Finalization(finalization4)).await;
+            actor.report(H::finalization_activity(finalization4)).await;
             actor
                 .verified(Round::new(Epoch::new(0), View::new(4)), block4.clone())
                 .await;
@@ -1351,7 +1833,16 @@ mod tests {
     }
 
     #[test_traced("WARN")]
-    fn test_get_info_basic_queries_present_and_missing() {
+    fn test_get_info_basic_queries_present_and_missing_simplex() {
+        get_info_basic_queries_present_and_missing::<SimplexHarness>();
+    }
+
+    #[test_traced("WARN")]
+    fn test_get_info_basic_queries_present_and_missing_minimmit() {
+        get_info_basic_queries_present_and_missing::<MinimmitHarness>();
+    }
+
+    fn get_info_basic_queries_present_and_missing<H: ConsensusTestHarness>() {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
             let mut oracle = setup_network(context.clone(), None);
@@ -1359,15 +1850,15 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            } = H::fixture(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             // Single validator actor
             let me = participants[0].clone();
-            let (_application, mut actor, _processed_height) = setup_validator(
+            let (_application, mut actor, _processed_height) = setup_validator::<H>(
                 context.with_label("validator_0"),
                 &mut oracle,
                 me,
-                ConstantProvider::new(schemes[0].clone()),
+                H::provider(schemes[0].clone()),
             )
             .await;
 
@@ -1378,19 +1869,21 @@ mod tests {
             assert!(actor.get_info(Height::new(1)).await.is_none());
 
             // Create and verify a block, then finalize it
-            let parent = Sha256::hash(b"");
-            let block = make_block(parent, Height::new(1), 1);
+            let genesis_digest = Sha256::hash(b"");
+            let block = make_block(genesis_digest, Height::new(1), 1);
             let digest = block.digest();
             let round = Round::new(Epoch::new(0), View::new(1));
             actor.verified(round, block.clone()).await;
 
-            let proposal = Proposal {
+            let finalization = H::make_finalization(
                 round,
-                parent: View::new(0),
-                payload: digest,
-            };
-            let finalization = make_finalization(proposal, &schemes, QUORUM);
-            actor.report(Activity::Finalization(finalization)).await;
+                View::new(0),
+                genesis_digest,
+                digest,
+                &schemes,
+                QUORUM,
+            );
+            actor.report(H::finalization_activity(finalization)).await;
 
             // Latest should now be the finalized block
             assert_eq!(
@@ -1420,7 +1913,16 @@ mod tests {
     }
 
     #[test_traced("WARN")]
-    fn test_get_info_latest_progression_multiple_finalizations() {
+    fn test_get_info_latest_progression_multiple_finalizations_simplex() {
+        get_info_latest_progression_multiple_finalizations::<SimplexHarness>();
+    }
+
+    #[test_traced("WARN")]
+    fn test_get_info_latest_progression_multiple_finalizations_minimmit() {
+        get_info_latest_progression_multiple_finalizations::<MinimmitHarness>();
+    }
+
+    fn get_info_latest_progression_multiple_finalizations<H: ConsensusTestHarness>() {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
             let mut oracle = setup_network(context.clone(), None);
@@ -1428,15 +1930,15 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            } = H::fixture(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             // Single validator actor
             let me = participants[0].clone();
-            let (_application, mut actor, _processed_height) = setup_validator(
+            let (_application, mut actor, _processed_height) = setup_validator::<H>(
                 context.with_label("validator_0"),
                 &mut oracle,
                 me,
-                ConstantProvider::new(schemes[0].clone()),
+                H::provider(schemes[0].clone()),
             )
             .await;
 
@@ -1444,22 +1946,21 @@ mod tests {
             assert!(actor.get_info(Identifier::Latest).await.is_none());
 
             // Build and finalize heights 1..=3
-            let parent0 = Sha256::hash(b"");
-            let block1 = make_block(parent0, Height::new(1), 1);
+            let genesis_digest = Sha256::hash(b"");
+            let block1 = make_block(genesis_digest, Height::new(1), 1);
             let d1 = block1.digest();
             actor
                 .verified(Round::new(Epoch::new(0), View::new(1)), block1.clone())
                 .await;
-            let f1 = make_finalization(
-                Proposal {
-                    round: Round::new(Epoch::new(0), View::new(1)),
-                    parent: View::new(0),
-                    payload: d1,
-                },
+            let f1 = H::make_finalization(
+                Round::new(Epoch::new(0), View::new(1)),
+                View::new(0),
+                genesis_digest,
+                d1,
                 &schemes,
                 QUORUM,
             );
-            actor.report(Activity::Finalization(f1)).await;
+            actor.report(H::finalization_activity(f1)).await;
             let latest = actor.get_info(Identifier::Latest).await;
             assert_eq!(latest, Some((Height::new(1), d1)));
 
@@ -1468,16 +1969,15 @@ mod tests {
             actor
                 .verified(Round::new(Epoch::new(0), View::new(2)), block2.clone())
                 .await;
-            let f2 = make_finalization(
-                Proposal {
-                    round: Round::new(Epoch::new(0), View::new(2)),
-                    parent: View::new(1),
-                    payload: d2,
-                },
+            let f2 = H::make_finalization(
+                Round::new(Epoch::new(0), View::new(2)),
+                View::new(1),
+                d1,
+                d2,
                 &schemes,
                 QUORUM,
             );
-            actor.report(Activity::Finalization(f2)).await;
+            actor.report(H::finalization_activity(f2)).await;
             let latest = actor.get_info(Identifier::Latest).await;
             assert_eq!(latest, Some((Height::new(2), d2)));
 
@@ -1486,23 +1986,31 @@ mod tests {
             actor
                 .verified(Round::new(Epoch::new(0), View::new(3)), block3.clone())
                 .await;
-            let f3 = make_finalization(
-                Proposal {
-                    round: Round::new(Epoch::new(0), View::new(3)),
-                    parent: View::new(2),
-                    payload: d3,
-                },
+            let f3 = H::make_finalization(
+                Round::new(Epoch::new(0), View::new(3)),
+                View::new(2),
+                d2,
+                d3,
                 &schemes,
                 QUORUM,
             );
-            actor.report(Activity::Finalization(f3)).await;
+            actor.report(H::finalization_activity(f3)).await;
             let latest = actor.get_info(Identifier::Latest).await;
             assert_eq!(latest, Some((Height::new(3), d3)));
         })
     }
 
     #[test_traced("WARN")]
-    fn test_get_block_by_height_and_latest() {
+    fn test_get_block_by_height_and_latest_simplex() {
+        get_block_by_height_and_latest::<SimplexHarness>();
+    }
+
+    #[test_traced("WARN")]
+    fn test_get_block_by_height_and_latest_minimmit() {
+        get_block_by_height_and_latest::<MinimmitHarness>();
+    }
+
+    fn get_block_by_height_and_latest<H: ConsensusTestHarness>() {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
             let mut oracle = setup_network(context.clone(), None);
@@ -1510,14 +2018,14 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            } = H::fixture(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             let me = participants[0].clone();
-            let (application, mut actor, _processed_height) = setup_validator(
+            let (application, mut actor, _processed_height) = setup_validator::<H>(
                 context.with_label("validator_0"),
                 &mut oracle,
                 me,
-                ConstantProvider::new(schemes[0].clone()),
+                H::provider(schemes[0].clone()),
             )
             .await;
 
@@ -1527,18 +2035,20 @@ mod tests {
             assert!(application.tip().is_none());
 
             // Finalize a block at height 1
-            let parent = Sha256::hash(b"");
-            let block = make_block(parent, Height::new(1), 1);
+            let genesis_digest = Sha256::hash(b"");
+            let block = make_block(genesis_digest, Height::new(1), 1);
             let commitment = block.digest();
             let round = Round::new(Epoch::new(0), View::new(1));
             actor.verified(round, block.clone()).await;
-            let proposal = Proposal {
+            let finalization = H::make_finalization(
                 round,
-                parent: View::new(0),
-                payload: commitment,
-            };
-            let finalization = make_finalization(proposal, &schemes, QUORUM);
-            actor.report(Activity::Finalization(finalization)).await;
+                View::new(0),
+                genesis_digest,
+                commitment,
+                &schemes,
+                QUORUM,
+            );
+            actor.report(H::finalization_activity(finalization)).await;
 
             // Get by height
             let by_height = actor
@@ -1564,7 +2074,16 @@ mod tests {
     }
 
     #[test_traced("WARN")]
-    fn test_get_block_by_commitment_from_sources_and_missing() {
+    fn test_get_block_by_commitment_from_sources_and_missing_simplex() {
+        get_block_by_commitment_from_sources_and_missing::<SimplexHarness>();
+    }
+
+    #[test_traced("WARN")]
+    fn test_get_block_by_commitment_from_sources_and_missing_minimmit() {
+        get_block_by_commitment_from_sources_and_missing::<MinimmitHarness>();
+    }
+
+    fn get_block_by_commitment_from_sources_and_missing<H: ConsensusTestHarness>() {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
             let mut oracle = setup_network(context.clone(), None);
@@ -1572,20 +2091,20 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            } = H::fixture(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             let me = participants[0].clone();
-            let (_application, mut actor, _processed_height) = setup_validator(
+            let (_application, mut actor, _processed_height) = setup_validator::<H>(
                 context.with_label("validator_0"),
                 &mut oracle,
                 me,
-                ConstantProvider::new(schemes[0].clone()),
+                H::provider(schemes[0].clone()),
             )
             .await;
 
             // 1) From cache via verified
-            let parent = Sha256::hash(b"");
-            let ver_block = make_block(parent, Height::new(1), 1);
+            let genesis_digest = Sha256::hash(b"");
+            let ver_block = make_block(genesis_digest, Height::new(1), 1);
             let ver_commitment = ver_block.digest();
             let round1 = Round::new(Epoch::new(0), View::new(1));
             actor.verified(round1, ver_block.clone()).await;
@@ -1600,13 +2119,15 @@ mod tests {
             let fin_commitment = fin_block.digest();
             let round2 = Round::new(Epoch::new(0), View::new(2));
             actor.verified(round2, fin_block.clone()).await;
-            let proposal = Proposal {
-                round: round2,
-                parent: View::new(1),
-                payload: fin_commitment,
-            };
-            let finalization = make_finalization(proposal, &schemes, QUORUM);
-            actor.report(Activity::Finalization(finalization)).await;
+            let finalization = H::make_finalization(
+                round2,
+                View::new(1),
+                ver_commitment,
+                fin_commitment,
+                &schemes,
+                QUORUM,
+            );
+            actor.report(H::finalization_activity(finalization)).await;
             let got = actor
                 .get_block(&fin_commitment)
                 .await
@@ -1622,7 +2143,16 @@ mod tests {
     }
 
     #[test_traced("WARN")]
-    fn test_get_finalization_by_height() {
+    fn test_get_finalization_by_height_simplex() {
+        get_finalization_by_height::<SimplexHarness>();
+    }
+
+    #[test_traced("WARN")]
+    fn test_get_finalization_by_height_minimmit() {
+        get_finalization_by_height::<MinimmitHarness>();
+    }
+
+    fn get_finalization_by_height<H: ConsensusTestHarness>() {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
             let mut oracle = setup_network(context.clone(), None);
@@ -1630,14 +2160,14 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            } = H::fixture(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             let me = participants[0].clone();
-            let (_application, mut actor, _processed_height) = setup_validator(
+            let (_application, mut actor, _processed_height) = setup_validator::<H>(
                 context.with_label("validator_0"),
                 &mut oracle,
                 me,
-                ConstantProvider::new(schemes[0].clone()),
+                H::provider(schemes[0].clone()),
             )
             .await;
 
@@ -1646,37 +2176,48 @@ mod tests {
             assert!(finalization.is_none());
 
             // Finalize a block at height 1
-            let parent = Sha256::hash(b"");
-            let block = make_block(parent, Height::new(1), 1);
+            let genesis_digest = Sha256::hash(b"");
+            let block = make_block(genesis_digest, Height::new(1), 1);
             let commitment = block.digest();
             let round = Round::new(Epoch::new(0), View::new(1));
             actor.verified(round, block.clone()).await;
-            let proposal = Proposal {
+            let finalization = H::make_finalization(
                 round,
-                parent: View::new(0),
-                payload: commitment,
-            };
-            let finalization = make_finalization(proposal, &schemes, QUORUM);
-            actor.report(Activity::Finalization(finalization)).await;
+                View::new(0),
+                genesis_digest,
+                commitment,
+                &schemes,
+                QUORUM,
+            );
+            actor.report(H::finalization_activity(finalization)).await;
 
             // Get finalization by height
             let finalization = actor
                 .get_finalization(Height::new(1))
                 .await
                 .expect("missing finalization by height");
-            assert_eq!(finalization.proposal.parent, View::new(0));
+            assert_eq!(finalization.parent(), View::new(0));
             assert_eq!(
-                finalization.proposal.round,
+                finalization.round(),
                 Round::new(Epoch::new(0), View::new(1))
             );
-            assert_eq!(finalization.proposal.payload, commitment);
+            assert_eq!(finalization.payload(), commitment);
 
             assert!(actor.get_finalization(Height::new(2)).await.is_none());
         })
     }
 
     #[test_traced("WARN")]
-    fn test_hint_finalized_triggers_fetch() {
+    fn test_hint_finalized_triggers_fetch_simplex() {
+        hint_finalized_triggers_fetch::<SimplexHarness>();
+    }
+
+    #[test_traced("WARN")]
+    fn test_hint_finalized_triggers_fetch_minimmit() {
+        hint_finalized_triggers_fetch::<MinimmitHarness>();
+    }
+
+    fn hint_finalized_triggers_fetch<H: ConsensusTestHarness>() {
         let runner = deterministic::Runner::new(
             deterministic::Config::new()
                 .with_seed(42)
@@ -1688,7 +2229,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            } = H::fixture(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             // Register the initial peer set
             let mut manager = oracle.manager();
@@ -1697,18 +2238,18 @@ mod tests {
                 .await;
 
             // Set up two validators
-            let (app0, mut actor0, _) = setup_validator(
+            let (app0, mut actor0, _) = setup_validator::<H>(
                 context.with_label("validator_0"),
                 &mut oracle,
                 participants[0].clone(),
-                ConstantProvider::new(schemes[0].clone()),
+                H::provider(schemes[0].clone()),
             )
             .await;
-            let (_app1, mut actor1, _) = setup_validator(
+            let (_app1, mut actor1, _) = setup_validator::<H>(
                 context.with_label("validator_1"),
                 &mut oracle,
                 participants[1].clone(),
-                ConstantProvider::new(schemes[1].clone()),
+                H::provider(schemes[1].clone()),
             )
             .await;
 
@@ -1716,20 +2257,27 @@ mod tests {
             setup_network_links(&mut oracle, &participants[..2], LINK).await;
 
             // Validator 0: Create and finalize blocks 1-5
-            let mut parent = Sha256::hash(b"");
+            let mut parent_payloads = BTreeMap::<Height, D>::new();
+            let genesis_digest = Sha256::hash(b"");
+            parent_payloads.insert(Height::new(0), genesis_digest);
+            let mut parent = genesis_digest;
             for i in 1..=5u64 {
                 let block = make_block(parent, Height::new(i), i);
                 let commitment = block.digest();
+                parent_payloads.insert(Height::new(i), commitment);
                 let round = Round::new(Epoch::new(0), View::new(i));
+                let parent_payload = *parent_payloads.get(&Height::new(i - 1)).unwrap();
 
                 actor0.verified(round, block.clone()).await;
-                let proposal = Proposal {
+                let finalization = H::make_finalization(
                     round,
-                    parent: View::new(i - 1),
-                    payload: commitment,
-                };
-                let finalization = make_finalization(proposal, &schemes, QUORUM);
-                actor0.report(Activity::Finalization(finalization)).await;
+                    View::new(i - 1),
+                    parent_payload,
+                    commitment,
+                    &schemes,
+                    QUORUM,
+                );
+                actor0.report(H::finalization_activity(finalization)).await;
 
                 parent = commitment;
             }
@@ -1757,12 +2305,21 @@ mod tests {
                 .get_finalization(Height::new(5))
                 .await
                 .expect("finalization should be fetched");
-            assert_eq!(finalization.proposal.round.view(), View::new(5));
+            assert_eq!(finalization.round().view(), View::new(5));
         })
     }
 
     #[test_traced("WARN")]
-    fn test_ancestry_stream() {
+    fn test_ancestry_stream_simplex() {
+        ancestry_stream::<SimplexHarness>();
+    }
+
+    #[test_traced("WARN")]
+    fn test_ancestry_stream_minimmit() {
+        ancestry_stream::<MinimmitHarness>();
+    }
+
+    fn ancestry_stream<H: ConsensusTestHarness>() {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
             let mut oracle = setup_network(context.clone(), None);
@@ -1770,31 +2327,38 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            } = H::fixture(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             let me = participants[0].clone();
-            let (_application, mut actor, _processed_height) = setup_validator(
+            let (_application, mut actor, _processed_height) = setup_validator::<H>(
                 context.with_label("validator_0"),
                 &mut oracle,
                 me,
-                ConstantProvider::new(schemes[0].clone()),
+                H::provider(schemes[0].clone()),
             )
             .await;
 
             // Finalize blocks at heights 1-5
-            let mut parent = Sha256::hash(b"");
-            for i in 1..=5 {
+            let mut parent_payloads = BTreeMap::<Height, D>::new();
+            let genesis_digest = Sha256::hash(b"");
+            parent_payloads.insert(Height::new(0), genesis_digest);
+            let mut parent = genesis_digest;
+            for i in 1..=5u64 {
                 let block = make_block(parent, Height::new(i), i);
                 let commitment = block.digest();
+                parent_payloads.insert(Height::new(i), commitment);
                 let round = Round::new(Epoch::new(0), View::new(i));
+                let parent_payload = *parent_payloads.get(&Height::new(i - 1)).unwrap();
                 actor.verified(round, block.clone()).await;
-                let proposal = Proposal {
+                let finalization = H::make_finalization(
                     round,
-                    parent: View::new(i - 1),
-                    payload: commitment,
-                };
-                let finalization = make_finalization(proposal, &schemes, QUORUM);
-                actor.report(Activity::Finalization(finalization)).await;
+                    View::new(i - 1),
+                    parent_payload,
+                    commitment,
+                    &schemes,
+                    QUORUM,
+                );
+                actor.report(H::finalization_activity(finalization)).await;
 
                 parent = block.digest();
             }
@@ -1813,16 +2377,28 @@ mod tests {
     }
 
     #[test_traced("WARN")]
-    fn test_marshaled_rejects_invalid_ancestry() {
+    fn test_marshaled_rejects_invalid_ancestry_simplex() {
+        marshaled_rejects_invalid_ancestry::<SimplexHarness>();
+    }
+
+    #[test_traced("WARN")]
+    fn test_marshaled_rejects_invalid_ancestry_minimmit() {
+        marshaled_rejects_invalid_ancestry::<MinimmitHarness>();
+    }
+
+    fn marshaled_rejects_invalid_ancestry<H: ConsensusTestHarness>() {
         #[derive(Clone)]
-        struct MockVerifyingApp {
+        struct MockVerifyingApp<C: MarshalConsensus> {
             genesis: B,
+            _marker: std::marker::PhantomData<C>,
         }
 
-        impl crate::Application<deterministic::Context> for MockVerifyingApp {
+        impl<C: MarshalConsensus<Digest = D>> crate::Application<deterministic::Context>
+            for MockVerifyingApp<C>
+        {
             type Block = B;
             type Context = Context<D, K>;
-            type SigningScheme = S;
+            type Consensus = C;
 
             async fn genesis(&mut self) -> Self::Block {
                 self.genesis.clone()
@@ -1831,17 +2407,19 @@ mod tests {
             async fn propose(
                 &mut self,
                 _context: (deterministic::Context, Self::Context),
-                _ancestry: AncestorStream<Self::SigningScheme, Self::Block>,
+                _ancestry: AncestorStream<Self::Consensus, Self::Block>,
             ) -> Option<Self::Block> {
                 None
             }
         }
 
-        impl VerifyingApplication<deterministic::Context> for MockVerifyingApp {
+        impl<C: MarshalConsensus<Digest = D>> VerifyingApplication<deterministic::Context>
+            for MockVerifyingApp<C>
+        {
             async fn verify(
                 &mut self,
                 _context: (deterministic::Context, Self::Context),
-                _ancestry: AncestorStream<Self::SigningScheme, Self::Block>,
+                _ancestry: AncestorStream<Self::Consensus, Self::Block>,
             ) -> bool {
                 // Ancestry verification occurs entirely in `Marshaled`.
                 true
@@ -1855,14 +2433,14 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            } = H::fixture(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             let me = participants[0].clone();
-            let (_base_app, marshal, _processed_height) = setup_validator(
+            let (_base_app, marshal, _processed_height) = setup_validator::<H>(
                 context.with_label("validator_0"),
                 &mut oracle,
                 me.clone(),
-                ConstantProvider::new(schemes[0].clone()),
+                H::provider(schemes[0].clone()),
             )
             .await;
 
@@ -1870,8 +2448,9 @@ mod tests {
             let genesis = make_block(Sha256::hash(b""), Height::zero(), 0);
 
             // Wrap with Marshaled verifier
-            let mock_app = MockVerifyingApp {
+            let mock_app = MockVerifyingApp::<H::Consensus> {
                 genesis: genesis.clone(),
+                _marker: std::marker::PhantomData,
             };
             let mut marshaled = Marshaled::new(
                 context.clone(),
@@ -1998,7 +2577,16 @@ mod tests {
     }
 
     #[test_traced("WARN")]
-    fn test_finalize_same_height_different_views() {
+    fn test_finalize_same_height_different_views_simplex() {
+        finalize_same_height_different_views::<SimplexHarness>();
+    }
+
+    #[test_traced("WARN")]
+    fn test_finalize_same_height_different_views_minimmit() {
+        finalize_same_height_different_views::<MinimmitHarness>();
+    }
+
+    fn finalize_same_height_different_views<H: ConsensusTestHarness>() {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
             let mut oracle = setup_network(context.clone(), None);
@@ -2006,24 +2594,24 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            } = H::fixture(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             // Set up two validators
             let mut actors = Vec::new();
             for (i, validator) in participants.iter().enumerate().take(2) {
-                let (_app, actor, _processed_height) = setup_validator(
+                let (_app, actor, _processed_height) = setup_validator::<H>(
                     context.with_label(&format!("validator_{i}")),
                     &mut oracle,
                     validator.clone(),
-                    ConstantProvider::new(schemes[i].clone()),
+                    H::provider(schemes[i].clone()),
                 )
                 .await;
                 actors.push(actor);
             }
 
             // Create block at height 1
-            let parent = Sha256::hash(b"");
-            let block = make_block(parent, Height::new(1), 1);
+            let genesis_digest = Sha256::hash(b"");
+            let block = make_block(genesis_digest, Height::new(1), 1);
             let commitment = block.digest();
 
             // Both validators verify the block
@@ -2035,35 +2623,53 @@ mod tests {
                 .await;
 
             // Validator 0: Finalize with view 1
-            let proposal_v1 = Proposal {
-                round: Round::new(Epoch::new(0), View::new(1)),
-                parent: View::new(0),
-                payload: commitment,
-            };
-            let notarization_v1 = make_notarization(proposal_v1.clone(), &schemes, QUORUM);
-            let finalization_v1 = make_finalization(proposal_v1.clone(), &schemes, QUORUM);
+            let notarization_v1 = H::make_notarization(
+                Round::new(Epoch::new(0), View::new(1)),
+                View::new(0),
+                genesis_digest,
+                commitment,
+                &schemes,
+                QUORUM,
+            );
+            let finalization_v1 = H::make_finalization(
+                Round::new(Epoch::new(0), View::new(1)),
+                View::new(0),
+                genesis_digest,
+                commitment,
+                &schemes,
+                QUORUM,
+            );
             actors[0]
-                .report(Activity::Notarization(notarization_v1.clone()))
+                .report(H::notarization_activity(notarization_v1.clone()))
                 .await;
             actors[0]
-                .report(Activity::Finalization(finalization_v1.clone()))
+                .report(H::finalization_activity(finalization_v1.clone()))
                 .await;
 
             // Validator 1: Finalize with view 2 (simulates receiving finalization from different view)
             // This could happen during epoch transitions where the same block gets finalized
             // with different views by different validators.
-            let proposal_v2 = Proposal {
-                round: Round::new(Epoch::new(0), View::new(2)), // Different view
-                parent: View::new(0),
-                payload: commitment, // Same block
-            };
-            let notarization_v2 = make_notarization(proposal_v2.clone(), &schemes, QUORUM);
-            let finalization_v2 = make_finalization(proposal_v2.clone(), &schemes, QUORUM);
+            let notarization_v2 = H::make_notarization(
+                Round::new(Epoch::new(0), View::new(2)),
+                View::new(0),
+                genesis_digest,
+                commitment,
+                &schemes,
+                QUORUM,
+            );
+            let finalization_v2 = H::make_finalization(
+                Round::new(Epoch::new(0), View::new(2)),
+                View::new(0),
+                genesis_digest,
+                commitment,
+                &schemes,
+                QUORUM,
+            );
             actors[1]
-                .report(Activity::Notarization(notarization_v2.clone()))
+                .report(H::notarization_activity(notarization_v2.clone()))
                 .await;
             actors[1]
-                .report(Activity::Finalization(finalization_v2.clone()))
+                .report(H::finalization_activity(finalization_v2.clone()))
                 .await;
 
             // Wait for finalization processing
@@ -2080,9 +2686,9 @@ mod tests {
             let fin1 = actors[1].get_finalization(Height::new(1)).await.unwrap();
 
             // Verify the finalizations have the expected different views
-            assert_eq!(fin0.proposal.payload, block.commitment());
+            assert_eq!(fin0.payload(), block.commitment());
             assert_eq!(fin0.round().view(), View::new(1));
-            assert_eq!(fin1.proposal.payload, block.commitment());
+            assert_eq!(fin1.payload(), block.commitment());
             assert_eq!(fin1.round().view(), View::new(2));
 
             // Both validators can retrieve block by height
@@ -2098,10 +2704,10 @@ mod tests {
             // Test that a validator receiving BOTH finalizations handles it correctly
             // (the second one should be ignored since archive ignores duplicates for same height)
             actors[0]
-                .report(Activity::Finalization(finalization_v2.clone()))
+                .report(H::finalization_activity(finalization_v2.clone()))
                 .await;
             actors[1]
-                .report(Activity::Finalization(finalization_v1.clone()))
+                .report(H::finalization_activity(finalization_v1.clone()))
                 .await;
             context.sleep(Duration::from_millis(100)).await;
 
@@ -2116,7 +2722,16 @@ mod tests {
     }
 
     #[test_traced("WARN")]
-    fn test_init_processed_height() {
+    fn test_init_processed_height_simplex() {
+        init_processed_height::<SimplexHarness>();
+    }
+
+    #[test_traced("WARN")]
+    fn test_init_processed_height_minimmit() {
+        init_processed_height::<MinimmitHarness>();
+    }
+
+    fn init_processed_height<H: ConsensusTestHarness>() {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
             let mut oracle = setup_network(context.clone(), None);
@@ -2124,35 +2739,42 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            } = H::fixture(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             // Test 1: Fresh init should return processed height 0
             let me = participants[0].clone();
-            let (application, mut actor, initial_height) = setup_validator(
+            let (application, mut actor, initial_height) = setup_validator::<H>(
                 context.with_label("validator_0"),
                 &mut oracle,
                 me.clone(),
-                ConstantProvider::new(schemes[0].clone()),
+                H::provider(schemes[0].clone()),
             )
             .await;
             assert_eq!(initial_height, Height::zero());
 
             // Process multiple blocks (1, 2, 3)
-            let mut parent = Sha256::hash(b"");
+            let mut parent_payloads = BTreeMap::<Height, D>::new();
+            let genesis_digest = Sha256::hash(b"");
+            parent_payloads.insert(Height::new(0), genesis_digest);
+            let mut parent = genesis_digest;
             let mut blocks = Vec::new();
-            for i in 1..=3 {
+            for i in 1..=3u64 {
                 let block = make_block(parent, Height::new(i), i);
                 let commitment = block.digest();
+                parent_payloads.insert(Height::new(i), commitment);
                 let round = Round::new(Epoch::new(0), View::new(i));
+                let parent_payload = *parent_payloads.get(&Height::new(i - 1)).unwrap();
 
                 actor.verified(round, block.clone()).await;
-                let proposal = Proposal {
+                let finalization = H::make_finalization(
                     round,
-                    parent: View::new(i - 1),
-                    payload: commitment,
-                };
-                let finalization = make_finalization(proposal, &schemes, QUORUM);
-                actor.report(Activity::Finalization(finalization)).await;
+                    View::new(i - 1),
+                    parent_payload,
+                    commitment,
+                    &schemes,
+                    QUORUM,
+                );
+                actor.report(H::finalization_activity(finalization)).await;
 
                 blocks.push(block);
                 parent = commitment;
@@ -2175,11 +2797,11 @@ mod tests {
             );
 
             // Test 2: Restart with marshal processed height = 3
-            let (_restart_application, _restart_actor, restart_height) = setup_validator(
+            let (_restart_application, _restart_actor, restart_height) = setup_validator::<H>(
                 context.with_label("validator_0_restart"),
                 &mut oracle,
                 me,
-                ConstantProvider::new(schemes[0].clone()),
+                H::provider(schemes[0].clone()),
             )
             .await;
 
@@ -2188,16 +2810,28 @@ mod tests {
     }
 
     #[test_traced("WARN")]
-    fn test_marshaled_rejects_unsupported_epoch() {
+    fn test_marshaled_rejects_unsupported_epoch_simplex() {
+        marshaled_rejects_unsupported_epoch::<SimplexHarness>();
+    }
+
+    #[test_traced("WARN")]
+    fn test_marshaled_rejects_unsupported_epoch_minimmit() {
+        marshaled_rejects_unsupported_epoch::<MinimmitHarness>();
+    }
+
+    fn marshaled_rejects_unsupported_epoch<H: ConsensusTestHarness>() {
         #[derive(Clone)]
-        struct MockVerifyingApp {
+        struct MockVerifyingApp<C: MarshalConsensus> {
             genesis: B,
+            _marker: std::marker::PhantomData<C>,
         }
 
-        impl crate::Application<deterministic::Context> for MockVerifyingApp {
+        impl<C: MarshalConsensus<Digest = D>> crate::Application<deterministic::Context>
+            for MockVerifyingApp<C>
+        {
             type Block = B;
             type Context = Context<D, K>;
-            type SigningScheme = S;
+            type Consensus = C;
 
             async fn genesis(&mut self) -> Self::Block {
                 self.genesis.clone()
@@ -2206,17 +2840,19 @@ mod tests {
             async fn propose(
                 &mut self,
                 _context: (deterministic::Context, Self::Context),
-                _ancestry: AncestorStream<Self::SigningScheme, Self::Block>,
+                _ancestry: AncestorStream<Self::Consensus, Self::Block>,
             ) -> Option<Self::Block> {
                 None
             }
         }
 
-        impl VerifyingApplication<deterministic::Context> for MockVerifyingApp {
+        impl<C: MarshalConsensus<Digest = D>> VerifyingApplication<deterministic::Context>
+            for MockVerifyingApp<C>
+        {
             async fn verify(
                 &mut self,
                 _context: (deterministic::Context, Self::Context),
-                _ancestry: AncestorStream<Self::SigningScheme, Self::Block>,
+                _ancestry: AncestorStream<Self::Consensus, Self::Block>,
             ) -> bool {
                 true
             }
@@ -2262,21 +2898,22 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            } = H::fixture(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             let me = participants[0].clone();
-            let (_base_app, marshal, _processed_height) = setup_validator(
+            let (_base_app, marshal, _processed_height) = setup_validator::<H>(
                 context.with_label("validator_0"),
                 &mut oracle,
                 me.clone(),
-                ConstantProvider::new(schemes[0].clone()),
+                H::provider(schemes[0].clone()),
             )
             .await;
 
             let genesis = make_block(Sha256::hash(b""), Height::zero(), 0);
 
-            let mock_app = MockVerifyingApp {
+            let mock_app = MockVerifyingApp::<H::Consensus> {
                 genesis: genesis.clone(),
+                _marker: std::marker::PhantomData,
             };
             let limited_epocher = LimitedEpocher {
                 inner: FixedEpocher::new(BLOCKS_PER_EPOCH),
@@ -2332,16 +2969,28 @@ mod tests {
     /// 3. Certify block B at view V+K
     /// 4. Certify block A at view V - should succeed
     #[test_traced("INFO")]
-    fn test_certify_lower_view_after_higher_view() {
+    fn test_certify_lower_view_after_higher_view_simplex() {
+        certify_lower_view_after_higher_view::<SimplexHarness>();
+    }
+
+    #[test_traced("INFO")]
+    fn test_certify_lower_view_after_higher_view_minimmit() {
+        certify_lower_view_after_higher_view::<MinimmitHarness>();
+    }
+
+    fn certify_lower_view_after_higher_view<H: ConsensusTestHarness>() {
         #[derive(Clone)]
-        struct MockVerifyingApp {
+        struct MockVerifyingApp<C: MarshalConsensus> {
             genesis: B,
+            _marker: std::marker::PhantomData<C>,
         }
 
-        impl crate::Application<deterministic::Context> for MockVerifyingApp {
+        impl<C: MarshalConsensus<Digest = D>> crate::Application<deterministic::Context>
+            for MockVerifyingApp<C>
+        {
             type Block = B;
             type Context = Context<D, K>;
-            type SigningScheme = S;
+            type Consensus = C;
 
             async fn genesis(&mut self) -> Self::Block {
                 self.genesis.clone()
@@ -2350,17 +2999,19 @@ mod tests {
             async fn propose(
                 &mut self,
                 _context: (deterministic::Context, Self::Context),
-                _ancestry: AncestorStream<Self::SigningScheme, Self::Block>,
+                _ancestry: AncestorStream<Self::Consensus, Self::Block>,
             ) -> Option<Self::Block> {
                 None
             }
         }
 
-        impl VerifyingApplication<deterministic::Context> for MockVerifyingApp {
+        impl<C: MarshalConsensus<Digest = D>> VerifyingApplication<deterministic::Context>
+            for MockVerifyingApp<C>
+        {
             async fn verify(
                 &mut self,
                 _context: (deterministic::Context, Self::Context),
-                _ancestry: AncestorStream<Self::SigningScheme, Self::Block>,
+                _ancestry: AncestorStream<Self::Consensus, Self::Block>,
             ) -> bool {
                 true
             }
@@ -2373,21 +3024,22 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            } = H::fixture(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             let me = participants[0].clone();
-            let (_base_app, marshal, _processed_height) = setup_validator(
+            let (_base_app, marshal, _processed_height) = setup_validator::<H>(
                 context.with_label("validator_0"),
                 &mut oracle,
                 me.clone(),
-                ConstantProvider::new(schemes[0].clone()),
+                H::provider(schemes[0].clone()),
             )
             .await;
 
             let genesis = make_block(Sha256::hash(b""), Height::zero(), 0);
 
-            let mock_app = MockVerifyingApp {
+            let mock_app = MockVerifyingApp::<H::Consensus> {
                 genesis: genesis.clone(),
+                _marker: std::marker::PhantomData,
             };
             let mut marshaled = Marshaled::new(
                 context.clone(),
@@ -2469,16 +3121,28 @@ mod tests {
     /// A re-proposal occurs when the parent commitment equals the block being verified,
     /// meaning the same block is being proposed again in a new view.
     #[test_traced("INFO")]
-    fn test_marshaled_reproposal_validation() {
+    fn test_marshaled_reproposal_validation_simplex() {
+        marshaled_reproposal_validation::<SimplexHarness>();
+    }
+
+    #[test_traced("INFO")]
+    fn test_marshaled_reproposal_validation_minimmit() {
+        marshaled_reproposal_validation::<MinimmitHarness>();
+    }
+
+    fn marshaled_reproposal_validation<H: ConsensusTestHarness>() {
         #[derive(Clone)]
-        struct MockVerifyingApp {
+        struct MockVerifyingApp<C: MarshalConsensus> {
             genesis: B,
+            _marker: std::marker::PhantomData<C>,
         }
 
-        impl crate::Application<deterministic::Context> for MockVerifyingApp {
+        impl<C: MarshalConsensus<Digest = D>> crate::Application<deterministic::Context>
+            for MockVerifyingApp<C>
+        {
             type Block = B;
             type Context = Context<D, K>;
-            type SigningScheme = S;
+            type Consensus = C;
 
             async fn genesis(&mut self) -> Self::Block {
                 self.genesis.clone()
@@ -2487,17 +3151,19 @@ mod tests {
             async fn propose(
                 &mut self,
                 _context: (deterministic::Context, Self::Context),
-                _ancestry: AncestorStream<Self::SigningScheme, Self::Block>,
+                _ancestry: AncestorStream<Self::Consensus, Self::Block>,
             ) -> Option<Self::Block> {
                 None
             }
         }
 
-        impl VerifyingApplication<deterministic::Context> for MockVerifyingApp {
+        impl<C: MarshalConsensus<Digest = D>> VerifyingApplication<deterministic::Context>
+            for MockVerifyingApp<C>
+        {
             async fn verify(
                 &mut self,
                 _context: (deterministic::Context, Self::Context),
-                _ancestry: AncestorStream<Self::SigningScheme, Self::Block>,
+                _ancestry: AncestorStream<Self::Consensus, Self::Block>,
             ) -> bool {
                 true
             }
@@ -2510,21 +3176,22 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            } = H::fixture(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             let me = participants[0].clone();
-            let (_base_app, marshal, _processed_height) = setup_validator(
+            let (_base_app, marshal, _processed_height) = setup_validator::<H>(
                 context.with_label("validator_0"),
                 &mut oracle,
                 me.clone(),
-                ConstantProvider::new(schemes[0].clone()),
+                H::provider(schemes[0].clone()),
             )
             .await;
 
             let genesis = make_block(Sha256::hash(b""), Height::zero(), 0);
 
-            let mock_app = MockVerifyingApp {
+            let mock_app = MockVerifyingApp::<H::Consensus> {
                 genesis: genesis.clone(),
+                _marker: std::marker::PhantomData,
             };
             let mut marshaled = Marshaled::new(
                 context.clone(),
@@ -2710,7 +3377,16 @@ mod tests {
     }
 
     #[test_traced("INFO")]
-    fn test_broadcast_caches_block() {
+    fn test_broadcast_caches_block_simplex() {
+        broadcast_caches_block::<SimplexHarness>();
+    }
+
+    #[test_traced("INFO")]
+    fn test_broadcast_caches_block_minimmit() {
+        broadcast_caches_block::<MinimmitHarness>();
+    }
+
+    fn broadcast_caches_block<H: ConsensusTestHarness>() {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
             let mut oracle = setup_network(context.clone(), None);
@@ -2718,22 +3394,22 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            } = H::fixture(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             // Set up one validator
             let (i, validator) = participants.iter().enumerate().next().unwrap();
-            let mut actor = setup_validator(
+            let mut actor = setup_validator::<H>(
                 context.with_label(&format!("validator_{i}")),
                 &mut oracle,
                 validator.clone(),
-                ConstantProvider::new(schemes[i].clone()),
+                H::provider(schemes[i].clone()),
             )
             .await
             .1;
 
             // Create block at height 1
-            let parent = Sha256::hash(b"");
-            let block = make_block(parent, Height::new(1), 1);
+            let genesis_digest = Sha256::hash(b"");
+            let block = make_block(genesis_digest, Height::new(1), 1);
             let commitment = block.digest();
 
             // Broadcast the block
@@ -2749,11 +3425,11 @@ mod tests {
                 .expect("block should be cached after broadcast");
 
             // Restart marshal, removing any in-memory cache
-            let mut actor = setup_validator(
+            let mut actor = setup_validator::<H>(
                 context.with_label(&format!("validator_{i}_restart")),
                 &mut oracle,
                 validator.clone(),
-                ConstantProvider::new(schemes[i].clone()),
+                H::provider(schemes[i].clone()),
             )
             .await
             .1;
@@ -2761,16 +3437,15 @@ mod tests {
             // Put a notarization into the cache to re-initialize the ephemeral cache for the
             // first epoch. Without this, the marshal cannot determine the epoch of the block being fetched,
             // so it won't look to restore the cache for the epoch.
-            let notarization = make_notarization(
-                Proposal {
-                    round: Round::new(Epoch::new(0), View::new(1)),
-                    parent: View::new(0),
-                    payload: commitment,
-                },
+            let notarization = H::make_notarization(
+                Round::new(Epoch::new(0), View::new(1)),
+                View::new(0),
+                genesis_digest,
+                commitment,
                 &schemes,
                 QUORUM,
             );
-            actor.report(Activity::Notarization(notarization)).await;
+            actor.report(H::notarization_activity(notarization)).await;
 
             // Ensure the block is cached and retrievable
             let fetched = actor

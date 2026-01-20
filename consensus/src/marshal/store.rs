@@ -1,21 +1,33 @@
 //! Interface for a store of finalized blocks, used by [Actor](super::Actor).
 
-use crate::{simplex::types::Finalization, types::Height, Block};
-use commonware_cryptography::{certificate::Scheme, Committable, Digest};
+use crate::{types::Height, Block};
+use commonware_codec::{Decode, Encode, EncodeSize, Write};
+use commonware_cryptography::{Committable, Digest};
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_storage::{
     archive::{self, immutable, prunable, Archive, Identifier},
     translator::Translator,
 };
-use std::{error::Error, future::Future};
+use std::{error::Error, future::Future, hash::Hash};
 
-/// Durable store for [Finalizations](Finalization) keyed by height and commitment.
+/// Durable store for finalization certificates keyed by height and commitment.
+///
+/// This trait is generic over the finalization type to support different consensus protocols.
 pub trait Certificates: Send + Sync + 'static {
     /// The type of commitment included in consensus certificates.
     type Commitment: Digest;
 
-    /// The type of signing [Scheme] used by consensus.
-    type Scheme: Scheme;
+    /// The finalization certificate type.
+    type Finalization: Clone
+        + Send
+        + Sync
+        + 'static
+        + Write
+        + EncodeSize
+        + Encode
+        + Decode
+        + Eq
+        + Hash;
 
     /// The type of error returned when storing, retrieving, or pruning finalizations.
     type Error: Error + Send + Sync + 'static;
@@ -39,10 +51,10 @@ pub trait Certificates: Send + Sync + 'static {
         &mut self,
         height: Height,
         commitment: Self::Commitment,
-        finalization: Finalization<Self::Scheme, Self::Commitment>,
+        finalization: Self::Finalization,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send;
 
-    /// Retrieve a [Finalization] by height or commitment.
+    /// Retrieve a finalization by height or commitment.
     ///
     /// The [Identifier] is borrowed from the [archive] API and allows lookups via either the application height or
     /// its commitment.
@@ -54,13 +66,10 @@ pub trait Certificates: Send + Sync + 'static {
     /// # Returns
     ///
     /// `Ok(Some(finalization))` if present, `Ok(None)` if missing, or `Err` on read failure.
-    #[allow(clippy::type_complexity)]
     fn get(
         &self,
         id: Identifier<'_, Self::Commitment>,
-    ) -> impl Future<
-        Output = Result<Option<Finalization<Self::Scheme, Self::Commitment>>, Self::Error>,
-    > + Send;
+    ) -> impl Future<Output = Result<Option<Self::Finalization>, Self::Error>> + Send;
 
     /// Prune the store to the provided minimum height (inclusive).
     ///
@@ -172,21 +181,25 @@ pub trait Blocks: Send + Sync + 'static {
     fn next_gap(&self, value: Height) -> (Option<Height>, Option<Height>);
 }
 
-impl<E, C, S> Certificates for immutable::Archive<E, C, Finalization<S, C>>
+// -----------------------------------------------------------------------------
+// Certificates implementations for archive types
+// -----------------------------------------------------------------------------
+
+impl<E, C, F> Certificates for immutable::Archive<E, C, F>
 where
     E: Storage + Metrics + Clock,
     C: Digest,
-    S: Scheme,
+    F: Clone + Send + Sync + 'static + Write + EncodeSize + Encode + Decode + Eq + Hash,
 {
     type Commitment = C;
-    type Scheme = S;
+    type Finalization = F;
     type Error = archive::Error;
 
     async fn put(
         &mut self,
         height: Height,
         commitment: Self::Commitment,
-        finalization: Finalization<S, Self::Commitment>,
+        finalization: Self::Finalization,
     ) -> Result<(), Self::Error> {
         self.put_sync(height.get(), commitment, finalization).await
     }
@@ -194,7 +207,7 @@ where
     async fn get(
         &self,
         id: Identifier<'_, Self::Commitment>,
-    ) -> Result<Option<Finalization<Self::Scheme, Self::Commitment>>, Self::Error> {
+    ) -> Result<Option<Self::Finalization>, Self::Error> {
         <Self as Archive>::get(self, id).await
     }
 
@@ -207,6 +220,46 @@ where
         <Self as Archive>::last_index(self).map(Height::new)
     }
 }
+
+impl<T, E, C, F> Certificates for prunable::Archive<T, E, C, F>
+where
+    T: Translator,
+    E: Storage + Metrics + Clock,
+    C: Digest,
+    F: Clone + Send + Sync + 'static + Write + EncodeSize + Encode + Decode + Eq + Hash,
+{
+    type Commitment = C;
+    type Finalization = F;
+    type Error = archive::Error;
+
+    async fn put(
+        &mut self,
+        height: Height,
+        commitment: Self::Commitment,
+        finalization: Self::Finalization,
+    ) -> Result<(), Self::Error> {
+        self.put_sync(height.get(), commitment, finalization).await
+    }
+
+    async fn get(
+        &self,
+        id: Identifier<'_, Self::Commitment>,
+    ) -> Result<Option<Self::Finalization>, Self::Error> {
+        <Self as Archive>::get(self, id).await
+    }
+
+    async fn prune(&mut self, min: Height) -> Result<(), Self::Error> {
+        Self::prune(self, min.get()).await
+    }
+
+    fn last_index(&self) -> Option<Height> {
+        <Self as Archive>::last_index(self).map(Height::new)
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Blocks implementations for archive types
+// -----------------------------------------------------------------------------
 
 impl<E, B> Blocks for immutable::Archive<E, B::Commitment, B>
 where
@@ -243,42 +296,6 @@ where
     fn next_gap(&self, value: Height) -> (Option<Height>, Option<Height>) {
         let (a, b) = <Self as Archive>::next_gap(self, value.get());
         (a.map(Height::new), b.map(Height::new))
-    }
-}
-
-impl<T, E, C, S> Certificates for prunable::Archive<T, E, C, Finalization<S, C>>
-where
-    T: Translator,
-    E: Storage + Metrics + Clock,
-    C: Digest,
-    S: Scheme,
-{
-    type Commitment = C;
-    type Scheme = S;
-    type Error = archive::Error;
-
-    async fn put(
-        &mut self,
-        height: Height,
-        commitment: Self::Commitment,
-        finalization: Finalization<S, Self::Commitment>,
-    ) -> Result<(), Self::Error> {
-        self.put_sync(height.get(), commitment, finalization).await
-    }
-
-    async fn get(
-        &self,
-        id: Identifier<'_, Self::Commitment>,
-    ) -> Result<Option<Finalization<Self::Scheme, Self::Commitment>>, Self::Error> {
-        <Self as Archive>::get(self, id).await
-    }
-
-    async fn prune(&mut self, min: Height) -> Result<(), Self::Error> {
-        Self::prune(self, min.get()).await
-    }
-
-    fn last_index(&self) -> Option<Height> {
-        <Self as Archive>::last_index(self).map(Height::new)
     }
 }
 

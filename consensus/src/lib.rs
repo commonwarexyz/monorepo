@@ -74,7 +74,7 @@ cfg_if::cfg_if! {
         use rand::Rng;
         use crate::marshal::ingress::mailbox::AncestorStream;
         use crate::types::Round;
-        use commonware_cryptography::certificate::Scheme;
+        use crate::marshal::consensus::MarshalConsensus;
 
         pub mod application;
         pub mod marshal;
@@ -162,8 +162,11 @@ cfg_if::cfg_if! {
         where
             E: Rng + Spawner + Metrics + Clock
         {
-            /// The signing scheme used by the application.
-            type SigningScheme: Scheme;
+            /// The consensus protocol abstraction used by this application.
+            ///
+            /// This type ties together the signing scheme, certificate types, and activity types
+            /// needed by the marshal layer.
+            type Consensus: MarshalConsensus;
 
             /// Context is metadata provided by the consensus engine associated with a given payload.
             ///
@@ -181,7 +184,7 @@ cfg_if::cfg_if! {
             fn propose(
                 &mut self,
                 context: (E, Self::Context),
-                ancestry: AncestorStream<Self::SigningScheme, Self::Block>,
+                ancestry: AncestorStream<Self::Consensus, Self::Block>,
             ) -> impl Future<Output = Option<Self::Block>> + Send;
         }
 
@@ -199,7 +202,7 @@ cfg_if::cfg_if! {
             fn verify(
                 &mut self,
                 context: (E, Self::Context),
-                ancestry: AncestorStream<Self::SigningScheme, Self::Block>,
+                ancestry: AncestorStream<Self::Consensus, Self::Block>,
             ) -> impl Future<Output = bool> + Send;
         }
 

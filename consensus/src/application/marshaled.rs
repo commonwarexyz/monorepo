@@ -51,7 +51,7 @@
 //!   than blocks they need AND can fetch).
 
 use crate::{
-    marshal::{self, ingress::mailbox::AncestorStream, Update},
+    marshal::{self, consensus::MarshalConsensus, ingress::mailbox::AncestorStream, Update},
     simplex::types::Context,
     types::{Epoch, Epocher, Height, Round},
     Application, Automaton, Block, CertifiableAutomaton, CertifiableBlock, Epochable, Relay,
@@ -102,17 +102,17 @@ type TasksMap<B> = HashMap<(Round, <B as Committable>::Commitment), oneshot::Rec
 /// _This embedded context is trustworthy because the notarizing quorum (which contains at least f+1 honest
 /// validators) verified that the block's context matched the consensus context before voting._
 #[derive(Clone)]
-pub struct Marshaled<E, S, A, B, ES>
+pub struct Marshaled<E, C, A, B, ES>
 where
     E: Rng + Spawner + Metrics + Clock,
-    S: Scheme,
+    C: MarshalConsensus,
     A: Application<E>,
     B: CertifiableBlock,
     ES: Epocher,
 {
     context: E,
     application: A,
-    marshal: marshal::Mailbox<S, B>,
+    marshal: marshal::Mailbox<C, B>,
     epocher: ES,
     last_built: Arc<Mutex<Option<(Round, B)>>>,
     verification_tasks: Arc<Mutex<TasksMap<B>>>,
@@ -120,21 +120,21 @@ where
     build_duration: Gauge,
 }
 
-impl<E, S, A, B, ES> Marshaled<E, S, A, B, ES>
+impl<E, C, A, B, ES> Marshaled<E, C, A, B, ES>
 where
     E: Rng + Spawner + Metrics + Clock,
-    S: Scheme,
+    C: MarshalConsensus,
     A: VerifyingApplication<
         E,
         Block = B,
-        SigningScheme = S,
-        Context = Context<B::Commitment, S::PublicKey>,
+        Consensus = C,
+        Context = Context<B::Commitment, <C::Scheme as Scheme>::PublicKey>,
     >,
     B: CertifiableBlock<Context = <A as Application<E>>::Context>,
     ES: Epocher,
 {
     /// Creates a new [`Marshaled`] wrapper.
-    pub fn new(context: E, application: A, marshal: marshal::Mailbox<S, B>, epocher: ES) -> Self {
+    pub fn new(context: E, application: A, marshal: marshal::Mailbox<C, B>, epocher: ES) -> Self {
         let build_duration = Gauge::default();
         context.register(
             "build_duration",
@@ -261,21 +261,21 @@ where
     }
 }
 
-impl<E, S, A, B, ES> Automaton for Marshaled<E, S, A, B, ES>
+impl<E, C, A, B, ES> Automaton for Marshaled<E, C, A, B, ES>
 where
     E: Rng + Spawner + Metrics + Clock,
-    S: Scheme,
+    C: MarshalConsensus,
     A: VerifyingApplication<
         E,
         Block = B,
-        SigningScheme = S,
-        Context = Context<B::Commitment, S::PublicKey>,
+        Consensus = C,
+        Context = Context<B::Commitment, <C::Scheme as Scheme>::PublicKey>,
     >,
     B: CertifiableBlock<Context = <A as Application<E>>::Context>,
     ES: Epocher,
 {
     type Digest = B::Commitment;
-    type Context = Context<Self::Digest, S::PublicKey>;
+    type Context = Context<Self::Digest, <C::Scheme as Scheme>::PublicKey>;
 
     /// Returns the genesis commitment for a given epoch.
     ///
@@ -317,7 +317,7 @@ where
     /// broadcasting.
     async fn propose(
         &mut self,
-        consensus_context: Context<Self::Digest, S::PublicKey>,
+        consensus_context: Context<Self::Digest, <C::Scheme as Scheme>::PublicKey>,
     ) -> oneshot::Receiver<Self::Digest> {
         let mut marshal = self.marshal.clone();
         let mut application = self.application.clone();
@@ -433,7 +433,7 @@ where
 
     async fn verify(
         &mut self,
-        context: Context<Self::Digest, S::PublicKey>,
+        context: Context<Self::Digest, <C::Scheme as Scheme>::PublicKey>,
         commitment: Self::Digest,
     ) -> oneshot::Receiver<bool> {
         let mut marshal = self.marshal.clone();
@@ -556,15 +556,15 @@ where
     }
 }
 
-impl<E, S, A, B, ES> CertifiableAutomaton for Marshaled<E, S, A, B, ES>
+impl<E, C, A, B, ES> CertifiableAutomaton for Marshaled<E, C, A, B, ES>
 where
     E: Rng + Spawner + Metrics + Clock,
-    S: Scheme,
+    C: MarshalConsensus,
     A: VerifyingApplication<
         E,
         Block = B,
-        SigningScheme = S,
-        Context = Context<B::Commitment, S::PublicKey>,
+        Consensus = C,
+        Context = Context<B::Commitment, <C::Scheme as Scheme>::PublicKey>,
     >,
     B: CertifiableBlock<Context = <A as Application<E>>::Context>,
     ES: Epocher,
@@ -650,11 +650,15 @@ where
     }
 }
 
-impl<E, S, A, B, ES> Relay for Marshaled<E, S, A, B, ES>
+impl<E, C, A, B, ES> Relay for Marshaled<E, C, A, B, ES>
 where
     E: Rng + Spawner + Metrics + Clock,
-    S: Scheme,
-    A: Application<E, Block = B, Context = Context<B::Commitment, S::PublicKey>>,
+    C: MarshalConsensus,
+    A: Application<
+        E,
+        Block = B,
+        Context = Context<B::Commitment, <C::Scheme as Scheme>::PublicKey>,
+    >,
     B: CertifiableBlock<Context = <A as Application<E>>::Context>,
     ES: Epocher,
 {
@@ -690,12 +694,15 @@ where
     }
 }
 
-impl<E, S, A, B, ES> Reporter for Marshaled<E, S, A, B, ES>
+impl<E, C, A, B, ES> Reporter for Marshaled<E, C, A, B, ES>
 where
     E: Rng + Spawner + Metrics + Clock,
-    S: Scheme,
-    A: Application<E, Block = B, Context = Context<B::Commitment, S::PublicKey>>
-        + Reporter<Activity = Update<B>>,
+    C: MarshalConsensus,
+    A: Application<
+            E,
+            Block = B,
+            Context = Context<B::Commitment, <C::Scheme as Scheme>::PublicKey>,
+        > + Reporter<Activity = Update<B>>,
     B: CertifiableBlock<Context = <A as Application<E>>::Context>,
     ES: Epocher,
 {
@@ -729,16 +736,20 @@ fn is_at_epoch_boundary<ES: Epocher>(epocher: &ES, block_height: Height, epoch: 
 ///
 /// Returns an error if the marshal subscription is cancelled.
 #[inline]
-async fn fetch_parent<E, S, A, B>(
+async fn fetch_parent<E, C, A, B>(
     parent_commitment: B::Commitment,
     parent_round: Option<Round>,
     application: &mut A,
-    marshal: &mut marshal::Mailbox<S, B>,
+    marshal: &mut marshal::Mailbox<C, B>,
 ) -> Either<Ready<Result<B, Canceled>>, oneshot::Receiver<B>>
 where
     E: Rng + Spawner + Metrics + Clock,
-    S: Scheme,
-    A: Application<E, Block = B, Context = Context<B::Commitment, S::PublicKey>>,
+    C: MarshalConsensus,
+    A: Application<
+        E,
+        Block = B,
+        Context = Context<B::Commitment, <C::Scheme as Scheme>::PublicKey>,
+    >,
     B: Block,
 {
     let genesis = application.genesis().await;
