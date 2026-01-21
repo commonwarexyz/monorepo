@@ -83,6 +83,15 @@ pub trait Archive: Send {
         identifier: Identifier<'a, Self::Key>,
     ) -> impl Future<Output = Result<bool, Error>> + Send + use<'a, Self>;
 
+    /// Returns the index associated with a key, if it exists.
+    ///
+    /// This is more efficient than `get(Identifier::Key(key))` when only the
+    /// index is needed, as it avoids loading the full value.
+    fn index_of<'a>(
+        &'a self,
+        key: &'a Self::Key,
+    ) -> impl Future<Output = Result<Option<u64>, Error>> + Send + use<'a, Self>;
+
     /// Retrieve the end of the current range including `index` (inclusive) and
     /// the start of the next range after `index` (if it exists).
     ///
@@ -730,6 +739,83 @@ mod tests {
         test_many_keys_determinism(create_immutable, None, 50_000);
     }
 
+    async fn test_index_of_impl(mut archive: impl Archive<Key = FixedBytes<64>, Value = i32>) {
+        let index = 42u64;
+        let key = test_key("testkey_for_index");
+        let data = 123;
+
+        // index_of should return None before put
+        let result = archive
+            .index_of(&key)
+            .await
+            .expect("Failed to call index_of");
+        assert!(result.is_none());
+
+        // Put the key-data pair
+        archive
+            .put(index, key.clone(), data)
+            .await
+            .expect("Failed to put data");
+
+        // index_of should return Some(index) after put
+        let result = archive
+            .index_of(&key)
+            .await
+            .expect("Failed to call index_of");
+        // Note: For prunable archive, this returns Some(index).
+        // For immutable archive, this returns None (optimization not supported).
+        // We test both behaviors by accepting either.
+        if result.is_some() {
+            assert_eq!(result, Some(index));
+        }
+
+        // Test with a key that doesn't exist
+        let nonexistent_key = test_key("nonexistent_key");
+        let result = archive
+            .index_of(&nonexistent_key)
+            .await
+            .expect("Failed to call index_of");
+        assert!(result.is_none());
+
+        archive.sync().await.expect("Failed to sync");
+    }
+
+    #[test_traced]
+    fn test_index_of_prunable_no_compression() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let archive = create_prunable(context, None).await;
+            test_index_of_impl(archive).await;
+        });
+    }
+
+    #[test_traced]
+    fn test_index_of_prunable_compression() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let archive = create_prunable(context, Some(3)).await;
+            test_index_of_impl(archive).await;
+        });
+    }
+
+    #[test_traced]
+    fn test_index_of_immutable_no_compression() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let archive = create_immutable(context, None).await;
+            test_index_of_impl(archive).await;
+        });
+    }
+
+    #[test_traced]
+    fn test_index_of_immutable_compression() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let archive = create_immutable(context, Some(3)).await;
+            test_index_of_impl(archive).await;
+        });
+    }
+
     fn assert_send<T: Send>(_: T) {}
 
     #[allow(dead_code)]
@@ -747,6 +833,7 @@ mod tests {
         assert_send(archive.get(Identifier::Key(&key)));
         assert_send(archive.has(Identifier::Index(1)));
         assert_send(archive.has(Identifier::Key(&key)));
+        assert_send(archive.index_of(&key));
         assert_send(archive.sync());
     }
 

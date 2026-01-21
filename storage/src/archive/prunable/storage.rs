@@ -285,6 +285,33 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: CodecShared> Archive<T, E
         self.indices.contains_key(&index)
     }
 
+    async fn index_of_key(&self, key: &K) -> Result<Option<u64>, Error> {
+        // Fetch candidate indices from in-memory map
+        let iter = self.keys.get(key);
+        let min_allowed = self.oldest_allowed.unwrap_or(0);
+        for index in iter {
+            // Continue if index is no longer allowed due to pruning.
+            if *index < min_allowed {
+                continue;
+            }
+
+            // Get index location
+            let position = *self.indices.get(index).ok_or(Error::RecordCorrupted)?;
+
+            // Fetch index entry from index journal to verify key
+            let section = self.section(*index);
+            let entry = self.oversized.get(section, position).await?;
+
+            // Verify key matches (skip value loading)
+            if entry.key.as_ref() == key.as_ref() {
+                return Ok(Some(*index));
+            }
+            self.unnecessary_reads.inc();
+        }
+
+        Ok(None)
+    }
+
     /// Prune `Archive` to the provided `min` (masked by the configured
     /// section mask).
     ///
@@ -392,6 +419,10 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: CodecShared> crate::archi
             Identifier::Index(index) => Ok(self.has_index(index)),
             Identifier::Key(key) => self.get_key(key).await.map(|result| result.is_some()),
         }
+    }
+
+    async fn index_of(&self, key: &K) -> Result<Option<u64>, Error> {
+        self.index_of_key(key).await
     }
 
     async fn sync(&mut self) -> Result<(), Error> {
