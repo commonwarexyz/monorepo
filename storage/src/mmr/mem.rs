@@ -423,16 +423,16 @@ impl<D: Digest> CleanMmr<D> {
     ///
     /// Returns [Error::LocationOverflow] if `loc` > [crate::mmr::MAX_LOCATION].
     /// Returns [Error::ElementPruned] if some element needed to generate the proof has been pruned.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `loc` is out of bounds.
+    /// Returns [Error::LeafOutOfBounds] if `loc` >= [Self::leaves()].
     pub fn proof(&self, loc: Location) -> Result<Proof<D>, Error> {
         if !loc.is_valid() {
             return Err(Error::LocationOverflow(loc));
         }
         // loc is valid so it won't overflow from + 1
-        self.range_proof(loc..loc + 1)
+        self.range_proof(loc..loc + 1).map_err(|e| match e {
+            Error::RangeOutOfBounds(loc) => Error::LeafOutOfBounds(loc),
+            _ => e,
+        })
     }
 
     /// Return an inclusion proof for all elements within the provided `range` of locations.
@@ -441,26 +441,10 @@ impl<D: Digest> CleanMmr<D> {
     ///
     /// Returns [Error::Empty] if the range is empty.
     /// Returns [Error::LocationOverflow] if any location in `range` exceeds [crate::mmr::MAX_LOCATION].
+    /// Returns [Error::RangeOutOfBounds] if `range.end` > [Self::leaves()].
     /// Returns [Error::ElementPruned] if some element needed to generate the proof has been pruned.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the element range is out of bounds.
     pub fn range_proof(&self, range: Range<Location>) -> Result<Proof<D>, Error> {
         let leaves = self.leaves();
-        assert!(
-            range.start < leaves,
-            "range start {} >= leaf count {}",
-            range.start,
-            leaves
-        );
-        assert!(
-            range.end <= leaves,
-            "range end {} > leaf count {}",
-            range.end,
-            leaves
-        );
-
         let positions = proof::nodes_required_for_range_proof(leaves, range)?;
         let digests = positions
             .into_iter()
@@ -1470,6 +1454,60 @@ mod tests {
                 Mmr::init(config, &mut hasher),
                 Err(Error::InvalidSize(_))
             ));
+        });
+    }
+
+    #[test]
+    fn test_mem_mmr_range_proof_out_of_bounds() {
+        let mut hasher: Standard<Sha256> = Standard::new();
+
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
+            // Range end > leaves errors on empty MMR
+            let mmr = CleanMmr::new(&mut hasher);
+            assert_eq!(mmr.leaves(), Location::new_unchecked(0));
+            let result = mmr.range_proof(Location::new_unchecked(0)..Location::new_unchecked(1));
+            assert!(matches!(result, Err(Error::RangeOutOfBounds(_))));
+
+            // Range end > leaves errors on non-empty MMR
+            let mmr = build_test_mmr(&mut hasher, mmr, 10);
+            assert_eq!(mmr.leaves(), Location::new_unchecked(10));
+            let result = mmr.range_proof(Location::new_unchecked(5)..Location::new_unchecked(11));
+            assert!(matches!(result, Err(Error::RangeOutOfBounds(_))));
+
+            // Range end == leaves succeeds
+            let result = mmr.range_proof(Location::new_unchecked(5)..Location::new_unchecked(10));
+            assert!(result.is_ok());
+        });
+    }
+
+    #[test]
+    fn test_mem_mmr_proof_out_of_bounds() {
+        let mut hasher: Standard<Sha256> = Standard::new();
+
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
+            // Test on empty MMR - should return error, not panic
+            let mmr = CleanMmr::new(&mut hasher);
+            let result = mmr.proof(Location::new_unchecked(0));
+            assert!(
+                matches!(result, Err(Error::LeafOutOfBounds(_))),
+                "expected LeafOutOfBounds, got {:?}",
+                result
+            );
+
+            // Test on non-empty MMR with location >= leaves
+            let mmr = build_test_mmr(&mut hasher, mmr, 10);
+            let result = mmr.proof(Location::new_unchecked(10));
+            assert!(
+                matches!(result, Err(Error::LeafOutOfBounds(_))),
+                "expected LeafOutOfBounds, got {:?}",
+                result
+            );
+
+            // location < leaves should succeed
+            let result = mmr.proof(Location::new_unchecked(9));
+            assert!(result.is_ok(), "expected Ok, got {:?}", result);
         });
     }
 }
