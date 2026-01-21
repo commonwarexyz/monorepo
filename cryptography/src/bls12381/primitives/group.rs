@@ -531,7 +531,7 @@ impl<'a> Sub<&'a Self> for Scalar {
     }
 }
 
-impl<'a, 'b> Sub<&'b Scalar> for &'a Scalar {
+impl<'b> Sub<&'b Scalar> for &Scalar {
     type Output = Scalar;
 
     fn sub(self, rhs: &'b Scalar) -> Self::Output {
