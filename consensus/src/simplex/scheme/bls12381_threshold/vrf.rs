@@ -637,24 +637,23 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
         I::IntoIter: Send,
     {
         let namespace = self.namespace();
-        let partials = strategy.map_collect_vec(attestations.into_iter(), |attestation| {
-            let index = attestation.signer;
-            let Some(sig) = attestation.signature.get() else {
-                return (index, None, None);
-            };
-
-            (
-                index,
-                Some(PartialSignature::<V> {
-                    index,
-                    value: sig.vote_signature,
-                }),
-                Some(PartialSignature::<V> {
-                    index,
-                    value: sig.seed_signature,
-                }),
-            )
-        });
+        let (partials, decode_failures) =
+            strategy.map_collect_vec_filter(attestations.into_iter(), |attestation| {
+                let index = attestation.signer;
+                let value = attestation.signature.get().map(|sig| {
+                    (
+                        PartialSignature::<V> {
+                            index,
+                            value: sig.vote_signature,
+                        },
+                        PartialSignature::<V> {
+                            index,
+                            value: sig.seed_signature,
+                        },
+                    )
+                });
+                (index, value)
+            });
 
         let polynomial = self.polynomial();
         let vote_namespace = subject.namespace(namespace);
@@ -676,7 +675,7 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
                     polynomial,
                     vote_namespace,
                     &vote_message,
-                    partials.iter().filter_map(|x| x.1.as_ref()),
+                    partials.iter().map(|(vote, _)| vote),
                     strategy,
                 ) {
                     Ok(()) => BTreeSet::new(),
@@ -690,7 +689,7 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
                     polynomial,
                     &namespace.seed,
                     &seed_message,
-                    partials.iter().filter_map(|x| x.2.as_ref()),
+                    partials.iter().map(|(_, seed)| seed),
                     strategy,
                 ) {
                     Ok(()) => BTreeSet::new(),
@@ -698,32 +697,23 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
                 }
             },
         );
-        // Merge invalid sets
-        let mut invalid: BTreeSet<_> = vote_invalid.union(&seed_invalid).copied().collect();
 
-        // At this point, invalid contains all the signatures which successfully
-        // parsed, and which ended up being invalid. We now want to add in all
-        // the signatures which failed to parse.
-        for (signer, vote, seed) in partials.iter() {
-            if vote.is_none() || seed.is_none() {
-                invalid.insert(*signer);
-            }
-        }
+        // Merge invalid sets and add decode failures
+        let mut invalid: BTreeSet<_> = vote_invalid.union(&seed_invalid).copied().collect();
+        invalid.extend(decode_failures);
 
         // Signatures that are not invalid.
         let verified = partials
             .into_iter()
-            .filter_map(|(signer, vote, seed)| {
-                Some(Attestation {
-                    signer,
-                    signature: Signature {
-                        vote_signature: vote?.value,
-                        seed_signature: seed?.value,
-                    }
-                    .into(),
-                })
+            .filter(|(vote, _)| !invalid.contains(&vote.index))
+            .map(|(vote, seed)| Attestation {
+                signer: vote.index,
+                signature: Signature {
+                    vote_signature: vote.value,
+                    seed_signature: seed.value,
+                }
+                .into(),
             })
-            .filter(|attestation| !invalid.contains(&attestation.signer))
             .collect();
 
         Verification::new(verified, invalid.into_iter().collect())
@@ -735,21 +725,26 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
         I::IntoIter: Send,
         M: Faults,
     {
-        let partials = strategy.map_collect_vec(attestations.into_iter(), |attestation| {
-            let index = attestation.signer;
-            let sig = attestation.signature.get()?;
-            Some((
-                PartialSignature::<V> {
-                    index,
-                    value: sig.vote_signature,
-                },
-                PartialSignature::<V> {
-                    index,
-                    value: sig.seed_signature,
-                },
-            ))
-        });
-        let partials: Vec<_> = partials.into_iter().collect::<Option<_>>()?;
+        let (partials, failures) =
+            strategy.map_collect_vec_filter(attestations.into_iter(), |attestation| {
+                let index = attestation.signer;
+                let value = attestation.signature.get().map(|sig| {
+                    (
+                        PartialSignature::<V> {
+                            index,
+                            value: sig.vote_signature,
+                        },
+                        PartialSignature::<V> {
+                            index,
+                            value: sig.seed_signature,
+                        },
+                    )
+                });
+                (index, value)
+            });
+        if !failures.is_empty() {
+            return None;
+        }
         let (vote_partials, seed_partials): (Vec<_>, Vec<_>) = partials.into_iter().unzip();
 
         let quorum = self.polynomial();

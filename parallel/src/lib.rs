@@ -16,6 +16,8 @@
 //! - [`map_collect_vec`](Strategy::map_collect_vec): Maps elements and collects into a `Vec`
 //! - [`map_init_collect_vec`](Strategy::map_init_collect_vec): Like `map_collect_vec` with
 //!   per-partition initialization
+//! - [`map_collect_vec_filter`](Strategy::map_collect_vec_filter): Maps elements, collecting
+//!   successful results and tracking indices of filtered elements
 //!
 //! Two implementations are provided:
 //!
@@ -277,6 +279,66 @@ pub trait Strategy: Clone + Send + Sync + fmt::Debug + 'static {
             |mut a, b| {
                 a.extend(b);
                 a
+            },
+        )
+    }
+
+    /// Maps each element, filtering out `None` results and tracking their keys.
+    ///
+    /// This is a convenience method that applies `map_op` to each element. The
+    /// closure returns `(key, Option<value>)`. Elements where the option is `Some`
+    /// have their values collected into the first vector. Elements where the option
+    /// is `None` have their keys collected into the second vector.
+    ///
+    /// # Arguments
+    ///
+    /// - `iter`: The collection to map over
+    /// - `map_op`: The mapping function returning `(K, Option<U>)`
+    ///
+    /// # Returns
+    ///
+    /// A tuple of `(results, filtered_keys)` where:
+    /// - `results`: Values from successful mappings (where `map_op` returned `Some`)
+    /// - `filtered_keys`: Keys where `map_op` returned `None`
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use commonware_parallel::{Strategy, Sequential};
+    ///
+    /// let strategy = Sequential;
+    /// let data = vec![1, 2, 3, 4, 5];
+    ///
+    /// let (evens, odd_values): (Vec<i32>, Vec<i32>) = strategy.map_collect_vec_filter(
+    ///     data.iter(),
+    ///     |&x| (x, if x % 2 == 0 { Some(x * 10) } else { None }),
+    /// );
+    ///
+    /// assert_eq!(evens, vec![20, 40]);
+    /// assert_eq!(odd_values, vec![1, 3, 5]);
+    /// ```
+    fn map_collect_vec_filter<I, F, K, U>(&self, iter: I, map_op: F) -> (Vec<U>, Vec<K>)
+    where
+        I: IntoIterator<IntoIter: Send, Item: Send> + Send,
+        F: Fn(I::Item) -> (K, Option<U>) + Send + Sync,
+        K: Send,
+        U: Send,
+    {
+        self.fold(
+            iter,
+            || (Vec::new(), Vec::new()),
+            |(mut results, mut filtered), item| {
+                let (key, value) = map_op(item);
+                match value {
+                    Some(v) => results.push(v),
+                    None => filtered.push(key),
+                }
+                (results, filtered)
+            },
+            |(mut r1, mut f1), (r2, f2)| {
+                r1.extend(r2);
+                f1.extend(f2);
+                (r1, f1)
             },
         )
     }
@@ -598,6 +660,42 @@ mod test {
             );
 
             prop_assert_eq!(via_map, via_fold_init);
+        }
+
+        #[test]
+        fn parallel_map_collect_vec_filter_matches_sequential(data in prop::collection::vec(any::<i32>(), 0..500)) {
+            let sequential = Sequential;
+            let parallel = parallel_strategy();
+
+            let map_op = |&x: &i32| {
+                let value = if x % 2 == 0 { Some(x.wrapping_mul(2)) } else { None };
+                (x, value)
+            };
+
+            let seq_result = sequential.map_collect_vec_filter(data.iter(), map_op);
+            let par_result = parallel.map_collect_vec_filter(data.iter(), map_op);
+
+            prop_assert_eq!(seq_result, par_result);
+        }
+
+        #[test]
+        fn map_collect_vec_filter_returns_correct_results(data in prop::collection::vec(any::<i32>(), 0..500)) {
+            let s = Sequential;
+
+            let map_op = |&x: &i32| {
+                let value = if x % 2 == 0 { Some(x.wrapping_mul(2)) } else { None };
+                (x, value)
+            };
+
+            let (results, filtered) = s.map_collect_vec_filter(data.iter(), map_op);
+
+            // Verify results contains doubled even numbers
+            let expected_results: Vec<i32> = data.iter().filter(|&&x| x % 2 == 0).map(|&x| x.wrapping_mul(2)).collect();
+            prop_assert_eq!(results, expected_results);
+
+            // Verify filtered contains odd numbers
+            let expected_filtered: Vec<i32> = data.iter().filter(|&&x| x % 2 != 0).copied().collect();
+            prop_assert_eq!(filtered, expected_filtered);
         }
     }
 }

@@ -320,16 +320,18 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         T: Strategy,
         M: Faults,
     {
-        let partials = strategy.map_collect_vec(attestations.into_iter(), |attestation| {
-            attestation
-                .signature
-                .get()
-                .map(|&value| PartialSignature::<V> {
-                    index: attestation.signer,
-                    value,
-                })
-        });
-        let partials: Vec<_> = partials.into_iter().collect::<Option<_>>()?;
+        let (partials, failures) =
+            strategy.map_collect_vec_filter(attestations.into_iter(), |attestation| {
+                let index = attestation.signer;
+                let value = attestation
+                    .signature
+                    .get()
+                    .map(|&sig| PartialSignature::<V> { index, value: sig });
+                (index, value)
+            });
+        if !failures.is_empty() {
+            return None;
+        }
 
         let quorum = self.polynomial();
         if partials.len() < quorum.required::<M>() as usize {
