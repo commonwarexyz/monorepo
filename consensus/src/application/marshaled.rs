@@ -45,11 +45,12 @@
 //!
 //! # Future Work
 //!
-//! - It is possible to skip fetching the block during [`Automaton::verify`] and optimistically vote,
-//!   removing the need for data availability as a condition for voting to notarize. However, this
-//!   adds complexity since notarization certificates would no longer imply data availability. In
-//!   the future, by updating marshal and other components to meet this assumption, we can improve
-//!   view latency further.
+//! - To further reduce view latency, a participant could optimistically vote for a block prior to
+//!   observing its availability during [`Automaton::verify`]. However, this would require updating
+//!   other components (like [`crate::marshal`]) to handle backfill where notarization does not imply
+//!   a block is fetchable (without modification, a malicious leader that withholds blocks during propose
+//!   could get an honest node to exhaust their network rate limit fetching things that don't exist rather
+//!   than blocks they need AND can fetch).
 
 use crate::{
     marshal::{self, ingress::mailbox::AncestorStream, Update},
