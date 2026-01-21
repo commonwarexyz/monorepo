@@ -6,11 +6,10 @@
 
 use super::ledger::LedgerService;
 use crate::{
-    domain::{LedgerEvent, StateRoot, Tx},
+    domain::{StateRoot, Tx},
     ConsensusDigest,
 };
 use alloy_evm::revm::primitives::{Address, B256, U256};
-use futures::channel::mpsc::UnboundedReceiver;
 
 #[derive(Clone)]
 /// Handle that exposes application queries and submissions to the simulation harness.
@@ -22,12 +21,6 @@ pub struct NodeHandle {
 impl NodeHandle {
     pub(crate) const fn new(state: LedgerService) -> Self {
         Self { state }
-    }
-
-    /// Subscribe to the ledger domain event stream.
-    #[allow(dead_code)]
-    pub fn subscribe_events(&self) -> UnboundedReceiver<LedgerEvent> {
-        self.state.subscribe()
     }
 
     pub async fn submit_tx(&self, tx: Tx) -> bool {
