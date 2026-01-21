@@ -593,6 +593,7 @@ where
         );
         let block_rx = self.marshal.subscribe(Some(round), commitment).await;
         let mut marshaled = self.clone();
+        let epocher = self.epocher.clone();
         let (mut tx, rx) = oneshot::channel();
         self.context
             .with_label("certify")
@@ -622,18 +623,20 @@ where
                     }
                 };
 
-                // Check if this is a re-proposal (the block commitment matches the parent from
-                // the context).
-                let context = block.context();
-                if context.parent.1 == block.commitment() {
-                    marshaled.marshal.verified(context.round, block).await;
+                // Check for re-proposal: block at epoch boundary being certified at a later view.
+                let embedded_context = block.context();
+                let is_reproposal = epocher
+                    .last(embedded_context.round.epoch())
+                    .is_some_and(|last| last == block.height())
+                    && round.view() > embedded_context.round.view()
+                    && round.epoch() == embedded_context.round.epoch();
+                if is_reproposal {
+                    marshaled.marshal.verified(round, block).await;
                     tx.send_lossy(true);
                     return;
                 }
 
-                // If the block is not a re-proposal, verify it using the deferred verification
-                // process.
-                let verify_rx = marshaled.deferred_verify(context, block).await;
+                let verify_rx = marshaled.deferred_verify(embedded_context, block).await;
                 if let Ok(result) = verify_rx.await {
                     tx.send_lossy(result);
                 }
