@@ -901,11 +901,11 @@ pub struct Notarization<S: Scheme, D: Digest> {
 
 impl<S: Scheme, D: Digest> Notarization<S, D> {
     /// Builds a notarization certificate from notarize votes for the same proposal.
-    pub fn from_notarizes<'a>(
-        scheme: &S,
-        notarizes: impl IntoIterator<Item = &'a Notarize<S, D>>,
-        strategy: &impl Strategy,
-    ) -> Option<Self> {
+    pub fn from_notarizes<'a, I>(scheme: &S, notarizes: I, strategy: &impl Strategy) -> Option<Self>
+    where
+        I: IntoIterator<Item = &'a Notarize<S, D>>,
+        I::IntoIter: Send,
+    {
         let mut iter = notarizes.into_iter().peekable();
         let proposal = iter.peek()?.proposal.clone();
         let certificate =
@@ -1139,11 +1139,11 @@ pub struct Nullification<S: Scheme> {
 
 impl<S: Scheme> Nullification<S> {
     /// Builds a nullification certificate from nullify votes from the same round.
-    pub fn from_nullifies<'a>(
-        scheme: &S,
-        nullifies: impl IntoIterator<Item = &'a Nullify<S>>,
-        strategy: &impl Strategy,
-    ) -> Option<Self> {
+    pub fn from_nullifies<'a, I>(scheme: &S, nullifies: I, strategy: &impl Strategy) -> Option<Self>
+    where
+        I: IntoIterator<Item = &'a Nullify<S>>,
+        I::IntoIter: Send,
+    {
         let mut iter = nullifies.into_iter().peekable();
         let round = iter.peek()?.round;
         let certificate =
@@ -1384,11 +1384,11 @@ pub struct Finalization<S: Scheme, D: Digest> {
 
 impl<S: Scheme, D: Digest> Finalization<S, D> {
     /// Builds a finalization certificate from finalize votes for the same proposal.
-    pub fn from_finalizes<'a>(
-        scheme: &S,
-        finalizes: impl IntoIterator<Item = &'a Finalize<S, D>>,
-        strategy: &impl Strategy,
-    ) -> Option<Self> {
+    pub fn from_finalizes<'a, I>(scheme: &S, finalizes: I, strategy: &impl Strategy) -> Option<Self>
+    where
+        I: IntoIterator<Item = &'a Finalize<S, D>>,
+        I::IntoIter: Send,
+    {
         let mut iter = finalizes.into_iter().peekable();
         let proposal = iter.peek()?.proposal.clone();
         let certificate =

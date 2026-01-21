@@ -39,7 +39,9 @@ use crate::{
     Epochable, Viewable,
 };
 use bytes::{Buf, BufMut};
-use commonware_codec::{Encode, EncodeSize, Error, FixedSize, Read, ReadExt, Write};
+use commonware_codec::{
+    types::lazy::Lazy, Encode, EncodeSize, Error, FixedSize, Read, ReadExt, Write,
+};
 use commonware_cryptography::{
     bls12381::{
         primitives::{
@@ -304,7 +306,7 @@ where
 }
 
 /// Combined vote/seed signature pair emitted by the BLS12-381 threshold VRF scheme.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Signature<V: Variant> {
     /// Signature over the consensus vote message (partial or recovered aggregate).
     pub vote_signature: V::Signature,
@@ -346,6 +348,61 @@ where
         Ok(Self {
             vote_signature: u.arbitrary()?,
             seed_signature: u.arbitrary()?,
+        })
+    }
+}
+
+/// Certificate for BLS12-381 threshold VRF signatures.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct Certificate<V: Variant> {
+    /// The recovered threshold signature pair.
+    pub signature: Lazy<Signature<V>>,
+}
+
+impl<V: Variant> Certificate<V> {
+    /// Attempts to get the decoded signature.
+    ///
+    /// Returns `None` if the signature fails to decode.
+    pub fn get(&self) -> Option<&Signature<V>> {
+        self.signature.get()
+    }
+}
+
+impl<V: Variant> From<Signature<V>> for Certificate<V> {
+    fn from(signature: Signature<V>) -> Self {
+        Self {
+            signature: Lazy::from(signature),
+        }
+    }
+}
+
+impl<V: Variant> Write for Certificate<V> {
+    fn write(&self, writer: &mut impl BufMut) {
+        self.signature.write(writer);
+    }
+}
+
+impl<V: Variant> Read for Certificate<V> {
+    type Cfg = ();
+
+    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
+        let signature = Lazy::<Signature<V>>::read(reader)?;
+        Ok(Self { signature })
+    }
+}
+
+impl<V: Variant> FixedSize for Certificate<V> {
+    const SIZE: usize = Signature::<V>::SIZE;
+}
+
+#[cfg(feature = "arbitrary")]
+impl<V: Variant> arbitrary::Arbitrary<'_> for Certificate<V>
+where
+    V::Signature: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(Self {
+            signature: Lazy::from(u.arbitrary::<Signature<V>>()?),
         })
     }
 }
@@ -458,13 +515,21 @@ pub trait Seedable<V: Variant> {
 
 impl<P: PublicKey, V: Variant, D: Digest> Seedable<V> for Notarization<Scheme<P, V>, D> {
     fn seed(&self) -> Seed<V> {
-        Seed::new(self.proposal.round, self.certificate.seed_signature)
+        let cert = self
+            .certificate
+            .get()
+            .expect("verified certificate must decode");
+        Seed::new(self.proposal.round, cert.seed_signature)
     }
 }
 
 impl<P: PublicKey, V: Variant, D: Digest> Seedable<V> for Finalization<Scheme<P, V>, D> {
     fn seed(&self) -> Seed<V> {
-        Seed::new(self.proposal.round, self.certificate.seed_signature)
+        let cert = self
+            .certificate
+            .get()
+            .expect("verified certificate must decode");
+        Seed::new(self.proposal.round, cert.seed_signature)
     }
 }
 
@@ -482,7 +547,7 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
     type Subject<'a, D: Digest> = Subject<'a, D>;
     type PublicKey = P;
     type Signature = Signature<V>;
-    type Certificate = Signature<V>;
+    type Certificate = Certificate<V>;
 
     fn me(&self) -> Option<Participant> {
         match &self.role {
@@ -515,7 +580,7 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
 
         Some(Attestation {
             signer: share.index,
-            signature,
+            signature: signature.into(),
         })
     }
 
@@ -539,16 +604,20 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
         let vote_message = subject.message();
         let seed_message = seed_message_from_subject(&subject);
 
+        let Some(signature) = attestation.signature.get() else {
+            return false;
+        };
+
         let entries = &[
             (
                 vote_namespace,
                 vote_message.as_ref(),
-                attestation.signature.vote_signature,
+                signature.vote_signature,
             ),
             (
                 &namespace.seed,
                 seed_message.as_ref(),
-                attestation.signature.seed_signature,
+                signature.seed_signature,
             ),
         ];
         batch::verify_same_signer::<_, V, _>(rng, &evaluated, entries, strategy).is_ok()
@@ -565,23 +634,26 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
         R: CryptoRngCore,
         D: Digest,
         I: IntoIterator<Item = Attestation<Self>>,
+        I::IntoIter: Send,
     {
         let namespace = self.namespace();
-        let (vote_partials, seed_partials): (Vec<_>, Vec<_>) = attestations
-            .into_iter()
-            .map(|attestation| {
-                (
-                    PartialSignature::<V> {
-                        index: attestation.signer,
-                        value: attestation.signature.vote_signature,
-                    },
-                    PartialSignature::<V> {
-                        index: attestation.signer,
-                        value: attestation.signature.seed_signature,
-                    },
-                )
-            })
-            .unzip();
+        let (partials, failures) =
+            strategy.map_partition_collect_vec(attestations.into_iter(), |attestation| {
+                let index = attestation.signer;
+                let value = attestation.signature.get().map(|sig| {
+                    (
+                        PartialSignature::<V> {
+                            index,
+                            value: sig.vote_signature,
+                        },
+                        PartialSignature::<V> {
+                            index,
+                            value: sig.seed_signature,
+                        },
+                    )
+                });
+                (index, value)
+            });
 
         let polynomial = self.polynomial();
         let vote_namespace = subject.namespace(namespace);
@@ -603,7 +675,7 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
                     polynomial,
                     vote_namespace,
                     &vote_message,
-                    vote_partials.iter(),
+                    partials.iter().map(|(vote, _)| vote),
                     strategy,
                 ) {
                     Ok(()) => BTreeSet::new(),
@@ -617,7 +689,7 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
                     polynomial,
                     &namespace.seed,
                     &seed_message,
-                    seed_partials.iter(),
+                    partials.iter().map(|(_, seed)| seed),
                     strategy,
                 ) {
                     Ok(()) => BTreeSet::new(),
@@ -625,20 +697,23 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
                 }
             },
         );
-        // Merge invalid sets
-        let invalid: BTreeSet<_> = vote_invalid.union(&seed_invalid).copied().collect();
 
-        let verified = vote_partials
+        // Merge invalid sets and add decode failures
+        let mut invalid: BTreeSet<_> = vote_invalid.union(&seed_invalid).copied().collect();
+        invalid.extend(failures);
+
+        // Filter out cryptographically invalid signatures (partials only excludes decode failures)
+        let verified = partials
             .into_iter()
-            .zip(seed_partials)
+            .filter(|(vote, _)| !invalid.contains(&vote.index))
             .map(|(vote, seed)| Attestation {
                 signer: vote.index,
                 signature: Signature {
                     vote_signature: vote.value,
                     seed_signature: seed.value,
-                },
+                }
+                .into(),
             })
-            .filter(|attestation| !invalid.contains(&attestation.signer))
             .collect();
 
         Verification::new(verified, invalid.into_iter().collect())
@@ -647,23 +722,30 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
     fn assemble<I, M>(&self, attestations: I, strategy: &impl Strategy) -> Option<Self::Certificate>
     where
         I: IntoIterator<Item = Attestation<Self>>,
+        I::IntoIter: Send,
         M: Faults,
     {
-        let (vote_partials, seed_partials): (Vec<_>, Vec<_>) = attestations
-            .into_iter()
-            .map(|attestation| {
-                (
-                    PartialSignature::<V> {
-                        index: attestation.signer,
-                        value: attestation.signature.vote_signature,
-                    },
-                    PartialSignature::<V> {
-                        index: attestation.signer,
-                        value: attestation.signature.seed_signature,
-                    },
-                )
-            })
-            .unzip();
+        let (partials, failures) =
+            strategy.map_partition_collect_vec(attestations.into_iter(), |attestation| {
+                let index = attestation.signer;
+                let value = attestation.signature.get().map(|sig| {
+                    (
+                        PartialSignature::<V> {
+                            index,
+                            value: sig.vote_signature,
+                        },
+                        PartialSignature::<V> {
+                            index,
+                            value: sig.seed_signature,
+                        },
+                    )
+                });
+                (index, value)
+            });
+        if !failures.is_empty() {
+            return None;
+        }
+        let (vote_partials, seed_partials): (Vec<_>, Vec<_>) = partials.into_iter().unzip();
 
         let quorum = self.polynomial();
         if vote_partials.len() < quorum.required::<M>() as usize {
@@ -678,10 +760,13 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
         )
         .ok()?;
 
-        Some(Signature {
-            vote_signature,
-            seed_signature,
-        })
+        Some(
+            Signature {
+                vote_signature,
+                seed_signature,
+            }
+            .into(),
+        )
     }
 
     fn verify_certificate<R, D, M>(
@@ -696,6 +781,10 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
         D: Digest,
         M: Faults,
     {
+        let Some(cert) = certificate.get() else {
+            return false;
+        };
+
         let identity = self.identity();
         let namespace = self.namespace();
 
@@ -704,16 +793,8 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
         let seed_message = seed_message_from_subject(&subject);
 
         let entries = &[
-            (
-                vote_namespace,
-                vote_message.as_ref(),
-                certificate.vote_signature,
-            ),
-            (
-                &namespace.seed,
-                seed_message.as_ref(),
-                certificate.seed_signature,
-            ),
+            (vote_namespace, vote_message.as_ref(), cert.vote_signature),
+            (&namespace.seed, seed_message.as_ref(), cert.seed_signature),
         ];
         batch::verify_same_signer::<_, V, _>(rng, identity, entries, strategy).is_ok()
     }
@@ -737,23 +818,27 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
         let mut entries: Vec<_> = Vec::new();
 
         for (context, certificate) in certificates {
+            let Some(cert) = certificate.get() else {
+                return false;
+            };
+
             // Prepare vote message with context-specific namespace
             let vote_namespace = context.namespace(namespace);
             let vote_message = context.message();
-            entries.push((vote_namespace, vote_message, certificate.vote_signature));
+            entries.push((vote_namespace, vote_message, cert.vote_signature));
 
             // Seed signatures are per-view, so multiple certificates for the same view
             // (e.g., notarization and finalization) share the same seed. We only include
             // each unique seed once in the aggregate, but verify all certificates for a
             // view have matching seeds.
             if let Some(previous) = seeds.get(&context.view()) {
-                if *previous != certificate.seed_signature {
+                if *previous != cert.seed_signature {
                     return false;
                 }
             } else {
                 let seed_message = seed_message_from_subject(&context);
-                entries.push((&namespace.seed, seed_message, certificate.seed_signature));
-                seeds.insert(context.view(), certificate.seed_signature);
+                entries.push((&namespace.seed, seed_message, cert.seed_signature));
+                seeds.insert(context.view(), cert.seed_signature);
             }
         }
 
@@ -1154,8 +1239,12 @@ mod tests {
             &Sequential,
         ));
 
-        let mut corrupted = certificate;
-        corrupted.vote_signature = corrupted.seed_signature;
+        let cert = certificate.get().unwrap();
+        let corrupted: Certificate<V> = Signature {
+            vote_signature: cert.seed_signature,
+            seed_signature: cert.seed_signature,
+        }
+        .into();
         assert!(!verifier.verify_certificate::<_, Sha256Digest, N3f1>(
             &mut rng,
             Subject::Notarize {
@@ -1194,7 +1283,7 @@ mod tests {
             .expect("assemble certificate");
 
         let encoded = certificate.encode();
-        let decoded = Signature::<V>::decode_cfg(encoded, &()).expect("decode certificate");
+        let decoded = Certificate::<V>::decode_cfg(encoded, &()).expect("decode certificate");
         assert_eq!(decoded, certificate);
     }
 
@@ -1224,8 +1313,9 @@ mod tests {
         let certificate = schemes[0]
             .assemble::<_, N3f1>(votes, &Sequential)
             .expect("assemble certificate");
+        let cert = certificate.get().unwrap();
 
-        let seed = Seed::new(proposal.round, certificate.seed_signature);
+        let seed = Seed::new(proposal.round, cert.seed_signature);
 
         let encoded = seed.encode();
         let decoded = Seed::<V>::decode_cfg(encoded, &()).expect("decode seed");
@@ -1258,15 +1348,16 @@ mod tests {
         let certificate = schemes[0]
             .assemble::<_, N3f1>(votes, &Sequential)
             .expect("assemble certificate");
+        let cert = certificate.get().unwrap();
 
-        let seed = Seed::new(proposal.round, certificate.seed_signature);
+        let seed = Seed::new(proposal.round, cert.seed_signature);
 
         assert!(seed.verify(&schemes[0]));
 
         // Create an invalid seed with a mismatched round
         let invalid_seed = Seed::new(
             Round::new(proposal.epoch(), proposal.view().next()),
-            certificate.seed_signature,
+            cert.seed_signature,
         );
 
         assert!(!invalid_seed.verify(&schemes[0]));
@@ -1443,9 +1534,10 @@ mod tests {
         let certificate = schemes[0]
             .assemble::<_, N3f1>(votes, &Sequential)
             .expect("assemble certificate");
+        let cert = certificate.get().unwrap();
 
-        let seed = Seed::<V>::new(proposal.round, certificate.seed_signature);
-        assert_eq!(seed.signature, certificate.seed_signature);
+        let seed = Seed::<V>::new(proposal.round, cert.seed_signature);
+        assert_eq!(seed.signature, cert.seed_signature);
     }
 
     #[test]
@@ -1514,8 +1606,9 @@ mod tests {
                 .value;
 
         assert_eq!(vote.signer, share.index);
-        assert_eq!(vote.signature.vote_signature, expected_message);
-        assert_eq!(vote.signature.seed_signature, expected_seed);
+        let sig = vote.signature.get().unwrap();
+        assert_eq!(sig.vote_signature, expected_message);
+        assert_eq!(sig.seed_signature, expected_seed);
     }
 
     #[test]
@@ -1555,8 +1648,12 @@ mod tests {
             &Sequential,
         ));
 
-        let mut corrupted = certificate;
-        corrupted.seed_signature = corrupted.vote_signature;
+        let cert = certificate.get().unwrap();
+        let corrupted: Certificate<V> = Signature {
+            vote_signature: cert.vote_signature,
+            seed_signature: cert.vote_signature,
+        }
+        .into();
         assert!(!verifier.verify_certificate::<_, Sha256Digest, N3f1>(
             &mut rng,
             Subject::Nullify {
@@ -1638,18 +1735,19 @@ mod tests {
 
         let random_scalar = Scalar::random(&mut rng);
         let delta = V::Signature::generator() * &random_scalar;
+        let att_sig = attestation.signature.get().unwrap();
         let forged_attestation: Attestation<Scheme<V>> = Attestation {
             signer: attestation.signer,
             signature: Signature {
-                vote_signature: attestation.signature.vote_signature - &delta,
-                seed_signature: attestation.signature.seed_signature + &delta,
-            },
+                vote_signature: att_sig.vote_signature - &delta,
+                seed_signature: att_sig.seed_signature + &delta,
+            }
+            .into(),
         };
 
-        let forged_sum = forged_attestation.signature.vote_signature
-            + &forged_attestation.signature.seed_signature;
-        let valid_sum =
-            attestation.signature.vote_signature + &attestation.signature.seed_signature;
+        let forged_sig = forged_attestation.signature.get().unwrap();
+        let forged_sum = forged_sig.vote_signature + &forged_sig.seed_signature;
+        let valid_sum = att_sig.vote_signature + &att_sig.seed_signature;
         assert_eq!(forged_sum, valid_sum, "signature sums should be equal");
 
         assert!(
@@ -1700,25 +1798,29 @@ mod tests {
 
         let random_scalar = Scalar::random(&mut rng);
         let delta = V::Signature::generator() * &random_scalar;
+        let att1_sig = attestation1.signature.get().unwrap();
+        let att2_sig = attestation2.signature.get().unwrap();
         let forged_attestation1: Attestation<Scheme<V>> = Attestation {
             signer: attestation1.signer,
             signature: Signature {
-                vote_signature: attestation1.signature.vote_signature - &delta,
-                seed_signature: attestation1.signature.seed_signature,
-            },
+                vote_signature: att1_sig.vote_signature - &delta,
+                seed_signature: att1_sig.seed_signature,
+            }
+            .into(),
         };
         let forged_attestation2: Attestation<Scheme<V>> = Attestation {
             signer: attestation2.signer,
             signature: Signature {
-                vote_signature: attestation2.signature.vote_signature + &delta,
-                seed_signature: attestation2.signature.seed_signature,
-            },
+                vote_signature: att2_sig.vote_signature + &delta,
+                seed_signature: att2_sig.seed_signature,
+            }
+            .into(),
         };
 
-        let forged_vote_sum = forged_attestation1.signature.vote_signature
-            + &forged_attestation2.signature.vote_signature;
-        let valid_vote_sum =
-            attestation1.signature.vote_signature + &attestation2.signature.vote_signature;
+        let forged1_sig = forged_attestation1.signature.get().unwrap();
+        let forged2_sig = forged_attestation2.signature.get().unwrap();
+        let forged_vote_sum = forged1_sig.vote_signature + &forged2_sig.vote_signature;
+        let valid_vote_sum = att1_sig.vote_signature + &att2_sig.vote_signature;
         assert_eq!(
             forged_vote_sum, valid_vote_sum,
             "vote signature sums should be equal"
@@ -1775,15 +1877,18 @@ mod tests {
             &Sequential,
         ));
 
+        let cert = certificate.get().unwrap();
         let random_scalar = Scalar::random(&mut rng);
         let delta = V::Signature::generator() * &random_scalar;
-        let forged_certificate = Signature {
-            vote_signature: certificate.vote_signature - &delta,
-            seed_signature: certificate.seed_signature + &delta,
-        };
+        let forged_certificate: Certificate<V> = Signature {
+            vote_signature: cert.vote_signature - &delta,
+            seed_signature: cert.seed_signature + &delta,
+        }
+        .into();
 
-        let forged_sum = forged_certificate.vote_signature + &forged_certificate.seed_signature;
-        let valid_sum = certificate.vote_signature + &certificate.seed_signature;
+        let forged_cert = forged_certificate.get().unwrap();
+        let forged_sum = forged_cert.vote_signature + &forged_cert.seed_signature;
+        let valid_sum = cert.vote_signature + &cert.seed_signature;
         assert_eq!(forged_sum, valid_sum, "signature sums should be equal");
 
         assert!(
@@ -1862,20 +1967,25 @@ mod tests {
             &Sequential,
         ));
 
+        let cert1 = certificate1.get().unwrap();
+        let cert2 = certificate2.get().unwrap();
         let random_scalar = Scalar::random(&mut rng);
         let delta = V::Signature::generator() * &random_scalar;
-        let forged_certificate1 = Signature {
-            vote_signature: certificate1.vote_signature - &delta,
-            seed_signature: certificate1.seed_signature,
-        };
-        let forged_certificate2 = Signature {
-            vote_signature: certificate2.vote_signature + &delta,
-            seed_signature: certificate2.seed_signature,
-        };
+        let forged_certificate1: Certificate<V> = Signature {
+            vote_signature: cert1.vote_signature - &delta,
+            seed_signature: cert1.seed_signature,
+        }
+        .into();
+        let forged_certificate2: Certificate<V> = Signature {
+            vote_signature: cert2.vote_signature + &delta,
+            seed_signature: cert2.seed_signature,
+        }
+        .into();
 
-        let forged_vote_sum =
-            forged_certificate1.vote_signature + &forged_certificate2.vote_signature;
-        let valid_vote_sum = certificate1.vote_signature + &certificate2.vote_signature;
+        let forged1 = forged_certificate1.get().unwrap();
+        let forged2 = forged_certificate2.get().unwrap();
+        let forged_vote_sum = forged1.vote_signature + &forged2.vote_signature;
+        let valid_vote_sum = cert1.vote_signature + &cert2.vote_signature;
         assert_eq!(
             forged_vote_sum, valid_vote_sum,
             "vote signature sums should be equal"
@@ -1918,6 +2028,7 @@ mod tests {
 
         commonware_conformance::conformance_tests! {
             CodecConformance<Signature<MinSig>>,
+            CodecConformance<Certificate<MinSig>>,
             CodecConformance<Seed<MinSig>>,
         }
     }
