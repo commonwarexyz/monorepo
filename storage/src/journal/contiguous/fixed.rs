@@ -132,10 +132,12 @@ pub struct Journal<E: Clock + Storage + Metrics, A: CodecFixedShared> {
     /// Total number of items appended (not affected by pruning).
     size: u64,
 
-    /// Persists `pruning_boundary` for crash recovery when it is mid-section.
+    /// If the journal's pruning boundary is mid-section (that is, the oldest retained item's
+    /// position is not a multiple of `items_per_blob`), then the metadata stores the pruning
+    /// boundary. Otherwise, the metadata is empty.
     ///
-    /// When `pruning_boundary` is section-aligned, metadata is empty and pruning boundary is
-    /// derived from blobs.
+    /// When the journal is pruned, `metadata` must be persisted AFTER the inner journal is
+    /// persisted to ensure that its pruning boundary is never after the inner journal's size.
     metadata: Metadata<E, u64, Vec<u8>>,
 
     /// The position before which all items have been pruned.
