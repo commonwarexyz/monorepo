@@ -2092,113 +2092,36 @@ mod tests {
         assert!(display.contains("REDACTED"));
     }
 
+    fn assert_msm_parallel_eq<G, S>(points: &[G], scalars: &[S], par: &Rayon)
+    where
+        G: Space<S> + std::fmt::Debug + PartialEq,
+    {
+        let seq = G::msm(points, scalars, &Sequential);
+        assert_eq!(seq, G::msm(points, scalars, par));
+    }
+
     #[test]
-    fn test_msm_parallel_matches_sequential_g1() {
+    fn test_msm_parallel() {
         let mut rng = test_rng();
         let par = Rayon::new(NonZeroUsize::new(8).unwrap()).unwrap();
 
-        for n in [32, 100, 500, 1000] {
+        // G1
+        for n in [31, 32, 33, 100, 500, 1000] {
             let points: Vec<G1> = (0..n)
                 .map(|_| G1::generator() * &Scalar::random(&mut rng))
                 .collect();
             let scalars: Vec<Scalar> = (0..n).map(|_| Scalar::random(&mut rng)).collect();
-
-            let seq_result = G1::msm(&points, &scalars, &Sequential);
-            let par_result = G1::msm(&points, &scalars, &par);
-
-            assert_eq!(seq_result, par_result, "G1 MSM mismatch for n={}", n);
+            assert_msm_parallel_eq(&points, &scalars, &par);
         }
-    }
 
-    #[test]
-    fn test_msm_parallel_matches_sequential_g2() {
-        let mut rng = test_rng();
-        let par = Rayon::new(NonZeroUsize::new(8).unwrap()).unwrap();
-
-        for n in [32, 100, 500] {
+        // G2
+        for n in [31, 32, 33, 100, 500] {
             let points: Vec<G2> = (0..n)
                 .map(|_| G2::generator() * &Scalar::random(&mut rng))
                 .collect();
             let scalars: Vec<Scalar> = (0..n).map(|_| Scalar::random(&mut rng)).collect();
-
-            let seq_result = G2::msm(&points, &scalars, &Sequential);
-            let par_result = G2::msm(&points, &scalars, &par);
-
-            assert_eq!(seq_result, par_result, "G2 MSM mismatch for n={}", n);
+            assert_msm_parallel_eq(&points, &scalars, &par);
         }
-    }
-
-    #[test]
-    fn test_msm_parallel_edge_cases() {
-        let mut rng = test_rng();
-        let par = Rayon::new(NonZeroUsize::new(8).unwrap()).unwrap();
-
-        // Test at threshold boundary
-        for n in [31, 32, 33] {
-            let points: Vec<G1> = (0..n)
-                .map(|_| G1::generator() * &Scalar::random(&mut rng))
-                .collect();
-            let scalars: Vec<Scalar> = (0..n).map(|_| Scalar::random(&mut rng)).collect();
-
-            let seq_result = G1::msm(&points, &scalars, &Sequential);
-            let par_result = G1::msm(&points, &scalars, &par);
-
-            assert_eq!(
-                seq_result, par_result,
-                "G1 MSM threshold mismatch for n={}",
-                n
-            );
-        }
-
-        // Test with all zero scalars
-        let n = 50;
-        let points: Vec<G1> = (0..n)
-            .map(|_| G1::generator() * &Scalar::random(&mut rng))
-            .collect();
-        let zero_scalars = vec![Scalar::zero(); n];
-
-        let seq_result = G1::msm(&points, &zero_scalars, &Sequential);
-        let par_result = G1::msm(&points, &zero_scalars, &par);
-        assert_eq!(
-            seq_result,
-            G1::zero(),
-            "Sequential MSM with zero scalars should be zero"
-        );
-        assert_eq!(
-            par_result,
-            G1::zero(),
-            "Parallel MSM with zero scalars should be zero"
-        );
-
-        // Test with all identity points
-        let zero_points = vec![G1::zero(); n];
-        let scalars: Vec<Scalar> = (0..n).map(|_| Scalar::random(&mut rng)).collect();
-
-        let seq_result = G1::msm(&zero_points, &scalars, &Sequential);
-        let par_result = G1::msm(&zero_points, &scalars, &par);
-        assert_eq!(
-            seq_result,
-            G1::zero(),
-            "Sequential MSM with identity points should be zero"
-        );
-        assert_eq!(
-            par_result,
-            G1::zero(),
-            "Parallel MSM with identity points should be zero"
-        );
-
-        // Test with mixed zero/non-zero
-        let mut mixed_points = points;
-        let mut mixed_scalars: Vec<Scalar> = (0..n).map(|_| Scalar::random(&mut rng)).collect();
-        mixed_points[10] = G1::zero();
-        mixed_scalars[20] = Scalar::zero();
-
-        let seq_result = G1::msm(&mixed_points, &mixed_scalars, &Sequential);
-        let par_result = G1::msm(&mixed_points, &mixed_scalars, &par);
-        assert_eq!(
-            seq_result, par_result,
-            "G1 MSM mismatch for mixed zero/non-zero"
-        );
     }
 
     #[test]
@@ -2206,147 +2129,70 @@ mod tests {
         let mut rng = test_rng();
         let par = Rayon::new(NonZeroUsize::new(8).unwrap()).unwrap();
 
-        // G1 with SmallScalar
+        // G1
         for n in [32, 100, 500] {
             let points: Vec<G1> = (0..n)
                 .map(|_| G1::generator() * &Scalar::random(&mut rng))
                 .collect();
             let scalars: Vec<SmallScalar> = (0..n).map(|_| SmallScalar::random(&mut rng)).collect();
-
-            let seq_result = G1::msm(&points, &scalars, &Sequential);
-            let par_result = G1::msm(&points, &scalars, &par);
-
-            assert_eq!(
-                seq_result, par_result,
-                "G1 SmallScalar MSM mismatch for n={}",
-                n
-            );
+            assert_msm_parallel_eq(&points, &scalars, &par);
         }
 
-        // G2 with SmallScalar
+        // G2
         for n in [32, 100] {
             let points: Vec<G2> = (0..n)
                 .map(|_| G2::generator() * &Scalar::random(&mut rng))
                 .collect();
             let scalars: Vec<SmallScalar> = (0..n).map(|_| SmallScalar::random(&mut rng)).collect();
-
-            let seq_result = G2::msm(&points, &scalars, &Sequential);
-            let par_result = G2::msm(&points, &scalars, &par);
-
-            assert_eq!(
-                seq_result, par_result,
-                "G2 SmallScalar MSM mismatch for n={}",
-                n
-            );
+            assert_msm_parallel_eq(&points, &scalars, &par);
         }
     }
 
     #[test]
-    fn test_msm_parallel_varying_parallelism() {
+    fn test_msm_parallel_edge_cases() {
         let mut rng = test_rng();
-        let n = 200;
+        let par = Rayon::new(NonZeroUsize::new(8).unwrap()).unwrap();
+        let n = 50;
 
-        let points: Vec<G1> = (0..n)
+        // G1: all zero scalars
+        let g1_points: Vec<G1> = (0..n)
             .map(|_| G1::generator() * &Scalar::random(&mut rng))
             .collect();
+        assert_eq!(G1::msm(&g1_points, &vec![Scalar::zero(); n], &par), G1::zero());
+
+        // G1: all identity points
         let scalars: Vec<Scalar> = (0..n).map(|_| Scalar::random(&mut rng)).collect();
+        assert_eq!(G1::msm(&vec![G1::zero(); n], &scalars, &par), G1::zero());
 
-        let seq_result = G1::msm(&points, &scalars, &Sequential);
+        // G1: single nonzero among zeros
+        let mut points = vec![G1::zero(); n];
+        let mut scalars = vec![Scalar::zero(); n];
+        let p = G1::generator() * &Scalar::random(&mut rng);
+        let s = Scalar::random(&mut rng);
+        points[25] = p;
+        scalars[25] = s.clone();
+        assert_eq!(G1::msm(&points, &scalars, &par), p * &s);
 
-        // Test different parallelism levels to exercise different tile configurations
-        for ncpus in [2, 4, 8, 16] {
-            let par = Rayon::new(NonZeroUsize::new(ncpus).unwrap()).unwrap();
-            let par_result = G1::msm(&points, &scalars, &par);
+        // G2: all zero scalars
+        let g2_points: Vec<G2> = (0..n)
+            .map(|_| G2::generator() * &Scalar::random(&mut rng))
+            .collect();
+        assert_eq!(G2::msm(&g2_points, &vec![Scalar::zero(); n], &par), G2::zero());
 
-            assert_eq!(
-                seq_result, par_result,
-                "G1 MSM mismatch for ncpus={}",
-                ncpus
-            );
-        }
+        // G2: all identity points
+        let scalars: Vec<Scalar> = (0..n).map(|_| Scalar::random(&mut rng)).collect();
+        assert_eq!(G2::msm(&vec![G2::zero(); n], &scalars, &par), G2::zero());
     }
 
     #[test]
     fn test_msm_breakdown_high_parallelism() {
-        // Verify msm_breakdown doesn't panic with extreme parallelism values.
-        // This tests the fix for division-by-zero when ncpus is very high
-        // relative to point count.
         for npoints in [32, 50, 100, 200] {
             let window = pippenger_window_size(npoints);
             for ncpus in [64, 128, 256, 512, 1024, 2048] {
                 let (nx, ny, final_wnd) = msm_breakdown(SCALAR_BITS, window, ncpus);
-                assert!(nx >= 1, "nx must be >= 1");
-                assert!(ny >= 1, "ny must be >= 1");
-                assert!(final_wnd >= 1, "final_wnd must be >= 1");
+                assert!(nx >= 1 && ny >= 1 && final_wnd >= 1);
             }
         }
-    }
-
-    #[test]
-    fn test_msm_parallel_single_nonzero() {
-        let mut rng = test_rng();
-        let par = Rayon::new(NonZeroUsize::new(8).unwrap()).unwrap();
-
-        // Single non-zero point and scalar among zeros
-        let n = 50;
-        let mut points = vec![G1::zero(); n];
-        let mut scalars = vec![Scalar::zero(); n];
-
-        let nonzero_point = G1::generator() * &Scalar::random(&mut rng);
-        let nonzero_scalar = Scalar::random(&mut rng);
-        points[25] = nonzero_point;
-        scalars[25] = nonzero_scalar.clone();
-
-        let expected = nonzero_point * &nonzero_scalar;
-        let seq_result = G1::msm(&points, &scalars, &Sequential);
-        let par_result = G1::msm(&points, &scalars, &par);
-
-        assert_eq!(seq_result, expected, "Sequential single nonzero mismatch");
-        assert_eq!(par_result, expected, "Parallel single nonzero mismatch");
-    }
-
-    #[test]
-    fn test_msm_parallel_g2_edge_cases() {
-        let mut rng = test_rng();
-        let par = Rayon::new(NonZeroUsize::new(8).unwrap()).unwrap();
-
-        // Test at threshold boundary for G2
-        for n in [31, 32, 33] {
-            let points: Vec<G2> = (0..n)
-                .map(|_| G2::generator() * &Scalar::random(&mut rng))
-                .collect();
-            let scalars: Vec<Scalar> = (0..n).map(|_| Scalar::random(&mut rng)).collect();
-
-            let seq_result = G2::msm(&points, &scalars, &Sequential);
-            let par_result = G2::msm(&points, &scalars, &par);
-
-            assert_eq!(
-                seq_result, par_result,
-                "G2 MSM threshold mismatch for n={}",
-                n
-            );
-        }
-
-        // Test with all zero scalars
-        let n = 50;
-        let points: Vec<G2> = (0..n)
-            .map(|_| G2::generator() * &Scalar::random(&mut rng))
-            .collect();
-        let zero_scalars = vec![Scalar::zero(); n];
-
-        let seq_result = G2::msm(&points, &zero_scalars, &Sequential);
-        let par_result = G2::msm(&points, &zero_scalars, &par);
-        assert_eq!(seq_result, G2::zero());
-        assert_eq!(par_result, G2::zero());
-
-        // Test with all identity points
-        let zero_points = vec![G2::zero(); n];
-        let scalars: Vec<Scalar> = (0..n).map(|_| Scalar::random(&mut rng)).collect();
-
-        let seq_result = G2::msm(&zero_points, &scalars, &Sequential);
-        let par_result = G2::msm(&zero_points, &scalars, &par);
-        assert_eq!(seq_result, G2::zero());
-        assert_eq!(par_result, G2::zero());
     }
 
     #[cfg(feature = "arbitrary")]
