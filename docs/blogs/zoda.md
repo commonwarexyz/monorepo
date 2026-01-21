@@ -178,7 +178,7 @@ and treat them as missing instead.
 If the followers received a hash of each shard, then they could tell
 whether some data is actually the shard it claims to be, by hashing it.
 This comes at a penalty of transmitting $m \cdot 2^\lambda$ bits of data
-(guaranteeing no collisions up to a probability of $2^-\lambda$ requires $2 \lambda$ bit hashes).
+(guaranteeing no collisions up to a probability of $2^{-\lambda}$ requires $2 \lambda$ bit hashes).
 We can improve this a bit by having the leader use a vector commitment over the $m$ hashes.
 Each shard would then come with an opening, demonstrating that the $i$th hash
 in the vector is that of the shard.
