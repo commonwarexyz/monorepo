@@ -159,33 +159,24 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         I::IntoIter: Send,
         T: Strategy,
     {
-        let filtered = strategy.map_collect_vec(attestations.into_iter(), |attestation| {
-            let Some(public_key) = self.participants.value(attestation.signer.into()) else {
-                return (attestation.signer, None);
-            };
-            let Some(signature) = attestation.signature.get().cloned() else {
-                return (attestation.signer, None);
-            };
-            (
-                attestation.signer,
-                Some((attestation, *public_key, signature)),
-            )
-        });
+        let (filtered, decode_failures) =
+            strategy.map_collect_vec_filter(attestations.into_iter(), |attestation| {
+                let signer = attestation.signer;
+                let value = self
+                    .participants
+                    .value(signer.into())
+                    .and_then(|public_key| {
+                        attestation
+                            .signature
+                            .get()
+                            .cloned()
+                            .map(|signature| (attestation, (*public_key, signature)))
+                    });
+                (signer, value)
+            });
 
-        let mut invalid = BTreeSet::new();
-        let mut candidates = Vec::new();
-        let mut entries = Vec::new();
-        for (signer, maybe_good) in filtered {
-            match maybe_good {
-                None => {
-                    invalid.insert(signer);
-                }
-                Some((a, pk, sig)) => {
-                    candidates.push(a);
-                    entries.push((pk, sig));
-                }
-            }
-        }
+        let mut invalid: BTreeSet<_> = decode_failures.into_iter().collect();
+        let (candidates, entries): (Vec<_>, Vec<_>) = filtered.into_iter().unzip();
 
         // If there are no candidates to verify, return before doing any work.
         if candidates.is_empty() {

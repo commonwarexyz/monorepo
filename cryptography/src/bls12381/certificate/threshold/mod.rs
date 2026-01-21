@@ -267,24 +267,16 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         I::IntoIter: Send,
         T: Strategy,
     {
-        let mut invalid = BTreeSet::new();
-        let partials = strategy.map_collect_vec(attestations.into_iter(), |attestation| {
-            let index = attestation.signer;
-            let partial = attestation
-                .signature
-                .get()
-                .map(|&value| PartialSignature::<V> { index, value });
-            (index, partial)
-        });
-        let partials: Vec<_> = partials
-            .into_iter()
-            .filter_map(|(index, partial)| {
-                if partial.is_none() {
-                    invalid.insert(index);
-                }
-                partial
-            })
-            .collect();
+        let (partials, decode_failures) =
+            strategy.map_collect_vec_filter(attestations.into_iter(), |attestation| {
+                let index = attestation.signer;
+                let partial = attestation
+                    .signature
+                    .get()
+                    .map(|&value| PartialSignature::<V> { index, value });
+                (index, partial)
+            });
+        let mut invalid: BTreeSet<_> = decode_failures.into_iter().collect();
         let polynomial = self.polynomial();
         if let Err(errs) = threshold::batch_verify_same_message::<_, V, _>(
             rng,
