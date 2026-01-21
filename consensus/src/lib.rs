@@ -53,12 +53,7 @@ pub trait Block: Heightable + Codec + Digestible + Committable + Send + Sync + '
 ///
 /// This trait is required for blocks used with deferred verification in [CertifiableAutomaton].
 /// It allows the verification context to be derived directly from the block when a validator
-/// needs to participate in certification but never verified the block locally.
-///
-/// This is important for liveness: when Byzantine validators withhold their finalization votes,
-/// honest validators who weren't in the original notarizing quorum may need to help complete
-/// finalization. Since the block was notarized by 2f+1 validators (at least f+1 honest), the
-/// context embedded in the block can be trusted.
+/// needs to participate in certification but never verified the block locally (necessary for liveness).
 pub trait CertifiableBlock: Block {
     /// The consensus context type stored in this block.
     type Context: Clone;
