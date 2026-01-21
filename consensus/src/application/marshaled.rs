@@ -155,15 +155,16 @@ where
         }
     }
 
-    /// Verifies a proposed block within epoch boundaries.
+    /// Verifies a proposed block.
     ///
     /// This method validates that:
-    /// 1. The block's embedded context matches the consensus-provided context
-    /// 2. The block is within the current epoch (unless it's a boundary block re-proposal)
-    /// 3. Re-proposals are only allowed for the last block in an epoch
-    /// 4. The block's parent commitment matches the consensus context's expected parent
-    /// 5. The block's height is exactly one greater than the parent's height
-    /// 6. The underlying application's verification logic passes
+    /// 1. The block's parent commitment matches the consensus context's expected parent
+    /// 2. The block's height is exactly one greater than the parent's height
+    /// 3. The underlying application's verification logic passes
+    ///
+    /// Re-proposals (where the block commitment equals the parent commitment) are
+    /// accepted without further validation since they were already verified when
+    /// originally proposed.
     ///
     /// Verification is spawned in a background task and returns a receiver that will contain
     /// the verification result. Valid blocks are reported to the marshal as verified.
@@ -177,7 +178,6 @@ where
     ) -> oneshot::Receiver<bool> {
         let mut marshal = self.marshal.clone();
         let mut application = self.application.clone();
-        let epocher = self.epocher.clone();
         let (mut tx, rx) = oneshot::channel();
         self.context
             .with_label("verify")
@@ -223,35 +223,6 @@ where
                 if parent.commitment() == block.commitment() {
                     marshal.verified(context.round, block).await;
                     tx.send_lossy(true);
-                    return;
-                }
-
-                // Verify the block's embedded context matches what consensus provided.
-                // For some validators who did not vote, this is a no-op. However, it is
-                // guaranteed that at least f+1 honest validators who did vote (and cached
-                // the true context) will verify against this same context.
-                if block.context() != context {
-                    debug!(
-                        ?context,
-                        block_context = ?block.context(),
-                        "block-embedded context does not match consensus context"
-                    );
-                    tx.send_lossy(false);
-                    return;
-                }
-
-                // Blocks are invalid if they are not within the current epoch and they aren't
-                // a re-proposal of the boundary block.
-                let Some(block_bounds) = epocher.containing(block.height()) else {
-                    debug!(
-                        height = %block.height(),
-                        "block height not covered by epoch strategy"
-                    );
-                    tx.send_lossy(false);
-                    return;
-                };
-                if block_bounds.epoch() != context.epoch() {
-                    tx.send_lossy(false);
                     return;
                 }
 
@@ -516,19 +487,31 @@ where
                     }
                 };
 
+                // Blocks are invalid if they are not within the current epoch and they aren't
+                // a re-proposal of the boundary block.
+                let Some(block_bounds) = marshaled.epocher.containing(block.height()) else {
+                    debug!(
+                        height = %block.height(),
+                        "block height not in any known epoch"
+                    );
+                    tx.send_lossy(false);
+                    return;
+                };
+                if block_bounds.epoch() != context.epoch() {
+                    debug!(
+                        epoch = %context.epoch(),
+                        block_epoch = %block_bounds.epoch(),
+                        "block is not in the current epoch"
+                    );
+                    tx.send_lossy(false);
+                    return;
+                }
+
                 // Check if this is a re-proposal (the block commitment matches the parent from
                 // the context). Re-proposals are only valid at epoch boundaries.
                 if context.parent.1 == digest {
                     // Use the block's epoch (not context's epoch) since the block being
                     // re-proposed was created in the previous epoch.
-                    let Some(block_bounds) = marshaled.epocher.containing(block.height()) else {
-                        debug!(
-                            height = %block.height(),
-                            "re-proposal block height not in any known epoch"
-                        );
-                        tx.send_lossy(false);
-                        return;
-                    };
                     if block.height() != block_bounds.last() {
                         debug!(
                             height = %block.height(),
