@@ -224,14 +224,15 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         I: IntoIterator<Item = Attestation<S>>,
         M: Faults,
     {
-        // Collect the signers and signatures.
+        // Collect the signers and signatures, filtering out failed decodes.
         let mut entries = Vec::new();
         for Attestation { signer, signature } in attestations {
             if usize::from(signer) >= self.participants.len() {
-                return None;
+                continue;
             }
-            let signature = signature.get().cloned()?;
-
+            let Some(signature) = signature.get().cloned() else {
+                continue;
+            };
             entries.push((signer, signature));
         }
         if entries.len() < self.participants.quorum::<M>() as usize {
