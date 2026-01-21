@@ -29,8 +29,13 @@ use commonware_macros::select;
 use commonware_p2p::{Blocker, Sender};
 use commonware_parallel::Strategy;
 use commonware_runtime::{
-    buffer::PoolRef, spawn_cell, telemetry::metrics::status::GaugeExt, Clock, ContextCell, Handle,
-    Metrics, Spawner, Storage,
+    buffer::PoolRef,
+    spawn_cell,
+    telemetry::metrics::{
+        histogram::{self, Buckets},
+        status::GaugeExt,
+    },
+    Clock, ContextCell, Handle, Metrics, Spawner, Storage,
 };
 use commonware_storage::journal::segmented::variable::{Config as JConfig, Journal};
 use futures::{
@@ -44,7 +49,7 @@ use rand_core::CryptoRngCore;
 use std::{
     collections::BTreeMap,
     num::NonZeroUsize,
-    sync::atomic::AtomicI64,
+    sync::{atomic::AtomicI64, Arc},
     time::{Duration, SystemTime},
 };
 use tracing::{debug, info, trace};
@@ -114,6 +119,7 @@ where
 
     outbound_messages: Family<Outbound, Counter>,
     m_notarization_latency: Histogram,
+    recover_latency: histogram::Timed<E>,
     current_view: Gauge,
     skipped_views: Counter,
 
@@ -156,9 +162,17 @@ where
             "M-notarization latency",
             m_notarization_latency.clone(),
         );
+        let recover_latency = Histogram::new(Buckets::CRYPTOGRAPHY);
+        context.register(
+            "recover_latency",
+            "certificate recover latency",
+            recover_latency.clone(),
+        );
         context.register("current_view", "current view", current_view.clone());
         context.register("skipped_views", "skipped views", skipped_views.clone());
 
+        // TODO(#1833): Metrics should use the post-start context
+        let clock = Arc::new(context.clone());
         let (sender, receiver) = mpsc::channel(config.mailbox_size);
         let mailbox = Mailbox::new(sender);
         (
@@ -192,6 +206,7 @@ where
 
                 outbound_messages,
                 m_notarization_latency,
+                recover_latency: histogram::Timed::new(recover_latency, clock),
                 current_view,
                 skipped_views,
 
@@ -475,10 +490,32 @@ where
 
                     let actions = match message {
                         Message::VerifiedNotarize(notarize) => {
-                            state.receive_verified_notarize(notarize, &self.strategy)
+                            // Time certificate construction (only record if certificate is built)
+                            let mut timer = self.recover_latency.timer();
+                            let actions = state.receive_verified_notarize(notarize, &self.strategy);
+                            let has_certificate = actions.iter().any(|a| {
+                                matches!(a, Action::BroadcastCertificate(_) | Action::Finalized(_))
+                            });
+                            if has_certificate {
+                                timer.observe();
+                            } else {
+                                timer.cancel();
+                            }
+                            actions
                         }
                         Message::VerifiedNullify(nullify) => {
-                            state.receive_verified_nullify(nullify, &self.strategy)
+                            // Time certificate construction (only record if certificate is built)
+                            let mut timer = self.recover_latency.timer();
+                            let actions = state.receive_verified_nullify(nullify, &self.strategy);
+                            let has_certificate = actions.iter().any(|a| {
+                                matches!(a, Action::BroadcastCertificate(_))
+                            });
+                            if has_certificate {
+                                timer.observe();
+                            } else {
+                                timer.cancel();
+                            }
+                            actions
                         }
                         Message::VerifiedCertificate(certificate) => {
                             state.receive_certificate(certificate)
