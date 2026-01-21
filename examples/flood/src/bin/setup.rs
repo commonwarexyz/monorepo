@@ -1,8 +1,10 @@
 use clap::{value_parser, Arg, Command};
+use commonware_codec::Encode;
 use commonware_cryptography::{ed25519, Signer as _};
 use commonware_deployer::aws;
 use commonware_flood::Config;
 use commonware_math::algebra::Random;
+use commonware_utils::hex;
 use rand::{rngs::OsRng, seq::IteratorRandom};
 use tracing::info;
 use uuid::Uuid;
@@ -148,7 +150,8 @@ fn main() {
         let name = scheme.public_key().to_string();
         let peer_config_file = format!("{name}.yaml");
         let peer_config = Config {
-            private_key: scheme.to_string(),
+            // The private key material isn't exposed through Debug/Display
+            private_key: hex(&scheme.encode()),
             port: PORT,
             allowed_peers: allowed_peers.clone(),
             bootstrappers: bootstrappers.clone(),
