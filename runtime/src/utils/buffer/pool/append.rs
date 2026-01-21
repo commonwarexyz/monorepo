@@ -843,13 +843,14 @@ impl<B: Blob> Blob for Append<B> {
             let mut buffer_guard = self.buffer.write().await;
             let current_size = buffer_guard.size();
             if end_offset > current_size {
-                // If the write extends beyond the buffer, update the offset to reflect the new size
-                // We round up to the next page boundary to ensure the offset is page-aligned
-
-                // Calculate the page that contains end_offset and set offset to start of that page
-                let page_containing_end = (end_offset + logical_page_size - 1) / logical_page_size;
-                buffer_guard.offset = page_containing_end * logical_page_size;
-                buffer_guard.data.clear();
+                let new_size = end_offset;
+                let current_data_len = buffer_guard.data.len();
+                // The buffer starts at buffer_guard.offset. The total length of data it needs to hold is
+                // new_size - buffer_guard.offset.
+                let required_data_len = (new_size.saturating_sub(buffer_guard.offset)) as usize;
+                if required_data_len > current_data_len {
+                    buffer_guard.data.resize(required_data_len, 0);
+                }
             }
         }
 
@@ -887,10 +888,17 @@ impl<B: Blob> Blob for Append<B> {
 
             if page_start_offset >= buffer_start && page_start_offset < buffer_end {
                 // Writing to buffered data - modify buffer directly
-                let offset_in_buffer = (offset.max(buffer_start) - buffer_start) as usize;
-                let write_len = (buf_slice.len()).min((buffer_end - offset) as usize);
-                buffer_guard.data[offset_in_buffer..offset_in_buffer + write_len]
-                    .copy_from_slice(&buf_slice[..write_len]);
+                let write_start_in_buffer = offset.max(buffer_start);
+                let write_end_in_buffer = end_offset.min(buffer_end);
+
+                if write_start_in_buffer < write_end_in_buffer {
+                    let write_len = (write_end_in_buffer - write_start_in_buffer) as usize;
+                    let dest_start = (write_start_in_buffer - buffer_start) as usize;
+                    let src_start = (write_start_in_buffer - offset) as usize;
+
+                    buffer_guard.data[dest_start..dest_start + write_len]
+                        .copy_from_slice(&buf_slice[src_start..src_start + write_len]);
+                }
                 drop(buffer_guard);
 
                 // Invalidate partial_page_state since buffer was modified
@@ -2375,7 +2383,7 @@ mod tests {
             let append = Append::new(blob, size, BUFFER_SIZE, pool_ref)
                 .await
                 .unwrap();
-            assert_eq!(append.size().await, 100);
+            assert_eq!(append.size().await, 110);
 
             // Verify data persisted
             let mut buf = vec![0u8; 100];
