@@ -70,7 +70,7 @@ mod tests {
         bls12381::{
             certificate::threshold::Certificate,
             primitives::{
-                group::{self},
+                group,
                 variant::{MinSig, Variant},
             },
         },
