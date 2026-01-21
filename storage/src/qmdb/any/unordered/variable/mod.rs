@@ -71,8 +71,12 @@ impl<E: Storage + Clock + Metrics, K: Array, V: VariableValue, H: Hasher, T: Tra
 
         if log.size() == 0 {
             warn!("Authenticated log is empty, initializing new db");
-            log.append(Operation::CommitFloor(None, Location::new_unchecked(0)))
-                .await?;
+            log.append(Operation::CommitFloor(
+                None,
+                Location::new_unchecked(0),
+                Location::new_unchecked(0),
+            ))
+            .await?;
             log.sync().await?;
         }
 

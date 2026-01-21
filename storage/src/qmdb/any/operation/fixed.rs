@@ -19,9 +19,9 @@ where
     V: FixedValue,
     S: Update<K, FixedEncoding<V>> + FixedSize,
 {
-    const UPDATE_OP_SIZE: usize = 1 + S::SIZE;
-    const COMMIT_OP_SIZE: usize = 1 + 1 + V::SIZE + u64::SIZE;
-    const DELETE_OP_SIZE: usize = 1 + K::SIZE;
+    const UPDATE_OP_SIZE: usize = 1 + S::SIZE + u64::SIZE;
+    const COMMIT_OP_SIZE: usize = 1 + 1 + V::SIZE + u64::SIZE + u64::SIZE;
+    const DELETE_OP_SIZE: usize = 1 + K::SIZE + u64::SIZE;
 }
 
 impl<K, V, S> FixedSize for Operation<K, FixedEncoding<V>, S>
@@ -53,17 +53,19 @@ where
 {
     fn write(&self, buf: &mut impl BufMut) {
         match self {
-            Self::Delete(k) => {
+            Self::Delete(k, loc) => {
                 DELETE_CONTEXT.write(buf);
                 k.write(buf);
+                buf.put_u64(**loc);
                 buf.put_bytes(0, Self::SIZE - Self::DELETE_OP_SIZE);
             }
-            Self::Update(p) => {
+            Self::Update(p, loc) => {
                 UPDATE_CONTEXT.write(buf);
                 p.write(buf);
+                buf.put_u64(**loc);
                 buf.put_bytes(0, Self::SIZE - Self::UPDATE_OP_SIZE);
             }
-            Self::CommitFloor(metadata, floor_loc) => {
+            Self::CommitFloor(metadata, floor_loc, loc) => {
                 COMMIT_CONTEXT.write(buf);
                 if let Some(metadata) = metadata {
                     true.write(buf);
@@ -71,7 +73,8 @@ where
                 } else {
                     buf.put_bytes(0, V::SIZE + 1);
                 }
-                buf.put_slice(&floor_loc.to_be_bytes());
+                buf.put_u64(**floor_loc);
+                buf.put_u64(**loc);
                 buf.put_bytes(0, Self::SIZE - Self::COMMIT_OP_SIZE);
             }
         }
@@ -92,13 +95,27 @@ where
         match u8::read(buf)? {
             DELETE_CONTEXT => {
                 let key = K::read(buf)?;
+                let loc = u64::read(buf)?;
+                let loc = Location::new(loc).ok_or_else(|| {
+                    CodecError::Invalid(
+                        "storage::qmdb::any::operation::fixed::Operation",
+                        "delete location overflow",
+                    )
+                })?;
                 ensure_zeros(buf, Self::SIZE - Self::DELETE_OP_SIZE)?;
-                Ok(Self::Delete(key))
+                Ok(Self::Delete(key, loc))
             }
             UPDATE_CONTEXT => {
                 let payload = S::read_cfg(buf, cfg)?;
+                let loc = u64::read(buf)?;
+                let loc = Location::new(loc).ok_or_else(|| {
+                    CodecError::Invalid(
+                        "storage::qmdb::any::operation::fixed::Operation",
+                        "update location overflow",
+                    )
+                })?;
                 ensure_zeros(buf, Self::SIZE - Self::UPDATE_OP_SIZE)?;
-                Ok(Self::Update(payload))
+                Ok(Self::Update(payload, loc))
             }
             COMMIT_CONTEXT => {
                 let is_some = bool::read(buf)?;
@@ -115,8 +132,15 @@ where
                         "commit floor location overflow",
                     )
                 })?;
+                let loc = u64::read(buf)?;
+                let loc = Location::new(loc).ok_or_else(|| {
+                    CodecError::Invalid(
+                        "storage::qmdb::any::operation::fixed::Operation",
+                        "commit location overflow",
+                    )
+                })?;
                 ensure_zeros(buf, Self::SIZE - Self::COMMIT_OP_SIZE)?;
-                Ok(Self::CommitFloor(metadata, floor_loc))
+                Ok(Self::CommitFloor(metadata, floor_loc, loc))
             }
             e => Err(CodecError::InvalidEnum(e)),
         }

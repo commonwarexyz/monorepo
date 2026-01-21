@@ -57,7 +57,7 @@ where
         for loc in locs {
             let op = self.log.read(loc).await?;
             match &op {
-                Operation::Update(Update(k, value)) => {
+                Operation::Update(Update(k, value), _) => {
                     if k == key {
                         return Ok(Some((value.clone(), loc)));
                     }
@@ -95,7 +95,7 @@ where
         let Some(loc) = delete_key(&mut self.snapshot, &self.log, &key).await? else {
             return Ok(None);
         };
-        self.log.append(Operation::Delete(key)).await?;
+        self.log.append(Operation::Delete(key, loc)).await?;
         self.durable_state.steps += 1;
         self.active_keys -= 1;
 
@@ -113,7 +113,10 @@ where
         let res = self.update_loc(&key, new_loc).await?;
 
         self.log
-            .append(Operation::Update(Update(key, value)))
+            .append(Operation::Update(
+                Update(key, value),
+                res.unwrap_or(Location::new_unchecked(0)),
+            ))
             .await?;
         if res.is_some() {
             self.durable_state.steps += 1;
@@ -132,7 +135,10 @@ where
         }
 
         self.log
-            .append(Operation::Update(Update(key, value)))
+            .append(Operation::Update(
+                Update(key, value),
+                Location::new_unchecked(0),
+            ))
             .await?;
         self.active_keys += 1;
 
@@ -206,12 +212,14 @@ where
             if let Some(value) = update {
                 update_known_loc(&mut self.snapshot, key, old_loc, new_loc);
                 self.log
-                    .append(Operation::Update(Update(key.clone(), value)))
+                    .append(Operation::Update(Update(key.clone(), value), old_loc))
                     .await?;
                 callback(true, Some(old_loc));
             } else {
                 delete_known_loc(&mut self.snapshot, key, old_loc);
-                self.log.append(Operation::Delete(key.clone())).await?;
+                self.log
+                    .append(Operation::Delete(key.clone(), old_loc))
+                    .await?;
                 callback(false, Some(old_loc));
                 self.active_keys -= 1;
             }
@@ -225,7 +233,10 @@ where
             };
             self.snapshot.insert(&key, self.op_count());
             self.log
-                .append(Operation::Update(Update(key, value)))
+                .append(Operation::Update(
+                    Update(key, value),
+                    Location::new_unchecked(0),
+                ))
                 .await?;
             callback(true, None);
             self.active_keys += 1;

@@ -132,11 +132,14 @@ impl<
         proof: &KeyValueProof<K, H::Digest, N>,
         root: &H::Digest,
     ) -> bool {
-        let op = Operation::Update(Update {
-            key,
-            value,
-            next_key: proof.next_key.clone(),
-        });
+        let op = Operation::Update(
+            Update {
+                key,
+                value,
+                next_key: proof.next_key.clone(),
+            },
+            Location::new_unchecked(0),
+        );
 
         proof
             .proof
@@ -182,7 +185,10 @@ impl<
                     return false;
                 }
 
-                (op_proof, Operation::Update(data.clone()))
+                (
+                    op_proof,
+                    Operation::Update(data.clone(), Location::new_unchecked(0)),
+                )
             }
             ExclusionProof::Commit(op_proof, metadata) => {
                 // Handle the case where the proof shows the db is empty, hence any key is proven
@@ -191,7 +197,7 @@ impl<
                 let floor_loc = op_proof.loc;
                 (
                     op_proof,
-                    Operation::CommitFloor(metadata.clone(), floor_loc),
+                    Operation::CommitFloor(metadata.clone(), floor_loc, Location::new_unchecked(0)),
                 )
             }
         };
@@ -418,7 +424,7 @@ impl<
             Some((_, key_data)) => ExclusionProof::KeyValue(op_proof, key_data),
             None => {
                 let value = match self.any.log.read(loc).await? {
-                    Operation::CommitFloor(value, _) => value,
+                    Operation::CommitFloor(value, _, _) => value,
                     _ => unreachable!("last commit is not a CommitFloor operation"),
                 };
                 ExclusionProof::Commit(op_proof, value)
@@ -508,7 +514,8 @@ impl<
 
         // Append the commit operation with the new floor and tag it as active in the bitmap.
         self.status.push(true);
-        let commit_op = Operation::CommitFloor(metadata, inactivity_floor_loc);
+        let commit_op =
+            Operation::CommitFloor(metadata, inactivity_floor_loc, Location::new_unchecked(0));
 
         self.any.apply_commit_op(commit_op).await?;
 
@@ -1247,11 +1254,14 @@ pub mod test {
             };
             // This proof should verify using verify_range_proof which does not check activity
             // status.
-            let op = Operation::Update(Update {
-                key: k,
-                value: v1,
-                next_key: k,
-            });
+            let op = Operation::Update(
+                Update {
+                    key: k,
+                    value: v1,
+                    next_key: k,
+                },
+                Location::new_unchecked(0),
+            );
             assert!(CleanCurrentTest::verify_range_proof(
                 hasher.inner(),
                 &proof_inactive.proof.range_proof,
@@ -1458,8 +1468,8 @@ pub mod test {
                 // it's a key-updating operation.
                 let op = db.any.log.read(Location::new_unchecked(i)).await.unwrap();
                 let (key, value) = match op {
-                    Operation::Update(key_data) => (key_data.key, key_data.value),
-                    Operation::CommitFloor(_, _) => continue,
+                    Operation::Update(key_data, _) => (key_data.key, key_data.value),
+                    Operation::CommitFloor(_, _, _) => continue,
                     _ => unreachable!("expected update or commit floor operation"),
                 };
                 let proof = db.key_value_proof(hasher.inner(), key).await.unwrap();

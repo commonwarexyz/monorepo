@@ -121,7 +121,7 @@ where
     /// Get the metadata associated with the last commit.
     pub async fn get_metadata(&self) -> Result<Option<V::Value>, Error> {
         match self.log.read(self.last_commit_loc).await? {
-            Operation::CommitFloor(metadata, _) => Ok(metadata),
+            Operation::CommitFloor(metadata, _, _) => Ok(metadata),
             _ => unreachable!("last commit is not a CommitFloor operation"),
         }
     }
@@ -392,8 +392,12 @@ where
         let inactivity_floor_loc = self.raise_floor().await?;
 
         // Append the commit operation with the new inactivity floor.
-        self.apply_commit_op(Operation::CommitFloor(metadata, inactivity_floor_loc))
-            .await?;
+        self.apply_commit_op(Operation::CommitFloor(
+            metadata,
+            inactivity_floor_loc,
+            Location::new_unchecked(0),
+        ))
+        .await?;
 
         let range = start_loc..self.op_count();
 

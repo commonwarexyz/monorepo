@@ -55,8 +55,12 @@ impl<E: Storage + Clock + Metrics, K: Array, V: FixedValue, H: Hasher, T: Transl
         let mut log = init_fixed_authenticated_log(context.clone(), cfg).await?;
         if log.size() == 0 {
             warn!("Authenticated log is empty, initializing new db");
-            log.append(Operation::CommitFloor(None, Location::new_unchecked(0)))
-                .await?;
+            log.append(Operation::CommitFloor(
+                None,
+                Location::new_unchecked(0),
+                Location::new_unchecked(0),
+            ))
+            .await?;
             log.sync().await?;
         }
 
@@ -167,16 +171,19 @@ mod test {
         let mut ops = Vec::new();
         for i in 0..n {
             if i % 10 == 0 && i > 0 {
-                ops.push(Operation::Delete(prev_key));
+                ops.push(Operation::Delete(prev_key, Location::new_unchecked(0)));
             } else {
                 let key = Digest::random(&mut rng);
                 let next_key = Digest::random(&mut rng);
                 let value = Digest::random(&mut rng);
-                ops.push(Operation::Update(Update {
-                    key,
-                    value,
-                    next_key,
-                }));
+                ops.push(Operation::Update(
+                    Update {
+                        key,
+                        value,
+                        next_key,
+                    },
+                    Location::new_unchecked(0),
+                ));
                 prev_key = key;
             }
         }
@@ -187,13 +194,13 @@ mod test {
     async fn apply_ops(db: &mut MutableAnyTest, ops: Vec<Operation<Digest, Digest>>) {
         for op in ops {
             match op {
-                Operation::Update(data) => {
+                Operation::Update(data, _) => {
                     db.update(data.key, data.value).await.unwrap();
                 }
-                Operation::Delete(key) => {
+                Operation::Delete(key, _) => {
                     db.delete(key).await.unwrap();
                 }
-                Operation::CommitFloor(_, _) => {
+                Operation::CommitFloor(_, _, _) => {
                     // CommitFloor consumes self - not supported in this helper.
                     // Test data from create_test_ops never includes CommitFloor.
                     panic!("CommitFloor not supported in apply_ops");
@@ -844,11 +851,14 @@ mod test {
             }
 
             // Changing the ops should cause verification to fail
-            let changed_op = Operation::Update(Update {
-                key: Sha256::hash(b"key1"),
-                value: Sha256::hash(b"value1"),
-                next_key: Sha256::hash(b"key2"),
-            });
+            let changed_op = Operation::Update(
+                Update {
+                    key: Sha256::hash(b"key1"),
+                    value: Sha256::hash(b"value1"),
+                    next_key: Sha256::hash(b"key2"),
+                },
+                Location::new_unchecked(0),
+            );
             {
                 let mut ops = ops.clone();
                 ops[0] = changed_op.clone();
