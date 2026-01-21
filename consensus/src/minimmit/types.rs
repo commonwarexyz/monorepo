@@ -540,6 +540,26 @@ impl<S: Scheme, D: Digest> Viewable for Artifact<S, D> {
     }
 }
 
+#[cfg(feature = "arbitrary")]
+impl<S: Scheme, D: Digest> arbitrary::Arbitrary<'_> for Artifact<S, D>
+where
+    S::Signature: for<'a> arbitrary::Arbitrary<'a>,
+    S::Certificate: for<'a> arbitrary::Arbitrary<'a>,
+    D: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let tag = u.int_in_range(0..=4)?;
+        match tag {
+            0 => Ok(Self::Notarize(Notarize::arbitrary(u)?)),
+            1 => Ok(Self::MNotarization(MNotarization::arbitrary(u)?)),
+            2 => Ok(Self::Nullify(Nullify::arbitrary(u)?)),
+            3 => Ok(Self::Nullification(Nullification::arbitrary(u)?)),
+            4 => Ok(Self::Finalization(Finalization::arbitrary(u)?)),
+            _ => unreachable!(),
+        }
+    }
+}
+
 /// Validator vote that endorses a proposal for notarization.
 ///
 /// In Minimmit, notarize votes serve dual purposes:
@@ -1383,5 +1403,31 @@ mod tests {
 
         assert_eq!(tracker.len_notarizes(), 0);
         assert_eq!(tracker.len_nullifies(), 0);
+    }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::*;
+        use crate::minimmit::scheme::bls12381_threshold;
+        use commonware_codec::conformance::CodecConformance;
+        use commonware_cryptography::{
+            bls12381::primitives::variant::MinSig, ed25519::PublicKey,
+            sha256::Digest as Sha256Digest,
+        };
+
+        type Scheme = bls12381_threshold::Scheme<PublicKey, MinSig>;
+
+        commonware_conformance::conformance_tests! {
+            CodecConformance<Vote<Scheme, Sha256Digest>>,
+            CodecConformance<Certificate<Scheme, Sha256Digest>>,
+            CodecConformance<Artifact<Scheme, Sha256Digest>>,
+            CodecConformance<Proposal<Sha256Digest>>,
+            CodecConformance<Notarize<Scheme, Sha256Digest>>,
+            CodecConformance<MNotarization<Scheme, Sha256Digest>>,
+            CodecConformance<Nullify<Scheme>>,
+            CodecConformance<Nullification<Scheme>>,
+            CodecConformance<Finalization<Scheme, Sha256Digest>>,
+            CodecConformance<ConflictingNotarize<Scheme, Sha256Digest>>,
+        }
     }
 }
