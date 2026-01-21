@@ -227,15 +227,13 @@ impl<N: Namespace> Generic<N> {
         I: IntoIterator<Item = Attestation<S>>,
         M: Faults,
     {
-        // Collect the signers and signatures, filtering out failed decodes.
+        // Collect the signers and signatures.
         let mut entries = Vec::new();
         for Attestation { signer, signature } in attestations {
             if usize::from(signer) >= self.participants.len() {
-                continue;
+                return None;
             }
-            let Some(signature) = signature.get().cloned() else {
-                continue;
-            };
+            let signature = signature.get().cloned()?;
             entries.push((signer, signature));
         }
         if entries.len() < self.participants.quorum::<M>() as usize {

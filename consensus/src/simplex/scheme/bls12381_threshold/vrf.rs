@@ -749,8 +749,8 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
                 },
             ))
         });
-        let (vote_partials, seed_partials): (Vec<_>, Vec<_>) =
-            partials.into_iter().flatten().unzip();
+        let partials: Vec<_> = partials.into_iter().collect::<Option<_>>()?;
+        let (vote_partials, seed_partials): (Vec<_>, Vec<_>) = partials.into_iter().unzip();
 
         let quorum = self.polynomial();
         if vote_partials.len() < quorum.required::<M>() as usize {

@@ -329,7 +329,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
                     value,
                 })
         });
-        let partials: Vec<_> = partials.into_iter().flatten().collect();
+        let partials: Vec<_> = partials.into_iter().collect::<Option<_>>()?;
 
         let quorum = self.polynomial();
         if partials.len() < quorum.required::<M>() as usize {

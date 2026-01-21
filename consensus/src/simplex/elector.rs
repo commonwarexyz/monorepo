@@ -225,7 +225,11 @@ where
         Random::select_leader::<V>(
             round,
             self.n,
-            certificate.and_then(|c| c.get().map(|s| s.seed_signature)),
+            certificate.map(|c| {
+                c.get()
+                    .expect("verified certificate must decode")
+                    .seed_signature
+            }),
         )
     }
 }
