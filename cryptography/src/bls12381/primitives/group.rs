@@ -149,6 +149,63 @@ fn build_tiles(npoints: usize, nx: usize, ny: usize, window: usize) -> Vec<Tile>
     tiles
 }
 
+/// Generic parallel MSM implementation that works for both G1 and G2.
+///
+/// Takes closures for the type-specific blst operations to avoid code duplication.
+#[allow(clippy::too_many_arguments)]
+fn msm_parallel_generic<A, P, R>(
+    affine_points: &[A],
+    scalars: &[u8],
+    nbits: usize,
+    ncpus: usize,
+    strategy: &impl Strategy,
+    compute_tile: impl Fn(&[A], &[u8], &Tile, usize, usize, usize) -> P + Sync,
+    add: impl Fn(&P, &P) -> P,
+    double: impl Fn(&P) -> P,
+    from_projective: impl Fn(P) -> R,
+) -> R
+where
+    A: Sync,
+    P: Default + Send,
+{
+    let npoints = affine_points.len();
+    let nbytes = nbits.div_ceil(8);
+    let (nx, ny, window) = msm_breakdown(nbits, pippenger_window_size(npoints), ncpus);
+    let tiles = build_tiles(npoints, nx, ny, window);
+
+    // Compute all tiles in parallel
+    let tile_results: Vec<(usize, usize, P)> =
+        strategy.map_collect_vec(tiles.iter().enumerate(), |(idx, tile)| {
+            let result = compute_tile(affine_points, scalars, tile, nbytes, nbits, window);
+            (idx / nx, idx % nx, result)
+        });
+
+    // Combine results by row
+    let mut row_sums: Vec<Option<P>> = (0..ny).map(|_| None).collect();
+    for (row, _col, point) in tile_results {
+        row_sums[row] = Some(match row_sums[row].take() {
+            Some(sum) => add(&sum, &point),
+            None => point,
+        });
+    }
+
+    // Combine rows with doubling (highest bits first)
+    let mut result = P::default();
+    for (i, row_sum) in row_sums.into_iter().enumerate() {
+        if let Some(sum) = row_sum {
+            result = add(&result, &sum);
+        }
+        // Double `window` times for all but the last row
+        if i < ny - 1 {
+            for _ in 0..window {
+                result = double(&result);
+            }
+        }
+    }
+
+    from_projective(result)
+}
+
 /// Domain separation tag used when hashing a message to a curve (G1 or G2).
 ///
 /// Reference: <https://datatracker.ietf.org/doc/html/draft-irtf-cfrg-bls-signature-05#name-ciphersuites>
@@ -921,23 +978,21 @@ impl G1 {
         ncpus: usize,
         strategy: &impl Strategy,
     ) -> Self {
-        let npoints = affine_points.len();
-        let nbytes = nbits.div_ceil(8);
-        let (nx, ny, window) = msm_breakdown(nbits, pippenger_window_size(npoints), ncpus);
-        let tiles = build_tiles(npoints, nx, ny, window);
-
-        // Compute all tiles in parallel
         // SAFETY: blst_p1s_mult_pippenger_scratch_sizeof(0) returns base scratch size.
         let scratch_size = unsafe { blst_p1s_mult_pippenger_scratch_sizeof(0) } / 8;
-        let tile_results: Vec<(usize, usize, blst_p1)> =
-            strategy.map_collect_vec(tiles.iter().enumerate(), |(idx, tile)| {
+
+        msm_parallel_generic(
+            affine_points,
+            scalars,
+            nbits,
+            ncpus,
+            strategy,
+            |points, scalars, tile, nbytes, nbits, window| {
                 let mut scratch = vec![0u64; scratch_size << (window - 1)];
                 let mut result = blst_p1::default();
-
                 // blst uses null-terminated pointer arrays
-                let p: [*const blst_p1_affine; 2] = [affine_points[tile.x..].as_ptr(), ptr::null()];
+                let p: [*const blst_p1_affine; 2] = [points[tile.x..].as_ptr(), ptr::null()];
                 let s: [*const u8; 2] = [scalars[tile.x * nbytes..].as_ptr(), ptr::null()];
-
                 // SAFETY: All pointers valid, scratch sized correctly for window.
                 unsafe {
                     blst_p1s_tile_pippenger(
@@ -951,36 +1006,22 @@ impl G1 {
                         window,
                     );
                 }
-                (idx / nx, idx % nx, result)
-            });
-
-        // Combine results by row
-        let mut row_sums: Vec<Option<blst_p1>> = vec![None; ny];
-        for (row, _col, point) in tile_results {
-            match &mut row_sums[row] {
+                result
+            },
+            |a, b| {
+                let mut result = blst_p1::default();
                 // SAFETY: blst_p1_add_or_double is safe for valid blst_p1 points.
-                Some(sum) => unsafe { blst_p1_add_or_double(sum, sum, &point) },
-                None => row_sums[row] = Some(point),
-            }
-        }
-
-        // Combine rows with doubling (highest bits first)
-        let mut result = blst_p1::default();
-        for (i, row_sum) in row_sums.into_iter().enumerate() {
-            if let Some(sum) = row_sum {
-                // SAFETY: blst_p1_add_or_double is safe for valid blst_p1 points.
-                unsafe { blst_p1_add_or_double(&mut result, &result, &sum) };
-            }
-            // Double `window` times for all but the last row
-            if i < ny - 1 {
-                for _ in 0..window {
-                    // SAFETY: blst_p1_double is safe for valid blst_p1 points.
-                    unsafe { blst_p1_double(&mut result, &result) };
-                }
-            }
-        }
-
-        Self::from_blst_p1(result)
+                unsafe { blst_p1_add_or_double(&mut result, a, b) };
+                result
+            },
+            |a| {
+                let mut result = blst_p1::default();
+                // SAFETY: blst_p1_double is safe for valid blst_p1 points.
+                unsafe { blst_p1_double(&mut result, a) };
+                result
+            },
+            Self::from_blst_p1,
+        )
     }
 }
 
@@ -1358,23 +1399,21 @@ impl G2 {
         ncpus: usize,
         strategy: &impl Strategy,
     ) -> Self {
-        let npoints = affine_points.len();
-        let nbytes = nbits.div_ceil(8);
-        let (nx, ny, window) = msm_breakdown(nbits, pippenger_window_size(npoints), ncpus);
-        let tiles = build_tiles(npoints, nx, ny, window);
-
-        // Compute all tiles in parallel
         // SAFETY: blst_p2s_mult_pippenger_scratch_sizeof(0) returns base scratch size.
         let scratch_size = unsafe { blst_p2s_mult_pippenger_scratch_sizeof(0) } / 8;
-        let tile_results: Vec<(usize, usize, blst_p2)> =
-            strategy.map_collect_vec(tiles.iter().enumerate(), |(idx, tile)| {
+
+        msm_parallel_generic(
+            affine_points,
+            scalars,
+            nbits,
+            ncpus,
+            strategy,
+            |points, scalars, tile, nbytes, nbits, window| {
                 let mut scratch = vec![0u64; scratch_size << (window - 1)];
                 let mut result = blst_p2::default();
-
                 // blst uses null-terminated pointer arrays
-                let p: [*const blst_p2_affine; 2] = [affine_points[tile.x..].as_ptr(), ptr::null()];
+                let p: [*const blst_p2_affine; 2] = [points[tile.x..].as_ptr(), ptr::null()];
                 let s: [*const u8; 2] = [scalars[tile.x * nbytes..].as_ptr(), ptr::null()];
-
                 // SAFETY: All pointers valid, scratch sized correctly for window.
                 unsafe {
                     blst_p2s_tile_pippenger(
@@ -1388,36 +1427,22 @@ impl G2 {
                         window,
                     );
                 }
-                (idx / nx, idx % nx, result)
-            });
-
-        // Combine results by row
-        let mut row_sums: Vec<Option<blst_p2>> = vec![None; ny];
-        for (row, _col, point) in tile_results {
-            match &mut row_sums[row] {
+                result
+            },
+            |a, b| {
+                let mut result = blst_p2::default();
                 // SAFETY: blst_p2_add_or_double is safe for valid blst_p2 points.
-                Some(sum) => unsafe { blst_p2_add_or_double(sum, sum, &point) },
-                None => row_sums[row] = Some(point),
-            }
-        }
-
-        // Combine rows with doubling (highest bits first)
-        let mut result = blst_p2::default();
-        for (i, row_sum) in row_sums.into_iter().enumerate() {
-            if let Some(sum) = row_sum {
-                // SAFETY: blst_p2_add_or_double is safe for valid blst_p2 points.
-                unsafe { blst_p2_add_or_double(&mut result, &result, &sum) };
-            }
-            // Double `window` times for all but the last row
-            if i < ny - 1 {
-                for _ in 0..window {
-                    // SAFETY: blst_p2_double is safe for valid blst_p2 points.
-                    unsafe { blst_p2_double(&mut result, &result) };
-                }
-            }
-        }
-
-        Self::from_blst_p2(result)
+                unsafe { blst_p2_add_or_double(&mut result, a, b) };
+                result
+            },
+            |a| {
+                let mut result = blst_p2::default();
+                // SAFETY: blst_p2_double is safe for valid blst_p2 points.
+                unsafe { blst_p2_double(&mut result, a) };
+                result
+            },
+            Self::from_blst_p2,
+        )
     }
 }
 
