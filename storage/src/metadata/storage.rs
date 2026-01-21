@@ -6,7 +6,7 @@ use commonware_runtime::{
     telemetry::metrics::status::GaugeExt, Blob, Clock, Error as RError, Metrics, Storage,
 };
 use commonware_utils::Span;
-use futures::future::try_join_all;
+use futures::{future::try_join_all, lock::Mutex};
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use tracing::{debug, warn};
@@ -60,16 +60,21 @@ impl<B: Blob, K: Span> Wrapper<B, K> {
     }
 }
 
+/// State used during [Metadata::sync] operations.
+struct State<B: Blob, K: Span> {
+    cursor: usize,
+    next_version: u64,
+    key_order_changed: u64,
+    blobs: [Wrapper<B, K>; 2],
+}
+
 /// Implementation of [Metadata] storage.
 pub struct Metadata<E: Clock + Storage + Metrics, K: Span, V: Codec> {
     context: E,
 
     map: BTreeMap<K, V>,
-    cursor: usize,
-    key_order_changed: u64,
-    next_version: u64,
     partition: String,
-    blobs: [Wrapper<E::Blob, K>; 2],
+    state: Mutex<State<E::Blob, K>>,
 
     sync_overwrites: Counter,
     sync_rewrites: Counter,
@@ -122,11 +127,13 @@ impl<E: Clock + Storage + Metrics, K: Span, V: Codec> Metadata<E, K, V> {
             context,
 
             map,
-            cursor,
-            key_order_changed: next_version, // rewrite on startup because we don't have a diff record
-            next_version,
             partition: cfg.partition,
-            blobs: [left_wrapper, right_wrapper],
+            state: Mutex::new(State {
+                cursor,
+                next_version,
+                key_order_changed: next_version, // rewrite on startup because we don't have a diff record
+                blobs: [left_wrapper, right_wrapper],
+            }),
 
             sync_rewrites,
             sync_overwrites,
@@ -224,8 +231,9 @@ impl<E: Clock + Storage + Metrics, K: Span, V: Codec> Metadata<E, K, V> {
         // Mark key as modified.
         //
         // We need to mark both blobs as modified because we may need to update both files.
-        self.blobs[self.cursor].modified.insert(key.clone());
-        self.blobs[1 - self.cursor].modified.insert(key.clone());
+        let state = self.state.get_mut();
+        state.blobs[state.cursor].modified.insert(key.clone());
+        state.blobs[1 - state.cursor].modified.insert(key.clone());
 
         Some(value)
     }
@@ -237,7 +245,8 @@ impl<E: Clock + Storage + Metrics, K: Span, V: Codec> Metadata<E, K, V> {
         self.map.clear();
 
         // Mark key order as changed
-        self.key_order_changed = self.next_version;
+        let state = self.state.get_mut();
+        state.key_order_changed = state.next_version;
         self.keys.set(0);
     }
 
@@ -253,11 +262,12 @@ impl<E: Clock + Storage + Metrics, K: Span, V: Codec> Metadata<E, K, V> {
         // Mark key as modified.
         //
         // We need to mark both blobs as modified because we may need to update both files.
+        let state = self.state.get_mut();
         if previous.is_some() {
-            self.blobs[self.cursor].modified.insert(key.clone());
-            self.blobs[1 - self.cursor].modified.insert(key);
+            state.blobs[state.cursor].modified.insert(key.clone());
+            state.blobs[1 - state.cursor].modified.insert(key);
         } else {
-            self.key_order_changed = self.next_version;
+            state.key_order_changed = state.next_version;
         }
         let _ = self.keys.try_set(self.map.len());
         previous
@@ -301,7 +311,8 @@ impl<E: Clock + Storage + Metrics, K: Span, V: Codec> Metadata<E, K, V> {
 
         // Mark key as modified.
         if past.is_some() {
-            self.key_order_changed = self.next_version;
+            let state = self.state.get_mut();
+            state.key_order_changed = state.next_version;
         }
         let _ = self.keys.try_set(self.map.len());
 
@@ -322,28 +333,48 @@ impl<E: Clock + Storage + Metrics, K: Span, V: Codec> Metadata<E, K, V> {
 
         // If the number of keys has changed, mark the key order as changed
         if new_len != old_len {
-            self.key_order_changed = self.next_version;
+            let state = self.state.get_mut();
+            state.key_order_changed = state.next_version;
             let _ = self.keys.try_set(self.map.len());
         }
     }
 
     /// Atomically commit the current state of [Metadata].
-    pub async fn sync(&mut self) -> Result<(), Error> {
+    pub async fn sync(&self) -> Result<(), Error> {
+        // Acquire lock on sync state which will prevent concurrent sync calls while not blocking
+        // reads from the metadata map.
+        let mut state = self.state.lock().await;
+
+        // Extract values we need
+        let cursor = state.cursor;
+        let next_version = state.next_version;
+        let key_order_changed = state.key_order_changed;
+
         // Compute next version.
         //
-        // While it is possible that extremely high-frequency updates to metadata could cause an eventual
-        // overflow of version, syncing once per millisecond would overflow in 584,942,417 years.
-        let past_version = self.blobs[self.cursor].version;
-        let next_next_version = self.next_version.checked_add(1).expect("version overflow");
+        // While it is possible that extremely high-frequency updates to metadata could cause an
+        // eventual overflow of version, syncing once per millisecond would overflow in 584,942,417
+        // years.
+        let past_version = state.blobs[cursor].version;
+        let next_next_version = next_version.checked_add(1).expect("version overflow");
 
         // Get target blob (the one we will modify)
-        let target_cursor = 1 - self.cursor;
-        let target = &mut self.blobs[target_cursor];
+        let target_cursor = 1 - cursor;
 
-        // Attempt to overwrite existing data if key order has not changed recently
+        // Update the state.
+        state.cursor = target_cursor;
+        state.next_version = next_next_version;
+
+        // Get a mutable reference to the target blob.
+        let target = &mut state.blobs[target_cursor];
+
+        // Determine if we can overwrite existing data in place, and prepare the list of data to
+        // write in that event.
         let mut overwrite = true;
-        let mut writes = Vec::with_capacity(target.modified.len());
-        if self.key_order_changed < past_version {
+        let mut writes = vec![];
+        if key_order_changed < past_version {
+            let write_capacity = target.modified.len() + 2;
+            writes.reserve(write_capacity);
             for key in target.modified.iter() {
                 let info = target.lengths.get(key).expect("key must exist");
                 let new_value = self.map.get(key).expect("key must exist");
@@ -369,7 +400,7 @@ impl<E: Clock + Storage + Metrics, K: Span, V: Codec> Metadata<E, K, V> {
         // Overwrite existing data
         if overwrite {
             // Update version
-            let version = self.next_version.to_be_bytes();
+            let version = next_version.to_be_bytes();
             target.data[0..8].copy_from_slice(&version);
             writes.push(target.blob.write_at(version.as_slice().into(), 0));
 
@@ -388,17 +419,17 @@ impl<E: Clock + Storage + Metrics, K: Span, V: Codec> Metadata<E, K, V> {
             target.blob.sync().await?;
 
             // Update state
-            target.version = self.next_version;
-            self.cursor = target_cursor;
-            self.next_version = next_next_version;
+            target.version = next_version;
             self.sync_overwrites.inc();
             return Ok(());
         }
 
-        // Rewrite all data
+        // Since we can't overwrite in place, we rewrite the entire blob.
         let mut lengths = HashMap::new();
         let mut next_data = Vec::with_capacity(target.data.len());
-        next_data.put_u64(self.next_version);
+        next_data.put_u64(next_version);
+
+        // Build new data
         for (key, value) in &self.map {
             key.write(&mut next_data);
             let start = next_data.len();
@@ -407,26 +438,26 @@ impl<E: Clock + Storage + Metrics, K: Span, V: Codec> Metadata<E, K, V> {
         }
         next_data.put_u32(Crc32::checksum(&next_data[..]));
 
-        // Persist changes
+        // Write and persist the new data
         target.blob.write_at(next_data.clone(), 0).await?;
         if next_data.len() < target.data.len() {
             target.blob.resize(next_data.len() as u64).await?;
         }
         target.blob.sync().await?;
 
-        // Update state
-        target.version = self.next_version;
+        // Update blob state
+        target.version = next_version;
         target.lengths = lengths;
         target.data = next_data;
-        self.cursor = target_cursor;
-        self.next_version = next_next_version;
+
         self.sync_rewrites.inc();
         Ok(())
     }
 
     /// Remove the underlying blobs for this [Metadata].
     pub async fn destroy(self) -> Result<(), Error> {
-        for (i, wrapper) in self.blobs.into_iter().enumerate() {
+        let state = self.state.into_inner();
+        for (i, wrapper) in state.blobs.into_iter().enumerate() {
             drop(wrapper.blob);
             self.context
                 .remove(&self.partition, Some(BLOB_NAMES[i]))
