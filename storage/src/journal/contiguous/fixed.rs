@@ -195,7 +195,7 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
             write_buffer: cfg.write_buffer,
         };
 
-        let mut inner = SegmentedJournal::init(context.clone(), segmented_cfg).await?;
+        let mut inner = SegmentedJournal::init(context.with_label("blobs"), segmented_cfg).await?;
 
         // Initialize metadata store
         let meta_cfg = MetadataConfig {
@@ -398,7 +398,7 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
             write_buffer: cfg.write_buffer,
         };
 
-        let mut inner = SegmentedJournal::init(context.clone(), segmented_cfg).await?;
+        let mut inner = SegmentedJournal::init(context.with_label("blobs"), segmented_cfg).await?;
         inner.ensure_section_exists(tail_section).await?;
 
         // Initialize and populate metadata
