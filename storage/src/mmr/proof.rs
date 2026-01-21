@@ -16,9 +16,9 @@ use alloc::{
     vec,
     vec::Vec,
 };
+use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Read, ReadExt, ReadRangeExt, Write};
 use commonware_cryptography::Digest;
-use commonware_runtime::{Buf, BufMut};
 use core::ops::Range;
 #[cfg(feature = "std")]
 use tracing::debug;

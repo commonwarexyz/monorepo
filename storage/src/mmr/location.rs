@@ -1,7 +1,7 @@
 use super::position::Position;
 use crate::mmr::MAX_POSITION;
+use bytes::{Buf, BufMut};
 use commonware_codec::{Read, ReadExt};
-use commonware_runtime::{Buf, BufMut};
 use core::{
     convert::TryFrom,
     fmt,

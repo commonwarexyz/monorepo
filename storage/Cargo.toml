@@ -16,6 +16,7 @@ workspace = true
 [dependencies]
 anyhow.workspace = true
 arbitrary = { workspace = true, optional = true, features = ["derive"] }
+bytes = { workspace = true, default-features = false }
 cfg-if.workspace = true
 commonware-codec = { workspace = true, default-features = false }
 commonware-cryptography = { workspace = true, default-features = false }
@@ -44,6 +45,7 @@ tracing-subscriber.workspace = true
 default = [ "std" ]
 std = [
 	"anyhow/std",
+	"bytes/std",
 	"commonware-codec/std",
 	"commonware-cryptography/std",
 	"commonware-parallel",

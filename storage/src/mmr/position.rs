@@ -1,6 +1,6 @@
 use super::location::Location;
+use bytes::{Buf, BufMut};
 use commonware_codec::ReadExt;
-use commonware_runtime::{Buf, BufMut};
 use core::{
     fmt,
     ops::{Add, AddAssign, Deref, Sub, SubAssign},
