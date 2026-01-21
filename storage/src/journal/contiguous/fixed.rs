@@ -76,7 +76,7 @@ use std::{
     num::{NonZeroU64, NonZeroUsize},
     ops::Range,
 };
-use tracing::{debug, info};
+use tracing::{debug, warn};
 
 /// Suffix appended to the partition name for the metadata store.
 const META_SUFFIX: &str = "_meta";
@@ -272,7 +272,7 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
                 let meta_oldest_section = meta_pruning_boundary / items_per_blob;
                 match inner.oldest_section() {
                     Some(oldest_section) if meta_oldest_section < oldest_section => {
-                        info!(
+                        warn!(
                             meta_oldest_section,
                             oldest_section, "crash repair: metadata stale, computing from blobs"
                         );

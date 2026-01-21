@@ -18,7 +18,7 @@ use commonware_utils::NZUsize;
 use core::ops::Range;
 use futures::{future::Either, stream, Stream, StreamExt as _};
 use std::num::{NonZeroU64, NonZeroUsize};
-use tracing::{debug, info};
+use tracing::{debug, warn};
 
 const REPLAY_BUFFER_SIZE: NonZeroUsize = NZUsize!(1024);
 
@@ -655,7 +655,7 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Journal<E, V> {
                 let data_section_start = data_first_section * items_per_section;
                 let target_pos = data_section_start.max(offsets.pruning_boundary());
 
-                info!("crash repair: clearing offsets to {target_pos} (empty section crash)");
+                warn!("crash repair: clearing offsets to {target_pos} (empty section crash)");
                 offsets.clear_to_size(target_pos).await?;
                 return Ok((target_pos, target_pos));
             }
@@ -669,7 +669,7 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Journal<E, V> {
                     // Offsets has unpruned entries but data is gone - clear to match empty state.
                     // We use clear_to_size (not prune) to ensure pruning_boundary == size,
                     // even when size is mid-section.
-                    info!("crash repair: clearing offsets to {size} (prune-all crash)");
+                    warn!("crash repair: clearing offsets to {size} (prune-all crash)");
                     offsets.clear_to_size(size).await?;
                 }
             }
@@ -690,7 +690,7 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Journal<E, V> {
         match offsets.oldest_retained_pos() {
             Some(oldest_retained_pos) if oldest_retained_pos < data_oldest_pos => {
                 // Offsets behind on pruning -- prune to catch up
-                info!("crash repair: pruning offsets journal to {data_oldest_pos}");
+                warn!("crash repair: pruning offsets journal to {data_oldest_pos}");
                 offsets.prune(data_oldest_pos).await?;
             }
             Some(oldest_retained_pos) if oldest_retained_pos > data_oldest_pos => {
@@ -715,7 +715,7 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Journal<E, V> {
                         offsets_size / items_per_section
                     )));
                 }
-                info!(
+                warn!(
                     "crash repair: offsets journal empty at {offsets_size}, will rebuild from data"
                 );
             }
@@ -743,7 +743,7 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Journal<E, V> {
         let offsets_size = offsets.size();
         if offsets_size > data_size {
             // Crashed after writing offsets but before writing data.
-            info!("crash repair: rewinding offsets from {offsets_size} to {data_size}");
+            warn!("crash repair: rewinding offsets from {offsets_size} to {data_size}");
             offsets.rewind(data_size).await?;
         } else if offsets_size < data_size {
             // Crashed after writing data but before writing offsets.
