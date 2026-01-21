@@ -330,7 +330,7 @@ where
                 let block_requests = try_join(parent_request, block_request);
                 pin_mut!(block_requests);
 
-                // If consensus drops the rceiver, we can stop work early.
+                // If consensus drops the receiver, we can stop work early.
                 let (parent, block) = match select(block_requests, &mut tx_closed).await {
                     Either::Left((Ok((parent, block)), _)) => (parent, block),
                     Either::Left((Err(_), _)) => {
@@ -407,7 +407,7 @@ where
                 );
                 pin_mut!(validity_request);
 
-                // If consensus drops the rceiver, we can stop work early.
+                // If consensus drops the receiver, we can stop work early.
                 let application_valid = match select(validity_request, &mut tx_closed).await {
                     Either::Left((is_valid, _)) => is_valid,
                     Either::Right(_) => {
