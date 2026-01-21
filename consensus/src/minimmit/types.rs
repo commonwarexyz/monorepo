@@ -688,11 +688,11 @@ impl<S: Scheme, D: Digest> MNotarization<S, D> {
     /// Builds an M-notarization certificate from notarize votes for the same proposal.
     ///
     /// Requires M-quorum (2f+1) votes.
-    pub fn from_notarizes<'a>(
-        scheme: &S,
-        notarizes: impl IntoIterator<Item = &'a Notarize<S, D>>,
-        strategy: &impl Strategy,
-    ) -> Option<Self> {
+    pub fn from_notarizes<'a, I>(scheme: &S, notarizes: I, strategy: &impl Strategy) -> Option<Self>
+    where
+        I: IntoIterator<Item = &'a Notarize<S, D>>,
+        I::IntoIter: Send,
+    {
         let mut iter = notarizes.into_iter().peekable();
         let proposal = iter.peek()?.proposal.clone();
         let certificate =
@@ -929,11 +929,11 @@ impl<S: Scheme> Nullification<S> {
     /// Builds a nullification certificate from nullify votes from the same round.
     ///
     /// Requires M-quorum (2f+1) votes.
-    pub fn from_nullifies<'a>(
-        scheme: &S,
-        nullifies: impl IntoIterator<Item = &'a Nullify<S>>,
-        strategy: &impl Strategy,
-    ) -> Option<Self> {
+    pub fn from_nullifies<'a, I>(scheme: &S, nullifies: I, strategy: &impl Strategy) -> Option<Self>
+    where
+        I: IntoIterator<Item = &'a Nullify<S>>,
+        I::IntoIter: Send,
+    {
         let mut iter = nullifies.into_iter().peekable();
         let round = iter.peek()?.round;
         let certificate =
@@ -1052,11 +1052,11 @@ impl<S: Scheme, D: Digest> Finalization<S, D> {
     ///
     /// Requires L-quorum (n-f) votes. Note that in Minimmit, finalization uses
     /// the same notarize votes as M-notarization, just with a higher threshold.
-    pub fn from_notarizes<'a>(
-        scheme: &S,
-        notarizes: impl IntoIterator<Item = &'a Notarize<S, D>>,
-        strategy: &impl Strategy,
-    ) -> Option<Self> {
+    pub fn from_notarizes<'a, I>(scheme: &S, notarizes: I, strategy: &impl Strategy) -> Option<Self>
+    where
+        I: IntoIterator<Item = &'a Notarize<S, D>>,
+        I::IntoIter: Send,
+    {
         let mut iter = notarizes.into_iter().peekable();
         let proposal = iter.peek()?.proposal.clone();
         let certificate =

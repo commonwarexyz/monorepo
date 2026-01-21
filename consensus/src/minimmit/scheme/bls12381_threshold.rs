@@ -21,7 +21,7 @@ use crate::{
     types::Participant,
 };
 use bytes::{Buf, BufMut};
-use commonware_codec::{EncodeSize, Error, Read, ReadExt as _, Write};
+use commonware_codec::{types::lazy::Lazy, EncodeSize, Error, Read, ReadExt as _, Write};
 use commonware_cryptography::{
     bls12381::primitives::{
         group::Share,
@@ -300,7 +300,7 @@ pub enum Certificate<V: Variant> {
         /// Bitmap of which participants contributed signatures.
         signers: Signers,
         /// Aggregated BLS signature from the partial vote signatures.
-        vote_signature: V::Signature,
+        vote_signature: Lazy<V::Signature>,
     },
     /// Recovered threshold signature.
     ///
@@ -309,16 +309,18 @@ pub enum Certificate<V: Variant> {
     /// Verified against the group public key.
     Threshold {
         /// The recovered threshold signature over the vote message.
-        vote_signature: V::Signature,
+        vote_signature: Lazy<V::Signature>,
     },
 }
 
 impl<V: Variant> Certificate<V> {
     /// Returns the vote signature regardless of certificate type.
-    pub const fn vote_signature(&self) -> &V::Signature {
+    ///
+    /// Returns `None` if the signature fails to decode.
+    pub fn vote_signature(&self) -> Option<&V::Signature> {
         match self {
-            Self::Aggregated { vote_signature, .. } => vote_signature,
-            Self::Threshold { vote_signature, .. } => vote_signature,
+            Self::Aggregated { vote_signature, .. } => vote_signature.get(),
+            Self::Threshold { vote_signature, .. } => vote_signature.get(),
         }
     }
 
@@ -379,7 +381,7 @@ impl<V: Variant> Read for Certificate<V> {
             0 => {
                 // Aggregated
                 let signers = Signers::read_cfg(reader, max_participants)?;
-                let vote_signature = V::Signature::read(reader)?;
+                let vote_signature = Lazy::<V::Signature>::read(reader)?;
                 Ok(Self::Aggregated {
                     signers,
                     vote_signature,
@@ -387,7 +389,7 @@ impl<V: Variant> Read for Certificate<V> {
             }
             1 => {
                 // Threshold
-                let vote_signature = V::Signature::read(reader)?;
+                let vote_signature = Lazy::<V::Signature>::read(reader)?;
                 Ok(Self::Threshold { vote_signature })
             }
             _ => Err(Error::Invalid("Certificate", "unknown tag")),
@@ -405,11 +407,11 @@ where
         if u.arbitrary::<bool>()? {
             Ok(Self::Aggregated {
                 signers: u.arbitrary()?,
-                vote_signature: u.arbitrary()?,
+                vote_signature: Lazy::from(u.arbitrary::<V::Signature>()?),
             })
         } else {
             Ok(Self::Threshold {
-                vote_signature: u.arbitrary()?,
+                vote_signature: Lazy::from(u.arbitrary::<V::Signature>()?),
             })
         }
     }
@@ -442,7 +444,7 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
 
         Some(Attestation {
             signer: share.index,
-            signature,
+            signature: Lazy::from(signature),
         })
     }
 
@@ -460,18 +462,15 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
         let Ok(evaluated) = self.polynomial().partial_public(attestation.signer) else {
             return false;
         };
+        let Some(signature) = attestation.signature.get() else {
+            return false;
+        };
 
         let namespace = self.namespace();
         let vote_namespace = subject.namespace(namespace);
         let vote_message = subject.message();
 
-        ops::verify_message::<V>(
-            &evaluated,
-            vote_namespace,
-            &vote_message,
-            &attestation.signature,
-        )
-        .is_ok()
+        ops::verify_message::<V>(&evaluated, vote_namespace, &vote_message, signature).is_ok()
     }
 
     fn verify_attestations<R, D, I>(
@@ -485,21 +484,27 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
         R: CryptoRngCore,
         D: Digest,
         I: IntoIterator<Item = Attestation<Self>>,
+        I::IntoIter: Send,
     {
         let namespace = self.namespace();
-        let vote_partials: Vec<_> = attestations
-            .into_iter()
-            .map(|attestation| PartialSignature::<V> {
-                index: attestation.signer,
-                value: attestation.signature,
-            })
-            .collect();
+
+        // Extract signatures from lazy attestations in parallel, tracking failures
+        let (vote_partials, failures) =
+            strategy.map_partition_collect_vec(attestations.into_iter(), |attestation| {
+                let index = attestation.signer;
+                let partial = attestation
+                    .signature
+                    .get()
+                    .map(|&value| PartialSignature::<V> { index, value });
+                (index, partial)
+            });
+        let mut invalid: BTreeSet<_> = failures.into_iter().collect();
 
         let polynomial = self.polynomial();
         let vote_namespace = subject.namespace(namespace);
         let vote_message = subject.message();
 
-        let invalid: BTreeSet<_> = match threshold::batch_verify_same_message::<_, V, _>(
+        if let Err(errs) = threshold::batch_verify_same_message::<_, V, _>(
             rng,
             polynomial,
             vote_namespace,
@@ -507,17 +512,18 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
             vote_partials.iter(),
             strategy,
         ) {
-            Ok(()) => BTreeSet::new(),
-            Err(errs) => errs.into_iter().map(|p| p.index).collect(),
-        };
+            for partial in errs {
+                invalid.insert(partial.index);
+            }
+        }
 
         let verified = vote_partials
             .into_iter()
+            .filter(|partial| !invalid.contains(&partial.index))
             .map(|partial| Attestation {
                 signer: partial.index,
-                signature: partial.value,
+                signature: Lazy::from(partial.value),
             })
-            .filter(|attestation| !invalid.contains(&attestation.signer))
             .collect();
 
         Verification::new(verified, invalid.into_iter().collect())
@@ -526,16 +532,22 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
     fn assemble<I, M>(&self, attestations: I, strategy: &impl Strategy) -> Option<Self::Certificate>
     where
         I: IntoIterator<Item = Attestation<Self>>,
+        I::IntoIter: Send,
         M: Faults,
     {
-        let attestations: Vec<_> = attestations.into_iter().collect();
-        let vote_partials: Vec<_> = attestations
-            .iter()
-            .map(|attestation| PartialSignature::<V> {
-                index: attestation.signer,
-                value: attestation.signature,
-            })
-            .collect();
+        // Extract signatures from lazy attestations in parallel, returning None if any fail
+        let (vote_partials, failures) =
+            strategy.map_partition_collect_vec(attestations.into_iter(), |attestation| {
+                let index = attestation.signer;
+                let partial = attestation
+                    .signature
+                    .get()
+                    .map(|&value| PartialSignature::<V> { index, value });
+                (index, partial)
+            });
+        if !failures.is_empty() {
+            return None;
+        }
 
         let polynomial = self.polynomial();
         let n = self.participants().len() as u32;
@@ -557,11 +569,13 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
                 threshold::recover::<V, _, N5f1>(polynomial, vote_partials.iter(), strategy)
                     .ok()?;
 
-            Some(Certificate::Threshold { vote_signature })
+            Some(Certificate::Threshold {
+                vote_signature: Lazy::from(vote_signature),
+            })
         } else {
             // M-quorum: Use aggregated signature with explicit signers.
             // This proves exactly which validators signed (unforgeable).
-            let signers = Signers::from(n as usize, attestations.iter().map(|a| a.signer));
+            let signers = Signers::from(n as usize, vote_partials.iter().map(|p| p.index));
 
             // Aggregate the vote partial signatures using BLS point addition
             let aggregated_vote =
@@ -569,7 +583,7 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
 
             Some(Certificate::Aggregated {
                 signers,
-                vote_signature: *aggregated_vote.inner(),
+                vote_signature: Lazy::from(*aggregated_vote.inner()),
             })
         }
     }
@@ -592,12 +606,16 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
 
         match certificate {
             Certificate::Threshold { vote_signature } => {
+                // Get the lazy signature
+                let Some(sig) = vote_signature.get() else {
+                    return false;
+                };
                 // Verify recovered threshold signature against group identity
                 let identity = self.identity();
                 batch::verify_same_signer::<_, V, _>(
                     rng,
                     identity,
-                    &[(vote_namespace, vote_message.as_ref(), *vote_signature)],
+                    &[(vote_namespace, vote_message.as_ref(), *sig)],
                     &commonware_parallel::Sequential,
                 )
                 .is_ok()
@@ -606,6 +624,10 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
                 signers,
                 vote_signature,
             } => {
+                // Get the lazy signature
+                let Some(sig) = vote_signature.get() else {
+                    return false;
+                };
                 // Verify aggregated vote signature against aggregated public keys.
                 let polynomial = self.polynomial();
 
@@ -625,7 +647,7 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
                     aggregate::combine_public_keys::<V, _>(partial_publics.iter());
 
                 // Wrap signature in aggregate::Signature for verification
-                let aggregated_sig = aggregate::Signature::<V>::from_raw(*vote_signature);
+                let aggregated_sig = aggregate::Signature::<V>::from_raw(*sig);
 
                 // Verify the aggregated vote signature
                 aggregate::verify_same_message::<V>(
@@ -664,19 +686,23 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
 
             match certificate {
                 Certificate::Threshold { vote_signature } => {
+                    // Get the lazy signature
+                    let Some(sig) = vote_signature.get() else {
+                        return false;
+                    };
                     // Vote signature can be batch-verified against group identity
-                    threshold_entries.push((
-                        vote_namespace.to_vec(),
-                        vote_message.clone(),
-                        *vote_signature,
-                    ));
+                    threshold_entries.push((vote_namespace.to_vec(), vote_message.clone(), *sig));
                 }
                 Certificate::Aggregated {
                     signers,
                     vote_signature,
                 } => {
+                    // Get the lazy signature
+                    let Some(sig) = vote_signature.get() else {
+                        return false;
+                    };
                     // Vote signature needs per-certificate verification against aggregated public keys
-                    aggregated_certs.push((vote_namespace, vote_message, signers, vote_signature));
+                    aggregated_certs.push((vote_namespace, vote_message, signers, *sig));
                 }
             }
         }
@@ -713,7 +739,7 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
             let aggregated_public = aggregate::combine_public_keys::<V, _>(partial_publics.iter());
 
             // Wrap signature in aggregate::Signature for verification
-            let aggregated_sig = aggregate::Signature::<V>::from_raw(*vote_signature);
+            let aggregated_sig = aggregate::Signature::<V>::from_raw(vote_signature);
 
             // Verify the aggregated vote signature
             if aggregate::verify_same_message::<V>(
@@ -1103,7 +1129,7 @@ mod tests {
         .value;
 
         assert_eq!(vote.signer, share.index);
-        assert_eq!(vote.signature, expected_signature);
+        assert_eq!(vote.signature.get().unwrap(), &expected_signature);
     }
 
     #[test]
