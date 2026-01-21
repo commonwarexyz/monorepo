@@ -104,16 +104,17 @@
 //! ## `aws create`
 //!
 //! 1. Validates configuration and generates an SSH key pair, stored in `$HOME/.commonware_deployer/{tag}/id_rsa_{tag}`.
-//! 2. Ensures the shared S3 bucket exists and caches observability tools (Prometheus, Grafana, Loki, etc.) if not already present.
-//! 3. Uploads deployment-specific files (binaries, configs) to S3.
-//! 4. Creates VPCs, subnets, internet gateways, route tables, and security groups per region (concurrently).
-//! 5. Establishes VPC peering between the monitoring region and binary regions.
-//! 6. Launches the monitoring instance.
-//! 7. Launches binary instances.
-//! 8. Caches all static config files and uploads per-instance configs (hosts.yaml, promtail, pyroscope) to S3.
-//! 9. Configures monitoring and binary instances in parallel via SSH (BBR, service installation, service startup).
-//! 10. Updates the monitoring security group to allow telemetry traffic from binary instances.
-//! 11. Persists deployment metadata (tag, regions, instance names) to `$HOME/.commonware_deployer/{tag}/metadata.yaml`.
+//! 2. Persists deployment metadata (tag, regions, instance names) to `$HOME/.commonware_deployer/{tag}/metadata.yaml`.
+//!    This enables `destroy --tag` cleanup if creation fails.
+//! 3. Ensures the shared S3 bucket exists and caches observability tools (Prometheus, Grafana, Loki, etc.) if not already present.
+//! 4. Uploads deployment-specific files (binaries, configs) to S3.
+//! 5. Creates VPCs, subnets, internet gateways, route tables, and security groups per region (concurrently).
+//! 6. Establishes VPC peering between the monitoring region and binary regions.
+//! 7. Launches the monitoring instance.
+//! 8. Launches binary instances.
+//! 9. Caches all static config files and uploads per-instance configs (hosts.yaml, promtail, pyroscope) to S3.
+//! 10. Configures monitoring and binary instances in parallel via SSH (BBR, service installation, service startup).
+//! 11. Updates the monitoring security group to allow telemetry traffic from binary instances.
 //! 12. Marks completion with `$HOME/.commonware_deployer/{tag}/created`.
 //!
 //! ## `aws update`

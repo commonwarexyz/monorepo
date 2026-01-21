@@ -108,6 +108,20 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
     let mut regions: BTreeSet<String> = config.instances.iter().map(|i| i.region.clone()).collect();
     regions.insert(MONITORING_REGION.to_string());
 
+    // Persist deployment metadata early to enable `destroy --tag` on failure
+    let metadata = Metadata {
+        tag: tag.clone(),
+        created_at: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+        regions: regions.iter().cloned().collect(),
+        instance_names: config.instances.iter().map(|i| i.name.clone()).collect(),
+    };
+    let metadata_file = File::create(tag_directory.join(METADATA_FILE_NAME))?;
+    serde_yaml::to_writer(metadata_file, &metadata)?;
+    info!("persisted deployment metadata");
+
     // Collect instance types by region (for availability zone selection) and unique types (for architecture detection)
     let mut instance_types_by_region: HashMap<String, HashSet<String>> = HashMap::new();
     let mut unique_instance_types: HashSet<String> = HashSet::new();
@@ -1230,19 +1244,6 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
         }
     }
     info!("updated monitoring security group");
-
-    // Persist deployment metadata
-    let metadata = Metadata {
-        tag: tag.clone(),
-        created_at: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs(),
-        regions: regions.iter().cloned().collect(),
-        instance_names: config.instances.iter().map(|i| i.name.clone()).collect(),
-    };
-    let metadata_file = File::create(tag_directory.join(METADATA_FILE_NAME))?;
-    serde_yaml::to_writer(metadata_file, &metadata)?;
 
     // Mark deployment as complete
     File::create(tag_directory.join(CREATED_FILE_NAME))?;

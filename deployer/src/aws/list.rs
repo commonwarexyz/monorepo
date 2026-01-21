@@ -7,13 +7,16 @@ use crate::aws::{
 use std::fs::{self, File};
 use tracing::info;
 
+/// Lists all active deployments (created but not destroyed)
 pub fn list() -> Result<(), Error> {
+    // Check if deployer directory exists
     let deployer_dir = deployer_directory(None);
     if !deployer_dir.exists() {
         info!("no deployments found");
         return Ok(());
     }
 
+    // Collect active deployments
     let mut active = Vec::new();
     for entry in fs::read_dir(&deployer_dir)? {
         let path = entry?.path();
@@ -21,12 +24,14 @@ pub fn list() -> Result<(), Error> {
             continue;
         }
 
+        // Skip incomplete or destroyed deployments
         let created = path.join(CREATED_FILE_NAME);
         let destroyed = path.join(DESTROYED_FILE_NAME);
         if !created.exists() || destroyed.exists() {
             continue;
         }
 
+        // Load metadata if available, otherwise use directory name as tag
         let metadata_path = path.join(METADATA_FILE_NAME);
         if metadata_path.exists() {
             let file = File::open(&metadata_path)?;
@@ -45,6 +50,7 @@ pub fn list() -> Result<(), Error> {
         }
     }
 
+    // Display results sorted by creation time (newest first)
     if active.is_empty() {
         info!("no active deployments");
     } else {
