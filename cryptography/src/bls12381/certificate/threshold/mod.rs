@@ -1496,4 +1496,14 @@ mod tests {
         sign_vote_partial_matches_share::<MinPk>();
         sign_vote_partial_matches_share::<MinSig>();
     }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::*;
+        use commonware_codec::conformance::CodecConformance;
+
+        commonware_conformance::conformance_tests! {
+            CodecConformance<Certificate<MinSig>>,
+        }
+    }
 }

@@ -2036,6 +2036,7 @@ mod tests {
 
         commonware_conformance::conformance_tests! {
             CodecConformance<Signature<MinSig>>,
+            CodecConformance<Certificate<MinSig>>,
             CodecConformance<Seed<MinSig>>,
         }
     }
