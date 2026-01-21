@@ -170,7 +170,7 @@ mod tests {
             deterministic::Network as DeterministicNetwork, metered::Network as MeteredNetwork,
             tests,
         },
-        IoBuf, Listener as _, Network as _, Sink as _, Stream as _,
+        Listener as _, Network as _, Sink as _, Stream as _,
     };
     use commonware_macros::test_group;
     use prometheus_client::registry::Registry;
@@ -217,9 +217,7 @@ mod tests {
         let server = tokio::spawn(async move {
             let (_, mut sink, mut stream) = listener.accept().await.unwrap();
             let received = stream.recv(MSG_SIZE).await.unwrap();
-            sink.send(IoBuf::copy_from_slice(received.coalesce().as_ref()))
-                .await
-                .unwrap();
+            sink.send(received).await.unwrap();
         });
 
         // Send and receive data as client
@@ -229,8 +227,7 @@ mod tests {
         let msg = vec![42u8; MSG_SIZE as usize];
         client_sink.send(msg.clone()).await.unwrap();
 
-        let response = client_stream.recv(MSG_SIZE).await.unwrap();
-        let response = response.coalesce();
+        let response = client_stream.recv(MSG_SIZE).await.unwrap().coalesce();
         assert_eq!(response.len(), MSG_SIZE as usize);
         assert_eq!(response, msg.as_slice());
 

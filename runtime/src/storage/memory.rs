@@ -153,7 +153,6 @@ impl crate::Blob for Blob {
         buf: impl Into<IoBufsMut> + Send,
     ) -> Result<IoBufsMut, crate::Error> {
         let mut buf = buf.into();
-        let len = buf.len();
         let offset = offset
             .checked_add(Header::SIZE_U64)
             .ok_or(crate::Error::OffsetOverflow)?;
@@ -162,10 +161,10 @@ impl crate::Blob for Blob {
             .map_err(|_| crate::Error::OffsetOverflow)?;
         let content = self.content.read().unwrap();
         let content_len = content.len();
-        if offset + len > content_len {
+        if offset + buf.len() > content_len {
             return Err(crate::Error::BlobInsufficientLength);
         }
-        buf.copy_from_slice(&content[offset..offset + len]);
+        buf.copy_from_slice(&content[offset..offset + buf.len()]);
         Ok(buf)
     }
 
@@ -175,7 +174,6 @@ impl crate::Blob for Blob {
         buf: impl Into<IoBufs> + Send,
     ) -> Result<(), crate::Error> {
         let buf = buf.into().coalesce();
-        let buf_len = buf.len();
         let offset = offset
             .checked_add(Header::SIZE_U64)
             .ok_or(crate::Error::OffsetOverflow)?;
@@ -183,11 +181,11 @@ impl crate::Blob for Blob {
             .try_into()
             .map_err(|_| crate::Error::OffsetOverflow)?;
         let mut content = self.content.write().unwrap();
-        let required = offset + buf_len;
+        let required = offset + buf.len();
         if required > content.len() {
             content.resize(required, 0);
         }
-        content[offset..offset + buf_len].copy_from_slice(buf.as_ref());
+        content[offset..offset + buf.len()].copy_from_slice(buf.as_ref());
         Ok(())
     }
 

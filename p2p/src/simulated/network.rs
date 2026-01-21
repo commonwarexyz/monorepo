@@ -1179,7 +1179,7 @@ impl<P: PublicKey> Peer<P> {
                                     return;
                                 }
                             };
-                            let Ok(dialer) = P::decode(dialer.coalesce().as_ref()) else {
+                            let Ok(dialer) = P::decode(dialer.coalesce()) else {
                                 error!("received public key is invalid");
                                 return;
                             };
@@ -1801,7 +1801,7 @@ mod tests {
                 .unwrap();
 
             const COUNT: usize = 50;
-            let mut expected: Vec<Vec<u8>> = Vec::with_capacity(COUNT);
+            let mut expected = Vec::with_capacity(COUNT);
             for i in 0..COUNT {
                 let msg = vec![i as u8; 64];
                 sender

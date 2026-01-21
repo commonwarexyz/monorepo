@@ -498,8 +498,7 @@ mod tests {
             Ok(Payload::<PublicKey>::Data(d)) => d,
             _ => panic!(),
         };
-        assert_eq!(original.channel, decoded.channel);
-        assert_eq!(original.message, decoded.message);
+        assert_eq!(original, decoded);
     }
 
     #[test]

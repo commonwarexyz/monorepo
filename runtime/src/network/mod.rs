@@ -160,9 +160,7 @@ mod tests {
                     .recv(CHUNK_SIZE as u64)
                     .await
                     .expect("Failed to receive chunk");
-                sink.send(IoBuf::copy_from_slice(received.coalesce().as_ref()))
-                    .await
-                    .expect("Failed to send chunk");
+                sink.send(received).await.expect("Failed to send chunk");
             }
         });
 
@@ -243,9 +241,7 @@ mod tests {
                 tokio::spawn(async move {
                     for _ in 0..NUM_MESSAGES {
                         let received = stream.recv(MESSAGE_SIZE as u64).await.unwrap();
-                        sink.send(IoBuf::copy_from_slice(received.coalesce().as_ref()))
-                            .await
-                            .unwrap();
+                        sink.send(received).await.unwrap();
                     }
                 });
             }

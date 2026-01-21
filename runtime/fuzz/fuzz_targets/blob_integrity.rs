@@ -137,8 +137,9 @@ fn fuzz(input: FuzzInput) {
         let byte_buf = blob
             .read_at(corrupt_offset, IoBufMut::zeroed(1))
             .await
-            .expect("cannot read byte to corrupt");
-        let corrupted_byte = byte_buf.chunk()[0] ^ (1 << corrupt_bit);
+            .expect("cannot read byte to corrupt")
+            .coalesce();
+        let corrupted_byte = byte_buf.as_ref()[0] ^ (1 << corrupt_bit);
         blob.write_at(corrupt_offset, vec![corrupted_byte])
             .await
             .expect("cannot write corrupted byte");
@@ -258,7 +259,7 @@ fn fuzz(input: FuzzInput) {
                         // Read succeeded - data must match expected.
                         let expected_slice = &expected_data[offset as usize..offset as usize + len];
                         assert_eq!(
-                            buf.chunk(), expected_slice,
+                            buf.coalesce(), expected_slice,
                             "Read via Append returned wrong data at offset {}, len {}",
                             offset, len
                         );

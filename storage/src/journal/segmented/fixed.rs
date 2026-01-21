@@ -160,7 +160,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         let buf = blob
             .read_at(offset, IoBufMut::zeroed(Self::CHUNK_SIZE))
             .await?;
-        A::decode(buf.coalesce().as_ref()).map_err(Error::Codec)
+        A::decode(buf.coalesce()).map_err(Error::Codec)
     }
 
     /// Read the last item in a section, if any.
@@ -180,9 +180,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         let buf = blob
             .read_at(offset, IoBufMut::zeroed(Self::CHUNK_SIZE))
             .await?;
-        A::decode(buf.coalesce().as_ref())
-            .map_err(Error::Codec)
-            .map(Some)
+        A::decode(buf.coalesce()).map_err(Error::Codec).map(Some)
     }
 
     /// Returns a stream of all items starting from the given section.

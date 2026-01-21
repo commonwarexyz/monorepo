@@ -138,11 +138,10 @@ fn fuzz(input: FuzzInput) {
                 let announce = recv_frame(&mut adversary_d_stream, MAX_MESSAGE_SIZE).await?;
                 send_frame(&mut adversary_d_sink, announce, MAX_MESSAGE_SIZE).await?;
 
-                let mut m1 = recv_frame(&mut adversary_d_stream, MAX_MESSAGE_SIZE)
+                let mut m1: Vec<u8> = recv_frame(&mut adversary_d_stream, MAX_MESSAGE_SIZE)
                     .await?
                     .coalesce()
-                    .as_ref()
-                    .to_vec();
+                    .into();
                 for byte in m1.iter_mut() {
                     if corruption_i < setup_corruption.len() {
                         *byte ^= setup_corruption[corruption_i];
@@ -151,11 +150,10 @@ fn fuzz(input: FuzzInput) {
                 }
                 send_frame(&mut adversary_d_sink, m1, MAX_MESSAGE_SIZE).await?;
 
-                let mut m2 = recv_frame(&mut adversary_l_stream, MAX_MESSAGE_SIZE)
+                let mut m2: Vec<u8> = recv_frame(&mut adversary_l_stream, MAX_MESSAGE_SIZE)
                     .await?
                     .coalesce()
-                    .as_ref()
-                    .to_vec();
+                    .into();
                 for byte in m2.iter_mut() {
                     if corruption_i < setup_corruption.len() {
                         *byte ^= setup_corruption[corruption_i];
@@ -164,11 +162,10 @@ fn fuzz(input: FuzzInput) {
                 }
                 send_frame(&mut adversary_l_sink, m2, MAX_MESSAGE_SIZE).await?;
 
-                let mut m3 = recv_frame(&mut adversary_d_stream, MAX_MESSAGE_SIZE)
+                let mut m3: Vec<u8> = recv_frame(&mut adversary_d_stream, MAX_MESSAGE_SIZE)
                     .await?
                     .coalesce()
-                    .as_ref()
-                    .to_vec();
+                    .into();
                 for byte in m3.iter_mut() {
                     if corruption_i < setup_corruption.len() {
                         *byte ^= setup_corruption[corruption_i];

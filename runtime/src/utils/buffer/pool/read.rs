@@ -109,8 +109,12 @@ impl<B: Blob> PageReader<B> {
 
         // Read physical data
         let buf = IoBufMut::zeroed(bytes_to_read);
-        let physical_buf_iobufs = self.blob.read_at(start_offset, buf).await?;
-        let physical_buf: Vec<u8> = physical_buf_iobufs.coalesce().as_ref().to_vec();
+        let physical_buf = self
+            .blob
+            .read_at(start_offset, buf)
+            .await?
+            .coalesce()
+            .freeze();
 
         // Validate CRCs and compute total logical bytes
         let mut total_logical = 0usize;
@@ -118,7 +122,7 @@ impl<B: Blob> PageReader<B> {
         let is_final_batch = pages_to_read == max_pages;
         for page_idx in 0..pages_to_read {
             let page_start = page_idx * self.page_size;
-            let page_slice = &physical_buf[page_start..page_start + self.page_size];
+            let page_slice = &physical_buf.as_ref()[page_start..page_start + self.page_size];
             let Some(record) = Checksum::validate_page(page_slice) else {
                 error!(page = self.blob_page + page_idx as u64, "CRC mismatch");
                 return Err(Error::InvalidChecksum);
@@ -144,7 +148,7 @@ impl<B: Blob> PageReader<B> {
         self.blob_page += pages_to_read as u64;
 
         let state = BufferState {
-            buffer: physical_buf,
+            buffer: physical_buf.into(),
             num_pages: pages_to_read,
             last_page_len: last_len,
         };
