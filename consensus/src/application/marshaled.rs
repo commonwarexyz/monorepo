@@ -216,16 +216,6 @@ where
                     }
                 };
 
-                // Re-proposals are pre-validated by Automaton::verify before notarization
-                // can form. At least f+1 honest validators in the notarizing quorum verified
-                // that this is a valid re-proposal at an epoch boundary, so we don't re-check
-                // here. If the check had failed, no notarization would have formed.
-                if parent.commitment() == block.commitment() {
-                    marshal.verified(context.round, block).await;
-                    tx.send_lossy(true);
-                    return;
-                }
-
                 // Validate that heights are contiguous.
                 //
                 // We already checked that the parent commitment matches the context's parent,
@@ -638,6 +628,17 @@ where
                         return;
                     }
                 };
+
+                // Check if this is a re-proposal (the block commitment matches the parent from
+                // the context). Re-proposals are only valid at epoch boundaries.
+                if commitment == block.parent() {
+                    marshaled
+                        .marshal
+                        .verified(block.context().round, block)
+                        .await;
+                    tx.send_lossy(true);
+                    return;
+                }
 
                 let context = block.context();
                 let verify_rx = marshaled.verify(context, block).await;
