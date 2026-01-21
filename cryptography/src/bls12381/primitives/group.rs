@@ -2106,7 +2106,14 @@ mod tests {
         let par = Rayon::new(NonZeroUsize::new(8).unwrap()).unwrap();
 
         // G1 (include MIN_PARALLEL_POINTS boundary)
-        for n in [MIN_PARALLEL_POINTS - 1, MIN_PARALLEL_POINTS, MIN_PARALLEL_POINTS + 1, 100, 500, 1000] {
+        for n in [
+            MIN_PARALLEL_POINTS - 1,
+            MIN_PARALLEL_POINTS,
+            MIN_PARALLEL_POINTS + 1,
+            100,
+            500,
+            1000,
+        ] {
             let points: Vec<G1> = (0..n)
                 .map(|_| G1::generator() * &Scalar::random(&mut rng))
                 .collect();
@@ -2115,7 +2122,13 @@ mod tests {
         }
 
         // G2 (include MIN_PARALLEL_POINTS boundary)
-        for n in [MIN_PARALLEL_POINTS - 1, MIN_PARALLEL_POINTS, MIN_PARALLEL_POINTS + 1, 100, 500] {
+        for n in [
+            MIN_PARALLEL_POINTS - 1,
+            MIN_PARALLEL_POINTS,
+            MIN_PARALLEL_POINTS + 1,
+            100,
+            500,
+        ] {
             let points: Vec<G2> = (0..n)
                 .map(|_| G2::generator() * &Scalar::random(&mut rng))
                 .collect();
@@ -2158,7 +2171,10 @@ mod tests {
         let g1_points: Vec<G1> = (0..n)
             .map(|_| G1::generator() * &Scalar::random(&mut rng))
             .collect();
-        assert_eq!(G1::msm(&g1_points, &vec![Scalar::zero(); n], &par), G1::zero());
+        assert_eq!(
+            G1::msm(&g1_points, &vec![Scalar::zero(); n], &par),
+            G1::zero()
+        );
 
         // G1: all identity points
         let scalars: Vec<Scalar> = (0..n).map(|_| Scalar::random(&mut rng)).collect();
@@ -2177,7 +2193,10 @@ mod tests {
         let g2_points: Vec<G2> = (0..n)
             .map(|_| G2::generator() * &Scalar::random(&mut rng))
             .collect();
-        assert_eq!(G2::msm(&g2_points, &vec![Scalar::zero(); n], &par), G2::zero());
+        assert_eq!(
+            G2::msm(&g2_points, &vec![Scalar::zero(); n], &par),
+            G2::zero()
+        );
 
         // G2: all identity points
         let scalars: Vec<Scalar> = (0..n).map(|_| Scalar::random(&mut rng)).collect();
