@@ -399,9 +399,10 @@ pub(crate) mod tests {
         let read = blob
             .read_at(0, IoBufMut::zeroed(10 * 1024 * 1024))
             .await
-            .unwrap();
+            .unwrap()
+            .coalesce();
 
-        assert_eq!(read.chunk(), large_data, "Large data read/write failed");
+        assert_eq!(read, large_data.as_slice(), "Large data read/write failed");
     }
 
     /// Test overwriting data in a blob.
@@ -422,11 +423,14 @@ pub(crate) mod tests {
         blob.write_at(8, b"overwrite").await.unwrap();
 
         // Read back the data
-        let read = blob.read_at(0, IoBufMut::zeroed(17)).await.unwrap();
+        let read = blob
+            .read_at(0, IoBufMut::zeroed(17))
+            .await
+            .unwrap()
+            .coalesce();
 
         assert_eq!(
-            read.chunk(),
-            b"initial overwrite",
+            read, b"initial overwrite",
             "Data was not overwritten correctly"
         );
     }
@@ -469,12 +473,12 @@ pub(crate) mod tests {
         blob.write_at(10_000, b"offset data").await.unwrap();
 
         // Read back the data
-        let read = blob.read_at(10_000, IoBufMut::zeroed(11)).await.unwrap();
-        assert_eq!(
-            read.chunk(),
-            b"offset data",
-            "Data at large offset is incorrect"
-        );
+        let read = blob
+            .read_at(10_000, IoBufMut::zeroed(11))
+            .await
+            .unwrap()
+            .coalesce();
+        assert_eq!(read, b"offset data", "Data at large offset is incorrect");
     }
 
     /// Test appending data to a blob.
@@ -495,8 +499,12 @@ pub(crate) mod tests {
         blob.write_at(5, b"second").await.unwrap();
 
         // Read back the data
-        let read = blob.read_at(0, IoBufMut::zeroed(11)).await.unwrap();
-        assert_eq!(read.chunk(), b"firstsecond", "Appended data is incorrect");
+        let read = blob
+            .read_at(0, IoBufMut::zeroed(11))
+            .await
+            .unwrap()
+            .coalesce();
+        assert_eq!(read, b"firstsecond", "Appended data is incorrect");
     }
 
     /// Test reading and writing with interleaved offsets.
@@ -512,11 +520,19 @@ pub(crate) mod tests {
         blob.write_at(10, b"second").await.unwrap();
 
         // Read back the data
-        let read = blob.read_at(0, IoBufMut::zeroed(5)).await.unwrap();
-        assert_eq!(read.chunk(), b"first", "Data at offset 0 is incorrect");
+        let read = blob
+            .read_at(0, IoBufMut::zeroed(5))
+            .await
+            .unwrap()
+            .coalesce();
+        assert_eq!(read, b"first", "Data at offset 0 is incorrect");
 
-        let read = blob.read_at(10, IoBufMut::zeroed(6)).await.unwrap();
-        assert_eq!(read.chunk(), b"second", "Data at offset 10 is incorrect");
+        let read = blob
+            .read_at(10, IoBufMut::zeroed(6))
+            .await
+            .unwrap()
+            .coalesce();
+        assert_eq!(read, b"second", "Data at offset 10 is incorrect");
     }
 
     /// Test writing and reading large data in chunks.
@@ -546,8 +562,9 @@ pub(crate) mod tests {
             let read = blob
                 .read_at((i * chunk_size) as u64, IoBufMut::zeroed(chunk_size))
                 .await
-                .unwrap();
-            assert_eq!(read.chunk(), data, "Chunk {i} is incorrect");
+                .unwrap()
+                .coalesce();
+            assert_eq!(read, data.as_slice(), "Chunk {i} is incorrect");
         }
     }
 
@@ -585,8 +602,12 @@ pub(crate) mod tests {
         blob.write_at(4, b"map").await.unwrap();
 
         // Read back the data
-        let read = blob.read_at(0, IoBufMut::zeroed(7)).await.unwrap();
-        assert_eq!(read.chunk(), b"overmap", "Overlapping writes are incorrect");
+        let read = blob
+            .read_at(0, IoBufMut::zeroed(7))
+            .await
+            .unwrap()
+            .coalesce();
+        assert_eq!(read, b"overmap", "Overlapping writes are incorrect");
     }
 
     async fn test_resize_then_open<S>(storage: &S)
@@ -618,8 +639,12 @@ pub(crate) mod tests {
         assert_eq!(len, 5, "Blob length after resize is incorrect");
 
         // Read back the data
-        let read = blob.read_at(0, IoBufMut::zeroed(5)).await.unwrap();
-        assert_eq!(read.chunk(), b"hello", "Resized data is incorrect");
+        let read = blob
+            .read_at(0, IoBufMut::zeroed(5))
+            .await
+            .unwrap()
+            .coalesce();
+        assert_eq!(read, b"hello", "Resized data is incorrect");
     }
 
     /// Test that partition names are validated correctly.

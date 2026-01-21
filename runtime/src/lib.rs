@@ -729,7 +729,7 @@ pub trait Blob: Clone + Send + Sync + 'static {
     /// # Contract
     ///
     /// - The output `IoBufsMut` is the same as the input, with data filled from offset
-    /// - The total bytes read equals the total capacity of the input buffer(s)
+    /// - The total bytes read equals the total initialized length of the input buffer(s)
     fn read_at(
         &self,
         offset: u64,
@@ -3311,11 +3311,10 @@ mod tests {
 
             // Helper functions to parse HTTP response
             async fn read_line<St: Stream>(stream: &mut St) -> Result<String, Error> {
-                use bytes::Buf;
                 let mut line = Vec::new();
                 loop {
                     let received = stream.recv(1).await?;
-                    let byte = received.chunk()[0];
+                    let byte = received.coalesce().as_ref()[0];
                     if byte == b'\n' {
                         if line.last() == Some(&b'\r') {
                             line.pop(); // Remove trailing \r
@@ -3349,8 +3348,7 @@ mod tests {
                 content_length: usize,
             ) -> Result<String, Error> {
                 let received = stream.recv(content_length as u64).await?;
-                String::from_utf8(received.coalesce().as_ref().to_vec())
-                    .map_err(|_| Error::ReadFailed)
+                String::from_utf8(received.coalesce().into()).map_err(|_| Error::ReadFailed)
             }
 
             // Simulate a client connecting to the server

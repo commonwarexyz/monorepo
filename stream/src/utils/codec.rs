@@ -70,7 +70,7 @@ mod tests {
 
             let data = recv_frame(&mut stream, MAX_MESSAGE_SIZE).await.unwrap();
             assert_eq!(data.len(), buf.len());
-            assert_eq!(data.coalesce(), buf.as_ref());
+            assert_eq!(data.coalesce(), buf);
         });
     }
 
@@ -94,10 +94,10 @@ mod tests {
             // Read both messages in order
             let data = recv_frame(&mut stream, MAX_MESSAGE_SIZE).await.unwrap();
             assert_eq!(data.len(), buf1.len());
-            assert_eq!(data.coalesce(), buf1.as_ref());
+            assert_eq!(data.coalesce(), buf1);
             let data = recv_frame(&mut stream, MAX_MESSAGE_SIZE).await.unwrap();
             assert_eq!(data.len(), buf2.len());
-            assert_eq!(data.coalesce(), buf2.as_ref());
+            assert_eq!(data.coalesce(), buf2);
         });
     }
 
@@ -118,7 +118,7 @@ mod tests {
             let read = stream.recv(2).await.unwrap();
             assert_eq!(read.coalesce(), &[0x80, 0x08]); // 1024 as varint
             let read = stream.recv(MAX_MESSAGE_SIZE as u64).await.unwrap();
-            assert_eq!(read.coalesce(), buf.as_ref());
+            assert_eq!(read.coalesce(), buf);
         });
     }
 
@@ -157,7 +157,7 @@ mod tests {
 
             let data = recv_frame(&mut stream, MAX_MESSAGE_SIZE).await.unwrap();
             assert_eq!(data.len(), MAX_MESSAGE_SIZE as usize);
-            assert_eq!(data.coalesce(), msg.as_ref());
+            assert_eq!(data.coalesce(), msg);
         });
     }
 

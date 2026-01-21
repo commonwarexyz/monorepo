@@ -540,7 +540,7 @@ mod tests {
         let received = reader.await.unwrap();
 
         // Verify we got the right data
-        assert_eq!(received.chunk(), msg);
+        assert_eq!(received.coalesce(), msg);
     }
 
     #[tokio::test]

@@ -31,7 +31,6 @@ pub enum Message<P: PublicKey> {
     /// Send pre-encoded data to one or more recipients.
     Content {
         recipients: Recipients<P>,
-        /// Pre-encoded payload ready for transmission.
         encoded: EncodedData,
         priority: bool,
         success: oneshot::Sender<Vec<P>>,
