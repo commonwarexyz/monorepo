@@ -53,8 +53,12 @@ impl<E: Storage + Clock + Metrics, K: Array, V: FixedValue, H: Hasher, T: Transl
         let mut log = init_fixed_authenticated_log(context.clone(), cfg).await?;
         if log.size() == 0 {
             warn!("Authenticated log is empty, initializing new db");
-            log.append(Operation::CommitFloor(None, Location::new_unchecked(0)))
-                .await?;
+            log.append(Operation::CommitFloor(
+                None,
+                Location::new_unchecked(0),
+                Location::new_unchecked(0),
+            ))
+            .await?;
             log.sync().await?;
         }
 
@@ -175,10 +179,13 @@ pub(super) mod test {
         for i in 0..n {
             let key = Digest::random(&mut rng);
             if i % 10 == 0 && i > 0 {
-                ops.push(Operation::Delete(prev_key));
+                ops.push(Operation::Delete(prev_key, Location::new_unchecked(0)));
             } else {
                 let value = Digest::random(&mut rng);
-                ops.push(Operation::Update(Update(key, value)));
+                ops.push(Operation::Update(
+                    Update(key, value),
+                    Location::new_unchecked(0),
+                ));
                 prev_key = key;
             }
         }
@@ -189,13 +196,13 @@ pub(super) mod test {
     pub(crate) async fn apply_ops(db: &mut DirtyAnyTest, ops: Vec<Operation<Digest, Digest>>) {
         for op in ops {
             match op {
-                Operation::Update(Update(key, value)) => {
+                Operation::Update(Update(key, value), _) => {
                     db.update(key, value).await.unwrap();
                 }
-                Operation::Delete(key) => {
+                Operation::Delete(key, _) => {
                     db.delete(key).await.unwrap();
                 }
-                Operation::CommitFloor(_, _) => {
+                Operation::CommitFloor(_, _, _) => {
                     panic!("CommitFloor not supported in apply_ops");
                 }
             }
@@ -562,7 +569,10 @@ pub(super) mod test {
             // Changing the ops should cause verification to fail
             {
                 let mut ops = ops.clone();
-                ops[0] = Operation::Update(Update(Sha256::hash(b"key1"), Sha256::hash(b"value1")));
+                ops[0] = Operation::Update(
+                    Update(Sha256::hash(b"key1"), Sha256::hash(b"value1")),
+                    Location::new_unchecked(0),
+                );
                 let root_hash = db.root();
                 assert!(!verify_proof(
                     &mut hasher,
@@ -574,10 +584,10 @@ pub(super) mod test {
             }
             {
                 let mut ops = ops.clone();
-                ops.push(Operation::Update(Update(
-                    Sha256::hash(b"key1"),
-                    Sha256::hash(b"value1"),
-                )));
+                ops.push(Operation::Update(
+                    Update(Sha256::hash(b"key1"), Sha256::hash(b"value1")),
+                    Location::new_unchecked(0),
+                ));
                 let root_hash = db.root();
                 assert!(!verify_proof(
                     &mut hasher,

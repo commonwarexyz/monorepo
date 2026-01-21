@@ -193,10 +193,13 @@ mod tests {
         for i in 0..n {
             let key = Digest::random(&mut rng);
             if i % 10 == 0 && i > 0 {
-                ops.push(Operation::Delete(prev_key));
+                ops.push(Operation::Delete(prev_key, Location::new_unchecked(0)));
             } else {
                 let value = test_value(i as u64);
-                ops.push(Operation::Update(Update(key, value)));
+                ops.push(Operation::Update(
+                    Update(key, value),
+                    Location::new_unchecked(0),
+                ));
                 prev_key = key;
             }
         }
@@ -213,13 +216,13 @@ mod tests {
     ) -> DirtyAnyTest {
         for op in ops {
             match op {
-                Operation::Update(Update(key, value)) => {
+                Operation::Update(Update(key, value), _) => {
                     db.update(key, value).await.unwrap();
                 }
-                Operation::Delete(key) => {
+                Operation::Delete(key, _) => {
                     db.delete(key).await.unwrap();
                 }
-                Operation::CommitFloor(metadata, _) => {
+                Operation::CommitFloor(metadata, _, _) => {
                     db = db.commit(metadata).await.unwrap().0.into_mutable();
                 }
             }

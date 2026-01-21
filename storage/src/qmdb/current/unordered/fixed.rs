@@ -127,7 +127,7 @@ impl<
         proof: &KeyValueProof<H::Digest, N>,
         root: &H::Digest,
     ) -> bool {
-        let op = Operation::Update(Update(key, value));
+        let op = Operation::Update(Update(key, value), Location::new_unchecked(0));
 
         proof.verify(hasher, Self::grafting_height(), op, root)
     }
@@ -383,7 +383,8 @@ impl<
 
         // Append the commit operation with the new floor and tag it as active in the bitmap.
         self.status.push(true);
-        let commit_op = Operation::CommitFloor(metadata, inactivity_floor_loc);
+        let commit_op =
+            Operation::CommitFloor(metadata, inactivity_floor_loc, Location::new_unchecked(0));
 
         self.any.apply_commit_op(commit_op).await?;
 
@@ -1130,7 +1131,7 @@ pub mod test {
             };
             // This proof should verify using verify_range_proof which does not check activity
             // status.
-            let op = Operation::Update(Update(k, v1));
+            let op = Operation::Update(Update(k, v1), Location::new_unchecked(0));
             assert!(CleanCurrentTest::verify_range_proof(
                 hasher.inner(),
                 &proof_inactive.range_proof,
@@ -1338,9 +1339,9 @@ pub mod test {
                 // it's a key-updating operation.
                 let (key, value) = match db.any.log.read(Location::new_unchecked(i)).await.unwrap()
                 {
-                    Operation::Update(Update(key, value)) => (key, value),
-                    Operation::CommitFloor(_, _) => continue,
-                    Operation::Delete(_) => {
+                    Operation::Update(Update(key, value), _) => (key, value),
+                    Operation::CommitFloor(_, _, _) => continue,
+                    Operation::Delete(_, _) => {
                         unreachable!("location does not reference update/commit operation")
                     }
                 };

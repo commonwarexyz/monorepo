@@ -176,7 +176,7 @@ where
     /// Get the value of `key` in the db, or None if it has no value.
     pub async fn get(&self, key: &K) -> Result<Option<V>, Error> {
         for &loc in self.snapshot.get(key) {
-            let Operation::Update(Update(k, v)) = self.get_op(loc).await? else {
+            let Operation::Update(Update(k, v), _) = self.get_op(loc).await? else {
                 unreachable!("location ({loc}) does not reference update operation");
             };
 
@@ -221,7 +221,7 @@ where
 
     /// Get the metadata associated with the last commit.
     pub async fn get_metadata(&self) -> Result<Option<V>, Error> {
-        let Operation::CommitFloor(metadata, _) = self.log.read(*self.last_commit_loc).await?
+        let Operation::CommitFloor(metadata, _, _) = self.log.read(*self.last_commit_loc).await?
         else {
             unreachable!("last commit should be a commit floor operation");
         };
@@ -284,8 +284,12 @@ where
         // Rewind log to remove uncommitted operations.
         if log.rewind_to(|op| op.is_commit()).await? == 0 {
             warn!("Log is empty, initializing new db");
-            log.append(Operation::CommitFloor(None, Location::new_unchecked(0)))
-                .await?;
+            log.append(Operation::CommitFloor(
+                None,
+                Location::new_unchecked(0),
+                Location::new_unchecked(0),
+            ))
+            .await?;
         }
 
         // Sync the log to avoid having to repeat any recovery that may have been performed on next
@@ -367,7 +371,7 @@ where
         }
 
         self.log
-            .append(Operation::Update(Update(key, value)))
+            .append(Operation::Update(Update(key, value), new_loc))
             .await?;
 
         Ok(())
@@ -384,7 +388,10 @@ where
 
         self.active_keys += 1;
         self.log
-            .append(Operation::Update(Update(key, value)))
+            .append(Operation::Update(
+                Update(key, value),
+                Location::new_unchecked(0),
+            ))
             .await?;
 
         Ok(true)
@@ -399,7 +406,7 @@ where
             return Ok(false);
         }
 
-        self.log.append(Operation::Delete(key)).await?;
+        self.log.append(Operation::Delete(key, r.unwrap())).await?;
         self.state.steps += 1;
         self.active_keys -= 1;
 
@@ -440,7 +447,11 @@ where
         // Apply the commit operation with the new inactivity floor.
         self.last_commit_loc = Location::new_unchecked(
             self.log
-                .append(Operation::CommitFloor(metadata, self.inactivity_floor_loc))
+                .append(Operation::CommitFloor(
+                    metadata,
+                    self.inactivity_floor_loc,
+                    Location::new_unchecked(0),
+                ))
                 .await?,
         );
 

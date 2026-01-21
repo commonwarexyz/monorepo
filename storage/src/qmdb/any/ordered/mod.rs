@@ -47,11 +47,11 @@ type LocatedKey<K, V> = Option<(Location, Update<K, V>)>;
 /// The return type of the `Db::update_loc` method.
 enum UpdateLocResult<K: Array, V: ValueEncoding> {
     /// The key already exists in the snapshot. The wrapped value is its next-key.
-    Exists(K),
+    Exists(K, Location),
 
     /// The key did not already exist in the snapshot. The wrapped key data is for the first
-    /// preceding key that does exist in the snapshot.
-    NotExists(Update<K, V>),
+    /// preceding key that does exist in the snapshot, and the wrapped location is its location.
+    NotExists(Update<K, V>, Location),
 }
 
 impl<
@@ -73,7 +73,7 @@ where
         loc: Location,
     ) -> Result<Update<K, V>, Error> {
         match log.read(loc).await? {
-            Operation::Update(key_data) => Ok(key_data),
+            Operation::Update(key_data, _) => Ok(key_data),
             _ => unreachable!("expected update operation at location {}", loc),
         }
     }
@@ -190,7 +190,7 @@ where
                 "location does not reference update operation. loc={loc}"
             );
             if op.key().expect("update operation must have key") == key {
-                let Operation::Update(data) = op else {
+                let Operation::Update(data, _) = op else {
                     unreachable!("expected update operation");
                 };
                 return Ok(Some((data, loc)));
@@ -303,7 +303,7 @@ where
         callback(Some(loc));
         update_known_loc(&mut self.snapshot, &last_key.key, loc, next_loc);
 
-        Ok(UpdateLocResult::NotExists(last_key))
+        Ok(UpdateLocResult::NotExists(last_key, loc))
     }
 
     /// Update the location of `key` to `next_loc` in the snapshot, and update the location of
@@ -336,13 +336,13 @@ where
                 if data.key == *key {
                     // Found the key in the snapshot.
                     if create_only {
-                        return Ok(UpdateLocResult::Exists(data.next_key));
+                        return Ok(UpdateLocResult::Exists(data.next_key, loc));
                     }
                     // Update its location and return its next-key.
                     assert!(next_loc > loc);
                     cursor.update(next_loc);
                     callback(Some(loc));
-                    return Ok(UpdateLocResult::Exists(data.next_key));
+                    return Ok(UpdateLocResult::Exists(data.next_key, loc));
                 }
                 if data.key > *key {
                     continue;
@@ -383,7 +383,7 @@ where
         cursor.update(next_loc + 1);
         callback(Some(loc));
 
-        Ok(UpdateLocResult::NotExists(prev_key_data))
+        Ok(UpdateLocResult::NotExists(prev_key_data, loc))
     }
 
     /// Updates `key` to have value `value` while maintaining appropriate next_key spans. The
@@ -401,11 +401,14 @@ where
             // We're inserting the very first key. For this special case, the next-key value is the
             // same as the key.
             self.snapshot.insert(&key, next_loc);
-            let op = Operation::Update(Update {
-                key: key.clone(),
-                value,
-                next_key: key.clone(),
-            });
+            let op = Operation::Update(
+                Update {
+                    key: key.clone(),
+                    value,
+                    next_key: key.clone(),
+                },
+                Location::new_unchecked(0),
+            );
             callback(None);
             self.log.append(op).await?;
             self.active_keys += 1;
@@ -413,27 +416,36 @@ where
         }
         let res = self.update_loc(&key, false, next_loc, callback).await?;
         let op = match res {
-            UpdateLocResult::Exists(next_key) => Operation::Update(Update {
-                key: key.clone(),
-                value,
-                next_key,
-            }),
-            UpdateLocResult::NotExists(prev_data) => {
+            UpdateLocResult::Exists(next_key, old_loc) => Operation::Update(
+                Update {
+                    key: key.clone(),
+                    value,
+                    next_key,
+                },
+                old_loc,
+            ),
+            UpdateLocResult::NotExists(prev_data, prev_loc) => {
                 self.active_keys += 1;
                 self.log
-                    .append(Operation::Update(Update {
-                        key: key.clone(),
-                        value,
-                        next_key: prev_data.next_key,
-                    }))
+                    .append(Operation::Update(
+                        Update {
+                            key: key.clone(),
+                            value,
+                            next_key: prev_data.next_key,
+                        },
+                        Location::new_unchecked(0), // brand new key
+                    ))
                     .await?;
                 // For a key that was not previously active, we need to update the next_key value of
                 // the previous key.
-                Operation::Update(Update {
-                    key: prev_data.key,
-                    value: prev_data.value,
-                    next_key: key,
-                })
+                Operation::Update(
+                    Update {
+                        key: prev_data.key,
+                        value: prev_data.value,
+                        next_key: key,
+                    },
+                    prev_loc,
+                )
             }
         };
 
@@ -458,11 +470,14 @@ where
             // We're inserting the very first key. For this special case, the next-key value is the
             // same as the key.
             self.snapshot.insert(&key, next_loc);
-            let op = Operation::Update(Update {
-                key: key.clone(),
-                value,
-                next_key: key.clone(),
-            });
+            let op = Operation::Update(
+                Update {
+                    key: key.clone(),
+                    value,
+                    next_key: key.clone(),
+                },
+                Location::new_unchecked(0),
+            );
             callback(None);
             self.log.append(op).await?;
             self.active_keys += 1;
@@ -470,21 +485,27 @@ where
         }
         let res = self.update_loc(&key, true, next_loc, callback).await?;
         match res {
-            UpdateLocResult::Exists(_) => {
+            UpdateLocResult::Exists(_, _) => {
                 return Ok(false);
             }
-            UpdateLocResult::NotExists(prev_data) => {
+            UpdateLocResult::NotExists(prev_data, prev_loc) => {
                 self.active_keys += 1;
-                let value_update_op = Operation::Update(Update {
-                    key: key.clone(),
-                    value,
-                    next_key: prev_data.next_key,
-                });
-                let next_key_update_op = Operation::Update(Update {
-                    key: prev_data.key,
-                    value: prev_data.value,
-                    next_key: key,
-                });
+                let value_update_op = Operation::Update(
+                    Update {
+                        key: key.clone(),
+                        value,
+                        next_key: prev_data.next_key,
+                    },
+                    Location::new_unchecked(0),
+                );
+                let next_key_update_op = Operation::Update(
+                    Update {
+                        key: prev_data.key,
+                        value: prev_data.value,
+                        next_key: key,
+                    },
+                    prev_loc,
+                );
                 self.log.append(value_update_op).await?;
                 self.log.append(next_key_update_op).await?;
             }
@@ -521,7 +542,7 @@ where
                 if data.key == key {
                     // The key is in the snapshot, so delete it.
                     cursor.delete();
-                    next_key = Some(data.next_key);
+                    next_key = Some((data.next_key, loc));
                     callback(false, Some(loc));
                     continue;
                 }
@@ -538,13 +559,13 @@ where
             }
         }
 
-        let Some(next_key) = next_key else {
+        let Some((next_key, inactivated_loc)) = next_key else {
             // no-op
             return Ok(());
         };
 
         self.active_keys -= 1;
-        let op = Operation::Delete(key.clone());
+        let op = Operation::Delete(key.clone(), inactivated_loc);
         self.log.append(op).await?;
         self.durable_state.steps += 1;
 
@@ -564,17 +585,21 @@ where
             prev_key = last_key.map(|(loc, data)| (loc, data.key, data.value));
         }
 
-        let prev_key = prev_key.expect("prev_key should have been found");
+        let (inactivated_loc, prev_key_name, prev_key_value) =
+            prev_key.expect("prev_key should have been found");
 
         let loc = self.op_count();
-        callback(true, Some(prev_key.0));
-        update_known_loc(&mut self.snapshot, &prev_key.1, prev_key.0, loc);
+        callback(true, Some(inactivated_loc));
+        update_known_loc(&mut self.snapshot, &prev_key_name, inactivated_loc, loc);
 
-        let op = Operation::Update(Update {
-            key: prev_key.1,
-            value: prev_key.2,
-            next_key,
-        });
+        let op = Operation::Update(
+            Update {
+                key: prev_key_name,
+                value: prev_key_value,
+                next_key,
+            },
+            inactivated_loc,
+        );
         self.log.append(op).await?;
         self.durable_state.steps += 1;
 
@@ -646,7 +671,7 @@ where
         let mut deleted = Vec::new();
         let mut updated = BTreeMap::new();
         for (op, old_loc) in (results.into_iter()).zip(locations) {
-            let Operation::Update(key_data) = op else {
+            let Operation::Update(key_data, _) = op else {
                 unreachable!("updates should have key data");
             };
             let key = key_data.key.clone();
@@ -669,7 +694,7 @@ where
 
                 // Update the log and snapshot.
                 delete_known_loc(&mut self.snapshot, &key, old_loc);
-                self.log.append(Operation::Delete(key)).await?;
+                self.log.append(Operation::Delete(key, old_loc)).await?;
                 callback(false, Some(old_loc));
 
                 // Each delete reduces the active key count by one and inactivates that key.
@@ -705,7 +730,7 @@ where
         let results = try_join_all(futures).await?;
 
         for (op, old_loc) in (results.into_iter()).zip(locations) {
-            let Operation::Update(key_data) = op else {
+            let Operation::Update(key_data, _) = op else {
                 unreachable!("updates should have key data");
             };
             possible_next.insert(key_data.next_key);
@@ -725,11 +750,14 @@ where
             update_known_loc(&mut self.snapshot, &key, loc, new_loc);
 
             let next_key = find_next_key(&key, &possible_next);
-            let op = Operation::Update(Update {
-                key: key.clone(),
-                value: value.clone(),
-                next_key,
-            });
+            let op = Operation::Update(
+                Update {
+                    key: key.clone(),
+                    value: value.clone(),
+                    next_key,
+                },
+                loc,
+            );
             self.log.append(op).await?;
             callback(true, Some(loc));
 
@@ -743,11 +771,14 @@ where
             let new_loc = self.op_count();
             self.snapshot.insert(&key, new_loc);
             let next_key = find_next_key(&key, &possible_next);
-            let op = Operation::Update(Update {
-                key: key.clone(),
-                value: value.clone(),
-                next_key,
-            });
+            let op = Operation::Update(
+                Update {
+                    key: key.clone(),
+                    value: value.clone(),
+                    next_key,
+                },
+                Location::new_unchecked(0),
+            );
 
             // Each newly created key increases the active key count.
             self.log.append(op).await?;
@@ -767,11 +798,14 @@ where
             let new_loc = self.op_count();
             update_known_loc(&mut self.snapshot, prev_key, *prev_loc, new_loc);
             let next_key = find_next_key(prev_key, &possible_next);
-            let op = Operation::Update(Update {
-                key: prev_key.clone(),
-                value: prev_value.clone(),
-                next_key,
-            });
+            let op = Operation::Update(
+                Update {
+                    key: prev_key.clone(),
+                    value: prev_value.clone(),
+                    next_key,
+                },
+                *prev_loc,
+            );
             self.log.append(op).await?;
             callback(true, Some(*prev_loc));
 
@@ -794,11 +828,14 @@ where
             let new_loc = self.op_count();
             update_known_loc(&mut self.snapshot, prev_key, *prev_loc, new_loc);
             let next_key = find_next_key(prev_key, &possible_next);
-            let op = Operation::Update(Update {
-                key: prev_key.clone(),
-                value: prev_value.clone(),
-                next_key,
-            });
+            let op = Operation::Update(
+                Update {
+                    key: prev_key.clone(),
+                    value: prev_value.clone(),
+                    next_key,
+                },
+                *prev_loc,
+            );
             self.log.append(op).await?;
             callback(true, Some(*prev_loc));
 

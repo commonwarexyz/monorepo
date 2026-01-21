@@ -21,9 +21,9 @@ pub type Unordered<K, V> = Operation<K, V, update::Unordered<K, V>>;
 
 #[derive(Clone, PartialEq, Debug)]
 pub enum Operation<K: Array, V: ValueEncoding, S: Update<K, V>> {
-    Delete(K),
-    Update(S),
-    CommitFloor(Option<V::Value>, Location),
+    Delete(K, Location),
+    Update(S, Location),
+    CommitFloor(Option<V::Value>, Location, Location),
 }
 
 #[cfg(feature = "arbitrary")]
@@ -36,9 +36,13 @@ where
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let choice = u.int_in_range(0..=2)?;
         match choice {
-            0 => Ok(Self::Delete(u.arbitrary()?)),
-            1 => Ok(Self::Update(u.arbitrary()?)),
-            2 => Ok(Self::CommitFloor(u.arbitrary()?, u.arbitrary()?)),
+            0 => Ok(Self::Delete(u.arbitrary()?, u.arbitrary()?)),
+            1 => Ok(Self::Update(u.arbitrary()?, u.arbitrary()?)),
+            2 => Ok(Self::CommitFloor(
+                u.arbitrary()?,
+                u.arbitrary()?,
+                u.arbitrary()?,
+            )),
             _ => unreachable!(),
         }
     }
@@ -55,23 +59,23 @@ where
 
     fn key(&self) -> Option<&Self::Key> {
         match self {
-            Self::Delete(k) => Some(k),
-            Self::Update(p) => Some(p.key()),
-            Self::CommitFloor(_, _) => None,
+            Self::Delete(k, _) => Some(k),
+            Self::Update(p, _) => Some(p.key()),
+            Self::CommitFloor(_, _, _) => None,
         }
     }
 
     fn is_update(&self) -> bool {
-        matches!(self, Self::Update(_))
+        matches!(self, Self::Update(_, _))
     }
 
     fn is_delete(&self) -> bool {
-        matches!(self, Self::Delete(_))
+        matches!(self, Self::Delete(_, _))
     }
 
     fn has_floor(&self) -> Option<Location> {
         match self {
-            Self::CommitFloor(_, loc) => Some(*loc),
+            Self::CommitFloor(_, loc, _) => Some(*loc),
             _ => None,
         }
     }
@@ -85,7 +89,7 @@ where
     S: Update<K, V>,
 {
     fn is_commit(&self) -> bool {
-        matches!(self, Self::CommitFloor(_, _))
+        matches!(self, Self::CommitFloor(_, _, _))
     }
 }
 
@@ -97,9 +101,9 @@ where
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Delete(key) => write!(f, "[key:{key} <deleted>]"),
-            Self::Update(payload) => payload.fmt(f),
-            Self::CommitFloor(value, loc) => {
+            Self::Delete(key, _) => write!(f, "[key:{key} <deleted>]"),
+            Self::Update(payload, _) => payload.fmt(f),
+            Self::CommitFloor(value, loc, _) => {
                 if let Some(value) = value {
                     write!(
                         f,
@@ -138,14 +142,25 @@ mod tests {
         type V = u64;
         type Op = Ordered<K, FixedEncoding<V>>;
 
-        let delete = Op::Delete(FixedBytes::from([1, 2, 3, 4]));
-        let update = Op::Update(update::Ordered {
-            key: FixedBytes::from([4, 3, 2, 1]),
-            value: 0xdead_beef_u64,
-            next_key: FixedBytes::from([9, 9, 9, 9]),
-        });
-        let commit_some = Op::CommitFloor(Some(123u64), crate::mmr::Location::new_unchecked(5));
-        let commit_none = Op::CommitFloor(None, crate::mmr::Location::new_unchecked(7));
+        let delete = Op::Delete(FixedBytes::from([1, 2, 3, 4]), Location::from(0u64));
+        let update = Op::Update(
+            update::Ordered {
+                key: FixedBytes::from([4, 3, 2, 1]),
+                value: 0xdead_beef_u64,
+                next_key: FixedBytes::from([9, 9, 9, 9]),
+            },
+            Location::from(0u64),
+        );
+        let commit_some = Op::CommitFloor(
+            Some(123u64),
+            crate::mmr::Location::new_unchecked(5),
+            Location::from(0u64),
+        );
+        let commit_none = Op::CommitFloor(
+            None,
+            crate::mmr::Location::new_unchecked(7),
+            Location::from(0u64),
+        );
 
         roundtrip(&delete, &());
         roundtrip(&update, &());
@@ -159,9 +174,16 @@ mod tests {
         type V = u64;
         type Op = Unordered<K, FixedEncoding<V>>;
 
-        let delete = Op::Delete(FixedBytes::from([0, 0, 0, 1]));
-        let update = Op::Update(update::Unordered(FixedBytes::from([9, 8, 7, 6]), 77u64));
-        let commit = Op::CommitFloor(Some(555u64), crate::mmr::Location::new_unchecked(3));
+        let delete = Op::Delete(FixedBytes::from([0, 0, 0, 1]), Location::from(0u64));
+        let update = Op::Update(
+            update::Unordered(FixedBytes::from([9, 8, 7, 6]), 77u64),
+            Location::from(0u64),
+        );
+        let commit = Op::CommitFloor(
+            Some(555u64),
+            crate::mmr::Location::new_unchecked(3),
+            Location::from(0u64),
+        );
 
         roundtrip(&delete, &());
         roundtrip(&update, &());
@@ -175,15 +197,25 @@ mod tests {
         type Op = Ordered<K, VariableEncoding<V>>;
         let cfg = (RangeCfg::from(..), ());
 
-        let delete = Op::Delete(FixedBytes::from([1, 1, 1, 1]));
-        let update = Op::Update(update::Ordered {
-            key: FixedBytes::from([2, 2, 2, 2]),
-            value: vec![1, 2, 3, 4, 5],
-            next_key: FixedBytes::from([3, 3, 3, 3]),
-        });
-        let commit_some =
-            Op::CommitFloor(Some(vec![9, 9, 9]), crate::mmr::Location::new_unchecked(9));
-        let commit_none = Op::CommitFloor(None, crate::mmr::Location::new_unchecked(10));
+        let delete = Op::Delete(FixedBytes::from([1, 1, 1, 1]), Location::from(0u64));
+        let update = Op::Update(
+            update::Ordered {
+                key: FixedBytes::from([2, 2, 2, 2]),
+                value: vec![1, 2, 3, 4, 5],
+                next_key: FixedBytes::from([3, 3, 3, 3]),
+            },
+            Location::from(0u64),
+        );
+        let commit_some = Op::CommitFloor(
+            Some(vec![9, 9, 9]),
+            crate::mmr::Location::new_unchecked(9),
+            Location::from(0u64),
+        );
+        let commit_none = Op::CommitFloor(
+            None,
+            crate::mmr::Location::new_unchecked(10),
+            Location::from(0u64),
+        );
 
         roundtrip(&delete, &cfg);
         roundtrip(&update, &cfg);
@@ -198,12 +230,16 @@ mod tests {
         type Op = Unordered<K, VariableEncoding<V>>;
         let cfg = (RangeCfg::from(..), ());
 
-        let delete = Op::Delete(FixedBytes::from([4, 4, 4, 4]));
-        let update = Op::Update(update::Unordered(
-            FixedBytes::from([5, 5, 5, 5]),
-            vec![7, 7, 7, 7],
-        ));
-        let commit = Op::CommitFloor(Some(vec![8, 8]), crate::mmr::Location::new_unchecked(12));
+        let delete = Op::Delete(FixedBytes::from([4, 4, 4, 4]), Location::from(0u64));
+        let update = Op::Update(
+            update::Unordered(FixedBytes::from([5, 5, 5, 5]), vec![7, 7, 7, 7]),
+            Location::from(0u64),
+        );
+        let commit = Op::CommitFloor(
+            Some(vec![8, 8]),
+            crate::mmr::Location::new_unchecked(12),
+            Location::from(0u64),
+        );
 
         roundtrip(&delete, &cfg);
         roundtrip(&update, &cfg);
