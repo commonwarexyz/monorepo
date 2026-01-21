@@ -2092,12 +2092,17 @@ mod tests {
         assert!(display.contains("REDACTED"));
     }
 
-    fn assert_msm_parallel_eq<G, S>(points: &[G], scalars: &[S], par: &Rayon)
-    where
-        G: Space<S> + std::fmt::Debug + PartialEq,
-    {
-        let seq = G::msm(points, scalars, &Sequential);
-        assert_eq!(seq, G::msm(points, scalars, par));
+    macro_rules! test_msm_parallel_sizes {
+        ($rng:expr, $par:expr, $G:ty, $S:ty) => {
+            for n in [MIN_PARALLEL_POINTS - 1, MIN_PARALLEL_POINTS, MIN_PARALLEL_POINTS + 1, 100] {
+                let points: Vec<$G> = (0..n)
+                    .map(|_| <$G>::generator() * &Scalar::random(&mut $rng))
+                    .collect();
+                let scalars: Vec<$S> = (0..n).map(|_| <$S>::random(&mut $rng)).collect();
+                let seq = <$G>::msm(&points, &scalars, &Sequential);
+                assert_eq!(seq, <$G>::msm(&points, &scalars, &$par));
+            }
+        };
     }
 
     #[test]
@@ -2105,60 +2110,10 @@ mod tests {
         let mut rng = test_rng();
         let par = Rayon::new(NonZeroUsize::new(8).unwrap()).unwrap();
 
-        // G1 (include MIN_PARALLEL_POINTS boundary)
-        for n in [
-            MIN_PARALLEL_POINTS - 1,
-            MIN_PARALLEL_POINTS,
-            MIN_PARALLEL_POINTS + 1,
-            100,
-            500,
-            1000,
-        ] {
-            let points: Vec<G1> = (0..n)
-                .map(|_| G1::generator() * &Scalar::random(&mut rng))
-                .collect();
-            let scalars: Vec<Scalar> = (0..n).map(|_| Scalar::random(&mut rng)).collect();
-            assert_msm_parallel_eq(&points, &scalars, &par);
-        }
-
-        // G2 (include MIN_PARALLEL_POINTS boundary)
-        for n in [
-            MIN_PARALLEL_POINTS - 1,
-            MIN_PARALLEL_POINTS,
-            MIN_PARALLEL_POINTS + 1,
-            100,
-            500,
-        ] {
-            let points: Vec<G2> = (0..n)
-                .map(|_| G2::generator() * &Scalar::random(&mut rng))
-                .collect();
-            let scalars: Vec<Scalar> = (0..n).map(|_| Scalar::random(&mut rng)).collect();
-            assert_msm_parallel_eq(&points, &scalars, &par);
-        }
-    }
-
-    #[test]
-    fn test_msm_parallel_small_scalar() {
-        let mut rng = test_rng();
-        let par = Rayon::new(NonZeroUsize::new(8).unwrap()).unwrap();
-
-        // G1
-        for n in [32, 100, 500] {
-            let points: Vec<G1> = (0..n)
-                .map(|_| G1::generator() * &Scalar::random(&mut rng))
-                .collect();
-            let scalars: Vec<SmallScalar> = (0..n).map(|_| SmallScalar::random(&mut rng)).collect();
-            assert_msm_parallel_eq(&points, &scalars, &par);
-        }
-
-        // G2
-        for n in [32, 100] {
-            let points: Vec<G2> = (0..n)
-                .map(|_| G2::generator() * &Scalar::random(&mut rng))
-                .collect();
-            let scalars: Vec<SmallScalar> = (0..n).map(|_| SmallScalar::random(&mut rng)).collect();
-            assert_msm_parallel_eq(&points, &scalars, &par);
-        }
+        test_msm_parallel_sizes!(rng, par, G1, Scalar);
+        test_msm_parallel_sizes!(rng, par, G2, Scalar);
+        test_msm_parallel_sizes!(rng, par, G1, SmallScalar);
+        test_msm_parallel_sizes!(rng, par, G2, SmallScalar);
     }
 
     #[test]
@@ -2167,20 +2122,18 @@ mod tests {
         let par = Rayon::new(NonZeroUsize::new(8).unwrap()).unwrap();
         let n = 50;
 
-        // G1: all zero scalars
-        let g1_points: Vec<G1> = (0..n)
-            .map(|_| G1::generator() * &Scalar::random(&mut rng))
-            .collect();
-        assert_eq!(
-            G1::msm(&g1_points, &vec![Scalar::zero(); n], &par),
-            G1::zero()
-        );
+        // All zero scalars
+        let g1_pts: Vec<G1> = (0..n).map(|_| G1::generator() * &Scalar::random(&mut rng)).collect();
+        let g2_pts: Vec<G2> = (0..n).map(|_| G2::generator() * &Scalar::random(&mut rng)).collect();
+        assert_eq!(G1::msm(&g1_pts, &vec![Scalar::zero(); n], &par), G1::zero());
+        assert_eq!(G2::msm(&g2_pts, &vec![Scalar::zero(); n], &par), G2::zero());
 
-        // G1: all identity points
+        // All identity points
         let scalars: Vec<Scalar> = (0..n).map(|_| Scalar::random(&mut rng)).collect();
         assert_eq!(G1::msm(&vec![G1::zero(); n], &scalars, &par), G1::zero());
+        assert_eq!(G2::msm(&vec![G2::zero(); n], &scalars, &par), G2::zero());
 
-        // G1: single nonzero among zeros
+        // Single nonzero among zeros
         let mut points = vec![G1::zero(); n];
         let mut scalars = vec![Scalar::zero(); n];
         let p = G1::generator() * &Scalar::random(&mut rng);
@@ -2188,19 +2141,6 @@ mod tests {
         points[25] = p;
         scalars[25] = s.clone();
         assert_eq!(G1::msm(&points, &scalars, &par), p * &s);
-
-        // G2: all zero scalars
-        let g2_points: Vec<G2> = (0..n)
-            .map(|_| G2::generator() * &Scalar::random(&mut rng))
-            .collect();
-        assert_eq!(
-            G2::msm(&g2_points, &vec![Scalar::zero(); n], &par),
-            G2::zero()
-        );
-
-        // G2: all identity points
-        let scalars: Vec<Scalar> = (0..n).map(|_| Scalar::random(&mut rng)).collect();
-        assert_eq!(G2::msm(&vec![G2::zero(); n], &scalars, &par), G2::zero());
     }
 
     #[test]
