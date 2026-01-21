@@ -2105,8 +2105,8 @@ mod tests {
         let mut rng = test_rng();
         let par = Rayon::new(NonZeroUsize::new(8).unwrap()).unwrap();
 
-        // G1
-        for n in [31, 32, 33, 100, 500, 1000] {
+        // G1 (include MIN_PARALLEL_POINTS boundary)
+        for n in [MIN_PARALLEL_POINTS - 1, MIN_PARALLEL_POINTS, MIN_PARALLEL_POINTS + 1, 100, 500, 1000] {
             let points: Vec<G1> = (0..n)
                 .map(|_| G1::generator() * &Scalar::random(&mut rng))
                 .collect();
@@ -2114,8 +2114,8 @@ mod tests {
             assert_msm_parallel_eq(&points, &scalars, &par);
         }
 
-        // G2
-        for n in [31, 32, 33, 100, 500] {
+        // G2 (include MIN_PARALLEL_POINTS boundary)
+        for n in [MIN_PARALLEL_POINTS - 1, MIN_PARALLEL_POINTS, MIN_PARALLEL_POINTS + 1, 100, 500] {
             let points: Vec<G2> = (0..n)
                 .map(|_| G2::generator() * &Scalar::random(&mut rng))
                 .collect();
