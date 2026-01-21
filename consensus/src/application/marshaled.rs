@@ -96,15 +96,12 @@ type TasksMap<B> = HashMap<(Round, <B as Committable>::Commitment), oneshot::Rec
 ///
 /// # Context Recovery
 ///
-/// With deferred verification, validators wait for DA and verify the context before voting.
-/// If a validator crashes after voting but before certification, they lose their in-memory
-/// verification task. When recovering, validators use the block-embedded context.
+/// With deferred verification, validators wait for data availability (DA) and verify the context
+/// before voting. If a validator crashes after voting but before certification, they lose their in-memory
+/// verification task. When recovering, validators extract context from a [`CertifiableBlock`].
 ///
-/// Blocks implement [`CertifiableBlock`] which embeds the consensus context. This embedded
-/// context is trustworthy because the notarizing quorum (which contains at least f+1 honest
-/// validators) verified that the block's context matched the consensus context before voting.
-/// This allows validators that crashed or never participated in notarization to use the
-/// block-embedded context for finalization.
+/// _This embedded context is trustworthy because the notarizing quorum (which contains at least f+1 honest
+/// validators) verified that the block's context matched the consensus context before voting._
 #[derive(Clone)]
 pub struct Marshaled<E, S, A, B, ES>
 where
