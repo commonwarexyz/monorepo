@@ -22,6 +22,7 @@ use crate::{
             operation::{update::Update, Operation},
             ValueEncoding,
         },
+        current::proof::RangeProof,
         store::{self, LogStore, MerkleizedStore, PrunableStore},
         DurabilityState, Durable, Error, MerkleizationState, Merkleized, NonDurable, Unmerkleized,
     },
@@ -118,6 +119,30 @@ where
     pub(super) const fn bitmap_pruned_bits(&self) -> u64 {
         self.status.pruned_bits()
     }
+
+    /// Returns a proof that the specified range of operations are part of the database, along with
+    /// the operations from the range. A truncated range (from hitting the max) can be detected by
+    /// looking at the length of the returned operations vector. Also returns the bitmap chunks
+    /// required to verify the proof.
+    ///
+    /// # Errors
+    ///
+    /// Returns [crate::mmr::Error::LocationOverflow] if `start_loc` > [crate::mmr::MAX_LOCATION].
+    /// Returns [crate::mmr::Error::RangeOutOfBounds] if `start_loc` >= number of leaves in the MMR.
+    /// Return true if the given sequence of `ops` were applied starting at location `start_loc` in
+    /// the log with the provided root.
+    pub fn verify_range_proof(
+        hasher: &mut H,
+        proof: &RangeProof<H::Digest>,
+        start_loc: Location,
+        ops: &[Operation<K, V, U>],
+        chunks: &[[u8; N]],
+        root: &H::Digest,
+    ) -> bool {
+        let height = Self::grafting_height();
+
+        proof.verify(hasher, height, start_loc, ops, chunks, root)
+    }
 }
 
 // Functionality shared across Merkleized states, such as the ability to prune the log and retrieve
@@ -138,6 +163,33 @@ where
         self.cached_root.expect("Cached root must be set")
     }
 
+    /// Returns a proof that the specified range of operations are part of the database, along with
+    /// the operations from the range. A truncated range (from hitting the max) can be detected by
+    /// looking at the length of the returned operations vector. Also returns the bitmap chunks
+    /// required to verify the proof.
+    ///
+    /// # Errors
+    ///
+    /// Returns [crate::mmr::Error::LocationOverflow] if `start_loc` > [crate::mmr::MAX_LOCATION].
+    /// Returns [crate::mmr::Error::RangeOutOfBounds] if `start_loc` >= number of leaves in the MMR.
+    pub async fn range_proof(
+        &self,
+        hasher: &mut H,
+        start_loc: Location,
+        max_ops: NonZeroU64,
+    ) -> Result<(RangeProof<H::Digest>, Vec<Operation<K, V, U>>, Vec<[u8; N]>), Error> {
+        RangeProof::<H::Digest>::new_with_ops(
+            hasher,
+            &self.status,
+            Self::grafting_height(),
+            &self.any.log.mmr,
+            &self.any.log,
+            start_loc,
+            max_ops,
+        )
+        .await
+    }
+
     /// Prunes historical operations prior to `prune_loc`. This does not affect the db's root or
     /// snapshot.
     ///
@@ -155,7 +207,7 @@ where
     }
 }
 
-// Functionality specific to Clean state, such as ability to initialize and persist.
+// Functionality specific to Clean state, such as ability to persist the database.
 impl<E, K, V, U, C, I, H, const N: usize> Db<E, C, I, H, U, N, Merkleized<H>, Durable>
 where
     E: Storage + Clock + Metrics,

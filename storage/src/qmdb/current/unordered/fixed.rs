@@ -21,7 +21,7 @@ use crate::{
         current::{
             self,
             db::{merkleize_grafted_bitmap, root},
-            proof::{OperationProof, RangeProof},
+            proof::OperationProof,
             FixedConfig as Config,
         },
         store::{self},
@@ -33,7 +33,6 @@ use commonware_codec::FixedSize;
 use commonware_cryptography::{DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage as RStorage};
 use commonware_utils::Array;
-use std::num::NonZeroU64;
 
 /// Proof information for verifying a key has a particular value in the database.
 pub type KeyValueProof<D, const N: usize> = OperationProof<D, N>;
@@ -71,21 +70,6 @@ impl<
         let op = Operation::Update(UnorderedUpdate(key, value));
 
         proof.verify(hasher, Self::grafting_height(), op, root)
-    }
-
-    /// Return true if the given sequence of `ops` were applied starting at location `start_loc` in
-    /// the log with the provided root.
-    pub fn verify_range_proof(
-        hasher: &mut H,
-        proof: &RangeProof<H::Digest>,
-        start_loc: Location,
-        ops: &[Operation<K, V>],
-        chunks: &[[u8; N]],
-        root: &H::Digest,
-    ) -> bool {
-        let height = Self::grafting_height();
-
-        proof.verify(hasher, height, start_loc, ops, chunks, root)
     }
 }
 
@@ -168,33 +152,6 @@ impl<
         D: store::State,
     > Db<E, K, V, H, T, N, Merkleized<H>, D>
 {
-    /// Returns a proof that the specified range of operations are part of the database, along with
-    /// the operations from the range. A truncated range (from hitting the max) can be detected by
-    /// looking at the length of the returned operations vector. Also returns the bitmap chunks
-    /// required to verify the proof.
-    ///
-    /// # Errors
-    ///
-    /// Returns [crate::mmr::Error::LocationOverflow] if `start_loc` > [crate::mmr::MAX_LOCATION].
-    /// Returns [crate::mmr::Error::RangeOutOfBounds] if `start_loc` >= number of leaves in the MMR.
-    pub async fn range_proof(
-        &self,
-        hasher: &mut H,
-        start_loc: Location,
-        max_ops: NonZeroU64,
-    ) -> Result<(RangeProof<H::Digest>, Vec<Operation<K, V>>, Vec<[u8; N]>), Error> {
-        RangeProof::<H::Digest>::new_with_ops(
-            hasher,
-            &self.status,
-            Self::grafting_height(),
-            &self.any.log.mmr,
-            &self.any.log,
-            start_loc,
-            max_ops,
-        )
-        .await
-    }
-
     /// Generate and return a proof of the current value of `key`, along with the other
     /// [KeyValueProof] required to verify the proof. Returns KeyNotFound error if the key is not
     /// currently assigned any value.
@@ -351,7 +308,7 @@ pub mod test {
         mmr::{hasher::Hasher as _, Location, Proof},
         qmdb::{
             any,
-            current::tests::apply_random_ops,
+            current::{proof::RangeProof, tests::apply_random_ops},
             store::{
                 batch_tests,
                 tests::{assert_log_store, assert_merkleized_store, assert_prunable_store},
