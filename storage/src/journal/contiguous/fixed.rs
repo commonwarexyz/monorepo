@@ -294,8 +294,48 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
             None => (blob_boundary, false),
         };
 
+        // Validate oldest section before computing size.
+        Self::validate_oldest_section(inner, items_per_blob, pruning_boundary).await?;
+
         let size = Self::compute_size(inner, items_per_blob, pruning_boundary).await?;
         Ok((pruning_boundary, size, needs_update))
+    }
+
+    /// Validate that the oldest section has the expected number of items.
+    ///
+    /// Non-tail sections must be full from their logical start. The tail section
+    /// (oldest == newest) can be partially filled.
+    async fn validate_oldest_section(
+        inner: &SegmentedJournal<E, A>,
+        items_per_blob: u64,
+        pruning_boundary: u64,
+    ) -> Result<(), Error> {
+        let (Some(oldest), Some(newest)) = (inner.oldest_section(), inner.newest_section()) else {
+            return Ok(()); // No sections to validate
+        };
+
+        if oldest == newest {
+            return Ok(()); // Tail section, can be partial
+        }
+
+        let oldest_len = inner.section_len(oldest).await?;
+        let oldest_start = oldest * items_per_blob;
+
+        let expected = if pruning_boundary > oldest_start {
+            // Mid-section boundary: items from pruning_boundary to section end
+            items_per_blob - (pruning_boundary - oldest_start)
+        } else {
+            // Section-aligned boundary: full section
+            items_per_blob
+        };
+
+        if oldest_len != expected {
+            return Err(Error::Corruption(format!(
+                "oldest section {oldest} has wrong size: expected {expected} items, got {oldest_len}"
+            )));
+        }
+
+        Ok(())
     }
 
     /// Returns the total number of items ever appended (size), computed from the blobs.
@@ -1500,6 +1540,42 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_fixed_journal_recover_detects_oldest_section_too_short() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(NZU64!(5));
+            let mut journal =
+                Journal::<_, Digest>::init_at_size(context.with_label("first"), cfg.clone(), 7)
+                    .await
+                    .expect("failed to initialize journal at size");
+
+            // Append items so section 1 has exactly the expected minimum (3 items).
+            for i in 0..8u64 {
+                journal
+                    .append(test_digest(100 + i))
+                    .await
+                    .expect("failed to append data");
+            }
+            journal.sync().await.expect("failed to sync journal");
+            assert_eq!(journal.pruning_boundary, 7);
+            assert_eq!(journal.size(), 15);
+            drop(journal);
+
+            // Corrupt the oldest section by truncating one byte (drops one item on recovery).
+            let (blob, size) = context
+                .open(&blob_partition(&cfg), &1u64.to_be_bytes())
+                .await
+                .expect("failed to open oldest blob");
+            blob.resize(size - 1).await.expect("failed to corrupt blob");
+            blob.sync().await.expect("failed to sync blob");
+
+            let result =
+                Journal::<_, Digest>::init(context.with_label("second"), cfg.clone()).await;
+            assert!(matches!(result, Err(Error::Corruption(_))));
+        });
+    }
+
+    #[test_traced]
     fn test_fixed_journal_recover_to_empty_from_partial_write() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -2305,7 +2381,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_fixed_journal_sync_crash_meta_none_boundary_mid_section_rolls_back() {
+    fn test_fixed_journal_oldest_section_invalid_len() {
         // Old meta = None (aligned), new boundary = mid-section.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -2317,20 +2393,25 @@ mod tests {
             for i in 0..3u64 {
                 journal.append(test_digest(i)).await.unwrap();
             }
-            // Simulate metadata not written.
+            assert_eq!(journal.inner.newest_section(), Some(2));
+            journal.sync().await.unwrap();
+
+            // Simulate metadata deletion (corruption).
             journal.metadata.clear();
             journal.metadata.sync().await.unwrap();
-
-            let tail_section = journal.size / journal.items_per_blob;
-            journal.inner.sync(tail_section).await.unwrap();
             drop(journal);
 
-            let journal = Journal::<_, Digest>::init(context.with_label("second"), cfg.clone())
+            // Section 1 has items 7,8,9 but metadata is missing, so falls back to blob-based boundary.
+            // Section 1 has 3 items, but recovery thinks it should have 5 because metadata deletion
+            // causes us to forget that section 1 starts at logical position 7.
+            let result =
+                Journal::<_, Digest>::init(context.with_label("second"), cfg.clone()).await;
+            assert!(matches!(result, Err(Error::Corruption(_))));
+            context.remove(&blob_partition(&cfg), None).await.unwrap();
+            context
+                .remove(&format!("{}{}", cfg.partition, META_SUFFIX), None)
                 .await
                 .unwrap();
-            assert_eq!(journal.pruning_boundary(), 5);
-            assert_eq!(journal.size(), 8);
-            journal.destroy().await.unwrap();
         });
     }
 
