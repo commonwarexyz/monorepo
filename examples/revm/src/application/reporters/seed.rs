@@ -3,7 +3,7 @@ use crate::ConsensusDigest;
 use alloy_evm::revm::primitives::{keccak256, B256};
 use commonware_consensus::{
     simplex::{
-        scheme::{bls12381_threshold, bls12381_threshold::Seedable as _},
+        scheme::bls12381_threshold::vrf::{self, Seedable as _},
         types::Activity,
     },
     Reporter,
@@ -14,7 +14,7 @@ use std::marker::PhantomData;
 /// Helper function for SeedReporter::report that owns all its inputs.
 async fn seed_report_inner<V: Variant>(
     state: LedgerService,
-    activity: Activity<bls12381_threshold::Scheme<crate::PublicKey, V>, ConsensusDigest>,
+    activity: Activity<vrf::Scheme<crate::PublicKey, V>, ConsensusDigest>,
 ) {
     match activity {
         Activity::Notarization(notarization) => {
@@ -63,7 +63,7 @@ impl<V> Reporter for SeedReporter<V>
 where
     V: Variant,
 {
-    type Activity = Activity<bls12381_threshold::Scheme<crate::PublicKey, V>, ConsensusDigest>;
+    type Activity = Activity<vrf::Scheme<crate::PublicKey, V>, ConsensusDigest>;
 
     fn report(&mut self, activity: Self::Activity) -> impl std::future::Future<Output = ()> + Send {
         let state = self.state.clone();

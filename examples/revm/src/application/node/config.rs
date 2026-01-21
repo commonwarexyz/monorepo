@@ -3,7 +3,7 @@ use crate::{
     PublicKey,
 };
 use anyhow::Context as _;
-use commonware_consensus::simplex;
+use commonware_consensus::simplex::scheme::bls12381_threshold::vrf;
 use commonware_cryptography::{
     bls12381::{
         dkg,
@@ -17,7 +17,7 @@ use commonware_utils::{ordered::Set, N3f1, NZUsize, TryCollect as _, NZU16, NZU3
 use governor::Quota;
 use rand::{rngs::StdRng, SeedableRng as _};
 
-pub(crate) type ThresholdScheme = simplex::scheme::bls12381_threshold::Scheme<PublicKey, MinSig>;
+pub(crate) type ThresholdScheme = vrf::Scheme<PublicKey, MinSig>;
 
 /// Namespace used by simplex votes in this example.
 pub(crate) const SIMPLEX_NAMESPACE: &[u8] = b"_COMMONWARE_REVM_SIMPLEX";
@@ -89,7 +89,7 @@ pub(crate) fn threshold_schemes(
     let mut schemes = Vec::with_capacity(n);
     for pk in participants.iter() {
         let share = shares.get_value(pk).expect("share exists").clone();
-        let scheme = simplex::scheme::bls12381_threshold::Scheme::signer(
+        let scheme = vrf::Scheme::signer(
             SIMPLEX_NAMESPACE,
             participants.clone(),
             output.public().clone(),
