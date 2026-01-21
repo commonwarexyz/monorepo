@@ -67,9 +67,12 @@ mod tests {
         types::{Epoch, Round, View},
     };
     use commonware_cryptography::{
-        bls12381::primitives::{
-            group::{self},
-            variant::{MinSig, Variant},
+        bls12381::{
+            certificate::threshold::Certificate,
+            primitives::{
+                group::{self},
+                variant::{MinSig, Variant},
+            },
         },
         sha256::Digest as Sha256Digest,
     };
@@ -90,7 +93,7 @@ mod tests {
                 parent: View::new(54321),
                 payload: new_digest(),
             },
-            certificate: signature,
+            certificate: Certificate::new(signature),
         }
     }
 
