@@ -2469,7 +2469,7 @@ mod tests {
     /// A re-proposal occurs when the parent commitment equals the block being verified,
     /// meaning the same block is being proposed again in a new view.
     #[test_traced("INFO")]
-    fn test_reproposal_validation() {
+    fn test_marshaled_reproposal_validation() {
         #[derive(Clone)]
         struct MockVerifyingApp {
             genesis: B,

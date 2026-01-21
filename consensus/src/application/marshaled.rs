@@ -157,8 +157,9 @@ where
     /// Verifies a proposed block's application-level validity.
     ///
     /// This method validates that:
-    /// 1. The block's height is exactly one greater than the parent's height
-    /// 2. The underlying application's verification logic passes
+    /// 1. The block's parent commitment matches the expected parent
+    /// 2. The block's height is exactly one greater than the parent's height
+    /// 3. The underlying application's verification logic passes
     ///
     /// Verification is spawned in a background task and returns a receiver that will contain
     /// the verification result. Valid blocks are reported to the marshal as verified.
@@ -208,10 +209,17 @@ where
                     }
                 };
 
-                // Validate that heights are contiguous.
-                //
-                // When called via Automaton::verify, parent commitment was already validated
-                // against the context's parent.
+                // Validate parent commitment and height contiguity.
+                if block.parent() != parent.commitment() || parent.commitment() != parent_commitment
+                {
+                    debug!(
+                        block_parent = %block.parent(),
+                        expected_parent = %parent.commitment(),
+                        "block parent commitment does not match expected parent"
+                    );
+                    tx.send_lossy(false);
+                    return;
+                }
                 if parent.height().next() != block.height() {
                     debug!(
                         parent_height = %parent.height(),
@@ -499,7 +507,7 @@ where
                         return;
                     }
 
-                    // Valid re-proposal. Create a completed verification task for certify().
+                    // Valid re-proposal. Create a completed verification task for `certify`
                     let round = context.round;
                     marshal.verified(round, block).await;
 
@@ -512,17 +520,6 @@ where
                         .insert((round, commitment), task_rx);
 
                     tx.send_lossy(true);
-                    return;
-                }
-
-                // If the block is not a re-proposal, its parent must match the context's parent.
-                if block.parent() != context.parent.1 {
-                    debug!(
-                        block_parent = %block.parent(),
-                        expected_parent = %context.parent.1,
-                        "block parent commitment does not match expected parent"
-                    );
-                    tx.send_lossy(false);
                     return;
                 }
 
@@ -627,8 +624,9 @@ where
 
                 // Re-proposal detection for certify path: we don't have the consensus context,
                 // only the block's embedded context from original proposal. Infer re-proposal from:
-                // 1. Block is at epoch boundary
-                // 2. Certification round is later than block's original round
+                // 1. Block is at epoch boundary (only boundary blocks can be re-proposed)
+                // 2. Certification round's view > embedded context's view (re-proposals retain their
+                //    original embedded context, so a later view indicates the block was re-proposed)
                 // 3. Same epoch (re-proposals don't cross epoch boundaries)
                 let embedded_context = block.context();
                 let is_reproposal =
@@ -636,6 +634,8 @@ where
                         && round.view() > embedded_context.round.view()
                         && round.epoch() == embedded_context.round.epoch();
                 if is_reproposal {
+                    // NOTE: It is possible that, during crash recovery, we call `marshal.verified`
+                    // twice for the same block. That function is idempotent, so this is safe.
                     marshaled.marshal.verified(round, block).await;
                     tx.send_lossy(true);
                     return;
