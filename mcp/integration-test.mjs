@@ -14,17 +14,24 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 
 const BASE_URL = process.env.MCP_URL || "http://localhost:8787";
 
-async function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 async function triggerIndexing() {
-  console.log("Triggering scheduled indexing...");
-  const response = await fetch(`${BASE_URL}/__scheduled?cron=*`);
-  if (!response.ok) {
-    throw new Error(`Failed to trigger indexing: ${response.status}`);
+  console.log("Triggering synchronous indexing...");
+
+  // reindexVersions indexes one version per call, loop until we get one
+  let indexed = null;
+  while (indexed === null) {
+    const response = await fetch(`${BASE_URL}/__test/reindex`);
+    if (!response.ok) {
+      const body = await response.text();
+      throw new Error(`Reindex failed: ${response.status} - ${body}`);
+    }
+    const result = await response.json();
+    indexed = result.indexed;
+    if (indexed) {
+      console.log(`Indexed version: ${indexed}`);
+    }
   }
-  console.log("Indexing triggered successfully");
+  console.log("Indexing complete");
 }
 
 async function testCors() {
@@ -296,12 +303,8 @@ async function main() {
     // Test server info via MCP protocol
     await testServerInfo();
 
-    // Trigger indexing and wait for it to complete
+    // Trigger indexing (synchronous, waits for completion)
     await triggerIndexing();
-
-    // Wait a bit for indexing to complete (it fetches files from commonware.xyz)
-    console.log("Waiting for indexing to complete...");
-    await sleep(30000);
 
     // Test MCP tools
     await testMcpTools();
