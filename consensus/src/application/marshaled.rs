@@ -163,7 +163,7 @@ where
     /// Verification is spawned in a background task and returns a receiver that will contain
     /// the verification result. Valid blocks are reported to the marshal as verified.
     #[inline]
-    async fn verify(
+    async fn deferred_verify(
         &mut self,
         context: <Self as Automaton>::Context,
         block: B,
@@ -172,7 +172,7 @@ where
         let mut application = self.application.clone();
         let (mut tx, rx) = oneshot::channel();
         self.context
-            .with_label("verify")
+            .with_label("deferred_verify")
             .with_attribute("round", context.round)
             .spawn(move |runtime_context| async move {
                 // Create a future for tracking if the receiver is dropped, which could allow
@@ -525,11 +525,13 @@ where
                 }
 
                 // Before casting a notarize vote, ensure the block's embedded context matches
-                // the consensus context. This is a critical step - the notarize quorum is
-                // guaranteed to have at least f+1 honest validators who will verify against this
-                // context, preventing a Byzantine proposer from embedding a malicious context.
-                // The other f honest validators who did not vote will later use the block-embedded
-                // context to help finalize if Byzantine validators withhold their finalize votes.
+                // the consensus context.
+
+                // This is a critical step - the notarize quorum is guaranteed to have at least
+                // f+1 honest validators who will verify against this context, preventing a Byzantine
+                // proposer from embedding a malicious context. The other f honest validators who did
+                // not vote will later use the block-embedded context to help finalize if Byzantine
+                // validators withhold their finalize votes.
                 if block.context() != context {
                     debug!(
                         ?context,
@@ -542,7 +544,7 @@ where
 
                 // Begin the rest of the verification process asynchronously.
                 let round = context.round;
-                let task = marshaled.verify(context, block).await;
+                let task = marshaled.deferred_verify(context, block).await;
                 marshaled
                     .verification_tasks
                     .lock()
@@ -632,7 +634,7 @@ where
                 }
 
                 let context = block.context();
-                let verify_rx = marshaled.verify(context, block).await;
+                let verify_rx = marshaled.deferred_verify(context, block).await;
                 if let Ok(result) = verify_rx.await {
                     tx.send_lossy(result);
                 }
