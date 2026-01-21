@@ -138,6 +138,13 @@ impl ArchiveTrait for Archive {
         }
     }
 
+    async fn index_of(&self, key: &Key) -> Result<Option<u64>, commonware_storage::archive::Error> {
+        match self {
+            Self::Immutable(a) => a.index_of(key).await,
+            Self::Prunable(a) => a.index_of(key).await,
+        }
+    }
+
     fn next_gap(&self, index: u64) -> (Option<u64>, Option<u64>) {
         match self {
             Self::Immutable(a) => a.next_gap(index),

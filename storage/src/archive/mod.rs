@@ -762,12 +762,7 @@ mod tests {
             .index_of(&key)
             .await
             .expect("Failed to call index_of");
-        // Note: For prunable archive, this returns Some(index).
-        // For immutable archive, this returns None (optimization not supported).
-        // We test both behaviors by accepting either.
-        if result.is_some() {
-            assert_eq!(result, Some(index));
-        }
+        assert_eq!(result, Some(index));
 
         // Test with a key that doesn't exist
         let nonexistent_key = test_key("nonexistent_key");

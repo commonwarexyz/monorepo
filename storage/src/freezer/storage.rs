@@ -947,6 +947,47 @@ impl<E: Storage + Metrics + Clock, K: Array, V: CodecShared> Freezer<E, K, V> {
         }
     }
 
+    /// Get the [Cursor] for a given key without loading the value.
+    ///
+    /// This is more efficient than `get(Identifier::Key(key))` when only
+    /// the cursor is needed.
+    pub async fn cursor_for_key(&self, key: &K) -> Result<Option<Cursor>, Error> {
+        // Get head of the chain from table
+        let table_index = self.table_index(key);
+        let (entry1, entry2) = Self::read_table(&self.table, table_index).await?;
+        let Some((mut section, mut position, _)) = Self::read_latest_entry(&entry1, &entry2) else {
+            return Ok(None);
+        };
+
+        // Follow the linked list chain to find the first matching key
+        loop {
+            // Get the key entry from the fixed key index
+            let key_entry = self.oversized.get(section, position).await?;
+
+            // Check if this key matches
+            if key_entry.key.as_ref() == key.as_ref() {
+                // Return cursor without loading value
+                return Ok(Some(Cursor::new(
+                    section,
+                    key_entry.value_offset,
+                    key_entry.value_size,
+                )));
+            }
+
+            // Increment unnecessary reads
+            self.unnecessary_reads.inc();
+
+            // Follow the chain
+            let Some(next) = key_entry.next() else {
+                break; // End of chain
+            };
+            section = next.0;
+            position = next.1;
+        }
+
+        Ok(None)
+    }
+
     /// Resize the table by doubling its size and split each entry into two.
     async fn start_resize(&mut self) -> Result<(), Error> {
         self.resizes.inc();
