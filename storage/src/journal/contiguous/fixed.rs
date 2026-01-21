@@ -34,7 +34,9 @@
 //! # Partition
 //!
 //! Blobs are stored in the legacy partition (`cfg.partition`) if it already contains data;
-//! otherwise they are stored in `{cfg.partition}_blobs`.
+//! otherwise they are stored in `{cfg.partition}-blobs`.
+//!
+//! Metadata is stored in `{cfg.partition}-metadata`.
 //!
 //! # Consistency
 //!
@@ -77,12 +79,6 @@ use std::{
     ops::Range,
 };
 use tracing::{debug, warn};
-
-/// Suffix appended to the partition name for the metadata store.
-const META_SUFFIX: &str = "_meta";
-
-/// Suffix appended to the partition name for the blobs store (new default).
-const BLOB_SUFFIX: &str = "_blobs";
 
 /// Metadata key for storing the pruning boundary.
 const PRUNING_BOUNDARY_KEY: u64 = 1;
@@ -166,7 +162,7 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     /// If neither contains data, defaults to the new blobs partition.
     async fn select_blob_partition(context: &E, cfg: &Config) -> Result<String, Error> {
         let legacy_partition = cfg.partition.as_str();
-        let new_partition = format!("{}{}", cfg.partition, BLOB_SUFFIX);
+        let new_partition = format!("{}-blobs", cfg.partition);
 
         let legacy_blobs = Self::scan_partition(context, legacy_partition).await?;
         let new_blobs = Self::scan_partition(context, &new_partition).await?;
@@ -203,7 +199,7 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
 
         // Initialize metadata store
         let meta_cfg = MetadataConfig {
-            partition: format!("{}{}", cfg.partition, META_SUFFIX),
+            partition: format!("{}-metadata", cfg.partition),
             codec_config: ((0..).into(), ()),
         };
         let mut metadata =
@@ -407,7 +403,7 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
 
         // Initialize and populate metadata
         let meta_cfg = MetadataConfig {
-            partition: format!("{}{}", cfg.partition, META_SUFFIX),
+            partition: format!("{}-metadata", cfg.partition),
             codec_config: ((0..).into(), ()),
         };
         let mut metadata =
@@ -877,7 +873,7 @@ mod tests {
     }
 
     fn blob_partition(cfg: &Config) -> String {
-        format!("{}{}", cfg.partition, BLOB_SUFFIX)
+        format!("{}-blobs", cfg.partition)
     }
 
     async fn scan_partition(context: &Context, partition: &str) -> Vec<Vec<u8>> {
@@ -2409,7 +2405,7 @@ mod tests {
             assert!(matches!(result, Err(Error::Corruption(_))));
             context.remove(&blob_partition(&cfg), None).await.unwrap();
             context
-                .remove(&format!("{}{}", cfg.partition, META_SUFFIX), None)
+                .remove(&format!("{}-metadata", cfg.partition), None)
                 .await
                 .unwrap();
         });

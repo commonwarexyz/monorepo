@@ -521,7 +521,7 @@ mod tests {
 
                 assert!(matches!(result, Err(qmdb::Error::UnexpectedData(_))));
             }
-            let blobs_partition = format!("{}_blobs", cfg.partition);
+            let blobs_partition = format!("{}-blobs", cfg.partition);
             context.remove(&blobs_partition, None).await.unwrap();
         });
     }

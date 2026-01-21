@@ -1143,7 +1143,7 @@ mod tests {
             // The very last element we added (pos=495) resulted in new parents at positions 496 &
             // 497. Simulate a partial write by corrupting the last page's checksum by truncating
             // the last blob by a single byte.
-            let partition: String = "journal_partition_blobs".into();
+            let partition: String = "journal_partition-blobs".into();
             let (blob, len) = context
                 .open(&partition, &71u64.to_be_bytes())
                 .await
