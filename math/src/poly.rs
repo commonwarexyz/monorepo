@@ -449,20 +449,16 @@ impl<I: Clone + Ord, F: Field> Interpolator<I, F> {
         // Step 2: Single inversion, multiplied by W
         let mut inv_acc = total_product * &prefix[n - 1].inv();
 
-        // Step 3: Compute weights
-        let mut weights = vec![F::one(); n];
+        // Step 3: Compute weights directly into output
+        let mut out = points;
+        let out_vals = out.values_mut();
         for i in (0..n).rev() {
-            weights[i] = if i > 0 {
+            out_vals[i] = if i > 0 {
                 inv_acc.clone() * &prefix[i - 1]
             } else {
                 inv_acc.clone()
             };
             inv_acc *= &c[i];
-        }
-
-        let mut out = points;
-        for (o, w) in out.values_mut().iter_mut().zip(weights) {
-            *o = w;
         }
         Self { weights: out }
     }
