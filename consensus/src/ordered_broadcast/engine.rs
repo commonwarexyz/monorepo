@@ -1016,7 +1016,7 @@ impl<
 
         // Initialize journal
         let cfg = JournalConfig {
-            partition: format!("{}{}", &self.journal_name_prefix, sequencer),
+            partition: format!("{}-{}", &self.journal_name_prefix, sequencer),
             compression: self.journal_compression,
             codec_config: P::Scheme::certificate_codec_config_unbounded(),
             buffer_pool: self.journal_buffer_pool.clone(),
