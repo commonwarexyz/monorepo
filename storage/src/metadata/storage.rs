@@ -60,8 +60,7 @@ impl<B: Blob, K: Span> Wrapper<B, K> {
     }
 }
 
-/// State used during sync operations to support a non &mut self sync implementation that won't
-/// block concurrent reads.
+/// State used during [Metadata::sync] operations.
 struct State<B: Blob, K: Span> {
     cursor: usize,
     next_version: u64,
@@ -75,8 +74,6 @@ pub struct Metadata<E: Clock + Storage + Metrics, K: Span, V: Codec> {
 
     map: BTreeMap<K, V>,
     partition: String,
-
-    /// State used during [Self::sync] that is protected by a lock.
     state: Mutex<State<E::Blob, K>>,
 
     sync_overwrites: Counter,
