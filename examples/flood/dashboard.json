@@ -1195,6 +1195,126 @@
         },
         {
             "datasource": {
+                "type": "prometheus",
+                "uid": "PBFA97CFB590B2093"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "color": {
+                        "mode": "palette-classic"
+                    },
+                    "custom": {
+                        "axisBorderShow": false,
+                        "axisCenteredZero": false,
+                        "axisColorMode": "text",
+                        "axisLabel": "",
+                        "axisPlacement": "auto",
+                        "barAlignment": 0,
+                        "barWidthFactor": 0.6,
+                        "drawStyle": "line",
+                        "fillOpacity": 0,
+                        "gradientMode": "none",
+                        "hideFrom": {
+                            "legend": false,
+                            "tooltip": false,
+                            "viz": false
+                        },
+                        "insertNulls": false,
+                        "lineInterpolation": "linear",
+                        "lineWidth": 1,
+                        "pointSize": 5,
+                        "scaleDistribution": {
+                            "type": "linear"
+                        },
+                        "showPoints": "auto",
+                        "spanNulls": false,
+                        "stacking": {
+                            "group": "A",
+                            "mode": "none"
+                        },
+                        "thresholdsStyle": {
+                            "mode": "off"
+                        }
+                    },
+                    "mappings": [],
+                    "thresholds": {
+                        "mode": "absolute",
+                        "steps": [
+                            {
+                                "color": "green",
+                                "value": null
+                            },
+                            {
+                                "color": "red",
+                                "value": 80
+                            }
+                        ]
+                    },
+                    "unit": "s"
+                },
+                "overrides": []
+            },
+            "gridPos": {
+                "h": 9,
+                "w": 12,
+                "x": 0,
+                "y": 37
+            },
+            "id": 18,
+            "options": {
+                "legend": {
+                    "calcs": [],
+                    "displayMode": "list",
+                    "placement": "bottom",
+                    "showLegend": true
+                },
+                "tooltip": {
+                    "hideZeros": false,
+                    "mode": "single",
+                    "sort": "none"
+                }
+            },
+            "pluginVersion": "11.5.2",
+            "targets": [
+                {
+                    "disableTextWrap": false,
+                    "editorMode": "code",
+                    "expr": "histogram_quantile(0.5, sum(rate(flood_receiver_latency_bucket{deployer_name=~\"$Name\"}[1m])) by (le, deployer_name, deployer_ip))",
+                    "fullMetaSearch": false,
+                    "includeNullMetadata": true,
+                    "legendFormat": "p50 {{deployer_name}}",
+                    "range": true,
+                    "refId": "A",
+                    "useBackend": false
+                },
+                {
+                    "disableTextWrap": false,
+                    "editorMode": "code",
+                    "expr": "histogram_quantile(0.9, sum(rate(flood_receiver_latency_bucket{deployer_name=~\"$Name\"}[1m])) by (le, deployer_name, deployer_ip))",
+                    "fullMetaSearch": false,
+                    "includeNullMetadata": true,
+                    "legendFormat": "p90 {{deployer_name}}",
+                    "range": true,
+                    "refId": "B",
+                    "useBackend": false
+                },
+                {
+                    "disableTextWrap": false,
+                    "editorMode": "code",
+                    "expr": "histogram_quantile(0.99, sum(rate(flood_receiver_latency_bucket{deployer_name=~\"$Name\"}[1m])) by (le, deployer_name, deployer_ip))",
+                    "fullMetaSearch": false,
+                    "includeNullMetadata": true,
+                    "legendFormat": "p99 {{deployer_name}}",
+                    "range": true,
+                    "refId": "C",
+                    "useBackend": false
+                }
+            ],
+            "title": "Message Latency (One-Way)",
+            "type": "timeseries"
+        },
+        {
+            "datasource": {
                 "type": "grafana-pyroscope-datasource",
                 "uid": "P02E4190217B50628"
             },
@@ -1206,7 +1326,7 @@
                 "h": 15,
                 "w": 24,
                 "x": 0,
-                "y": 37
+                "y": 46
             },
             "id": 16,
             "options": {},
@@ -1275,7 +1395,7 @@
                 "h": 17,
                 "w": 12,
                 "x": 0,
-                "y": 52
+                "y": 61
             },
             "id": 17,
             "options": {
@@ -1341,7 +1461,7 @@
                 "h": 17,
                 "w": 12,
                 "x": 12,
-                "y": 52
+                "y": 61
             },
             "id": 6,
             "options": {
