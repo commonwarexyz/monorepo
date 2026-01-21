@@ -2308,14 +2308,13 @@ mod tests {
                 parent: (View::new(19), parent_commitment),
             };
 
-            let _ = marshaled
+            let verify_result = marshaled
                 .verify(unsupported_context, block_commitment)
                 .await
                 .await;
-            let verify = marshaled.certify(unsupported_round, block_commitment).await;
 
             assert!(
-                !verify.await.unwrap(),
+                !verify_result.unwrap(),
                 "Block in unsupported epoch should be rejected"
             );
         })
@@ -2581,7 +2580,8 @@ mod tests {
 
             // Test 1: Valid re-proposal at epoch boundary should be accepted
             // Re-proposal context: parent commitment equals the block being verified
-            let reproposal_round = Round::new(Epoch::new(1), View::new(20));
+            // Re-proposals happen within the same epoch when the parent is the last block
+            let reproposal_round = Round::new(Epoch::new(0), View::new(20));
             let reproposal_context = Context {
                 round: reproposal_round,
                 leader: me.clone(),
@@ -2638,6 +2638,73 @@ mod tests {
             assert!(
                 !verify_result.unwrap(),
                 "Invalid re-proposal (not at epoch boundary) should be rejected"
+            );
+
+            // Test 3: Re-proposal with mismatched epoch should be rejected
+            // This is a regression test - re-proposals must be in the same epoch as the block.
+            let cross_epoch_reproposal_round = Round::new(Epoch::new(1), View::new(20));
+            let cross_epoch_reproposal_context = Context {
+                round: cross_epoch_reproposal_round,
+                leader: me.clone(),
+                parent: (View::new(boundary_height.get()), boundary_commitment),
+            };
+
+            let verify_result = marshaled
+                .verify(cross_epoch_reproposal_context, boundary_commitment)
+                .await
+                .await;
+            assert!(
+                !verify_result.unwrap(),
+                "Re-proposal with mismatched epoch should be rejected"
+            );
+
+            // Test 4: Certify-only path for re-proposal (no prior verify call)
+            // This tests the crash recovery scenario where a validator needs to certify
+            // a re-proposal without having called verify first.
+            let certify_only_round = Round::new(Epoch::new(0), View::new(21));
+            let certify_result = marshaled
+                .certify(certify_only_round, boundary_commitment)
+                .await
+                .await;
+            assert!(
+                certify_result.unwrap(),
+                "Certify-only path for re-proposal should succeed"
+            );
+
+            // Test 5: Certify-only path for a normal block (no prior verify call)
+            // Build a normal block (not at epoch boundary) and test certify without verify.
+            // Use genesis as the parent since we don't have finalized blocks at other heights.
+            let normal_height = Height::new(1);
+            let normal_round = Round::new(Epoch::new(0), View::new(100));
+            let genesis_commitment = genesis.commitment();
+
+            let normal_context = Context {
+                round: normal_round,
+                leader: me.clone(),
+                parent: (View::zero(), genesis_commitment),
+            };
+            let normal_block = B::new::<Sha256>(
+                normal_context.clone(),
+                genesis_commitment,
+                normal_height,
+                500,
+            );
+            let normal_commitment = normal_block.commitment();
+            marshal
+                .clone()
+                .proposed(normal_round, normal_block.clone())
+                .await;
+
+            context.sleep(Duration::from_millis(10)).await;
+
+            // Certify without calling verify first
+            let certify_result = marshaled
+                .certify(normal_round, normal_commitment)
+                .await
+                .await;
+            assert!(
+                certify_result.unwrap(),
+                "Certify-only path for normal block should succeed"
             );
         })
     }

@@ -8,20 +8,18 @@
 //!
 //! # Epoch Boundaries
 //!
-//! An epoch is a fixed number of blocks (the `epoch_length`). When the last block in an epoch
-//! is reached, this wrapper prevents new blocks from being built & proposed until the next epoch begins.
-//! Instead, it re-proposes the boundary block to avoid producing blocks that would be pruned
-//! by the epoch transition.
+//! When the parent is the last block in an epoch (as determined by the [`Epocher`]), this wrapper
+//! re-proposes that boundary block instead of building a new block. This avoids producing blocks
+//! that would be pruned by the epoch transition.
 //!
 //! # Deferred Verification
 //!
-//! [`Marshaled`] uses deferred verification. Before casting a notarize vote, it waits
-//! for the block to become available and verifies that the block's embedded context
-//! matches the consensus context. This ensures that at least f+1 honest validators in the
-//! notarizing quorum have verified the context is valid, preventing a Byzantine proposer
-//! from embedding a malicious context. Once the context is validated, verification of block
-//! contents begins asynchronously. In [`CertifiableAutomaton::certify`], we wait on the
-//! verification result before voting to finalize.
+//! Before casting a notarize vote, [`Marshaled`] waits for the block to become available and
+//! then verifies that the block's embedded context matches the consensus context. However, it does not
+//! wait for the application to finish verifying the block contents before voting. This enables verification
+//! to run while we wait for a quorum of votes to form a certificate (hiding verification latency behind network
+//! latency). Once a certificate is formed, we wait on the verification result in [`CertifiableAutomaton::certify`]
+//! before voting to finalize (ensuring no invalid blocks are admitted to the canonical chain).
 //!
 //! # Usage
 //!
@@ -45,16 +43,17 @@
 //!
 //! # Future Work
 //!
-//! - It is possible to skip fetching the block during [`Automaton::verify`] and optimistically vote,
-//!   removing the need for data availability as a condition for voting to notarize. However, this
-//!   adds complexity since notarization certificates would no longer imply data availability. In
-//!   the future, by updating marshal and other components to meet this assumption, we can improve
-//!   view latency further.
+//! - To further reduce view latency, a participant could optimistically vote for a block prior to
+//!   observing its availability during [`Automaton::verify`]. However, this would require updating
+//!   other components (like [`crate::marshal`]) to handle backfill where notarization does not imply
+//!   a block is fetchable (without modification, a malicious leader that withholds blocks during propose
+//!   could get an honest node to exhaust their network rate limit fetching things that don't exist rather
+//!   than blocks they need AND can fetch).
 
 use crate::{
     marshal::{self, ingress::mailbox::AncestorStream, Update},
     simplex::types::Context,
-    types::{Epoch, Epocher, Round},
+    types::{Epoch, Epocher, Height, Round},
     Application, Automaton, Block, CertifiableAutomaton, CertifiableBlock, Epochable, Relay,
     Reporter, VerifyingApplication,
 };
@@ -78,7 +77,7 @@ type TasksMap<B> = HashMap<(Round, <B as Committable>::Commitment), oneshot::Rec
 ///
 /// This wrapper intercepts consensus operations to enforce epoch boundaries and validate
 /// block ancestry. It prevents blocks from being produced outside their valid epoch,
-/// handles the special case of re-proposing boundary blocks during epoch transitions,
+/// handles the special case of re-proposing boundary blocks at epoch boundaries,
 /// and ensures all blocks have valid parent linkage and contiguous heights.
 ///
 /// # Ancestry Validation
@@ -96,15 +95,12 @@ type TasksMap<B> = HashMap<(Round, <B as Committable>::Commitment), oneshot::Rec
 ///
 /// # Context Recovery
 ///
-/// With deferred verification, validators wait for DA and verify the context before voting.
-/// If a validator crashes after voting but before certification, they lose their in-memory
-/// verification task. When recovering, validators use the block-embedded context.
+/// With deferred verification, validators wait for data availability (DA) and verify the context
+/// before voting. If a validator crashes after voting but before certification, they lose their in-memory
+/// verification task. When recovering, validators extract context from a [`CertifiableBlock`].
 ///
-/// Blocks implement [`CertifiableBlock`] which embeds the consensus context. This embedded
-/// context is trustworthy because the notarizing quorum (which contains at least f+1 honest
-/// validators) verified that the block's context matched the consensus context before voting.
-/// This allows validators that crashed or never participated in notarization to use the
-/// block-embedded context for finalization.
+/// _This embedded context is trustworthy because the notarizing quorum (which contains at least f+1 honest
+/// validators) verified that the block's context matched the consensus context before voting._
 #[derive(Clone)]
 pub struct Marshaled<E, S, A, B, ES>
 where
@@ -158,32 +154,25 @@ where
         }
     }
 
-    /// Verifies a proposed block within epoch boundaries.
+    /// Verifies a proposed block's application-level validity.
     ///
     /// This method validates that:
-    /// 1. The block's embedded context matches the consensus-provided context
-    /// 2. The block is within the current epoch (unless it's a boundary block re-proposal)
-    /// 3. Re-proposals are only allowed for the last block in an epoch
-    /// 4. The block's parent commitment matches the consensus context's expected parent
-    /// 5. The block's height is exactly one greater than the parent's height
-    /// 6. The underlying application's verification logic passes
+    /// 1. The block's height is exactly one greater than the parent's height
+    /// 2. The underlying application's verification logic passes
     ///
     /// Verification is spawned in a background task and returns a receiver that will contain
     /// the verification result. Valid blocks are reported to the marshal as verified.
-    ///
-    /// If `block` is provided, it will be used directly instead of fetching from the marshal.
     #[inline]
-    async fn verify(
+    async fn deferred_verify(
         &mut self,
         context: <Self as Automaton>::Context,
         block: B,
     ) -> oneshot::Receiver<bool> {
         let mut marshal = self.marshal.clone();
         let mut application = self.application.clone();
-        let epocher = self.epocher.clone();
         let (mut tx, rx) = oneshot::channel();
         self.context
-            .with_label("verify")
+            .with_label("deferred_verify")
             .with_attribute("round", context.round)
             .spawn(move |runtime_context| async move {
                 // Create a future for tracking if the receiver is dropped, which could allow
@@ -219,57 +208,10 @@ where
                     }
                 };
 
-                // Re-proposals are pre-validated by Automaton::verify before notarization
-                // can form. At least f+1 honest validators in the notarizing quorum verified
-                // that this is a valid re-proposal at an epoch boundary, so we don't re-check
-                // here. If the check had failed, no notarization would have formed.
-                if parent.commitment() == block.commitment() {
-                    marshal.verified(context.round, block).await;
-                    tx.send_lossy(true);
-                    return;
-                }
-
-                // Verify the block's embedded context matches what consensus provided.
-                // For some validators who did not vote, this is a no-op. However, it is
-                // guaranteed that at least f+1 honest validators who did vote (and cached
-                // the true context) will verify against this same context.
-                if block.context() != context {
-                    debug!(
-                        ?context,
-                        block_context = ?block.context(),
-                        "block-embedded context does not match consensus context"
-                    );
-                    tx.send_lossy(false);
-                    return;
-                }
-
-                // Blocks are invalid if they are not within the current epoch and they aren't
-                // a re-proposal of the boundary block.
-                let Some(block_bounds) = epocher.containing(block.height()) else {
-                    debug!(
-                        height = %block.height(),
-                        "block height not covered by epoch strategy"
-                    );
-                    tx.send_lossy(false);
-                    return;
-                };
-                if block_bounds.epoch() != context.epoch() {
-                    tx.send_lossy(false);
-                    return;
-                }
-
-                // Validate that the block's parent commitment matches what consensus expects.
-                if block.parent() != parent.commitment() {
-                    debug!(
-                        block_parent = %block.parent(),
-                        expected_parent = %parent.commitment(),
-                        "block parent commitment does not match expected parent"
-                    );
-                    tx.send_lossy(false);
-                    return;
-                }
-
                 // Validate that heights are contiguous.
+                //
+                // When called via Automaton::verify, parent commitment was already validated
+                // against the context's parent.
                 if parent.height().next() != block.height() {
                     debug!(
                         parent_height = %parent.height(),
@@ -280,6 +222,7 @@ where
                     return;
                 }
 
+                // Request verification from the application.
                 let ancestry_stream = AncestorStream::new(marshal.clone(), [block.clone(), parent]);
                 let validity_request = application.verify(
                     (runtime_context.with_label("app_verify"), context.clone()),
@@ -287,7 +230,7 @@ where
                 );
                 pin_mut!(validity_request);
 
-                // If consensus drops the rceiver, we can stop work early.
+                // If consensus drops the receiver, we can stop work early.
                 let application_valid = match select(validity_request, &mut tx_closed).await {
                     Either::Left((is_valid, _)) => is_valid,
                     Either::Right(_) => {
@@ -299,6 +242,7 @@ where
                     }
                 };
 
+                // Handle the verification result.
                 if application_valid {
                     marshal.verified(context.round, block).await;
                 }
@@ -482,7 +426,7 @@ where
     async fn verify(
         &mut self,
         context: Context<Self::Digest, S::PublicKey>,
-        digest: Self::Digest,
+        commitment: Self::Digest,
     ) -> oneshot::Receiver<bool> {
         let mut marshal = self.marshal.clone();
         let mut marshaled = self.clone();
@@ -497,12 +441,12 @@ where
                 let tx_closed = tx.closed();
                 pin_mut!(tx_closed);
 
-                let block_request = marshal.subscribe(Some(context.round), digest).await;
+                let block_request = marshal.subscribe(Some(context.round), commitment).await;
                 let block = match select(block_request, &mut tx_closed).await {
                     Either::Left((Ok(block), _)) => block,
                     Either::Left((Err(_), _)) => {
                         debug!(
-                            ?digest,
+                            ?commitment,
                             reason = "failed to fetch block for optimistic verification",
                             "skipping optimistic verification"
                         );
@@ -517,21 +461,35 @@ where
                     }
                 };
 
-                // Check if this is a re-proposal (the block commitment matches the parent from
-                // the context). Re-proposals are only valid at epoch boundaries.
-                let is_reproposal = context.parent.1 == digest;
+                // Blocks are invalid if they are not within the current epoch and they aren't
+                // a re-proposal of the boundary block.
+                let Some(block_bounds) = marshaled.epocher.containing(block.height()) else {
+                    debug!(
+                        height = %block.height(),
+                        "block height not in any known epoch"
+                    );
+                    tx.send_lossy(false);
+                    return;
+                };
+                if block_bounds.epoch() != context.epoch() {
+                    debug!(
+                        epoch = %context.epoch(),
+                        block_epoch = %block_bounds.epoch(),
+                        "block is not in the current epoch"
+                    );
+                    tx.send_lossy(false);
+                    return;
+                }
+
+                // Re-proposal detection: consensus signals a re-proposal by setting
+                // context.parent to the block being verified (commitment == context.parent.1).
+                //
+                // Re-proposals skip normal verification because:
+                // 1. The block was already verified when originally proposed
+                // 2. The parent-child height check would fail (parent IS the block)
+                let is_reproposal = commitment == context.parent.1;
                 if is_reproposal {
-                    // Use the block's epoch (not context's epoch) since the block being
-                    // re-proposed was created in the previous epoch.
-                    let Some(block_bounds) = marshaled.epocher.containing(block.height()) else {
-                        debug!(
-                            height = %block.height(),
-                            "re-proposal block height not in any known epoch"
-                        );
-                        tx.send_lossy(false);
-                        return;
-                    };
-                    if block.height() != block_bounds.last() {
+                    if !is_at_epoch_boundary(&marshaled.epocher, block.height(), context.epoch()) {
                         debug!(
                             height = %block.height(),
                             last_in_epoch = %block_bounds.last(),
@@ -541,9 +499,7 @@ where
                         return;
                     }
 
-                    // Valid re-proposal at epoch boundary. Mark as verified and create
-                    // a completed task for certify. No further verification needed since
-                    // the block was already fully verified when originally proposed.
+                    // Valid re-proposal. Create a completed verification task for certify().
                     let round = context.round;
                     marshal.verified(round, block).await;
 
@@ -553,36 +509,49 @@ where
                         .verification_tasks
                         .lock()
                         .await
-                        .insert((round, digest), task_rx);
+                        .insert((round, commitment), task_rx);
 
                     tx.send_lossy(true);
                     return;
-                } else {
-                    // Before casting a notarize vote, ensure the block's embedded context matches
-                    // the consensus context. This is a critical step - the notarize quorum is
-                    // guaranteed to have at least f+1 honest validators who will verify against this
-                    // context, preventing a Byzantine proposer from embedding a malicious context.
-                    // The other f honest validators who did not vote will later use the block-embedded
-                    // context to help finalize if Byzantine validators withhold their finalize votes.
-                    if block.context() != context {
-                        debug!(
-                            ?context,
-                            block_context = ?block.context(),
-                            "block-embedded context does not match consensus context during optimistic verification"
-                        );
-                        tx.send_lossy(false);
-                        return;
-                    }
+                }
+
+                // If the block is not a re-proposal, its parent must match the context's parent.
+                if block.parent() != context.parent.1 {
+                    debug!(
+                        block_parent = %block.parent(),
+                        expected_parent = %context.parent.1,
+                        "block parent commitment does not match expected parent"
+                    );
+                    tx.send_lossy(false);
+                    return;
+                }
+
+                // Before casting a notarize vote, ensure the block's embedded context matches
+                // the consensus context.
+                //
+                // This is a critical step - the notarize quorum is guaranteed to have at least
+                // f+1 honest validators who will verify against this context, preventing a Byzantine
+                // proposer from embedding a malicious context. The other f honest validators who did
+                // not vote will later use the block-embedded context to help finalize if Byzantine
+                // validators withhold their finalize votes.
+                if block.context() != context {
+                    debug!(
+                        ?context,
+                        block_context = ?block.context(),
+                        "block-embedded context does not match consensus context during optimistic verification"
+                    );
+                    tx.send_lossy(false);
+                    return;
                 }
 
                 // Begin the rest of the verification process asynchronously.
                 let round = context.round;
-                let task = marshaled.verify(context, block).await;
+                let task = marshaled.deferred_verify(context, block).await;
                 marshaled
                     .verification_tasks
                     .lock()
                     .await
-                    .insert((round, digest), task);
+                    .insert((round, commitment), task);
 
                 tx.send_lossy(true);
             });
@@ -603,10 +572,10 @@ where
     B: CertifiableBlock<Context = <A as Application<E>>::Context>,
     ES: Epocher,
 {
-    async fn certify(&mut self, round: Round, payload: Self::Digest) -> oneshot::Receiver<bool> {
+    async fn certify(&mut self, round: Round, commitment: Self::Digest) -> oneshot::Receiver<bool> {
         // Attempt to retrieve the existing verification task for this (round, payload).
         let mut tasks_guard = self.verification_tasks.lock().await;
-        let task = tasks_guard.remove(&(round, payload));
+        let task = tasks_guard.remove(&(round, commitment));
         drop(tasks_guard);
         if let Some(task) = task {
             return task;
@@ -621,11 +590,12 @@ where
         // Subscribe to the block and verify using its embedded context once available.
         debug!(
             ?round,
-            ?payload,
+            ?commitment,
             "subscribing to block for certification using embedded context"
         );
-        let block_rx = self.marshal.subscribe(Some(round), payload).await;
+        let block_rx = self.marshal.subscribe(Some(round), commitment).await;
         let mut marshaled = self.clone();
+        let epocher = self.epocher.clone();
         let (mut tx, rx) = oneshot::channel();
         self.context
             .with_label("certify")
@@ -640,7 +610,7 @@ where
                     Either::Left((Ok(block), _)) => block,
                     Either::Left((Err(_), _)) => {
                         debug!(
-                            ?payload,
+                            ?commitment,
                             reason = "failed to fetch block for certification",
                             "skipping certification"
                         );
@@ -655,8 +625,23 @@ where
                     }
                 };
 
-                let context = block.context();
-                let verify_rx = marshaled.verify(context, block).await;
+                // Re-proposal detection for certify path: we don't have the consensus context,
+                // only the block's embedded context from original proposal. Infer re-proposal from:
+                // 1. Block is at epoch boundary
+                // 2. Certification round is later than block's original round
+                // 3. Same epoch (re-proposals don't cross epoch boundaries)
+                let embedded_context = block.context();
+                let is_reproposal =
+                    is_at_epoch_boundary(&epocher, block.height(), embedded_context.round.epoch())
+                        && round.view() > embedded_context.round.view()
+                        && round.epoch() == embedded_context.round.epoch();
+                if is_reproposal {
+                    marshaled.marshal.verified(round, block).await;
+                    tx.send_lossy(true);
+                    return;
+                }
+
+                let verify_rx = marshaled.deferred_verify(embedded_context, block).await;
                 if let Ok(result) = verify_rx.await {
                     tx.send_lossy(result);
                 }
@@ -725,6 +710,14 @@ where
         }
         self.application.report(update).await
     }
+}
+
+/// Returns true if the block is at an epoch boundary (last block in its epoch).
+///
+/// This is used to validate re-proposals, which are only allowed for boundary blocks.
+#[inline]
+fn is_at_epoch_boundary<ES: Epocher>(epocher: &ES, block_height: Height, epoch: Epoch) -> bool {
+    epocher.last(epoch).is_some_and(|last| last == block_height)
 }
 
 /// Fetches the parent block given its commitment and optional round.
