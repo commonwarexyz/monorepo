@@ -2094,7 +2094,12 @@ mod tests {
 
     macro_rules! test_msm_parallel_sizes {
         ($rng:expr, $par:expr, $G:ty, $S:ty) => {
-            for n in [MIN_PARALLEL_POINTS - 1, MIN_PARALLEL_POINTS, MIN_PARALLEL_POINTS + 1, 100] {
+            for n in [
+                MIN_PARALLEL_POINTS - 1,
+                MIN_PARALLEL_POINTS,
+                MIN_PARALLEL_POINTS + 1,
+                100,
+            ] {
                 let points: Vec<$G> = (0..n)
                     .map(|_| <$G>::generator() * &Scalar::random(&mut $rng))
                     .collect();
@@ -2123,8 +2128,12 @@ mod tests {
         let n = 50;
 
         // All zero scalars
-        let g1_pts: Vec<G1> = (0..n).map(|_| G1::generator() * &Scalar::random(&mut rng)).collect();
-        let g2_pts: Vec<G2> = (0..n).map(|_| G2::generator() * &Scalar::random(&mut rng)).collect();
+        let g1_pts: Vec<G1> = (0..n)
+            .map(|_| G1::generator() * &Scalar::random(&mut rng))
+            .collect();
+        let g2_pts: Vec<G2> = (0..n)
+            .map(|_| G2::generator() * &Scalar::random(&mut rng))
+            .collect();
         assert_eq!(G1::msm(&g1_pts, &vec![Scalar::zero(); n], &par), G1::zero());
         assert_eq!(G2::msm(&g2_pts, &vec![Scalar::zero(); n], &par), G2::zero());
 
