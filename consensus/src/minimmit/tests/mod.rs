@@ -3129,7 +3129,7 @@ mod engine_tests {
         use tracing::debug;
 
         let n = 6;
-        let required_containers = View::new(50);
+        let required_containers = View::new(100);
         let activity_timeout = ViewDelta::new(10);
         let skip_timeout = ViewDelta::new(5);
         let namespace = b"minimmit_unclean_shutdown".to_vec();

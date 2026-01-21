@@ -823,17 +823,12 @@ where
                         self.last_finalized = view;
                     }
                     let cert = finalization.certificate.clone();
-                    if should_broadcast {
-                        let broadcasted = {
-                            let state = self.ensure_view(view);
-                            state.mark_broadcast_finalization()
-                        };
-                        if broadcasted {
-                            actions.push(Action::BroadcastCertificate(Certificate::Finalization(
-                                finalization.clone(),
-                            )));
-                        }
-                    }
+                    // Per the Minimmit paper (Algorithm 1, lines 431-433):
+                    // "Since it is not necessary for liveness, our pseudocode does not
+                    // require processors to forward L-notarisations."
+                    // Unlike M-notarizations and Nullifications, Finalizations are NOT
+                    // broadcast. Each node reaches L-quorum independently by collecting
+                    // votes. Broadcasting would create O(n^2) unnecessary messages.
                     actions.push(Action::Finalized(finalization.clone()));
                     actions.extend(self.handle_view_progress(
                         view,

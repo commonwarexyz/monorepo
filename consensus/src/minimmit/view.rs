@@ -31,7 +31,6 @@ pub struct ViewState<S: crate::minimmit::scheme::Scheme<D>, D: Digest> {
     broadcast_notarize: bool,
     broadcast_nullify: bool,
     broadcast_nullification: bool,
-    broadcast_finalization: bool,
     _marker: std::marker::PhantomData<S>,
 }
 
@@ -48,7 +47,6 @@ impl<S: crate::minimmit::scheme::Scheme<D>, D: Digest> ViewState<S, D> {
             broadcast_notarize: false,
             broadcast_nullify: false,
             broadcast_nullification: false,
-            broadcast_finalization: false,
             _marker: std::marker::PhantomData,
         }
     }
@@ -188,15 +186,6 @@ impl<S: crate::minimmit::scheme::Scheme<D>, D: Digest> ViewState<S, D> {
         true
     }
 
-    /// Marks that we've broadcast a finalization certificate.
-    pub const fn mark_broadcast_finalization(&mut self) -> bool {
-        if self.broadcast_finalization {
-            return false;
-        }
-        self.broadcast_finalization = true;
-        true
-    }
-
     /// Returns true if the notarize vote was broadcast.
     pub const fn broadcast_notarize(&self) -> bool {
         self.broadcast_notarize
@@ -217,20 +206,19 @@ impl<S: crate::minimmit::scheme::Scheme<D>, D: Digest> ViewState<S, D> {
         self.broadcast_nullification
     }
 
-    /// Returns true if the finalization certificate was broadcast.
-    pub const fn broadcast_finalization(&self) -> bool {
-        self.broadcast_finalization
-    }
-
-    /// Returns true if a certificate of the same type was already recorded.
+    /// Returns true if a certificate of the same type was already broadcast.
     ///
     /// For M-notarizations, this returns true if ANY M-notarization was broadcast
     /// (regardless of digest), since we only broadcast the first one per view.
+    ///
+    /// For Finalizations, this always returns false since Finalizations are never
+    /// broadcast (per the Minimmit paper). Deduplication for Finalizations is
+    /// handled by the ancestry tracker.
     pub const fn has_certificate(&self, certificate: &Certificate<S, D>) -> bool {
         match certificate {
             Certificate::MNotarization(_) => self.broadcast_m_notarization.is_some(),
             Certificate::Nullification(_) => self.broadcast_nullification,
-            Certificate::Finalization(_) => self.broadcast_finalization,
+            Certificate::Finalization(_) => false,
         }
     }
 
@@ -260,6 +248,7 @@ impl<S: crate::minimmit::scheme::Scheme<D>, D: Digest> ViewState<S, D> {
     /// Replays a certificate from crash recovery.
     ///
     /// Sets internal broadcast flags to prevent double-broadcasting after restart.
+    /// Finalizations are not tracked here since they are never broadcast.
     pub const fn replay_certificate(&mut self, certificate: &Certificate<S, D>) {
         match certificate {
             Certificate::MNotarization(m) => {
@@ -269,7 +258,7 @@ impl<S: crate::minimmit::scheme::Scheme<D>, D: Digest> ViewState<S, D> {
                 self.broadcast_nullification = true;
             }
             Certificate::Finalization(_) => {
-                self.broadcast_finalization = true;
+                // Finalizations are never broadcast, so no flag to set
             }
         }
     }
