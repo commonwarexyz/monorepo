@@ -152,6 +152,15 @@ impl Read for IoBuf {
     }
 }
 
+#[cfg(feature = "arbitrary")]
+impl arbitrary::Arbitrary<'_> for IoBuf {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let len = u.arbitrary_len::<u8>()?;
+        let data: Vec<u8> = u.arbitrary_iter()?.take(len).collect::<Result<_, _>>()?;
+        Ok(Self::from(data))
+    }
+}
+
 /// Mutable byte buffer.
 ///
 /// Use this to build or mutate payloads before freezing into `IoBuf`.
@@ -1522,5 +1531,15 @@ mod tests {
         let iobufs_bytes = iobufs.copy_to_bytes(8);
         assert_eq!(chain_bytes, iobufs_bytes);
         assert_eq!(chain_bytes.as_ref(), b"hello wo");
+    }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::IoBuf;
+        use commonware_codec::conformance::CodecConformance;
+
+        commonware_conformance::conformance_tests! {
+            CodecConformance<IoBuf>
+        }
     }
 }
