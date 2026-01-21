@@ -18,7 +18,7 @@ use crate::{
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 use bytes::{Buf, BufMut};
-use commonware_codec::{EncodeSize, Error, Read, ReadRangeExt, Write};
+use commonware_codec::{types::lazy::Lazy, EncodeSize, Error, Read, ReadRangeExt, Write};
 use commonware_utils::{
     ordered::{Quorum, Set},
     Faults, Participant,
@@ -245,6 +245,7 @@ impl<N: Namespace> Generic<N> {
         entries.sort_by_key(|(signer, _)| *signer);
         let (signer, signatures): (Vec<Participant>, Vec<_>) = entries.into_iter().unzip();
         let signers = Signers::from(self.participants.len(), signer);
+        let signatures = signatures.into_iter().map(Lazy::from).collect();
 
         Some(Certificate {
             signers,
@@ -288,6 +289,9 @@ impl<N: Namespace> Generic<N> {
         let message = subject.message();
         for (signer, signature) in certificate.signers.iter().zip(&certificate.signatures) {
             let Some(public_key) = self.participants.key(signer) else {
+                return false;
+            };
+            let Some(signature) = signature.get() else {
                 return false;
             };
 
@@ -349,6 +353,9 @@ impl<N: Namespace> Generic<N> {
         let message = subject.message();
         for (signer, signature) in certificate.signers.iter().zip(&certificate.signatures) {
             let Some(public_key) = self.participants.key(signer) else {
+                return false;
+            };
+            let Some(signature) = signature.get() else {
                 return false;
             };
             if !public_key.verify(namespace, &message, signature) {
@@ -425,7 +432,8 @@ pub struct Certificate {
     /// Bitmap of participant indices that contributed signatures.
     pub signers: Signers,
     /// Ed25519 signatures emitted by the respective participants ordered by signer index.
-    pub signatures: Vec<Ed25519Signature>,
+    /// Wrapped in [`Lazy`] to defer signature decompression.
+    pub signatures: Vec<Lazy<Ed25519Signature>>,
 }
 
 #[cfg(feature = "arbitrary")]
@@ -433,7 +441,7 @@ impl arbitrary::Arbitrary<'_> for Certificate {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let signers = Signers::arbitrary(u)?;
         let signatures = (0..signers.count())
-            .map(|_| u.arbitrary::<Ed25519Signature>())
+            .map(|_| u.arbitrary::<Ed25519Signature>().map(Lazy::from))
             .collect::<arbitrary::Result<Vec<_>>>()?;
         Ok(Self {
             signers,
@@ -467,7 +475,7 @@ impl Read for Certificate {
             ));
         }
 
-        let signatures = Vec::<Ed25519Signature>::read_range(reader, ..=*participants)?;
+        let signatures = Vec::<Lazy<Ed25519Signature>>::read_range(reader, ..=*participants)?;
         if signers.count() != signatures.len() {
             return Err(Error::Invalid(
                 "cryptography::ed25519::certificate::Certificate",

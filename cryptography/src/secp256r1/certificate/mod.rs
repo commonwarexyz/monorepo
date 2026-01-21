@@ -14,7 +14,7 @@ use crate::{
 #[cfg(not(feature = "std"))]
 use alloc::{collections::BTreeSet, vec::Vec};
 use bytes::{Buf, BufMut};
-use commonware_codec::{EncodeSize, Error, Read, ReadRangeExt, Write};
+use commonware_codec::{types::lazy::Lazy, EncodeSize, Error, Read, ReadRangeExt, Write};
 use commonware_utils::{
     ordered::{BiMap, Quorum, Set},
     Faults, Participant,
@@ -195,6 +195,7 @@ impl<P: crate::PublicKey, N: Namespace> Generic<P, N> {
         entries.sort_by_key(|(signer, _)| *signer);
         let (signer, signatures): (Vec<Participant>, Vec<_>) = entries.into_iter().unzip();
         let signers = Signers::from(self.participants.len(), signer);
+        let signatures = signatures.into_iter().map(Lazy::from).collect();
 
         Some(Certificate {
             signers,
@@ -237,6 +238,9 @@ impl<P: crate::PublicKey, N: Namespace> Generic<P, N> {
             let Some(public_key) = self.participants.value(signer.into()) else {
                 return false;
             };
+            let Some(signature) = signature.get() else {
+                return false;
+            };
             if !public_key.verify(namespace, &message, signature) {
                 return false;
             }
@@ -268,7 +272,8 @@ pub struct Certificate {
     /// Bitmap of participant indices that contributed signatures.
     pub signers: Signers,
     /// Secp256r1 signatures emitted by the respective participants ordered by signer index.
-    pub signatures: Vec<Secp256r1Signature>,
+    /// Wrapped in [`Lazy`] to defer signature decompression.
+    pub signatures: Vec<Lazy<Secp256r1Signature>>,
 }
 
 #[cfg(feature = "arbitrary")]
@@ -276,7 +281,7 @@ impl arbitrary::Arbitrary<'_> for Certificate {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let signers = Signers::arbitrary(u)?;
         let signatures = (0..signers.count())
-            .map(|_| u.arbitrary::<Secp256r1Signature>())
+            .map(|_| u.arbitrary::<Secp256r1Signature>().map(Lazy::from))
             .collect::<arbitrary::Result<Vec<_>>>()?;
         Ok(Self {
             signers,
@@ -310,7 +315,7 @@ impl Read for Certificate {
             ));
         }
 
-        let signatures = Vec::<Secp256r1Signature>::read_range(reader, ..=*participants)?;
+        let signatures = Vec::<Lazy<Secp256r1Signature>>::read_range(reader, ..=*participants)?;
         if signers.count() != signatures.len() {
             return Err(Error::Invalid(
                 "cryptography::secp256r1::certificate::Certificate",

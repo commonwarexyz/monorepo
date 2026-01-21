@@ -354,41 +354,34 @@ where
 
 /// Lazy certificate for BLS12-381 threshold VRF signatures.
 ///
-/// This is the same as [`Signature`] but with lazy decoding of the BLS points
-/// to defer expensive point decompression from the network receive path.
+/// This wraps a [`Signature`] with lazy decoding to defer expensive BLS point
+/// decompression from the network receive path.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Certificate<V: Variant> {
-    /// Signature over the consensus vote message (recovered aggregate).
-    pub vote_signature: Lazy<V::Signature>,
-    /// Signature over the per-view seed (recovered aggregate).
-    pub seed_signature: Lazy<V::Signature>,
+    /// The recovered threshold signature pair.
+    pub signature: Lazy<Signature<V>>,
 }
 
 impl<V: Variant> Certificate<V> {
-    /// Attempts to get the decoded signatures.
+    /// Attempts to get the decoded signature.
     ///
-    /// Returns `None` if either signature fails to decode.
-    pub fn get(&self) -> Option<Signature<V>> {
-        Some(Signature {
-            vote_signature: *self.vote_signature.get()?,
-            seed_signature: *self.seed_signature.get()?,
-        })
+    /// Returns `None` if the signature fails to decode.
+    pub fn get(&self) -> Option<&Signature<V>> {
+        self.signature.get()
     }
 }
 
 impl<V: Variant> From<Signature<V>> for Certificate<V> {
     fn from(sig: Signature<V>) -> Self {
         Self {
-            vote_signature: Lazy::from(sig.vote_signature),
-            seed_signature: Lazy::from(sig.seed_signature),
+            signature: Lazy::from(sig),
         }
     }
 }
 
 impl<V: Variant> Write for Certificate<V> {
     fn write(&self, writer: &mut impl BufMut) {
-        self.vote_signature.write(writer);
-        self.seed_signature.write(writer);
+        self.signature.write(writer);
     }
 }
 
@@ -396,18 +389,13 @@ impl<V: Variant> Read for Certificate<V> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let vote_signature = Lazy::<V::Signature>::read(reader)?;
-        let seed_signature = Lazy::<V::Signature>::read(reader)?;
-
-        Ok(Self {
-            vote_signature,
-            seed_signature,
-        })
+        let signature = Lazy::<Signature<V>>::read(reader)?;
+        Ok(Self { signature })
     }
 }
 
 impl<V: Variant> FixedSize for Certificate<V> {
-    const SIZE: usize = V::Signature::SIZE * 2;
+    const SIZE: usize = Signature::<V>::SIZE;
 }
 
 #[cfg(feature = "arbitrary")]
@@ -417,8 +405,7 @@ where
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         Ok(Self {
-            vote_signature: Lazy::from(u.arbitrary::<V::Signature>()?),
-            seed_signature: Lazy::from(u.arbitrary::<V::Signature>()?),
+            signature: Lazy::from(u.arbitrary::<Signature<V>>()?),
         })
     }
 }
