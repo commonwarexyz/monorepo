@@ -3305,7 +3305,7 @@ mod tests {
     /// Once the f+1 honest validators certify view 3 and advance to view 4,
     /// they can only vote to nullify view 4 (their current view) without equivocating.
     /// The `handle_timeout` function only votes to nullify `self.view` (current view).
-    fn future_notarization_does_not_rescue_stuck_validator<S, F>(mut fixture: F)
+    fn only_finalization_rescues_validator<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
@@ -3486,20 +3486,12 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_future_notarization_does_not_rescue_stuck_validator() {
-        future_notarization_does_not_rescue_stuck_validator::<_, _>(
-            bls12381_threshold_vrf::fixture::<MinPk, _>,
-        );
-        future_notarization_does_not_rescue_stuck_validator::<_, _>(
-            bls12381_threshold_vrf::fixture::<MinSig, _>,
-        );
-        future_notarization_does_not_rescue_stuck_validator::<_, _>(
-            bls12381_multisig::fixture::<MinPk, _>,
-        );
-        future_notarization_does_not_rescue_stuck_validator::<_, _>(
-            bls12381_multisig::fixture::<MinSig, _>,
-        );
-        future_notarization_does_not_rescue_stuck_validator::<_, _>(ed25519::fixture);
-        future_notarization_does_not_rescue_stuck_validator::<_, _>(secp256r1::fixture);
+    fn test_only_finalization_rescues_validator() {
+        only_finalization_rescues_validator::<_, _>(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        only_finalization_rescues_validator::<_, _>(bls12381_threshold_vrf::fixture::<MinSig, _>);
+        only_finalization_rescues_validator::<_, _>(bls12381_multisig::fixture::<MinPk, _>);
+        only_finalization_rescues_validator::<_, _>(bls12381_multisig::fixture::<MinSig, _>);
+        only_finalization_rescues_validator::<_, _>(ed25519::fixture);
+        only_finalization_rescues_validator::<_, _>(secp256r1::fixture);
     }
 }

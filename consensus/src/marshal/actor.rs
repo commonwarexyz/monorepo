@@ -293,7 +293,7 @@ where
         let tip = self.get_latest().await;
         if let Some((height, commitment, round)) = tip {
             application
-                .report(Update::Tip(height, commitment, round))
+                .report(Update::Tip(round, height, commitment))
                 .await;
             self.tip = height;
             let _ = self.finalized_height.try_set(height.get());
@@ -930,7 +930,7 @@ where
         // Update metrics and send tip update to application
         if let Some(round) = round.filter(|_| height > self.tip) {
             application
-                .report(Update::Tip(height, commitment, round))
+                .report(Update::Tip(round, height, commitment))
                 .await;
             self.tip = height;
             let _ = self.finalized_height.try_set(height.get());

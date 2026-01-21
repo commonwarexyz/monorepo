@@ -51,7 +51,7 @@ pub trait Block: Heightable + Codec + Digestible + Committable + Send + Sync + '
 
 /// CertifiableBlock extends [Block] with consensus context information.
 ///
-/// This trait is required for blocks used with deferred verification in Simplex consensus.
+/// This trait is required for blocks used with deferred verification in [CertifiableAutomaton].
 /// It allows the verification context to be derived directly from the block when a validator
 /// needs to participate in certification but never verified the block locally.
 ///

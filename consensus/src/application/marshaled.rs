@@ -16,7 +16,7 @@
 //! # Deferred Verification
 //!
 //! [`Marshaled`] uses deferred verification. Before casting a notarize vote, it waits
-//! for the block to become available (DA) and verifies that the block's embedded context
+//! for the block to become available and verifies that the block's embedded context
 //! matches the consensus context. This ensures that at least f+1 honest validators in the
 //! notarizing quorum have verified the context is valid, preventing a Byzantine proposer
 //! from embedding a malicious context. Once the context is validated, verification of block
@@ -45,11 +45,11 @@
 //!
 //! # Future Work
 //!
-//! - It is possible to not wait for data availability during notarization by caching the consensus
-//!   context at proposal and verification time. This optimization adds complexity from the perspective
-//!   that Notarization certificates no longer imply data availability, so it is deferred for now. However,
-//!   by updating marshal and other components to meet this assumption, we can improve view latency with
-//!   this technique.
+//! - It is possible to skip fetching the block during [`Automaton::verify`] and optimistically vote,
+//!   removing the need for data availability as a condition for voting to notarize. However, this
+//!   adds complexity since notarization certificates would no longer imply data availability. In
+//!   the future, by updating marshal and other components to meet this assumption, we can improve
+//!   view latency further.
 
 use crate::{
     marshal::{self, ingress::mailbox::AncestorStream, Update},
@@ -94,7 +94,7 @@ type TasksMap<B> = HashMap<(Round, <B as Committable>::Commitment), oneshot::Rec
 ///
 /// Applications do not need to re-implement these checks in their own verification logic.
 ///
-/// # Verification Context Recovery
+/// # Context Recovery
 ///
 /// With deferred verification, validators wait for DA and verify the context before voting.
 /// If a validator crashes after voting but before certification, they lose their in-memory
@@ -103,10 +103,8 @@ type TasksMap<B> = HashMap<(Round, <B as Committable>::Commitment), oneshot::Rec
 /// Blocks implement [`CertifiableBlock`] which embeds the consensus context. This embedded
 /// context is trustworthy because the notarizing quorum (which contains at least f+1 honest
 /// validators) verified that the block's context matched the consensus context before voting.
-/// This allows validators who crashed or never participated in notarization to use the
-/// block-embedded context for finalization. If a Byzantine proposer had embedded a malicious
-/// context, the f+1 honest validators would have rejected the mismatch during notarization,
-/// preventing the block from being notarized.
+/// This allows validators that crashed or never participated in notarization to use the
+/// block-embedded context for finalization.
 #[derive(Clone)]
 pub struct Marshaled<E, S, A, B, ES>
 where
@@ -183,10 +181,10 @@ where
         let mut marshal = self.marshal.clone();
         let mut application = self.application.clone();
         let epocher = self.epocher.clone();
-
         let (mut tx, rx) = oneshot::channel();
         self.context
             .with_label("verify")
+            .with_attribute("round", context.round)
             .spawn(move |runtime_context| async move {
                 // Create a future for tracking if the receiver is dropped, which could allow
                 // us to cancel work early.
@@ -221,21 +219,13 @@ where
                     }
                 };
 
-                // You can only re-propose the same block if it's the last height in its epoch.
+                // Re-proposals are pre-validated by Automaton::verify before notarization
+                // can form. At least f+1 honest validators in the notarizing quorum verified
+                // that this is a valid re-proposal at an epoch boundary, so we don't re-check
+                // here. If the check had failed, no notarization would have formed.
                 if parent.commitment() == block.commitment() {
-                    let Some(block_bounds) = epocher.containing(block.height()) else {
-                        debug!(
-                            height = %block.height(),
-                            "re-proposal block height not in any known epoch"
-                        );
-                        tx.send_lossy(false);
-                        return;
-                    };
-                    let is_valid = block.height() == block_bounds.last();
-                    if is_valid {
-                        marshal.verified(context.round, block).await;
-                    }
-                    tx.send_lossy(is_valid);
+                    marshal.verified(context.round, block).await;
+                    tx.send_lossy(true);
                     return;
                 }
 
@@ -388,6 +378,7 @@ where
         let (mut tx, rx) = oneshot::channel();
         self.context
             .with_label("propose")
+            .with_attribute("round", consensus_context.round)
             .spawn(move |runtime_context| async move {
                 // Create a future for tracking if the receiver is dropped, which could allow
                 // us to cancel work early.
@@ -499,6 +490,7 @@ where
         let (mut tx, rx) = oneshot::channel();
         self.context
             .with_label("optimistic_verify")
+            .with_attribute("round", context.round)
             .spawn(move |_| async move {
                 // Create a future for tracking if the receiver is dropped, which could allow
                 // us to cancel work early.
@@ -548,8 +540,23 @@ where
                         tx.send_lossy(false);
                         return;
                     }
-                    // Valid re-proposal at epoch boundary - skip context check since
-                    // the block retains its original embedded context.
+
+                    // Valid re-proposal at epoch boundary. Mark as verified and create
+                    // a completed task for certify. No further verification needed since
+                    // the block was already fully verified when originally proposed.
+                    let round = context.round;
+                    marshal.verified(round, block).await;
+
+                    let (task_tx, task_rx) = oneshot::channel();
+                    task_tx.send_lossy(true);
+                    marshaled
+                        .verification_tasks
+                        .lock()
+                        .await
+                        .insert((round, digest), task_rx);
+
+                    tx.send_lossy(true);
+                    return;
                 } else {
                     // Before casting a notarize vote, ensure the block's embedded context matches
                     // the consensus context. This is a critical step - the notarize quorum is
@@ -601,7 +608,6 @@ where
         let mut tasks_guard = self.verification_tasks.lock().await;
         let task = tasks_guard.remove(&(round, payload));
         drop(tasks_guard);
-
         if let Some(task) = task {
             return task;
         }
@@ -623,6 +629,7 @@ where
         let (mut tx, rx) = oneshot::channel();
         self.context
             .with_label("certify")
+            .with_attribute("round", round)
             .spawn(move |_| async move {
                 // Create a future for tracking if the receiver is dropped, which could allow
                 // us to cancel work early.
@@ -712,7 +719,7 @@ where
     /// Relays a report to the underlying [`Application`] and cleans up old verification tasks.
     async fn report(&mut self, update: Self::Activity) {
         // Clean up verification tasks for rounds <= the finalized round.
-        if let Update::Tip(_, _, round) = &update {
+        if let Update::Tip(round, _, _) = &update {
             let mut tasks_guard = self.verification_tasks.lock().await;
             tasks_guard.retain(|(task_round, _), _| task_round > round);
         }

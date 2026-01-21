@@ -18,14 +18,14 @@ where
     C: Signer,
     V: Variant,
 {
+    /// The consensus context when this block was proposed.
+    pub context: Context<H::Digest, C::PublicKey>,
+
     /// The parent digest.
     pub parent: H::Digest,
 
     /// The current height.
     pub height: Height,
-
-    /// The consensus context when this block was proposed.
-    pub context: Context<H::Digest, C::PublicKey>,
 
     /// An optional outcome of a dealing operation.
     pub log: Option<SignedDealerLog<V, C>>,
@@ -39,15 +39,15 @@ where
 {
     /// Create a new [Block].
     pub const fn new(
+        context: Context<H::Digest, C::PublicKey>,
         parent: H::Digest,
         height: Height,
-        context: Context<H::Digest, C::PublicKey>,
         log: Option<SignedDealerLog<V, C>>,
     ) -> Self {
         Self {
+            context,
             parent,
             height,
-            context,
             log,
         }
     }
@@ -60,9 +60,9 @@ where
     V: Variant,
 {
     fn write(&self, buf: &mut impl BufMut) {
+        self.context.write(buf);
         self.parent.write(buf);
         self.height.write(buf);
-        self.context.write(buf);
         self.log.write(buf);
     }
 }
@@ -74,9 +74,9 @@ where
     V: Variant,
 {
     fn encode_size(&self) -> usize {
-        self.parent.encode_size()
+        self.context.encode_size()
+            + self.parent.encode_size()
             + self.height.encode_size()
-            + self.context.encode_size()
             + self.log.encode_size()
     }
 }
@@ -92,9 +92,9 @@ where
 
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
         Ok(Self {
+            context: Context::read(buf)?,
             parent: H::Digest::read(buf)?,
             height: Height::read(buf)?,
-            context: Context::read(buf)?,
             log: Read::read_cfg(buf, cfg)?,
         })
     }
@@ -171,9 +171,9 @@ where
     V: Variant,
 {
     Block::new(
+        context,
         <<H as Hasher>::Digest as Digest>::EMPTY,
         Height::zero(),
-        context,
         None,
     )
 }

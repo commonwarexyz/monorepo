@@ -85,7 +85,7 @@ use commonware_utils::{acknowledgement::Exact, Acknowledgement};
 #[derive(Clone, Debug)]
 pub enum Update<B: Block, A: Acknowledgement = Exact> {
     /// A new finalized tip and the finalization round.
-    Tip(Height, B::Commitment, Round),
+    Tip(Round, Height, B::Commitment),
     /// A new finalized block and an [Acknowledgement] for the application to signal once processed.
     ///
     /// To ensure all blocks are delivered at least once, marshal waits to mark a block as delivered
