@@ -91,7 +91,7 @@ where
     let handle = NodeHandle::new(ledger.clone());
     let app = RevmApplication::<ThresholdScheme>::new(block_cfg.max_txs, state.clone());
 
-    let finalized_reporter = FinalizedReporter::new(ledger.clone());
+    let finalized_reporter = FinalizedReporter::new(ledger.clone(), context.clone());
 
     let marshal_mailbox = start_marshal(
         &context,
