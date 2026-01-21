@@ -1661,7 +1661,6 @@ mod tests {
     use commonware_utils::test_rng;
     use proptest::{prelude::*, strategy::Strategy};
     use rand::{rngs::StdRng, SeedableRng};
-    use rand_core::CryptoRngCore;
     use std::{
         collections::{BTreeSet, HashMap},
         num::NonZeroUsize,
@@ -2093,78 +2092,88 @@ mod tests {
         assert!(display.contains("REDACTED"));
     }
 
-    fn test_msm_parallel_sizes<G>(
-        rng: &mut impl CryptoRngCore,
-        par: &impl commonware_parallel::Strategy,
-    ) where
-        G: Space<Scalar> + CryptoGroup + PartialEq + Debug + Copy,
-        for<'a> G: Mul<&'a Scalar, Output = G>,
+    fn test_msm_parallel_impl<G>(points: Vec<G>, scalars: Vec<Scalar>)
+    where
+        G: Space<Scalar> + PartialEq + Debug + Copy,
     {
-        for n in [
-            MIN_PARALLEL_POINTS - 1,
-            MIN_PARALLEL_POINTS,
-            MIN_PARALLEL_POINTS + 1,
-            100,
-        ] {
-            let mut points = Vec::with_capacity(n);
-            for _ in 0..n {
-                points.push(G::generator() * &Scalar::random(&mut *rng));
-            }
-            let mut scalars = Vec::with_capacity(n);
-            for _ in 0..n {
-                scalars.push(Scalar::random(&mut *rng));
-            }
-            let seq = G::msm(&points, &scalars, &Sequential);
-            assert_eq!(seq, G::msm(&points, &scalars, par));
-        }
-    }
-
-    #[test]
-    fn test_msm_parallel() {
-        let mut rng = test_rng();
         let par = Rayon::new(NonZeroUsize::new(8).unwrap()).unwrap();
-
-        test_msm_parallel_sizes::<G1>(&mut rng, &par);
-        test_msm_parallel_sizes::<G2>(&mut rng, &par);
+        let seq = G::msm(&points, &scalars, &Sequential);
+        assert_eq!(seq, G::msm(&points, &scalars, &par));
     }
 
-    fn test_msm_parallel_edge_cases<G>(
-        rng: &mut impl CryptoRngCore,
-        par: &impl commonware_parallel::Strategy,
+    fn test_msm_parallel_edge_cases_impl<G>(
+        points: Vec<G>,
+        scalars: Vec<Scalar>,
+        single_point: G,
+        single_scalar: Scalar,
+        idx: usize,
     ) where
-        G: Space<Scalar> + CryptoGroup + PartialEq + Debug + Copy,
+        G: Space<Scalar> + Additive + PartialEq + Debug + Copy,
         for<'a> G: Mul<&'a Scalar, Output = G>,
     {
-        let n = 50;
+        let par = Rayon::new(NonZeroUsize::new(8).unwrap()).unwrap();
+        let n = points.len();
+
         // All zero scalars
-        let mut pts = Vec::with_capacity(n);
-        for _ in 0..n {
-            pts.push(G::generator() * &Scalar::random(&mut *rng));
-        }
-        assert_eq!(G::msm(&pts, &vec![Scalar::zero(); n], par), G::zero());
+        assert_eq!(G::msm(&points, &vec![Scalar::zero(); n], &par), G::zero());
+
         // All identity points
-        let mut scalars = Vec::with_capacity(n);
-        for _ in 0..n {
-            scalars.push(Scalar::random(&mut *rng));
-        }
-        assert_eq!(G::msm(&vec![G::zero(); n], &scalars, par), G::zero());
+        assert_eq!(G::msm(&vec![G::zero(); n], &scalars, &par), G::zero());
+
         // Single nonzero among zeros
         let mut pts = vec![G::zero(); n];
         let mut scalars = vec![Scalar::zero(); n];
-        let p = G::generator() * &Scalar::random(&mut *rng);
-        let s = Scalar::random(&mut *rng);
-        pts[25] = p;
-        scalars[25] = s.clone();
-        assert_eq!(G::msm(&pts, &scalars, par), p * &s);
+        pts[idx] = single_point;
+        scalars[idx] = single_scalar.clone();
+        assert_eq!(G::msm(&pts, &scalars, &par), single_point * &single_scalar);
     }
 
-    #[test]
-    fn test_msm_parallel_edge_cases_test() {
-        let mut rng = test_rng();
-        let par = Rayon::new(NonZeroUsize::new(8).unwrap()).unwrap();
+    proptest! {
+        #[test]
+        fn test_msm_parallel_g1(
+            points in prop::collection::vec(any::<G1>(), MIN_PARALLEL_POINTS..=100),
+            scalars in prop::collection::vec(any::<Scalar>(), MIN_PARALLEL_POINTS..=100),
+        ) {
+            let n = points.len().min(scalars.len());
+            test_msm_parallel_impl(
+                points.into_iter().take(n).collect(),
+                scalars.into_iter().take(n).collect(),
+            );
+        }
 
-        test_msm_parallel_edge_cases::<G1>(&mut rng, &par);
-        test_msm_parallel_edge_cases::<G2>(&mut rng, &par);
+        #[test]
+        fn test_msm_parallel_g2(
+            points in prop::collection::vec(any::<G2>(), MIN_PARALLEL_POINTS..=100),
+            scalars in prop::collection::vec(any::<Scalar>(), MIN_PARALLEL_POINTS..=100),
+        ) {
+            let n = points.len().min(scalars.len());
+            test_msm_parallel_impl(
+                points.into_iter().take(n).collect(),
+                scalars.into_iter().take(n).collect(),
+            );
+        }
+
+        #[test]
+        fn test_msm_parallel_edge_cases_g1(
+            points in prop::collection::vec(any::<G1>(), 50..=50),
+            scalars in prop::collection::vec(any::<Scalar>(), 50..=50),
+            single_point in any::<G1>(),
+            single_scalar in any::<Scalar>(),
+            idx in 0usize..50,
+        ) {
+            test_msm_parallel_edge_cases_impl(points, scalars, single_point, single_scalar, idx);
+        }
+
+        #[test]
+        fn test_msm_parallel_edge_cases_g2(
+            points in prop::collection::vec(any::<G2>(), 50..=50),
+            scalars in prop::collection::vec(any::<Scalar>(), 50..=50),
+            single_point in any::<G2>(),
+            single_scalar in any::<Scalar>(),
+            idx in 0usize..50,
+        ) {
+            test_msm_parallel_edge_cases_impl(points, scalars, single_point, single_scalar, idx);
+        }
     }
 
     #[test]
