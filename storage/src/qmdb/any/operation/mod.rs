@@ -6,11 +6,10 @@ use commonware_codec::{Codec, Encode as _};
 use commonware_utils::{hex, Array};
 use std::fmt;
 
-mod fixed;
-mod variable;
-
-pub(super) mod update;
-pub(super) use update::Update;
+pub(crate) mod fixed;
+pub(crate) mod update;
+pub(crate) mod variable;
+pub(crate) use update::Update;
 
 const DELETE_CONTEXT: u8 = 0xD1;
 const UPDATE_CONTEXT: u8 = 0xD2;

@@ -14,6 +14,10 @@ hash = "f631238a016fb44fd2dee9eeb5bd20fc5052f33434810599b8ba6535e2ad8e97"
 n_cases = 65536
 hash = "ad245f64a57c96036599647eaf509937173e9de01503a9e6494f29571191ade1"
 
+["commonware_cryptography::bls12381::certificate::threshold::tests::conformance::CodecConformance<Certificate<MinSig>>"]
+n_cases = 65536
+hash = "ba2d888e6d1050e6a361aa79430c1bb03d90eb8e74b9715b1d7d01c35a495e1d"
+
 ["commonware_cryptography::bls12381::dkg::test::conformance::CodecConformance<AckOrReveal<ed25519::PublicKey>>"]
 n_cases = 65536
 hash = "97c266fb7821326e6333be0859025c774220c8d010e488d2fd13a743e4135f64"
