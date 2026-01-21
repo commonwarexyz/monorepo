@@ -89,9 +89,9 @@ where
 
         // Create a new block with the consensus context
         Some(Block::new(
+            context,
             parent_commitment,
             parent_block.height().next(),
-            context,
             reshare,
         ))
     }
