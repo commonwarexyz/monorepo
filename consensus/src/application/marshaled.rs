@@ -526,7 +526,7 @@ where
 
                 // Before casting a notarize vote, ensure the block's embedded context matches
                 // the consensus context.
-
+                //
                 // This is a critical step - the notarize quorum is guaranteed to have at least
                 // f+1 honest validators who will verify against this context, preventing a Byzantine
                 // proposer from embedding a malicious context. The other f honest validators who did
