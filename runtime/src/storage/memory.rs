@@ -269,7 +269,7 @@ mod tests {
 
         // Read at logical offset 0 returns data from raw offset 8
         let read_buf = blob.read_at(0, IoBufMut::zeroed(data.len())).await.unwrap();
-        assert_eq!(read_buf.coalesce().as_ref(), data);
+        assert_eq!(read_buf.coalesce(), data);
 
         // Corrupted blob recovery (0 < raw_size < 8)
         {

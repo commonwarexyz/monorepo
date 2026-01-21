@@ -218,7 +218,7 @@ mod tests {
 
         // Read data from the blob
         let read = blob.read_at(0, IoBufMut::zeroed(11)).await.unwrap();
-        assert_eq!(read.coalesce().as_ref(), b"hello world");
+        assert_eq!(read.coalesce(), b"hello world");
         let reads = storage.metrics.storage_reads.get();
         let read_bytes = storage.metrics.storage_read_bytes.get();
         assert_eq!(

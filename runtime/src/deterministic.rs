@@ -1664,7 +1664,7 @@ mod tests {
             let (blob, len) = context.open(partition, name).await.unwrap();
             assert_eq!(len, data.len() as u64);
             let read = blob.read_at(0, IoBufMut::zeroed(data.len())).await.unwrap();
-            assert_eq!(read.coalesce().as_ref(), data);
+            assert_eq!(read.coalesce(), data);
         });
     }
 

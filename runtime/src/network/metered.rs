@@ -231,8 +231,8 @@ mod tests {
 
         let response = client_stream.recv(MSG_SIZE).await.unwrap();
         let response = response.coalesce();
-        assert_eq!(response.as_ref().len(), MSG_SIZE as usize);
-        assert_eq!(response.as_ref(), msg);
+        assert_eq!(response.len(), MSG_SIZE as usize);
+        assert_eq!(response, msg.as_slice());
 
         // Wait for server to complete
         server.await.unwrap();

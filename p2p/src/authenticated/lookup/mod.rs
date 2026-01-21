@@ -291,7 +291,7 @@ mod tests {
                         while received.len() < n - 1 {
                             // Ensure message equals sender identity
                             let (sender, message) = receiver.recv().await.unwrap();
-                            assert_eq!(sender.as_ref(), message.as_ref());
+                            assert_eq!(message, sender.as_ref());
 
                             // Add to received set
                             received.insert(sender);
@@ -567,7 +567,7 @@ mod tests {
                         } else {
                             // Ensure message equals sender identity
                             let (sender, message) = receiver.recv().await.unwrap();
-                            assert_eq!(sender.as_ref(), message.as_ref());
+                            assert_eq!(message, sender.as_ref());
                         }
                     });
 
@@ -1103,7 +1103,7 @@ mod tests {
                             let mut received = HashSet::new();
                             while received.len() < n - 1 {
                                 let (sender, message) = receiver.recv().await.unwrap();
-                                assert_eq!(sender.as_ref(), message.as_ref());
+                                assert_eq!(message, sender.as_ref());
                                 received.insert(sender);
                             }
                             complete_sender.send(()).await.unwrap();
@@ -1233,7 +1233,7 @@ mod tests {
                             let mut received = HashSet::new();
                             while received.len() < n - 1 {
                                 let (sender, message) = receiver.recv().await.unwrap();
-                                assert_eq!(sender.as_ref(), message.as_ref());
+                                assert_eq!(message, sender.as_ref());
                                 received.insert(sender);
                             }
                             complete_sender.send(()).await.unwrap();
@@ -1470,7 +1470,7 @@ mod tests {
                 // Verify peer 0 received the message
                 let (sender, msg) = receiver0.recv().await.unwrap();
                 assert_eq!(sender, peer1.public_key());
-                assert_eq!(msg.as_ref(), peer1.public_key().as_ref());
+                assert_eq!(msg, peer1.public_key().as_ref());
             });
         }
     }
@@ -1563,7 +1563,7 @@ mod tests {
                 let mut received = HashSet::new();
                 while received.len() < n - 1 {
                     let (sender, message): (ed25519::PublicKey, _) = receiver.recv().await.unwrap();
-                    assert_eq!(sender.as_ref(), message.as_ref());
+                    assert_eq!(message, sender.as_ref());
                     received.insert(sender);
                 }
             }
@@ -1685,7 +1685,7 @@ mod tests {
                     while received.len() < n - 1 {
                         let (sender, message): (ed25519::PublicKey, _) =
                             restarted_receiver.recv().await.unwrap();
-                        assert_eq!(sender.as_ref(), message.as_ref());
+                        assert_eq!(message, sender.as_ref());
                         received.insert(sender);
                     }
                 }
@@ -1783,7 +1783,7 @@ mod tests {
                 let mut received = HashSet::new();
                 while received.len() < n - 1 {
                     let (sender, message): (ed25519::PublicKey, _) = receiver.recv().await.unwrap();
-                    assert_eq!(sender.as_ref(), message.as_ref());
+                    assert_eq!(message, sender.as_ref());
                     received.insert(sender);
                 }
             }
@@ -1878,7 +1878,7 @@ mod tests {
                 let mut received = HashSet::new();
                 while received.len() < n - 1 {
                     let (sender, message): (ed25519::PublicKey, _) = receiver.recv().await.unwrap();
-                    assert_eq!(sender.as_ref(), message.as_ref());
+                    assert_eq!(message, sender.as_ref());
                     received.insert(sender);
                 }
             }

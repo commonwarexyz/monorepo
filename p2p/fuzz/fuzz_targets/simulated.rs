@@ -240,7 +240,7 @@ fn fuzz(input: FuzzInput) {
 
                                 // Find message in expected queue
                                 // Messages can be dropped, but if received they must be in order
-                                if let Some(pos) = queue.iter().position(|m| m.as_ref() == message.as_ref()) {
+                                if let Some(pos) = queue.iter().position(|m| *m == message) {
                                     // Remove all messages up to and including this one
                                     // Messages before it were implicitly dropped, this one is received
                                     for _ in 0..=pos {

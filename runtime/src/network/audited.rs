@@ -263,7 +263,7 @@ mod tests {
 
                 // Receive data from client
                 let received = stream.recv(CLIENT_MSG.len() as u64).await.unwrap();
-                assert_eq!(received.coalesce().as_ref(), CLIENT_MSG.as_bytes());
+                assert_eq!(received.coalesce(), CLIENT_MSG.as_bytes());
 
                 // Send response
                 sink.send(SERVER_MSG.as_bytes()).await.unwrap();
@@ -284,7 +284,7 @@ mod tests {
 
                 // Receive response
                 let received = stream.recv(SERVER_MSG.len() as u64).await.unwrap();
-                assert_eq!(received.coalesce().as_ref(), SERVER_MSG.as_bytes());
+                assert_eq!(received.coalesce(), SERVER_MSG.as_bytes());
             });
             client_handles.push(handle);
         }

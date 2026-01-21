@@ -1487,18 +1487,18 @@ mod tests {
             // Verify routing: peer_a messages go to primary, peer_b to secondary
             let (sender, payload) = twin_primary_recv.recv().await.unwrap();
             assert_eq!(sender, peer_a);
-            assert_eq!(payload.as_ref(), b"from_a");
+            assert_eq!(payload, b"from_a");
             let (sender, payload) = twin_secondary_recv.recv().await.unwrap();
             assert_eq!(sender, peer_b);
-            assert_eq!(payload.as_ref(), b"from_b");
+            assert_eq!(payload, b"from_b");
 
             // Verify routing: primary sends to peer_a, secondary to peer_b
             let (sender, payload) = peer_a_recv.recv().await.unwrap();
             assert_eq!(sender, twin);
-            assert_eq!(payload.as_ref(), b"primary_out");
+            assert_eq!(payload, b"primary_out");
             let (sender, payload) = peer_b_recv.recv().await.unwrap();
             assert_eq!(sender, twin);
-            assert_eq!(payload.as_ref(), b"secondary_out");
+            assert_eq!(payload, b"secondary_out");
         });
     }
 
@@ -1569,10 +1569,10 @@ mod tests {
             // Verify both receivers get the message
             let (sender, payload) = twin_primary_recv.recv().await.unwrap();
             assert_eq!(sender, peer_c);
-            assert_eq!(payload.as_ref(), b"to_both");
+            assert_eq!(payload, b"to_both");
             let (sender, payload) = twin_secondary_recv.recv().await.unwrap();
             assert_eq!(sender, peer_c);
-            assert_eq!(payload.as_ref(), b"to_both");
+            assert_eq!(payload, b"to_both");
         });
     }
 
@@ -1813,7 +1813,7 @@ mod tests {
 
             for expected_msg in expected {
                 let (_pk, bytes) = receiver.recv().await.unwrap();
-                assert_eq!(bytes.as_ref(), expected_msg.as_slice());
+                assert_eq!(bytes, expected_msg.as_slice());
             }
 
             drop(oracle);
@@ -1899,12 +1899,12 @@ mod tests {
                 .unwrap();
 
             let (_pk, received_a) = recv_a.recv().await.unwrap();
-            assert_eq!(received_a.as_ref(), big_msg.as_slice());
+            assert_eq!(received_a, big_msg.as_slice());
             let elapsed_a = context.current().duration_since(start).unwrap();
             assert!(elapsed_a >= Duration::from_secs(20));
 
             let (_pk, received_b) = recv_b.recv().await.unwrap();
-            assert_eq!(received_b.as_ref(), big_msg.as_slice());
+            assert_eq!(received_b, big_msg.as_slice());
             let elapsed_b = context.current().duration_since(start).unwrap();
             assert!(elapsed_b >= Duration::from_secs(20));
 

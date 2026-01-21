@@ -49,7 +49,7 @@ mod tests {
                 .recv(CLIENT_SEND_DATA.len() as u64)
                 .await
                 .expect("Failed to receive");
-            assert_eq!(received.coalesce().as_ref(), CLIENT_SEND_DATA);
+            assert_eq!(received.coalesce(), CLIENT_SEND_DATA);
             sink.send(IoBuf::from(SERVER_SEND_DATA))
                 .await
                 .expect("Failed to send");
@@ -71,7 +71,7 @@ mod tests {
                 .recv(SERVER_SEND_DATA.len() as u64)
                 .await
                 .expect("Failed to receive data");
-            assert_eq!(received.coalesce().as_ref(), SERVER_SEND_DATA);
+            assert_eq!(received.coalesce(), SERVER_SEND_DATA);
         });
 
         // Wait for both tasks to complete
@@ -101,7 +101,7 @@ mod tests {
                     .recv(CLIENT_SEND_DATA.len() as u64)
                     .await
                     .expect("Failed to receive");
-                assert_eq!(received.coalesce().as_ref(), CLIENT_SEND_DATA);
+                assert_eq!(received.coalesce(), CLIENT_SEND_DATA);
 
                 sink.send(IoBuf::from(SERVER_SEND_DATA))
                     .await
@@ -129,7 +129,7 @@ mod tests {
                     .await
                     .expect("Failed to receive data");
                 // Verify the received data
-                assert_eq!(received.coalesce().as_ref(), SERVER_SEND_DATA);
+                assert_eq!(received.coalesce(), SERVER_SEND_DATA);
             }
         });
 
@@ -186,7 +186,7 @@ mod tests {
                     .recv(CHUNK_SIZE as u64)
                     .await
                     .expect("Failed to receive chunk");
-                assert_eq!(received.coalesce().as_ref(), &pattern[..]);
+                assert_eq!(received.coalesce(), &pattern[..]);
             }
         });
 
@@ -261,7 +261,7 @@ mod tests {
                 for _ in 0..NUM_MESSAGES {
                     sink.send(payload.clone()).await.unwrap();
                     let received = stream.recv(MESSAGE_SIZE as u64).await.unwrap();
-                    assert_eq!(received.coalesce().as_ref(), &payload[..]);
+                    assert_eq!(received.coalesce(), &payload[..]);
                 }
             }));
         }

@@ -743,7 +743,7 @@ mod tests {
 
             // Read spanning both blob and buffer
             let combo_read_buf_vec = writer.read_at(16, IoBufMut::zeroed(12)).await.unwrap();
-            assert_eq!(combo_read_buf_vec.coalesce().as_ref(), b"shed more da");
+            assert_eq!(combo_read_buf_vec.coalesce(), b"shed more da");
 
             // Verify complete content by reopening
             writer.sync().await.unwrap();

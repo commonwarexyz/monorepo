@@ -78,7 +78,7 @@ mod tests {
         let encoded = original.encode();
         let decoded = Data::decode_cfg(encoded, &(13..=13).into()).unwrap();
         assert_eq!(decoded.channel, 12345);
-        assert_eq!(decoded.message.as_ref(), b"Hello, world!");
+        assert_eq!(decoded.message, b"Hello, world!");
 
         let original2 = Data {
             channel: 12345,

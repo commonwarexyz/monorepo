@@ -173,13 +173,13 @@ mod tests {
         // Read data from the blobs
         let read = blob1.read_at(0, IoBufMut::zeroed(11)).await.unwrap();
         assert_eq!(
-            read.coalesce().as_ref(),
+            read.coalesce(),
             b"hello world",
             "Blob1 content does not match"
         );
         let read = blob2.read_at(0, IoBufMut::zeroed(11)).await.unwrap();
         assert_eq!(
-            read.coalesce().as_ref(),
+            read.coalesce(),
             b"hello world",
             "Blob2 content does not match"
         );

@@ -882,7 +882,7 @@ mod tests {
             // Receive the response with pk1's receiver.
             let (from, bytes) = rx1.recv().await.unwrap();
             assert_eq!(from, pk2);
-            assert_eq!(bytes.as_ref(), b"TEST");
+            assert_eq!(bytes, b"TEST");
         });
     }
 

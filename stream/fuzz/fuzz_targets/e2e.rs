@@ -246,11 +246,7 @@ fn fuzz(input: FuzzInput) {
                     let frame = recv_frame(a_in, MAX_MESSAGE_SIZE).await.unwrap();
                     send_frame(a_out, frame, MAX_MESSAGE_SIZE).await.unwrap();
                     let data2 = receiver.recv().await.unwrap();
-                    assert_eq!(
-                        data.as_slice(),
-                        data2.coalesce().as_ref(),
-                        "expected data to match"
-                    );
+                    assert_eq!(data2.coalesce(), data.as_slice(), "expected data to match");
                 }
                 Message::Unauthenticated(direction, data) => {
                     let (sender, a_in, a_out, receiver): (

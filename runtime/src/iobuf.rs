@@ -62,6 +62,34 @@ impl AsRef<[u8]> for IoBuf {
     }
 }
 
+impl PartialEq<[u8]> for IoBuf {
+    #[inline]
+    fn eq(&self, other: &[u8]) -> bool {
+        self.as_ref() == other
+    }
+}
+
+impl PartialEq<&[u8]> for IoBuf {
+    #[inline]
+    fn eq(&self, other: &&[u8]) -> bool {
+        self.as_ref() == *other
+    }
+}
+
+impl<const N: usize> PartialEq<[u8; N]> for IoBuf {
+    #[inline]
+    fn eq(&self, other: &[u8; N]) -> bool {
+        self.as_ref() == other
+    }
+}
+
+impl<const N: usize> PartialEq<&[u8; N]> for IoBuf {
+    #[inline]
+    fn eq(&self, other: &&[u8; N]) -> bool {
+        self.as_ref() == *other
+    }
+}
+
 impl Buf for IoBuf {
     #[inline]
     fn remaining(&self) -> usize {
@@ -264,6 +292,34 @@ impl AsMut<[u8]> for IoBufMut {
     #[inline]
     fn as_mut(&mut self) -> &mut [u8] {
         self.inner.as_mut()
+    }
+}
+
+impl PartialEq<[u8]> for IoBufMut {
+    #[inline]
+    fn eq(&self, other: &[u8]) -> bool {
+        self.as_ref() == other
+    }
+}
+
+impl PartialEq<&[u8]> for IoBufMut {
+    #[inline]
+    fn eq(&self, other: &&[u8]) -> bool {
+        self.as_ref() == *other
+    }
+}
+
+impl<const N: usize> PartialEq<[u8; N]> for IoBufMut {
+    #[inline]
+    fn eq(&self, other: &[u8; N]) -> bool {
+        self.as_ref() == other
+    }
+}
+
+impl<const N: usize> PartialEq<&[u8; N]> for IoBufMut {
+    #[inline]
+    fn eq(&self, other: &&[u8; N]) -> bool {
+        self.as_ref() == *other
     }
 }
 
@@ -784,11 +840,11 @@ mod tests {
     fn test_iobuf_copy_from_slice() {
         let data = vec![1u8, 2, 3, 4, 5];
         let buf = IoBuf::copy_from_slice(&data);
-        assert_eq!(buf.as_ref(), &[1, 2, 3, 4, 5]);
+        assert_eq!(buf, [1, 2, 3, 4, 5]);
         assert_eq!(buf.len(), 5);
 
         drop(data);
-        assert_eq!(buf.as_ref(), &[1, 2, 3, 4, 5]);
+        assert_eq!(buf, [1, 2, 3, 4, 5]);
 
         let empty = IoBuf::copy_from_slice(&[]);
         assert!(empty.is_empty());
@@ -819,6 +875,38 @@ mod tests {
     }
 
     #[test]
+    fn test_iobuf_equality_with_slice() {
+        let buf = IoBuf::from(b"hello".as_slice());
+        assert_eq!(buf, *b"hello");
+        assert_eq!(buf, b"hello");
+        assert_ne!(buf, *b"world");
+        assert_ne!(buf, b"world");
+    }
+
+    #[test]
+    fn test_iobuf_codec_roundtrip() {
+        use commonware_codec::{Decode, Encode, RangeCfg};
+
+        let cfg: RangeCfg<usize> = (0..=1024).into();
+
+        let original = IoBuf::from(b"hello world".as_slice());
+        let encoded = original.encode();
+        let decoded = IoBuf::decode_cfg(encoded.as_ref(), &cfg).unwrap();
+        assert_eq!(original, decoded);
+
+        let empty = IoBuf::default();
+        let encoded = empty.encode();
+        let decoded = IoBuf::decode_cfg(encoded.as_ref(), &cfg).unwrap();
+        assert_eq!(empty, decoded);
+
+        let large_cfg: RangeCfg<usize> = (0..=20000).into();
+        let large = IoBuf::from(vec![42u8; 10000]);
+        let encoded = large.encode();
+        let decoded = IoBuf::decode_cfg(encoded.as_ref(), &large_cfg).unwrap();
+        assert_eq!(large, decoded);
+    }
+
+    #[test]
     fn test_iobuf_copy_to_bytes() {
         let mut buf = IoBuf::from(b"hello world".as_slice());
         let first = buf.copy_to_bytes(5);
@@ -834,18 +922,18 @@ mod tests {
         let buf = IoBuf::from(b"hello world".as_slice());
 
         let slice = buf.slice(..5);
-        assert_eq!(slice.as_ref(), b"hello");
+        assert_eq!(slice, b"hello");
 
         let slice = buf.slice(6..);
-        assert_eq!(slice.as_ref(), b"world");
+        assert_eq!(slice, b"world");
 
         let slice = buf.slice(3..8);
-        assert_eq!(slice.as_ref(), b"lo wo");
+        assert_eq!(slice, b"lo wo");
 
         let slice = buf.slice(5..5);
         assert!(slice.is_empty());
 
-        assert_eq!(buf.as_ref(), b"hello world");
+        assert_eq!(buf, b"hello world");
     }
 
     #[test]
@@ -859,13 +947,13 @@ mod tests {
     fn test_iobuf_mut_build_and_freeze() {
         let mut buf = IoBufMut::with_capacity(100);
         buf.put_slice(b"hello");
-        assert_eq!(buf.as_ref(), b"hello");
+        assert_eq!(buf, b"hello");
 
         buf.put_slice(b" world");
-        assert_eq!(buf.as_ref(), b"hello world");
+        assert_eq!(buf, b"hello world");
 
         let frozen = buf.freeze();
-        assert_eq!(frozen.as_ref(), b"hello world");
+        assert_eq!(frozen, b"hello world");
     }
 
     #[test]
@@ -885,7 +973,7 @@ mod tests {
             buf.set_len(5);
         }
         assert_eq!(buf.len(), 5);
-        assert_eq!(buf.as_ref(), &[0xAB; 5]);
+        assert_eq!(buf, &[0xAB; 5]);
     }
 
     #[test]
@@ -893,7 +981,7 @@ mod tests {
         let mut buf = IoBufMut::zeroed(10);
         assert_eq!(buf.len(), 10);
         assert!(buf.capacity() >= 10);
-        assert_eq!(buf.as_ref(), &[0u8; 10]);
+        assert_eq!(buf, &[0u8; 10]);
 
         // Can write into it via as_mut
         buf.as_mut()[..5].copy_from_slice(b"hello");
@@ -956,7 +1044,7 @@ mod tests {
         let mut bufs = IoBufs::from(b"middle".as_slice());
         bufs.prepend(IoBuf::from(b"start ".as_slice()));
         bufs.append(IoBuf::from(b" end".as_slice()));
-        assert_eq!(bufs.coalesce().as_ref(), b"start middle end");
+        assert_eq!(bufs.coalesce(), b"start middle end");
     }
 
     #[test]
@@ -969,7 +1057,7 @@ mod tests {
         bufs.advance(3);
         assert_eq!(bufs.len(), 8);
 
-        assert_eq!(bufs.coalesce().as_ref(), b"lo world");
+        assert_eq!(bufs.coalesce(), b"lo world");
     }
 
     #[test]
@@ -990,7 +1078,7 @@ mod tests {
         bufs.advance(1);
         assert_eq!(bufs.chunk(), b"world");
 
-        assert_eq!(bufs.coalesce().as_ref(), b"world");
+        assert_eq!(bufs.coalesce(), b"world");
     }
 
     #[test]
@@ -1125,7 +1213,7 @@ mod tests {
         let buf2 = IoBufMut::from(b" world".as_ref());
         let bufs = IoBufsMut::from(vec![buf1, buf2]);
         let coalesced = bufs.coalesce();
-        assert_eq!(coalesced.as_ref(), b"hello world");
+        assert_eq!(coalesced, b"hello world");
     }
 
     #[test]
@@ -1248,7 +1336,7 @@ mod tests {
         assert_eq!(bufs.len(), 5);
 
         bufs.put_slice(b" world");
-        assert_eq!(bufs.coalesce().as_ref(), b"hello world");
+        assert_eq!(bufs.coalesce(), b"hello world");
     }
 
     #[test]
@@ -1273,7 +1361,7 @@ mod tests {
         // Write data
         bufs.put_slice(b"hello");
         bufs.put_slice(b" world");
-        assert_eq!(bufs.coalesce().as_ref(), b"hello world");
+        assert_eq!(bufs.coalesce(), b"hello world");
     }
 
     #[test]
@@ -1332,7 +1420,7 @@ mod tests {
         let mut bufs = IoBufsMut::from(vec![buf1, buf2]);
 
         bufs.advance(3);
-        assert_eq!(bufs.coalesce().as_ref(), b"lo world");
+        assert_eq!(bufs.coalesce(), b"lo world");
     }
 
     #[test]
@@ -1354,7 +1442,7 @@ mod tests {
     fn test_iobufsmut_copy_from_slice_single() {
         let mut bufs = IoBufsMut::from(IoBufMut::zeroed(11));
         bufs.copy_from_slice(b"hello world");
-        assert_eq!(bufs.coalesce().as_ref(), b"hello world");
+        assert_eq!(bufs.coalesce(), b"hello world");
     }
 
     #[test]
@@ -1368,8 +1456,8 @@ mod tests {
         // Verify each chunk was filled correctly
         match &bufs {
             IoBufsMut::Chunked(chunks) => {
-                assert_eq!(chunks[0].as_ref(), b"hello");
-                assert_eq!(chunks[1].as_ref(), b" world");
+                assert_eq!(chunks[0], b"hello");
+                assert_eq!(chunks[1], b" world");
             }
             _ => panic!("expected Chunked variant"),
         }
@@ -1444,8 +1532,8 @@ mod tests {
         let mut chain_content = bm1.to_vec();
         chain_content.extend_from_slice(&bm2);
         chain_content.extend_from_slice(&bm3);
-        assert_eq!(frozen.as_ref(), chain_content.as_slice());
-        assert_eq!(frozen.as_ref(), b"hello world!");
+        assert_eq!(frozen, chain_content.as_slice());
+        assert_eq!(frozen, b"hello world!");
     }
 
     #[test]

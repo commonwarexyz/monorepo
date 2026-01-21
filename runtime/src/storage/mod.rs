@@ -302,7 +302,7 @@ pub(crate) mod tests {
         let read = blob.read_at(0, IoBufMut::zeroed(11)).await.unwrap();
 
         assert_eq!(
-            read.coalesce().as_ref(),
+            read.coalesce(),
             b"hello world",
             "Blob content does not match expected value"
         );
@@ -379,7 +379,7 @@ pub(crate) mod tests {
         let buffer = read_task.await.unwrap();
 
         assert_eq!(
-            buffer.coalesce().as_ref(),
+            buffer.coalesce(),
             b"concurrent write",
             "Concurrent access failed"
         );
@@ -784,8 +784,8 @@ pub(crate) mod tests {
                     ptr2,
                     "Second chunk must be the same buffer"
                 );
-                assert_eq!(chunks[0].as_ref(), b"hello");
-                assert_eq!(chunks[1].as_ref(), b" world");
+                assert_eq!(chunks[0], b"hello");
+                assert_eq!(chunks[1], b" world");
             }
             _ => panic!("Expected Chunked variant"),
         }

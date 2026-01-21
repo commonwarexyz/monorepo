@@ -303,7 +303,7 @@ mod tests {
 
         // Test 3: Read at logical offset 0 returns data from raw offset 8
         let read_buf = blob.read_at(0, IoBufMut::zeroed(data.len())).await.unwrap();
-        assert_eq!(read_buf.coalesce().as_ref(), data);
+        assert_eq!(read_buf.coalesce(), data);
 
         // Test 4: Resize with logical length
         blob.resize(5).await.unwrap();
@@ -333,7 +333,7 @@ mod tests {
         let (blob2, size2) = storage.open("partition", b"test").await.unwrap();
         assert_eq!(size2, 9, "reopened blob should have logical size 9");
         let read_buf = blob2.read_at(0, IoBufMut::zeroed(9)).await.unwrap();
-        assert_eq!(read_buf.coalesce().as_ref(), b"test data");
+        assert_eq!(read_buf.coalesce(), b"test data");
         drop(blob2);
 
         // Test 6: Corrupted blob recovery (0 < raw_size < 8)

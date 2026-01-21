@@ -316,7 +316,7 @@ mod tests {
         let (received, elapsed) = reader.await.unwrap();
 
         // Verify we got the right data
-        assert_eq!(received.coalesce().as_ref(), msg.as_slice());
+        assert_eq!(received.coalesce(), msg.as_slice());
 
         // Verify it completed quickly (well under the read timeout)
         // Should complete in milliseconds, not seconds
@@ -395,7 +395,7 @@ mod tests {
         let (buf1, buf2) = reader.await.unwrap();
 
         // Verify we got the right data
-        assert_eq!(buf1.coalesce().as_ref(), &[1u8, 2, 3, 4, 5]);
-        assert_eq!(buf2.coalesce().as_ref(), &[6u8, 7, 8, 9, 10]);
+        assert_eq!(buf1.coalesce(), &[1u8, 2, 3, 4, 5]);
+        assert_eq!(buf2.coalesce(), &[6u8, 7, 8, 9, 10]);
     }
 }

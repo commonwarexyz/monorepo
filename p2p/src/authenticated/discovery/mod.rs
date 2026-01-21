@@ -350,7 +350,7 @@ mod tests {
                         while received.len() < n - 1 {
                             // Ensure message equals sender identity
                             let (sender, message) = receiver.recv().await.unwrap();
-                            assert_eq!(sender.as_ref(), message.as_ref());
+                            assert_eq!(message, sender.as_ref());
 
                             // Add to received set
                             received.insert(sender);
@@ -636,7 +636,7 @@ mod tests {
                         } else {
                             // Ensure message equals sender identity
                             let (sender, message) = receiver.recv().await.unwrap();
-                            assert_eq!(sender.as_ref(), message.as_ref());
+                            assert_eq!(message, sender.as_ref());
                         }
                     });
 
@@ -1188,7 +1188,7 @@ mod tests {
                             let mut received = HashSet::new();
                             while received.len() < n - 1 {
                                 let (sender, message) = receiver.recv().await.unwrap();
-                                assert_eq!(sender.as_ref(), message.as_ref());
+                                assert_eq!(message, sender.as_ref());
                                 received.insert(sender);
                             }
                             complete_sender.send(()).await.unwrap();
@@ -1317,7 +1317,7 @@ mod tests {
             context.with_label("recv0").spawn(move |_| async move {
                 let (sender, message) = receiver0.recv().await.unwrap();
                 assert_eq!(sender, pk1_clone);
-                assert_eq!(message.as_ref(), msg1.as_slice());
+                assert_eq!(message, msg1.as_slice());
                 done0.send(()).await.unwrap();
             });
             let mut done1 = done_sender.clone();
@@ -1325,7 +1325,7 @@ mod tests {
             context.with_label("recv1").spawn(move |_| async move {
                 let (sender, message) = receiver1.recv().await.unwrap();
                 assert_eq!(sender, pk0_clone);
-                assert_eq!(message.as_ref(), msg0.as_slice());
+                assert_eq!(message, msg0.as_slice());
                 done1.send(()).await.unwrap();
             });
 
@@ -1417,7 +1417,7 @@ mod tests {
                             let mut received = HashSet::new();
                             while received.len() < n - 1 {
                                 let (sender, message) = receiver.recv().await.unwrap();
-                                assert_eq!(sender.as_ref(), message.as_ref());
+                                assert_eq!(message, sender.as_ref());
                                 received.insert(sender);
                             }
                             complete_sender.send(()).await.unwrap();
@@ -1643,7 +1643,7 @@ mod tests {
                 // Verify peer 0 received the message
                 let (sender, msg) = receiver0.recv().await.unwrap();
                 assert_eq!(sender, peer1.public_key());
-                assert_eq!(msg.as_ref().to_vec(), peer1.public_key().as_ref());
+                assert_eq!(msg, peer1.public_key().as_ref());
             });
         }
     }
@@ -1730,7 +1730,7 @@ mod tests {
                 let mut received = HashSet::new();
                 while received.len() < n - 1 {
                     let (sender, message): (ed25519::PublicKey, _) = receiver.recv().await.unwrap();
-                    assert_eq!(sender.as_ref(), message.as_ref());
+                    assert_eq!(message, sender.as_ref());
                     received.insert(sender);
                 }
             }
@@ -1828,7 +1828,7 @@ mod tests {
                     while received.len() < n - 1 {
                         let (sender, message): (ed25519::PublicKey, _) =
                             restarted_receiver.recv().await.unwrap();
-                        assert_eq!(sender.as_ref(), message.as_ref());
+                        assert_eq!(message, sender.as_ref());
                         received.insert(sender);
                     }
                 }
@@ -1920,7 +1920,7 @@ mod tests {
                 let mut received = HashSet::new();
                 while received.len() < n - 1 {
                     let (sender, message): (ed25519::PublicKey, _) = receiver.recv().await.unwrap();
-                    assert_eq!(sender.as_ref(), message.as_ref());
+                    assert_eq!(message, sender.as_ref());
                     received.insert(sender);
                 }
             }
@@ -1998,7 +1998,7 @@ mod tests {
                 let mut received = HashSet::new();
                 while received.len() < n - 1 {
                     let (sender, message): (ed25519::PublicKey, _) = receiver.recv().await.unwrap();
-                    assert_eq!(sender.as_ref(), message.as_ref());
+                    assert_eq!(message, sender.as_ref());
                     received.insert(sender);
                 }
             }
@@ -2099,7 +2099,7 @@ mod tests {
                 let mut received = HashSet::new();
                 while received.len() < n - 1 {
                     let (sender, message) = receiver.recv().await.unwrap();
-                    assert_eq!(sender.as_ref(), message.as_ref());
+                    assert_eq!(message, sender.as_ref());
                     received.insert(sender);
                 }
             }
@@ -2198,7 +2198,7 @@ mod tests {
             let mut received = HashSet::new();
             while received.len() < n - 1 {
                 let (sender, message) = restarted_receiver.recv().await.unwrap();
-                assert_eq!(sender.as_ref(), message.as_ref());
+                assert_eq!(message, sender.as_ref());
                 received.insert(sender);
             }
 

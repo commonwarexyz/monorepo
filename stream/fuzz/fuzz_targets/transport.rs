@@ -64,11 +64,11 @@ fn fuzz(data: &[u8]) {
         for chunk in data.chunks(1024) {
             dialer_sender.send(chunk.to_vec()).await.unwrap();
             let recv_result = listener_receiver.recv().await.unwrap();
-            assert_eq!(recv_result.coalesce().as_ref(), chunk);
+            assert_eq!(recv_result.coalesce(), chunk);
 
             listener_sender.send(chunk.to_vec()).await.unwrap();
             let recv_result = dialer_receiver.recv().await.unwrap();
-            assert_eq!(recv_result.coalesce().as_ref(), chunk);
+            assert_eq!(recv_result.coalesce(), chunk);
         }
     });
 }

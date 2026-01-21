@@ -400,10 +400,10 @@ mod test {
             for msg in &messages {
                 dialer_sender.send(&msg[..]).await?;
                 let syn_ack = listener_receiver.recv().await?;
-                assert_eq!(*msg, syn_ack.coalesce().as_ref());
+                assert_eq!(syn_ack.coalesce(), *msg);
                 listener_sender.send(&msg[..]).await?;
                 let ack = dialer_receiver.recv().await?;
-                assert_eq!(*msg, ack.coalesce().as_ref());
+                assert_eq!(ack.coalesce(), *msg);
             }
             Ok(())
         })

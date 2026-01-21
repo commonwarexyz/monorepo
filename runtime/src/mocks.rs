@@ -151,7 +151,7 @@ mod tests {
         executor.start(|_| async move {
             sink.send(data.as_slice()).await.unwrap();
             let received = stream.recv(data.len() as u64).await.unwrap();
-            assert_eq!(received.coalesce().as_ref(), data);
+            assert_eq!(received.coalesce(), data);
         });
     }
 
@@ -166,11 +166,11 @@ mod tests {
             sink.send(data.as_slice()).await.unwrap();
             sink.send(data2.as_slice()).await.unwrap();
             let received = stream.recv(5).await.unwrap();
-            assert_eq!(received.coalesce().as_ref(), b"hello");
+            assert_eq!(received.coalesce(), b"hello");
             let received = stream.recv(5).await.unwrap();
-            assert_eq!(received.coalesce().as_ref(), b" worl");
+            assert_eq!(received.coalesce(), b" worl");
             let received = stream.recv(1).await.unwrap();
-            assert_eq!(received.coalesce().as_ref(), b"d");
+            assert_eq!(received.coalesce(), b"d");
         });
     }
 
@@ -186,7 +186,7 @@ mod tests {
                 sink.send(data.as_slice()).await
             })
             .unwrap();
-            assert_eq!(received.coalesce().as_ref(), data);
+            assert_eq!(received.coalesce(), data);
         });
     }
 

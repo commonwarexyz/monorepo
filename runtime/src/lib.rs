@@ -1092,7 +1092,7 @@ mod tests {
                 .read_at(0, IoBufMut::zeroed(data.len()))
                 .await
                 .expect("Failed to read from blob");
-            assert_eq!(read.coalesce().as_ref(), data);
+            assert_eq!(read.coalesce(), data);
 
             // Sync the blob
             blob.sync().await.expect("Failed to sync blob");
@@ -1116,7 +1116,7 @@ mod tests {
                 .read_at(7, IoBufMut::zeroed(7))
                 .await
                 .expect("Failed to read data");
-            assert_eq!(read.coalesce().as_ref(), b"Storage");
+            assert_eq!(read.coalesce(), b"Storage");
 
             // Sync the blob
             blob.sync().await.expect("Failed to sync blob");
@@ -1241,17 +1241,14 @@ mod tests {
 
             // Read original data
             let read_buf = blob.read_at(0, IoBufMut::zeroed(data.len())).await.unwrap();
-            assert_eq!(read_buf.coalesce().as_ref(), data);
+            assert_eq!(read_buf.coalesce(), data);
 
             // Read extended part (should be zeros)
             let extended_part = blob
                 .read_at(data.len() as u64, IoBufMut::zeroed(data.len()))
                 .await
                 .unwrap();
-            assert_eq!(
-                extended_part.coalesce().as_ref(),
-                vec![0; data.len()].as_slice()
-            );
+            assert_eq!(extended_part.coalesce(), vec![0; data.len()].as_slice());
 
             // Truncate the blob
             blob.resize(data.len() as u64).await.unwrap();
@@ -1263,7 +1260,7 @@ mod tests {
 
             // Read truncated data
             let read_buf = blob.read_at(0, IoBufMut::zeroed(data.len())).await.unwrap();
-            assert_eq!(read_buf.coalesce().as_ref(), data);
+            assert_eq!(read_buf.coalesce(), data);
             blob.sync().await.unwrap();
         });
     }
@@ -1379,7 +1376,7 @@ mod tests {
                         .read_at(0, IoBufMut::zeroed(data_len))
                         .await
                         .expect("Failed to read from blob");
-                    assert_eq!(read.coalesce().as_ref(), data);
+                    assert_eq!(read.coalesce(), data);
                 }
             });
             let check2 = context.with_label("check2").spawn({
@@ -1390,7 +1387,7 @@ mod tests {
                         .read_at(0, IoBufMut::zeroed(data_len))
                         .await
                         .expect("Failed to read from blob");
-                    assert_eq!(read.coalesce().as_ref(), data);
+                    assert_eq!(read.coalesce(), data);
                 }
             });
 
@@ -1404,7 +1401,7 @@ mod tests {
                 .read_at(0, IoBufMut::zeroed(data.len()))
                 .await
                 .expect("Failed to read from blob");
-            assert_eq!(read.coalesce().as_ref(), data);
+            assert_eq!(read.coalesce(), data);
 
             // Drop the blob
             drop(blob);
