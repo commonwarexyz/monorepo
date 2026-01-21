@@ -531,6 +531,17 @@ impl<'a> Sub<&'a Self> for Scalar {
     }
 }
 
+impl<'a, 'b> Sub<&'b Scalar> for &'a Scalar {
+    type Output = Scalar;
+
+    fn sub(self, rhs: &'b Scalar) -> Self::Output {
+        let mut out = blst_fr::default();
+        // SAFETY: blst_fr_sub writes to out, reads from self.0 and rhs.0. No aliasing.
+        unsafe { blst_fr_sub(&mut out, &self.0, &rhs.0) }
+        Scalar(out)
+    }
+}
+
 impl Neg for Scalar {
     type Output = Self;
 

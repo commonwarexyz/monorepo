@@ -413,7 +413,10 @@ impl<I: Clone + Ord, F: Field> Interpolator<I, F> {
     /// any one of the evaluation points associated with that index. In other words,
     /// don't do that, or ensure that if, for some reason, an index appears more
     /// than once, then it has the same evaluation point.
-    pub fn new(points: impl IntoIterator<Item = (I, F)>) -> Self {
+    pub fn new(points: impl IntoIterator<Item = (I, F)>) -> Self
+    where
+        for<'a, 'b> &'a F: Sub<&'b F, Output = F>,
+    {
         let points = Map::from_iter_dedup(points);
         let n = points.len();
         if n == 0 {
@@ -429,10 +432,10 @@ impl<I: Clone + Ord, F: Field> Interpolator<I, F> {
             total_product *= w_i;
             let mut c_i = w_i.clone();
             for w_j in &values[..i] {
-                c_i *= &(w_j.clone() - w_i);
+                c_i *= &(w_j - w_i);
             }
             for w_j in &values[i + 1..] {
-                c_i *= &(w_j.clone() - w_i);
+                c_i *= &(w_j - w_i);
             }
             c.push(c_i);
         }
