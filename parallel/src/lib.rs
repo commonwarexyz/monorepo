@@ -16,7 +16,7 @@
 //! - [`map_collect_vec`](Strategy::map_collect_vec): Maps elements and collects into a `Vec`
 //! - [`map_init_collect_vec`](Strategy::map_init_collect_vec): Like `map_collect_vec` with
 //!   per-partition initialization
-//! - [`map_collect_vec_filter`](Strategy::map_collect_vec_filter): Maps elements, collecting
+//! - [`map_filter_collect_vec`](Strategy::map_filter_collect_vec): Maps elements, collecting
 //!   successful results and tracking indices of filtered elements
 //!
 //! Two implementations are provided:
@@ -309,7 +309,7 @@ pub trait Strategy: Clone + Send + Sync + fmt::Debug + 'static {
     /// let strategy = Sequential;
     /// let data = vec![1, 2, 3, 4, 5];
     ///
-    /// let (evens, odd_values): (Vec<i32>, Vec<i32>) = strategy.map_collect_vec_filter(
+    /// let (evens, odd_values): (Vec<i32>, Vec<i32>) = strategy.map_filter_collect_vec(
     ///     data.iter(),
     ///     |&x| (x, if x % 2 == 0 { Some(x * 10) } else { None }),
     /// );
@@ -317,7 +317,7 @@ pub trait Strategy: Clone + Send + Sync + fmt::Debug + 'static {
     /// assert_eq!(evens, vec![20, 40]);
     /// assert_eq!(odd_values, vec![1, 3, 5]);
     /// ```
-    fn map_collect_vec_filter<I, F, K, U>(&self, iter: I, map_op: F) -> (Vec<U>, Vec<K>)
+    fn map_filter_collect_vec<I, F, K, U>(&self, iter: I, map_op: F) -> (Vec<U>, Vec<K>)
     where
         I: IntoIterator<IntoIter: Send, Item: Send> + Send,
         F: Fn(I::Item) -> (K, Option<U>) + Send + Sync,
@@ -663,7 +663,7 @@ mod test {
         }
 
         #[test]
-        fn map_collect_vec_filter_returns_valid_results(data in prop::collection::vec(any::<i32>(), 0..500)) {
+        fn map_filter_collect_vec_returns_valid_results(data in prop::collection::vec(any::<i32>(), 0..500)) {
             let s = Sequential;
 
             let map_op = |&x: &i32| {
@@ -671,7 +671,7 @@ mod test {
                 (x, value)
             };
 
-            let (results, filtered) = s.map_collect_vec_filter(data.iter(), map_op);
+            let (results, filtered) = s.map_filter_collect_vec(data.iter(), map_op);
 
             // Verify results contains doubled even numbers
             let expected_results: Vec<i32> = data.iter().filter(|&&x| x % 2 == 0).map(|&x| x.wrapping_mul(2)).collect();
