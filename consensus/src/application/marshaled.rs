@@ -277,6 +277,7 @@ where
                     return;
                 }
 
+                // Request verification from the application.
                 let ancestry_stream = AncestorStream::new(marshal.clone(), [block.clone(), parent]);
                 let validity_request = application.verify(
                     (runtime_context.with_label("app_verify"), context.clone()),
@@ -296,6 +297,7 @@ where
                     }
                 };
 
+                // Handle the verification result.
                 if application_valid {
                     marshal.verified(context.round, block).await;
                 }
