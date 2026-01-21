@@ -922,7 +922,6 @@ impl G1 {
         if points_filtered.is_empty() {
             return Self::zero();
         }
-
         let npoints = points_filtered.len();
         let ncpus = strategy.parallelism_hint();
 
@@ -1343,7 +1342,6 @@ impl G2 {
         if points_filtered.is_empty() {
             return Self::zero();
         }
-
         let npoints = points_filtered.len();
         let ncpus = strategy.parallelism_hint();
 
