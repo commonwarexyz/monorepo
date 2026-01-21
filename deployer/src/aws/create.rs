@@ -6,7 +6,7 @@ use crate::aws::{
     s3::{self, *},
     services::*,
     utils::*,
-    Architecture, Config, DeploymentMetadata, Error, Host, Hosts, InstanceConfig,
+    Architecture, Config, Metadata, Error, Host, Hosts, InstanceConfig,
     CREATED_FILE_NAME, LOGS_PORT, METADATA_FILE_NAME, MONITORING_NAME, MONITORING_REGION,
     PROFILES_PORT, TRACES_PORT,
 };
@@ -1232,7 +1232,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
     info!("updated monitoring security group");
 
     // Persist deployment metadata
-    let metadata = DeploymentMetadata {
+    let metadata = Metadata {
         tag: tag.clone(),
         created_at: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

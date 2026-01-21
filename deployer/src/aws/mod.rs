@@ -316,7 +316,7 @@ cfg_if::cfg_if! {
 
         /// Metadata persisted during deployment creation
         #[derive(Serialize, Deserialize)]
-        pub struct DeploymentMetadata {
+        pub struct Metadata {
             pub tag: String,
             pub created_at: u64,
             pub regions: Vec<String>,

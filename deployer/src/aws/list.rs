@@ -1,7 +1,7 @@
 //! `list` subcommand for `ec2`
 
 use crate::aws::{
-    deployer_directory, DeploymentMetadata, Error, CREATED_FILE_NAME, DESTROYED_FILE_NAME,
+    deployer_directory, Metadata, Error, CREATED_FILE_NAME, DESTROYED_FILE_NAME,
     METADATA_FILE_NAME,
 };
 use std::fs::{self, File};
@@ -30,13 +30,13 @@ pub fn list() -> Result<(), Error> {
         let metadata_path = path.join(METADATA_FILE_NAME);
         if metadata_path.exists() {
             let file = File::open(&metadata_path)?;
-            active.push(serde_yaml::from_reader::<_, DeploymentMetadata>(file)?);
+            active.push(serde_yaml::from_reader::<_, Metadata>(file)?);
         } else {
             let Some(tag) = path.file_name().and_then(|n| n.to_str()) else {
                 continue;
             };
             let tag = tag.to_string();
-            active.push(DeploymentMetadata {
+            active.push(Metadata {
                 tag,
                 created_at: 0,
                 regions: vec!["unknown".to_string()],

@@ -4,7 +4,7 @@ use crate::aws::{
     deployer_directory,
     ec2::{self, *},
     s3::{self, delete_prefix, is_no_such_bucket_error, Region, BUCKET_NAME, DEPLOYMENTS_PREFIX},
-    Config, DeploymentMetadata, Error, DESTROYED_FILE_NAME, LOGS_PORT, METADATA_FILE_NAME,
+    Config, Metadata, Error, DESTROYED_FILE_NAME, LOGS_PORT, METADATA_FILE_NAME,
     MONITORING_REGION, PROFILES_PORT, TRACES_PORT,
 };
 use futures::future::try_join_all;
@@ -35,7 +35,7 @@ pub async fn destroy(config: Option<&PathBuf>, tag: Option<&str>) -> Result<(), 
         if !metadata_path.exists() {
             return Err(Error::MetadataNotFound(tag.to_string()));
         }
-        let metadata: DeploymentMetadata = {
+        let metadata: Metadata = {
             let file = File::open(&metadata_path)?;
             serde_yaml::from_reader(file)?
         };
