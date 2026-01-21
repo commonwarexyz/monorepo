@@ -2121,35 +2121,41 @@ mod tests {
         test_msm_parallel_sizes!(rng, par, G2, SmallScalar);
     }
 
+    macro_rules! test_msm_parallel_edge_cases_for {
+        ($rng:expr, $par:expr, $G:ty) => {
+            let n = 50;
+            // All zero scalars
+            let pts: Vec<$G> = (0..n)
+                .map(|_| <$G>::generator() * &Scalar::random(&mut $rng))
+                .collect();
+            assert_eq!(
+                <$G>::msm(&pts, &vec![Scalar::zero(); n], &$par),
+                <$G>::zero()
+            );
+            // All identity points
+            let scalars: Vec<Scalar> = (0..n).map(|_| Scalar::random(&mut $rng)).collect();
+            assert_eq!(
+                <$G>::msm(&vec![<$G>::zero(); n], &scalars, &$par),
+                <$G>::zero()
+            );
+            // Single nonzero among zeros
+            let mut pts = vec![<$G>::zero(); n];
+            let mut scalars = vec![Scalar::zero(); n];
+            let p = <$G>::generator() * &Scalar::random(&mut $rng);
+            let s = Scalar::random(&mut $rng);
+            pts[25] = p;
+            scalars[25] = s.clone();
+            assert_eq!(<$G>::msm(&pts, &scalars, &$par), p * &s);
+        };
+    }
+
     #[test]
     fn test_msm_parallel_edge_cases() {
         let mut rng = test_rng();
         let par = Rayon::new(NonZeroUsize::new(8).unwrap()).unwrap();
-        let n = 50;
 
-        // All zero scalars
-        let g1_pts: Vec<G1> = (0..n)
-            .map(|_| G1::generator() * &Scalar::random(&mut rng))
-            .collect();
-        let g2_pts: Vec<G2> = (0..n)
-            .map(|_| G2::generator() * &Scalar::random(&mut rng))
-            .collect();
-        assert_eq!(G1::msm(&g1_pts, &vec![Scalar::zero(); n], &par), G1::zero());
-        assert_eq!(G2::msm(&g2_pts, &vec![Scalar::zero(); n], &par), G2::zero());
-
-        // All identity points
-        let scalars: Vec<Scalar> = (0..n).map(|_| Scalar::random(&mut rng)).collect();
-        assert_eq!(G1::msm(&vec![G1::zero(); n], &scalars, &par), G1::zero());
-        assert_eq!(G2::msm(&vec![G2::zero(); n], &scalars, &par), G2::zero());
-
-        // Single nonzero among zeros
-        let mut points = vec![G1::zero(); n];
-        let mut scalars = vec![Scalar::zero(); n];
-        let p = G1::generator() * &Scalar::random(&mut rng);
-        let s = Scalar::random(&mut rng);
-        points[25] = p;
-        scalars[25] = s.clone();
-        assert_eq!(G1::msm(&points, &scalars, &par), p * &s);
+        test_msm_parallel_edge_cases_for!(rng, par, G1);
+        test_msm_parallel_edge_cases_for!(rng, par, G2);
     }
 
     #[test]
