@@ -389,8 +389,10 @@ pub mod test {
         }
     }
 
-    /// A type alias for the concrete [Db] type used in these unit tests (Merkleized, Durable).
+    /// A type alias for the concrete clean [Db] type used in these unit tests.
     type CleanCurrentTest = Db<deterministic::Context, Digest, Digest, Sha256, TwoCap, 32>;
+
+    /// A type alias for the concrete mutable [Db] type used in these unit tests.
     type MutableCurrentTest =
         Db<deterministic::Context, Digest, Digest, Sha256, TwoCap, 32, Unmerkleized, NonDurable>;
 

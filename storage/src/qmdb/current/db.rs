@@ -39,7 +39,6 @@ const fn grafting_height<const N: usize>() -> u32 {
 }
 
 /// A Current QMDB implementation generic over ordered/unordered keys and variable/fixed values.
-/// generic over ordered/unordered keys.
 pub struct Db<
     E: Storage + Clock + Metrics,
     C: Contiguous<Item: CodecShared>,
