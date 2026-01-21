@@ -168,8 +168,11 @@ fn fuzz(input: FuzzInput) {
                 (i1.min(i2), i1.abs_diff(i2) + 1)
             };
             let start_loc = Location::new(start_idx as u64).unwrap();
-            let Ok(original_proof) = mmr.range_proof(start_loc..start_loc + range_len as u64)
-            else {
+            let range = start_loc..start_loc + range_len as u64;
+            if range.start >= mmr.leaves() || range.end > mmr.leaves() {
+                return;
+            }
+            let Ok(original_proof) = mmr.range_proof(range) else {
                 return;
             };
             let range_elements: Vec<Digest> = digests[start_idx..start_idx + range_len].to_vec();
