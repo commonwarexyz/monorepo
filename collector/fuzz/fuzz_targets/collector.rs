@@ -1,7 +1,6 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use bytes::{Buf, BufMut};
 use commonware_codec::{
     Encode, EncodeSize, Error as CodecError, FixedSize, RangeCfg, Read, ReadExt, ReadRangeExt,
     Write,
@@ -16,7 +15,7 @@ use commonware_cryptography::{
     Committable, Digestible, Hasher, Sha256, Signer,
 };
 use commonware_p2p::{Blocker, CheckedSender, LimitedSender, Receiver, Recipients};
-use commonware_runtime::{deterministic, Clock, IoBuf, IoBufMut, Metrics, Runner};
+use commonware_runtime::{deterministic, Buf, BufMut, Clock, IoBuf, IoBufMut, Metrics, Runner};
 use futures::{
     channel::{mpsc, oneshot},
     StreamExt,

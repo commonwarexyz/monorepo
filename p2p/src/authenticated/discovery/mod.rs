@@ -86,7 +86,7 @@
 //! Application-level data is exchanged using the `Payload::Data` message type, which wraps an
 //! internal `Data` structure. This structure contains:
 //! - `channel`: A `u32` identifier used to route the message to the correct application handler.
-//! - `message`: The arbitrary application payload as `Bytes`.
+//! - `message`: The arbitrary application payload as `IoBuf`.
 //!
 //! The size of the `message` bytes must not exceed the configured
 //! `max_message_size`. If it does, the sending operation will fail with
@@ -199,7 +199,7 @@
 //!     network.start();
 //!
 //!     // Example: Use sender
-//!     let _ = sender.send(Recipients::All, bytes::Bytes::from_static(b"hello"), false).await;
+//!     let _ = sender.send(Recipients::All, IoBuf::from(b"hello"), false).await;
 //!
 //!     // Graceful shutdown (stops all spawned tasks)
 //!     context.stop(0, None).await.unwrap();
@@ -239,12 +239,11 @@ mod tests {
         },
         Blocker, Ingress, Manager, Receiver, Recipients, Sender,
     };
-    use bytes::Bytes;
     use commonware_cryptography::{ed25519, Signer as _};
     use commonware_macros::{select, select_loop, test_group, test_traced};
     use commonware_runtime::{
-        count_running_tasks, deterministic, tokio, Clock, Handle, Metrics, Network as RNetwork,
-        Quota, Resolver, Runner, Spawner,
+        count_running_tasks, deterministic, tokio, Clock, Handle, IoBuf, Metrics,
+        Network as RNetwork, Quota, Resolver, Runner, Spawner,
     };
     use commonware_utils::{hostname, ordered::Set, TryCollect, NZU32};
     use futures::{channel::mpsc, SinkExt, StreamExt};
@@ -2350,7 +2349,7 @@ mod tests {
                 "Failed to register fast peer"
             );
 
-            let message = Bytes::from(vec![0u8; 100]);
+            let message = IoBuf::from(vec![0u8; 100]);
             let mut messenger = messenger;
 
             // Send 10 messages to fill slow_peer's buffer

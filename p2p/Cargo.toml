@@ -15,7 +15,6 @@ workspace = true
 
 [dependencies]
 arbitrary = { workspace = true, optional = true, features = ["derive"] }
-bytes.workspace = true
 commonware-codec.workspace = true
 commonware-cryptography.workspace = true
 commonware-macros.workspace = true

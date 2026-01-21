@@ -63,7 +63,6 @@
 pub mod utils;
 
 use crate::utils::codec::{recv_frame, send_frame};
-use bytes::Bytes;
 use commonware_codec::{DecodeExt, Encode as _, Error as CodecError};
 use commonware_cryptography::{
     handshake::{
@@ -74,7 +73,7 @@ use commonware_cryptography::{
     Signer,
 };
 use commonware_macros::select;
-use commonware_runtime::{Clock, Error as RuntimeError, IoBufs, Sink, Stream};
+use commonware_runtime::{Clock, Error as RuntimeError, IoBuf, IoBufs, Sink, Stream};
 use commonware_utils::{hex, SystemTimeExt};
 use rand_core::CryptoRngCore;
 use std::{future::Future, ops::Range, time::Duration};
@@ -309,7 +308,7 @@ impl<O: Sink> Sender<O> {
 
         send_frame(
             &mut self.sink,
-            Bytes::from(c),
+            IoBuf::from(c),
             self.max_message_size.saturating_add(CIPHERTEXT_OVERHEAD),
         )
         .await?;

@@ -1,6 +1,5 @@
 use super::Checksum;
-use crate::{Blob, Error, IoBufMut};
-use bytes::Buf;
+use crate::{Blob, Buf, Error, IoBufMut};
 use commonware_codec::FixedSize;
 use std::{collections::VecDeque, num::NonZeroU16};
 use tracing::error;

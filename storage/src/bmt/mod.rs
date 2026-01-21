@@ -43,9 +43,9 @@
 //! ```
 
 use alloc::collections::btree_set::BTreeSet;
-use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Read, ReadExt, ReadRangeExt, Write};
 use commonware_cryptography::{Digest, Hasher};
+use commonware_runtime::{Buf, BufMut};
 use commonware_utils::{non_empty_vec, vec::NonEmptyVec};
 use thiserror::Error;
 

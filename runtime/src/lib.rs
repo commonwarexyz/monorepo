@@ -47,6 +47,8 @@ cfg_if::cfg_if! {
     }
 }
 pub mod iobuf;
+/// Re-export of `Buf` and `BufMut` traits for usage with [I/O buffers](iobuf).
+pub use bytes::{Buf, BufMut};
 pub use iobuf::{IoBuf, IoBufMut, IoBufs, IoBufsMut};
 mod network;
 mod process;

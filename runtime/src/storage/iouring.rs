@@ -465,8 +465,7 @@ impl crate::Blob for Blob {
 #[cfg(test)]
 mod tests {
     use super::{Header, *};
-    use crate::{storage::tests::run_storage_tests, Blob, IoBufMut, Storage as _};
-    use bytes::Buf;
+    use crate::{storage::tests::run_storage_tests, Blob, Buf, IoBufMut, Storage as _};
     use rand::{Rng as _, SeedableRng as _};
     use std::env;
 

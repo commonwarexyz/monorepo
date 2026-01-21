@@ -1,6 +1,6 @@
 //! Implementations of the `Storage` trait that can be used by the runtime.
 
-use bytes::{Buf, BufMut};
+use crate::{Buf, BufMut};
 use commonware_codec::{DecodeExt, FixedSize, Read as CodecRead, Write as CodecWrite};
 use commonware_utils::hex;
 use std::ops::RangeInclusive;
@@ -193,8 +193,7 @@ pub fn validate_partition_name(partition: &str) -> Result<(), crate::Error> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::{Header, HeaderError};
-    use crate::{Blob, IoBuf, IoBufMut, IoBufsMut, Storage};
-    use bytes::Buf;
+    use crate::{Blob, Buf, IoBuf, IoBufMut, IoBufsMut, Storage};
     use commonware_codec::{DecodeExt, Encode};
 
     #[test]

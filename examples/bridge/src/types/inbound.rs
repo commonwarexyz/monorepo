@@ -1,12 +1,12 @@
 use super::block::BlockFormat;
 use crate::Scheme;
-use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error, FixedSize, Read, ReadExt, Write};
 use commonware_consensus::simplex::types::Finalization;
 use commonware_cryptography::{
     bls12381::primitives::variant::{MinSig, Variant},
     Digest,
 };
+use commonware_runtime::{Buf, BufMut};
 
 /// Enum representing incoming messages from validators to the indexer.
 ///

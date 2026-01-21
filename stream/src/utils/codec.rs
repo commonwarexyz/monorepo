@@ -1,10 +1,9 @@
 use crate::Error;
-use bytes::Buf;
 use commonware_codec::{
     varint::{Decoder, UInt},
     Encode,
 };
-use commonware_runtime::{IoBuf, IoBufs, Sink, Stream};
+use commonware_runtime::{Buf, IoBuf, IoBufs, Sink, Stream};
 
 /// Sends data to the sink with a varint length prefix.
 /// Returns an error if the message is too large or the stream is closed.
@@ -52,8 +51,7 @@ pub async fn recv_frame<T: Stream>(stream: &mut T, max_message_size: u32) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bytes::BufMut;
-    use commonware_runtime::{deterministic, mocks, IoBufMut, Runner};
+    use commonware_runtime::{deterministic, mocks, BufMut, IoBufMut, Runner};
     use rand::Rng;
 
     const MAX_MESSAGE_SIZE: u32 = 1024;

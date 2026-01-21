@@ -856,7 +856,7 @@ mod tests {
                     let data =
                         types::Payload::<PublicKey>::Data(crate::authenticated::data::Data {
                             channel: channel_id,
-                            message: bytes::Bytes::from(vec![i as u8; 100]).into(),
+                            message: IoBuf::from(vec![i as u8; 100]),
                         });
                     let _ = local_sender.send(data.encode()).await;
                 }

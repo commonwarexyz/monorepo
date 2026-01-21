@@ -16,9 +16,9 @@ use alloc::{
     vec,
     vec::Vec,
 };
-use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Read, ReadExt, ReadRangeExt, Write};
 use commonware_cryptography::Digest;
+use commonware_runtime::{Buf, BufMut};
 use core::ops::Range;
 #[cfg(feature = "std")]
 use tracing::debug;
@@ -691,7 +691,6 @@ mod tests {
     use crate::mmr::{
         hasher::Standard, location::LocationRangeExt as _, mem::CleanMmr, MAX_LOCATION,
     };
-    use bytes::Bytes;
     use commonware_codec::{Decode, Encode};
     use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
     use commonware_macros::test_traced;
@@ -1086,7 +1085,7 @@ mod tests {
                 // Remove one byte from the end of the serialized
                 // proof and confirm it fails to deserialize.
                 let serialized_proof = proof.encode();
-                let serialized_proof: Bytes = serialized_proof.slice(0..serialized_proof.len() - 1);
+                let serialized_proof = serialized_proof.slice(0..serialized_proof.len() - 1);
                 assert!(
                     Proof::<Digest>::decode_cfg(serialized_proof, &max_items).is_err(),
                     "proof should not deserialize with truncated data"

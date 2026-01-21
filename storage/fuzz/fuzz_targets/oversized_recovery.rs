@@ -6,10 +6,9 @@
 //! that recovery doesn't panic and leaves the journal in a consistent state.
 
 use arbitrary::{Arbitrary, Result, Unstructured};
-use bytes::{Buf, BufMut};
 use commonware_codec::{FixedSize, Read, ReadExt, Write};
 use commonware_runtime::{
-    buffer::PoolRef, deterministic, Blob as _, Metrics, Runner, Storage as _,
+    buffer::PoolRef, deterministic, Blob as _, Buf, BufMut, Metrics, Runner, Storage as _,
 };
 use commonware_storage::journal::segmented::oversized::{Config, Oversized, Record};
 use commonware_utils::{NZUsize, NZU16};

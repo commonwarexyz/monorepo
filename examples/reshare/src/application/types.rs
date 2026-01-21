@@ -1,11 +1,11 @@
 //! Types for the `commonware-reshare` example application.
-use bytes::{Buf, BufMut};
 use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write};
 use commonware_consensus::{types::Height, Block as ConsensusBlock, Heightable};
 use commonware_cryptography::{
     bls12381::{dkg::SignedDealerLog, primitives::variant::Variant},
     Committable, Digest, Digestible, Hasher, Signer,
 };
+use commonware_runtime::{Buf, BufMut};
 use std::num::NonZeroU32;
 
 /// A block in the reshare chain.

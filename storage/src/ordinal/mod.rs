@@ -133,11 +133,10 @@ pub struct Config {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bytes::{Buf, BufMut};
     use commonware_codec::{FixedSize, Read, ReadExt, Write};
     use commonware_cryptography::Crc32;
     use commonware_macros::{test_group, test_traced};
-    use commonware_runtime::{deterministic, Blob, Metrics, Runner, Storage};
+    use commonware_runtime::{deterministic, Blob, Buf, BufMut, Metrics, Runner, Storage};
     use commonware_utils::{bitmap::BitMap, hex, sequence::FixedBytes, NZUsize, NZU64};
     use rand::RngCore;
     use std::collections::BTreeMap;

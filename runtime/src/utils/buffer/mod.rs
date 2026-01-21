@@ -12,8 +12,7 @@ pub use write::Write;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{deterministic, Blob as _, Error, IoBufMut, Runner, Storage};
-    use bytes::Buf;
+    use crate::{deterministic, Blob as _, Buf, Error, IoBufMut, Runner, Storage};
     use commonware_macros::test_traced;
     use commonware_utils::NZUsize;
 

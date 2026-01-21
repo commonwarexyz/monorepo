@@ -1,8 +1,7 @@
 //! Shared address types for p2p networking.
 
-use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error as CodecError, FixedSize, Read, ReadExt, Write};
-use commonware_runtime::{Error as RuntimeError, Resolver};
+use commonware_runtime::{Buf, BufMut, Error as RuntimeError, Resolver};
 use commonware_utils::{Hostname, IpAddrExt};
 use std::net::{IpAddr, SocketAddr};
 
@@ -269,6 +268,7 @@ impl arbitrary::Arbitrary<'_> for Address {
 mod tests {
     use super::*;
     use commonware_codec::{DecodeExt, Encode};
+    use commonware_runtime::IoBuf;
     use commonware_utils::hostname;
     use std::net::{Ipv4Addr, Ipv6Addr};
 
@@ -318,7 +318,7 @@ mod tests {
         buf.extend(long_hostname.as_bytes());
         8080u16.write(&mut buf);
 
-        let result = Ingress::decode(bytes::Bytes::from(buf));
+        let result = Ingress::decode(IoBuf::from(buf));
         assert!(result.is_err());
     }
 

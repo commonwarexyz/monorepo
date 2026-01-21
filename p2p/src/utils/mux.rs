@@ -9,10 +9,9 @@
 //!   even if the muxer is already running.
 
 use crate::{Channel, CheckedSender, LimitedSender, Message, Receiver, Recipients, Sender};
-use bytes::BufMut;
 use commonware_codec::{varint::UInt, Encode, Error as CodecError, ReadExt};
 use commonware_macros::select_loop;
-use commonware_runtime::{spawn_cell, ContextCell, Handle, IoBuf, IoBufMut, Spawner};
+use commonware_runtime::{spawn_cell, BufMut, ContextCell, Handle, IoBuf, IoBufMut, Spawner};
 use commonware_utils::channels::fallible::FallibleExt;
 use futures::{
     channel::{mpsc, oneshot},
@@ -517,13 +516,12 @@ mod tests {
         simulated::{self, Link, Network, Oracle},
         Recipients,
     };
-    use bytes::Bytes;
     use commonware_cryptography::{
         ed25519::{PrivateKey, PublicKey},
         Signer,
     };
     use commonware_macros::{select, test_traced};
-    use commonware_runtime::{deterministic, Metrics, Quota, Runner};
+    use commonware_runtime::{deterministic, IoBuf, Metrics, Quota, Runner};
     use std::{num::NonZeroU32, time::Duration};
 
     const LINK: Link = Link {
@@ -614,7 +612,7 @@ mod tests {
     /// Send a burst of messages to a list of senders.
     async fn send_burst<S: Sender>(txs: &mut [SubSender<S>], count: usize) {
         for i in 0..count {
-            let payload = Bytes::from(vec![i as u8]);
+            let payload = IoBuf::from(vec![i as u8]);
             for tx in txs.iter_mut() {
                 let _ = tx
                     .send(Recipients::All, payload.clone(), false)
@@ -689,14 +687,14 @@ mod tests {
             let (mut sub_tx2, _) = handle2.register(7).await.unwrap();
 
             // Send and receive
-            let payload = Bytes::from_static(b"hello");
+            let payload = IoBuf::from(b"hello");
             let _ = sub_tx2
                 .send(Recipients::One(pk1.clone()), payload.clone(), false)
                 .await
                 .unwrap();
             let (from, bytes) = sub_rx1.recv().await.unwrap();
             assert_eq!(from, pk2);
-            assert_eq!(bytes, IoBuf::from(payload));
+            assert_eq!(bytes, payload);
         });
     }
 
@@ -717,8 +715,8 @@ mod tests {
             let (mut tx2_a, _) = handle2.register(10).await.unwrap();
             let (mut tx2_b, _) = handle2.register(20).await.unwrap();
 
-            let payload_a = Bytes::from_static(b"A");
-            let payload_b = Bytes::from_static(b"B");
+            let payload_a = IoBuf::from(b"A");
+            let payload_b = IoBuf::from(b"B");
             let _ = tx2_a
                 .send(Recipients::One(pk1.clone()), payload_a.clone(), false)
                 .await
@@ -730,11 +728,11 @@ mod tests {
 
             let (from_a, bytes_a) = rx_a.recv().await.unwrap();
             assert_eq!(from_a, pk2);
-            assert_eq!(bytes_a, IoBuf::from(payload_a));
+            assert_eq!(bytes_a, payload_a);
 
             let (from_b, bytes_b) = rx_b.recv().await.unwrap();
             assert_eq!(from_b, pk2);
-            assert_eq!(bytes_b, IoBuf::from(payload_b));
+            assert_eq!(bytes_b, payload_b);
         });
     }
 

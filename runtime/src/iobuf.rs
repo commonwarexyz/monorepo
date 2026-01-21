@@ -6,6 +6,7 @@
 //! - [`IoBufsMut`]: Container for one or more mutable buffers
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
+use commonware_codec::{util::at_least, EncodeSize, Error, RangeCfg, Read, Write};
 use std::{collections::VecDeque, ops::RangeBounds};
 
 /// Immutable byte buffer.
@@ -122,6 +123,32 @@ impl From<IoBuf> for Vec<u8> {
 impl From<IoBuf> for Bytes {
     fn from(buf: IoBuf) -> Self {
         buf.inner
+    }
+}
+
+impl Write for IoBuf {
+    #[inline]
+    fn write(&self, buf: &mut impl BufMut) {
+        self.len().write(buf);
+        buf.put_slice(self.as_ref());
+    }
+}
+
+impl EncodeSize for IoBuf {
+    #[inline]
+    fn encode_size(&self) -> usize {
+        self.len().encode_size() + self.len()
+    }
+}
+
+impl Read for IoBuf {
+    type Cfg = RangeCfg<usize>;
+
+    #[inline]
+    fn read_cfg(buf: &mut impl Buf, range: &Self::Cfg) -> Result<Self, Error> {
+        let len = usize::read_cfg(buf, range)?;
+        at_least(buf, len)?;
+        Ok(Self::from(buf.copy_to_bytes(len)))
     }
 }
 

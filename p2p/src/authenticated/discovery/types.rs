@@ -1,10 +1,9 @@
 use crate::{authenticated::data::Data, Ingress};
-use bytes::{Buf, BufMut};
 use commonware_codec::{
     config::RangeCfg, varint::UInt, Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write,
 };
 use commonware_cryptography::{PublicKey, Signer};
-use commonware_runtime::Clock;
+use commonware_runtime::{Buf, BufMut, Clock};
 use commonware_utils::SystemTimeExt;
 use std::time::Duration;
 use thiserror::Error;
@@ -384,11 +383,10 @@ impl<C: PublicKey> InfoVerifier<C> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bytes::Bytes;
     use commonware_codec::{Decode, DecodeExt};
     use commonware_cryptography::secp256r1::standard::{PrivateKey, PublicKey};
     use commonware_math::algebra::Random;
-    use commonware_runtime::{deterministic, Clock, Runner};
+    use commonware_runtime::{deterministic, Clock, IoBuf, Runner};
     use commonware_utils::{hostname, test_rng};
     use std::{net::SocketAddr, time::Duration};
 
@@ -469,7 +467,7 @@ mod tests {
             index: 1234,
             bits: BitMap::ones(100),
         };
-        let encoded: Bytes = Payload::<PublicKey>::BitVec(original.clone()).encode();
+        let encoded = Payload::<PublicKey>::BitVec(original.clone()).encode();
         let decoded = match Payload::<PublicKey>::decode_cfg(encoded, &cfg) {
             Ok(Payload::<PublicKey>::BitVec(b)) => b,
             _ => panic!(),
@@ -493,7 +491,7 @@ mod tests {
         // Test Data
         let original = Data {
             channel: 12345,
-            message: Bytes::from("Hello, world!").into(),
+            message: IoBuf::from(b"Hello, world!"),
         };
         let encoded = Payload::<PublicKey>::Data(original.clone()).encode();
         let decoded = match Payload::<PublicKey>::decode_cfg(encoded, &cfg) {
@@ -556,7 +554,7 @@ mod tests {
         };
         let encoded = Payload::<PublicKey>::Data(Data {
             channel: 1,
-            message: Bytes::from_static(b"hello").into(),
+            message: IoBuf::from(b"hello"),
         })
         .encode();
         let err = Payload::<PublicKey>::decode_cfg(encoded, &cfg).unwrap_err();
@@ -565,11 +563,11 @@ mod tests {
 
     #[test]
     fn test_max_payload_data_overhead() {
-        let message = Bytes::from(vec![0; 1 << 29]);
+        let message = IoBuf::from(vec![0; 1 << 29]);
         let message_len = message.len();
         let payload = Payload::<PublicKey>::Data(Data {
             channel: u64::MAX,
-            message: message.into(),
+            message,
         });
         assert_eq!(
             payload.encode_size(),

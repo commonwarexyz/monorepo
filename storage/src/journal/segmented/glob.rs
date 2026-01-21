@@ -28,10 +28,9 @@
 
 use super::manager::{Config as ManagerConfig, Manager, WriteFactory};
 use crate::journal::Error;
-use bytes::BufMut;
 use commonware_codec::{Codec, CodecShared, FixedSize};
 use commonware_cryptography::{crc32, Crc32};
-use commonware_runtime::{Blob as _, Error as RError, IoBufMut, Metrics, Storage};
+use commonware_runtime::{Blob as _, BufMut, Error as RError, IoBufMut, Metrics, Storage};
 use std::{io::Cursor, num::NonZeroUsize};
 use zstd::{bulk::compress, decode_all};
 

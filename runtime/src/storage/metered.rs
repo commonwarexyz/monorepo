@@ -1,5 +1,4 @@
-use crate::{Error, IoBufs, IoBufsMut};
-use bytes::Buf;
+use crate::{Buf, Error, IoBufs, IoBufsMut};
 use prometheus_client::{
     metrics::{counter::Counter, gauge::Gauge},
     registry::Registry,

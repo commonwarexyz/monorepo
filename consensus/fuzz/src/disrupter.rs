@@ -1,6 +1,5 @@
 use crate::{types::Message, FuzzInput, EPOCH};
 use arbitrary::Arbitrary;
-use bytes::Bytes;
 use commonware_codec::{Encode, Read, ReadExt};
 use commonware_consensus::{
     simplex::{
@@ -13,7 +12,7 @@ use commonware_consensus::{
 use commonware_cryptography::{ed25519::PublicKey, sha256::Digest as Sha256Digest};
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
-use commonware_runtime::{Clock, Handle, Spawner};
+use commonware_runtime::{Clock, Handle, IoBuf, Spawner};
 use commonware_utils::ordered::{Quorum, Set};
 use rand_core::CryptoRngCore;
 use std::time::Duration;
@@ -204,7 +203,7 @@ where
     async fn handle_vote(&mut self, sender: &mut impl Sender, msg: Vec<u8>) {
         if self.fuzz_input.random_bool() {
             let _ = sender
-                .send(Recipients::All, Bytes::from(msg.clone()), true)
+                .send(Recipients::All, IoBuf::from(msg.clone()), true)
                 .await;
         }
 
@@ -256,7 +255,7 @@ where
     async fn handle_certificate(&mut self, sender: &mut impl Sender, msg: Vec<u8>) {
         if self.fuzz_input.random_bool() {
             let _ = sender
-                .send(Recipients::All, Bytes::from(msg.clone()), true)
+                .send(Recipients::All, IoBuf::from(msg.clone()), true)
                 .await;
         }
 

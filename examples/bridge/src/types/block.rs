@@ -1,8 +1,8 @@
 use crate::Scheme;
-use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error, Read, ReadExt, Write};
 use commonware_consensus::simplex::types::Finalization;
 use commonware_cryptography::Digest;
+use commonware_runtime::{Buf, BufMut};
 
 /// Enum representing the valid formats for blocks.
 #[derive(Debug, Clone, PartialEq, Eq)]

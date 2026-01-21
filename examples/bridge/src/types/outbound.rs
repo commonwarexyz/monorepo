@@ -1,9 +1,9 @@
 use super::block::BlockFormat;
 use crate::Scheme;
-use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error, Read, ReadExt, Write};
 use commonware_consensus::simplex::types::Finalization;
 use commonware_cryptography::Digest;
+use commonware_runtime::{Buf, BufMut};
 
 /// Enum representing responses from the indexer to validators.
 ///

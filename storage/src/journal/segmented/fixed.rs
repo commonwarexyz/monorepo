@@ -22,11 +22,10 @@
 
 use super::manager::{AppendFactory, Config as ManagerConfig, Manager};
 use crate::journal::Error;
-use bytes::Buf;
 use commonware_codec::{CodecFixed, CodecFixedShared, DecodeExt as _, ReadExt as _};
 use commonware_runtime::{
     buffer::pool::{PoolRef, Replay},
-    Blob, IoBufMut, Metrics, Storage,
+    Blob, Buf, IoBufMut, Metrics, Storage,
 };
 use futures::{
     stream::{self, Stream},

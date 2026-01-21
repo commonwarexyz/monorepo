@@ -15,10 +15,9 @@
 #![no_main]
 
 use arbitrary::{Arbitrary, Unstructured};
-use bytes::Buf;
 use commonware_runtime::{
     buffer::pool::{Append, PoolRef},
-    deterministic, Blob, Error, IoBufMut, Runner, Storage,
+    deterministic, Blob, Buf, Error, IoBufMut, Runner, Storage,
 };
 use commonware_utils::{NZUsize, NZU16};
 use libfuzzer_sys::fuzz_target;

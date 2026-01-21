@@ -1,13 +1,12 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use bytes::Bytes;
 use commonware_codec::codec::FixedSize;
 use commonware_cryptography::{ed25519, Signer};
 use commonware_p2p::{
     simulated, Channel, Receiver as ReceiverTrait, Recipients, Sender as SenderTrait,
 };
-use commonware_runtime::{deterministic, Clock, Metrics, Quota, Runner};
+use commonware_runtime::{deterministic, Clock, IoBuf, Metrics, Quota, Runner};
 use libfuzzer_sys::fuzz_target;
 use rand::Rng;
 use std::{
@@ -142,7 +141,7 @@ fn fuzz(input: FuzzInput) {
 
         // Track expected messages: (to_idx, sender_pk, channel_id) -> queue of messages
         // Messages may be dropped (unreliable links) but those delivered must match expectations
-        let mut expected_msgs: HashMap<(usize, ed25519::PublicKey, u8), VecDeque<Bytes>> = HashMap::new();
+        let mut expected_msgs: HashMap<(usize, ed25519::PublicKey, u8), VecDeque<IoBuf>> = HashMap::new();
 
         for op in input.operations.into_iter() {
             match op {
@@ -191,7 +190,7 @@ fn fuzz(input: FuzzInput) {
                     // Generate random message payload
                     let mut bytes = vec![0u8; msg_size];
                     context.fill(&mut bytes[..]);
-                    let message = Bytes::from(bytes);
+                    let message = IoBuf::from(bytes);
 
                     // Attempt to send the message
                     // Note: Success only means accepted for transmission, not guaranteed delivery

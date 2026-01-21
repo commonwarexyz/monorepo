@@ -28,7 +28,7 @@
 //!
 //! Application-level data is exchanged using the `Data` message type. This structure contains:
 //! - `channel`: A `u32` identifier used to route the message to the correct application handler.
-//! - `message`: The arbitrary application payload as `Bytes`.
+//! - `message`: The arbitrary application payload as `IoBuf`.
 //!
 //! The size of the `message` bytes must not exceed the configured
 //! `max_message_size`. If it does, the sending operation will fail with
@@ -73,7 +73,7 @@
 //! ```rust
 //! use commonware_p2p::{authenticated::lookup::{self, Network}, Address, Manager, Sender, Recipients};
 //! use commonware_cryptography::{ed25519, Signer, PrivateKey as _, PublicKey as _, };
-//! use commonware_runtime::{deterministic, Metrics, Quota, Runner, Spawner};
+//! use commonware_runtime::{deterministic, IoBuf, Metrics, Quota, Runner, Spawner};
 //! use commonware_utils::{NZU32, ordered::Map};
 //! use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 //!
@@ -143,7 +143,7 @@
 //!     network.start();
 //!
 //!     // Example: Use sender
-//!     let _ = sender.send(Recipients::All, bytes::Bytes::from_static(b"hello"), false).await;
+//!     let _ = sender.send(Recipients::All, IoBuf::from(b"hello"), false).await;
 //!
 //!     // Graceful shutdown (stops all spawned tasks)
 //!     context.stop(0, None).await.unwrap();

@@ -1,7 +1,6 @@
 use crate::Channel;
-use bytes::{Buf, BufMut, Bytes};
 use commonware_codec::{varint::UInt, EncodeSize, Error, RangeCfg, Read, ReadExt as _, Write};
-use commonware_runtime::IoBuf;
+use commonware_runtime::{Buf, BufMut, IoBuf};
 
 /// Data is an arbitrary message sent between peers.
 #[derive(Clone, Debug, PartialEq)]
@@ -33,11 +32,8 @@ impl Read for Data {
 
     fn read_cfg(buf: &mut impl Buf, range: &Self::Cfg) -> Result<Self, Error> {
         let channel = UInt::read(buf)?.into();
-        let message = Bytes::read_cfg(buf, range)?;
-        Ok(Self {
-            channel,
-            message: IoBuf::from(message),
-        })
+        let message = IoBuf::read_cfg(buf, range)?;
+        Ok(Self { channel, message })
     }
 }
 

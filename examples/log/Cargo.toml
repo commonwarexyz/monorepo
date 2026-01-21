@@ -14,7 +14,6 @@ documentation = "https://docs.rs/commonware-log"
 workspace = true
 
 [dependencies]
-bytes.workspace = true
 chrono.workspace = true
 clap.workspace = true
 commonware-consensus.workspace = true

@@ -79,13 +79,12 @@
 
 use super::manager::{AppendFactory, Config as ManagerConfig, Manager};
 use crate::journal::Error;
-use bytes::{Buf, BufMut, Bytes};
 use commonware_codec::{
     varint::UInt, Codec, CodecShared, EncodeSize, ReadExt, Write as CodecWrite,
 };
 use commonware_runtime::{
     buffer::pool::{Append, PoolRef, Replay},
-    Blob, IoBufMut, Metrics, Storage,
+    Blob, Buf, BufMut, IoBuf, IoBufMut, Metrics, Storage,
 };
 use futures::stream::{self, Stream, StreamExt};
 use std::{io::Cursor, num::NonZeroUsize};
@@ -281,7 +280,7 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
                 let remainder_len = total_len - prefix_len;
                 let mut remainder = vec![0u8; remainder_len];
                 blob.read_into(&mut remainder, read_offset).await?;
-                let chained = prefix.chain(Bytes::from(remainder));
+                let chained = prefix.chain(IoBuf::from(remainder));
                 let decoded = decode_item::<V>(chained, cfg, compressed)?;
                 (total_len as u32, decoded)
             }
@@ -660,9 +659,8 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bytes::BufMut;
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic, Blob, Metrics, Runner, Storage};
+    use commonware_runtime::{deterministic, Blob, BufMut, Metrics, Runner, Storage};
     use commonware_utils::{NZUsize, NZU16};
     use futures::{pin_mut, StreamExt};
     use std::num::NonZeroU16;
