@@ -369,9 +369,9 @@ impl<V: Variant> Certificate<V> {
 }
 
 impl<V: Variant> From<Signature<V>> for Certificate<V> {
-    fn from(sig: Signature<V>) -> Self {
+    fn from(signature: Signature<V>) -> Self {
         Self {
-            signature: Lazy::from(sig),
+            signature: Lazy::from(signature),
         }
     }
 }
