@@ -14,24 +14,36 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 
 const BASE_URL = process.env.MCP_URL || "http://localhost:8787";
 
-async function triggerIndexing() {
-  console.log("Triggering synchronous indexing...");
+async function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
-  // reindexVersions indexes one version per call, loop until we get one
-  let indexed = null;
-  while (indexed === null) {
-    const response = await fetch(`${BASE_URL}/__test/reindex`);
-    if (!response.ok) {
-      const body = await response.text();
-      throw new Error(`Reindex failed: ${response.status} - ${body}`);
-    }
-    const result = await response.json();
-    indexed = result.indexed;
-    if (indexed) {
-      console.log(`Indexed version: ${indexed}`);
-    }
+async function triggerIndexing() {
+  console.log("Triggering scheduled indexing...");
+  const response = await fetch(`${BASE_URL}/__scheduled?cron=*`);
+  if (!response.ok) {
+    throw new Error(`Failed to trigger indexing: ${response.status}`);
   }
-  console.log("Indexing complete");
+  console.log("Indexing triggered");
+}
+
+async function waitForIndexing() {
+  console.log("Waiting for indexing to complete...");
+  const transport = new StreamableHTTPClientTransport(new URL(BASE_URL));
+  const client = new Client({ name: "integration-test", version: "1.0.0" }, { capabilities: {} });
+  await client.connect(transport);
+
+  while (true) {
+    const result = await client.callTool({ name: "list_versions", arguments: {} });
+    if (!result.isError) {
+      console.log("Indexing complete");
+      break;
+    }
+    console.log("  Still waiting...");
+    await sleep(1000);
+  }
+
+  await client.close();
 }
 
 async function testCors() {
@@ -303,8 +315,9 @@ async function main() {
     // Test server info via MCP protocol
     await testServerInfo();
 
-    // Trigger indexing (synchronous, waits for completion)
+    // Trigger indexing and poll until a version is available
     await triggerIndexing();
+    await waitForIndexing();
 
     // Test MCP tools
     await testMcpTools();

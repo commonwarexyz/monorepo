@@ -746,23 +746,6 @@ async function reindexVersions(
 // Worker fetch handler
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-    const url = new URL(request.url);
-
-    // Test endpoint: synchronous reindex
-    if (url.pathname === "/__test/reindex") {
-      try {
-        const result = await reindexVersions(env);
-        return new Response(JSON.stringify(result), {
-          headers: { "Content-Type": "application/json" },
-        });
-      } catch (error) {
-        return new Response(JSON.stringify({ error: String(error) }), {
-          status: 500,
-          headers: { "Content-Type": "application/json" },
-        });
-      }
-    }
-
     // Route all requests to MCP agent (handles CORS including OPTIONS preflight)
     return mcpHandler.fetch(request, env, ctx);
   },
