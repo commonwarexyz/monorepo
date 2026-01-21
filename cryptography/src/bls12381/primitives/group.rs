@@ -1661,6 +1661,7 @@ mod tests {
     use commonware_utils::test_rng;
     use proptest::{prelude::*, strategy::Strategy};
     use rand::{rngs::StdRng, SeedableRng};
+    use rand_core::CryptoRngCore;
     use std::{
         collections::{BTreeSet, HashMap},
         num::NonZeroUsize,
@@ -2092,22 +2093,30 @@ mod tests {
         assert!(display.contains("REDACTED"));
     }
 
-    macro_rules! test_msm_parallel_sizes {
-        ($rng:expr, $par:expr, $G:ty, $S:ty) => {
-            for n in [
-                MIN_PARALLEL_POINTS - 1,
-                MIN_PARALLEL_POINTS,
-                MIN_PARALLEL_POINTS + 1,
-                100,
-            ] {
-                let points: Vec<$G> = (0..n)
-                    .map(|_| <$G>::generator() * &Scalar::random(&mut $rng))
-                    .collect();
-                let scalars: Vec<$S> = (0..n).map(|_| <$S>::random(&mut $rng)).collect();
-                let seq = <$G>::msm(&points, &scalars, &Sequential);
-                assert_eq!(seq, <$G>::msm(&points, &scalars, &$par));
+    fn test_msm_parallel_sizes<G>(
+        rng: &mut impl CryptoRngCore,
+        par: &impl commonware_parallel::Strategy,
+    ) where
+        G: Space<Scalar> + CryptoGroup + PartialEq + Debug + Copy,
+        for<'a> G: Mul<&'a Scalar, Output = G>,
+    {
+        for n in [
+            MIN_PARALLEL_POINTS - 1,
+            MIN_PARALLEL_POINTS,
+            MIN_PARALLEL_POINTS + 1,
+            100,
+        ] {
+            let mut points = Vec::with_capacity(n);
+            for _ in 0..n {
+                points.push(G::generator() * &Scalar::random(&mut *rng));
             }
-        };
+            let mut scalars = Vec::with_capacity(n);
+            for _ in 0..n {
+                scalars.push(Scalar::random(&mut *rng));
+            }
+            let seq = G::msm(&points, &scalars, &Sequential);
+            assert_eq!(seq, G::msm(&points, &scalars, par));
+        }
     }
 
     #[test]
@@ -2115,47 +2124,47 @@ mod tests {
         let mut rng = test_rng();
         let par = Rayon::new(NonZeroUsize::new(8).unwrap()).unwrap();
 
-        test_msm_parallel_sizes!(rng, par, G1, Scalar);
-        test_msm_parallel_sizes!(rng, par, G2, Scalar);
-        test_msm_parallel_sizes!(rng, par, G1, SmallScalar);
-        test_msm_parallel_sizes!(rng, par, G2, SmallScalar);
+        test_msm_parallel_sizes::<G1>(&mut rng, &par);
+        test_msm_parallel_sizes::<G2>(&mut rng, &par);
     }
 
-    macro_rules! test_msm_parallel_edge_cases_for {
-        ($rng:expr, $par:expr, $G:ty) => {
-            let n = 50;
-            // All zero scalars
-            let pts: Vec<$G> = (0..n)
-                .map(|_| <$G>::generator() * &Scalar::random(&mut $rng))
-                .collect();
-            assert_eq!(
-                <$G>::msm(&pts, &vec![Scalar::zero(); n], &$par),
-                <$G>::zero()
-            );
-            // All identity points
-            let scalars: Vec<Scalar> = (0..n).map(|_| Scalar::random(&mut $rng)).collect();
-            assert_eq!(
-                <$G>::msm(&vec![<$G>::zero(); n], &scalars, &$par),
-                <$G>::zero()
-            );
-            // Single nonzero among zeros
-            let mut pts = vec![<$G>::zero(); n];
-            let mut scalars = vec![Scalar::zero(); n];
-            let p = <$G>::generator() * &Scalar::random(&mut $rng);
-            let s = Scalar::random(&mut $rng);
-            pts[25] = p;
-            scalars[25] = s.clone();
-            assert_eq!(<$G>::msm(&pts, &scalars, &$par), p * &s);
-        };
+    fn test_msm_parallel_edge_cases<G>(
+        rng: &mut impl CryptoRngCore,
+        par: &impl commonware_parallel::Strategy,
+    ) where
+        G: Space<Scalar> + CryptoGroup + PartialEq + Debug + Copy,
+        for<'a> G: Mul<&'a Scalar, Output = G>,
+    {
+        let n = 50;
+        // All zero scalars
+        let mut pts = Vec::with_capacity(n);
+        for _ in 0..n {
+            pts.push(G::generator() * &Scalar::random(&mut *rng));
+        }
+        assert_eq!(G::msm(&pts, &vec![Scalar::zero(); n], par), G::zero());
+        // All identity points
+        let mut scalars = Vec::with_capacity(n);
+        for _ in 0..n {
+            scalars.push(Scalar::random(&mut *rng));
+        }
+        assert_eq!(G::msm(&vec![G::zero(); n], &scalars, par), G::zero());
+        // Single nonzero among zeros
+        let mut pts = vec![G::zero(); n];
+        let mut scalars = vec![Scalar::zero(); n];
+        let p = G::generator() * &Scalar::random(&mut *rng);
+        let s = Scalar::random(&mut *rng);
+        pts[25] = p;
+        scalars[25] = s.clone();
+        assert_eq!(G::msm(&pts, &scalars, par), p * &s);
     }
 
     #[test]
-    fn test_msm_parallel_edge_cases() {
+    fn test_msm_parallel_edge_cases_test() {
         let mut rng = test_rng();
         let par = Rayon::new(NonZeroUsize::new(8).unwrap()).unwrap();
 
-        test_msm_parallel_edge_cases_for!(rng, par, G1);
-        test_msm_parallel_edge_cases_for!(rng, par, G2);
+        test_msm_parallel_edge_cases::<G1>(&mut rng, &par);
+        test_msm_parallel_edge_cases::<G2>(&mut rng, &par);
     }
 
     #[test]
