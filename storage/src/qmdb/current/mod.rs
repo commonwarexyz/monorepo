@@ -110,20 +110,20 @@ pub mod tests {
         let mut rng = StdRng::seed_from_u64(rng_seed);
 
         for i in 0u64..num_elements {
-            let k = TestKey::from_seed((i % 256) as u8);
-            let v = TestValue::from_seed((rng.next_u32() % 256) as u8);
+            let k = TestKey::from_seed(i);
+            let v = TestValue::from_seed(rng.next_u64());
             db.update(k, v).await.unwrap();
         }
 
         // Randomly update / delete them. We use a delete frequency that is 1/7th of the update
         // frequency.
         for _ in 0u64..num_elements * 10 {
-            let rand_key = TestKey::from_seed((rng.next_u64() % num_elements % 256) as u8);
+            let rand_key = TestKey::from_seed(rng.next_u64() % num_elements);
             if rng.next_u32() % 7 == 0 {
                 db.delete(rand_key).await.unwrap();
                 continue;
             }
-            let v = TestValue::from_seed((rng.next_u32() % 256) as u8);
+            let v = TestValue::from_seed(rng.next_u64());
             db.update(rand_key, v).await.unwrap();
             if commit_changes && rng.next_u32() % 20 == 0 {
                 // Commit every ~20 updates.
