@@ -195,7 +195,7 @@ async fn main() -> std::process::ExitCode {
                 }
             }
             Some((aws::LIST_CMD, _)) => {
-                if let Err(e) = aws::list().await {
+                if let Err(e) = aws::list() {
                     error!(error=?e, "failed to list deployments");
                 } else {
                     return std::process::ExitCode::SUCCESS;

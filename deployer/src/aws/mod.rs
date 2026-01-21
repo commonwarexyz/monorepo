@@ -397,9 +397,13 @@ cfg_if::cfg_if! {
         pub const LIST_CMD: &str = "list";
 
         /// Directory where deployer files are stored
-        fn deployer_directory(tag: &str) -> PathBuf {
+        fn deployer_directory(tag: Option<&str>) -> PathBuf {
             let base_dir = std::env::var("HOME").expect("$HOME is not configured");
-            PathBuf::from(format!("{base_dir}/.commonware_deployer/{tag}"))
+            let path = PathBuf::from(base_dir).join(".commonware_deployer");
+            match tag {
+                Some(tag) => path.join(tag),
+                None => path,
+            }
         }
 
         /// S3 operations that can fail

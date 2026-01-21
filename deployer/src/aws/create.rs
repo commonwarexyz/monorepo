@@ -61,7 +61,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
     info!(tag = tag.as_str(), "loaded configuration");
 
     // Create a temporary directory for local files
-    let tag_directory = deployer_directory(tag);
+    let tag_directory = deployer_directory(Some(tag));
     if tag_directory.exists() {
         return Err(Error::CreationAttempted);
     }

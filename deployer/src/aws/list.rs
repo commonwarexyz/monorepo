@@ -1,15 +1,14 @@
 //! `list` subcommand for `ec2`
 
 use crate::aws::{
-    DeploymentMetadata, Error, CREATED_FILE_NAME, DESTROYED_FILE_NAME, METADATA_FILE_NAME,
+    deployer_directory, DeploymentMetadata, Error, CREATED_FILE_NAME, DESTROYED_FILE_NAME,
+    METADATA_FILE_NAME,
 };
 use std::fs::{self, File};
 use tracing::info;
 
-pub async fn list() -> Result<(), Error> {
-    let base_dir = std::env::var("HOME").expect("$HOME is not configured");
-    let deployer_dir = std::path::PathBuf::from(format!("{base_dir}/.commonware_deployer"));
-
+pub fn list() -> Result<(), Error> {
+    let deployer_dir = deployer_directory(None);
     if !deployer_dir.exists() {
         info!("no deployments found");
         return Ok(());
@@ -33,7 +32,10 @@ pub async fn list() -> Result<(), Error> {
             let file = File::open(&metadata_path)?;
             active.push(serde_yaml::from_reader::<_, DeploymentMetadata>(file)?);
         } else {
-            let tag = path.file_name().unwrap().to_string_lossy().to_string();
+            let Some(tag) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            let tag = tag.to_string();
             active.push(DeploymentMetadata {
                 tag,
                 created_at: 0,

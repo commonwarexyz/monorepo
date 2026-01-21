@@ -30,7 +30,7 @@ pub async fn destroy(config: Option<&PathBuf>, tag: Option<&str>) -> Result<(), 
         }
         (config.tag, regions)
     } else if let Some(tag) = tag {
-        let tag_directory = deployer_directory(tag);
+        let tag_directory = deployer_directory(Some(tag));
         let metadata_path = tag_directory.join(METADATA_FILE_NAME);
         if !metadata_path.exists() {
             return Err(Error::MetadataNotFound(tag.to_string()));
@@ -46,7 +46,7 @@ pub async fn destroy(config: Option<&PathBuf>, tag: Option<&str>) -> Result<(), 
     info!(tag = tag.as_str(), "loaded configuration");
 
     // Ensure deployment directory exists
-    let tag_directory = deployer_directory(&tag);
+    let tag_directory = deployer_directory(Some(&tag));
     if !tag_directory.exists() {
         return Err(Error::DeploymentDoesNotExist(tag.clone()));
     }
