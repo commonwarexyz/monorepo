@@ -272,7 +272,6 @@ pub struct Certificate {
     /// Bitmap of participant indices that contributed signatures.
     pub signers: Signers,
     /// Secp256r1 signatures emitted by the respective participants ordered by signer index.
-    /// Wrapped in [`Lazy`] to defer signature decompression.
     pub signatures: Vec<Lazy<Secp256r1Signature>>,
 }
 

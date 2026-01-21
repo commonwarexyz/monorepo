@@ -339,7 +339,6 @@ pub struct Certificate<V: Variant> {
     /// Bitmap of participant indices that contributed signatures.
     pub signers: Signers,
     /// Aggregated BLS signature covering all signatures in this certificate.
-    /// Wrapped in [`Lazy`] to defer signature decompression.
     pub signature: Lazy<aggregate::Signature<V>>,
 }
 

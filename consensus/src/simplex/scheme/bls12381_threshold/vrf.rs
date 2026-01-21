@@ -352,10 +352,7 @@ where
     }
 }
 
-/// Lazy certificate for BLS12-381 threshold VRF signatures.
-///
-/// This wraps a [`Signature`] with lazy decoding to defer expensive BLS point
-/// decompression from the network receive path.
+/// Certificate for BLS12-381 threshold VRF signatures.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Certificate<V: Variant> {
     /// The recovered threshold signature pair.

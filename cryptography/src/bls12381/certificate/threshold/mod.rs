@@ -419,10 +419,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
     pub const fn certificate_codec_config_unbounded() {}
 }
 
-/// Lazy certificate for BLS12-381 threshold signatures.
-///
-/// This wraps a recovered threshold signature with lazy decoding to defer
-/// expensive BLS point decompression from the network receive path.
+/// Certificate for BLS12-381 threshold signatures.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Certificate<V: Variant> {
     /// The recovered threshold signature.
