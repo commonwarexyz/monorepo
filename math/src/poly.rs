@@ -415,25 +415,54 @@ impl<I: Clone + Ord, F: Field> Interpolator<I, F> {
     /// than once, then it has the same evaluation point.
     pub fn new(points: impl IntoIterator<Item = (I, F)>) -> Self {
         let points = Map::from_iter_dedup(points);
-        let weights = points
-            .iter_pairs()
-            .map(|(i, w_i)| {
-                let mut top_i = F::one();
-                let mut bot_i = F::one();
-                for (j, w_j) in points.iter_pairs() {
-                    if i == j {
-                        continue;
-                    }
-                    top_i *= w_j;
-                    bot_i *= &(w_j.clone() - w_i);
-                }
-                top_i * &bot_i.inv()
-            })
-            .collect::<Vec<_>>();
-        // Avoid re-sorting by using the memory of points.
+        let n = points.len();
+        if n == 0 {
+            return Self { weights: points };
+        }
+
+        // Compute W = product of all w_i
+        // Compute c_i = w_i * product((w_j - w_i) for j != i)
+        let values = points.values();
+        let mut total_product = F::one();
+        let mut c = Vec::with_capacity(n);
+        for (i, w_i) in values.iter().enumerate() {
+            total_product *= w_i;
+            let mut c_i = w_i.clone();
+            for w_j in &values[..i] {
+                c_i *= &(w_j.clone() - w_i);
+            }
+            for w_j in &values[i + 1..] {
+                c_i *= &(w_j.clone() - w_i);
+            }
+            c.push(c_i);
+        }
+
+        // Batch inversion using Montgomery's trick to compute W/c_i for all i
+        // Step 1: Compute prefix products
+        let mut prefix = Vec::with_capacity(n);
+        let mut acc = F::one();
+        for c_i in &c {
+            acc *= c_i;
+            prefix.push(acc.clone());
+        }
+
+        // Step 2: Single inversion, multiplied by W
+        let mut inv_acc = total_product * &prefix[n - 1].inv();
+
+        // Step 3: Compute weights
+        let mut weights = vec![F::one(); n];
+        for i in (0..n).rev() {
+            weights[i] = if i > 0 {
+                inv_acc.clone() * &prefix[i - 1]
+            } else {
+                inv_acc.clone()
+            };
+            inv_acc *= &c[i];
+        }
+
         let mut out = points;
-        for (out_i, weight_i) in out.values_mut().iter_mut().zip(weights.into_iter()) {
-            *out_i = weight_i;
+        for (o, w) in out.values_mut().iter_mut().zip(weights) {
+            *o = w;
         }
         Self { weights: out }
     }
