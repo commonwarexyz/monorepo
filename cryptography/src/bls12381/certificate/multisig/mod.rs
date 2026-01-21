@@ -160,7 +160,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         T: Strategy,
     {
         let (filtered, failures) =
-            strategy.map_filter_collect_vec(attestations.into_iter(), |attestation| {
+            strategy.map_partition_collect_vec(attestations.into_iter(), |attestation| {
                 let signer = attestation.signer;
                 let value = self
                     .participants

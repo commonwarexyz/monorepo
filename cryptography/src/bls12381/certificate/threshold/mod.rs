@@ -268,7 +268,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         T: Strategy,
     {
         let (partials, failures) =
-            strategy.map_filter_collect_vec(attestations.into_iter(), |attestation| {
+            strategy.map_partition_collect_vec(attestations.into_iter(), |attestation| {
                 let index = attestation.signer;
                 let partial = attestation
                     .signature
@@ -313,7 +313,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         M: Faults,
     {
         let (partials, failures) =
-            strategy.map_filter_collect_vec(attestations.into_iter(), |attestation| {
+            strategy.map_partition_collect_vec(attestations.into_iter(), |attestation| {
                 let index = attestation.signer;
                 let value = attestation
                     .signature

@@ -638,7 +638,7 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
     {
         let namespace = self.namespace();
         let (partials, failures) =
-            strategy.map_filter_collect_vec(attestations.into_iter(), |attestation| {
+            strategy.map_partition_collect_vec(attestations.into_iter(), |attestation| {
                 let index = attestation.signer;
                 let value = attestation.signature.get().map(|sig| {
                     (
@@ -726,7 +726,7 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
         M: Faults,
     {
         let (partials, failures) =
-            strategy.map_filter_collect_vec(attestations.into_iter(), |attestation| {
+            strategy.map_partition_collect_vec(attestations.into_iter(), |attestation| {
                 let index = attestation.signer;
                 let value = attestation.signature.get().map(|sig| {
                     (
