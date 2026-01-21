@@ -155,21 +155,14 @@ where
         }
     }
 
-    /// Verifies a proposed block.
+    /// Verifies a proposed block's application-level validity.
     ///
     /// This method validates that:
-    /// 1. The block's parent commitment matches the consensus context's expected parent
-    /// 2. The block's height is exactly one greater than the parent's height
-    /// 3. The underlying application's verification logic passes
-    ///
-    /// Re-proposals (where the block commitment equals the parent commitment) are
-    /// accepted without further validation since they were already verified when
-    /// originally proposed.
+    /// 1. The block's height is exactly one greater than the parent's height
+    /// 2. The underlying application's verification logic passes
     ///
     /// Verification is spawned in a background task and returns a receiver that will contain
     /// the verification result. Valid blocks are reported to the marshal as verified.
-    ///
-    /// If `block` is provided, it will be used directly instead of fetching from the marshal.
     #[inline]
     async fn verify(
         &mut self,
@@ -492,8 +485,7 @@ where
                 // Check if this is a re-proposal (the block commitment matches the parent from
                 // the context). Re-proposals are only valid at epoch boundaries.
                 if commitment == context.parent.1 {
-                    // Use the block's epoch (not context's epoch) since the block being
-                    // re-proposed was created in the previous epoch.
+                    // Ensure the re-proposal is at the epoch boundary.
                     if block.height() != block_bounds.last() {
                         debug!(
                             height = %block.height(),
