@@ -14,6 +14,7 @@ documentation = "https://docs.rs/commonware-flood"
 workspace = true
 
 [dependencies]
+bytes.workspace = true
 clap.workspace = true
 commonware-codec.workspace = true
 commonware-cryptography.workspace = true
