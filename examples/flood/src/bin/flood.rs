@@ -55,7 +55,8 @@ fn main() {
     // Load config
     let config_file = matches.get_one::<String>("config").unwrap();
     let config_file = std::fs::read_to_string(config_file).expect("Could not read config file");
-    let config: Config = serde_yaml::from_str(&config_file).expect("Could not parse config file");
+    let mut config: Config =
+        serde_yaml::from_str(&config_file).expect("Could not parse config file");
 
     // Parse config
     info!(peers = peers.len(), "loaded peers");
@@ -66,6 +67,9 @@ fn main() {
     // Initialize runtime
     let cfg = tokio::Config::new().with_worker_threads(config.worker_threads);
     let executor = tokio::Runner::new(cfg);
+
+    // Enforce minimum message size of 8 bytes for timestamp
+    config.message_size = config.message_size.max(8);
 
     // Start runtime
     executor.start(|context| async move {
@@ -182,6 +186,9 @@ fn main() {
                     loop {
                         match flood_receiver.recv().await {
                             Ok((_sender, mut msg)) => {
+                                if msg.len() < 8 {
+                                    continue;
+                                }
                                 let sent_ns = msg.get_u64_le();
                                 let now_ns = SystemTime::now()
                                     .duration_since(UNIX_EPOCH)
