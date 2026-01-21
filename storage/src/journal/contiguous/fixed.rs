@@ -250,7 +250,8 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     /// If `meta_pruning_boundary` is `Some`, validates it against the physical blob state:
     /// - If metadata is section-aligned, it's unnecessary and we use blob-based boundary
     /// - If metadata refers to a pruned section, it's stale and we use blob-based boundary
-    /// - If metadata refers to a future section, it's corruption
+    /// - If metadata refers to a future section, it must have been written by [Self::clear_to_size]
+    ///   or [Self::init_at_size] and crashed before writing the blobs. Fall back to blobs.
     /// - Otherwise, metadata is valid and we use it
     ///
     /// If `meta_pruning_boundary` is `None`, computes bounds purely from blobs.
@@ -276,10 +277,16 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
                         );
                         (blob_boundary, true)
                     }
-                    Some(oldest) if meta_oldest_section > oldest => {
-                        return Err(Error::Corruption(format!(
-                            "metadata ahead of blobs: meta_section={meta_oldest_section} oldest={oldest}"
-                        )));
+                    Some(oldest_section) if meta_oldest_section > oldest_section => {
+                        // Metadata references a section ahead of the oldest blob. This can happen
+                        // if we crash during clear_to_size/init_at_size after blobs update but
+                        // before metadata update. Fall back to blob state.
+                        warn!(
+                            meta_oldest_section,
+                            oldest_section,
+                            "crash repair: metadata ahead of blobs, computing from blobs"
+                        );
+                        (blob_boundary, true)
                     }
                     _ => (meta_pruning_boundary, false), // valid mid-section metadata
                 }
@@ -375,42 +382,53 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     /// * `size` - The number of operations that have been "pruned"
     ///
     /// # Behavior
+    /// - Clears any existing data in the partition
     /// - Creates an empty tail blob where the next append (at position `size`) will go
     /// - `oldest_retained_pos()` returns `None` (fully pruned state)
     /// - The next `append()` will write to position `size`
-    ///
-    /// # Invariants
-    /// - The directory given by `cfg.partition` should be empty
     ///
     /// # Post-conditions
     /// - `size()` returns `size`
     /// - `oldest_retained_pos()` returns `None`
     /// - `pruning_boundary` equals `size` (no data exists)
+    ///
+    /// # Crash Safety
+    /// If a crash occurs during this operation, `init()` will recover to a consistent state
+    /// (though possibly different from the intended `size`).
     pub async fn init_at_size(context: E, cfg: Config, size: u64) -> Result<Self, Error> {
         let items_per_blob = cfg.items_per_blob.get();
         let tail_section = size / items_per_blob;
 
         let blob_partition = Self::select_blob_partition(&context, &cfg).await?;
-        // Initialize the segmented journal (empty)
         let segmented_cfg = SegmentedConfig {
             partition: blob_partition,
             buffer_pool: cfg.buffer_pool,
             write_buffer: cfg.write_buffer,
         };
 
-        let mut inner = SegmentedJournal::init(context.with_label("blobs"), segmented_cfg).await?;
-        inner.ensure_section_exists(tail_section).await?;
-
-        // Initialize and populate metadata
+        // Initialize both stores.
         let meta_cfg = MetadataConfig {
             partition: format!("{}-metadata", cfg.partition),
             codec_config: ((0..).into(), ()),
         };
         let mut metadata =
             Metadata::<_, u64, Vec<u8>>::init(context.with_label("meta"), meta_cfg).await?;
+        let mut inner = SegmentedJournal::init(context.with_label("blobs"), segmented_cfg).await?;
 
+        // Clear blobs before updating metadata.
+        // This ordering is critical for crash safety:
+        // - Crash after clear: no blobs, recovery returns (0, 0), metadata ignored
+        // - Crash after create: old metadata triggers "metadata ahead" warning,
+        //   recovery falls back to blob state.
+        inner.clear().await?;
+        inner.ensure_section_exists(tail_section).await?;
+
+        // Persist metadata if pruning_boundary is mid-section.
         if !size.is_multiple_of(items_per_blob) {
             metadata.put(PRUNING_BOUNDARY_KEY, size.to_be_bytes().to_vec());
+            metadata.sync().await?;
+        } else if metadata.get(&PRUNING_BOUNDARY_KEY).is_some() {
+            metadata.remove(&PRUNING_BOUNDARY_KEY);
             metadata.sync().await?;
         }
 
@@ -755,15 +773,20 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     ///
     /// Unlike `destroy`, this keeps the journal alive so it can be reused.
     /// After clearing, the journal will behave as if initialized with `init_at_size(new_size)`.
+    ///
+    /// # Crash Safety
+    /// If a crash occurs during this operation, `init()` will recover to a consistent state
+    /// (though possibly different from the intended `new_size`).
     pub(crate) async fn clear_to_size(&mut self, new_size: u64) -> Result<(), Error> {
-        // Clear all data from inner journal
+        // Clear blobs before updating metadata.
+        // This ordering is critical for crash safety:
+        // - Crash after clear: no blobs, recovery returns (0, 0), metadata ignored
+        // - Crash after create: old metadata triggers "metadata ahead" warning,
+        //   recovery falls back to blob state
         self.inner.clear().await?;
-
-        // Ensure tail section exists
         let tail_section = new_size / self.items_per_blob;
         self.inner.ensure_section_exists(tail_section).await?;
 
-        // Update state
         self.size = new_size;
         self.pruning_boundary = new_size; // No data exists
 
