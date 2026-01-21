@@ -32,8 +32,8 @@
 //! to prevent accidental type misuse.
 
 use crate::{Epochable, Viewable};
+use bytes::{Buf, BufMut};
 use commonware_codec::{varint::UInt, EncodeSize, Error, Read, ReadExt, Write};
-use commonware_runtime::{Buf, BufMut};
 use commonware_utils::sequence::U64;
 use std::{
     fmt::{self, Display, Formatter},
