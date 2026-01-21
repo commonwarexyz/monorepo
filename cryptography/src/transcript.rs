@@ -132,7 +132,7 @@ impl Transcript {
         self.pending += data.len() as u64;
     }
 
-    fn unflushed(&self) -> bool {
+    const fn unflushed(&self) -> bool {
         self.pending != 0
     }
 }
