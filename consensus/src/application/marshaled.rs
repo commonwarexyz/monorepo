@@ -210,8 +210,8 @@ where
 
                 // Validate that heights are contiguous.
                 //
-                // We already checked that the parent commitment matches the context's parent,
-                // during verify.
+                // When called via Automaton::verify, parent commitment was already validated
+                // against the context's parent.
                 if parent.height().next() != block.height() {
                     debug!(
                         parent_height = %parent.height(),
@@ -623,17 +623,16 @@ where
                 };
 
                 // Check if this is a re-proposal (the block commitment matches the parent from
-                // the context). Re-proposals are only valid at epoch boundaries.
-                if commitment == block.parent() {
-                    marshaled
-                        .marshal
-                        .verified(block.context().round, block)
-                        .await;
+                // the context).
+                let context = block.context();
+                if context.parent.1 == block.commitment() {
+                    marshaled.marshal.verified(context.round, block).await;
                     tx.send_lossy(true);
                     return;
                 }
 
-                let context = block.context();
+                // If the block is not a re-proposal, verify it using the deferred verification
+                // process.
                 let verify_rx = marshaled.deferred_verify(context, block).await;
                 if let Ok(result) = verify_rx.await {
                     tx.send_lossy(result);
