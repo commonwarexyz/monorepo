@@ -174,7 +174,6 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
                     });
                 (signer, value)
             });
-
         let mut invalid: BTreeSet<_> = failures.into_iter().collect();
         let (candidates, entries): (Vec<_>, Vec<_>) = filtered.into_iter().unzip();
 
