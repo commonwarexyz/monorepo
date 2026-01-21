@@ -15,13 +15,12 @@
 //!
 //! # Deferred Verification
 //!
-//! [`Marshaled`] uses deferred verification. Before casting a notarize vote, it waits
-//! for the block to become available and verifies that the block's embedded context
-//! matches the consensus context. This ensures that at least f+1 honest validators in the
-//! notarizing quorum have verified the context is valid, preventing a Byzantine proposer
-//! from embedding a malicious context. Once the context is validated, verification of block
-//! contents begins asynchronously. In [`CertifiableAutomaton::certify`], we wait on the
-//! verification result before voting to finalize.
+//! Before casting a notarize vote, [`Marshaled`] waits for the block to become available and
+//! then verifies that the block's embedded context matches the consensus context. However, it does not
+//! wait for the application to finish verifying the block contents before voting. This enables verification
+//! to run while we wait for a quorum of votes to form a certificate (hiding verification latency behind network
+//! latency). Once a certificate is formed, we wait on the verification result in [`CertifiableAutomaton::certify`]
+//! before voting to finalize (ensuring no invalid blocks are admitted to the canonical chain).
 //!
 //! # Usage
 //!
