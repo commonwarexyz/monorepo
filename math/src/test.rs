@@ -89,14 +89,6 @@ impl<'a> SubAssign<&'a F> for F {
     }
 }
 
-impl<'b> Sub<&'b F> for &F {
-    type Output = F;
-
-    fn sub(self, rhs: &'b F) -> Self::Output {
-        *self - rhs
-    }
-}
-
 impl Additive for F {
     fn zero() -> Self {
         Self(0)
