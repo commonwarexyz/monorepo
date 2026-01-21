@@ -62,7 +62,7 @@ impl<B: Blob, K: Span> Wrapper<B, K> {
 
 /// State used during sync operations to support a non &mut self sync implementation that won't
 /// block concurrent reads.
-struct SyncState<B: Blob, K: Span> {
+struct State<B: Blob, K: Span> {
     cursor: usize,
     next_version: u64,
     key_order_changed: u64,
@@ -77,7 +77,7 @@ pub struct Metadata<E: Clock + Storage + Metrics, K: Span, V: Codec> {
     partition: String,
 
     /// State used during [Self::sync] that is protected by a lock.
-    sync_state: Mutex<SyncState<E::Blob, K>>,
+    state: Mutex<State<E::Blob, K>>,
 
     sync_overwrites: Counter,
     sync_rewrites: Counter,
@@ -131,7 +131,7 @@ impl<E: Clock + Storage + Metrics, K: Span, V: Codec> Metadata<E, K, V> {
 
             map,
             partition: cfg.partition,
-            sync_state: Mutex::new(SyncState {
+            state: Mutex::new(State {
                 cursor,
                 next_version,
                 key_order_changed: next_version, // rewrite on startup because we don't have a diff record
@@ -234,7 +234,7 @@ impl<E: Clock + Storage + Metrics, K: Span, V: Codec> Metadata<E, K, V> {
         // Mark key as modified.
         //
         // We need to mark both blobs as modified because we may need to update both files.
-        let state = self.sync_state.get_mut();
+        let state = self.state.get_mut();
         state.blobs[state.cursor].modified.insert(key.clone());
         state.blobs[1 - state.cursor].modified.insert(key.clone());
 
@@ -248,7 +248,7 @@ impl<E: Clock + Storage + Metrics, K: Span, V: Codec> Metadata<E, K, V> {
         self.map.clear();
 
         // Mark key order as changed
-        let state = self.sync_state.get_mut();
+        let state = self.state.get_mut();
         state.key_order_changed = state.next_version;
         self.keys.set(0);
     }
@@ -265,7 +265,7 @@ impl<E: Clock + Storage + Metrics, K: Span, V: Codec> Metadata<E, K, V> {
         // Mark key as modified.
         //
         // We need to mark both blobs as modified because we may need to update both files.
-        let state = self.sync_state.get_mut();
+        let state = self.state.get_mut();
         if previous.is_some() {
             state.blobs[state.cursor].modified.insert(key.clone());
             state.blobs[1 - state.cursor].modified.insert(key);
@@ -314,7 +314,7 @@ impl<E: Clock + Storage + Metrics, K: Span, V: Codec> Metadata<E, K, V> {
 
         // Mark key as modified.
         if past.is_some() {
-            let state = self.sync_state.get_mut();
+            let state = self.state.get_mut();
             state.key_order_changed = state.next_version;
         }
         let _ = self.keys.try_set(self.map.len());
@@ -336,7 +336,7 @@ impl<E: Clock + Storage + Metrics, K: Span, V: Codec> Metadata<E, K, V> {
 
         // If the number of keys has changed, mark the key order as changed
         if new_len != old_len {
-            let state = self.sync_state.get_mut();
+            let state = self.state.get_mut();
             state.key_order_changed = state.next_version;
             let _ = self.keys.try_set(self.map.len());
         }
@@ -346,7 +346,7 @@ impl<E: Clock + Storage + Metrics, K: Span, V: Codec> Metadata<E, K, V> {
     pub async fn sync(&self) -> Result<(), Error> {
         // Acquire lock on sync state which will prevent concurrent sync calls while not blocking
         // reads from the metadata map.
-        let mut state = self.sync_state.lock().await;
+        let mut state = self.state.lock().await;
 
         // Extract values we need
         let cursor = state.cursor;
@@ -441,7 +441,7 @@ impl<E: Clock + Storage + Metrics, K: Span, V: Codec> Metadata<E, K, V> {
         }
         next_data.put_u32(Crc32::checksum(&next_data[..]));
 
-        // Write & persist the new data
+        // Write and persist the new data
         target.blob.write_at(next_data.clone(), 0).await?;
         if next_data.len() < target.data.len() {
             target.blob.resize(next_data.len() as u64).await?;
@@ -459,7 +459,7 @@ impl<E: Clock + Storage + Metrics, K: Span, V: Codec> Metadata<E, K, V> {
 
     /// Remove the underlying blobs for this [Metadata].
     pub async fn destroy(self) -> Result<(), Error> {
-        let state = self.sync_state.into_inner();
+        let state = self.state.into_inner();
         for (i, wrapper) in state.blobs.into_iter().enumerate() {
             drop(wrapper.blob);
             self.context
