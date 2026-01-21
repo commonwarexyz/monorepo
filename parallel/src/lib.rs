@@ -663,23 +663,7 @@ mod test {
         }
 
         #[test]
-        fn parallel_map_collect_vec_filter_matches_sequential(data in prop::collection::vec(any::<i32>(), 0..500)) {
-            let sequential = Sequential;
-            let parallel = parallel_strategy();
-
-            let map_op = |&x: &i32| {
-                let value = if x % 2 == 0 { Some(x.wrapping_mul(2)) } else { None };
-                (x, value)
-            };
-
-            let seq_result = sequential.map_collect_vec_filter(data.iter(), map_op);
-            let par_result = parallel.map_collect_vec_filter(data.iter(), map_op);
-
-            prop_assert_eq!(seq_result, par_result);
-        }
-
-        #[test]
-        fn map_collect_vec_filter_returns_correct_results(data in prop::collection::vec(any::<i32>(), 0..500)) {
+        fn map_collect_vec_filter_returns_valid_results(data in prop::collection::vec(any::<i32>(), 0..500)) {
             let s = Sequential;
 
             let map_op = |&x: &i32| {

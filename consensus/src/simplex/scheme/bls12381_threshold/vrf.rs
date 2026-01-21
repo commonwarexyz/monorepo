@@ -637,7 +637,7 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
         I::IntoIter: Send,
     {
         let namespace = self.namespace();
-        let (partials, decode_failures) =
+        let (partials, failures) =
             strategy.map_collect_vec_filter(attestations.into_iter(), |attestation| {
                 let index = attestation.signer;
                 let value = attestation.signature.get().map(|sig| {
@@ -700,9 +700,9 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
 
         // Merge invalid sets and add decode failures
         let mut invalid: BTreeSet<_> = vote_invalid.union(&seed_invalid).copied().collect();
-        invalid.extend(decode_failures);
+        invalid.extend(failures);
 
-        // Signatures that are not invalid.
+        // Filter out cryptographically invalid signatures (partials only excludes decode failures)
         let verified = partials
             .into_iter()
             .filter(|(vote, _)| !invalid.contains(&vote.index))

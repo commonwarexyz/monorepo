@@ -159,7 +159,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         I::IntoIter: Send,
         T: Strategy,
     {
-        let (filtered, decode_failures) =
+        let (filtered, failures) =
             strategy.map_collect_vec_filter(attestations.into_iter(), |attestation| {
                 let signer = attestation.signer;
                 let value = self
@@ -175,7 +175,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
                 (signer, value)
             });
 
-        let mut invalid: BTreeSet<_> = decode_failures.into_iter().collect();
+        let mut invalid: BTreeSet<_> = failures.into_iter().collect();
         let (candidates, entries): (Vec<_>, Vec<_>) = filtered.into_iter().unzip();
 
         // If there are no candidates to verify, return before doing any work.
