@@ -226,18 +226,10 @@ where
                     return;
                 }
 
-                // Validate that the block's parent commitment matches what consensus expects.
-                if block.parent() != parent.commitment() {
-                    debug!(
-                        block_parent = %block.parent(),
-                        expected_parent = %parent.commitment(),
-                        "block parent commitment does not match expected parent"
-                    );
-                    tx.send_lossy(false);
-                    return;
-                }
-
                 // Validate that heights are contiguous.
+                //
+                // We already checked that the parent commitment matches the context's parent,
+                // during verify.
                 if parent.height().next() != block.height() {
                     debug!(
                         parent_height = %parent.height(),
@@ -452,7 +444,7 @@ where
     async fn verify(
         &mut self,
         context: Context<Self::Digest, S::PublicKey>,
-        digest: Self::Digest,
+        commitment: Self::Digest,
     ) -> oneshot::Receiver<bool> {
         let mut marshal = self.marshal.clone();
         let mut marshaled = self.clone();
@@ -467,12 +459,12 @@ where
                 let tx_closed = tx.closed();
                 pin_mut!(tx_closed);
 
-                let block_request = marshal.subscribe(Some(context.round), digest).await;
+                let block_request = marshal.subscribe(Some(context.round), commitment).await;
                 let block = match select(block_request, &mut tx_closed).await {
                     Either::Left((Ok(block), _)) => block,
                     Either::Left((Err(_), _)) => {
                         debug!(
-                            ?digest,
+                            ?commitment,
                             reason = "failed to fetch block for optimistic verification",
                             "skipping optimistic verification"
                         );
@@ -509,7 +501,7 @@ where
 
                 // Check if this is a re-proposal (the block commitment matches the parent from
                 // the context). Re-proposals are only valid at epoch boundaries.
-                if context.parent.1 == digest {
+                if commitment == context.parent.1 {
                     // Use the block's epoch (not context's epoch) since the block being
                     // re-proposed was created in the previous epoch.
                     if block.height() != block_bounds.last() {
@@ -534,9 +526,20 @@ where
                         .verification_tasks
                         .lock()
                         .await
-                        .insert((round, digest), task_rx);
+                        .insert((round, commitment), task_rx);
 
                     tx.send_lossy(true);
+                    return;
+                }
+
+                // If the block is not a re-proposal, its parent must match the context's parent.
+                if block.parent() != context.parent.1 {
+                    debug!(
+                        block_parent = %block.parent(),
+                        expected_parent = %context.parent.1,
+                        "block parent commitment does not match expected parent"
+                    );
+                    tx.send_lossy(false);
                     return;
                 }
 
@@ -563,7 +566,7 @@ where
                     .verification_tasks
                     .lock()
                     .await
-                    .insert((round, digest), task);
+                    .insert((round, commitment), task);
 
                 tx.send_lossy(true);
             });
@@ -584,10 +587,10 @@ where
     B: CertifiableBlock<Context = <A as Application<E>>::Context>,
     ES: Epocher,
 {
-    async fn certify(&mut self, round: Round, payload: Self::Digest) -> oneshot::Receiver<bool> {
+    async fn certify(&mut self, round: Round, commitment: Self::Digest) -> oneshot::Receiver<bool> {
         // Attempt to retrieve the existing verification task for this (round, payload).
         let mut tasks_guard = self.verification_tasks.lock().await;
-        let task = tasks_guard.remove(&(round, payload));
+        let task = tasks_guard.remove(&(round, commitment));
         drop(tasks_guard);
         if let Some(task) = task {
             return task;
@@ -602,10 +605,10 @@ where
         // Subscribe to the block and verify using its embedded context once available.
         debug!(
             ?round,
-            ?payload,
+            ?commitment,
             "subscribing to block for certification using embedded context"
         );
-        let block_rx = self.marshal.subscribe(Some(round), payload).await;
+        let block_rx = self.marshal.subscribe(Some(round), commitment).await;
         let mut marshaled = self.clone();
         let (mut tx, rx) = oneshot::channel();
         self.context
@@ -621,7 +624,7 @@ where
                     Either::Left((Ok(block), _)) => block,
                     Either::Left((Err(_), _)) => {
                         debug!(
-                            ?payload,
+                            ?commitment,
                             reason = "failed to fetch block for certification",
                             "skipping certification"
                         );
