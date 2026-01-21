@@ -18,7 +18,7 @@ use crate::{
 #[cfg(not(feature = "std"))]
 use alloc::{collections::BTreeSet, vec::Vec};
 use bytes::{Buf, BufMut};
-use commonware_codec::{EncodeSize, Error, Read, ReadExt, Write};
+use commonware_codec::{types::lazy::Lazy, EncodeSize, Error, Read, ReadExt, Write};
 use commonware_parallel::Strategy;
 use commonware_utils::{
     ordered::{BiMap, Quorum, Set},
@@ -243,7 +243,10 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         let signers = Signers::from(self.participants.len(), signers);
         let signature = aggregate::combine_signatures::<V, _>(signatures.iter());
 
-        Some(Certificate { signers, signature })
+        Some(Certificate {
+            signers,
+            signature: Lazy::from(signature),
+        })
     }
 
     /// Verifies a certificate.
@@ -281,12 +284,15 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         }
 
         // Verify the aggregate signature.
+        let Some(signature) = certificate.signature.get() else {
+            return false;
+        };
         let agg_public = aggregate::combine_public_keys::<V, _>(&publics);
         aggregate::verify_same_message::<V>(
             &agg_public,
             subject.namespace(&self.namespace),
             &subject.message(),
-            &certificate.signature,
+            signature,
         )
         .is_ok()
     }
@@ -333,7 +339,7 @@ pub struct Certificate<V: Variant> {
     /// Bitmap of participant indices that contributed signatures.
     pub signers: Signers,
     /// Aggregated BLS signature covering all signatures in this certificate.
-    pub signature: aggregate::Signature<V>,
+    pub signature: Lazy<aggregate::Signature<V>>,
 }
 
 impl<V: Variant> Write for Certificate<V> {
@@ -361,7 +367,7 @@ impl<V: Variant> Read for Certificate<V> {
             ));
         }
 
-        let signature = aggregate::Signature::read(reader)?;
+        let signature = Lazy::<aggregate::Signature<V>>::read(reader)?;
 
         Ok(Self { signers, signature })
     }
@@ -375,7 +381,10 @@ where
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let signers = Signers::arbitrary(u)?;
         let signature = aggregate::Signature::arbitrary(u)?;
-        Ok(Self { signers, signature })
+        Ok(Self {
+            signers,
+            signature: Lazy::from(signature),
+        })
     }
 }
 
@@ -930,7 +939,7 @@ mod tests {
 
         // Corrupted certificate fails
         let mut corrupted = certificate;
-        corrupted.signature = aggregate::Signature::zero();
+        corrupted.signature = Lazy::from(aggregate::Signature::zero());
         assert!(!verifier.verify_certificate::<_, Sha256Digest, N3f1>(
             &mut rng,
             TestSubject {
@@ -1197,7 +1206,7 @@ mod tests {
         }
 
         // Corrupt second certificate
-        certificates[1].signature = aggregate::Signature::zero();
+        certificates[1].signature = Lazy::from(aggregate::Signature::zero());
 
         let certs_iter = messages.iter().zip(&certificates).map(|(msg, cert)| {
             (
