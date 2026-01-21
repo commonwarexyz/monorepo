@@ -8,10 +8,9 @@
 //!
 //! # Epoch Boundaries
 //!
-//! An epoch is a fixed number of blocks (the `epoch_length`). When the last block in an epoch
-//! is reached, this wrapper prevents new blocks from being built & proposed until the next epoch begins.
-//! Instead, it re-proposes the boundary block to avoid producing blocks that would be pruned
-//! by the epoch transition.
+//! When the parent is the last block in an epoch (as determined by the [`Epocher`]), this wrapper
+//! re-proposes that boundary block instead of building a new block. This avoids producing blocks
+//! that would be pruned by the epoch transition.
 //!
 //! # Deferred Verification
 //!
@@ -78,7 +77,7 @@ type TasksMap<B> = HashMap<(Round, <B as Committable>::Commitment), oneshot::Rec
 ///
 /// This wrapper intercepts consensus operations to enforce epoch boundaries and validate
 /// block ancestry. It prevents blocks from being produced outside their valid epoch,
-/// handles the special case of re-proposing boundary blocks during epoch transitions,
+/// handles the special case of re-proposing boundary blocks at epoch boundaries,
 /// and ensures all blocks have valid parent linkage and contiguous heights.
 ///
 /// # Ancestry Validation
