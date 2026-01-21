@@ -81,6 +81,13 @@ impl RngCore for Rng {
 
 impl CryptoRng for Rng {}
 
+fn flush(hasher: &mut blake3::Hasher, pending: u64) {
+    let mut pending_bytes = [0u8; 9];
+    let pending = UInt(pending);
+    pending.write(&mut &mut pending_bytes[..]);
+    hasher.update(&pending_bytes[..pending.encode_size()]);
+}
+
 /// Ensures different [Transcript] initializations are unique.
 #[repr(u8)]
 enum StartTag {
@@ -116,10 +123,7 @@ impl Transcript {
     }
 
     fn flush(&mut self) {
-        let mut pending_bytes = [0u8; 9];
-        let pending = UInt(self.pending);
-        pending.write(&mut &mut pending_bytes[..]);
-        self.hasher.update(&pending_bytes[..pending.encode_size()]);
+        flush(&mut self.hasher, self.pending);
         self.pending = 0;
     }
 
@@ -128,8 +132,8 @@ impl Transcript {
         self.pending += data.len() as u64;
     }
 
-    fn assert_committed(&self) {
-        assert!(self.pending == 0, "transcript had uncommitted data");
+    const fn unflushed(&self) -> bool {
+        self.pending != 0
     }
 }
 
@@ -250,10 +254,14 @@ impl Transcript {
     /// assert_eq!(s1, s2);
     /// ```
     pub fn summarize(&self) -> Summary {
-        self.assert_committed();
-        Summary {
-            hash: self.hasher.finalize(),
-        }
+        let hash = if self.unflushed() {
+            let mut hasher = self.hasher.clone();
+            flush(&mut hasher, self.pending);
+            hasher.finalize()
+        } else {
+            self.hasher.finalize()
+        };
+        Summary { hash }
     }
 }
 
@@ -473,6 +481,16 @@ mod test {
     fn test_summary_encode_roundtrip() {
         let s = Transcript::new(b"test").summarize();
         assert_eq!(&s, &Summary::decode(s.encode()).unwrap());
+    }
+
+    #[test]
+    fn test_missing_append() {
+        let s1 = Transcript::new(b"foo").append(b"AB".as_slice()).summarize();
+        let s2 = Transcript::new(b"foo")
+            .append(b"A".as_slice())
+            .commit(b"B".as_slice())
+            .summarize();
+        assert_eq!(s1, s2)
     }
 
     #[cfg(feature = "arbitrary")]
