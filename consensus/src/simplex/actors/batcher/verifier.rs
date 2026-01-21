@@ -454,7 +454,13 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
 mod tests {
     use super::*;
     use crate::{
-        simplex::scheme::{bls12381_multisig, bls12381_threshold, ed25519, secp256r1},
+        simplex::scheme::{
+            bls12381_multisig,
+            bls12381_threshold::{
+                standard as bls12381_threshold_std, vrf as bls12381_threshold_vrf,
+            },
+            ed25519, secp256r1,
+        },
         types::{Epoch, Round, View},
     };
     use commonware_cryptography::{
@@ -559,8 +565,10 @@ mod tests {
 
     #[test]
     fn test_add_notarize() {
-        add_notarize(bls12381_threshold::fixture::<MinSig, _>);
-        add_notarize(bls12381_threshold::fixture::<MinPk, _>);
+        add_notarize(bls12381_threshold_vrf::fixture::<MinSig, _>);
+        add_notarize(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        add_notarize(bls12381_threshold_std::fixture::<MinSig, _>);
+        add_notarize(bls12381_threshold_std::fixture::<MinPk, _>);
         add_notarize(bls12381_multisig::fixture::<MinSig, _>);
         add_notarize(bls12381_multisig::fixture::<MinPk, _>);
         add_notarize(ed25519::fixture);
@@ -601,8 +609,10 @@ mod tests {
 
     #[test]
     fn test_set_leader() {
-        set_leader(bls12381_threshold::fixture::<MinSig, _>);
-        set_leader(bls12381_threshold::fixture::<MinPk, _>);
+        set_leader(bls12381_threshold_vrf::fixture::<MinSig, _>);
+        set_leader(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        set_leader(bls12381_threshold_std::fixture::<MinSig, _>);
+        set_leader(bls12381_threshold_std::fixture::<MinPk, _>);
         set_leader(bls12381_multisig::fixture::<MinSig, _>);
         set_leader(bls12381_multisig::fixture::<MinPk, _>);
         set_leader(ed25519::fixture);
@@ -673,8 +683,10 @@ mod tests {
 
     #[test]
     fn test_ready_and_verify_notarizes() {
-        ready_and_verify_notarizes(bls12381_threshold::fixture::<MinSig, _>);
-        ready_and_verify_notarizes(bls12381_threshold::fixture::<MinPk, _>);
+        ready_and_verify_notarizes(bls12381_threshold_vrf::fixture::<MinSig, _>);
+        ready_and_verify_notarizes(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        ready_and_verify_notarizes(bls12381_threshold_std::fixture::<MinSig, _>);
+        ready_and_verify_notarizes(bls12381_threshold_std::fixture::<MinPk, _>);
         ready_and_verify_notarizes(bls12381_multisig::fixture::<MinSig, _>);
         ready_and_verify_notarizes(bls12381_multisig::fixture::<MinPk, _>);
         ready_and_verify_notarizes(ed25519::fixture);
@@ -704,8 +716,10 @@ mod tests {
 
     #[test]
     fn test_add_nullify() {
-        add_nullify(bls12381_threshold::fixture::<MinSig, _>);
-        add_nullify(bls12381_threshold::fixture::<MinPk, _>);
+        add_nullify(bls12381_threshold_vrf::fixture::<MinSig, _>);
+        add_nullify(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        add_nullify(bls12381_threshold_std::fixture::<MinSig, _>);
+        add_nullify(bls12381_threshold_std::fixture::<MinPk, _>);
         add_nullify(bls12381_multisig::fixture::<MinSig, _>);
         add_nullify(bls12381_multisig::fixture::<MinPk, _>);
         add_nullify(ed25519::fixture);
@@ -749,8 +763,10 @@ mod tests {
 
     #[test]
     fn test_ready_and_verify_nullifies() {
-        ready_and_verify_nullifies(bls12381_threshold::fixture::<MinSig, _>);
-        ready_and_verify_nullifies(bls12381_threshold::fixture::<MinPk, _>);
+        ready_and_verify_nullifies(bls12381_threshold_vrf::fixture::<MinSig, _>);
+        ready_and_verify_nullifies(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        ready_and_verify_nullifies(bls12381_threshold_std::fixture::<MinSig, _>);
+        ready_and_verify_nullifies(bls12381_threshold_std::fixture::<MinPk, _>);
         ready_and_verify_nullifies(bls12381_multisig::fixture::<MinSig, _>);
         ready_and_verify_nullifies(bls12381_multisig::fixture::<MinPk, _>);
         ready_and_verify_nullifies(ed25519::fixture);
@@ -795,8 +811,10 @@ mod tests {
 
     #[test]
     fn test_add_finalize() {
-        add_finalize(bls12381_threshold::fixture::<MinSig, _>);
-        add_finalize(bls12381_threshold::fixture::<MinPk, _>);
+        add_finalize(bls12381_threshold_vrf::fixture::<MinSig, _>);
+        add_finalize(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        add_finalize(bls12381_threshold_std::fixture::<MinSig, _>);
+        add_finalize(bls12381_threshold_std::fixture::<MinPk, _>);
         add_finalize(bls12381_multisig::fixture::<MinSig, _>);
         add_finalize(bls12381_multisig::fixture::<MinPk, _>);
         add_finalize(ed25519::fixture);
@@ -845,8 +863,10 @@ mod tests {
 
     #[test]
     fn test_ready_and_verify_finalizes() {
-        ready_and_verify_finalizes(bls12381_threshold::fixture::<MinSig, _>);
-        ready_and_verify_finalizes(bls12381_threshold::fixture::<MinPk, _>);
+        ready_and_verify_finalizes(bls12381_threshold_vrf::fixture::<MinSig, _>);
+        ready_and_verify_finalizes(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        ready_and_verify_finalizes(bls12381_threshold_std::fixture::<MinSig, _>);
+        ready_and_verify_finalizes(bls12381_threshold_std::fixture::<MinPk, _>);
         ready_and_verify_finalizes(bls12381_multisig::fixture::<MinSig, _>);
         ready_and_verify_finalizes(bls12381_multisig::fixture::<MinPk, _>);
         ready_and_verify_finalizes(ed25519::fixture);
@@ -889,8 +909,10 @@ mod tests {
 
     #[test]
     fn test_leader_proposal_filters_messages() {
-        leader_proposal_filters_messages(bls12381_threshold::fixture::<MinSig, _>);
-        leader_proposal_filters_messages(bls12381_threshold::fixture::<MinPk, _>);
+        leader_proposal_filters_messages(bls12381_threshold_vrf::fixture::<MinSig, _>);
+        leader_proposal_filters_messages(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        leader_proposal_filters_messages(bls12381_threshold_std::fixture::<MinSig, _>);
+        leader_proposal_filters_messages(bls12381_threshold_std::fixture::<MinPk, _>);
         leader_proposal_filters_messages(bls12381_multisig::fixture::<MinSig, _>);
         leader_proposal_filters_messages(bls12381_multisig::fixture::<MinPk, _>);
         leader_proposal_filters_messages(ed25519::fixture);
@@ -912,13 +934,25 @@ mod tests {
     #[test]
     #[should_panic(expected = "self.leader.is_none()")]
     fn test_set_leader_twice_panics_bls_threshold_minsig() {
-        set_leader_twice_panics(bls12381_threshold::fixture::<MinSig, _>);
+        set_leader_twice_panics(bls12381_threshold_vrf::fixture::<MinSig, _>);
     }
 
     #[test]
     #[should_panic(expected = "self.leader.is_none()")]
     fn test_set_leader_twice_panics_bls_threshold_minpk() {
-        set_leader_twice_panics(bls12381_threshold::fixture::<MinPk, _>);
+        set_leader_twice_panics(bls12381_threshold_vrf::fixture::<MinPk, _>);
+    }
+
+    #[test]
+    #[should_panic(expected = "self.leader.is_none()")]
+    fn test_set_leader_twice_panics_bls_threshold_std_minsig() {
+        set_leader_twice_panics(bls12381_threshold_std::fixture::<MinSig, _>);
+    }
+
+    #[test]
+    #[should_panic(expected = "self.leader.is_none()")]
+    fn test_set_leader_twice_panics_bls_threshold_std_minpk() {
+        set_leader_twice_panics(bls12381_threshold_std::fixture::<MinPk, _>);
     }
 
     #[test]
@@ -981,8 +1015,10 @@ mod tests {
 
     #[test]
     fn test_notarizes_wait_for_quorum() {
-        notarizes_wait_for_quorum(bls12381_threshold::fixture::<MinSig, _>);
-        notarizes_wait_for_quorum(bls12381_threshold::fixture::<MinPk, _>);
+        notarizes_wait_for_quorum(bls12381_threshold_vrf::fixture::<MinSig, _>);
+        notarizes_wait_for_quorum(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        notarizes_wait_for_quorum(bls12381_threshold_std::fixture::<MinSig, _>);
+        notarizes_wait_for_quorum(bls12381_threshold_std::fixture::<MinPk, _>);
         notarizes_wait_for_quorum(bls12381_multisig::fixture::<MinSig, _>);
         notarizes_wait_for_quorum(bls12381_multisig::fixture::<MinPk, _>);
         notarizes_wait_for_quorum(ed25519::fixture);
@@ -1024,8 +1060,10 @@ mod tests {
 
     #[test]
     fn test_ready_notarizes_without_leader_or_proposal() {
-        ready_notarizes_without_leader(bls12381_threshold::fixture::<MinSig, _>);
-        ready_notarizes_without_leader(bls12381_threshold::fixture::<MinPk, _>);
+        ready_notarizes_without_leader(bls12381_threshold_vrf::fixture::<MinSig, _>);
+        ready_notarizes_without_leader(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        ready_notarizes_without_leader(bls12381_threshold_std::fixture::<MinSig, _>);
+        ready_notarizes_without_leader(bls12381_threshold_std::fixture::<MinPk, _>);
         ready_notarizes_without_leader(bls12381_multisig::fixture::<MinSig, _>);
         ready_notarizes_without_leader(bls12381_multisig::fixture::<MinPk, _>);
         ready_notarizes_without_leader(ed25519::fixture);
@@ -1066,8 +1104,10 @@ mod tests {
 
     #[test]
     fn test_ready_finalizes_without_leader_or_proposal() {
-        ready_finalizes_without_leader(bls12381_threshold::fixture::<MinSig, _>);
-        ready_finalizes_without_leader(bls12381_threshold::fixture::<MinPk, _>);
+        ready_finalizes_without_leader(bls12381_threshold_vrf::fixture::<MinSig, _>);
+        ready_finalizes_without_leader(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        ready_finalizes_without_leader(bls12381_threshold_std::fixture::<MinSig, _>);
+        ready_finalizes_without_leader(bls12381_threshold_std::fixture::<MinPk, _>);
         ready_finalizes_without_leader(bls12381_multisig::fixture::<MinSig, _>);
         ready_finalizes_without_leader(bls12381_multisig::fixture::<MinPk, _>);
         ready_finalizes_without_leader(ed25519::fixture);
@@ -1092,8 +1132,10 @@ mod tests {
 
     #[test]
     fn test_verify_notarizes_empty_pending_when_forced() {
-        verify_notarizes_empty(bls12381_threshold::fixture::<MinSig, _>);
-        verify_notarizes_empty(bls12381_threshold::fixture::<MinPk, _>);
+        verify_notarizes_empty(bls12381_threshold_vrf::fixture::<MinSig, _>);
+        verify_notarizes_empty(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        verify_notarizes_empty(bls12381_threshold_std::fixture::<MinSig, _>);
+        verify_notarizes_empty(bls12381_threshold_std::fixture::<MinPk, _>);
         verify_notarizes_empty(bls12381_multisig::fixture::<MinSig, _>);
         verify_notarizes_empty(bls12381_multisig::fixture::<MinPk, _>);
         verify_notarizes_empty(ed25519::fixture);
@@ -1119,8 +1161,10 @@ mod tests {
 
     #[test]
     fn test_verify_nullifies_empty_pending() {
-        verify_nullifies_empty(bls12381_threshold::fixture::<MinSig, _>);
-        verify_nullifies_empty(bls12381_threshold::fixture::<MinPk, _>);
+        verify_nullifies_empty(bls12381_threshold_vrf::fixture::<MinSig, _>);
+        verify_nullifies_empty(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        verify_nullifies_empty(bls12381_threshold_std::fixture::<MinSig, _>);
+        verify_nullifies_empty(bls12381_threshold_std::fixture::<MinPk, _>);
         verify_nullifies_empty(bls12381_multisig::fixture::<MinSig, _>);
         verify_nullifies_empty(bls12381_multisig::fixture::<MinPk, _>);
         verify_nullifies_empty(ed25519::fixture);
@@ -1147,8 +1191,10 @@ mod tests {
 
     #[test]
     fn test_verify_finalizes_empty_pending() {
-        verify_finalizes_empty(bls12381_threshold::fixture::<MinSig, _>);
-        verify_finalizes_empty(bls12381_threshold::fixture::<MinPk, _>);
+        verify_finalizes_empty(bls12381_threshold_vrf::fixture::<MinSig, _>);
+        verify_finalizes_empty(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        verify_finalizes_empty(bls12381_threshold_std::fixture::<MinSig, _>);
+        verify_finalizes_empty(bls12381_threshold_std::fixture::<MinPk, _>);
         verify_finalizes_empty(bls12381_multisig::fixture::<MinSig, _>);
         verify_finalizes_empty(bls12381_multisig::fixture::<MinPk, _>);
         verify_finalizes_empty(ed25519::fixture);
@@ -1200,8 +1246,10 @@ mod tests {
 
     #[test]
     fn test_ready_notarizes_exact_quorum() {
-        ready_notarizes_exact_quorum(bls12381_threshold::fixture::<MinSig, _>);
-        ready_notarizes_exact_quorum(bls12381_threshold::fixture::<MinPk, _>);
+        ready_notarizes_exact_quorum(bls12381_threshold_vrf::fixture::<MinSig, _>);
+        ready_notarizes_exact_quorum(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        ready_notarizes_exact_quorum(bls12381_threshold_std::fixture::<MinSig, _>);
+        ready_notarizes_exact_quorum(bls12381_threshold_std::fixture::<MinPk, _>);
         ready_notarizes_exact_quorum(bls12381_multisig::fixture::<MinSig, _>);
         ready_notarizes_exact_quorum(bls12381_multisig::fixture::<MinPk, _>);
         ready_notarizes_exact_quorum(ed25519::fixture);
@@ -1240,8 +1288,10 @@ mod tests {
 
     #[test]
     fn test_ready_nullifies_exact_quorum() {
-        ready_nullifies_exact_quorum(bls12381_threshold::fixture::<MinSig, _>);
-        ready_nullifies_exact_quorum(bls12381_threshold::fixture::<MinPk, _>);
+        ready_nullifies_exact_quorum(bls12381_threshold_vrf::fixture::<MinSig, _>);
+        ready_nullifies_exact_quorum(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        ready_nullifies_exact_quorum(bls12381_threshold_std::fixture::<MinSig, _>);
+        ready_nullifies_exact_quorum(bls12381_threshold_std::fixture::<MinPk, _>);
         ready_nullifies_exact_quorum(bls12381_multisig::fixture::<MinSig, _>);
         ready_nullifies_exact_quorum(bls12381_multisig::fixture::<MinPk, _>);
         ready_nullifies_exact_quorum(ed25519::fixture);
@@ -1285,8 +1335,10 @@ mod tests {
 
     #[test]
     fn test_ready_finalizes_exact_quorum() {
-        ready_finalizes_exact_quorum(bls12381_threshold::fixture::<MinSig, _>);
-        ready_finalizes_exact_quorum(bls12381_threshold::fixture::<MinPk, _>);
+        ready_finalizes_exact_quorum(bls12381_threshold_vrf::fixture::<MinSig, _>);
+        ready_finalizes_exact_quorum(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        ready_finalizes_exact_quorum(bls12381_threshold_std::fixture::<MinSig, _>);
+        ready_finalizes_exact_quorum(bls12381_threshold_std::fixture::<MinPk, _>);
         ready_finalizes_exact_quorum(bls12381_multisig::fixture::<MinSig, _>);
         ready_finalizes_exact_quorum(bls12381_multisig::fixture::<MinPk, _>);
         ready_finalizes_exact_quorum(ed25519::fixture);
@@ -1337,8 +1389,14 @@ mod tests {
 
     #[test]
     fn test_ready_notarizes_quorum_already_met_by_verified() {
-        ready_notarizes_quorum_already_met_by_verified(bls12381_threshold::fixture::<MinSig, _>);
-        ready_notarizes_quorum_already_met_by_verified(bls12381_threshold::fixture::<MinPk, _>);
+        ready_notarizes_quorum_already_met_by_verified(
+            bls12381_threshold_vrf::fixture::<MinSig, _>,
+        );
+        ready_notarizes_quorum_already_met_by_verified(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        ready_notarizes_quorum_already_met_by_verified(
+            bls12381_threshold_std::fixture::<MinSig, _>,
+        );
+        ready_notarizes_quorum_already_met_by_verified(bls12381_threshold_std::fixture::<MinPk, _>);
         ready_notarizes_quorum_already_met_by_verified(bls12381_multisig::fixture::<MinSig, _>);
         ready_notarizes_quorum_already_met_by_verified(bls12381_multisig::fixture::<MinPk, _>);
         ready_notarizes_quorum_already_met_by_verified(ed25519::fixture);
@@ -1381,8 +1439,14 @@ mod tests {
 
     #[test]
     fn test_ready_nullifies_quorum_already_met_by_verified() {
-        ready_nullifies_quorum_already_met_by_verified(bls12381_threshold::fixture::<MinSig, _>);
-        ready_nullifies_quorum_already_met_by_verified(bls12381_threshold::fixture::<MinPk, _>);
+        ready_nullifies_quorum_already_met_by_verified(
+            bls12381_threshold_vrf::fixture::<MinSig, _>,
+        );
+        ready_nullifies_quorum_already_met_by_verified(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        ready_nullifies_quorum_already_met_by_verified(
+            bls12381_threshold_std::fixture::<MinSig, _>,
+        );
+        ready_nullifies_quorum_already_met_by_verified(bls12381_threshold_std::fixture::<MinPk, _>);
         ready_nullifies_quorum_already_met_by_verified(bls12381_multisig::fixture::<MinSig, _>);
         ready_nullifies_quorum_already_met_by_verified(bls12381_multisig::fixture::<MinPk, _>);
         ready_nullifies_quorum_already_met_by_verified(ed25519::fixture);
@@ -1433,8 +1497,14 @@ mod tests {
 
     #[test]
     fn test_ready_finalizes_quorum_already_met_by_verified() {
-        ready_finalizes_quorum_already_met_by_verified(bls12381_threshold::fixture::<MinSig, _>);
-        ready_finalizes_quorum_already_met_by_verified(bls12381_threshold::fixture::<MinPk, _>);
+        ready_finalizes_quorum_already_met_by_verified(
+            bls12381_threshold_vrf::fixture::<MinSig, _>,
+        );
+        ready_finalizes_quorum_already_met_by_verified(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        ready_finalizes_quorum_already_met_by_verified(
+            bls12381_threshold_std::fixture::<MinSig, _>,
+        );
+        ready_finalizes_quorum_already_met_by_verified(bls12381_threshold_std::fixture::<MinPk, _>);
         ready_finalizes_quorum_already_met_by_verified(bls12381_multisig::fixture::<MinSig, _>);
         ready_finalizes_quorum_already_met_by_verified(bls12381_multisig::fixture::<MinPk, _>);
         ready_finalizes_quorum_already_met_by_verified(ed25519::fixture);

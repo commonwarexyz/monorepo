@@ -63,11 +63,7 @@ pub struct Db<
 
     /// The bitmap over the activity status of each operation. Supports augmenting [Db] proofs in
     /// order to further prove whether a key _currently_ has a specific value.
-    status: BitMap<H::Digest, N, M>,
-
-    context: E,
-
-    bitmap_metadata_partition: String,
+    status: BitMap<E, H::Digest, N, M>,
 
     /// Cached root digest. Invariant: valid when in Clean state.
     cached_root: Option<H::Digest>,
@@ -124,7 +120,7 @@ impl<
     /// This value is log2 of the chunk size in bits. Since we assume the chunk size is a power of
     /// 2, we compute this from trailing_zeros.
     const fn grafting_height() -> u32 {
-        CleanBitMap::<H::Digest, N>::CHUNK_SIZE_BITS.trailing_zeros()
+        CleanBitMap::<E, H::Digest, N>::CHUNK_SIZE_BITS.trailing_zeros()
     }
 
     /// Return true if the proof authenticates that `key` currently has value `value` in the db with
@@ -250,7 +246,7 @@ impl<
         let bitmap_metadata_partition = config.bitmap_metadata_partition.clone();
 
         let mut hasher = StandardHasher::<H>::new();
-        let mut status = CleanBitMap::restore_pruned(
+        let mut status = CleanBitMap::init(
             context.with_label("bitmap"),
             &bitmap_metadata_partition,
             thread_pool,
@@ -283,8 +279,6 @@ impl<
         Ok(Self {
             any,
             status,
-            context,
-            bitmap_metadata_partition,
             cached_root,
         })
     }
@@ -300,19 +294,13 @@ impl<
 
         // Write the bitmap pruning boundary to disk so that next startup doesn't have to
         // re-Merkleize the inactive portion up to the inactivity floor.
-        self.status
-            .write_pruned(
-                self.context.with_label("bitmap"),
-                &self.bitmap_metadata_partition,
-            )
-            .await
-            .map_err(Into::into)
+        self.status.write_pruned().await.map_err(Into::into)
     }
 
     /// Destroy the db, removing all data from disk.
     pub async fn destroy(self) -> Result<(), Error> {
         // Clean up bitmap metadata partition.
-        CleanBitMap::<H::Digest, N>::destroy(self.context, &self.bitmap_metadata_partition).await?;
+        self.status.destroy().await?;
 
         // Clean up Any components (MMR and log).
         self.any.destroy().await
@@ -323,8 +311,6 @@ impl<
         Db {
             any: self.any.into_mutable(),
             status: self.status.into_dirty(),
-            context: self.context,
-            bitmap_metadata_partition: self.bitmap_metadata_partition,
             cached_root: None,
         }
     }
@@ -446,12 +432,7 @@ impl<
         // Write the pruned portion of the bitmap to disk *first* to ensure recovery in case of
         // failure during pruning. If we don't do this, we may not be able to recover the bitmap
         // because it may require replaying of pruned operations.
-        self.status
-            .write_pruned(
-                self.context.with_label("bitmap"),
-                &self.bitmap_metadata_partition,
-            )
-            .await?;
+        self.status.write_pruned().await?;
 
         self.any.prune(prune_loc).await
     }
@@ -559,8 +540,6 @@ impl<
             Db {
                 any,
                 status: self.status,
-                context: self.context,
-                bitmap_metadata_partition: self.bitmap_metadata_partition,
                 cached_root: None, // Not merkleized yet
             },
             range,
@@ -598,8 +577,6 @@ impl<
         Ok(Db {
             any,
             status,
-            context: self.context,
-            bitmap_metadata_partition: self.bitmap_metadata_partition,
             cached_root,
         })
     }
@@ -620,8 +597,6 @@ impl<
         Db {
             any: self.any.into_mutable(),
             status: self.status.into_dirty(),
-            context: self.context,
-            bitmap_metadata_partition: self.bitmap_metadata_partition,
             cached_root: None,
         }
     }
@@ -667,8 +642,6 @@ impl<
         Ok(Db {
             any,
             status,
-            context: self.context,
-            bitmap_metadata_partition: self.bitmap_metadata_partition,
             cached_root,
         })
     }
@@ -678,8 +651,6 @@ impl<
         Db {
             any: self.any.into_mutable(),
             status: self.status,
-            context: self.context,
-            bitmap_metadata_partition: self.bitmap_metadata_partition,
             cached_root: None,
         }
     }
@@ -1022,12 +993,12 @@ pub mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let partition = "build_small";
-            let db = open_db(context.clone(), partition).await;
+            let db = open_db(context.with_label("first"), partition).await;
             assert_eq!(db.op_count(), 1);
             assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(0));
             let root0 = db.root();
             drop(db);
-            let db = open_db(context.clone(), partition).await;
+            let db = open_db(context.with_label("second"), partition).await;
             assert_eq!(db.op_count(), 1);
             assert!(db.get_metadata().await.unwrap().is_none());
             assert_eq!(db.root(), root0);
@@ -1046,7 +1017,7 @@ pub mod test {
             assert!(root1 != root0);
 
             drop(db);
-            let db = open_db(context.clone(), partition).await;
+            let db = open_db(context.with_label("third"), partition).await;
             assert_eq!(db.op_count(), 4);
             assert_eq!(db.root(), root1);
 
@@ -1066,7 +1037,7 @@ pub mod test {
             let root2 = db.root();
 
             drop(db);
-            let db = open_db(context.clone(), partition).await;
+            let db = open_db(context.with_label("fourth"), partition).await;
             assert_eq!(db.op_count(), 6);
             assert_eq!(db.get_metadata().await.unwrap().unwrap(), metadata);
             assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(5));
@@ -1095,7 +1066,9 @@ pub mod test {
         // confirm that the end state of the db matches that of an identically updated hashmap.
         const ELEMENTS: u64 = 1000;
         executor.start(|context| async move {
-            let mut db = open_db(context.clone(), "build_big").await.into_mutable();
+            let mut db = open_db(context.with_label("first"), "build_big")
+                .await
+                .into_mutable();
 
             let mut map = HashMap::<Digest, Digest>::default();
             for i in 0u64..ELEMENTS {
@@ -1142,7 +1115,7 @@ pub mod test {
             // Reopen the db, making sure it has exactly the same state.
             let root = db.root();
             drop(db);
-            let db = open_db(context.clone(), "build_big").await;
+            let db = open_db(context.with_label("second"), "build_big").await;
             assert_eq!(root, db.root());
             assert_eq!(db.op_count(), 4241);
             assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(3383));
@@ -1304,8 +1277,10 @@ pub mod test {
             // The new location should differ but still be in the same chunk.
             assert_ne!(active_loc, proof_inactive.proof.loc);
             assert_eq!(
-                CleanBitMap::<Digest, 32>::leaf_pos(*active_loc),
-                CleanBitMap::<Digest, 32>::leaf_pos(*proof_inactive.proof.loc)
+                CleanBitMap::<deterministic::Context, Digest, 32>::leaf_pos(*active_loc),
+                CleanBitMap::<deterministic::Context, Digest, 32>::leaf_pos(
+                    *proof_inactive.proof.loc
+                )
             );
             let mut fake_proof = proof_inactive.clone();
             fake_proof.proof.loc = active_loc;
@@ -1551,7 +1526,9 @@ pub mod test {
         executor.start(|mut context| async move {
             let partition = "build_random";
             let rng_seed = context.next_u64();
-            let db = open_db(context.clone(), partition).await.into_mutable();
+            let db = open_db(context.with_label("first"), partition)
+                .await
+                .into_mutable();
             let db = apply_random_ops(ELEMENTS, true, rng_seed, db)
                 .await
                 .unwrap();
@@ -1562,7 +1539,7 @@ pub mod test {
             // Drop and reopen the db
             let root = db.root();
             drop(db);
-            let db = open_db(context, partition).await;
+            let db = open_db(context.with_label("second"), partition).await;
 
             // Ensure the root matches
             assert_eq!(db.root(), root);
@@ -1629,7 +1606,9 @@ pub mod test {
         executor.start(|mut context| async move {
             let partition = "build_random_fail_commit";
             let rng_seed = context.next_u64();
-            let db = open_db(context.clone(), partition).await.into_mutable();
+            let db = open_db(context.with_label("first"), partition)
+                .await
+                .into_mutable();
             let db = apply_random_ops(ELEMENTS, true, rng_seed, db)
                 .await
                 .unwrap();
@@ -1648,7 +1627,7 @@ pub mod test {
             // SCENARIO #1: Simulate a crash that happens before any writes. Upon reopening, the
             // state of the DB should be as of the last commit.
             drop(db);
-            let db = open_db(context.clone(), partition).await;
+            let db = open_db(context.with_label("second"), partition).await;
             assert_eq!(db.root(), committed_root);
             assert_eq!(db.op_count(), committed_op_count);
 
@@ -1667,13 +1646,13 @@ pub mod test {
 
             // We should be able to recover, so the root should differ from the previous commit, and
             // the op count should be greater than before.
-            let db = open_db(context.clone(), partition).await;
+            let db = open_db(context.with_label("third"), partition).await;
             let scenario_2_root = db.root();
 
             // To confirm the second committed hash is correct we'll re-build the DB in a new
             // partition, but without any failures. They should have the exact same state.
             let fresh_partition = "build_random_fail_commit_fresh";
-            let db = open_db(context.clone(), fresh_partition)
+            let db = open_db(context.with_label("fourth"), fresh_partition)
                 .await
                 .into_mutable();
             let db = apply_random_ops(ELEMENTS, true, rng_seed, db)
@@ -1703,15 +1682,20 @@ pub mod test {
 
             let db_config_pruning = current_db_config("pruning_test");
 
-            let mut db_no_pruning =
-                CleanCurrentTest::init(context.clone(), db_config_no_pruning.clone())
-                    .await
-                    .unwrap()
-                    .into_mutable();
-            let mut db_pruning = CleanCurrentTest::init(context.clone(), db_config_pruning.clone())
-                .await
-                .unwrap()
-                .into_mutable();
+            let mut db_no_pruning = CleanCurrentTest::init(
+                context.with_label("no_pruning_first"),
+                db_config_no_pruning.clone(),
+            )
+            .await
+            .unwrap()
+            .into_mutable();
+            let mut db_pruning = CleanCurrentTest::init(
+                context.with_label("pruning_first"),
+                db_config_pruning.clone(),
+            )
+            .await
+            .unwrap()
+            .into_mutable();
 
             // Apply identical operations to both databases, but only prune one.
             const NUM_OPERATIONS: u64 = 1000;
@@ -1754,12 +1738,16 @@ pub mod test {
             drop(db_pruning);
 
             // Restart both databases
-            let db_no_pruning = CleanCurrentTest::init(context.clone(), db_config_no_pruning)
-                .await
-                .unwrap();
-            let db_pruning = CleanCurrentTest::init(context.clone(), db_config_pruning)
-                .await
-                .unwrap();
+            let db_no_pruning = CleanCurrentTest::init(
+                context.with_label("no_pruning_second"),
+                db_config_no_pruning,
+            )
+            .await
+            .unwrap();
+            let db_pruning =
+                CleanCurrentTest::init(context.with_label("pruning_second"), db_config_pruning)
+                    .await
+                    .unwrap();
             assert_eq!(
                 db_no_pruning.inactivity_floor_loc(),
                 db_pruning.inactivity_floor_loc()
@@ -1785,7 +1773,7 @@ pub mod test {
         executor.start(|context| async move {
             let mut hasher = StandardHasher::<Sha256>::new();
             let partition = "exclusion_proofs";
-            let db = open_db(context.clone(), partition).await;
+            let db = open_db(context, partition).await;
 
             let key_exists_1 = Sha256::fill(0x10);
 

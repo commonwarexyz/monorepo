@@ -1023,7 +1023,10 @@ impl<
             write_buffer: self.journal_write_buffer,
         };
         let journal = Journal::<_, Node<C::PublicKey, P::Scheme, D>>::init(
-            self.context.with_label("journal").into_present(),
+            self.context
+                .with_label("journal")
+                .with_attribute("sequencer", sequencer)
+                .into_present(),
             cfg,
         )
         .await

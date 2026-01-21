@@ -141,7 +141,7 @@ impl<const N: usize> BitMap<N> {
     #[inline]
     pub fn get(&self, bit: u64) -> bool {
         let chunk = self.get_chunk_containing(bit);
-        Self::get_from_chunk(chunk, bit)
+        Self::get_bit_from_chunk(chunk, bit)
     }
 
     /// Returns the bitmap chunk containing the given bit.
@@ -176,7 +176,7 @@ impl<const N: usize> BitMap<N> {
     /// Get the value at the given `bit` from the `chunk`.
     /// `bit` is an index into the entire bitmap, not just the chunk.
     #[inline]
-    const fn get_from_chunk(chunk: &[u8; N], bit: u64) -> bool {
+    pub const fn get_bit_from_chunk(chunk: &[u8; N], bit: u64) -> bool {
         let byte = Self::chunk_byte_offset(bit);
         let byte = chunk[byte];
         let mask = Self::chunk_byte_bitmask(bit);
@@ -224,7 +224,7 @@ impl<const N: usize> BitMap<N> {
 
         // Get the bit value at the last position
         let last_bit_pos = self.len - 1;
-        let bit = Self::get_from_chunk(self.chunks.back().unwrap(), last_bit_pos);
+        let bit = Self::get_bit_from_chunk(self.chunks.back().unwrap(), last_bit_pos);
 
         // Decrement length
         self.len -= 1;

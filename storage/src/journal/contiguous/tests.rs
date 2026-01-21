@@ -7,6 +7,7 @@ use crate::{
 };
 use commonware_utils::NZUsize;
 use futures::{future::BoxFuture, StreamExt};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Helper trait for tests combining [MutableContiguous] and [Persistable].
 pub(super) trait PersistableContiguous<I>:
@@ -21,8 +22,9 @@ impl<I, T: MutableContiguous<Item = I> + Persistable<Error = Error>> Persistable
 
 /// Run the full suite of generic tests on a [Contiguous] implementation.
 ///
-/// The factory function receives a test identifier string that should be used
-/// to create unique partitions for each test to avoid conflicts.
+/// The factory function receives a test identifier string and a unique index
+/// for each invocation. Use both to create unique contexts/partitions to avoid
+/// metric name collisions (the deterministic runtime panics on duplicate metrics).
 ///
 /// # Assumptions
 ///
@@ -31,43 +33,49 @@ impl<I, T: MutableContiguous<Item = I> + Persistable<Error = Error>> Persistable
 /// for section boundary calculations and pruning behavior.
 pub(super) async fn run_contiguous_tests<F, J>(factory: F)
 where
-    F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
+    F: Fn(String, usize) -> BoxFuture<'static, Result<J, Error>>,
     J: PersistableContiguous<u64>,
 {
-    test_empty_journal_size(&factory).await;
-    test_empty_journal_oldest_retained_pos(&factory).await;
-    test_oldest_retained_pos_with_items(&factory).await;
-    test_oldest_retained_pos_after_prune(&factory).await;
-    test_pruning_boundary(&factory).await;
-    test_append_and_size(&factory).await;
-    test_sequential_appends(&factory).await;
-    test_replay_from_start(&factory).await;
-    test_replay_from_middle(&factory).await;
-    test_prune_retains_size(&factory).await;
-    test_through_trait(&factory).await;
-    test_replay_after_prune(&factory).await;
-    test_prune_then_append(&factory).await;
-    test_position_stability(&factory).await;
-    test_sync_behavior(&factory).await;
-    test_replay_on_empty(&factory).await;
-    test_replay_at_exact_size(&factory).await;
-    test_multiple_prunes(&factory).await;
-    test_prune_beyond_size(&factory).await;
-    test_persistence_basic(&factory).await;
-    test_persistence_after_prune(&factory).await;
-    test_read_by_position(&factory).await;
-    test_read_out_of_range(&factory).await;
-    test_read_after_prune(&factory).await;
-    test_rewind_to_middle(&factory).await;
-    test_rewind_to_zero(&factory).await;
-    test_rewind_current_size(&factory).await;
-    test_rewind_invalid_forward(&factory).await;
-    test_rewind_invalid_pruned(&factory).await;
-    test_rewind_then_append(&factory).await;
-    test_rewind_zero_then_append(&factory).await;
-    test_rewind_after_prune(&factory).await;
-    test_section_boundary_behavior(&factory).await;
-    test_destroy_and_reinit(&factory).await;
+    let counter = AtomicUsize::new(0);
+    let indexed_factory = |name: String| {
+        let idx = counter.fetch_add(1, Ordering::SeqCst);
+        factory(name, idx)
+    };
+
+    test_empty_journal_size(&indexed_factory).await;
+    test_empty_journal_oldest_retained_pos(&indexed_factory).await;
+    test_oldest_retained_pos_with_items(&indexed_factory).await;
+    test_oldest_retained_pos_after_prune(&indexed_factory).await;
+    test_pruning_boundary(&indexed_factory).await;
+    test_append_and_size(&indexed_factory).await;
+    test_sequential_appends(&indexed_factory).await;
+    test_replay_from_start(&indexed_factory).await;
+    test_replay_from_middle(&indexed_factory).await;
+    test_prune_retains_size(&indexed_factory).await;
+    test_through_trait(&indexed_factory).await;
+    test_replay_after_prune(&indexed_factory).await;
+    test_prune_then_append(&indexed_factory).await;
+    test_position_stability(&indexed_factory).await;
+    test_sync_behavior(&indexed_factory).await;
+    test_replay_on_empty(&indexed_factory).await;
+    test_replay_at_exact_size(&indexed_factory).await;
+    test_multiple_prunes(&indexed_factory).await;
+    test_prune_beyond_size(&indexed_factory).await;
+    test_persistence_basic(&indexed_factory).await;
+    test_persistence_after_prune(&indexed_factory).await;
+    test_read_by_position(&indexed_factory).await;
+    test_read_out_of_range(&indexed_factory).await;
+    test_read_after_prune(&indexed_factory).await;
+    test_rewind_to_middle(&indexed_factory).await;
+    test_rewind_to_zero(&indexed_factory).await;
+    test_rewind_current_size(&indexed_factory).await;
+    test_rewind_invalid_forward(&indexed_factory).await;
+    test_rewind_invalid_pruned(&indexed_factory).await;
+    test_rewind_then_append(&indexed_factory).await;
+    test_rewind_zero_then_append(&indexed_factory).await;
+    test_rewind_after_prune(&indexed_factory).await;
+    test_section_boundary_behavior(&indexed_factory).await;
+    test_destroy_and_reinit(&indexed_factory).await;
 }
 
 /// Test that an empty journal has size 0.

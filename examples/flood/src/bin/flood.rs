@@ -4,7 +4,7 @@ use commonware_cryptography::{
     ed25519::{PrivateKey, PublicKey},
     Signer as _,
 };
-use commonware_deployer::ec2::{Hosts, METRICS_PORT};
+use commonware_deployer::aws::{Hosts, METRICS_PORT};
 use commonware_flood::Config;
 use commonware_p2p::{authenticated::discovery, Manager, Receiver, Recipients, Sender};
 use commonware_runtime::{tokio, Metrics, Quota, Runner, Spawner};

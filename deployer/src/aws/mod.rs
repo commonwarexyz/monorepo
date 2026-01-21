@@ -86,7 +86,10 @@
 //!
 //! ### Subnets
 //!
-//! Single subnet per VPC (e.g., `10.<region-index>.1.0/24`), linked to a route table with an internet gateway.
+//! One subnet per availability zone that supports any required instance type in the region
+//! (e.g., `10.<region-index>.<az-index>.0/24`), linked to a shared route table with an internet gateway.
+//! Each instance is placed in an AZ that supports its instance type, distributed round-robin across
+//! eligible AZs, with automatic fallback to other AZs on capacity errors.
 //!
 //! ### VPC Peering
 //!
@@ -98,7 +101,7 @@
 //!
 //! # Workflow
 //!
-//! ## `ec2 create`
+//! ## `aws create`
 //!
 //! 1. Validates configuration and generates an SSH key pair, stored in `$HOME/.commonware_deployer/{tag}/id_rsa_{tag}`.
 //! 2. Ensures the shared S3 bucket exists and caches observability tools (Prometheus, Grafana, Loki, etc.) if not already present.
@@ -112,29 +115,87 @@
 //! 10. Updates the monitoring security group to allow telemetry traffic from binary instances.
 //! 11. Marks completion with `$HOME/.commonware_deployer/{tag}/created`.
 //!
-//! ## `ec2 update`
+//! ## `aws update`
+//!
+//! Performs rolling updates across all binary instances:
 //!
 //! 1. Uploads the latest binary and configuration to S3.
-//! 2. Stops the `binary` service on each binary instance.
-//! 3. Instances download the updated files from S3 via pre-signed URLs.
-//! 4. Restarts the `binary` service, ensuring minimal downtime.
+//! 2. For each instance (up to `--concurrency` at a time, default 128):
+//!    a. Stops the `binary` service.
+//!    b. Downloads the updated files from S3 via pre-signed URLs.
+//!    c. Restarts the `binary` service.
+//!    d. Waits for the service to become active before proceeding.
 //!
-//! ## `ec2 authorize`
+//! _Use `--concurrency 1` for fully sequential updates that wait for each instance to be healthy
+//! before updating the next._
+//!
+//! ## `aws authorize`
 //!
 //! 1. Obtains the deployer's current public IP address (or parses the one provided).
 //! 2. For each security group in the deployment, adds an ingress rule for the IP (if it doesn't already exist).
 //!
-//! ## `ec2 destroy`
+//! ## `aws destroy`
 //!
 //! 1. Terminates all instances across regions.
 //! 2. Deletes security groups, subnets, route tables, VPC peering connections, internet gateways, key pairs, and VPCs in dependency order.
 //! 3. Deletes deployment-specific data from S3 (cached tools remain for future deployments).
 //! 4. Marks destruction with `$HOME/.commonware_deployer/{tag}/destroyed`, retaining the directory to prevent tag reuse.
 //!
-//! ## `ec2 clean`
+//! ## `aws clean`
 //!
 //! 1. Deletes the shared S3 bucket and all its contents (cached tools and any remaining deployment data).
 //! 2. Use this to fully clean up when you no longer need the deployer cache.
+//!
+//! ## `aws profile`
+//!
+//! 1. Loads the deployment configuration and locates the specified instance.
+//! 2. Caches the samply binary in S3 if not already present.
+//! 3. SSHes to the instance, downloads samply, and records a CPU profile of the running binary for the specified duration.
+//! 4. Downloads the profile locally via SCP.
+//! 5. Opens Firefox Profiler with symbols resolved from your local debug binary.
+//!
+//! # Profiling
+//!
+//! The deployer supports two profiling modes:
+//!
+//! ## Continuous Profiling (Pyroscope)
+//!
+//! Enable continuous CPU profiling by setting `profiling: true` in your instance config. This runs
+//! Pyroscope in the background, continuously collecting profiles that are viewable in the Grafana
+//! dashboard on the monitoring instance.
+//!
+//! For best results, build and deploy your binary with debug symbols and frame pointers:
+//!
+//! ```bash
+//! CARGO_PROFILE_RELEASE_DEBUG=true RUSTFLAGS="-C force-frame-pointers=yes" cargo build --release
+//! ```
+//!
+//! ## On-Demand Profiling (samply)
+//!
+//! To generate an on-demand CPU profile (viewable in the Firefox Profiler UI), run the
+//! following:
+//!
+//! ```bash
+//! deployer aws profile --config config.yaml --instance <name> --binary <path-to-binary-with-debug>
+//! ```
+//!
+//! This captures a 30-second profile (configurable with `--duration`) using samply on the remote
+//! instance, downloads it, and opens it in Firefox Profiler. Unlike Continuous Profiling, this mode
+//! does not require deploying a binary with debug symbols (reducing deployment time).
+//!
+//! Like above, build your binary with debug symbols (but not frame pointers):
+//!
+//! ```bash
+//! CARGO_PROFILE_RELEASE_DEBUG=true cargo build --release
+//! ```
+//!
+//! Now, strip symbols and deploy via `aws create` (preserve the original binary for profile symbolication
+//! when you run the `aws profile` command shown above):
+//!
+//! ```bash
+//! cp target/release/my-binary target/release/my-binary-debug
+//! strip target/release/my-binary
+//! ```
 //!
 //! # Persistence
 //!
@@ -238,7 +299,7 @@ cfg_if::cfg_if! {
             }
         }
 
-        pub mod aws;
+        pub mod ec2;
         mod create;
         pub mod services;
         pub use create::create;
@@ -250,6 +311,8 @@ cfg_if::cfg_if! {
         pub use destroy::destroy;
         mod clean;
         pub use clean::clean;
+        mod profile;
+        pub use profile::profile;
         pub mod utils;
         pub mod s3;
 
@@ -277,8 +340,11 @@ cfg_if::cfg_if! {
         /// Port on monitoring where traces are pushed
         const TRACES_PORT: u16 = 4318;
 
+        /// Maximum instances to manipulate at one time
+        pub const DEFAULT_CONCURRENCY: &str = "128";
+
         /// Subcommand name
-        pub const CMD: &str = "ec2";
+        pub const CMD: &str = "aws";
 
         /// Create subcommand name
         pub const CREATE_CMD: &str = "create";
@@ -295,6 +361,9 @@ cfg_if::cfg_if! {
         /// Clean subcommand name
         pub const CLEAN_CMD: &str = "clean";
 
+        /// Profile subcommand name
+        pub const PROFILE_CMD: &str = "profile";
+
         /// Directory where deployer files are stored
         fn deployer_directory(tag: &str) -> PathBuf {
             let base_dir = std::env::var("HOME").expect("$HOME is not configured");
@@ -307,7 +376,6 @@ cfg_if::cfg_if! {
             CreateBucket,
             DeleteBucket,
             HeadObject,
-            PutObject,
             ListObjects,
             DeleteObjects,
         }
@@ -333,7 +401,6 @@ cfg_if::cfg_if! {
                     Self::CreateBucket => write!(f, "CreateBucket"),
                     Self::DeleteBucket => write!(f, "DeleteBucket"),
                     Self::HeadObject => write!(f, "HeadObject"),
-                    Self::PutObject => write!(f, "PutObject"),
                     Self::ListObjects => write!(f, "ListObjects"),
                     Self::DeleteObjects => write!(f, "DeleteObjects"),
                 }
@@ -399,6 +466,14 @@ cfg_if::cfg_if! {
             S3Builder(#[from] aws_sdk_s3::error::BuildError),
             #[error("duplicate instance name: {0}")]
             DuplicateInstanceName(String),
+            #[error("instance not found: {0}")]
+            InstanceNotFound(String),
+            #[error("symbolication failed: {0}")]
+            Symbolication(String),
+            #[error("no subnet supports instance type: {0}")]
+            UnsupportedInstanceType(String),
+            #[error("no subnets available")]
+            NoSubnetsAvailable,
         }
 
         impl From<aws_sdk_s3::error::SdkError<aws_sdk_s3::operation::get_object::GetObjectError>> for Error {

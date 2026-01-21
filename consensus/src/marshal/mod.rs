@@ -109,7 +109,7 @@ mod tests {
         application::marshaled::Marshaled,
         marshal::ingress::mailbox::{AncestorStream, Identifier},
         simplex::{
-            scheme::bls12381_threshold,
+            scheme::bls12381_threshold::vrf as bls12381_threshold_vrf,
             types::{Activity, Context, Finalization, Finalize, Notarization, Notarize, Proposal},
         },
         types::{Epoch, Epocher, FixedEpocher, Height, Round, View, ViewDelta},
@@ -130,7 +130,10 @@ mod tests {
     };
     use commonware_parallel::Sequential;
     use commonware_runtime::{buffer::PoolRef, deterministic, Clock, Metrics, Quota, Runner};
-    use commonware_storage::archive::immutable;
+    use commonware_storage::{
+        archive::{immutable, prunable},
+        translator::EightCap,
+    };
     use commonware_utils::{vec::NonEmptyVec, NZUsize, NZU16, NZU64};
     use futures::StreamExt;
     use rand::{
@@ -148,7 +151,7 @@ mod tests {
     type B = Block<D>;
     type K = PublicKey;
     type V = MinPk;
-    type S = bls12381_threshold::Scheme<K, V>;
+    type S = bls12381_threshold_vrf::Scheme<K, V>;
     type P = ConstantProvider<S, Epoch>;
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
@@ -433,7 +436,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             // Initialize applications and actors
             let mut applications = BTreeMap::new();
@@ -583,7 +586,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             // Initialize applications and actors
             let mut applications = BTreeMap::new();
@@ -750,6 +753,266 @@ mod tests {
     }
 
     #[test_traced("WARN")]
+    fn test_prune_finalized_archives() {
+        let runner = deterministic::Runner::new(
+            deterministic::Config::new().with_timeout(Some(Duration::from_secs(120))),
+        );
+        runner.start(|mut context| async move {
+            let oracle = setup_network(context.clone(), None);
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+
+            let validator = participants[0].clone();
+            let partition_prefix = format!("prune-test-{}", validator.clone());
+            let buffer_pool = PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
+            let control = oracle.control(validator.clone());
+
+            // Closure to initialize marshal with prunable archives
+            let init_marshal = |label: &str| {
+                let ctx = context.with_label(label);
+                let validator = validator.clone();
+                let schemes = schemes.clone();
+                let partition_prefix = partition_prefix.clone();
+                let buffer_pool = buffer_pool.clone();
+                let control = control.clone();
+                let oracle_manager = oracle.manager();
+                async move {
+                    let provider = ConstantProvider::new(schemes[0].clone());
+                    let config = Config {
+                        provider,
+                        epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+                        mailbox_size: 100,
+                        view_retention_timeout: ViewDelta::new(10),
+                        max_repair: NZUsize!(10),
+                        block_codec_config: (),
+                        partition_prefix: partition_prefix.clone(),
+                        prunable_items_per_section: NZU64!(10),
+                        replay_buffer: NZUsize!(1024),
+                        key_write_buffer: NZUsize!(1024),
+                        value_write_buffer: NZUsize!(1024),
+                        buffer_pool: buffer_pool.clone(),
+                        strategy: Sequential,
+                    };
+
+                    // Create resolver
+                    let backfill = control.register(0, TEST_QUOTA).await.unwrap();
+                    let resolver_cfg = resolver::Config {
+                        public_key: validator.clone(),
+                        manager: oracle_manager,
+                        blocker: control.clone(),
+                        mailbox_size: config.mailbox_size,
+                        initial: Duration::from_secs(1),
+                        timeout: Duration::from_secs(2),
+                        fetch_retry_timeout: Duration::from_millis(100),
+                        priority_requests: false,
+                        priority_responses: false,
+                    };
+                    let resolver = resolver::init(&ctx, resolver_cfg, backfill);
+
+                    // Create buffered broadcast engine
+                    let broadcast_config = buffered::Config {
+                        public_key: validator.clone(),
+                        mailbox_size: config.mailbox_size,
+                        deque_size: 10,
+                        priority: false,
+                        codec_config: (),
+                    };
+                    let (broadcast_engine, buffer) =
+                        buffered::Engine::new(ctx.clone(), broadcast_config);
+                    let network = control.register(1, TEST_QUOTA).await.unwrap();
+                    broadcast_engine.start(network);
+
+                    // Initialize prunable archives
+                    let finalizations_by_height = prunable::Archive::init(
+                        ctx.with_label("finalizations_by_height"),
+                        prunable::Config {
+                            translator: EightCap,
+                            key_partition: format!(
+                                "{}-finalizations-by-height-key",
+                                partition_prefix
+                            ),
+                            key_buffer_pool: buffer_pool.clone(),
+                            value_partition: format!(
+                                "{}-finalizations-by-height-value",
+                                partition_prefix
+                            ),
+                            compression: None,
+                            codec_config: S::certificate_codec_config_unbounded(),
+                            items_per_section: NZU64!(10),
+                            key_write_buffer: config.key_write_buffer,
+                            value_write_buffer: config.value_write_buffer,
+                            replay_buffer: config.replay_buffer,
+                        },
+                    )
+                    .await
+                    .expect("failed to initialize finalizations by height archive");
+
+                    let finalized_blocks = prunable::Archive::init(
+                        ctx.with_label("finalized_blocks"),
+                        prunable::Config {
+                            translator: EightCap,
+                            key_partition: format!("{}-finalized-blocks-key", partition_prefix),
+                            key_buffer_pool: buffer_pool.clone(),
+                            value_partition: format!("{}-finalized-blocks-value", partition_prefix),
+                            compression: None,
+                            codec_config: config.block_codec_config,
+                            items_per_section: NZU64!(10),
+                            key_write_buffer: config.key_write_buffer,
+                            value_write_buffer: config.value_write_buffer,
+                            replay_buffer: config.replay_buffer,
+                        },
+                    )
+                    .await
+                    .expect("failed to initialize finalized blocks archive");
+
+                    let (actor, mailbox, _processed_height) = actor::Actor::init(
+                        ctx.clone(),
+                        finalizations_by_height,
+                        finalized_blocks,
+                        config,
+                    )
+                    .await;
+                    let application = Application::<B>::default();
+                    actor.start(application.clone(), buffer, resolver);
+
+                    (mailbox, application)
+                }
+            };
+
+            // Initial setup
+            let (mut mailbox, application) = init_marshal("init").await;
+
+            // Finalize blocks 1-20
+            let mut parent = Sha256::hash(b"");
+            let epocher = FixedEpocher::new(BLOCKS_PER_EPOCH);
+            for i in 1..=20u64 {
+                let block = B::new::<Sha256>(parent, Height::new(i), i);
+                let commitment = block.digest();
+                let bounds = epocher.containing(Height::new(i)).unwrap();
+                let round = Round::new(bounds.epoch(), View::new(i));
+
+                mailbox.verified(round, block.clone()).await;
+                let proposal = Proposal {
+                    round,
+                    parent: View::new(i - 1),
+                    payload: commitment,
+                };
+                let finalization = make_finalization(proposal, &schemes, QUORUM);
+                mailbox.report(Activity::Finalization(finalization)).await;
+
+                parent = commitment;
+            }
+
+            // Wait for application to process all blocks
+            // After this, last_processed_height will be 20
+            while application.blocks().len() < 20 {
+                context.sleep(Duration::from_millis(10)).await;
+            }
+
+            // Verify all blocks are accessible before pruning
+            for i in 1..=20u64 {
+                assert!(
+                    mailbox.get_block(Height::new(i)).await.is_some(),
+                    "block {i} should exist before pruning"
+                );
+                assert!(
+                    mailbox.get_finalization(Height::new(i)).await.is_some(),
+                    "finalization {i} should exist before pruning"
+                );
+            }
+
+            // All blocks should still be accessible (prune was ignored)
+            mailbox.prune(Height::new(25)).await;
+            context.sleep(Duration::from_millis(50)).await;
+            for i in 1..=20u64 {
+                assert!(
+                    mailbox.get_block(Height::new(i)).await.is_some(),
+                    "block {i} should still exist after pruning above floor"
+                );
+            }
+
+            // Pruning at height 10 should prune blocks below 10 (heights 1-9)
+            mailbox.prune(Height::new(10)).await;
+            context.sleep(Duration::from_millis(100)).await;
+            for i in 1..10u64 {
+                assert!(
+                    mailbox.get_block(Height::new(i)).await.is_none(),
+                    "block {i} should be pruned"
+                );
+                assert!(
+                    mailbox.get_finalization(Height::new(i)).await.is_none(),
+                    "finalization {i} should be pruned"
+                );
+            }
+
+            // Blocks at or above prune height (10-20) should still be accessible
+            for i in 10..=20u64 {
+                assert!(
+                    mailbox.get_block(Height::new(i)).await.is_some(),
+                    "block {i} should still exist after pruning"
+                );
+                assert!(
+                    mailbox.get_finalization(Height::new(i)).await.is_some(),
+                    "finalization {i} should still exist after pruning"
+                );
+            }
+
+            // Pruning at height 20 should prune blocks 10-19
+            mailbox.prune(Height::new(20)).await;
+            context.sleep(Duration::from_millis(100)).await;
+            for i in 10..20u64 {
+                assert!(
+                    mailbox.get_block(Height::new(i)).await.is_none(),
+                    "block {i} should be pruned after second prune"
+                );
+                assert!(
+                    mailbox.get_finalization(Height::new(i)).await.is_none(),
+                    "finalization {i} should be pruned after second prune"
+                );
+            }
+
+            // Block 20 should still be accessible
+            assert!(
+                mailbox.get_block(Height::new(20)).await.is_some(),
+                "block 20 should still exist"
+            );
+            assert!(
+                mailbox.get_finalization(Height::new(20)).await.is_some(),
+                "finalization 20 should still exist"
+            );
+
+            // Restart to verify pruning persisted to storage (not just in-memory)
+            drop(mailbox);
+            let (mut mailbox, _application) = init_marshal("restart").await;
+
+            // Verify blocks 1-19 are still pruned after restart
+            for i in 1..20u64 {
+                assert!(
+                    mailbox.get_block(Height::new(i)).await.is_none(),
+                    "block {i} should still be pruned after restart"
+                );
+                assert!(
+                    mailbox.get_finalization(Height::new(i)).await.is_none(),
+                    "finalization {i} should still be pruned after restart"
+                );
+            }
+
+            // Verify block 20 persisted correctly after restart
+            assert!(
+                mailbox.get_block(Height::new(20)).await.is_some(),
+                "block 20 should still exist after restart"
+            );
+            assert!(
+                mailbox.get_finalization(Height::new(20)).await.is_some(),
+                "finalization 20 should still exist after restart"
+            );
+        })
+    }
+
+    #[test_traced("WARN")]
     fn test_subscribe_basic_block_delivery() {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
@@ -758,7 +1021,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             let mut actors = Vec::new();
             for (i, validator) in participants.iter().enumerate() {
@@ -813,7 +1076,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             let mut actors = Vec::new();
             for (i, validator) in participants.iter().enumerate() {
@@ -889,7 +1152,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             let mut actors = Vec::new();
             for (i, validator) in participants.iter().enumerate() {
@@ -957,7 +1220,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             let mut actors = Vec::new();
             for (i, validator) in participants.iter().enumerate() {
@@ -1068,7 +1331,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             // Single validator actor
             let me = participants[0].clone();
@@ -1137,7 +1400,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             // Single validator actor
             let me = participants[0].clone();
@@ -1219,7 +1482,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             let me = participants[0].clone();
             let (application, mut actor, _processed_height) = setup_validator(
@@ -1281,7 +1544,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             let me = participants[0].clone();
             let (_application, mut actor, _processed_height) = setup_validator(
@@ -1339,7 +1602,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             let me = participants[0].clone();
             let (_application, mut actor, _processed_height) = setup_validator(
@@ -1397,7 +1660,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             // Register the initial peer set
             let mut manager = oracle.manager();
@@ -1479,7 +1742,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             let me = participants[0].clone();
             let (_application, mut actor, _processed_height) = setup_validator(
@@ -1564,7 +1827,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             let me = participants[0].clone();
             let (_base_app, marshal, _processed_height) = setup_validator(
@@ -1705,7 +1968,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             // Set up two validators
             let mut actors = Vec::new();
@@ -1823,7 +2086,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             // Test 1: Fresh init should return processed height 0
             let me = participants[0].clone();
@@ -1961,7 +2224,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             let me = participants[0].clone();
             let (_base_app, marshal, _processed_height) = setup_validator(
@@ -2026,7 +2289,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             // Set up one validator
             let (i, validator) = participants.iter().enumerate().next().unwrap();
@@ -2058,7 +2321,7 @@ mod tests {
 
             // Restart marshal, removing any in-memory cache
             let mut actor = setup_validator(
-                context.with_label(&format!("validator_{i}")),
+                context.with_label(&format!("validator_{i}_restart")),
                 &mut oracle,
                 validator.clone(),
                 ConstantProvider::new(schemes[i].clone()),

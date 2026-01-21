@@ -133,7 +133,7 @@ mod tests {
     use super::*;
     use crate::archive::Archive as ArchiveTrait;
     use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
-    use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
+    use commonware_runtime::{buffer::PoolRef, deterministic, Metrics, Runner};
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use std::num::NonZeroU16;
 
@@ -166,11 +166,15 @@ mod tests {
 
             // First initialization
             let archive: Archive<_, Digest, i32> =
-                Archive::init(context.clone(), cfg.clone()).await.unwrap();
+                Archive::init(context.with_label("first"), cfg.clone())
+                    .await
+                    .unwrap();
             drop(archive);
 
             // Second initialization
-            let mut archive = Archive::init(context.clone(), cfg.clone()).await.unwrap();
+            let mut archive = Archive::init(context.with_label("second"), cfg.clone())
+                .await
+                .unwrap();
 
             // Add some data
             let key1 = Sha256::hash(b"key1");
@@ -183,7 +187,9 @@ mod tests {
             drop(archive);
 
             // Re-initialize archive (should load from checkpoint)
-            let archive = Archive::init(context, cfg).await.unwrap();
+            let archive = Archive::init(context.with_label("third"), cfg)
+                .await
+                .unwrap();
 
             // Verify data persisted
             assert_eq!(

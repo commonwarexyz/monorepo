@@ -9,7 +9,7 @@ use commonware_bridge::{
 };
 use commonware_codec::{DecodeExt, Encode};
 use commonware_consensus::{
-    simplex::{scheme::bls12381_threshold, types::Finalization},
+    simplex::{scheme::bls12381_threshold::standard as bls12381_threshold, types::Finalization},
     types::View,
     Viewable,
 };

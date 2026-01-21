@@ -1,16 +1,17 @@
 //! `destroy` subcommand for `ec2`
 
-use crate::ec2::{
-    aws::*,
+use crate::aws::{
     deployer_directory,
-    s3::{
-        create_s3_client, delete_prefix, is_no_such_bucket_error, Region, S3_BUCKET_NAME,
-        S3_DEPLOYMENTS_PREFIX,
-    },
+    ec2::{self, *},
+    s3::{self, delete_prefix, is_no_such_bucket_error, Region, BUCKET_NAME, DEPLOYMENTS_PREFIX},
     Config, Error, DESTROYED_FILE_NAME, LOGS_PORT, MONITORING_REGION, PROFILES_PORT, TRACES_PORT,
 };
 use futures::future::try_join_all;
-use std::{collections::HashSet, fs::File, path::PathBuf};
+use std::{
+    collections::{HashMap, HashSet},
+    fs::File,
+    path::PathBuf,
+};
 use tracing::{info, warn};
 
 /// Tears down all resources associated with the deployment tag
@@ -37,13 +38,13 @@ pub async fn destroy(config: &PathBuf) -> Result<(), Error> {
     }
 
     // Clean up S3 deployment data (preserves cached tools)
-    info!(bucket = S3_BUCKET_NAME, "cleaning up S3 deployment data");
-    let s3_client = create_s3_client(Region::new(MONITORING_REGION)).await;
-    let deployment_prefix = format!("{}/{}/", S3_DEPLOYMENTS_PREFIX, tag);
-    match delete_prefix(&s3_client, S3_BUCKET_NAME, &deployment_prefix).await {
+    info!(bucket = BUCKET_NAME, "cleaning up S3 deployment data");
+    let s3_client = s3::create_client(Region::new(MONITORING_REGION)).await;
+    let deployment_prefix = format!("{}/{}/", DEPLOYMENTS_PREFIX, tag);
+    match delete_prefix(&s3_client, BUCKET_NAME, &deployment_prefix).await {
         Ok(()) => {
             info!(
-                bucket = S3_BUCKET_NAME,
+                bucket = BUCKET_NAME,
                 prefix = deployment_prefix.as_str(),
                 "deleted S3 deployment data"
             );
@@ -51,11 +52,11 @@ pub async fn destroy(config: &PathBuf) -> Result<(), Error> {
         Err(e) => {
             if is_no_such_bucket_error(&e) {
                 info!(
-                    bucket = S3_BUCKET_NAME,
+                    bucket = BUCKET_NAME,
                     "bucket does not exist, skipping S3 cleanup"
                 );
             } else {
-                warn!(bucket = S3_BUCKET_NAME, %e, "failed to delete S3 deployment data, continuing with destroy");
+                warn!(bucket = BUCKET_NAME, %e, "failed to delete S3 deployment data, continuing with destroy");
             }
         }
     }
@@ -73,7 +74,7 @@ pub async fn destroy(config: &PathBuf) -> Result<(), Error> {
         let region = region.clone();
         let tag = tag.clone();
         async move {
-            let ec2_client = create_ec2_client(Region::new(region.clone())).await;
+            let ec2_client = ec2::create_client(Region::new(region.clone())).await;
             info!(region = region.as_str(), "created EC2 client");
 
             let instance_ids = find_instances_by_tag(&ec2_client, &tag).await?;
@@ -232,21 +233,24 @@ pub async fn destroy(config: &PathBuf) -> Result<(), Error> {
             let key_name = format!("deployer-{tag}");
             delete_key_pair(&ec2_client, &key_name).await?;
             info!(region = region.as_str(), key_name, "deleted key pair");
+            Ok::<_, Error>((region, ec2_client))
+        }
+    });
+    let ec2_clients: HashMap<String, Ec2Client> = try_join_all(jobs).await?.into_iter().collect();
+
+    // Second pass: Delete VPCs after dependencies are removed
+    let vpc_jobs = ec2_clients.into_iter().map(|(region, ec2_client)| {
+        let tag = tag.clone();
+        async move {
+            let vpc_ids = find_vpcs_by_tag(&ec2_client, &tag).await?;
+            for vpc_id in vpc_ids {
+                delete_vpc(&ec2_client, &vpc_id).await?;
+                info!(region = region.as_str(), vpc_id, "deleted VPC");
+            }
             Ok::<(), Error>(())
         }
     });
-    try_join_all(jobs).await?;
-
-    // Second pass: Delete VPCs after dependencies are removed
-    for region in &all_regions {
-        let ec2_client = create_ec2_client(Region::new(region.clone())).await;
-        info!(region = region.as_str(), "created EC2 client");
-        let vpc_ids = find_vpcs_by_tag(&ec2_client, tag).await?;
-        for vpc_id in vpc_ids {
-            delete_vpc(&ec2_client, &vpc_id).await?;
-            info!(region = region.as_str(), vpc_id, "deleted VPC");
-        }
-    }
+    try_join_all(vpc_jobs).await?;
     info!(regions = ?all_regions, "resources removed");
 
     // Write destruction file

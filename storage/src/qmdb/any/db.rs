@@ -430,9 +430,13 @@ where
 
     /// Same as `raise_floor` but uses the status bitmap to more efficiently find the first active
     /// operation above the inactivity floor.
-    pub(crate) async fn raise_floor_with_bitmap<D: Digest, const N: usize>(
+    pub(crate) async fn raise_floor_with_bitmap<
+        F: Storage + Clock + Metrics,
+        D: Digest,
+        const N: usize,
+    >(
         &mut self,
-        status: &mut AuthenticatedBitMap<D, N, Unmerkleized>,
+        status: &mut AuthenticatedBitMap<F, D, N, Unmerkleized>,
     ) -> Result<Location, Error> {
         if self.is_empty() {
             self.inactivity_floor_loc = self.op_count();

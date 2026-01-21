@@ -113,7 +113,8 @@ impl<E: Spawner + Clock + CryptoRngCore + RNetwork + Resolver + Metrics, C: Sign
     ) {
         let clock = self
             .context
-            .with_label(&format!("channel_{channel}"))
+            .with_label("channel")
+            .with_attribute("idx", channel)
             .take();
         self.channels.register(channel, rate, backlog, clock)
     }

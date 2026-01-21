@@ -57,7 +57,10 @@ mod tests {
             },
             elector::{Config as ElectorConfig, Elector, Random, RoundRobin, RoundRobinElector},
             mocks, quorum,
-            scheme::{bls12381_multisig, bls12381_threshold, ed25519, secp256r1, Scheme},
+            scheme::{
+                bls12381_multisig, bls12381_threshold::vrf as bls12381_threshold_vrf, ed25519,
+                secp256r1, Scheme,
+            },
             types::{Certificate, Finalization, Finalize, Notarization, Notarize, Proposal, Vote},
         },
         types::{Participant, Round, View},
@@ -487,8 +490,8 @@ mod tests {
 
     #[test_traced]
     fn test_stale_backfill() {
-        stale_backfill::<_, _, Random>(bls12381_threshold::fixture::<MinPk, _>);
-        stale_backfill::<_, _, Random>(bls12381_threshold::fixture::<MinSig, _>);
+        stale_backfill::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        stale_backfill::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinSig, _>);
         stale_backfill::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>);
         stale_backfill::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>);
         stale_backfill::<_, _, RoundRobin>(ed25519::fixture);
@@ -773,8 +776,8 @@ mod tests {
 
     #[test_traced]
     fn test_append_old_interesting_view() {
-        append_old_interesting_view::<_, _, Random>(bls12381_threshold::fixture::<MinPk, _>);
-        append_old_interesting_view::<_, _, Random>(bls12381_threshold::fixture::<MinSig, _>);
+        append_old_interesting_view::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        append_old_interesting_view::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinSig, _>);
         append_old_interesting_view::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>);
         append_old_interesting_view::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>);
         append_old_interesting_view::<_, _, RoundRobin>(ed25519::fixture);
@@ -894,10 +897,10 @@ mod tests {
     #[test_traced]
     fn test_finalization_without_notarization_certificate() {
         finalization_without_notarization_certificate::<_, _, Random>(
-            bls12381_threshold::fixture::<MinPk, _>,
+            bls12381_threshold_vrf::fixture::<MinPk, _>,
         );
         finalization_without_notarization_certificate::<_, _, Random>(
-            bls12381_threshold::fixture::<MinSig, _>,
+            bls12381_threshold_vrf::fixture::<MinSig, _>,
         );
         finalization_without_notarization_certificate::<_, _, RoundRobin>(
             bls12381_multisig::fixture::<MinPk, _>,
@@ -1042,8 +1045,10 @@ mod tests {
 
     #[test_traced]
     fn test_certificate_conflicts_proposal() {
-        certificate_conflicts_proposal::<_, _, Random>(bls12381_threshold::fixture::<MinPk, _>);
-        certificate_conflicts_proposal::<_, _, Random>(bls12381_threshold::fixture::<MinSig, _>);
+        certificate_conflicts_proposal::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        certificate_conflicts_proposal::<_, _, Random>(
+            bls12381_threshold_vrf::fixture::<MinSig, _>,
+        );
         certificate_conflicts_proposal::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>);
         certificate_conflicts_proposal::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>);
         certificate_conflicts_proposal::<_, _, RoundRobin>(ed25519::fixture);
@@ -1171,8 +1176,10 @@ mod tests {
 
     #[test_traced]
     fn test_proposal_conflicts_certificate() {
-        proposal_conflicts_certificate::<_, _, Random>(bls12381_threshold::fixture::<MinPk, _>);
-        proposal_conflicts_certificate::<_, _, Random>(bls12381_threshold::fixture::<MinSig, _>);
+        proposal_conflicts_certificate::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        proposal_conflicts_certificate::<_, _, Random>(
+            bls12381_threshold_vrf::fixture::<MinSig, _>,
+        );
         proposal_conflicts_certificate::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>);
         proposal_conflicts_certificate::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>);
         proposal_conflicts_certificate::<_, _, RoundRobin>(ed25519::fixture);
@@ -1342,8 +1349,8 @@ mod tests {
 
     #[test_traced]
     fn test_certificate_verifies_proposal() {
-        certificate_verifies_proposal::<_, _, Random>(bls12381_threshold::fixture::<MinPk, _>);
-        certificate_verifies_proposal::<_, _, Random>(bls12381_threshold::fixture::<MinSig, _>);
+        certificate_verifies_proposal::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        certificate_verifies_proposal::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinSig, _>);
         certificate_verifies_proposal::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>);
         certificate_verifies_proposal::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>);
         certificate_verifies_proposal::<_, _, RoundRobin>(ed25519::fixture);
@@ -1567,8 +1574,8 @@ mod tests {
 
     #[test_traced]
     fn test_drop_our_proposal_on_conflict() {
-        drop_our_proposal_on_conflict(bls12381_threshold::fixture::<MinPk, _>);
-        drop_our_proposal_on_conflict(bls12381_threshold::fixture::<MinSig, _>);
+        drop_our_proposal_on_conflict(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        drop_our_proposal_on_conflict(bls12381_threshold_vrf::fixture::<MinSig, _>);
         drop_our_proposal_on_conflict(bls12381_multisig::fixture::<MinPk, _>);
         drop_our_proposal_on_conflict(bls12381_multisig::fixture::<MinSig, _>);
         drop_our_proposal_on_conflict(ed25519::fixture);
@@ -1646,7 +1653,7 @@ mod tests {
                 write_buffer: NZUsize!(1024 * 1024),
                 buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
-            let (voter, mut mailbox) = Actor::new(context.clone(), voter_cfg);
+            let (voter, mut mailbox) = Actor::new(context.with_label("voter"), voter_cfg);
 
             // Resolver and batcher mailboxes
             let (resolver_sender, mut resolver_receiver) = mpsc::channel(8);
@@ -1736,7 +1743,7 @@ mod tests {
                 write_buffer: NZUsize!(1024 * 1024),
                 buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
-            let (voter, _mailbox) = Actor::new(context.clone(), voter_cfg);
+            let (voter, _mailbox) = Actor::new(context.with_label("voter_restarted"), voter_cfg);
 
             // Resolver and batcher mailboxes
             let (resolver_sender, mut resolver_receiver) = mpsc::channel(8);
@@ -1794,8 +1801,8 @@ mod tests {
 
     #[test_traced]
     fn test_populate_resolver_on_restart() {
-        populate_resolver_on_restart::<_, _, Random>(bls12381_threshold::fixture::<MinPk, _>);
-        populate_resolver_on_restart::<_, _, Random>(bls12381_threshold::fixture::<MinSig, _>);
+        populate_resolver_on_restart::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        populate_resolver_on_restart::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinSig, _>);
         populate_resolver_on_restart::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>);
         populate_resolver_on_restart::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>);
         populate_resolver_on_restart::<_, _, RoundRobin>(ed25519::fixture);
@@ -1896,8 +1903,8 @@ mod tests {
 
     #[test_traced]
     fn test_finalization_from_resolver() {
-        finalization_from_resolver::<_, _, Random>(bls12381_threshold::fixture::<MinPk, _>);
-        finalization_from_resolver::<_, _, Random>(bls12381_threshold::fixture::<MinSig, _>);
+        finalization_from_resolver::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        finalization_from_resolver::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinSig, _>);
         finalization_from_resolver::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>);
         finalization_from_resolver::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>);
         finalization_from_resolver::<_, _, RoundRobin>(ed25519::fixture);
@@ -2018,8 +2025,8 @@ mod tests {
 
     #[test_traced]
     fn test_no_resolver_boomerang() {
-        no_resolver_boomerang::<_, _, Random>(bls12381_threshold::fixture::<MinPk, _>);
-        no_resolver_boomerang::<_, _, Random>(bls12381_threshold::fixture::<MinSig, _>);
+        no_resolver_boomerang::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        no_resolver_boomerang::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinSig, _>);
         no_resolver_boomerang::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>);
         no_resolver_boomerang::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>);
         no_resolver_boomerang::<_, _, RoundRobin>(ed25519::fixture);
@@ -2232,10 +2239,10 @@ mod tests {
     #[test_traced]
     fn test_verification_failure_emits_nullify_immediately() {
         verification_failure_emits_nullify_immediately::<_, _, Random>(
-            bls12381_threshold::fixture::<MinPk, _>,
+            bls12381_threshold_vrf::fixture::<MinPk, _>,
         );
         verification_failure_emits_nullify_immediately::<_, _, Random>(
-            bls12381_threshold::fixture::<MinSig, _>,
+            bls12381_threshold_vrf::fixture::<MinSig, _>,
         );
         verification_failure_emits_nullify_immediately::<_, _, RoundRobin>(
             bls12381_multisig::fixture::<MinPk, _>,
@@ -2330,7 +2337,7 @@ mod tests {
                 write_buffer: NZUsize!(1024 * 1024),
                 buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
-            let (voter, mut mailbox) = Actor::new(context.clone(), voter_cfg);
+            let (voter, mut mailbox) = Actor::new(context.with_label("voter"), voter_cfg);
 
             let (resolver_sender, _) = mpsc::channel(8);
             let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
@@ -2463,7 +2470,7 @@ mod tests {
                 write_buffer: NZUsize!(1024 * 1024),
                 buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
-            let (voter, _) = Actor::new(context.clone(), voter_cfg);
+            let (voter, _) = Actor::new(context.with_label("voter_restarted"), voter_cfg);
 
             let (resolver_sender, _) = mpsc::channel(8);
             let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
@@ -2505,8 +2512,12 @@ mod tests {
 
     #[test_traced]
     fn test_no_recertification_after_replay() {
-        no_recertification_after_replay::<_, _, Random>(bls12381_threshold::fixture::<MinPk, _>);
-        no_recertification_after_replay::<_, _, Random>(bls12381_threshold::fixture::<MinSig, _>);
+        no_recertification_after_replay::<_, _, Random>(
+            bls12381_threshold_vrf::fixture::<MinPk, _>,
+        );
+        no_recertification_after_replay::<_, _, Random>(
+            bls12381_threshold_vrf::fixture::<MinSig, _>,
+        );
         no_recertification_after_replay::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>);
         no_recertification_after_replay::<_, _, RoundRobin>(
             bls12381_multisig::fixture::<MinSig, _>,
@@ -2699,10 +2710,10 @@ mod tests {
     #[test_traced]
     fn test_certification_cancelled_on_finalization() {
         certification_cancelled_on_finalization::<_, _, Random>(
-            bls12381_threshold::fixture::<MinPk, _>,
+            bls12381_threshold_vrf::fixture::<MinPk, _>,
         );
         certification_cancelled_on_finalization::<_, _, Random>(
-            bls12381_threshold::fixture::<MinSig, _>,
+            bls12381_threshold_vrf::fixture::<MinSig, _>,
         );
         certification_cancelled_on_finalization::<_, _, RoundRobin>(
             bls12381_multisig::fixture::<MinPk, _>,
@@ -2829,8 +2840,8 @@ mod tests {
 
     #[test_traced]
     fn test_certification_after_timeout() {
-        certification_after_timeout::<_, _>(bls12381_threshold::fixture::<MinPk, _>);
-        certification_after_timeout::<_, _>(bls12381_threshold::fixture::<MinSig, _>);
+        certification_after_timeout::<_, _>(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        certification_after_timeout::<_, _>(bls12381_threshold_vrf::fixture::<MinSig, _>);
         certification_after_timeout::<_, _>(bls12381_multisig::fixture::<MinPk, _>);
         certification_after_timeout::<_, _>(bls12381_multisig::fixture::<MinSig, _>);
         certification_after_timeout::<_, _>(ed25519::fixture);
@@ -2980,10 +2991,10 @@ mod tests {
     #[test_traced]
     fn test_certification_after_notarize_timeout_as_follower() {
         certification_after_notarize_timeout_as_follower::<_, _>(
-            bls12381_threshold::fixture::<MinPk, _>,
+            bls12381_threshold_vrf::fixture::<MinPk, _>,
         );
         certification_after_notarize_timeout_as_follower::<_, _>(
-            bls12381_threshold::fixture::<MinSig, _>,
+            bls12381_threshold_vrf::fixture::<MinSig, _>,
         );
         certification_after_notarize_timeout_as_follower::<_, _>(
             bls12381_multisig::fixture::<MinPk, _>,
@@ -3127,10 +3138,10 @@ mod tests {
     #[test_traced]
     fn test_certification_after_notarize_timeout_as_leader() {
         certification_after_notarize_timeout_as_leader::<_, _>(
-            bls12381_threshold::fixture::<MinPk, _>,
+            bls12381_threshold_vrf::fixture::<MinPk, _>,
         );
         certification_after_notarize_timeout_as_leader::<_, _>(
-            bls12381_threshold::fixture::<MinSig, _>,
+            bls12381_threshold_vrf::fixture::<MinSig, _>,
         );
         certification_after_notarize_timeout_as_leader::<_, _>(
             bls12381_multisig::fixture::<MinPk, _>,
@@ -3265,11 +3276,11 @@ mod tests {
     #[test_collect_traces]
     fn test_cancelled_certification_does_not_hang(traces: TraceStorage) {
         cancelled_certification_does_not_hang(
-            bls12381_threshold::fixture::<MinPk, _>,
+            bls12381_threshold_vrf::fixture::<MinPk, _>,
             traces.clone(),
         );
         cancelled_certification_does_not_hang(
-            bls12381_threshold::fixture::<MinSig, _>,
+            bls12381_threshold_vrf::fixture::<MinSig, _>,
             traces.clone(),
         );
         cancelled_certification_does_not_hang(

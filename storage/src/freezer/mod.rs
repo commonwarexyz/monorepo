@@ -506,10 +506,12 @@ mod tests {
 
             // Insert data and close the freezer
             let checkpoint = {
-                let mut freezer =
-                    Freezer::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone())
-                        .await
-                        .expect("Failed to initialize freezer");
+                let mut freezer = Freezer::<_, FixedBytes<64>, i32>::init(
+                    context.with_label("first"),
+                    cfg.clone(),
+                )
+                .await
+                .expect("Failed to initialize freezer");
 
                 let keys = vec![
                     (test_key("persist1"), 100),
@@ -530,7 +532,7 @@ mod tests {
             // Reopen and verify data persisted
             {
                 let freezer = Freezer::<_, FixedBytes<64>, i32>::init_with_checkpoint(
-                    context.clone(),
+                    context.with_label("second"),
                     cfg.clone(),
                     Some(checkpoint),
                 )
@@ -578,10 +580,12 @@ mod tests {
 
             // First, create some committed data and close the freezer
             let checkpoint = {
-                let mut freezer =
-                    Freezer::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone())
-                        .await
-                        .expect("Failed to initialize freezer");
+                let mut freezer = Freezer::<_, FixedBytes<64>, i32>::init(
+                    context.with_label("first"),
+                    cfg.clone(),
+                )
+                .await
+                .expect("Failed to initialize freezer");
 
                 freezer
                     .put(test_key("committed1"), 1)
@@ -612,7 +616,7 @@ mod tests {
             // Reopen and verify only committed data is present
             {
                 let freezer = Freezer::<_, FixedBytes<64>, i32>::init_with_checkpoint(
-                    context.clone(),
+                    context.with_label("second"),
                     cfg.clone(),
                     Some(checkpoint),
                 )
@@ -677,10 +681,12 @@ mod tests {
                 codec_config: (),
             };
             {
-                let mut freezer =
-                    Freezer::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone())
-                        .await
-                        .expect("Failed to initialize freezer");
+                let mut freezer = Freezer::<_, FixedBytes<64>, i32>::init(
+                    context.with_label("first"),
+                    cfg.clone(),
+                )
+                .await
+                .expect("Failed to initialize freezer");
 
                 freezer
                     .put(test_key("destroy1"), 1)
@@ -697,9 +703,12 @@ mod tests {
 
             // Try to create a new freezer - it should be empty
             {
-                let freezer = Freezer::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone())
-                    .await
-                    .expect("Failed to initialize freezer");
+                let freezer = Freezer::<_, FixedBytes<64>, i32>::init(
+                    context.with_label("second"),
+                    cfg.clone(),
+                )
+                .await
+                .expect("Failed to initialize freezer");
 
                 // Should not find any data
                 assert!(freezer
@@ -738,10 +747,12 @@ mod tests {
                 codec_config: (),
             };
             let checkpoint = {
-                let mut freezer =
-                    Freezer::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone())
-                        .await
-                        .expect("Failed to initialize freezer");
+                let mut freezer = Freezer::<_, FixedBytes<64>, i32>::init(
+                    context.with_label("first"),
+                    cfg.clone(),
+                )
+                .await
+                .expect("Failed to initialize freezer");
 
                 freezer.put(test_key("key1"), 42).await.unwrap();
                 freezer.sync().await.unwrap();
@@ -759,7 +770,7 @@ mod tests {
             // Reopen and verify it handles the corruption
             {
                 let freezer = Freezer::<_, FixedBytes<64>, i32>::init_with_checkpoint(
-                    context.clone(),
+                    context.with_label("second"),
                     cfg.clone(),
                     Some(checkpoint),
                 )
@@ -800,10 +811,12 @@ mod tests {
 
             // Create freezer with data
             let checkpoint = {
-                let mut freezer =
-                    Freezer::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone())
-                        .await
-                        .expect("Failed to initialize freezer");
+                let mut freezer = Freezer::<_, FixedBytes<64>, i32>::init(
+                    context.with_label("first"),
+                    cfg.clone(),
+                )
+                .await
+                .expect("Failed to initialize freezer");
 
                 freezer.put(test_key("key1"), 42).await.unwrap();
                 freezer.sync().await.unwrap();
@@ -825,7 +838,7 @@ mod tests {
             // Reopen and verify it handles invalid CRC
             {
                 let freezer = Freezer::<_, FixedBytes<64>, i32>::init_with_checkpoint(
-                    context.clone(),
+                    context.with_label("second"),
                     cfg.clone(),
                     Some(checkpoint),
                 )
@@ -866,10 +879,12 @@ mod tests {
 
             // Create freezer with data
             let checkpoint = {
-                let mut freezer =
-                    Freezer::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone())
-                        .await
-                        .expect("Failed to initialize freezer");
+                let mut freezer = Freezer::<_, FixedBytes<64>, i32>::init(
+                    context.with_label("first"),
+                    cfg.clone(),
+                )
+                .await
+                .expect("Failed to initialize freezer");
 
                 freezer.put(test_key("key1"), 42).await.unwrap();
                 freezer.sync().await.unwrap();
@@ -889,7 +904,7 @@ mod tests {
             // Reopen and verify it handles extra bytes gracefully
             {
                 let freezer = Freezer::<_, FixedBytes<64>, i32>::init_with_checkpoint(
-                    context.clone(),
+                    context.with_label("second"),
                     cfg.clone(),
                     Some(checkpoint),
                 )
@@ -940,9 +955,10 @@ mod tests {
                 table_replay_buffer: NZUsize!(DEFAULT_TABLE_REPLAY_BUFFER),
                 codec_config: (),
             };
-            let mut freezer = Freezer::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone())
-                .await
-                .expect("Failed to initialize freezer");
+            let mut freezer =
+                Freezer::<_, FixedBytes<64>, i32>::init(context.with_label("first"), cfg.clone())
+                    .await
+                    .expect("Failed to initialize freezer");
 
             // Insert many keys to force multiple table resizes
             // Table will grow from 2 -> 4 -> 8 -> 16 -> 32 -> 64 -> 128 -> 256 -> 512 -> 1024
@@ -969,7 +985,7 @@ mod tests {
             // Close and reopen to verify persistence
             let checkpoint = freezer.close().await.expect("Failed to close");
             let freezer = Freezer::<_, FixedBytes<64>, i32>::init_with_checkpoint(
-                context.clone(),
+                context.with_label("second"),
                 cfg.clone(),
                 Some(checkpoint),
             )
@@ -988,7 +1004,7 @@ mod tests {
 
             // Verify metrics show resize operations occurred
             let buffer = context.encode();
-            assert!(buffer.contains("resizes_total 8"), "{}", buffer);
+            assert!(buffer.contains("first_resizes_total 8"), "{}", buffer);
         });
     }
 
@@ -1091,10 +1107,12 @@ mod tests {
 
             // Create freezer and then shutdown uncleanly
             let checkpoint = {
-                let mut freezer =
-                    Freezer::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone())
-                        .await
-                        .unwrap();
+                let mut freezer = Freezer::<_, FixedBytes<64>, i32>::init(
+                    context.with_label("first"),
+                    cfg.clone(),
+                )
+                .await
+                .unwrap();
 
                 // Insert keys to trigger resize
                 // key0 -> entry 0, key2 -> entry 1
@@ -1110,7 +1128,7 @@ mod tests {
 
             // Reopen freezer
             let mut freezer = Freezer::<_, FixedBytes<64>, i32>::init_with_checkpoint(
-                context.clone(),
+                context.with_label("second"),
                 cfg.clone(),
                 Some(checkpoint),
             )
@@ -1134,10 +1152,8 @@ mod tests {
     }
 
     fn test_operations_and_restart(num_keys: usize) -> String {
-        // Initialize the deterministic context
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
-            // Initialize the freezer
             let cfg = Config {
                 key_partition: "test_key_index".into(),
                 key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
@@ -1153,10 +1169,12 @@ mod tests {
                 table_replay_buffer: NZUsize!(DEFAULT_TABLE_REPLAY_BUFFER),
                 codec_config: (),
             };
-            let mut freezer =
-                Freezer::<_, FixedBytes<96>, FixedBytes<256>>::init(context.clone(), cfg.clone())
-                    .await
-                    .expect("Failed to initialize freezer");
+            let mut freezer = Freezer::<_, FixedBytes<96>, FixedBytes<256>>::init(
+                context.with_label("init1"),
+                cfg.clone(),
+            )
+            .await
+            .expect("Failed to initialize freezer");
 
             // Generate and insert random key-value pairs
             let mut pairs = Vec::new();
@@ -1224,7 +1242,7 @@ mod tests {
 
             // Reopen the freezer
             let mut freezer = Freezer::<_, FixedBytes<96>, FixedBytes<256>>::init_with_checkpoint(
-                context.clone(),
+                context.with_label("init2"),
                 cfg.clone(),
                 Some(checkpoint),
             )

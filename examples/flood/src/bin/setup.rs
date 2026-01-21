@@ -1,6 +1,6 @@
 use clap::{value_parser, Arg, Command};
 use commonware_cryptography::{ed25519, Signer as _};
-use commonware_deployer::ec2;
+use commonware_deployer::aws;
 use commonware_flood::Config;
 use commonware_math::algebra::Random;
 use rand::{rngs::OsRng, seq::IteratorRandom};
@@ -163,7 +163,7 @@ fn main() {
         // Create instance config
         let region_index = index % regions.len();
         let region = regions[region_index].clone();
-        let instance = ec2::InstanceConfig {
+        let instance = aws::InstanceConfig {
             name: name.clone(),
             region,
             instance_type: instance_type.clone(),
@@ -177,16 +177,16 @@ fn main() {
     }
 
     // Generate root config file
-    let config = ec2::Config {
+    let config = aws::Config {
         tag,
         instances: instance_configs,
-        monitoring: ec2::MonitoringConfig {
+        monitoring: aws::MonitoringConfig {
             instance_type: instance_type.clone(),
             storage_size,
             storage_class: storage_class.clone(),
             dashboard: "dashboard.json".to_string(),
         },
-        ports: vec![ec2::PortConfig {
+        ports: vec![aws::PortConfig {
             protocol: "tcp".to_string(),
             port: PORT,
             cidr: "0.0.0.0/0".to_string(),

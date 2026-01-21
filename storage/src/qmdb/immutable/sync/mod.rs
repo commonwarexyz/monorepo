@@ -4,7 +4,8 @@ use crate::{
     qmdb::{
         any::VariableValue,
         immutable::{self, Operation},
-        sync, Error,
+        sync::{self, Journal},
+        Error,
     },
     translator::Translator,
 };
@@ -88,16 +89,14 @@ where
 
     async fn resize_journal(
         mut journal: Self::Journal,
-        context: Self::Context,
-        config: &Self::Config,
         range: Range<Location>,
     ) -> Result<Self::Journal, Error> {
         let size = journal.size();
 
         if size <= range.start {
-            // Destroy and recreate
-            journal.destroy().await?;
-            Self::create_journal(context, config, range).await
+            // Clear and reuse the journal
+            journal.clear(*range.start).await?;
+            Ok(journal)
         } else {
             // Prune to range start (position-based, not section-based)
             journal
@@ -167,7 +166,7 @@ mod tests {
     use commonware_cryptography::{sha256, Sha256};
     use commonware_macros::test_traced;
     use commonware_math::algebra::Random;
-    use commonware_runtime::{buffer::PoolRef, deterministic, Runner as _, RwLock};
+    use commonware_runtime::{buffer::PoolRef, deterministic, Metrics, Runner as _, RwLock};
     use commonware_utils::{test_rng_seeded, NZUsize, NZU16, NZU64};
     use futures::{channel::mpsc, SinkExt as _};
     use rand::RngCore as _;
@@ -279,7 +278,9 @@ mod tests {
     fn test_sync(#[case] target_db_ops: usize, #[case] fetch_batch_size: NonZeroU64) {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
-            let mut target_db = create_test_db(context.clone()).await.into_mutable();
+            let mut target_db = create_test_db(context.with_label("target"))
+                .await
+                .into_mutable();
             let target_db_ops = create_test_ops(target_db_ops);
             apply_ops(&mut target_db, target_db_ops.clone()).await;
             let metadata = Some(Sha256::fill(1));
@@ -307,7 +308,7 @@ mod tests {
                     root: target_root,
                     range: target_oldest_retained_loc..target_op_count,
                 },
-                context: context.clone(),
+                context: context.with_label("client"),
                 resolver: target_db.clone(),
                 apply_batch_size: 1024,
                 max_outstanding_requests: 1,
@@ -369,7 +370,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             // Create an empty target database
-            let target_db = create_test_db(context.clone()).await;
+            let target_db = create_test_db(context.with_label("target")).await;
             let target_db = target_db.into_mutable();
             let (durable_db, _) = target_db.commit(Some(Sha256::fill(1))).await.unwrap(); // Commit to establish a valid root
             let target_db = durable_db.into_merkleized();
@@ -387,7 +388,7 @@ mod tests {
                     root: target_root,
                     range: target_oldest_retained_loc..target_op_count,
                 },
-                context: context.clone(),
+                context: context.with_label("client"),
                 resolver: target_db.clone(),
                 apply_batch_size: 1024,
                 max_outstanding_requests: 1,
@@ -416,7 +417,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Create and populate a simple target database
-            let target_db = create_test_db(context.clone()).await;
+            let target_db = create_test_db(context.with_label("target")).await;
             let mut target_db = target_db.into_mutable();
             let target_ops = create_test_ops(10);
             apply_ops(&mut target_db, target_ops.clone()).await;
@@ -430,7 +431,7 @@ mod tests {
 
             // Perform sync
             let db_config = create_sync_config("persistence_test");
-            let context_clone = context.clone();
+            let client_context = context.with_label("client");
             let target_db = Arc::new(RwLock::new(target_db));
             let config = Config {
                 db_config: db_config.clone(),
@@ -439,7 +440,7 @@ mod tests {
                     root: target_root,
                     range: lower_bound..op_count,
                 },
-                context,
+                context: client_context.clone(),
                 resolver: target_db.clone(),
                 apply_batch_size: 1024,
                 max_outstanding_requests: 1,
@@ -458,7 +459,7 @@ mod tests {
             // Drop & reopen the database to test persistence
             synced_db.sync().await.unwrap();
             drop(synced_db);
-            let reopened_db = ImmutableSyncTest::init(context_clone, db_config)
+            let reopened_db = ImmutableSyncTest::init(context.with_label("reopened"), db_config)
                 .await
                 .unwrap();
 
@@ -493,7 +494,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             // Create and populate initial target database
-            let target_db = create_test_db(context.clone()).await;
+            let target_db = create_test_db(context.with_label("target")).await;
             let mut target_db = target_db.into_mutable();
             let initial_ops = create_test_ops(50);
             apply_ops(&mut target_db, initial_ops.clone()).await;
@@ -522,7 +523,7 @@ mod tests {
             let (mut update_sender, update_receiver) = mpsc::channel(1);
             let client = {
                 let config = Config {
-                    context: context.clone(),
+                    context: context.with_label("client"),
                     db_config: create_sync_config(&format!("update_test_{}", context.next_u64())),
                     target: Target {
                         root: initial_root,
@@ -596,7 +597,7 @@ mod tests {
     fn test_sync_invalid_bounds() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
-            let target_db = create_test_db(context.clone()).await;
+            let target_db = create_test_db(context.with_label("target")).await;
             let db_config = create_sync_config(&format!("invalid_bounds_{}", context.next_u64()));
             let config = Config {
                 db_config,
@@ -605,7 +606,7 @@ mod tests {
                     root: sha256::Digest::from([1u8; 32]),
                     range: Location::new_unchecked(31)..Location::new_unchecked(31),
                 },
-                context,
+                context: context.with_label("client"),
                 resolver: Arc::new(commonware_runtime::RwLock::new(target_db)),
                 apply_batch_size: 1024,
                 max_outstanding_requests: 1,
@@ -631,7 +632,7 @@ mod tests {
     fn test_sync_subset_of_target_database() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
-            let target_db = create_test_db(context.clone()).await;
+            let target_db = create_test_db(context.with_label("target")).await;
             let mut target_db = target_db.into_mutable();
             let target_ops = create_test_ops(30);
             // Apply all but the last operation
@@ -657,7 +658,7 @@ mod tests {
                     root: target_root,
                     range: lower_bound..op_count,
                 },
-                context,
+                context: context.with_label("client"),
                 resolver: target_db.clone(),
                 apply_batch_size: 1024,
                 max_outstanding_requests: 1,
@@ -686,11 +687,12 @@ mod tests {
             let original_ops = create_test_ops(50);
 
             // Create two databases
-            let target_db = create_test_db(context.clone()).await;
+            let target_db = create_test_db(context.with_label("target")).await;
             let mut target_db = target_db.into_mutable();
             let sync_db_config = create_sync_config(&format!("partial_{}", context.next_u64()));
+            let client_context = context.with_label("client");
             let sync_db: ImmutableSyncTest =
-                immutable::Immutable::init(context.clone(), sync_db_config.clone())
+                immutable::Immutable::init(client_context.clone(), sync_db_config.clone())
                     .await
                     .unwrap();
             let mut sync_db = sync_db.into_mutable();
@@ -725,7 +727,7 @@ mod tests {
                     root,
                     range: lower_bound..upper_bound,
                 },
-                context: context.clone(),
+                context: context.with_label("sync"),
                 resolver: target_db.clone(),
                 apply_batch_size: 1024,
                 max_outstanding_requests: 1,
@@ -753,11 +755,12 @@ mod tests {
             let target_ops = create_test_ops(40);
 
             // Create two databases
-            let target_db = create_test_db(context.clone()).await;
+            let target_db = create_test_db(context.with_label("target")).await;
             let mut target_db = target_db.into_mutable();
             let sync_config = create_sync_config(&format!("exact_{}", context.next_u64()));
+            let client_context = context.with_label("client");
             let sync_db: ImmutableSyncTest =
-                immutable::Immutable::init(context.clone(), sync_config.clone())
+                immutable::Immutable::init(client_context.clone(), sync_config.clone())
                     .await
                     .unwrap();
             let mut sync_db = sync_db.into_mutable();
@@ -786,7 +789,7 @@ mod tests {
                     root,
                     range: lower_bound..upper_bound,
                 },
-                context,
+                context: context.with_label("sync"),
                 resolver: resolver.clone(),
                 apply_batch_size: 1024,
                 max_outstanding_requests: 1,
@@ -811,7 +814,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             // Create and populate target database
-            let target_db = create_test_db(context.clone()).await;
+            let target_db = create_test_db(context.with_label("target")).await;
             let mut target_db = target_db.into_mutable();
             let target_ops = create_test_ops(100);
             apply_ops(&mut target_db, target_ops).await;
@@ -829,7 +832,7 @@ mod tests {
             let (mut update_sender, update_receiver) = mpsc::channel(1);
             let target_db = Arc::new(commonware_runtime::RwLock::new(target_db));
             let config = Config {
-                context: context.clone(),
+                context: context.with_label("client"),
                 db_config: create_sync_config(&format!("lb_dec_{}", context.next_u64())),
                 fetch_batch_size: NZU64!(5),
                 target: Target {
@@ -873,7 +876,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             // Create and populate target database
-            let target_db = create_test_db(context.clone()).await;
+            let target_db = create_test_db(context.with_label("target")).await;
             let mut target_db = target_db.into_mutable();
             let target_ops = create_test_ops(50);
             apply_ops(&mut target_db, target_ops).await;
@@ -889,7 +892,7 @@ mod tests {
             let (mut update_sender, update_receiver) = mpsc::channel(1);
             let target_db = Arc::new(commonware_runtime::RwLock::new(target_db));
             let config = Config {
-                context: context.clone(),
+                context: context.with_label("client"),
                 db_config: create_sync_config(&format!("ub_dec_{}", context.next_u64())),
                 fetch_batch_size: NZU64!(5),
                 target: Target {
@@ -933,7 +936,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             // Create and populate target database
-            let target_db = create_test_db(context.clone()).await;
+            let target_db = create_test_db(context.with_label("target")).await;
             let mut target_db = target_db.into_mutable();
             let target_ops = create_test_ops(100);
             apply_ops(&mut target_db, target_ops.clone()).await;
@@ -949,7 +952,7 @@ mod tests {
             // (use different seed to avoid key collisions)
             let mut target_db = target_db.into_mutable();
             let more_ops = create_test_ops_seeded(5, 1);
-            apply_ops(&mut target_db, more_ops.clone()).await;
+            apply_ops(&mut target_db, more_ops).await;
             let (durable_db, _) = target_db.commit(None).await.unwrap();
             let mut target_db = durable_db.into_merkleized();
 
@@ -971,7 +974,7 @@ mod tests {
             let (mut update_sender, update_receiver) = mpsc::channel(1);
             let target_db = Arc::new(commonware_runtime::RwLock::new(target_db));
             let config = Config {
-                context: context.clone(),
+                context: context.with_label("client"),
                 db_config: create_sync_config(&format!("bounds_inc_{}", context.next_u64())),
                 fetch_batch_size: NZU64!(1),
                 target: Target {
@@ -1016,7 +1019,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             // Create and populate target database
-            let target_db = create_test_db(context.clone()).await;
+            let target_db = create_test_db(context.with_label("target")).await;
             let mut target_db = target_db.into_mutable();
             let target_ops = create_test_ops(25);
             apply_ops(&mut target_db, target_ops).await;
@@ -1032,7 +1035,7 @@ mod tests {
             let (mut update_sender, update_receiver) = mpsc::channel(1);
             let target_db = Arc::new(commonware_runtime::RwLock::new(target_db));
             let config = Config {
-                context: context.clone(),
+                context: context.with_label("client"),
                 db_config: create_sync_config(&format!("invalid_update_{}", context.next_u64())),
                 fetch_batch_size: NZU64!(5),
                 target: Target {
@@ -1074,7 +1077,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             // Create and populate target database
-            let target_db = create_test_db(context.clone()).await;
+            let target_db = create_test_db(context.with_label("target")).await;
             let mut target_db = target_db.into_mutable();
             let target_ops = create_test_ops(10);
             apply_ops(&mut target_db, target_ops).await;
@@ -1090,7 +1093,7 @@ mod tests {
             let (mut update_sender, update_receiver) = mpsc::channel(1);
             let target_db = Arc::new(commonware_runtime::RwLock::new(target_db));
             let config = Config {
-                context: context.clone(),
+                context: context.with_label("client"),
                 db_config: create_sync_config(&format!("done_{}", context.next_u64())),
                 fetch_batch_size: NZU64!(20),
                 target: Target {

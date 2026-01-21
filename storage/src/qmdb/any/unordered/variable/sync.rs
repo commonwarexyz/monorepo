@@ -5,7 +5,7 @@ use crate::{
     index::unordered::Index,
     journal::{authenticated, contiguous::variable},
     mmr::{mem::Clean, Location, Position, StandardHasher},
-    qmdb::{self, any::VariableValue, Durable, Merkleized},
+    qmdb::{self, any::VariableValue, sync::Journal, Durable, Merkleized},
     translator::Translator,
 };
 use commonware_codec::Read;
@@ -102,16 +102,14 @@ where
 
     async fn resize_journal(
         mut journal: Self::Journal,
-        context: Self::Context,
-        config: &Self::Config,
         range: Range<Location>,
     ) -> Result<Self::Journal, qmdb::Error> {
         let size = journal.size();
 
         if size <= range.start {
-            // Create a new journal with the new bounds
-            journal.destroy().await?;
-            Self::create_journal(context, config, range).await
+            // Clear and reuse the journal
+            journal.clear(*range.start).await?;
+            Ok(journal)
         } else {
             // Just prune to the lower bound
             journal.prune(*range.start).await?;

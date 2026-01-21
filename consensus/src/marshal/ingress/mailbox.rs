@@ -126,15 +126,24 @@ pub(crate) enum Message<S: Scheme, B: Block> {
     },
     /// Sets the sync starting point (advances if higher than current).
     ///
-    /// Marshal will sync and deliver blocks starting at `floor + 1`. Data at or
-    /// below the floor is pruned.
+    /// Marshal will sync and deliver blocks starting at `floor + 1`. Data below
+    /// the floor is pruned.
     ///
     /// To prune data without affecting the sync starting point (say at some trailing depth
-    /// from tip), prune the finalized stores directly.
+    /// from tip), use [Message::Prune] instead.
     ///
     /// The default floor is 0.
     SetFloor {
         /// The candidate floor height.
+        height: Height,
+    },
+    /// Prunes finalized blocks and certificates below the given height.
+    ///
+    /// Unlike [Message::SetFloor], this does not affect the sync starting point.
+    /// The height must be at or below the current floor (last processed height),
+    /// otherwise the prune request is ignored.
+    Prune {
+        /// The minimum height to keep (blocks below this are pruned).
         height: Height,
     },
 
@@ -282,15 +291,24 @@ impl<S: Scheme, B: Block> Mailbox<S, B> {
 
     /// Sets the sync starting point (advances if higher than current).
     ///
-    /// Marshal will sync and deliver blocks starting at `floor + 1`. Data at or
-    /// below the floor is pruned.
+    /// Marshal will sync and deliver blocks starting at `floor + 1`. Data below
+    /// the floor is pruned.
     ///
     /// To prune data without affecting the sync starting point (say at some trailing depth
-    /// from tip), prune the finalized stores directly.
+    /// from tip), use [Self::prune] instead.
     ///
     /// The default floor is 0.
     pub async fn set_floor(&mut self, height: Height) {
         self.sender.send_lossy(Message::SetFloor { height }).await;
+    }
+
+    /// Prunes finalized blocks and certificates below the given height.
+    ///
+    /// Unlike [Self::set_floor], this does not affect the sync starting point.
+    /// The height must be at or below the current floor (last processed height),
+    /// otherwise the prune request is ignored.
+    pub async fn prune(&mut self, height: Height) {
+        self.sender.send_lossy(Message::Prune { height }).await;
     }
 }
 

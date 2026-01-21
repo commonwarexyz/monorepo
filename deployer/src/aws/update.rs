@@ -1,11 +1,19 @@
 //! `update` subcommand for `ec2`
 
-use crate::ec2::{
-    aws::*, deployer_directory, s3::*, services::*, utils::*, Config, Error, InstanceConfig,
-    CREATED_FILE_NAME, DESTROYED_FILE_NAME, MONITORING_NAME, MONITORING_REGION,
+use crate::aws::{
+    deployer_directory,
+    ec2::{self, *},
+    s3::{self, *},
+    services::*,
+    utils::*,
+    Config, Error, InstanceConfig, CREATED_FILE_NAME, DESTROYED_FILE_NAME, MONITORING_NAME,
+    MONITORING_REGION,
 };
 use aws_sdk_ec2::types::Filter;
-use futures::future::try_join_all;
+use futures::{
+    future::try_join_all,
+    stream::{self, StreamExt, TryStreamExt},
+};
 use std::{
     collections::{BTreeMap, HashMap},
     fs::File,
@@ -14,7 +22,7 @@ use std::{
 use tracing::{error, info};
 
 /// Updates the binary and configuration on all binary nodes
-pub async fn update(config_path: &PathBuf) -> Result<(), Error> {
+pub async fn update(config_path: &PathBuf, concurrency: usize) -> Result<(), Error> {
     // Load config
     let config: Config = {
         let config_file = File::open(config_path)?;
@@ -51,16 +59,35 @@ pub async fn update(config_path: &PathBuf) -> Result<(), Error> {
 
     // Upload updated binaries and configs to S3 and generate pre-signed URLs
     // Uses digest-based deduplication to avoid re-uploading identical files
-    let s3_client = create_s3_client(Region::new(MONITORING_REGION)).await;
+    let s3_client = s3::create_client(Region::new(MONITORING_REGION)).await;
 
-    // Compute digests and build deduplication maps
+    // Collect unique binary and config paths (dedup before hashing)
+    info!("computing file digests");
+    let mut unique_binary_paths: std::collections::BTreeSet<String> =
+        std::collections::BTreeSet::new();
+    let mut unique_config_paths: std::collections::BTreeSet<String> =
+        std::collections::BTreeSet::new();
+    for instance in &config.instances {
+        unique_binary_paths.insert(instance.binary.clone());
+        unique_config_paths.insert(instance.config.clone());
+    }
+
+    // Compute digests concurrently for unique files only
+    let unique_paths: Vec<String> = unique_binary_paths
+        .iter()
+        .chain(unique_config_paths.iter())
+        .cloned()
+        .collect();
+    let path_to_digest = hash_files(unique_paths).await?;
+
+    // Build dedup maps from digests
     let mut binary_digests: BTreeMap<String, String> = BTreeMap::new();
     let mut config_digests: BTreeMap<String, String> = BTreeMap::new();
     let mut instance_binary_digest: HashMap<String, String> = HashMap::new();
     let mut instance_config_digest: HashMap<String, String> = HashMap::new();
     for instance in &config.instances {
-        let binary_digest = hash_file(std::path::Path::new(&instance.binary))?;
-        let config_digest = hash_file(std::path::Path::new(&instance.config))?;
+        let binary_digest = path_to_digest[&instance.binary].clone();
+        let config_digest = path_to_digest[&instance.config].clone();
         binary_digests.insert(binary_digest.clone(), instance.binary.clone());
         config_digests.insert(config_digest.clone(), instance.config.clone());
         instance_binary_digest.insert(instance.name.clone(), binary_digest);
@@ -81,11 +108,11 @@ pub async fn update(config_path: &PathBuf) -> Result<(), Error> {
                     let key = binary_s3_key(tag, &digest);
                     let path = path.clone();
                     async move {
-                        let url = cache_file_and_presign(
+                        let url = cache_and_presign(
                             &s3_client,
-                            S3_BUCKET_NAME,
+                            BUCKET_NAME,
                             &key,
-                            path.as_ref(),
+                            UploadSource::File(path.as_ref()),
                             PRESIGN_DURATION,
                         )
                         .await?;
@@ -105,11 +132,11 @@ pub async fn update(config_path: &PathBuf) -> Result<(), Error> {
                     let key = config_s3_key(tag, &digest);
                     let path = path.clone();
                     async move {
-                        let url = cache_file_and_presign(
+                        let url = cache_and_presign(
                             &s3_client,
-                            S3_BUCKET_NAME,
+                            BUCKET_NAME,
                             &key,
-                            path.as_ref(),
+                            UploadSource::File(path.as_ref()),
                             PRESIGN_DURATION,
                         )
                         .await?;
@@ -148,41 +175,53 @@ pub async fn update(config_path: &PathBuf) -> Result<(), Error> {
         .collect::<std::collections::HashSet<_>>();
     regions.insert(MONITORING_REGION.to_string());
 
-    // Collect all binary instances across regions
-    let mut binary_instances = Vec::new();
-    for region in &regions {
-        let ec2_client = create_ec2_client(Region::new(region.clone())).await;
-        let resp = ec2_client
-            .describe_instances()
-            .filters(Filter::builder().name("tag:deployer").values(tag).build())
-            .send()
-            .await
-            .map_err(|err| err.into_service_error())?;
-        for reservation in resp.reservations.unwrap_or_default() {
-            for instance in reservation.instances.unwrap_or_default() {
-                if let Some(tags) = &instance.tags {
-                    if let Some(name_tag) = tags.iter().find(|t| t.key.as_deref() == Some("name")) {
-                        if name_tag.value.as_deref() != Some(MONITORING_NAME) {
-                            if let Some(public_ip) = &instance.public_ip_address {
-                                binary_instances
-                                    .push((name_tag.value.clone().unwrap(), public_ip.clone()));
-                                info!(
-                                    region,
-                                    name = name_tag.value.clone().unwrap(),
-                                    ip = public_ip,
-                                    "found instance"
-                                );
+    // Collect all binary instances across regions (in parallel)
+    let region_futures = regions.iter().map(|region| {
+        let region = region.clone();
+        let tag = tag.clone();
+        async move {
+            let ec2_client = ec2::create_client(Region::new(region.clone())).await;
+            let resp = ec2_client
+                .describe_instances()
+                .filters(Filter::builder().name("tag:deployer").values(&tag).build())
+                .send()
+                .await
+                .map_err(|err| err.into_service_error())?;
+            let mut instances = Vec::new();
+            for reservation in resp.reservations.unwrap_or_default() {
+                for instance in reservation.instances.unwrap_or_default() {
+                    if let Some(tags) = &instance.tags {
+                        if let Some(name_tag) =
+                            tags.iter().find(|t| t.key.as_deref() == Some("name"))
+                        {
+                            if name_tag.value.as_deref() != Some(MONITORING_NAME) {
+                                if let Some(public_ip) = &instance.public_ip_address {
+                                    let name = name_tag.value.clone().unwrap();
+                                    info!(
+                                        region = region.as_str(),
+                                        name = name.as_str(),
+                                        ip = public_ip.as_str(),
+                                        "found instance"
+                                    );
+                                    instances.push((name, public_ip.clone()));
+                                }
                             }
                         }
                     }
                 }
             }
+            Ok::<_, Error>(instances)
         }
-    }
+    });
+    let binary_instances: Vec<(String, String)> = try_join_all(region_futures)
+        .await?
+        .into_iter()
+        .flatten()
+        .collect();
 
-    // Update each binary instance concurrently
+    // Update each binary instance with limited concurrency to avoid SSH overload
     let private_key = private_key_path.to_str().unwrap();
-    try_join_all(binary_instances.into_iter().filter_map(|(name, ip)| {
+    stream::iter(binary_instances.into_iter().filter_map(|(name, ip)| {
         if instance_map.contains_key(&name) {
             let binary_url = instance_binary_urls[&name].clone();
             let config_url = instance_config_urls[&name].clone();
@@ -196,6 +235,8 @@ pub async fn update(config_path: &PathBuf) -> Result<(), Error> {
             None
         }
     }))
+    .buffer_unordered(concurrency)
+    .try_collect::<Vec<_>>()
     .await?;
     info!("update complete");
     Ok(())
@@ -220,8 +261,8 @@ async fn update_instance(
 
     // Download the latest binary and config from S3 concurrently via pre-signed URLs
     let download_cmd = format!(
-        r#"wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/binary '{}' &
-wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/config.conf '{}' &
+        r#"{WGET} -O /home/ubuntu/binary '{}' &
+{WGET} -O /home/ubuntu/config.conf '{}' &
 wait
 
 # Verify all downloads succeeded

@@ -1100,7 +1100,7 @@ mod tests {
             let other_schemes: Vec<_> = scheme_iter.collect();
             let epoch: Epoch = Epoch::new(3);
             let mut state = State::new(
-                context.clone(),
+                context.with_label("state"),
                 Config {
                     scheme: local_scheme.clone(),
                     elector: <RoundRobin>::default(),
@@ -1137,7 +1137,7 @@ mod tests {
 
             // Restart state and replay
             let mut restarted = State::new(
-                context,
+                context.with_label("state_restarted"),
                 Config {
                     scheme: local_scheme,
                     elector: <RoundRobin>::default(),

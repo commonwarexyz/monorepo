@@ -1,11 +1,19 @@
 //! `create` subcommand for `ec2`
 
-use crate::ec2::{
-    aws::*, deployer_directory, s3::*, services::*, utils::*, Architecture, Config, Error, Host,
-    Hosts, InstanceConfig, CREATED_FILE_NAME, LOGS_PORT, MONITORING_NAME, MONITORING_REGION,
-    PROFILES_PORT, TRACES_PORT,
+use crate::aws::{
+    deployer_directory,
+    ec2::{self, *},
+    s3::{self, *},
+    services::*,
+    utils::*,
+    Architecture, Config, Error, Host, Hosts, InstanceConfig, CREATED_FILE_NAME, LOGS_PORT,
+    MONITORING_NAME, MONITORING_REGION, PROFILES_PORT, TRACES_PORT,
 };
-use futures::future::try_join_all;
+use commonware_cryptography::{Hasher as _, Sha256};
+use futures::{
+    future::try_join_all,
+    stream::{self, StreamExt, TryStreamExt},
+};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fs::File,
@@ -15,6 +23,9 @@ use std::{
 };
 use tokio::process::Command;
 use tracing::info;
+
+/// Maximum number of instance IDs per DescribeInstances API call
+const MAX_DESCRIBE_BATCH: usize = 1000;
 
 /// Pre-signed URLs for observability tools (prometheus, grafana, loki, pyroscope, tempo, node_exporter, promtail)
 type ToolUrls = (String, String, String, String, String, String, String);
@@ -32,13 +43,14 @@ pub struct RegionResources {
     pub vpc_id: String,
     pub vpc_cidr: String,
     pub route_table_id: String,
-    pub subnet_id: String,
+    pub subnets: Vec<(String, String)>,
+    pub az_support: BTreeMap<String, BTreeSet<String>>,
     pub binary_sg_id: Option<String>,
     pub monitoring_sg_id: Option<String>,
 }
 
 /// Sets up EC2 instances, deploys files, and configures monitoring and logging
-pub async fn create(config: &PathBuf) -> Result<(), Error> {
+pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
     // Load configuration from YAML file
     let config: Config = {
         let config_file = File::open(config)?;
@@ -113,7 +125,7 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
 
     // Detect architecture for each unique instance type (architecture is global, not region-specific)
     info!("detecting architectures for instance types");
-    let ec2_client = create_ec2_client(Region::new(MONITORING_REGION)).await;
+    let ec2_client = ec2::create_client(Region::new(MONITORING_REGION)).await;
     let mut arch_by_instance_type: HashMap<String, Architecture> = HashMap::new();
     for instance_type in &unique_instance_types {
         let arch = detect_architecture(&ec2_client, instance_type).await?;
@@ -137,9 +149,9 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     }
 
     // Setup S3 bucket and cache observability tools
-    info!(bucket = S3_BUCKET_NAME, "setting up S3 bucket");
-    let s3_client = create_s3_client(Region::new(MONITORING_REGION)).await;
-    ensure_bucket_exists(&s3_client, S3_BUCKET_NAME, MONITORING_REGION).await?;
+    info!(bucket = BUCKET_NAME, "setting up S3 bucket");
+    let s3_client = s3::create_client(Region::new(MONITORING_REGION)).await;
+    ensure_bucket_exists(&s3_client, BUCKET_NAME, MONITORING_REGION).await?;
 
     // Cache observability tools for each architecture needed
     info!("uploading observability tools to S3");
@@ -147,27 +159,26 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
         let tag_directory = tag_directory.clone();
         let s3_client = s3_client.clone();
         async move {
-            if !object_exists(&s3_client, S3_BUCKET_NAME, &s3_key).await? {
-                info!(
-                    key = s3_key.as_str(),
-                    "tool not in S3, downloading and uploading"
-                );
-                let temp_path = tag_directory.join(s3_key.replace('/', "_"));
-                download_file(&download_url, &temp_path).await?;
-                let url = upload_and_presign(
-                    &s3_client,
-                    S3_BUCKET_NAME,
-                    &s3_key,
-                    &temp_path,
-                    PRESIGN_DURATION,
-                )
-                .await?;
-                std::fs::remove_file(&temp_path)?;
-                Ok::<_, Error>(url)
-            } else {
+            if object_exists(&s3_client, BUCKET_NAME, &s3_key).await? {
                 info!(key = s3_key.as_str(), "tool already in S3");
-                presign_url(&s3_client, S3_BUCKET_NAME, &s3_key, PRESIGN_DURATION).await
+                return presign_url(&s3_client, BUCKET_NAME, &s3_key, PRESIGN_DURATION).await;
             }
+            info!(
+                key = s3_key.as_str(),
+                "tool not in S3, downloading and uploading"
+            );
+            let temp_path = tag_directory.join(s3_key.replace('/', "_"));
+            download_file(&download_url, &temp_path).await?;
+            let url = cache_and_presign(
+                &s3_client,
+                BUCKET_NAME,
+                &s3_key,
+                UploadSource::File(&temp_path),
+                PRESIGN_DURATION,
+            )
+            .await?;
+            std::fs::remove_file(&temp_path)?;
+            Ok::<_, Error>(url)
         }
     };
 
@@ -202,14 +213,30 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     }
     info!("observability tools uploaded");
 
-    // Compute digests for binaries and configs, grouping by digest for deduplication
+    // Collect unique binary and config paths (dedup before hashing)
+    let mut unique_binary_paths: BTreeSet<String> = BTreeSet::new();
+    let mut unique_config_paths: BTreeSet<String> = BTreeSet::new();
+    for instance in &config.instances {
+        unique_binary_paths.insert(instance.binary.clone());
+        unique_config_paths.insert(instance.config.clone());
+    }
+
+    // Compute digests concurrently for unique files only
+    let unique_paths: Vec<String> = unique_binary_paths
+        .iter()
+        .chain(unique_config_paths.iter())
+        .cloned()
+        .collect();
+    let path_to_digest = hash_files(unique_paths).await?;
+
+    // Build dedup maps from digests
     let mut binary_digests: BTreeMap<String, String> = BTreeMap::new(); // digest -> path
     let mut config_digests: BTreeMap<String, String> = BTreeMap::new(); // digest -> path
     let mut instance_binary_digest: HashMap<String, String> = HashMap::new(); // instance -> digest
     let mut instance_config_digest: HashMap<String, String> = HashMap::new(); // instance -> digest
     for instance in &config.instances {
-        let binary_digest = hash_file(std::path::Path::new(&instance.binary))?;
-        let config_digest = hash_file(std::path::Path::new(&instance.config))?;
+        let binary_digest = path_to_digest[&instance.binary].clone();
+        let config_digest = path_to_digest[&instance.config].clone();
         binary_digests.insert(binary_digest.clone(), instance.binary.clone());
         config_digests.insert(config_digest.clone(), instance.config.clone());
         instance_binary_digest.insert(instance.name.clone(), binary_digest);
@@ -230,11 +257,11 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
                     let key = binary_s3_key(tag, &digest);
                     let path = path.clone();
                     async move {
-                        let url = cache_file_and_presign(
+                        let url = cache_and_presign(
                             &s3_client,
-                            S3_BUCKET_NAME,
+                            BUCKET_NAME,
                             &key,
-                            path.as_ref(),
+                            UploadSource::File(path.as_ref()),
                             PRESIGN_DURATION,
                         )
                         .await?;
@@ -254,11 +281,11 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
                     let key = config_s3_key(tag, &digest);
                     let path = path.clone();
                     async move {
-                        let url = cache_file_and_presign(
+                        let url = cache_and_presign(
                             &s3_client,
-                            S3_BUCKET_NAME,
+                            BUCKET_NAME,
                             &key,
-                            path.as_ref(),
+                            UploadSource::File(path.as_ref()),
                             PRESIGN_DURATION,
                         )
                         .await?;
@@ -305,18 +332,16 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
 
             async move {
                 // Create client for region
-                let ec2_client = create_ec2_client(Region::new(region.clone())).await;
+                let ec2_client = ec2::create_client(Region::new(region.clone())).await;
                 info!(region = region.as_str(), "created EC2 client");
 
-                // Find availability zone that supports all instance types
-                let az = find_availability_zone(&ec2_client, &instance_types).await?;
-                info!(
-                    az = az.as_str(),
-                    region = region.as_str(),
-                    "selected availability zone"
-                );
+                // Find which AZs support which instance types
+                let az_support = find_az_instance_support(&ec2_client, &instance_types).await?;
+                let mut azs: Vec<String> = az_support.keys().cloned().collect();
+                azs.sort();
+                info!(?azs, region = region.as_str(), "found availability zones");
 
-                // Create VPC, IGW, route table, subnet, security groups, and key pair
+                // Create VPC, IGW, route table
                 let vpc_cidr = format!("10.{idx}.0.0/16");
                 let vpc_id = create_vpc(&ec2_client, &vpc_cidr, &tag).await?;
                 info!(
@@ -339,22 +364,40 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
                     region = region.as_str(),
                     "created route table"
                 );
-                let subnet_cidr = format!("10.{idx}.1.0/24");
-                let subnet_id = create_subnet(
-                    &ec2_client,
-                    &vpc_id,
-                    &route_table_id,
-                    &subnet_cidr,
-                    &az,
-                    &tag,
-                )
-                .await?;
-                info!(
-                    subnet = subnet_id.as_str(),
-                    vpc = vpc_id.as_str(),
-                    region = region.as_str(),
-                    "created subnet"
-                );
+
+                // Create a subnet in each AZ concurrently
+                let subnet_futures: Vec<_> = azs
+                    .iter()
+                    .enumerate()
+                    .map(|(az_idx, az)| {
+                        let ec2_client = ec2_client.clone();
+                        let vpc_id = vpc_id.clone();
+                        let route_table_id = route_table_id.clone();
+                        let tag = tag.clone();
+                        let az = az.clone();
+                        let region = region.clone();
+                        async move {
+                            let subnet_cidr = format!("10.{idx}.{az_idx}.0/24");
+                            let subnet_id = create_subnet(
+                                &ec2_client,
+                                &vpc_id,
+                                &route_table_id,
+                                &subnet_cidr,
+                                &az,
+                                &tag,
+                            )
+                            .await?;
+                            info!(
+                                subnet = subnet_id.as_str(),
+                                az = az.as_str(),
+                                region = region.as_str(),
+                                "created subnet"
+                            );
+                            Ok::<(String, String), Error>((az, subnet_id))
+                        }
+                    })
+                    .collect();
+                let subnets = try_join_all(subnet_futures).await?;
 
                 // Create monitoring security group in monitoring region
                 let monitoring_sg_id = if region == MONITORING_REGION {
@@ -382,8 +425,7 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
 
                 info!(
                     vpc = vpc_id.as_str(),
-                    subnet = subnet_id.as_str(),
-                    subnet_cidr = subnet_cidr.as_str(),
+                    subnet_count = subnets.len(),
                     region = region.as_str(),
                     "initialized resources"
                 );
@@ -395,7 +437,8 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
                         vpc_id,
                         vpc_cidr,
                         route_table_id,
-                        subnet_id,
+                        subnets,
+                        az_support,
                         binary_sg_id: None,
                         monitoring_sg_id,
                     },
@@ -413,26 +456,35 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
 
     // Create binary security groups (without monitoring IP - added later for parallel launch)
     info!("creating binary security groups");
-    for (region, resources) in region_resources.iter_mut() {
-        let binary_sg_id = create_security_group_binary(
-            &ec2_clients[region],
-            &resources.vpc_id,
-            &deployer_ip,
-            tag,
-            &config.ports,
-        )
-        .await?;
-        info!(
-            sg = binary_sg_id.as_str(),
-            vpc = resources.vpc_id.as_str(),
-            region = region.as_str(),
-            "created binary security group"
-        );
-        resources.binary_sg_id = Some(binary_sg_id);
+    let binary_sg_futures: Vec<_> = region_resources
+        .iter()
+        .map(|(region, resources)| {
+            let region = region.clone();
+            let ec2_client = ec2_clients[&region].clone();
+            let vpc_id = resources.vpc_id.clone();
+            let deployer_ip = deployer_ip.clone();
+            let tag = tag.clone();
+            let ports = config.ports.clone();
+            async move {
+                let binary_sg_id =
+                    create_security_group_binary(&ec2_client, &vpc_id, &deployer_ip, &tag, &ports)
+                        .await?;
+                info!(
+                    sg = binary_sg_id.as_str(),
+                    vpc = vpc_id.as_str(),
+                    region = region.as_str(),
+                    "created binary security group"
+                );
+                Ok::<_, Error>((region, binary_sg_id))
+            }
+        })
+        .collect();
+    for (region, binary_sg_id) in try_join_all(binary_sg_futures).await? {
+        region_resources.get_mut(&region).unwrap().binary_sg_id = Some(binary_sg_id);
     }
     info!("created binary security groups");
 
-    // Setup VPC peering connections
+    // Setup VPC peering connections concurrently
     info!("initializing VPC peering connections");
     let monitoring_region = MONITORING_REGION.to_string();
     let monitoring_resources = region_resources.get(&monitoring_region).unwrap();
@@ -441,61 +493,75 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
     let monitoring_route_table_id = &monitoring_resources.route_table_id;
     let binary_regions: HashSet<String> =
         config.instances.iter().map(|i| i.region.clone()).collect();
-    for region in &regions {
-        if region != &monitoring_region && binary_regions.contains(region) {
-            let binary_resources = region_resources.get(region).unwrap();
-            let binary_vpc_id = &binary_resources.vpc_id;
-            let binary_cidr = &binary_resources.vpc_cidr;
-            let peer_id = create_vpc_peering_connection(
-                &ec2_clients[&monitoring_region],
-                monitoring_vpc_id,
-                binary_vpc_id,
-                region,
-                tag,
-            )
-            .await?;
-            info!(
-                peer = peer_id.as_str(),
-                monitoring = monitoring_vpc_id.as_str(),
-                binary = binary_vpc_id.as_str(),
-                region = region.as_str(),
-                "created VPC peering connection"
-            );
-            wait_for_vpc_peering_connection(&ec2_clients[region], &peer_id).await?;
-            info!(
-                peer = peer_id.as_str(),
-                region = region.as_str(),
-                "VPC peering connection is available"
-            );
-            accept_vpc_peering_connection(&ec2_clients[region], &peer_id).await?;
-            info!(
-                peer = peer_id.as_str(),
-                region = region.as_str(),
-                "accepted VPC peering connection"
-            );
-            add_route(
-                &ec2_clients[&monitoring_region],
-                monitoring_route_table_id,
-                binary_cidr,
-                &peer_id,
-            )
-            .await?;
-            add_route(
-                &ec2_clients[region],
-                &binary_resources.route_table_id,
-                monitoring_cidr,
-                &peer_id,
-            )
-            .await?;
-            info!(
-                peer = peer_id.as_str(),
-                monitoring = monitoring_vpc_id.as_str(),
-                binary = binary_vpc_id.as_str(),
-                region = region.as_str(),
-                "added routes for VPC peering connection"
-            );
-        }
-    }
+    let peering_futures: Vec<_> = regions
+        .iter()
+        .filter(|region| *region != &monitoring_region && binary_regions.contains(*region))
+        .map(|region| {
+            let region = region.clone();
+            let monitoring_ec2_client = ec2_clients[&monitoring_region].clone();
+            let binary_ec2_client = ec2_clients[&region].clone();
+            let monitoring_vpc_id = monitoring_vpc_id.clone();
+            let monitoring_cidr = monitoring_cidr.clone();
+            let monitoring_route_table_id = monitoring_route_table_id.clone();
+            let binary_resources = region_resources.get(&region).unwrap();
+            let binary_vpc_id = binary_resources.vpc_id.clone();
+            let binary_cidr = binary_resources.vpc_cidr.clone();
+            let binary_route_table_id = binary_resources.route_table_id.clone();
+            let tag = tag.clone();
+            async move {
+                let peer_id = create_vpc_peering_connection(
+                    &monitoring_ec2_client,
+                    &monitoring_vpc_id,
+                    &binary_vpc_id,
+                    &region,
+                    &tag,
+                )
+                .await?;
+                info!(
+                    peer = peer_id.as_str(),
+                    monitoring = monitoring_vpc_id.as_str(),
+                    binary = binary_vpc_id.as_str(),
+                    region = region.as_str(),
+                    "created VPC peering connection"
+                );
+                wait_for_vpc_peering_connection(&binary_ec2_client, &peer_id).await?;
+                info!(
+                    peer = peer_id.as_str(),
+                    region = region.as_str(),
+                    "VPC peering connection is available"
+                );
+                accept_vpc_peering_connection(&binary_ec2_client, &peer_id).await?;
+                info!(
+                    peer = peer_id.as_str(),
+                    region = region.as_str(),
+                    "accepted VPC peering connection"
+                );
+                add_route(
+                    &monitoring_ec2_client,
+                    &monitoring_route_table_id,
+                    &binary_cidr,
+                    &peer_id,
+                )
+                .await?;
+                add_route(
+                    &binary_ec2_client,
+                    &binary_route_table_id,
+                    &monitoring_cidr,
+                    &peer_id,
+                )
+                .await?;
+                info!(
+                    peer = peer_id.as_str(),
+                    monitoring = monitoring_vpc_id.as_str(),
+                    binary = binary_vpc_id.as_str(),
+                    region = region.as_str(),
+                    "added routes for VPC peering connection"
+                );
+                Ok::<_, Error>(())
+            }
+        })
+        .collect();
+    try_join_all(peering_futures).await?;
     info!("initialized VPC peering connections");
 
     // Prepare launch configurations for all instances
@@ -511,99 +577,191 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
         .as_ref()
         .unwrap()
         .clone();
-    let monitoring_subnet_id = monitoring_resources.subnet_id.clone();
+    let monitoring_subnets = monitoring_resources.subnets.clone();
+    let monitoring_az_support = monitoring_resources.az_support.clone();
 
+    // Lookup AMI IDs for binary instances
+    let mut ami_cache: HashMap<(String, Architecture), String> = HashMap::new();
+    ami_cache.insert(
+        (monitoring_region.clone(), monitoring_architecture),
+        monitoring_ami_id.clone(),
+    );
+    info!(
+        region = monitoring_region.as_str(),
+        architecture = %monitoring_architecture,
+        ami_id = monitoring_ami_id.as_str(),
+        "selected AMI"
+    );
     let mut binary_launch_configs = Vec::new();
     for instance in &config.instances {
         let region = instance.region.clone();
         let resources = region_resources.get(&region).unwrap();
         let ec2_client = ec2_clients.get(&region).unwrap();
         let arch = instance_architectures[&instance.name];
-        let ami_id = find_latest_ami(ec2_client, arch).await?;
+        let ami_id = match ami_cache.get(&(region.clone(), arch)) {
+            Some(id) => id.clone(),
+            None => {
+                let id = find_latest_ami(ec2_client, arch).await?;
+                ami_cache.insert((region.clone(), arch), id.clone());
+                info!(
+                    region = region.as_str(),
+                    architecture = %arch,
+                    ami_id = id.as_str(),
+                    "selected AMI"
+                );
+                id
+            }
+        };
         binary_launch_configs.push((instance, ec2_client, resources, ami_id, arch));
     }
 
-    // Launch monitoring instance (don't wait yet)
+    // Launch monitoring instance (uses start_idx=0 since there's only one)
     let monitoring_launch_future = {
         let key_name = key_name.clone();
         let tag = tag.clone();
         let sg_id = monitoring_sg_id.clone();
         async move {
-            let instance_id = launch_instances(
+            let (mut ids, az) = launch_instances(
                 monitoring_ec2_client,
                 &monitoring_ami_id,
                 monitoring_instance_type,
                 config.monitoring.storage_size,
                 monitoring_storage_class,
                 &key_name,
-                &monitoring_subnet_id,
+                &monitoring_subnets,
+                &monitoring_az_support,
+                0,
                 &sg_id,
                 1,
                 MONITORING_NAME,
                 &tag,
             )
-            .await?[0]
-                .clone();
-            let ip =
-                wait_for_instances_running(monitoring_ec2_client, slice::from_ref(&instance_id))
-                    .await?[0]
-                    .clone();
-            let private_ip = get_private_ip(monitoring_ec2_client, &instance_id).await?;
-            info!(ip = ip.as_str(), "launched monitoring instance");
-            Ok::<(String, String, String), Error>((instance_id, ip, private_ip))
+            .await?;
+            let instance_id = ids.remove(0);
+            info!(
+                instance_id = instance_id.as_str(),
+                az = az.as_str(),
+                "launched monitoring instance"
+            );
+            Ok::<String, Error>(instance_id)
         }
     };
 
-    // Launch binary instances (don't wait yet)
-    let binary_launch_futures =
-        binary_launch_configs
-            .iter()
-            .map(|(instance, ec2_client, resources, ami_id, _arch)| {
-                let key_name = key_name.clone();
-                let instance_type = InstanceType::try_parse(&instance.instance_type)
-                    .expect("Invalid instance type");
-                let storage_class =
-                    VolumeType::try_parse(&instance.storage_class).expect("Invalid storage class");
-                let binary_sg_id = resources.binary_sg_id.as_ref().unwrap();
-                let tag = tag.clone();
-                async move {
-                    let instance_id = launch_instances(
-                        ec2_client,
-                        ami_id,
-                        instance_type,
-                        instance.storage_size,
-                        storage_class,
-                        &key_name,
-                        &resources.subnet_id,
-                        binary_sg_id,
-                        1,
-                        &instance.name,
-                        &tag,
-                    )
-                    .await?[0]
-                        .clone();
-                    let ip = wait_for_instances_running(ec2_client, slice::from_ref(&instance_id))
-                        .await?[0]
-                        .clone();
-                    info!(
-                        ip = ip.as_str(),
-                        instance = instance.name.as_str(),
-                        "launched instance"
-                    );
-                    Ok::<Deployment, Error>(Deployment {
-                        instance: (*instance).clone(),
-                        id: instance_id,
-                        ip,
-                    })
-                }
-            });
+    // Launch binary instances, distributing across AZs by using instance index as start_idx
+    let binary_launch_futures = binary_launch_configs.iter().enumerate().map(
+        |(idx, (instance, ec2_client, resources, ami_id, _arch))| {
+            let key_name = key_name.clone();
+            let instance_type =
+                InstanceType::try_parse(&instance.instance_type).expect("Invalid instance type");
+            let storage_class =
+                VolumeType::try_parse(&instance.storage_class).expect("Invalid storage class");
+            let binary_sg_id = resources.binary_sg_id.as_ref().unwrap();
+            let tag = tag.clone();
+            let instance_name = instance.name.clone();
+            let region = instance.region.clone();
+            let subnets = resources.subnets.clone();
+            let az_support = resources.az_support.clone();
+            async move {
+                let (mut ids, az) = launch_instances(
+                    ec2_client,
+                    ami_id,
+                    instance_type,
+                    instance.storage_size,
+                    storage_class,
+                    &key_name,
+                    &subnets,
+                    &az_support,
+                    idx,
+                    binary_sg_id,
+                    1,
+                    &instance.name,
+                    &tag,
+                )
+                .await?;
+                let instance_id = ids.remove(0);
+                info!(
+                    instance_id = instance_id.as_str(),
+                    instance = instance_name.as_str(),
+                    az = az.as_str(),
+                    "launched instance"
+                );
+                Ok::<(String, String, InstanceConfig), Error>((
+                    instance_id,
+                    region,
+                    (*instance).clone(),
+                ))
+            }
+        },
+    );
 
-    // Wait for all instances in parallel
-    let (monitoring_result, deployments) = tokio::try_join!(
+    // Wait for all launches to complete (get instance IDs)
+    let (monitoring_instance_id, binary_launches) = tokio::try_join!(
         monitoring_launch_future,
         try_join_all(binary_launch_futures)
     )?;
-    let (monitoring_instance_id, monitoring_ip, monitoring_private_ip) = monitoring_result;
+    info!("instances requested");
+
+    // Group binary instances by region for batched DescribeInstances calls
+    let mut instances_by_region: HashMap<String, Vec<(String, InstanceConfig)>> = HashMap::new();
+    for (instance_id, region, instance_config) in binary_launches {
+        instances_by_region
+            .entry(region)
+            .or_default()
+            .push((instance_id, instance_config));
+    }
+
+    // Wait for instances to be running, batched by region
+    let wait_futures = instances_by_region
+        .into_iter()
+        .flat_map(|(region, instances)| {
+            let ec2_client = ec2_clients[&region].clone();
+            instances
+                .chunks(MAX_DESCRIBE_BATCH)
+                .map(move |chunk| {
+                    let ec2_client = ec2_client.clone();
+                    let chunk: Vec<_> = chunk.to_vec();
+                    let region = region.clone();
+                    async move {
+                        let instance_ids: Vec<String> =
+                            chunk.iter().map(|(id, _)| id.clone()).collect();
+                        let ips = wait_for_instances_running(&ec2_client, &instance_ids).await?;
+                        info!(
+                            region = region.as_str(),
+                            count = chunk.len(),
+                            "instances running in region"
+                        );
+                        let deployments: Vec<Deployment> = chunk
+                            .into_iter()
+                            .zip(ips)
+                            .map(|((instance_id, instance_config), ip)| Deployment {
+                                instance: instance_config,
+                                id: instance_id,
+                                ip,
+                            })
+                            .collect();
+                        Ok::<Vec<Deployment>, Error>(deployments)
+                    }
+                })
+                .collect::<Vec<_>>()
+        });
+
+    // Wait for monitoring instance and all binary instances in parallel
+    let (monitoring_ips, binary_deployment_batches) = tokio::try_join!(
+        async {
+            wait_for_instances_running(
+                monitoring_ec2_client,
+                slice::from_ref(&monitoring_instance_id),
+            )
+            .await
+            .map_err(Error::AwsEc2)
+        },
+        try_join_all(wait_futures)
+    )?;
+    let monitoring_ip = monitoring_ips[0].clone();
+    let monitoring_private_ip =
+        get_private_ip(monitoring_ec2_client, &monitoring_instance_id).await?;
+    let deployments: Vec<Deployment> = binary_deployment_batches.into_iter().flatten().collect();
+    info!(ip = monitoring_ip.as_str(), "monitoring instance running");
     info!("launched instances");
 
     // Add monitoring IP rules to binary security groups (for Prometheus scraping).
@@ -635,21 +793,21 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
         pyroscope_agent_service_url,
         pyroscope_agent_timer_url,
     ]: [String; 15] = try_join_all([
-        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &bbr_config_s3_key(), BBR_CONF.as_bytes(), PRESIGN_DURATION),
-        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &grafana_datasources_s3_key(), DATASOURCES_YML.as_bytes(), PRESIGN_DURATION),
-        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &grafana_dashboards_s3_key(), ALL_YML.as_bytes(), PRESIGN_DURATION),
-        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &loki_config_s3_key(), LOKI_CONFIG.as_bytes(), PRESIGN_DURATION),
-        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &pyroscope_config_s3_key(), PYROSCOPE_CONFIG.as_bytes(), PRESIGN_DURATION),
-        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &tempo_config_s3_key(), TEMPO_CONFIG.as_bytes(), PRESIGN_DURATION),
-        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &prometheus_service_s3_key(), PROMETHEUS_SERVICE.as_bytes(), PRESIGN_DURATION),
-        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &loki_service_s3_key(), LOKI_SERVICE.as_bytes(), PRESIGN_DURATION),
-        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &pyroscope_service_s3_key(), PYROSCOPE_SERVICE.as_bytes(), PRESIGN_DURATION),
-        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &tempo_service_s3_key(), TEMPO_SERVICE.as_bytes(), PRESIGN_DURATION),
-        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &node_exporter_service_s3_key(), NODE_EXPORTER_SERVICE.as_bytes(), PRESIGN_DURATION),
-        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &promtail_service_s3_key(), PROMTAIL_SERVICE.as_bytes(), PRESIGN_DURATION),
-        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &logrotate_config_s3_key(), LOGROTATE_CONF.as_bytes(), PRESIGN_DURATION),
-        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &pyroscope_agent_service_s3_key(), PYROSCOPE_AGENT_SERVICE.as_bytes(), PRESIGN_DURATION),
-        cache_content_and_presign(&s3_client, S3_BUCKET_NAME, &pyroscope_agent_timer_s3_key(), PYROSCOPE_AGENT_TIMER.as_bytes(), PRESIGN_DURATION),
+        cache_and_presign(&s3_client, BUCKET_NAME, &bbr_config_s3_key(), UploadSource::Static(BBR_CONF.as_bytes()), PRESIGN_DURATION),
+        cache_and_presign(&s3_client, BUCKET_NAME, &grafana_datasources_s3_key(), UploadSource::Static(DATASOURCES_YML.as_bytes()), PRESIGN_DURATION),
+        cache_and_presign(&s3_client, BUCKET_NAME, &grafana_dashboards_s3_key(), UploadSource::Static(ALL_YML.as_bytes()), PRESIGN_DURATION),
+        cache_and_presign(&s3_client, BUCKET_NAME, &loki_config_s3_key(), UploadSource::Static(LOKI_CONFIG.as_bytes()), PRESIGN_DURATION),
+        cache_and_presign(&s3_client, BUCKET_NAME, &pyroscope_config_s3_key(), UploadSource::Static(PYROSCOPE_CONFIG.as_bytes()), PRESIGN_DURATION),
+        cache_and_presign(&s3_client, BUCKET_NAME, &tempo_config_s3_key(), UploadSource::Static(TEMPO_CONFIG.as_bytes()), PRESIGN_DURATION),
+        cache_and_presign(&s3_client, BUCKET_NAME, &prometheus_service_s3_key(), UploadSource::Static(PROMETHEUS_SERVICE.as_bytes()), PRESIGN_DURATION),
+        cache_and_presign(&s3_client, BUCKET_NAME, &loki_service_s3_key(), UploadSource::Static(LOKI_SERVICE.as_bytes()), PRESIGN_DURATION),
+        cache_and_presign(&s3_client, BUCKET_NAME, &pyroscope_service_s3_key(), UploadSource::Static(PYROSCOPE_SERVICE.as_bytes()), PRESIGN_DURATION),
+        cache_and_presign(&s3_client, BUCKET_NAME, &tempo_service_s3_key(), UploadSource::Static(TEMPO_SERVICE.as_bytes()), PRESIGN_DURATION),
+        cache_and_presign(&s3_client, BUCKET_NAME, &node_exporter_service_s3_key(), UploadSource::Static(NODE_EXPORTER_SERVICE.as_bytes()), PRESIGN_DURATION),
+        cache_and_presign(&s3_client, BUCKET_NAME, &promtail_service_s3_key(), UploadSource::Static(PROMTAIL_SERVICE.as_bytes()), PRESIGN_DURATION),
+        cache_and_presign(&s3_client, BUCKET_NAME, &logrotate_config_s3_key(), UploadSource::Static(LOGROTATE_CONF.as_bytes()), PRESIGN_DURATION),
+        cache_and_presign(&s3_client, BUCKET_NAME, &pyroscope_agent_service_s3_key(), UploadSource::Static(PYROSCOPE_AGENT_SERVICE.as_bytes()), PRESIGN_DURATION),
+        cache_and_presign(&s3_client, BUCKET_NAME, &pyroscope_agent_timer_s3_key(), UploadSource::Static(PYROSCOPE_AGENT_TIMER.as_bytes()), PRESIGN_DURATION),
     ])
     .await?
     .try_into()
@@ -661,11 +819,11 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
         let binary_service_content = binary_service(*arch);
         let temp_path = tag_directory.join(format!("binary-{}.service", arch.as_str()));
         std::fs::write(&temp_path, &binary_service_content)?;
-        let binary_service_url = cache_file_and_presign(
+        let binary_service_url = cache_and_presign(
             &s3_client,
-            S3_BUCKET_NAME,
+            BUCKET_NAME,
             &binary_service_s3_key_for_arch(*arch),
-            &temp_path,
+            UploadSource::File(&temp_path),
             PRESIGN_DURATION,
         )
         .await?;
@@ -687,24 +845,24 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
         })
         .collect();
     let prom_config = generate_prometheus_config(&instances);
+    let prom_digest = Sha256::hash(prom_config.as_bytes()).to_string();
     let prom_path = tag_directory.join("prometheus.yml");
     std::fs::write(&prom_path, &prom_config)?;
-    let prom_digest = hash_file(&prom_path)?;
     let dashboard_path = std::path::PathBuf::from(&config.monitoring.dashboard);
-    let dashboard_digest = hash_file(&dashboard_path)?;
+    let dashboard_digest = hash_file(&dashboard_path).await?;
     let [prometheus_config_url, dashboard_url]: [String; 2] = try_join_all([
-        cache_file_and_presign(
+        cache_and_presign(
             &s3_client,
-            S3_BUCKET_NAME,
+            BUCKET_NAME,
             &monitoring_s3_key(tag, &prom_digest),
-            &prom_path,
+            UploadSource::File(&prom_path),
             PRESIGN_DURATION,
         ),
-        cache_file_and_presign(
+        cache_and_presign(
             &s3_client,
-            S3_BUCKET_NAME,
+            BUCKET_NAME,
             &monitoring_s3_key(tag, &dashboard_digest),
-            &dashboard_path,
+            UploadSource::File(&dashboard_path),
             PRESIGN_DURATION,
         ),
     ])
@@ -725,19 +883,19 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
             .collect(),
     };
     let hosts_yaml = serde_yaml::to_string(&hosts)?;
+    let hosts_digest = Sha256::hash(hosts_yaml.as_bytes()).to_string();
     let hosts_path = tag_directory.join("hosts.yaml");
     std::fs::write(&hosts_path, &hosts_yaml)?;
-    let hosts_digest = hash_file(&hosts_path)?;
-    let hosts_url = cache_file_and_presign(
+    let hosts_url = cache_and_presign(
         &s3_client,
-        S3_BUCKET_NAME,
+        BUCKET_NAME,
         &hosts_s3_key(tag, &hosts_digest),
-        &hosts_path,
+        UploadSource::File(&hosts_path),
         PRESIGN_DURATION,
     )
     .await?;
 
-    // Write per-instance config files locally, compute digests, and deduplicate
+    // Write per-instance config files locally and compute digests
     let mut promtail_digests: BTreeMap<String, std::path::PathBuf> = BTreeMap::new();
     let mut pyroscope_digests: BTreeMap<String, std::path::PathBuf> = BTreeMap::new();
     let mut instance_promtail_digest: HashMap<String, String> = HashMap::new();
@@ -754,9 +912,9 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
             &instance.region,
             arch,
         );
+        let promtail_digest = Sha256::hash(promtail_cfg.as_bytes()).to_string();
         let promtail_path = tag_directory.join(format!("promtail_{}.yml", instance.name));
         std::fs::write(&promtail_path, &promtail_cfg)?;
-        let promtail_digest = hash_file(&promtail_path)?;
 
         let pyroscope_script = generate_pyroscope_script(
             &monitoring_private_ip,
@@ -765,12 +923,16 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
             &instance.region,
             arch,
         );
+        let pyroscope_digest = Sha256::hash(pyroscope_script.as_bytes()).to_string();
         let pyroscope_path = tag_directory.join(format!("pyroscope-agent_{}.sh", instance.name));
         std::fs::write(&pyroscope_path, &pyroscope_script)?;
-        let pyroscope_digest = hash_file(&pyroscope_path)?;
 
-        promtail_digests.insert(promtail_digest.clone(), promtail_path);
-        pyroscope_digests.insert(pyroscope_digest.clone(), pyroscope_path);
+        promtail_digests
+            .entry(promtail_digest.clone())
+            .or_insert(promtail_path);
+        pyroscope_digests
+            .entry(pyroscope_digest.clone())
+            .or_insert(pyroscope_path);
         instance_promtail_digest.insert(instance.name.clone(), promtail_digest);
         instance_pyroscope_digest.insert(instance.name.clone(), pyroscope_digest);
     }
@@ -788,11 +950,11 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
                     let key = promtail_s3_key(tag, &digest);
                     let path = path.clone();
                     async move {
-                        let url = cache_file_and_presign(
+                        let url = cache_and_presign(
                             &s3_client,
-                            S3_BUCKET_NAME,
+                            BUCKET_NAME,
                             &key,
-                            &path,
+                            UploadSource::File(&path),
                             PRESIGN_DURATION,
                         )
                         .await?;
@@ -812,11 +974,11 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
                     let key = pyroscope_s3_key(tag, &digest);
                     let path = path.clone();
                     async move {
-                        let url = cache_file_and_presign(
+                        let url = cache_and_presign(
                             &s3_client,
-                            S3_BUCKET_NAME,
+                            BUCKET_NAME,
                             &key,
-                            &path,
+                            UploadSource::File(&path),
                             PRESIGN_DURATION,
                         )
                         .await?;
@@ -958,8 +1120,11 @@ pub async fn create(config: &PathBuf) -> Result<(), Error> {
             Ok::<(), Error>(())
         },
         async {
-            // Configure binary instances
-            let all_binary_ips = try_join_all(binary_futures).await?;
+            // Configure binary instances (limited concurrency to avoid SSH overload)
+            let all_binary_ips: Vec<String> = stream::iter(binary_futures)
+                .buffer_unordered(concurrency)
+                .try_collect()
+                .await?;
             info!("configured binary instances");
             Ok::<Vec<String>, Error>(all_binary_ips)
         }

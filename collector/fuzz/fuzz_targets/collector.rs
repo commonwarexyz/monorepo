@@ -16,7 +16,7 @@ use commonware_cryptography::{
     Committable, Digestible, Hasher, Sha256, Signer,
 };
 use commonware_p2p::{Blocker, CheckedSender, LimitedSender, Receiver, Recipients};
-use commonware_runtime::{deterministic, Clock, Runner};
+use commonware_runtime::{deterministic, Clock, Metrics, Runner};
 use futures::{
     channel::{mpsc, oneshot},
     StreamExt,
@@ -319,6 +319,7 @@ fn fuzz(input: FuzzInput) {
         let mut mailboxes: HashMap<usize, Mailbox<PublicKey, FuzzRequest>> = HashMap::new();
         let mut handlers: HashMap<usize, FuzzHandler> = HashMap::new();
         let mut monitors: HashMap<usize, FuzzMonitor> = HashMap::new();
+        let mut restarts = 0usize;
 
         for i in 2..5 {
             let seed = rng.gen();
@@ -429,7 +430,13 @@ fn fuzz(input: FuzzInput) {
                         response_codec: RangeCfg::from(..=MAX_LEN),
                     };
 
-                    let (engine, mailbox) = Engine::new(context.clone(), config);
+                    let (engine, mailbox) = Engine::new(
+                        context
+                            .with_label("engine")
+                            .with_attribute("instance", restarts),
+                        config,
+                    );
+                    restarts += 1;
                     mailboxes.insert(idx, mailbox);
 
                     let (_tx, _rx) = mpsc::unbounded();

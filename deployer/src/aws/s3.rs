@@ -1,6 +1,6 @@
 //! AWS S3 SDK function wrappers for caching deployer artifacts
 
-use crate::ec2::Error;
+use crate::aws::Error;
 use aws_config::BehaviorVersion;
 pub use aws_config::Region;
 use aws_sdk_s3::{
@@ -11,33 +11,53 @@ use aws_sdk_s3::{
     types::{BucketLocationConstraint, CreateBucketConfiguration, Delete, ObjectIdentifier},
     Client as S3Client,
 };
-use commonware_cryptography::{Hasher, Sha256};
-use std::{io::Read, path::Path, time::Duration};
+use commonware_cryptography::{Hasher as _, Sha256};
+use futures::stream::{self, StreamExt, TryStreamExt};
+use std::{collections::HashMap, io::Read, path::Path, time::Duration};
 use tracing::{debug, info};
 
-/// S3 bucket name for caching deployer artifacts
-pub const S3_BUCKET_NAME: &str = "commonware-deployer-cache";
+/// Bucket name for caching deployer artifacts
+pub const BUCKET_NAME: &str = "commonware-deployer-cache";
 
-/// S3 prefix for tool binaries: tools/binaries/{tool}/{version}/{platform}/{filename}
-pub const S3_TOOLS_BINARIES_PREFIX: &str = "tools/binaries";
+/// Prefix for tool binaries: tools/binaries/{tool}/{version}/{platform}/{filename}
+pub const TOOLS_BINARIES_PREFIX: &str = "tools/binaries";
 
-/// S3 prefix for tool configs: tools/configs/{deployer_version}/{component}/{file}
-pub const S3_TOOLS_CONFIGS_PREFIX: &str = "tools/configs";
+/// Prefix for tool configs: tools/configs/{deployer_version}/{component}/{file}
+pub const TOOLS_CONFIGS_PREFIX: &str = "tools/configs";
 
-/// S3 prefix for per-deployment data
-pub const S3_DEPLOYMENTS_PREFIX: &str = "deployments";
+/// Prefix for per-deployment data
+pub const DEPLOYMENTS_PREFIX: &str = "deployments";
+
+/// Maximum buffer size for file hashing (32MB)
+pub const MAX_HASH_BUFFER_SIZE: usize = 32 * 1024 * 1024;
+
+/// Maximum number of concurrent file hash operations
+pub const MAX_CONCURRENT_HASHES: usize = 8;
 
 /// Duration for pre-signed URLs (6 hours)
 pub const PRESIGN_DURATION: Duration = Duration::from_secs(6 * 60 * 60);
 
+/// Common wget prefix with retry settings for S3 downloads
+///
+/// Retries on connection failures and HTTP errors:
+/// - 404: Not Found (S3 eventual consistency)
+/// - 408: Request Timeout
+/// - 429: Too Many Requests (rate limiting)
+/// - 500: Internal Server Error
+/// - 502: Bad Gateway
+/// - 503: Service Unavailable
+/// - 504: Gateway Timeout
+pub const WGET: &str =
+    "wget -q --tries=30 --retry-connrefused --retry-on-http-error=404,408,429,500,502,503,504 --waitretry=5";
+
 /// Creates an S3 client for the specified AWS region
-pub async fn create_s3_client(region: Region) -> S3Client {
+pub async fn create_client(region: Region) -> S3Client {
     let retry = aws_config::retry::RetryConfig::adaptive()
         .with_max_attempts(u32::MAX)
         .with_initial_backoff(Duration::from_millis(500))
         .with_max_backoff(Duration::from_secs(30))
         .with_reconnect_mode(ReconnectMode::ReconnectOnTransientError);
-    let config = aws_config::defaults(BehaviorVersion::v2025_08_07())
+    let config = aws_config::defaults(BehaviorVersion::v2026_01_12())
         .region(region)
         .retry_config(retry)
         .load()
@@ -141,104 +161,134 @@ pub async fn object_exists(client: &S3Client, bucket: &str, key: &str) -> Result
     }
 }
 
-/// Uploads a file to S3
-pub async fn upload_file(
-    client: &S3Client,
-    bucket: &str,
-    key: &str,
-    path: &Path,
-) -> Result<(), Error> {
-    let body = ByteStream::from_path(path)
-        .await
-        .map_err(std::io::Error::other)?;
+/// Uploads a ByteStream to S3 with unlimited retries for transient failures.
+/// Takes a closure that produces the ByteStream, allowing re-creation on retry.
+async fn upload_with_retry<F, Fut>(client: &S3Client, bucket: &str, key: &str, make_body: F)
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = Result<ByteStream, Error>>,
+{
+    let mut attempt = 0u32;
+    loop {
+        let body = match make_body().await {
+            Ok(b) => b,
+            Err(e) => {
+                debug!(
+                    bucket = bucket,
+                    key = key,
+                    attempt = attempt + 1,
+                    error = %e,
+                    "failed to create body, retrying"
+                );
+                attempt = attempt.saturating_add(1);
+                let backoff = Duration::from_millis(500 * (1 << attempt.min(10)));
+                tokio::time::sleep(backoff).await;
+                continue;
+            }
+        };
 
-    client
-        .put_object()
-        .bucket(bucket)
-        .key(key)
-        .body(body)
-        .send()
-        .await
-        .map_err(|e| Error::AwsS3 {
-            bucket: bucket.to_string(),
-            operation: super::S3Operation::PutObject,
-            source: Box::new(aws_sdk_s3::Error::from(e.into_service_error())),
-        })?;
-
-    debug!(bucket = bucket, key = key, "uploaded file to S3");
-    Ok(())
-}
-
-/// Uploads a file to S3 and returns a pre-signed URL for downloading it
-#[must_use = "the pre-signed URL should be used to download the file"]
-pub async fn upload_and_presign(
-    client: &S3Client,
-    bucket: &str,
-    key: &str,
-    path: &Path,
-    expires_in: Duration,
-) -> Result<String, Error> {
-    upload_file(client, bucket, key, path).await?;
-    presign_url(client, bucket, key, expires_in).await
-}
-
-/// Caches content to S3 if it doesn't exist, then returns a pre-signed URL
-#[must_use = "the pre-signed URL should be used to download the content"]
-pub async fn cache_content_and_presign(
-    client: &S3Client,
-    bucket: &str,
-    key: &str,
-    content: &'static [u8],
-    expires_in: Duration,
-) -> Result<String, Error> {
-    if !object_exists(client, bucket, key).await? {
-        debug!(key = key, "static content not in S3, uploading");
-        let body = ByteStream::from_static(content);
-        client
+        match client
             .put_object()
             .bucket(bucket)
             .key(key)
             .body(body)
             .send()
             .await
-            .map_err(|e| Error::AwsS3 {
-                bucket: bucket.to_string(),
-                operation: super::S3Operation::PutObject,
-                source: Box::new(aws_sdk_s3::Error::from(e.into_service_error())),
-            })?;
-    }
-    presign_url(client, bucket, key, expires_in).await
-}
-
-/// Computes the SHA256 hash of a file and returns it as a hex string
-pub fn hash_file(path: &Path) -> Result<String, Error> {
-    let mut file = std::fs::File::open(path)?;
-    let mut hasher = Sha256::new();
-    let mut buffer = [0u8; 8192];
-    loop {
-        let bytes_read = file.read(&mut buffer)?;
-        if bytes_read == 0 {
-            break;
+        {
+            Ok(_) => {
+                debug!(bucket = bucket, key = key, "uploaded to S3");
+                return;
+            }
+            Err(e) => {
+                debug!(
+                    bucket = bucket,
+                    key = key,
+                    attempt = attempt + 1,
+                    error = %e,
+                    "upload failed, retrying"
+                );
+                attempt = attempt.saturating_add(1);
+                let backoff = Duration::from_millis(500 * (1 << attempt.min(10)));
+                tokio::time::sleep(backoff).await;
+            }
         }
-        hasher.update(&buffer[..bytes_read]);
     }
-    Ok(hasher.finalize().to_string())
 }
 
-/// Caches a file to S3 by digest if it doesn't exist, then returns a pre-signed URL
-#[must_use = "the pre-signed URL should be used to download the file"]
-pub async fn cache_file_and_presign(
+/// Source for S3 upload
+pub enum UploadSource<'a> {
+    File(&'a Path),
+    Static(&'static [u8]),
+}
+
+/// Caches content to S3 if it doesn't exist, then returns a pre-signed URL
+#[must_use = "the pre-signed URL should be used to download the content"]
+pub async fn cache_and_presign(
     client: &S3Client,
     bucket: &str,
     key: &str,
-    path: &Path,
+    source: UploadSource<'_>,
     expires_in: Duration,
 ) -> Result<String, Error> {
     if !object_exists(client, bucket, key).await? {
-        debug!(key = key, "file not in S3, uploading");
-        upload_file(client, bucket, key, path).await?;
+        debug!(key = key, "not in S3, uploading");
+        match source {
+            UploadSource::File(path) => {
+                let path = path.to_path_buf();
+                upload_with_retry(client, bucket, key, || {
+                    let path = path.clone();
+                    async move {
+                        ByteStream::from_path(path)
+                            .await
+                            .map_err(|e| Error::Io(std::io::Error::other(e)))
+                    }
+                })
+                .await;
+            }
+            UploadSource::Static(content) => {
+                upload_with_retry(client, bucket, key, || async {
+                    Ok(ByteStream::from_static(content))
+                })
+                .await;
+            }
+        }
     }
     presign_url(client, bucket, key, expires_in).await
+}
+
+/// Computes the SHA256 hash of a file and returns it as a hex string.
+/// Uses spawn_blocking internally to avoid blocking the async runtime.
+pub async fn hash_file(path: &Path) -> Result<String, Error> {
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let mut file = std::fs::File::open(&path)?;
+        let file_size = file.metadata()?.len() as usize;
+        let buffer_size = file_size.min(MAX_HASH_BUFFER_SIZE);
+        let mut hasher = Sha256::new();
+        let mut buffer = vec![0u8; buffer_size];
+        loop {
+            let bytes_read = file.read(&mut buffer)?;
+            if bytes_read == 0 {
+                break;
+            }
+            hasher.update(&buffer[..bytes_read]);
+        }
+        Ok(hasher.finalize().to_string())
+    })
+    .await
+    .map_err(|e| Error::Io(std::io::Error::other(e)))?
+}
+
+/// Computes SHA256 hashes for multiple files concurrently.
+/// Returns a map from file path to hex-encoded digest.
+pub async fn hash_files(paths: Vec<String>) -> Result<HashMap<String, String>, Error> {
+    stream::iter(paths.into_iter().map(|path| async move {
+        let digest = hash_file(Path::new(&path)).await?;
+        Ok::<_, Error>((path, digest))
+    }))
+    .buffer_unordered(MAX_CONCURRENT_HASHES)
+    .try_collect()
+    .await
 }
 
 /// Generates a pre-signed URL for downloading an object from S3

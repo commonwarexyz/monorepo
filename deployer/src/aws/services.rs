@@ -1,7 +1,7 @@
 //! Service configuration for Prometheus, Loki, Grafana, Promtail, and a caller-provided binary
 
-use crate::ec2::{
-    s3::{S3_DEPLOYMENTS_PREFIX, S3_TOOLS_BINARIES_PREFIX, S3_TOOLS_CONFIGS_PREFIX},
+use crate::aws::{
+    s3::{DEPLOYMENTS_PREFIX, TOOLS_BINARIES_PREFIX, TOOLS_CONFIGS_PREFIX, WGET},
     Architecture,
 };
 
@@ -29,9 +29,12 @@ pub const PYROSCOPE_VERSION: &str = "1.12.0";
 /// Version of Grafana to download and install
 pub const GRAFANA_VERSION: &str = "11.5.2";
 
+/// Version of Samply to download and install
+pub const SAMPLY_VERSION: &str = "0.13.1";
+
 // S3 key functions for tool binaries
 //
-// Convention: {S3_TOOLS_BINARIES_PREFIX}/{tool}/{version}/{platform}/{filename}
+// Convention: {TOOLS_BINARIES_PREFIX}/{tool}/{version}/{platform}/{filename}
 //
 // The filename matches the upstream download URL exactly. The version is placed
 // in the path (not embedded in the filename) to ensure consistent cache organization
@@ -41,158 +44,166 @@ pub const GRAFANA_VERSION: &str = "11.5.2";
 
 pub(crate) fn prometheus_bin_s3_key(version: &str, architecture: Architecture) -> String {
     format!(
-        "{S3_TOOLS_BINARIES_PREFIX}/prometheus/{version}/linux-{arch}/prometheus-{version}.linux-{arch}.tar.gz",
+        "{TOOLS_BINARIES_PREFIX}/prometheus/{version}/linux-{arch}/prometheus-{version}.linux-{arch}.tar.gz",
         arch = architecture.as_str()
     )
 }
 
 pub(crate) fn grafana_bin_s3_key(version: &str, architecture: Architecture) -> String {
     format!(
-        "{S3_TOOLS_BINARIES_PREFIX}/grafana/{version}/linux-{arch}/grafana_{version}_{arch}.deb",
+        "{TOOLS_BINARIES_PREFIX}/grafana/{version}/linux-{arch}/grafana_{version}_{arch}.deb",
         arch = architecture.as_str()
     )
 }
 
 pub(crate) fn loki_bin_s3_key(version: &str, architecture: Architecture) -> String {
     format!(
-        "{S3_TOOLS_BINARIES_PREFIX}/loki/{version}/linux-{arch}/loki-linux-{arch}.zip",
+        "{TOOLS_BINARIES_PREFIX}/loki/{version}/linux-{arch}/loki-linux-{arch}.zip",
         arch = architecture.as_str()
     )
 }
 
 pub(crate) fn pyroscope_bin_s3_key(version: &str, architecture: Architecture) -> String {
     format!(
-        "{S3_TOOLS_BINARIES_PREFIX}/pyroscope/{version}/linux-{arch}/pyroscope_{version}_linux_{arch}.tar.gz",
+        "{TOOLS_BINARIES_PREFIX}/pyroscope/{version}/linux-{arch}/pyroscope_{version}_linux_{arch}.tar.gz",
         arch = architecture.as_str()
     )
 }
 
 pub(crate) fn tempo_bin_s3_key(version: &str, architecture: Architecture) -> String {
     format!(
-        "{S3_TOOLS_BINARIES_PREFIX}/tempo/{version}/linux-{arch}/tempo_{version}_linux_{arch}.tar.gz",
+        "{TOOLS_BINARIES_PREFIX}/tempo/{version}/linux-{arch}/tempo_{version}_linux_{arch}.tar.gz",
         arch = architecture.as_str()
     )
 }
 
 pub(crate) fn node_exporter_bin_s3_key(version: &str, architecture: Architecture) -> String {
     format!(
-        "{S3_TOOLS_BINARIES_PREFIX}/node-exporter/{version}/linux-{arch}/node_exporter-{version}.linux-{arch}.tar.gz",
+        "{TOOLS_BINARIES_PREFIX}/node-exporter/{version}/linux-{arch}/node_exporter-{version}.linux-{arch}.tar.gz",
         arch = architecture.as_str()
     )
 }
 
 pub(crate) fn promtail_bin_s3_key(version: &str, architecture: Architecture) -> String {
     format!(
-        "{S3_TOOLS_BINARIES_PREFIX}/promtail/{version}/linux-{arch}/promtail-linux-{arch}.zip",
+        "{TOOLS_BINARIES_PREFIX}/promtail/{version}/linux-{arch}/promtail-linux-{arch}.zip",
         arch = architecture.as_str()
     )
 }
 
+pub(crate) fn samply_bin_s3_key(version: &str, architecture: Architecture) -> String {
+    let arch = match architecture {
+        Architecture::Arm64 => "aarch64",
+        Architecture::X86_64 => "x86_64",
+    };
+    format!("{TOOLS_BINARIES_PREFIX}/samply/{version}/linux-{arch}/samply-{arch}-unknown-linux-gnu.tar.xz")
+}
+
 // S3 key functions for component configs and services (include deployer version for cache invalidation)
 //
-// Convention: {S3_TOOLS_CONFIGS_PREFIX}/{deployer_version}/{component}/{file}
+// Convention: {TOOLS_CONFIGS_PREFIX}/{deployer_version}/{component}/{file}
 
 pub fn prometheus_service_s3_key() -> String {
-    format!("{S3_TOOLS_CONFIGS_PREFIX}/{DEPLOYER_VERSION}/prometheus/service")
+    format!("{TOOLS_CONFIGS_PREFIX}/{DEPLOYER_VERSION}/prometheus/service")
 }
 
 pub fn grafana_datasources_s3_key() -> String {
-    format!("{S3_TOOLS_CONFIGS_PREFIX}/{DEPLOYER_VERSION}/grafana/datasources.yml")
+    format!("{TOOLS_CONFIGS_PREFIX}/{DEPLOYER_VERSION}/grafana/datasources.yml")
 }
 
 pub fn grafana_dashboards_s3_key() -> String {
-    format!("{S3_TOOLS_CONFIGS_PREFIX}/{DEPLOYER_VERSION}/grafana/all.yml")
+    format!("{TOOLS_CONFIGS_PREFIX}/{DEPLOYER_VERSION}/grafana/all.yml")
 }
 
 pub fn loki_config_s3_key() -> String {
-    format!("{S3_TOOLS_CONFIGS_PREFIX}/{DEPLOYER_VERSION}/loki/config.yml")
+    format!("{TOOLS_CONFIGS_PREFIX}/{DEPLOYER_VERSION}/loki/config.yml")
 }
 
 pub fn loki_service_s3_key() -> String {
-    format!("{S3_TOOLS_CONFIGS_PREFIX}/{DEPLOYER_VERSION}/loki/service")
+    format!("{TOOLS_CONFIGS_PREFIX}/{DEPLOYER_VERSION}/loki/service")
 }
 
 pub fn pyroscope_config_s3_key() -> String {
-    format!("{S3_TOOLS_CONFIGS_PREFIX}/{DEPLOYER_VERSION}/pyroscope/config.yml")
+    format!("{TOOLS_CONFIGS_PREFIX}/{DEPLOYER_VERSION}/pyroscope/config.yml")
 }
 
 pub fn pyroscope_service_s3_key() -> String {
-    format!("{S3_TOOLS_CONFIGS_PREFIX}/{DEPLOYER_VERSION}/pyroscope/service")
+    format!("{TOOLS_CONFIGS_PREFIX}/{DEPLOYER_VERSION}/pyroscope/service")
 }
 
 pub fn tempo_config_s3_key() -> String {
-    format!("{S3_TOOLS_CONFIGS_PREFIX}/{DEPLOYER_VERSION}/tempo/config.yml")
+    format!("{TOOLS_CONFIGS_PREFIX}/{DEPLOYER_VERSION}/tempo/config.yml")
 }
 
 pub fn tempo_service_s3_key() -> String {
-    format!("{S3_TOOLS_CONFIGS_PREFIX}/{DEPLOYER_VERSION}/tempo/service")
+    format!("{TOOLS_CONFIGS_PREFIX}/{DEPLOYER_VERSION}/tempo/service")
 }
 
 pub fn node_exporter_service_s3_key() -> String {
-    format!("{S3_TOOLS_CONFIGS_PREFIX}/{DEPLOYER_VERSION}/node-exporter/service")
+    format!("{TOOLS_CONFIGS_PREFIX}/{DEPLOYER_VERSION}/node-exporter/service")
 }
 
 pub fn promtail_service_s3_key() -> String {
-    format!("{S3_TOOLS_CONFIGS_PREFIX}/{DEPLOYER_VERSION}/promtail/service")
+    format!("{TOOLS_CONFIGS_PREFIX}/{DEPLOYER_VERSION}/promtail/service")
 }
 
 // S3 key functions for pyroscope agent (lives with pyroscope component)
 
 pub fn pyroscope_agent_service_s3_key() -> String {
-    format!("{S3_TOOLS_CONFIGS_PREFIX}/{DEPLOYER_VERSION}/pyroscope/agent.service")
+    format!("{TOOLS_CONFIGS_PREFIX}/{DEPLOYER_VERSION}/pyroscope/agent.service")
 }
 
 pub fn pyroscope_agent_timer_s3_key() -> String {
-    format!("{S3_TOOLS_CONFIGS_PREFIX}/{DEPLOYER_VERSION}/pyroscope/agent.timer")
+    format!("{TOOLS_CONFIGS_PREFIX}/{DEPLOYER_VERSION}/pyroscope/agent.timer")
 }
 
 // S3 key functions for system configs
 
 pub fn bbr_config_s3_key() -> String {
-    format!("{S3_TOOLS_CONFIGS_PREFIX}/{DEPLOYER_VERSION}/system/bbr.conf")
+    format!("{TOOLS_CONFIGS_PREFIX}/{DEPLOYER_VERSION}/system/bbr.conf")
 }
 
 pub fn logrotate_config_s3_key() -> String {
-    format!("{S3_TOOLS_CONFIGS_PREFIX}/{DEPLOYER_VERSION}/system/logrotate.conf")
+    format!("{TOOLS_CONFIGS_PREFIX}/{DEPLOYER_VERSION}/system/logrotate.conf")
 }
 
 // S3 key functions for binary instance configs
 
 pub(crate) fn binary_service_s3_key_for_arch(architecture: Architecture) -> String {
     format!(
-        "{S3_TOOLS_CONFIGS_PREFIX}/{DEPLOYER_VERSION}/binary/service-{arch}",
+        "{TOOLS_CONFIGS_PREFIX}/{DEPLOYER_VERSION}/binary/service-{arch}",
         arch = architecture.as_str()
     )
 }
 
 /// Returns the S3 key for an instance's binary by digest (deduplicated within deployment)
 pub fn binary_s3_key(tag: &str, digest: &str) -> String {
-    format!("{S3_DEPLOYMENTS_PREFIX}/{tag}/binaries/{digest}")
+    format!("{DEPLOYMENTS_PREFIX}/{tag}/binaries/{digest}")
 }
 
 /// Returns the S3 key for an instance's config by digest (deduplicated within deployment)
 pub fn config_s3_key(tag: &str, digest: &str) -> String {
-    format!("{S3_DEPLOYMENTS_PREFIX}/{tag}/configs/{digest}")
+    format!("{DEPLOYMENTS_PREFIX}/{tag}/configs/{digest}")
 }
 
 /// Returns the S3 key for hosts.yaml by digest (deduplicated within deployment)
 pub fn hosts_s3_key(tag: &str, digest: &str) -> String {
-    format!("{S3_DEPLOYMENTS_PREFIX}/{tag}/hosts/{digest}")
+    format!("{DEPLOYMENTS_PREFIX}/{tag}/hosts/{digest}")
 }
 
 /// Returns the S3 key for promtail config by digest (deduplicated within deployment)
 pub fn promtail_s3_key(tag: &str, digest: &str) -> String {
-    format!("{S3_DEPLOYMENTS_PREFIX}/{tag}/promtail/{digest}")
+    format!("{DEPLOYMENTS_PREFIX}/{tag}/promtail/{digest}")
 }
 
 /// Returns the S3 key for pyroscope agent script by digest (deduplicated within deployment)
 pub fn pyroscope_s3_key(tag: &str, digest: &str) -> String {
-    format!("{S3_DEPLOYMENTS_PREFIX}/{tag}/pyroscope/{digest}")
+    format!("{DEPLOYMENTS_PREFIX}/{tag}/pyroscope/{digest}")
 }
 
 /// Returns the S3 key for monitoring config by digest (deduplicated within deployment)
 pub fn monitoring_s3_key(tag: &str, digest: &str) -> String {
-    format!("{S3_DEPLOYMENTS_PREFIX}/{tag}/monitoring/{digest}")
+    format!("{DEPLOYMENTS_PREFIX}/{tag}/monitoring/{digest}")
 }
 
 /// Returns the download URL for Prometheus from GitHub
@@ -248,6 +259,17 @@ pub(crate) fn promtail_download_url(version: &str, architecture: Architecture) -
     format!(
         "https://github.com/grafana/loki/releases/download/v{version}/promtail-linux-{arch}.zip",
         arch = architecture.as_str()
+    )
+}
+
+/// Returns the download URL for Samply from GitHub
+pub(crate) fn samply_download_url(version: &str, architecture: Architecture) -> String {
+    let arch = match architecture {
+        Architecture::Arm64 => "aarch64",
+        Architecture::X86_64 => "x86_64",
+    };
+    format!(
+        "https://github.com/mstange/samply/releases/download/samply-v{version}/samply-{arch}-unknown-linux-gnu.tar.xz"
     )
 }
 
@@ -478,24 +500,24 @@ sudo apt-get update -y
 sudo apt-get install -y unzip adduser libfontconfig1 wget tar
 
 # Download all files from S3 concurrently via pre-signed URLs
-wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/prometheus.tar.gz '{}' &
-wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/grafana.deb '{}' &
-wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/loki.zip '{}' &
-wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/pyroscope.tar.gz '{}' &
-wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/tempo.tar.gz '{}' &
-wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/node_exporter.tar.gz '{}' &
-wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/prometheus.yml '{}' &
-wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/datasources.yml '{}' &
-wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/all.yml '{}' &
-wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/dashboard.json '{}' &
-wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/loki.yml '{}' &
-wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/pyroscope.yml '{}' &
-wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/tempo.yml '{}' &
-wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/prometheus.service '{}' &
-wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/loki.service '{}' &
-wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/pyroscope.service '{}' &
-wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/tempo.service '{}' &
-wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/node_exporter.service '{}' &
+{WGET} -O /home/ubuntu/prometheus.tar.gz '{}' &
+{WGET} -O /home/ubuntu/grafana.deb '{}' &
+{WGET} -O /home/ubuntu/loki.zip '{}' &
+{WGET} -O /home/ubuntu/pyroscope.tar.gz '{}' &
+{WGET} -O /home/ubuntu/tempo.tar.gz '{}' &
+{WGET} -O /home/ubuntu/node_exporter.tar.gz '{}' &
+{WGET} -O /home/ubuntu/prometheus.yml '{}' &
+{WGET} -O /home/ubuntu/datasources.yml '{}' &
+{WGET} -O /home/ubuntu/all.yml '{}' &
+{WGET} -O /home/ubuntu/dashboard.json '{}' &
+{WGET} -O /home/ubuntu/loki.yml '{}' &
+{WGET} -O /home/ubuntu/pyroscope.yml '{}' &
+{WGET} -O /home/ubuntu/tempo.yml '{}' &
+{WGET} -O /home/ubuntu/prometheus.service '{}' &
+{WGET} -O /home/ubuntu/loki.service '{}' &
+{WGET} -O /home/ubuntu/pyroscope.service '{}' &
+{WGET} -O /home/ubuntu/tempo.service '{}' &
+{WGET} -O /home/ubuntu/node_exporter.service '{}' &
 wait
 
 # Verify all downloads succeeded
@@ -652,19 +674,19 @@ sudo apt-get update -y
 sudo apt-get install -y logrotate jq wget unzip libjemalloc2 linux-tools-common linux-tools-generic linux-tools-$(uname -r)
 
 # Download all files from S3 concurrently via pre-signed URLs
-wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/binary '{}' &
-wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/config.conf '{}' &
-wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/hosts.yaml '{}' &
-wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/promtail.zip '{}' &
-wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/promtail.yml '{}' &
-wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/promtail.service '{}' &
-wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/node_exporter.tar.gz '{}' &
-wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/node_exporter.service '{}' &
-wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/binary.service '{}' &
-wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/logrotate.conf '{}' &
-wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/pyroscope-agent.sh '{}' &
-wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/pyroscope-agent.service '{}' &
-wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/pyroscope-agent.timer '{}' &
+{WGET} -O /home/ubuntu/binary '{}' &
+{WGET} -O /home/ubuntu/config.conf '{}' &
+{WGET} -O /home/ubuntu/hosts.yaml '{}' &
+{WGET} -O /home/ubuntu/promtail.zip '{}' &
+{WGET} -O /home/ubuntu/promtail.yml '{}' &
+{WGET} -O /home/ubuntu/promtail.service '{}' &
+{WGET} -O /home/ubuntu/node_exporter.tar.gz '{}' &
+{WGET} -O /home/ubuntu/node_exporter.service '{}' &
+{WGET} -O /home/ubuntu/binary.service '{}' &
+{WGET} -O /home/ubuntu/logrotate.conf '{}' &
+{WGET} -O /home/ubuntu/pyroscope-agent.sh '{}' &
+{WGET} -O /home/ubuntu/pyroscope-agent.service '{}' &
+{WGET} -O /home/ubuntu/pyroscope-agent.timer '{}' &
 wait
 
 # Verify all downloads succeeded

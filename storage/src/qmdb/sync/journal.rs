@@ -16,6 +16,11 @@ pub trait Journal: Send {
 
     /// Append an operation to the journal
     fn append(&mut self, op: Self::Op) -> impl Future<Output = Result<(), Self::Error>> + Send;
+
+    /// Clear all data and reset the journal to a new starting position.
+    ///
+    /// After clearing, the journal will behave as if initialized at `new_size`.
+    fn clear(&mut self, new_size: u64) -> impl Future<Output = Result<(), Self::Error>> + Send;
 }
 
 impl<E, V> Journal for crate::journal::contiguous::variable::Journal<E, V>
@@ -37,6 +42,10 @@ where
     async fn append(&mut self, op: Self::Op) -> Result<(), Self::Error> {
         Self::append(self, op).await.map(|_| ())
     }
+
+    async fn clear(&mut self, new_size: u64) -> Result<(), Self::Error> {
+        self.clear_to_size(new_size).await
+    }
 }
 
 impl<E, A> Journal for crate::journal::contiguous::fixed::Journal<E, A>
@@ -57,5 +66,9 @@ where
 
     async fn append(&mut self, op: Self::Op) -> Result<(), Self::Error> {
         Self::append(self, op).await.map(|_| ())
+    }
+
+    async fn clear(&mut self, new_size: u64) -> Result<(), Self::Error> {
+        self.clear_to_size(new_size).await
     }
 }

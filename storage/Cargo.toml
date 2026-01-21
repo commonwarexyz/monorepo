@@ -75,9 +75,15 @@ bench = false
 crate-type = ["rlib", "cdylib"]
 
 [[bench]]
-name = "qmdb"
+name = "qmdb_generate"
 harness = false
-path = "src/qmdb/benches/bench.rs"
+path = "src/qmdb/benches/generate_bench.rs"
+required-features = ["test-traits"]
+
+[[bench]]
+name = "qmdb_init"
+harness = false
+path = "src/qmdb/benches/init_bench.rs"
 required-features = ["test-traits"]
 
 [[bench]]

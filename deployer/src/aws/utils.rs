@@ -1,6 +1,6 @@
 //! Utility functions for interacting with EC2 instances
 
-use crate::ec2::Error;
+use crate::aws::{s3::WGET, Error};
 use std::path::Path;
 use tokio::{
     fs::File,
@@ -17,7 +17,7 @@ pub const MAX_SSH_ATTEMPTS: usize = 30;
 pub const MAX_POLL_ATTEMPTS: usize = 30;
 
 /// Interval between retries
-pub const RETRY_INTERVAL: Duration = Duration::from_secs(10);
+pub const RETRY_INTERVAL: Duration = Duration::from_secs(15);
 
 /// Protocol for deployer ingress
 pub const DEPLOYER_PROTOCOL: &str = "tcp";
@@ -90,7 +90,7 @@ pub async fn poll_service_active(key_file: &str, ip: &str, service: &str) -> Res
             warn!(service, "service failed to start (check logs and update)");
             return Ok(());
         }
-        warn!(error = ?String::from_utf8_lossy(&output.stderr), service, "active status check failed");
+        warn!(status = parsed, service, "service not yet active");
         sleep(RETRY_INTERVAL).await;
     }
     Err(Error::ServiceTimeout(ip.to_string(), service.to_string()))
@@ -121,18 +121,45 @@ pub async fn poll_service_inactive(key_file: &str, ip: &str, service: &str) -> R
             warn!(service, "service was never active");
             return Ok(());
         }
-        warn!(error = ?String::from_utf8_lossy(&output.stderr), service, "inactive status check failed");
+        warn!(status = parsed, service, "service not yet inactive");
         sleep(RETRY_INTERVAL).await;
     }
     Err(Error::ServiceTimeout(ip.to_string(), service.to_string()))
 }
 
+/// Downloads a file from a remote instance via SCP with retries
+pub async fn scp_download(
+    key_file: &str,
+    ip: &str,
+    remote_path: &str,
+    local_path: &str,
+) -> Result<(), Error> {
+    for _ in 0..MAX_SSH_ATTEMPTS {
+        let output = Command::new("scp")
+            .arg("-i")
+            .arg(key_file)
+            .arg("-o")
+            .arg("IdentitiesOnly=yes")
+            .arg("-o")
+            .arg("ServerAliveInterval=600")
+            .arg("-o")
+            .arg("StrictHostKeyChecking=no")
+            .arg(format!("ubuntu@{ip}:{remote_path}"))
+            .arg(local_path)
+            .output()
+            .await?;
+        if output.status.success() {
+            return Ok(());
+        }
+        warn!(error = ?String::from_utf8_lossy(&output.stderr), "SCP failed");
+        sleep(RETRY_INTERVAL).await;
+    }
+    Err(Error::SshFailed)
+}
+
 /// Enables BBR on a remote instance by downloading config from S3 and applying sysctl settings.
 pub async fn enable_bbr(key_file: &str, ip: &str, bbr_conf_url: &str) -> Result<(), Error> {
-    let download_cmd = format!(
-        "wget -q --tries=10 --retry-connrefused --waitretry=5 -O /home/ubuntu/99-bbr.conf '{}'",
-        bbr_conf_url
-    );
+    let download_cmd = format!("{WGET} -O /home/ubuntu/99-bbr.conf '{bbr_conf_url}'");
     ssh_execute(key_file, ip, &download_cmd).await?;
     ssh_execute(
         key_file,

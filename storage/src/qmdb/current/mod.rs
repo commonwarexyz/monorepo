@@ -84,7 +84,7 @@ impl<T: Translator> FixedConfig<T> {
 async fn root<E: RStorage + Clock + Metrics, H: CHasher, const N: usize>(
     hasher: &mut StandardHasher<H>,
     height: u32,
-    status: &CleanBitMap<H::Digest, N>,
+    status: &CleanBitMap<E, H::Digest, N>,
     mmr: &Mmr<E, H::Digest, Clean<DigestOf<H>>>,
 ) -> Result<H::Digest, Error> {
     let grafted_mmr = GraftingStorage::<'_, H, _, _>::new(status, mmr, height);
@@ -92,7 +92,7 @@ async fn root<E: RStorage + Clock + Metrics, H: CHasher, const N: usize>(
 
     // If we are on a chunk boundary, then the mmr_root fully captures the state of the DB.
     let (last_chunk, next_bit) = status.last_chunk();
-    if next_bit == CleanBitMap::<H::Digest, N>::CHUNK_SIZE_BITS {
+    if next_bit == CleanBitMap::<E, H::Digest, N>::CHUNK_SIZE_BITS {
         // Last chunk is complete, no partial chunk to add
         return Ok(mmr_root);
     }
@@ -103,7 +103,7 @@ async fn root<E: RStorage + Clock + Metrics, H: CHasher, const N: usize>(
     hasher.inner().update(last_chunk);
     let last_chunk_digest = hasher.inner().finalize();
 
-    Ok(CleanBitMap::<H::Digest, N>::partial_chunk_root(
+    Ok(crate::bitmap::partial_chunk_root::<_, N>(
         hasher.inner(),
         &mmr_root,
         next_bit,
@@ -119,13 +119,14 @@ async fn root<E: RStorage + Clock + Metrics, H: CHasher, const N: usize>(
 /// * `status` - The `DirtyBitMap` to be merkleized. Ownership is taken.
 /// * `mmr` - The MMR storage used for grafting.
 /// * `grafting_height` - The height at which grafting occurs.
-async fn merkleize_grafted_bitmap<H, const N: usize>(
+async fn merkleize_grafted_bitmap<E, H, const N: usize>(
     hasher: &mut StandardHasher<H>,
-    status: DirtyBitMap<H::Digest, N>,
+    status: DirtyBitMap<E, H::Digest, N>,
     mmr: &impl crate::mmr::storage::Storage<H::Digest>,
     grafting_height: u32,
-) -> Result<CleanBitMap<H::Digest, N>, Error>
+) -> Result<CleanBitMap<E, H::Digest, N>, Error>
 where
+    E: RStorage + Clock + Metrics,
     H: CHasher,
 {
     let mut grafter = GraftingHasher::new(hasher, grafting_height);

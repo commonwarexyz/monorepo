@@ -231,7 +231,7 @@ impl<E: Storage + Metrics, V: CodecShared> Glob<E, V> {
 mod tests {
     use super::*;
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic, Runner};
+    use commonware_runtime::{deterministic, Metrics, Runner};
     use commonware_utils::NZUsize;
 
     fn test_cfg() -> Config<()> {
@@ -433,7 +433,7 @@ mod tests {
             let cfg = test_cfg();
 
             // Create and populate glob
-            let mut glob: Glob<_, i32> = Glob::init(context.clone(), cfg.clone())
+            let mut glob: Glob<_, i32> = Glob::init(context.with_label("first"), cfg.clone())
                 .await
                 .expect("Failed to init glob");
 
@@ -443,7 +443,7 @@ mod tests {
             drop(glob);
 
             // Reopen and verify
-            let glob: Glob<_, i32> = Glob::init(context.clone(), cfg)
+            let glob: Glob<_, i32> = Glob::init(context.with_label("second"), cfg)
                 .await
                 .expect("Failed to reinit glob");
 

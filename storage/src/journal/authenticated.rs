@@ -257,38 +257,35 @@ where
     }
 
     /// Generate a historical proof with respect to the state of the MMR when it had
-    /// `historical_size` items.
+    /// `historical_leaves` leaves.
     ///
     /// Returns a proof and the items corresponding to the leaves in the range `start_loc..end_loc`,
-    /// where `end_loc` is the minimum of `historical_size` and `start_loc + max_ops`.
+    /// where `end_loc` is the minimum of `historical_leaves` and `start_loc + max_ops`.
     ///
     /// # Errors
     ///
-    /// - Returns [Error::Mmr] with [crate::mmr::Error::LocationOverflow] if `historical_size` or
-    ///   `start_loc` > [crate::mmr::MAX_LOCATION].
     /// - Returns [Error::Mmr] with [crate::mmr::Error::RangeOutOfBounds] if `start_loc` >=
-    ///   `historical_size` or `historical_size` > number of items in the journal.
+    ///   `historical_leaves` or `historical_leaves` > number of items in the journal.
     /// - Returns [Error::Journal] with [crate::journal::Error::ItemPruned] if `start_loc` has been
     ///   pruned.
     pub async fn historical_proof(
         &self,
-        historical_size: Location,
+        historical_leaves: Location,
         start_loc: Location,
         max_ops: NonZeroU64,
     ) -> Result<(Proof<H::Digest>, Vec<C::Item>), Error> {
-        let size = self.size();
-        if historical_size > size {
-            return Err(crate::mmr::Error::RangeOutOfBounds(size).into());
+        let leaves = self.size();
+        if historical_leaves > leaves {
+            return Err(crate::mmr::Error::RangeOutOfBounds(leaves).into());
         }
-        if start_loc >= historical_size {
+        if start_loc >= historical_leaves {
             return Err(crate::mmr::Error::RangeOutOfBounds(start_loc).into());
         }
-        let end_loc = std::cmp::min(historical_size, start_loc.saturating_add(max_ops.get()));
+        let end_loc = std::cmp::min(historical_leaves, start_loc.saturating_add(max_ops.get()));
 
-        let mmr_size = Position::try_from(historical_size)?;
         let proof = self
             .mmr
-            .historical_range_proof(mmr_size, start_loc..end_loc)
+            .historical_range_proof(historical_leaves, start_loc..end_loc)
             .await?;
 
         let mut ops = Vec::with_capacity((*end_loc - *start_loc) as usize);
@@ -635,7 +632,7 @@ mod tests {
     use commonware_runtime::{
         buffer::PoolRef,
         deterministic::{self, Context},
-        Runner as _,
+        Metrics, Runner as _,
     };
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use futures::StreamExt as _;
@@ -843,7 +840,7 @@ mod tests {
     fn test_align_with_mismatched_committed_ops() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut journal = create_empty_journal(context.clone(), "mismatched").await;
+            let mut journal = create_empty_journal(context.with_label("first"), "mismatched").await;
 
             // Add 20 uncommitted operations
             for i in 0..20 {
@@ -859,7 +856,7 @@ mod tests {
             // Drop and recreate to simulate restart (which calls align internally)
             journal.sync().await.unwrap();
             drop(journal);
-            let journal = create_empty_journal(context, "mismatched").await;
+            let journal = create_empty_journal(context.with_label("second"), "mismatched").await;
 
             // Uncommitted operations should be gone
             assert_eq!(journal.size(), 0);
@@ -1237,7 +1234,8 @@ mod tests {
     fn test_sync() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut journal = create_empty_journal(context.clone(), "close_pending").await;
+            let mut journal =
+                create_empty_journal(context.with_label("first"), "close_pending").await;
 
             // Add 20 operations
             let expected_ops: Vec<_> = (0..20).map(|i| create_operation(i as u8)).collect();
@@ -1260,7 +1258,7 @@ mod tests {
 
             // Reopen and verify the operations persisted
             drop(journal);
-            let journal = create_empty_journal(context, "close_pending").await;
+            let journal = create_empty_journal(context.with_label("second"), "close_pending").await;
             assert_eq!(journal.size(), 21);
 
             // Verify all operations can be read back
@@ -1360,17 +1358,19 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Test empty journal
-            let journal = create_empty_journal(context.clone(), "oldest").await;
+            let journal = create_empty_journal(context.with_label("empty"), "oldest").await;
             let oldest = journal.oldest_retained_loc();
             assert_eq!(oldest, None);
 
             // Test no pruning
-            let journal = create_journal_with_ops(context.clone(), "oldest", 100).await;
+            let journal =
+                create_journal_with_ops(context.with_label("no_prune"), "oldest", 100).await;
             let oldest = journal.oldest_retained_loc();
             assert_eq!(oldest, Some(Location::new_unchecked(0)));
 
             // Test after pruning
-            let mut journal = create_journal_with_ops(context, "oldest", 100).await;
+            let mut journal =
+                create_journal_with_ops(context.with_label("pruned"), "oldest", 100).await;
             journal
                 .append(Operation::CommitFloor(None, Location::new_unchecked(50)))
                 .await
@@ -1393,17 +1393,19 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Test empty journal
-            let journal = create_empty_journal(context.clone(), "boundary").await;
+            let journal = create_empty_journal(context.with_label("empty"), "boundary").await;
             let boundary = journal.pruning_boundary();
             assert_eq!(boundary, Location::new_unchecked(0));
 
             // Test no pruning
-            let journal = create_journal_with_ops(context.clone(), "boundary", 100).await;
+            let journal =
+                create_journal_with_ops(context.with_label("no_prune"), "boundary", 100).await;
             let boundary = journal.pruning_boundary();
             assert_eq!(boundary, Location::new_unchecked(0));
 
             // Test after pruning
-            let mut journal = create_journal_with_ops(context, "boundary", 100).await;
+            let mut journal =
+                create_journal_with_ops(context.with_label("pruned"), "boundary", 100).await;
             journal
                 .append(Operation::CommitFloor(None, Location::new_unchecked(50)))
                 .await
@@ -1654,13 +1656,14 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Test empty journal
-            let journal = create_empty_journal(context.clone(), "replay").await;
+            let journal = create_empty_journal(context.with_label("empty"), "replay").await;
             let stream = journal.replay(0, NZUsize!(10)).await.unwrap();
             futures::pin_mut!(stream);
             assert!(stream.next().await.is_none());
 
             // Test replaying all operations
-            let journal = create_journal_with_ops(context, "replay", 50).await;
+            let journal =
+                create_journal_with_ops(context.with_label("with_ops"), "replay", 50).await;
             let stream = journal.replay(0, NZUsize!(100)).await.unwrap();
             futures::pin_mut!(stream);
 

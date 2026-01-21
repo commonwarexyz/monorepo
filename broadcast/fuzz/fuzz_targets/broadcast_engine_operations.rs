@@ -225,7 +225,7 @@ fn fuzz(input: FuzzInput) {
             };
 
             // Create engine
-            let engine_context = context.with_label(&format!("peer_{i}"));
+            let engine_context = context.with_label("peer").with_attribute("index", i);
             let (engine, mailbox) =
                 Engine::<_, PublicKey, FuzzMessage>::new(engine_context, config);
             mailboxes.insert(public_key.clone(), mailbox);

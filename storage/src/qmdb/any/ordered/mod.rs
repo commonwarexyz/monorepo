@@ -1108,7 +1108,7 @@ mod test {
         let root = db.root();
         let mut db = db.into_mutable();
         db.update(d1, d2).await.unwrap();
-        let db = reopen_db(context.clone()).await;
+        let db = reopen_db(context.with_label("reopen1")).await;
         assert_eq!(db.root(), root);
         assert_eq!(db.op_count(), 1);
 
@@ -1125,7 +1125,7 @@ mod test {
         assert!(matches!(db.prune(db.inactivity_floor_loc()).await, Ok(())));
 
         // Re-opening the DB without a clean shutdown should still recover the correct state.
-        let db = reopen_db(context.clone()).await;
+        let db = reopen_db(context.with_label("reopen2")).await;
         assert_eq!(db.op_count(), 2);
         assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
         assert_eq!(db.root(), root);
@@ -1154,7 +1154,7 @@ mod test {
     fn test_ordered_any_fixed_db_empty() {
         let executor = Runner::default();
         executor.start(|context| async move {
-            let db = open_fixed_db(context.clone()).await;
+            let db = open_fixed_db(context.with_label("initial")).await;
             test_ordered_any_db_empty(context, db, |ctx| Box::pin(open_fixed_db(ctx))).await;
         });
     }
@@ -1163,7 +1163,7 @@ mod test {
     fn test_ordered_any_variable_db_empty() {
         let executor = Runner::default();
         executor.start(|context| async move {
-            let db = open_variable_db(context.clone()).await;
+            let db = open_variable_db(context.with_label("initial")).await;
             test_ordered_any_db_empty(context, db, |ctx| Box::pin(open_variable_db(ctx))).await;
         });
     }
@@ -1286,7 +1286,7 @@ mod test {
             .unwrap();
         let op_count = db.op_count();
         let root = db.root();
-        let db = reopen_db(context.clone()).await;
+        let db = reopen_db(context.with_label("reopen1")).await;
         assert_eq!(db.op_count(), op_count);
         assert_eq!(db.root(), root);
         let mut db = db.into_mutable();
@@ -1310,7 +1310,7 @@ mod test {
         // Confirm close/reopen gets us back to the same state.
         let op_count = db.op_count();
         let root = db.root();
-        let db = reopen_db(context.clone()).await;
+        let db = reopen_db(context.with_label("reopen2")).await;
 
         assert_eq!(db.root(), root);
         assert_eq!(db.op_count(), op_count);
@@ -1341,7 +1341,7 @@ mod test {
     fn test_ordered_any_fixed_db_basic() {
         let executor = Runner::default();
         executor.start(|context| async move {
-            let db = open_fixed_db(context.clone()).await;
+            let db = open_fixed_db(context.with_label("initial")).await;
             test_ordered_any_db_basic(context, db, |ctx| Box::pin(open_fixed_db(ctx))).await;
         });
     }
@@ -1350,7 +1350,7 @@ mod test {
     fn test_ordered_any_variable_db_basic() {
         let executor = Runner::default();
         executor.start(|context| async move {
-            let db = open_variable_db(context.clone()).await;
+            let db = open_variable_db(context.with_label("initial")).await;
             test_ordered_any_db_basic(context, db, |ctx| Box::pin(open_variable_db(ctx))).await;
         });
     }
@@ -1550,7 +1550,9 @@ mod test {
             let val3 = Sha256::fill(3u8);
 
             // Delete the previous key of a newly created key.
-            let mut db = open_variable_db(context.clone()).await.into_mutable();
+            let mut db = open_variable_db(context.with_label("first"))
+                .await
+                .into_mutable();
             db.update(key1.clone(), val1).await.unwrap();
             db.update(key3.clone(), val3).await.unwrap();
             let mut db = db.commit(None).await.unwrap().0.into_mutable();
@@ -1571,7 +1573,9 @@ mod test {
             db.into_merkleized().destroy().await.unwrap();
 
             // Create a key that becomes the previous key of a concurrently deleted key.
-            let mut db = open_variable_db(context.clone()).await.into_mutable();
+            let mut db = open_variable_db(context.with_label("second"))
+                .await
+                .into_mutable();
             db.update(key1.clone(), val1).await.unwrap();
             db.update(key3.clone(), val3).await.unwrap();
             let mut db = db.commit(None).await.unwrap().0.into_mutable();
