@@ -53,7 +53,7 @@
 use crate::{
     marshal::{self, ingress::mailbox::AncestorStream, Update},
     simplex::types::Context,
-    types::{Epoch, Epocher, Round},
+    types::{Epoch, Epocher, Height, Round},
     Application, Automaton, Block, CertifiableAutomaton, CertifiableBlock, Epochable, Relay,
     Reporter, VerifyingApplication,
 };
@@ -481,11 +481,15 @@ where
                     return;
                 }
 
-                // Check if this is a re-proposal (the block commitment matches the parent from
-                // the context). Re-proposals are only valid at epoch boundaries.
-                if commitment == context.parent.1 {
-                    // Ensure the re-proposal is at the epoch boundary.
-                    if block.height() != block_bounds.last() {
+                // Re-proposal detection: consensus signals a re-proposal by setting
+                // context.parent to the block being verified (commitment == context.parent.1).
+                //
+                // Re-proposals skip normal verification because:
+                // 1. The block was already verified when originally proposed
+                // 2. The parent-child height check would fail (parent IS the block)
+                let is_reproposal = commitment == context.parent.1;
+                if is_reproposal {
+                    if !is_at_epoch_boundary(&marshaled.epocher, block.height(), context.epoch()) {
                         debug!(
                             height = %block.height(),
                             last_in_epoch = %block_bounds.last(),
@@ -495,9 +499,7 @@ where
                         return;
                     }
 
-                    // Valid re-proposal at epoch boundary. Mark as verified and create
-                    // a completed task for certify. No further verification needed since
-                    // the block was already fully verified when originally proposed.
+                    // Valid re-proposal. Create a completed verification task for certify().
                     let round = context.round;
                     marshal.verified(round, block).await;
 
@@ -623,13 +625,16 @@ where
                     }
                 };
 
-                // Check for re-proposal: block at epoch boundary being certified at a later view.
+                // Re-proposal detection for certify path: we don't have the consensus context,
+                // only the block's embedded context from original proposal. Infer re-proposal from:
+                // 1. Block is at epoch boundary
+                // 2. Certification round is later than block's original round
+                // 3. Same epoch (re-proposals don't cross epoch boundaries)
                 let embedded_context = block.context();
-                let is_reproposal = epocher
-                    .last(embedded_context.round.epoch())
-                    .is_some_and(|last| last == block.height())
-                    && round.view() > embedded_context.round.view()
-                    && round.epoch() == embedded_context.round.epoch();
+                let is_reproposal =
+                    is_at_epoch_boundary(&epocher, block.height(), embedded_context.round.epoch())
+                        && round.view() > embedded_context.round.view()
+                        && round.epoch() == embedded_context.round.epoch();
                 if is_reproposal {
                     marshaled.marshal.verified(round, block).await;
                     tx.send_lossy(true);
@@ -705,6 +710,14 @@ where
         }
         self.application.report(update).await
     }
+}
+
+/// Returns true if the block is at an epoch boundary (last block in its epoch).
+///
+/// This is used to validate re-proposals, which are only allowed for boundary blocks.
+#[inline]
+fn is_at_epoch_boundary<ES: Epocher>(epocher: &ES, block_height: Height, epoch: Epoch) -> bool {
+    epocher.last(epoch).is_some_and(|last| last == block_height)
 }
 
 /// Fetches the parent block given its commitment and optional round.
