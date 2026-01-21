@@ -31,6 +31,11 @@
 //! All `Blobs` in a given `partition` are kept open during the lifetime of `Journal`. You can limit
 //! the number of open blobs by using a higher number of `items_per_blob` and/or pruning old items.
 //!
+//! # Partition
+//!
+//! Blobs are stored in the legacy partition (`cfg.partition`) if it already contains data;
+//! otherwise they are stored in `{cfg.partition}_blobs`.
+//!
 //! # Consistency
 //!
 //! Data written to `Journal` may not be immediately persisted to `Storage`. It is up to the caller
@@ -76,13 +81,19 @@ use tracing::{debug, info};
 /// Suffix appended to the partition name for the metadata store.
 const META_SUFFIX: &str = "_meta";
 
+/// Suffix appended to the partition name for the blobs store (new default).
+const BLOB_SUFFIX: &str = "_blobs";
+
 /// Metadata key for storing the pruning boundary.
 const PRUNING_BOUNDARY_KEY: u64 = 1;
 
 /// Configuration for `Journal` storage.
 #[derive(Clone)]
 pub struct Config {
-    /// The `commonware-runtime::Storage` partition to use for storing journal data.
+    /// Prefix for the journal partitions.
+    ///
+    /// Blobs are stored in `partition` (legacy) if it contains data, otherwise in
+    /// `{partition}{BLOB_SUFFIX}`. Metadata is stored in `{partition}{META_SUFFIX}`.
     pub partition: String,
 
     /// The maximum number of journal items to store in each blob.
@@ -138,6 +149,40 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     /// Size of each entry in bytes (as u64).
     pub const CHUNK_SIZE_U64: u64 = Self::CHUNK_SIZE as u64;
 
+    /// Scan a partition and return blob names, treating a missing partition as empty.
+    async fn scan_partition(context: &E, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
+        match context.scan(partition).await {
+            Ok(blobs) => Ok(blobs),
+            Err(commonware_runtime::Error::PartitionMissing(_)) => Ok(Vec::new()),
+            Err(err) => Err(Error::Runtime(err)),
+        }
+    }
+
+    /// Select the blobs partition using legacy-first compatibility rules.
+    ///
+    /// If both legacy and new blobs partitions contain data, returns corruption.
+    /// If neither contains data, defaults to the new blobs partition.
+    async fn select_blob_partition(context: &E, cfg: &Config) -> Result<String, Error> {
+        let legacy_partition = cfg.partition.as_str();
+        let new_partition = format!("{}{}", cfg.partition, BLOB_SUFFIX);
+
+        let legacy_blobs = Self::scan_partition(context, legacy_partition).await?;
+        let new_blobs = Self::scan_partition(context, &new_partition).await?;
+
+        if !legacy_blobs.is_empty() && !new_blobs.is_empty() {
+            return Err(Error::Corruption(format!(
+                "both legacy and blobs partitions contain data: legacy={} blobs={}",
+                legacy_partition, new_partition
+            )));
+        }
+
+        if !legacy_blobs.is_empty() {
+            Ok(legacy_partition.to_string())
+        } else {
+            Ok(new_partition)
+        }
+    }
+
     /// Initialize a new `Journal` instance.
     ///
     /// All backing blobs are opened but not read during initialization. The `replay` method can be
@@ -145,8 +190,9 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     pub async fn init(context: E, cfg: Config) -> Result<Self, Error> {
         let items_per_blob = cfg.items_per_blob.get();
 
+        let blob_partition = Self::select_blob_partition(&context, &cfg).await?;
         let segmented_cfg = SegmentedConfig {
-            partition: cfg.partition.clone(),
+            partition: blob_partition,
             buffer_pool: cfg.buffer_pool,
             write_buffer: cfg.write_buffer,
         };
@@ -306,9 +352,10 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         let items_per_blob = cfg.items_per_blob.get();
         let tail_section = size / items_per_blob;
 
+        let blob_partition = Self::select_blob_partition(&context, &cfg).await?;
         // Initialize the segmented journal (empty)
         let segmented_cfg = SegmentedConfig {
-            partition: cfg.partition.clone(),
+            partition: blob_partition,
             buffer_pool: cfg.buffer_pool,
             write_buffer: cfg.write_buffer,
         };
@@ -432,9 +479,7 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
             let needs_update = self
                 .metadata
                 .get(&PRUNING_BOUNDARY_KEY)
-                .map_or(true, |bytes| {
-                    bytes.as_slice() != self.pruning_boundary.to_be_bytes()
-                });
+                .is_none_or(|bytes| bytes.as_slice() != self.pruning_boundary.to_be_bytes());
             if needs_update {
                 self.metadata.put(
                     PRUNING_BOUNDARY_KEY,
@@ -766,7 +811,7 @@ mod tests {
     use commonware_macros::test_traced;
     use commonware_runtime::{
         deterministic::{self, Context},
-        Blob, Metrics, Runner, Storage,
+        Blob, Error as RuntimeError, Metrics, Runner, Storage,
     };
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use futures::{pin_mut, StreamExt};
@@ -787,6 +832,113 @@ mod tests {
             buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             write_buffer: NZUsize!(2048),
         }
+    }
+
+    fn blob_partition(cfg: &Config) -> String {
+        format!("{}{}", cfg.partition, BLOB_SUFFIX)
+    }
+
+    async fn scan_partition(context: &Context, partition: &str) -> Vec<Vec<u8>> {
+        match context.scan(partition).await {
+            Ok(blobs) => blobs,
+            Err(RuntimeError::PartitionMissing(_)) => Vec::new(),
+            Err(err) => panic!("Failed to scan partition {partition}: {err}"),
+        }
+    }
+
+    #[test_traced]
+    fn test_fixed_journal_init_conflicting_partitions() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(NZU64!(2));
+            let legacy_partition = cfg.partition.clone();
+            let blobs_partition = blob_partition(&cfg);
+
+            let (legacy_blob, _) = context
+                .open(&legacy_partition, &0u64.to_be_bytes())
+                .await
+                .expect("Failed to open legacy blob");
+            legacy_blob
+                .write_at(vec![0u8; 1], 0)
+                .await
+                .expect("Failed to write legacy blob");
+            legacy_blob
+                .sync()
+                .await
+                .expect("Failed to sync legacy blob");
+
+            let (new_blob, _) = context
+                .open(&blobs_partition, &0u64.to_be_bytes())
+                .await
+                .expect("Failed to open new blob");
+            new_blob
+                .write_at(vec![0u8; 1], 0)
+                .await
+                .expect("Failed to write new blob");
+            new_blob.sync().await.expect("Failed to sync new blob");
+
+            let result =
+                Journal::<_, Digest>::init(context.with_label("second"), cfg.clone()).await;
+            assert!(matches!(result, Err(Error::Corruption(_))));
+        });
+    }
+
+    #[test_traced]
+    fn test_fixed_journal_init_prefers_legacy_partition() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(NZU64!(2));
+            let legacy_partition = cfg.partition.clone();
+            let blobs_partition = blob_partition(&cfg);
+
+            // Seed legacy partition so it is selected.
+            let (legacy_blob, _) = context
+                .open(&legacy_partition, &0u64.to_be_bytes())
+                .await
+                .expect("Failed to open legacy blob");
+            legacy_blob
+                .write_at(vec![0u8; 1], 0)
+                .await
+                .expect("Failed to write legacy blob");
+            legacy_blob
+                .sync()
+                .await
+                .expect("Failed to sync legacy blob");
+
+            let mut journal = Journal::<_, Digest>::init(context.with_label("first"), cfg.clone())
+                .await
+                .expect("failed to initialize journal");
+            journal.append(test_digest(1)).await.unwrap();
+            journal.sync().await.unwrap();
+            drop(journal);
+
+            let legacy_blobs = scan_partition(&context, &legacy_partition).await;
+            let new_blobs = scan_partition(&context, &blobs_partition).await;
+            assert!(!legacy_blobs.is_empty());
+            assert!(new_blobs.is_empty());
+        });
+    }
+
+    #[test_traced]
+    fn test_fixed_journal_init_defaults_to_blobs_partition() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(NZU64!(2));
+            let legacy_partition = cfg.partition.clone();
+            let blobs_partition = blob_partition(&cfg);
+
+            let mut journal = Journal::<_, Digest>::init(context.with_label("first"), cfg.clone())
+                .await
+                .expect("failed to initialize journal");
+            journal.append(test_digest(1)).await.unwrap();
+            journal.sync().await.unwrap();
+            drop(journal);
+
+            let legacy_blobs = scan_partition(&context, &legacy_partition).await;
+            let new_blobs = scan_partition(&context, &blobs_partition).await;
+            assert!(legacy_blobs.is_empty());
+            assert!(!new_blobs.is_empty());
+        });
     }
 
     #[test_traced]
@@ -1025,7 +1177,7 @@ mod tests {
 
             // Corrupt one of the bytes and make sure it's detected.
             let (blob, _) = context
-                .open(&cfg.partition, &40u64.to_be_bytes())
+                .open(&blob_partition(&cfg), &40u64.to_be_bytes())
                 .await
                 .expect("Failed to open blob");
             // Write junk bytes.
@@ -1103,7 +1255,7 @@ mod tests {
             // missing one item. This should be detected during init because all non-tail blobs
             // must be full.
             let (blob, size) = context
-                .open(&cfg.partition, &40u64.to_be_bytes())
+                .open(&blob_partition(&cfg), &40u64.to_be_bytes())
                 .await
                 .expect("Failed to open blob");
             blob.resize(size - 1).await.expect("Failed to corrupt blob");
@@ -1152,7 +1304,7 @@ mod tests {
             drop(journal);
 
             context
-                .remove(&cfg.partition, Some(&1u64.to_be_bytes()))
+                .remove(&blob_partition(&cfg), Some(&1u64.to_be_bytes()))
                 .await
                 .expect("failed to remove blob");
 
@@ -1205,7 +1357,7 @@ mod tests {
             // Truncate the tail blob by one byte, which should result in the last item being
             // discarded during replay (detected via corruption).
             let (blob, size) = context
-                .open(&cfg.partition, &1u64.to_be_bytes())
+                .open(&blob_partition(&cfg), &1u64.to_be_bytes())
                 .await
                 .expect("Failed to open blob");
             blob.resize(size - 1).await.expect("Failed to corrupt blob");
@@ -1313,7 +1465,7 @@ mod tests {
 
             // Manually truncate most recent blob to simulate a partial write.
             let (blob, size) = context
-                .open(&cfg.partition, &1u64.to_be_bytes())
+                .open(&blob_partition(&cfg), &1u64.to_be_bytes())
                 .await
                 .expect("Failed to open blob");
             // truncate the most recent blob by 1 byte which corrupts the most recent item
@@ -1331,7 +1483,7 @@ mod tests {
 
             // Delete the second blob and re-init
             context
-                .remove(&cfg.partition, Some(&1u64.to_be_bytes()))
+                .remove(&blob_partition(&cfg), Some(&1u64.to_be_bytes()))
                 .await
                 .expect("Failed to remove blob");
 
@@ -1365,7 +1517,7 @@ mod tests {
 
             // Manually truncate most recent blob to simulate a partial write.
             let (blob, size) = context
-                .open(&cfg.partition, &0u64.to_be_bytes())
+                .open(&blob_partition(&cfg), &0u64.to_be_bytes())
                 .await
                 .expect("Failed to open blob");
             // Truncate the most recent blob by 1 byte which corrupts the one appended item
@@ -1414,7 +1566,7 @@ mod tests {
             // Manually extend the blob to simulate a failure where the file was extended, but no
             // bytes were written due to failure.
             let (blob, size) = context
-                .open(&cfg.partition, &0u64.to_be_bytes())
+                .open(&blob_partition(&cfg), &0u64.to_be_bytes())
                 .await
                 .expect("Failed to open blob");
             blob.write_at(vec![0u8; PAGE_SIZE.get() as usize * 3], size)
@@ -1583,7 +1735,7 @@ mod tests {
             // Physical page size = PAGE_SIZE + CHECKSUM_SIZE = 44 + 12 = 56
             let physical_page_size = PAGE_SIZE.get() as u64 + 12;
             let (blob, size) = context
-                .open(&cfg.partition, &0u64.to_be_bytes())
+                .open(&blob_partition(&cfg), &0u64.to_be_bytes())
                 .await
                 .expect("Failed to open blob");
 

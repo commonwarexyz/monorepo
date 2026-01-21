@@ -949,9 +949,9 @@ mod tests {
             // === Phase 2: Simulate complete offsets partition loss ===
             // Remove both the offsets data partition and its metadata partition
             context
-                .remove(&cfg.offsets_partition(), None)
+                .remove(&format!("{}_blobs", cfg.offsets_partition()), None)
                 .await
-                .expect("Failed to remove offsets partition");
+                .expect("Failed to remove offsets blobs partition");
             context
                 .remove(&format!("{}_meta", cfg.offsets_partition()), None)
                 .await
