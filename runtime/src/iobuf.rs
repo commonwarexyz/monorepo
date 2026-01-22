@@ -1749,6 +1749,52 @@ mod tests {
         assert_eq!(bufs.len(), 4);
     }
 
+    #[test]
+    fn test_iobufsmut_freeze_after_advance() {
+        let buf1 = IoBufMut::from(b"hello");
+        let buf2 = IoBufMut::from(b" world");
+        let mut bufs = IoBufsMut::from(vec![buf1, buf2]);
+
+        // Advance partway through first buffer
+        bufs.advance(3);
+        assert_eq!(bufs.len(), 8);
+
+        // Freeze and verify only remaining data is preserved
+        let frozen = bufs.freeze();
+        assert_eq!(frozen.len(), 8);
+        assert_eq!(frozen.coalesce(), b"lo world");
+    }
+
+    #[test]
+    fn test_iobufsmut_freeze_after_advance_to_boundary() {
+        let buf1 = IoBufMut::from(b"hello");
+        let buf2 = IoBufMut::from(b" world");
+        let mut bufs = IoBufsMut::from(vec![buf1, buf2]);
+
+        // Advance exactly to first buffer boundary
+        bufs.advance(5);
+        assert_eq!(bufs.len(), 6);
+
+        // First buffer should be fully consumed (empty after advance)
+        // freeze() filters empty buffers, so result should be Single
+        let frozen = bufs.freeze();
+        assert!(frozen.is_single());
+        assert_eq!(frozen.coalesce(), b" world");
+    }
+
+    #[test]
+    fn test_iobufsmut_coalesce_after_advance_to_boundary() {
+        let buf1 = IoBufMut::from(b"hello");
+        let buf2 = IoBufMut::from(b" world");
+        let mut bufs = IoBufsMut::from(vec![buf1, buf2]);
+
+        // Advance exactly past first buffer
+        bufs.advance(5);
+
+        // Coalesce should only include second buffer's data
+        assert_eq!(bufs.coalesce(), b" world");
+    }
+
     #[cfg(feature = "arbitrary")]
     mod conformance {
         use super::IoBuf;
