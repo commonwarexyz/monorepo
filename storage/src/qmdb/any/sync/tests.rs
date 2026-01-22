@@ -1592,8 +1592,6 @@ macro_rules! sync_tests_for_harness {
     };
 }
 
-// ===== Instantiate Tests for All Harnesses =====
-
 sync_tests_for_harness!(harnesses::OrderedFixedHarness, ordered_fixed);
 sync_tests_for_harness!(harnesses::OrderedVariableHarness, ordered_variable);
 sync_tests_for_harness!(harnesses::UnorderedFixedHarness, unordered_fixed);
