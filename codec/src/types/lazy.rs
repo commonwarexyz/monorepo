@@ -4,7 +4,7 @@ use crate::{Decode, Encode, EncodeSize, FixedSize, Read, Write};
 use bytes::{Buf, Bytes};
 use core::hash::Hash;
 #[cfg(feature = "std")]
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 /// A type which can be deserialized lazily.
 ///
@@ -63,12 +63,22 @@ use std::sync::OnceLock;
 ///
 /// Furthermore, we implement [`Eq`], [`Ord`], [`Hash`] based on the implementation
 /// of `T` as well. These methods will force deserialization of the value.
+///
+/// ## Note
+///
+/// When `std` is enabled, [`Lazy`] will share a cache of the deserialized value
+/// across clones. This means that cloning a [`Lazy`] is cheap, and deserializing
+/// will only happen once across all clones.
+///
+/// When `std` is not enabled, cloning a [`Lazy`] will duplicate the pending
+/// and deserialized value, meaning that deserialization will happen once
+/// per clone (unless the clone was created after deserialization).
 #[derive(Clone)]
 pub struct Lazy<T: Read> {
     /// This should only be `None` if `value` is initialized.
     pending: Option<Pending<T>>,
     #[cfg(feature = "std")]
-    value: OnceLock<Option<T>>,
+    value: Arc<OnceLock<Option<T>>>,
     #[cfg(not(feature = "std"))]
     value: Option<T>,
 }
@@ -80,11 +90,13 @@ struct Pending<T: Read> {
 }
 
 impl<T: Read> Lazy<T> {
-    // I considered calling this "now", but this was too close to "new".
     /// Create a [`Lazy`] using a value.
     pub fn new(value: T) -> Self {
         Self {
             pending: None,
+            #[cfg(feature = "std")]
+            value: Arc::new(Some(value).into()),
+            #[cfg(not(feature = "std"))]
             value: Some(value).into(),
         }
     }
@@ -229,6 +241,7 @@ mod test {
     use super::Lazy;
     use crate::{DecodeExt, Encode, FixedSize, Read, Write};
     use proptest::prelude::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// A byte that's always <= 100
     #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -305,5 +318,55 @@ mod test {
             prop_assert_eq!(a < b, la < lb);
             prop_assert_eq!(a >= b, la >= lb);
         }
+    }
+
+    #[test]
+    fn test_clone_shares_cache() {
+        static DECODE_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        struct Tracked(u8);
+
+        impl FixedSize for Tracked {
+            const SIZE: usize = 1;
+        }
+
+        impl Write for Tracked {
+            fn write(&self, buf: &mut impl bytes::BufMut) {
+                self.0.write(buf);
+            }
+        }
+
+        impl Read for Tracked {
+            type Cfg = ();
+
+            fn read_cfg(buf: &mut impl bytes::Buf, _cfg: &Self::Cfg) -> Result<Self, crate::Error> {
+                DECODE_COUNT.fetch_add(1, Ordering::SeqCst);
+                Ok(Self(u8::read_cfg(buf, &())?))
+            }
+        }
+
+        DECODE_COUNT.store(0, Ordering::SeqCst);
+
+        // Create a lazy value (no deserialization yet)
+        let original = Lazy::<Tracked>::deferred(&mut 42u8.encode(), ());
+        assert_eq!(DECODE_COUNT.load(Ordering::SeqCst), 0);
+
+        let clone1 = original.clone();
+        let clone2 = original.clone();
+        assert_eq!(DECODE_COUNT.load(Ordering::SeqCst), 0);
+
+        // Deserialize via one clone
+        assert_eq!(clone1.get(), Some(&Tracked(42)));
+        assert_eq!(DECODE_COUNT.load(Ordering::SeqCst), 1);
+
+        // All other instances should have the cached value without re-deserializing
+        assert_eq!(original.get(), Some(&Tracked(42)));
+        assert_eq!(clone2.get(), Some(&Tracked(42)));
+        assert_eq!(
+            DECODE_COUNT.load(Ordering::SeqCst),
+            1,
+            "clones should share cache"
+        );
     }
 }
