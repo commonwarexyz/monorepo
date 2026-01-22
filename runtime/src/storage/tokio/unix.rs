@@ -28,6 +28,7 @@ impl crate::Blob for Blob {
         buf: impl Into<IoBufsMut> + Send,
     ) -> Result<IoBufsMut, Error> {
         let buf = buf.into();
+        let len = buf.len();
         let file = self.file.clone();
         let offset = offset
             .checked_add(Header::SIZE_U64)
@@ -40,7 +41,6 @@ impl crate::Blob for Blob {
             }
             IoBufsMut::Chunked(mut chunks) => {
                 // Read into a temporary buffer and copy to preserve the chunked structure
-                let len: usize = chunks.iter().map(|b| b.len()).sum();
                 let mut temp = vec![0u8; len];
                 file.read_exact_at(&mut temp, offset)?;
                 let mut off = 0;

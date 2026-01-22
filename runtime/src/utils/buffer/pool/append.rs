@@ -303,8 +303,7 @@ impl<B: Blob> Append<B> {
                     let len = len as u64;
                     if len != page_size {
                         // The page is partial (logical data doesn't fill the page).
-                        // TODO: avoid the copy here by returning IoBuf instead of Vec<u8>
-                        let logical_bytes = buf.as_ref()[..(len as usize)].to_vec();
+                        let logical_bytes = buf.slice(..len as usize).into();
                         return Ok((
                             Some((logical_bytes, crc_record)),
                             last_page_end / physical_page_size,
@@ -509,12 +508,11 @@ impl<B: Blob> Append<B> {
         logical_offset: u64,
     ) -> Result<(IoBufMut, usize), Error> {
         let mut buf = buf.into();
-        let max_len = buf.len();
-        if max_len == 0 {
+        if buf.is_empty() {
             return Ok((buf, 0));
         }
         let blob_size = self.size().await;
-        let available = (blob_size.saturating_sub(logical_offset) as usize).min(max_len);
+        let available = (blob_size.saturating_sub(logical_offset) as usize).min(buf.len());
         if available == 0 {
             return Err(Error::BlobInsufficientLength);
         }
@@ -781,6 +779,7 @@ impl<B: Blob> Blob for Append<B> {
         buf: impl Into<IoBufsMut> + Send,
     ) -> Result<IoBufsMut, Error> {
         let buf = buf.into();
+        let len = buf.len();
         match buf {
             IoBufsMut::Single(mut single) => {
                 self.read_into(single.as_mut(), logical_offset).await?;
@@ -788,8 +787,7 @@ impl<B: Blob> Blob for Append<B> {
             }
             IoBufsMut::Chunked(mut chunks) => {
                 // Read into a temporary buffer and copy back to preserve structure
-                let total_len: usize = chunks.iter().map(|c| c.len()).sum();
-                let mut temp = vec![0u8; total_len];
+                let mut temp = vec![0u8; len];
                 self.read_into(&mut temp, logical_offset).await?;
                 let mut pos = 0;
                 for chunk in chunks.iter_mut() {
@@ -915,7 +913,7 @@ impl<B: Blob> Blob for Append<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{deterministic, Buf, IoBufMut, Runner as _, Storage as _};
+    use crate::{deterministic, IoBufMut, Runner as _, Storage as _};
     use commonware_codec::ReadExt;
     use commonware_macros::test_traced;
     use commonware_utils::{NZUsize, NZU16};
@@ -992,16 +990,28 @@ mod tests {
             assert_eq!(append.size().await, 10);
 
             // Read back the first chunk and verify.
-            let read_buf = append.read_at(0, IoBufMut::zeroed(5)).await.unwrap();
-            assert_eq!(read_buf.chunk(), &data[..]);
+            let read_buf = append
+                .read_at(0, IoBufMut::zeroed(5))
+                .await
+                .unwrap()
+                .coalesce();
+            assert_eq!(read_buf, &data[..]);
 
             // Read back the second chunk and verify.
-            let read_buf = append.read_at(5, IoBufMut::zeroed(5)).await.unwrap();
-            assert_eq!(read_buf.chunk(), &more_data[..]);
+            let read_buf = append
+                .read_at(5, IoBufMut::zeroed(5))
+                .await
+                .unwrap()
+                .coalesce();
+            assert_eq!(read_buf, &more_data[..]);
 
             // Read all data at once and verify.
-            let read_buf = append.read_at(0, IoBufMut::zeroed(10)).await.unwrap();
-            assert_eq!(read_buf.chunk(), &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+            let read_buf = append
+                .read_at(0, IoBufMut::zeroed(10))
+                .await
+                .unwrap()
+                .coalesce();
+            assert_eq!(read_buf, &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
 
             // Close and reopen the blob and make sure the data is still there and the trailing
             // checksum is written & stripped as expected.
@@ -1024,13 +1034,21 @@ mod tests {
             assert_eq!(append.size().await, 110);
 
             // Read back data that spans the page boundary.
-            let read_buf = append.read_at(10, IoBufMut::zeroed(100)).await.unwrap();
-            assert_eq!(read_buf.chunk(), &spanning_data[..]);
+            let read_buf = append
+                .read_at(10, IoBufMut::zeroed(100))
+                .await
+                .unwrap()
+                .coalesce();
+            assert_eq!(read_buf, &spanning_data[..]);
 
             // Read all 110 bytes at once.
-            let read_buf = append.read_at(0, IoBufMut::zeroed(110)).await.unwrap();
+            let read_buf = append
+                .read_at(0, IoBufMut::zeroed(110))
+                .await
+                .unwrap()
+                .coalesce();
             let expected: Vec<u8> = (1..=110).collect();
-            assert_eq!(read_buf.chunk(), &expected[..]);
+            assert_eq!(read_buf, &expected[..]);
 
             // Drop and re-open and make sure bytes are still there.
             append.sync().await.unwrap();
@@ -1053,9 +1071,13 @@ mod tests {
             assert_eq!(append.size().await, 206);
 
             // Verify we can read it back.
-            let read_buf = append.read_at(0, IoBufMut::zeroed(206)).await.unwrap();
+            let read_buf = append
+                .read_at(0, IoBufMut::zeroed(206))
+                .await
+                .unwrap()
+                .coalesce();
             let expected: Vec<u8> = (1..=206).collect();
-            assert_eq!(read_buf.chunk(), &expected[..]);
+            assert_eq!(read_buf, &expected[..]);
 
             // Drop and re-open at the page boundary.
             append.sync().await.unwrap();
@@ -1070,8 +1092,12 @@ mod tests {
             assert_eq!(append.size().await, 206);
 
             // Verify data is still readable after reopen.
-            let read_buf = append.read_at(0, IoBufMut::zeroed(206)).await.unwrap();
-            assert_eq!(read_buf.chunk(), &expected[..]);
+            let read_buf = append
+                .read_at(0, IoBufMut::zeroed(206))
+                .await
+                .unwrap()
+                .coalesce();
+            assert_eq!(read_buf, &expected[..]);
         });
     }
 
@@ -1188,8 +1214,9 @@ mod tests {
             let page = blob
                 .read_at(0, IoBufMut::zeroed(physical_page_size))
                 .await
-                .unwrap();
-            let crc = read_crc_record_from_page(page.chunk());
+                .unwrap()
+                .coalesce();
+            let crc = read_crc_record_from_page(page.as_ref());
             assert!(
                 crc.len2 > crc.len1,
                 "Slot 1 should be authoritative (len2={} > len1={})",
@@ -1202,8 +1229,9 @@ mod tests {
                 .read_at(slot1_offset, IoBufMut::zeroed(6))
                 .await
                 .unwrap()
-                .chunk()
-                .to_vec();
+                .coalesce()
+                .freeze()
+                .into();
 
             // === Step 3: Mangle slot 0 (non-authoritative) ===
             blob.write_at(slot0_offset, DUMMY_MARKER.to_vec())
@@ -1216,8 +1244,9 @@ mod tests {
                 .read_at(slot0_offset, IoBufMut::zeroed(6))
                 .await
                 .unwrap()
-                .chunk()
-                .to_vec();
+                .coalesce()
+                .freeze()
+                .into();
             assert_eq!(slot0_mangled, DUMMY_MARKER, "Mangle failed");
 
             // === Step 4: Extend to 50 bytes → new CRC goes to slot 0, slot 1 protected ===
@@ -1239,8 +1268,9 @@ mod tests {
                 .read_at(slot0_offset, IoBufMut::zeroed(6))
                 .await
                 .unwrap()
-                .chunk()
-                .to_vec();
+                .coalesce()
+                .freeze()
+                .into();
             assert_ne!(
                 slot0_after, DUMMY_MARKER,
                 "Slot 0 should have been overwritten with new CRC"
@@ -1251,8 +1281,9 @@ mod tests {
                 .read_at(slot1_offset, IoBufMut::zeroed(6))
                 .await
                 .unwrap()
-                .chunk()
-                .to_vec();
+                .coalesce()
+                .freeze()
+                .into();
             assert_eq!(
                 slot1_before, slot1_after,
                 "Slot 1 was modified! Protected region violated."
@@ -1262,8 +1293,9 @@ mod tests {
             let page = blob
                 .read_at(0, IoBufMut::zeroed(physical_page_size))
                 .await
-                .unwrap();
-            let crc = read_crc_record_from_page(page.chunk());
+                .unwrap()
+                .coalesce();
+            let crc = read_crc_record_from_page(page.as_ref());
             assert_eq!(crc.len1, 50, "Slot 0 should have len=50");
         });
     }
@@ -1320,8 +1352,9 @@ mod tests {
             let page = blob
                 .read_at(0, IoBufMut::zeroed(physical_page_size))
                 .await
-                .unwrap();
-            let crc = read_crc_record_from_page(page.chunk());
+                .unwrap()
+                .coalesce();
+            let crc = read_crc_record_from_page(page.as_ref());
             assert!(
                 crc.len1 > crc.len2,
                 "Slot 0 should be authoritative (len1={} > len2={})",
@@ -1334,8 +1367,9 @@ mod tests {
                 .read_at(slot0_offset, IoBufMut::zeroed(6))
                 .await
                 .unwrap()
-                .chunk()
-                .to_vec();
+                .coalesce()
+                .freeze()
+                .into();
 
             // === Step 4: Mangle slot 1 (non-authoritative) ===
             blob.write_at(slot1_offset, DUMMY_MARKER.to_vec())
@@ -1348,8 +1382,9 @@ mod tests {
                 .read_at(slot1_offset, IoBufMut::zeroed(6))
                 .await
                 .unwrap()
-                .chunk()
-                .to_vec();
+                .coalesce()
+                .freeze()
+                .into();
             assert_eq!(slot1_mangled, DUMMY_MARKER, "Mangle failed");
 
             // === Step 5: Extend to 70 bytes → new CRC goes to slot 1, slot 0 protected ===
@@ -1371,8 +1406,9 @@ mod tests {
                 .read_at(slot1_offset, IoBufMut::zeroed(6))
                 .await
                 .unwrap()
-                .chunk()
-                .to_vec();
+                .coalesce()
+                .freeze()
+                .into();
             assert_ne!(
                 slot1_after, DUMMY_MARKER,
                 "Slot 1 should have been overwritten with new CRC"
@@ -1383,8 +1419,9 @@ mod tests {
                 .read_at(slot0_offset, IoBufMut::zeroed(6))
                 .await
                 .unwrap()
-                .chunk()
-                .to_vec();
+                .coalesce()
+                .freeze()
+                .into();
             assert_eq!(
                 slot0_before, slot0_after,
                 "Slot 0 was modified! Protected region violated."
@@ -1394,8 +1431,9 @@ mod tests {
             let page = blob
                 .read_at(0, IoBufMut::zeroed(physical_page_size))
                 .await
-                .unwrap();
-            let crc = read_crc_record_from_page(page.chunk());
+                .unwrap()
+                .coalesce();
+            let crc = read_crc_record_from_page(page.as_ref());
             assert_eq!(crc.len2, 70, "Slot 1 should have len=70");
         });
     }
@@ -1436,8 +1474,9 @@ mod tests {
                 .read_at(0, IoBufMut::zeroed(20))
                 .await
                 .unwrap()
-                .chunk()
-                .to_vec();
+                .coalesce()
+                .freeze()
+                .into();
 
             // Mangle bytes 25-30 (safely in the padding area, after our 20 bytes of data)
             blob.write_at(25, DUMMY_MARKER.to_vec()).await.unwrap();
@@ -1465,8 +1504,9 @@ mod tests {
                 .read_at(0, IoBufMut::zeroed(20))
                 .await
                 .unwrap()
-                .chunk()
-                .to_vec();
+                .coalesce()
+                .freeze()
+                .into();
             assert_eq!(prefix_before, prefix_after, "Data prefix was modified!");
 
             // Bytes at offset 25-30: data (21..=40) starts at offset 20, so offset 25 has value 26
@@ -1474,8 +1514,9 @@ mod tests {
                 .read_at(25, IoBufMut::zeroed(6))
                 .await
                 .unwrap()
-                .chunk()
-                .to_vec();
+                .coalesce()
+                .freeze()
+                .into();
             assert_eq!(
                 overwritten,
                 vec![26, 27, 28, 29, 30, 31],
@@ -1524,8 +1565,9 @@ mod tests {
             let page = blob
                 .read_at(0, IoBufMut::zeroed(physical_page_size))
                 .await
-                .unwrap();
-            let crc = read_crc_record_from_page(page.chunk());
+                .unwrap()
+                .coalesce();
+            let crc = read_crc_record_from_page(page.as_ref());
             assert!(crc.len2 > crc.len1, "Slot 1 should be authoritative");
 
             // Capture slot 1 before extending past page boundary
@@ -1533,8 +1575,9 @@ mod tests {
                 .read_at(slot1_offset, IoBufMut::zeroed(6))
                 .await
                 .unwrap()
-                .chunk()
-                .to_vec();
+                .coalesce()
+                .freeze()
+                .into();
 
             // Mangle slot 0 (non-authoritative)
             blob.write_at(slot0_offset, DUMMY_MARKER.to_vec())
@@ -1562,8 +1605,9 @@ mod tests {
                 .read_at(slot0_offset, IoBufMut::zeroed(6))
                 .await
                 .unwrap()
-                .chunk()
-                .to_vec();
+                .coalesce()
+                .freeze()
+                .into();
             assert_ne!(
                 slot0_after, DUMMY_MARKER,
                 "Slot 0 should have full-page CRC"
@@ -1574,8 +1618,9 @@ mod tests {
                 .read_at(slot1_offset, IoBufMut::zeroed(6))
                 .await
                 .unwrap()
-                .chunk()
-                .to_vec();
+                .coalesce()
+                .freeze()
+                .into();
             assert_eq!(
                 slot1_before, slot1_after,
                 "Slot 1 was modified during page boundary crossing!"
@@ -1585,8 +1630,9 @@ mod tests {
             let page0 = blob
                 .read_at(0, IoBufMut::zeroed(physical_page_size))
                 .await
-                .unwrap();
-            let crc0 = read_crc_record_from_page(page0.chunk());
+                .unwrap()
+                .coalesce();
+            let crc0 = read_crc_record_from_page(page0.as_ref());
             assert_eq!(
                 crc0.len1,
                 PAGE_SIZE.get(),
@@ -1602,8 +1648,9 @@ mod tests {
                 .read_at(0, IoBufMut::zeroed(120))
                 .await
                 .unwrap()
-                .chunk()
-                .to_vec();
+                .coalesce()
+                .freeze()
+                .into();
             let expected: Vec<u8> = (1..=120).collect();
             assert_eq!(all_data, expected);
         });
@@ -1664,8 +1711,9 @@ mod tests {
             let page = blob
                 .read_at(0, IoBufMut::zeroed(physical_page_size))
                 .await
-                .unwrap();
-            let crc = read_crc_record_from_page(page.chunk());
+                .unwrap()
+                .coalesce();
+            let crc = read_crc_record_from_page(page.as_ref());
             assert!(
                 crc.len2 > crc.len1,
                 "Slot 1 should be authoritative (len2={} > len1={})",
@@ -1684,8 +1732,9 @@ mod tests {
                 .read_at(0, IoBufMut::zeroed(30))
                 .await
                 .unwrap()
-                .chunk()
-                .to_vec();
+                .coalesce()
+                .freeze()
+                .into();
             let expected: Vec<u8> = (1..=30).collect();
             assert_eq!(all_data, expected);
             drop(append);
@@ -1701,8 +1750,9 @@ mod tests {
             let page = blob
                 .read_at(0, IoBufMut::zeroed(physical_page_size))
                 .await
-                .unwrap();
-            let crc = read_crc_record_from_page(page.chunk());
+                .unwrap()
+                .coalesce();
+            let crc = read_crc_record_from_page(page.as_ref());
             assert_eq!(crc.len2, 30, "len2 should still be 30 after corruption");
             assert_eq!(crc.crc2, 0xDEADBEEF, "crc2 should be our corrupted value");
 
@@ -1723,8 +1773,9 @@ mod tests {
                 .read_at(0, IoBufMut::zeroed(10))
                 .await
                 .unwrap()
-                .chunk()
-                .to_vec();
+                .coalesce()
+                .freeze()
+                .into();
             assert_eq!(
                 fallback_data, data1,
                 "Fallback data should match original 10 bytes"
@@ -1792,8 +1843,9 @@ mod tests {
             let page = blob
                 .read_at(0, IoBufMut::zeroed(physical_page_size))
                 .await
-                .unwrap();
-            let crc = read_crc_record_from_page(page.chunk());
+                .unwrap()
+                .coalesce();
+            let crc = read_crc_record_from_page(page.as_ref());
             assert_eq!(crc.len1, 10, "Slot 0 should have len=10");
             assert_eq!(
                 crc.len2,
@@ -1834,8 +1886,9 @@ mod tests {
                 .read_at(0, IoBufMut::zeroed(113))
                 .await
                 .unwrap()
-                .chunk()
-                .to_vec();
+                .coalesce()
+                .freeze()
+                .into();
             let expected: Vec<u8> = (1..=113).collect();
             assert_eq!(all_data, expected);
             drop(append);
@@ -1850,8 +1903,9 @@ mod tests {
             let page = blob
                 .read_at(0, IoBufMut::zeroed(physical_page_size))
                 .await
-                .unwrap();
-            let crc = read_crc_record_from_page(page.chunk());
+                .unwrap()
+                .coalesce();
+            let crc = read_crc_record_from_page(page.as_ref());
             assert_eq!(crc.len2, PAGE_SIZE.get(), "len2 should still be 103");
             assert_eq!(crc.crc2, 0xDEADBEEF, "crc2 should be corrupted");
             // Slot 0 fallback has len=10 (partial), which is invalid for non-last page
@@ -2017,8 +2071,9 @@ mod tests {
                 .read_at(0, IoBufMut::zeroed(5))
                 .await
                 .unwrap()
-                .chunk()
-                .to_vec();
+                .coalesce()
+                .freeze()
+                .into();
             assert_eq!(data, vec![1, 2, 3, 4, 5]);
         });
     }

@@ -87,11 +87,14 @@ impl<B: Blob> Blob for Write<B> {
             return Err(Error::BlobInsufficientLength);
         }
 
-        // For single buffers, work directly to avoid copies.
-        // For chunked buffers, read into temp and copy back to preserve structure.
         match buf {
+            // For single buffers, work directly to avoid copies.
             IoBufsMut::Single(mut single) => {
+                // Extract any bytes from the buffer that overlap with the requested range.
                 let remaining = buffer.extract(single.as_mut(), offset);
+
+                // If bytes remain, read directly from the blob. Any remaining bytes reside at the beginning
+                // of the range.
                 if remaining > 0 {
                     let blob_buf = IoBufMut::zeroed(remaining);
                     let blob_result = self.blob.read_at(offset, blob_buf).await?;
@@ -99,10 +102,15 @@ impl<B: Blob> Blob for Write<B> {
                 }
                 Ok(IoBufsMut::Single(single))
             }
+            // For chunked buffers, read into temp and copy back to preserve structure.
             IoBufsMut::Chunked(mut chunks) => {
-                // Read into a temporary contiguous buffer
                 let mut temp = vec![0u8; len as usize];
+                // Extract any bytes from the buffer that overlap with the
+                // requested range, into a temporary contiguous buffer
                 let remaining = buffer.extract(&mut temp, offset);
+
+                // If bytes remain, read directly from the blob. Any remaining bytes reside at the beginning
+                // of the range.
                 if remaining > 0 {
                     let blob_buf = IoBufMut::zeroed(remaining);
                     let blob_result = self.blob.read_at(offset, blob_buf).await?;

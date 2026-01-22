@@ -23,7 +23,7 @@
 use super::Header;
 use crate::{
     iouring::{self, should_retry, OpBuffer},
-    Error, IoBuf, IoBufMut, IoBufs, IoBufsMut,
+    Error, IoBufMut, IoBufs, IoBufsMut,
 };
 use commonware_codec::Encode;
 use commonware_utils::{from_hex, hex};
@@ -267,15 +267,12 @@ impl crate::Blob for Blob {
 
         // For single buffers, read directly into them (zero-copy).
         // For chunked buffers, use a temporary and copy to preserve the input structure.
+        let buf_len = input_buf.len();
         let (mut io_buf, original_bufs) = match input_buf {
             IoBufsMut::Single(buf) => (buf, None),
-            IoBufsMut::Chunked(bufs) => {
-                let total_len = bufs.iter().map(|b| b.len()).fold(0, usize::saturating_add);
-                (IoBufMut::zeroed(total_len), Some(bufs))
-            }
+            IoBufsMut::Chunked(bufs) => (IoBufMut::zeroed(buf_len), Some(bufs)),
         };
 
-        let buf_len = io_buf.len();
         let fd = types::Fd(self.file.as_raw_fd());
         let mut bytes_read = 0;
         let mut io_sender = self.io_sender.clone();
@@ -349,7 +346,7 @@ impl crate::Blob for Blob {
     async fn write_at(&self, offset: u64, buf: impl Into<IoBufs> + Send) -> Result<(), Error> {
         // Convert to contiguous IoBuf for io_uring write
         // (zero-copy if single buffer, copies if multiple)
-        let mut buf: IoBuf = buf.into().coalesce();
+        let mut buf = buf.into().coalesce();
         let fd = types::Fd(self.file.as_raw_fd());
         let mut bytes_written = 0;
         let buf_len = buf.len();
@@ -465,7 +462,7 @@ impl crate::Blob for Blob {
 #[cfg(test)]
 mod tests {
     use super::{Header, *};
-    use crate::{storage::tests::run_storage_tests, Blob, Buf, IoBufMut, Storage as _};
+    use crate::{storage::tests::run_storage_tests, Blob, IoBufMut, Storage as _};
     use rand::{Rng as _, SeedableRng as _};
     use std::env;
 
@@ -530,8 +527,12 @@ mod tests {
         assert_eq!(&raw_content[Header::SIZE..], data);
 
         // Test 3: Read at logical offset 0 returns data from raw offset 8
-        let read_buf = blob.read_at(0, IoBufMut::zeroed(data.len())).await.unwrap();
-        assert_eq!(read_buf.chunk(), data);
+        let read_buf = blob
+            .read_at(0, IoBufMut::zeroed(data.len()))
+            .await
+            .unwrap()
+            .coalesce();
+        assert_eq!(read_buf, data);
 
         // Test 4: Resize with logical length
         blob.resize(5).await.unwrap();
@@ -560,8 +561,12 @@ mod tests {
 
         let (blob2, size2) = storage.open("partition", b"test").await.unwrap();
         assert_eq!(size2, 9, "reopened blob should have logical size 9");
-        let read_buf = blob2.read_at(0, IoBufMut::zeroed(9)).await.unwrap();
-        assert_eq!(read_buf.chunk(), b"test data");
+        let read_buf = blob2
+            .read_at(0, IoBufMut::zeroed(9))
+            .await
+            .unwrap()
+            .coalesce();
+        assert_eq!(read_buf, b"test data");
         drop(blob2);
 
         // Test 6: Corrupted blob recovery (0 < raw_size < 8)

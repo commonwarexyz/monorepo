@@ -12,7 +12,7 @@ pub use write::Write;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{deterministic, Blob as _, Buf, Error, IoBufMut, Runner, Storage};
+    use crate::{deterministic, Blob as _, Error, IoBufMut, Runner, Storage};
     use commonware_macros::test_traced;
     use commonware_utils::NZUsize;
 
@@ -711,11 +711,19 @@ mod tests {
             assert_eq!(writer.size().await, 8);
 
             // Read from buffer via writer
-            let read_buf_vec = writer.read_at(0, IoBufMut::zeroed(4)).await.unwrap();
-            assert_eq!(read_buf_vec.chunk(), b"buff");
+            let read_buf_vec = writer
+                .read_at(0, IoBufMut::zeroed(4))
+                .await
+                .unwrap()
+                .coalesce();
+            assert_eq!(read_buf_vec, b"buff");
 
-            let read_buf_vec = writer.read_at(4, IoBufMut::zeroed(4)).await.unwrap();
-            assert_eq!(read_buf_vec.chunk(), b"ered");
+            let read_buf_vec = writer
+                .read_at(4, IoBufMut::zeroed(4))
+                .await
+                .unwrap()
+                .coalesce();
+            assert_eq!(read_buf_vec, b"ered");
 
             // Reading past buffer end should fail
             assert!(writer.read_at(8, IoBufMut::zeroed(1)).await.is_err());
@@ -727,19 +735,31 @@ mod tests {
             assert_eq!(writer.size().await, 20);
 
             // Read from underlying blob through writer
-            let read_buf_vec_2 = writer.read_at(0, IoBufMut::zeroed(4)).await.unwrap();
-            assert_eq!(read_buf_vec_2.chunk(), b"buff");
+            let read_buf_vec_2 = writer
+                .read_at(0, IoBufMut::zeroed(4))
+                .await
+                .unwrap()
+                .coalesce();
+            assert_eq!(read_buf_vec_2, b"buff");
 
-            let read_buf_7_vec = writer.read_at(13, IoBufMut::zeroed(7)).await.unwrap();
-            assert_eq!(read_buf_7_vec.chunk(), b"flushed");
+            let read_buf_7_vec = writer
+                .read_at(13, IoBufMut::zeroed(7))
+                .await
+                .unwrap()
+                .coalesce();
+            assert_eq!(read_buf_7_vec, b"flushed");
 
             // Buffer new data at the end
             writer.write_at(20, b" more data").await.unwrap();
             assert_eq!(writer.size().await, 30);
 
             // Read newly buffered data
-            let read_buf_vec_3 = writer.read_at(20, IoBufMut::zeroed(5)).await.unwrap();
-            assert_eq!(read_buf_vec_3.chunk(), b" more");
+            let read_buf_vec_3 = writer
+                .read_at(20, IoBufMut::zeroed(5))
+                .await
+                .unwrap()
+                .coalesce();
+            assert_eq!(read_buf_vec_3, b" more");
 
             // Read spanning both blob and buffer
             let combo_read_buf_vec = writer.read_at(16, IoBufMut::zeroed(12)).await.unwrap();
@@ -873,8 +893,12 @@ mod tests {
             assert_eq!(writer.size().await, 13);
 
             // Verify it's in buffer by reading through writer
-            let read_small_buf_vec = writer.read_at(10, IoBufMut::zeroed(3)).await.unwrap();
-            assert_eq!(read_small_buf_vec.chunk(), b"abc");
+            let read_small_buf_vec = writer
+                .read_at(10, IoBufMut::zeroed(3))
+                .await
+                .unwrap()
+                .coalesce();
+            assert_eq!(read_small_buf_vec, b"abc");
 
             writer.sync().await.unwrap();
 
@@ -911,8 +935,12 @@ mod tests {
             assert_eq!(writer.size().await, 15);
 
             // Verify buffer content through writer
-            let read_buf_vec = writer.read_at(0, IoBufMut::zeroed(15)).await.unwrap();
-            assert_eq!(read_buf_vec.chunk(), b"01234ABCDEFGHIJ");
+            let read_buf_vec = writer
+                .read_at(0, IoBufMut::zeroed(15))
+                .await
+                .unwrap()
+                .coalesce();
+            assert_eq!(read_buf_vec, b"01234ABCDEFGHIJ");
 
             writer.sync().await.unwrap();
 

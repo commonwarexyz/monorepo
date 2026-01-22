@@ -55,16 +55,15 @@ async fn get_page_from_blob(
             physical_page_start,
             IoBufMut::zeroed(physical_page_size as usize),
         )
-        .await?;
+        .await?
+        .coalesce();
 
-    let page = page.coalesce();
-    let page_bytes = page.as_ref();
-    let Some(record) = Checksum::validate_page(page_bytes) else {
+    let Some(record) = Checksum::validate_page(page.as_ref()) else {
         return Err(Error::InvalidChecksum);
     };
     let (len, _) = record.get_crc();
 
-    Ok(page_bytes[..len as usize].to_vec())
+    Ok(page.freeze().slice(..len as usize).into())
 }
 
 /// Describes a CRC record stored at the end of a page.
