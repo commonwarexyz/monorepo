@@ -852,7 +852,7 @@ mod tests {
 
     #[test]
     fn test_iobuf_buf_trait() {
-        let mut buf = IoBuf::from(b"hello".as_slice());
+        let mut buf = IoBuf::from(b"hello");
         assert_eq!(buf.remaining(), 5);
         buf.advance(2);
         assert_eq!(buf.chunk(), b"llo");
@@ -867,16 +867,16 @@ mod tests {
 
     #[test]
     fn test_iobuf_equality() {
-        let buf1 = IoBuf::from(b"hello".as_slice());
-        let buf2 = IoBuf::from(b"hello".as_slice());
-        let buf3 = IoBuf::from(b"world".as_slice());
+        let buf1 = IoBuf::from(b"hello");
+        let buf2 = IoBuf::from(b"hello");
+        let buf3 = IoBuf::from(b"world");
         assert_eq!(buf1, buf2);
         assert_ne!(buf1, buf3);
     }
 
     #[test]
     fn test_iobuf_equality_with_slice() {
-        let buf = IoBuf::from(b"hello".as_slice());
+        let buf = IoBuf::from(b"hello");
         assert_eq!(buf, *b"hello");
         assert_eq!(buf, b"hello");
         assert_ne!(buf, *b"world");
@@ -889,26 +889,26 @@ mod tests {
 
         let cfg: RangeCfg<usize> = (0..=1024).into();
 
-        let original = IoBuf::from(b"hello world".as_slice());
+        let original = IoBuf::from(b"hello world");
         let encoded = original.encode();
-        let decoded = IoBuf::decode_cfg(encoded.as_ref(), &cfg).unwrap();
+        let decoded = IoBuf::decode_cfg(encoded, &cfg).unwrap();
         assert_eq!(original, decoded);
 
         let empty = IoBuf::default();
         let encoded = empty.encode();
-        let decoded = IoBuf::decode_cfg(encoded.as_ref(), &cfg).unwrap();
+        let decoded = IoBuf::decode_cfg(encoded, &cfg).unwrap();
         assert_eq!(empty, decoded);
 
         let large_cfg: RangeCfg<usize> = (0..=20000).into();
         let large = IoBuf::from(vec![42u8; 10000]);
         let encoded = large.encode();
-        let decoded = IoBuf::decode_cfg(encoded.as_ref(), &large_cfg).unwrap();
+        let decoded = IoBuf::decode_cfg(encoded, &large_cfg).unwrap();
         assert_eq!(large, decoded);
     }
 
     #[test]
     fn test_iobuf_copy_to_bytes() {
-        let mut buf = IoBuf::from(b"hello world".as_slice());
+        let mut buf = IoBuf::from(b"hello world");
         let first = buf.copy_to_bytes(5);
         assert_eq!(&first[..], b"hello");
         assert_eq!(buf.remaining(), 6);
@@ -919,7 +919,7 @@ mod tests {
 
     #[test]
     fn test_iobuf_slice() {
-        let buf = IoBuf::from(b"hello world".as_slice());
+        let buf = IoBuf::from(b"hello world");
 
         let slice = buf.slice(..5);
         assert_eq!(slice, b"hello");
@@ -939,7 +939,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "cannot advance")]
     fn test_iobuf_advance_past_end() {
-        let mut buf = IoBuf::from(b"hello".as_slice());
+        let mut buf = IoBuf::from(b"hello");
         buf.advance(10);
     }
 
@@ -1005,7 +1005,7 @@ mod tests {
 
     #[test]
     fn test_iobufs_single_buffer() {
-        let mut bufs = IoBufs::from(b"hello world".as_slice());
+        let mut bufs = IoBufs::from(b"hello world");
         assert!(bufs.is_single());
 
         assert_eq!(bufs.remaining(), 11);
@@ -1022,17 +1022,17 @@ mod tests {
 
     #[test]
     fn test_iobufs_is_single() {
-        let bufs = IoBufs::from(b"hello".as_slice());
+        let bufs = IoBufs::from(b"hello");
         assert!(bufs.is_single());
 
-        let mut bufs = IoBufs::from(b"world".as_slice());
+        let mut bufs = IoBufs::from(b"world");
         assert!(bufs.is_single());
-        bufs.prepend(IoBuf::from(b"hello ".as_slice()));
+        bufs.prepend(IoBuf::from(b"hello "));
         assert!(!bufs.is_single());
 
-        let mut bufs = IoBufs::from(b"hello".as_slice());
+        let mut bufs = IoBufs::from(b"hello");
         assert!(bufs.is_single());
-        bufs.append(IoBuf::from(b" world".as_slice()));
+        bufs.append(IoBuf::from(b" world"));
         assert!(!bufs.is_single());
 
         let bufs = IoBufs::default();
@@ -1041,16 +1041,16 @@ mod tests {
 
     #[test]
     fn test_iobufs_prepend_and_append() {
-        let mut bufs = IoBufs::from(b"middle".as_slice());
-        bufs.prepend(IoBuf::from(b"start ".as_slice()));
-        bufs.append(IoBuf::from(b" end".as_slice()));
+        let mut bufs = IoBufs::from(b"middle");
+        bufs.prepend(IoBuf::from(b"start "));
+        bufs.append(IoBuf::from(b" end"));
         assert_eq!(bufs.coalesce(), b"start middle end");
     }
 
     #[test]
     fn test_iobufs_coalesce_after_advance() {
-        let mut bufs = IoBufs::from(IoBuf::from(b"hello".as_slice()));
-        bufs.append(IoBuf::from(b" world".as_slice()));
+        let mut bufs = IoBufs::from(IoBuf::from(b"hello"));
+        bufs.append(IoBuf::from(b" world"));
 
         assert_eq!(bufs.len(), 11);
 
@@ -1063,11 +1063,11 @@ mod tests {
     #[test]
     fn test_iobufs_with_empty_buffers() {
         let mut bufs = IoBufs::default();
-        bufs.append(IoBuf::from(b"hello".as_slice()));
+        bufs.append(IoBuf::from(b"hello"));
         bufs.append(IoBuf::default());
-        bufs.append(IoBuf::from(b" ".as_slice()));
+        bufs.append(IoBuf::from(b" "));
         bufs.append(IoBuf::default());
-        bufs.append(IoBuf::from(b"world".as_slice()));
+        bufs.append(IoBuf::from(b"world"));
 
         assert_eq!(bufs.len(), 11);
         assert_eq!(bufs.chunk(), b"hello");
@@ -1083,7 +1083,7 @@ mod tests {
 
     #[test]
     fn test_iobufs_copy_to_bytes_single_buffer() {
-        let mut bufs = IoBufs::from(b"hello world".as_slice());
+        let mut bufs = IoBufs::from(b"hello world");
         let first = bufs.copy_to_bytes(5);
         assert_eq!(&first[..], b"hello");
         assert_eq!(bufs.remaining(), 6);
@@ -1091,8 +1091,8 @@ mod tests {
 
     #[test]
     fn test_iobufs_copy_to_bytes_multiple_buffers() {
-        let mut bufs = IoBufs::from(b"hello".as_slice());
-        bufs.prepend(IoBuf::from(b"say ".as_slice()));
+        let mut bufs = IoBufs::from(b"hello");
+        bufs.prepend(IoBuf::from(b"say "));
 
         let first = bufs.copy_to_bytes(7);
         assert_eq!(&first[..], b"say hel");
@@ -1105,14 +1105,14 @@ mod tests {
     #[test]
     fn test_iobufs_copy_to_bytes_edge_cases() {
         // Empty first buffer
-        let mut iobufs = IoBufs::from(IoBuf::from(b"".as_slice()));
-        iobufs.append(IoBuf::from(b"hello".as_slice()));
+        let mut iobufs = IoBufs::from(IoBuf::from(b""));
+        iobufs.append(IoBuf::from(b"hello"));
         let bytes = iobufs.copy_to_bytes(5);
         assert_eq!(&bytes[..], b"hello");
 
         // Exact buffer boundary
-        let mut iobufs = IoBufs::from(IoBuf::from(b"hello".as_slice()));
-        iobufs.append(IoBuf::from(b"world".as_slice()));
+        let mut iobufs = IoBufs::from(IoBuf::from(b"hello"));
+        iobufs.append(IoBuf::from(b"world"));
 
         let bytes = iobufs.copy_to_bytes(5);
         assert_eq!(&bytes[..], b"hello");
@@ -1126,16 +1126,16 @@ mod tests {
     #[test]
     #[should_panic(expected = "cannot advance past end of buffer")]
     fn test_iobufs_advance_past_end() {
-        let mut bufs = IoBufs::from(b"hel".as_slice());
-        bufs.append(IoBuf::from(b"lo".as_slice()));
+        let mut bufs = IoBufs::from(b"hel");
+        bufs.append(IoBuf::from(b"lo"));
         bufs.advance(10);
     }
 
     #[test]
     #[should_panic(expected = "not enough data")]
     fn test_iobufs_copy_to_bytes_past_end() {
-        let mut bufs = IoBufs::from(b"hel".as_slice());
-        bufs.append(IoBuf::from(b"lo".as_slice()));
+        let mut bufs = IoBufs::from(b"hel");
+        bufs.append(IoBuf::from(b"lo"));
         bufs.copy_to_bytes(10);
     }
 
@@ -1190,8 +1190,8 @@ mod tests {
 
     #[test]
     fn test_iobufsmut_chunked() {
-        let buf1 = IoBufMut::from(b"hello".as_ref());
-        let buf2 = IoBufMut::from(b" world".as_ref());
+        let buf1 = IoBufMut::from(b"hello");
+        let buf2 = IoBufMut::from(b" world");
         let bufs = IoBufsMut::from(vec![buf1, buf2]);
         assert!(!bufs.is_single());
         assert_eq!(bufs.len(), 11);
@@ -1200,7 +1200,7 @@ mod tests {
 
     #[test]
     fn test_iobufsmut_freeze() {
-        let buf = IoBufMut::from(b"hello".as_ref());
+        let buf = IoBufMut::from(b"hello");
         let bufs = IoBufsMut::from(buf);
         let frozen = bufs.freeze();
         assert!(frozen.is_single());
@@ -1209,8 +1209,8 @@ mod tests {
 
     #[test]
     fn test_iobufsmut_coalesce() {
-        let buf1 = IoBufMut::from(b"hello".as_ref());
-        let buf2 = IoBufMut::from(b" world".as_ref());
+        let buf1 = IoBufMut::from(b"hello");
+        let buf2 = IoBufMut::from(b" world");
         let bufs = IoBufsMut::from(vec![buf1, buf2]);
         let coalesced = bufs.coalesce();
         assert_eq!(coalesced, b"hello world");
@@ -1219,7 +1219,7 @@ mod tests {
     #[test]
     fn test_iobufsmut_from_vec_single() {
         // A Vec with one element should become Single
-        let buf = IoBufMut::from(b"test".as_ref());
+        let buf = IoBufMut::from(b"test");
         let bufs = IoBufsMut::from(vec![buf]);
         assert!(bufs.is_single());
     }
@@ -1242,7 +1242,7 @@ mod tests {
 
     #[test]
     fn test_iobufmut_buf_trait() {
-        let mut buf = IoBufMut::from(b"hello world".as_ref());
+        let mut buf = IoBufMut::from(b"hello world");
         assert_eq!(buf.remaining(), 11);
         assert_eq!(buf.chunk(), b"hello world");
 
@@ -1258,13 +1258,13 @@ mod tests {
     #[test]
     #[should_panic(expected = "cannot advance")]
     fn test_iobufmut_advance_past_end() {
-        let mut buf = IoBufMut::from(b"hello".as_ref());
+        let mut buf = IoBufMut::from(b"hello");
         buf.advance(10);
     }
 
     #[test]
     fn test_iobufsmut_buf_trait_single() {
-        let mut bufs = IoBufsMut::from(IoBufMut::from(b"hello world".as_ref()));
+        let mut bufs = IoBufsMut::from(IoBufMut::from(b"hello world"));
         assert_eq!(bufs.remaining(), 11);
         assert_eq!(bufs.chunk(), b"hello world");
 
@@ -1275,9 +1275,9 @@ mod tests {
 
     #[test]
     fn test_iobufsmut_buf_trait_chunked() {
-        let buf1 = IoBufMut::from(b"hello".as_ref());
-        let buf2 = IoBufMut::from(b" ".as_ref());
-        let buf3 = IoBufMut::from(b"world".as_ref());
+        let buf1 = IoBufMut::from(b"hello");
+        let buf2 = IoBufMut::from(b" ");
+        let buf3 = IoBufMut::from(b"world");
         let mut bufs = IoBufsMut::from(vec![buf1, buf2, buf3]);
 
         assert_eq!(bufs.remaining(), 11);
@@ -1305,9 +1305,9 @@ mod tests {
 
     #[test]
     fn test_iobufsmut_advance_across_multiple_buffers() {
-        let buf1 = IoBufMut::from(b"ab".as_ref());
-        let buf2 = IoBufMut::from(b"cd".as_ref());
-        let buf3 = IoBufMut::from(b"ef".as_ref());
+        let buf1 = IoBufMut::from(b"ab");
+        let buf2 = IoBufMut::from(b"cd");
+        let buf3 = IoBufMut::from(b"ef");
         let mut bufs = IoBufsMut::from(vec![buf1, buf2, buf3]);
 
         // Advance across two buffers at once
@@ -1319,8 +1319,8 @@ mod tests {
     #[test]
     #[should_panic(expected = "cannot advance past end of buffer")]
     fn test_iobufsmut_advance_past_end() {
-        let buf1 = IoBufMut::from(b"hello".as_ref());
-        let buf2 = IoBufMut::from(b" world".as_ref());
+        let buf1 = IoBufMut::from(b"hello");
+        let buf2 = IoBufMut::from(b" world");
         let mut bufs = IoBufsMut::from(vec![buf1, buf2]);
         bufs.advance(20);
     }
@@ -1366,9 +1366,9 @@ mod tests {
 
     #[test]
     fn test_iobufs_advance_drains_buffers() {
-        let mut bufs = IoBufs::from(IoBuf::from(b"hello".as_slice()));
-        bufs.append(IoBuf::from(b" ".as_slice()));
-        bufs.append(IoBuf::from(b"world".as_slice()));
+        let mut bufs = IoBufs::from(IoBuf::from(b"hello"));
+        bufs.append(IoBuf::from(b" "));
+        bufs.append(IoBuf::from(b"world"));
 
         // Advance exactly past first buffer
         bufs.advance(5);
@@ -1383,8 +1383,8 @@ mod tests {
 
     #[test]
     fn test_iobufs_advance_exactly_to_boundary() {
-        let mut bufs = IoBufs::from(IoBuf::from(b"abc".as_slice()));
-        bufs.append(IoBuf::from(b"def".as_slice()));
+        let mut bufs = IoBufs::from(IoBuf::from(b"abc"));
+        bufs.append(IoBuf::from(b"def"));
 
         // Advance exactly to first buffer boundary
         bufs.advance(3);
@@ -1398,9 +1398,9 @@ mod tests {
 
     #[test]
     fn test_iobufsmut_with_empty_buffers() {
-        let buf1 = IoBufMut::from(b"hello".as_ref());
+        let buf1 = IoBufMut::from(b"hello");
         let buf2 = IoBufMut::default();
-        let buf3 = IoBufMut::from(b" world".as_ref());
+        let buf3 = IoBufMut::from(b" world");
         let mut bufs = IoBufsMut::from(vec![buf1, buf2, buf3]);
 
         assert_eq!(bufs.remaining(), 11);
@@ -1415,8 +1415,8 @@ mod tests {
 
     #[test]
     fn test_iobufsmut_coalesce_after_advance() {
-        let buf1 = IoBufMut::from(b"hello".as_ref());
-        let buf2 = IoBufMut::from(b" world".as_ref());
+        let buf1 = IoBufMut::from(b"hello");
+        let buf2 = IoBufMut::from(b" world");
         let mut bufs = IoBufsMut::from(vec![buf1, buf2]);
 
         bufs.advance(3);
@@ -1425,8 +1425,8 @@ mod tests {
 
     #[test]
     fn test_iobufsmut_copy_to_bytes() {
-        let buf1 = IoBufMut::from(b"hello".as_ref());
-        let buf2 = IoBufMut::from(b" world".as_ref());
+        let buf1 = IoBufMut::from(b"hello");
+        let buf2 = IoBufMut::from(b" world");
         let mut bufs = IoBufsMut::from(vec![buf1, buf2]);
 
         let first = bufs.copy_to_bytes(7);
@@ -1545,9 +1545,9 @@ mod tests {
 
         // Create matching IoBufsMut
         let mut iobufs = IoBufsMut::from(vec![
-            IoBufMut::from(b"hello".as_ref()),
-            IoBufMut::from(b" world".as_ref()),
-            IoBufMut::from(b"!".as_ref()),
+            IoBufMut::from(b"hello"),
+            IoBufMut::from(b" world"),
+            IoBufMut::from(b"!"),
         ]);
 
         // Test Buf::remaining matches
@@ -1610,9 +1610,9 @@ mod tests {
         let b2 = Bytes::from_static(b" world");
         let b3 = Bytes::from_static(b"!");
         let mut iobufs = IoBufsMut::from(vec![
-            IoBufMut::from(b"hello".as_ref()),
-            IoBufMut::from(b" world".as_ref()),
-            IoBufMut::from(b"!".as_ref()),
+            IoBufMut::from(b"hello"),
+            IoBufMut::from(b" world"),
+            IoBufMut::from(b"!"),
         ]);
 
         let chain_bytes = b1.chain(b2).chain(b3).copy_to_bytes(8);
