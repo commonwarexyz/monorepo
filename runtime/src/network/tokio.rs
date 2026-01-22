@@ -40,21 +40,11 @@ impl crate::Stream for Stream {
     async fn recv(&mut self, len: u64) -> Result<IoBufs, Error> {
         let len = len as usize;
         let read_fut = async {
-            let mut buf = IoBufMut::with_capacity(len);
-            let mut read = 0;
-            while read < len {
-                let n = self
-                    .stream
-                    .read_buf(&mut buf)
-                    .await
-                    .map_err(|_| Error::RecvFailed)?;
-
-                if n == 0 {
-                    return Err(Error::RecvFailed);
-                }
-
-                read += n;
-            }
+            let mut buf = IoBufMut::zeroed(len);
+            self.stream
+                .read_exact(buf.as_mut())
+                .await
+                .map_err(|_| Error::RecvFailed)?;
             Ok(IoBufs::from(buf.freeze()))
         };
 
