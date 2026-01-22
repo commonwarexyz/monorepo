@@ -426,7 +426,7 @@ impl IoBufs {
         self.remaining()
     }
 
-    /// Whether there are no bytes remaining.
+    /// Whether all buffers are empty.
     #[inline]
     pub fn is_empty(&self) -> bool {
         self.remaining() == 0
@@ -466,9 +466,9 @@ impl IoBufs {
         }
     }
 
-    /// Coalesce all remaining bytes into a single contiguous buffer.
+    /// Coalesce all remaining bytes into a single contiguous `IoBuf`.
     ///
-    /// Zero-copy if only one buffer with all remaining data.
+    /// Zero-copy if only one buffer. Copies if multiple buffers.
     #[inline]
     pub fn coalesce(mut self) -> IoBuf {
         match self {
@@ -637,6 +637,8 @@ impl IoBufsMut {
     }
 
     /// Whether this contains a single contiguous buffer.
+    ///
+    /// When true, `chunk()` returns all remaining bytes.
     #[inline]
     pub const fn is_single(&self) -> bool {
         matches!(self, Self::Single(_))
