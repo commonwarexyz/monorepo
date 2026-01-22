@@ -624,6 +624,15 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
                 signers,
                 vote_signature,
             } => {
+                let participants = self.participants().len();
+                if signers.len() != participants {
+                    return false;
+                }
+                let quorum = M::quorum(participants as u32) as usize;
+                if signers.count() < quorum {
+                    return false;
+                }
+
                 // Get the lazy signature
                 let Some(sig) = vote_signature.get() else {
                     return false;
@@ -675,6 +684,8 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
     {
         let identity = self.identity();
         let namespace = self.namespace();
+        let participants = self.participants().len();
+        let quorum = M::quorum(participants as u32) as usize;
 
         // Separate Threshold and Aggregated certificates for different verification paths
         let mut threshold_entries: Vec<_> = Vec::new();
@@ -697,6 +708,9 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
                     signers,
                     vote_signature,
                 } => {
+                    if signers.len() != participants || signers.count() < quorum {
+                        return false;
+                    }
                     // Get the lazy signature
                     let Some(sig) = vote_signature.get() else {
                         return false;
@@ -782,7 +796,7 @@ mod tests {
     use crate::{
         minimmit::{
             scheme::{bls12381_threshold, notarize_namespace},
-            types::{Proposal, Subject},
+            types::{Notarize, Proposal, Subject},
         },
         types::{Epoch, Round, View},
     };
@@ -888,6 +902,55 @@ mod tests {
     fn test_is_batchable() {
         assert!(Scheme::<MinPk>::is_batchable());
         assert!(Scheme::<MinSig>::is_batchable());
+    }
+
+    fn aggregated_certificate_requires_quorum<V: Variant>() {
+        let mut rng = test_rng();
+        let (schemes, verifier) = setup_signers::<V>(6, 13);
+        let proposal = sample_proposal(Epoch::new(0), View::new(1), 1);
+
+        let votes: Vec<_> = schemes
+            .iter()
+            .take(2)
+            .map(|scheme| Notarize::sign(scheme, proposal.clone()).expect("notarize"))
+            .collect();
+
+        let vote_partials: Vec<_> = votes
+            .iter()
+            .map(|vote| {
+                let signature = vote.attestation.signature.get().expect("signature");
+                PartialSignature::<V> {
+                    index: vote.attestation.signer,
+                    value: *signature,
+                }
+            })
+            .collect();
+        let signers = Signers::from(schemes.len(), vote_partials.iter().map(|p| p.index));
+        let aggregated_vote =
+            aggregate::combine_signatures::<V, _>(vote_partials.iter().map(|p| &p.value));
+        let certificate = Certificate::Aggregated {
+            signers,
+            vote_signature: Lazy::from(*aggregated_vote.inner()),
+        };
+
+        let subject = Subject::Notarize {
+            proposal: &proposal,
+        };
+        assert!(
+            !verifier.verify_certificate::<_, Sha256Digest, M5f1>(
+                &mut rng,
+                subject,
+                &certificate,
+                &Sequential
+            ),
+            "certificate should fail without M-quorum"
+        );
+    }
+
+    #[test]
+    fn test_aggregated_certificate_requires_quorum() {
+        aggregated_certificate_requires_quorum::<MinPk>();
+        aggregated_certificate_requires_quorum::<MinSig>();
     }
 
     fn sign_vote_roundtrip_for_each_context<V: Variant>() {
