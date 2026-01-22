@@ -66,13 +66,14 @@ where
 {
     pub fn new(participants: Set<S::PublicKey>, scheme: S, blocker: B, reporter: R) -> Self {
         let m_quorum = participants.quorum::<commonware_utils::M5f1>();
+        let l_quorum = commonware_utils::N5f1::l_quorum(participants.len());
         let len = participants.len();
         Self {
             participants,
 
             blocker,
             reporter,
-            verifier: Verifier::new(scheme, m_quorum),
+            verifier: Verifier::new(scheme, m_quorum, l_quorum),
 
             pending_votes: VoteTracker::new(len),
 
@@ -210,6 +211,15 @@ where
     /// Sets the leader for this view.
     pub fn set_leader(&mut self, leader: Participant) {
         self.verifier.set_leader(leader);
+    }
+
+    /// Marks that M-quorum was reached for this view.
+    ///
+    /// Called when an MNotarization certificate exists (either newly created or
+    /// recovered from journal). This allows batching toward L-quorum even after
+    /// crash recovery where the verified vote count is lost.
+    pub fn mark_m_quorum_reached(&mut self) {
+        self.verifier.mark_m_quorum_reached();
     }
 
     /// Returns the leader's proposal to forward to the voter, if:

@@ -19,6 +19,13 @@ pub enum Message<S: Scheme, D: Digest> {
     },
     /// A vote was constructed and should be broadcast.
     Constructed(Vote<S, D>),
+    /// An MNotarization exists for a view (newly created or recovered from journal).
+    ///
+    /// This informs the batcher that M-quorum was reached for the view, allowing
+    /// it to batch toward L-quorum rather than M-quorum. This is important for
+    /// crash recovery where the verified vote count is lost but the certificate
+    /// survives.
+    MNotarizationExists(View),
 }
 
 /// Mailbox for sending messages to the batcher actor.
@@ -51,5 +58,16 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
     /// Notify the batcher that a vote was constructed.
     pub async fn constructed(&mut self, vote: Vote<S, D>) {
         self.sender.send_lossy(Message::Constructed(vote)).await;
+    }
+
+    /// Notify the batcher that an MNotarization exists for a view.
+    ///
+    /// This should be called when an MNotarization is created or recovered from
+    /// the journal. It allows the batcher to batch toward L-quorum rather than
+    /// re-batching toward M-quorum after crash recovery.
+    pub async fn m_notarization_exists(&mut self, view: View) {
+        self.sender
+            .send_lossy(Message::MNotarizationExists(view))
+            .await;
     }
 }

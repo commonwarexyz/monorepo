@@ -18,9 +18,9 @@ use crate::{
         metrics::Outbound,
         scheme::Scheme,
         state::{Action, State},
-        types::{Activity, Artifact, Certificate, Context, Proposal},
+        types::{Activity, Artifact, Certificate, Context, Proposal, Vote},
     },
-    types::View,
+    types::{Epoch, View, ViewDelta},
     Automaton, Relay, Reporter, Viewable,
 };
 use commonware_codec::Read;
@@ -92,7 +92,7 @@ where
     // State initialization deferred to start/run
     scheme: S,
     elector: Option<L>, // Option because it's consumed during state init
-    epoch: crate::types::Epoch,
+    epoch: Epoch,
 
     blocker: B,
     automaton: A,
@@ -113,7 +113,7 @@ where
     leader_timeout: Duration,
     notarization_timeout: Duration,
     nullify_retry: Duration,
-    activity_timeout: crate::types::ViewDelta,
+    activity_timeout: ViewDelta,
 
     receiver: mpsc::Receiver<Message<S, D>>,
 
@@ -346,12 +346,16 @@ where
                         // Don't send to batcher - vote was already sent before crash
                     }
                     Artifact::MNotarization(m_notarization) => {
+                        let view = m_notarization.view();
                         resolver
                             .updated(Certificate::MNotarization(m_notarization.clone()))
                             .await;
                         self.reporter
                             .report(Activity::MNotarization(m_notarization))
                             .await;
+                        // Notify batcher that M-quorum was reached for this view.
+                        // This allows batching toward L-quorum after crash recovery.
+                        batcher.m_notarization_exists(view).await;
                     }
                     Artifact::Nullify(nullify) => {
                         self.reporter
@@ -424,11 +428,11 @@ where
         // would be stuck if other nodes didn't receive their original vote.
         if let Some(vote) = state.our_vote_for_current_view() {
             match vote {
-                crate::minimmit::types::Vote::Notarize(n) => {
+                Vote::Notarize(n) => {
                     debug!(view = %n.view(), "re-broadcasting notarize after recovery");
                     egress.broadcast_notarize(n).await;
                 }
-                crate::minimmit::types::Vote::Nullify(n) => {
+                Vote::Nullify(n) => {
                     debug!(view = %n.view(), "re-broadcasting nullify after recovery");
                     egress.broadcast_nullify(n).await;
                 }
@@ -462,7 +466,7 @@ where
                                 .report(Activity::Nullify(nullify.clone()))
                                 .await;
                             batcher
-                                .constructed(crate::minimmit::types::Vote::Nullify(nullify.clone()))
+                                .constructed(Vote::Nullify(nullify.clone()))
                                 .await;
 
                             // Update skipped_views metric (view skipped due to timeout/nullification)
@@ -658,9 +662,7 @@ where
                     .report(Activity::Notarize(notarize.clone()))
                     .await;
                 // Add to batcher for tracking
-                batcher
-                    .constructed(crate::minimmit::types::Vote::Notarize(notarize.clone()))
-                    .await;
+                batcher.constructed(Vote::Notarize(notarize.clone())).await;
                 egress.broadcast_notarize(notarize).await;
             }
             Action::BroadcastNullify(nullify) => {
@@ -673,9 +675,7 @@ where
                     .report(Activity::Nullify(nullify.clone()))
                     .await;
                 // Add to batcher for tracking
-                batcher
-                    .constructed(crate::minimmit::types::Vote::Nullify(nullify.clone()))
-                    .await;
+                batcher.constructed(Vote::Nullify(nullify.clone())).await;
                 egress.broadcast_nullify(nullify).await;
             }
             Action::BroadcastCertificate(certificate) => {
@@ -691,6 +691,9 @@ where
                         self.reporter
                             .report(Activity::MNotarization(m.clone()))
                             .await;
+                        // Notify batcher that M-quorum was reached for this view.
+                        // This allows batching toward L-quorum.
+                        batcher.m_notarization_exists(view).await;
                         Artifact::MNotarization(m.clone())
                     }
                     Certificate::Nullification(n) => {

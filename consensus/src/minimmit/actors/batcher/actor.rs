@@ -255,6 +255,16 @@ where
                             self.added.inc();
                             updated_view = view;
                         }
+                        Some(Message::MNotarizationExists(view)) => {
+                            // Mark that M-quorum was reached for this view.
+                            // This allows batching toward L-quorum even after crash
+                            // recovery where the verified vote count is lost.
+                            if let Some(round) = work.get_mut(&view) {
+                                round.mark_m_quorum_reached();
+                            }
+                            // No verification needed, just continue
+                            continue;
+                        }
                         None => {
                             break;
                         }

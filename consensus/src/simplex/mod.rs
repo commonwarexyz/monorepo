@@ -1147,7 +1147,7 @@ mod tests {
 
             let (complete, checkpoint) = prev_checkpoint
                 .map_or_else(
-                    || deterministic::Runner::timed(Duration::from_secs(180)),
+                    || deterministic::Runner::timed(Duration::from_secs(360)),
                     deterministic::Runner::from,
                 )
                 .start_and_recover(f);

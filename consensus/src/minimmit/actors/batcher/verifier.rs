@@ -14,7 +14,6 @@ use crate::{
 use commonware_cryptography::{certificate::Verification, Digest};
 use commonware_parallel::Strategy;
 use rand_core::CryptoRngCore;
-use std::collections::{BTreeMap, BTreeSet};
 
 /// `Verifier` is a utility for tracking and verifying consensus messages.
 ///
@@ -32,6 +31,9 @@ pub struct Verifier<S: Scheme<D>, D: Digest> {
 
     /// M-quorum size (2f+1) for MNotarization and Nullification.
     m_quorum: usize,
+
+    /// L-quorum size (4f+1) for Finalization.
+    l_quorum: usize,
 
     /// Current leader index.
     leader: Option<Participant>,
@@ -56,10 +58,12 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
     ///
     /// * `scheme` - Scheme handle used to verify and aggregate votes.
     /// * `m_quorum` - The M-quorum size (2f+1) for MNotarization and Nullification.
-    pub const fn new(scheme: S, m_quorum: u32) -> Self {
+    /// * `l_quorum` - The L-quorum size (4f+1) for Finalization.
+    pub const fn new(scheme: S, m_quorum: u32, l_quorum: u32) -> Self {
         Self {
             scheme,
             m_quorum: m_quorum as usize,
+            l_quorum: l_quorum as usize,
 
             leader: None,
             leader_proposal: None,
@@ -72,8 +76,10 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
         }
     }
 
-    /// Records the leader's proposal when it becomes known.
-    const fn set_leader_proposal(&mut self, proposal: Proposal<D>) {
+    /// Records the leader's proposal and filters out pending votes for other proposals.
+    fn set_leader_proposal(&mut self, proposal: Proposal<D>) {
+        self.notarizes
+            .retain(|n| n.proposal.payload == proposal.payload);
         self.leader_proposal = Some(proposal);
     }
 
@@ -93,6 +99,10 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
     /// If a leader is known and the message is a [Vote::Notarize] from that leader,
     /// this method may trigger `set_leader_proposal`.
     ///
+    /// Once the leader's proposal is known, only votes for that proposal are accepted.
+    /// Votes for other proposals are dropped since they cannot contribute to a valid
+    /// certificate.
+    ///
     /// # Arguments
     ///
     /// * `msg` - The [Vote] message to add.
@@ -104,15 +114,18 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
     pub fn add(&mut self, msg: Vote<S, D>, verified: bool) -> bool {
         match msg {
             Vote::Notarize(notarize) => {
-                if self.leader_proposal.is_none() {
-                    if let Some(leader) = self.leader {
-                        if leader == notarize.signer() {
-                            self.set_leader_proposal(notarize.proposal.clone());
-                        }
+                if let Some(ref leader_proposal) = self.leader_proposal {
+                    // Leader proposal is known - only accept votes for it
+                    if notarize.proposal.payload != leader_proposal.payload {
+                        return false;
+                    }
+                } else if let Some(leader) = self.leader {
+                    // Leader is known but proposal is not - set it from leader's vote
+                    if leader == notarize.signer() {
+                        self.set_leader_proposal(notarize.proposal.clone());
                     }
                 }
 
-                // If we've made it this far, add the notarize
                 if verified {
                     self.notarizes_verified += 1;
                 } else {
@@ -146,7 +159,26 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
         self.set_leader_proposal(notarize.proposal.clone());
     }
 
+    /// Marks that M-quorum was reached for this view.
+    ///
+    /// This is called when an MNotarization certificate is created or recovered
+    /// from the journal. It allows the verifier to know that M-quorum was reached
+    /// (even if the individual votes weren't tracked) so it can continue batching
+    /// toward L-quorum.
+    ///
+    /// This is important for crash recovery: after restart, `notarizes_verified`
+    /// is 0, but if we have an MNotarization certificate, we know M-quorum was
+    /// reached and should batch toward L-quorum rather than M-quorum.
+    pub fn mark_m_quorum_reached(&mut self) {
+        // Only update if we haven't already verified M-quorum worth of votes
+        if self.notarizes_verified < self.m_quorum {
+            self.notarizes_verified = self.m_quorum;
+        }
+    }
+
     /// Verifies a batch of pending [Vote::Notarize] messages.
+    ///
+    /// All pending votes are for the leader's proposal (filtered during `add()`).
     ///
     /// # Arguments
     ///
@@ -170,69 +202,51 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
             return (vec![], vec![]);
         }
 
-        let leader_payload = match &self.leader_proposal {
-            Some(proposal) => proposal.payload,
-            None => return (vec![], vec![]),
+        let Some(proposal) = &self.leader_proposal else {
+            return (vec![], vec![]);
         };
 
-        let mut grouped: BTreeMap<Proposal<D>, Vec<Notarize<S, D>>> = BTreeMap::new();
-        for notarize in notarizes {
-            grouped
-                .entry(notarize.proposal.clone())
-                .or_default()
-                .push(notarize);
-        }
+        let attestations = notarizes.into_iter().map(|n| n.attestation);
+        let Verification { verified, invalid } = self.scheme.verify_attestations::<_, D, _>(
+            rng,
+            Subject::Notarize { proposal },
+            attestations,
+            strategy,
+        );
 
-        let mut verified_votes = Vec::new();
-        let mut invalid_signers = BTreeSet::new();
-
-        for (proposal, votes) in grouped {
-            if proposal.payload != leader_payload {
-                self.notarizes.extend(votes);
-                continue;
-            }
-            let attestations = votes.into_iter().map(|n| n.attestation);
-
-            let Verification { verified, invalid } = self.scheme.verify_attestations::<_, D, _>(
-                rng,
-                Subject::Notarize {
-                    proposal: &proposal,
-                },
-                attestations,
-                strategy,
-            );
-
-            for signer in invalid {
-                invalid_signers.insert(signer);
-            }
-
-            for attestation in verified {
-                verified_votes.push(Vote::Notarize(Notarize {
+        let verified_votes: Vec<_> = verified
+            .into_iter()
+            .map(|attestation| {
+                Vote::Notarize(Notarize {
                     proposal: proposal.clone(),
                     attestation,
-                }));
-            }
-        }
+                })
+            })
+            .collect();
 
         self.notarizes_verified += verified_votes.len();
 
-        (verified_votes, invalid_signers.into_iter().collect())
+        (verified_votes, invalid)
     }
 
     /// Checks if there are [Vote::Notarize] messages ready for batch verification.
     ///
-    /// Verification is considered "ready" when all of the following are true:
-    /// 1. There are pending notarize messages to verify.
-    /// 2. The leader and their proposal are known (so we know which proposal to verify for).
-    /// 3. We haven't already verified enough messages to reach L-quorum.
-    /// 4. The sum of verified and pending messages could potentially reach M-quorum,
-    ///    or the scheme doesn't benefit from batching (eager verification).
+    /// Batching strategy:
+    /// - Before M-quorum: batch when we can reach M-quorum
+    /// - After M-quorum: batch when we can reach L-quorum
     ///
-    /// Note: We track up to L-quorum because notarize votes are used for both
-    /// MNotarization (M-quorum) and Finalization (L-quorum).
+    /// The `notarizes_verified` count may be set via `mark_m_quorum_reached()` when
+    /// an MNotarization certificate exists (either newly created or recovered from
+    /// journal). This ensures that after crash recovery, we continue batching toward
+    /// L-quorum rather than re-batching toward M-quorum.
     pub fn ready_notarizes(&self) -> bool {
         // If there are no pending notarizes, there is nothing to do.
         if self.notarizes.is_empty() {
+            return false;
+        }
+
+        // If we've already verified enough for L-quorum, no need to verify more.
+        if self.notarizes_verified >= self.l_quorum {
             return false;
         }
 
@@ -242,28 +256,21 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
             return false;
         }
 
-        let leader_payload = self
-            .leader_proposal
-            .as_ref()
-            .expect("leader proposal set")
-            .payload;
-        let leader_votes = self
-            .notarizes
-            .iter()
-            .filter(|vote| vote.proposal.payload == leader_payload)
-            .count();
-
         // For schemes that don't benefit from batching, verify immediately.
         if !S::is_batchable() {
-            return leader_votes > 0;
+            return true;
         }
 
-        // If we don't have enough leader votes to reach M-quorum, there is nothing to do yet.
-        if self.notarizes_verified + leader_votes < self.m_quorum {
-            return false;
+        let total = self.notarizes_verified + self.notarizes.len();
+
+        // If M-quorum was reached (via verification or mark_m_quorum_reached),
+        // batch toward L-quorum.
+        if self.notarizes_verified >= self.m_quorum {
+            return total >= self.l_quorum;
         }
 
-        true
+        // Before M-quorum, batch when we can reach M-quorum.
+        total >= self.m_quorum
     }
 
     /// Verifies a batch of pending [Vote::Nullify] messages.
@@ -351,7 +358,7 @@ mod tests {
         sha256::Digest as Sha256,
     };
     use commonware_parallel::Sequential;
-    use commonware_utils::{test_rng, Faults, M5f1};
+    use commonware_utils::{test_rng, Faults, M5f1, N5f1};
     use rand::rngs::StdRng;
 
     const NAMESPACE: &[u8] = b"test";
@@ -393,7 +400,8 @@ mod tests {
         let n = 6; // Need n >= 5f+1, so for f=1, n=6
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, n);
         let m_quorum = M5f1::quorum(n);
-        let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), m_quorum);
+        let l_quorum = N5f1::l_quorum(n);
+        let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), m_quorum, l_quorum);
 
         let round = Round::new(Epoch::new(0), View::new(1));
         let notarize1 = create_notarize(&schemes[0], round, View::new(0), 1);
@@ -419,12 +427,12 @@ mod tests {
         verifier.add(Vote::Notarize(notarize2), false);
         assert_eq!(verifier.notarizes.len(), 2);
 
-        // Different proposal should still be tracked for contradiction handling
+        // Different proposal should be dropped (only leader's proposal matters)
         verifier.add(Vote::Notarize(notarize_diff), false);
-        assert_eq!(verifier.notarizes.len(), 3);
+        assert_eq!(verifier.notarizes.len(), 2);
 
         // Test with leader set before receiving their vote
-        let mut verifier2 = Verifier::<S, Sha256>::new(schemes[0].clone(), m_quorum);
+        let mut verifier2 = Verifier::<S, Sha256>::new(schemes[0].clone(), m_quorum, l_quorum);
         let round2 = Round::new(Epoch::new(0), View::new(2));
         let notarize_non_leader = create_notarize(&schemes[1], round2, View::new(1), 3);
         let notarize_leader = create_notarize(&schemes[0], round2, View::new(1), 3);
@@ -468,7 +476,8 @@ mod tests {
         let n = 6;
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, n);
         let m_quorum = M5f1::quorum(n);
-        let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), m_quorum);
+        let l_quorum = N5f1::l_quorum(n);
+        let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), m_quorum, l_quorum);
 
         let round = Round::new(Epoch::new(0), View::new(1));
         let leader_notarize = create_notarize(&schemes[0], round, View::new(0), 1);
@@ -511,7 +520,8 @@ mod tests {
         let n = 6;
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, n);
         let m_quorum = M5f1::quorum(n);
-        let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), m_quorum);
+        let l_quorum = N5f1::l_quorum(n);
+        let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), m_quorum, l_quorum);
         let round = Round::new(Epoch::new(0), View::new(1));
         let notarizes: Vec<_> = schemes
             .iter()
@@ -560,7 +570,8 @@ mod tests {
         let n = 6;
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, n);
         let m_quorum = M5f1::quorum(n);
-        let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), m_quorum);
+        let l_quorum = N5f1::l_quorum(n);
+        let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), m_quorum, l_quorum);
         let round = Round::new(Epoch::new(0), View::new(1));
         let nullify = create_nullify(&schemes[0], round);
 
@@ -592,7 +603,8 @@ mod tests {
         let n = 6;
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, n);
         let m_quorum = M5f1::quorum(n);
-        let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), m_quorum);
+        let l_quorum = N5f1::l_quorum(n);
+        let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), m_quorum, l_quorum);
         let round = Round::new(Epoch::new(0), View::new(1));
         let nullifies: Vec<_> = schemes
             .iter()
@@ -637,7 +649,8 @@ mod tests {
         let n = 6;
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, n);
         let m_quorum = M5f1::quorum(n);
-        let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), m_quorum);
+        let l_quorum = N5f1::l_quorum(n);
+        let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), m_quorum, l_quorum);
         verifier.set_leader(Participant::new(0));
         verifier.set_leader(Participant::new(1));
     }
@@ -687,7 +700,8 @@ mod tests {
         let n = 6;
         let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, n);
         let m_quorum = M5f1::quorum(n);
-        let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), m_quorum);
+        let l_quorum = N5f1::l_quorum(n);
+        let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), m_quorum, l_quorum);
         let round = Round::new(Epoch::new(0), View::new(1));
 
         let notarizes: Vec<_> = schemes
