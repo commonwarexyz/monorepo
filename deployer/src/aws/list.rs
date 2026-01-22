@@ -45,7 +45,7 @@ pub fn list() -> Result<(), Error> {
                 tag,
                 created_at: 0,
                 regions: vec!["unknown".to_string()],
-                instance_names: vec![],
+                instance_count: 0,
             });
         }
     }
@@ -60,7 +60,7 @@ pub fn list() -> Result<(), Error> {
                 tag = d.tag.as_str(),
                 created_at = d.created_at,
                 regions = ?d.regions,
-                instances = d.instance_names.len(),
+                instances = d.instance_count,
             );
         }
     }

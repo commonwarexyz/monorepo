@@ -116,7 +116,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
             .unwrap()
             .as_secs(),
         regions: regions.iter().cloned().collect(),
-        instance_names: config.instances.iter().map(|i| i.name.clone()).collect(),
+        instance_count: config.instances.len(),
     };
     let metadata_file = File::create(tag_directory.join(METADATA_FILE_NAME))?;
     serde_yaml::to_writer(metadata_file, &metadata)?;

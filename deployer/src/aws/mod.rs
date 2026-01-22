@@ -321,7 +321,7 @@ cfg_if::cfg_if! {
             pub tag: String,
             pub created_at: u64,
             pub regions: Vec<String>,
-            pub instance_names: Vec<String>,
+            pub instance_count: usize,
         }
 
         pub mod ec2;
