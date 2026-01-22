@@ -131,7 +131,7 @@
 //! ```rust
 //! use commonware_p2p::{authenticated::discovery::{self, Network}, Ingress, Manager, Sender, Recipients};
 //! use commonware_cryptography::{ed25519, Signer, PrivateKey as _, PublicKey as _, };
-//! use commonware_runtime::{deterministic, Metrics, Quota, Runner, Spawner};
+//! use commonware_runtime::{deterministic, IoBuf, Metrics, Quota, Runner, Spawner};
 //! use commonware_utils::NZU32;
 //! use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 //!
