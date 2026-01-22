@@ -425,10 +425,9 @@ impl Field for F {
     }
 }
 
-#[cfg(test)]
-mod test {
+#[cfg(any(test, feature = "fuzz"))]
+mod impl_proptest_arbitrary {
     use super::*;
-    use crate::algebra;
     use proptest::prelude::*;
 
     impl Arbitrary for F {
@@ -439,6 +438,60 @@ mod test {
             any::<u64>().prop_map_into().boxed()
         }
     }
+}
+
+#[cfg(any(test, feature = "fuzz"))]
+pub(crate) mod fuzz {
+    use super::*;
+    use crate::algebra::Ring;
+    use commonware_test::FuzzPlan;
+    use proptest::{prop_assert_eq, test_runner::TestCaseResult};
+    use proptest_derive::Arbitrary;
+
+    #[derive(Debug, Arbitrary)]
+    pub enum Plan {
+        Exp(F, u8),
+        Div2(F),
+        StreamRoundtrip(
+            #[proptest(
+                strategy = "proptest::collection::vec(proptest::arbitrary::any::<u64>(), 0..128)"
+            )]
+            Vec<u64>,
+        ),
+    }
+
+    impl FuzzPlan for Plan {
+        fn run(self) -> TestCaseResult {
+            match self {
+                Plan::Exp(x, k) => {
+                    let mut naive = F::one();
+                    for _ in 0..k {
+                        naive = naive * x;
+                    }
+                    prop_assert_eq!(naive, x.exp(&[k as u64]));
+                }
+                Plan::Div2(x) => {
+                    prop_assert_eq!((x + x).div_2(), x);
+                }
+                Plan::StreamRoundtrip(data) => {
+                    let mut roundtrip =
+                        F::stream_to_u64s(F::stream_from_u64s(data.clone().into_iter()))
+                            .collect::<Vec<_>>();
+                    roundtrip.truncate(data.len());
+                    prop_assert_eq!(data, roundtrip);
+                }
+            }
+            Ok(())
+        }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::algebra;
+    use commonware_test::FuzzPlan as _;
+    use proptest::{prelude::Arbitrary, proptest};
 
     #[test]
     fn test_generator_calculation() {
@@ -465,31 +518,10 @@ mod test {
         assert_eq!(F::ROOT_OF_UNITY.exp(&[1 << 26]), F(8));
     }
 
-    fn test_stream_roundtrip_inner(data: Vec<u64>) {
-        let mut roundtrip =
-            F::stream_to_u64s(F::stream_from_u64s(data.clone().into_iter())).collect::<Vec<_>>();
-        roundtrip.truncate(data.len());
-        assert_eq!(data, roundtrip);
-    }
-
     proptest! {
         #[test]
-        fn test_exp(x: F, k: u8) {
-            let mut naive = F::one();
-            for _ in 0..k {
-                naive = naive * x;
-            }
-            assert_eq!(naive, x.exp(&[k as u64]));
-        }
-
-        #[test]
-        fn test_div2(x: F) {
-            assert_eq!((x + x).div_2(), x)
-        }
-
-        #[test]
-        fn test_stream_roundtrip(xs in proptest::collection::vec(any::<u64>(), 0..128)) {
-            test_stream_roundtrip_inner(xs);
+        fn test_fuzz(plan: fuzz::Plan) {
+            plan.run()?;
         }
     }
 
