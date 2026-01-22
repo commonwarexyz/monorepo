@@ -150,7 +150,6 @@ fn main() {
         let name = scheme.public_key().to_string();
         let peer_config_file = format!("{name}.yaml");
         let peer_config = Config {
-            // The private key material isn't exposed through Debug/Display
             private_key: hex(&scheme.encode()),
             port: PORT,
             allowed_peers: allowed_peers.clone(),

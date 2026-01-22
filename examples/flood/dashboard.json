@@ -1181,7 +1181,7 @@
                 {
                     "disableTextWrap": false,
                     "editorMode": "code",
-                    "expr": "irate(flood_receiver_messages_total{deployer_name=~\"$Name\"}[1m])",
+                    "expr": "irate(flood_receiver_latency_count{deployer_name=~\"$Name\"}[1m])",
                     "fullMetaSearch": false,
                     "includeNullMetadata": true,
                     "legendFormat": "{{deployer_name}} ({{deployer_ip}})",

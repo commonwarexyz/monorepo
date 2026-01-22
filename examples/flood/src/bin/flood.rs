@@ -8,7 +8,9 @@ use commonware_cryptography::{
 use commonware_deployer::aws::{Hosts, METRICS_PORT};
 use commonware_flood::Config;
 use commonware_p2p::{authenticated::discovery, Manager, Receiver, Recipients, Sender};
-use commonware_runtime::{tokio, Metrics, Quota, Runner, Spawner};
+use commonware_runtime::{
+    telemetry::metrics::histogram::HistogramExt, tokio, Metrics, Quota, Runner, Spawner,
+};
 use commonware_utils::{from_hex_formatted, ordered::Set, union, TryCollect, NZU32};
 use futures::future::try_join_all;
 use prometheus_client::metrics::{counter::Counter, histogram::Histogram};
@@ -18,7 +20,7 @@ use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     str::FromStr,
     sync::atomic::AtomicU64,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tracing::{error, info, Level};
 
@@ -179,8 +181,6 @@ fn main() {
             context
                 .with_label("flood_receiver")
                 .spawn(move |context| async move {
-                    let messages: Counter<u64, AtomicU64> = Counter::default();
-                    context.register("messages", "Received messages", messages.clone());
                     let latency = Histogram::new(LATENCY_BUCKETS);
                     context.register("latency", "Message latency in seconds", latency.clone());
                     loop {
@@ -190,16 +190,8 @@ fn main() {
                                     continue;
                                 }
                                 let sent_ns = msg.get_u64_le();
-                                let now_ns = SystemTime::now()
-                                    .duration_since(UNIX_EPOCH)
-                                    .unwrap()
-                                    .as_nanos() as u64;
-                                if now_ns > sent_ns {
-                                    // This assumes clocks are reasonably synchronized
-                                    let latency_secs = (now_ns - sent_ns) as f64 / 1_000_000_000.0;
-                                    latency.observe(latency_secs);
-                                }
-                                messages.inc();
+                                let sent_time = UNIX_EPOCH + Duration::from_nanos(sent_ns);
+                                latency.observe_between(sent_time, SystemTime::now());
                             }
                             Err(e) => {
                                 error!(?e, "could not receive flood message");
