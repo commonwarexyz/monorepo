@@ -1,11 +1,16 @@
 use crate::{
-    journal::contiguous::variable,
-    mmr::Location,
+    index::unordered::Index,
+    journal::{authenticated, contiguous::variable},
+    mmr::{
+        journaled::{Config as MmrConfig, Mmr},
+        Location, Position, StandardHasher,
+    },
     qmdb::{
         any::VariableValue,
+        build_snapshot_from_log,
         immutable::{self, Operation},
         sync::{self},
-        Error,
+        Error, Merkleized,
     },
     translator::Translator,
 };
@@ -47,55 +52,66 @@ where
     async fn from_sync_result(
         context: Self::Context,
         db_config: Self::Config,
-        journal: Self::Journal,
+        log: Self::Journal,
         pinned_nodes: Option<Vec<Self::Digest>>,
         range: Range<Location>,
         apply_batch_size: usize,
     ) -> Result<Self, Error> {
-        let sync_config = Config {
-            db_config,
-            log: journal,
-            range,
-            pinned_nodes,
-            apply_batch_size,
+        let mut hasher = StandardHasher::new();
+
+        // Initialize MMR for sync
+        let mmr = Mmr::init_sync(
+            context.with_label("mmr"),
+            crate::mmr::journaled::SyncConfig {
+                config: MmrConfig {
+                    journal_partition: db_config.mmr_journal_partition.clone(),
+                    metadata_partition: db_config.mmr_metadata_partition.clone(),
+                    items_per_blob: db_config.mmr_items_per_blob,
+                    write_buffer: db_config.mmr_write_buffer,
+                    thread_pool: db_config.thread_pool.clone(),
+                    buffer_pool: db_config.buffer_pool.clone(),
+                },
+                range: Position::try_from(range.start)?
+                    ..Position::try_from(range.end.saturating_add(1))?,
+                pinned_nodes,
+            },
+            &mut hasher,
+        )
+        .await?;
+
+        let journal = authenticated::Journal::<_, _, _, Merkleized<H>>::from_components(
+            mmr,
+            log,
+            hasher,
+            apply_batch_size as u64,
+        )
+        .await?;
+
+        let mut snapshot: Index<T, Location> =
+            Index::new(context.with_label("snapshot"), db_config.translator.clone());
+
+        // Get the start of the log.
+        let start_loc = journal.pruning_boundary();
+
+        // Build snapshot from the log
+        build_snapshot_from_log(start_loc, &journal.journal, &mut snapshot, |_, _| {}).await?;
+
+        let last_commit_loc = journal.size().checked_sub(1).expect("commit should exist");
+
+        let mut db = Self {
+            journal,
+            snapshot,
+            last_commit_loc,
+            _durable: core::marker::PhantomData,
         };
-        Self::init_synced(context, sync_config).await
+
+        db.sync().await?;
+        Ok(db)
     }
 
     fn root(&self) -> Self::Digest {
         self.root()
     }
-}
-
-/// Configuration for syncing an [immutable::Immutable] to a target state.
-pub struct Config<E, K, V, T, D, C>
-where
-    E: Storage + Metrics,
-    K: Array,
-    V: VariableValue,
-    T: Translator,
-    D: commonware_cryptography::Digest,
-{
-    /// Database configuration.
-    pub db_config: immutable::Config<T, C>,
-
-    /// The [immutable::Immutable]'s log of operations. It has elements within the range.
-    /// Reports the range start as its pruning boundary (oldest retained operation index).
-    pub log: variable::Journal<E, Operation<K, V>>,
-
-    /// Sync range - operations outside this range are pruned or not synced.
-    pub range: Range<Location>,
-
-    /// The pinned nodes the MMR needs at the pruning boundary (range start), in the order
-    /// specified by `Proof::nodes_to_pin`.
-    /// If `None`, the pinned nodes will be computed from the MMR's journal and metadata,
-    /// which are expected to have the necessary pinned nodes.
-    pub pinned_nodes: Option<Vec<D>>,
-
-    /// The maximum number of operations to keep in memory
-    /// before committing the database while applying operations.
-    /// Higher value will cause more memory usage during sync.
-    pub apply_batch_size: usize,
 }
 
 #[cfg(test)]
