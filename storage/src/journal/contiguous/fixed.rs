@@ -2609,4 +2609,117 @@ mod tests {
             journal.destroy().await.unwrap();
         });
     }
+
+    #[test_traced]
+    fn test_fixed_journal_init_at_size_crash_scenarios() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(NZU64!(5));
+
+            // Setup: Create a journal with some data and mid-section metadata
+            let mut journal =
+                Journal::<_, Digest>::init_at_size(context.with_label("first"), cfg.clone(), 7)
+                    .await
+                    .unwrap();
+            for i in 0..5u64 {
+                journal.append(test_digest(i)).await.unwrap();
+            }
+            journal.sync().await.unwrap();
+            drop(journal);
+
+            // Crash Scenario 1: After clear(), before blob creation
+            // Simulate by manually removing all blobs but leaving metadata
+            let blob_part = blob_partition(&cfg);
+            context.remove(&blob_part, None).await.unwrap();
+
+            // Recovery should see no blobs and return empty journal, ignoring metadata
+            let journal = Journal::<_, Digest>::init(context.with_label("crash1"), cfg.clone())
+                .await
+                .expect("init failed after clear crash");
+            assert_eq!(journal.size(), 0);
+            assert_eq!(journal.pruning_boundary(), 0);
+            drop(journal);
+
+            // Restore metadata for next scenario (it might have been removed by init)
+            let meta_cfg = MetadataConfig {
+                partition: format!("{}-metadata", cfg.partition),
+                codec_config: ((0..).into(), ()),
+            };
+            let mut metadata = Metadata::<_, u64, Vec<u8>>::init(
+                context.with_label("restore_meta"),
+                meta_cfg.clone(),
+            )
+            .await
+            .unwrap();
+            metadata.put(PRUNING_BOUNDARY_KEY, 7u64.to_be_bytes().to_vec());
+            metadata.sync().await.unwrap();
+
+            // Crash Scenario 2: After ensure_section_exists(), before metadata update
+            // Target: init_at_size(12) -> should be section 2 (starts at 10)
+            // State: Blob at section 2, Metadata says 7 (section 1)
+            // Wait, old metadata (7) is BEHIND new blob (12/5 = 2).
+            // recover_bounds treats "meta < blob" as stale -> uses blob.
+
+            // Let's try init_at_size(2) -> section 0.
+            // Old metadata says 7 (section 1).
+            // State: Blob at section 0, Metadata says 7 (section 1).
+            // recover_bounds sees "meta (1) > blob (0)" -> metadata ahead -> uses blob.
+
+            // Simulate: Create blob at section 0 (tail for init_at_size(2))
+            let (blob, _) = context.open(&blob_part, &0u64.to_be_bytes()).await.unwrap();
+            blob.sync().await.unwrap(); // Ensure it exists
+
+            // Recovery should warn "metadata ahead" and use blob state (0, 0)
+            let journal = Journal::<_, Digest>::init(context.with_label("crash2"), cfg.clone())
+                .await
+                .expect("init failed after create crash");
+
+            // Should recover to blob state (section 0 aligned)
+            assert_eq!(journal.pruning_boundary(), 0);
+            // Size is 0 because blob is empty
+            assert_eq!(journal.size(), 0);
+            drop(journal);
+        });
+    }
+
+    #[test_traced]
+    fn test_fixed_journal_clear_to_size_crash_scenarios() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(NZU64!(5));
+
+            // Setup: Init at 12 (Section 2, offset 2)
+            // Metadata = 12
+            let mut journal =
+                Journal::<_, Digest>::init_at_size(context.with_label("first"), cfg.clone(), 12)
+                    .await
+                    .unwrap();
+            journal.sync().await.unwrap();
+            drop(journal);
+
+            // Crash Scenario: clear_to_size(2) [Section 0]
+            // We want to simulate crash after blob 0 created, but metadata still 12.
+
+            // manually clear blobs
+            let blob_part = blob_partition(&cfg);
+            context.remove(&blob_part, None).await.unwrap();
+
+            // manually create section 0
+            let (blob, _) = context.open(&blob_part, &0u64.to_be_bytes()).await.unwrap();
+            blob.sync().await.unwrap();
+
+            // Metadata is still 12 (from setup)
+            // Blob is Section 0
+            // Metadata (12 -> sec 2) > Blob (sec 0) -> Ahead warning
+
+            let journal =
+                Journal::<_, Digest>::init(context.with_label("crash_clear"), cfg.clone())
+                    .await
+                    .expect("init failed after clear_to_size crash");
+
+            // Should fallback to blobs
+            assert_eq!(journal.pruning_boundary(), 0);
+            assert_eq!(journal.size(), 0);
+        });
+    }
 }
