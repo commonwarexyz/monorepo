@@ -120,7 +120,7 @@ module replica {
     // and that there is a `notarization(c', view_parent)` for the parent block `c'`.
     def valid_parent(view: ViewNumber, view_parent: ViewNumber, certificates: Set[Certificate]): bool = {
         is_view_notarized(view_parent, certificates) and
-            are_views_nullified(view_parent + 1, view - 1, certificates)
+            are_views_nullified(view_parent, view, certificates)
     }
 
     // Create a nullify certificate from a set of votes.
