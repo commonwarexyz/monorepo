@@ -60,6 +60,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "simplex_ed25519_twins_mutator"
+path = "fuzz_targets/simplex_ed25519_twins_mutator.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "simplex_bls12381_threshold_minpk"
 path = "fuzz_targets/simplex_bls12381_threshold_minpk.rs"
 test = false
