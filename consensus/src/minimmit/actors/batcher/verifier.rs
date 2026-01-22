@@ -45,6 +45,9 @@ pub struct Verifier<S: Scheme<D>, D: Digest> {
     /// Count of already-verified notarize votes.
     notarizes_verified: usize,
 
+    /// Notarize votes for conflicting proposals.
+    conflicting_notarizes: Vec<Notarize<S, D>>,
+
     /// Pending nullify votes waiting to be verified.
     nullifies: Vec<Nullify<S>>,
     /// Count of already-verified nullify votes.
@@ -71,6 +74,8 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
             notarizes: Vec::new(),
             notarizes_verified: 0,
 
+            conflicting_notarizes: Vec::new(),
+
             nullifies: Vec::new(),
             nullifies_verified: 0,
         }
@@ -78,8 +83,17 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
 
     /// Records the leader's proposal and filters out pending votes for other proposals.
     fn set_leader_proposal(&mut self, proposal: Proposal<D>) {
-        self.notarizes
-            .retain(|n| n.proposal.payload == proposal.payload);
+        let mut retained = Vec::new();
+        let mut conflicts = Vec::new();
+        for notarize in self.notarizes.drain(..) {
+            if notarize.proposal.payload == proposal.payload {
+                retained.push(notarize);
+            } else {
+                conflicts.push(notarize);
+            }
+        }
+        self.notarizes = retained;
+        self.conflicting_notarizes.extend(conflicts);
         self.leader_proposal = Some(proposal);
     }
 
@@ -117,7 +131,8 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
                 if let Some(ref leader_proposal) = self.leader_proposal {
                     // Leader proposal is known - only accept votes for it
                     if notarize.proposal.payload != leader_proposal.payload {
-                        return false;
+                        self.conflicting_notarizes.push(notarize);
+                        return true;
                     }
                 } else if let Some(leader) = self.leader {
                     // Leader is known but proposal is not - set it from leader's vote
@@ -195,36 +210,50 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
         rng: &mut R,
         strategy: &impl Strategy,
     ) -> (Vec<Vote<S, D>>, Vec<Participant>) {
-        let notarizes = std::mem::take(&mut self.notarizes);
-
-        // Early return if there are no notarizes to verify
-        if notarizes.is_empty() {
-            return (vec![], vec![]);
-        }
-
-        let Some(proposal) = &self.leader_proposal else {
-            return (vec![], vec![]);
+        let verify_leader = self.ready_leader_notarizes();
+        let notarizes = if verify_leader {
+            std::mem::take(&mut self.notarizes)
+        } else {
+            Vec::new()
         };
+        let conflicting = std::mem::take(&mut self.conflicting_notarizes);
 
-        let attestations = notarizes.into_iter().map(|n| n.attestation);
-        let Verification { verified, invalid } = self.scheme.verify_attestations::<_, D, _>(
-            rng,
-            Subject::Notarize { proposal },
-            attestations,
-            strategy,
-        );
+        let mut verified_votes = Vec::new();
+        let mut invalid = Vec::new();
 
-        let verified_votes: Vec<_> = verified
-            .into_iter()
-            .map(|attestation| {
+        if verify_leader {
+            let Some(proposal) = &self.leader_proposal else {
+                return (vec![], vec![]);
+            };
+
+            let attestations = notarizes.into_iter().map(|n| n.attestation);
+            let Verification {
+                verified,
+                invalid: invalid_signers,
+            } = self.scheme.verify_attestations::<_, D, _>(
+                rng,
+                Subject::Notarize { proposal },
+                attestations,
+                strategy,
+            );
+
+            verified_votes.extend(verified.into_iter().map(|attestation| {
                 Vote::Notarize(Notarize {
                     proposal: proposal.clone(),
                     attestation,
                 })
-            })
-            .collect();
+            }));
+            invalid.extend(invalid_signers);
+            self.notarizes_verified += verified_votes.len();
+        }
 
-        self.notarizes_verified += verified_votes.len();
+        for notarize in conflicting {
+            if notarize.verify(rng, &self.scheme, strategy) {
+                verified_votes.push(Vote::Notarize(notarize));
+            } else {
+                invalid.push(notarize.signer());
+            }
+        }
 
         (verified_votes, invalid)
     }
@@ -240,6 +269,14 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
     /// journal). This ensures that after crash recovery, we continue batching toward
     /// L-quorum rather than re-batching toward M-quorum.
     pub fn ready_notarizes(&self) -> bool {
+        if !self.conflicting_notarizes.is_empty() {
+            return true;
+        }
+
+        self.ready_leader_notarizes()
+    }
+
+    fn ready_leader_notarizes(&self) -> bool {
         // If there are no pending notarizes, there is nothing to do.
         if self.notarizes.is_empty() {
             return false;
@@ -427,9 +464,10 @@ mod tests {
         verifier.add(Vote::Notarize(notarize2), false);
         assert_eq!(verifier.notarizes.len(), 2);
 
-        // Different proposal should be dropped (only leader's proposal matters)
+        // Different proposal should be tracked separately
         verifier.add(Vote::Notarize(notarize_diff), false);
         assert_eq!(verifier.notarizes.len(), 2);
+        assert_eq!(verifier.conflicting_notarizes.len(), 1);
 
         // Test with leader set before receiving their vote
         let mut verifier2 = Verifier::<S, Sha256>::new(schemes[0].clone(), m_quorum, l_quorum);
@@ -441,6 +479,7 @@ mod tests {
         verifier2.add(Vote::Notarize(notarize_non_leader), false);
         assert!(verifier2.leader_proposal.is_none());
         assert_eq!(verifier2.notarizes.len(), 1);
+        assert!(verifier2.conflicting_notarizes.is_empty());
 
         verifier2.add(Vote::Notarize(notarize_leader.clone()), false);
         assert!(verifier2.leader_proposal.is_some());
@@ -449,6 +488,7 @@ mod tests {
             &notarize_leader.proposal
         );
         assert_eq!(verifier2.notarizes.len(), 2);
+        assert!(verifier2.conflicting_notarizes.is_empty());
 
         // Leader votes are verified; proposals that match are verified together
         let (verified_bulk, failed_bulk) = verifier2.verify_notarizes(&mut rng, &Sequential);
@@ -465,6 +505,50 @@ mod tests {
         add_notarize(bls12381_multisig::fixture::<MinPk, _>);
         add_notarize(ed25519::fixture);
         add_notarize(secp256r1::fixture);
+    }
+
+    fn conflicting_notarizes_are_verified<S, F>(mut fixture: F)
+    where
+        S: Scheme<Sha256, PublicKey = PublicKey>,
+        F: FnMut(&mut StdRng, &[u8], u32) -> Fixture<S>,
+    {
+        let mut rng = test_rng();
+        let n = 6;
+        let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, n);
+        let m_quorum = M5f1::quorum(n);
+        let l_quorum = N5f1::l_quorum(n);
+        let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), m_quorum, l_quorum);
+
+        let round = Round::new(Epoch::new(0), View::new(1));
+        let leader_vote = create_notarize(&schemes[0], round, View::new(0), 1);
+        verifier.add(Vote::Notarize(leader_vote.clone()), false);
+        verifier.set_leader(leader_vote.signer());
+
+        let leader_vote2 = create_notarize(&schemes[1], round, View::new(0), 1);
+        let leader_vote3 = create_notarize(&schemes[2], round, View::new(0), 1);
+        verifier.add(Vote::Notarize(leader_vote2), false);
+        verifier.add(Vote::Notarize(leader_vote3), false);
+
+        let conflict_vote = create_notarize(&schemes[3], round, View::new(0), 2);
+        verifier.add(Vote::Notarize(conflict_vote.clone()), false);
+
+        assert!(verifier.ready_notarizes());
+        let (verified, failed) = verifier.verify_notarizes(&mut rng, &Sequential);
+        assert!(failed.is_empty());
+        assert!(verified.iter().any(|vote| match vote {
+            Vote::Notarize(notarize) => notarize.proposal.payload == conflict_vote.proposal.payload,
+            _ => false,
+        }));
+    }
+
+    #[test]
+    fn test_conflicting_notarizes_are_verified() {
+        conflicting_notarizes_are_verified(bls12381_threshold::fixture::<MinSig, _>);
+        conflicting_notarizes_are_verified(bls12381_threshold::fixture::<MinPk, _>);
+        conflicting_notarizes_are_verified(bls12381_multisig::fixture::<MinSig, _>);
+        conflicting_notarizes_are_verified(bls12381_multisig::fixture::<MinPk, _>);
+        conflicting_notarizes_are_verified(ed25519::fixture);
+        conflicting_notarizes_are_verified(secp256r1::fixture);
     }
 
     fn set_leader<S, F>(mut fixture: F)
