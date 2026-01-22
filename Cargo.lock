@@ -1353,7 +1353,6 @@ dependencies = [
 name = "commonware-flood"
 version = "0.0.65"
 dependencies = [
- "bytes",
  "clap",
  "commonware-codec",
  "commonware-cryptography",
