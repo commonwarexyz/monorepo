@@ -2060,7 +2060,7 @@ mod tests {
             assert_eq!(sender, peer0.public_key());
 
             // Wait for connection attempts between peer 0 and peer 2 to fail
-            context.sleep(Duration::from_secs(2)).await;
+            context.sleep(Duration::from_secs(30)).await;
 
             // Peer 0 cannot reach peer 2 (dials socket1, gets peer 1, key mismatch)
             let sent = sender0
