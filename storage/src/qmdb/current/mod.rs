@@ -134,11 +134,17 @@ impl<T: Translator, C> VariableConfig<T, C> {
     }
 }
 
-/// Extension trait for Current QMDB types that exposes bitmap pruning information for testing.
+/// Extension trait for Current QMDB types that exposes bitmap information for testing.
 #[cfg(any(test, feature = "test-traits"))]
 pub trait BitmapPrunedBits {
     /// Returns the number of bits that have been pruned from the bitmap.
     fn bitmap_pruned_bits(&self) -> u64;
+
+    /// Returns the value of the bit at the given index.
+    fn get_bit(&self, index: u64) -> bool;
+
+    /// Returns the oldest retained location.
+    fn oldest_retained_loc(&self) -> crate::mmr::Location;
 }
 
 #[cfg(test)]

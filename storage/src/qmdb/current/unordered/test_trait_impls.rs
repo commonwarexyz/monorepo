@@ -218,6 +218,14 @@ impl<
     fn bitmap_pruned_bits(&self) -> u64 {
         self.status.pruned_bits()
     }
+
+    fn get_bit(&self, index: u64) -> bool {
+        self.status.get_bit(index)
+    }
+
+    fn oldest_retained_loc(&self) -> Location {
+        self.oldest_retained_loc()
+    }
 }
 
 impl<
@@ -233,5 +241,13 @@ where
 {
     fn bitmap_pruned_bits(&self) -> u64 {
         self.status.pruned_bits()
+    }
+
+    fn get_bit(&self, index: u64) -> bool {
+        self.status.get_bit(index)
+    }
+
+    fn oldest_retained_loc(&self) -> Location {
+        self.oldest_retained_loc()
     }
 }
