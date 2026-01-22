@@ -327,6 +327,7 @@ where
         // - Resolver knows about certificates (for sync)
         // - Timeout will fire and re-broadcast our nullify if needed
         let start = self.context.current();
+        let mut recovered_certificates = Vec::new();
         {
             let stream = journal
                 .replay(0, 0, self.replay_buffer)
@@ -347,12 +348,14 @@ where
                     }
                     Artifact::MNotarization(m_notarization) => {
                         let view = m_notarization.view();
+                        let recovered = m_notarization.clone();
                         resolver
                             .updated(Certificate::MNotarization(m_notarization.clone()))
                             .await;
                         self.reporter
                             .report(Activity::MNotarization(m_notarization))
                             .await;
+                        recovered_certificates.push(Certificate::MNotarization(recovered));
                         // Notify batcher that M-quorum was reached for this view.
                         // This allows batching toward L-quorum after crash recovery.
                         batcher.m_notarization_exists(view).await;
@@ -364,12 +367,14 @@ where
                         // Don't send to batcher - vote was already sent before crash
                     }
                     Artifact::Nullification(nullification) => {
+                        let recovered = nullification.clone();
                         resolver
                             .updated(Certificate::Nullification(nullification.clone()))
                             .await;
                         self.reporter
                             .report(Activity::Nullification(nullification))
                             .await;
+                        recovered_certificates.push(Certificate::Nullification(recovered));
                     }
                     Artifact::Finalization(finalization) => {
                         resolver
@@ -400,6 +405,12 @@ where
             certificate_sender,
             self.outbound_messages.clone(),
         );
+
+        // Re-broadcast recovered certificates to guard against crashes that
+        // happened after journaling but before network send.
+        for certificate in recovered_certificates.drain(..) {
+            egress.broadcast_certificate(certificate).await;
+        }
 
         // Initialize view tracking
         let mut current_view = state.view();
@@ -738,32 +749,38 @@ where
 #[cfg(test)]
 mod tests {
     use super::Actor;
+    use bytes::{Buf, Bytes};
     use crate::{
         elector::RoundRobin,
         minimmit::{
             mocks::{application, reporter},
             scheme::ed25519,
+            types::{Artifact, Certificate, MNotarization, Notarize, Proposal},
         },
         mocks::relay,
-        types::{Epoch, ViewDelta},
+        types::{Epoch, Round, View, ViewDelta},
     };
+    use commonware_codec::Read;
     use commonware_cryptography::{
         certificate::mocks::Fixture,
         certificate::Scheme as CertificateScheme,
-        ed25519::PublicKey,
+        ed25519::PublicKey as Ed25519PublicKey,
+        sha256::Digest as Sha256Digest,
+        PublicKey,
         Sha256,
     };
     use commonware_parallel::Sequential;
-    use commonware_p2p::Blocker;
+    use commonware_p2p::{Blocker, CheckedSender, LimitedSender, Recipients};
     use commonware_runtime::{buffer::PoolRef, deterministic};
-    use commonware_runtime::Runner;
-    use commonware_runtime::Metrics;
-    use commonware_runtime::Clock;
+    use commonware_runtime::{Clock, Metrics, Runner, Spawner};
+    use commonware_storage::journal::segmented::variable::{Config as JConfig, Journal};
     use commonware_utils::{test_rng, NZU16, NZUsize, Participant};
     use std::{
+        convert::Infallible,
+        marker::PhantomData,
         num::{NonZeroU16, NonZeroUsize},
-        sync::Arc,
-        time::Duration,
+        sync::{Arc, Mutex},
+        time::{Duration, SystemTime},
     };
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
@@ -773,9 +790,66 @@ mod tests {
     struct NoopBlocker;
 
     impl Blocker for NoopBlocker {
-        type PublicKey = PublicKey;
+        type PublicKey = Ed25519PublicKey;
 
         async fn block(&mut self, _peer: Self::PublicKey) {}
+    }
+
+    #[derive(Clone)]
+    struct TestSender<P: PublicKey> {
+        messages: Arc<Mutex<Vec<Vec<u8>>>>,
+        _marker: PhantomData<P>,
+    }
+
+    impl<P: PublicKey> Default for TestSender<P> {
+        fn default() -> Self {
+            Self {
+                messages: Arc::new(Mutex::new(Vec::new())),
+                _marker: PhantomData,
+            }
+        }
+    }
+
+    impl<P: PublicKey> TestSender<P> {
+        fn len(&self) -> usize {
+            self.messages.lock().unwrap().len()
+        }
+
+        fn take(&self) -> Vec<Vec<u8>> {
+            std::mem::take(&mut *self.messages.lock().unwrap())
+        }
+    }
+
+    struct TestChecked<P: PublicKey> {
+        messages: Arc<Mutex<Vec<Vec<u8>>>>,
+        _marker: PhantomData<P>,
+    }
+
+    impl<P: PublicKey> CheckedSender for TestChecked<P> {
+        type PublicKey = P;
+        type Error = Infallible;
+
+        async fn send(self, mut message: impl Buf + Send, _: bool) -> Result<Vec<P>, Infallible> {
+            let mut buf = vec![0u8; message.remaining()];
+            message.copy_to_slice(&mut buf);
+            self.messages.lock().unwrap().push(buf);
+            Ok(Vec::new())
+        }
+    }
+
+    impl<P: PublicKey> LimitedSender for TestSender<P> {
+        type PublicKey = P;
+        type Checked<'a> = TestChecked<P> where Self: 'a;
+
+        async fn check<'a>(
+            &'a mut self,
+            _: Recipients<Self::PublicKey>,
+        ) -> Result<Self::Checked<'a>, SystemTime> {
+            Ok(TestChecked {
+                messages: self.messages.clone(),
+                _marker: PhantomData,
+            })
+        }
     }
 
     #[test]
@@ -809,8 +883,9 @@ mod tests {
                 certify_latency: (1.0, 0.0),
                 should_certify: application::Certifier::Always,
             };
-            let (_app_actor, application) =
+            let (app_actor, application) =
                 application::Application::new(context.with_label("app"), application_cfg);
+            let _app_handle = app_actor.start();
 
             let leader_timeout = Duration::from_secs(3);
             let notarization_timeout = Duration::from_secs(5);
@@ -848,6 +923,140 @@ mod tests {
                 active_deadline.duration_since(start).unwrap(),
                 notarization_timeout
             );
+        });
+    }
+
+    #[test]
+    fn rebroadcasts_replayed_certificates() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let mut rng = test_rng();
+            let Fixture { schemes, .. } = ed25519::fixture(&mut rng, b"minimmit-rebroadcast", 6);
+            let scheme = schemes[0].clone();
+            let participants = scheme.participants().clone();
+            let me = participants
+                .get(Participant::new(0).into())
+                .expect("participant")
+                .clone();
+
+            let elector = RoundRobin::<commonware_cryptography::Sha256>::default();
+            let reporter_cfg = reporter::Config {
+                participants: participants.clone(),
+                scheme: scheme.clone(),
+                elector: elector.clone(),
+            };
+            let reporter = reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
+
+            let relay = Arc::new(relay::Relay::new());
+            let application_cfg = application::Config {
+                hasher: Sha256::default(),
+                relay: relay.clone(),
+                me: me.clone(),
+                propose_latency: (1.0, 0.0),
+                verify_latency: (1.0, 0.0),
+                certify_latency: (1.0, 0.0),
+                should_certify: application::Certifier::Always,
+            };
+            let (app_actor, application) =
+                application::Application::new(context.with_label("app"), application_cfg);
+            let _app_handle = app_actor.start();
+
+            let partition = "voter_rebroadcast".to_string();
+            let mut journal = Journal::<_, Artifact<ed25519::Scheme, Sha256Digest>>::init(
+                context.with_label("journal"),
+                JConfig {
+                    partition: partition.clone(),
+                    compression: None,
+                    codec_config: scheme.certificate_codec_config(),
+                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                    write_buffer: NZUsize!(1024 * 1024),
+                },
+            )
+            .await
+            .expect("journal init");
+
+            let view = View::new(1);
+            let proposal = Proposal::new(
+                Round::new(Epoch::new(1), view),
+                View::zero(),
+                Sha256Digest::from([0u8; 32]),
+                Sha256Digest::from([1u8; 32]),
+            );
+            let votes: Vec<_> = schemes
+                .iter()
+                .take(3)
+                .map(|scheme| Notarize::sign(scheme, proposal.clone()).expect("notarize"))
+                .collect();
+            let m_notarization =
+                MNotarization::from_notarizes(&scheme, votes.iter(), &Sequential)
+                    .expect("m-notarization");
+            journal
+                .append(view.get(), Artifact::MNotarization(m_notarization.clone()))
+                .await
+                .expect("append");
+            journal
+                .sync_all()
+                .await
+                .expect("sync");
+            drop(journal);
+
+            let cfg = crate::minimmit::actors::voter::Config {
+                scheme: scheme.clone(),
+                elector,
+                blocker: NoopBlocker,
+                automaton: application.clone(),
+                relay: application.clone(),
+                reporter,
+                strategy: Sequential,
+                partition,
+                epoch: Epoch::new(1),
+                mailbox_size: 16,
+                leader_timeout: Duration::from_secs(1),
+                notarization_timeout: Duration::from_secs(2),
+                nullify_retry: Duration::from_secs(1),
+                activity_timeout: ViewDelta::new(3),
+                replay_buffer: NZUsize!(1024 * 1024),
+                write_buffer: NZUsize!(1024 * 1024),
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            };
+
+            let (actor, _mailbox) = Actor::new(context.with_label("voter"), cfg);
+            let (batcher_sender, _batcher_receiver) = futures::channel::mpsc::channel(8);
+            let (resolver_sender, _resolver_receiver) = futures::channel::mpsc::channel(8);
+            let vote_sender = TestSender::<Ed25519PublicKey>::default();
+            let certificate_sender = TestSender::<Ed25519PublicKey>::default();
+
+            actor.start(
+                crate::minimmit::actors::batcher::Mailbox::new(batcher_sender),
+                crate::minimmit::actors::resolver::Mailbox::new(resolver_sender),
+                vote_sender,
+                certificate_sender.clone(),
+            );
+
+            for _ in 0..5 {
+                if certificate_sender.len() > 0 {
+                    break;
+                }
+                context.sleep(Duration::from_millis(1)).await;
+            }
+
+            let messages = certificate_sender.take();
+            assert!(!messages.is_empty(), "expected replayed certificate broadcast");
+
+            let mut buf = Bytes::from(messages[0].clone());
+            let decoded = Certificate::<ed25519::Scheme, Sha256Digest>::read_cfg(
+                &mut buf,
+                &scheme.certificate_codec_config(),
+            )
+            .expect("decode certificate");
+            match decoded {
+                Certificate::MNotarization(m_not) => {
+                    assert_eq!(m_not.proposal.payload, proposal.payload);
+                }
+                _ => panic!("expected m-notarization"),
+            }
+
+            context.stop(0, None).await.expect("stop");
         });
     }
 }
