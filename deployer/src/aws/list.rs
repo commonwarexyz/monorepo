@@ -1,9 +1,9 @@
 //! `list` subcommand for `ec2`
 
 use crate::aws::{
-    deployer_directory, Metadata, Error, CREATED_FILE_NAME, DESTROYED_FILE_NAME,
-    METADATA_FILE_NAME,
+    deployer_directory, Error, Metadata, CREATED_FILE_NAME, DESTROYED_FILE_NAME, METADATA_FILE_NAME,
 };
+use chrono::{DateTime, Local, Utc};
 use std::fs::{self, File};
 use tracing::info;
 
@@ -31,23 +31,15 @@ pub fn list() -> Result<(), Error> {
             continue;
         }
 
-        // Load metadata if available, otherwise use directory name as tag
+        // Load metadata (skip if missing or malformed)
         let metadata_path = path.join(METADATA_FILE_NAME);
-        if metadata_path.exists() {
-            let file = File::open(&metadata_path)?;
-            active.push(serde_yaml::from_reader::<_, Metadata>(file)?);
-        } else {
-            let Some(tag) = path.file_name().and_then(|n| n.to_str()) else {
-                continue;
-            };
-            let tag = tag.to_string();
-            active.push(Metadata {
-                tag,
-                created_at: 0,
-                regions: vec!["unknown".to_string()],
-                instance_count: 0,
-            });
-        }
+        let Ok(file) = File::open(&metadata_path) else {
+            continue;
+        };
+        let Ok(metadata) = serde_yaml::from_reader::<_, Metadata>(file) else {
+            continue;
+        };
+        active.push(metadata);
     }
 
     // Display results sorted by creation time (newest first)
@@ -56,9 +48,14 @@ pub fn list() -> Result<(), Error> {
     } else {
         active.sort_by(|a, b| b.created_at.cmp(&a.created_at));
         for d in &active {
+            let created_at = DateTime::<Utc>::from_timestamp(d.created_at as i64, 0).map(|dt| {
+                dt.with_timezone(&Local)
+                    .format("%Y-%m-%d %H:%M:%S")
+                    .to_string()
+            });
             info!(
                 tag = d.tag.as_str(),
-                created_at = d.created_at,
+                created_at,
                 regions = ?d.regions,
                 instances = d.instance_count,
             );
