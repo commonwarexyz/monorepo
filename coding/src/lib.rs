@@ -10,135 +10,128 @@
     html_favicon_url = "https://commonware.xyz/favicon.ico"
 )]
 
-#[ready(2)]
-use bytes::Buf;
-#[ready(2)]
-use commonware_codec::{Codec, FixedSize, Read, Write};
-#[ready(2)]
-use commonware_cryptography::Digest;
-use commonware_macros::{ready, ready_mod};
-#[ready(2)]
-use commonware_parallel::Strategy;
-#[ready(2)]
-use std::fmt::Debug;
-
-ready_mod!(1, mod reed_solomon);
-#[ready(1)]
-pub use reed_solomon::{Error as ReedSolomonError, ReedSolomon};
+use commonware_macros::{ready_mod, ready_scope};
 
 ready_mod!(0, mod no_coding);
-#[ready(0)]
+#[cfg(not(min_readiness_1))]
+#[cfg(not(min_readiness_2))]
+#[cfg(not(min_readiness_3))]
+#[cfg(not(min_readiness_4))]
 pub use no_coding::{Error as NoCodingError, NoCoding};
 
-ready_mod!(1, mod zoda);
-#[ready(1)]
-pub use zoda::{Error as ZodaError, Zoda};
+ready_scope!(1 {
+    mod reed_solomon;
+    pub use reed_solomon::{Error as ReedSolomonError, ReedSolomon};
 
-/// Configuration common to all encoding schemes.
-#[ready(2)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
-pub struct Config {
-    /// The minimum number of shards needed to encode the data.
-    pub minimum_shards: u16,
-    /// Extra shards beyond the minimum number.
+    mod zoda;
+    pub use zoda::{Error as ZodaError, Zoda};
+});
+
+ready_scope!(2 {
+    use bytes::Buf;
+    use commonware_codec::{Codec, FixedSize, Read, Write};
+    use commonware_cryptography::Digest;
+    use commonware_parallel::Strategy;
+    use std::fmt::Debug;
+
+    /// Configuration common to all encoding schemes.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+    pub struct Config {
+        /// The minimum number of shards needed to encode the data.
+        pub minimum_shards: u16,
+        /// Extra shards beyond the minimum number.
+        ///
+        /// Alternatively, one can think of the configuration as having a total number
+        /// `N = extra_shards + minimum_shards`, but by specifying the `extra_shards`
+        /// rather than `N`, we avoid needing to check that `minimum_shards <= N`.
+        pub extra_shards: u16,
+    }
+
+    impl Config {
+        /// Returns the total number of shards produced by this configuration.
+        pub fn total_shards(&self) -> u32 {
+            u32::from(self.minimum_shards) + u32::from(self.extra_shards)
+        }
+    }
+
+    impl FixedSize for Config {
+        const SIZE: usize = 2 * <u16 as FixedSize>::SIZE;
+    }
+
+    impl Write for Config {
+        fn write(&self, buf: &mut impl bytes::BufMut) {
+            self.minimum_shards.write(buf);
+            self.extra_shards.write(buf);
+        }
+    }
+
+    impl Read for Config {
+        type Cfg = ();
+
+        fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+            Ok(Self {
+                minimum_shards: u16::read_cfg(buf, cfg)?,
+                extra_shards: u16::read_cfg(buf, cfg)?,
+            })
+        }
+    }
+
+    /// The configuration for decoding shard data.
+    #[derive(Clone, Debug)]
+    pub struct CodecConfig {
+        /// The maximum number of bytes a shard is expected to contain.
+        ///
+        /// This can be an upper bound, and only constrains the non-fixed-size portion
+        /// of shard data.
+        pub maximum_shard_size: usize,
+    }
+
+    /// A scheme for encoding data into pieces, and recovering the data from those pieces.
     ///
-    /// Alternatively, one can think of the configuration as having a total number
-    /// `N = extra_shards + minimum_shards`, but by specifying the `extra_shards`
-    /// rather than `N`, we avoid needing to check that `minimum_shards <= N`.
-    pub extra_shards: u16,
-}
-
-#[ready(2)]
-impl Config {
-    /// Returns the total number of shards produced by this configuration.
-    pub fn total_shards(&self) -> u32 {
-        u32::from(self.minimum_shards) + u32::from(self.extra_shards)
-    }
-}
-
-#[ready(2)]
-impl FixedSize for Config {
-    const SIZE: usize = 2 * <u16 as FixedSize>::SIZE;
-}
-
-#[ready(2)]
-impl Write for Config {
-    fn write(&self, buf: &mut impl bytes::BufMut) {
-        self.minimum_shards.write(buf);
-        self.extra_shards.write(buf);
-    }
-}
-
-#[ready(2)]
-impl Read for Config {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
-        Ok(Self {
-            minimum_shards: u16::read_cfg(buf, cfg)?,
-            extra_shards: u16::read_cfg(buf, cfg)?,
-        })
-    }
-}
-
-/// The configuration for decoding shard data.
-#[ready(2)]
-#[derive(Clone, Debug)]
-pub struct CodecConfig {
-    /// The maximum number of bytes a shard is expected to contain.
+    /// # Example
+    /// ```
+    /// use commonware_coding::{Config, ReedSolomon, Scheme as _};
+    /// use commonware_cryptography::Sha256;
+    /// use commonware_parallel::Sequential;
     ///
-    /// This can be an upper bound, and only constrains the non-fixed-size portion
-    /// of shard data.
-    pub maximum_shard_size: usize,
-}
-
-/// A scheme for encoding data into pieces, and recovering the data from those pieces.
-///
-/// # Example
-/// ```
-/// use commonware_coding::{Config, ReedSolomon, Scheme as _};
-/// use commonware_cryptography::Sha256;
-/// use commonware_parallel::Sequential;
-///
-/// const STRATEGY: Sequential = Sequential;
-///
-/// type RS = ReedSolomon<Sha256>;
-///
-/// let config = Config { minimum_shards: 2, extra_shards: 1 };
-/// let data = b"Hello!";
-/// // Turn the data into shards, and a commitment to those shards.
-/// let (commitment, shards) =
-///      RS::encode(&config, data.as_slice(), &STRATEGY).unwrap();
-///
-/// // Each person produces reshards, their own checked shard, and checking data
-/// // to check other peoples reshards.
-/// let (mut checking_data_w_shard, reshards): (Vec<_>, Vec<_>) = shards
-///         .into_iter()
-///         .enumerate()
-///         .map(|(i, shard)| {
-///             let (checking_data, checked_shard, reshard) = RS::reshard(&config, &commitment, i as u16, shard).unwrap();
-///             ((checking_data, checked_shard), reshard)
-///         })
-///         .collect();
-/// // Let's pretend that the last item is "ours"
-/// let (checking_data, checked_shard) = checking_data_w_shard.pop().unwrap();
-/// // We can use this checking_data to check the other shards.
-/// let mut checked_shards = Vec::new();
-/// checked_shards.push(checked_shard);
-/// for (i, reshard) in reshards.into_iter().enumerate().skip(1) {
-///   checked_shards.push(RS::check(&config, &commitment, &checking_data, i as u16, reshard).unwrap())
-/// }
-///
-/// let data2 = RS::decode(&config, &commitment, checking_data, &checked_shards[..2], &STRATEGY).unwrap();
-/// assert_eq!(&data[..], &data2[..]);
-///
-/// // Decoding works with different shards, with a guarantee to get the same result.
-/// let data3 = RS::decode(&config, &commitment, checking_data, &checked_shards[1..], &STRATEGY).unwrap();
-/// assert_eq!(&data[..], &data3[..]);
-/// ```
-#[ready(2)]
-pub trait Scheme: Debug + Clone + Send + Sync + 'static {
+    /// const STRATEGY: Sequential = Sequential;
+    ///
+    /// type RS = ReedSolomon<Sha256>;
+    ///
+    /// let config = Config { minimum_shards: 2, extra_shards: 1 };
+    /// let data = b"Hello!";
+    /// // Turn the data into shards, and a commitment to those shards.
+    /// let (commitment, shards) =
+    ///      RS::encode(&config, data.as_slice(), &STRATEGY).unwrap();
+    ///
+    /// // Each person produces reshards, their own checked shard, and checking data
+    /// // to check other peoples reshards.
+    /// let (mut checking_data_w_shard, reshards): (Vec<_>, Vec<_>) = shards
+    ///         .into_iter()
+    ///         .enumerate()
+    ///         .map(|(i, shard)| {
+    ///             let (checking_data, checked_shard, reshard) = RS::reshard(&config, &commitment, i as u16, shard).unwrap();
+    ///             ((checking_data, checked_shard), reshard)
+    ///         })
+    ///         .collect();
+    /// // Let's pretend that the last item is "ours"
+    /// let (checking_data, checked_shard) = checking_data_w_shard.pop().unwrap();
+    /// // We can use this checking_data to check the other shards.
+    /// let mut checked_shards = Vec::new();
+    /// checked_shards.push(checked_shard);
+    /// for (i, reshard) in reshards.into_iter().enumerate().skip(1) {
+    ///   checked_shards.push(RS::check(&config, &commitment, &checking_data, i as u16, reshard).unwrap())
+    /// }
+    ///
+    /// let data2 = RS::decode(&config, &commitment, checking_data, &checked_shards[..2], &STRATEGY).unwrap();
+    /// assert_eq!(&data[..], &data2[..]);
+    ///
+    /// // Decoding works with different shards, with a guarantee to get the same result.
+    /// let data3 = RS::decode(&config, &commitment, checking_data, &checked_shards[1..], &STRATEGY).unwrap();
+    /// assert_eq!(&data[..], &data3[..]);
+    /// ```
+    pub trait Scheme: Debug + Clone + Send + Sync + 'static {
     /// A commitment attesting to the shards of data.
     type Commitment: Digest;
     /// A shard of data, to be received by a participant.
@@ -217,15 +210,15 @@ pub trait Scheme: Debug + Clone + Send + Sync + 'static {
         shards: &[Self::CheckedShard],
         strategy: &impl Strategy,
     ) -> Result<Vec<u8>, Self::Error>;
-}
+    }
 
-/// A marker trait indicating that [Scheme::check] proves validity of the encoding.
-///
-/// In more detail, this means that upon a successful call to [Scheme::check],
-/// guarantees that the shard results from a valid encoding of the data, and thus,
-/// if other participants also call check, then the data is guaranteed to be reconstructable.
-#[ready(2)]
-pub trait ValidatingScheme: Scheme {}
+    /// A marker trait indicating that [Scheme::check] proves validity of the encoding.
+    ///
+    /// In more detail, this means that upon a successful call to [Scheme::check],
+    /// guarantees that the shard results from a valid encoding of the data, and thus,
+    /// if other participants also call check, then the data is guaranteed to be reconstructable.
+    pub trait ValidatingScheme: Scheme {}
+});
 
 #[cfg(test)]
 mod test {

@@ -5,38 +5,37 @@
     html_favicon_url = "https://commonware.xyz/favicon.ico"
 )]
 
-#[ready(2)]
-use commonware_codec::Codec;
-use commonware_macros::{ready, ready_mod};
-#[ready(2)]
-use futures::channel::oneshot;
-#[ready(2)]
-use std::future::Future;
+use commonware_macros::ready_scope;
 
-ready_mod!(2, pub mod buffered);
+ready_scope!(2 {
+    use commonware_codec::Codec;
+    use futures::channel::oneshot;
+    use std::future::Future;
 
-/// Broadcaster is the interface responsible for attempting replication of messages across a network.
-#[ready(2)]
-pub trait Broadcaster: Clone + Send + 'static {
-    /// The type of recipients that can receive messages.
-    type Recipients;
+    pub mod buffered;
 
-    /// Message is the type of data that can be broadcasted.
-    ///
-    /// It must implement the Codec trait so that it can be:
-    /// - serialized upon broadcast
-    /// - deserialized upon reception
-    type Message: Codec + Clone + Send + 'static;
+    /// Broadcaster is the interface responsible for attempting replication of messages across a network.
+    pub trait Broadcaster: Clone + Send + 'static {
+        /// The type of recipients that can receive messages.
+        type Recipients;
 
-    /// The type of data that is returned once the message is broadcasted.
-    ///
-    /// It may also indicate the success or failure of the broadcast attempt.
-    type Response: Clone + Send + 'static;
+        /// Message is the type of data that can be broadcasted.
+        ///
+        /// It must implement the Codec trait so that it can be:
+        /// - serialized upon broadcast
+        /// - deserialized upon reception
+        type Message: Codec + Clone + Send + 'static;
 
-    /// Attempt to broadcast a message to the associated recipients.
-    fn broadcast(
-        &mut self,
-        recipients: Self::Recipients,
-        message: Self::Message,
-    ) -> impl Future<Output = oneshot::Receiver<Self::Response>> + Send;
-}
+        /// The type of data that is returned once the message is broadcasted.
+        ///
+        /// It may also indicate the success or failure of the broadcast attempt.
+        type Response: Clone + Send + 'static;
+
+        /// Attempt to broadcast a message to the associated recipients.
+        fn broadcast(
+            &mut self,
+            recipients: Self::Recipients,
+            message: Self::Message,
+        ) -> impl Future<Output = oneshot::Receiver<Self::Response>> + Send;
+    }
+});

@@ -11,6 +11,7 @@ use proc_macro2::Span;
 use proc_macro_crate::{crate_name, FoundCrate};
 use quote::{format_ident, quote, ToTokens};
 use syn::{
+    braced,
     parse::{Parse, ParseStream, Result},
     parse_macro_input, Block, Error, Expr, Ident, ItemFn, LitInt, LitStr, Pat, Token, Visibility,
 };
@@ -117,6 +118,78 @@ pub fn ready_mod(input: TokenStream) -> TokenStream {
     let expanded = quote! {
         #(#cfg_attrs)*
         #visibility mod #name;
+    };
+
+    TokenStream::from(expanded)
+}
+
+/// Input for the `ready_scope!` macro: `level { items... }`
+struct ReadyScopeInput {
+    level: LitInt,
+    items: Vec<syn::Item>,
+}
+
+impl Parse for ReadyScopeInput {
+    fn parse(input: ParseStream<'_>) -> Result<Self> {
+        let level: LitInt = input.parse()?;
+        let content;
+        braced!(content in input);
+
+        let mut items = Vec::new();
+        while !content.is_empty() {
+            items.push(content.parse()?);
+        }
+
+        Ok(Self { level, items })
+    }
+}
+
+/// Marks all items within a scope with a readiness level (0-4).
+///
+/// When building with `RUSTFLAGS="--cfg min_readiness_N"`, items with readiness
+/// less than N are excluded.
+///
+/// # Example
+/// ```rust,ignore
+/// use commonware_macros::ready_scope;
+///
+/// ready_scope!(2 {
+///     pub mod stable_module;
+///     pub use crate::stable_module::Item;
+/// });
+/// ```
+#[proc_macro]
+pub fn ready_scope(input: TokenStream) -> TokenStream {
+    let ReadyScopeInput { level, items } = parse_macro_input!(input as ReadyScopeInput);
+
+    let level_value: u8 = match level.base10_parse() {
+        Ok(v) if v <= 4 => v,
+        _ => {
+            return Error::new(level.span(), "readiness level must be 0, 1, 2, 3, or 4")
+                .to_compile_error()
+                .into();
+        }
+    };
+
+    // Generate cfg attributes: ready_scope!(N { ... }) excludes items when min_readiness_(N+1..=4) is set
+    let mut cfg_attrs = Vec::new();
+    for exclude_level in (level_value + 1)..=4 {
+        let cfg_name = format_ident!("min_readiness_{}", exclude_level);
+        cfg_attrs.push(quote! { #[cfg(not(#cfg_name))] });
+    }
+
+    let expanded_items: Vec<_> = items
+        .into_iter()
+        .map(|item| {
+            quote! {
+                #(#cfg_attrs)*
+                #item
+            }
+        })
+        .collect();
+
+    let expanded = quote! {
+        #(#expanded_items)*
     };
 
     TokenStream::from(expanded)
