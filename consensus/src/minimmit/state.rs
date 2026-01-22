@@ -758,17 +758,9 @@ where
         // For non-M-notarization certificates, skip if we've already processed
         if should_broadcast {
             if let Some(state) = self.views.get(&view) {
-                if state.has_certificate(&certificate) {
-                    // For M-notarizations, we still need to check for contradiction even
-                    // if we've already broadcast one. Multiple M-notarizations can exist
-                    // for different proposals, and we may need to nullify.
-                    if let Certificate::MNotarization(ref m_not) = certificate {
-                        let mut actions = Vec::new();
-                        actions.extend(
-                            self.nullify_by_certificate_contradiction(view, m_not.proposal.payload),
-                        );
-                        return actions;
-                    }
+                if state.has_certificate(&certificate)
+                    && !matches!(certificate, Certificate::MNotarization(_))
+                {
                     return Vec::new();
                 }
             }

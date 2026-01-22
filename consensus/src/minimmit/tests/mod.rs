@@ -1609,6 +1609,67 @@ fn select_parent_returns_highest_m_notarization() {
     assert_eq!(parent_payload, payload_v2, "Parent payload should match");
 }
 
+/// Test: multiple M-notarizations for the same view are retained.
+#[test]
+fn multiple_m_notarizations_per_view_are_retained() {
+    let mut harness = Harness::new(6);
+    let view = harness.view();
+    let payload_a = Digest::from([0xA1; 32]);
+    let payload_b = Digest::from([0xB2; 32]);
+
+    let proposal_a = Proposal::new(
+        Round::new(Epoch::new(1), view),
+        View::zero(),
+        GENESIS,
+        payload_a,
+    );
+    let proposal_b = Proposal::new(
+        Round::new(Epoch::new(1), view),
+        View::zero(),
+        GENESIS,
+        payload_b,
+    );
+
+    let votes_a: Vec<_> = [0, 1, 2]
+        .iter()
+        .map(|&i| Notarize::sign(&harness.schemes[i], proposal_a.clone()).expect("notarize"))
+        .collect();
+    let m_not_a =
+        MNotarization::from_notarizes(&harness.verifier, votes_a.iter(), &Sequential)
+            .expect("m-notarization A");
+    let actions = harness
+        .state
+        .receive_certificate(Certificate::MNotarization(m_not_a));
+    harness.next_actions(actions);
+    harness.drain_actions();
+
+    let votes_b: Vec<_> = [3, 4, 5]
+        .iter()
+        .map(|&i| Notarize::sign(&harness.schemes[i], proposal_b.clone()).expect("notarize"))
+        .collect();
+    let m_not_b =
+        MNotarization::from_notarizes(&harness.verifier, votes_b.iter(), &Sequential)
+            .expect("m-notarization B");
+    let actions = harness
+        .state
+        .receive_certificate(Certificate::MNotarization(m_not_b));
+    harness.next_actions(actions);
+    harness.drain_actions();
+
+    let proposal_next = Proposal::new(
+        Round::new(Epoch::new(1), view.next()),
+        view,
+        payload_b,
+        Digest::from([0xC3; 32]),
+    );
+    let parent = harness.state.parent_payload(&proposal_next);
+    assert_eq!(
+        parent,
+        Some((view, payload_b)),
+        "Parent payload should be resolved for the second M-notarization"
+    );
+}
+
 // =============================================================================
 // Leader Election Tests
 // =============================================================================
