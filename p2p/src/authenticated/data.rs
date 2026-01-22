@@ -16,14 +16,14 @@ pub struct Data {
 
 impl EncodeSize for Data {
     fn encode_size(&self) -> usize {
-        UInt(self.channel).encode_size() + self.message.as_ref().encode_size()
+        UInt(self.channel).encode_size() + self.message.encode_size()
     }
 }
 
 impl Write for Data {
     fn write(&self, buf: &mut impl BufMut) {
         UInt(self.channel).write(buf);
-        self.message.as_ref().write(buf);
+        self.message.write(buf);
     }
 }
 
@@ -73,25 +73,16 @@ mod tests {
     fn test_data_codec() {
         let original = Data {
             channel: 12345,
-            message: IoBuf::from(b"Hello, world!".as_slice()),
+            message: IoBuf::from(b"Hello, world!"),
         };
         let encoded = original.encode();
         let decoded = Data::decode_cfg(encoded, &(13..=13).into()).unwrap();
-        assert_eq!(decoded.channel, 12345);
-        assert_eq!(decoded.message, b"Hello, world!");
+        assert_eq!(original, decoded);
 
-        let original2 = Data {
-            channel: 12345,
-            message: IoBuf::from(b"Hello, world!".as_slice()),
-        };
-        let too_short = Data::decode_cfg(original2.encode(), &(0..13).into());
+        let too_short = Data::decode_cfg(original.encode(), &(0..13).into());
         assert!(matches!(too_short, Err(Error::InvalidLength(13))));
 
-        let original3 = Data {
-            channel: 12345,
-            message: IoBuf::from(b"Hello, world!".as_slice()),
-        };
-        let too_long = Data::decode_cfg(original3.encode(), &(14..).into());
+        let too_long = Data::decode_cfg(original.encode(), &(14..).into());
         assert!(matches!(too_long, Err(Error::InvalidLength(13))));
     }
 
@@ -104,7 +95,7 @@ mod tests {
 
     #[cfg(feature = "arbitrary")]
     mod conformance {
-        use super::Data;
+        use super::*;
         use commonware_codec::conformance::CodecConformance;
 
         commonware_conformance::conformance_tests! {
