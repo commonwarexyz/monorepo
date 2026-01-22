@@ -14,7 +14,7 @@ use commonware_runtime::{
 use commonware_utils::{from_hex_formatted, ordered::Set, union, TryCollect, NZU32};
 use futures::future::try_join_all;
 use prometheus_client::metrics::{counter::Counter, histogram::Histogram};
-use rand::{rngs::StdRng, RngCore, SeedableRng};
+use rand::{rngs::SmallRng, RngCore, SeedableRng};
 use std::{
     collections::HashMap,
     net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -157,7 +157,7 @@ fn main() {
         let flood_sender = context
             .with_label("flood_sender")
             .spawn(move |context| async move {
-                let mut rng = StdRng::seed_from_u64(0);
+                let mut rng = SmallRng::seed_from_u64(0);
                 let messages: Counter<u64, AtomicU64> = Counter::default();
                 context.register("messages", "Sent messages", messages.clone());
                 loop {
