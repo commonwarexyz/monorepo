@@ -5,6 +5,7 @@ pub(crate) mod impls;
 pub(crate) mod tests;
 
 use crate::{
+    index,
     mmr::journaled::Config as MmrConfig,
     qmdb::any::{FixedConfig, VariableConfig},
     translator::Translator,
@@ -55,4 +56,22 @@ pub trait Index: Sized {
     type Translator: crate::translator::Translator + Clone;
     /// Create a new index for use during sync.
     fn new(ctx: impl Metrics, translator: Self::Translator) -> Self;
+}
+
+impl<T: Translator, V: Eq + Send + Sync> crate::qmdb::any::sync::Index
+    for index::unordered::Index<T, V>
+{
+    type Translator = T;
+    fn new(ctx: impl Metrics, translator: T) -> Self {
+        Self::new(ctx, translator)
+    }
+}
+
+impl<T: Translator, V: Eq + Send + Sync> crate::qmdb::any::sync::Index
+    for index::ordered::Index<T, V>
+{
+    type Translator = T;
+    fn new(ctx: impl Metrics, translator: T) -> Self {
+        Self::new(ctx, translator)
+    }
 }
