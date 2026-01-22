@@ -1004,6 +1004,21 @@ mod tests {
     }
 
     #[test]
+    fn test_iobuf_len_equals_remaining_after_advance() {
+        let mut buf = IoBuf::from(b"hello world");
+
+        // Before advance
+        assert_eq!(buf.len(), buf.remaining());
+        assert_eq!(buf.as_ref(), buf.chunk());
+
+        // After advance
+        buf.advance(6);
+        assert_eq!(buf.len(), buf.remaining());
+        assert_eq!(buf.as_ref(), buf.chunk());
+        assert_eq!(buf.len(), 5);
+    }
+
+    #[test]
     fn test_iobufs_empty() {
         let bufs = IoBufs::from(Vec::new());
         assert!(bufs.is_empty());
@@ -1318,6 +1333,28 @@ mod tests {
     fn test_iobufmut_advance_past_end() {
         let mut buf = IoBufMut::from(b"hello");
         buf.advance(10);
+    }
+
+    #[test]
+    fn test_iobufmut_len_equals_remaining_after_advance() {
+        let mut buf = IoBufMut::from(b"hello world");
+
+        // Before advance
+        assert_eq!(buf.len(), buf.remaining());
+        assert_eq!(buf.as_ref(), buf.chunk());
+
+        // After partial advance
+        buf.advance(6);
+        assert_eq!(buf.len(), buf.remaining());
+        assert_eq!(buf.as_ref(), buf.chunk());
+        assert_eq!(buf.len(), 5);
+        assert_eq!(buf.as_ref(), b"world");
+
+        // After advancing to end
+        buf.advance(5);
+        assert_eq!(buf.len(), buf.remaining());
+        assert_eq!(buf.as_ref(), buf.chunk());
+        assert_eq!(buf.len(), 0);
     }
 
     #[test]
@@ -1677,6 +1714,27 @@ mod tests {
         let iobufs_bytes = iobufs.copy_to_bytes(8);
         assert_eq!(chain_bytes, iobufs_bytes);
         assert_eq!(chain_bytes.as_ref(), b"hello wo");
+    }
+
+    #[test]
+    fn test_iobufsmut_len_equals_remaining_after_advance() {
+        let buf1 = IoBufMut::from(b"hello");
+        let buf2 = IoBufMut::from(b" world");
+        let mut bufs = IoBufsMut::from(vec![buf1, buf2]);
+
+        // Before advance
+        assert_eq!(bufs.len(), bufs.remaining());
+        assert_eq!(bufs.len(), 11);
+
+        // After partial advance (within first buffer)
+        bufs.advance(3);
+        assert_eq!(bufs.len(), bufs.remaining());
+        assert_eq!(bufs.len(), 8);
+
+        // After advance past first buffer
+        bufs.advance(4);
+        assert_eq!(bufs.len(), bufs.remaining());
+        assert_eq!(bufs.len(), 4);
     }
 
     #[cfg(feature = "arbitrary")]
