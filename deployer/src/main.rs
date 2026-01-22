@@ -95,7 +95,7 @@ async fn main() -> std::process::ExitCode {
                         .arg(
                             Arg::new("tag")
                                 .long("tag")
-                                .help("Deployment tag (uses persisted metadata)")
+                                .help("Deployment tag")
                                 .value_parser(clap::value_parser!(String)),
                         )
                         .group(
