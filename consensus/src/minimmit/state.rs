@@ -669,14 +669,14 @@ where
     /// individual votes. An M-notarization proves that M-quorum (2f+1) validators voted
     /// for a different proposal, which is sufficient contradiction evidence.
     ///
-    /// This applies to both current and past views - M-notarizations can arrive after
-    /// we've advanced, and emitting nullifies helps other validators form nullification
-    /// certificates.
     fn nullify_by_certificate_contradiction(
         &mut self,
         view: View,
         certificate_digest: D,
     ) -> Option<Action<S, D>> {
+        if view != self.view {
+            return None;
+        }
         // Check if we voted for a different proposal
         let state = self.views.get(&view)?;
         let Phase::Voted { digest } = *state.phase() else {

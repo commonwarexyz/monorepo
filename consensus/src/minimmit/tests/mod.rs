@@ -545,6 +545,60 @@ fn vote_on_past_view_m_notarization() {
     );
 }
 
+/// Regression test: past-view M-notarizations should not trigger nullify.
+#[test]
+fn past_view_m_notarization_does_not_nullify() {
+    let mut harness = Harness::new(6);
+    let view = harness.view();
+
+    // Vote for proposal A in the current view.
+    let payload_a = Digest::from([0xAA; 32]);
+    let proposal_a = Proposal::new(
+        Round::new(Epoch::new(1), view),
+        View::zero(),
+        GENESIS,
+        payload_a,
+    );
+    harness.receive_proposal(proposal_a);
+    harness.verify_proposal(view, true);
+    harness.drain_actions();
+
+    // Advance to the next view via an M-notarization for proposal A.
+    harness.deliver_m_notarization(
+        view,
+        payload_a,
+        &[
+            Participant::new(0),
+            Participant::new(1),
+            Participant::new(2),
+        ],
+    );
+    harness.drain_actions();
+    assert_eq!(harness.view(), view.next());
+
+    // Deliver a conflicting M-notarization for the past view.
+    let payload_b = Digest::from([0xBB; 32]);
+    harness.deliver_m_notarization(
+        view,
+        payload_b,
+        &[
+            Participant::new(3),
+            Participant::new(4),
+            Participant::new(5),
+        ],
+    );
+    let actions = harness.drain_actions();
+
+    let nullified_past_view = actions.iter().any(|action| match action {
+        Action::BroadcastNullify(nullify) => nullify.round.view() == view,
+        _ => false,
+    });
+    assert!(
+        !nullified_past_view,
+        "Should not nullify a past view when receiving a conflicting M-notarization"
+    );
+}
+
 // =============================================================================
 // Core Axiom Tests (Lemmas from the paper)
 // =============================================================================
