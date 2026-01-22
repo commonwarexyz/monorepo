@@ -245,6 +245,7 @@ impl crate::Sink for Sink {
     async fn send(&mut self, buf: impl Into<IoBufs> + Send) -> Result<(), crate::Error> {
         // Convert to contiguous IoBuf for io_uring send
         // (zero-copy if single buffer, copies if multiple)
+        // TODO(#2705): Use writev to avoid this copy.
         let mut buf = buf.into().coalesce();
         let mut bytes_sent = 0;
         let buf_len = buf.len();
@@ -252,7 +253,7 @@ impl crate::Sink for Sink {
         while bytes_sent < buf_len {
             // Figure out how much is left to send and where to send from.
             //
-            // SAFETY: IoBuf wraps Bytes which has stable memory addresses.
+            // SAFETY: `buf` is an `IoBuf` guaranteeing the memory won't move.
             // `bytes_sent` is always < `buf_len` due to the loop condition, so
             // `add(bytes_sent)` stays within bounds and `buf_len - bytes_sent`
             // correctly represents the remaining valid bytes.
@@ -266,7 +267,7 @@ impl crate::Sink for Sink {
             // Submit the operation to the io_uring event loop
             let (tx, rx) = oneshot::channel();
             self.submitter
-                .send(crate::iouring::Op {
+                .send(iouring::Op {
                     work: op,
                     sender: tx,
                     buffer: Some(OpBuffer::Write(buf)),
@@ -344,14 +345,14 @@ impl Stream {
     ) -> (IoBufMut, Result<usize, crate::Error>) {
         loop {
             // SAFETY: offset + len <= buffer.len() as guaranteed by callers.
-            // IoBufMut wraps BytesMut which has stable memory addresses.
+            // `buffer` is an `IoBufMut` guaranteeing the memory won't move.
             let ptr = unsafe { buffer.as_mut_ptr().add(offset) };
             let op = io_uring::opcode::Recv::new(self.as_raw_fd(), ptr, len as u32).build();
 
             let (tx, rx) = oneshot::channel();
             if self
                 .submitter
-                .send(crate::iouring::Op {
+                .send(iouring::Op {
                     work: op,
                     sender: tx,
                     buffer: Some(OpBuffer::Read(buffer)),
@@ -460,7 +461,6 @@ mod tests {
             tests,
         },
     };
-    use bytes::Buf;
     use commonware_macros::test_group;
     use prometheus_client::registry::Registry;
     use std::time::Duration;
@@ -633,7 +633,7 @@ mod tests {
         let (buf1, buf2) = reader.await.unwrap();
 
         // Verify we got the right data
-        assert_eq!(buf1.chunk(), &[1u8, 2, 3, 4, 5]);
-        assert_eq!(buf2.chunk(), &[6u8, 7, 8, 9, 10]);
+        assert_eq!(buf1.coalesce(), &[1u8, 2, 3, 4, 5]);
+        assert_eq!(buf2.coalesce(), &[6u8, 7, 8, 9, 10]);
     }
 }
