@@ -29,27 +29,6 @@ where
     type Digest = H::Digest;
     type Context = E;
 
-    async fn create_journal(
-        context: Self::Context,
-        config: &Self::Config,
-        range: Range<Location>,
-    ) -> Result<Self::Journal, Error> {
-        // Initialize contiguous journal for the sync range
-        variable::Journal::init_sync(
-            context.with_label("log"),
-            variable::Config {
-                items_per_section: config.log_items_per_section,
-                partition: config.log_partition.clone(),
-                compression: config.log_compression,
-                codec_config: config.log_codec_config.clone(),
-                buffer_pool: config.buffer_pool.clone(),
-                write_buffer: config.log_write_buffer,
-            },
-            *range.start..*range.end,
-        )
-        .await
-    }
-
     /// Returns a [super::Immutable] initialized data collected in the sync process.
     ///
     /// # Behavior

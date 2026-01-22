@@ -1,10 +1,10 @@
 //! Core sync engine components that are shared across sync clients.
-
 use crate::{
     mmr::{Location, StandardHasher},
     qmdb::{
         self,
         sync::{
+            database::Config as _,
             error::EngineError,
             requests::Requests,
             resolver::{FetchResult, Resolver},
@@ -172,9 +172,9 @@ where
         }
 
         // Create journal and verifier using the database's factory methods
-        let journal = DB::create_journal(
+        let journal = <DB::Journal as Journal>::new(
             config.context.clone(),
-            &config.db_config,
+            config.db_config.journal_config(),
             config.target.range.clone(),
         )
         .await?;

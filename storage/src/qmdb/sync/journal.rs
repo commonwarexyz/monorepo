@@ -1,12 +1,31 @@
-use std::future::Future;
+use crate::mmr::Location;
+use std::{future::Future, ops::Range};
 
 /// Journal of operations used by a [super::Database]
-pub trait Journal: Send {
+pub trait Journal: Sized + Send {
+    /// The context of the journal
+    type Context;
+
+    /// The configuration of the journal
+    type Config;
+
     /// The type of operations in the journal
     type Op: Send;
 
     /// The error type returned by the journal
     type Error: std::error::Error + Send + 'static + Into<crate::qmdb::Error>;
+
+    /// Create/open a journal for syncing the given range.
+    ///
+    /// The implementation must:
+    /// - Reuse any on-disk data whose logical locations lie within the range.
+    /// - Discard/ignore any data outside the range.
+    /// - Report `size()` equal to the next location to be filled.
+    fn new(
+        context: Self::Context,
+        config: Self::Config,
+        range: Range<Location>,
+    ) -> impl Future<Output = Result<Self, Self::Error>>;
 
     /// Persist the journal.
     fn sync(&mut self) -> impl Future<Output = Result<(), Self::Error>> + Send;
@@ -28,8 +47,23 @@ where
     E: commonware_runtime::Storage + commonware_runtime::Metrics,
     V: commonware_codec::CodecShared,
 {
+    type Context = E;
+    type Config = crate::journal::contiguous::variable::Config<V::Cfg>;
     type Op = V;
     type Error = crate::journal::Error;
+
+    async fn new(
+        context: Self::Context,
+        config: Self::Config,
+        range: Range<Location>,
+    ) -> Result<Self, Self::Error> {
+        Self::init_sync(
+            context.with_label("log"),
+            config.clone(),
+            *range.start..*range.end,
+        )
+        .await
+    }
 
     async fn sync(&mut self) -> Result<(), Self::Error> {
         Self::sync(self).await
@@ -53,8 +87,18 @@ where
     E: commonware_runtime::Storage + commonware_runtime::Metrics,
     A: commonware_codec::CodecFixedShared,
 {
+    type Context = E;
+    type Config = crate::journal::contiguous::fixed::Config;
     type Op = A;
     type Error = crate::journal::Error;
+
+    async fn new(
+        context: Self::Context,
+        config: Self::Config,
+        range: Range<Location>,
+    ) -> Result<Self, Self::Error> {
+        Self::init_sync(context, config, *range.start..*range.end).await
+    }
 
     async fn sync(&mut self) -> Result<(), Self::Error> {
         Self::sync(self).await

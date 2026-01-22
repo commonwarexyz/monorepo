@@ -1,29 +1,63 @@
-use crate::{mmr::Location, qmdb::sync::Journal};
+use crate::{mmr::Location, qmdb::sync::Journal, translator::Translator};
 use commonware_cryptography::Digest;
 use std::{future::Future, ops::Range};
 
-/// A database that can be synced
+pub trait Config {
+    type JournalConfig;
+    fn journal_config(&self) -> Self::JournalConfig;
+}
+
+impl<T: Translator> Config for crate::qmdb::any::FixedConfig<T> {
+    type JournalConfig = crate::journal::contiguous::fixed::Config;
+
+    fn journal_config(&self) -> Self::JournalConfig {
+        crate::journal::contiguous::fixed::Config {
+            partition: self.log_journal_partition.clone(),
+            items_per_blob: self.log_items_per_blob,
+            write_buffer: self.log_write_buffer,
+            buffer_pool: self.buffer_pool.clone(),
+        }
+    }
+}
+
+impl<T: Translator, C: Clone> Config for crate::qmdb::any::VariableConfig<T, C> {
+    type JournalConfig = crate::journal::contiguous::variable::Config<C>;
+
+    fn journal_config(&self) -> Self::JournalConfig {
+        crate::journal::contiguous::variable::Config {
+            items_per_section: self.log_items_per_blob,
+            partition: self.log_partition.clone(),
+            compression: self.log_compression,
+            codec_config: self.log_codec_config.clone(),
+            buffer_pool: self.buffer_pool.clone(),
+            write_buffer: self.log_write_buffer,
+        }
+    }
+}
+
+impl<T: Translator, C: Clone> Config for crate::qmdb::immutable::Config<T, C> {
+    type JournalConfig = crate::journal::contiguous::variable::Config<C>;
+
+    fn journal_config(&self) -> Self::JournalConfig {
+        crate::journal::contiguous::variable::Config {
+            items_per_section: self.log_items_per_section,
+            partition: self.log_partition.clone(),
+            compression: self.log_compression,
+            codec_config: self.log_codec_config.clone(),
+            buffer_pool: self.buffer_pool.clone(),
+            write_buffer: self.log_write_buffer,
+        }
+    }
+}
 pub trait Database: Sized + Send {
     type Op: Send;
-    type Journal: Journal<Op = Self::Op>;
-    type Config;
+    type Journal: Journal<Context = Self::Context, Op = Self::Op>;
+    type Config: Config<JournalConfig = <Self::Journal as Journal>::Config>;
     type Digest: Digest;
     type Context: commonware_runtime::Storage
         + commonware_runtime::Clock
         + commonware_runtime::Metrics;
     type Hasher: commonware_cryptography::Hasher<Digest = Self::Digest>;
-
-    /// Create/open a journal for syncing the given range.
-    ///
-    /// The implementation must:
-    /// - Reuse any on-disk data whose logical locations lie within the range.
-    /// - Discard/ignore any data outside the range.
-    /// - Report `size()` equal to the next location to be filled.
-    fn create_journal(
-        context: Self::Context,
-        config: &Self::Config,
-        range: Range<Location>,
-    ) -> impl Future<Output = Result<Self::Journal, crate::qmdb::Error>> + Send;
 
     /// Build a database from the journal and pinned nodes populated by the sync engine.
     fn from_sync_result(

@@ -60,7 +60,6 @@ use crate::{
         segmented::fixed::{Config as SegmentedConfig, Journal as SegmentedJournal},
         Error,
     },
-    mmr::Location,
     Persistable,
 };
 use commonware_codec::CodecFixedShared;
@@ -222,7 +221,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         context: E,
         cfg: Config,
         range: Range<u64>,
-    ) -> Result<Self, crate::qmdb::Error> {
+    ) -> Result<Self, Error> {
         assert!(!range.is_empty(), "range must not be empty");
 
         debug!(
@@ -246,15 +245,13 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
                     "no existing journal data, initializing at sync range start"
                 );
                 journal.destroy().await?;
-                return Ok(Self::init_at_size(context, cfg, range.start).await?);
+                return Self::init_at_size(context, cfg, range.start).await;
             }
         }
 
         // Check if data exceeds the sync range
         if size > range.end {
-            return Err(crate::qmdb::Error::UnexpectedData(Location::new_unchecked(
-                size,
-            )));
+            return Err(Error::ItemOutOfRange(size));
         }
 
         // If all existing data is before our sync range, destroy and recreate fresh
@@ -264,7 +261,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
                 range.start, "existing journal data is stale, re-initializing at start position"
             );
             journal.destroy().await?;
-            return Ok(Self::init_at_size(context, cfg, range.start).await?);
+            return Self::init_at_size(context, cfg, range.start).await;
         }
 
         // Prune to lower bound if needed
