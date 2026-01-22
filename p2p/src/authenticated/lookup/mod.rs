@@ -1984,9 +1984,9 @@ mod tests {
 
     #[test_traced]
     fn test_two_peers_same_address_then_correction() {
-        // Two peers claim the same address. After connection attempts fail for peer 2
-        // (not actually listening), start peer 2 on its real address and update the
-        // oracle to verify connectivity can be established.
+        // Test that when peer 0 and peer 2 each have wrong addresses for each other
+        // (both pointing to peer 1's address), they cannot connect. After oracles
+        // are updated with correct addresses, connectivity is established.
         let base_port = 6000;
 
         let executor = deterministic::Runner::default();
@@ -1999,17 +1999,26 @@ mod tests {
             let socket1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port + 1);
             let socket2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port + 2);
 
-            // Initial peer set: peer2 claims socket1 (same as peer1)
-            let peers_wrong: Vec<(_, Address)> = vec![
+            // Peer 0 and 1's view: peer 2 has wrong address (socket1)
+            let peers_wrong_for_0_and_1: Vec<(_, Address)> = vec![
                 (peer0.public_key(), Address::Symmetric(socket0)),
                 (peer1.public_key(), Address::Symmetric(socket1)),
-                (peer2.public_key(), Address::Symmetric(socket1)), // Wrong address
+                (peer2.public_key(), Address::Symmetric(socket1)), // Wrong: points to peer 1
+            ];
+
+            // Peer 2's view: peer 0 has wrong address (socket1)
+            let peers_wrong_for_2: Vec<(_, Address)> = vec![
+                (peer0.public_key(), Address::Symmetric(socket1)), // Wrong: points to peer 1
+                (peer1.public_key(), Address::Symmetric(socket1)),
+                (peer2.public_key(), Address::Symmetric(socket2)),
             ];
 
             // Start peer 0
             let config0 = Config::test(peer0.clone(), socket0, MAX_MESSAGE_SIZE);
             let (mut network0, mut oracle0) = Network::new(context.with_label("peer_0"), config0);
-            oracle0.update(0, peers_wrong.clone().try_into().unwrap()).await;
+            oracle0
+                .update(0, peers_wrong_for_0_and_1.clone().try_into().unwrap())
+                .await;
             let (mut sender0, mut receiver0) =
                 network0.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
             network0.start();
@@ -2017,12 +2026,22 @@ mod tests {
             // Start peer 1 (actually listening on socket1)
             let config1 = Config::test(peer1.clone(), socket1, MAX_MESSAGE_SIZE);
             let (mut network1, mut oracle1) = Network::new(context.with_label("peer_1"), config1);
-            oracle1.update(0, peers_wrong.clone().try_into().unwrap()).await;
+            oracle1
+                .update(0, peers_wrong_for_0_and_1.clone().try_into().unwrap())
+                .await;
             let (mut sender1, mut receiver1) =
                 network1.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
             network1.start();
 
-            // Do NOT start peer 2 yet - let connection attempts fail first
+            // Start peer 2 with wrong address for peer 0
+            let config2 = Config::test(peer2.clone(), socket2, MAX_MESSAGE_SIZE);
+            let (mut network2, mut oracle2) = Network::new(context.with_label("peer_2"), config2);
+            oracle2
+                .update(0, peers_wrong_for_2.clone().try_into().unwrap())
+                .await;
+            let (mut sender2, mut receiver2) =
+                network2.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
+            network2.start();
 
             // Wait for peer 0 to connect to peer 1
             loop {
@@ -2040,33 +2059,33 @@ mod tests {
             let (sender, _) = receiver1.recv().await.unwrap();
             assert_eq!(sender, peer0.public_key());
 
-            // Wait for connection attempts to peer2 at wrong address to fail
+            // Wait for connection attempts between peer 0 and peer 2 to fail
             context.sleep(Duration::from_secs(2)).await;
 
-            // Peer 0 cannot reach peer 2 (socket1 has peer1, handshake fails due to key mismatch)
+            // Peer 0 cannot reach peer 2 (dials socket1, gets peer 1, key mismatch)
             let sent = sender0
                 .send(Recipients::One(peer2.public_key()), peer0.public_key().as_ref(), true)
                 .await
                 .unwrap();
-            assert!(sent.is_empty(), "should not connect to peer 2 via wrong address");
+            assert!(sent.is_empty(), "peer 0 should not connect to peer 2 via wrong address");
 
-            // Now start peer 2 on its real address and update oracles with correct info
+            // Peer 2 cannot reach peer 0 (dials socket1, gets peer 1, key mismatch)
+            let sent = sender2
+                .send(Recipients::One(peer0.public_key()), peer2.public_key().as_ref(), true)
+                .await
+                .unwrap();
+            assert!(sent.is_empty(), "peer 2 should not connect to peer 0 via wrong address");
+
+            // Now update all oracles with correct addresses
             let peers_correct: Vec<(_, Address)> = vec![
                 (peer0.public_key(), Address::Symmetric(socket0)),
                 (peer1.public_key(), Address::Symmetric(socket1)),
-                (peer2.public_key(), Address::Symmetric(socket2)), // Correct address
+                (peer2.public_key(), Address::Symmetric(socket2)),
             ];
 
-            let config2 = Config::test(peer2.clone(), socket2, MAX_MESSAGE_SIZE);
-            let (mut network2, mut oracle2) = Network::new(context.with_label("peer_2"), config2);
-            oracle2.update(1, peers_correct.clone().try_into().unwrap()).await;
-            let (mut sender2, mut receiver2) =
-                network2.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
-            network2.start();
-
-            // Update other oracles
             oracle0.update(1, peers_correct.clone().try_into().unwrap()).await;
             oracle1.update(1, peers_correct.clone().try_into().unwrap()).await;
+            oracle2.update(1, peers_correct.clone().try_into().unwrap()).await;
 
             // Now peer 0 should connect to peer 2 at correct address
             loop {
