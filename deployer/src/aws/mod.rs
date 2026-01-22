@@ -155,8 +155,7 @@
 //! ## `aws list`
 //!
 //! Lists all active deployments (created but not destroyed). For each deployment, displays the tag,
-//! creation timestamp, regions, and number of instances. Reads from `metadata.yaml` if available,
-//! otherwise falls back to showing only the tag.
+//! creation timestamp, regions, and number of instances.
 //!
 //! ## `aws profile`
 //!
