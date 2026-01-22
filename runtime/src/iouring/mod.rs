@@ -88,6 +88,18 @@ pub enum OpBuffer {
     Write(IoBuf),
 }
 
+impl From<IoBufMut> for OpBuffer {
+    fn from(buf: IoBufMut) -> Self {
+        Self::Read(buf)
+    }
+}
+
+impl From<IoBuf> for OpBuffer {
+    fn from(buf: IoBuf) -> Self {
+        Self::Write(buf)
+    }
+}
+
 /// Active operations keyed by their work id.
 ///
 /// Each entry keeps the caller's oneshot sender, the buffer that must stay
@@ -456,7 +468,7 @@ pub const fn should_retry(return_value: i32) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use crate::iouring::{Config, Op, OpBuffer};
+    use crate::iouring::{Config, IoBuf, IoBufMut, Op};
     use futures::{
         channel::{
             mpsc::channel,
@@ -485,17 +497,16 @@ mod tests {
         let (left_pipe, right_pipe) = UnixStream::pair().unwrap();
 
         // Submit a read
-        let msg = b"hello".to_vec();
-        let msg_len = msg.len();
-        let mut buf = crate::IoBufMut::with_capacity(msg_len);
+        let msg = IoBuf::from(b"hello");
+        let mut buf = IoBufMut::with_capacity(msg.len());
         let recv =
-            opcode::Recv::new(Fd(left_pipe.as_raw_fd()), buf.as_mut_ptr(), msg_len as _).build();
+            opcode::Recv::new(Fd(left_pipe.as_raw_fd()), buf.as_mut_ptr(), msg.len() as _).build();
         let (recv_tx, recv_rx) = oneshot::channel();
         submitter
-            .send(crate::iouring::Op {
+            .send(Op {
                 work: recv,
                 sender: recv_tx,
-                buffer: Some(OpBuffer::Read(buf)),
+                buffer: Some(buf.into()),
             })
             .await
             .expect("failed to send work");
@@ -506,19 +517,14 @@ mod tests {
         }
 
         // Submit a write that satisfies the read.
-        let msg_buf = crate::IoBuf::from(msg.clone());
-        let write = opcode::Write::new(
-            Fd(right_pipe.as_raw_fd()),
-            msg_buf.as_ptr(),
-            msg_buf.len() as _,
-        )
-        .build();
+        let write =
+            opcode::Write::new(Fd(right_pipe.as_raw_fd()), msg.as_ptr(), msg.len() as _).build();
         let (write_tx, write_rx) = oneshot::channel();
         submitter
-            .send(crate::iouring::Op {
+            .send(Op {
                 work: write,
                 sender: write_tx,
-                buffer: Some(OpBuffer::Write(msg_buf)),
+                buffer: Some(msg.into()),
             })
             .await
             .expect("failed to send work");
@@ -579,16 +585,19 @@ mod tests {
 
         // Submit a work item that will time out (because we don't write to the pipe)
         let (pipe_left, _pipe_right) = UnixStream::pair().unwrap();
-        let buf_len = 8;
-        let mut buf = crate::IoBufMut::with_capacity(buf_len);
-        let work =
-            opcode::Recv::new(Fd(pipe_left.as_raw_fd()), buf.as_mut_ptr(), buf_len as _).build();
+        let mut buf = IoBufMut::with_capacity(8);
+        let work = opcode::Recv::new(
+            Fd(pipe_left.as_raw_fd()),
+            buf.as_mut_ptr(),
+            buf.capacity() as _,
+        )
+        .build();
         let (tx, rx) = oneshot::channel();
         submitter
-            .send(crate::iouring::Op {
+            .send(Op {
                 work,
                 sender: tx,
-                buffer: Some(OpBuffer::Read(buf)),
+                buffer: Some(buf.into()),
             })
             .await
             .expect("failed to send work");
