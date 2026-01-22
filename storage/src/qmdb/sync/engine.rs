@@ -16,6 +16,7 @@ use crate::{
 use commonware_codec::Encode;
 use commonware_cryptography::Digest;
 use commonware_macros::select;
+use commonware_runtime::Metrics as _;
 use commonware_utils::NZU64;
 use futures::{channel::mpsc, future::Either, StreamExt};
 use std::{collections::BTreeMap, fmt::Debug, num::NonZeroU64};
@@ -173,7 +174,7 @@ where
 
         // Create journal and verifier using the database's factory methods
         let journal = <DB::Journal as Journal>::new(
-            config.context.clone(),
+            config.context.with_label("journal"),
             config.db_config.journal_config(),
             config.target.range.clone(),
         )

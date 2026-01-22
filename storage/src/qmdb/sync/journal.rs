@@ -58,12 +58,7 @@ where
         config: Self::Config,
         range: Range<Location>,
     ) -> Result<Self, Self::Error> {
-        Self::init_sync(
-            context.with_label("log"),
-            config.clone(),
-            *range.start..*range.end,
-        )
-        .await
+        Self::init_sync(context, config.clone(), *range.start..*range.end).await
     }
 
     async fn resize(&mut self, start: Location) -> Result<(), Self::Error> {
