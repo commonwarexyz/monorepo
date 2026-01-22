@@ -19,7 +19,7 @@ The specification supports various configurations for testing:
 - **N=6, F=0**: 6 replicas, no Byzantine replicas
 - **N=6, F=1**: 6 replicas, 1 Byzantine replica
 - **N=6, F=2**: 6 replicas, 2 Byzantine replicas (safety violations expected)
-- **N=7, F=1**: 7 replicas, no Byzantine replicas
+- **N=7, F=1**: 7 replicas, 1 Byzantine replica
 
 ## Safety Invariants
 
