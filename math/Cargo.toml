@@ -20,7 +20,7 @@ arbitrary = [
 	"dep:arbitrary",
 	"std",
 ]
-default = [ "std" ]
+default = [ "std", "fuzz" ]
 test_strategies = [ "dep:proptest", "std" ]
 std = [
 	"bytes/std",
@@ -30,6 +30,11 @@ std = [
 	"commonware-utils/std",
 	"rand_core/std",
 ]
+fuzz = [
+	"dep:commonware-test",
+	"dep:proptest",
+	"dep:proptest-derive",
+]
 
 [dependencies]
 arbitrary = { workspace = true, optional = true }
@@ -37,8 +42,10 @@ bytes.workspace = true
 commonware-codec.workspace = true
 commonware-macros.workspace = true
 commonware-parallel.workspace = true
+commonware-test = { workspace = true, optional = true }
 commonware-utils.workspace = true
 proptest = { workspace = true, optional = true }
+proptest-derive = { workspace = true, optional = true }
 rand_core.workspace = true
 
 [dev-dependencies]
