@@ -1,9 +1,12 @@
 //! A mock implementation of a channel that implements the Sink and Stream traits.
 
-use crate::{Buf, BufMut, Error, IoBufs, Sink as SinkTrait, Stream as StreamTrait};
+use crate::{BufMut, Error, IoBufs, Sink as SinkTrait, Stream as StreamTrait};
 use bytes::{Bytes, BytesMut};
 use futures::channel::oneshot;
 use std::sync::{Arc, Mutex};
+
+/// Default read buffer size for the stream's local buffer (64 KB).
+const DEFAULT_READ_BUFFER_SIZE: usize = 64 * 1024;
 
 /// A mock channel struct that is used internally by Sink and Stream.
 pub struct Channel {
@@ -15,6 +18,9 @@ pub struct Channel {
     /// the sink uses to send the bytes to the stream directly.
     waiter: Option<(usize, oneshot::Sender<Bytes>)>,
 
+    /// Target size for the stream's local buffer, used to bound buffering.
+    read_buffer_size: usize,
+
     /// Tracks whether the sink is still alive and able to send messages.
     sink_alive: bool,
 
@@ -23,11 +29,17 @@ pub struct Channel {
 }
 
 impl Channel {
-    /// Returns an async-safe Sink/Stream pair that share an underlying buffer of bytes.
+    /// Returns an async-safe Sink/Stream pair with default read buffer size.
     pub fn init() -> (Sink, Stream) {
+        Self::init_with_read_buffer_size(DEFAULT_READ_BUFFER_SIZE)
+    }
+
+    /// Returns an async-safe Sink/Stream pair with the specified buffer capacity.
+    pub fn init_with_read_buffer_size(read_buffer_size: usize) -> (Sink, Stream) {
         let channel = Arc::new(Mutex::new(Self {
             buffer: BytesMut::new(),
             waiter: None,
+            read_buffer_size,
             sink_alive: true,
             stream_alive: true,
         }));
@@ -35,7 +47,10 @@ impl Channel {
             Sink {
                 channel: channel.clone(),
             },
-            Stream { channel },
+            Stream {
+                channel,
+                buffer: BytesMut::new(),
+            },
         )
     }
 }
@@ -66,7 +81,12 @@ impl SinkTrait for Sink {
                 .is_some_and(|(requested, _)| *requested <= channel.buffer.len())
             {
                 let (requested, os_send) = channel.waiter.take().unwrap();
-                let data = channel.buffer.copy_to_bytes(requested);
+                // Send up to read_buffer_size bytes (but at least requested amount)
+                let send_amount = channel
+                    .buffer
+                    .len()
+                    .min(requested.max(channel.read_buffer_size));
+                let data = channel.buffer.split_to(send_amount).freeze();
                 (os_send, data)
             } else {
                 return Ok(());
@@ -92,39 +112,66 @@ impl Drop for Sink {
 /// A mock stream that implements the Stream trait.
 pub struct Stream {
     channel: Arc<Mutex<Channel>>,
+    /// Local buffer for data that has been received but not yet consumed.
+    buffer: BytesMut,
 }
 
 impl StreamTrait for Stream {
     async fn recv(&mut self, len: u64) -> Result<IoBufs, Error> {
         let len = len as usize;
+
+        // Pull any data already in the channel buffer into local buffer
+        // (bounded by read_buffer_size, but at least enough for the request).
+        {
+            let mut channel = self.channel.lock().unwrap();
+            if !channel.buffer.is_empty() {
+                let target = len.max(channel.read_buffer_size);
+                let pull_amount = channel
+                    .buffer
+                    .len()
+                    .min(target.saturating_sub(self.buffer.len()));
+                if pull_amount > 0 {
+                    let data = channel.buffer.split_to(pull_amount);
+                    self.buffer.extend_from_slice(&data);
+                }
+            }
+        }
+
+        // If we have enough locally, consume and return.
+        if self.buffer.len() >= len {
+            return Ok(IoBufs::from(self.buffer.split_to(len).freeze()));
+        }
+
+        // Need more data, set up waiter for the remaining amount.
+        let remaining = len - self.buffer.len();
         let os_recv = {
             let mut channel = self.channel.lock().unwrap();
 
-            // If the message is fully available in the buffer,
-            // drain the value and return.
-            if channel.buffer.len() >= len {
-                let data = channel.buffer.copy_to_bytes(len);
-                return Ok(IoBufs::from(data));
-            }
-
-            // At this point, there is not enough data in the buffer.
             // If the sink is dead, we cannot receive any more messages.
             if !channel.sink_alive {
                 return Err(Error::Closed);
             }
 
-            // Otherwise, populate the waiter.
+            // Populate the waiter.
             assert!(channel.waiter.is_none());
             let (os_send, os_recv) = oneshot::channel();
-            channel.waiter = Some((len, os_send));
+            channel.waiter = Some((remaining, os_send));
             os_recv
         };
 
         // Wait for the waiter to be resolved.
         // If the oneshot sender was dropped, it means the sink is closed.
         let data = os_recv.await.map_err(|_| Error::Closed)?;
-        assert_eq!(data.len(), len);
-        Ok(IoBufs::from(data))
+        self.buffer.extend_from_slice(&data);
+
+        // We should now have enough
+        assert!(self.buffer.len() >= len);
+        Ok(IoBufs::from(self.buffer.split_to(len).freeze()))
+    }
+
+    fn peek(&self, max_len: u64) -> &[u8] {
+        let len = (max_len as usize).min(self.buffer.len());
+        &self.buffer[..len]
     }
 }
 
@@ -278,6 +325,119 @@ mod tests {
                     "timeout"
                 },
             };
+        });
+    }
+
+    #[test]
+    fn test_peek_empty() {
+        let (_sink, stream) = Channel::init();
+
+        // Peek on a fresh stream should return empty slice
+        assert!(stream.peek(10).is_empty());
+    }
+
+    #[test]
+    fn test_peek_after_partial_recv() {
+        let (mut sink, mut stream) = Channel::init();
+
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
+            // Send more data than we'll consume
+            sink.send(b"hello world".as_slice()).await.unwrap();
+
+            // Recv only part of it
+            let received = stream.recv(5).await.unwrap();
+            assert_eq!(received.coalesce(), b"hello");
+
+            // Peek should show the remaining data
+            assert_eq!(stream.peek(100), b" world");
+
+            // Peek with smaller max_len
+            assert_eq!(stream.peek(3), b" wo");
+
+            // Peek doesn't consume - can peek again
+            assert_eq!(stream.peek(100), b" world");
+
+            // Recv consumes the peeked data
+            let received = stream.recv(6).await.unwrap();
+            assert_eq!(received.coalesce(), b" world");
+
+            // Peek is now empty
+            assert!(stream.peek(100).is_empty());
+        });
+    }
+
+    #[test]
+    fn test_peek_multiple_sends() {
+        let (mut sink, mut stream) = Channel::init();
+
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
+            // Send multiple chunks
+            sink.send(b"aaa".as_slice()).await.unwrap();
+            sink.send(b"bbb".as_slice()).await.unwrap();
+            sink.send(b"ccc".as_slice()).await.unwrap();
+
+            // Recv less than total
+            let received = stream.recv(4).await.unwrap();
+            assert_eq!(received.coalesce(), b"aaab");
+
+            // Peek should show remaining
+            assert_eq!(stream.peek(100), b"bbccc");
+        });
+    }
+
+    #[test]
+    fn test_read_buffer_size_limit() {
+        // Use a small buffer capacity for testing
+        let (mut sink, mut stream) = Channel::init_with_read_buffer_size(10);
+
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
+            // Send more than buffer capacity
+            sink.send(b"0123456789ABCDEF".as_slice()).await.unwrap();
+
+            // Recv a small amount - should only pull up to capacity (10 bytes)
+            let received = stream.recv(2).await.unwrap();
+            assert_eq!(received.coalesce(), b"01");
+
+            // Peek should show remaining buffered data (8 bytes, not 14)
+            assert_eq!(stream.peek(100), b"23456789");
+
+            // The rest should still be in the channel buffer
+            // Recv more to pull the remaining data
+            let received = stream.recv(8).await.unwrap();
+            assert_eq!(received.coalesce(), b"23456789");
+
+            // Now peek should show next chunk from channel (up to capacity)
+            let received = stream.recv(2).await.unwrap();
+            assert_eq!(received.coalesce(), b"AB");
+
+            assert_eq!(stream.peek(100), b"CDEF");
+        });
+    }
+
+    #[test]
+    fn test_recv_before_send() {
+        // Use a small buffer capacity for testing
+        let (mut sink, mut stream) = Channel::init_with_read_buffer_size(10);
+
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Start recv before send (will wait)
+            let recv_handle = context
+                .clone()
+                .spawn(|_| async move { stream.recv(3).await.unwrap() });
+
+            // Give recv time to set up waiter
+            context.sleep(Duration::from_millis(10)).await;
+
+            // Send more than capacity
+            sink.send(b"ABCDEFGHIJKLMNOP".as_slice()).await.unwrap();
+
+            // Recv should get its 3 bytes
+            let received = recv_handle.await.unwrap();
+            assert_eq!(received.coalesce(), b"ABC");
         });
     }
 }
