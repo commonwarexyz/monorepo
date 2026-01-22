@@ -1,8 +1,6 @@
 //! `list` subcommand for `ec2`
 
-use crate::aws::{
-    deployer_directory, Error, Metadata, CREATED_FILE_NAME, DESTROYED_FILE_NAME, METADATA_FILE_NAME,
-};
+use crate::aws::{deployer_directory, Error, Metadata, DESTROYED_FILE_NAME, METADATA_FILE_NAME};
 use chrono::{DateTime, Local, Utc};
 use std::fs::{self, File};
 use tracing::info;
@@ -24,10 +22,9 @@ pub fn list() -> Result<(), Error> {
             continue;
         }
 
-        // Skip incomplete or destroyed deployments
-        let created = path.join(CREATED_FILE_NAME);
+        // Skip destroyed deployments
         let destroyed = path.join(DESTROYED_FILE_NAME);
-        if !created.exists() || destroyed.exists() {
+        if destroyed.exists() {
             continue;
         }
 
