@@ -53,6 +53,22 @@ const DATA_BITS_MASK: u8 = 0x7F;
 /// if clear this is the final byte.
 const CONTINUATION_BIT_MASK: u8 = 0x80;
 
+/// Maximum encoded size of a u16 varint in bytes.
+pub const MAX_U16_VARINT_SIZE: usize =
+    (size_of::<u16>() * BITS_PER_BYTE).div_ceil(DATA_BITS_PER_BYTE);
+
+/// Maximum encoded size of a u32 varint in bytes.
+pub const MAX_U32_VARINT_SIZE: usize =
+    (size_of::<u32>() * BITS_PER_BYTE).div_ceil(DATA_BITS_PER_BYTE);
+
+/// Maximum encoded size of a u64 varint in bytes.
+pub const MAX_U64_VARINT_SIZE: usize =
+    (size_of::<u64>() * BITS_PER_BYTE).div_ceil(DATA_BITS_PER_BYTE);
+
+/// Maximum encoded size of a u128 varint in bytes.
+pub const MAX_U128_VARINT_SIZE: usize =
+    (size_of::<u128>() * BITS_PER_BYTE).div_ceil(DATA_BITS_PER_BYTE);
+
 /// An incremental varint decoder for reading varints byte-by-byte from streams.
 ///
 /// This is useful when reading from async streams where you receive one byte at a time
