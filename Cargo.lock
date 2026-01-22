@@ -1692,6 +1692,11 @@ dependencies = [
 [[package]]
 name = "commonware-test"
 version = "0.0.65"
+dependencies = [
+ "arbitrary",
+ "libfuzzer-sys",
+ "proptest",
+]
 
 [[package]]
 name = "commonware-utils"
