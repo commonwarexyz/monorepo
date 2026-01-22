@@ -270,6 +270,16 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
             {
                 let meta_oldest_section = meta_pruning_boundary / items_per_blob;
                 match inner.oldest_section() {
+                    None => {
+                        // No blobs exist but metadata claims mid-section boundary.
+                        // This can happen if we crash after inner.clear() but before
+                        // ensure_section_exists(). Ignore stale metadata.
+                        warn!(
+                            meta_oldest_section,
+                            "crash repair: no blobs exist, ignoring stale metadata"
+                        );
+                        (blob_boundary, true)
+                    }
                     Some(oldest_section) if meta_oldest_section < oldest_section => {
                         warn!(
                             meta_oldest_section,
@@ -288,7 +298,7 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
                         );
                         (blob_boundary, true)
                     }
-                    _ => (meta_pruning_boundary, false), // valid mid-section metadata
+                    Some(_) => (meta_pruning_boundary, false), // valid mid-section metadata
                 }
             }
             // Section-aligned metadata: unnecessary, use blob-based
