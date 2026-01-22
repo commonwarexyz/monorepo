@@ -118,7 +118,7 @@ mod test {
             current::{
                 ordered::{db::KeyValueProof, variable::Db},
                 proof::{OperationProof, RangeProof},
-                tests::apply_random_ops,
+                tests::{self, apply_random_ops},
                 VariableConfig as Config,
             },
             store::{
@@ -731,95 +731,12 @@ mod test {
 
     #[test_traced("WARN")]
     pub fn test_current_db_different_pruning_delays_same_root() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            // Create two databases that are identical other than how they are pruned.
-            let db_config_no_pruning = current_db_config("no_pruning_test");
+        tests::test_different_pruning_delays_same_root::<CleanCurrentTest, _, _>(open_db);
+    }
 
-            let db_config_pruning = current_db_config("pruning_test");
-
-            let mut db_no_pruning = CleanCurrentTest::init(
-                context.with_label("no_pruning_test"),
-                db_config_no_pruning.clone(),
-            )
-            .await
-            .unwrap()
-            .into_mutable();
-            let mut db_pruning = CleanCurrentTest::init(
-                context.with_label("pruning_test"),
-                db_config_pruning.clone(),
-            )
-            .await
-            .unwrap()
-            .into_mutable();
-
-            // Apply identical operations to both databases, but only prune one.
-            const NUM_OPERATIONS: u64 = 1000;
-            for i in 0..NUM_OPERATIONS {
-                let key = Sha256::hash(&i.to_be_bytes());
-                let value = Sha256::hash(&(i * 1000).to_be_bytes());
-
-                db_no_pruning.update(key, value).await.unwrap();
-                db_pruning.update(key, value).await.unwrap();
-
-                // Commit periodically
-                if i % 50 == 49 {
-                    let (durable_no_pruning, _) = db_no_pruning.commit(None).await.unwrap();
-                    let clean_no_pruning = durable_no_pruning.into_merkleized().await.unwrap();
-                    let (durable_pruning, _) = db_pruning.commit(None).await.unwrap();
-                    let mut clean_pruning = durable_pruning.into_merkleized().await.unwrap();
-                    clean_pruning
-                        .prune(clean_no_pruning.any.inactivity_floor_loc())
-                        .await
-                        .unwrap();
-                    db_no_pruning = clean_no_pruning.into_mutable();
-                    db_pruning = clean_pruning.into_mutable();
-                }
-            }
-
-            // Final commit
-            let (db_no_pruning, _) = db_no_pruning.commit(None).await.unwrap();
-            let db_no_pruning = db_no_pruning.into_merkleized().await.unwrap();
-            let (db_pruning, _) = db_pruning.commit(None).await.unwrap();
-            let db_pruning = db_pruning.into_merkleized().await.unwrap();
-
-            // Get roots from both databases
-            let root_no_pruning = db_no_pruning.root();
-            let root_pruning = db_pruning.root();
-
-            // Verify they generate the same roots
-            assert_eq!(root_no_pruning, root_pruning);
-
-            drop(db_no_pruning);
-            drop(db_pruning);
-
-            // Restart both databases
-            let db_no_pruning = CleanCurrentTest::init(
-                context.with_label("no_pruning_test_2"),
-                db_config_no_pruning,
-            )
-            .await
-            .unwrap();
-            let db_pruning =
-                CleanCurrentTest::init(context.with_label("pruning_test_2"), db_config_pruning)
-                    .await
-                    .unwrap();
-            assert_eq!(
-                db_no_pruning.inactivity_floor_loc(),
-                db_pruning.inactivity_floor_loc()
-            );
-
-            // Get roots after restart
-            let root_no_pruning_restart = db_no_pruning.root();
-            let root_pruning_restart = db_pruning.root();
-
-            // Ensure roots still match after restart
-            assert_eq!(root_no_pruning, root_no_pruning_restart);
-            assert_eq!(root_pruning, root_pruning_restart);
-
-            db_no_pruning.destroy().await.unwrap();
-            db_pruning.destroy().await.unwrap();
-        });
+    #[test_traced("WARN")]
+    pub fn test_current_db_sync_persists_bitmap_pruning_boundary() {
+        tests::test_sync_persists_bitmap_pruning_boundary::<CleanCurrentTest, _, _>(open_db);
     }
 
     #[test_traced("DEBUG")]

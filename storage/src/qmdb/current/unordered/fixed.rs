@@ -111,7 +111,10 @@ pub mod test {
         mmr::{hasher::Hasher as _, Proof},
         qmdb::{
             any::operation::update::Unordered as UnorderedUpdate,
-            current::{proof::RangeProof, tests::apply_random_ops},
+            current::{
+                proof::RangeProof,
+                tests::{self, apply_random_ops},
+            },
             store::{
                 batch_tests,
                 tests::{assert_log_store, assert_merkleized_store, assert_prunable_store},
@@ -129,7 +132,6 @@ pub mod test {
         collections::HashMap,
         num::{NonZeroU16, NonZeroUsize},
     };
-    use tracing::warn;
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(88);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(8);
@@ -663,69 +665,9 @@ pub mod test {
         crate::qmdb::current::tests::test_build_random_close_reopen(open_db);
     }
 
-    /// Test that sync() persists the bitmap pruning boundary.
-    ///
-    /// This test verifies that calling `sync()` persists the bitmap pruning boundary that was
-    /// set during `into_merkleized()`. If `sync()` didn't call `write_pruned`, the
-    /// `bitmap_pruned_bits()` count would be 0 after reopen instead of the expected value.
     #[test_traced("WARN")]
     pub fn test_current_db_sync_persists_bitmap_pruning_boundary() {
-        const ELEMENTS: u64 = 500;
-
-        let executor = deterministic::Runner::default();
-        executor.start(|mut context| async move {
-            let partition = "sync_bitmap_pruning".to_string();
-            let rng_seed = context.next_u64();
-            let db = open_db(context.with_label("first"), partition.clone()).await;
-
-            // Apply random operations with commits to advance the inactivity floor.
-            let db = apply_random_ops::<CleanCurrentTest>(ELEMENTS, true, rng_seed, db.into_mutable())
-                .await
-                .unwrap();
-            let (db, _) = db.commit(None).await.unwrap();
-            let mut db = db.into_merkleized().await.unwrap();
-
-            // The bitmap should have been pruned during into_merkleized().
-            let pruned_bits_before = db.bitmap_pruned_bits();
-            warn!(
-                "pruned_bits_before={}, inactivity_floor={}, op_count={}",
-                pruned_bits_before,
-                *db.inactivity_floor_loc(),
-                *db.op_count()
-            );
-
-            // Verify we actually have some pruning (otherwise the test is meaningless).
-            assert!(
-                pruned_bits_before > 0,
-                "Expected bitmap to have pruned bits after merkleization"
-            );
-
-            // Call sync() WITHOUT calling prune(). The bitmap pruning boundary was set
-            // during into_merkleized(), and sync() should persist it.
-            db.sync().await.unwrap();
-
-            // Record the root before dropping.
-            let root_before = db.root();
-            drop(db);
-
-            // Reopen the database.
-            let db = open_db(context.with_label("second"), partition).await;
-
-            // The pruned bits count should match. If sync() didn't persist the bitmap pruned
-            // state, this would be 0.
-            let pruned_bits_after = db.bitmap_pruned_bits();
-            warn!("pruned_bits_after={}", pruned_bits_after);
-
-            assert_eq!(
-                pruned_bits_after, pruned_bits_before,
-                "Bitmap pruned bits mismatch after reopen - sync() may not have called write_pruned()"
-            );
-
-            // Also verify the root matches.
-            assert_eq!(db.root(), root_before);
-
-            db.destroy().await.unwrap();
-        });
+        tests::test_sync_persists_bitmap_pruning_boundary::<CleanCurrentTest, _, _>(open_db);
     }
 
     /// Repeatedly update the same key to a new value and ensure we can prove its current value
@@ -783,93 +725,7 @@ pub mod test {
 
     #[test_traced("WARN")]
     pub fn test_current_db_different_pruning_delays_same_root() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            // Create two databases that are identical other than how they are pruned.
-            let db_config_no_pruning = current_db_config("no_pruning_test");
-
-            let db_config_pruning = current_db_config("pruning_test");
-
-            let mut db_no_pruning = CleanCurrentTest::init(
-                context.with_label("no_pruning"),
-                db_config_no_pruning.clone(),
-            )
-            .await
-            .unwrap()
-            .into_mutable();
-            let mut db_pruning =
-                CleanCurrentTest::init(context.with_label("pruning"), db_config_pruning.clone())
-                    .await
-                    .unwrap()
-                    .into_mutable();
-
-            // Apply identical operations to both databases, but only prune one.
-            const NUM_OPERATIONS: u64 = 1000;
-            for i in 0..NUM_OPERATIONS {
-                let key = Sha256::hash(&i.to_be_bytes());
-                let value = Sha256::hash(&(i * 1000).to_be_bytes());
-
-                db_no_pruning.update(key, value).await.unwrap();
-                db_pruning.update(key, value).await.unwrap();
-
-                // Commit periodically
-                if i % 50 == 49 {
-                    let (db_1, _) = db_no_pruning.commit(None).await.unwrap();
-                    let clean_no_pruning = db_1.into_merkleized().await.unwrap();
-                    let (db_2, _) = db_pruning.commit(None).await.unwrap();
-                    let mut clean_pruning = db_2.into_merkleized().await.unwrap();
-                    clean_pruning
-                        .prune(clean_no_pruning.any.inactivity_floor_loc())
-                        .await
-                        .unwrap();
-                    db_no_pruning = clean_no_pruning.into_mutable();
-                    db_pruning = clean_pruning.into_mutable();
-                }
-            }
-
-            // Final commit
-            let (db_1, _) = db_no_pruning.commit(None).await.unwrap();
-            let db_no_pruning = db_1.into_merkleized().await.unwrap();
-            let (db_2, _) = db_pruning.commit(None).await.unwrap();
-            let db_pruning = db_2.into_merkleized().await.unwrap();
-
-            // Get roots from both databases
-            let root_no_pruning = db_no_pruning.root();
-            let root_pruning = db_pruning.root();
-
-            // Verify they generate the same roots
-            assert_eq!(root_no_pruning, root_pruning);
-
-            drop(db_no_pruning);
-            drop(db_pruning);
-
-            // Restart both databases
-            let db_no_pruning = CleanCurrentTest::init(
-                context.with_label("no_pruning_restart"),
-                db_config_no_pruning,
-            )
-            .await
-            .unwrap();
-            let db_pruning =
-                CleanCurrentTest::init(context.with_label("pruning_restart"), db_config_pruning)
-                    .await
-                    .unwrap();
-            assert_eq!(
-                db_no_pruning.inactivity_floor_loc(),
-                db_pruning.inactivity_floor_loc()
-            );
-
-            // Get roots after restart
-            let root_no_pruning_restart = db_no_pruning.root();
-            let root_pruning_restart = db_pruning.root();
-
-            // Ensure roots still match after restart
-            assert_eq!(root_no_pruning, root_no_pruning_restart);
-            assert_eq!(root_pruning, root_pruning_restart);
-
-            db_no_pruning.destroy().await.unwrap();
-            db_pruning.destroy().await.unwrap();
-        });
+        tests::test_different_pruning_delays_same_root::<CleanCurrentTest, _, _>(open_db);
     }
 
     #[test_traced("DEBUG")]

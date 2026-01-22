@@ -134,10 +134,18 @@ impl<T: Translator, C> VariableConfig<T, C> {
     }
 }
 
+/// Extension trait for Current QMDB types that exposes bitmap pruning information for testing.
+#[cfg(any(test, feature = "test-traits"))]
+pub trait BitmapPrunedBits {
+    /// Returns the number of bits that have been pruned from the bitmap.
+    fn bitmap_pruned_bits(&self) -> u64;
+}
+
 #[cfg(test)]
 pub mod tests {
     //! Shared test utilities for Current QMDB variants.
 
+    pub use super::BitmapPrunedBits;
     use crate::{
         kv::{Deletable as _, Updatable as _},
         qmdb::{
@@ -345,6 +353,152 @@ pub mod tests {
             // State from scenario #2 should match that of a successful commit.
             assert_eq!(db.op_count(), committed_op_count);
             assert_eq!(db.root(), scenario_2_root);
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Run `test_different_pruning_delays_same_root` against a database factory.
+    ///
+    /// This test verifies that pruning operations do not affect the root hash - two databases
+    /// with identical operations but different pruning schedules should have the same root.
+    pub fn test_different_pruning_delays_same_root<C, F, Fut>(mut open_db: F)
+    where
+        C: CleanAny,
+        C::Key: TestKey,
+        <C as LogStore>::Value: TestValue,
+        F: FnMut(Context, String) -> Fut + Clone,
+        Fut: Future<Output = C>,
+    {
+        const NUM_OPERATIONS: u64 = 1000;
+
+        let executor = deterministic::Runner::default();
+        let mut open_db_clone = open_db.clone();
+        executor.start(|context| async move {
+            // Create two databases that are identical other than how they are pruned.
+            let mut db_no_pruning: C = open_db_clone(
+                context.with_label("no_pruning"),
+                "no_pruning_test".to_string(),
+            )
+            .await;
+            let mut db_pruning: C =
+                open_db(context.with_label("pruning"), "pruning_test".to_string()).await;
+
+            let mut db_no_pruning_mut = db_no_pruning.into_mutable();
+            let mut db_pruning_mut = db_pruning.into_mutable();
+
+            // Apply identical operations to both databases, but only prune one.
+            for i in 0..NUM_OPERATIONS {
+                let key: C::Key = TestKey::from_seed(i);
+                let value: <C as LogStore>::Value = TestValue::from_seed(i * 1000);
+
+                db_no_pruning_mut.update(key, value.clone()).await.unwrap();
+                db_pruning_mut.update(key, value).await.unwrap();
+
+                // Commit periodically
+                if i % 50 == 49 {
+                    let (db_1, _) = db_no_pruning_mut.commit(None).await.unwrap();
+                    let clean_no_pruning: C = db_1.into_merkleized().await.unwrap();
+                    let (db_2, _) = db_pruning_mut.commit(None).await.unwrap();
+                    let mut clean_pruning: C = db_2.into_merkleized().await.unwrap();
+                    clean_pruning
+                        .prune(clean_no_pruning.inactivity_floor_loc())
+                        .await
+                        .unwrap();
+                    db_no_pruning_mut = clean_no_pruning.into_mutable();
+                    db_pruning_mut = clean_pruning.into_mutable();
+                }
+            }
+
+            // Final commit
+            let (db_1, _) = db_no_pruning_mut.commit(None).await.unwrap();
+            db_no_pruning = db_1.into_merkleized().await.unwrap();
+            let (db_2, _) = db_pruning_mut.commit(None).await.unwrap();
+            db_pruning = db_2.into_merkleized().await.unwrap();
+
+            // Get roots from both databases - they should match
+            let root_no_pruning = db_no_pruning.root();
+            let root_pruning = db_pruning.root();
+            assert_eq!(root_no_pruning, root_pruning);
+
+            // Also verify inactivity floors match
+            assert_eq!(
+                db_no_pruning.inactivity_floor_loc(),
+                db_pruning.inactivity_floor_loc()
+            );
+
+            db_no_pruning.destroy().await.unwrap();
+            db_pruning.destroy().await.unwrap();
+        });
+    }
+
+    /// Run `test_sync_persists_bitmap_pruning_boundary` against a database factory.
+    ///
+    /// This test verifies that calling `sync()` persists the bitmap pruning boundary that was
+    /// set during `into_merkleized()`. If `sync()` didn't call `write_pruned`, the
+    /// `bitmap_pruned_bits()` count would be 0 after reopen instead of the expected value.
+    pub fn test_sync_persists_bitmap_pruning_boundary<C, F, Fut>(mut open_db: F)
+    where
+        C: CleanAny + BitmapPrunedBits,
+        C::Key: TestKey,
+        <C as LogStore>::Value: TestValue,
+        F: FnMut(Context, String) -> Fut + Clone,
+        Fut: Future<Output = C>,
+    {
+        const ELEMENTS: u64 = 500;
+
+        let executor = deterministic::Runner::default();
+        let mut open_db_clone = open_db.clone();
+        executor.start(|mut context| async move {
+            let partition = "sync_bitmap_pruning".to_string();
+            let rng_seed = context.next_u64();
+            let db: C = open_db_clone(context.with_label("first"), partition.clone()).await;
+
+            // Apply random operations with commits to advance the inactivity floor.
+            let db = apply_random_ops::<C>(ELEMENTS, true, rng_seed, db.into_mutable())
+                .await
+                .unwrap();
+            let (db, _) = db.commit(None).await.unwrap();
+            let mut db: C = db.into_merkleized().await.unwrap();
+
+            // The bitmap should have been pruned during into_merkleized().
+            let pruned_bits_before = db.bitmap_pruned_bits();
+            warn!(
+                "pruned_bits_before={}, inactivity_floor={}, op_count={}",
+                pruned_bits_before,
+                *db.inactivity_floor_loc(),
+                *db.op_count()
+            );
+
+            // Verify we actually have some pruning (otherwise the test is meaningless).
+            assert!(
+                pruned_bits_before > 0,
+                "Expected bitmap to have pruned bits after merkleization"
+            );
+
+            // Call sync() WITHOUT calling prune(). The bitmap pruning boundary was set
+            // during into_merkleized(), and sync() should persist it.
+            db.sync().await.unwrap();
+
+            // Record the root before dropping.
+            let root_before = db.root();
+            drop(db);
+
+            // Reopen the database.
+            let db: C = open_db(context.with_label("second"), partition).await;
+
+            // The pruned bits count should match. If sync() didn't persist the bitmap pruned
+            // state, this would be 0.
+            let pruned_bits_after = db.bitmap_pruned_bits();
+            warn!("pruned_bits_after={}", pruned_bits_after);
+
+            assert_eq!(
+                pruned_bits_after, pruned_bits_before,
+                "Bitmap pruned bits mismatch after reopen - sync() may not have called write_pruned()"
+            );
+
+            // Also verify the root matches.
+            assert_eq!(db.root(), root_before);
 
             db.destroy().await.unwrap();
         });

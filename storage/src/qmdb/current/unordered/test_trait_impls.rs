@@ -11,6 +11,7 @@ use crate::{
             },
             FixedValue, VariableValue,
         },
+        current::BitmapPrunedBits,
         Durable, Error, Merkleized, NonDurable, Unmerkleized,
     },
     translator::Translator,
@@ -198,5 +199,39 @@ where
 
     fn steps(&self) -> u64 {
         self.any.durable_state.steps
+    }
+}
+
+// =============================================================================
+// BitmapPrunedBits trait implementations
+// =============================================================================
+
+impl<
+        E: Storage + Clock + Metrics,
+        K: Array,
+        V: FixedValue,
+        H: Hasher,
+        T: Translator,
+        const N: usize,
+    > BitmapPrunedBits for fixed::Db<E, K, V, H, T, N, Merkleized<H>, Durable>
+{
+    fn bitmap_pruned_bits(&self) -> u64 {
+        self.status.pruned_bits()
+    }
+}
+
+impl<
+        E: Storage + Clock + Metrics,
+        K: Array,
+        V: VariableValue,
+        H: Hasher,
+        T: Translator,
+        const N: usize,
+    > BitmapPrunedBits for variable::Db<E, K, V, H, T, N, Merkleized<H>, Durable>
+where
+    VariableOperation<K, V>: Read,
+{
+    fn bitmap_pruned_bits(&self) -> u64 {
+        self.status.pruned_bits()
     }
 }
