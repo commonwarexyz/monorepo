@@ -2000,7 +2000,7 @@ mod tests {
                 network0.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
             network0.start();
 
-            // Create peer set where peer set with an incorrect address for peer 2
+            // Create peer set with an incorrect address for peer 2
             let peer_set0: Vec<(_, Address)> = vec![
                 (peer0.public_key(), Address::Symmetric(socket0)),
                 (peer1.public_key(), Address::Symmetric(socket1)),
@@ -2088,7 +2088,7 @@ mod tests {
                 network2.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
             network2.start();
 
-            // Create peer set where peer set with an incorrect address for peer 2
+            // Create peer set with an incorrect address for peer 2
             let peer_set: Vec<(_, Address)> = vec![
                 (peer0.public_key(), Address::Symmetric(socket0)),
                 (peer1.public_key(), Address::Symmetric(socket1)),
