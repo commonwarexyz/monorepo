@@ -2,7 +2,7 @@
 
 use arbitrary::Arbitrary;
 use commonware_cryptography::blake3::Digest;
-use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
+use commonware_runtime::{buffer::PoolRef, deterministic, Metrics, Runner};
 use commonware_storage::{
     qmdb::store::db::{Config, Db},
     translator::TwoCap,
@@ -110,6 +110,7 @@ fn fuzz(input: FuzzInput) {
             .await
             .expect("Failed to init db")
             .into_dirty();
+        let mut restarts = 0usize;
 
         for op in &input.ops {
             match op {
@@ -164,10 +165,16 @@ fn fuzz(input: FuzzInput) {
                 Operation::SimulateFailure => {
                     drop(db);
 
-                    db = StoreDb::init(context.clone(), test_config("store_fuzz_test"))
-                        .await
-                        .expect("Failed to init db")
-                        .into_dirty();
+                    db = StoreDb::init(
+                        context
+                            .with_label("db")
+                            .with_attribute("instance", restarts),
+                        test_config("store_fuzz_test"),
+                    )
+                    .await
+                    .expect("Failed to init db")
+                    .into_dirty();
+                    restarts += 1;
                 }
             }
         }

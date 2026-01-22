@@ -18,7 +18,7 @@ use std::{collections::HashSet, fmt::Debug, hash::Hash};
 
 /// Context is a collection of metadata from consensus about a given payload.
 /// It provides information about the current epoch/view and the parent payload that new proposals are built on.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Context<D: Digest, P: PublicKey> {
     /// Current round of consensus.
     pub round: Round,
@@ -42,6 +42,51 @@ impl<D: Digest, P: PublicKey> Epochable for Context<D, P> {
 impl<D: Digest, P: PublicKey> Viewable for Context<D, P> {
     fn view(&self) -> View {
         self.round.view()
+    }
+}
+
+impl<D: Digest, P: PublicKey> Write for Context<D, P> {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.round.write(buf);
+        self.leader.write(buf);
+        self.parent.write(buf);
+    }
+}
+
+impl<D: Digest, P: PublicKey> EncodeSize for Context<D, P> {
+    fn encode_size(&self) -> usize {
+        self.round.encode_size() + self.leader.encode_size() + self.parent.encode_size()
+    }
+}
+
+impl<D: Digest, P: PublicKey> Read for Context<D, P> {
+    type Cfg = ();
+
+    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
+        let round = Round::read(reader)?;
+        let leader = P::read(reader)?;
+        let parent = <(View, D)>::read_cfg(reader, &((), ()))?;
+
+        Ok(Self {
+            round,
+            leader,
+            parent,
+        })
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl<D: Digest, P: PublicKey> arbitrary::Arbitrary<'_> for Context<D, P>
+where
+    D: for<'a> arbitrary::Arbitrary<'a>,
+    P: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(Self {
+            round: Round::arbitrary(u)?,
+            leader: P::arbitrary(u)?,
+            parent: (View::arbitrary(u)?, D::arbitrary(u)?),
+        })
     }
 }
 
@@ -901,11 +946,11 @@ pub struct Notarization<S: Scheme, D: Digest> {
 
 impl<S: Scheme, D: Digest> Notarization<S, D> {
     /// Builds a notarization certificate from notarize votes for the same proposal.
-    pub fn from_notarizes<'a>(
-        scheme: &S,
-        notarizes: impl IntoIterator<Item = &'a Notarize<S, D>>,
-        strategy: &impl Strategy,
-    ) -> Option<Self> {
+    pub fn from_notarizes<'a, I>(scheme: &S, notarizes: I, strategy: &impl Strategy) -> Option<Self>
+    where
+        I: IntoIterator<Item = &'a Notarize<S, D>>,
+        I::IntoIter: Send,
+    {
         let mut iter = notarizes.into_iter().peekable();
         let proposal = iter.peek()?.proposal.clone();
         let certificate =
@@ -1139,11 +1184,11 @@ pub struct Nullification<S: Scheme> {
 
 impl<S: Scheme> Nullification<S> {
     /// Builds a nullification certificate from nullify votes from the same round.
-    pub fn from_nullifies<'a>(
-        scheme: &S,
-        nullifies: impl IntoIterator<Item = &'a Nullify<S>>,
-        strategy: &impl Strategy,
-    ) -> Option<Self> {
+    pub fn from_nullifies<'a, I>(scheme: &S, nullifies: I, strategy: &impl Strategy) -> Option<Self>
+    where
+        I: IntoIterator<Item = &'a Nullify<S>>,
+        I::IntoIter: Send,
+    {
         let mut iter = nullifies.into_iter().peekable();
         let round = iter.peek()?.round;
         let certificate =
@@ -1384,11 +1429,11 @@ pub struct Finalization<S: Scheme, D: Digest> {
 
 impl<S: Scheme, D: Digest> Finalization<S, D> {
     /// Builds a finalization certificate from finalize votes for the same proposal.
-    pub fn from_finalizes<'a>(
-        scheme: &S,
-        finalizes: impl IntoIterator<Item = &'a Finalize<S, D>>,
-        strategy: &impl Strategy,
-    ) -> Option<Self> {
+    pub fn from_finalizes<'a, I>(scheme: &S, finalizes: I, strategy: &impl Strategy) -> Option<Self>
+    where
+        I: IntoIterator<Item = &'a Finalize<S, D>>,
+        I::IntoIter: Send,
+    {
         let mut iter = finalizes.into_iter().peekable();
         let proposal = iter.peek()?.proposal.clone();
         let certificate =
@@ -3361,6 +3406,7 @@ mod tests {
             CodecConformance<ConflictingNotarize<Scheme, Sha256Digest>>,
             CodecConformance<ConflictingFinalize<Scheme, Sha256Digest>>,
             CodecConformance<NullifyFinalize<Scheme, Sha256Digest>>,
+            CodecConformance<Context<Sha256Digest, PublicKey>>
         }
     }
 }

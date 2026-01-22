@@ -257,38 +257,35 @@ where
     }
 
     /// Generate a historical proof with respect to the state of the MMR when it had
-    /// `historical_size` items.
+    /// `historical_leaves` leaves.
     ///
     /// Returns a proof and the items corresponding to the leaves in the range `start_loc..end_loc`,
-    /// where `end_loc` is the minimum of `historical_size` and `start_loc + max_ops`.
+    /// where `end_loc` is the minimum of `historical_leaves` and `start_loc + max_ops`.
     ///
     /// # Errors
     ///
-    /// - Returns [Error::Mmr] with [crate::mmr::Error::LocationOverflow] if `historical_size` or
-    ///   `start_loc` > [crate::mmr::MAX_LOCATION].
     /// - Returns [Error::Mmr] with [crate::mmr::Error::RangeOutOfBounds] if `start_loc` >=
-    ///   `historical_size` or `historical_size` > number of items in the journal.
+    ///   `historical_leaves` or `historical_leaves` > number of items in the journal.
     /// - Returns [Error::Journal] with [crate::journal::Error::ItemPruned] if `start_loc` has been
     ///   pruned.
     pub async fn historical_proof(
         &self,
-        historical_size: Location,
+        historical_leaves: Location,
         start_loc: Location,
         max_ops: NonZeroU64,
     ) -> Result<(Proof<H::Digest>, Vec<C::Item>), Error> {
-        let size = self.size();
-        if historical_size > size {
-            return Err(crate::mmr::Error::RangeOutOfBounds(size).into());
+        let leaves = self.size();
+        if historical_leaves > leaves {
+            return Err(crate::mmr::Error::RangeOutOfBounds(leaves).into());
         }
-        if start_loc >= historical_size {
+        if start_loc >= historical_leaves {
             return Err(crate::mmr::Error::RangeOutOfBounds(start_loc).into());
         }
-        let end_loc = std::cmp::min(historical_size, start_loc.saturating_add(max_ops.get()));
+        let end_loc = std::cmp::min(historical_leaves, start_loc.saturating_add(max_ops.get()));
 
-        let mmr_size = Position::try_from(historical_size)?;
         let proof = self
             .mmr
-            .historical_range_proof(mmr_size, start_loc..end_loc)
+            .historical_range_proof(historical_leaves, start_loc..end_loc)
             .await?;
 
         let mut ops = Vec::with_capacity((*end_loc - *start_loc) as usize);

@@ -41,6 +41,7 @@ pub enum Message<D: Digest, P: PublicKey> {
         response: oneshot::Sender<bool>,
     },
     Certify {
+        round: Round,
         payload: D,
         response: oneshot::Sender<bool>,
     },
@@ -98,10 +99,11 @@ impl<D: Digest, P: PublicKey> Au for Mailbox<D, P> {
 }
 
 impl<D: Digest, P: PublicKey> CAu for Mailbox<D, P> {
-    async fn certify(&mut self, payload: Self::Digest) -> oneshot::Receiver<bool> {
+    async fn certify(&mut self, round: Round, payload: Self::Digest) -> oneshot::Receiver<bool> {
         let (tx, rx) = oneshot::channel();
         self.sender
             .send_lossy(Message::Certify {
+                round,
                 payload,
                 response: tx,
             })
@@ -379,7 +381,7 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
                                 .push((context, response));
                         }
                     }
-                    Message::Certify { payload, response } => {
+                    Message::Certify { round: _, payload, response } => {
                         let contents = seen.get(&payload).cloned().unwrap_or_default();
                         // If certify returns None (Cancel mode), drop the sender without
                         // responding, causing the receiver to return Err(Canceled).

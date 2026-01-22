@@ -306,6 +306,9 @@ pub trait Metrics: Clone + Send + Sync + 'static {
     /// This pattern avoids wrapping every metric in a `Family` and avoids polluting metric
     /// names with dynamic values like `orchestrator_epoch_5_votes`.
     ///
+    /// _Using attributes does not reduce cardinality (N epochs still means N time series).
+    /// Attributes just make metrics easier to query, filter, and aggregate._
+    ///
     /// # Family Label Conflicts
     ///
     /// When using `Family` metrics, avoid using attribute keys that match the Family's label field names.
@@ -330,7 +333,7 @@ pub trait Metrics: Clone + Send + Sync + 'static {
     /// # Example
     ///
     /// ```ignore
-    /// // Instead of creating epoch-specific metric names (causes cardinality explosion):
+    /// // Instead of creating epoch-specific metric names:
     /// let ctx = context.with_label(&format!("consensus_engine_{}", epoch));
     /// // Produces: consensus_engine_5_votes_total, consensus_engine_6_votes_total, ...
     ///

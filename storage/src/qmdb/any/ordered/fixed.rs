@@ -72,7 +72,7 @@ mod test {
     use super::*;
     use crate::{
         index::Unordered as _,
-        mmr::{Position, StandardHasher as Standard},
+        mmr::StandardHasher as Standard,
         qmdb::{
             any::ordered::Update, store::batch_tests, verify_proof, Durable, Merkleized,
             NonDurable, Unmerkleized,
@@ -633,7 +633,7 @@ mod test {
             let (regular_proof, regular_ops) =
                 db.proof(Location::new_unchecked(5), max_ops).await.unwrap();
 
-            assert_eq!(historical_proof.size, regular_proof.size);
+            assert_eq!(historical_proof.leaves, regular_proof.leaves);
             assert_eq!(historical_proof.digests, regular_proof.digests);
             assert_eq!(historical_ops, regular_ops);
             assert!(verify_proof(
@@ -657,11 +657,7 @@ mod test {
                 .historical_proof(original_op_count, Location::new_unchecked(5), NZU64!(10))
                 .await
                 .unwrap();
-            assert_eq!(
-                historical_proof.size,
-                Position::try_from(original_op_count).unwrap()
-            );
-            assert_eq!(historical_proof.size, regular_proof.size);
+            assert_eq!(historical_proof.leaves, original_op_count);
             assert_eq!(historical_ops.len(), 10);
             assert_eq!(historical_proof.digests, regular_proof.digests);
             assert_eq!(historical_ops, regular_ops);
@@ -700,10 +696,7 @@ mod test {
                 )
                 .await
                 .unwrap();
-            assert_eq!(
-                single_proof.size,
-                Position::try_from(Location::new_unchecked(2)).unwrap()
-            );
+            assert_eq!(single_proof.leaves, Location::new_unchecked(2));
             assert_eq!(single_ops.len(), 1);
 
             // Create historical database with single operation
@@ -743,10 +736,7 @@ mod test {
                 )
                 .await
                 .unwrap();
-            assert_eq!(
-                min_proof.size,
-                Position::try_from(Location::new_unchecked(4)).unwrap()
-            );
+            assert_eq!(min_proof.leaves, Location::new_unchecked(4));
             assert_eq!(min_ops.len(), 3);
 
             drop(single_db);
@@ -786,7 +776,7 @@ mod test {
                     .historical_proof(historical_size, start_loc, max_ops)
                     .await
                     .unwrap();
-                assert_eq!(proof.size, historical_proof.size);
+                assert_eq!(proof.leaves, historical_proof.leaves);
                 assert_eq!(ops, historical_ops);
                 assert_eq!(proof.digests, historical_proof.digests);
 
@@ -818,12 +808,11 @@ mod test {
             let db = db.into_merkleized();
 
             let historical_op_count = Location::new_unchecked(5);
-            let historical_mmr_size = Position::try_from(historical_op_count).unwrap();
             let (proof, ops) = db
                 .historical_proof(historical_op_count, Location::new_unchecked(1), NZU64!(10))
                 .await
                 .unwrap();
-            assert_eq!(proof.size, historical_mmr_size);
+            assert_eq!(proof.leaves, historical_op_count);
             assert_eq!(ops.len(), 4);
 
             let mut hasher = Standard::<Sha256>::new();
@@ -911,7 +900,7 @@ mod test {
             // Changing the proof size should cause verification to fail
             {
                 let mut proof = proof.clone();
-                proof.size = Position::from(100u64);
+                proof.leaves = Location::new_unchecked(100);
                 let root_hash = db.root();
                 assert!(!verify_proof(
                     &mut hasher,

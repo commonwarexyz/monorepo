@@ -2,7 +2,7 @@
 
 use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
-use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
+use commonware_runtime::{buffer::PoolRef, deterministic, Metrics, Runner};
 use commonware_storage::{
     mmr::{self, hasher::Standard, MAX_LOCATION},
     qmdb::{
@@ -163,6 +163,7 @@ fn fuzz(input: FuzzInput) {
         .await
         .expect("Failed to init source db")
         .into_mutable();
+        let mut restarts = 0usize;
 
         let mut historical_roots: HashMap<
             Location,
@@ -281,12 +282,15 @@ fn fuzz(input: FuzzInput) {
                     drop(db);
 
                     db = Db::<_, Key, Vec<u8>, Sha256, TwoCap, _, _>::init(
-                        context.clone(),
+                        context
+                            .with_label("db")
+                            .with_attribute("instance", restarts),
                         test_config("qmdb_any_variable_fuzz_test"),
                     )
                     .await
                     .expect("Failed to init source db")
                     .into_mutable();
+                    restarts += 1;
                 }
             }
         }

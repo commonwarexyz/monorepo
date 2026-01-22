@@ -18,7 +18,7 @@ use crate::{
 #[cfg(not(feature = "std"))]
 use alloc::{collections::BTreeSet, vec::Vec};
 use bytes::{Buf, BufMut};
-use commonware_codec::{EncodeSize, Error, Read, ReadExt, Write};
+use commonware_codec::{types::lazy::Lazy, EncodeSize, Error, Read, ReadExt, Write};
 use commonware_parallel::Strategy;
 use commonware_utils::{
     ordered::{BiMap, Quorum, Set},
@@ -111,7 +111,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
 
         Some(Attestation {
             signer: *index,
-            signature,
+            signature: signature.into(),
         })
     }
 
@@ -129,12 +129,15 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         let Some(public_key) = self.participants.value(attestation.signer.into()) else {
             return false;
         };
+        let Some(sig) = attestation.signature.get() else {
+            return false;
+        };
 
         ops::verify_message::<V>(
             public_key,
             subject.namespace(&self.namespace),
             &subject.message(),
-            &attestation.signature,
+            sig,
         )
         .is_ok()
     }
@@ -153,20 +156,26 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         R: CryptoRngCore,
         D: Digest,
         I: IntoIterator<Item = Attestation<S>>,
+        I::IntoIter: Send,
         T: Strategy,
     {
-        let mut invalid = BTreeSet::new();
-        let mut candidates = Vec::new();
-        let mut entries = Vec::new();
-        for attestation in attestations.into_iter() {
-            let Some(public_key) = self.participants.value(attestation.signer.into()) else {
-                invalid.insert(attestation.signer);
-                continue;
-            };
-
-            entries.push((*public_key, attestation.signature));
-            candidates.push(attestation);
-        }
+        let (filtered, failures) =
+            strategy.map_partition_collect_vec(attestations.into_iter(), |attestation| {
+                let signer = attestation.signer;
+                let value = self
+                    .participants
+                    .value(signer.into())
+                    .and_then(|public_key| {
+                        attestation
+                            .signature
+                            .get()
+                            .cloned()
+                            .map(|signature| (attestation, (*public_key, signature)))
+                    });
+                (signer, value)
+            });
+        let mut invalid: BTreeSet<_> = failures.into_iter().collect();
+        let (candidates, entries): (Vec<_>, Vec<_>) = filtered.into_iter().unzip();
 
         // If there are no candidates to verify, return before doing any work.
         if candidates.is_empty() {
@@ -211,7 +220,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
             if usize::from(signer) >= self.participants.len() {
                 return None;
             }
-
+            let signature = signature.get().cloned()?;
             entries.push((signer, signature));
         }
         if entries.len() < self.participants.quorum::<M>() as usize {
@@ -223,7 +232,10 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         let signers = Signers::from(self.participants.len(), signers);
         let signature = aggregate::combine_signatures::<V, _>(signatures.iter());
 
-        Some(Certificate { signers, signature })
+        Some(Certificate {
+            signers,
+            signature: Lazy::from(signature),
+        })
     }
 
     /// Verifies a certificate.
@@ -261,12 +273,15 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         }
 
         // Verify the aggregate signature.
+        let Some(signature) = certificate.signature.get() else {
+            return false;
+        };
         let agg_public = aggregate::combine_public_keys::<V, _>(&publics);
         aggregate::verify_same_message::<V>(
             &agg_public,
             subject.namespace(&self.namespace),
             &subject.message(),
-            &certificate.signature,
+            signature,
         )
         .is_ok()
     }
@@ -313,7 +328,7 @@ pub struct Certificate<V: Variant> {
     /// Bitmap of participant indices that contributed signatures.
     pub signers: Signers,
     /// Aggregated BLS signature covering all signatures in this certificate.
-    pub signature: aggregate::Signature<V>,
+    pub signature: Lazy<aggregate::Signature<V>>,
 }
 
 impl<V: Variant> Write for Certificate<V> {
@@ -341,7 +356,7 @@ impl<V: Variant> Read for Certificate<V> {
             ));
         }
 
-        let signature = aggregate::Signature::read(reader)?;
+        let signature = Lazy::<aggregate::Signature<V>>::read(reader)?;
 
         Ok(Self { signers, signature })
     }
@@ -355,7 +370,10 @@ where
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let signers = Signers::arbitrary(u)?;
         let signature = aggregate::Signature::arbitrary(u)?;
-        Ok(Self { signers, signature })
+        Ok(Self {
+            signers,
+            signature: Lazy::from(signature),
+        })
     }
 }
 
@@ -504,6 +522,7 @@ mod macros {
                     R: rand_core::CryptoRngCore,
                     D: $crate::Digest,
                     I: IntoIterator<Item = $crate::certificate::Attestation<Self>>,
+                    I::IntoIter: Send
                 {
                     self.generic
                         .verify_attestations::<_, _, D, _, _>(rng, subject, attestations, strategy)
@@ -752,7 +771,7 @@ mod tests {
 
         // Test: Corrupt one attestation - invalid signature
         let mut attestations_corrupted = attestations;
-        attestations_corrupted[0].signature = attestations_corrupted[1].signature;
+        attestations_corrupted[0].signature = attestations_corrupted[1].signature.clone();
         let result = schemes[0].verify_attestations::<_, Sha256Digest, _>(
             &mut rng,
             TestSubject {
@@ -909,7 +928,7 @@ mod tests {
 
         // Corrupted certificate fails
         let mut corrupted = certificate;
-        corrupted.signature = aggregate::Signature::zero();
+        corrupted.signature = Lazy::from(aggregate::Signature::zero());
         assert!(!verifier.verify_certificate::<_, Sha256Digest, N3f1>(
             &mut rng,
             TestSubject {
@@ -1176,7 +1195,7 @@ mod tests {
         }
 
         // Corrupt second certificate
-        certificates[1].signature = aggregate::Signature::zero();
+        certificates[1].signature = Lazy::from(aggregate::Signature::zero());
 
         let certs_iter = messages.iter().zip(&certificates).map(|(msg, cert)| {
             (
@@ -1386,15 +1405,17 @@ mod tests {
         let delta = V::Signature::generator() * &random_scalar;
         let forged_attestation1: Attestation<Scheme<ed25519::PublicKey, V>> = Attestation {
             signer: attestation1.signer,
-            signature: attestation1.signature - &delta,
+            signature: (*attestation1.signature.get().unwrap() - &delta).into(),
         };
         let forged_attestation2: Attestation<Scheme<ed25519::PublicKey, V>> = Attestation {
             signer: attestation2.signer,
-            signature: attestation2.signature + &delta,
+            signature: (*attestation2.signature.get().unwrap() + &delta).into(),
         };
 
-        let forged_sum = forged_attestation1.signature + &forged_attestation2.signature;
-        let valid_sum = attestation1.signature + &attestation2.signature;
+        let forged_sum = *forged_attestation1.signature.get().unwrap()
+            + forged_attestation2.signature.get().unwrap();
+        let valid_sum =
+            *attestation1.signature.get().unwrap() + attestation2.signature.get().unwrap();
         assert_eq!(forged_sum, valid_sum, "signature sums should be equal");
 
         let verification = schemes[0].verify_attestations::<_, Sha256Digest, _>(

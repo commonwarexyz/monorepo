@@ -23,6 +23,8 @@ use crate::{
 };
 #[cfg(not(feature = "std"))]
 use alloc::{collections::BTreeSet, vec::Vec};
+use bytes::{Buf, BufMut};
+use commonware_codec::{types::lazy::Lazy, Error, FixedSize, Read, ReadExt, Write};
 use commonware_parallel::Strategy;
 use commonware_utils::{ordered::Set, Faults, Participant};
 use core::fmt::Debug;
@@ -217,7 +219,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
 
         Some(Attestation {
             signer: share.index,
-            signature,
+            signature: signature.into(),
         })
     }
 
@@ -235,12 +237,15 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         let Ok(evaluated) = self.polynomial().partial_public(attestation.signer) else {
             return false;
         };
+        let Some(signature) = attestation.signature.get() else {
+            return false;
+        };
 
         ops::verify_message::<V>(
             &evaluated,
             subject.namespace(self.namespace()),
             &subject.message(),
-            &attestation.signature,
+            signature,
         )
         .is_ok()
     }
@@ -259,17 +264,19 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         R: CryptoRngCore,
         D: Digest,
         I: IntoIterator<Item = Attestation<S>>,
+        I::IntoIter: Send,
         T: Strategy,
     {
-        let mut invalid = BTreeSet::new();
-        let partials: Vec<_> = attestations
-            .into_iter()
-            .map(|attestation| PartialSignature::<V> {
-                index: attestation.signer,
-                value: attestation.signature,
-            })
-            .collect();
-
+        let (partials, failures) =
+            strategy.map_partition_collect_vec(attestations.into_iter(), |attestation| {
+                let index = attestation.signer;
+                let partial = attestation
+                    .signature
+                    .get()
+                    .map(|&value| PartialSignature::<V> { index, value });
+                (index, partial)
+            });
+        let mut invalid: BTreeSet<_> = failures.into_iter().collect();
         let polynomial = self.polynomial();
         if let Err(errs) = threshold::batch_verify_same_message::<_, V, _>(
             rng,
@@ -289,7 +296,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
             .filter(|partial| !invalid.contains(&partial.index))
             .map(|partial| Attestation {
                 signer: partial.index,
-                signature: partial.value,
+                signature: partial.value.into(),
             })
             .collect();
 
@@ -297,27 +304,35 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
     }
 
     /// Assembles a certificate from a collection of attestations.
-    pub fn assemble<S, I, T, M>(&self, attestations: I, strategy: &T) -> Option<V::Signature>
+    pub fn assemble<S, I, T, M>(&self, attestations: I, strategy: &T) -> Option<Certificate<V>>
     where
         S: Scheme<Signature = V::Signature>,
         I: IntoIterator<Item = Attestation<S>>,
+        I::IntoIter: Send,
         T: Strategy,
         M: Faults,
     {
-        let partials: Vec<_> = attestations
-            .into_iter()
-            .map(|attestation| PartialSignature::<V> {
-                index: attestation.signer,
-                value: attestation.signature,
-            })
-            .collect();
+        let (partials, failures) =
+            strategy.map_partition_collect_vec(attestations.into_iter(), |attestation| {
+                let index = attestation.signer;
+                let value = attestation
+                    .signature
+                    .get()
+                    .map(|&sig| PartialSignature::<V> { index, value: sig });
+                (index, value)
+            });
+        if !failures.is_empty() {
+            return None;
+        }
 
         let quorum = self.polynomial();
         if partials.len() < quorum.required::<M>() as usize {
             return None;
         }
 
-        threshold::recover::<V, _, M>(quorum, partials.iter(), strategy).ok()
+        threshold::recover::<V, _, M>(quorum, partials.iter(), strategy)
+            .ok()
+            .map(Certificate::new)
     }
 
     /// Verifies a certificate.
@@ -325,7 +340,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         &self,
         _rng: &mut R,
         subject: S::Subject<'a, D>,
-        certificate: &V::Signature,
+        certificate: &Certificate<V>,
     ) -> bool
     where
         S: Scheme,
@@ -334,11 +349,14 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         D: Digest,
         M: Faults,
     {
+        let Some(signature) = certificate.get() else {
+            return false;
+        };
         ops::verify_message::<V>(
             self.identity(),
             subject.namespace(self.namespace()),
             &subject.message(),
-            certificate,
+            signature,
         )
         .is_ok()
     }
@@ -355,16 +373,19 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         S::Subject<'a, D>: Subject<Namespace = N>,
         R: CryptoRngCore,
         D: Digest,
-        I: Iterator<Item = (S::Subject<'a, D>, &'a V::Signature)>,
+        I: Iterator<Item = (S::Subject<'a, D>, &'a Certificate<V>)>,
         T: Strategy,
         M: Faults,
     {
         let mut entries: Vec<_> = Vec::new();
 
         for (subject, certificate) in certificates {
+            let Some(signature) = certificate.get() else {
+                return false;
+            };
             let namespace = subject.namespace(self.namespace());
             let message = subject.message();
-            entries.push((namespace.to_vec(), message.to_vec(), *certificate));
+            entries.push((namespace.to_vec(), message.to_vec(), *signature));
         }
 
         if entries.is_empty() {
@@ -390,6 +411,60 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
     pub const fn certificate_codec_config(&self) {}
 
     pub const fn certificate_codec_config_unbounded() {}
+}
+
+/// Certificate for BLS12-381 threshold signatures.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct Certificate<V: Variant> {
+    /// The recovered threshold signature.
+    pub signature: Lazy<V::Signature>,
+}
+
+impl<V: Variant> Certificate<V> {
+    /// Creates a new certificate from a recovered signature.
+    pub fn new(signature: V::Signature) -> Self {
+        Self {
+            signature: Lazy::from(signature),
+        }
+    }
+
+    /// Attempts to get the decoded signature.
+    ///
+    /// Returns `None` if the signature fails to decode.
+    pub fn get(&self) -> Option<&V::Signature> {
+        self.signature.get()
+    }
+}
+
+impl<V: Variant> Write for Certificate<V> {
+    fn write(&self, writer: &mut impl BufMut) {
+        self.signature.write(writer);
+    }
+}
+
+impl<V: Variant> Read for Certificate<V> {
+    type Cfg = ();
+
+    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
+        let signature = Lazy::<V::Signature>::read(reader)?;
+        Ok(Self { signature })
+    }
+}
+
+impl<V: Variant> FixedSize for Certificate<V> {
+    const SIZE: usize = V::Signature::SIZE;
+}
+
+#[cfg(feature = "arbitrary")]
+impl<V: Variant> arbitrary::Arbitrary<'_> for Certificate<V>
+where
+    V::Signature: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(Self {
+            signature: Lazy::from(u.arbitrary::<V::Signature>()?),
+        })
+    }
 }
 
 mod macros {
@@ -518,7 +593,7 @@ mod macros {
                 type Subject<'a, D: $crate::Digest> = $subject;
                 type PublicKey = P;
                 type Signature = V::Signature;
-                type Certificate = V::Signature;
+                type Certificate = $crate::bls12381::certificate::threshold::Certificate<V>;
 
                 fn me(&self) -> Option<commonware_utils::Participant> {
                     self.generic.me()
@@ -561,6 +636,7 @@ mod macros {
                     R: rand_core::CryptoRngCore,
                     D: $crate::Digest,
                     I: IntoIterator<Item = $crate::certificate::Attestation<Self>>,
+                    I::IntoIter: Send
                 {
                     self.generic
                         .verify_attestations::<_, _, D, _, _>(rng, subject, attestations, strategy)
@@ -573,6 +649,7 @@ mod macros {
                 ) -> Option<Self::Certificate>
                 where
                     I: IntoIterator<Item = $crate::certificate::Attestation<Self>>,
+                    I::IntoIter: Send,
                     M: commonware_utils::Faults,
                 {
                     self.generic.assemble::<Self, _, _, M>(attestations, strategy)
@@ -800,7 +877,7 @@ mod tests {
 
         // Test: Corrupt one attestation - invalid signature
         let mut attestations_corrupted = attestations;
-        attestations_corrupted[0].signature = attestations_corrupted[1].signature;
+        attestations_corrupted[0].signature = attestations_corrupted[1].signature.clone();
         let result = schemes[0].verify_attestations::<_, Sha256Digest, _>(
             &mut rng,
             TestSubject {
@@ -923,7 +1000,7 @@ mod tests {
         ));
 
         // Corrupted certificate fails
-        let corrupted = V::Signature::zero();
+        let corrupted = Certificate::new(V::Signature::zero());
         assert!(!verifier.verify_certificate::<_, Sha256Digest, N3f1>(
             &mut rng,
             TestSubject {
@@ -960,7 +1037,7 @@ mod tests {
             .assemble::<_, N3f1>(attestations, &Sequential)
             .unwrap();
         let encoded = certificate.encode();
-        let decoded = V::Signature::decode(encoded).expect("decode certificate");
+        let decoded = Certificate::<V>::decode(encoded).expect("decode certificate");
         assert_eq!(decoded, certificate);
     }
 
@@ -1076,7 +1153,7 @@ mod tests {
         }
 
         // Corrupt second certificate
-        certificates[1] = V::Signature::zero();
+        certificates[1] = Certificate::new(V::Signature::zero());
 
         let certs_iter = messages.iter().zip(&certificates).map(|(msg, cert)| {
             (
@@ -1402,12 +1479,22 @@ mod tests {
         let expected = sign_message::<V>(share, NAMESPACE, MESSAGE);
 
         assert_eq!(signature.signer, share.index);
-        assert_eq!(signature.signature, expected.value);
+        assert_eq!(signature.signature.get().unwrap(), &expected.value);
     }
 
     #[test]
     fn test_sign_vote_partial_matches_share_variants() {
         sign_vote_partial_matches_share::<MinPk>();
         sign_vote_partial_matches_share::<MinSig>();
+    }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::*;
+        use commonware_codec::conformance::CodecConformance;
+
+        commonware_conformance::conformance_tests! {
+            CodecConformance<Certificate<MinSig>>,
+        }
     }
 }
