@@ -817,11 +817,11 @@ impl From<BytesMut> for IoBufsMut {
 }
 
 impl From<Vec<IoBufMut>> for IoBufsMut {
-    fn from(bufs: Vec<IoBufMut>) -> Self {
-        if bufs.len() == 1 {
-            Self::Single(bufs.into_iter().next().unwrap())
-        } else {
-            Self::Chunked(bufs.into())
+    fn from(mut bufs: Vec<IoBufMut>) -> Self {
+        match bufs.len() {
+            0 => Self::default(),
+            1 => Self::Single(bufs.pop().unwrap()),
+            _ => Self::Chunked(bufs.into()),
         }
     }
 }
@@ -1290,11 +1290,23 @@ mod tests {
     }
 
     #[test]
-    fn test_iobufsmut_from_vec_single() {
-        // A Vec with one element should become Single
+    fn test_iobufsmut_from_vec() {
+        // Empty Vec becomes Single with empty buffer
+        let bufs = IoBufsMut::from(Vec::<IoBufMut>::new());
+        assert!(bufs.is_single());
+        assert!(bufs.is_empty());
+
+        // Vec with one element becomes Single
         let buf = IoBufMut::from(b"test");
         let bufs = IoBufsMut::from(vec![buf]);
         assert!(bufs.is_single());
+        assert_eq!(bufs.chunk(), b"test");
+
+        // Vec with multiple elements becomes Chunked
+        let buf1 = IoBufMut::from(b"hello");
+        let buf2 = IoBufMut::from(b" world");
+        let bufs = IoBufsMut::from(vec![buf1, buf2]);
+        assert!(!bufs.is_single());
     }
 
     #[test]
