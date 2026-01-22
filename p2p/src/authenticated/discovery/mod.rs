@@ -2296,6 +2296,126 @@ mod tests {
         }
     }
 
+    #[test_traced]
+    fn test_two_peers_same_address_then_correction() {
+        // Peer 2 initially advertises the same address as peer 1 (wrong). After
+        // connection attempts fail, peer 2 starts on its real address and gossips
+        // the correct info.
+        let base_port = 6100;
+
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let peer0 = ed25519::PrivateKey::from_seed(0);
+            let peer1 = ed25519::PrivateKey::from_seed(1);
+            let peer2 = ed25519::PrivateKey::from_seed(2);
+
+            let socket0 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port);
+            let socket1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port + 1);
+            let socket2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port + 2);
+
+            let addresses: Vec<_> = vec![peer0.public_key(), peer1.public_key(), peer2.public_key()];
+
+            // Start peer 0 (bootstrapper)
+            let config0 = Config::test(peer0.clone(), socket0, vec![], MAX_MESSAGE_SIZE);
+            let (mut network0, mut oracle0) = Network::new(context.with_label("peer_0"), config0);
+            oracle0.update(0, addresses.clone().try_into().unwrap()).await;
+            let (mut sender0, mut receiver0) =
+                network0.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
+            network0.start();
+
+            // Start peer 1 (listening on socket1, advertises correct address)
+            let bootstrappers1 = vec![(peer0.public_key(), socket0.into())];
+            let config1 = Config::test(peer1.clone(), socket1, bootstrappers1, MAX_MESSAGE_SIZE);
+            let (mut network1, mut oracle1) = Network::new(context.with_label("peer_1"), config1);
+            oracle1.update(0, addresses.clone().try_into().unwrap()).await;
+            let (mut sender1, mut receiver1) =
+                network1.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
+            network1.start();
+
+            // Do NOT start peer 2 yet - let connection attempts to wrong address fail first
+
+            // Wait for peer 0 to connect to peer 1
+            loop {
+                let sent = sender0
+                    .send(Recipients::One(peer1.public_key()), peer0.public_key().as_ref(), true)
+                    .await
+                    .unwrap();
+                if !sent.is_empty() {
+                    break;
+                }
+                context.sleep(Duration::from_millis(100)).await;
+            }
+
+            // Verify peer 1 received the message
+            let (sender, _) = receiver1.recv().await.unwrap();
+            assert_eq!(sender, peer0.public_key());
+
+            // Wait for gossip and connection attempts
+            context.sleep(Duration::from_secs(2)).await;
+
+            // Peer 0 cannot reach peer 2 (no one is listening, or if peer1's address
+            // was gossiped as peer2's, handshake fails due to key mismatch)
+            let sent = sender0
+                .send(Recipients::One(peer2.public_key()), peer0.public_key().as_ref(), true)
+                .await
+                .unwrap();
+            assert!(sent.is_empty(), "should not connect to peer 2 yet");
+
+            // Now start peer 2 on its real address (gossips correct address)
+            let bootstrappers2 = vec![(peer0.public_key(), socket0.into())];
+            let config2 = Config::test(peer2.clone(), socket2, bootstrappers2, MAX_MESSAGE_SIZE);
+            let (mut network2, mut oracle2) = Network::new(context.with_label("peer_2"), config2);
+            oracle2.update(0, addresses.clone().try_into().unwrap()).await;
+            let (mut sender2, mut receiver2) =
+                network2.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
+            network2.start();
+
+            // Wait for peer 2 to gossip its correct address and establish connectivity
+            loop {
+                let sent = sender0
+                    .send(Recipients::One(peer2.public_key()), peer0.public_key().as_ref(), true)
+                    .await
+                    .unwrap();
+                if !sent.is_empty() {
+                    break;
+                }
+                context.sleep(Duration::from_millis(100)).await;
+            }
+
+            // Verify peer 2 received the message
+            let (sender, _) = receiver2.recv().await.unwrap();
+            assert_eq!(sender, peer0.public_key());
+
+            // Verify bidirectional: peer 2 can send to peer 0
+            loop {
+                let sent = sender2
+                    .send(Recipients::One(peer0.public_key()), peer2.public_key().as_ref(), true)
+                    .await
+                    .unwrap();
+                if !sent.is_empty() {
+                    break;
+                }
+                context.sleep(Duration::from_millis(100)).await;
+            }
+            let (sender, _) = receiver0.recv().await.unwrap();
+            assert_eq!(sender, peer2.public_key());
+
+            // Verify peer 1 connectivity still works
+            loop {
+                let sent = sender1
+                    .send(Recipients::One(peer0.public_key()), peer1.public_key().as_ref(), true)
+                    .await
+                    .unwrap();
+                if !sent.is_empty() {
+                    break;
+                }
+                context.sleep(Duration::from_millis(100)).await;
+            }
+            let (sender, _) = receiver0.recv().await.unwrap();
+            assert_eq!(sender, peer1.public_key());
+        });
+    }
+
     #[test]
     fn test_broadcast_slow_peer_no_blocking() {
         let executor = deterministic::Runner::timed(Duration::from_secs(5));
