@@ -227,7 +227,7 @@ impl IoBufMut {
         self.inner.set_len(len);
     }
 
-    /// Number of initialized bytes.
+    /// Number of bytes remaining in the buffer.
     #[inline]
     pub fn len(&self) -> usize {
         self.remaining()
@@ -420,7 +420,7 @@ impl Default for IoBufs {
 }
 
 impl IoBufs {
-    /// Number of bytes remaining to read.
+    /// Number of bytes remaining across all buffers.
     #[inline]
     pub fn len(&self) -> usize {
         self.remaining()
@@ -624,7 +624,7 @@ impl Default for IoBufsMut {
 }
 
 impl IoBufsMut {
-    /// Total initialized length across all buffers.
+    /// Number of bytes remaining across all buffers.
     #[inline]
     pub fn len(&self) -> usize {
         self.remaining()
