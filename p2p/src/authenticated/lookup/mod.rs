@@ -2002,7 +2002,7 @@ mod tests {
                 network0.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
             network0.start();
 
-            // Start peer 2 (incorrect)
+            // Start peer 2
             let config2 = Config::test(peer2.clone(), socket2, MAX_MESSAGE_SIZE);
             let (mut network2, mut oracle2) = Network::new(context.with_label("peer_2"), config2);
             let (_sender2, mut receiver2) =
