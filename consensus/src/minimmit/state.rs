@@ -1583,13 +1583,12 @@ mod tests {
         );
     }
 
-    /// Test: M-notarization certificate for different proposal triggers nullify (past view).
+    /// Test: M-notarization certificate for different proposal does not nullify (past view).
     ///
-    /// Even after we've advanced past a view, receiving an M-notarization for a
-    /// different proposal than we voted for should trigger nullify. This helps
-    /// other validators form nullification certificates.
+    /// After we've advanced past a view, receiving an M-notarization for a
+    /// different proposal should not trigger nullify for that past view.
     #[test]
-    fn nullify_by_certificate_contradiction_past_view() {
+    fn no_nullify_by_certificate_contradiction_past_view() {
         let (mut state, schemes, _rng) = setup_state();
         let genesis = Sha256Digest::from([0u8; 32]);
 
@@ -1639,12 +1638,12 @@ mod tests {
 
         let actions = state.receive_certificate(Certificate::MNotarization(m_notarization_b));
 
-        // Should emit nullify for past view due to contradiction
+        // Should NOT emit nullify for past view due to contradiction
         assert!(
-            actions
+            !actions
                 .iter()
                 .any(|a| matches!(a, Action::BroadcastNullify(_))),
-            "Should nullify when receiving M-notarization for different proposal in past view"
+            "Should NOT nullify when receiving M-notarization for different proposal in past view"
         );
     }
 

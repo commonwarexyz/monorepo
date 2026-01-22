@@ -474,6 +474,7 @@ mod tests {
         let round2 = Round::new(Epoch::new(0), View::new(2));
         let notarize_non_leader = create_notarize(&schemes[1], round2, View::new(1), 3);
         let notarize_leader = create_notarize(&schemes[0], round2, View::new(1), 3);
+        let notarize_third = create_notarize(&schemes[2], round2, View::new(1), 3);
 
         verifier2.set_leader(notarize_leader.signer());
         verifier2.add(Vote::Notarize(notarize_non_leader), false);
@@ -490,9 +491,12 @@ mod tests {
         assert_eq!(verifier2.notarizes.len(), 2);
         assert!(verifier2.conflicting_notarizes.is_empty());
 
+        verifier2.add(Vote::Notarize(notarize_third), false);
+        assert_eq!(verifier2.notarizes.len(), 3);
+
         // Leader votes are verified; proposals that match are verified together
         let (verified_bulk, failed_bulk) = verifier2.verify_notarizes(&mut rng, &Sequential);
-        assert_eq!(verified_bulk.len(), 2);
+        assert_eq!(verified_bulk.len(), m_quorum as usize);
         assert!(failed_bulk.is_empty());
         assert_eq!(verifier2.notarizes.len(), 0);
     }
