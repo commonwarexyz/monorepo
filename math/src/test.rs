@@ -243,12 +243,9 @@ impl arbitrary::Arbitrary<'_> for G {
     }
 }
 
-#[allow(clippy::module_inception)]
-#[cfg(test)]
-mod test {
+#[cfg(any(test, feature = "fuzz"))]
+mod impl_proptest_arbitrary {
     use super::*;
-    use crate::algebra;
-    use commonware_codec::Encode;
     use proptest::prelude::*;
 
     impl Arbitrary for F {
@@ -268,6 +265,44 @@ mod test {
             any::<F>().prop_map(|x| Self::generator() * &x).boxed()
         }
     }
+}
+
+#[cfg(any(test, feature = "fuzz"))]
+pub(crate) mod fuzz {
+    use super::*;
+    use commonware_codec::Encode as _;
+    use commonware_test::FuzzPlan;
+    use proptest::{prop_assert_eq, test_runner::TestCaseResult};
+    use proptest_derive::Arbitrary;
+
+    #[derive(Debug, Arbitrary)]
+    pub enum Plan {
+        FCodec(F),
+        GCodec(G),
+    }
+
+    impl FuzzPlan for Plan {
+        fn run(self) -> TestCaseResult {
+            match self {
+                Plan::FCodec(x) => {
+                    prop_assert_eq!(&x, &F::read(&mut x.encode()).unwrap());
+                }
+                Plan::GCodec(x) => {
+                    prop_assert_eq!(&x, &G::read(&mut x.encode()).unwrap());
+                }
+            }
+            Ok(())
+        }
+    }
+}
+
+#[allow(clippy::module_inception)]
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::algebra;
+    use commonware_test::FuzzPlan as _;
+    use proptest::{prelude::Arbitrary, proptest};
 
     #[test]
     fn test_field() {
@@ -281,13 +316,8 @@ mod test {
 
     proptest! {
         #[test]
-        fn test_f_codec(x: F) {
-            assert_eq!(&x, &F::read(&mut x.encode()).unwrap());
-        }
-
-        #[test]
-        fn test_g_codec(x: G) {
-            assert_eq!(&x, &G::read(&mut x.encode()).unwrap());
+        fn test_fuzz(plan: super::fuzz::Plan) {
+            plan.run()?;
         }
     }
 

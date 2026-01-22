@@ -584,51 +584,69 @@ pub mod test_suites {
     }
 }
 
-#[cfg(test)]
-mod test {
+#[cfg(any(test, feature = "fuzz"))]
+pub(crate) mod fuzz {
     use super::*;
     use crate::fields::goldilocks::F;
     use commonware_parallel::Sequential;
-    use proptest::prelude::*;
+    use commonware_test::FuzzPlan;
+    use proptest::{prop_assert_eq, test_runner::TestCaseResult};
+    use proptest_derive::Arbitrary;
+
+    #[derive(Debug, Arbitrary)]
+    pub enum Plan {
+        ExpOne(F),
+        ExpZero(F),
+        Exp(F, u32, u32),
+        ScaleOne(F),
+        ScaleZero(F),
+        Scale(F, u32, u32),
+        Msm2([F; 2], [F; 2]),
+    }
+
+    impl FuzzPlan for Plan {
+        fn run(self) -> TestCaseResult {
+            match self {
+                Plan::ExpOne(x) => {
+                    prop_assert_eq!(x.exp(&[1]), x);
+                }
+                Plan::ExpZero(x) => {
+                    prop_assert_eq!(x.exp(&[]), F::one());
+                }
+                Plan::Exp(x, a, b) => {
+                    let a = u64::from(a);
+                    let b = u64::from(b);
+                    prop_assert_eq!(x.exp(&[a + b]), x.exp(&[a]) * x.exp(&[b]));
+                }
+                Plan::ScaleOne(x) => {
+                    prop_assert_eq!(x.scale(&[1]), x);
+                }
+                Plan::ScaleZero(x) => {
+                    prop_assert_eq!(x.scale(&[]), F::zero());
+                }
+                Plan::Scale(x, a, b) => {
+                    let a = u64::from(a);
+                    let b = u64::from(b);
+                    prop_assert_eq!(x.scale(&[a + b]), x.scale(&[a]) + x.scale(&[b]));
+                }
+                Plan::Msm2(a, b) => {
+                    prop_assert_eq!(F::msm(&a, &b, &Sequential), a[0] * b[0] + a[1] * b[1]);
+                }
+            }
+            Ok(())
+        }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use commonware_test::FuzzPlan as _;
+    use proptest::proptest;
 
     proptest! {
         #[test]
-        fn test_exp_one(x: F) {
-            assert_eq!(x.exp(&[1]), x);
-        }
-
-        #[test]
-        fn test_exp_zero(x: F) {
-            assert_eq!(x.exp(&[]), F::one());
-        }
-
-        #[test]
-        fn test_exp(x: F, a: u32, b: u32) {
-            let a = u64::from(a);
-            let b = u64::from(b);
-            assert_eq!(x.exp(&[a + b]), x.exp(&[a]) * x.exp(&[b]));
-        }
-
-        #[test]
-        fn test_scale_one(x: F) {
-            assert_eq!(x.scale(&[1]), x);
-        }
-
-        #[test]
-        fn test_scale_zero(x: F) {
-            assert_eq!(x.scale(&[]), F::zero());
-        }
-
-        #[test]
-        fn test_scale(x: F, a: u32, b: u32) {
-            let a = u64::from(a);
-            let b = u64::from(b);
-            assert_eq!(x.scale(&[a + b]), x.scale(&[a]) + x.scale(&[b]));
-        }
-
-        #[test]
-        fn test_msm_2(a: [F; 2], b: [F; 2]) {
-            assert_eq!(F::msm(&a, &b, &Sequential), a[0] * b[0] + a[1] * b[1]);
+        fn test_fuzz(plan: super::fuzz::Plan) {
+            plan.run()?;
         }
     }
 }
