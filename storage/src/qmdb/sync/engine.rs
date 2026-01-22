@@ -272,7 +272,7 @@ where
         mut self,
         new_target: Target<DB::Digest>,
     ) -> Result<Self, Error<DB, R>> {
-        self.journal.resize(new_target.range.clone()).await?;
+        self.journal.resize(new_target.range.start).await?;
 
         Ok(Self {
             outstanding_requests: Requests::new(),

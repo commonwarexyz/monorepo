@@ -27,14 +27,11 @@ pub trait Journal: Sized + Send {
         range: Range<Location>,
     ) -> impl Future<Output = Result<Self, Self::Error>>;
 
-    /// Resize the journal to be within the given range.
+    /// Discard all operations before the given location.
     ///
-    /// If current `size() <= range.start`, initialize as empty at the start of the range.
-    /// Otherwise prune data before the start of the range.
-    fn resize(
-        &mut self,
-        range: Range<Location>,
-    ) -> impl Future<Output = Result<(), Self::Error>> + Send;
+    /// If current `size() <= start`, initialize as empty at the given location.
+    /// Otherwise prune data before the given location.
+    fn resize(&mut self, start: Location) -> impl Future<Output = Result<(), Self::Error>> + Send;
 
     /// Persist the journal.
     fn sync(&mut self) -> impl Future<Output = Result<(), Self::Error>> + Send;
@@ -69,11 +66,11 @@ where
         .await
     }
 
-    async fn resize(&mut self, range: Range<Location>) -> Result<(), Self::Error> {
-        if self.size() <= range.start {
-            self.clear_to_size(*range.start).await
+    async fn resize(&mut self, start: Location) -> Result<(), Self::Error> {
+        if self.size() <= start {
+            self.clear_to_size(*start).await
         } else {
-            self.prune(*range.start).await.map(|_| ())
+            self.prune(*start).await.map(|_| ())
         }
     }
 
@@ -108,11 +105,11 @@ where
         Self::init_sync(context, config, *range.start..*range.end).await
     }
 
-    async fn resize(&mut self, range: Range<Location>) -> Result<(), Self::Error> {
-        if self.size() <= range.start {
-            self.clear_to_size(*range.start).await
+    async fn resize(&mut self, start: Location) -> Result<(), Self::Error> {
+        if self.size() <= start {
+            self.clear_to_size(*start).await
         } else {
-            self.prune(*range.start).await.map(|_| ())
+            self.prune(*start).await.map(|_| ())
         }
     }
 
