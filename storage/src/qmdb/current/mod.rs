@@ -503,4 +503,105 @@ pub mod tests {
             db.destroy().await.unwrap();
         });
     }
+
+    /// Run `test_current_db_build_big` against a database factory.
+    ///
+    /// This test builds a database with 1000 keys, updates some, deletes some, and verifies that
+    /// the final state matches an independently computed HashMap. It also verifies that the state
+    /// persists correctly after close and reopen.
+    ///
+    /// The `expected_op_count` and `expected_inactivity_floor` parameters specify the expected
+    /// values after commit + merkleize + prune. These differ between ordered and unordered variants.
+    pub fn test_current_db_build_big<C, F, Fut>(
+        mut open_db: F,
+        expected_op_count: u64,
+        expected_inactivity_floor: u64,
+    ) where
+        C: CleanAny,
+        C::Key: TestKey,
+        <C as LogStore>::Value: TestValue,
+        F: FnMut(Context, String) -> Fut + Clone,
+        Fut: Future<Output = C>,
+    {
+        use crate::mmr::Location;
+
+        const ELEMENTS: u64 = 1000;
+
+        let executor = deterministic::Runner::default();
+        let mut open_db_clone = open_db.clone();
+        executor.start(|context| async move {
+            let mut db = open_db_clone(context.with_label("first"), "build_big".to_string())
+                .await
+                .into_mutable();
+
+            let mut map = std::collections::HashMap::<C::Key, <C as LogStore>::Value>::default();
+            for i in 0u64..ELEMENTS {
+                let k: C::Key = TestKey::from_seed(i);
+                let v: <C as LogStore>::Value = TestValue::from_seed(i * 1000);
+                db.update(k, v.clone()).await.unwrap();
+                map.insert(k, v);
+            }
+
+            // Update every 3rd key
+            for i in 0u64..ELEMENTS {
+                if i % 3 != 0 {
+                    continue;
+                }
+                let k: C::Key = TestKey::from_seed(i);
+                let v: <C as LogStore>::Value = TestValue::from_seed((i + 1) * 10000);
+                db.update(k, v.clone()).await.unwrap();
+                map.insert(k, v);
+            }
+
+            // Delete every 7th key
+            for i in 0u64..ELEMENTS {
+                if i % 7 != 1 {
+                    continue;
+                }
+                let k: C::Key = TestKey::from_seed(i);
+                db.delete(k).await.unwrap();
+                map.remove(&k);
+            }
+
+            // Test that commit + sync w/ pruning will raise the activity floor.
+            let (db, _) = db.commit(None).await.unwrap();
+            let mut db: C = db.into_merkleized().await.unwrap();
+            db.sync().await.unwrap();
+            db.prune(db.inactivity_floor_loc()).await.unwrap();
+
+            // Verify expected state after prune.
+            assert_eq!(db.op_count(), Location::new_unchecked(expected_op_count));
+            assert_eq!(
+                db.inactivity_floor_loc(),
+                Location::new_unchecked(expected_inactivity_floor)
+            );
+
+            // Record root before dropping.
+            let root = db.root();
+            db.sync().await.unwrap();
+            drop(db);
+
+            // Reopen the db and verify it has exactly the same state.
+            let db: C = open_db(context.with_label("second"), "build_big".to_string()).await;
+            assert_eq!(root, db.root());
+            assert_eq!(db.op_count(), Location::new_unchecked(expected_op_count));
+            assert_eq!(
+                db.inactivity_floor_loc(),
+                Location::new_unchecked(expected_inactivity_floor)
+            );
+
+            // Confirm the db's state matches that of the separate map we computed independently.
+            for i in 0u64..ELEMENTS {
+                let k: C::Key = TestKey::from_seed(i);
+                if let Some(map_value) = map.get(&k) {
+                    let Some(db_value) = db.get(&k).await.unwrap() else {
+                        panic!("key not found in db: {k}");
+                    };
+                    assert_eq!(*map_value, db_value);
+                } else {
+                    assert!(db.get(&k).await.unwrap().is_none());
+                }
+            }
+        });
+    }
 }

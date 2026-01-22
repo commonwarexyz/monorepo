@@ -106,7 +106,6 @@ impl<
 pub mod test {
     use super::*;
     use crate::{
-        index::Unordered as _,
         kv::tests::{assert_batchable, assert_deletable, assert_gettable, assert_send},
         mmr::hasher::Hasher as _,
         qmdb::{
@@ -128,10 +127,7 @@ pub mod test {
     use commonware_runtime::{buffer::PoolRef, deterministic, Runner as _};
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use rand::RngCore;
-    use std::{
-        collections::HashMap,
-        num::{NonZeroU16, NonZeroUsize},
-    };
+    use std::num::{NonZeroU16, NonZeroUsize};
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(88);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(8);
@@ -243,79 +239,8 @@ pub mod test {
 
     #[test_traced("WARN")]
     fn test_current_db_build_big() {
-        let executor = deterministic::Runner::default();
-        // Build a db with 1000 keys, some of which we update and some of which we delete, and
-        // confirm that the end state of the db matches that of an identically updated hashmap.
-        const ELEMENTS: u64 = 1000;
-        executor.start(|context| async move {
-            let mut db = open_db(context.with_label("first"), "build_big".to_string())
-                .await
-                .into_mutable();
-
-            let mut map = HashMap::<Digest, Digest>::default();
-            for i in 0u64..ELEMENTS {
-                let k = Sha256::hash(&i.to_be_bytes());
-                let v = Sha256::hash(&(i * 1000).to_be_bytes());
-                db.update(k, v).await.unwrap();
-                map.insert(k, v);
-            }
-
-            // Update every 3rd key
-            for i in 0u64..ELEMENTS {
-                if i % 3 != 0 {
-                    continue;
-                }
-                let k = Sha256::hash(&i.to_be_bytes());
-                let v = Sha256::hash(&((i + 1) * 10000).to_be_bytes());
-                db.update(k, v).await.unwrap();
-                map.insert(k, v);
-            }
-
-            // Delete every 7th key
-            for i in 0u64..ELEMENTS {
-                if i % 7 != 1 {
-                    continue;
-                }
-                let k = Sha256::hash(&i.to_be_bytes());
-                db.delete(k).await.unwrap();
-                map.remove(&k);
-            }
-
-            assert_eq!(db.op_count(), 2620);
-            assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(0));
-            assert_eq!(db.any.snapshot.items(), 857);
-
-            // Test that commit + sync w/ pruning will raise the activity floor.
-            let (db, _) = db.commit(None).await.unwrap();
-            let mut db = db.into_merkleized().await.unwrap();
-            db.sync().await.unwrap();
-            db.prune(db.inactivity_floor_loc()).await.unwrap();
-            assert_eq!(db.op_count(), 4241);
-            assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(3383));
-            assert_eq!(db.any.snapshot.items(), 857);
-
-            // Reopen the db, making sure it has exactly the same state.
-            let root = db.root();
-            drop(db);
-            let db = open_db(context.with_label("second"), "build_big".to_string()).await;
-            assert_eq!(root, db.root());
-            assert_eq!(db.op_count(), 4241);
-            assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(3383));
-            assert_eq!(db.any.snapshot.items(), 857);
-
-            // Confirm the db's state matches that of the separate map we computed independently.
-            for i in 0u64..1000 {
-                let k = Sha256::hash(&i.to_be_bytes());
-                if let Some(map_value) = map.get(&k) {
-                    let Some(db_value) = db.get(&k).await.unwrap() else {
-                        panic!("key not found in db: {k}");
-                    };
-                    assert_eq!(*map_value, db_value);
-                } else {
-                    assert!(db.get(&k).await.unwrap().is_none());
-                }
-            }
-        });
+        // Expected values after commit + merkleize + prune for ordered variant.
+        tests::test_current_db_build_big::<CleanCurrentTest, _, _>(open_db, 4241, 3383);
     }
 
     // Test that merkleization state changes don't reset `steps`.
