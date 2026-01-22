@@ -27,6 +27,15 @@ pub trait Journal: Sized + Send {
         range: Range<Location>,
     ) -> impl Future<Output = Result<Self, Self::Error>>;
 
+    /// Resize the journal to be within the given range.
+    ///
+    /// If current `size() <= range.start`, initialize as empty at the start of the range.
+    /// Otherwise prune data before the start of the range.
+    fn resize(
+        &mut self,
+        range: Range<Location>,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send;
+
     /// Persist the journal.
     fn sync(&mut self) -> impl Future<Output = Result<(), Self::Error>> + Send;
 
@@ -35,11 +44,6 @@ pub trait Journal: Sized + Send {
 
     /// Append an operation to the journal
     fn append(&mut self, op: Self::Op) -> impl Future<Output = Result<(), Self::Error>> + Send;
-
-    /// Clear all data and reset the journal to a new starting position.
-    ///
-    /// After clearing, the journal will behave as if initialized at `new_size`.
-    fn clear(&mut self, new_size: u64) -> impl Future<Output = Result<(), Self::Error>> + Send;
 }
 
 impl<E, V> Journal for crate::journal::contiguous::variable::Journal<E, V>
@@ -65,6 +69,14 @@ where
         .await
     }
 
+    async fn resize(&mut self, range: Range<Location>) -> Result<(), Self::Error> {
+        if self.size() <= range.start {
+            self.clear_to_size(*range.start).await
+        } else {
+            self.prune(*range.start).await.map(|_| ())
+        }
+    }
+
     async fn sync(&mut self) -> Result<(), Self::Error> {
         Self::sync(self).await
     }
@@ -75,10 +87,6 @@ where
 
     async fn append(&mut self, op: Self::Op) -> Result<(), Self::Error> {
         Self::append(self, op).await.map(|_| ())
-    }
-
-    async fn clear(&mut self, new_size: u64) -> Result<(), Self::Error> {
-        self.clear_to_size(new_size).await
     }
 }
 
@@ -100,6 +108,14 @@ where
         Self::init_sync(context, config, *range.start..*range.end).await
     }
 
+    async fn resize(&mut self, range: Range<Location>) -> Result<(), Self::Error> {
+        if self.size() <= range.start {
+            self.clear_to_size(*range.start).await
+        } else {
+            self.prune(*range.start).await.map(|_| ())
+        }
+    }
+
     async fn sync(&mut self) -> Result<(), Self::Error> {
         Self::sync(self).await
     }
@@ -110,9 +126,5 @@ where
 
     async fn append(&mut self, op: Self::Op) -> Result<(), Self::Error> {
         Self::append(self, op).await.map(|_| ())
-    }
-
-    async fn clear(&mut self, new_size: u64) -> Result<(), Self::Error> {
-        self.clear_to_size(new_size).await
     }
 }

@@ -4,7 +4,7 @@ use crate::{
     qmdb::{
         any::VariableValue,
         immutable::{self, Operation},
-        sync::{self, Journal},
+        sync::{self},
         Error,
     },
     translator::Translator,
@@ -64,35 +64,6 @@ where
 
     fn root(&self) -> Self::Digest {
         self.root()
-    }
-
-    async fn resize_journal(
-        mut journal: Self::Journal,
-        range: Range<Location>,
-    ) -> Result<Self::Journal, Error> {
-        let size = journal.size();
-
-        if size <= range.start {
-            // Clear and reuse the journal
-            journal.clear(*range.start).await?;
-            Ok(journal)
-        } else {
-            // Prune to range start (position-based, not section-based)
-            journal
-                .prune(*range.start)
-                .await
-                .map_err(crate::qmdb::Error::from)?;
-
-            // Verify size is within range
-            let size = journal.size();
-            if size > range.end {
-                return Err(crate::qmdb::Error::UnexpectedData(Location::new_unchecked(
-                    size,
-                )));
-            }
-
-            Ok(journal)
-        }
     }
 }
 

@@ -74,21 +74,6 @@ where
     fn root(&self) -> Self::Digest {
         self.log.root()
     }
-
-    async fn resize_journal(
-        mut journal: Self::Journal,
-        range: Range<Location>,
-    ) -> Result<Self::Journal, qmdb::Error> {
-        let size = journal.size();
-
-        if size <= range.start {
-            journal.clear_to_size(*range.start).await?;
-            Ok(journal)
-        } else {
-            journal.prune(*range.start).await?;
-            Ok(journal)
-        }
-    }
 }
 
 // Blanket implementation for Variable Journal
@@ -147,20 +132,5 @@ where
 
     fn root(&self) -> Self::Digest {
         self.log.root()
-    }
-
-    async fn resize_journal(
-        mut journal: Self::Journal,
-        range: Range<Location>,
-    ) -> Result<Self::Journal, qmdb::Error> {
-        let size = journal.size();
-
-        if size <= range.start {
-            journal.clear_to_size(*range.start).await?;
-            Ok(journal)
-        } else {
-            journal.prune(*range.start).await?;
-            Ok(journal)
-        }
     }
 }

@@ -71,15 +71,4 @@ pub trait Database: Sized + Send {
 
     /// Get the root digest of the database for verification
     fn root(&self) -> Self::Digest;
-
-    /// Resize an existing journal to a new range.
-    ///
-    /// The implementation must:
-    /// - If current `size() <= range.start`: clear the journal and reset to the new start.
-    /// - Else: prune/discard data outside the range.
-    /// - Report `size()` as the next location to be set by the sync engine.
-    fn resize_journal(
-        journal: Self::Journal,
-        range: Range<Location>,
-    ) -> impl Future<Output = Result<Self::Journal, crate::qmdb::Error>> + Send;
 }

@@ -269,10 +269,10 @@ where
 
     /// Clear all sync state for a target update
     pub async fn reset_for_target_update(
-        self,
+        mut self,
         new_target: Target<DB::Digest>,
     ) -> Result<Self, Error<DB, R>> {
-        let journal = DB::resize_journal(self.journal, new_target.range.clone()).await?;
+        self.journal.resize(new_target.range.clone()).await?;
 
         Ok(Self {
             outstanding_requests: Requests::new(),
@@ -282,7 +282,7 @@ where
             max_outstanding_requests: self.max_outstanding_requests,
             fetch_batch_size: self.fetch_batch_size,
             apply_batch_size: self.apply_batch_size,
-            journal,
+            journal: self.journal,
             resolver: self.resolver,
             hasher: self.hasher,
             context: self.context,
