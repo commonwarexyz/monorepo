@@ -21,3 +21,22 @@ commonware_macros::stability_scope!(BETA {
 
 #[cfg(test)]
 pub(crate) mod test;
+
+#[cfg(feature = "fuzz")]
+pub mod fuzz {
+    use commonware_test::FuzzPlan;
+    use proptest::{prop_assert_ne, test_runner::TestCaseResult};
+    use proptest_derive::Arbitrary;
+
+    #[derive(Debug, Arbitrary)]
+    pub struct Plan {
+        x: u16,
+    }
+
+    impl FuzzPlan for Plan {
+        fn run(self) -> TestCaseResult {
+            prop_assert_ne!(self.x, 7777);
+            Ok(())
+        }
+    }
+}
