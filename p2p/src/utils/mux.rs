@@ -33,9 +33,6 @@ pub enum Error {
 }
 
 /// Parse a muxed message into its subchannel and payload.
-///
-/// Takes an immutable `IoBuf` (received from p2p layer) and returns
-/// the subchannel and remaining payload bytes.
 pub fn parse(mut buf: IoBuf) -> Result<(Channel, IoBuf), CodecError> {
     let subchannel: Channel = UInt::read(&mut buf)?.into();
     Ok((subchannel, buf))

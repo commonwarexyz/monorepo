@@ -27,8 +27,6 @@ pub use types::{Address, Ingress};
 ///
 /// This message is guaranteed to adhere to the configuration of the channel and
 /// will already be decrypted and authenticated.
-///
-/// Uses `IoBuf` (immutable) since received messages are read-only.
 pub type Message<P> = (P, IoBuf);
 
 /// Alias for identifying communication channels.

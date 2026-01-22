@@ -648,11 +648,18 @@ impl IoBufsMut {
         match self {
             Self::Single(buf) => IoBufs::Single(buf.freeze()),
             Self::Chunked(bufs) => {
-                let mut result = IoBufs::default();
-                for buf in bufs {
-                    result.append(buf.freeze());
+                let mut frozen: VecDeque<IoBuf> = bufs
+                    .into_iter()
+                    .map(|b| b.freeze())
+                    .filter(|b| !b.is_empty())
+                    .collect();
+                if frozen.len() == 1 {
+                    IoBufs::Single(frozen.pop_front().unwrap())
+                } else if frozen.is_empty() {
+                    IoBufs::Single(IoBuf::default())
+                } else {
+                    IoBufs::Chunked(frozen)
                 }
-                result
             }
         }
     }
@@ -770,7 +777,7 @@ unsafe impl BufMut for IoBufsMut {
                     buf.advance_mut(avail);
                     remaining -= avail;
                 }
-                panic!("advance_mut overflow");
+                panic!("cannot advance past end of buffer");
             }
         }
     }
@@ -1199,12 +1206,63 @@ mod tests {
     }
 
     #[test]
-    fn test_iobufsmut_freeze() {
+    fn test_iobufsmut_freeze_single() {
         let buf = IoBufMut::from(b"hello");
         let bufs = IoBufsMut::from(buf);
         let frozen = bufs.freeze();
         assert!(frozen.is_single());
         assert_eq!(frozen.chunk(), b"hello");
+    }
+
+    #[test]
+    fn test_iobufsmut_freeze_chunked() {
+        // Multiple non-empty buffers stays Chunked
+        let buf1 = IoBufMut::from(b"hello".as_ref());
+        let buf2 = IoBufMut::from(b" world".as_ref());
+        let bufs = IoBufsMut::from(vec![buf1, buf2]);
+        let frozen = bufs.freeze();
+        assert!(!frozen.is_single());
+        match frozen {
+            IoBufs::Chunked(ref chunks) => {
+                assert_eq!(chunks.len(), 2);
+                assert_eq!(chunks[0], b"hello");
+                assert_eq!(chunks[1], b" world");
+            }
+            _ => unreachable!(),
+        }
+
+        // Empty buffers are filtered out
+        let buf1 = IoBufMut::from(b"hello".as_ref());
+        let empty = IoBufMut::default();
+        let buf2 = IoBufMut::from(b" world".as_ref());
+        let bufs = IoBufsMut::from(vec![buf1, empty, buf2]);
+        let frozen = bufs.freeze();
+        assert!(!frozen.is_single());
+        match frozen {
+            IoBufs::Chunked(ref chunks) => {
+                assert_eq!(chunks.len(), 2);
+                assert_eq!(chunks[0], b"hello");
+                assert_eq!(chunks[1], b" world");
+            }
+            _ => unreachable!(),
+        }
+
+        // Collapses to Single when one non-empty buffer remains
+        let empty1 = IoBufMut::default();
+        let buf = IoBufMut::from(b"only one".as_ref());
+        let empty2 = IoBufMut::default();
+        let bufs = IoBufsMut::from(vec![empty1, buf, empty2]);
+        let frozen = bufs.freeze();
+        assert!(frozen.is_single());
+        assert_eq!(frozen.coalesce(), b"only one");
+
+        // All empty buffers -> Single with empty buffer
+        let empty1 = IoBufMut::default();
+        let empty2 = IoBufMut::default();
+        let bufs = IoBufsMut::from(vec![empty1, empty2]);
+        let frozen = bufs.freeze();
+        assert!(frozen.is_single());
+        assert!(frozen.is_empty());
     }
 
     #[test]
