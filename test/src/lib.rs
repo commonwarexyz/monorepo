@@ -8,10 +8,11 @@
 use libfuzzer_sys::Corpus;
 use proptest::{
     prelude::Arbitrary,
-    test_runner::{Config, RngAlgorithm, TestCaseResult, TestError, TestRng, TestRunner},
+    strategy::{Strategy, ValueTree},
+    test_runner::{Config, RngAlgorithm, TestCaseResult, TestRng, TestRunner},
 };
 
-pub trait FuzzPlan: Arbitrary {
+pub trait FuzzPlan: Arbitrary + std::fmt::Debug {
     fn run(self) -> TestCaseResult;
 }
 
@@ -19,19 +20,33 @@ pub trait FuzzPlan: Arbitrary {
 pub fn fuzz_shim<T: FuzzPlan>(fuzz: &[u8]) -> Corpus {
     let rng = TestRng::from_seed(RngAlgorithm::PassThrough, fuzz);
     let config = Config {
-        // We want to avoid persisting failures, in the assumption that the fuzz
-        // harness already has a system for doing that.
         failure_persistence: None,
-        // The defaults are otherwise fine, and we want to keep them to allow
-        // using the existing proptest environment variable system for tweaking these.
         ..Default::default()
     };
     let mut runner = TestRunner::new_with_rng(config, rng);
-    let result = runner.run(&T::arbitrary(), |t| t.run());
-    match result {
-        Ok(_) => Corpus::Keep,
-        Err(TestError::Abort(_)) => Corpus::Reject,
-        Err(TestError::Fail(reason, t)) => panic!("fuzz test failed: {}\n{:#?}", reason, t),
+    eprintln!("fuzz: {:?}", fuzz);
+
+    // Generate exactly one test case from the fuzz input.
+    // Using runner.run() would try to run 256 cases, which doesn't make sense
+    // when the fuzzer provides a single input.
+    eprintln!("calling new_tree...");
+    let tree = match T::arbitrary().new_tree(&mut runner) {
+        Ok(tree) => {
+            eprintln!("new_tree succeeded");
+            tree
+        }
+        Err(e) => {
+            eprintln!("new_tree failed: {}", e);
+            return Corpus::Reject;
+        }
+    };
+    eprintln!("calling current...");
+    let value = tree.current();
+    eprintln!("value: {:?}", value);
+
+    match value.run() {
+        Ok(()) => Corpus::Keep,
+        Err(reason) => panic!("fuzz test failed: {}", reason),
     }
 }
 

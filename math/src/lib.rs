@@ -14,24 +14,34 @@ pub mod fields {
 }
 pub mod ntt;
 pub mod poly;
-#[cfg(test)]
+#[cfg(any(test, feature = "fuzz"))]
 pub mod test;
 
 #[cfg(feature = "fuzz")]
 pub mod fuzz {
     use commonware_test::FuzzPlan;
-    use proptest::{prop_assert_ne, test_runner::TestCaseResult};
+    use proptest::test_runner::TestCaseResult;
     use proptest_derive::Arbitrary;
 
     #[derive(Debug, Arbitrary)]
-    pub struct Plan {
-        x: u16,
+    pub enum Plan {
+        Poly(crate::poly::fuzz::Plan),
+        Algebra(crate::algebra::fuzz::Plan),
+        Goldilocks(crate::fields::goldilocks::fuzz::Plan),
+        Test(crate::test::fuzz::Plan),
+        Ntt(crate::ntt::fuzz::Plan),
     }
 
     impl FuzzPlan for Plan {
         fn run(self) -> TestCaseResult {
-            prop_assert_ne!(self.x, 7777);
-            Ok(())
+            panic!("WOAH");
+            match self {
+                Plan::Poly(plan) => plan.run(),
+                Plan::Algebra(plan) => plan.run(),
+                Plan::Goldilocks(plan) => plan.run(),
+                Plan::Test(plan) => plan.run(),
+                Plan::Ntt(plan) => plan.run(),
+            }
         }
     }
 }

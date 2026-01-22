@@ -30,6 +30,7 @@ fuzz = [
 	"dep:commonware-test",
 	"dep:proptest",
 	"dep:proptest-derive",
+	"std"
 ]
 
 [dependencies]
