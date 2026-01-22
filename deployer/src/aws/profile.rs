@@ -42,7 +42,7 @@ pub async fn profile(
     let instance_type = &instance_config.instance_type;
 
     // Ensure created file exists
-    let tag_directory = deployer_directory(tag);
+    let tag_directory = deployer_directory(Some(tag));
     let created_file = tag_directory.join(CREATED_FILE_NAME);
     if !created_file.exists() {
         return Err(Error::DeploymentNotComplete(tag.clone()));

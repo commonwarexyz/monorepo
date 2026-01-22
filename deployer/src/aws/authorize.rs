@@ -20,7 +20,7 @@ pub async fn authorize(config_path: &PathBuf, ip: Option<String>) -> Result<(), 
     info!(tag = tag.as_str(), "loaded configuration");
 
     // Check deployment status
-    let tag_directory = deployer_directory(tag);
+    let tag_directory = deployer_directory(Some(tag));
     if !tag_directory.exists() {
         return Err(Error::DeploymentDoesNotExist(tag.clone()));
     }
