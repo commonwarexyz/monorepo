@@ -48,7 +48,7 @@ pub const PRESIGN_DURATION: Duration = Duration::from_secs(6 * 60 * 60);
 /// - 503: Service Unavailable
 /// - 504: Gateway Timeout
 pub const WGET: &str =
-    "wget -q --tries=30 --retry-connrefused --retry-on-http-error=404,408,429,500,502,503,504 --waitretry=5";
+    "wget -q --tries=10 --retry-connrefused --retry-on-http-error=404,408,429,500,502,503,504 --waitretry=5";
 
 /// Creates an S3 client for the specified AWS region
 pub async fn create_client(region: Region) -> S3Client {
