@@ -33,8 +33,8 @@ pub async fn recv_frame<T: Stream>(stream: &mut T, max_message_size: u32) -> Res
     // Read and decode the varint length prefix byte-by-byte
     let mut decoder = Decoder::<u32>::new();
     let len = loop {
-        let buf = stream.recv(1).await.map_err(Error::RecvFailed)?;
-        match decoder.feed(buf.chunk()[0]) {
+        let mut buf = stream.recv(1).await.map_err(Error::RecvFailed)?;
+        match decoder.feed(buf.get_u8()) {
             Ok(Some(len)) => break len as usize,
             Ok(None) => continue,
             Err(_) => return Err(Error::InvalidVarint),

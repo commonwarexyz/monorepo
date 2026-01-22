@@ -555,12 +555,12 @@ mod tests {
             // Seek forward, read, then seek backward
             replay.seek_to(150).await.unwrap();
             replay.ensure(50).await.unwrap();
-            assert_eq!(replay.chunk()[0], data[150]);
+            assert_eq!(replay.get_u8(), data[150]);
 
             // Seek back to start
             replay.seek_to(0).await.unwrap();
             replay.ensure(1).await.unwrap();
-            assert_eq!(replay.chunk()[0], data[0]);
+            assert_eq!(replay.get_u8(), data[0]);
 
             // Seek beyond blob size should error
             assert!(replay.seek_to(data.len() as u64 + 1).await.is_err());

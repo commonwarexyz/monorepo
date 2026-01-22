@@ -28,16 +28,16 @@ impl IoBuf {
         }
     }
 
-    /// Number of bytes in the buffer.
+    /// Number of bytes remaining in the buffer.
     #[inline]
-    pub const fn len(&self) -> usize {
-        self.inner.len()
+    pub fn len(&self) -> usize {
+        self.remaining()
     }
 
     /// Whether the buffer is empty.
     #[inline]
-    pub const fn is_empty(&self) -> bool {
-        self.inner.is_empty()
+    pub fn is_empty(&self) -> bool {
+        self.remaining() == 0
     }
 
     /// Get raw pointer to the buffer data.
@@ -230,13 +230,13 @@ impl IoBufMut {
     /// Number of initialized bytes.
     #[inline]
     pub fn len(&self) -> usize {
-        self.inner.len()
+        self.remaining()
     }
 
     /// Whether the buffer is empty.
     #[inline]
     pub fn is_empty(&self) -> bool {
-        self.inner.is_empty()
+        self.remaining() == 0
     }
 
     /// Freeze into immutable `IoBuf`.
@@ -625,16 +625,15 @@ impl Default for IoBufsMut {
 
 impl IoBufsMut {
     /// Total initialized length across all buffers.
+    #[inline]
     pub fn len(&self) -> usize {
-        match self {
-            Self::Single(buf) => buf.len(),
-            Self::Chunked(bufs) => bufs.iter().map(|b| b.len()).fold(0, usize::saturating_add),
-        }
+        self.remaining()
     }
 
     /// Whether all buffers are empty.
+    #[inline]
     pub fn is_empty(&self) -> bool {
-        self.len() == 0
+        self.remaining() == 0
     }
 
     /// Whether this contains a single contiguous buffer.
