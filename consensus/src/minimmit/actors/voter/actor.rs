@@ -241,7 +241,7 @@ where
         let timeout = if is_active {
             self.notarization_timeout
         } else {
-            Duration::ZERO
+            self.leader_timeout
         };
         self.context.current() + timeout
     }
@@ -732,5 +732,122 @@ where
                 // View advancement is handled in the main loop
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Actor;
+    use crate::{
+        elector::RoundRobin,
+        minimmit::{
+            mocks::{application, reporter},
+            scheme::ed25519,
+        },
+        mocks::relay,
+        types::{Epoch, ViewDelta},
+    };
+    use commonware_cryptography::{
+        certificate::mocks::Fixture,
+        certificate::Scheme as CertificateScheme,
+        ed25519::PublicKey,
+        Sha256,
+    };
+    use commonware_parallel::Sequential;
+    use commonware_p2p::Blocker;
+    use commonware_runtime::{buffer::PoolRef, deterministic};
+    use commonware_runtime::Runner;
+    use commonware_runtime::Metrics;
+    use commonware_runtime::Clock;
+    use commonware_utils::{test_rng, NZU16, NZUsize, Participant};
+    use std::{
+        num::{NonZeroU16, NonZeroUsize},
+        sync::Arc,
+        time::Duration,
+    };
+
+    const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
+    const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
+
+    #[derive(Clone, Default)]
+    struct NoopBlocker;
+
+    impl Blocker for NoopBlocker {
+        type PublicKey = PublicKey;
+
+        async fn block(&mut self, _peer: Self::PublicKey) {}
+    }
+
+    #[test]
+    fn leader_timeout_used_when_inactive() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let mut rng = test_rng();
+            let Fixture { schemes, .. } = ed25519::fixture(&mut rng, b"minimmit-timeout", 6);
+            let scheme = schemes[0].clone();
+            let participants = scheme.participants().clone();
+            let me = participants
+                .get(Participant::new(0).into())
+                .expect("participant")
+                .clone();
+
+            let elector = RoundRobin::<commonware_cryptography::Sha256>::default();
+            let reporter_cfg = reporter::Config {
+                participants: participants.clone(),
+                scheme: scheme.clone(),
+                elector: elector.clone(),
+            };
+            let reporter = reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
+
+            let relay = Arc::new(relay::Relay::new());
+            let application_cfg = application::Config {
+                hasher: Sha256::default(),
+                relay: relay.clone(),
+                me: me.clone(),
+                propose_latency: (1.0, 0.0),
+                verify_latency: (1.0, 0.0),
+                certify_latency: (1.0, 0.0),
+                should_certify: application::Certifier::Always,
+            };
+            let (_app_actor, application) =
+                application::Application::new(context.with_label("app"), application_cfg);
+
+            let leader_timeout = Duration::from_secs(3);
+            let notarization_timeout = Duration::from_secs(5);
+            let cfg = crate::minimmit::actors::voter::Config {
+                scheme: scheme.clone(),
+                elector,
+                blocker: NoopBlocker,
+                automaton: application.clone(),
+                relay: application.clone(),
+                reporter,
+                strategy: Sequential,
+                partition: "voter_timeout".to_string(),
+                epoch: Epoch::new(1),
+                mailbox_size: 16,
+                leader_timeout,
+                notarization_timeout,
+                nullify_retry: Duration::from_secs(1),
+                activity_timeout: ViewDelta::new(3),
+                replay_buffer: NZUsize!(1024),
+                write_buffer: NZUsize!(1024),
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            };
+
+            let actor_context = context.with_label("voter");
+            let start = actor_context.current();
+            let (actor, _mailbox) = Actor::new(actor_context, cfg);
+
+            let inactive_deadline = actor.next_timeout_deadline(false);
+            let active_deadline = actor.next_timeout_deadline(true);
+            assert_eq!(
+                inactive_deadline.duration_since(start).unwrap(),
+                leader_timeout
+            );
+            assert_eq!(
+                active_deadline.duration_since(start).unwrap(),
+                notarization_timeout
+            );
+        });
     }
 }
