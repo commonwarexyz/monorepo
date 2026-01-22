@@ -89,7 +89,7 @@ pub struct Config {
     /// Prefix for the journal partitions.
     ///
     /// Blobs are stored in `partition` (legacy) if it contains data, otherwise in
-    /// `{partition}{BLOB_SUFFIX}`. Metadata is stored in `{partition}{META_SUFFIX}`.
+    /// `{partition}-blobs`. Metadata is stored in `{partition}-metadata`.
     pub partition: String,
 
     /// The maximum number of journal items to store in each blob.
