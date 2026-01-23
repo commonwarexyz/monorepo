@@ -8,7 +8,10 @@ use aws_sdk_s3::{
     operation::head_object::HeadObjectError,
     presigning::PresigningConfig,
     primitives::ByteStream,
-    types::{BucketLocationConstraint, CreateBucketConfiguration, Delete, ObjectIdentifier},
+    types::{
+        AccelerateConfiguration, BucketAccelerateStatus, BucketLocationConstraint,
+        CreateBucketConfiguration, Delete, ObjectIdentifier,
+    },
     Client as S3Client,
 };
 use commonware_cryptography::{Hasher as _, Sha256};
@@ -50,19 +53,22 @@ pub const PRESIGN_DURATION: Duration = Duration::from_secs(6 * 60 * 60);
 pub const WGET: &str =
     "wget -q --tries=10 --retry-connrefused --retry-on-http-error=404,408,429,500,502,503,504 --waitretry=5";
 
-/// Creates an S3 client for the specified AWS region
+/// Creates an S3 client with Transfer Acceleration enabled for faster global downloads
 pub async fn create_client(region: Region) -> S3Client {
     let retry = aws_config::retry::RetryConfig::adaptive()
         .with_max_attempts(u32::MAX)
         .with_initial_backoff(Duration::from_millis(500))
         .with_max_backoff(Duration::from_secs(30))
         .with_reconnect_mode(ReconnectMode::ReconnectOnTransientError);
-    let config = aws_config::defaults(BehaviorVersion::v2026_01_12())
+    let sdk_config = aws_config::defaults(BehaviorVersion::v2026_01_12())
         .region(region)
         .retry_config(retry)
         .load()
         .await;
-    S3Client::new(&config)
+    let s3_config = aws_sdk_s3::config::Builder::from(&sdk_config)
+        .accelerate(true)
+        .build();
+    S3Client::from_conf(s3_config)
 }
 
 /// Ensures the S3 bucket exists, creating it if necessary
@@ -139,6 +145,49 @@ pub async fn ensure_bucket_exists(
             }
         }
     }
+
+    // Enable Transfer Acceleration for faster global downloads
+    enable_transfer_acceleration(client, bucket_name).await?;
+
+    Ok(())
+}
+
+/// Enables Transfer Acceleration on an S3 bucket for faster global downloads
+async fn enable_transfer_acceleration(client: &S3Client, bucket_name: &str) -> Result<(), Error> {
+    // Check if already enabled
+    if let Ok(response) = client
+        .get_bucket_accelerate_configuration()
+        .bucket(bucket_name)
+        .send()
+        .await
+    {
+        if response.status() == Some(&BucketAccelerateStatus::Enabled) {
+            debug!(
+                bucket = bucket_name,
+                "transfer acceleration already enabled"
+            );
+            return Ok(());
+        }
+    }
+
+    // Enable acceleration
+    let config = AccelerateConfiguration::builder()
+        .status(BucketAccelerateStatus::Enabled)
+        .build();
+
+    client
+        .put_bucket_accelerate_configuration()
+        .bucket(bucket_name)
+        .accelerate_configuration(config)
+        .send()
+        .await
+        .map_err(|e| Error::AwsS3 {
+            bucket: bucket_name.to_string(),
+            operation: super::S3Operation::PutBucketAccelerateConfiguration,
+            source: Box::new(aws_sdk_s3::Error::from(e.into_service_error())),
+        })?;
+
+    info!(bucket = bucket_name, "enabled transfer acceleration");
     Ok(())
 }
 

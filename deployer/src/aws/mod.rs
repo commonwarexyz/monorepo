@@ -414,6 +414,7 @@ cfg_if::cfg_if! {
             HeadObject,
             ListObjects,
             DeleteObjects,
+            PutBucketAccelerateConfiguration,
         }
 
         /// Reasons why accessing a bucket may be forbidden
@@ -439,6 +440,9 @@ cfg_if::cfg_if! {
                     Self::HeadObject => write!(f, "HeadObject"),
                     Self::ListObjects => write!(f, "ListObjects"),
                     Self::DeleteObjects => write!(f, "DeleteObjects"),
+                    Self::PutBucketAccelerateConfiguration => {
+                        write!(f, "PutBucketAccelerateConfiguration")
+                    }
                 }
             }
         }
