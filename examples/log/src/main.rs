@@ -20,10 +20,29 @@
 //!
 //! _To run this example, you must first install [Rust](https://www.rust-lang.org/tools/install)._
 //!
+//! If you want run one of the nodes using postgres as a backing store instead of a local journal,
+//! you need to first have docker installed (and running), as well as libpq. Then execute:
+//!
+//! ```sh
+//! docker compose up -d
+//!
+//! # Uses the password set in compose.yml
+//! createdb -h localhost -p 5432 -user user log-0
+//! ```
+//!
+//! You can then provide the argument `--database-url postgres://user:password@localhost:5432/log-0`
+//! to a node to have it write to `log-0` (use a different database for each node).
+//!
 //! ## Participant 0 (Bootstrapper)
 //!
 //! ```sh
 //! cargo run --release -- --me 0@3000 --participants 0,1,2,3 --storage-dir /tmp/commonware-log/0
+//! ```
+//!
+//! Or running the bootstrapper with a database instead of a journal
+//!
+//! ```sh
+//! cargo run --release -- --me 0@3000 --participants 0,1,2,3 --storage-dir /tmp/commonware-log/0 --database-url postgres://user:password@localhost:5432/log-0
 //! ```
 //!
 //! ## Participant 1
@@ -46,19 +65,21 @@
 
 mod application;
 mod gui;
+mod votes;
 
 use clap::{value_parser, Arg, Command};
 use commonware_consensus::{
     simplex::{self, elector::RoundRobin, store::VotesJournal},
     types::{Epoch, ViewDelta},
 };
-use commonware_cryptography::{certificate::Scheme as _, ed25519, Sha256, Signer as _};
+use commonware_cryptography::{certificate::Scheme as _, ed25519, sha256, Sha256, Signer as _};
 use commonware_p2p::{authenticated::discovery, Manager};
 use commonware_parallel::Sequential;
 use commonware_runtime::{buffer::PoolRef, tokio, Metrics, Quota, Runner};
 use commonware_storage::journal::segmented::variable::Config as JConfig;
 use commonware_storage::journal::segmented::variable::Journal;
 use commonware_utils::{ordered::Set, union, NZUsize, TryCollect, NZU16, NZU32};
+use sqlx::PgPool;
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     str::FromStr,
@@ -88,6 +109,7 @@ fn main() {
                 .value_parser(value_parser!(u64))
                 .help("All participants (arbiter and contributors)"),
         )
+        .arg(Arg::new("database-url").long("database-url"))
         .arg(Arg::new("storage-dir").long("storage-dir").required(true))
         .get_matches();
 
@@ -143,6 +165,7 @@ fn main() {
     }
 
     // Configure storage directory
+
     let storage_directory = matches
         .get_one::<String>("storage-dir")
         .expect("Please provide storage directory");
@@ -160,6 +183,8 @@ fn main() {
         bootstrapper_identities.clone(),
         1024 * 1024, // 1MB
     );
+
+    let database_url = matches.get_one::<String>("database-url");
 
     // Start context
     executor.start(async |context| {
@@ -206,21 +231,40 @@ fn main() {
             },
         );
 
-        let votes = VotesJournal::from_journal(
-            Journal::init(
-                context.with_label("engine_voter"),
-                JConfig {
-                    partition: String::from("log"),
-                    buffer_pool: PoolRef::new(NZU16!(16_384), NZUsize!(10_000)),
-                    write_buffer: NZUsize!(1024 * 1024),
-                    compression: None,
-                    codec_config: scheme.certificate_codec_config(),
-                },
-            )
-            .await
-            .expect("must be able to initialize votes journal"),
-        )
-        .replay_buffer(NZUsize!(1024 * 1024));
+        let votes: crate::votes::DatabaseOrJournal<_, _, _> =
+            if let Some(database_url) = database_url {
+                let pg_pool = PgPool::connect(&database_url)
+                    .await
+                    .expect("must be able to connect to database");
+                // In production systems, this should happen outside the app.
+                sqlx::migrate!("./migrations")
+                    .run(&pg_pool)
+                    .await
+                    .expect("must be able to run migration to create votes table");
+
+                commonware_consensus_sqlx::VotesSqlx::<application::Scheme, sha256::Digest>::new(
+                    pg_pool,
+                    scheme.certificate_codec_config(),
+                )
+                .into()
+            } else {
+                VotesJournal::from_journal(
+                    Journal::init(
+                        context.with_label("engine_voter"),
+                        JConfig {
+                            partition: String::from("log"),
+                            buffer_pool: PoolRef::new(NZU16!(16_384), NZUsize!(10_000)),
+                            write_buffer: NZUsize!(1024 * 1024),
+                            compression: None,
+                            codec_config: scheme.certificate_codec_config(),
+                        },
+                    )
+                    .await
+                    .expect("must be able to initialize votes journal"),
+                )
+                .replay_buffer(NZUsize!(1024 * 1024))
+                .into()
+            };
         // Initialize consensus
         let cfg = simplex::Config {
             scheme,

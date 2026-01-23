@@ -1,0 +1,16 @@
+services:
+  db:
+    image: postgres:18
+    restart: always
+    shm_size: 128mb
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: password
+
+  adminer:
+    image: adminer:5.4.1
+    restart: always
+    ports:
+      - 8080:8080

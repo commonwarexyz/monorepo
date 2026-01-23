@@ -1,0 +1,18 @@
+[package]
+name = "commonware-consensus-sqlx"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+description = "Extensions to make commonware-consensus work with SQLx."
+
+[dependencies]
+commonware-codec.workspace = true
+commonware-consensus.workspace = true
+commonware-cryptography.workspace = true
+futures.workspace = true
+sqlx = { workspace = true, features = ["runtime-tokio", "postgres"] }
+
+[lints]
+workspace = true

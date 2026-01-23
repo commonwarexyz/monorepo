@@ -663,6 +663,7 @@ impl<
 
         // Rebuild from votes store
         let start = self.context.current();
+        tracing::debug!("replaying votes");
         {
             // Collect all artifacts first to avoid borrowing conflicts
             let stream = self
@@ -670,9 +671,11 @@ impl<
                 .replay(self.state.epoch())
                 .await
                 .expect("unable to replay votes");
+            tracing::debug!("constructed stream");
             pin_mut!(stream);
             let mut artifacts = Vec::new();
             while let Some(result) = stream.next().await {
+                tracing::debug!(?result, "collected artifacts");
                 let artifact = result.expect("unable to replay votes");
                 artifacts.push(artifact);
             }
@@ -737,6 +740,7 @@ impl<
                 }
             }
         }
+        tracing::debug!("replayed votes");
 
         // Update current view and immediately move to timeout (very unlikely we restarted and still within timeout)
         let end = self.context.current();

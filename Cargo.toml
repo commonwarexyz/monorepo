@@ -7,6 +7,7 @@ members = [
     "conformance/macros",
     "conformance",
     "consensus",
+    "consensus-sqlx",
     "cryptography",
     "deployer",
     "macros",
@@ -87,6 +88,7 @@ commonware-collector = { version = "0.0.65", path = "collector" }
 commonware-conformance = { version = "0.0.65", path = "conformance" }
 commonware-conformance-macros = { version = "0.0.65", path = "conformance/macros" }
 commonware-consensus = { version = "0.0.65", path = "consensus" }
+commonware-consensus-sqlx = { version = "0.0.65", path = "consensus-sqlx" }
 commonware-cryptography = { version = "0.0.65", path = "cryptography", default-features = false }
 commonware-deployer = { version = "0.0.65", path = "deployer", default-features = false }
 commonware-macros = { version = "0.0.65", path = "macros" }
@@ -146,6 +148,7 @@ serde = "1.0.218"
 serde_json = "1.0.122"
 serde_yaml = "0.9.34"
 sha2 = { version = "0.10.8", default-features = false }
+sqlx = { version = "0.8.6", default-features = false }
 syn = "2.0.0"
 sysinfo = "0.37.2"
 thiserror = { version = "2.0.12", default-features = false }

@@ -76,7 +76,7 @@ impl std::io::Write for Writer {
         // Create message
         let timestamp = json["timestamp"].as_str().unwrap();
         let target = json["target"].as_str().unwrap();
-        let msg = json["fields"]["message"].as_str().unwrap();
+        let msg = json["fields"]["message"].as_str().unwrap_or_default();
         let datetime_local = timestamp
             .parse::<chrono::DateTime<chrono::Utc>>()
             .unwrap()
