@@ -270,34 +270,34 @@ impl<
         self.safe_tip.init(scheme.participants());
 
         select_loop! {
-        self.context,
-        on_start => {
-            let _ = self.metrics.tip.try_set(self.tip.get());
+            self.context,
+            on_start => {
+                let _ = self.metrics.tip.try_set(self.tip.get());
 
-            // Propose a new digest if we are processing less than the window
-            let next = self.next();
+                // Propose a new digest if we are processing less than the window
+                let next = self.next();
 
-            // Underflow safe: next >= self.tip is guaranteed by next()
-            if next.delta_from(self.tip).unwrap() < self.window {
-                trace!(%next, "requesting new digest");
-                assert!(self
-                    .pending
-                    .insert(next, Pending::Unverified(BTreeMap::new()))
-                    .is_none());
-                self.get_digest(next);
-                continue;
-            }
+                // Underflow safe: next >= self.tip is guaranteed by next()
+                if next.delta_from(self.tip).unwrap() < self.window {
+                    trace!(%next, "requesting new digest");
+                    assert!(self
+                        .pending
+                        .insert(next, Pending::Unverified(BTreeMap::new()))
+                        .is_none());
+                    self.get_digest(next);
+                    continue;
+                }
 
-            // Get the rebroadcast deadline for the next height
-            let rebroadcast = match self.rebroadcast_deadlines.peek() {
-                Some((_, &deadline)) => Either::Left(self.context.sleep_until(deadline)),
-                None => Either::Right(future::pending()),
-            };
-        },
-        on_stopped => {
-            debug!("shutdown");
-        },
-        // Handle refresh epoch deadline
+                // Get the rebroadcast deadline for the next height
+                let rebroadcast = match self.rebroadcast_deadlines.peek() {
+                    Some((_, &deadline)) => Either::Left(self.context.sleep_until(deadline)),
+                    None => Either::Right(future::pending()),
+                };
+            },
+            on_stopped => {
+                debug!("shutdown");
+            },
+            // Handle refresh epoch deadline
             epoch = epoch_updates.next() => {
                 // Error handling
                 let Some(epoch) = epoch else {
@@ -374,7 +374,7 @@ impl<
                     // Fast-forward our tip if needed
                     let safe_tip = self.safe_tip.get();
                     if safe_tip > self.tip {
-                       self.fast_forward_tip(safe_tip).await;
+                        self.fast_forward_tip(safe_tip).await;
                     }
                 }
 

@@ -307,18 +307,18 @@ where
             .await;
 
         select_loop! {
-        self.context,
-        on_start => {
-            // Remove any dropped subscribers. If all subscribers dropped, abort the waiter.
-            self.block_subscriptions.retain(|_, bs| {
-                bs.subscribers.retain(|tx| !tx.is_canceled());
-                !bs.subscribers.is_empty()
-            });
-        },
-        on_stopped => {
-            debug!("context shutdown, stopping marshal");
-        },
-        // Handle waiter completions first
+            self.context,
+            on_start => {
+                // Remove any dropped subscribers. If all subscribers dropped, abort the waiter.
+                self.block_subscriptions.retain(|_, bs| {
+                    bs.subscribers.retain(|tx| !tx.is_canceled());
+                    !bs.subscribers.is_empty()
+                });
+            },
+            on_stopped => {
+                debug!("context shutdown, stopping marshal");
+            },
+            // Handle waiter completions first
             result = waiters.next_completed() => {
                 let Ok((commitment, block)) = result else {
                     continue; // Aborted future

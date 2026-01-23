@@ -310,32 +310,32 @@ impl<
         }
 
         select_loop! {
-        self.context,
-        on_start => {
-            // Request a new proposal if necessary
-            if pending.is_none() {
-                if let Some(context) = self.should_propose() {
-                    let receiver = self.automaton.propose(context.clone()).await;
-                    pending = Some((context, receiver));
+            self.context,
+            on_start => {
+                // Request a new proposal if necessary
+                if pending.is_none() {
+                    if let Some(context) = self.should_propose() {
+                        let receiver = self.automaton.propose(context.clone()).await;
+                        pending = Some((context, receiver));
+                    }
                 }
-            }
 
-            // Create deadline futures.
-            //
-            // If the deadline is None, the future will never resolve.
-            let rebroadcast = match self.rebroadcast_deadline {
-                Some(deadline) => Either::Left(self.context.sleep_until(deadline)),
-                None => Either::Right(future::pending()),
-            };
-            let propose = match &mut pending {
-                Some((_context, receiver)) => Either::Left(receiver),
-                None => Either::Right(futures::future::pending()),
-            };
-        },
-        on_stopped => {
-            debug!("shutdown");
-        },
-        // Handle refresh epoch deadline
+                // Create deadline futures.
+                //
+                // If the deadline is None, the future will never resolve.
+                let rebroadcast = match self.rebroadcast_deadline {
+                    Some(deadline) => Either::Left(self.context.sleep_until(deadline)),
+                    None => Either::Right(future::pending()),
+                };
+                let propose = match &mut pending {
+                    Some((_context, receiver)) => Either::Left(receiver),
+                    None => Either::Right(futures::future::pending()),
+                };
+            },
+            on_stopped => {
+                debug!("shutdown");
+            },
+            // Handle refresh epoch deadline
             epoch = epoch_updates.next() => {
                 // Error handling
                 let Some(epoch) = epoch else {
