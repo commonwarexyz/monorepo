@@ -668,7 +668,9 @@ pub fn fuzz<P: simplex::Simplex>(input: FuzzInput) {
 
 pub fn fuzz_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
     let seed = input.seed;
-    match panic::catch_unwind(panic::AssertUnwindSafe(|| run_with_twin_mutator::<P>(input))) {
+    match panic::catch_unwind(panic::AssertUnwindSafe(|| {
+        run_with_twin_mutator::<P>(input)
+    })) {
         Ok(()) => {}
         Err(payload) => {
             println!("Panicked with seed: {}", seed);
