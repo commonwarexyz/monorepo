@@ -17,13 +17,19 @@ workspace = true
 default = [ "aws" ]
 aws = [
 	"aws-config",
+	"aws-sdk-cloudfront",
 	"aws-sdk-ec2",
 	"aws-sdk-s3",
+	"aws-sdk-sts",
+	"base64",
 	"chrono",
 	"clap",
 	"commonware-cryptography",
 	"futures",
+	"rand",
 	"reqwest",
+	"rsa",
+	"serde_json",
 	"thiserror",
 	"tokio",
 	"tracing",
@@ -33,8 +39,14 @@ aws = [
 
 [dependencies]
 aws-config = { workspace = true, optional = true }
+aws-sdk-cloudfront = { workspace = true, optional = true }
 aws-sdk-ec2 = { workspace = true, optional = true }
 aws-sdk-s3 = { workspace = true, optional = true }
+aws-sdk-sts = { workspace = true, optional = true }
+base64 = { version = "0.22", optional = true }
+rand = { workspace = true, optional = true }
+rsa = { version = "0.9", optional = true, features = ["sha2"] }
+serde_json = { workspace = true, optional = true }
 cfg-if.workspace = true
 chrono = { workspace = true, optional = true }
 clap = { workspace = true, optional = true }

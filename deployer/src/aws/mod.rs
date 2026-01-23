@@ -323,6 +323,7 @@ cfg_if::cfg_if! {
             pub instance_count: usize,
         }
 
+        pub mod cloudfront;
         pub mod ec2;
         mod create;
         pub mod services;
@@ -414,6 +415,51 @@ cfg_if::cfg_if! {
             HeadObject,
             ListObjects,
             DeleteObjects,
+            PutBucketPolicy,
+        }
+
+        /// CloudFront operations that can fail
+        #[derive(Debug, Clone, Copy)]
+        pub enum CloudFrontOperation {
+            CreateDistribution,
+            GetDistribution,
+            UpdateDistribution,
+            DeleteDistribution,
+            ListDistributions,
+            CreatePublicKey,
+            GetPublicKey,
+            DeletePublicKey,
+            ListPublicKeys,
+            CreateKeyGroup,
+            DeleteKeyGroup,
+            ListKeyGroups,
+            CreateOriginAccessControl,
+            GetOriginAccessControl,
+            DeleteOriginAccessControl,
+            ListOriginAccessControls,
+        }
+
+        impl std::fmt::Display for CloudFrontOperation {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                match self {
+                    Self::CreateDistribution => write!(f, "CreateDistribution"),
+                    Self::GetDistribution => write!(f, "GetDistribution"),
+                    Self::UpdateDistribution => write!(f, "UpdateDistribution"),
+                    Self::DeleteDistribution => write!(f, "DeleteDistribution"),
+                    Self::ListDistributions => write!(f, "ListDistributions"),
+                    Self::CreatePublicKey => write!(f, "CreatePublicKey"),
+                    Self::GetPublicKey => write!(f, "GetPublicKey"),
+                    Self::DeletePublicKey => write!(f, "DeletePublicKey"),
+                    Self::ListPublicKeys => write!(f, "ListPublicKeys"),
+                    Self::CreateKeyGroup => write!(f, "CreateKeyGroup"),
+                    Self::DeleteKeyGroup => write!(f, "DeleteKeyGroup"),
+                    Self::ListKeyGroups => write!(f, "ListKeyGroups"),
+                    Self::CreateOriginAccessControl => write!(f, "CreateOriginAccessControl"),
+                    Self::GetOriginAccessControl => write!(f, "GetOriginAccessControl"),
+                    Self::DeleteOriginAccessControl => write!(f, "DeleteOriginAccessControl"),
+                    Self::ListOriginAccessControls => write!(f, "ListOriginAccessControls"),
+                }
+            }
         }
 
         /// Reasons why accessing a bucket may be forbidden
@@ -439,6 +485,7 @@ cfg_if::cfg_if! {
                     Self::HeadObject => write!(f, "HeadObject"),
                     Self::ListObjects => write!(f, "ListObjects"),
                     Self::DeleteObjects => write!(f, "DeleteObjects"),
+                    Self::PutBucketPolicy => write!(f, "PutBucketPolicy"),
                 }
             }
         }
@@ -514,6 +561,18 @@ cfg_if::cfg_if! {
             MetadataNotFound(String),
             #[error("must specify either --config or --tag")]
             MissingTagOrConfig,
+            #[error("CloudFront operation failed: {operation}")]
+            AwsCloudFront {
+                operation: CloudFrontOperation,
+                #[source]
+                source: Box<aws_sdk_cloudfront::Error>,
+            },
+            #[error("CloudFront configuration error: {0}")]
+            CloudFrontConfiguration(String),
+            #[error("CloudFront key generation error: {0}")]
+            CloudFrontKeyGeneration(String),
+            #[error("CloudFront distribution not ready after timeout")]
+            CloudFrontDistributionTimeout,
         }
 
         impl From<aws_sdk_s3::error::SdkError<aws_sdk_s3::operation::get_object::GetObjectError>> for Error {
