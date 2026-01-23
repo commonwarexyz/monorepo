@@ -60,8 +60,43 @@ doc = false
 bench = false
 
 [[bin]]
-name = "simplex_ed25519_twins_mutator"
-path = "fuzz_targets/simplex_ed25519_twins_mutator.rs"
+name = "simplex_ed25519_twin_mutator"
+path = "fuzz_targets/simplex_ed25519_twin_mutator.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simplex_bls12381_threshold_minpk_twin_mutator"
+path = "fuzz_targets/simplex_bls12381_threshold_minpk_twin_mutator.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simplex_bls12381_threshold_minsig_twin_mutator"
+path = "fuzz_targets/simplex_bls12381_threshold_minsig_twin_mutator.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simplex_bls12381_multisig_minpk_twin_mutator"
+path = "fuzz_targets/simplex_bls12381_multisig_minpk_twin_mutator.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simplex_bls12381_multisig_minsig_twin_mutator"
+path = "fuzz_targets/simplex_bls12381_multisig_minsig_twin_mutator.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simplex_secp256r1_twin_mutator"
+path = "fuzz_targets/simplex_secp256r1_twin_mutator.rs"
 test = false
 doc = false
 bench = false

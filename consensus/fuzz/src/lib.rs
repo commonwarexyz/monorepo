@@ -3,6 +3,7 @@ pub mod invariants;
 pub mod simplex;
 pub mod types;
 pub mod utils;
+mod twins;
 
 use crate::{
     disrupter::Disrupter,
@@ -10,6 +11,7 @@ use crate::{
 };
 use arbitrary::Arbitrary;
 use bytes::Bytes;
+use commonware_codec::{Decode, DecodeExt};
 use commonware_consensus::{
     simplex::{
         config,
@@ -18,15 +20,17 @@ use commonware_consensus::{
         Engine,
     },
     types::{Delta, Epoch, View},
-    Monitor,
-    Viewable,
+    Monitor, Viewable,
 };
-use commonware_cryptography::sha256::Digest as Sha256Digest;
-use commonware_cryptography::{certificate::mocks::Fixture, certificate::Scheme, Sha256};
-use commonware_codec::{Decode, DecodeExt};
-use commonware_p2p::Recipients;
-use commonware_p2p::simulated::{Config as NetworkConfig, Link, Network};
-use commonware_p2p::simulated::{SplitOrigin, SplitTarget};
+use commonware_cryptography::{
+    certificate::{mocks::Fixture, Scheme},
+    sha256::Digest as Sha256Digest,
+    Sha256,
+};
+use commonware_p2p::{
+    simulated::{Config as NetworkConfig, Link, Network, SplitOrigin, SplitTarget},
+    Recipients,
+};
 use commonware_parallel::Sequential;
 use commonware_runtime::{buffer::PoolRef, deterministic, Clock, Metrics, Runner, Spawner};
 use commonware_utils::{Faults, N3f1, NZUsize, NZU16};
@@ -332,7 +336,7 @@ fn run<P: simplex::Simplex>(input: FuzzInput) {
     });
 }
 
-fn run_twins_mutator<P: simplex::Simplex>(input: FuzzInput) {
+fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
     let (n, _, f) = input.configuration;
     let required_containers = input.required_containers;
     let cfg = deterministic::Config::new().with_seed(input.seed);
@@ -416,7 +420,8 @@ fn run_twins_mutator<P: simplex::Simplex>(input: FuzzInput) {
                     let Ok(msg) = Vote::<P::Scheme, Sha256Digest>::decode(message.clone()) else {
                         return Some(recipients.clone());
                     };
-                    let (primary, secondary) = strategy.partitions(msg.view(), participants.as_ref());
+                    let (primary, secondary) =
+                        strategy.partitions(msg.view(), participants.as_ref());
                     match origin {
                         SplitOrigin::Primary => Some(Recipients::Some(primary)),
                         SplitOrigin::Secondary => Some(Recipients::Some(secondary)),
@@ -433,17 +438,19 @@ fn run_twins_mutator<P: simplex::Simplex>(input: FuzzInput) {
                     ) else {
                         return Some(recipients.clone());
                     };
-                    let (primary, secondary) = strategy.partitions(msg.view(), participants.as_ref());
+                    let (primary, secondary) =
+                        strategy.partitions(msg.view(), participants.as_ref());
                     match origin {
                         SplitOrigin::Primary => Some(Recipients::Some(primary)),
                         SplitOrigin::Secondary => Some(Recipients::Some(secondary)),
                     }
                 }
             };
-            let make_resolver_forwarder =
-                || move |_: SplitOrigin, recipients: &Recipients<_>, _: &Bytes| {
+            let make_resolver_forwarder = || {
+                move |_: SplitOrigin, recipients: &Recipients<_>, _: &Bytes| {
                     Some(recipients.clone())
-                };
+                }
+            };
 
             let make_vote_router = || {
                 let participants = participants.clone();
@@ -498,11 +505,15 @@ fn run_twins_mutator<P: simplex::Simplex>(input: FuzzInput) {
             let primary_context = context.with_label(&primary_label);
             let primary_elector = P::Elector::default();
             let reporter_cfg = reporter::Config {
-                participants: participants.as_ref().try_into().expect("public keys are unique"),
+                participants: participants
+                    .as_ref()
+                    .try_into()
+                    .expect("public keys are unique"),
                 scheme: scheme.clone(),
                 elector: primary_elector.clone(),
             };
-            let reporter = reporter::Reporter::new(primary_context.with_label("reporter"), reporter_cfg);
+            let reporter =
+                reporter::Reporter::new(primary_context.with_label("reporter"), reporter_cfg);
 
             let app_cfg = application::Config {
                 hasher: Sha256::default(),
@@ -547,85 +558,7 @@ fn run_twins_mutator<P: simplex::Simplex>(input: FuzzInput) {
                 (resolver_sender_primary, resolver_receiver_primary),
             );
 
-            let (vote_receiver_secondary, vote_receiver_mutator) = vote_receiver_secondary
-                .split_with(
-                    context.with_label(&format!("pending_secondary_fanout_{idx}")),
-                    |_| SplitTarget::Both,
-                );
-            let (certificate_receiver_secondary, certificate_receiver_mutator) =
-                certificate_receiver_secondary.split_with(
-                    context.with_label(&format!("recovered_secondary_fanout_{idx}")),
-                    |_| SplitTarget::Both,
-                );
-            let (resolver_receiver_secondary, resolver_receiver_mutator) =
-                resolver_receiver_secondary.split_with(
-                    context.with_label(&format!("resolver_secondary_fanout_{idx}")),
-                    |_| SplitTarget::Both,
-                );
-
-            let secondary_label = format!("twin_{idx}_secondary");
-            let secondary_context = context.with_label(&secondary_label);
-            let secondary_elector = P::Elector::default();
-            let secondary_reporter_cfg = reporter::Config {
-                participants: participants.as_ref().try_into().expect("public keys are unique"),
-                scheme: scheme.clone(),
-                elector: secondary_elector.clone(),
-            };
-            let secondary_reporter = reporter::Reporter::new(
-                secondary_context.with_label("reporter"),
-                secondary_reporter_cfg,
-            );
-            let secondary_app_cfg = application::Config {
-                hasher: Sha256::default(),
-                relay: relay.clone(),
-                me: validator.clone(),
-                propose_latency: (10.0, 5.0),
-                verify_latency: (10.0, 5.0),
-                certify_latency: (10.0, 5.0),
-                should_certify: application::Certifier::Sometimes,
-            };
-            let (secondary_actor, secondary_application) = application::Application::new(
-                secondary_context.with_label("application"),
-                secondary_app_cfg,
-            );
-            secondary_actor.start();
-            let secondary_blocker = oracle.control(validator.clone());
-            let secondary_engine_cfg = config::Config {
-                blocker: secondary_blocker,
-                scheme: scheme.clone(),
-                elector: secondary_elector,
-                automaton: secondary_application.clone(),
-                relay: secondary_application.clone(),
-                reporter: secondary_reporter,
-                partition: secondary_label,
-                mailbox_size: 1024,
-                epoch: Epoch::new(EPOCH),
-                leader_timeout: Duration::from_secs(1),
-                notarization_timeout: Duration::from_secs(2),
-                nullify_retry: Duration::from_secs(10),
-                fetch_timeout: Duration::from_secs(1),
-                activity_timeout: Delta::new(10),
-                skip_timeout: Delta::new(5),
-                fetch_concurrent: 1,
-                replay_buffer: NZUsize!(1024 * 1024),
-                write_buffer: NZUsize!(1024 * 1024),
-                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
-                strategy: Sequential,
-            };
-            let secondary_engine = Engine::new(
-                secondary_context.with_label("engine"),
-                secondary_engine_cfg,
-            );
-            secondary_engine.start(
-                (vote_sender_secondary.clone(), vote_receiver_secondary),
-                (
-                    certificate_sender_secondary.clone(),
-                    certificate_receiver_secondary,
-                ),
-                (resolver_sender_secondary.clone(), resolver_receiver_secondary),
-            );
-
-            let mutator_label = format!("twin_{idx}_mutator");
+            let mutator_label = format!("twin_{idx}_secondary");
             let mutator_context = context.with_label(&mutator_label);
             let disrupter = Disrupter::<_, _>::new(
                 mutator_context.with_label("disrupter"),
@@ -639,9 +572,9 @@ fn run_twins_mutator<P: simplex::Simplex>(input: FuzzInput) {
                 input.clone(),
             );
             disrupter.start(
-                (vote_sender_secondary, vote_receiver_mutator),
-                (certificate_sender_secondary, certificate_receiver_mutator),
-                (resolver_sender_secondary, resolver_receiver_mutator),
+                (vote_sender_secondary, vote_receiver_secondary),
+                (certificate_sender_secondary, certificate_receiver_secondary),
+                (resolver_sender_secondary, resolver_receiver_secondary),
             );
         }
 
@@ -649,7 +582,10 @@ fn run_twins_mutator<P: simplex::Simplex>(input: FuzzInput) {
             let context = context.with_label(&format!("honest_{idx}"));
             let elector = P::Elector::default();
             let reporter_cfg = reporter::Config {
-                participants: participants.as_ref().try_into().expect("public keys are unique"),
+                participants: participants
+                    .as_ref()
+                    .try_into()
+                    .expect("public keys are unique"),
                 scheme: schemes[idx].clone(),
                 elector: elector.clone(),
             };
@@ -731,9 +667,9 @@ pub fn fuzz<P: simplex::Simplex>(input: FuzzInput) {
     }
 }
 
-pub fn fuzz_with_twins_mutator<P: simplex::Simplex>(input: FuzzInput) {
+pub fn fuzz_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
     let seed = input.seed;
-    match panic::catch_unwind(panic::AssertUnwindSafe(|| run_twins_mutator::<P>(input))) {
+    match panic::catch_unwind(panic::AssertUnwindSafe(|| run_with_twin_mutator::<P>(input))) {
         Ok(()) => {}
         Err(payload) => {
             println!("Panicked with seed: {}", seed);
