@@ -120,10 +120,10 @@ impl StreamTrait for Stream {
     async fn recv(&mut self, len: u64) -> Result<IoBufs, Error> {
         let len = len as usize;
 
-        // Pull any data already in the channel buffer into local buffer
-        // (bounded by read_buffer_size, but at least enough for the request).
-        {
+        let os_recv = {
             let mut channel = self.channel.lock().unwrap();
+
+            // Pull data from channel buffer into local buffer.
             if !channel.buffer.is_empty() {
                 let target = len.max(channel.read_buffer_size);
                 let pull_amount = channel
@@ -135,24 +135,19 @@ impl StreamTrait for Stream {
                     self.buffer.extend_from_slice(&data);
                 }
             }
-        }
 
-        // If we have enough locally, consume and return.
-        if self.buffer.len() >= len {
-            return Ok(IoBufs::from(self.buffer.split_to(len).freeze()));
-        }
-
-        // Need more data, set up waiter for the remaining amount.
-        let remaining = len - self.buffer.len();
-        let os_recv = {
-            let mut channel = self.channel.lock().unwrap();
+            // If we have enough, return immediately.
+            if self.buffer.len() >= len {
+                return Ok(IoBufs::from(self.buffer.split_to(len).freeze()));
+            }
 
             // If the sink is dead, we cannot receive any more messages.
             if !channel.sink_alive {
                 return Err(Error::Closed);
             }
 
-            // Populate the waiter.
+            // Set up waiter for remaining amount.
+            let remaining = len - self.buffer.len();
             assert!(channel.waiter.is_none());
             let (os_send, os_recv) = oneshot::channel();
             channel.waiter = Some((remaining, os_send));
@@ -160,11 +155,9 @@ impl StreamTrait for Stream {
         };
 
         // Wait for the waiter to be resolved.
-        // If the oneshot sender was dropped, it means the sink is closed.
         let data = os_recv.await.map_err(|_| Error::Closed)?;
         self.buffer.extend_from_slice(&data);
 
-        // We should now have enough
         assert!(self.buffer.len() >= len);
         Ok(IoBufs::from(self.buffer.split_to(len).freeze()))
     }
