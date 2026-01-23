@@ -346,12 +346,12 @@ fn test_storage_operations() {
             .expect("Failed to open blob");
 
         // Write data at offset
-        blob.write_at(vec![1, 2, 3, 4], 0)
+        blob.write_at(0, vec![1, 2, 3, 4])
             .await
             .expect("Failed to write");
 
         // Read data from offset
-        let data = blob.read_at(vec![0u8; 4], 0)
+        let data = blob.read_at(0, vec![0u8; 4])
             .await
             .expect("Failed to read");
 
@@ -410,7 +410,7 @@ fn test_corruption_recovery() {
             .unwrap();
 
         // Corrupt checksum or truncate data
-        blob.write_at(vec![0xFF; 4], size - 4).await.unwrap();
+        blob.write_at(size - 4, vec![0xFF; 4]).await.unwrap();
         blob.sync().await.unwrap();
 
         // Re-initialize and verify recovery
@@ -471,7 +471,7 @@ fn test_storage_conformance() {
 
         // Hash blob contents to verify format
         let (blob, size) = context.open(&partition, &name).await.unwrap();
-        let buf = blob.read_at(vec![0u8; size as usize], 0).await.unwrap();
+        let buf = blob.read_at(0, vec![0u8; size as usize]).await.unwrap().coalesce();
         let digest = hash(buf.as_ref());
 
         // Compare against known hash

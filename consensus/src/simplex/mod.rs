@@ -321,7 +321,6 @@ mod tests {
         types::{Epoch, Round},
         Monitor, Viewable,
     };
-    use bytes::Bytes;
     use commonware_codec::{Decode, DecodeExt, Encode};
     use commonware_cryptography::{
         bls12381::primitives::variant::{MinPk, MinSig, Variant},
@@ -337,7 +336,8 @@ mod tests {
     };
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        buffer::PoolRef, count_running_tasks, deterministic, Clock, Metrics, Quota, Runner, Spawner,
+        buffer::PoolRef, count_running_tasks, deterministic, Clock, IoBuf, Metrics, Quota, Runner,
+        Spawner,
     };
     use commonware_utils::{test_rng, Faults, N3f1, NZUsize, NZU16};
     use engine::Engine;
@@ -5600,7 +5600,7 @@ mod tests {
                 // Create forwarder closures for votes
                 let make_vote_forwarder = || {
                     let participants = participants.clone();
-                    move |origin: SplitOrigin, _: &Recipients<_>, message: &Bytes| {
+                    move |origin: SplitOrigin, _: &Recipients<_>, message: &IoBuf| {
                         let msg: Vote<S, D> = Vote::decode(message.clone()).unwrap();
                         let (primary, secondary) =
                             strategy.partitions(msg.view(), participants.as_ref());
@@ -5614,7 +5614,7 @@ mod tests {
                 let make_certificate_forwarder = || {
                     let codec = schemes[idx].certificate_codec_config();
                     let participants = participants.clone();
-                    move |origin: SplitOrigin, _: &Recipients<_>, message: &Bytes| {
+                    move |origin: SplitOrigin, _: &Recipients<_>, message: &IoBuf| {
                         let msg: Certificate<S, D> =
                             Certificate::decode_cfg(&mut message.as_ref(), &codec).unwrap();
                         let (primary, secondary) =
@@ -5626,12 +5626,12 @@ mod tests {
                     }
                 };
                 let make_drop_forwarder =
-                    || move |_: SplitOrigin, _: &Recipients<_>, _: &Bytes| None;
+                    || move |_: SplitOrigin, _: &Recipients<_>, _: &IoBuf| None;
 
                 // Create router closures for votes
                 let make_vote_router = || {
                     let participants = participants.clone();
-                    move |(sender, message): &(_, Bytes)| {
+                    move |(sender, message): &(_, IoBuf)| {
                         let msg: Vote<S, D> = Vote::decode(message.clone()).unwrap();
                         strategy.route(msg.view(), sender, participants.as_ref())
                     }
@@ -5640,7 +5640,7 @@ mod tests {
                 let make_certificate_router = || {
                     let codec = schemes[idx].certificate_codec_config();
                     let participants = participants.clone();
-                    move |(sender, message): &(_, Bytes)| {
+                    move |(sender, message): &(_, IoBuf)| {
                         let msg: Certificate<S, D> =
                             Certificate::decode_cfg(&mut message.as_ref(), &codec).unwrap();
                         strategy.route(msg.view(), sender, participants.as_ref())

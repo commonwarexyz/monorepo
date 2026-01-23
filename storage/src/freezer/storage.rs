@@ -5,10 +5,9 @@ use crate::{
     },
     kv, Persistable,
 };
-use bytes::{Buf, BufMut};
 use commonware_codec::{CodecShared, Encode, FixedSize, Read, ReadExt, Write as CodecWrite};
 use commonware_cryptography::{crc32, Crc32, Hasher};
-use commonware_runtime::{buffer, Blob, Clock, Metrics, Storage};
+use commonware_runtime::{buffer, Blob, Buf, BufMut, Clock, IoBufMut, Metrics, Storage};
 use commonware_utils::{Array, Span};
 use futures::future::{try_join, try_join_all};
 use prometheus_client::metrics::counter::Counter;
@@ -426,10 +425,11 @@ impl<E: Storage + Metrics + Clock, K: Array, V: CodecShared> Freezer<E, K, V> {
     /// Read entries from the table blob.
     async fn read_table(blob: &E::Blob, table_index: u32) -> Result<(Entry, Entry), Error> {
         let offset = Self::table_offset(table_index);
-        let buf = vec![0u8; Entry::FULL_SIZE];
-        let read_buf = blob.read_at(buf, offset).await?;
+        let read_buf = blob
+            .read_at(offset, IoBufMut::zeroed(Entry::FULL_SIZE))
+            .await?;
 
-        Self::parse_entries(read_buf.as_ref())
+        Self::parse_entries(read_buf.coalesce().as_ref())
     }
 
     /// Recover a single table entry and update tracking.
@@ -455,7 +455,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: CodecShared> Freezer<E, K, V> {
             );
             *entry = Entry::new(0, 0, 0, 0);
             let zero_buf = vec![0u8; Entry::SIZE];
-            blob.write_at(zero_buf, entry_offset).await?;
+            blob.write_at(entry_offset, zero_buf).await?;
             Ok(true)
         } else if max_valid_epoch.is_none() && entry.epoch > *max_epoch {
             // Only track max epoch if we're discovering it (not validating against a known epoch)
@@ -589,7 +589,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: CodecShared> Freezer<E, K, V> {
 
         // Write the new entry
         table
-            .write_at(update.encode_mut(), table_offset + start)
+            .write_at(table_offset + start, update.encode_mut())
             .await
             .map_err(Error::Runtime)
     }
@@ -991,8 +991,11 @@ impl<E: Storage + Metrics + Clock, K: Array, V: CodecShared> Freezer<E, K, V> {
         // Read the entire chunk
         let chunk_bytes = chunk_size as usize * Entry::FULL_SIZE;
         let read_offset = Self::table_offset(current_index);
-        let read_buf = vec![0u8; chunk_bytes];
-        let read_buf: Vec<u8> = self.table.read_at(read_buf, read_offset).await?.into();
+        let read_buf = self
+            .table
+            .read_at(read_offset, IoBufMut::zeroed(chunk_bytes))
+            .await?
+            .coalesce();
 
         // Process each entry in the chunk
         let mut writes = Vec::with_capacity(chunk_bytes);
@@ -1000,7 +1003,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: CodecShared> Freezer<E, K, V> {
             // Get the entry
             let entry_offset = i as usize * Entry::FULL_SIZE;
             let entry_end = entry_offset + Entry::FULL_SIZE;
-            let entry_buf = &read_buf[entry_offset..entry_end];
+            let entry_buf = &read_buf.as_ref()[entry_offset..entry_end];
 
             // Parse the two slots
             let (entry1, entry2) = Self::parse_entries(entry_buf)?;
@@ -1020,9 +1023,9 @@ impl<E: Storage + Metrics + Clock, K: Array, V: CodecShared> Freezer<E, K, V> {
         }
 
         // Put the writes into the table
-        let old_write = self.table.write_at(writes.clone(), read_offset);
+        let old_write = self.table.write_at(read_offset, writes.clone());
         let new_offset = (old_size as usize * Entry::FULL_SIZE) as u64 + read_offset;
-        let new_write = self.table.write_at(writes, new_offset);
+        let new_write = self.table.write_at(new_offset, writes);
         try_join(old_write, new_write).await?;
 
         // Update progress

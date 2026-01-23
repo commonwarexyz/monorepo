@@ -143,9 +143,9 @@ fn fuzz(input: FuzzInput) {
                 continue;
             }
 
-            dialer_sender.send(msg.as_slice()).await.unwrap();
+            dialer_sender.send(msg.clone()).await.unwrap();
             let received = listener_receiver.recv().await.unwrap();
-            assert_eq!(&received[..], &msg[..], "Message {i} mismatch");
+            assert_eq!(received.coalesce(), &msg[..], "Message {i} mismatch");
         }
 
         // Exchange messages from listener to dialer
@@ -154,9 +154,9 @@ fn fuzz(input: FuzzInput) {
                 continue;
             }
 
-            listener_sender.send(msg.as_slice()).await.unwrap();
+            listener_sender.send(msg.clone()).await.unwrap();
             let received = dialer_receiver.recv().await.unwrap();
-            assert_eq!(&received[..], &msg[..], "Message {i} mismatch");
+            assert_eq!(received.coalesce(), &msg[..], "Message {i} mismatch");
         }
     });
 }

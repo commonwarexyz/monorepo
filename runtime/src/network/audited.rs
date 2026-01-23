@@ -1,5 +1,4 @@
-use crate::{deterministic::Auditor, Error, SinkOf, StreamOf};
-use bytes::{Buf, BufMut};
+use crate::{deterministic::Auditor, Error, IoBufs, SinkOf, StreamOf};
 use sha2::Digest;
 use std::{net::SocketAddr, sync::Arc};
 
@@ -11,14 +10,14 @@ pub struct Sink<S: crate::Sink> {
 }
 
 impl<S: crate::Sink> crate::Sink for Sink<S> {
-    async fn send(&mut self, mut buf: impl Buf + Send) -> Result<(), Error> {
-        let bytes = buf.copy_to_bytes(buf.remaining());
+    async fn send(&mut self, buf: impl Into<IoBufs> + Send) -> Result<(), Error> {
+        let buf = buf.into().coalesce();
         self.auditor.event(b"send_attempt", |hasher| {
             hasher.update(self.remote_addr.to_string().as_bytes());
-            hasher.update(&bytes);
+            hasher.update(buf.as_ref());
         });
 
-        self.inner.send(bytes).await.inspect_err(|e| {
+        self.inner.send(buf).await.inspect_err(|e| {
             self.auditor.event(b"send_failure", |hasher| {
                 hasher.update(self.remote_addr.to_string().as_bytes());
                 hasher.update(e.to_string().as_bytes());
@@ -40,29 +39,29 @@ pub struct Stream<S: crate::Stream> {
 }
 
 impl<S: crate::Stream> crate::Stream for Stream<S> {
-    async fn recv(&mut self, mut buf: impl BufMut + Send) -> Result<(), Error> {
-        // Create an intermediate buffer to capture data for auditing
-        let len = buf.remaining_mut();
-        let mut temp = vec![0u8; len];
-
+    async fn recv(&mut self, len: u64) -> Result<IoBufs, Error> {
         self.auditor.event(b"recv_attempt", |hasher| {
             hasher.update(self.remote_addr.to_string().as_bytes());
         });
 
-        self.inner.recv(&mut temp[..]).await.inspect_err(|e| {
-            self.auditor.event(b"recv_failure", |hasher| {
-                hasher.update(self.remote_addr.to_string().as_bytes());
-                hasher.update(e.to_string().as_bytes());
-            });
-        })?;
+        let buf = self
+            .inner
+            .recv(len)
+            .await
+            .inspect_err(|e| {
+                self.auditor.event(b"recv_failure", |hasher| {
+                    hasher.update(self.remote_addr.to_string().as_bytes());
+                    hasher.update(e.to_string().as_bytes());
+                });
+            })?
+            .coalesce();
 
         self.auditor.event(b"recv_success", |hasher| {
             hasher.update(self.remote_addr.to_string().as_bytes());
-            hasher.update(&temp);
+            hasher.update(buf.as_ref());
         });
 
-        buf.put_slice(&temp);
-        Ok(())
+        Ok(buf.into())
     }
 }
 
@@ -263,9 +262,8 @@ mod tests {
                 let (_, mut sink, mut stream) = listener.accept().await.unwrap();
 
                 // Receive data from client
-                let mut buf = vec![0; CLIENT_MSG.len()];
-                stream.recv(&mut buf[..]).await.unwrap();
-                assert_eq!(&buf[..], CLIENT_MSG.as_bytes());
+                let received = stream.recv(CLIENT_MSG.len() as u64).await.unwrap();
+                assert_eq!(received.coalesce(), CLIENT_MSG.as_bytes());
 
                 // Send response
                 sink.send(SERVER_MSG.as_bytes()).await.unwrap();
@@ -285,9 +283,8 @@ mod tests {
                 sink.send(CLIENT_MSG.as_bytes()).await.unwrap();
 
                 // Receive response
-                let mut buf = vec![0; SERVER_MSG.len()];
-                stream.recv(&mut buf[..]).await.unwrap();
-                assert_eq!(&buf[..], SERVER_MSG.as_bytes());
+                let received = stream.recv(SERVER_MSG.len() as u64).await.unwrap();
+                assert_eq!(received.coalesce(), SERVER_MSG.as_bytes());
             });
             client_handles.push(handle);
         }

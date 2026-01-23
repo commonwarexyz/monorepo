@@ -1,6 +1,5 @@
 use super::Checksum;
-use crate::{Blob, Error};
-use bytes::Buf;
+use crate::{Blob, Buf, Error, IoBufMut};
 use commonware_codec::FixedSize;
 use std::{collections::VecDeque, num::NonZeroU16};
 use tracing::error;
@@ -109,11 +108,13 @@ impl<B: Blob> PageReader<B> {
         let bytes_to_read = pages_to_read * self.page_size;
 
         // Read physical data
-        let physical_buf: Vec<u8> = self
+        let buf = IoBufMut::zeroed(bytes_to_read);
+        let physical_buf = self
             .blob
-            .read_at(vec![0u8; bytes_to_read], start_offset)
+            .read_at(start_offset, buf)
             .await?
-            .into();
+            .coalesce()
+            .freeze();
 
         // Validate CRCs and compute total logical bytes
         let mut total_logical = 0usize;
@@ -121,7 +122,7 @@ impl<B: Blob> PageReader<B> {
         let is_final_batch = pages_to_read == max_pages;
         for page_idx in 0..pages_to_read {
             let page_start = page_idx * self.page_size;
-            let page_slice = &physical_buf[page_start..page_start + self.page_size];
+            let page_slice = &physical_buf.as_ref()[page_start..page_start + self.page_size];
             let Some(record) = Checksum::validate_page(page_slice) else {
                 error!(page = self.blob_page + page_idx as u64, "CRC mismatch");
                 return Err(Error::InvalidChecksum);
@@ -147,7 +148,7 @@ impl<B: Blob> PageReader<B> {
         self.blob_page += pages_to_read as u64;
 
         let state = BufferState {
-            buffer: physical_buf,
+            buffer: physical_buf.into(),
             num_pages: pages_to_read,
             last_page_len: last_len,
         };
@@ -554,12 +555,12 @@ mod tests {
             // Seek forward, read, then seek backward
             replay.seek_to(150).await.unwrap();
             replay.ensure(50).await.unwrap();
-            assert_eq!(replay.chunk()[0], data[150]);
+            assert_eq!(replay.get_u8(), data[150]);
 
             // Seek back to start
             replay.seek_to(0).await.unwrap();
             replay.ensure(1).await.unwrap();
-            assert_eq!(replay.chunk()[0], data[0]);
+            assert_eq!(replay.get_u8(), data[0]);
 
             // Seek beyond blob size should error
             assert!(replay.seek_to(data.len() as u64 + 1).await.is_err());
