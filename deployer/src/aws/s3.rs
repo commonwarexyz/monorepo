@@ -291,6 +291,41 @@ pub async fn hash_files(paths: Vec<String>) -> Result<HashMap<String, String>, E
     .await
 }
 
+/// Caches content to S3 if it doesn't exist, then returns the S3 key (not a URL).
+/// Use this when you want to generate CloudFront signed URLs instead of S3 presigned URLs.
+#[must_use = "the S3 key should be used to generate a signed URL"]
+pub async fn cache_and_get_key(
+    client: &S3Client,
+    bucket: &str,
+    key: &str,
+    source: UploadSource<'_>,
+) -> Result<String, Error> {
+    if !object_exists(client, bucket, key).await? {
+        debug!(key = key, "not in S3, uploading");
+        match source {
+            UploadSource::File(path) => {
+                let path = path.to_path_buf();
+                upload_with_retry(client, bucket, key, || {
+                    let path = path.clone();
+                    async move {
+                        ByteStream::from_path(path)
+                            .await
+                            .map_err(|e| Error::Io(std::io::Error::other(e)))
+                    }
+                })
+                .await;
+            }
+            UploadSource::Static(content) => {
+                upload_with_retry(client, bucket, key, || async {
+                    Ok(ByteStream::from_static(content))
+                })
+                .await;
+            }
+        }
+    }
+    Ok(key.to_string())
+}
+
 /// Generates a pre-signed URL for downloading an object from S3
 #[must_use = "the pre-signed URL should be used to download the object"]
 pub async fn presign_url(

@@ -1,7 +1,7 @@
 //! `update` subcommand for `ec2`
 
 use crate::aws::{
-    deployer_directory,
+    cloudfront, deployer_directory,
     ec2::{self, *},
     s3::{self, *},
     services::*,
@@ -57,9 +57,11 @@ pub async fn update(config_path: &PathBuf, concurrency: usize) -> Result<(), Err
         .map(|i| (i.name.clone(), i.clone()))
         .collect();
 
-    // Upload updated binaries and configs to S3 and generate pre-signed URLs
+    // Upload updated binaries and configs to S3 and generate CloudFront signed URLs
     // Uses digest-based deduplication to avoid re-uploading identical files
     let s3_client = s3::create_client(Region::new(MONITORING_REGION)).await;
+    let cf_client = cloudfront::create_client(Region::new(MONITORING_REGION)).await;
+    let cf_config = cloudfront::ensure_distribution_exists(&cf_client, &s3_client).await?;
 
     // Collect unique binary and config paths (dedup before hashing)
     info!("computing file digests");
@@ -106,14 +108,14 @@ pub async fn update(config_path: &PathBuf, concurrency: usize) -> Result<(), Err
                     let s3_client = s3_client.clone();
                     let digest = digest.clone();
                     let key = binary_s3_key(tag, &digest);
+                    let url = cloudfront::sign_url(&cf_config, &key, PRESIGN_DURATION);
                     let path = path.clone();
                     async move {
-                        let url = cache_and_presign(
+                        cache_and_get_key(
                             &s3_client,
                             BUCKET_NAME,
                             &key,
                             UploadSource::File(path.as_ref()),
-                            PRESIGN_DURATION,
                         )
                         .await?;
                         Ok::<_, Error>((digest, url))
@@ -130,14 +132,14 @@ pub async fn update(config_path: &PathBuf, concurrency: usize) -> Result<(), Err
                     let s3_client = s3_client.clone();
                     let digest = digest.clone();
                     let key = config_s3_key(tag, &digest);
+                    let url = cloudfront::sign_url(&cf_config, &key, PRESIGN_DURATION);
                     let path = path.clone();
                     async move {
-                        let url = cache_and_presign(
+                        cache_and_get_key(
                             &s3_client,
                             BUCKET_NAME,
                             &key,
                             UploadSource::File(path.as_ref()),
-                            PRESIGN_DURATION,
                         )
                         .await?;
                         Ok::<_, Error>((digest, url))

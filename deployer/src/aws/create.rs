@@ -1,6 +1,7 @@
 //! `create` subcommand for `ec2`
 
 use crate::aws::{
+    cloudfront::{self, CloudFrontConfig},
     deployer_directory,
     ec2::{self, *},
     s3::{self, *},
@@ -162,20 +163,25 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
         architectures_needed.insert(arch);
     }
 
-    // Setup S3 bucket and cache observability tools
+    // Setup S3 bucket and CloudFront distribution
     info!(bucket = BUCKET_NAME, "setting up S3 bucket");
     let s3_client = s3::create_client(Region::new(MONITORING_REGION)).await;
     ensure_bucket_exists(&s3_client, BUCKET_NAME, MONITORING_REGION).await?;
 
+    info!("setting up CloudFront distribution");
+    let cf_client = cloudfront::create_client(Region::new(MONITORING_REGION)).await;
+    let cf_config = cloudfront::ensure_distribution_exists(&cf_client, &s3_client).await?;
+
     // Cache observability tools for each architecture needed
     info!("uploading observability tools to S3");
-    let cache_tool = |s3_key: String, download_url: String| {
+    let cache_tool = |s3_key: String, download_url: String, cf_config: &CloudFrontConfig| {
         let tag_directory = tag_directory.clone();
         let s3_client = s3_client.clone();
+        let url = cloudfront::sign_url(cf_config, &s3_key, PRESIGN_DURATION);
         async move {
             if object_exists(&s3_client, BUCKET_NAME, &s3_key).await? {
                 info!(key = s3_key.as_str(), "tool already in S3");
-                return presign_url(&s3_client, BUCKET_NAME, &s3_key, PRESIGN_DURATION).await;
+                return Ok::<_, Error>(url);
             }
             info!(
                 key = s3_key.as_str(),
@@ -183,12 +189,11 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
             );
             let temp_path = tag_directory.join(s3_key.replace('/', "_"));
             download_file(&download_url, &temp_path).await?;
-            let url = cache_and_presign(
+            cache_and_get_key(
                 &s3_client,
                 BUCKET_NAME,
                 &s3_key,
                 UploadSource::File(&temp_path),
-                PRESIGN_DURATION,
             )
             .await?;
             std::fs::remove_file(&temp_path)?;
@@ -201,13 +206,13 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
     for arch in &architectures_needed {
         let [prometheus_url, grafana_url, loki_url, pyroscope_url, tempo_url, node_exporter_url, promtail_url]: [String; 7] =
             try_join_all([
-                cache_tool(prometheus_bin_s3_key(PROMETHEUS_VERSION, *arch), prometheus_download_url(PROMETHEUS_VERSION, *arch)),
-                cache_tool(grafana_bin_s3_key(GRAFANA_VERSION, *arch), grafana_download_url(GRAFANA_VERSION, *arch)),
-                cache_tool(loki_bin_s3_key(LOKI_VERSION, *arch), loki_download_url(LOKI_VERSION, *arch)),
-                cache_tool(pyroscope_bin_s3_key(PYROSCOPE_VERSION, *arch), pyroscope_download_url(PYROSCOPE_VERSION, *arch)),
-                cache_tool(tempo_bin_s3_key(TEMPO_VERSION, *arch), tempo_download_url(TEMPO_VERSION, *arch)),
-                cache_tool(node_exporter_bin_s3_key(NODE_EXPORTER_VERSION, *arch), node_exporter_download_url(NODE_EXPORTER_VERSION, *arch)),
-                cache_tool(promtail_bin_s3_key(PROMTAIL_VERSION, *arch), promtail_download_url(PROMTAIL_VERSION, *arch)),
+                cache_tool(prometheus_bin_s3_key(PROMETHEUS_VERSION, *arch), prometheus_download_url(PROMETHEUS_VERSION, *arch), &cf_config),
+                cache_tool(grafana_bin_s3_key(GRAFANA_VERSION, *arch), grafana_download_url(GRAFANA_VERSION, *arch), &cf_config),
+                cache_tool(loki_bin_s3_key(LOKI_VERSION, *arch), loki_download_url(LOKI_VERSION, *arch), &cf_config),
+                cache_tool(pyroscope_bin_s3_key(PYROSCOPE_VERSION, *arch), pyroscope_download_url(PYROSCOPE_VERSION, *arch), &cf_config),
+                cache_tool(tempo_bin_s3_key(TEMPO_VERSION, *arch), tempo_download_url(TEMPO_VERSION, *arch), &cf_config),
+                cache_tool(node_exporter_bin_s3_key(NODE_EXPORTER_VERSION, *arch), node_exporter_download_url(NODE_EXPORTER_VERSION, *arch), &cf_config),
+                cache_tool(promtail_bin_s3_key(PROMTAIL_VERSION, *arch), promtail_download_url(PROMTAIL_VERSION, *arch), &cf_config),
             ])
             .await?
             .try_into()
@@ -269,14 +274,14 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
                     let s3_client = s3_client.clone();
                     let digest = digest.clone();
                     let key = binary_s3_key(tag, &digest);
+                    let url = cloudfront::sign_url(&cf_config, &key, PRESIGN_DURATION);
                     let path = path.clone();
                     async move {
-                        let url = cache_and_presign(
+                        cache_and_get_key(
                             &s3_client,
                             BUCKET_NAME,
                             &key,
                             UploadSource::File(path.as_ref()),
-                            PRESIGN_DURATION,
                         )
                         .await?;
                         Ok::<_, Error>((digest, url))
@@ -293,14 +298,14 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
                     let s3_client = s3_client.clone();
                     let digest = digest.clone();
                     let key = config_s3_key(tag, &digest);
+                    let url = cloudfront::sign_url(&cf_config, &key, PRESIGN_DURATION);
                     let path = path.clone();
                     async move {
-                        let url = cache_and_presign(
+                        cache_and_get_key(
                             &s3_client,
                             BUCKET_NAME,
                             &key,
                             UploadSource::File(path.as_ref()),
-                            PRESIGN_DURATION,
                         )
                         .await?;
                         Ok::<_, Error>((digest, url))
@@ -790,6 +795,14 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
 
     // Cache static config files globally (these don't change between deployments)
     info!("uploading config files to S3");
+    let cache_static = |key: String, content: &'static [u8]| {
+        let s3_client = s3_client.clone();
+        let url = cloudfront::sign_url(&cf_config, &key, PRESIGN_DURATION);
+        async move {
+            cache_and_get_key(&s3_client, BUCKET_NAME, &key, UploadSource::Static(content)).await?;
+            Ok::<_, Error>(url)
+        }
+    };
     let [
         bbr_conf_url,
         datasources_url,
@@ -807,21 +820,21 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
         pyroscope_agent_service_url,
         pyroscope_agent_timer_url,
     ]: [String; 15] = try_join_all([
-        cache_and_presign(&s3_client, BUCKET_NAME, &bbr_config_s3_key(), UploadSource::Static(BBR_CONF.as_bytes()), PRESIGN_DURATION),
-        cache_and_presign(&s3_client, BUCKET_NAME, &grafana_datasources_s3_key(), UploadSource::Static(DATASOURCES_YML.as_bytes()), PRESIGN_DURATION),
-        cache_and_presign(&s3_client, BUCKET_NAME, &grafana_dashboards_s3_key(), UploadSource::Static(ALL_YML.as_bytes()), PRESIGN_DURATION),
-        cache_and_presign(&s3_client, BUCKET_NAME, &loki_config_s3_key(), UploadSource::Static(LOKI_CONFIG.as_bytes()), PRESIGN_DURATION),
-        cache_and_presign(&s3_client, BUCKET_NAME, &pyroscope_config_s3_key(), UploadSource::Static(PYROSCOPE_CONFIG.as_bytes()), PRESIGN_DURATION),
-        cache_and_presign(&s3_client, BUCKET_NAME, &tempo_config_s3_key(), UploadSource::Static(TEMPO_CONFIG.as_bytes()), PRESIGN_DURATION),
-        cache_and_presign(&s3_client, BUCKET_NAME, &prometheus_service_s3_key(), UploadSource::Static(PROMETHEUS_SERVICE.as_bytes()), PRESIGN_DURATION),
-        cache_and_presign(&s3_client, BUCKET_NAME, &loki_service_s3_key(), UploadSource::Static(LOKI_SERVICE.as_bytes()), PRESIGN_DURATION),
-        cache_and_presign(&s3_client, BUCKET_NAME, &pyroscope_service_s3_key(), UploadSource::Static(PYROSCOPE_SERVICE.as_bytes()), PRESIGN_DURATION),
-        cache_and_presign(&s3_client, BUCKET_NAME, &tempo_service_s3_key(), UploadSource::Static(TEMPO_SERVICE.as_bytes()), PRESIGN_DURATION),
-        cache_and_presign(&s3_client, BUCKET_NAME, &node_exporter_service_s3_key(), UploadSource::Static(NODE_EXPORTER_SERVICE.as_bytes()), PRESIGN_DURATION),
-        cache_and_presign(&s3_client, BUCKET_NAME, &promtail_service_s3_key(), UploadSource::Static(PROMTAIL_SERVICE.as_bytes()), PRESIGN_DURATION),
-        cache_and_presign(&s3_client, BUCKET_NAME, &logrotate_config_s3_key(), UploadSource::Static(LOGROTATE_CONF.as_bytes()), PRESIGN_DURATION),
-        cache_and_presign(&s3_client, BUCKET_NAME, &pyroscope_agent_service_s3_key(), UploadSource::Static(PYROSCOPE_AGENT_SERVICE.as_bytes()), PRESIGN_DURATION),
-        cache_and_presign(&s3_client, BUCKET_NAME, &pyroscope_agent_timer_s3_key(), UploadSource::Static(PYROSCOPE_AGENT_TIMER.as_bytes()), PRESIGN_DURATION),
+        cache_static(bbr_config_s3_key(), BBR_CONF.as_bytes()),
+        cache_static(grafana_datasources_s3_key(), DATASOURCES_YML.as_bytes()),
+        cache_static(grafana_dashboards_s3_key(), ALL_YML.as_bytes()),
+        cache_static(loki_config_s3_key(), LOKI_CONFIG.as_bytes()),
+        cache_static(pyroscope_config_s3_key(), PYROSCOPE_CONFIG.as_bytes()),
+        cache_static(tempo_config_s3_key(), TEMPO_CONFIG.as_bytes()),
+        cache_static(prometheus_service_s3_key(), PROMETHEUS_SERVICE.as_bytes()),
+        cache_static(loki_service_s3_key(), LOKI_SERVICE.as_bytes()),
+        cache_static(pyroscope_service_s3_key(), PYROSCOPE_SERVICE.as_bytes()),
+        cache_static(tempo_service_s3_key(), TEMPO_SERVICE.as_bytes()),
+        cache_static(node_exporter_service_s3_key(), NODE_EXPORTER_SERVICE.as_bytes()),
+        cache_static(promtail_service_s3_key(), PROMTAIL_SERVICE.as_bytes()),
+        cache_static(logrotate_config_s3_key(), LOGROTATE_CONF.as_bytes()),
+        cache_static(pyroscope_agent_service_s3_key(), PYROSCOPE_AGENT_SERVICE.as_bytes()),
+        cache_static(pyroscope_agent_timer_s3_key(), PYROSCOPE_AGENT_TIMER.as_bytes()),
     ])
     .await?
     .try_into()
@@ -833,12 +846,13 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
         let binary_service_content = binary_service(*arch);
         let temp_path = tag_directory.join(format!("binary-{}.service", arch.as_str()));
         std::fs::write(&temp_path, &binary_service_content)?;
-        let binary_service_url = cache_and_presign(
+        let key = binary_service_s3_key_for_arch(*arch);
+        let binary_service_url = cloudfront::sign_url(&cf_config, &key, PRESIGN_DURATION);
+        cache_and_get_key(
             &s3_client,
             BUCKET_NAME,
-            &binary_service_s3_key_for_arch(*arch),
+            &key,
             UploadSource::File(&temp_path),
-            PRESIGN_DURATION,
         )
         .await?;
         std::fs::remove_file(&temp_path)?;
@@ -864,25 +878,25 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
     std::fs::write(&prom_path, &prom_config)?;
     let dashboard_path = std::path::PathBuf::from(&config.monitoring.dashboard);
     let dashboard_digest = hash_file(&dashboard_path).await?;
-    let [prometheus_config_url, dashboard_url]: [String; 2] = try_join_all([
-        cache_and_presign(
+    let prom_s3_key = monitoring_s3_key(tag, &prom_digest);
+    let dashboard_s3_key = monitoring_s3_key(tag, &dashboard_digest);
+    let prometheus_config_url = cloudfront::sign_url(&cf_config, &prom_s3_key, PRESIGN_DURATION);
+    let dashboard_url = cloudfront::sign_url(&cf_config, &dashboard_s3_key, PRESIGN_DURATION);
+    try_join_all([
+        cache_and_get_key(
             &s3_client,
             BUCKET_NAME,
-            &monitoring_s3_key(tag, &prom_digest),
+            &prom_s3_key,
             UploadSource::File(&prom_path),
-            PRESIGN_DURATION,
         ),
-        cache_and_presign(
+        cache_and_get_key(
             &s3_client,
             BUCKET_NAME,
-            &monitoring_s3_key(tag, &dashboard_digest),
+            &dashboard_s3_key,
             UploadSource::File(&dashboard_path),
-            PRESIGN_DURATION,
         ),
     ])
-    .await?
-    .try_into()
-    .unwrap();
+    .await?;
 
     // Generate hosts.yaml and upload once (shared by all instances)
     let hosts = Hosts {
@@ -900,12 +914,13 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
     let hosts_digest = Sha256::hash(hosts_yaml.as_bytes()).to_string();
     let hosts_path = tag_directory.join("hosts.yaml");
     std::fs::write(&hosts_path, &hosts_yaml)?;
-    let hosts_url = cache_and_presign(
+    let hosts_s3_key = hosts_s3_key(tag, &hosts_digest);
+    let hosts_url = cloudfront::sign_url(&cf_config, &hosts_s3_key, PRESIGN_DURATION);
+    cache_and_get_key(
         &s3_client,
         BUCKET_NAME,
-        &hosts_s3_key(tag, &hosts_digest),
+        &hosts_s3_key,
         UploadSource::File(&hosts_path),
-        PRESIGN_DURATION,
     )
     .await?;
 
@@ -962,16 +977,11 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
                     let s3_client = s3_client.clone();
                     let digest = digest.clone();
                     let key = promtail_s3_key(tag, &digest);
+                    let url = cloudfront::sign_url(&cf_config, &key, PRESIGN_DURATION);
                     let path = path.clone();
                     async move {
-                        let url = cache_and_presign(
-                            &s3_client,
-                            BUCKET_NAME,
-                            &key,
-                            UploadSource::File(&path),
-                            PRESIGN_DURATION,
-                        )
-                        .await?;
+                        cache_and_get_key(&s3_client, BUCKET_NAME, &key, UploadSource::File(&path))
+                            .await?;
                         Ok::<_, Error>((digest, url))
                     }
                 }))
@@ -986,16 +996,11 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
                     let s3_client = s3_client.clone();
                     let digest = digest.clone();
                     let key = pyroscope_s3_key(tag, &digest);
+                    let url = cloudfront::sign_url(&cf_config, &key, PRESIGN_DURATION);
                     let path = path.clone();
                     async move {
-                        let url = cache_and_presign(
-                            &s3_client,
-                            BUCKET_NAME,
-                            &key,
-                            UploadSource::File(&path),
-                            PRESIGN_DURATION,
-                        )
-                        .await?;
+                        cache_and_get_key(&s3_client, BUCKET_NAME, &key, UploadSource::File(&path))
+                            .await?;
                         Ok::<_, Error>((digest, url))
                     }
                 }))

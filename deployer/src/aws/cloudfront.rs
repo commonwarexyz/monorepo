@@ -5,6 +5,7 @@
 
 use crate::aws::{deployer_directory, s3::BUCKET_NAME, Error};
 use aws_config::BehaviorVersion;
+pub use aws_config::Region;
 use aws_sdk_cloudfront::{
     config::retry::ReconnectMode,
     types::{
@@ -15,7 +16,6 @@ use aws_sdk_cloudfront::{
     },
     Client as CloudFrontClient,
 };
-pub use aws_config::Region;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use rsa::{
     pkcs1v15::SigningKey,
@@ -197,9 +197,9 @@ async fn create_oac(client: &CloudFrontClient) -> Result<String, Error> {
             source: Box::new(aws_sdk_cloudfront::Error::from(e.into_service_error())),
         })?;
 
-    let oac = resp
-        .origin_access_control
-        .ok_or_else(|| Error::CloudFrontConfiguration("OAC created but not returned".to_string()))?;
+    let oac = resp.origin_access_control.ok_or_else(|| {
+        Error::CloudFrontConfiguration("OAC created but not returned".to_string())
+    })?;
     let id = oac.id().to_string();
     Ok(id)
 }
@@ -313,11 +313,9 @@ async fn create_key_pair_and_group(
             source: Box::new(aws_sdk_cloudfront::Error::from(e.into_service_error())),
         })?;
 
-    let public_key = create_key_resp
-        .public_key
-        .ok_or_else(|| {
-            Error::CloudFrontConfiguration("Public key created but not returned".to_string())
-        })?;
+    let public_key = create_key_resp.public_key.ok_or_else(|| {
+        Error::CloudFrontConfiguration("Public key created but not returned".to_string())
+    })?;
     let public_key_id = public_key.id().to_string();
     info!(id = public_key_id.as_str(), "created public key");
 
@@ -337,11 +335,9 @@ async fn create_key_pair_and_group(
             source: Box::new(aws_sdk_cloudfront::Error::from(e.into_service_error())),
         })?;
 
-    let key_group = create_group_resp
-        .key_group
-        .ok_or_else(|| {
-            Error::CloudFrontConfiguration("Key group created but not returned".to_string())
-        })?;
+    let key_group = create_group_resp.key_group.ok_or_else(|| {
+        Error::CloudFrontConfiguration("Key group created but not returned".to_string())
+    })?;
     let key_group_id = key_group.id().to_string();
     info!(id = key_group_id.as_str(), "created key group");
 
@@ -399,18 +395,19 @@ async fn create_distribution(
     let origin_id = "S3-commonware-deployer-cache";
     let origin_domain = format!("{BUCKET_NAME}.s3.amazonaws.com");
 
-    let s3_origin_config = S3OriginConfig::builder()
-        .origin_access_identity("")
-        .build();
+    let s3_origin_config = S3OriginConfig::builder().origin_access_identity("").build();
 
     let origin = Origin::builder()
         .id(origin_id)
         .domain_name(&origin_domain)
         .s3_origin_config(s3_origin_config)
         .origin_access_control_id(oac_id)
-        .custom_headers(CustomHeaders::builder().quantity(0).build().map_err(|e| {
-            Error::CloudFrontConfiguration(e.to_string())
-        })?)
+        .custom_headers(
+            CustomHeaders::builder()
+                .quantity(0)
+                .build()
+                .map_err(|e| Error::CloudFrontConfiguration(e.to_string()))?,
+        )
         .build()
         .map_err(|e| Error::CloudFrontConfiguration(e.to_string()))?;
 
