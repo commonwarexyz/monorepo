@@ -43,6 +43,7 @@ struct ToolUrls {
     libfontconfig: String,
     unzip: String,
     adduser: String,
+    musl: String,
 }
 
 /// Represents a deployed instance with its configuration and public IP
@@ -222,7 +223,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
     let mut tool_urls_by_arch: HashMap<Architecture, ToolUrls> = HashMap::new();
     for arch in &architectures_needed {
         let [prometheus_url, grafana_url, loki_url, pyroscope_url, tempo_url, node_exporter_url, promtail_url,
-             libjemalloc_url, logrotate_url, jq_url, libfontconfig_url, unzip_url]: [String; 12] =
+             libjemalloc_url, logrotate_url, jq_url, libfontconfig_url, unzip_url, musl_url]: [String; 13] =
             try_join_all([
                 cache_tool(prometheus_bin_s3_key(PROMETHEUS_VERSION, *arch), prometheus_download_url(PROMETHEUS_VERSION, *arch)),
                 cache_tool(grafana_bin_s3_key(GRAFANA_VERSION, *arch), grafana_download_url(GRAFANA_VERSION, *arch)),
@@ -236,6 +237,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
                 cache_tool(jq_bin_s3_key(JQ_VERSION, *arch), jq_download_url(JQ_VERSION, *arch)),
                 cache_tool(libfontconfig_bin_s3_key(LIBFONTCONFIG1_VERSION, *arch), libfontconfig_download_url(LIBFONTCONFIG1_VERSION, *arch)),
                 cache_tool(unzip_bin_s3_key(UNZIP_VERSION, *arch), unzip_download_url(UNZIP_VERSION, *arch)),
+                cache_tool(musl_bin_s3_key(MUSL_VERSION, *arch), musl_download_url(MUSL_VERSION, *arch)),
             ])
             .await?
             .try_into()
@@ -256,6 +258,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
                 libfontconfig: libfontconfig_url,
                 unzip: unzip_url,
                 adduser: adduser_url.clone(),
+                musl: musl_url,
             },
         );
     }
@@ -1092,6 +1095,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
         libfontconfig_deb: tool_urls.libfontconfig.clone(),
         unzip_deb: tool_urls.unzip.clone(),
         adduser_deb: tool_urls.adduser.clone(),
+        musl_deb: tool_urls.musl.clone(),
         prometheus_config: prometheus_config_url,
         datasources_yml: datasources_url,
         all_yml: all_yml_url,

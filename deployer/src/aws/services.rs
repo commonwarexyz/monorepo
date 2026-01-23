@@ -50,6 +50,9 @@ pub const UNZIP_VERSION: &str = "6.0-28ubuntu4";
 /// Version of adduser package for Ubuntu 24.04 (arch-independent)
 pub const ADDUSER_VERSION: &str = "3.137ubuntu1";
 
+/// Version of musl package for Ubuntu 24.04
+pub const MUSL_VERSION: &str = "1.2.4-2";
+
 // S3 key functions for tool binaries
 //
 // Convention: {TOOLS_BINARIES_PREFIX}/{tool}/{version}/{platform}/{filename}
@@ -155,6 +158,13 @@ pub(crate) fn unzip_bin_s3_key(version: &str, architecture: Architecture) -> Str
 /// S3 key for adduser (architecture-independent package)
 pub(crate) fn adduser_bin_s3_key(version: &str) -> String {
     format!("{TOOLS_BINARIES_PREFIX}/adduser/{version}/adduser_{version}_all.deb")
+}
+
+pub(crate) fn musl_bin_s3_key(version: &str, architecture: Architecture) -> String {
+    format!(
+        "{TOOLS_BINARIES_PREFIX}/musl/{version}/linux-{arch}/musl_{version}_{arch}.deb",
+        arch = architecture.as_str()
+    )
 }
 
 // S3 key functions for component configs and services (include deployer version for cache invalidation)
@@ -392,6 +402,14 @@ pub(crate) fn adduser_download_url(version: &str) -> String {
     format!("http://archive.ubuntu.com/ubuntu/pool/main/a/adduser/adduser_{version}_all.deb")
 }
 
+pub(crate) fn musl_download_url(version: &str, architecture: Architecture) -> String {
+    let base = match architecture {
+        Architecture::Arm64 => "http://ports.ubuntu.com/ubuntu-ports/pool/universe/m/musl",
+        Architecture::X86_64 => "http://archive.ubuntu.com/ubuntu/pool/universe/m/musl",
+    };
+    format!("{base}/musl_{version}_{arch}.deb", arch = architecture.as_str())
+}
+
 /// YAML configuration for Grafana datasources (Prometheus, Loki, Tempo, and Pyroscope)
 pub const DATASOURCES_YML: &str = r#"
 apiVersion: 1
@@ -595,6 +613,7 @@ pub struct MonitoringUrls {
     pub libfontconfig_deb: String,
     pub unzip_deb: String,
     pub adduser_deb: String,
+    pub musl_deb: String,
     pub prometheus_config: String,
     pub datasources_yml: String,
     pub all_yml: String,
@@ -616,7 +635,7 @@ pub(crate) fn install_monitoring_download_cmd(urls: &MonitoringUrls) -> String {
 # Clean up any previous download artifacts (allows retries to re-download fresh copies)
 rm -f /home/ubuntu/prometheus.tar.gz /home/ubuntu/loki.zip /home/ubuntu/pyroscope.tar.gz \
       /home/ubuntu/tempo.tar.gz /home/ubuntu/node_exporter.tar.gz /home/ubuntu/libfontconfig1.deb \
-      /home/ubuntu/unzip.deb /home/ubuntu/adduser.deb
+      /home/ubuntu/unzip.deb /home/ubuntu/adduser.deb /home/ubuntu/musl.deb
 rm -rf /home/ubuntu/prometheus-* /home/ubuntu/loki-linux-* /home/ubuntu/pyroscope \
        /home/ubuntu/tempo /home/ubuntu/node_exporter-*
 
@@ -633,6 +652,7 @@ sudo systemctl unmask prometheus loki pyroscope tempo node_exporter grafana-serv
 {WGET} -O /home/ubuntu/libfontconfig1.deb '{}' &
 {WGET} -O /home/ubuntu/unzip.deb '{}' &
 {WGET} -O /home/ubuntu/adduser.deb '{}' &
+{WGET} -O /home/ubuntu/musl.deb '{}' &
 {WGET} -O /home/ubuntu/prometheus.yml '{}' &
 {WGET} -O /home/ubuntu/datasources.yml '{}' &
 {WGET} -O /home/ubuntu/all.yml '{}' &
@@ -649,7 +669,7 @@ wait
 
 # Verify all downloads succeeded
 for f in prometheus.tar.gz grafana.deb loki.zip pyroscope.tar.gz tempo.tar.gz node_exporter.tar.gz \
-         libfontconfig1.deb unzip.deb adduser.deb prometheus.yml datasources.yml all.yml dashboard.json \
+         libfontconfig1.deb unzip.deb adduser.deb musl.deb prometheus.yml datasources.yml all.yml dashboard.json \
          loki.yml pyroscope.yml tempo.yml prometheus.service loki.service pyroscope.service \
          tempo.service node_exporter.service; do
     if [ ! -f "/home/ubuntu/$f" ]; then
@@ -667,6 +687,7 @@ done
         urls.libfontconfig_deb,
         urls.unzip_deb,
         urls.adduser_deb,
+        urls.musl_deb,
         urls.prometheus_config,
         urls.datasources_yml,
         urls.all_yml,
@@ -702,8 +723,9 @@ sudo mv /home/ubuntu/prometheus-{prometheus_version}.linux-{arch} /opt/prometheu
 sudo ln -sf /opt/prometheus/prometheus-{prometheus_version}.linux-{arch}/prometheus /opt/prometheus/prometheus
 sudo chmod +x /opt/prometheus/prometheus
 
-# Install libfontconfig1 (Grafana dependency) and Grafana
+# Install Grafana dependencies (libfontconfig1, musl) and Grafana
 sudo dpkg -i /home/ubuntu/libfontconfig1.deb
+sudo dpkg -i /home/ubuntu/musl.deb
 sudo dpkg -i /home/ubuntu/grafana.deb
 
 # Install Loki
