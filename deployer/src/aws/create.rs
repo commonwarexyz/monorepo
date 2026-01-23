@@ -1128,50 +1128,40 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
             let start = Instant::now();
 
             wait_for_instances_ready(&ec2_client, slice::from_ref(&deployment_id)).await?;
-            let wait_ready_ms = start.elapsed().as_millis();
-
-            let bbr_start = Instant::now();
-            enable_bbr(private_key, &ip).await?;
-            let bbr_ms = bbr_start.elapsed().as_millis();
-
-            let apt_ms = if let Some(apt_cmd) = install_binary_apt_cmd(instance.profiling) {
-                let apt_start = Instant::now();
-                ssh_execute(private_key, &ip, apt_cmd).await?;
-                apt_start.elapsed().as_millis()
-            } else {
-                0
-            };
+            let deploy = format!("{:.1}s", start.elapsed().as_secs_f64());
 
             let download_start = Instant::now();
+            if let Some(apt_cmd) = install_binary_apt_cmd(instance.profiling) {
+                ssh_execute(private_key, &ip, apt_cmd).await?;
+            }
             ssh_execute(private_key, &ip, &install_binary_download_cmd(&urls)).await?;
-            let download_ms = download_start.elapsed().as_millis();
+            let download = format!("{:.1}s", download_start.elapsed().as_secs_f64());
 
             let setup_start = Instant::now();
+            enable_bbr(private_key, &ip).await?;
             ssh_execute(
                 private_key,
                 &ip,
                 &install_binary_setup_cmd(instance.profiling, arch),
             )
             .await?;
-            let setup_ms = setup_start.elapsed().as_millis();
+            let setup = format!("{:.1}s", setup_start.elapsed().as_secs_f64());
 
-            let poll_start = Instant::now();
+            let start_time = Instant::now();
             poll_service_active(private_key, &ip, "promtail").await?;
             poll_service_active(private_key, &ip, "node_exporter").await?;
             poll_service_active(private_key, &ip, "binary").await?;
-            let poll_ms = poll_start.elapsed().as_millis();
+            let start_dur = format!("{:.1}s", start_time.elapsed().as_secs_f64());
 
-            let total_ms = start.elapsed().as_millis();
+            let total = format!("{:.1}s", start.elapsed().as_secs_f64());
             info!(
-                ip = ip.as_str(),
+                ip,
                 instance = instance.name.as_str(),
-                wait_ready_ms,
-                bbr_ms,
-                apt_ms,
-                download_ms,
-                setup_ms,
-                poll_ms,
-                total_ms,
+                deploy,
+                download,
+                setup,
+                start = start_dur,
+                total,
                 "configured instance"
             );
             Ok::<String, Error>(ip)
@@ -1190,11 +1180,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
                 slice::from_ref(&monitoring_instance_id),
             )
             .await?;
-            let wait_ready_ms = start.elapsed().as_millis();
-
-            let bbr_start = Instant::now();
-            enable_bbr(private_key, &monitoring_ip).await?;
-            let bbr_ms = bbr_start.elapsed().as_millis();
+            let deploy = format!("{:.1}s", start.elapsed().as_secs_f64());
 
             let download_start = Instant::now();
             ssh_execute(
@@ -1203,40 +1189,36 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
                 &install_monitoring_download_cmd(&monitoring_urls),
             )
             .await?;
-            let download_ms = download_start.elapsed().as_millis();
+            let download = format!("{:.1}s", download_start.elapsed().as_secs_f64());
 
             let setup_start = Instant::now();
+            enable_bbr(private_key, &monitoring_ip).await?;
             ssh_execute(
                 private_key,
                 &monitoring_ip,
                 &install_monitoring_setup_cmd(PROMETHEUS_VERSION, monitoring_architecture),
             )
             .await?;
-            let setup_ms = setup_start.elapsed().as_millis();
-
-            let services_start = Instant::now();
             ssh_execute(private_key, &monitoring_ip, start_monitoring_services_cmd()).await?;
-            let services_ms = services_start.elapsed().as_millis();
+            let setup = format!("{:.1}s", setup_start.elapsed().as_secs_f64());
 
-            let poll_start = Instant::now();
+            let start_time = Instant::now();
             poll_service_active(private_key, &monitoring_ip, "node_exporter").await?;
             poll_service_active(private_key, &monitoring_ip, "prometheus").await?;
             poll_service_active(private_key, &monitoring_ip, "loki").await?;
             poll_service_active(private_key, &monitoring_ip, "pyroscope").await?;
             poll_service_active(private_key, &monitoring_ip, "tempo").await?;
             poll_service_active(private_key, &monitoring_ip, "grafana-server").await?;
-            let poll_ms = poll_start.elapsed().as_millis();
+            let start_dur = format!("{:.1}s", start_time.elapsed().as_secs_f64());
 
-            let total_ms = start.elapsed().as_millis();
+            let total = format!("{:.1}s", start.elapsed().as_secs_f64());
             info!(
                 ip = monitoring_ip.as_str(),
-                wait_ready_ms,
-                bbr_ms,
-                download_ms,
-                setup_ms,
-                services_ms,
-                poll_ms,
-                total_ms,
+                deploy,
+                download,
+                setup,
+                start = start_dur,
+                total,
                 "configured monitoring instance"
             );
             Ok::<(), Error>(())
