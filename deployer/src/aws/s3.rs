@@ -152,9 +152,7 @@ pub async fn ensure_bucket_exists(
     enable_transfer_acceleration(bucket_name, region).await
 }
 
-/// Enables Transfer Acceleration on an S3 bucket.
-/// Uses a non-accelerated client because we can't use the accelerated endpoint
-/// until acceleration is enabled.
+/// Enables Transfer Acceleration on an S3 bucket
 async fn enable_transfer_acceleration(bucket_name: &str, region: &str) -> Result<(), Error> {
     // Create a non-accelerated client for this operation
     let sdk_config = aws_config::defaults(BehaviorVersion::v2026_01_12())
