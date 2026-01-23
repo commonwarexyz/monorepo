@@ -32,6 +32,18 @@ pub const GRAFANA_VERSION: &str = "11.5.2";
 /// Version of Samply to download and install
 pub const SAMPLY_VERSION: &str = "0.13.1";
 
+/// Version of libjemalloc2 package for Ubuntu 24.04
+pub const LIBJEMALLOC2_VERSION: &str = "5.3.0-2build1";
+
+/// Version of logrotate package for Ubuntu 24.04
+pub const LOGROTATE_VERSION: &str = "3.21.0-2build1";
+
+/// Version of jq package for Ubuntu 24.04
+pub const JQ_VERSION: &str = "1.7.1-3build1";
+
+/// Version of libfontconfig1 package for Ubuntu 24.04
+pub const LIBFONTCONFIG1_VERSION: &str = "2.15.0-1.1ubuntu2";
+
 // S3 key functions for tool binaries
 //
 // Convention: {TOOLS_BINARIES_PREFIX}/{tool}/{version}/{platform}/{filename}
@@ -97,6 +109,34 @@ pub(crate) fn samply_bin_s3_key(version: &str, architecture: Architecture) -> St
         Architecture::X86_64 => "x86_64",
     };
     format!("{TOOLS_BINARIES_PREFIX}/samply/{version}/linux-{arch}/samply-{arch}-unknown-linux-gnu.tar.xz")
+}
+
+pub(crate) fn libjemalloc_bin_s3_key(version: &str, architecture: Architecture) -> String {
+    format!(
+        "{TOOLS_BINARIES_PREFIX}/libjemalloc2/{version}/linux-{arch}/libjemalloc2_{version}_{arch}.deb",
+        arch = architecture.as_str()
+    )
+}
+
+pub(crate) fn logrotate_bin_s3_key(version: &str, architecture: Architecture) -> String {
+    format!(
+        "{TOOLS_BINARIES_PREFIX}/logrotate/{version}/linux-{arch}/logrotate_{version}_{arch}.deb",
+        arch = architecture.as_str()
+    )
+}
+
+pub(crate) fn jq_bin_s3_key(version: &str, architecture: Architecture) -> String {
+    format!(
+        "{TOOLS_BINARIES_PREFIX}/jq/{version}/linux-{arch}/jq_{version}_{arch}.deb",
+        arch = architecture.as_str()
+    )
+}
+
+pub(crate) fn libfontconfig_bin_s3_key(version: &str, architecture: Architecture) -> String {
+    format!(
+        "{TOOLS_BINARIES_PREFIX}/libfontconfig1/{version}/linux-{arch}/libfontconfig1_{version}_{arch}.deb",
+        arch = architecture.as_str()
+    )
 }
 
 // S3 key functions for component configs and services (include deployer version for cache invalidation)
@@ -270,6 +310,54 @@ pub(crate) fn samply_download_url(version: &str, architecture: Architecture) -> 
     };
     format!(
         "https://github.com/mstange/samply/releases/download/samply-v{version}/samply-{arch}-unknown-linux-gnu.tar.xz"
+    )
+}
+
+/// Returns the download URL for libjemalloc2 from Ubuntu archive
+pub(crate) fn libjemalloc_download_url(version: &str, architecture: Architecture) -> String {
+    let base = match architecture {
+        Architecture::Arm64 => "http://ports.ubuntu.com/pool/universe/j/jemalloc",
+        Architecture::X86_64 => "https://archive.ubuntu.com/ubuntu/pool/universe/j/jemalloc",
+    };
+    format!(
+        "{base}/libjemalloc2_{version}_{arch}.deb",
+        arch = architecture.as_str()
+    )
+}
+
+/// Returns the download URL for logrotate from Ubuntu archive
+pub(crate) fn logrotate_download_url(version: &str, architecture: Architecture) -> String {
+    let base = match architecture {
+        Architecture::Arm64 => "http://ports.ubuntu.com/pool/main/l/logrotate",
+        Architecture::X86_64 => "https://archive.ubuntu.com/ubuntu/pool/main/l/logrotate",
+    };
+    format!(
+        "{base}/logrotate_{version}_{arch}.deb",
+        arch = architecture.as_str()
+    )
+}
+
+/// Returns the download URL for jq from Ubuntu archive
+pub(crate) fn jq_download_url(version: &str, architecture: Architecture) -> String {
+    let base = match architecture {
+        Architecture::Arm64 => "http://ports.ubuntu.com/pool/universe/j/jq",
+        Architecture::X86_64 => "https://archive.ubuntu.com/ubuntu/pool/universe/j/jq",
+    };
+    format!(
+        "{base}/jq_{version}_{arch}.deb",
+        arch = architecture.as_str()
+    )
+}
+
+/// Returns the download URL for libfontconfig1 from Ubuntu archive
+pub(crate) fn libfontconfig_download_url(version: &str, architecture: Architecture) -> String {
+    let base = match architecture {
+        Architecture::Arm64 => "http://ports.ubuntu.com/pool/main/f/fontconfig",
+        Architecture::X86_64 => "https://archive.ubuntu.com/ubuntu/pool/main/f/fontconfig",
+    };
+    format!(
+        "{base}/libfontconfig1_{version}_{arch}.deb",
+        arch = architecture.as_str()
     )
 }
 
@@ -473,6 +561,7 @@ pub struct MonitoringUrls {
     pub pyroscope_bin: String,
     pub tempo_bin: String,
     pub node_exporter_bin: String,
+    pub libfontconfig_deb: String,
     pub prometheus_config: String,
     pub datasources_yml: String,
     pub all_yml: String,
@@ -487,21 +576,13 @@ pub struct MonitoringUrls {
     pub node_exporter_service: String,
 }
 
-/// Phase 1: Install apt packages on monitoring instance
-pub(crate) fn install_monitoring_apt_cmd() -> &'static str {
-    r#"
-sudo apt-get update -y
-sudo apt-get install -y unzip adduser libfontconfig1 wget tar
-"#
-}
-
-/// Phase 2: Download files from S3 on monitoring instance
+/// Phase 1: Download files from S3 on monitoring instance
 pub(crate) fn install_monitoring_download_cmd(urls: &MonitoringUrls) -> String {
     format!(
         r#"
 # Clean up any previous download artifacts (allows retries to re-download fresh copies)
 rm -f /home/ubuntu/prometheus.tar.gz /home/ubuntu/loki.zip /home/ubuntu/pyroscope.tar.gz \
-      /home/ubuntu/tempo.tar.gz /home/ubuntu/node_exporter.tar.gz
+      /home/ubuntu/tempo.tar.gz /home/ubuntu/node_exporter.tar.gz /home/ubuntu/libfontconfig1.deb
 rm -rf /home/ubuntu/prometheus-* /home/ubuntu/loki-linux-* /home/ubuntu/pyroscope \
        /home/ubuntu/tempo /home/ubuntu/node_exporter-*
 
@@ -515,6 +596,7 @@ sudo systemctl unmask prometheus loki pyroscope tempo node_exporter grafana-serv
 {WGET} -O /home/ubuntu/pyroscope.tar.gz '{}' &
 {WGET} -O /home/ubuntu/tempo.tar.gz '{}' &
 {WGET} -O /home/ubuntu/node_exporter.tar.gz '{}' &
+{WGET} -O /home/ubuntu/libfontconfig1.deb '{}' &
 {WGET} -O /home/ubuntu/prometheus.yml '{}' &
 {WGET} -O /home/ubuntu/datasources.yml '{}' &
 {WGET} -O /home/ubuntu/all.yml '{}' &
@@ -531,8 +613,9 @@ wait
 
 # Verify all downloads succeeded
 for f in prometheus.tar.gz grafana.deb loki.zip pyroscope.tar.gz tempo.tar.gz node_exporter.tar.gz \
-         prometheus.yml datasources.yml all.yml dashboard.json loki.yml pyroscope.yml tempo.yml \
-         prometheus.service loki.service pyroscope.service tempo.service node_exporter.service; do
+         libfontconfig1.deb prometheus.yml datasources.yml all.yml dashboard.json loki.yml \
+         pyroscope.yml tempo.yml prometheus.service loki.service pyroscope.service tempo.service \
+         node_exporter.service; do
     if [ ! -f "/home/ubuntu/$f" ]; then
         echo "ERROR: Failed to download $f" >&2
         exit 1
@@ -545,6 +628,7 @@ done
         urls.pyroscope_bin,
         urls.tempo_bin,
         urls.node_exporter_bin,
+        urls.libfontconfig_deb,
         urls.prometheus_config,
         urls.datasources_yml,
         urls.all_yml,
@@ -560,7 +644,7 @@ done
     )
 }
 
-/// Phase 3: Setup services on monitoring instance (does not start them)
+/// Phase 2: Setup services on monitoring instance (does not start them)
 pub(crate) fn install_monitoring_setup_cmd(
     prometheus_version: &str,
     architecture: Architecture,
@@ -576,9 +660,9 @@ sudo mv /home/ubuntu/prometheus-{prometheus_version}.linux-{arch} /opt/prometheu
 sudo ln -sf /opt/prometheus/prometheus-{prometheus_version}.linux-{arch}/prometheus /opt/prometheus/prometheus
 sudo chmod +x /opt/prometheus/prometheus
 
-# Install Grafana
+# Install libfontconfig1 (Grafana dependency) and Grafana
+sudo dpkg -i /home/ubuntu/libfontconfig1.deb
 sudo dpkg -i /home/ubuntu/grafana.deb
-sudo apt-get install -f -y
 
 # Install Loki
 sudo mkdir -p /opt/loki /loki/index /loki/index_cache /loki/chunks /loki/compactor /loki/wal
@@ -678,22 +762,40 @@ pub struct InstanceUrls {
     pub pyroscope_script: String,
     pub pyroscope_service: String,
     pub pyroscope_timer: String,
+    pub libjemalloc_deb: String,
+    pub logrotate_deb: String,
+    pub jq_deb: Option<String>,
 }
 
-/// Phase 1: Install apt packages on binary instances
-pub(crate) fn install_binary_apt_cmd() -> &'static str {
-    r#"
+/// Phase 1 (optional): Install apt packages on binary instances
+/// Only needed when profiling is enabled (for linux-tools)
+pub(crate) fn install_binary_apt_cmd(profiling: bool) -> Option<&'static str> {
+    if profiling {
+        Some(
+            r#"
+while sudo fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; do sleep 5; done
 sudo apt-get update -y
-sudo apt-get install -y logrotate jq wget unzip libjemalloc2 linux-tools-common linux-tools-generic linux-tools-$(uname -r)
-"#
+sudo apt-get install -y linux-tools-common linux-tools-generic linux-tools-$(uname -r)
+"#,
+        )
+    } else {
+        None
+    }
 }
 
 /// Phase 2: Download files from S3 on binary instances
 pub(crate) fn install_binary_download_cmd(urls: &InstanceUrls) -> String {
+    let jq_download = urls
+        .jq_deb
+        .as_ref()
+        .map(|url| format!("{WGET} -O /home/ubuntu/jq.deb '{url}' &\n"))
+        .unwrap_or_default();
+    let jq_verify = if urls.jq_deb.is_some() { " jq.deb" } else { "" };
     format!(
         r#"
 # Clean up any previous download artifacts (allows retries to re-download fresh copies)
-rm -f /home/ubuntu/promtail.zip /home/ubuntu/node_exporter.tar.gz
+rm -f /home/ubuntu/promtail.zip /home/ubuntu/node_exporter.tar.gz \
+      /home/ubuntu/libjemalloc2.deb /home/ubuntu/logrotate.deb /home/ubuntu/jq.deb
 rm -rf /home/ubuntu/promtail-linux-* /home/ubuntu/node_exporter-*
 
 # Unmask services in case previous attempt left them masked
@@ -713,12 +815,15 @@ sudo systemctl unmask promtail node_exporter binary 2>/dev/null || true
 {WGET} -O /home/ubuntu/pyroscope-agent.sh '{}' &
 {WGET} -O /home/ubuntu/pyroscope-agent.service '{}' &
 {WGET} -O /home/ubuntu/pyroscope-agent.timer '{}' &
-wait
+{WGET} -O /home/ubuntu/libjemalloc2.deb '{}' &
+{WGET} -O /home/ubuntu/logrotate.deb '{}' &
+{jq_download}wait
 
 # Verify all downloads succeeded
 for f in binary config.conf hosts.yaml promtail.zip promtail.yml promtail.service \
          node_exporter.tar.gz node_exporter.service binary.service logrotate.conf \
-         pyroscope-agent.sh pyroscope-agent.service pyroscope-agent.timer; do
+         pyroscope-agent.sh pyroscope-agent.service pyroscope-agent.timer \
+         libjemalloc2.deb logrotate.deb{jq_verify}; do
     if [ ! -f "/home/ubuntu/$f" ]; then
         echo "ERROR: Failed to download $f" >&2
         exit 1
@@ -738,14 +843,41 @@ done
         urls.pyroscope_script,
         urls.pyroscope_service,
         urls.pyroscope_timer,
+        urls.libjemalloc_deb,
+        urls.logrotate_deb,
     )
 }
 
 /// Phase 3: Setup and start services on binary instances
 pub(crate) fn install_binary_setup_cmd(profiling: bool, architecture: Architecture) -> String {
     let arch = architecture.as_str();
-    let mut script = format!(
+    let jq_install = if profiling {
+        "sudo dpkg -i /home/ubuntu/jq.deb\n"
+    } else {
+        ""
+    };
+    let perf_setup = if profiling {
         r#"
+# Setup pyroscope agent (perf symlink must be created after linux-tools installed via apt)
+sudo ln -sf "$(find /usr/lib/linux-tools/*/perf | head -1)" /usr/local/bin/perf
+sudo chmod +x /home/ubuntu/pyroscope-agent.sh
+sudo mv /home/ubuntu/pyroscope-agent.service /etc/systemd/system/pyroscope-agent.service
+sudo mv /home/ubuntu/pyroscope-agent.timer /etc/systemd/system/pyroscope-agent.timer
+"#
+    } else {
+        ""
+    };
+    let pyroscope_enable = if profiling {
+        "\nsudo systemctl enable --now pyroscope-agent.timer\n"
+    } else {
+        ""
+    };
+    format!(
+        r#"
+# Install deb packages (libjemalloc2, logrotate, jq if profiling)
+sudo dpkg -i /home/ubuntu/libjemalloc2.deb
+sudo dpkg -i /home/ubuntu/logrotate.deb
+{jq_install}
 # Install Promtail
 sudo mkdir -p /opt/promtail /etc/promtail
 sudo chown -R ubuntu:ubuntu /opt/promtail
@@ -774,28 +906,13 @@ sudo mv /home/ubuntu/binary.service /etc/systemd/system/binary.service
 sudo mv /home/ubuntu/logrotate.conf /etc/logrotate.d/binary
 sudo chown root:root /etc/logrotate.d/binary
 echo "0 * * * * /usr/sbin/logrotate /etc/logrotate.d/binary" | crontab -
-
-# Setup pyroscope agent
-sudo ln -sf "$(find /usr/lib/linux-tools/*/perf | head -1)" /usr/local/bin/perf
-sudo chmod +x /home/ubuntu/pyroscope-agent.sh
-sudo mv /home/ubuntu/pyroscope-agent.service /etc/systemd/system/pyroscope-agent.service
-sudo mv /home/ubuntu/pyroscope-agent.timer /etc/systemd/system/pyroscope-agent.timer
-
+{perf_setup}
 # Start services
 sudo systemctl daemon-reload
 sudo systemctl enable --now promtail
 sudo systemctl enable --now node_exporter
-sudo systemctl enable --now binary
-"#
-    );
-    if profiling {
-        script.push_str(
-            r#"
-sudo systemctl enable --now pyroscope-agent.timer
-"#,
-        );
-    }
-    script
+sudo systemctl enable --now binary{pyroscope_enable}"#
+    )
 }
 
 /// Generates Promtail configuration with the monitoring instance's private IP and instance name
@@ -1051,6 +1168,22 @@ mod tests {
             promtail_bin_s3_key("3.4.2", arch),
             "tools/binaries/promtail/3.4.2/linux-arm64/promtail-linux-arm64.zip"
         );
+        assert_eq!(
+            libjemalloc_bin_s3_key("5.3.0-2build1", arch),
+            "tools/binaries/libjemalloc2/5.3.0-2build1/linux-arm64/libjemalloc2_5.3.0-2build1_arm64.deb"
+        );
+        assert_eq!(
+            logrotate_bin_s3_key("3.21.0-2build1", arch),
+            "tools/binaries/logrotate/3.21.0-2build1/linux-arm64/logrotate_3.21.0-2build1_arm64.deb"
+        );
+        assert_eq!(
+            jq_bin_s3_key("1.7.1-3build1", arch),
+            "tools/binaries/jq/1.7.1-3build1/linux-arm64/jq_1.7.1-3build1_arm64.deb"
+        );
+        assert_eq!(
+            libfontconfig_bin_s3_key("2.15.0-1.1ubuntu2", arch),
+            "tools/binaries/libfontconfig1/2.15.0-1.1ubuntu2/linux-arm64/libfontconfig1_2.15.0-1.1ubuntu2_arm64.deb"
+        );
     }
 
     #[test]
@@ -1083,6 +1216,22 @@ mod tests {
         assert_eq!(
             promtail_bin_s3_key("3.4.2", arch),
             "tools/binaries/promtail/3.4.2/linux-amd64/promtail-linux-amd64.zip"
+        );
+        assert_eq!(
+            libjemalloc_bin_s3_key("5.3.0-2build1", arch),
+            "tools/binaries/libjemalloc2/5.3.0-2build1/linux-amd64/libjemalloc2_5.3.0-2build1_amd64.deb"
+        );
+        assert_eq!(
+            logrotate_bin_s3_key("3.21.0-2build1", arch),
+            "tools/binaries/logrotate/3.21.0-2build1/linux-amd64/logrotate_3.21.0-2build1_amd64.deb"
+        );
+        assert_eq!(
+            jq_bin_s3_key("1.7.1-3build1", arch),
+            "tools/binaries/jq/1.7.1-3build1/linux-amd64/jq_1.7.1-3build1_amd64.deb"
+        );
+        assert_eq!(
+            libfontconfig_bin_s3_key("2.15.0-1.1ubuntu2", arch),
+            "tools/binaries/libfontconfig1/2.15.0-1.1ubuntu2/linux-amd64/libfontconfig1_2.15.0-1.1ubuntu2_amd64.deb"
         );
     }
 

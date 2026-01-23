@@ -28,8 +28,20 @@ use tracing::info;
 /// Maximum number of instance IDs per DescribeInstances API call
 const MAX_DESCRIBE_BATCH: usize = 1000;
 
-/// Pre-signed URLs for observability tools (prometheus, grafana, loki, pyroscope, tempo, node_exporter, promtail)
-type ToolUrls = (String, String, String, String, String, String, String);
+/// Pre-signed URLs for observability tools per architecture
+struct ToolUrls {
+    prometheus: String,
+    grafana: String,
+    loki: String,
+    pyroscope: String,
+    tempo: String,
+    node_exporter: String,
+    promtail: String,
+    libjemalloc: String,
+    logrotate: String,
+    jq: String,
+    libfontconfig: String,
+}
 
 /// Represents a deployed instance with its configuration and public IP
 #[derive(Clone)]
@@ -200,7 +212,8 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
     // Cache tools for each architecture and store URLs per-architecture
     let mut tool_urls_by_arch: HashMap<Architecture, ToolUrls> = HashMap::new();
     for arch in &architectures_needed {
-        let [prometheus_url, grafana_url, loki_url, pyroscope_url, tempo_url, node_exporter_url, promtail_url]: [String; 7] =
+        let [prometheus_url, grafana_url, loki_url, pyroscope_url, tempo_url, node_exporter_url, promtail_url,
+             libjemalloc_url, logrotate_url, jq_url, libfontconfig_url]: [String; 11] =
             try_join_all([
                 cache_tool(prometheus_bin_s3_key(PROMETHEUS_VERSION, *arch), prometheus_download_url(PROMETHEUS_VERSION, *arch)),
                 cache_tool(grafana_bin_s3_key(GRAFANA_VERSION, *arch), grafana_download_url(GRAFANA_VERSION, *arch)),
@@ -209,21 +222,29 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
                 cache_tool(tempo_bin_s3_key(TEMPO_VERSION, *arch), tempo_download_url(TEMPO_VERSION, *arch)),
                 cache_tool(node_exporter_bin_s3_key(NODE_EXPORTER_VERSION, *arch), node_exporter_download_url(NODE_EXPORTER_VERSION, *arch)),
                 cache_tool(promtail_bin_s3_key(PROMTAIL_VERSION, *arch), promtail_download_url(PROMTAIL_VERSION, *arch)),
+                cache_tool(libjemalloc_bin_s3_key(LIBJEMALLOC2_VERSION, *arch), libjemalloc_download_url(LIBJEMALLOC2_VERSION, *arch)),
+                cache_tool(logrotate_bin_s3_key(LOGROTATE_VERSION, *arch), logrotate_download_url(LOGROTATE_VERSION, *arch)),
+                cache_tool(jq_bin_s3_key(JQ_VERSION, *arch), jq_download_url(JQ_VERSION, *arch)),
+                cache_tool(libfontconfig_bin_s3_key(LIBFONTCONFIG1_VERSION, *arch), libfontconfig_download_url(LIBFONTCONFIG1_VERSION, *arch)),
             ])
             .await?
             .try_into()
             .unwrap();
         tool_urls_by_arch.insert(
             *arch,
-            (
-                prometheus_url,
-                grafana_url,
-                loki_url,
-                pyroscope_url,
-                tempo_url,
-                node_exporter_url,
-                promtail_url,
-            ),
+            ToolUrls {
+                prometheus: prometheus_url,
+                grafana: grafana_url,
+                loki: loki_url,
+                pyroscope: pyroscope_url,
+                tempo: tempo_url,
+                node_exporter: node_exporter_url,
+                promtail: promtail_url,
+                libjemalloc: libjemalloc_url,
+                logrotate: logrotate_url,
+                jq: jq_url,
+                libfontconfig: libfontconfig_url,
+            },
         );
     }
     info!("observability tools uploaded");
@@ -1014,7 +1035,12 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
         let arch = instance_architectures[name];
         let promtail_digest = &instance_promtail_digest[name];
         let pyroscope_digest = &instance_pyroscope_digest[name];
-        let (_, _, _, _, _, node_exporter_url, promtail_url) = &tool_urls_by_arch[&arch];
+        let tool_urls = &tool_urls_by_arch[&arch];
+        let jq_deb = if deployment.instance.profiling {
+            Some(tool_urls.jq.clone())
+        } else {
+            None
+        };
 
         instance_urls_map.insert(
             name.clone(),
@@ -1023,16 +1049,19 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
                     binary: instance_binary_urls[name].clone(),
                     config: instance_config_urls[name].clone(),
                     hosts: hosts_url.clone(),
-                    promtail_bin: promtail_url.clone(),
+                    promtail_bin: tool_urls.promtail.clone(),
                     promtail_config: promtail_digest_to_url[promtail_digest].clone(),
                     promtail_service: promtail_service_url.clone(),
-                    node_exporter_bin: node_exporter_url.clone(),
+                    node_exporter_bin: tool_urls.node_exporter.clone(),
                     node_exporter_service: monitoring_node_exporter_service_url.clone(),
                     binary_service: binary_service_urls_by_arch[&arch].clone(),
                     logrotate_conf: logrotate_conf_url.clone(),
                     pyroscope_script: pyroscope_digest_to_url[pyroscope_digest].clone(),
                     pyroscope_service: pyroscope_agent_service_url.clone(),
                     pyroscope_timer: pyroscope_agent_timer_url.clone(),
+                    libjemalloc_deb: tool_urls.libjemalloc.clone(),
+                    logrotate_deb: tool_urls.logrotate.clone(),
+                    jq_deb,
                 },
                 arch,
             ),
@@ -1041,15 +1070,15 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
     info!("uploaded config files to S3");
 
     // Build monitoring URLs struct for SSH configuration (using monitoring architecture)
-    let (prometheus_url, grafana_url, loki_url, pyroscope_url, tempo_url, node_exporter_url, _) =
-        &tool_urls_by_arch[&monitoring_architecture];
+    let tool_urls = &tool_urls_by_arch[&monitoring_architecture];
     let monitoring_urls = MonitoringUrls {
-        prometheus_bin: prometheus_url.clone(),
-        grafana_bin: grafana_url.clone(),
-        loki_bin: loki_url.clone(),
-        pyroscope_bin: pyroscope_url.clone(),
-        tempo_bin: tempo_url.clone(),
-        node_exporter_bin: node_exporter_url.clone(),
+        prometheus_bin: tool_urls.prometheus.clone(),
+        grafana_bin: tool_urls.grafana.clone(),
+        loki_bin: tool_urls.loki.clone(),
+        pyroscope_bin: tool_urls.pyroscope.clone(),
+        tempo_bin: tool_urls.tempo.clone(),
+        node_exporter_bin: tool_urls.node_exporter.clone(),
+        libfontconfig_deb: tool_urls.libfontconfig.clone(),
         prometheus_config: prometheus_config_url,
         datasources_yml: datasources_url,
         all_yml: all_yml_url,
@@ -1089,9 +1118,13 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
             enable_bbr(private_key, &ip, &bbr_url).await?;
             let bbr_ms = bbr_start.elapsed().as_millis();
 
-            let apt_start = Instant::now();
-            ssh_execute(private_key, &ip, install_binary_apt_cmd()).await?;
-            let apt_ms = apt_start.elapsed().as_millis();
+            let apt_ms = if let Some(apt_cmd) = install_binary_apt_cmd(instance.profiling) {
+                let apt_start = Instant::now();
+                ssh_execute(private_key, &ip, apt_cmd).await?;
+                apt_start.elapsed().as_millis()
+            } else {
+                0
+            };
 
             let download_start = Instant::now();
             ssh_execute(private_key, &ip, &install_binary_download_cmd(&urls)).await?;
@@ -1147,10 +1180,6 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
             enable_bbr(private_key, &monitoring_ip, &bbr_conf_url).await?;
             let bbr_ms = bbr_start.elapsed().as_millis();
 
-            let apt_start = Instant::now();
-            ssh_execute(private_key, &monitoring_ip, install_monitoring_apt_cmd()).await?;
-            let apt_ms = apt_start.elapsed().as_millis();
-
             let download_start = Instant::now();
             ssh_execute(
                 private_key,
@@ -1187,7 +1216,6 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
                 ip = monitoring_ip.as_str(),
                 wait_ready_ms,
                 bbr_ms,
-                apt_ms,
                 download_ms,
                 setup_ms,
                 services_ms,
