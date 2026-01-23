@@ -209,7 +209,7 @@ impl<
             );
         }
         self.votes
-            .prune(self.state.min_active())
+            .prune(self.state.epoch(), self.state.min_active())
             .await
             .expect("unable to prune votes");
     }
@@ -217,14 +217,17 @@ impl<
     /// Appends a verified message to the votes store.
     async fn append_votes(&mut self, view: View, artifact: Artifact<S, D>) {
         self.votes
-            .append(view, artifact)
+            .append(self.state.epoch(), view, artifact)
             .await
             .expect("unable to append to votes");
     }
 
     /// Syncs the votes store so data can be recovered for `view`.
     async fn sync_votes(&mut self, view: View) {
-        self.votes.sync(view).await.expect("unable to sync votes");
+        self.votes
+            .sync(self.state.epoch(), view)
+            .await
+            .expect("unable to sync votes");
     }
 
     /// Send a vote to every peer.
@@ -662,7 +665,11 @@ impl<
         let start = self.context.current();
         {
             // Collect all artifacts first to avoid borrowing conflicts
-            let stream = self.votes.replay().await.expect("unable to replay votes");
+            let stream = self
+                .votes
+                .replay(self.state.epoch())
+                .await
+                .expect("unable to replay votes");
             pin_mut!(stream);
             let mut artifacts = Vec::new();
             while let Some(result) = stream.next().await {

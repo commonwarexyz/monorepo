@@ -1,7 +1,7 @@
 //! Interface for a store of votes, used by [voter::Actor](super::actors::voter::Actor).
 
 use super::types::Artifact;
-use crate::types::View;
+use crate::types::{Epoch, View};
 use commonware_cryptography::{certificate::Scheme, Digest};
 use commonware_runtime::{Metrics, Storage};
 use commonware_storage::journal::{self, segmented::variable::Journal};
@@ -42,6 +42,7 @@ pub trait Votes: Send + Sync + 'static {
     /// `Ok(())` on success, or `Err` if persistence fails.
     fn append(
         &mut self,
+        epoch: Epoch,
         view: View,
         artifact: Artifact<Self::Scheme, Self::Digest>,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send;
@@ -57,7 +58,11 @@ pub trait Votes: Send + Sync + 'static {
     /// # Returns
     ///
     /// `Ok(())` when the sync completes, or `Err` if syncing fails.
-    fn sync(&mut self, view: View) -> impl Future<Output = Result<(), Self::Error>> + Send;
+    fn sync(
+        &mut self,
+        epoch: Epoch,
+        view: View,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send;
 
     /// Sync all data across all views.
     ///
@@ -78,7 +83,11 @@ pub trait Votes: Send + Sync + 'static {
     /// # Returns
     ///
     /// `Ok(())` when pruning is complete, or `Err` if pruning fails.
-    fn prune(&mut self, min: View) -> impl Future<Output = Result<(), Self::Error>> + Send;
+    fn prune(
+        &mut self,
+        epoch: Epoch,
+        min: View,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send;
 
     /// Replay all stored artifacts starting from the given view and offset.
     ///
@@ -95,6 +104,7 @@ pub trait Votes: Send + Sync + 'static {
     /// A stream of artifacts on success, or `Err` if replay initialization fails.
     fn replay(
         &mut self,
+        epoch: Epoch,
     ) -> impl Future<Output = Result<Self::ReplayStream<'_>, Self::Error>> + Send;
 }
 
@@ -145,6 +155,7 @@ where
 
     async fn append(
         &mut self,
+        _epoch: Epoch,
         view: View,
         artifact: Artifact<Self::Scheme, Self::Digest>,
     ) -> Result<(), Self::Error> {
@@ -152,7 +163,7 @@ where
         Ok(())
     }
 
-    async fn sync(&mut self, view: View) -> Result<(), Self::Error> {
+    async fn sync(&mut self, _epoch: Epoch, view: View) -> Result<(), Self::Error> {
         self.inner.sync(view.get()).await
     }
 
@@ -160,12 +171,12 @@ where
         self.inner.sync_all().await
     }
 
-    async fn prune(&mut self, min: View) -> Result<(), Self::Error> {
+    async fn prune(&mut self, _epoch: Epoch, min: View) -> Result<(), Self::Error> {
         self.inner.prune(min.get()).await?;
         Ok(())
     }
 
-    async fn replay(&mut self) -> Result<Self::ReplayStream<'_>, Self::Error> {
+    async fn replay(&mut self, _epoch: Epoch) -> Result<Self::ReplayStream<'_>, Self::Error> {
         let stream = self
             .inner
             .replay(0, 0, self.buffer)
