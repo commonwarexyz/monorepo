@@ -77,11 +77,11 @@ pub async fn ensure_bucket_exists(
     bucket_name: &str,
     region: &str,
 ) -> Result<(), Error> {
-    // Check if bucket exists by trying to get its location
-    match client.head_bucket().bucket(bucket_name).send().await {
+    // Check if bucket exists
+    let needs_creation = match client.head_bucket().bucket(bucket_name).send().await {
         Ok(_) => {
             info!(bucket = bucket_name, "bucket already exists");
-            return enable_transfer_acceleration(client, bucket_name).await;
+            false
         }
         Err(e) => {
             // Check for region header before consuming the error
@@ -89,11 +89,11 @@ pub async fn ensure_bucket_exists(
                 .raw_response()
                 .and_then(|r| r.headers().get("x-amz-bucket-region"))
                 .map(|s| s.to_string());
-
             let service_err = e.into_service_error();
             if service_err.is_not_found() {
                 // 404: bucket doesn't exist, we need to create it
                 debug!(bucket = bucket_name, "bucket not found, will create");
+                true
             } else if let Some(bucket_region) = bucket_region {
                 // Bucket exists in a different region - proceed with cross-region access
                 info!(
@@ -102,7 +102,7 @@ pub async fn ensure_bucket_exists(
                     client_region = region,
                     "bucket exists in different region, using cross-region access"
                 );
-                return enable_transfer_acceleration(client, bucket_name).await;
+                false
             } else {
                 // 403 or other error without region header: access denied
                 return Err(Error::S3BucketForbidden {
@@ -111,58 +111,67 @@ pub async fn ensure_bucket_exists(
                 });
             }
         }
-    }
+    };
 
-    // Create the bucket (us-east-1 must not have a location constraint)
-    let mut request = client.create_bucket().bucket(bucket_name);
-    if region != "us-east-1" {
-        let location_constraint = BucketLocationConstraint::from(region);
-        let bucket_config = CreateBucketConfiguration::builder()
-            .location_constraint(location_constraint)
-            .build();
-        request = request.create_bucket_configuration(bucket_config);
-    }
-    match request.send().await {
-        Ok(_) => {
-            info!(bucket = bucket_name, region = region, "created bucket");
+    // Create the bucket, if it doesn't exist
+    if needs_creation {
+        // Create the bucket (us-east-1 must not have a location constraint)
+        let mut request = client.create_bucket().bucket(bucket_name);
+        if region != "us-east-1" {
+            let location_constraint = BucketLocationConstraint::from(region);
+            let bucket_config = CreateBucketConfiguration::builder()
+                .location_constraint(location_constraint)
+                .build();
+            request = request.create_bucket_configuration(bucket_config);
         }
-        Err(e) => {
-            let service_err = e.into_service_error();
-            let s3_err = aws_sdk_s3::Error::from(service_err);
-            match &s3_err {
-                aws_sdk_s3::Error::BucketAlreadyExists(_)
-                | aws_sdk_s3::Error::BucketAlreadyOwnedByYou(_) => {
-                    info!(bucket = bucket_name, "bucket already exists");
-                }
-                _ => {
-                    return Err(Error::AwsS3 {
-                        bucket: bucket_name.to_string(),
-                        operation: super::S3Operation::CreateBucket,
-                        source: Box::new(s3_err),
-                    });
+        match request.send().await {
+            Ok(_) => {
+                info!(bucket = bucket_name, region = region, "created bucket");
+            }
+            Err(e) => {
+                let service_err = e.into_service_error();
+                let s3_err = aws_sdk_s3::Error::from(service_err);
+                match &s3_err {
+                    aws_sdk_s3::Error::BucketAlreadyExists(_)
+                    | aws_sdk_s3::Error::BucketAlreadyOwnedByYou(_) => {
+                        info!(bucket = bucket_name, "bucket already exists");
+                    }
+                    _ => {
+                        return Err(Error::AwsS3 {
+                            bucket: bucket_name.to_string(),
+                            operation: super::S3Operation::CreateBucket,
+                            source: Box::new(s3_err),
+                        });
+                    }
                 }
             }
         }
     }
 
-    return enable_transfer_acceleration(client, bucket_name).await;
+    // Enable acceleration
+    enable_transfer_acceleration(client, bucket_name).await
 }
 
 /// Enables Transfer Acceleration on an S3 bucket
 async fn enable_transfer_acceleration(client: &S3Client, bucket_name: &str) -> Result<(), Error> {
     // Check if already enabled
-    if let Ok(response) = client
+    match client
         .get_bucket_accelerate_configuration()
         .bucket(bucket_name)
         .send()
         .await
     {
-        if response.status() == Some(&BucketAccelerateStatus::Enabled) {
-            debug!(
-                bucket = bucket_name,
-                "transfer acceleration already enabled"
-            );
-            return Ok(());
+        Ok(response) => {
+            if response.status() == Some(&BucketAccelerateStatus::Enabled) {
+                debug!(
+                    bucket = bucket_name,
+                    "transfer acceleration already enabled"
+                );
+                return Ok(());
+            }
+        }
+        Err(e) => {
+            debug!(bucket = bucket_name, error = %e, "failed to get acceleration config, will attempt to enable");
         }
     }
 
