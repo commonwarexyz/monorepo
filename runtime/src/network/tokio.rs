@@ -53,6 +53,13 @@ impl crate::Stream for Stream {
             .await
             .map_err(|_| Error::Timeout)?
     }
+
+    fn peek(&self, max_len: u64) -> &[u8] {
+        let max_len = max_len as usize;
+        let buffered = self.stream.buffer();
+        let len = std::cmp::min(buffered.len(), max_len);
+        &buffered[..len]
+    }
 }
 
 /// Implementation of [crate::Listener] using the [tokio] runtime.
@@ -370,9 +377,18 @@ mod tests {
         let reader = tokio::spawn(async move {
             let (_addr, _sink, mut stream) = listener.accept().await.unwrap();
 
+            // In unbuffered mode, peek should always return empty
+            assert!(stream.peek(100).is_empty());
+
             // Read messages without buffering
             let buf1 = stream.recv(5).await.unwrap();
+
+            // Even after recv, peek should be empty in unbuffered mode
+            assert!(stream.peek(100).is_empty());
+
             let buf2 = stream.recv(5).await.unwrap();
+            assert!(stream.peek(100).is_empty());
+
             (buf1, buf2)
         });
 
@@ -387,5 +403,53 @@ mod tests {
         // Verify we got the right data
         assert_eq!(buf1.coalesce(), &[1u8, 2, 3, 4, 5]);
         assert_eq!(buf2.coalesce(), &[6u8, 7, 8, 9, 10]);
+    }
+
+    #[tokio::test]
+    async fn test_peek_with_buffered_data() {
+        // Use default buffer size to enable buffering
+        let network = TokioNetwork::Network::from(
+            TokioNetwork::Config::default()
+                .with_read_timeout(Duration::from_secs(5))
+                .with_write_timeout(Duration::from_secs(5)),
+        );
+
+        let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let reader = tokio::spawn(async move {
+            let (_addr, _sink, mut stream) = listener.accept().await.unwrap();
+
+            // Initially peek should be empty (no data received yet)
+            assert!(stream.peek(100).is_empty());
+
+            // Receive partial data - this should buffer more than requested
+            let first = stream.recv(5).await.unwrap();
+            assert_eq!(first.coalesce(), b"hello");
+
+            // Peek should show remaining buffered data
+            let peeked = stream.peek(100);
+            assert!(!peeked.is_empty());
+            assert_eq!(peeked, b" world");
+
+            // Peek again should return the same (non-consuming)
+            assert_eq!(stream.peek(100), b" world");
+
+            // Peek with max_len should truncate
+            assert_eq!(stream.peek(3), b" wo");
+
+            // Receive the rest
+            let rest = stream.recv(6).await.unwrap();
+            assert_eq!(rest.coalesce(), b" world");
+
+            // Peek should be empty after consuming all buffered data
+            assert!(stream.peek(100).is_empty());
+        });
+
+        // Connect and send data
+        let (mut sink, _stream) = network.dial(addr).await.unwrap();
+        sink.send(b"hello world").await.unwrap();
+
+        reader.await.unwrap();
     }
 }
