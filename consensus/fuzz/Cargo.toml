@@ -18,6 +18,7 @@ commonware-math.workspace = true
 commonware-p2p.workspace = true
 commonware-parallel.workspace = true
 commonware-runtime.workspace = true
+commonware-storage.workspace = true
 commonware-utils = { workspace = true, features = ["arbitrary"] }
 futures.workspace = true
 libfuzzer-sys.workspace = true

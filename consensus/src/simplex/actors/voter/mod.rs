@@ -5,18 +5,17 @@ mod slot;
 mod state;
 
 use crate::{
-    simplex::{elector::Config as Elector, types::Activity},
+    simplex::{elector::Config as Elector, store::Votes, types::Activity},
     types::{Epoch, ViewDelta},
     CertifiableAutomaton, Relay, Reporter,
 };
 pub use actor::Actor;
 use commonware_cryptography::{certificate::Scheme, Digest};
 use commonware_p2p::Blocker;
-use commonware_runtime::buffer::PoolRef;
 pub use ingress::Mailbox;
 #[cfg(test)]
 pub use ingress::Message;
-use std::{num::NonZeroUsize, time::Duration};
+use std::time::Duration;
 
 pub struct Config<
     S: Scheme,
@@ -26,6 +25,7 @@ pub struct Config<
     A: CertifiableAutomaton,
     R: Relay<Digest = D>,
     F: Reporter<Activity = Activity<S, D>>,
+    V: Votes<Scheme = S, Digest = D>,
 > {
     pub scheme: S,
     pub elector: L,
@@ -33,17 +33,14 @@ pub struct Config<
     pub automaton: A,
     pub relay: R,
     pub reporter: F,
+    pub votes: V,
 
-    pub partition: String,
     pub epoch: Epoch,
     pub mailbox_size: usize,
     pub leader_timeout: Duration,
     pub notarization_timeout: Duration,
     pub nullify_retry: Duration,
     pub activity_timeout: ViewDelta,
-    pub replay_buffer: NonZeroUsize,
-    pub write_buffer: NonZeroUsize,
-    pub buffer_pool: PoolRef,
 }
 
 #[cfg(test)]
@@ -61,6 +58,7 @@ mod tests {
                 bls12381_multisig, bls12381_threshold::vrf as bls12381_threshold_vrf, ed25519,
                 secp256r1, Scheme,
             },
+            store::VotesJournal,
             types::{Certificate, Finalization, Finalize, Notarization, Notarize, Proposal, Vote},
         },
         types::{Participant, Round, View},
@@ -78,12 +76,14 @@ mod tests {
     use commonware_p2p::simulated::{Config as NConfig, Network};
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        deterministic, telemetry::traces::collector::TraceStorage, Clock, Metrics, Quota, Runner,
+        buffer::PoolRef, deterministic, telemetry::traces::collector::TraceStorage, Clock, Metrics,
+        Quota, Runner,
     };
+    use commonware_storage::journal::segmented::variable::{Config as JConfig, Journal};
     use commonware_utils::{NZUsize, NZU16};
     use futures::{channel::mpsc, FutureExt, StreamExt};
     use std::{
-        num::{NonZeroU16, NonZeroU32},
+        num::{NonZeroU16, NonZeroU32, NonZeroUsize},
         sync::{Arc, Mutex},
         time::Duration,
     };
@@ -92,6 +92,27 @@ mod tests {
     const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
     const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
+
+    async fn create_votes_journal<S: Scheme<Sha256Digest>>(
+        context: deterministic::Context,
+        scheme: &S,
+        partition: &str,
+    ) -> VotesJournal<deterministic::Context, S, Sha256Digest> {
+        VotesJournal::from_journal(
+            Journal::init(
+                context,
+                JConfig {
+                    partition: partition.to_string(),
+                    compression: None,
+                    codec_config: scheme.certificate_codec_config(),
+                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                    write_buffer: NZUsize!(1024 * 1024),
+                },
+            )
+            .await
+            .expect("failed to initialize votes journal"),
+        )
+    }
 
     fn build_notarization<S: Scheme<Sha256Digest>>(
         schemes: &[S],
@@ -175,6 +196,11 @@ mod tests {
             mocks::application::Application::new(context.with_label("app"), application_cfg);
         actor.start();
 
+        let partition = format!("voter_test_{me}");
+        let votes = create_votes_journal(context.with_label("votes"), &signing, &partition)
+            .await
+            .replay_buffer(NZUsize!(10240));
+
         let voter_cfg = Config {
             scheme: signing.clone(),
             elector,
@@ -182,16 +208,13 @@ mod tests {
             automaton: application.clone(),
             relay: application.clone(),
             reporter: reporter.clone(),
-            partition: format!("voter_test_{me}"),
+            votes,
             epoch: Epoch::new(333),
             mailbox_size: 128,
             leader_timeout,
             notarization_timeout,
             nullify_retry,
             activity_timeout: ViewDelta::new(10),
-            replay_buffer: NZUsize!(10240),
-            write_buffer: NZUsize!(10240),
-            buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
         };
         let (voter, mailbox) = Actor::new(context.clone(), voter_cfg);
 
@@ -325,6 +348,12 @@ mod tests {
                 application_cfg,
             );
             actor.start();
+
+            let partition = "test".to_string();
+            let votes = create_votes_journal(context.with_label("votes"), &schemes[0], &partition)
+                .await
+                .replay_buffer(NZUsize!(1024 * 1024));
+
             let cfg = Config {
                 scheme: schemes[0].clone(),
                 elector,
@@ -332,16 +361,13 @@ mod tests {
                 automaton: application.clone(),
                 relay: application.clone(),
                 reporter: reporter.clone(),
-                partition: "test".to_string(),
+                votes,
                 epoch: Epoch::new(333),
                 mailbox_size: 10,
                 leader_timeout: Duration::from_secs(5),
                 notarization_timeout: Duration::from_secs(5),
                 nullify_retry: Duration::from_secs(5),
                 activity_timeout: ViewDelta::new(10),
-                replay_buffer: NonZeroUsize::new(1024 * 1024).unwrap(),
-                write_buffer: NonZeroUsize::new(1024 * 1024).unwrap(),
-                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (actor, mut mailbox) = Actor::new(context.clone(), cfg);
 
@@ -561,6 +587,12 @@ mod tests {
             let (actor, application) =
                 mocks::application::Application::new(context.with_label("app"), app_config);
             actor.start();
+
+            let partition = format!("voter_actor_test_{me}");
+            let votes = create_votes_journal(context.with_label("votes"), &signing, &partition)
+                .await
+                .replay_buffer(NZUsize!(10240));
+
             let voter_config = Config {
                 scheme: signing.clone(),
                 elector,
@@ -568,16 +600,13 @@ mod tests {
                 automaton: application.clone(),
                 relay: application.clone(),
                 reporter: reporter.clone(),
-                partition: format!("voter_actor_test_{me}"),
+                votes,
                 epoch: Epoch::new(333),
                 mailbox_size: 128,
                 leader_timeout: Duration::from_millis(500),
                 notarization_timeout: Duration::from_millis(1000),
                 nullify_retry: Duration::from_millis(1000),
                 activity_timeout,
-                replay_buffer: NZUsize!(10240),
-                write_buffer: NZUsize!(10240),
-                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (actor, mut mailbox) = Actor::new(context.clone(), voter_config);
 
@@ -1235,6 +1264,11 @@ mod tests {
                 mocks::application::Application::new(context.with_label("app"), application_cfg);
             actor.start();
 
+            let partition = "voter_certificate_verifies_proposal_test".to_string();
+            let votes = create_votes_journal(context.with_label("votes"), &schemes[0], &partition)
+                .await
+                .replay_buffer(NZUsize!(1024 * 1024));
+
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
                 elector,
@@ -1242,16 +1276,13 @@ mod tests {
                 automaton: application.clone(),
                 relay: application.clone(),
                 reporter: reporter.clone(),
-                partition: "voter_certificate_verifies_proposal_test".to_string(),
+                votes,
                 epoch: Epoch::new(333),
                 mailbox_size: 128,
                 leader_timeout: Duration::from_millis(500),
                 notarization_timeout: Duration::from_secs(1000),
                 nullify_retry: Duration::from_secs(1000),
                 activity_timeout: ViewDelta::new(10),
-                replay_buffer: NZUsize!(1024 * 1024),
-                write_buffer: NZUsize!(1024 * 1024),
-                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, mut mailbox) = Actor::new(context.clone(), voter_cfg);
 
@@ -1429,6 +1460,12 @@ mod tests {
             let reporter =
                 mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
 
+            let partition = "voter_leader".to_string();
+            let votes =
+                create_votes_journal(context.with_label("votes"), &leader_scheme, &partition)
+                    .await
+                    .replay_buffer(NZUsize!(1024 * 1024));
+
             // Initialize voter actor
             let voter_cfg = Config {
                 scheme: leader_scheme.clone(),
@@ -1437,16 +1474,13 @@ mod tests {
                 automaton: application.clone(),
                 relay: application.clone(),
                 reporter: reporter.clone(),
-                partition: "voter_leader".to_string(),
+                votes,
                 epoch,
                 mailbox_size: 128,
                 leader_timeout: Duration::from_millis(500),
                 notarization_timeout: Duration::from_secs(1000),
                 nullify_retry: Duration::from_secs(1000),
                 activity_timeout: ViewDelta::new(10),
-                replay_buffer: NZUsize!(1024 * 1024),
-                write_buffer: NZUsize!(1024 * 1024),
-                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, mut mailbox) = Actor::new(context.clone(), voter_cfg);
 
@@ -1634,6 +1668,11 @@ mod tests {
                 mocks::application::Application::new(context.with_label("app"), application_cfg);
             actor.start();
 
+            let partition = "voter_populate_resolver_on_restart_test".to_string();
+            let votes = create_votes_journal(context.with_label("votes"), &schemes[0], &partition)
+                .await
+                .replay_buffer(NZUsize!(1024 * 1024));
+
             // Initialize voter actor
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
@@ -1642,16 +1681,13 @@ mod tests {
                 automaton: application.clone(),
                 relay: application.clone(),
                 reporter: reporter.clone(),
-                partition: "voter_populate_resolver_on_restart_test".to_string(),
+                votes,
                 epoch: Epoch::new(333),
                 mailbox_size: 128,
                 leader_timeout: Duration::from_millis(500),
                 notarization_timeout: Duration::from_secs(1000),
                 nullify_retry: Duration::from_secs(1000),
                 activity_timeout: ViewDelta::new(10),
-                replay_buffer: NZUsize!(1024 * 1024),
-                write_buffer: NZUsize!(1024 * 1024),
-                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, mut mailbox) = Actor::new(context.with_label("voter"), voter_cfg);
 
@@ -1724,6 +1760,12 @@ mod tests {
             // Restart voter
             handle.abort();
 
+            // Reuse same partition to recover state
+            let votes =
+                create_votes_journal(context.with_label("votes_restart"), &schemes[0], &partition)
+                    .await
+                    .replay_buffer(NZUsize!(1024 * 1024));
+
             // Initialize voter actor
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
@@ -1732,16 +1774,13 @@ mod tests {
                 automaton: application.clone(),
                 relay: application.clone(),
                 reporter: reporter.clone(),
-                partition: "voter_populate_resolver_on_restart_test".to_string(),
+                votes,
                 epoch: Epoch::new(333),
                 mailbox_size: 128,
                 leader_timeout: Duration::from_millis(500),
                 notarization_timeout: Duration::from_secs(1000),
                 nullify_retry: Duration::from_secs(1000),
                 activity_timeout: ViewDelta::new(10),
-                replay_buffer: NZUsize!(1024 * 1024),
-                write_buffer: NZUsize!(1024 * 1024),
-                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, _mailbox) = Actor::new(context.with_label("voter_restarted"), voter_cfg);
 
@@ -2094,6 +2133,11 @@ mod tests {
             actor.set_fail_verification(true);
             actor.start();
 
+            let partition = format!("voter_verify_fail_test_{me}");
+            let votes =
+                create_votes_journal(context.with_label("votes"), &signing, &partition).await
+                .replay_buffer(NZUsize!(10240));
+
             let voter_cfg = Config {
                 scheme: signing.clone(),
                 elector,
@@ -2101,7 +2145,7 @@ mod tests {
                 automaton: application.clone(),
                 relay: application.clone(),
                 reporter: reporter.clone(),
-                partition: format!("voter_verify_fail_test_{me}"),
+                votes,
                 epoch: Epoch::new(333),
                 mailbox_size: 128,
                 // Use long timeouts to prove nullify comes immediately, not from timeout
@@ -2109,9 +2153,6 @@ mod tests {
                 notarization_timeout: Duration::from_secs(10),
                 nullify_retry: Duration::from_secs(10),
                 activity_timeout,
-                replay_buffer: NZUsize!(10240),
-                write_buffer: NZUsize!(10240),
-                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, mut mailbox) = Actor::new(context.clone(), voter_cfg);
 
@@ -2319,6 +2360,11 @@ mod tests {
                 mocks::application::Application::new(context.with_label("app"), app_cfg);
             actor.start();
 
+            let partition = "no_recertification_after_replay".to_string();
+            let votes = create_votes_journal(context.with_label("votes"), &schemes[0], &partition)
+                .await
+                .replay_buffer(NZUsize!(1024 * 1024));
+
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
                 elector: elector.clone(),
@@ -2326,16 +2372,13 @@ mod tests {
                 automaton: application.clone(),
                 relay: application.clone(),
                 reporter: reporter.clone(),
-                partition: "no_recertification_after_replay".to_string(),
+                votes,
                 epoch: Epoch::new(333),
                 mailbox_size: 128,
                 leader_timeout: Duration::from_millis(500),
                 notarization_timeout: Duration::from_secs(1000),
                 nullify_retry: Duration::from_secs(1000),
                 activity_timeout: ViewDelta::new(10),
-                replay_buffer: NZUsize!(1024 * 1024),
-                write_buffer: NZUsize!(1024 * 1024),
-                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, mut mailbox) = Actor::new(context.with_label("voter"), voter_cfg);
 
@@ -2452,6 +2495,12 @@ mod tests {
                 mocks::application::Application::new(context.with_label("app2"), app_cfg);
             actor.start();
 
+            // Reuse same partition to recover state
+            let votes =
+                create_votes_journal(context.with_label("votes_restart"), &schemes[0], &partition)
+                    .await
+                    .replay_buffer(NZUsize!(1024 * 1024));
+
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
                 elector: elector.clone(),
@@ -2459,16 +2508,13 @@ mod tests {
                 automaton: application.clone(),
                 relay: application.clone(),
                 reporter: reporter.clone(),
-                partition: "no_recertification_after_replay".to_string(),
+                votes,
                 epoch: Epoch::new(333),
                 mailbox_size: 128,
                 leader_timeout: Duration::from_millis(500),
                 notarization_timeout: Duration::from_secs(1000),
                 nullify_retry: Duration::from_secs(1000),
                 activity_timeout: ViewDelta::new(10),
-                replay_buffer: NZUsize!(1024 * 1024),
-                write_buffer: NZUsize!(1024 * 1024),
-                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, _) = Actor::new(context.with_label("voter_restarted"), voter_cfg);
 
@@ -2585,6 +2631,11 @@ mod tests {
             );
             actor.start();
 
+            let partition = "cert_cancel_test".to_string();
+            let votes = create_votes_journal(context.with_label("votes"), &schemes[0], &partition)
+                .await
+                .replay_buffer(NZUsize!(1024 * 1024));
+
             let cfg = Config {
                 scheme: schemes[0].clone(),
                 elector,
@@ -2592,16 +2643,13 @@ mod tests {
                 automaton: application.clone(),
                 relay: application.clone(),
                 reporter: reporter.clone(),
-                partition: "cert_cancel_test".to_string(),
+                votes,
                 epoch: Epoch::new(333),
                 mailbox_size: 128,
                 leader_timeout: Duration::from_secs(5),
                 notarization_timeout: Duration::from_secs(5),
                 nullify_retry: Duration::from_secs(5),
                 activity_timeout: ViewDelta::new(10),
-                replay_buffer: NZUsize!(1024 * 1024),
-                write_buffer: NZUsize!(1024 * 1024),
-                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (actor, mut mailbox) = Actor::new(context.clone(), cfg);
 

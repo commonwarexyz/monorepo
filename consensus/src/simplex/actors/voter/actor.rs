@@ -9,6 +9,7 @@ use crate::{
         elector::Config as Elector,
         metrics::{self, Outbound},
         scheme::Scheme,
+        store::Votes,
         types::{
             Activity, Artifact, Certificate, Context, Finalization, Finalize, Notarization,
             Notarize, Nullification, Nullify, Proposal, Vote,
@@ -17,14 +18,10 @@ use crate::{
     types::{Round as Rnd, View},
     CertifiableAutomaton, Relay, Reporter, Viewable, LATENCY,
 };
-use commonware_codec::Read;
 use commonware_cryptography::Digest;
 use commonware_macros::select;
 use commonware_p2p::{utils::codec::WrappedSender, Blocker, Recipients, Sender};
-use commonware_runtime::{
-    buffer::PoolRef, spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner, Storage,
-};
-use commonware_storage::journal::segmented::variable::{Config as JConfig, Journal};
+use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner};
 use commonware_utils::futures::AbortablePool;
 use core::{future::Future, panic};
 use futures::{
@@ -34,7 +31,6 @@ use futures::{
 use prometheus_client::metrics::{counter::Counter, family::Family, histogram::Histogram};
 use rand_core::CryptoRngCore;
 use std::{
-    num::NonZeroUsize,
     pin::Pin,
     task::{self, Poll},
 };
@@ -89,7 +85,7 @@ impl<'a, V: Viewable, R> Future for Waiter<'a, V, R> {
 
 /// Actor responsible for driving participation in the consensus protocol.
 pub struct Actor<
-    E: Clock + CryptoRngCore + Spawner + Storage + Metrics,
+    E: Clock + CryptoRngCore + Spawner + Metrics,
     S: Scheme<D>,
     L: Elector<S>,
     B: Blocker<PublicKey = S::PublicKey>,
@@ -97,6 +93,7 @@ pub struct Actor<
     A: CertifiableAutomaton<Digest = D, Context = Context<D, S::PublicKey>>,
     R: Relay,
     F: Reporter<Activity = Activity<S, D>>,
+    V: Votes<Scheme = S, Digest = D>,
 > {
     context: ContextCell<E>,
     state: State<E, S, L, D>,
@@ -105,12 +102,7 @@ pub struct Actor<
     relay: R,
     reporter: F,
 
-    certificate_config: <S::Certificate as Read>::Cfg,
-    partition: String,
-    replay_buffer: NonZeroUsize,
-    write_buffer: NonZeroUsize,
-    buffer_pool: PoolRef,
-    journal: Option<Journal<E, Artifact<S, D>>>,
+    votes: V,
 
     mailbox_receiver: mpsc::Receiver<Message<S, D>>,
 
@@ -120,7 +112,7 @@ pub struct Actor<
 }
 
 impl<
-        E: Clock + CryptoRngCore + Spawner + Storage + Metrics,
+        E: Clock + CryptoRngCore + Spawner + Metrics,
         S: Scheme<D>,
         L: Elector<S>,
         B: Blocker<PublicKey = S::PublicKey>,
@@ -128,9 +120,10 @@ impl<
         A: CertifiableAutomaton<Digest = D, Context = Context<D, S::PublicKey>>,
         R: Relay<Digest = D>,
         F: Reporter<Activity = Activity<S, D>>,
-    > Actor<E, S, L, B, D, A, R, F>
+        V: Votes<Scheme = S, Digest = D>,
+    > Actor<E, S, L, B, D, A, R, F, V>
 {
-    pub fn new(context: E, cfg: Config<S, L, B, D, A, R, F>) -> (Self, Mailbox<S, D>) {
+    pub fn new(context: E, cfg: Config<S, L, B, D, A, R, F, V>) -> (Self, Mailbox<S, D>) {
         // Assert correctness of timeouts
         if cfg.leader_timeout > cfg.notarization_timeout {
             panic!("leader timeout must be less than or equal to notarization timeout");
@@ -159,7 +152,6 @@ impl<
         // Initialize store
         let (mailbox_sender, mailbox_receiver) = mpsc::channel(cfg.mailbox_size);
         let mailbox = Mailbox::new(mailbox_sender);
-        let certificate_config = cfg.scheme.certificate_codec_config();
         let state = State::new(
             context.with_label("state"),
             StateConfig {
@@ -181,12 +173,7 @@ impl<
                 relay: cfg.relay,
                 reporter: cfg.reporter,
 
-                certificate_config,
-                partition: cfg.partition,
-                replay_buffer: cfg.replay_buffer,
-                write_buffer: cfg.write_buffer,
-                buffer_pool: cfg.buffer_pool,
-                journal: None,
+                votes: cfg.votes,
 
                 mailbox_receiver,
 
@@ -221,32 +208,26 @@ impl<
                 "pruned view"
             );
         }
-        if let Some(journal) = self.journal.as_mut() {
-            journal
-                .prune(self.state.min_active().get())
-                .await
-                .expect("unable to prune journal");
-        }
+        self.votes
+            .prune(self.state.epoch(), self.state.min_active())
+            .await
+            .expect("unable to prune votes");
     }
 
-    /// Appends a verified message to the journal.
-    async fn append_journal(&mut self, view: View, artifact: Artifact<S, D>) {
-        if let Some(journal) = self.journal.as_mut() {
-            journal
-                .append(view.get(), artifact)
-                .await
-                .expect("unable to append to journal");
-        }
+    /// Appends a verified message to the votes store.
+    async fn append_votes(&mut self, view: View, artifact: Artifact<S, D>) {
+        self.votes
+            .append(self.state.epoch(), view, artifact)
+            .await
+            .expect("unable to append to votes");
     }
 
-    /// Syncs the journal so other replicas can recover messages in `view`.
-    async fn sync_journal(&mut self, view: View) {
-        if let Some(journal) = self.journal.as_mut() {
-            journal
-                .sync(view.get())
-                .await
-                .expect("unable to sync journal");
-        }
+    /// Syncs the votes store so data can be recovered for `view`.
+    async fn sync_votes(&mut self, view: View) {
+        self.votes
+            .sync(self.state.epoch(), view)
+            .await
+            .expect("unable to sync votes");
     }
 
     /// Send a vote to every peer.
@@ -337,7 +318,7 @@ impl<
                 self.handle_nullify(nullify.clone()).await;
 
                 // Sync the journal
-                self.sync_journal(nullify.view()).await;
+                self.sync_votes(nullify.view()).await;
             }
 
             // Broadcast nullify
@@ -358,7 +339,7 @@ impl<
 
     /// Records a locally verified nullify vote and ensures the round exists.
     async fn handle_nullify(&mut self, nullify: Nullify<S>) {
-        self.append_journal(nullify.view(), Artifact::Nullify(nullify))
+        self.append_votes(nullify.view(), Artifact::Nullify(nullify))
             .await;
     }
 
@@ -377,7 +358,7 @@ impl<
         if !self.state.add_nullification(nullification) {
             return None;
         }
-        self.append_journal(view, artifact).await;
+        self.append_votes(view, artifact).await;
 
         // If we were the leader and proposed, we should emit the parent certificate (a notarization or finalization)
         // of our proposal
@@ -389,7 +370,7 @@ impl<
 
     /// Persists our notarize vote to the journal for crash recovery.
     async fn handle_notarize(&mut self, notarize: Notarize<S, D>) {
-        self.append_journal(notarize.view(), Artifact::Notarize(notarize))
+        self.append_votes(notarize.view(), Artifact::Notarize(notarize))
             .await;
     }
 
@@ -399,7 +380,7 @@ impl<
         let artifact = Artifact::Notarization(notarization.clone());
         let (added, equivocator) = self.state.add_notarization(notarization);
         if added {
-            self.append_journal(view, artifact).await;
+            self.append_votes(view, artifact).await;
         }
         self.block_equivocator(equivocator).await;
     }
@@ -418,15 +399,15 @@ impl<
 
         // Persist certification result for recovery
         let artifact = Artifact::Certification(Rnd::new(self.state.epoch(), view), success);
-        self.append_journal(view, artifact.clone()).await;
-        self.sync_journal(view).await;
+        self.append_votes(view, artifact.clone()).await;
+        self.sync_votes(view).await;
 
         Some(notarization)
     }
 
     /// Persists our finalize vote to the journal for crash recovery.
     async fn handle_finalize(&mut self, finalize: Finalize<S, D>) {
-        self.append_journal(finalize.view(), Artifact::Finalize(finalize))
+        self.append_votes(finalize.view(), Artifact::Finalize(finalize))
             .await;
     }
 
@@ -436,7 +417,7 @@ impl<
         let artifact = Artifact::Finalization(finalization.clone());
         let (added, equivocator) = self.state.add_finalization(finalization);
         if added {
-            self.append_journal(view, artifact).await;
+            self.append_votes(view, artifact).await;
         }
         self.block_equivocator(equivocator).await;
     }
@@ -458,7 +439,7 @@ impl<
         // Record the vote locally before sharing it.
         self.handle_notarize(notarize.clone()).await;
         // Keep the vote durable for crash recovery.
-        self.sync_journal(view).await;
+        self.sync_votes(view).await;
 
         // Broadcast the notarize vote
         debug!(
@@ -497,7 +478,7 @@ impl<
         // Update our local round with the certificate.
         self.handle_notarization(notarization.clone()).await;
         // Persist the certificate before informing others.
-        self.sync_journal(view).await;
+        self.sync_votes(view).await;
         // Broadcast the notarization certificate
         debug!(proposal=?notarization.proposal, "broadcasting notarization");
         self.broadcast_certificate(
@@ -537,7 +518,7 @@ impl<
             self.broadcast_certificate(certificate_sender, floor).await;
         }
         // Ensure deterministic restarts.
-        self.sync_journal(view).await;
+        self.sync_votes(view).await;
         // Broadcast the nullification certificate.
         debug!(round=?nullification.round(), "broadcasting nullification");
         self.broadcast_certificate(
@@ -568,7 +549,7 @@ impl<
         // Update the round before persisting.
         self.handle_finalize(finalize.clone()).await;
         // Keep the vote durable for recovery.
-        self.sync_journal(view).await;
+        self.sync_votes(view).await;
 
         // Broadcast the finalize vote.
         debug!(
@@ -607,7 +588,7 @@ impl<
         // Advance the consensus core with the finalization proof.
         self.handle_finalization(finalization.clone()).await;
         // Persist the proof before broadcasting it.
-        self.sync_journal(view).await;
+        self.sync_votes(view).await;
         // Broadcast the finalization certificate.
         debug!(proposal=?finalization.proposal, "broadcasting finalization");
         self.broadcast_certificate(
@@ -680,38 +661,33 @@ impl<
         self.state
             .set_genesis(self.automaton.genesis(self.state.epoch()).await);
 
-        // Initialize journal
-        let journal = Journal::<_, Artifact<S, D>>::init(
-            self.context.with_label("journal").into_present(),
-            JConfig {
-                partition: self.partition.clone(),
-                compression: None, // most of the data is not compressible
-                codec_config: self.certificate_config.clone(),
-                buffer_pool: self.buffer_pool.clone(),
-                write_buffer: self.write_buffer,
-            },
-        )
-        .await
-        .expect("unable to open journal");
-
-        // Rebuild from journal
+        // Rebuild from votes store
         let start = self.context.current();
         {
-            let stream = journal
-                .replay(0, 0, self.replay_buffer)
+            // Collect all artifacts first to avoid borrowing conflicts
+            let stream = self
+                .votes
+                .replay(self.state.epoch())
                 .await
-                .expect("unable to replay journal");
+                .expect("unable to replay votes");
             pin_mut!(stream);
-            while let Some(artifact) = stream.next().await {
-                let (_, _, _, artifact) = artifact.expect("unable to replay journal");
+            let mut artifacts = Vec::new();
+            while let Some(result) = stream.next().await {
+                let artifact = result.expect("unable to replay votes");
+                artifacts.push(artifact);
+            }
+
+            // Process collected artifacts
+            for artifact in artifacts {
                 self.state.replay(&artifact);
                 match artifact {
                     Artifact::Notarize(notarize) => {
-                        self.handle_notarize(notarize.clone()).await;
-                        self.reporter.report(Activity::Notarize(notarize)).await;
+                        self.reporter
+                            .report(Activity::Notarize(notarize.clone()))
+                            .await;
                     }
                     Artifact::Notarization(notarization) => {
-                        self.handle_notarization(notarization.clone()).await;
+                        self.state.add_notarization(notarization.clone());
                         resolver
                             .updated(Certificate::Notarization(notarization.clone()))
                             .await;
@@ -720,9 +696,7 @@ impl<
                             .await;
                     }
                     Artifact::Certification(round, success) => {
-                        let Some(notarization) =
-                            self.handle_certification(round.view(), success).await
-                        else {
+                        let Some(notarization) = self.state.certified(round.view(), success) else {
                             continue;
                         };
                         resolver.certified(round.view(), success).await;
@@ -733,11 +707,12 @@ impl<
                         }
                     }
                     Artifact::Nullify(nullify) => {
-                        self.handle_nullify(nullify.clone()).await;
-                        self.reporter.report(Activity::Nullify(nullify)).await;
+                        self.reporter
+                            .report(Activity::Nullify(nullify.clone()))
+                            .await;
                     }
                     Artifact::Nullification(nullification) => {
-                        self.handle_nullification(nullification.clone()).await;
+                        self.state.add_nullification(nullification.clone());
                         resolver
                             .updated(Certificate::Nullification(nullification.clone()))
                             .await;
@@ -746,11 +721,12 @@ impl<
                             .await;
                     }
                     Artifact::Finalize(finalize) => {
-                        self.handle_finalize(finalize.clone()).await;
-                        self.reporter.report(Activity::Finalize(finalize)).await;
+                        self.reporter
+                            .report(Activity::Finalize(finalize.clone()))
+                            .await;
                     }
                     Artifact::Finalization(finalization) => {
-                        self.handle_finalization(finalization.clone()).await;
+                        self.state.add_finalization(finalization.clone());
                         resolver
                             .updated(Certificate::Finalization(finalization.clone()))
                             .await;
@@ -761,7 +737,6 @@ impl<
                 }
             }
         }
-        self.journal = Some(journal);
 
         // Update current view and immediately move to timeout (very unlikely we restarted and still within timeout)
         let end = self.context.current();
@@ -841,10 +816,10 @@ impl<
                 _ = &mut shutdown => {
                     debug!("context shutdown, stopping voter");
 
-                    // Sync and drop journal
-                    self.journal.take().unwrap().sync_all().await.expect("unable to sync journal");
+                    // Sync votes store
+                    self.votes.sync_all().await.expect("unable to sync votes");
 
-                    // Only drop shutdown once journal is synced
+                    // Only drop shutdown once votes are synced
                     drop(shutdown);
                     return;
                 },

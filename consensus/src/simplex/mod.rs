@@ -253,6 +253,7 @@ cfg_if::cfg_if! {
         mod engine;
         pub use engine::Engine;
         mod metrics;
+        pub mod store;
     }
 }
 
@@ -312,6 +313,7 @@ mod tests {
                 },
                 ed25519, secp256r1, Scheme,
             },
+            store::VotesJournal,
             types::{
                 Certificate, Finalization as TFinalization, Finalize as TFinalize,
                 Notarization as TNotarization, Notarize as TNotarize,
@@ -339,6 +341,7 @@ mod tests {
         buffer::PoolRef, count_running_tasks, deterministic, Clock, IoBuf, Metrics, Quota, Runner,
         Spawner,
     };
+    use commonware_storage::journal::segmented::variable::{Config as JConfig, Journal};
     use commonware_utils::{test_rng, Faults, N3f1, NZUsize, NZU16};
     use engine::Engine;
     use futures::{future::join_all, StreamExt};
@@ -355,6 +358,28 @@ mod tests {
     const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
     const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
+
+    async fn create_votes_journal<S: Scheme<Sha256Digest>>(
+        context: deterministic::Context,
+        scheme: &S,
+        partition: &str,
+    ) -> VotesJournal<deterministic::Context, S, Sha256Digest> {
+        VotesJournal::from_journal(
+            Journal::init(
+                context,
+                JConfig {
+                    partition: partition.to_string(),
+                    compression: None,
+                    codec_config: scheme.certificate_codec_config(),
+                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                    write_buffer: NZUsize!(1024 * 1024),
+                },
+            )
+            .await
+            .expect("failed to initialize votes journal"),
+        )
+        .replay_buffer(NZUsize!(1024 * 1024))
+    }
 
     #[test]
     fn test_interesting() {
@@ -631,6 +656,12 @@ mod tests {
                 );
                 actor.start();
                 let blocker = oracle.control(validator.clone());
+
+                let partition = validator.to_string();
+                let votes =
+                    create_votes_journal(context.with_label("votes"), &schemes[idx], &partition)
+                        .await;
+
                 let cfg = config::Config {
                     scheme: schemes[idx].clone(),
                     elector: elector.clone(),
@@ -639,7 +670,7 @@ mod tests {
                     relay: application.clone(),
                     reporter: reporter.clone(),
                     strategy: Sequential,
-                    partition: validator.to_string(),
+                    votes,
                     mailbox_size: 1024,
                     epoch: Epoch::new(333),
                     leader_timeout: Duration::from_secs(1),
@@ -649,9 +680,6 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: 4,
-                    replay_buffer: NZUsize!(1024 * 1024),
-                    write_buffer: NZUsize!(1024 * 1024),
-                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -901,6 +929,11 @@ mod tests {
                 );
                 actor.start();
                 let blocker = oracle.control(validator.clone());
+
+                let partition = validator.to_string();
+                let votes =
+                    create_votes_journal(context.with_label("votes"), &signing, &partition).await;
+
                 let cfg = config::Config {
                     scheme: signing.clone(),
                     elector: elector.clone(),
@@ -909,7 +942,7 @@ mod tests {
                     relay: application.clone(),
                     reporter: reporter.clone(),
                     strategy: Sequential,
-                    partition: validator.to_string(),
+                    votes,
                     mailbox_size: 1024,
                     epoch: Epoch::new(333),
                     leader_timeout: Duration::from_secs(1),
@@ -919,9 +952,6 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: 4,
-                    replay_buffer: NZUsize!(1024 * 1024),
-                    write_buffer: NZUsize!(1024 * 1024),
-                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -1070,6 +1100,15 @@ mod tests {
                     );
                     actor.start();
                     let blocker = oracle.control(validator.clone());
+
+                    let partition = validator.to_string();
+                    let votes = create_votes_journal(
+                        context.with_label("votes"),
+                        &schemes[idx],
+                        &partition,
+                    )
+                    .await;
+
                     let cfg = config::Config {
                         scheme: schemes[idx].clone(),
                         elector: elector.clone(),
@@ -1078,7 +1117,7 @@ mod tests {
                         relay: application.clone(),
                         reporter: reporter.clone(),
                         strategy: Sequential,
-                        partition: validator.to_string(),
+                        votes,
                         mailbox_size: 1024,
                         epoch: Epoch::new(333),
                         leader_timeout: Duration::from_secs(1),
@@ -1088,9 +1127,6 @@ mod tests {
                         activity_timeout,
                         skip_timeout,
                         fetch_concurrent: 4,
-                        replay_buffer: NZUsize!(1024 * 1024),
-                        write_buffer: NZUsize!(1024 * 1024),
-                        buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     };
                     let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -1262,6 +1298,15 @@ mod tests {
                 );
                 actor.start();
                 let blocker = oracle.control(validator.clone());
+
+                let partition = validator.to_string();
+                let votes = create_votes_journal(
+                    context.with_label("votes"),
+                    &schemes[idx_scheme],
+                    &partition,
+                )
+                .await;
+
                 let cfg = config::Config {
                     scheme: schemes[idx_scheme].clone(),
                     elector: elector.clone(),
@@ -1270,7 +1315,7 @@ mod tests {
                     relay: application.clone(),
                     reporter: reporter.clone(),
                     strategy: Sequential,
-                    partition: validator.to_string(),
+                    votes,
                     mailbox_size: 1024,
                     epoch: Epoch::new(333),
                     leader_timeout: Duration::from_secs(1),
@@ -1280,9 +1325,6 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: 4,
-                    replay_buffer: NZUsize!(1024 * 1024),
-                    write_buffer: NZUsize!(1024 * 1024),
-                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -1382,6 +1424,11 @@ mod tests {
             );
             actor.start();
             let blocker = oracle.control(me.clone());
+
+            let partition = me.to_string();
+            let votes =
+                create_votes_journal(context.with_label("votes"), &schemes[0], &partition).await;
+
             let cfg = config::Config {
                 scheme: schemes[0].clone(),
                 elector: elector.clone(),
@@ -1390,7 +1437,7 @@ mod tests {
                 relay: application.clone(),
                 reporter: reporter.clone(),
                 strategy: Sequential,
-                partition: me.to_string(),
+                votes,
                 mailbox_size: 1024,
                 epoch: Epoch::new(333),
                 leader_timeout: Duration::from_secs(1),
@@ -1400,9 +1447,6 @@ mod tests {
                 activity_timeout,
                 skip_timeout,
                 fetch_concurrent: 4,
-                replay_buffer: NZUsize!(1024 * 1024),
-                write_buffer: NZUsize!(1024 * 1024),
-                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -1525,6 +1569,15 @@ mod tests {
                 );
                 actor.start();
                 let blocker = oracle.control(validator.clone());
+
+                let partition = validator.to_string();
+                let votes = create_votes_journal(
+                    context.with_label("votes"),
+                    &schemes[idx_scheme],
+                    &partition,
+                )
+                .await;
+
                 let cfg = config::Config {
                     scheme: schemes[idx_scheme].clone(),
                     elector: elector.clone(),
@@ -1533,7 +1586,7 @@ mod tests {
                     relay: application.clone(),
                     reporter: reporter.clone(),
                     strategy: Sequential,
-                    partition: validator.to_string(),
+                    votes,
                     mailbox_size: 1024,
                     epoch: Epoch::new(333),
                     leader_timeout: Duration::from_secs(1),
@@ -1543,9 +1596,6 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: 4,
-                    replay_buffer: NZUsize!(1024 * 1024),
-                    write_buffer: NZUsize!(1024 * 1024),
-                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -1789,6 +1839,15 @@ mod tests {
                 );
                 actor.start();
                 let blocker = oracle.control(validator.clone());
+
+                let partition = validator.to_string();
+                let votes = create_votes_journal(
+                    context.with_label("votes"),
+                    &schemes[idx_scheme],
+                    &partition,
+                )
+                .await;
+
                 let cfg = config::Config {
                     scheme: schemes[idx_scheme].clone(),
                     elector: elector.clone(),
@@ -1797,7 +1856,7 @@ mod tests {
                     relay: application.clone(),
                     reporter: reporter.clone(),
                     strategy: Sequential,
-                    partition: validator.to_string(),
+                    votes,
                     mailbox_size: 1024,
                     epoch: Epoch::new(333),
                     leader_timeout: Duration::from_secs(1),
@@ -1807,9 +1866,6 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: 4,
-                    replay_buffer: NZUsize!(1024 * 1024),
-                    write_buffer: NZUsize!(1024 * 1024),
-                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -1968,6 +2024,12 @@ mod tests {
                 );
                 actor.start();
                 let blocker = oracle.control(validator.clone());
+
+                let partition = validator.to_string();
+                let votes =
+                    create_votes_journal(context.with_label("votes"), &schemes[idx], &partition)
+                        .await;
+
                 let cfg = config::Config {
                     scheme: schemes[idx].clone(),
                     elector: elector.clone(),
@@ -1976,7 +2038,7 @@ mod tests {
                     relay: application.clone(),
                     reporter: reporter.clone(),
                     strategy: Sequential,
-                    partition: validator.to_string(),
+                    votes,
                     mailbox_size: 1024,
                     epoch: Epoch::new(333),
                     leader_timeout: Duration::from_secs(1),
@@ -1986,9 +2048,6 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: 4,
-                    replay_buffer: NZUsize!(1024 * 1024),
-                    write_buffer: NZUsize!(1024 * 1024),
-                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -2184,6 +2243,12 @@ mod tests {
                 );
                 actor.start();
                 let blocker = oracle.control(validator.clone());
+
+                let partition = validator.to_string();
+                let votes =
+                    create_votes_journal(context.with_label("votes"), &schemes[idx], &partition)
+                        .await;
+
                 let cfg = config::Config {
                     scheme: schemes[idx].clone(),
                     elector: elector.clone(),
@@ -2192,7 +2257,7 @@ mod tests {
                     relay: application.clone(),
                     reporter: reporter.clone(),
                     strategy: Sequential,
-                    partition: validator.to_string(),
+                    votes,
                     mailbox_size: 1024,
                     epoch: Epoch::new(333),
                     leader_timeout: Duration::from_secs(1),
@@ -2202,9 +2267,6 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: 4,
-                    replay_buffer: NZUsize!(1024 * 1024),
-                    write_buffer: NZUsize!(1024 * 1024),
-                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -2397,6 +2459,12 @@ mod tests {
                 );
                 actor.start();
                 let blocker = oracle.control(validator.clone());
+
+                let partition = validator.to_string();
+                let votes =
+                    create_votes_journal(context.with_label("votes"), &schemes[idx], &partition)
+                        .await;
+
                 let cfg = config::Config {
                     scheme: schemes[idx].clone(),
                     elector: elector.clone(),
@@ -2405,7 +2473,7 @@ mod tests {
                     relay: application.clone(),
                     reporter: reporter.clone(),
                     strategy: Sequential,
-                    partition: validator.to_string(),
+                    votes,
                     mailbox_size: 1024,
                     epoch: Epoch::new(333),
                     leader_timeout: Duration::from_secs(1),
@@ -2415,9 +2483,6 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: 4,
-                    replay_buffer: NZUsize!(1024 * 1024),
-                    write_buffer: NZUsize!(1024 * 1024),
-                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -2664,6 +2729,15 @@ mod tests {
                     );
                     actor.start();
                     let blocker = oracle.control(validator.clone());
+
+                    let partition = validator.to_string();
+                    let votes = create_votes_journal(
+                        context.with_label("votes"),
+                        &schemes[idx_scheme],
+                        &partition,
+                    )
+                    .await;
+
                     let cfg = config::Config {
                         scheme: schemes[idx_scheme].clone(),
                         elector: elector.clone(),
@@ -2672,7 +2746,7 @@ mod tests {
                         relay: application.clone(),
                         reporter: reporter.clone(),
                         strategy: Sequential,
-                        partition: validator.to_string(),
+                        votes,
                         mailbox_size: 1024,
                         epoch: Epoch::new(333),
                         leader_timeout: Duration::from_secs(1),
@@ -2682,9 +2756,6 @@ mod tests {
                         activity_timeout,
                         skip_timeout,
                         fetch_concurrent: 4,
-                        replay_buffer: NZUsize!(1024 * 1024),
-                        write_buffer: NZUsize!(1024 * 1024),
-                        buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     };
                     let engine = Engine::new(context.with_label("engine"), cfg);
                     engine.start(pending, recovered, resolver);
@@ -2853,6 +2924,11 @@ mod tests {
                 );
                 actor.start();
                 let blocker = oracle.control(validator.clone());
+
+                let partition = validator.clone().to_string();
+                let votes =
+                    create_votes_journal(context.with_label("votes"), &scheme, &partition).await;
+
                 let cfg = config::Config {
                     scheme,
                     elector: elector.clone(),
@@ -2861,7 +2937,7 @@ mod tests {
                     relay: application.clone(),
                     reporter: reporter.clone(),
                     strategy: Sequential,
-                    partition: validator.clone().to_string(),
+                    votes,
                     mailbox_size: 1024,
                     epoch: Epoch::new(333),
                     leader_timeout: Duration::from_secs(1),
@@ -2871,9 +2947,6 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: 4,
-                    replay_buffer: NZUsize!(1024 * 1024),
-                    write_buffer: NZUsize!(1024 * 1024),
-                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
                 let (pending, recovered, resolver) = registrations
@@ -3034,6 +3107,15 @@ mod tests {
                     );
                     actor.start();
                     let blocker = oracle.control(validator.clone());
+
+                    let partition = validator.clone().to_string();
+                    let votes = create_votes_journal(
+                        context.with_label("votes"),
+                        &schemes[idx_scheme],
+                        &partition,
+                    )
+                    .await;
+
                     let cfg = config::Config {
                         scheme: schemes[idx_scheme].clone(),
                         elector: elector.clone(),
@@ -3042,7 +3124,7 @@ mod tests {
                         relay: application.clone(),
                         reporter: reporter.clone(),
                         strategy: Sequential,
-                        partition: validator.clone().to_string(),
+                        votes,
                         mailbox_size: 1024,
                         epoch: Epoch::new(333),
                         leader_timeout: Duration::from_secs(1),
@@ -3052,9 +3134,6 @@ mod tests {
                         activity_timeout,
                         skip_timeout,
                         fetch_concurrent: 4,
-                        replay_buffer: NZUsize!(1024 * 1024),
-                        write_buffer: NZUsize!(1024 * 1024),
-                        buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     };
                     let engine = Engine::new(context.with_label("engine"), cfg);
                     engine.start(pending, recovered, resolver);
@@ -3211,6 +3290,15 @@ mod tests {
                     );
                     actor.start();
                     let blocker = oracle.control(validator.clone());
+
+                    let partition = validator.to_string();
+                    let votes = create_votes_journal(
+                        context.with_label("votes"),
+                        &schemes[idx_scheme],
+                        &partition,
+                    )
+                    .await;
+
                     let cfg = config::Config {
                         scheme: schemes[idx_scheme].clone(),
                         elector: elector.clone(),
@@ -3219,7 +3307,7 @@ mod tests {
                         relay: application.clone(),
                         reporter: reporter.clone(),
                         strategy: Sequential,
-                        partition: validator.to_string(),
+                        votes,
                         mailbox_size: 1024,
                         epoch: Epoch::new(333),
                         leader_timeout: Duration::from_secs(1),
@@ -3229,9 +3317,6 @@ mod tests {
                         activity_timeout,
                         skip_timeout,
                         fetch_concurrent: 4,
-                        replay_buffer: NZUsize!(1024 * 1024),
-                        write_buffer: NZUsize!(1024 * 1024),
-                        buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     };
                     let engine = Engine::new(context.with_label("engine"), cfg);
                     engines.push(engine.start(pending, recovered, resolver));
@@ -3301,6 +3386,11 @@ mod tests {
             );
             actor.start();
             let blocker = oracle.control(validator.clone());
+
+            let partition = validator.to_string();
+            let votes =
+                create_votes_journal(context.with_label("votes"), &schemes[idx], &partition).await;
+
             let cfg = config::Config {
                 scheme: schemes[idx].clone(),
                 elector: elector.clone(),
@@ -3309,7 +3399,7 @@ mod tests {
                 relay: application.clone(),
                 reporter: reporter.clone(),
                 strategy: Sequential,
-                partition: validator.to_string(),
+                votes,
                 mailbox_size: 1024,
                 epoch: Epoch::new(333),
                 leader_timeout: Duration::from_secs(1),
@@ -3319,9 +3409,6 @@ mod tests {
                 activity_timeout,
                 skip_timeout,
                 fetch_concurrent: 4,
-                replay_buffer: NZUsize!(1024 * 1024),
-                write_buffer: NZUsize!(1024 * 1024),
-                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let engine = Engine::new(context.with_label("engine"), cfg);
             engine.start(pending, recovered, resolver);
@@ -3535,6 +3622,15 @@ mod tests {
                     );
                     actor.start();
                     let blocker = oracle.control(validator.clone());
+
+                    let partition = validator.to_string();
+                    let votes = create_votes_journal(
+                        context.with_label("votes"),
+                        &schemes[idx_scheme],
+                        &partition,
+                    )
+                    .await;
+
                     let cfg = config::Config {
                         scheme: schemes[idx_scheme].clone(),
                         elector: elector.clone(),
@@ -3543,7 +3639,7 @@ mod tests {
                         relay: application.clone(),
                         reporter: reporter.clone(),
                         strategy: Sequential,
-                        partition: validator.to_string(),
+                        votes,
                         mailbox_size: 1024,
                         epoch: Epoch::new(333),
                         leader_timeout: Duration::from_secs(1),
@@ -3553,9 +3649,6 @@ mod tests {
                         activity_timeout,
                         skip_timeout,
                         fetch_concurrent: 4,
-                        replay_buffer: NZUsize!(1024 * 1024),
-                        write_buffer: NZUsize!(1024 * 1024),
-                        buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     };
                     let engine = Engine::new(context.with_label("engine"), cfg);
                     engine.start(pending, recovered, resolver);
@@ -3704,6 +3797,15 @@ mod tests {
                     );
                     actor.start();
                     let blocker = oracle.control(validator.clone());
+
+                    let partition = validator.clone().to_string();
+                    let votes = create_votes_journal(
+                        context.with_label("votes"),
+                        &schemes[idx_scheme],
+                        &partition,
+                    )
+                    .await;
+
                     let cfg = config::Config {
                         scheme: schemes[idx_scheme].clone(),
                         elector: elector.clone(),
@@ -3712,7 +3814,7 @@ mod tests {
                         relay: application.clone(),
                         reporter: reporter.clone(),
                         strategy: Sequential,
-                        partition: validator.clone().to_string(),
+                        votes,
                         mailbox_size: 1024,
                         epoch: Epoch::new(333),
                         leader_timeout: Duration::from_secs(1),
@@ -3722,9 +3824,6 @@ mod tests {
                         activity_timeout,
                         skip_timeout,
                         fetch_concurrent: 4,
-                        replay_buffer: NZUsize!(1024 * 1024),
-                        write_buffer: NZUsize!(1024 * 1024),
-                        buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     };
                     let engine = Engine::new(context.with_label("engine"), cfg);
                     engine.start(pending, recovered, resolver);
@@ -3887,6 +3986,15 @@ mod tests {
                     );
                     actor.start();
                     let blocker = oracle.control(validator.clone());
+
+                    let partition = validator.clone().to_string();
+                    let votes = create_votes_journal(
+                        context.with_label("votes"),
+                        &schemes[idx_scheme],
+                        &partition,
+                    )
+                    .await;
+
                     let cfg = config::Config {
                         scheme: schemes[idx_scheme].clone(),
                         elector: elector.clone(),
@@ -3895,7 +4003,7 @@ mod tests {
                         relay: application.clone(),
                         reporter: reporter.clone(),
                         strategy: Sequential,
-                        partition: validator.clone().to_string(),
+                        votes,
                         mailbox_size: 1024,
                         epoch: Epoch::new(333),
                         leader_timeout: Duration::from_secs(1),
@@ -3905,9 +4013,6 @@ mod tests {
                         activity_timeout,
                         skip_timeout,
                         fetch_concurrent: 4,
-                        replay_buffer: NZUsize!(1024 * 1024),
-                        write_buffer: NZUsize!(1024 * 1024),
-                        buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     };
                     let engine = Engine::new(context.with_label("engine"), cfg);
                     engine.start(pending, recovered, resolver);
@@ -4039,6 +4144,12 @@ mod tests {
                 );
                 actor.start();
                 let blocker = oracle.control(validator.clone());
+
+                let partition = validator.to_string();
+                let votes =
+                    create_votes_journal(context.with_label("votes"), &schemes[idx], &partition)
+                        .await;
+
                 let cfg = config::Config {
                     scheme: schemes[idx].clone(),
                     elector: elector.clone(),
@@ -4047,7 +4158,7 @@ mod tests {
                     relay: application.clone(),
                     reporter: reporter.clone(),
                     strategy: Sequential,
-                    partition: validator.to_string(),
+                    votes,
                     mailbox_size: 1024,
                     epoch: Epoch::new(333),
                     leader_timeout: Duration::from_secs(1),
@@ -4057,9 +4168,6 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: 4,
-                    replay_buffer: NZUsize!(1024 * 1024),
-                    write_buffer: NZUsize!(1024 * 1024),
-                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -4218,6 +4326,12 @@ mod tests {
             );
             actor.start();
             let blocker = oracle.control(participants[0].clone());
+
+            let partition = participants[0].clone().to_string();
+            let votes = create_votes_journal(context.with_label("votes"), &schemes[0], &partition)
+                .await
+                .replay_buffer(NZUsize!(1024 * 16));
+
             let cfg = config::Config {
                 scheme: schemes[0].clone(),
                 elector: elector.clone(),
@@ -4226,7 +4340,7 @@ mod tests {
                 relay: application.clone(),
                 reporter: reporter.clone(),
                 strategy: Sequential,
-                partition: participants[0].clone().to_string(),
+                votes,
                 mailbox_size: 64,
                 epoch: Epoch::new(333),
                 leader_timeout: Duration::from_millis(50),
@@ -4236,9 +4350,6 @@ mod tests {
                 activity_timeout: ViewDelta::new(4),
                 skip_timeout: ViewDelta::new(2),
                 fetch_concurrent: 4,
-                replay_buffer: NZUsize!(1024 * 16),
-                write_buffer: NZUsize!(1024 * 16),
-                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -4443,6 +4554,12 @@ mod tests {
                 );
                 actor.start();
                 let blocker = oracle.control(validator.clone());
+
+                let partition = validator.to_string();
+                let votes =
+                    create_votes_journal(context.with_label("votes"), &schemes[idx], &partition)
+                        .await;
+
                 let cfg = config::Config {
                     scheme: schemes[idx].clone(),
                     elector: elector.clone(),
@@ -4451,7 +4568,7 @@ mod tests {
                     relay: application.clone(),
                     reporter: attributable_reporter,
                     strategy: Sequential,
-                    partition: validator.to_string(),
+                    votes,
                     mailbox_size: 1024,
                     epoch: Epoch::new(333),
                     leader_timeout: Duration::from_secs(1),
@@ -4461,9 +4578,6 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: 4,
-                    replay_buffer: NZUsize!(1024 * 1024),
-                    write_buffer: NZUsize!(1024 * 1024),
-                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -4689,6 +4803,15 @@ mod tests {
                     );
                     actor.start();
                     let blocker = oracle.control(validator.clone());
+
+                    let partition = validator.to_string();
+                    let votes = create_votes_journal(
+                        context.with_label("votes"),
+                        &schemes[idx],
+                        &partition,
+                    )
+                    .await;
+
                     let cfg = config::Config {
                         scheme: schemes[idx].clone(),
                         elector: elector.clone(),
@@ -4697,7 +4820,7 @@ mod tests {
                         relay: application.clone(),
                         reporter: reporter.clone(),
                         strategy: Sequential,
-                        partition: validator.to_string(),
+                        votes,
                         mailbox_size: 1024,
                         epoch: Epoch::new(333),
                         leader_timeout: Duration::from_secs(10),
@@ -4707,9 +4830,6 @@ mod tests {
                         activity_timeout,
                         skip_timeout,
                         fetch_concurrent: 4,
-                        replay_buffer: NZUsize!(1024 * 1024),
-                        write_buffer: NZUsize!(1024 * 1024),
-                        buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     };
                     let engine =
                         Engine::new(context.with_label(&format!("engine_{}", *validator)), cfg);
@@ -5026,6 +5146,12 @@ mod tests {
                 );
                 actor.start();
                 let blocker = oracle.control(validator.clone());
+
+                let partition = validator.to_string();
+                let votes =
+                    create_votes_journal(context.with_label("votes"), &schemes[idx], &partition)
+                        .await;
+
                 let cfg = config::Config {
                     scheme: schemes[idx].clone(),
                     elector: elector.clone(),
@@ -5034,7 +5160,7 @@ mod tests {
                     relay: application.clone(),
                     reporter: reporter.clone(),
                     strategy: Sequential,
-                    partition: validator.to_string(),
+                    votes,
                     mailbox_size: 1024,
                     epoch: Epoch::new(333),
                     leader_timeout: Duration::from_millis(100),
@@ -5044,9 +5170,6 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: 4,
-                    replay_buffer: NZUsize!(1024 * 1024),
-                    write_buffer: NZUsize!(1024 * 1024),
-                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -5176,6 +5299,12 @@ mod tests {
                 );
                 actor.start();
                 let blocker = oracle.control(validator.clone());
+
+                let partition = validator.to_string();
+                let votes =
+                    create_votes_journal(context.with_label("votes"), &schemes[idx], &partition)
+                        .await;
+
                 let cfg = config::Config {
                     scheme: schemes[idx].clone(),
                     elector: elector.clone(),
@@ -5184,7 +5313,7 @@ mod tests {
                     relay: application.clone(),
                     reporter: reporter.clone(),
                     strategy: Sequential,
-                    partition: validator.to_string(),
+                    votes,
                     mailbox_size: 1024,
                     epoch: Epoch::new(333),
                     leader_timeout: Duration::from_secs(1),
@@ -5194,9 +5323,6 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: 4,
-                    replay_buffer: NZUsize!(1024 * 1024),
-                    write_buffer: NZUsize!(1024 * 1024),
-                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -5272,6 +5398,12 @@ mod tests {
                 actor.start();
                 reporters.insert(idx, selected_reporter.clone());
                 let blocker = oracle.control(validator.clone());
+
+                let partition = validator.to_string();
+                let votes =
+                    create_votes_journal(context.with_label("votes"), &schemes[idx], &partition)
+                        .await;
+
                 let cfg = config::Config {
                     scheme: schemes[idx].clone(),
                     elector: elector.clone(),
@@ -5280,7 +5412,7 @@ mod tests {
                     relay: application.clone(),
                     reporter: selected_reporter,
                     strategy: Sequential,
-                    partition: validator.to_string(),
+                    votes,
                     mailbox_size: 1024,
                     epoch: Epoch::new(333),
                     leader_timeout: Duration::from_secs(1),
@@ -5290,9 +5422,6 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: 4,
-                    replay_buffer: NZUsize!(1024 * 1024),
-                    write_buffer: NZUsize!(1024 * 1024),
-                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
                 engine_handlers.insert(idx, engine.start(pending, recovered, resolver));
@@ -5716,6 +5845,11 @@ mod tests {
                     actor.start();
 
                     let blocker = oracle.control(validator.clone());
+
+                    let votes =
+                        create_votes_journal(context.with_label("votes"), &schemes[idx], &label)
+                            .await;
+
                     let cfg = config::Config {
                         scheme: schemes[idx].clone(),
                         elector: elector.clone(),
@@ -5724,7 +5858,7 @@ mod tests {
                         relay: application.clone(),
                         reporter: reporter.clone(),
                         strategy: Sequential,
-                        partition: label,
+                        votes,
                         mailbox_size: 1024,
                         epoch: Epoch::new(333),
                         leader_timeout: Duration::from_secs(1),
@@ -5734,9 +5868,6 @@ mod tests {
                         activity_timeout,
                         skip_timeout,
                         fetch_concurrent: 4,
-                        replay_buffer: NZUsize!(1024 * 1024),
-                        write_buffer: NZUsize!(1024 * 1024),
-                        buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     };
                     let engine = Engine::new(context.with_label("engine"), cfg);
                     engine_handlers.push(engine.start(pending, recovered, resolver));
@@ -5773,6 +5904,10 @@ mod tests {
                 actor.start();
 
                 let blocker = oracle.control(validator.clone());
+
+                let votes =
+                    create_votes_journal(context.with_label("votes"), &schemes[idx], &label).await;
+
                 let cfg = config::Config {
                     scheme: schemes[idx].clone(),
                     elector: elector.clone(),
@@ -5781,7 +5916,7 @@ mod tests {
                     relay: application.clone(),
                     reporter: reporter.clone(),
                     strategy: Sequential,
-                    partition: label,
+                    votes,
                     mailbox_size: 1024,
                     epoch: Epoch::new(333),
                     leader_timeout: Duration::from_secs(1),
@@ -5791,9 +5926,6 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: 4,
-                    replay_buffer: NZUsize!(1024 * 1024),
-                    write_buffer: NZUsize!(1024 * 1024),
-                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
 

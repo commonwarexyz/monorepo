@@ -4,7 +4,10 @@ use commonware_bridge::{
 };
 use commonware_codec::{Decode, DecodeExt};
 use commonware_consensus::{
-    simplex::{self, elector::RoundRobin, scheme::bls12381_threshold::standard::Scheme, Engine},
+    simplex::{
+        self, elector::RoundRobin, scheme::bls12381_threshold::standard::Scheme,
+        store::VotesJournal, Engine,
+    },
     types::{Epoch, ViewDelta},
 };
 use commonware_cryptography::{
@@ -13,12 +16,14 @@ use commonware_cryptography::{
         sharing::Sharing,
         variant::{MinSig, Variant},
     },
+    certificate::Scheme as _,
     ed25519, Sha256, Signer as _,
 };
 use commonware_p2p::{authenticated, Manager};
 use commonware_runtime::{
     buffer::PoolRef, tokio, Metrics, Network, Quota, RayonPoolSpawner, Runner,
 };
+use commonware_storage::journal::segmented::variable::{Config as JConfig, Journal};
 use commonware_stream::{dial, Config as StreamConfig};
 use commonware_utils::{from_hex, ordered::Set, union, NZUsize, TryCollect, NZU16, NZU32};
 use std::{
@@ -236,6 +241,21 @@ fn main() {
             },
         );
 
+        let votes = VotesJournal::from_journal(
+            Journal::init(
+                context.with_label("engine_voter"),
+                JConfig {
+                    partition: String::from("log"),
+                    buffer_pool: PoolRef::new(NZU16!(16_384), NZUsize!(10_000)),
+                    write_buffer: NZUsize!(1024 * 1024),
+                    compression: None,
+                    codec_config: scheme.certificate_codec_config(),
+                },
+            )
+            .await
+            .expect("must be able to initialize votes journal"),
+        )
+        .replay_buffer(NZUsize!(1024 * 1024));
         // Initialize consensus
         let engine = Engine::new(
             context.with_label("engine"),
@@ -246,11 +266,8 @@ fn main() {
                 automaton: mailbox.clone(),
                 relay: mailbox.clone(),
                 reporter: mailbox.clone(),
-                partition: String::from("log"),
                 mailbox_size: 1024,
                 epoch: Epoch::zero(),
-                replay_buffer: NZUsize!(1024 * 1024),
-                write_buffer: NZUsize!(1024 * 1024),
                 leader_timeout: Duration::from_secs(1),
                 notarization_timeout: Duration::from_secs(2),
                 nullify_retry: Duration::from_secs(10),
@@ -258,8 +275,8 @@ fn main() {
                 activity_timeout: ViewDelta::new(10),
                 skip_timeout: ViewDelta::new(5),
                 fetch_concurrent: 32,
-                buffer_pool: PoolRef::new(NZU16!(16_384), NZUsize!(10_000)),
                 strategy,
+                votes,
             },
         );
 

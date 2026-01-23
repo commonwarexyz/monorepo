@@ -2,6 +2,7 @@ use super::{
     actors::{batcher, resolver, voter},
     config::Config,
     elector::Config as Elector,
+    store::Votes,
     types::{Activity, Context},
 };
 use crate::{simplex::scheme::Scheme, CertifiableAutomaton, Relay, Reporter};
@@ -9,13 +10,13 @@ use commonware_cryptography::Digest;
 use commonware_macros::select;
 use commonware_p2p::{Blocker, Receiver, Sender};
 use commonware_parallel::Strategy;
-use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner, Storage};
+use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner};
 use rand_core::CryptoRngCore;
 use tracing::debug;
 
 /// Instance of `simplex` consensus engine.
 pub struct Engine<
-    E: Clock + CryptoRngCore + Spawner + Storage + Metrics,
+    E: Clock + CryptoRngCore + Spawner + Metrics,
     S: Scheme<D>,
     L: Elector<S>,
     B: Blocker<PublicKey = S::PublicKey>,
@@ -24,10 +25,11 @@ pub struct Engine<
     R: Relay<Digest = D>,
     F: Reporter<Activity = Activity<S, D>>,
     T: Strategy,
+    V: Votes<Scheme = S, Digest = D>,
 > {
     context: ContextCell<E>,
 
-    voter: voter::Actor<E, S, L, B, D, A, R, F>,
+    voter: voter::Actor<E, S, L, B, D, A, R, F, V>,
     voter_mailbox: voter::Mailbox<S, D>,
 
     batcher: batcher::Actor<E, S, B, D, F, T>,
@@ -38,7 +40,7 @@ pub struct Engine<
 }
 
 impl<
-        E: Clock + CryptoRngCore + Spawner + Storage + Metrics,
+        E: Clock + CryptoRngCore + Spawner + Metrics,
         S: Scheme<D>,
         L: Elector<S>,
         B: Blocker<PublicKey = S::PublicKey>,
@@ -47,10 +49,11 @@ impl<
         R: Relay<Digest = D>,
         F: Reporter<Activity = Activity<S, D>>,
         T: Strategy,
-    > Engine<E, S, L, B, D, A, R, F, T>
+        V: Votes<Scheme = S, Digest = D>,
+    > Engine<E, S, L, B, D, A, R, F, T, V>
 {
     /// Create a new `simplex` consensus engine.
-    pub fn new(context: E, cfg: Config<S, L, B, D, A, R, F, T>) -> Self {
+    pub fn new(context: E, cfg: Config<S, L, B, D, A, R, F, T, V>) -> Self {
         // Ensure configuration is valid
         cfg.assert();
 
@@ -79,16 +82,13 @@ impl<
                 automaton: cfg.automaton,
                 relay: cfg.relay,
                 reporter: cfg.reporter,
-                partition: cfg.partition,
+                votes: cfg.votes,
                 mailbox_size: cfg.mailbox_size,
                 epoch: cfg.epoch,
                 leader_timeout: cfg.leader_timeout,
                 notarization_timeout: cfg.notarization_timeout,
                 nullify_retry: cfg.nullify_retry,
                 activity_timeout: cfg.activity_timeout,
-                replay_buffer: cfg.replay_buffer,
-                write_buffer: cfg.write_buffer,
-                buffer_pool: cfg.buffer_pool,
             },
         );
 

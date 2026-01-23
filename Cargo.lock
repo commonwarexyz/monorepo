@@ -1239,6 +1239,7 @@ dependencies = [
  "commonware-p2p",
  "commonware-parallel",
  "commonware-runtime",
+ "commonware-storage",
  "commonware-utils",
  "futures",
  "libfuzzer-sys",
