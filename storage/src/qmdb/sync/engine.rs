@@ -165,7 +165,7 @@ where
 {
     /// Create a new sync engine with the given configuration
     pub async fn new(config: Config<DB, R>) -> Result<Self, Error<DB, R>> {
-        if config.target.range.is_empty() {
+        if config.target.range.is_empty() || !config.target.range.end.is_valid() {
             return Err(SyncError::Engine(EngineError::InvalidTarget {
                 lower_bound_pos: config.target.range.start,
                 upper_bound_pos: config.target.range.end,
