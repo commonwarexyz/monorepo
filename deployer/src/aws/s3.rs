@@ -53,7 +53,7 @@ pub const PRESIGN_DURATION: Duration = Duration::from_secs(6 * 60 * 60);
 pub const WGET: &str =
     "wget -q --tries=10 --retry-connrefused --retry-on-http-error=404,408,429,500,502,503,504 --waitretry=5";
 
-/// Creates an S3 client with Transfer Acceleration enabled for faster global downloads
+/// Creates an S3 client with Transfer Acceleration
 pub async fn create_client(region: Region) -> S3Client {
     let retry = aws_config::retry::RetryConfig::adaptive()
         .with_max_attempts(u32::MAX)
@@ -81,7 +81,7 @@ pub async fn ensure_bucket_exists(
     match client.head_bucket().bucket(bucket_name).send().await {
         Ok(_) => {
             info!(bucket = bucket_name, "bucket already exists");
-            return Ok(());
+            return enable_transfer_acceleration(client, bucket_name).await;
         }
         Err(e) => {
             // Check for region header before consuming the error
@@ -122,7 +122,6 @@ pub async fn ensure_bucket_exists(
             .build();
         request = request.create_bucket_configuration(bucket_config);
     }
-
     match request.send().await {
         Ok(_) => {
             info!(bucket = bucket_name, region = region, "created bucket");
@@ -146,13 +145,10 @@ pub async fn ensure_bucket_exists(
         }
     }
 
-    // Enable Transfer Acceleration for faster global downloads
-    enable_transfer_acceleration(client, bucket_name).await?;
-
-    Ok(())
+    return enable_transfer_acceleration(client, bucket_name).await;
 }
 
-/// Enables Transfer Acceleration on an S3 bucket for faster global downloads
+/// Enables Transfer Acceleration on an S3 bucket
 async fn enable_transfer_acceleration(client: &S3Client, bucket_name: &str) -> Result<(), Error> {
     // Check if already enabled
     if let Ok(response) = client
@@ -174,7 +170,6 @@ async fn enable_transfer_acceleration(client: &S3Client, bucket_name: &str) -> R
     let config = AccelerateConfiguration::builder()
         .status(BucketAccelerateStatus::Enabled)
         .build();
-
     client
         .put_bucket_accelerate_configuration()
         .bucket(bucket_name)
