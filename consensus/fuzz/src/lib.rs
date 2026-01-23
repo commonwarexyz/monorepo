@@ -6,7 +6,7 @@ pub mod utils;
 
 use crate::{
     disrupter::Disrupter,
-    utils::{link_peers, register, Action, Partition},
+    utils::{link_peers, max_faults, register, Action, Partition},
 };
 use arbitrary::Arbitrary;
 use bytes::Bytes;
@@ -32,7 +32,7 @@ use commonware_p2p::{
 };
 use commonware_parallel::Sequential;
 use commonware_runtime::{buffer::PoolRef, deterministic, Clock, Metrics, Runner, Spawner};
-use commonware_utils::{Faults, N3f1, NZUsize, NZU16};
+use commonware_utils::{NZUsize, NZU16};
 use futures::{channel::mpsc::Receiver, future::join_all, StreamExt};
 use rand::{rngs::StdRng, RngCore, SeedableRng};
 pub use simplex::{
@@ -55,12 +55,12 @@ const MIN_REQUIRED_CONTAINERS: u64 = 5;
 const MAX_REQUIRED_CONTINERS: u64 = 50;
 const MAX_SLEEP_DURATION: Duration = Duration::from_secs(10);
 const NAMESPACE: &[u8] = b"consensus_fuzz";
-// 4 nodes, 3 correct, 1 faulty
-const N4C3F1: (u32, u32, u32) = (4, 3, 1);
-// 3 nodes, 2 correct, 1 faulty
-const N3C2F1: (u32, u32, u32) = (3, 2, 1);
-// 3 nodes, 1 correct, 2 faulty
-const N4C1F3: (u32, u32, u32) = (4, 1, 3);
+// 4 nodes, 1 faulty, 3 correct
+const N4C3F1: (u32, u32, u32) = (4, 1, 3);
+// 3 nodes, 1 faulty, 2 correct
+const N3C2F1: (u32, u32, u32) = (3, 1, 2);
+// 3 nodes, 2 faulty, 1 correct
+const N4C1F3: (u32, u32, u32) = (4, 3, 1);
 const MAX_RAW_BYTES: usize = 4096;
 
 #[derive(Debug, Clone)]
@@ -168,7 +168,7 @@ impl Arbitrary<'_> for FuzzInput {
 }
 
 fn run<P: simplex::Simplex>(input: FuzzInput) {
-    let (n, _, f) = input.configuration;
+    let (n, f, _) = input.configuration;
     let required_containers = input.required_containers;
     let cfg = deterministic::Config::new().with_seed(input.seed);
     let executor = deterministic::Runner::new(cfg);
@@ -315,7 +315,7 @@ fn run<P: simplex::Simplex>(input: FuzzInput) {
             engine.start(pending, recovered, resolver);
         }
 
-        if input.partition == Partition::Connected && N3f1::max_faults(n) == f {
+        if input.partition == Partition::Connected && max_faults(n) == f {
             let mut finalizers = Vec::new();
             for reporter in reporters.iter_mut() {
                 let (mut latest, mut monitor): (View, Receiver<View>) = reporter.subscribe().await;
@@ -336,7 +336,7 @@ fn run<P: simplex::Simplex>(input: FuzzInput) {
 }
 
 fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
-    let (n, _, f) = input.configuration;
+    let (n, f, _) = input.configuration;
     let required_containers = input.required_containers;
     let cfg = deterministic::Config::new().with_seed(input.seed);
     let executor = deterministic::Runner::new(cfg);
@@ -635,7 +635,7 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
             engine.start(pending, recovered, resolver);
         }
 
-        if input.partition == Partition::Connected && N3f1::max_faults(n) == f {
+        if input.partition == Partition::Connected && max_faults(n) == f {
             let mut finalizers = Vec::new();
             for reporter in reporters.iter_mut() {
                 let (mut latest, mut monitor): (View, Receiver<View>) = reporter.subscribe().await;

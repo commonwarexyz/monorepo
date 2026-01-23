@@ -1,6 +1,7 @@
 use crate::{
     simplex::Simplex,
     types::{Finalization, Notarization, Nullification, ReplicaState},
+    utils::{max_faults, quorum},
 };
 use commonware_codec::{Encode, Read};
 use commonware_consensus::simplex::{
@@ -13,24 +14,14 @@ use commonware_cryptography::{
 use rand_core::CryptoRngCore;
 use std::collections::{HashMap, HashSet};
 
-const N3F1_TABLE: &[(u32, u32, u32)] = &[
-    (1, 0, 1),
-    (2, 0, 2),
-    (3, 0, 3),
-    (4, 1, 3),
-    (5, 1, 4),
-    (6, 1, 5),
-    (7, 2, 5),
-    (8, 2, 6),
-    (9, 2, 7),
-];
-
 pub fn check<P: Simplex>(n: u32, replicas: Vec<ReplicaState>) {
-    let threshold = N3F1_TABLE
-        .iter()
-        .find(|(tn, _, _)| *tn == n)
-        .map(|(_, _, q)| *q as usize)
-        .expect("threshold must exist");
+    let threshold = quorum(n);
+    let faults = max_faults(n);
+    assert_eq!(
+        n,
+        faults + threshold as u32,
+        "Invariant violation: n must equal f + quorum",
+    );
 
     // Invariant: agreement
     // All replicas that finalized a given view must have the same digest for that view.
