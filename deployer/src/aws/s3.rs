@@ -192,6 +192,7 @@ where
             .bucket(bucket)
             .key(key)
             .body(body)
+            .cache_control("max-age=31536000, immutable")
             .send()
             .await
         {
