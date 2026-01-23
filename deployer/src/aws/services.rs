@@ -769,7 +769,7 @@ pub struct InstanceUrls {
 
 /// Phase 1 (optional): Install apt packages on binary instances
 /// Only needed when profiling is enabled (for linux-tools)
-pub(crate) fn install_binary_apt_cmd(profiling: bool) -> Option<&'static str> {
+pub(crate) const fn install_binary_apt_cmd(profiling: bool) -> Option<&'static str> {
     if profiling {
         Some(
             r#"
