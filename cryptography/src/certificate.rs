@@ -225,7 +225,8 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
     /// Batch-verifies attestations and separates valid attestations from signer indices that failed
     /// verification.
     ///
-    /// Callers must not include duplicate attestations from the same signer.
+    /// Callers must not include duplicate attestations from the same signer. Passing duplicates
+    /// is undefined behavior, implementations may panic or produce incorrect results.
     fn verify_attestations<R, D, I>(
         &self,
         rng: &mut R,
@@ -255,7 +256,8 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
 
     /// Assembles attestations into a certificate, returning `None` if the threshold is not met.
     ///
-    /// Callers must not include duplicate attestations from the same signer.
+    /// Callers must not include duplicate attestations from the same signer. Passing duplicates
+    /// is undefined behavior, implementations may panic or produce incorrect results.
     fn assemble<I, M>(
         &self,
         attestations: I,
