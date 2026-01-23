@@ -407,7 +407,10 @@ pub(crate) fn musl_download_url(version: &str, architecture: Architecture) -> St
         Architecture::Arm64 => "http://ports.ubuntu.com/ubuntu-ports/pool/universe/m/musl",
         Architecture::X86_64 => "http://archive.ubuntu.com/ubuntu/pool/universe/m/musl",
     };
-    format!("{base}/musl_{version}_{arch}.deb", arch = architecture.as_str())
+    format!(
+        "{base}/musl_{version}_{arch}.deb",
+        arch = architecture.as_str()
+    )
 }
 
 /// YAML configuration for Grafana datasources (Prometheus, Loki, Tempo, and Pyroscope)
