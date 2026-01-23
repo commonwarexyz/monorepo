@@ -316,8 +316,8 @@ pub(crate) fn samply_download_url(version: &str, architecture: Architecture) -> 
 /// Returns the download URL for libjemalloc2 from Ubuntu archive
 pub(crate) fn libjemalloc_download_url(version: &str, architecture: Architecture) -> String {
     let base = match architecture {
-        Architecture::Arm64 => "http://ports.ubuntu.com/pool/universe/j/jemalloc",
-        Architecture::X86_64 => "https://archive.ubuntu.com/ubuntu/pool/universe/j/jemalloc",
+        Architecture::Arm64 => "http://ports.ubuntu.com/ubuntu-ports/pool/universe/j/jemalloc",
+        Architecture::X86_64 => "http://archive.ubuntu.com/ubuntu/pool/universe/j/jemalloc",
     };
     format!(
         "{base}/libjemalloc2_{version}_{arch}.deb",
@@ -328,8 +328,8 @@ pub(crate) fn libjemalloc_download_url(version: &str, architecture: Architecture
 /// Returns the download URL for logrotate from Ubuntu archive
 pub(crate) fn logrotate_download_url(version: &str, architecture: Architecture) -> String {
     let base = match architecture {
-        Architecture::Arm64 => "http://ports.ubuntu.com/pool/main/l/logrotate",
-        Architecture::X86_64 => "https://archive.ubuntu.com/ubuntu/pool/main/l/logrotate",
+        Architecture::Arm64 => "http://ports.ubuntu.com/ubuntu-ports/pool/main/l/logrotate",
+        Architecture::X86_64 => "http://archive.ubuntu.com/ubuntu/pool/main/l/logrotate",
     };
     format!(
         "{base}/logrotate_{version}_{arch}.deb",
@@ -340,8 +340,8 @@ pub(crate) fn logrotate_download_url(version: &str, architecture: Architecture) 
 /// Returns the download URL for jq from Ubuntu archive
 pub(crate) fn jq_download_url(version: &str, architecture: Architecture) -> String {
     let base = match architecture {
-        Architecture::Arm64 => "http://ports.ubuntu.com/pool/universe/j/jq",
-        Architecture::X86_64 => "https://archive.ubuntu.com/ubuntu/pool/universe/j/jq",
+        Architecture::Arm64 => "http://ports.ubuntu.com/ubuntu-ports/pool/main/j/jq",
+        Architecture::X86_64 => "http://archive.ubuntu.com/ubuntu/pool/main/j/jq",
     };
     format!(
         "{base}/jq_{version}_{arch}.deb",
@@ -352,8 +352,8 @@ pub(crate) fn jq_download_url(version: &str, architecture: Architecture) -> Stri
 /// Returns the download URL for libfontconfig1 from Ubuntu archive
 pub(crate) fn libfontconfig_download_url(version: &str, architecture: Architecture) -> String {
     let base = match architecture {
-        Architecture::Arm64 => "http://ports.ubuntu.com/pool/main/f/fontconfig",
-        Architecture::X86_64 => "https://archive.ubuntu.com/ubuntu/pool/main/f/fontconfig",
+        Architecture::Arm64 => "http://ports.ubuntu.com/ubuntu-ports/pool/main/f/fontconfig",
+        Architecture::X86_64 => "http://archive.ubuntu.com/ubuntu/pool/main/f/fontconfig",
     };
     format!(
         "{base}/libfontconfig1_{version}_{arch}.deb",
