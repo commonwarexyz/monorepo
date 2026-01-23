@@ -9,6 +9,8 @@ use super::common::{
     impl_private_key_wrapper, impl_public_key_wrapper, PrivateKeyInner, PublicKeyInner, CURVE_NAME,
     PRIVATE_KEY_LENGTH, PUBLIC_KEY_LENGTH,
 };
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+use aws_lc_rs::signature::{UnparsedPublicKey, ECDSA_P256_SHA256_FIXED};
 use bytes::{Buf, BufMut};
 use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
 use commonware_utils::{hex, union_unique, Array, Span};
@@ -17,10 +19,9 @@ use core::{
     hash::{Hash, Hasher},
     ops::Deref,
 };
-use p256::{
-    ecdsa::signature::{Signer, Verifier},
-    elliptic_curve::scalar::IsHigh,
-};
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+use p256::ecdsa::signature::Verifier;
+use p256::{ecdsa::signature::Signer, elliptic_curve::scalar::IsHigh};
 
 const SIGNATURE_LENGTH: usize = 64; // R || S
 
@@ -49,9 +50,9 @@ impl PrivateKey {
         let payload = namespace.map_or(Cow::Borrowed(msg), |namespace| {
             Cow::Owned(union_unique(namespace, msg))
         });
-        let signature: p256::ecdsa::Signature = self.0.key.sign(&payload);
+        let signature: p256::ecdsa::Signature = self.0.key.expose(|key| key.sign(&payload));
         let signature = signature.normalize_s().unwrap_or(signature);
-        Signature::from(signature)
+        Signature::try_from(signature).expect("freshly signed signature is valid")
     }
 }
 
@@ -77,12 +78,24 @@ impl crate::Verifier for PublicKey {
 }
 
 impl PublicKey {
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     #[inline(always)]
     fn verify_inner(&self, namespace: Option<&[u8]>, msg: &[u8], sig: &Signature) -> bool {
         let payload = namespace.map_or(Cow::Borrowed(msg), |namespace| {
             Cow::Owned(union_unique(namespace, msg))
         });
         self.0.key.verify(&payload, &sig.signature).is_ok()
+    }
+
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    #[inline(always)]
+    fn verify_inner(&self, namespace: Option<&[u8]>, msg: &[u8], sig: &Signature) -> bool {
+        let payload = namespace.map_or(Cow::Borrowed(msg), |namespace| {
+            Cow::Owned(union_unique(namespace, msg))
+        });
+        let uncompressed = self.0.to_uncompressed();
+        let public_key = UnparsedPublicKey::new(&ECDSA_P256_SHA256_FIXED, &uncompressed);
+        public_key.verify(&payload, &sig.raw).is_ok()
     }
 }
 
@@ -91,6 +104,24 @@ impl PublicKey {
 pub struct Signature {
     raw: [u8; SIGNATURE_LENGTH],
     signature: p256::ecdsa::Signature,
+}
+
+impl TryFrom<[u8; SIGNATURE_LENGTH]> for Signature {
+    type Error = CodecError;
+
+    fn try_from(raw: [u8; SIGNATURE_LENGTH]) -> Result<Self, Self::Error> {
+        let result = p256::ecdsa::Signature::from_slice(&raw);
+        #[cfg(feature = "std")]
+        let signature = result.map_err(|e| CodecError::Wrapped(CURVE_NAME, e.into()))?;
+        #[cfg(not(feature = "std"))]
+        let signature = result
+            .map_err(|e| CodecError::Wrapped(CURVE_NAME, alloc::format!("{:?}", e).into()))?;
+        // Reject any signatures with a `s` value in the upper half of the curve order.
+        if signature.s().is_high().into() {
+            return Err(CodecError::Invalid(CURVE_NAME, "Signature S is high"));
+        }
+        Ok(Self { raw, signature })
+    }
 }
 
 impl crate::Signature for Signature {}
@@ -105,18 +136,7 @@ impl Read for Signature {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        let raw = <[u8; Self::SIZE]>::read(buf)?;
-        let result = p256::ecdsa::Signature::from_slice(&raw);
-        #[cfg(feature = "std")]
-        let signature = result.map_err(|e| CodecError::Wrapped(CURVE_NAME, e.into()))?;
-        #[cfg(not(feature = "std"))]
-        let signature = result
-            .map_err(|e| CodecError::Wrapped(CURVE_NAME, alloc::format!("{:?}", e).into()))?;
-        // Reject any signatures with a `s` value in the upper half of the curve order.
-        if signature.s().is_high().into() {
-            return Err(CodecError::Invalid(CURVE_NAME, "Signature S is high"));
-        }
-        Ok(Self { raw, signature })
+        <[u8; Self::SIZE]>::read(buf)?.try_into()
     }
 }
 
@@ -159,10 +179,12 @@ impl Deref for Signature {
     }
 }
 
-impl From<p256::ecdsa::Signature> for Signature {
-    fn from(signature: p256::ecdsa::Signature) -> Self {
-        let raw = signature.to_bytes().into();
-        Self { raw, signature }
+impl TryFrom<p256::ecdsa::Signature> for Signature {
+    type Error = CodecError;
+
+    fn try_from(value: p256::ecdsa::Signature) -> Result<Self, Self::Error> {
+        let raw: [u8; _] = value.to_bytes().into();
+        Self::try_from(raw)
     }
 }
 
@@ -543,7 +565,7 @@ mod tests {
                     ecdsa_signature = normalized_sig;
                 }
             }
-            let signature = Signature::from(ecdsa_signature);
+            let signature = Signature::try_from(ecdsa_signature).unwrap();
             public_key.verify_inner(None, &message, &signature)
         } else {
             let tf_res = Signature::decode(sig.as_ref());

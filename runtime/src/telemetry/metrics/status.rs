@@ -4,6 +4,7 @@ use prometheus_client::{
     encoding::{EncodeLabelSet, EncodeLabelValue},
     metrics::{counter::Counter as DefaultCounter, family::Family, gauge::Gauge},
 };
+use std::sync::atomic::Ordering;
 
 /// Metric label that indicates status.
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
@@ -87,6 +88,10 @@ impl Drop for CounterGuard {
 pub trait GaugeExt {
     /// Sets the [`Gauge`] using a value convertible to `i64`, if conversion is not lossy, returning the previous value if successful.
     fn try_set<T: TryInto<i64>>(&self, val: T) -> Result<i64, T::Error>;
+
+    /// Atomically sets the [`Gauge`] to the maximum of the current value and the provided value.
+    /// Returns the previous value.
+    fn try_set_max<T: TryInto<i64> + Copy>(&self, val: T) -> Result<i64, T::Error>;
 }
 
 impl GaugeExt for Gauge {
@@ -95,5 +100,10 @@ impl GaugeExt for Gauge {
         let val = val.try_into()?;
         let out = self.set(val);
         Ok(out)
+    }
+
+    fn try_set_max<T: TryInto<i64> + Copy>(&self, val: T) -> Result<i64, T::Error> {
+        let val = val.try_into()?;
+        Ok(self.inner().fetch_max(val, Ordering::Relaxed))
     }
 }

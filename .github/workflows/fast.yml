@@ -252,7 +252,7 @@ jobs:
       run: ./.github/scripts/check_no_std.sh
 
   lint-toml:
-    name: Lint Cargo.toml files
+    name: Lint Cargo.toml Files
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -266,6 +266,20 @@ jobs:
       uses: astral-sh/setup-uv@85856786d1ce8acfbcc2f13a5f3fbd6b938f9f41 # v7.1.2
     - name: Check Cargo.toml formatting
       run: just fix-toml-fmt && git diff --exit-code
+
+  lint-benchmark-names:
+    name: Lint Benchmark Names
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
+    - name: Clear disk space
+      uses: ./.github/actions/disk
+    - name: Run setup
+      uses: ./.github/actions/setup
+    - name: Check benchmark naming conventions
+      run: python3 .github/scripts/lint_benchmark_names.py
 
   zepter:
     name: Feature Propagation
@@ -282,3 +296,40 @@ jobs:
         run: zepter format features
       - name: Lint feature propagation
         run: zepter run check
+
+  build:
+    name: "Build (toolchain: ${{ matrix.toolchain }})"
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        toolchain:
+          - msrv
+          - stable
+          - nightly
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
+      - name: Clear disk space
+        uses: ./.github/actions/disk
+      - name: Determine toolchain version
+        id: toolchain
+        run: |
+          if [ "${{ matrix.toolchain }}" = "msrv" ]; then
+            echo "version=$(yq -oy '.workspace.package.rust-version' Cargo.toml)" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=${{ matrix.toolchain }}" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Run setup
+        uses: ./.github/actions/setup
+        with:
+          additional-cache-key: toolchain-${{ matrix.toolchain }}
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@f7ccc83f9ed1e5b9c81d8a67d7ad1a747e22a561
+        with:
+          toolchain: ${{ steps.toolchain.outputs.version }}
+      - name: Print Rust version
+        run: rustc --version
+      - name: Build workspace
+        run: cargo build --workspace --all-targets --all-features

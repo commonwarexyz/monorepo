@@ -215,6 +215,23 @@ loop {
 }
 ```
 
+#### Deterministic RNG
+Use `commonware_utils::test_rng()` for random number generation in tests:
+```rust
+let mut rng = test_rng();
+let key = PrivateKey::random(&mut rng);
+```
+
+When you need multiple independent RNG streams in the same test (e.g., to generate
+non-overlapping keys), use `test_rng_seeded(seed)`:
+```rust
+let mut rng1 = test_rng();           // Stream 1: seed 0
+let mut rng2 = test_rng_seeded(1);   // Stream 2: seed 1
+```
+
+Avoid `OsRng`, `StdRng::from_entropy()`, or raw `StdRng::seed_from_u64()`.
+Exceptions: fuzz tests deriving seed from input, or loops testing multiple seeds.
+
 ### Simulated Network Testing
 To simulate network operations, use the simulated network (`p2p/src/simulated`):
 ```rust
@@ -329,12 +346,12 @@ fn test_storage_operations() {
             .expect("Failed to open blob");
 
         // Write data at offset
-        blob.write_at(vec![1, 2, 3, 4], 0)
+        blob.write_at(0, vec![1, 2, 3, 4])
             .await
             .expect("Failed to write");
 
         // Read data from offset
-        let data = blob.read_at(vec![0u8; 4], 0)
+        let data = blob.read_at(0, vec![0u8; 4])
             .await
             .expect("Failed to read");
 
@@ -393,7 +410,7 @@ fn test_corruption_recovery() {
             .unwrap();
 
         // Corrupt checksum or truncate data
-        blob.write_at(vec![0xFF; 4], size - 4).await.unwrap();
+        blob.write_at(size - 4, vec![0xFF; 4]).await.unwrap();
         blob.sync().await.unwrap();
 
         // Re-initialize and verify recovery
@@ -454,7 +471,7 @@ fn test_storage_conformance() {
 
         // Hash blob contents to verify format
         let (blob, size) = context.open(&partition, &name).await.unwrap();
-        let buf = blob.read_at(vec![0u8; size as usize], 0).await.unwrap();
+        let buf = blob.read_at(0, vec![0u8; size as usize]).await.unwrap().coalesce();
         let digest = hash(buf.as_ref());
 
         // Compare against known hash
@@ -646,7 +663,22 @@ mod tests {
 ### Module Structure
 - Keep `mod.rs` minimal with re-exports
 - Use `cfg_if!` for platform-specific code
-- Always place imports at the top of a module (never inline)
+- Always place imports at the top of a module (never inline within functions)
+
+```rust
+// BAD - inline import inside function
+fn foo() -> usize {
+    use crate::Bar;
+    Bar::get()
+}
+
+// GOOD - import at module top
+use crate::Bar;
+
+fn foo() -> usize {
+    Bar::get()
+}
+```
 
 ### Performance Patterns
 - Prefer `Bytes` over `Vec<u8>` for zero-copy operations

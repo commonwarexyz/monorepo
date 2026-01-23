@@ -1,6 +1,6 @@
 use crate::qmdb::{any::VariableValue, operation::Committable};
-use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt, Write};
+use commonware_runtime::{Buf, BufMut};
 use commonware_utils::hex;
 use core::fmt::Display;
 

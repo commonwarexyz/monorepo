@@ -11,5 +11,5 @@ mod data;
 pub mod discovery;
 pub mod lookup;
 mod mailbox;
-pub use mailbox::Mailbox;
+pub use mailbox::{Mailbox, UnboundedMailbox};
 mod relay;

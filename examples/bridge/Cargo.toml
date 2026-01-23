@@ -14,13 +14,13 @@ documentation = "https://docs.rs/commonware-bridge"
 workspace = true
 
 [dependencies]
-bytes.workspace = true
 clap.workspace = true
 commonware-codec.workspace = true
 commonware-consensus.workspace = true
 commonware-cryptography.workspace = true
 commonware-macros.workspace = true
 commonware-p2p.workspace = true
+commonware-parallel = { workspace = true, features = ["std"] }
 commonware-runtime.workspace = true
 commonware-storage = { workspace = true, features = ["std"] }
 commonware-stream.workspace = true
@@ -28,6 +28,7 @@ commonware-utils.workspace = true
 futures.workspace = true
 prometheus-client.workspace = true
 rand.workspace = true
+rand_core.workspace = true
 tracing.workspace = true
 tracing-subscriber = { workspace = true, features = ["fmt", "json"] }
 

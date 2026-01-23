@@ -259,7 +259,7 @@ pub async fn run(
                                 continue;
                             }
                             let mut successful = sender
-                                .send(Recipients::All, input.clone().into_bytes().into(), false)
+                                .send(Recipients::All, input.as_bytes(), false)
                                 .await
                                 .expect("failed to send message");
                             if !successful.is_empty() {
@@ -305,7 +305,7 @@ pub async fn run(
                             chrono::Local::now().format("%m/%d %H:%M:%S"),
                             &peer[..4],
                             &peer[peer.len() - 4..],
-                            String::from_utf8_lossy(&msg)
+                            String::from_utf8_lossy(msg.as_ref())
                         ).into());
                     }
                     Err(err) => {

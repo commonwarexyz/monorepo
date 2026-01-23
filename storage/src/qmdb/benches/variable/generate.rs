@@ -2,18 +2,17 @@
 //! that supports variable-size values.
 
 use crate::variable::{
-    gen_random_kv, gen_random_kv_batched, get_any_ordered, get_any_unordered, get_store, Variant,
+    gen_random_kv, gen_random_kv_batched, get_any_ordered, get_any_unordered, Digest, Variant,
     VARIANTS,
 };
-use commonware_cryptography::{Hasher, Sha256};
 use commonware_runtime::{
     benchmarks::{context, tokio},
     tokio::{Config, Context},
 };
-use commonware_storage::{
-    kv::{Batchable, Deletable},
-    qmdb::{store::LogStorePrunable, Error},
-    Persistable,
+use commonware_storage::qmdb::{
+    any::states::{CleanAny, MutableAny, UnmerkleizedDurableAny},
+    store::LogStore,
+    Error,
 };
 use criterion::{criterion_group, Criterion};
 use std::time::{Duration, Instant};
@@ -47,18 +46,6 @@ fn bench_variable_generate(c: &mut Criterion) {
                                     let commit_frequency =
                                         (operations / COMMITS_PER_ITERATION) as u32;
                                     let elapsed = match variant {
-                                        Variant::Store => {
-                                            let db = get_store(ctx.clone()).await;
-                                            test_db(
-                                                db,
-                                                use_batch,
-                                                elements,
-                                                operations,
-                                                commit_frequency,
-                                            )
-                                            .await
-                                            .unwrap()
-                                        }
                                         Variant::AnyUnordered => {
                                             let db = get_any_unordered(ctx.clone()).await;
                                             test_db(
@@ -96,27 +83,42 @@ fn bench_variable_generate(c: &mut Criterion) {
     }
 }
 
-async fn test_db<A>(
-    db: A,
+/// Test the database generation and cleanup.
+///
+/// Takes a clean database, converts to mutable, generates data, then prunes and destroys.
+async fn test_db<C>(
+    db: C,
     use_batch: bool,
     elements: u64,
     operations: u64,
     commit_frequency: u32,
 ) -> Result<Duration, Error>
 where
-    A: Batchable<Key = <Sha256 as Hasher>::Digest, Value = Vec<u8>>
-        + Persistable<Error = Error>
-        + Deletable
-        + LogStorePrunable,
+    C: CleanAny<Key = Digest>,
+    C::Mutable: MutableAny<Key = Digest> + LogStore<Value = Vec<u8>>,
+    <C::Mutable as MutableAny>::Durable:
+        UnmerkleizedDurableAny<Mutable = C::Mutable, Merkleized = C>,
 {
     let start = Instant::now();
-    let db = if use_batch {
-        gen_random_kv_batched(db, elements, operations, commit_frequency).await
+
+    // Convert clean → mutable
+    let mutable = db.into_mutable();
+
+    // Generate random operations, returns in durable state
+    let durable = if use_batch {
+        gen_random_kv_batched(mutable, elements, operations, commit_frequency).await
     } else {
-        gen_random_kv(db, elements, operations, commit_frequency).await
+        gen_random_kv(mutable, elements, operations, commit_frequency).await
     };
+
+    // Convert durable → provable (clean) for pruning
+    let mut clean = durable.into_merkleized().await?;
+    clean.prune(clean.inactivity_floor_loc()).await?;
+    clean.sync().await?;
+
     let elapsed = start.elapsed();
-    db.destroy().await?;
+    clean.destroy().await?; // don't time destroy
+
     Ok(elapsed)
 }
 

@@ -1,6 +1,6 @@
 use crate::authenticated::data::Data;
-use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error, Read, ReadExt, Write};
+use commonware_runtime::{Buf, BufMut};
 
 /// The maximum overhead (in bytes) when encoding a [Data].
 ///
@@ -72,12 +72,12 @@ impl Read for Message {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bytes::Bytes;
     use commonware_codec::{Decode as _, Encode as _, Error};
+    use commonware_runtime::IoBuf;
 
     #[test]
     fn test_max_payload_overhead() {
-        let message = Bytes::from(vec![0; 1 << 29]);
+        let message = IoBuf::from(vec![0; 1 << 29]);
         let message_len = message.len();
         let payload = Message::Data(Data {
             channel: u64::MAX,
@@ -93,15 +93,15 @@ mod tests {
     fn test_decode_data_within_limit() {
         let payload = Message::Data(Data {
             channel: 7,
-            message: Bytes::from_static(b"ping"),
+            message: IoBuf::from(b"ping"),
         });
-        let encoded = payload.encode().freeze();
+        let encoded = payload.encode();
 
         let decoded = Message::decode_cfg(encoded, &4).expect("within limit");
         match decoded {
             Message::Data(data) => {
                 assert_eq!(data.channel, 7);
-                assert_eq!(data.message, Bytes::from_static(b"ping"));
+                assert_eq!(data.message, IoBuf::from(b"ping"));
             }
             other => panic!("unexpected message variant: {other:?}"),
         }
@@ -111,9 +111,9 @@ mod tests {
     fn test_decode_data_exceeding_limit() {
         let payload = Message::Data(Data {
             channel: 9,
-            message: Bytes::from_static(b"hello"),
+            message: IoBuf::from(b"hello"),
         });
-        let encoded = payload.encode().freeze();
+        let encoded = payload.encode();
 
         let result = Message::decode_cfg(encoded, &4);
         assert!(matches!(result, Err(Error::InvalidLength(5))));

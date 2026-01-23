@@ -5,7 +5,7 @@
 //! Certificates contain signer indices alongside an aggregated signature,
 //! enabling secure per-validator activity tracking and conflict detection.
 
-use crate::simplex::types::Subject;
+use crate::simplex::{scheme::Namespace, types::Subject};
 use commonware_cryptography::impl_certificate_bls12381_multisig;
 
-impl_certificate_bls12381_multisig!(Subject<'a, D>);
+impl_certificate_bls12381_multisig!(Subject<'a, D>, Namespace);

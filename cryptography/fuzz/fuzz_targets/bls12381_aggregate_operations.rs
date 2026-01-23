@@ -3,54 +3,54 @@
 use arbitrary::{Arbitrary, Unstructured};
 use commonware_cryptography::bls12381::primitives::{
     group::{G1, G2},
-    ops::*,
+    ops::aggregate,
     variant::{MinPk, MinSig},
 };
+use commonware_parallel::{Rayon, Sequential};
 use libfuzzer_sys::fuzz_target;
+use std::num::NonZeroUsize;
 
 mod common;
 use common::{
-    arbitrary_bytes, arbitrary_g1, arbitrary_g2, arbitrary_messages, arbitrary_optional_bytes,
-    arbitrary_vec_g1, arbitrary_vec_g2,
+    arbitrary_bytes, arbitrary_g1, arbitrary_g2, arbitrary_messages, arbitrary_vec_g1,
+    arbitrary_vec_g2,
 };
-
-type Message = (Option<Vec<u8>>, Vec<u8>);
 
 #[derive(Debug)]
 enum FuzzOperation {
-    PublicKeysMinPk {
+    CombinePublicKeysMinPk {
         public_keys: Vec<G1>,
     },
-    PublicKeysMinSig {
+    CombinePublicKeysMinSig {
         public_keys: Vec<G2>,
     },
-    SignaturesMinPk {
+    CombineSignaturesMinPk {
         signatures: Vec<G2>,
     },
-    SignaturesMinSig {
+    CombineSignaturesMinSig {
         signatures: Vec<G1>,
     },
-    AggregateVerifyMultiplePublicKeysMinPk {
+    VerifySameMessageMinPk {
         public_keys: Vec<G1>,
-        namespace: Option<Vec<u8>>,
+        namespace: Vec<u8>,
         message: Vec<u8>,
         signature: G2,
     },
-    AggregateVerifyMultiplePublicKeysMinSig {
+    VerifySameMessageMinSig {
         public_keys: Vec<G2>,
-        namespace: Option<Vec<u8>>,
+        namespace: Vec<u8>,
         message: Vec<u8>,
         signature: G1,
     },
-    AggregateVerifyMultipleMessagesMinPk {
+    VerifySameSignerMinPk {
         public_key: G1,
-        messages: Vec<(Option<Vec<u8>>, Vec<u8>)>,
+        messages: Vec<(Vec<u8>, Vec<u8>)>,
         signature: G2,
         concurrency: usize,
     },
-    AggregateVerifyMultipleMessagesMinSig {
+    VerifySameSignerMinSig {
         public_key: G2,
-        messages: Vec<(Option<Vec<u8>>, Vec<u8>)>,
+        messages: Vec<(Vec<u8>, Vec<u8>)>,
         signature: G1,
         concurrency: usize,
     },
@@ -61,43 +61,43 @@ impl<'a> Arbitrary<'a> for FuzzOperation {
         let choice = u.int_in_range(0..=7)?;
 
         match choice {
-            0 => Ok(FuzzOperation::PublicKeysMinPk {
+            0 => Ok(FuzzOperation::CombinePublicKeysMinPk {
                 public_keys: arbitrary_vec_g1(u, 0, 20)?,
             }),
-            1 => Ok(FuzzOperation::PublicKeysMinSig {
+            1 => Ok(FuzzOperation::CombinePublicKeysMinSig {
                 public_keys: arbitrary_vec_g2(u, 0, 20)?,
             }),
-            2 => Ok(FuzzOperation::SignaturesMinPk {
+            2 => Ok(FuzzOperation::CombineSignaturesMinPk {
                 signatures: arbitrary_vec_g2(u, 0, 20)?,
             }),
-            3 => Ok(FuzzOperation::SignaturesMinSig {
+            3 => Ok(FuzzOperation::CombineSignaturesMinSig {
                 signatures: arbitrary_vec_g1(u, 0, 20)?,
             }),
-            4 => Ok(FuzzOperation::AggregateVerifyMultiplePublicKeysMinPk {
+            4 => Ok(FuzzOperation::VerifySameMessageMinPk {
                 public_keys: arbitrary_vec_g1(u, 0, 20)?,
-                namespace: arbitrary_optional_bytes(u, 50)?,
+                namespace: arbitrary_bytes(u, 0, 50)?,
                 message: arbitrary_bytes(u, 0, 100)?,
                 signature: arbitrary_g2(u)?,
             }),
-            5 => Ok(FuzzOperation::AggregateVerifyMultiplePublicKeysMinSig {
+            5 => Ok(FuzzOperation::VerifySameMessageMinSig {
                 public_keys: arbitrary_vec_g2(u, 0, 20)?,
-                namespace: arbitrary_optional_bytes(u, 50)?,
+                namespace: arbitrary_bytes(u, 0, 50)?,
                 message: arbitrary_bytes(u, 0, 100)?,
                 signature: arbitrary_g1(u)?,
             }),
-            6 => Ok(FuzzOperation::AggregateVerifyMultipleMessagesMinPk {
+            6 => Ok(FuzzOperation::VerifySameSignerMinPk {
                 public_key: arbitrary_g1(u)?,
-                messages: arbitrary_messages(u, 0, 20)?,
+                messages: arbitrary_messages(u, 1, 20)?,
                 signature: arbitrary_g2(u)?,
                 concurrency: u.int_in_range(1..=8)?,
             }),
-            7 => Ok(FuzzOperation::AggregateVerifyMultipleMessagesMinSig {
+            7 => Ok(FuzzOperation::VerifySameSignerMinSig {
                 public_key: arbitrary_g2(u)?,
-                messages: arbitrary_messages(u, 0, 20)?,
+                messages: arbitrary_messages(u, 1, 20)?,
                 signature: arbitrary_g1(u)?,
                 concurrency: u.int_in_range(1..=8)?,
             }),
-            _ => Ok(FuzzOperation::PublicKeysMinPk {
+            _ => Ok(FuzzOperation::CombinePublicKeysMinPk {
                 public_keys: Vec::new(),
             }),
         }
@@ -106,102 +106,100 @@ impl<'a> Arbitrary<'a> for FuzzOperation {
 
 fn fuzz(op: FuzzOperation) {
     match op {
-        FuzzOperation::PublicKeysMinPk { public_keys } => {
+        FuzzOperation::CombinePublicKeysMinPk { public_keys } => {
             if !public_keys.is_empty() {
-                let _result = aggregate_public_keys::<MinPk, _>(&public_keys);
+                let _result = aggregate::combine_public_keys::<MinPk, _>(&public_keys);
             }
         }
 
-        FuzzOperation::PublicKeysMinSig { public_keys } => {
+        FuzzOperation::CombinePublicKeysMinSig { public_keys } => {
             if !public_keys.is_empty() {
-                let _result = aggregate_public_keys::<MinSig, _>(&public_keys);
+                let _result = aggregate::combine_public_keys::<MinSig, _>(&public_keys);
             }
         }
 
-        FuzzOperation::SignaturesMinPk { signatures } => {
+        FuzzOperation::CombineSignaturesMinPk { signatures } => {
             if !signatures.is_empty() {
-                let _result = aggregate_signatures::<MinPk, _>(&signatures);
+                let _result = aggregate::combine_signatures::<MinPk, _>(&signatures);
             }
         }
 
-        FuzzOperation::SignaturesMinSig { signatures } => {
+        FuzzOperation::CombineSignaturesMinSig { signatures } => {
             if !signatures.is_empty() {
-                let _result = aggregate_signatures::<MinSig, _>(&signatures);
+                let _result = aggregate::combine_signatures::<MinSig, _>(&signatures);
             }
         }
 
-        FuzzOperation::AggregateVerifyMultiplePublicKeysMinPk {
+        FuzzOperation::VerifySameMessageMinPk {
             public_keys,
             namespace,
             message,
             signature,
         } => {
             if !public_keys.is_empty() {
-                let _ = aggregate_verify_multiple_public_keys::<MinPk, _>(
-                    &public_keys,
-                    namespace.as_deref(),
-                    &message,
-                    &signature,
+                let agg_pk = aggregate::combine_public_keys::<MinPk, _>(&public_keys);
+                let agg_sig = aggregate::combine_signatures::<MinPk, _>([&signature]);
+                let _ = aggregate::verify_same_message::<MinPk>(
+                    &agg_pk, &namespace, &message, &agg_sig,
                 );
             }
         }
 
-        FuzzOperation::AggregateVerifyMultiplePublicKeysMinSig {
+        FuzzOperation::VerifySameMessageMinSig {
             public_keys,
             namespace,
             message,
             signature,
         } => {
             if !public_keys.is_empty() {
-                let _ = aggregate_verify_multiple_public_keys::<MinSig, _>(
-                    &public_keys,
-                    namespace.as_deref(),
-                    &message,
-                    &signature,
+                let agg_pk = aggregate::combine_public_keys::<MinSig, _>(&public_keys);
+                let agg_sig = aggregate::combine_signatures::<MinSig, _>([&signature]);
+                let _ = aggregate::verify_same_message::<MinSig>(
+                    &agg_pk, &namespace, &message, &agg_sig,
                 );
             }
         }
 
-        FuzzOperation::AggregateVerifyMultipleMessagesMinPk {
+        FuzzOperation::VerifySameSignerMinPk {
             public_key,
             messages,
             signature,
             concurrency,
         } => {
-            if !messages.is_empty() && concurrency > 0 {
-                let messages_refs: Vec<(Option<&[u8]>, &[u8])> = messages
-                    .iter()
-                    .map(|(ns, msg)| (ns.as_deref(), msg.as_slice()))
-                    .collect();
+            let messages_refs: Vec<(&[u8], &[u8])> = messages
+                .iter()
+                .map(|(ns, msg)| (ns.as_slice(), msg.as_slice()))
+                .collect();
 
-                let _ = aggregate_verify_multiple_messages::<MinPk, _>(
-                    &public_key,
-                    &messages_refs,
-                    &signature,
-                    concurrency,
-                );
-            }
+            let combined_msg = if concurrency > 1 {
+                let strategy = Rayon::new(NonZeroUsize::new(concurrency).unwrap()).unwrap();
+                aggregate::combine_messages::<MinPk, _>(&messages_refs, &strategy)
+            } else {
+                aggregate::combine_messages::<MinPk, _>(&messages_refs, &Sequential)
+            };
+            let agg_sig = aggregate::combine_signatures::<MinPk, _>([&signature]);
+            let _ = aggregate::verify_same_signer::<MinPk>(&public_key, &combined_msg, &agg_sig);
         }
 
-        FuzzOperation::AggregateVerifyMultipleMessagesMinSig {
+        FuzzOperation::VerifySameSignerMinSig {
             public_key,
             messages,
             signature,
             concurrency,
         } => {
-            if !messages.is_empty() && concurrency > 0 {
-                let messages_refs: Vec<(Option<&[u8]>, &[u8])> = messages
-                    .iter()
-                    .map(|(ns, msg)| (ns.as_deref(), msg.as_slice()))
-                    .collect();
+            let messages_refs: Vec<(&[u8], &[u8])> = messages
+                .iter()
+                .map(|(ns, msg)| (ns.as_slice(), msg.as_slice()))
+                .collect();
 
-                let _ = aggregate_verify_multiple_messages::<MinSig, _>(
-                    &public_key,
-                    &messages_refs,
-                    &signature,
-                    concurrency,
-                );
-            }
+            let combined_msg = if concurrency > 1 {
+                let strategy = Rayon::new(NonZeroUsize::new(concurrency).unwrap()).unwrap();
+                aggregate::combine_messages::<MinSig, _>(&messages_refs, &strategy)
+            } else {
+                aggregate::combine_messages::<MinSig, _>(&messages_refs, &Sequential)
+            };
+            let agg_sig = aggregate::combine_signatures::<MinSig, _>([&signature]);
+            let _ = aggregate::verify_same_signer::<MinSig>(&public_key, &combined_msg, &agg_sig);
         }
     }
 }

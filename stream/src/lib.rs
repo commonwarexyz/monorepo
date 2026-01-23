@@ -63,7 +63,6 @@
 pub mod utils;
 
 use crate::utils::codec::{recv_frame, send_frame};
-use bytes::Bytes;
 use commonware_codec::{DecodeExt, Encode as _, Error as CodecError};
 use commonware_cryptography::{
     handshake::{
@@ -74,7 +73,7 @@ use commonware_cryptography::{
     Signer,
 };
 use commonware_macros::select;
-use commonware_runtime::{Clock, Error as RuntimeError, Sink, Stream};
+use commonware_runtime::{Clock, Error as RuntimeError, IoBuf, IoBufs, Sink, Stream};
 use commonware_utils::{hex, SystemTimeExt};
 use rand_core::CryptoRngCore;
 use std::{future::Future, ops::Range, time::Duration};
@@ -181,7 +180,7 @@ pub async fn dial<R: CryptoRngCore + Clock, S: Signer, I: Stream, O: Sink>(
     let inner_routine = async move {
         send_frame(
             &mut sink,
-            config.signing_key.public_key().encode().as_ref(),
+            config.signing_key.public_key().encode(),
             config.max_message_size,
         )
         .await?;
@@ -197,13 +196,13 @@ pub async fn dial<R: CryptoRngCore + Clock, S: Signer, I: Stream, O: Sink>(
                 peer,
             ),
         );
-        send_frame(&mut sink, &syn.encode(), config.max_message_size).await?;
+        send_frame(&mut sink, syn.encode(), config.max_message_size).await?;
 
         let syn_ack_bytes = recv_frame(&mut stream, config.max_message_size).await?;
         let syn_ack = SynAck::<S::Signature>::decode(syn_ack_bytes)?;
 
         let (ack, send, recv) = dial_end(state, syn_ack)?;
-        send_frame(&mut sink, &ack.encode(), config.max_message_size).await?;
+        send_frame(&mut sink, ack.encode(), config.max_message_size).await?;
 
         Ok((
             Sender {
@@ -264,7 +263,7 @@ pub async fn listen<
             ),
             msg1,
         )?;
-        send_frame(&mut sink, &syn_ack.encode(), config.max_message_size).await?;
+        send_frame(&mut sink, syn_ack.encode(), config.max_message_size).await?;
 
         let ack_bytes = recv_frame(&mut stream, config.max_message_size).await?;
         let ack = Ack::decode(ack_bytes)?;
@@ -301,11 +300,15 @@ pub struct Sender<O> {
 
 impl<O: Sink> Sender<O> {
     /// Encrypts and sends a message to the peer.
-    pub async fn send(&mut self, msg: &[u8]) -> Result<(), Error> {
-        let c = self.cipher.send(msg)?;
+    pub async fn send(&mut self, buf: impl Into<IoBufs>) -> Result<(), Error> {
+        let bufs = buf.into();
+        // Ensure contiguous memory for encryption.
+        let msg = bufs.coalesce();
+        let c = self.cipher.send(msg.as_ref())?;
+
         send_frame(
             &mut self.sink,
-            &c,
+            IoBuf::from(c),
             self.max_message_size.saturating_add(CIPHERTEXT_OVERHEAD),
         )
         .await?;
@@ -322,13 +325,14 @@ pub struct Receiver<I> {
 
 impl<I: Stream> Receiver<I> {
     /// Receives and decrypts a message from the peer.
-    pub async fn recv(&mut self) -> Result<Bytes, Error> {
-        let c = recv_frame(
+    pub async fn recv(&mut self) -> Result<IoBufs, Error> {
+        let encrypted = recv_frame(
             &mut self.stream,
             self.max_message_size.saturating_add(CIPHERTEXT_OVERHEAD),
         )
-        .await?;
-        Ok(self.cipher.recv(&c)?.into())
+        .await?
+        .coalesce();
+        Ok(self.cipher.recv(encrypted.as_ref())?.into())
     }
 }
 
@@ -394,12 +398,12 @@ mod test {
             assert_eq!(listener_peer, dialer_crypto.public_key());
             let messages: Vec<&'static [u8]> = vec![b"A", b"B", b"C"];
             for msg in &messages {
-                dialer_sender.send(msg).await?;
+                dialer_sender.send(&msg[..]).await?;
                 let syn_ack = listener_receiver.recv().await?;
-                assert_eq!(msg, &syn_ack);
-                listener_sender.send(msg).await?;
+                assert_eq!(syn_ack.coalesce(), *msg);
+                listener_sender.send(&msg[..]).await?;
                 let ack = dialer_receiver.recv().await?;
-                assert_eq!(msg, &ack);
+                assert_eq!(ack.coalesce(), *msg);
             }
             Ok(())
         })

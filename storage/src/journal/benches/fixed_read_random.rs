@@ -1,4 +1,4 @@
-use super::{append_random_data, get_journal};
+use crate::{append_fixed_random_data, get_fixed_journal};
 use commonware_runtime::{
     benchmarks::{context, tokio},
     tokio::{Config, Context, Runner},
@@ -60,8 +60,8 @@ fn bench_fixed_read_random(c: &mut Criterion) {
     let runner = Runner::new(cfg.clone());
     runner.start(|ctx| async move {
         // Create a large temp journal with random data.
-        let mut j = get_journal(ctx, PARTITION, ITEMS_PER_BLOB).await;
-        append_random_data::<ITEM_SIZE>(&mut j, ITEMS_TO_WRITE).await;
+        let mut j = get_fixed_journal(ctx, PARTITION, ITEMS_PER_BLOB).await;
+        append_fixed_random_data::<_, ITEM_SIZE>(&mut j, ITEMS_TO_WRITE).await;
         j.sync().await.unwrap();
     });
 
@@ -80,7 +80,7 @@ fn bench_fixed_read_random(c: &mut Criterion) {
                 |b| {
                     b.to_async(&runner).iter_custom(|iters| async move {
                         let ctx = context::get::<commonware_runtime::tokio::Context>();
-                        let j = get_journal(ctx.clone(), PARTITION, ITEMS_PER_BLOB).await;
+                        let j = get_fixed_journal(ctx.clone(), PARTITION, ITEMS_PER_BLOB).await;
                         let mut duration = Duration::ZERO;
                         for _ in 0..iters {
                             let start = Instant::now();
@@ -101,7 +101,7 @@ fn bench_fixed_read_random(c: &mut Criterion) {
     // Clean up the temp journal
     let runner = Runner::new(cfg);
     runner.start(|context| async move {
-        let j = get_journal::<ITEM_SIZE>(context, PARTITION, ITEMS_PER_BLOB).await;
+        let j = get_fixed_journal::<ITEM_SIZE>(context, PARTITION, ITEMS_PER_BLOB).await;
         j.destroy().await.unwrap();
     });
 }

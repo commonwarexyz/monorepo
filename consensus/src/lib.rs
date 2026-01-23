@@ -18,13 +18,20 @@ pub mod ordered_broadcast;
 pub mod simplex;
 pub mod types;
 
-use types::{Epoch, View};
+use types::{Epoch, Height, View};
 
 /// Epochable is a trait that provides access to the epoch number.
 /// Any consensus message or object that is associated with a specific epoch should implement this.
 pub trait Epochable {
     /// Returns the epoch associated with this object.
     fn epoch(&self) -> Epoch;
+}
+
+/// Heightable is a trait that provides access to the height.
+/// Any consensus message or object that is associated with a specific height should implement this.
+pub trait Heightable {
+    /// Returns the height associated with this object.
+    fn height(&self) -> Height;
 }
 
 /// Viewable is a trait that provides access to the view (round) number.
@@ -37,22 +44,34 @@ pub trait Viewable {
 /// Block is the interface for a block in the blockchain.
 ///
 /// Blocks are used to track the progress of the consensus engine.
-pub trait Block: Codec + Digestible + Committable + Send + Sync + 'static {
-    /// Get the height of the block.
-    fn height(&self) -> u64;
-
+pub trait Block: Heightable + Codec + Digestible + Committable + Send + Sync + 'static {
     /// Get the parent block's digest.
     fn parent(&self) -> Self::Commitment;
+}
+
+/// CertifiableBlock extends [Block] with consensus context information.
+///
+/// This trait is required for blocks used with deferred verification in [CertifiableAutomaton].
+/// It allows the verification context to be derived directly from the block when a validator
+/// needs to participate in certification but never verified the block locally (necessary for liveness).
+pub trait CertifiableBlock: Block {
+    /// The consensus context type stored in this block.
+    type Context: Clone;
+
+    /// Get the consensus context that was used when this block was proposed.
+    fn context(&self) -> Self::Context;
 }
 
 cfg_if::cfg_if! {
     if #[cfg(not(target_arch = "wasm32"))] {
         use commonware_cryptography::Digest;
+        use commonware_utils::channels::fallible::OneshotExt;
         use futures::channel::{oneshot, mpsc};
         use std::future::Future;
         use commonware_runtime::{Spawner, Metrics, Clock};
         use rand::Rng;
         use crate::marshal::ingress::mailbox::AncestorStream;
+        use crate::types::Round;
         use commonware_cryptography::certificate::Scheme;
 
         pub mod application;
@@ -109,20 +128,26 @@ cfg_if::cfg_if! {
         pub trait CertifiableAutomaton: Automaton {
             /// Determine whether a verified payload is safe to commit.
             ///
-            /// If context is required during certify, it must be included in the
-            /// data associated with the payload.
+            /// The round parameter identifies which consensus round is being certified, allowing
+            /// applications to associate certification with the correct verification context.
             ///
-            /// Applications that employ erasure coding can override this method to delay or prevent
-            /// finalization until they have reconstructed and validated the full block (e.g. after
-            /// receiving enough shards).
+            /// Note: In applications where payloads incorporate the round number (recommended),
+            /// each round will have a unique payload digest. However, the same payload may appear
+            /// in multiple rounds when re-proposing notarized blocks at epoch boundaries or in
+            /// integrations where payloads are round-agnostic.
+            ///
+            /// This is particularly useful for applications that employ erasure coding, which
+            /// can override this method to delay or prevent finalization until they have
+            /// reconstructed and validated the full block (e.g., after receiving enough shards).
             fn certify(
                 &mut self,
+                _round: Round,
                 _payload: Self::Digest,
             ) -> impl Future<Output = oneshot::Receiver<bool>> + Send {
                 #[allow(clippy::async_yields_async)]
                 async move {
                     let (sender, receiver) = oneshot::channel();
-                    let _ = sender.send(true);
+                    sender.send_lossy(true);
                     receiver
                 }
             }

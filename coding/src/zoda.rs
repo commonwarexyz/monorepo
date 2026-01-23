@@ -113,6 +113,7 @@
 //! ## Decoding
 //!
 //! 1. Given n checked shards, you have n S encoded rows, which can be Reed-Solomon decoded.
+
 use crate::{Config, Scheme, ValidatingScheme};
 use bytes::BufMut;
 use commonware_codec::{Encode, EncodeSize, FixedSize, RangeCfg, Read, ReadExt, Write};
@@ -124,12 +125,9 @@ use commonware_math::{
     fields::goldilocks::F,
     ntt::{EvaluationVector, Matrix},
 };
-use commonware_storage::mmr::{
-    mem::DirtyMmr, verification::multi_proof, Error as MmrError, Location, Proof, StandardHasher,
-};
-use futures::executor::block_on;
+use commonware_parallel::Strategy;
+use commonware_storage::bmt::{Builder as BmtBuilder, Error as BmtError, Proof};
 use rand::seq::SliceRandom as _;
-use rayon::{iter::ParallelIterator, prelude::IntoParallelIterator, ThreadPoolBuilder};
 use std::{marker::PhantomData, sync::Arc};
 use thiserror::Error;
 
@@ -438,7 +436,6 @@ impl<H: Hasher> Read for ReShard<H> {
         let max_data_els = F::bits_to_elements(max_data_bits).max(1);
         Ok(Self {
             // Worst case: every row is one data element, and the sample size is all rows.
-            // TODO (#2506): use correct bounds on inclusion proof size
             inclusion_proof: Read::read_cfg(buf, &max_data_els)?,
             shard: Read::read_cfg(buf, &max_data_els)?,
         })
@@ -467,8 +464,15 @@ pub struct CheckedShard {
 /// Take indices up to `total`, and shuffle them.
 ///
 /// The shuffle depends, deterministically, on the transcript.
-fn shuffle_indices(transcript: &Transcript, total: usize) -> Vec<Location> {
-    let mut out = (0..total as u64).map(Location::from).collect::<Vec<_>>();
+///
+/// # Panics
+///
+/// Panics if `total` exceeds `u32::MAX`.
+fn shuffle_indices(transcript: &Transcript, total: usize) -> Vec<u32> {
+    let total: u32 = total
+        .try_into()
+        .expect("encoded_rows exceeds u32::MAX; data too large for ZODA");
+    let mut out = (0..total).collect::<Vec<_>>();
     out.shuffle(&mut transcript.noise(b"shuffle"));
     out
 }
@@ -491,7 +495,7 @@ pub struct CheckingData<H: Hasher> {
     root: H::Digest,
     checking_matrix: Matrix,
     encoded_checksum: Matrix,
-    shuffled_indices: Vec<Location>,
+    shuffled_indices: Vec<u32>,
 }
 
 impl<H: Hasher> CheckingData<H> {
@@ -549,24 +553,29 @@ impl<H: Hasher> CheckingData<H> {
         let index = index as usize;
         let these_shuffled_indices = &self.shuffled_indices
             [index * self.topology.samples..(index + 1) * self.topology.samples];
-        let proof_elements = {
-            these_shuffled_indices
-                .iter()
-                .zip(reshard.shard.iter())
-                .map(|(&i, row)| (row_digest::<H>(row), i))
-                .collect::<Vec<_>>()
-        };
-        if !reshard.inclusion_proof.verify_multi_inclusion(
-            &mut StandardHasher::<H>::new(),
-            &proof_elements,
-            &self.root,
-        ) {
+
+        // Build elements for BMT multi-proof verification using the deterministically
+        // computed indices for this shard
+        let proof_elements: Vec<(H::Digest, u32)> = these_shuffled_indices
+            .iter()
+            .zip(reshard.shard.iter())
+            .map(|(&i, row)| (row_digest::<H>(row), i))
+            .collect();
+
+        // Verify the multi-proof
+        let mut hasher = H::new();
+        if reshard
+            .inclusion_proof
+            .verify_multi_inclusion(&mut hasher, &proof_elements, &self.root)
+            .is_err()
+        {
             return Err(Error::InvalidReShard);
         }
+
         let shard_checksum = reshard.shard.mul(&self.checking_matrix);
         // Check that the shard checksum rows match the encoded checksums
         for (row, &i) in shard_checksum.iter().zip(these_shuffled_indices) {
-            if row != &self.encoded_checksum[u64::from(i) as usize] {
+            if row != &self.encoded_checksum[i as usize] {
                 return Err(Error::InvalidReShard);
             }
         }
@@ -590,7 +599,7 @@ pub enum Error {
     #[error("insufficient unique rows {0} < {1}")]
     InsufficientUniqueRows(usize, usize),
     #[error("failed to create inclusion proof: {0}")]
-    FailedToCreateInclusionProof(MmrError),
+    FailedToCreateInclusionProof(BmtError),
 }
 
 // TODO (#2506): rename this to `_COMMONWARE_CODING_ZODA`
@@ -623,7 +632,7 @@ impl<H: Hasher> Scheme for Zoda<H> {
     fn encode(
         config: &Config,
         data: impl bytes::Buf,
-        concurrency: usize,
+        strategy: &impl Strategy,
     ) -> Result<(Self::Commitment, Vec<Self::Shard>), Self::Error> {
         // Step 1: arrange the data as a matrix.
         let data_bytes = data.remaining();
@@ -641,30 +650,16 @@ impl<H: Hasher> Scheme for Zoda<H> {
             .evaluate()
             .data();
 
-        // Step 3: Commit to the rows of the data.
-        let mut hasher = StandardHasher::<H>::new();
-        let mut mmr = DirtyMmr::new();
-        if concurrency > 1 {
-            let pool = ThreadPoolBuilder::new()
-                .num_threads(concurrency)
-                .build()
-                .expect("failed to build thread pool");
-            let row_hashes = pool.install(|| {
-                (0..encoded_data.rows())
-                    .into_par_iter()
-                    .map(|i| row_digest::<H>(&encoded_data[i]))
-                    .collect::<Vec<_>>()
-            });
-            for hash in &row_hashes {
-                mmr.add(&mut hasher, hash);
-            }
-        } else {
-            for row in encoded_data.iter() {
-                mmr.add(&mut hasher, &row_digest::<H>(row));
-            }
+        // Step 3: Commit to the rows of the data using a Binary Merkle Tree.
+        let row_hashes: Vec<H::Digest> = strategy.map_collect_vec(0..encoded_data.rows(), |i| {
+            row_digest::<H>(&encoded_data[i])
+        });
+        let mut bmt_builder = BmtBuilder::<H>::new(row_hashes.len());
+        for hash in &row_hashes {
+            bmt_builder.add(hash);
         }
-        let mmr = mmr.merkleize(&mut hasher, None);
-        let root = *mmr.root();
+        let bmt = bmt_builder.build();
+        let root = bmt.root();
 
         // Step 4: Commit to the root, and the size of the data.
         let mut transcript = Transcript::new(NAMESPACE);
@@ -680,20 +675,20 @@ impl<H: Hasher> Scheme for Zoda<H> {
         // Step 6: Multiply the data with the checking matrix.
         let checksum = Arc::new(data.mul(&checking_matrix));
 
-        // Step 7: Produce the shards.
-        // We can't use "chunks" because we need to handle a sample size of 0
-        let index_chunks = (0..topology.total_shards)
-            .map(|i| &shuffled_indices[i * topology.samples..(i + 1) * topology.samples]);
-        let shards = index_chunks
-            .map(|indices| {
+        // Step 7: Produce the shards in parallel.
+        let shard_results: Vec<Result<Shard<H>, Error>> =
+            strategy.map_collect_vec(0..topology.total_shards, |shard_idx| {
+                let indices = &shuffled_indices
+                    [shard_idx * topology.samples..(shard_idx + 1) * topology.samples];
                 let rows = Matrix::init(
                     indices.len(),
                     topology.data_cols,
                     indices
                         .iter()
-                        .flat_map(|&i| encoded_data[u64::from(i) as usize].iter().copied()),
+                        .flat_map(|&i| encoded_data[i as usize].iter().copied()),
                 );
-                let inclusion_proof = block_on(multi_proof(&mmr, indices))
+                let inclusion_proof = bmt
+                    .multi_proof(indices)
                     .map_err(Error::FailedToCreateInclusionProof)?;
                 Ok(Shard {
                     data_bytes,
@@ -702,7 +697,9 @@ impl<H: Hasher> Scheme for Zoda<H> {
                     rows,
                     checksum: checksum.clone(),
                 })
-            })
+            });
+        let shards = shard_results
+            .into_iter()
             .collect::<Result<Vec<_>, Error>>()?;
         Ok((commitment, shards))
     }
@@ -743,7 +740,7 @@ impl<H: Hasher> Scheme for Zoda<H> {
         _commitment: &Self::Commitment,
         checking_data: Self::CheckingData,
         shards: &[Self::CheckedShard],
-        _concurrency: usize,
+        _strategy: &impl Strategy,
     ) -> Result<Vec<u8>, Self::Error> {
         let Topology {
             encoded_rows,
@@ -791,8 +788,9 @@ mod tests {
     use super::*;
     use crate::{CodecConfig, Config};
     use commonware_cryptography::Sha256;
+    use commonware_parallel::Sequential;
 
-    const CONCURRENCY: usize = 1;
+    const STRATEGY: Sequential = Sequential;
 
     #[test]
     fn topology_reckon_handles_small_extra_shards() {
@@ -828,7 +826,7 @@ mod tests {
         let data = vec![0xAA; 64];
 
         let (commitment, shards) =
-            Zoda::<Sha256>::encode(&config, data.as_slice(), CONCURRENCY).unwrap();
+            Zoda::<Sha256>::encode(&config, data.as_slice(), &STRATEGY).unwrap();
         let shard = shards.into_iter().next().unwrap();
 
         let (_, _, reshard) = Zoda::<Sha256>::reshard(&config, &commitment, 0, shard).unwrap();
@@ -854,7 +852,7 @@ mod tests {
             extra_shards: 0,
         };
         let data = b"duplicate shard coverage";
-        let (commitment, shards) = Zoda::<Sha256>::encode(&config, &data[..], CONCURRENCY).unwrap();
+        let (commitment, shards) = Zoda::<Sha256>::encode(&config, &data[..], &STRATEGY).unwrap();
         let shard0 = shards[0].clone();
         let (checking_data, checked_shard0, _reshard0) =
             Zoda::<Sha256>::reshard(&config, &commitment, 0, shard0).unwrap();
@@ -864,7 +862,7 @@ mod tests {
         };
         let shards = vec![checked_shard0, duplicate];
         let result =
-            Zoda::<Sha256>::decode(&config, &commitment, checking_data, &shards, CONCURRENCY);
+            Zoda::<Sha256>::decode(&config, &commitment, checking_data, &shards, &STRATEGY);
         match result {
             Err(Error::InsufficientUniqueRows(actual, expected)) => {
                 assert!(actual < expected);

@@ -1,10 +1,9 @@
 use crate::{authenticated::data::Data, Ingress};
-use bytes::{Buf, BufMut};
 use commonware_codec::{
     config::RangeCfg, varint::UInt, Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write,
 };
 use commonware_cryptography::{PublicKey, Signer};
-use commonware_runtime::Clock;
+use commonware_runtime::{Buf, BufMut, Clock};
 use commonware_utils::SystemTimeExt;
 use std::time::Duration;
 use thiserror::Error;
@@ -384,19 +383,17 @@ impl<C: PublicKey> InfoVerifier<C> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bytes::{Bytes, BytesMut};
     use commonware_codec::{Decode, DecodeExt};
     use commonware_cryptography::secp256r1::standard::{PrivateKey, PublicKey};
     use commonware_math::algebra::Random;
-    use commonware_runtime::{deterministic, Clock, Runner};
-    use commonware_utils::hostname;
+    use commonware_runtime::{deterministic, Clock, IoBuf, Runner};
+    use commonware_utils::{hostname, test_rng};
     use std::{net::SocketAddr, time::Duration};
 
     const NAMESPACE: &[u8] = b"test";
 
-    fn signed_peer_info() -> Info<PublicKey> {
-        let mut rng = rand::thread_rng();
-        let c = PrivateKey::random(&mut rng);
+    fn signed_peer_info(rng: &mut impl rand_core::CryptoRngCore) -> Info<PublicKey> {
+        let c = PrivateKey::random(rng);
         Info {
             ingress: Ingress::Socket(SocketAddr::from(([127, 0, 0, 1], 8080))),
             timestamp: 1234567890,
@@ -417,7 +414,12 @@ mod tests {
 
     #[test]
     fn test_signed_peer_info_codec() {
-        let original = vec![signed_peer_info(), signed_peer_info(), signed_peer_info()];
+        let mut rng = test_rng();
+        let original = vec![
+            signed_peer_info(&mut rng),
+            signed_peer_info(&mut rng),
+            signed_peer_info(&mut rng),
+        ];
         let encoded = original.encode();
         let decoded =
             Vec::<Info<PublicKey>>::decode_cfg(encoded, &(RangeCfg::new(3..=3), ())).unwrap();
@@ -439,6 +441,8 @@ mod tests {
 
     #[test]
     fn test_payload_codec() {
+        let mut rng = test_rng();
+
         // Config for the codec
         let cfg = PayloadConfig {
             max_bit_vec: 1024,
@@ -447,7 +451,7 @@ mod tests {
         };
 
         // Test Greeting
-        let original = signed_peer_info();
+        let original = signed_peer_info(&mut rng);
         let encoded = Payload::Greeting(original.clone()).encode();
         let decoded = match Payload::<PublicKey>::decode_cfg(encoded, &cfg) {
             Ok(Payload::<PublicKey>::Greeting(info)) => info,
@@ -463,7 +467,7 @@ mod tests {
             index: 1234,
             bits: BitMap::ones(100),
         };
-        let encoded: BytesMut = Payload::<PublicKey>::BitVec(original.clone()).encode();
+        let encoded = Payload::<PublicKey>::BitVec(original.clone()).encode();
         let decoded = match Payload::<PublicKey>::decode_cfg(encoded, &cfg) {
             Ok(Payload::<PublicKey>::BitVec(b)) => b,
             _ => panic!(),
@@ -471,7 +475,7 @@ mod tests {
         assert_eq!(original, decoded);
 
         // Test Peers
-        let original = vec![signed_peer_info(), signed_peer_info()];
+        let original = vec![signed_peer_info(&mut rng), signed_peer_info(&mut rng)];
         let encoded = Payload::Peers(original.clone()).encode();
         let decoded = match Payload::<PublicKey>::decode_cfg(encoded, &cfg) {
             Ok(Payload::<PublicKey>::Peers(p)) => p,
@@ -487,7 +491,7 @@ mod tests {
         // Test Data
         let original = Data {
             channel: 12345,
-            message: Bytes::from("Hello, world!"),
+            message: IoBuf::from(b"Hello, world!"),
         };
         let encoded = Payload::<PublicKey>::Data(original.clone()).encode();
         let decoded = match Payload::<PublicKey>::decode_cfg(encoded, &cfg) {
@@ -528,12 +532,13 @@ mod tests {
 
     #[test]
     fn test_payload_peers_respects_limit() {
+        let mut rng = test_rng();
         let cfg = PayloadConfig {
             max_bit_vec: 1024,
             max_peers: 1,
             max_data_length: 32,
         };
-        let peers = vec![signed_peer_info(), signed_peer_info()];
+        let peers = vec![signed_peer_info(&mut rng), signed_peer_info(&mut rng)];
         let encoded = Payload::Peers(peers).encode();
         let err = Payload::<PublicKey>::decode_cfg(encoded, &cfg).unwrap_err();
         assert!(matches!(err, CodecError::InvalidLength(2)));
@@ -548,7 +553,7 @@ mod tests {
         };
         let encoded = Payload::<PublicKey>::Data(Data {
             channel: 1,
-            message: Bytes::from_static(b"hello"),
+            message: IoBuf::from(b"hello"),
         })
         .encode();
         let err = Payload::<PublicKey>::decode_cfg(encoded, &cfg).unwrap_err();
@@ -557,7 +562,7 @@ mod tests {
 
     #[test]
     fn test_max_payload_data_overhead() {
-        let message = Bytes::from(vec![0; 1 << 29]);
+        let message = IoBuf::from(vec![0; 1 << 29]);
         let message_len = message.len();
         let payload = Payload::<PublicKey>::Data(Data {
             channel: u64::MAX,

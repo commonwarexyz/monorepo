@@ -15,7 +15,7 @@ use commonware_macros::select_loop;
 use commonware_runtime::{
     spawn_cell, Clock, ContextCell, Handle, Metrics as RuntimeMetrics, Spawner,
 };
-use commonware_utils::{ordered::Set, union, SystemTimeExt};
+use commonware_utils::{channels::fallible::FallibleExt, ordered::Set, union, SystemTimeExt};
 use futures::{channel::mpsc, StreamExt};
 use rand::{seq::SliceRandom, Rng};
 use tracing::debug;
@@ -79,6 +79,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
             max_sets: cfg.tracked_peer_sets,
             dial_fail_limit: cfg.dial_fail_limit,
             rate_limit: cfg.allowed_connection_rate_per_peer,
+            block_duration: cfg.block_duration,
         };
 
         // Create the mailboxes
@@ -130,6 +131,9 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
             on_stopped => {
                 debug!("context shutdown, stopping tracker");
             },
+            _ = self.directory.wait_for_unblock() => {
+                self.directory.unblock_expired();
+            },
             msg = self.receiver.next() => {
                 let Some(msg) = msg else {
                     debug!("mailbox closed, stopping tracker");
@@ -157,9 +161,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
 
                 // Notify all subscribers about the new peer set
                 self.subscribers.retain(|subscriber| {
-                    subscriber
-                        .unbounded_send((index, peers.clone(), self.directory.tracked()))
-                        .is_ok()
+                    subscriber.send_lossy((index, peers.clone(), self.directory.tracked()))
                 });
             }
             Message::PeerSet { index, responder } => {
@@ -173,9 +175,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                 // Send the latest peer set immediately
                 if let Some(latest_set_id) = self.directory.latest_set_index() {
                     let latest_set = self.directory.get_set(&latest_set_id).cloned().unwrap();
-                    sender
-                        .unbounded_send((latest_set_id, latest_set, self.directory.tracked()))
-                        .ok();
+                    sender.send_lossy((latest_set_id, latest_set, self.directory.tracked()));
                 }
                 self.subscribers.push(sender);
 
@@ -319,6 +319,7 @@ mod tests {
             peer_gossip_max_count: 5,
             max_peer_set_size: 128,
             dial_fail_limit: 1,
+            block_duration: Duration::from_secs(100),
         }
     }
 
@@ -343,7 +344,7 @@ mod tests {
         let mut signature = signer.sign(ip_namespace, &(ingress.clone(), timestamp).encode());
 
         if make_sig_invalid && !signature.as_ref().is_empty() {
-            let mut sig_bytes = signature.encode();
+            let mut sig_bytes = signature.encode_mut();
             sig_bytes[0] = sig_bytes[0].wrapping_add(1);
             signature = Signature::decode(sig_bytes).unwrap();
         }

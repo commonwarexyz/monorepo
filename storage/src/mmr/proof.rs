@@ -17,11 +17,18 @@ use alloc::{
     vec::Vec,
 };
 use bytes::{Buf, BufMut};
-use commonware_codec::{varint::UInt, EncodeSize, Read, ReadExt, ReadRangeExt, Write};
+use commonware_codec::{EncodeSize, Read, ReadExt, ReadRangeExt, Write};
 use commonware_cryptography::Digest;
 use core::ops::Range;
 #[cfg(feature = "std")]
 use tracing::debug;
+
+/// The maximum number of digests in a proof per element being proven.
+///
+/// This accounts for the worst case proof size, in an MMR with 62 peaks. The
+/// left-most leaf in such a tree requires 122 digests, for 61 path siblings
+/// and 61 peak digests.
+pub const MAX_PROOF_DIGESTS_PER_ELEMENT: usize = 122;
 
 /// Errors that can occur when reconstructing a digest from a proof due to invalid input.
 #[derive(Error, Debug)]
@@ -52,11 +59,10 @@ pub enum ReconstructionError {
 /// elements within the range, ordered by the position of their parent.
 #[derive(Clone, Debug, Eq)]
 pub struct Proof<D: Digest> {
-    /// The total number of nodes in the MMR for MMR proofs, though other authenticated data
+    /// The total number of leaves in the MMR for MMR proofs, though other authenticated data
     /// structures may override the meaning of this field. For example, the authenticated
-    /// [crate::AuthenticatedBitMap] stores the number of bits in the bitmap within
-    /// this field.
-    pub size: Position,
+    /// [crate::AuthenticatedBitMap] stores the number of bits in the bitmap within this field.
+    pub leaves: Location,
     /// The digests necessary for proving the inclusion of an element, or range of elements, in the
     /// MMR.
     pub digests: Vec<D>,
@@ -64,20 +70,20 @@ pub struct Proof<D: Digest> {
 
 impl<D: Digest> PartialEq for Proof<D> {
     fn eq(&self, other: &Self) -> bool {
-        self.size == other.size && self.digests == other.digests
+        self.leaves == other.leaves && self.digests == other.digests
     }
 }
 
 impl<D: Digest> EncodeSize for Proof<D> {
     fn encode_size(&self) -> usize {
-        UInt(*self.size).encode_size() + self.digests.encode_size()
+        self.leaves.encode_size() + self.digests.encode_size()
     }
 }
 
 impl<D: Digest> Write for Proof<D> {
     fn write(&self, buf: &mut impl BufMut) {
-        // Write the number of nodes in the MMR as a varint
-        UInt(*self.size).write(buf);
+        // Write the number of leaves in the MMR
+        self.leaves.write(buf);
 
         // Write the digests
         self.digests.write(buf);
@@ -85,26 +91,32 @@ impl<D: Digest> Write for Proof<D> {
 }
 
 impl<D: Digest> Read for Proof<D> {
-    /// The maximum number of digests in the proof.
+    /// The maximum number of items being proven.
+    ///
+    /// The upper bound on digests is derived as `max_items * MAX_PROOF_DIGESTS_PER_ELEMENT`.
     type Cfg = usize;
 
-    fn read_cfg(buf: &mut impl Buf, max_len: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+    fn read_cfg(
+        buf: &mut impl Buf,
+        max_items: &Self::Cfg,
+    ) -> Result<Self, commonware_codec::Error> {
         // Read the number of nodes in the MMR
-        let size = Position::new(UInt::<u64>::read(buf)?.into());
+        let leaves = Location::read(buf)?;
 
         // Read the digests
-        let range = ..=max_len;
-        let digests = Vec::<D>::read_range(buf, range)?;
-        Ok(Self { size, digests })
+        let max_digests = max_items.saturating_mul(MAX_PROOF_DIGESTS_PER_ELEMENT);
+        let digests = Vec::<D>::read_range(buf, ..=max_digests)?;
+
+        Ok(Self { leaves, digests })
     }
 }
 
 impl<D: Digest> Default for Proof<D> {
     /// Create an empty proof. The empty proof will verify only against the root digest of an empty
-    /// (`size == 0`) MMR.
+    /// (`leaves == 0`) MMR.
     fn default() -> Self {
         Self {
-            size: Position::new(0),
+            leaves: Location::new_unchecked(0),
             digests: vec![],
         }
     }
@@ -117,7 +129,7 @@ where
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         Ok(Self {
-            size: u.arbitrary()?,
+            leaves: u.arbitrary()?,
             digests: u.arbitrary()?,
         })
     }
@@ -134,7 +146,7 @@ impl<D: Digest> Proof<D> {
         root: &D,
     ) -> bool
     where
-        H: Hasher<D>,
+        H: Hasher<Digest = D>,
     {
         self.verify_range_inclusion(hasher, &[element], loc, root)
     }
@@ -150,15 +162,9 @@ impl<D: Digest> Proof<D> {
         root: &D,
     ) -> bool
     where
-        H: Hasher<D>,
+        H: Hasher<Digest = D>,
         E: AsRef<[u8]>,
     {
-        if !self.size.is_mmr_size() {
-            #[cfg(feature = "std")]
-            debug!(size = ?self.size, "invalid proof size");
-            return false;
-        }
-
         match self.reconstruct_root(hasher, elements, start_loc) {
             Ok(reconstructed_root) => *root == reconstructed_root,
             Err(_error) => {
@@ -180,16 +186,13 @@ impl<D: Digest> Proof<D> {
         root: &D,
     ) -> bool
     where
-        H: Hasher<D>,
+        H: Hasher<Digest = D>,
         E: AsRef<[u8]>,
     {
         // Empty proof is valid for an empty MMR
         if elements.is_empty() {
-            return self.size == Position::new(0)
-                && *root == hasher.root(Position::new(0), core::iter::empty());
-        }
-        if !self.size.is_mmr_size() {
-            return false;
+            return self.leaves == Location::new_unchecked(0)
+                && *root == hasher.root(Location::new_unchecked(0), core::iter::empty());
         }
 
         // Single pass to collect all required positions with deduplication
@@ -201,7 +204,7 @@ impl<D: Digest> Proof<D> {
                 return false;
             }
             // `loc` is valid so it won't overflow from +1
-            let Ok(required) = nodes_required_for_range_proof(self.size, *loc..*loc + 1) else {
+            let Ok(required) = nodes_required_for_range_proof(self.leaves, *loc..*loc + 1) else {
                 return false;
             };
             for req_pos in &required {
@@ -238,7 +241,7 @@ impl<D: Digest> Proof<D> {
                 digests.push(*digest);
             }
             let proof = Self {
-                size: self.size,
+                leaves: self.leaves,
                 digests,
             };
 
@@ -282,7 +285,7 @@ impl<D: Digest> Proof<D> {
         let pinned_positions: Vec<Position> = nodes_to_pin(start_pos).collect();
 
         // Get all positions required for the proof.
-        let required_positions = nodes_required_for_range_proof(self.size, range)?;
+        let required_positions = nodes_required_for_range_proof(self.leaves, range)?;
 
         if required_positions.len() != self.digests.len() {
             #[cfg(feature = "std")]
@@ -335,7 +338,7 @@ impl<D: Digest> Proof<D> {
         root: &D,
     ) -> Result<Vec<(Position, D)>, super::Error>
     where
-        H: Hasher<D>,
+        H: Hasher<Digest = D>,
         E: AsRef<[u8]>,
     {
         let mut collected_digests = Vec::new();
@@ -348,7 +351,7 @@ impl<D: Digest> Proof<D> {
             return Err(Error::InvalidProof);
         };
 
-        if hasher.root(self.size, peak_digests.iter()) != *root {
+        if hasher.root(self.leaves, peak_digests.iter()) != *root {
             return Err(Error::RootMismatch);
         }
 
@@ -364,16 +367,12 @@ impl<D: Digest> Proof<D> {
         start_loc: Location,
     ) -> Result<D, ReconstructionError>
     where
-        H: Hasher<D>,
+        H: Hasher<Digest = D>,
         E: AsRef<[u8]>,
     {
-        if !self.size.is_mmr_size() {
-            return Err(ReconstructionError::InvalidSize);
-        }
-
         let peak_digests = self.reconstruct_peak_digests(hasher, elements, start_loc, None)?;
 
-        Ok(hasher.root(self.size, peak_digests.iter()))
+        Ok(hasher.root(self.leaves, peak_digests.iter()))
     }
 
     /// Reconstruct the peak digests of the MMR that produced this proof, returning
@@ -387,7 +386,7 @@ impl<D: Digest> Proof<D> {
         mut collected_digests: Option<&mut Vec<(Position, D)>>,
     ) -> Result<Vec<D>, ReconstructionError>
     where
-        H: Hasher<D>,
+        H: Hasher<Digest = D>,
         E: AsRef<[u8]>,
     {
         if elements.is_empty() {
@@ -396,6 +395,7 @@ impl<D: Digest> Proof<D> {
             }
             return Err(ReconstructionError::MissingElements);
         }
+        let size = Position::try_from(self.leaves).map_err(|_| ReconstructionError::InvalidSize)?;
         let start_element_pos =
             Position::try_from(start_loc).map_err(|_| ReconstructionError::InvalidStartLoc)?;
         let end_element_pos = if elements.len() == 1 {
@@ -406,7 +406,7 @@ impl<D: Digest> Proof<D> {
                 .ok_or(ReconstructionError::InvalidEndLoc)?;
             Position::try_from(end_loc).map_err(|_| ReconstructionError::InvalidEndLoc)?
         };
-        if end_element_pos >= self.size {
+        if end_element_pos >= size {
             return Err(ReconstructionError::InvalidEndLoc);
         }
 
@@ -418,10 +418,7 @@ impl<D: Digest> Proof<D> {
         let mut peak_digests: Vec<D> = Vec::new();
         let mut proof_digests_used = 0;
         let mut elements_iter = elements.iter();
-        if !Position::is_mmr_size(self.size) {
-            return Err(ReconstructionError::InvalidSize);
-        }
-        for (peak_pos, height) in PeakIterator::new(self.size) {
+        for (peak_pos, height) in PeakIterator::new(size) {
             let leftmost_pos = peak_pos + 2 - (1 << (height + 1));
             if peak_pos >= start_element_pos && leftmost_pos <= end_element_pos {
                 let hash = peak_digest_from_range(
@@ -475,22 +472,17 @@ impl<D: Digest> Proof<D> {
 /// Returns [Error::RangeOutOfBounds] if the last element position in `range` is out of bounds
 /// (>= `size`).
 pub(crate) fn nodes_required_for_range_proof(
-    size: Position,
+    leaves: Location,
     range: Range<Location>,
 ) -> Result<Vec<Position>, Error> {
-    if !size.is_mmr_size() {
-        return Err(Error::InvalidSize(*size));
-    }
     if range.is_empty() {
         return Err(Error::Empty);
     }
-    let start_element_pos = Position::try_from(range.start)?;
     let end_minus_one = range
         .end
         .checked_sub(1)
         .expect("can't underflow because range is non-empty");
-    let end_element_pos = Position::try_from(end_minus_one)?;
-    if end_element_pos >= size {
+    if end_minus_one >= leaves {
         return Err(Error::RangeOutOfBounds(range.end));
     }
 
@@ -498,8 +490,12 @@ pub(crate) fn nodes_required_for_range_proof(
     // are required to prove the range, so they are added to the result.
     let mut start_tree_with_element: Option<(Position, u32)> = None;
     let mut end_tree_with_element: Option<(Position, u32)> = None;
-    let mut peak_iterator = PeakIterator::new(size);
     let mut positions = Vec::new();
+    let size = Position::try_from(leaves)?;
+    let start_element_pos = Position::try_from(range.start)?;
+    let end_element_pos = Position::try_from(end_minus_one)?;
+
+    let mut peak_iterator = PeakIterator::new(size);
     while let Some(peak) = peak_iterator.next() {
         if start_tree_with_element.is_none() && peak.0 >= start_element_pos {
             // Found the first tree to contain an element in the range
@@ -553,6 +549,7 @@ pub(crate) fn nodes_required_for_range_proof(
         }
     }
     positions.extend(siblings.into_iter().map(|(_, pos)| pos));
+
     Ok(positions)
 }
 
@@ -569,12 +566,9 @@ pub(crate) fn nodes_required_for_range_proof(
 /// Returns [Error::RangeOutOfBounds] if any location is out of bounds for the given `size`.
 #[cfg(any(feature = "std", test))]
 pub(crate) fn nodes_required_for_multi_proof(
-    size: Position,
+    leaves: Location,
     locations: &[Location],
 ) -> Result<BTreeSet<Position>, Error> {
-    if !size.is_mmr_size() {
-        return Err(Error::InvalidSize(*size));
-    }
     // Collect all required node positions
     //
     // TODO(#1472): Optimize this loop
@@ -586,8 +580,9 @@ pub(crate) fn nodes_required_for_multi_proof(
             return Err(Error::LocationOverflow(*loc));
         }
         // `loc` is valid so it won't overflow from +1
-        let positions = nodes_required_for_range_proof(size, *loc..*loc + 1)?;
+        let positions = nodes_required_for_range_proof(leaves, *loc..*loc + 1)?;
         acc.extend(positions);
+
         Ok(acc)
     })
 }
@@ -609,7 +604,7 @@ fn peak_digest_from_range<'a, D, H, E, S>(
 ) -> Result<D, ReconstructionError>
 where
     D: Digest,
-    H: Hasher<D>,
+    H: Hasher<Digest = D>,
     E: Iterator<Item: AsRef<[u8]>>,
     S: Iterator<Item = &'a D>,
 {
@@ -696,7 +691,6 @@ mod tests {
     use crate::mmr::{
         hasher::Standard, location::LocationRangeExt as _, mem::CleanMmr, MAX_LOCATION,
     };
-    use bytes::Bytes;
     use commonware_codec::{Decode, Encode};
     use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
     use commonware_macros::test_traced;
@@ -774,15 +768,6 @@ mod tests {
             proof.verify_element_inclusion(&mut hasher, &element, LEAF, root),
             "proof verification should be successful"
         );
-        let wrong_sizes = [0, 16, 17, 18, 20, u64::MAX - 100];
-        for sz in wrong_sizes {
-            let mut wrong_size_proof = proof.clone();
-            wrong_size_proof.size = Position::new(sz);
-            assert!(
-                !wrong_size_proof.verify_element_inclusion(&mut hasher, &element, LEAF, root),
-                "proof with wrong size should fail verification"
-            );
-        }
         assert!(
             !proof.verify_element_inclusion(&mut hasher, &element, LEAF + 1, root),
             "proof verification should fail with incorrect element position"
@@ -807,10 +792,10 @@ mod tests {
             "proof verification should fail with mangled proof hash"
         );
         proof2 = proof.clone();
-        proof2.size = Position::new(10);
+        proof2.leaves = Location::new_unchecked(10);
         assert!(
             !proof2.verify_element_inclusion(&mut hasher, &element, LEAF, root),
-            "proof verification should fail with incorrect size"
+            "proof verification should fail with incorrect leaves"
         );
         proof2 = proof.clone();
         proof2.digests.push(test_digest(0));
@@ -1083,14 +1068,15 @@ mod tests {
                 let proof = mmr.range_proof(range).unwrap();
 
                 let expected_size = proof.encode_size();
-                let serialized_proof = proof.encode().freeze();
+                let serialized_proof = proof.encode();
                 assert_eq!(
                     serialized_proof.len(),
                     expected_size,
                     "serialized proof should have expected size"
                 );
-                let max_digests = proof.digests.len();
-                let deserialized_proof = Proof::decode_cfg(serialized_proof, &max_digests).unwrap();
+                // max_items is the number of elements in the range
+                let max_items = j - i;
+                let deserialized_proof = Proof::decode_cfg(serialized_proof, &max_items).unwrap();
                 assert_eq!(
                     proof, deserialized_proof,
                     "deserialized proof should match source proof"
@@ -1098,30 +1084,35 @@ mod tests {
 
                 // Remove one byte from the end of the serialized
                 // proof and confirm it fails to deserialize.
-                let serialized_proof = proof.encode().freeze();
-                let serialized_proof: Bytes = serialized_proof.slice(0..serialized_proof.len() - 1);
+                let serialized_proof = proof.encode();
+                let serialized_proof = serialized_proof.slice(0..serialized_proof.len() - 1);
                 assert!(
-                    Proof::<Digest>::decode_cfg(serialized_proof, &max_digests).is_err(),
+                    Proof::<Digest>::decode_cfg(serialized_proof, &max_items).is_err(),
                     "proof should not deserialize with truncated data"
                 );
 
                 // Add 1 byte of extra data to the end of the serialized
                 // proof and confirm it fails to deserialize.
-                let mut serialized_proof = proof.encode();
+                let mut serialized_proof = proof.encode_mut();
                 serialized_proof.extend_from_slice(&[0; 10]);
-                let serialized_proof = serialized_proof.freeze();
+                let serialized_proof = serialized_proof;
 
                 assert!(
-                    Proof::<Digest>::decode_cfg(serialized_proof, &max_digests).is_err(),
+                    Proof::<Digest>::decode_cfg(serialized_proof, &max_items).is_err(),
                     "proof should not deserialize with extra data"
                 );
 
-                // Confirm deserialization fails when max length is exceeded.
-                if max_digests > 0 {
-                    let serialized_proof = proof.encode().freeze();
+                // Confirm deserialization fails when max_items is too small.
+                let actual_digests = proof.digests.len();
+                if actual_digests > 0 {
+                    // Find the minimum max_items that would allow this many digests
+                    let min_max_items = actual_digests.div_ceil(MAX_PROOF_DIGESTS_PER_ELEMENT);
+                    // Using one less should fail
+                    let too_small = min_max_items - 1;
+                    let serialized_proof = proof.encode();
                     assert!(
-                        Proof::<Digest>::decode_cfg(serialized_proof, &(max_digests - 1)).is_err(),
-                        "proof should not deserialize with max length exceeded"
+                        Proof::<Digest>::decode_cfg(serialized_proof, &too_small).is_err(),
+                        "proof should not deserialize with max_items too small"
                     );
                 }
             }
@@ -1228,18 +1219,10 @@ mod tests {
         // Verify the proof works with valid size
         assert!(proof.extract_pinned_nodes(range.clone()).is_ok());
 
-        // Test various invalid sizes
-        const INVALID_SIZES: [u64; 5] = [2, 5, 6, 9, u64::MAX];
-        for invalid_size in INVALID_SIZES {
-            proof.size = Position::new(invalid_size);
-            let result = proof.extract_pinned_nodes(range.clone());
-            assert!(matches!(result, Err(Error::InvalidSize(s)) if s == invalid_size));
-        }
-
-        // Test with MSB set (invalid due to leading zero requirement)
-        proof.size = Position::new(1u64 << 63);
+        // Test with invalid location.
+        proof.leaves = Location::new_unchecked(MAX_LOCATION + 2);
         let result = proof.extract_pinned_nodes(range);
-        assert!(matches!(result, Err(Error::InvalidSize(s)) if s == 1u64 << 63));
+        assert!(matches!(result, Err(Error::LocationOverflow(_))));
     }
 
     #[test]
@@ -1382,17 +1365,17 @@ mod tests {
             Location::new_unchecked(10),
         ];
         let nodes_for_multi_proof =
-            nodes_required_for_multi_proof(mmr.size(), locations).expect("test locations valid");
+            nodes_required_for_multi_proof(mmr.leaves(), locations).expect("test locations valid");
         let digests = nodes_for_multi_proof
             .into_iter()
             .map(|pos| mmr.get_node(pos).unwrap())
             .collect();
         let multi_proof = Proof {
-            size: mmr.size(),
+            leaves: mmr.leaves(),
             digests,
         };
 
-        assert_eq!(multi_proof.size, mmr.size());
+        assert_eq!(multi_proof.leaves, mmr.leaves());
 
         // Verify the proof
         assert!(multi_proof.verify_multi_inclusion(
@@ -1428,26 +1411,18 @@ mod tests {
             root
         ));
 
-        // Verify mangling the size to something invalid should fail. Test three cases: valid MMR
-        // size but wrong value, invalid MMR size, and overflowing MMR size.
-        let wrong_sizes = [
-            Position::new(16),
-            Position::new(17),
-            Position::new(u64::MAX - 100),
-        ];
-        for sz in wrong_sizes {
-            let mut wrong_size_proof = multi_proof.clone();
-            wrong_size_proof.size = sz;
-            assert!(!wrong_size_proof.verify_multi_inclusion(
-                &mut hasher,
-                &[
-                    (elements[0], Location::new_unchecked(0)),
-                    (elements[5], Location::new_unchecked(5)),
-                    (elements[10], Location::new_unchecked(10)),
-                ],
-                root,
-            ));
-        }
+        // Verify mangling the location to something invalid should fail.
+        let mut wrong_size_proof = multi_proof.clone();
+        wrong_size_proof.leaves = Location::new_unchecked(MAX_LOCATION + 2);
+        assert!(!wrong_size_proof.verify_multi_inclusion(
+            &mut hasher,
+            &[
+                (elements[0], Location::new_unchecked(0)),
+                (elements[5], Location::new_unchecked(5)),
+                (elements[10], Location::new_unchecked(10)),
+            ],
+            root,
+        ));
 
         // Verify with wrong positions
         assert!(!multi_proof.verify_multi_inclusion(
@@ -1536,13 +1511,13 @@ mod tests {
         // Generate multi-proof for the same positions
         let locations = &[Location::new_unchecked(0), Location::new_unchecked(1)];
         let multi_proof =
-            nodes_required_for_multi_proof(mmr.size(), locations).expect("test locations valid");
+            nodes_required_for_multi_proof(mmr.leaves(), locations).expect("test locations valid");
         let digests = multi_proof
             .into_iter()
             .map(|pos| mmr.get_node(pos).unwrap())
             .collect();
         let multi_proof = Proof {
-            size: mmr.size(),
+            leaves: mmr.leaves(),
             digests,
         };
 
@@ -1565,22 +1540,19 @@ mod tests {
     fn test_max_location_is_provable() {
         // Test that the validation logic accepts MAX_LOCATION as a valid location
         // We use the maximum valid MMR size (2^63 - 1) which can hold up to 2^62 leaves
-        let max_mmr_size = Position::new((1u64 << 63) - 1);
-
         let max_loc = Location::new_unchecked(MAX_LOCATION);
         let max_loc_plus_1 = Location::new_unchecked(MAX_LOCATION + 1);
-        let max_loc_plus_2 = Location::new_unchecked(MAX_LOCATION + 2);
 
         // MAX_LOCATION should be accepted by the validation logic
         // (The range MAX_LOCATION..MAX_LOCATION+1 proves a single element at MAX_LOCATION)
-        let result = nodes_required_for_range_proof(max_mmr_size, max_loc..max_loc_plus_1);
+        let result = nodes_required_for_range_proof(max_loc, max_loc - 1..max_loc);
 
         // This should succeed - MAX_LOCATION is a valid location
         assert!(result.is_ok(), "Should be able to prove MAX_LOCATION");
 
         // MAX_LOCATION + 1 should be rejected (exceeds MAX_LOCATION)
         let result_overflow =
-            nodes_required_for_range_proof(max_mmr_size, max_loc_plus_1..max_loc_plus_2);
+            nodes_required_for_range_proof(max_loc_plus_1, max_loc..max_loc_plus_1);
         assert!(
             result_overflow.is_err(),
             "Should reject location > MAX_LOCATION"
@@ -1591,19 +1563,18 @@ mod tests {
     #[test]
     fn test_max_location_multi_proof() {
         // Test that multi_proof can handle MAX_LOCATION
-        let max_mmr_size = Position::new((1u64 << 63) - 1);
         let max_loc = Location::new_unchecked(MAX_LOCATION);
 
         // Should be able to generate multi-proof for MAX_LOCATION
-        let result = nodes_required_for_multi_proof(max_mmr_size, &[max_loc]);
+        let result = nodes_required_for_multi_proof(max_loc, &[max_loc - 1]);
         assert!(
             result.is_ok(),
             "Should be able to generate multi-proof for MAX_LOCATION"
         );
 
         // Should reject MAX_LOCATION + 1
-        let invalid_loc = Location::new_unchecked(MAX_LOCATION + 1);
-        let result_overflow = nodes_required_for_multi_proof(max_mmr_size, &[invalid_loc]);
+        let invalid_loc = max_loc + 1;
+        let result_overflow = nodes_required_for_multi_proof(invalid_loc, &[max_loc]);
         assert!(
             result_overflow.is_err(),
             "Should reject location > MAX_LOCATION in multi-proof"
@@ -1611,19 +1582,104 @@ mod tests {
     }
 
     #[test]
-    fn test_invalid_size_validation() {
-        // Test that invalid sizes are rejected
-        let loc = Location::new_unchecked(0);
-        let range = loc..loc + 1;
+    fn test_max_proof_digests_per_element_sufficient() {
+        // Verify that MAX_PROOF_DIGESTS_PER_ELEMENT (122) is sufficient for any single-element
+        // proof in the largest valid MMR.
+        //
+        // MMR sizes follow: mmr_size(N) = 2*N - popcount(N) where N = leaf count.
+        // The number of peaks equals popcount(N).
+        //
+        // To maximize peaks, we want N with maximum popcount. N = 2^62 - 1 has 62 one-bits:
+        //   N = 0x3FFFFFFFFFFFFFFF = 2^0 + 2^1 + ... + 2^61
+        //
+        // This gives us 62 perfect binary trees with leaf counts 2^0, 2^1, ..., 2^61
+        // and corresponding heights 0, 1, ..., 61.
+        //
+        // mmr_size(2^62 - 1) = 2*(2^62 - 1) - 62 = 2^63 - 2 - 62 = 2^63 - 64
+        //
+        // For a single-element proof in a tree of height h:
+        //   - Path siblings from leaf to peak: h digests
+        //   - Other peaks (not containing the element): (62 - 1) = 61 digests
+        //   - Total: h + 61 digests
+        //
+        // Worst case: element in tallest tree (h = 61)
+        //   - Path siblings: 61
+        //   - Other peaks: 61
+        //   - Total: 61 + 61 = 122 digests
 
-        const INVALID_SIZES: [u64; 5] = [2, 5, 6, 9, u64::MAX];
-        for size in INVALID_SIZES {
-            let result = nodes_required_for_range_proof(Position::new(size), range.clone());
-            assert!(matches!(result, Err(Error::InvalidSize(s)) if s == size));
+        const NUM_PEAKS: usize = 62;
+        const MAX_TREE_HEIGHT: usize = 61;
+        const EXPECTED_WORST_CASE: usize = MAX_TREE_HEIGHT + (NUM_PEAKS - 1);
 
-            let result = nodes_required_for_multi_proof(Position::new(size), &[loc]);
-            assert!(matches!(result, Err(Error::InvalidSize(s)) if s == size));
+        let many_peaks_size = Position::new((1u64 << 63) - 64);
+        assert!(
+            many_peaks_size.is_mmr_size(),
+            "Size {many_peaks_size} should be a valid MMR size",
+        );
+
+        let peak_count = PeakIterator::new(many_peaks_size).count();
+        assert_eq!(peak_count, NUM_PEAKS);
+
+        // Verify the peak heights are 61, 60, ..., 1, 0 (from left to right)
+        let peaks: Vec<_> = PeakIterator::new(many_peaks_size).collect();
+        for (i, &(_pos, height)) in peaks.iter().enumerate() {
+            let expected_height = (NUM_PEAKS - 1 - i) as u32;
+            assert_eq!(
+                height, expected_height,
+                "Peak {i} should have height {expected_height}, got {height}",
+            );
         }
+
+        // Test location 0 (leftmost leaf, in tallest tree of height 61)
+        // Expected: 61 path siblings + 61 other peaks = 122 digests
+        let leaves = Location::try_from(many_peaks_size).unwrap();
+        let loc = Location::new_unchecked(0);
+        let positions = nodes_required_for_range_proof(leaves, loc..loc + 1)
+            .expect("should compute positions for location 0");
+
+        assert_eq!(
+            positions.len(),
+            EXPECTED_WORST_CASE,
+            "Location 0 proof should require exactly {EXPECTED_WORST_CASE} digests (61 path + 61 peaks)",
+        );
+
+        // Test the rightmost leaf (in smallest tree of height 0, which is itself a peak)
+        // Expected: 0 path siblings + 61 other peaks = 61 digests
+        let last_leaf_loc = leaves - 1;
+        let positions = nodes_required_for_range_proof(leaves, last_leaf_loc..last_leaf_loc + 1)
+            .expect("should compute positions for last leaf");
+
+        let expected_last_leaf = NUM_PEAKS - 1;
+        assert_eq!(
+            positions.len(),
+            expected_last_leaf,
+            "Last leaf proof should require exactly {expected_last_leaf} digests (0 path + 61 peaks)",
+        );
+    }
+
+    #[test]
+    fn test_max_proof_digests_per_element_is_maximum() {
+        // For K peaks, the worst-case proof needs: (max_tree_height) + (K - 1) digests
+        // With K peaks of heights K-1, K-2, ..., 0, this is (K-1) + (K-1) = 2*(K-1)
+        //
+        // To get K peaks, leaf count N must have exactly K bits set.
+        // MMR size = 2*N - popcount(N) = 2*N - K
+        //
+        // For 63 peaks: N = 2^63 - 1 (63 bits set), size = 2*(2^63 - 1) - 63 = 2^64 - 65
+        // This exceeds MAX_POSITION, so is_mmr_size() returns false.
+
+        let n_for_63_peaks = (1u128 << 63) - 1;
+        let size_for_63_peaks = 2 * n_for_63_peaks - 63; // = 2^64 - 65
+        assert!(
+            size_for_63_peaks > *crate::mmr::MAX_POSITION as u128,
+            "63 peaks requires size {size_for_63_peaks} > MAX_POSITION",
+        );
+
+        let size_truncated = size_for_63_peaks as u64;
+        assert!(
+            !Position::new(size_truncated).is_mmr_size(),
+            "Size for 63 peaks should fail is_mmr_size()"
+        );
     }
 
     #[cfg(feature = "arbitrary")]

@@ -5,19 +5,24 @@ use commonware_bridge::{
         inbound::{self, Inbound},
         outbound::Outbound,
     },
-    Scheme, APPLICATION_NAMESPACE, CONSENSUS_SUFFIX, INDEXER_NAMESPACE,
+    APPLICATION_NAMESPACE, CONSENSUS_SUFFIX, INDEXER_NAMESPACE,
 };
 use commonware_codec::{DecodeExt, Encode};
-use commonware_consensus::{simplex::types::Finalization, types::View, Viewable};
+use commonware_consensus::{
+    simplex::{scheme::bls12381_threshold::standard as bls12381_threshold, types::Finalization},
+    types::View,
+    Viewable,
+};
 use commonware_cryptography::{
     bls12381::primitives::{
         group::G2,
         variant::{MinSig, Variant},
     },
-    ed25519::{self},
+    ed25519::{self, PublicKey},
     sha256::Digest as Sha256Digest,
     Digest, Hasher, Sha256, Signer as _,
 };
+use commonware_parallel::Sequential;
 use commonware_runtime::{tokio, Listener, Metrics, Network, Runner, Spawner};
 use commonware_stream::{listen, Config as StreamConfig};
 use commonware_utils::{from_hex, ordered::Set, union, TryCollect};
@@ -31,6 +36,8 @@ use std::{
     time::Duration,
 };
 use tracing::{debug, info};
+
+type Scheme = bls12381_threshold::Scheme<PublicKey, MinSig>;
 
 #[allow(clippy::large_enum_variant)]
 enum Message<D: Digest> {
@@ -116,7 +123,7 @@ fn main() {
         .expect("public keys are unique");
 
     // Configure networks
-    let mut namespaces: HashMap<G2, (Scheme, Vec<u8>)> = HashMap::new();
+    let mut verifiers: HashMap<G2, Scheme> = HashMap::new();
     let mut blocks: HashMap<G2, HashMap<Sha256Digest, BlockFormat<Sha256Digest>>> = HashMap::new();
     let mut finalizations: HashMap<G2, BTreeMap<View, Finalization<Scheme, Sha256Digest>>> =
         HashMap::new();
@@ -126,19 +133,23 @@ fn main() {
     if networks.len() == 0 {
         panic!("Please provide at least one network");
     }
-    for network in networks {
-        let network = from_hex(network).expect("Network not well-formed");
-        let public =
-            <MinSig as Variant>::Public::decode(network.as_ref()).expect("Network not well-formed");
-        let namespace = union(APPLICATION_NAMESPACE, CONSENSUS_SUFFIX);
-        namespaces.insert(public, (Scheme::certificate_verifier(public), namespace));
-        blocks.insert(public, HashMap::new());
-        finalizations.insert(public, BTreeMap::new());
-    }
 
     // Create context
     let executor = tokio::Runner::default();
     executor.start(|context| async move {
+        for network in networks {
+            let network = from_hex(network).expect("Network not well-formed");
+            let public = <MinSig as Variant>::Public::decode(network.as_ref())
+                .expect("Network not well-formed");
+            let namespace = union(APPLICATION_NAMESPACE, CONSENSUS_SUFFIX);
+            verifiers.insert(
+                public,
+                bls12381_threshold::Scheme::certificate_verifier(&namespace, public),
+            );
+            blocks.insert(public, HashMap::new());
+            finalizations.insert(public, BTreeMap::new());
+        }
+
         // Create message handler
         let (handler, mut receiver) = mpsc::unbounded();
 
@@ -183,11 +194,14 @@ fn main() {
                         };
 
                         // Verify signature
-                        let Some((verifier, namespace)) = namespaces.get(&incoming.network) else {
+                        let Some(verifier) = verifiers.get(&incoming.network) else {
                             let _ = response.send(false);
                             continue;
                         };
-                        if !incoming.finalization.verify(&mut ctx, verifier, namespace) {
+                        if !incoming
+                            .finalization
+                            .verify(&mut ctx, verifier, &Sequential)
+                        {
                             let _ = response.send(false);
                             continue;
                         }
@@ -286,7 +300,7 @@ fn main() {
                                     .expect("failed to send message");
                                 let success = receiver.await.expect("failed to receive response");
                                 let msg = Outbound::<Sha256Digest>::Success(success).encode();
-                                if sender.send(&msg).await.is_err() {
+                                if sender.send(msg).await.is_err() {
                                     debug!(?peer, "failed to send message");
                                     return;
                                 }
@@ -304,14 +318,14 @@ fn main() {
                                 match response {
                                     Some(block) => {
                                         let msg = Outbound::Block(block).encode();
-                                        if sender.send(&msg).await.is_err() {
+                                        if sender.send(msg).await.is_err() {
                                             debug!(?peer, "failed to send message");
                                             return;
                                         }
                                     }
                                     None => {
                                         let msg = Outbound::<Sha256Digest>::Success(false).encode();
-                                        if sender.send(&msg).await.is_err() {
+                                        if sender.send(msg).await.is_err() {
                                             debug!(?peer, "failed to send message");
                                             return;
                                         }
@@ -329,7 +343,7 @@ fn main() {
                                     .expect("failed to send message");
                                 let success = receiver.await.expect("failed to receive response");
                                 let msg = Outbound::<Sha256Digest>::Success(success).encode();
-                                if sender.send(&msg).await.is_err() {
+                                if sender.send(msg).await.is_err() {
                                     debug!(?peer, "failed to send message");
                                     return;
                                 }
@@ -347,14 +361,14 @@ fn main() {
                                 match response {
                                     Some(data) => {
                                         let msg = Outbound::Finalization(data).encode();
-                                        if sender.send(&msg).await.is_err() {
+                                        if sender.send(msg).await.is_err() {
                                             debug!(?peer, "failed to send message");
                                             return;
                                         }
                                     }
                                     None => {
                                         let msg = Outbound::<Sha256Digest>::Success(false).encode();
-                                        if sender.send(&msg).await.is_err() {
+                                        if sender.send(msg).await.is_err() {
                                             debug!(?peer, "failed to send message");
                                             return;
                                         }

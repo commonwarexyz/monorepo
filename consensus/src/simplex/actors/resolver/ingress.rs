@@ -2,12 +2,8 @@ use crate::{simplex::types::Certificate, types::View};
 use bytes::Bytes;
 use commonware_cryptography::{certificate::Scheme, Digest};
 use commonware_resolver::{p2p::Producer, Consumer};
-use commonware_utils::sequence::U64;
-use futures::{
-    channel::{mpsc, oneshot},
-    SinkExt,
-};
-use tracing::error;
+use commonware_utils::{channels::fallible::AsyncFallibleExt, sequence::U64};
+use futures::channel::{mpsc, oneshot};
 
 /// Messages sent to the resolver actor from the voter.
 pub enum MailboxMessage<S: Scheme, D: Digest> {
@@ -30,24 +26,16 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
 
     /// Send a certificate.
     pub async fn updated(&mut self, certificate: Certificate<S, D>) {
-        if let Err(err) = self
-            .sender
-            .send(MailboxMessage::Certificate(certificate))
-            .await
-        {
-            error!(?err, "failed to send certificate message");
-        }
+        self.sender
+            .send_lossy(MailboxMessage::Certificate(certificate))
+            .await;
     }
 
     /// Notify the resolver of a certification result.
     pub async fn certified(&mut self, view: View, success: bool) {
-        if let Err(err) = self
-            .sender
-            .send(MailboxMessage::Certified { view, success })
-            .await
-        {
-            error!(?err, "failed to send certified message");
-        }
+        self.sender
+            .send_lossy(MailboxMessage::Certified { view, success })
+            .await;
     }
 }
 
@@ -81,21 +69,16 @@ impl Consumer for Handler {
     type Failure = ();
 
     async fn deliver(&mut self, key: Self::Key, value: Self::Value) -> bool {
-        let (response, receiver) = oneshot::channel();
-        if self
-            .sender
-            .send(HandlerMessage::Deliver {
-                view: View::new(key.into()),
-                data: value,
-                response,
-            })
+        self.sender
+            .request_or(
+                |response| HandlerMessage::Deliver {
+                    view: View::new(key.into()),
+                    data: value,
+                    response,
+                },
+                false,
+            )
             .await
-            .is_err()
-        {
-            error!("failed to deliver resolver message to actor");
-            return false;
-        }
-        receiver.await.unwrap_or(false)
     }
 
     async fn failed(&mut self, _: Self::Key, _: Self::Failure) {
@@ -108,17 +91,12 @@ impl Producer for Handler {
 
     async fn produce(&mut self, key: Self::Key) -> oneshot::Receiver<Bytes> {
         let (response, receiver) = oneshot::channel();
-        if self
-            .sender
-            .send(HandlerMessage::Produce {
+        self.sender
+            .send_lossy(HandlerMessage::Produce {
                 view: View::new(key.into()),
                 response,
             })
-            .await
-            .is_err()
-        {
-            error!("failed to send produce request to actor");
-        }
+            .await;
         receiver
     }
 }

@@ -11,6 +11,7 @@ cargo-fuzz = true
 [dependencies]
 arbitrary = { workspace = true, features = ["derive"] }
 commonware-cryptography.workspace = true
+commonware-parallel = { workspace = true, features = ["std"] }
 libfuzzer-sys.workspace = true
 rand_chacha.workspace = true
 

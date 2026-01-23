@@ -11,13 +11,15 @@ extern crate alloc;
 
 #[cfg(not(feature = "std"))]
 use alloc::{boxed::Box, string::String, vec::Vec};
-use bytes::{BufMut, BytesMut};
-use commonware_codec::{EncodeSize, Write};
+use bytes::{Buf, BufMut, BytesMut};
+use commonware_codec::{varint::UInt, EncodeSize, Error as CodecError, Read, ReadExt, Write};
 use core::{
     fmt::{Debug, Write as FmtWrite},
     time::Duration,
 };
 
+pub mod faults;
+pub use faults::{Faults, N3f1, N5f1};
 pub mod sequence;
 pub use sequence::{Array, Span};
 #[cfg(feature = "std")]
@@ -34,6 +36,69 @@ pub use hostname::Hostname;
 pub mod net;
 pub mod ordered;
 pub mod vec;
+
+/// Represents a participant/validator index within a consensus committee.
+///
+/// Participant indices are used to identify validators in attestations,
+/// votes, and certificates. The index corresponds to the position of the
+/// validator's public key in the ordered participant set.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+pub struct Participant(u32);
+
+impl Participant {
+    /// Creates a new participant from a u32 index.
+    pub const fn new(index: u32) -> Self {
+        Self(index)
+    }
+
+    /// Creates a new participant from a usize index.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `index` exceeds `u32::MAX`.
+    pub fn from_usize(index: usize) -> Self {
+        Self(u32::try_from(index).expect("participant index exceeds u32::MAX"))
+    }
+
+    /// Returns the underlying u32 index.
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+}
+
+impl From<Participant> for usize {
+    fn from(p: Participant) -> Self {
+        p.0 as Self
+    }
+}
+
+impl core::fmt::Display for Participant {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl Read for Participant {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, CodecError> {
+        let value: u32 = UInt::read(buf)?.into();
+        Ok(Self(value))
+    }
+}
+
+impl Write for Participant {
+    fn write(&self, buf: &mut impl BufMut) {
+        UInt(self.0).write(buf);
+    }
+}
+
+impl EncodeSize for Participant {
+    fn encode_size(&self) -> usize {
+        UInt(self.0).encode_size()
+    }
+}
 
 /// A type that can be constructed from an iterator, possibly failing.
 pub trait TryFromIterator<T>: Sized {
@@ -68,11 +133,26 @@ mod priority_set;
 #[cfg(feature = "std")]
 pub use priority_set::PrioritySet;
 #[cfg(feature = "std")]
-pub mod futures;
-mod stable_buf;
-pub use stable_buf::StableBuf;
-#[cfg(feature = "std")]
 pub mod concurrency;
+#[cfg(feature = "std")]
+pub mod futures;
+
+/// Returns a seeded RNG for deterministic testing.
+///
+/// Uses seed 0 by default to ensure reproducible test results.
+#[cfg(feature = "std")]
+pub fn test_rng() -> rand::rngs::StdRng {
+    rand::SeedableRng::seed_from_u64(0)
+}
+
+/// Returns a seeded RNG with a custom seed for deterministic testing.
+///
+/// Use this when you need multiple independent RNG streams in the same test,
+/// or when a helper function needs its own RNG that won't collide with the caller's.
+#[cfg(feature = "std")]
+pub fn test_rng_seeded(seed: u64) -> rand::rngs::StdRng {
+    rand::SeedableRng::seed_from_u64(seed)
+}
 
 /// Alias for boxed errors that are `Send` and `Sync`.
 pub type BoxedError = Box<dyn core::error::Error + Send + Sync>;
@@ -119,37 +199,6 @@ pub fn from_hex_formatted(hex: &str) -> Option<Vec<u8>> {
     let hex = hex.replace(['\t', '\n', '\r', ' '], "");
     let res = hex.strip_prefix("0x").unwrap_or(&hex);
     from_hex(res)
-}
-
-/// Compute the maximum number of `f` (faults) that can be tolerated for a given set of `n`
-/// participants. This is the maximum integer `f` such that `n >= 3*f + 1`. `f` may be zero.
-pub const fn max_faults(n: u32) -> u32 {
-    n.saturating_sub(1) / 3
-}
-
-/// Compute the quorum size for a given set of `n` participants. This is the minimum integer `q`
-/// such that `3*q >= 2*n + 1`. It is also equal to `n - f`, where `f` is the maximum number of
-/// faults.
-///
-/// # Panics
-///
-/// Panics if `n` is zero.
-pub fn quorum(n: u32) -> u32 {
-    assert!(n > 0, "n must not be zero");
-    n - max_faults(n)
-}
-
-/// Compute the quorum size for a given slice.
-///
-/// # Panics
-///
-/// Panics if the slice length is greater than [u32::MAX].
-pub fn quorum_from_slice<T>(slice: &[T]) -> u32 {
-    let n: u32 = slice
-        .len()
-        .try_into()
-        .expect("slice length must be less than u32::MAX");
-    quorum(n)
 }
 
 /// Computes the union of two byte slices.
@@ -199,11 +248,11 @@ pub fn modulo(bytes: &[u8], n: u64) -> u64 {
 #[macro_export]
 macro_rules! NZUsize {
     ($val:literal) => {
-        const { core::num::NonZeroUsize::new($val).expect("value must be non-zero") }
+        const { ::core::num::NonZeroUsize::new($val).expect("value must be non-zero") }
     };
     ($val:expr) => {
         // This will panic at runtime if $val is zero.
-        core::num::NonZeroUsize::new($val).expect("value must be non-zero")
+        ::core::num::NonZeroUsize::new($val).expect("value must be non-zero")
     };
 }
 
@@ -213,11 +262,11 @@ macro_rules! NZUsize {
 #[macro_export]
 macro_rules! NZU8 {
     ($val:literal) => {
-        const { core::num::NonZeroU8::new($val).expect("value must be non-zero") }
+        const { ::core::num::NonZeroU8::new($val).expect("value must be non-zero") }
     };
     ($val:expr) => {
         // This will panic at runtime if $val is zero.
-        core::num::NonZeroU8::new($val).expect("value must be non-zero")
+        ::core::num::NonZeroU8::new($val).expect("value must be non-zero")
     };
 }
 
@@ -227,11 +276,11 @@ macro_rules! NZU8 {
 #[macro_export]
 macro_rules! NZU16 {
     ($val:literal) => {
-        const { core::num::NonZeroU16::new($val).expect("value must be non-zero") }
+        const { ::core::num::NonZeroU16::new($val).expect("value must be non-zero") }
     };
     ($val:expr) => {
         // This will panic at runtime if $val is zero.
-        core::num::NonZeroU16::new($val).expect("value must be non-zero")
+        ::core::num::NonZeroU16::new($val).expect("value must be non-zero")
     };
 }
 
@@ -241,11 +290,11 @@ macro_rules! NZU16 {
 #[macro_export]
 macro_rules! NZU32 {
     ($val:literal) => {
-        const { core::num::NonZeroU32::new($val).expect("value must be non-zero") }
+        const { ::core::num::NonZeroU32::new($val).expect("value must be non-zero") }
     };
     ($val:expr) => {
         // This will panic at runtime if $val is zero.
-        core::num::NonZeroU32::new($val).expect("value must be non-zero")
+        ::core::num::NonZeroU32::new($val).expect("value must be non-zero")
     };
 }
 
@@ -255,11 +304,11 @@ macro_rules! NZU32 {
 #[macro_export]
 macro_rules! NZU64 {
     ($val:literal) => {
-        const { core::num::NonZeroU64::new($val).expect("value must be non-zero") }
+        const { ::core::num::NonZeroU64::new($val).expect("value must be non-zero") }
     };
     ($val:expr) => {
         // This will panic at runtime if $val is zero.
-        core::num::NonZeroU64::new($val).expect("value must be non-zero")
+        ::core::num::NonZeroU64::new($val).expect("value must be non-zero")
     };
 }
 
@@ -308,7 +357,6 @@ mod tests {
     use super::*;
     use num_bigint::BigUint;
     use rand::{rngs::StdRng, Rng, SeedableRng};
-    use rstest::rstest;
 
     #[test]
     fn test_hex() {
@@ -395,49 +443,6 @@ mod tests {
         // Ensure that `from_hex` can handle misaligned UTF-8 character boundaries.
         let b = from_hex(MISALIGNMENT_CASE);
         assert!(b.is_none());
-    }
-
-    #[test]
-    fn test_max_faults_zero() {
-        assert_eq!(max_faults(0), 0);
-    }
-
-    #[test]
-    #[should_panic]
-    fn test_quorum_zero() {
-        quorum(0);
-    }
-
-    #[rstest]
-    #[case(1, 0, 1)]
-    #[case(2, 0, 2)]
-    #[case(3, 0, 3)]
-    #[case(4, 1, 3)]
-    #[case(5, 1, 4)]
-    #[case(6, 1, 5)]
-    #[case(7, 2, 5)]
-    #[case(8, 2, 6)]
-    #[case(9, 2, 7)]
-    #[case(10, 3, 7)]
-    #[case(11, 3, 8)]
-    #[case(12, 3, 9)]
-    #[case(13, 4, 9)]
-    #[case(14, 4, 10)]
-    #[case(15, 4, 11)]
-    #[case(16, 5, 11)]
-    #[case(17, 5, 12)]
-    #[case(18, 5, 13)]
-    #[case(19, 6, 13)]
-    #[case(20, 6, 14)]
-    #[case(21, 6, 15)]
-    fn test_quorum_and_max_faults(
-        #[case] n: u32,
-        #[case] expected_f: u32,
-        #[case] expected_q: u32,
-    ) {
-        assert_eq!(max_faults(n), expected_f);
-        assert_eq!(quorum(n), expected_q);
-        assert_eq!(n, expected_f + expected_q);
     }
 
     #[test]
@@ -617,5 +622,59 @@ mod tests {
         let d1 = NonZeroDuration::new(Duration::from_millis(100)).unwrap();
         let d2 = NonZeroDuration::new(Duration::from_millis(200)).unwrap();
         assert!(d1 < d2);
+    }
+
+    #[test]
+    fn test_participant_constructors() {
+        assert_eq!(Participant::new(0).get(), 0);
+        assert_eq!(Participant::new(42).get(), 42);
+        assert_eq!(Participant::from_usize(0).get(), 0);
+        assert_eq!(Participant::from_usize(42).get(), 42);
+        assert_eq!(Participant::from_usize(u32::MAX as usize).get(), u32::MAX);
+    }
+
+    #[test]
+    #[should_panic(expected = "participant index exceeds u32::MAX")]
+    fn test_participant_from_usize_overflow() {
+        Participant::from_usize((u32::MAX as usize) + 1);
+    }
+
+    #[test]
+    fn test_participant_display() {
+        assert_eq!(format!("{}", Participant::new(0)), "0");
+        assert_eq!(format!("{}", Participant::new(42)), "42");
+        assert_eq!(format!("{}", Participant::new(1000)), "1000");
+    }
+
+    #[test]
+    fn test_participant_ordering() {
+        assert!(Participant::new(0) < Participant::new(1));
+        assert!(Participant::new(5) < Participant::new(10));
+        assert!(Participant::new(10) > Participant::new(5));
+        assert_eq!(Participant::new(42), Participant::new(42));
+    }
+
+    #[test]
+    fn test_participant_encode_decode() {
+        use commonware_codec::{DecodeExt, Encode};
+
+        let cases = vec![0u32, 1, 127, 128, 255, 256, u32::MAX];
+        for value in cases {
+            let participant = Participant::new(value);
+            let encoded = participant.encode();
+            assert_eq!(encoded.len(), participant.encode_size());
+            let decoded = Participant::decode(encoded).unwrap();
+            assert_eq!(participant, decoded);
+        }
+    }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::*;
+        use commonware_codec::conformance::CodecConformance;
+
+        commonware_conformance::conformance_tests! {
+            CodecConformance<Participant>,
+        }
     }
 }

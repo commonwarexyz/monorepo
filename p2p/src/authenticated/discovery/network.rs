@@ -17,7 +17,7 @@ use commonware_runtime::{
 };
 use commonware_stream::Config as StreamConfig;
 use commonware_utils::union;
-use rand::{CryptoRng, Rng};
+use rand_core::CryptoRngCore;
 use tracing::{debug, info};
 
 /// Unique suffix for all messages signed by the tracker.
@@ -27,8 +27,7 @@ const TRACKER_SUFFIX: &[u8] = b"_TRACKER";
 const STREAM_SUFFIX: &[u8] = b"_STREAM";
 
 /// Implementation of an `authenticated` network.
-pub struct Network<E: Spawner + Clock + Rng + CryptoRng + RNetwork + Resolver + Metrics, C: Signer>
-{
+pub struct Network<E: Spawner + Clock + CryptoRngCore + RNetwork + Resolver + Metrics, C: Signer> {
     context: ContextCell<E>,
     cfg: Config<C>,
 
@@ -40,9 +39,7 @@ pub struct Network<E: Spawner + Clock + Rng + CryptoRng + RNetwork + Resolver + 
     info_verifier: InfoVerifier<C::PublicKey>,
 }
 
-impl<E: Spawner + Clock + Rng + CryptoRng + RNetwork + Resolver + Metrics, C: Signer>
-    Network<E, C>
-{
+impl<E: Spawner + Clock + CryptoRngCore + RNetwork + Resolver + Metrics, C: Signer> Network<E, C> {
     /// Create a new instance of an `authenticated` network.
     ///
     /// # Parameters
@@ -69,6 +66,7 @@ impl<E: Spawner + Clock + Rng + CryptoRng + RNetwork + Resolver + Metrics, C: Si
                 peer_gossip_max_count: cfg.peer_gossip_max_count,
                 max_peer_set_size: cfg.max_peer_set_size,
                 dial_fail_limit: cfg.dial_fail_limit,
+                block_duration: cfg.block_duration,
             },
         );
         let (router, router_mailbox, messenger) = router::Actor::new(
@@ -120,7 +118,8 @@ impl<E: Spawner + Clock + Rng + CryptoRng + RNetwork + Resolver + Metrics, C: Si
     ) {
         let clock = self
             .context
-            .with_label(&format!("channel_{channel}"))
+            .with_label("channel")
+            .with_attribute("idx", channel)
             .take();
         self.channels.register(channel, rate, backlog, clock)
     }

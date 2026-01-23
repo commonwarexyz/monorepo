@@ -4,17 +4,16 @@
 use crate::fixed::{
     gen_random_kv, gen_random_kv_batched, get_any_ordered_fixed, get_any_ordered_variable,
     get_any_unordered_fixed, get_any_unordered_variable, get_current_ordered_fixed,
-    get_current_unordered_fixed, get_store, Variant, VARIANTS,
+    get_current_unordered_fixed, Digest, Variant, VARIANTS,
 };
-use commonware_cryptography::{Hasher, Sha256};
 use commonware_runtime::{
     benchmarks::{context, tokio},
     tokio::{Config, Context},
 };
-use commonware_storage::{
-    kv::Batchable,
-    qmdb::{any::AnyExt, store::LogStorePrunable, Error},
-    Persistable,
+use commonware_storage::qmdb::{
+    any::states::{CleanAny, MutableAny, UnmerkleizedDurableAny},
+    store::LogStore,
+    Error,
 };
 use criterion::{criterion_group, Criterion};
 use std::time::{Duration, Instant};
@@ -71,18 +70,6 @@ fn bench_fixed_generate(c: &mut Criterion) {
                                             .await
                                             .unwrap()
                                         }
-                                        Variant::Store => {
-                                            let db = get_store(ctx.clone()).await;
-                                            test_db(
-                                                db,
-                                                use_batch,
-                                                elements,
-                                                operations,
-                                                commit_frequency,
-                                            )
-                                            .await
-                                            .unwrap()
-                                        }
                                         Variant::AnyUnorderedVariable => {
                                             let db = get_any_unordered_variable(ctx.clone()).await;
                                             test_db(
@@ -109,7 +96,6 @@ fn bench_fixed_generate(c: &mut Criterion) {
                                         }
                                         Variant::CurrentUnorderedFixed => {
                                             let db = get_current_unordered_fixed(ctx.clone()).await;
-                                            let db = AnyExt::new(db);
                                             test_db(
                                                 db,
                                                 use_batch,
@@ -122,7 +108,6 @@ fn bench_fixed_generate(c: &mut Criterion) {
                                         }
                                         Variant::CurrentOrderedFixed => {
                                             let db = get_current_ordered_fixed(ctx.clone()).await;
-                                            let db = AnyExt::new(db);
                                             test_db(
                                                 db,
                                                 use_batch,
@@ -146,28 +131,41 @@ fn bench_fixed_generate(c: &mut Criterion) {
     }
 }
 
-async fn test_db<A>(
-    db: A,
+/// Test the database generation and cleanup.
+///
+/// Takes a clean database, converts to mutable, generates data, then prunes and destroys.
+async fn test_db<C>(
+    db: C,
     use_batch: bool,
     elements: u64,
     operations: u64,
     commit_frequency: u32,
-) -> Result<Duration, commonware_storage::qmdb::Error>
+) -> Result<Duration, Error>
 where
-    A: Batchable<Key = <Sha256 as Hasher>::Digest, Value = <Sha256 as Hasher>::Digest>
-        + Persistable<Error = Error>
-        + LogStorePrunable,
+    C: CleanAny<Key = Digest>,
+    C::Mutable: MutableAny<Key = Digest> + LogStore<Value = Digest>,
+    <C::Mutable as MutableAny>::Durable:
+        UnmerkleizedDurableAny<Mutable = C::Mutable, Merkleized = C>,
 {
     let start = Instant::now();
-    let mut db = if use_batch {
-        gen_random_kv_batched(db, elements, operations, Some(commit_frequency)).await
+
+    // Convert clean → mutable
+    let mutable = db.into_mutable();
+
+    // Generate random operations, returns in durable state
+    let durable = if use_batch {
+        gen_random_kv_batched(mutable, elements, operations, Some(commit_frequency)).await
     } else {
-        gen_random_kv(db, elements, operations, Some(commit_frequency)).await
+        gen_random_kv(mutable, elements, operations, Some(commit_frequency)).await
     };
-    db.commit().await?;
-    db.prune(db.inactivity_floor_loc()).await?;
+
+    // Convert durable → provable (clean) for pruning
+    let mut clean = durable.into_merkleized().await?;
+    clean.prune(clean.inactivity_floor_loc()).await?;
+    clean.sync().await?;
+
     let res = start.elapsed();
-    db.destroy().await?; // don't time destroy
+    clean.destroy().await?; // don't time destroy
 
     Ok(res)
 }

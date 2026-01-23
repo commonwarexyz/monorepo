@@ -1,10 +1,14 @@
 use crate::{signal, Error, Handle, SinkOf, StreamOf};
+use commonware_parallel::ThreadPool;
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use prometheus_client::registry::Metric;
 use rand::{CryptoRng, RngCore};
+use rayon::ThreadPoolBuildError;
 use std::{
     future::Future,
     net::SocketAddr,
+    num::NonZeroUsize,
+    ops::RangeInclusive,
     time::{Duration, SystemTime},
 };
 
@@ -139,6 +143,15 @@ where
     }
 }
 
+impl<C> crate::RayonPoolSpawner for Cell<C>
+where
+    C: crate::RayonPoolSpawner,
+{
+    fn create_pool(&self, concurrency: NonZeroUsize) -> Result<ThreadPool, ThreadPoolBuildError> {
+        self.as_present().create_pool(concurrency)
+    }
+}
+
 impl<C> crate::Metrics for Cell<C>
 where
     C: crate::Metrics,
@@ -157,6 +170,10 @@ where
 
     fn encode(&self) -> String {
         self.as_present().encode()
+    }
+
+    fn with_attribute(&self, key: &str, value: impl std::fmt::Display) -> Self {
+        Self::Present(self.as_present().with_attribute(key, value))
     }
 }
 
@@ -218,12 +235,13 @@ where
 {
     type Blob = <C as crate::Storage>::Blob;
 
-    fn open(
+    fn open_versioned(
         &self,
         partition: &str,
         name: &[u8],
-    ) -> impl Future<Output = Result<(Self::Blob, u64), Error>> + Send {
-        self.as_present().open(partition, name)
+        versions: RangeInclusive<u16>,
+    ) -> impl Future<Output = Result<(Self::Blob, u64, u16), Error>> + Send {
+        self.as_present().open_versioned(partition, name, versions)
     }
 
     fn remove(

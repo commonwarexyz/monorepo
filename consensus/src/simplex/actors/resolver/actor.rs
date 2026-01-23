@@ -16,27 +16,29 @@ use commonware_codec::{Decode, Encode};
 use commonware_cryptography::Digest;
 use commonware_macros::select_loop;
 use commonware_p2p::{utils::StaticManager, Blocker, Receiver, Sender};
+use commonware_parallel::Strategy;
 use commonware_resolver::p2p;
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner};
-use commonware_utils::{ordered::Quorum, sequence::U64};
+use commonware_utils::{channels::fallible::OneshotExt, ordered::Quorum, sequence::U64};
 use futures::{channel::mpsc, StreamExt};
-use rand::{CryptoRng, Rng};
+use rand_core::CryptoRngCore;
 use std::time::Duration;
 use tracing::debug;
 
 /// Requests are made concurrently to multiple peers.
 pub struct Actor<
-    E: Clock + Rng + CryptoRng + Metrics + Spawner,
+    E: Clock + CryptoRngCore + Metrics + Spawner,
     S: Scheme<D>,
     B: Blocker<PublicKey = S::PublicKey>,
     D: Digest,
+    T: Strategy,
 > {
     context: ContextCell<E>,
     scheme: S,
     blocker: Option<B>,
+    strategy: T,
 
     epoch: Epoch,
-    namespace: Vec<u8>,
     mailbox_size: usize,
     fetch_timeout: Duration,
 
@@ -46,22 +48,23 @@ pub struct Actor<
 }
 
 impl<
-        E: Clock + Rng + CryptoRng + Metrics + Spawner,
+        E: Clock + CryptoRngCore + Metrics + Spawner,
         S: Scheme<D>,
         B: Blocker<PublicKey = S::PublicKey>,
         D: Digest,
-    > Actor<E, S, B, D>
+        T: Strategy,
+    > Actor<E, S, B, D, T>
 {
-    pub fn new(context: E, cfg: Config<S, B>) -> (Self, Mailbox<S, D>) {
+    pub fn new(context: E, cfg: Config<S, B, T>) -> (Self, Mailbox<S, D>) {
         let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
         (
             Self {
                 context: ContextCell::new(context),
                 scheme: cfg.scheme,
                 blocker: Some(cfg.blocker),
+                strategy: cfg.strategy,
 
                 epoch: cfg.epoch,
-                namespace: cfg.namespace,
                 mailbox_size: cfg.mailbox_size,
                 fetch_timeout: cfg.fetch_timeout,
 
@@ -176,7 +179,7 @@ impl<
                     );
                     return None;
                 }
-                if !notarization.verify(&mut self.context, &self.scheme, &self.namespace) {
+                if !notarization.verify(&mut self.context, &self.scheme, &self.strategy) {
                     debug!(%view, "notarization failed verification");
                     return None;
                 }
@@ -196,7 +199,7 @@ impl<
                     );
                     return None;
                 }
-                if !finalization.verify(&mut self.context, &self.scheme, &self.namespace) {
+                if !finalization.verify(&mut self.context, &self.scheme, &self.strategy) {
                     debug!(%view, "finalization failed verification");
                     return None;
                 }
@@ -216,7 +219,7 @@ impl<
                     );
                     return None;
                 }
-                if !nullification.verify::<_, D>(&mut self.context, &self.scheme, &self.namespace) {
+                if !nullification.verify::<_, D>(&mut self.context, &self.scheme, &self.strategy) {
                     debug!(%view, "nullification failed verification");
                     return None;
                 }
@@ -243,10 +246,10 @@ impl<
                 let Some(parsed) = self.validate(view, data) else {
                     // Resolver will block any peers that send invalid responses, so
                     // we don't need to do again here
-                    let _ = response.send(false);
+                    response.send_lossy(false);
                     return;
                 };
-                let _ = response.send(true);
+                response.send_lossy(true);
 
                 // Notify voter as soon as possible
                 voter.resolved(parsed.clone()).await;
@@ -262,7 +265,7 @@ impl<
                     // the full timeout)
                     return;
                 };
-                let _ = response.send(certificate.encode().into());
+                response.send_lossy(certificate.encode());
             }
         }
     }

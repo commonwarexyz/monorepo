@@ -14,8 +14,8 @@ use commonware_cryptography::{
     bls12381::primitives::variant::MinSig, ed25519, Hasher, Sha256, Signer,
 };
 use commonware_p2p::authenticated::discovery;
-use commonware_runtime::{tokio, Metrics, Quota};
-use commonware_utils::{union, union_unique, NZU32};
+use commonware_runtime::{tokio, Metrics, Quota, RayonPoolSpawner};
+use commonware_utils::{union, union_unique, NZUsize, NZU32};
 use futures::future::try_join_all;
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -116,7 +116,8 @@ pub async fn run<S, L>(
     };
     let marshal = marshal_resolver::init(&context, resolver_cfg, marshal);
 
-    let engine = engine::Engine::<_, _, _, _, Sha256, MinSig, S, L>::new(
+    let strategy = context.clone().create_strategy(NZUsize!(2)).unwrap();
+    let engine = engine::Engine::<_, _, _, _, Sha256, MinSig, S, L, _>::new(
         context.with_label("engine"),
         engine::Config {
             signer: config.signing_key.clone(),
@@ -128,6 +129,7 @@ pub async fn run<S, L>(
             partition_prefix: "engine".to_string(),
             freezer_table_initial_size: 1024 * 1024, // 100mb
             peer_config,
+            strategy,
         },
     )
     .await;
@@ -174,11 +176,12 @@ mod test {
         utils::mux,
         Message, Receiver,
     };
+    use commonware_parallel::Sequential;
     use commonware_runtime::{
         deterministic::{self, Runner},
         Clock, Handle, Quota, Runner as _, Spawner,
     };
-    use commonware_utils::{union, TryCollect};
+    use commonware_utils::{union, N3f1, TryCollect};
     use futures::{
         channel::{mpsc, oneshot},
         SinkExt, StreamExt,
@@ -268,6 +271,7 @@ mod test {
         participants: BTreeMap<PublicKey, (PrivateKey, Option<Share>)>,
         handles: BTreeMap<PublicKey, Handle<()>>,
         failures: HashSet<u64>,
+        restart_counts: BTreeMap<PublicKey, u32>,
     }
 
     impl Team {
@@ -282,8 +286,9 @@ mod test {
                 num_participants_per_round: per_round.to_vec(),
                 participants: participants.keys().cloned().try_collect().unwrap(),
             };
-            let (output, shares) = deal(&mut rng, Default::default(), peer_config.dealers(0))
-                .expect("deal should succeed");
+            let (output, shares) =
+                deal::<MinSig, _, N3f1>(&mut rng, Default::default(), peer_config.dealers(0))
+                    .expect("deal should succeed");
             for (key, share) in shares.into_iter() {
                 if let Some((_, maybe_share)) = participants.get_mut(&key) {
                     *maybe_share = Some(share);
@@ -295,6 +300,7 @@ mod test {
                 participants,
                 handles: Default::default(),
                 failures: HashSet::new(),
+                restart_counts: Default::default(),
             }
         }
 
@@ -315,6 +321,7 @@ mod test {
                 participants,
                 handles: Default::default(),
                 failures: HashSet::new(),
+                restart_counts: Default::default(),
             }
         }
 
@@ -337,7 +344,7 @@ mod test {
                 return;
             };
 
-            let mut control = oracle.control(pk.clone());
+            let control = oracle.control(pk.clone());
             let votes = control.register(VOTE_CHANNEL, TEST_QUOTA).await.unwrap();
             let certificates = control
                 .register(CERTIFICATE_CHANNEL, TEST_QUOTA)
@@ -362,6 +369,9 @@ mod test {
                 },
             );
 
+            let restart_count = self.restart_counts.entry(pk.clone()).or_insert(0);
+            let validator_ctx = ctx.with_label(&format!("validator_{pk}_{restart_count}"));
+            *restart_count += 1;
             let resolver_cfg = marshal_resolver::Config {
                 public_key: pk.clone(),
                 manager: oracle.manager(),
@@ -373,9 +383,10 @@ mod test {
                 priority_requests: false,
                 priority_responses: false,
             };
-            let marshal = marshal_resolver::init(ctx, resolver_cfg, marshal);
-            let engine = engine::Engine::<_, _, _, _, Sha256, MinSig, S, L>::new(
-                ctx.with_label(&format!("validator_{}", &pk)),
+            let marshal =
+                marshal_resolver::init(&validator_ctx.with_label("marshal"), resolver_cfg, marshal);
+            let engine = engine::Engine::<_, _, _, _, Sha256, MinSig, S, L, _>::new(
+                validator_ctx.with_label("consensus"),
                 engine::Config {
                     signer: sk.clone(),
                     manager: oracle.manager(),
@@ -386,6 +397,7 @@ mod test {
                     partition_prefix: format!("validator_{}", &pk),
                     freezer_table_initial_size: 1024, // 1mb
                     peer_config: self.peer_config.clone(),
+                    strategy: Sequential,
                 },
             )
             .await;

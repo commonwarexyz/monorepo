@@ -1,11 +1,15 @@
-use super::types::{Activity, Context, SequencersProvider};
+use super::types::{Activity, ChunkSigner, ChunkVerifier, Context, SequencersProvider};
 use crate::{
-    types::{Epoch, EpochDelta},
+    types::{Epoch, EpochDelta, HeightDelta},
     Automaton, Monitor, Relay, Reporter,
 };
 use commonware_cryptography::{certificate::Provider, Digest, Signer};
+use commonware_parallel::Strategy;
 use commonware_runtime::buffer::PoolRef;
-use std::{num::NonZeroUsize, time::Duration};
+use std::{
+    num::{NonZeroU64, NonZeroUsize},
+    time::Duration,
+};
 
 /// Configuration for the [super::Engine].
 pub struct Config<
@@ -17,9 +21,18 @@ pub struct Config<
     R: Relay<Digest = D>,
     Z: Reporter<Activity = Activity<C::PublicKey, P::Scheme, D>>,
     M: Monitor<Index = Epoch>,
+    T: Strategy,
 > {
     /// The signer used when this engine acts as a sequencer.
-    pub sequencer_signer: Option<C>,
+    ///
+    /// Create with `ChunkSigner::new(namespace, signer)`.
+    pub sequencer_signer: Option<ChunkSigner<C>>,
+
+    /// Verifier for node signatures.
+    ///
+    /// Create with `ChunkVerifier::new(namespace)` using the same namespace
+    /// as the `ChunkSigner`.
+    pub chunk_verifier: ChunkVerifier,
 
     /// Provider for epoch-specific sequencers set.
     pub sequencers_provider: S,
@@ -39,10 +52,6 @@ pub struct Config<
     /// Tracks the current state of consensus (to determine which participants should
     /// be involved in the current broadcast attempt).
     pub monitor: M,
-
-    /// The application namespace used to sign over different types of messages.
-    /// Used to prevent replay attacks on other applications.
-    pub namespace: Vec<u8>,
 
     /// Whether proposals are sent as priority.
     pub priority_proposals: bool,
@@ -67,14 +76,14 @@ pub struct Config<
     ///
     /// For example, if the current tip for a sequencer is at height 100,
     /// and the height_bound is 10, then acks for heights 100-110 are accepted.
-    pub height_bound: u64,
+    pub height_bound: HeightDelta,
 
     /// A prefix for the journal names.
     /// The rest of the name is the hex-encoded public keys of the relevant sequencer.
     pub journal_name_prefix: String,
 
     /// The number of entries to keep per journal section.
-    pub journal_heights_per_section: u64,
+    pub journal_heights_per_section: NonZeroU64,
 
     /// The number of bytes to buffer when replaying a journal.
     pub journal_replay_buffer: NonZeroUsize,
@@ -87,4 +96,7 @@ pub struct Config<
 
     /// Buffer pool for the journal.
     pub journal_buffer_pool: PoolRef,
+
+    /// Strategy for parallel operations.
+    pub strategy: T,
 }

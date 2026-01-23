@@ -1,16 +1,18 @@
+use crate::Secret;
 use commonware_codec::{FixedSize, Read, ReadExt, Write};
 use rand_core::CryptoRngCore;
-use zeroize::ZeroizeOnDrop;
 
 /// A shared secret derived from X25519 key exchange.
-#[derive(ZeroizeOnDrop)]
 pub struct SharedSecret {
-    inner: x25519_dalek::SharedSecret,
+    pub(crate) secret: Secret<x25519_dalek::SharedSecret>,
 }
 
-impl AsRef<[u8]> for SharedSecret {
-    fn as_ref(&self) -> &[u8] {
-        self.inner.as_bytes().as_slice()
+impl SharedSecret {
+    /// Creates a new SharedSecret wrapping the given x25519 shared secret.
+    const fn new(secret: x25519_dalek::SharedSecret) -> Self {
+        Self {
+            secret: Secret::new(secret),
+        }
     }
 }
 
@@ -55,37 +57,35 @@ impl<'a> arbitrary::Arbitrary<'a> for EphemeralPublicKey {
     }
 }
 
-// I would implement `ZeroizeOnDrop`, but this seemingly fails because of a line
-// below, where the secret must be consumed.
 /// An ephemeral X25519 secret key used during handshake.
 pub struct SecretKey {
-    inner: x25519_dalek::EphemeralSecret,
+    inner: Secret<x25519_dalek::EphemeralSecret>,
 }
 
 impl SecretKey {
     /// Generates a new random ephemeral secret key.
     pub fn new(rng: impl CryptoRngCore) -> Self {
         Self {
-            inner: x25519_dalek::EphemeralSecret::random_from_rng(rng),
+            inner: Secret::new(x25519_dalek::EphemeralSecret::random_from_rng(rng)),
         }
     }
 
     /// Derives the corresponding public key.
     pub fn public(&self) -> EphemeralPublicKey {
-        EphemeralPublicKey {
-            inner: (&self.inner).into(),
-        }
+        self.inner.expose(|secret| EphemeralPublicKey {
+            inner: x25519_dalek::PublicKey::from(secret),
+        })
     }
 
     /// Performs X25519 key exchange with another public key.
     /// Returns None if the exchange is non-contributory.
     pub fn exchange(self, other: &EphemeralPublicKey) -> Option<SharedSecret> {
-        // This is the line mentioned above preventing `ZeroizeOnDrop` for this struct.
-        let out = self.inner.diffie_hellman(&other.inner);
+        let secret = self.inner.expose_unwrap();
+        let out = secret.diffie_hellman(&other.inner);
         if !out.was_contributory() {
             return None;
         }
-        Some(SharedSecret { inner: out })
+        Some(SharedSecret::new(out))
     }
 }
 

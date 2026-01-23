@@ -17,13 +17,11 @@ use tracing::debug;
 
 pub struct Config<S: certificate::Scheme> {
     pub scheme: S,
-    pub namespace: Vec<u8>,
 }
 
 pub struct NullifyOnly<E: Spawner, S: Scheme<H::Digest>, H: Hasher> {
     context: ContextCell<E>,
     scheme: S,
-    namespace: Vec<u8>,
     _hasher: PhantomData<H>,
 }
 
@@ -32,7 +30,6 @@ impl<E: Spawner, S: Scheme<H::Digest>, H: Hasher> NullifyOnly<E, S, H> {
         Self {
             context: ContextCell::new(context),
             scheme: cfg.scheme,
-            namespace: cfg.namespace,
             _hasher: PhantomData,
         }
     }
@@ -55,10 +52,8 @@ impl<E: Spawner, S: Scheme<H::Digest>, H: Hasher> NullifyOnly<E, S, H> {
 
             // Respond with only a `Nullify` vote when a proposal is observed.
             if let Vote::Notarize(notarize) = msg {
-                let nullify =
-                    Nullify::sign::<H::Digest>(&self.scheme, &self.namespace, notarize.round())
-                        .unwrap();
-                let msg = Vote::<S, H::Digest>::Nullify(nullify).encode().into();
+                let nullify = Nullify::sign::<H::Digest>(&self.scheme, notarize.round()).unwrap();
+                let msg = Vote::<S, H::Digest>::Nullify(nullify).encode();
                 sender.send(Recipients::All, msg, true).await.unwrap();
             }
         }

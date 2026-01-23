@@ -1,4 +1,4 @@
-use crate::{marshal::Update, Block, Reporter};
+use crate::{marshal::Update, types::Height, Block, Reporter};
 use commonware_utils::Acknowledgement;
 use std::{
     collections::BTreeMap,
@@ -8,9 +8,9 @@ use std::{
 /// A mock application that stores finalized blocks.
 #[derive(Clone)]
 pub struct Application<B: Block> {
-    blocks: Arc<Mutex<BTreeMap<u64, B>>>,
+    blocks: Arc<Mutex<BTreeMap<Height, B>>>,
     #[allow(clippy::type_complexity)]
-    tip: Arc<Mutex<Option<(u64, B::Commitment)>>>,
+    tip: Arc<Mutex<Option<(Height, B::Commitment)>>>,
 }
 
 impl<B: Block> Default for Application<B> {
@@ -24,12 +24,12 @@ impl<B: Block> Default for Application<B> {
 
 impl<B: Block> Application<B> {
     /// Returns the finalized blocks.
-    pub fn blocks(&self) -> BTreeMap<u64, B> {
+    pub fn blocks(&self) -> BTreeMap<Height, B> {
         self.blocks.lock().unwrap().clone()
     }
 
     /// Returns the tip.
-    pub fn tip(&self) -> Option<(u64, B::Commitment)> {
+    pub fn tip(&self) -> Option<(Height, B::Commitment)> {
         *self.tip.lock().unwrap()
     }
 }
@@ -43,7 +43,7 @@ impl<B: Block> Reporter for Application<B> {
                 self.blocks.lock().unwrap().insert(block.height(), block);
                 ack_tx.acknowledge();
             }
-            Update::Tip(height, commitment) => {
+            Update::Tip(_, height, commitment) => {
                 *self.tip.lock().unwrap() = Some((height, commitment));
             }
         }

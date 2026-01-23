@@ -12,9 +12,10 @@ use rand::{CryptoRng, RngCore};
 /// Builds ed25519 identities and matching BLS12-381 multisig schemes.
 pub fn fixture<S, V, R>(
     rng: &mut R,
+    namespace: &[u8],
     n: u32,
-    signer: impl Fn(BiMap<ed25519::PublicKey, V::Public>, Private) -> Option<S>,
-    verifier: impl Fn(BiMap<ed25519::PublicKey, V::Public>) -> S,
+    signer: impl Fn(&[u8], BiMap<ed25519::PublicKey, V::Public>, Private) -> Option<S>,
+    verifier: impl Fn(&[u8], BiMap<ed25519::PublicKey, V::Public>) -> S,
 ) -> Fixture<S>
 where
     V: Variant,
@@ -50,9 +51,11 @@ where
 
     let schemes = bls_privates
         .into_iter()
-        .map(|sk| signer(signers.clone(), sk).expect("scheme signer must be a participant"))
+        .map(|sk| {
+            signer(namespace, signers.clone(), sk).expect("scheme signer must be a participant")
+        })
         .collect();
-    let verifier = verifier(signers);
+    let verifier = verifier(namespace, signers);
 
     Fixture {
         participants: participants_vec,

@@ -12,6 +12,7 @@ use commonware_runtime::{
     telemetry::metrics::status::{CounterExt, GaugeExt, Status},
     Clock, ContextCell, Handle, Metrics, Spawner,
 };
+use commonware_utils::channels::fallible::OneshotExt;
 use futures::{
     channel::{mpsc, oneshot},
     StreamExt,
@@ -232,7 +233,7 @@ impl<E: Clock + Spawner + Metrics, P: PublicKey, M: Committable + Digestible + C
                 error!(?err, "failed to send message");
                 vec![]
             });
-        let _ = responder.send(sent_to);
+        responder.send_lossy(sent_to);
     }
 
     /// Searches through all maintained messages for a match.
@@ -453,10 +454,10 @@ impl<E: Clock + Spawner + Metrics, P: PublicKey, M: Committable + Digestible + C
     /// Respond to a waiter with a message.
     /// Increments the appropriate metric based on the result.
     fn respond_subscribe(&mut self, responder: oneshot::Sender<M>, msg: M) {
-        let result = responder.send(msg);
-        self.metrics.subscribe.inc(match result {
-            Ok(_) => Status::Success,
-            Err(_) => Status::Dropped,
+        self.metrics.subscribe.inc(if responder.send_lossy(msg) {
+            Status::Success
+        } else {
+            Status::Dropped
         });
     }
 
@@ -464,11 +465,14 @@ impl<E: Clock + Spawner + Metrics, P: PublicKey, M: Committable + Digestible + C
     /// Increments the appropriate metric based on the result.
     fn respond_get(&mut self, responder: oneshot::Sender<Vec<M>>, msg: Vec<M>) {
         let found = !msg.is_empty();
-        let result = responder.send(msg);
-        self.metrics.get.inc(match result {
-            Ok(_) if found => Status::Success,
-            Ok(_) => Status::Failure,
-            Err(_) => Status::Dropped,
+        self.metrics.get.inc(if responder.send_lossy(msg) {
+            if found {
+                Status::Success
+            } else {
+                Status::Failure
+            }
+        } else {
+            Status::Dropped
         });
     }
 }

@@ -215,6 +215,7 @@ impl SystemTimeExt for SystemTime {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_rng;
 
     #[test]
     fn test_epoch() {
@@ -290,7 +291,7 @@ mod tests {
 
     #[test]
     fn test_add_jittered() {
-        let mut rng = rand::thread_rng();
+        let mut rng = test_rng();
         let time = SystemTime::UNIX_EPOCH + Duration::from_secs(1);
         let jitter = Duration::from_secs(2);
 

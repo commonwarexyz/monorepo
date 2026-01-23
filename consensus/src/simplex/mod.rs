@@ -14,7 +14,7 @@
 //! * Lazy Message Verification
 //! * Application-Defined Block Format
 //! * Pluggable Hashing and Cryptography
-//! * Embedded VRF (via [scheme::bls12381_threshold])
+//! * Embedded VRF (via [scheme::bls12381_threshold::vrf])
 //!
 //! # Design
 //!
@@ -124,7 +124,8 @@
 //! where [`Scheme::is_batchable()`](commonware_cryptography::certificate::Scheme::is_batchable) returns `true`
 //! (such as [scheme::ed25519], [scheme::bls12381_multisig] and [scheme::bls12381_threshold]), `simplex` lazily
 //! verifies messages (only when a quorum is met), enabling efficient batch verification. For schemes where
-//! `is_batchable()` returns `false`, signatures are verified eagerly as they arrive since there is no batching benefit.
+//! `is_batchable()` returns `false` (such as [scheme::secp256r1]), signatures are verified eagerly as they
+//! arrive since there is no batching benefit.
 //!
 //! If an invalid signature is detected, the `Batcher` will perform repeated bisections over collected
 //! messages to find the offending message (and block the peer(s) that sent it via [commonware_p2p::Blocker]).
@@ -171,15 +172,28 @@
 //! into a single signature (reducing bandwidth usage per broadcast). That being said, [commonware_cryptography::bls12381] is much slower
 //! to verify than [commonware_cryptography::ed25519] and isn't supported by most HSMs (a standardization effort expired in 2022).
 //!
+//! ### [scheme::secp256r1]
+//!
+//! [commonware_cryptography::secp256r1] signatures use the NIST P-256 elliptic curve (also known as prime256v1), which is widely
+//! supported by commercial HSMs and hardware security modules. Unlike [commonware_cryptography::ed25519], Secp256r1 does not
+//! benefit from batch verification, so signatures are verified individually. Certificates grow linearly with quorum size
+//! (similar to ed25519).
+//!
 //! ### [scheme::bls12381_threshold]
 //!
-//! Last but not least, [scheme::bls12381_threshold] employs threshold cryptography (specifically BLS12-381 threshold signatures
-//! with a `2f+1` of `3f+1` quorum) to generate both a bias-resistant beacon (for leader election and post-facto execution randomness)
-//! and succinct consensus certificates (any certificate can be verified with just the static public key of the consensus instance) for each view
-//! with zero message overhead (natively integrated). While powerful, this scheme requires both instantiating the shared secret
-//! via [commonware_cryptography::bls12381::dkg] and performing a resharing procedure whenever participants are added or removed.
+//! [scheme::bls12381_threshold] employs threshold cryptography (BLS12-381 threshold signatures with a `2f+1` of `3f+1` quorum)
+//! to generate succinct consensus certificates (verifiable with just the static public key). This scheme requires instantiating
+//! the shared secret via [commonware_cryptography::bls12381::dkg] and resharing whenever participants change.
 //!
-//! #### Embedded VRF
+//! Two (non-attributable) variants are provided:
+//!
+//! - [scheme::bls12381_threshold::standard]: Certificates contain only a vote signature.
+//!
+//! - [scheme::bls12381_threshold::vrf]: Certificates contain a vote signature and a view signature (i.e. a seed that can be used
+//!   as a VRF). This variant can be configured for random leader election (via [elector::Random]) and/or incorporate this randomness
+//!   into execution.
+//!
+//! #### Embedded VRF ([scheme::bls12381_threshold::vrf])
 //!
 //! Every `notarize(c,v)` or `nullify(v)` message includes an `attestation(v)` (a partial signature over the view `v`). After `2f+1`
 //! `notarize(c,v)` or `nullify(v)` messages are collected from unique participants, `seed(v)` can be recovered. Because `attestation(v)` is
@@ -262,6 +276,10 @@ pub(crate) fn interesting(
     pending: View,
     allow_future: bool,
 ) -> bool {
+    // If the view is genesis, skip it, genesis doesn't have votes
+    if pending.is_zero() {
+        return false;
+    }
     if pending < min_active(activity_timeout, last_finalized) {
         return false;
     }
@@ -269,6 +287,14 @@ pub(crate) fn interesting(
         return false;
     }
     true
+}
+
+/// Convenience alias for [`N3f1::quorum`].
+#[cfg(test)]
+pub(crate) fn quorum(n: u32) -> u32 {
+    use commonware_utils::{Faults, N3f1};
+
+    N3f1::quorum(n)
 }
 
 #[cfg(test)]
@@ -279,8 +305,12 @@ mod tests {
             elector::{Config as Elector, Random, RoundRobin},
             mocks::twins::Strategy,
             scheme::{
-                bls12381_multisig, bls12381_threshold, bls12381_threshold::Seedable, ed25519,
-                Scheme,
+                bls12381_multisig,
+                bls12381_threshold::{
+                    standard as bls12381_threshold_std,
+                    vrf::{self as bls12381_threshold_vrf, Seedable},
+                },
+                ed25519, secp256r1, Scheme,
             },
             types::{
                 Certificate, Finalization as TFinalization, Finalize as TFinalize,
@@ -291,7 +321,6 @@ mod tests {
         types::{Epoch, Round},
         Monitor, Viewable,
     };
-    use bytes::Bytes;
     use commonware_codec::{Decode, DecodeExt, Encode};
     use commonware_cryptography::{
         bls12381::primitives::variant::{MinPk, MinSig, Variant},
@@ -305,25 +334,112 @@ mod tests {
         simulated::{Config, Link, Network, Oracle, Receiver, Sender, SplitOrigin, SplitTarget},
         Recipients, Sender as _,
     };
+    use commonware_parallel::Sequential;
     use commonware_runtime::{
-        buffer::PoolRef, deterministic, Clock, Metrics, Quota, Runner, Spawner,
+        buffer::PoolRef, count_running_tasks, deterministic, Clock, IoBuf, Metrics, Quota, Runner,
+        Spawner,
     };
-    use commonware_utils::{max_faults, quorum, NZUsize};
+    use commonware_utils::{test_rng, Faults, N3f1, NZUsize, NZU16};
     use engine::Engine;
     use futures::{future::join_all, StreamExt};
-    use rand::{rngs::StdRng, Rng as _, SeedableRng as _};
+    use rand::{rngs::StdRng, Rng as _};
     use std::{
         collections::{BTreeMap, HashMap},
-        num::{NonZeroU32, NonZeroUsize},
+        num::{NonZeroU16, NonZeroU32, NonZeroUsize},
         sync::{Arc, Mutex},
         time::Duration,
     };
     use tracing::{debug, info, warn};
     use types::Activity;
 
-    const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
+    const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
     const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
+
+    #[test]
+    fn test_interesting() {
+        let activity_timeout = ViewDelta::new(10);
+
+        // Genesis view is never interesting
+        assert!(!interesting(
+            activity_timeout,
+            View::zero(),
+            View::zero(),
+            View::zero(),
+            false
+        ));
+        assert!(!interesting(
+            activity_timeout,
+            View::zero(),
+            View::new(1),
+            View::zero(),
+            true
+        ));
+
+        // View below min_active is not interesting
+        assert!(!interesting(
+            activity_timeout,
+            View::new(20),
+            View::new(25),
+            View::new(5), // below min_active (10)
+            false
+        ));
+
+        // View at min_active boundary is interesting
+        assert!(interesting(
+            activity_timeout,
+            View::new(20),
+            View::new(25),
+            View::new(10), // exactly min_active
+            false
+        ));
+
+        // Future view beyond current.next() is not interesting when allow_future is false
+        assert!(!interesting(
+            activity_timeout,
+            View::new(20),
+            View::new(25),
+            View::new(27),
+            false
+        ));
+
+        // Future view beyond current.next() is interesting when allow_future is true
+        assert!(interesting(
+            activity_timeout,
+            View::new(20),
+            View::new(25),
+            View::new(27),
+            true
+        ));
+
+        // View at current.next() is interesting
+        assert!(interesting(
+            activity_timeout,
+            View::new(20),
+            View::new(25),
+            View::new(26),
+            false
+        ));
+
+        // View within valid range is interesting
+        assert!(interesting(
+            activity_timeout,
+            View::new(20),
+            View::new(25),
+            View::new(22),
+            false
+        ));
+
+        // When last_finalized is 0 and activity_timeout would underflow
+        // min_active saturates at 0, so view 1 should still be interesting
+        assert!(interesting(
+            activity_timeout,
+            View::zero(),
+            View::new(5),
+            View::new(1),
+            false
+        ));
+    }
 
     /// Register a validator with the oracle.
     async fn register_validator(
@@ -343,7 +459,7 @@ mod tests {
             Receiver<PublicKey>,
         ),
     ) {
-        let mut control = oracle.control(validator.clone());
+        let control = oracle.control(validator.clone());
         let (vote_sender, vote_receiver) = control.register(0, TEST_QUOTA).await.unwrap();
         let (certificate_sender, certificate_receiver) =
             control.register(1, TEST_QUOTA).await.unwrap();
@@ -441,7 +557,7 @@ mod tests {
     fn all_online<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: Elector<S>,
     {
         // Create context
@@ -471,7 +587,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = fixture(&mut context, n);
+            } = fixture(&mut context, &namespace, n);
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -493,7 +609,6 @@ mod tests {
 
                 // Configure engine
                 let reporter_config = mocks::reporter::Config {
-                    namespace: namespace.clone(),
                     participants: participants.clone().try_into().unwrap(),
                     scheme: schemes[idx].clone(),
                     elector: elector.clone(),
@@ -523,10 +638,10 @@ mod tests {
                     automaton: application.clone(),
                     relay: application.clone(),
                     reporter: reporter.clone(),
+                    strategy: Sequential,
                     partition: validator.to_string(),
                     mailbox_size: 1024,
                     epoch: Epoch::new(333),
-                    namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
                     nullify_retry: Duration::from_secs(10),
@@ -683,17 +798,20 @@ mod tests {
 
     #[test_traced]
     fn test_all_online() {
-        all_online::<_, _, Random>(bls12381_threshold::fixture::<MinPk, _>);
-        all_online::<_, _, Random>(bls12381_threshold::fixture::<MinSig, _>);
+        all_online::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        all_online::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinSig, _>);
+        all_online::<_, _, RoundRobin>(bls12381_threshold_std::fixture::<MinPk, _>);
+        all_online::<_, _, RoundRobin>(bls12381_threshold_std::fixture::<MinSig, _>);
         all_online::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>);
         all_online::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>);
         all_online::<_, _, RoundRobin>(ed25519::fixture);
+        all_online::<_, _, RoundRobin>(secp256r1::fixture);
     }
 
     fn observer<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: Elector<S>,
     {
         // Create context
@@ -723,7 +841,7 @@ mod tests {
                 schemes,
                 verifier,
                 ..
-            } = fixture(&mut context, n_active);
+            } = fixture(&mut context, &namespace, n_active);
 
             // Add observer (no share)
             let private_key_observer = PrivateKey::from_seed(n_active as u64);
@@ -761,7 +879,6 @@ mod tests {
                     schemes[idx].clone()
                 };
                 let reporter_config = mocks::reporter::Config {
-                    namespace: namespace.clone(),
                     participants: participants.clone().try_into().unwrap(),
                     scheme: signing.clone(),
                     elector: elector.clone(),
@@ -791,10 +908,10 @@ mod tests {
                     automaton: application.clone(),
                     relay: application.clone(),
                     reporter: reporter.clone(),
+                    strategy: Sequential,
                     partition: validator.to_string(),
                     mailbox_size: 1024,
                     epoch: Epoch::new(333),
-                    namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
                     nullify_retry: Duration::from_secs(10),
@@ -848,17 +965,20 @@ mod tests {
 
     #[test_traced]
     fn test_observer() {
-        observer::<_, _, Random>(bls12381_threshold::fixture::<MinPk, _>);
-        observer::<_, _, Random>(bls12381_threshold::fixture::<MinSig, _>);
+        observer::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        observer::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinSig, _>);
+        observer::<_, _, RoundRobin>(bls12381_threshold_std::fixture::<MinPk, _>);
+        observer::<_, _, RoundRobin>(bls12381_threshold_std::fixture::<MinSig, _>);
         observer::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>);
         observer::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>);
         observer::<_, _, RoundRobin>(ed25519::fixture);
+        observer::<_, _, RoundRobin>(secp256r1::fixture);
     }
 
     fn unclean_shutdown<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut StdRng, u32) -> Fixture<S>,
+        F: FnMut(&mut StdRng, &[u8], u32) -> Fixture<S>,
         L: Elector<S>,
     {
         // Create context
@@ -874,12 +994,12 @@ mod tests {
         let mut prev_checkpoint = None;
 
         // Create validator keys
-        let mut rng = StdRng::seed_from_u64(0);
+        let mut rng = test_rng();
         let Fixture {
             participants,
             schemes,
             ..
-        } = fixture(&mut rng, n);
+        } = fixture(&mut rng, &namespace, n);
 
         // Create block relay, shared across restarts.
         let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, S::PublicKey>::new());
@@ -888,7 +1008,6 @@ mod tests {
             let rng = rng.clone();
             let participants = participants.clone();
             let schemes = schemes.clone();
-            let namespace = namespace.clone();
             let shutdowns = shutdowns.clone();
             let supervised = supervised.clone();
             let relay = relay.clone();
@@ -930,7 +1049,6 @@ mod tests {
 
                     // Configure engine
                     let reporter_config = mocks::reporter::Config {
-                        namespace: namespace.clone(),
                         participants: participants.clone().try_into().unwrap(),
                         scheme: schemes[idx].clone(),
                         elector: elector.clone(),
@@ -959,10 +1077,10 @@ mod tests {
                         automaton: application.clone(),
                         relay: application.clone(),
                         reporter: reporter.clone(),
+                        strategy: Sequential,
                         partition: validator.to_string(),
                         mailbox_size: 1024,
                         epoch: Epoch::new(333),
-                        namespace: namespace.clone(),
                         leader_timeout: Duration::from_secs(1),
                         notarization_timeout: Duration::from_secs(2),
                         nullify_retry: Duration::from_secs(10),
@@ -1047,17 +1165,20 @@ mod tests {
     #[test_group("slow")]
     #[test_traced]
     fn test_unclean_shutdown() {
-        unclean_shutdown::<_, _, Random>(bls12381_threshold::fixture::<MinPk, _>);
-        unclean_shutdown::<_, _, Random>(bls12381_threshold::fixture::<MinSig, _>);
+        unclean_shutdown::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        unclean_shutdown::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinSig, _>);
+        unclean_shutdown::<_, _, RoundRobin>(bls12381_threshold_std::fixture::<MinPk, _>);
+        unclean_shutdown::<_, _, RoundRobin>(bls12381_threshold_std::fixture::<MinSig, _>);
         unclean_shutdown::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>);
         unclean_shutdown::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>);
         unclean_shutdown::<_, _, RoundRobin>(ed25519::fixture);
+        unclean_shutdown::<_, _, RoundRobin>(secp256r1::fixture);
     }
 
     fn backfill<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: Elector<S>,
     {
         // Create context
@@ -1086,7 +1207,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = fixture(&mut context, n);
+            } = fixture(&mut context, &namespace, n);
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators except first
@@ -1119,7 +1240,6 @@ mod tests {
 
                 // Configure engine
                 let reporter_config = mocks::reporter::Config {
-                    namespace: namespace.clone(),
                     participants: participants.clone().try_into().unwrap(),
                     scheme: schemes[idx_scheme].clone(),
                     elector: elector.clone(),
@@ -1149,10 +1269,10 @@ mod tests {
                     automaton: application.clone(),
                     relay: application.clone(),
                     reporter: reporter.clone(),
+                    strategy: Sequential,
                     partition: validator.to_string(),
                     mailbox_size: 1024,
                     epoch: Epoch::new(333),
-                    namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
                     nullify_retry: Duration::from_secs(10),
@@ -1240,7 +1360,6 @@ mod tests {
 
             // Configure engine
             let reporter_config = mocks::reporter::Config {
-                namespace: namespace.clone(),
                 participants: participants.clone().try_into().unwrap(),
                 scheme: schemes[0].clone(),
                 elector: elector.clone(),
@@ -1270,10 +1389,10 @@ mod tests {
                 automaton: application.clone(),
                 relay: application.clone(),
                 reporter: reporter.clone(),
+                strategy: Sequential,
                 partition: me.to_string(),
                 mailbox_size: 1024,
                 epoch: Epoch::new(333),
-                namespace: namespace.clone(),
                 leader_timeout: Duration::from_secs(1),
                 notarization_timeout: Duration::from_secs(2),
                 nullify_retry: Duration::from_secs(10),
@@ -1307,17 +1426,20 @@ mod tests {
 
     #[test_traced]
     fn test_backfill() {
-        backfill::<_, _, Random>(bls12381_threshold::fixture::<MinPk, _>);
-        backfill::<_, _, Random>(bls12381_threshold::fixture::<MinSig, _>);
+        backfill::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        backfill::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinSig, _>);
+        backfill::<_, _, RoundRobin>(bls12381_threshold_std::fixture::<MinPk, _>);
+        backfill::<_, _, RoundRobin>(bls12381_threshold_std::fixture::<MinSig, _>);
         backfill::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>);
         backfill::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>);
         backfill::<_, _, RoundRobin>(ed25519::fixture);
+        backfill::<_, _, RoundRobin>(secp256r1::fixture);
     }
 
     fn one_offline<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: Elector<S>,
     {
         // Create context
@@ -1348,7 +1470,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = fixture(&mut context, n);
+            } = fixture(&mut context, &namespace, n);
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators except first
@@ -1381,7 +1503,6 @@ mod tests {
 
                 // Configure engine
                 let reporter_config = mocks::reporter::Config {
-                    namespace: namespace.clone(),
                     participants: participants.clone().try_into().unwrap(),
                     scheme: schemes[idx_scheme].clone(),
                     elector: elector.clone(),
@@ -1411,10 +1532,10 @@ mod tests {
                     automaton: application.clone(),
                     relay: application.clone(),
                     reporter: reporter.clone(),
+                    strategy: Sequential,
                     partition: validator.to_string(),
                     mailbox_size: 1024,
                     epoch: Epoch::new(333),
-                    namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
                     nullify_retry: Duration::from_secs(10),
@@ -1570,17 +1691,20 @@ mod tests {
 
     #[test_traced]
     fn test_one_offline() {
-        one_offline::<_, _, Random>(bls12381_threshold::fixture::<MinPk, _>);
-        one_offline::<_, _, Random>(bls12381_threshold::fixture::<MinSig, _>);
+        one_offline::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        one_offline::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinSig, _>);
+        one_offline::<_, _, RoundRobin>(bls12381_threshold_std::fixture::<MinPk, _>);
+        one_offline::<_, _, RoundRobin>(bls12381_threshold_std::fixture::<MinSig, _>);
         one_offline::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>);
         one_offline::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>);
         one_offline::<_, _, RoundRobin>(ed25519::fixture);
+        one_offline::<_, _, RoundRobin>(secp256r1::fixture);
     }
 
     fn slow_validator<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: Elector<S>,
     {
         // Create context
@@ -1609,7 +1733,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = fixture(&mut context, n);
+            } = fixture(&mut context, &namespace, n);
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -1631,7 +1755,6 @@ mod tests {
 
                 // Configure engine
                 let reporter_config = mocks::reporter::Config {
-                    namespace: namespace.clone(),
                     participants: participants.clone().try_into().unwrap(),
                     scheme: schemes[idx_scheme].clone(),
                     elector: elector.clone(),
@@ -1673,10 +1796,10 @@ mod tests {
                     automaton: application.clone(),
                     relay: application.clone(),
                     reporter: reporter.clone(),
+                    strategy: Sequential,
                     partition: validator.to_string(),
                     mailbox_size: 1024,
                     epoch: Epoch::new(333),
-                    namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
                     nullify_retry: Duration::from_secs(10),
@@ -1759,17 +1882,20 @@ mod tests {
 
     #[test_traced]
     fn test_slow_validator() {
-        slow_validator::<_, _, Random>(bls12381_threshold::fixture::<MinPk, _>);
-        slow_validator::<_, _, Random>(bls12381_threshold::fixture::<MinSig, _>);
+        slow_validator::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        slow_validator::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinSig, _>);
+        slow_validator::<_, _, RoundRobin>(bls12381_threshold_std::fixture::<MinPk, _>);
+        slow_validator::<_, _, RoundRobin>(bls12381_threshold_std::fixture::<MinSig, _>);
         slow_validator::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>);
         slow_validator::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>);
         slow_validator::<_, _, RoundRobin>(ed25519::fixture);
+        slow_validator::<_, _, RoundRobin>(secp256r1::fixture);
     }
 
     fn all_recovery<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: Elector<S>,
     {
         // Create context
@@ -1798,7 +1924,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = fixture(&mut context, n);
+            } = fixture(&mut context, &namespace, n);
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -1820,7 +1946,6 @@ mod tests {
 
                 // Configure engine
                 let reporter_config = mocks::reporter::Config {
-                    namespace: namespace.clone(),
                     participants: participants.clone().try_into().unwrap(),
                     scheme: schemes[idx].clone(),
                     elector: elector.clone(),
@@ -1850,10 +1975,10 @@ mod tests {
                     automaton: application.clone(),
                     relay: application.clone(),
                     reporter: reporter.clone(),
+                    strategy: Sequential,
                     partition: validator.to_string(),
                     mailbox_size: 1024,
                     epoch: Epoch::new(333),
-                    namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
                     nullify_retry: Duration::from_secs(10),
@@ -1973,17 +2098,20 @@ mod tests {
 
     #[test_traced]
     fn test_all_recovery() {
-        all_recovery::<_, _, Random>(bls12381_threshold::fixture::<MinPk, _>);
-        all_recovery::<_, _, Random>(bls12381_threshold::fixture::<MinSig, _>);
+        all_recovery::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        all_recovery::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinSig, _>);
+        all_recovery::<_, _, RoundRobin>(bls12381_threshold_std::fixture::<MinPk, _>);
+        all_recovery::<_, _, RoundRobin>(bls12381_threshold_std::fixture::<MinSig, _>);
         all_recovery::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>);
         all_recovery::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>);
         all_recovery::<_, _, RoundRobin>(ed25519::fixture);
+        all_recovery::<_, _, RoundRobin>(secp256r1::fixture);
     }
 
     fn partition<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: Elector<S>,
     {
         // Create context
@@ -2012,7 +2140,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = fixture(&mut context, n);
+            } = fixture(&mut context, &namespace, n);
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -2034,7 +2162,6 @@ mod tests {
 
                 // Configure engine
                 let reporter_config = mocks::reporter::Config {
-                    namespace: namespace.clone(),
                     participants: participants.clone().try_into().unwrap(),
                     scheme: schemes[idx].clone(),
                     elector: elector.clone(),
@@ -2064,10 +2191,10 @@ mod tests {
                     automaton: application.clone(),
                     relay: application.clone(),
                     reporter: reporter.clone(),
+                    strategy: Sequential,
                     partition: validator.to_string(),
                     mailbox_size: 1024,
                     epoch: Epoch::new(333),
-                    namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
                     nullify_retry: Duration::from_secs(10),
@@ -2175,17 +2302,20 @@ mod tests {
     #[test_group("slow")]
     #[test_traced]
     fn test_partition() {
-        partition::<_, _, Random>(bls12381_threshold::fixture::<MinPk, _>);
-        partition::<_, _, Random>(bls12381_threshold::fixture::<MinSig, _>);
+        partition::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        partition::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinSig, _>);
+        partition::<_, _, RoundRobin>(bls12381_threshold_std::fixture::<MinPk, _>);
+        partition::<_, _, RoundRobin>(bls12381_threshold_std::fixture::<MinSig, _>);
         partition::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>);
         partition::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>);
         partition::<_, _, RoundRobin>(ed25519::fixture);
+        partition::<_, _, RoundRobin>(secp256r1::fixture);
     }
 
     fn slow_and_lossy_links<S, F, L>(seed: u64, mut fixture: F) -> String
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: Elector<S>,
     {
         // Create context
@@ -2217,7 +2347,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = fixture(&mut context, n);
+            } = fixture(&mut context, &namespace, n);
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -2245,7 +2375,6 @@ mod tests {
 
                 // Configure engine
                 let reporter_config = mocks::reporter::Config {
-                    namespace: namespace.clone(),
                     participants: participants.clone().try_into().unwrap(),
                     scheme: schemes[idx].clone(),
                     elector: elector.clone(),
@@ -2275,10 +2404,10 @@ mod tests {
                     automaton: application.clone(),
                     relay: application.clone(),
                     reporter: reporter.clone(),
+                    strategy: Sequential,
                     partition: validator.to_string(),
                     mailbox_size: 1024,
                     epoch: Epoch::new(333),
-                    namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
                     nullify_retry: Duration::from_secs(10),
@@ -2336,11 +2465,14 @@ mod tests {
 
     #[test_traced]
     fn test_slow_and_lossy_links() {
-        slow_and_lossy_links::<_, _, Random>(0, bls12381_threshold::fixture::<MinPk, _>);
-        slow_and_lossy_links::<_, _, Random>(0, bls12381_threshold::fixture::<MinSig, _>);
+        slow_and_lossy_links::<_, _, Random>(0, bls12381_threshold_vrf::fixture::<MinPk, _>);
+        slow_and_lossy_links::<_, _, Random>(0, bls12381_threshold_vrf::fixture::<MinSig, _>);
+        slow_and_lossy_links::<_, _, RoundRobin>(0, bls12381_threshold_std::fixture::<MinPk, _>);
+        slow_and_lossy_links::<_, _, RoundRobin>(0, bls12381_threshold_std::fixture::<MinSig, _>);
         slow_and_lossy_links::<_, _, RoundRobin>(0, bls12381_multisig::fixture::<MinPk, _>);
         slow_and_lossy_links::<_, _, RoundRobin>(0, bls12381_multisig::fixture::<MinSig, _>);
         slow_and_lossy_links::<_, _, RoundRobin>(0, ed25519::fixture);
+        slow_and_lossy_links::<_, _, RoundRobin>(0, secp256r1::fixture);
     }
 
     #[test_group("slow")]
@@ -2349,21 +2481,45 @@ mod tests {
         // We use slow and lossy links as the deterministic test
         // because it is the most complex test.
         for seed in 1..6 {
-            let ts_pk_state_1 =
-                slow_and_lossy_links::<_, _, Random>(seed, bls12381_threshold::fixture::<MinPk, _>);
-            let ts_pk_state_2 =
-                slow_and_lossy_links::<_, _, Random>(seed, bls12381_threshold::fixture::<MinPk, _>);
-            assert_eq!(ts_pk_state_1, ts_pk_state_2);
+            let ts_vrf_pk_state_1 = slow_and_lossy_links::<_, _, Random>(
+                seed,
+                bls12381_threshold_vrf::fixture::<MinPk, _>,
+            );
+            let ts_vrf_pk_state_2 = slow_and_lossy_links::<_, _, Random>(
+                seed,
+                bls12381_threshold_vrf::fixture::<MinPk, _>,
+            );
+            assert_eq!(ts_vrf_pk_state_1, ts_vrf_pk_state_2);
 
-            let ts_sig_state_1 = slow_and_lossy_links::<_, _, Random>(
+            let ts_vrf_sig_state_1 = slow_and_lossy_links::<_, _, Random>(
                 seed,
-                bls12381_threshold::fixture::<MinSig, _>,
+                bls12381_threshold_vrf::fixture::<MinSig, _>,
             );
-            let ts_sig_state_2 = slow_and_lossy_links::<_, _, Random>(
+            let ts_vrf_sig_state_2 = slow_and_lossy_links::<_, _, Random>(
                 seed,
-                bls12381_threshold::fixture::<MinSig, _>,
+                bls12381_threshold_vrf::fixture::<MinSig, _>,
             );
-            assert_eq!(ts_sig_state_1, ts_sig_state_2);
+            assert_eq!(ts_vrf_sig_state_1, ts_vrf_sig_state_2);
+
+            let ts_std_pk_state_1 = slow_and_lossy_links::<_, _, RoundRobin>(
+                seed,
+                bls12381_threshold_std::fixture::<MinPk, _>,
+            );
+            let ts_std_pk_state_2 = slow_and_lossy_links::<_, _, RoundRobin>(
+                seed,
+                bls12381_threshold_std::fixture::<MinPk, _>,
+            );
+            assert_eq!(ts_std_pk_state_1, ts_std_pk_state_2);
+
+            let ts_std_sig_state_1 = slow_and_lossy_links::<_, _, RoundRobin>(
+                seed,
+                bls12381_threshold_std::fixture::<MinSig, _>,
+            );
+            let ts_std_sig_state_2 = slow_and_lossy_links::<_, _, RoundRobin>(
+                seed,
+                bls12381_threshold_std::fixture::<MinSig, _>,
+            );
+            assert_eq!(ts_std_sig_state_1, ts_std_sig_state_2);
 
             let ms_pk_state_1 = slow_and_lossy_links::<_, _, RoundRobin>(
                 seed,
@@ -2389,12 +2545,19 @@ mod tests {
             let ed_state_2 = slow_and_lossy_links::<_, _, RoundRobin>(seed, ed25519::fixture);
             assert_eq!(ed_state_1, ed_state_2);
 
+            let secp_state_1 = slow_and_lossy_links::<_, _, RoundRobin>(seed, secp256r1::fixture);
+            let secp_state_2 = slow_and_lossy_links::<_, _, RoundRobin>(seed, secp256r1::fixture);
+            assert_eq!(secp_state_1, secp_state_2);
+
             let states = [
-                ("threshold-minpk", ts_pk_state_1),
-                ("threshold-minsig", ts_sig_state_1),
+                ("threshold-vrf-minpk", ts_vrf_pk_state_1),
+                ("threshold-vrf-minsig", ts_vrf_sig_state_1),
+                ("threshold-std-minpk", ts_std_pk_state_1),
+                ("threshold-std-minsig", ts_std_sig_state_1),
                 ("multisig-minpk", ms_pk_state_1),
                 ("multisig-minsig", ms_sig_state_1),
                 ("ed25519", ed_state_1),
+                ("secp256r1", secp_state_1),
             ];
 
             // Sanity check that different types can't be identical
@@ -2411,7 +2574,7 @@ mod tests {
     fn conflicter<S, F, L>(seed: u64, mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: Elector<S>,
     {
         // Create context
@@ -2443,7 +2606,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = fixture(&mut context, n);
+            } = fixture(&mut context, &namespace, n);
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -2464,7 +2627,6 @@ mod tests {
 
                 // Start engine
                 let reporter_config = mocks::reporter::Config {
-                    namespace: namespace.clone(),
                     participants: participants.clone().try_into().unwrap(),
                     scheme: schemes[idx_scheme].clone(),
                     elector: elector.clone(),
@@ -2476,7 +2638,6 @@ mod tests {
                     .expect("validator should be registered");
                 if idx_scheme == 0 {
                     let cfg = mocks::conflicter::Config {
-                        namespace: namespace.clone(),
                         scheme: schemes[idx_scheme].clone(),
                     };
 
@@ -2510,10 +2671,10 @@ mod tests {
                         automaton: application.clone(),
                         relay: application.clone(),
                         reporter: reporter.clone(),
+                        strategy: Sequential,
                         partition: validator.to_string(),
                         mailbox_size: 1024,
                         epoch: Epoch::new(333),
-                        namespace: namespace.clone(),
                         leader_timeout: Duration::from_secs(1),
                         notarization_timeout: Duration::from_secs(2),
                         nullify_retry: Duration::from_secs(10),
@@ -2588,18 +2749,21 @@ mod tests {
     #[test_traced]
     fn test_conflicter() {
         for seed in 0..5 {
-            conflicter::<_, _, Random>(seed, bls12381_threshold::fixture::<MinPk, _>);
-            conflicter::<_, _, Random>(seed, bls12381_threshold::fixture::<MinSig, _>);
+            conflicter::<_, _, Random>(seed, bls12381_threshold_vrf::fixture::<MinPk, _>);
+            conflicter::<_, _, Random>(seed, bls12381_threshold_vrf::fixture::<MinSig, _>);
+            conflicter::<_, _, RoundRobin>(seed, bls12381_threshold_std::fixture::<MinPk, _>);
+            conflicter::<_, _, RoundRobin>(seed, bls12381_threshold_std::fixture::<MinSig, _>);
             conflicter::<_, _, RoundRobin>(seed, bls12381_multisig::fixture::<MinPk, _>);
             conflicter::<_, _, RoundRobin>(seed, bls12381_multisig::fixture::<MinSig, _>);
             conflicter::<_, _, RoundRobin>(seed, ed25519::fixture);
+            conflicter::<_, _, RoundRobin>(seed, secp256r1::fixture);
         }
     }
 
     fn invalid<S, F, L>(seed: u64, mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: Elector<S>,
     {
         // Create context
@@ -2631,7 +2795,14 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = fixture(&mut context, n);
+            } = fixture(&mut context, &namespace, n);
+
+            // Create scheme with wrong namespace for byzantine node (index 0)
+            let Fixture {
+                schemes: wrong_schemes,
+                ..
+            } = fixture(&mut context, b"wrong-namespace", n);
+
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -2650,15 +2821,15 @@ mod tests {
                 // Create scheme context
                 let context = context.with_label(&format!("validator_{}", *validator));
 
-                // Byzantine node (idx 0) uses empty namespace to produce invalid signatures
-                let engine_namespace = if idx_scheme == 0 {
-                    vec![]
+                // Byzantine node (idx 0) uses wrong namespace scheme to produce invalid signatures
+                // Honest nodes use correct namespace schemes
+                let scheme = if idx_scheme == 0 {
+                    wrong_schemes[idx_scheme].clone()
                 } else {
-                    namespace.clone()
+                    schemes[idx_scheme].clone()
                 };
 
                 let reporter_config = mocks::reporter::Config {
-                    namespace: namespace.clone(), // Reporter always uses correct namespace
                     participants: participants.clone().try_into().unwrap(),
                     scheme: schemes[idx_scheme].clone(),
                     elector: elector.clone(),
@@ -2683,16 +2854,16 @@ mod tests {
                 actor.start();
                 let blocker = oracle.control(validator.clone());
                 let cfg = config::Config {
-                    scheme: schemes[idx_scheme].clone(),
+                    scheme,
                     elector: elector.clone(),
                     blocker,
                     automaton: application.clone(),
                     relay: application.clone(),
                     reporter: reporter.clone(),
+                    strategy: Sequential,
                     partition: validator.clone().to_string(),
                     mailbox_size: 1024,
                     epoch: Epoch::new(333),
-                    namespace: engine_namespace,
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
                     nullify_retry: Duration::from_secs(10),
@@ -2759,18 +2930,21 @@ mod tests {
     #[test_traced]
     fn test_invalid() {
         for seed in 0..5 {
-            invalid::<_, _, Random>(seed, bls12381_threshold::fixture::<MinPk, _>);
-            invalid::<_, _, Random>(seed, bls12381_threshold::fixture::<MinSig, _>);
+            invalid::<_, _, Random>(seed, bls12381_threshold_vrf::fixture::<MinPk, _>);
+            invalid::<_, _, Random>(seed, bls12381_threshold_vrf::fixture::<MinSig, _>);
+            invalid::<_, _, RoundRobin>(seed, bls12381_threshold_std::fixture::<MinPk, _>);
+            invalid::<_, _, RoundRobin>(seed, bls12381_threshold_std::fixture::<MinSig, _>);
             invalid::<_, _, RoundRobin>(seed, bls12381_multisig::fixture::<MinPk, _>);
             invalid::<_, _, RoundRobin>(seed, bls12381_multisig::fixture::<MinSig, _>);
             invalid::<_, _, RoundRobin>(seed, ed25519::fixture);
+            invalid::<_, _, RoundRobin>(seed, secp256r1::fixture);
         }
     }
 
     fn impersonator<S, F, L>(seed: u64, mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: Elector<S>,
     {
         // Create context
@@ -2802,7 +2976,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = fixture(&mut context, n);
+            } = fixture(&mut context, &namespace, n);
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -2823,7 +2997,6 @@ mod tests {
 
                 // Start engine
                 let reporter_config = mocks::reporter::Config {
-                    namespace: namespace.clone(),
                     participants: participants.clone().try_into().unwrap(),
                     scheme: schemes[idx_scheme].clone(),
                     elector: elector.clone(),
@@ -2836,7 +3009,6 @@ mod tests {
                 if idx_scheme == 0 {
                     let cfg = mocks::impersonator::Config {
                         scheme: schemes[idx_scheme].clone(),
-                        namespace: namespace.clone(),
                     };
 
                     let engine: mocks::impersonator::Impersonator<_, _, Sha256> =
@@ -2869,10 +3041,10 @@ mod tests {
                         automaton: application.clone(),
                         relay: application.clone(),
                         reporter: reporter.clone(),
+                        strategy: Sequential,
                         partition: validator.clone().to_string(),
                         mailbox_size: 1024,
                         epoch: Epoch::new(333),
-                        namespace: namespace.clone(),
                         leader_timeout: Duration::from_secs(1),
                         notarization_timeout: Duration::from_secs(2),
                         nullify_retry: Duration::from_secs(10),
@@ -2931,18 +3103,21 @@ mod tests {
     #[test_traced]
     fn test_impersonator() {
         for seed in 0..5 {
-            impersonator::<_, _, Random>(seed, bls12381_threshold::fixture::<MinPk, _>);
-            impersonator::<_, _, Random>(seed, bls12381_threshold::fixture::<MinSig, _>);
+            impersonator::<_, _, Random>(seed, bls12381_threshold_vrf::fixture::<MinPk, _>);
+            impersonator::<_, _, Random>(seed, bls12381_threshold_vrf::fixture::<MinSig, _>);
+            impersonator::<_, _, RoundRobin>(seed, bls12381_threshold_std::fixture::<MinPk, _>);
+            impersonator::<_, _, RoundRobin>(seed, bls12381_threshold_std::fixture::<MinSig, _>);
             impersonator::<_, _, RoundRobin>(seed, bls12381_multisig::fixture::<MinPk, _>);
             impersonator::<_, _, RoundRobin>(seed, bls12381_multisig::fixture::<MinSig, _>);
             impersonator::<_, _, RoundRobin>(seed, ed25519::fixture);
+            impersonator::<_, _, RoundRobin>(seed, secp256r1::fixture);
         }
     }
 
     fn equivocator<S, F, L>(seed: u64, mut fixture: F) -> bool
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: Elector<S>,
     {
         // Create context
@@ -2953,7 +3128,7 @@ mod tests {
         let namespace = b"consensus".to_vec();
         let cfg = deterministic::Config::new()
             .with_seed(seed)
-            .with_timeout(Some(Duration::from_secs(30)));
+            .with_timeout(Some(Duration::from_secs(60)));
         let executor = deterministic::Runner::new(cfg);
         executor.start(|mut context| async move {
             // Create simulated network
@@ -2974,7 +3149,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = fixture(&mut context, n);
+            } = fixture(&mut context, &namespace, n);
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -2996,7 +3171,6 @@ mod tests {
 
                 // Start engine
                 let reporter_config = mocks::reporter::Config {
-                    namespace: namespace.clone(),
                     participants: participants.clone().try_into().unwrap(),
                     scheme: schemes[idx_scheme].clone(),
                     elector: elector.clone(),
@@ -3009,7 +3183,6 @@ mod tests {
                     .expect("validator should be registered");
                 if idx_scheme == 0 {
                     let cfg = mocks::equivocator::Config {
-                        namespace: namespace.clone(),
                         scheme: schemes[idx_scheme].clone(),
                         epoch: Epoch::new(333),
                         relay: relay.clone(),
@@ -3045,10 +3218,10 @@ mod tests {
                         automaton: application.clone(),
                         relay: application.clone(),
                         reporter: reporter.clone(),
+                        strategy: Sequential,
                         partition: validator.to_string(),
                         mailbox_size: 1024,
                         epoch: Epoch::new(333),
-                        namespace: namespace.clone(),
                         leader_timeout: Duration::from_secs(1),
                         notarization_timeout: Duration::from_secs(2),
                         nullify_retry: Duration::from_secs(10),
@@ -3104,7 +3277,6 @@ mod tests {
 
             // Start engine
             let reporter_config = mocks::reporter::Config {
-                namespace: namespace.clone(),
                 participants: participants.clone().try_into().unwrap(),
                 scheme: schemes[idx].clone(),
                 elector: elector.clone(),
@@ -3136,10 +3308,10 @@ mod tests {
                 automaton: application.clone(),
                 relay: application.clone(),
                 reporter: reporter.clone(),
+                strategy: Sequential,
                 partition: validator.to_string(),
                 mailbox_size: 1024,
                 epoch: Epoch::new(333),
-                namespace: namespace.clone(),
                 leader_timeout: Duration::from_secs(1),
                 notarization_timeout: Duration::from_secs(2),
                 nullify_retry: Duration::from_secs(10),
@@ -3181,9 +3353,10 @@ mod tests {
 
     #[test_group("slow")]
     #[test_traced]
-    fn test_equivocator_bls12381_threshold_min_pk() {
-        let detected = (0..5)
-            .any(|seed| equivocator::<_, _, Random>(seed, bls12381_threshold::fixture::<MinPk, _>));
+    fn test_equivocator_bls12381_threshold_vrf_min_pk() {
+        let detected = (0..5).any(|seed| {
+            equivocator::<_, _, Random>(seed, bls12381_threshold_vrf::fixture::<MinPk, _>)
+        });
         assert!(
             detected,
             "expected at least one seed to detect equivocation"
@@ -3192,9 +3365,33 @@ mod tests {
 
     #[test_group("slow")]
     #[test_traced]
-    fn test_equivocator_bls12381_threshold_min_sig() {
+    fn test_equivocator_bls12381_threshold_vrf_min_sig() {
         let detected = (0..5).any(|seed| {
-            equivocator::<_, _, Random>(seed, bls12381_threshold::fixture::<MinSig, _>)
+            equivocator::<_, _, Random>(seed, bls12381_threshold_vrf::fixture::<MinSig, _>)
+        });
+        assert!(
+            detected,
+            "expected at least one seed to detect equivocation"
+        );
+    }
+
+    #[test_group("slow")]
+    #[test_traced]
+    fn test_equivocator_bls12381_threshold_std_min_pk() {
+        let detected = (0..5).any(|seed| {
+            equivocator::<_, _, RoundRobin>(seed, bls12381_threshold_std::fixture::<MinPk, _>)
+        });
+        assert!(
+            detected,
+            "expected at least one seed to detect equivocation"
+        );
+    }
+
+    #[test_group("slow")]
+    #[test_traced]
+    fn test_equivocator_bls12381_threshold_std_min_sig() {
+        let detected = (0..5).any(|seed| {
+            equivocator::<_, _, RoundRobin>(seed, bls12381_threshold_std::fixture::<MinSig, _>)
         });
         assert!(
             detected,
@@ -3236,10 +3433,20 @@ mod tests {
         );
     }
 
+    #[test_group("slow")]
+    #[test_traced]
+    fn test_equivocator_secp256r1() {
+        let detected = (0..5).any(|seed| equivocator::<_, _, RoundRobin>(seed, secp256r1::fixture));
+        assert!(
+            detected,
+            "expected at least one seed to detect equivocation"
+        );
+    }
+
     fn reconfigurer<S, F, L>(seed: u64, mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: Elector<S>,
     {
         // Create context
@@ -3271,7 +3478,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = fixture(&mut context, n);
+            } = fixture(&mut context, &namespace, n);
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -3292,7 +3499,6 @@ mod tests {
 
                 // Start engine
                 let reporter_config = mocks::reporter::Config {
-                    namespace: namespace.clone(),
                     participants: participants.clone().try_into().unwrap(),
                     scheme: schemes[idx_scheme].clone(),
                     elector: elector.clone(),
@@ -3305,7 +3511,6 @@ mod tests {
                 if idx_scheme == 0 {
                     let cfg = mocks::reconfigurer::Config {
                         scheme: schemes[idx_scheme].clone(),
-                        namespace: namespace.clone(),
                     };
                     let engine: mocks::reconfigurer::Reconfigurer<_, _, Sha256> =
                         mocks::reconfigurer::Reconfigurer::new(
@@ -3337,10 +3542,10 @@ mod tests {
                         automaton: application.clone(),
                         relay: application.clone(),
                         reporter: reporter.clone(),
+                        strategy: Sequential,
                         partition: validator.to_string(),
                         mailbox_size: 1024,
                         epoch: Epoch::new(333),
-                        namespace: namespace.clone(),
                         leader_timeout: Duration::from_secs(1),
                         notarization_timeout: Duration::from_secs(2),
                         nullify_retry: Duration::from_secs(10),
@@ -3399,18 +3604,21 @@ mod tests {
     #[test_traced]
     fn test_reconfigurer() {
         for seed in 0..5 {
-            reconfigurer::<_, _, Random>(seed, bls12381_threshold::fixture::<MinPk, _>);
-            reconfigurer::<_, _, Random>(seed, bls12381_threshold::fixture::<MinSig, _>);
+            reconfigurer::<_, _, Random>(seed, bls12381_threshold_vrf::fixture::<MinPk, _>);
+            reconfigurer::<_, _, Random>(seed, bls12381_threshold_vrf::fixture::<MinSig, _>);
+            reconfigurer::<_, _, RoundRobin>(seed, bls12381_threshold_std::fixture::<MinPk, _>);
+            reconfigurer::<_, _, RoundRobin>(seed, bls12381_threshold_std::fixture::<MinSig, _>);
             reconfigurer::<_, _, RoundRobin>(seed, bls12381_multisig::fixture::<MinPk, _>);
             reconfigurer::<_, _, RoundRobin>(seed, bls12381_multisig::fixture::<MinSig, _>);
             reconfigurer::<_, _, RoundRobin>(seed, ed25519::fixture);
+            reconfigurer::<_, _, RoundRobin>(seed, secp256r1::fixture);
         }
     }
 
     fn nuller<S, F, L>(seed: u64, mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: Elector<S>,
     {
         // Create context
@@ -3442,7 +3650,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = fixture(&mut context, n);
+            } = fixture(&mut context, &namespace, n);
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -3463,7 +3671,6 @@ mod tests {
 
                 // Start engine
                 let reporter_config = mocks::reporter::Config {
-                    namespace: namespace.clone(),
                     participants: participants.clone().try_into().unwrap(),
                     scheme: schemes[idx_scheme].clone(),
                     elector: elector.clone(),
@@ -3475,7 +3682,6 @@ mod tests {
                     .expect("validator should be registered");
                 if idx_scheme == 0 {
                     let cfg = mocks::nuller::Config {
-                        namespace: namespace.clone(),
                         scheme: schemes[idx_scheme].clone(),
                     };
                     let engine: mocks::nuller::Nuller<_, _, Sha256> =
@@ -3505,10 +3711,10 @@ mod tests {
                         automaton: application.clone(),
                         relay: application.clone(),
                         reporter: reporter.clone(),
+                        strategy: Sequential,
                         partition: validator.clone().to_string(),
                         mailbox_size: 1024,
                         epoch: Epoch::new(333),
-                        namespace: namespace.clone(),
                         leader_timeout: Duration::from_secs(1),
                         notarization_timeout: Duration::from_secs(2),
                         nullify_retry: Duration::from_secs(10),
@@ -3580,18 +3786,21 @@ mod tests {
     #[test_traced]
     fn test_nuller() {
         for seed in 0..5 {
-            nuller::<_, _, Random>(seed, bls12381_threshold::fixture::<MinPk, _>);
-            nuller::<_, _, Random>(seed, bls12381_threshold::fixture::<MinSig, _>);
+            nuller::<_, _, Random>(seed, bls12381_threshold_vrf::fixture::<MinPk, _>);
+            nuller::<_, _, Random>(seed, bls12381_threshold_vrf::fixture::<MinSig, _>);
+            nuller::<_, _, RoundRobin>(seed, bls12381_threshold_std::fixture::<MinPk, _>);
+            nuller::<_, _, RoundRobin>(seed, bls12381_threshold_std::fixture::<MinSig, _>);
             nuller::<_, _, RoundRobin>(seed, bls12381_multisig::fixture::<MinPk, _>);
             nuller::<_, _, RoundRobin>(seed, bls12381_multisig::fixture::<MinSig, _>);
             nuller::<_, _, RoundRobin>(seed, ed25519::fixture);
+            nuller::<_, _, RoundRobin>(seed, secp256r1::fixture);
         }
     }
 
     fn outdated<S, F, L>(seed: u64, mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: Elector<S>,
     {
         // Create context
@@ -3623,7 +3832,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = fixture(&mut context, n);
+            } = fixture(&mut context, &namespace, n);
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -3644,7 +3853,6 @@ mod tests {
 
                 // Start engine
                 let reporter_config = mocks::reporter::Config {
-                    namespace: namespace.clone(),
                     participants: participants.clone().try_into().unwrap(),
                     scheme: schemes[idx_scheme].clone(),
                     elector: elector.clone(),
@@ -3657,7 +3865,6 @@ mod tests {
                 if idx_scheme == 0 {
                     let cfg = mocks::outdated::Config {
                         scheme: schemes[idx_scheme].clone(),
-                        namespace: namespace.clone(),
                         view_delta: ViewDelta::new(activity_timeout.get().saturating_mul(4)),
                     };
                     let engine: mocks::outdated::Outdated<_, _, Sha256> =
@@ -3687,10 +3894,10 @@ mod tests {
                         automaton: application.clone(),
                         relay: application.clone(),
                         reporter: reporter.clone(),
+                        strategy: Sequential,
                         partition: validator.clone().to_string(),
                         mailbox_size: 1024,
                         epoch: Epoch::new(333),
-                        namespace: namespace.clone(),
                         leader_timeout: Duration::from_secs(1),
                         notarization_timeout: Duration::from_secs(2),
                         nullify_retry: Duration::from_secs(10),
@@ -3744,18 +3951,21 @@ mod tests {
     #[test_traced]
     fn test_outdated() {
         for seed in 0..5 {
-            outdated::<_, _, Random>(seed, bls12381_threshold::fixture::<MinPk, _>);
-            outdated::<_, _, Random>(seed, bls12381_threshold::fixture::<MinSig, _>);
+            outdated::<_, _, Random>(seed, bls12381_threshold_vrf::fixture::<MinPk, _>);
+            outdated::<_, _, Random>(seed, bls12381_threshold_vrf::fixture::<MinSig, _>);
+            outdated::<_, _, RoundRobin>(seed, bls12381_threshold_std::fixture::<MinPk, _>);
+            outdated::<_, _, RoundRobin>(seed, bls12381_threshold_std::fixture::<MinSig, _>);
             outdated::<_, _, RoundRobin>(seed, bls12381_multisig::fixture::<MinPk, _>);
             outdated::<_, _, RoundRobin>(seed, bls12381_multisig::fixture::<MinSig, _>);
             outdated::<_, _, RoundRobin>(seed, ed25519::fixture);
+            outdated::<_, _, RoundRobin>(seed, secp256r1::fixture);
         }
     }
 
     fn run_1k<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: Elector<S>,
     {
         // Create context
@@ -3785,7 +3995,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = fixture(&mut context, n);
+            } = fixture(&mut context, &namespace, n);
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -3807,7 +4017,6 @@ mod tests {
 
                 // Configure engine
                 let reporter_config = mocks::reporter::Config {
-                    namespace: namespace.clone(),
                     participants: participants.clone().try_into().unwrap(),
                     scheme: schemes[idx].clone(),
                     elector: elector.clone(),
@@ -3837,10 +4046,10 @@ mod tests {
                     automaton: application.clone(),
                     relay: application.clone(),
                     reporter: reporter.clone(),
+                    strategy: Sequential,
                     partition: validator.to_string(),
                     mailbox_size: 1024,
                     epoch: Epoch::new(333),
-                    namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
                     nullify_retry: Duration::from_secs(10),
@@ -3896,14 +4105,26 @@ mod tests {
 
     #[test_group("slow")]
     #[test_traced]
-    fn test_1k_bls12381_threshold_min_pk() {
-        run_1k::<_, _, Random>(bls12381_threshold::fixture::<MinPk, _>);
+    fn test_1k_bls12381_threshold_vrf_min_pk() {
+        run_1k::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinPk, _>);
     }
 
     #[test_group("slow")]
     #[test_traced]
-    fn test_1k_bls12381_threshold_min_sig() {
-        run_1k::<_, _, Random>(bls12381_threshold::fixture::<MinSig, _>);
+    fn test_1k_bls12381_threshold_vrf_min_sig() {
+        run_1k::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinSig, _>);
+    }
+
+    #[test_group("slow")]
+    #[test_traced]
+    fn test_1k_bls12381_threshold_std_min_pk() {
+        run_1k::<_, _, RoundRobin>(bls12381_threshold_std::fixture::<MinPk, _>);
+    }
+
+    #[test_group("slow")]
+    #[test_traced]
+    fn test_1k_bls12381_threshold_std_min_sig() {
+        run_1k::<_, _, RoundRobin>(bls12381_threshold_std::fixture::<MinSig, _>);
     }
 
     #[test_group("slow")]
@@ -3924,16 +4145,24 @@ mod tests {
         run_1k::<_, _, RoundRobin>(ed25519::fixture);
     }
 
-    fn engine_shutdown<S, F, L>(mut fixture: F, graceful: bool)
+    #[test_group("slow")]
+    #[test_traced]
+    fn test_1k_secp256r1() {
+        run_1k::<_, _, RoundRobin>(secp256r1::fixture);
+    }
+
+    fn engine_shutdown<S, F, L>(seed: u64, mut fixture: F, graceful: bool)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: Elector<S>,
     {
-        // Create context
         let n = 1;
         let namespace = b"consensus".to_vec();
-        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        let cfg = deterministic::Config::default()
+            .with_seed(seed)
+            .with_timeout(Some(Duration::from_secs(10)));
+        let executor = deterministic::Runner::new(cfg);
         executor.start(|mut context| async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
@@ -3953,7 +4182,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = fixture(&mut context, n);
+            } = fixture(&mut context, &namespace, n);
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link the single validator to itself (no-ops for completeness)
@@ -3967,7 +4196,6 @@ mod tests {
             // Create engine
             let elector = L::default();
             let reporter_config = mocks::reporter::Config {
-                namespace: namespace.clone(),
                 participants: participants.clone().try_into().unwrap(),
                 scheme: schemes[0].clone(),
                 elector: elector.clone(),
@@ -3997,10 +4225,10 @@ mod tests {
                 automaton: application.clone(),
                 relay: application.clone(),
                 reporter: reporter.clone(),
+                strategy: Sequential,
                 partition: participants[0].clone().to_string(),
                 mailbox_size: 64,
                 epoch: Epoch::new(333),
-                namespace: namespace.clone(),
                 leader_timeout: Duration::from_millis(50),
                 notarization_timeout: Duration::from_millis(100),
                 nullify_retry: Duration::from_millis(250),
@@ -4023,80 +4251,120 @@ mod tests {
             // Allow tasks to start
             context.sleep(Duration::from_millis(1000)).await;
 
-            // Verify that engine and child actors are running
-            let metrics_before = context.encode();
-            let is_running = |name: &str| -> bool {
-                metrics_before.lines().any(|line| {
-                    line.starts_with("runtime_tasks_running{")
-                        && line.contains(&format!("name=\"{name}\""))
-                        && line.contains("kind=\"Task\"")
-                        && line.trim_end().ends_with(" 1")
-                })
-            };
-            assert!(is_running("engine"));
-            assert!(is_running("engine_batcher"));
-            assert!(is_running("engine_voter"));
-            assert!(is_running("engine_resolver"));
+            // Count running tasks under the engine prefix
+            let running_before = count_running_tasks(&context, "engine");
+            assert!(
+                running_before > 0,
+                "at least one engine task should be running"
+            );
 
-            // Make sure the engine is still running
-            context.sleep(Duration::from_millis(1000)).await;
-            assert!(is_running("engine"));
+            // Make sure the engine is still running after some time
+            context.sleep(Duration::from_millis(1500)).await;
+            assert!(
+                count_running_tasks(&context, "engine") > 0,
+                "engine tasks should still be running"
+            );
 
             // Shutdown engine and ensure children stop
-            let metrics_after = if graceful {
+            let running_after = if graceful {
                 let metrics_context = context.clone();
                 let result = context.stop(0, Some(Duration::from_secs(5))).await;
                 assert!(
                     result.is_ok(),
                     "graceful shutdown should complete: {result:?}"
                 );
-                metrics_context.encode()
+                count_running_tasks(&metrics_context, "engine")
             } else {
                 handle.abort();
                 let _ = handle.await; // ensure parent tear-down runs
 
                 // Give the runtime a tick to process aborts
                 context.sleep(Duration::from_millis(1000)).await;
-                context.encode()
+                count_running_tasks(&context, "engine")
             };
-            let is_stopped = |name: &str| -> bool {
-                // Either the gauge is 0, or the entry is absent (both imply not running)
-                metrics_after.lines().any(|line| {
-                    line.starts_with("runtime_tasks_running{")
-                        && line.contains(&format!("name=\"{name}\""))
-                        && line.contains("kind=\"Task\"")
-                        && line.trim_end().ends_with(" 0")
-                })
-            };
-            assert!(is_stopped("engine"));
-            assert!(is_stopped("engine_batcher"));
-            assert!(is_stopped("engine_voter"));
-            assert!(is_stopped("engine_resolver"));
+            assert_eq!(
+                running_after, 0,
+                "all engine tasks should be stopped, but {running_after} still running"
+            );
         });
     }
 
     #[test_traced]
     fn test_children_shutdown_on_engine_abort() {
-        engine_shutdown::<_, _, Random>(bls12381_threshold::fixture::<MinPk, _>, false);
-        engine_shutdown::<_, _, Random>(bls12381_threshold::fixture::<MinSig, _>, false);
-        engine_shutdown::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>, false);
-        engine_shutdown::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>, false);
-        engine_shutdown::<_, _, RoundRobin>(ed25519::fixture, false);
+        for seed in 0..10 {
+            engine_shutdown::<_, _, Random>(
+                seed,
+                bls12381_threshold_vrf::fixture::<MinPk, _>,
+                false,
+            );
+            engine_shutdown::<_, _, Random>(
+                seed,
+                bls12381_threshold_vrf::fixture::<MinSig, _>,
+                false,
+            );
+            engine_shutdown::<_, _, RoundRobin>(
+                seed,
+                bls12381_threshold_std::fixture::<MinPk, _>,
+                false,
+            );
+            engine_shutdown::<_, _, RoundRobin>(
+                seed,
+                bls12381_threshold_std::fixture::<MinSig, _>,
+                false,
+            );
+            engine_shutdown::<_, _, RoundRobin>(
+                seed,
+                bls12381_multisig::fixture::<MinPk, _>,
+                false,
+            );
+            engine_shutdown::<_, _, RoundRobin>(
+                seed,
+                bls12381_multisig::fixture::<MinSig, _>,
+                false,
+            );
+            engine_shutdown::<_, _, RoundRobin>(seed, ed25519::fixture, false);
+            engine_shutdown::<_, _, RoundRobin>(seed, secp256r1::fixture, false);
+        }
     }
 
     #[test_traced]
     fn test_graceful_shutdown() {
-        engine_shutdown::<_, _, Random>(bls12381_threshold::fixture::<MinPk, _>, true);
-        engine_shutdown::<_, _, Random>(bls12381_threshold::fixture::<MinSig, _>, true);
-        engine_shutdown::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>, true);
-        engine_shutdown::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>, true);
-        engine_shutdown::<_, _, RoundRobin>(ed25519::fixture, true);
+        for seed in 0..10 {
+            engine_shutdown::<_, _, Random>(
+                seed,
+                bls12381_threshold_vrf::fixture::<MinPk, _>,
+                true,
+            );
+            engine_shutdown::<_, _, Random>(
+                seed,
+                bls12381_threshold_vrf::fixture::<MinSig, _>,
+                true,
+            );
+            engine_shutdown::<_, _, RoundRobin>(
+                seed,
+                bls12381_threshold_std::fixture::<MinPk, _>,
+                true,
+            );
+            engine_shutdown::<_, _, RoundRobin>(
+                seed,
+                bls12381_threshold_std::fixture::<MinSig, _>,
+                true,
+            );
+            engine_shutdown::<_, _, RoundRobin>(seed, bls12381_multisig::fixture::<MinPk, _>, true);
+            engine_shutdown::<_, _, RoundRobin>(
+                seed,
+                bls12381_multisig::fixture::<MinSig, _>,
+                true,
+            );
+            engine_shutdown::<_, _, RoundRobin>(seed, ed25519::fixture, true);
+            engine_shutdown::<_, _, RoundRobin>(seed, secp256r1::fixture, true);
+        }
     }
 
     fn attributable_reporter_filtering<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: Elector<S>,
     {
         let n = 3;
@@ -4122,7 +4390,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = fixture(&mut context, n);
+            } = fixture(&mut context, &namespace, n);
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -4141,7 +4409,6 @@ mod tests {
                 let context = context.with_label(&format!("validator_{}", *validator));
 
                 let reporter_config = mocks::reporter::Config {
-                    namespace: namespace.clone(),
                     participants: participants.clone().try_into().unwrap(),
                     scheme: schemes[idx].clone(),
                     elector: elector.clone(),
@@ -4155,8 +4422,8 @@ mod tests {
                 let attributable_reporter = scheme::reporter::AttributableReporter::new(
                     context.with_label("rng"),
                     schemes[idx].clone(),
-                    namespace.clone(),
                     mock_reporter.clone(),
+                    Sequential,
                     true, // Enable verification
                 );
                 reporters.push(mock_reporter.clone());
@@ -4183,10 +4450,10 @@ mod tests {
                     automaton: application.clone(),
                     relay: application.clone(),
                     reporter: attributable_reporter,
+                    strategy: Sequential,
                     partition: validator.to_string(),
                     mailbox_size: 1024,
                     epoch: Epoch::new(333),
-                    namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
                     nullify_retry: Duration::from_secs(10),
@@ -4285,19 +4552,30 @@ mod tests {
 
     #[test_traced]
     fn test_attributable_reporter_filtering() {
-        attributable_reporter_filtering::<_, _, Random>(bls12381_threshold::fixture::<MinPk, _>);
-        attributable_reporter_filtering::<_, _, Random>(bls12381_threshold::fixture::<MinSig, _>);
+        attributable_reporter_filtering::<_, _, Random>(
+            bls12381_threshold_vrf::fixture::<MinPk, _>,
+        );
+        attributable_reporter_filtering::<_, _, Random>(
+            bls12381_threshold_vrf::fixture::<MinSig, _>,
+        );
+        attributable_reporter_filtering::<_, _, RoundRobin>(
+            bls12381_threshold_std::fixture::<MinPk, _>,
+        );
+        attributable_reporter_filtering::<_, _, RoundRobin>(
+            bls12381_threshold_std::fixture::<MinSig, _>,
+        );
         attributable_reporter_filtering::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>);
         attributable_reporter_filtering::<_, _, RoundRobin>(
             bls12381_multisig::fixture::<MinSig, _>,
         );
         attributable_reporter_filtering::<_, _, RoundRobin>(ed25519::fixture);
+        attributable_reporter_filtering::<_, _, RoundRobin>(secp256r1::fixture);
     }
 
     fn split_views_no_lockup<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: Elector<S>,
     {
         // Scenario:
@@ -4353,7 +4631,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = fixture(&mut context, n);
+            } = fixture(&mut context, &namespace, n);
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // ========== Create engines ==========
@@ -4373,7 +4651,6 @@ mod tests {
                     // Byzantine engines
                     let cfg = mocks::nullify_only::Config {
                         scheme: schemes[idx].clone(),
-                        namespace: namespace.clone(),
                     };
                     let engine: mocks::nullify_only::NullifyOnly<_, _, Sha256> =
                         mocks::nullify_only::NullifyOnly::new(
@@ -4387,7 +4664,6 @@ mod tests {
                 } else {
                     // Honest engines
                     let reporter_config = mocks::reporter::Config {
-                        namespace: namespace.clone(),
                         participants: participants.clone().try_into().unwrap(),
                         scheme: schemes[idx].clone(),
                         elector: elector.clone(),
@@ -4420,10 +4696,10 @@ mod tests {
                         automaton: application.clone(),
                         relay: application.clone(),
                         reporter: reporter.clone(),
+                        strategy: Sequential,
                         partition: validator.to_string(),
                         mailbox_size: 1024,
                         epoch: Epoch::new(333),
-                        namespace: namespace.clone(),
                         leader_timeout: Duration::from_secs(10),
                         notarization_timeout: Duration::from_secs(10),
                         nullify_retry: Duration::from_secs(10),
@@ -4446,22 +4722,25 @@ mod tests {
             // Helper: assemble finalization from explicit signer indices
             let build_finalization = |proposal: &Proposal<D>| -> TFinalization<_, D> {
                 let votes: Vec<_> = (0..=quorum)
-                    .map(|i| TFinalize::sign(&schemes[i], &namespace, proposal.clone()).unwrap())
+                    .map(|i| TFinalize::sign(&schemes[i], proposal.clone()).unwrap())
                     .collect();
-                TFinalization::from_finalizes(&schemes[0], &votes).expect("finalization quorum")
+                TFinalization::from_finalizes(&schemes[0], &votes, &Sequential)
+                    .expect("finalization quorum")
             };
             // Helper: assemble notarization from explicit signer indices
             let build_notarization = |proposal: &Proposal<D>| -> TNotarization<_, D> {
                 let votes: Vec<_> = (0..=quorum)
-                    .map(|i| TNotarize::sign(&schemes[i], &namespace, proposal.clone()).unwrap())
+                    .map(|i| TNotarize::sign(&schemes[i], proposal.clone()).unwrap())
                     .collect();
-                TNotarization::from_notarizes(&schemes[0], &votes).expect("notarization quorum")
+                TNotarization::from_notarizes(&schemes[0], &votes, &Sequential)
+                    .expect("notarization quorum")
             };
             let build_nullification = |round: Round| -> TNullification<_> {
                 let votes: Vec<_> = (0..=quorum)
-                    .map(|i| TNullify::sign::<D>(&schemes[i], &namespace, round).unwrap())
+                    .map(|i| TNullify::sign::<D>(&schemes[i], round).unwrap())
                     .collect();
-                TNullification::from_nullifies(&schemes[0], &votes).expect("nullification quorum")
+                TNullification::from_nullifies(&schemes[0], &votes, &Sequential)
+                    .expect("nullification quorum")
             };
             // Choose F=1 and construct B_1, B_2A, B_2B
             let f_view = 1;
@@ -4524,8 +4803,8 @@ mod tests {
             for (i, participant) in participants.iter().enumerate() {
                 let recipient = Recipients::One(participant.clone());
                 let msg = match get_type(i) {
-                    ParticipantType::Group2 => notarization_msg.encode().into(),
-                    _ => nullification_msg.encode().into(),
+                    ParticipantType::Group2 => notarization_msg.encode(),
+                    _ => nullification_msg.encode(),
                 };
                 injector_sender.send(recipient, msg, true).await.unwrap();
             }
@@ -4535,22 +4814,18 @@ mod tests {
             for (i, participant) in participants.iter().enumerate() {
                 let recipient = Recipients::One(participant.clone());
                 let msg = match get_type(i) {
-                    ParticipantType::Group1 => notarization_msg.encode().into(),
-                    _ => nullification_msg.encode().into(),
+                    ParticipantType::Group1 => notarization_msg.encode(),
+                    _ => nullification_msg.encode(),
                 };
                 injector_sender.send(recipient, msg, true).await.unwrap();
             }
             // View F:
-            let msg = Certificate::<_, D>::Notarization(b0_notarization)
-                .encode()
-                .into();
+            let msg = Certificate::<_, D>::Notarization(b0_notarization).encode();
             injector_sender
                 .send(Recipients::All, msg, true)
                 .await
                 .unwrap();
-            let msg = Certificate::<_, D>::Finalization(b0_finalization)
-                .encode()
-                .into();
+            let msg = Certificate::<_, D>::Finalization(b0_finalization).encode();
             injector_sender
                 .send(Recipients::All, msg, true)
                 .await
@@ -4661,17 +4936,20 @@ mod tests {
 
     #[test_traced]
     fn test_split_views_no_lockup() {
-        split_views_no_lockup::<_, _, Random>(bls12381_threshold::fixture::<MinPk, _>);
-        split_views_no_lockup::<_, _, Random>(bls12381_threshold::fixture::<MinSig, _>);
+        split_views_no_lockup::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        split_views_no_lockup::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinSig, _>);
+        split_views_no_lockup::<_, _, RoundRobin>(bls12381_threshold_std::fixture::<MinPk, _>);
+        split_views_no_lockup::<_, _, RoundRobin>(bls12381_threshold_std::fixture::<MinSig, _>);
         split_views_no_lockup::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>);
         split_views_no_lockup::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>);
         split_views_no_lockup::<_, _, RoundRobin>(ed25519::fixture);
+        split_views_no_lockup::<_, _, RoundRobin>(secp256r1::fixture);
     }
 
     fn tle<V, L>()
     where
         V: Variant,
-        L: Elector<bls12381_threshold::Scheme<PublicKey, V>>,
+        L: Elector<bls12381_threshold_vrf::Scheme<PublicKey, V>>,
     {
         // Create context
         let n = 4;
@@ -4698,7 +4976,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold::fixture::<V, _>(&mut context, n);
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, &namespace, n);
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -4721,7 +4999,6 @@ mod tests {
 
                 // Store first reporter for monitoring
                 let reporter_config = mocks::reporter::Config {
-                    namespace: namespace.clone(),
                     participants: participants.clone().try_into().unwrap(),
                     scheme: schemes[idx].clone(),
                     elector: elector.clone(),
@@ -4756,10 +5033,10 @@ mod tests {
                     automaton: application.clone(),
                     relay: application.clone(),
                     reporter: reporter.clone(),
+                    strategy: Sequential,
                     partition: validator.to_string(),
                     mailbox_size: 1024,
                     epoch: Epoch::new(333),
-                    namespace: namespace.clone(),
                     leader_timeout: Duration::from_millis(100),
                     notarization_timeout: Duration::from_millis(200),
                     nullify_retry: Duration::from_millis(500),
@@ -4785,7 +5062,7 @@ mod tests {
             let message = b"Secret message for future view10"; // 32 bytes
 
             // Encrypt message
-            let ciphertext = schemes[0].encrypt(&mut context, &namespace, target, *message);
+            let ciphertext = schemes[0].encrypt(&mut context, target, *message);
 
             // Wait for consensus to reach the target view and then decrypt
             let reporter = monitor_reporter.lock().unwrap().clone().unwrap();
@@ -4826,7 +5103,7 @@ mod tests {
     ) -> String
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: Elector<S>,
     {
         // Create context
@@ -4855,7 +5132,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = fixture(&mut context, n);
+            } = fixture(&mut context, &namespace, n);
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -4877,7 +5154,6 @@ mod tests {
 
                 // Configure engine
                 let reporter_config = mocks::reporter::Config {
-                    namespace: namespace.clone(),
                     participants: participants.clone().try_into().unwrap(),
                     scheme: schemes[idx].clone(),
                     elector: elector.clone(),
@@ -4907,10 +5183,10 @@ mod tests {
                     automaton: application.clone(),
                     relay: application.clone(),
                     reporter: reporter.clone(),
+                    strategy: Sequential,
                     partition: validator.to_string(),
                     mailbox_size: 1024,
                     epoch: Epoch::new(333),
-                    namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
                     nullify_retry: Duration::from_secs(10),
@@ -5003,10 +5279,10 @@ mod tests {
                     automaton: application.clone(),
                     relay: application.clone(),
                     reporter: selected_reporter,
+                    strategy: Sequential,
                     partition: validator.to_string(),
                     mailbox_size: 1024,
                     epoch: Epoch::new(333),
-                    namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
                     nullify_retry: Duration::from_secs(10),
@@ -5138,38 +5414,76 @@ mod tests {
 
     #[test_group("slow")]
     #[test_traced]
-    fn test_hailstorm_bls12381_threshold_min_pk() {
+    fn test_hailstorm_bls12381_threshold_vrf_min_pk() {
         assert_eq!(
             hailstorm::<_, _, Random>(
                 0,
                 10,
                 ViewDelta::new(15),
-                bls12381_threshold::fixture::<MinPk, _>
+                bls12381_threshold_vrf::fixture::<MinPk, _>
             ),
             hailstorm::<_, _, Random>(
                 0,
                 10,
                 ViewDelta::new(15),
-                bls12381_threshold::fixture::<MinPk, _>
+                bls12381_threshold_vrf::fixture::<MinPk, _>
             ),
         );
     }
 
     #[test_group("slow")]
     #[test_traced]
-    fn test_hailstorm_bls12381_threshold_min_sig() {
+    fn test_hailstorm_bls12381_threshold_vrf_min_sig() {
         assert_eq!(
             hailstorm::<_, _, Random>(
                 0,
                 10,
                 ViewDelta::new(15),
-                bls12381_threshold::fixture::<MinSig, _>
+                bls12381_threshold_vrf::fixture::<MinSig, _>
             ),
             hailstorm::<_, _, Random>(
                 0,
                 10,
                 ViewDelta::new(15),
-                bls12381_threshold::fixture::<MinSig, _>
+                bls12381_threshold_vrf::fixture::<MinSig, _>
+            ),
+        );
+    }
+
+    #[test_group("slow")]
+    #[test_traced]
+    fn test_hailstorm_bls12381_threshold_std_min_pk() {
+        assert_eq!(
+            hailstorm::<_, _, RoundRobin>(
+                0,
+                10,
+                ViewDelta::new(15),
+                bls12381_threshold_std::fixture::<MinPk, _>
+            ),
+            hailstorm::<_, _, RoundRobin>(
+                0,
+                10,
+                ViewDelta::new(15),
+                bls12381_threshold_std::fixture::<MinPk, _>
+            ),
+        );
+    }
+
+    #[test_group("slow")]
+    #[test_traced]
+    fn test_hailstorm_bls12381_threshold_std_min_sig() {
+        assert_eq!(
+            hailstorm::<_, _, RoundRobin>(
+                0,
+                10,
+                ViewDelta::new(15),
+                bls12381_threshold_std::fixture::<MinSig, _>
+            ),
+            hailstorm::<_, _, RoundRobin>(
+                0,
+                10,
+                ViewDelta::new(15),
+                bls12381_threshold_std::fixture::<MinSig, _>
             ),
         );
     }
@@ -5221,14 +5535,23 @@ mod tests {
         );
     }
 
+    #[test_group("slow")]
+    #[test_traced]
+    fn test_hailstorm_secp256r1() {
+        assert_eq!(
+            hailstorm::<_, _, RoundRobin>(0, 10, ViewDelta::new(15), secp256r1::fixture),
+            hailstorm::<_, _, RoundRobin>(0, 10, ViewDelta::new(15), secp256r1::fixture)
+        );
+    }
+
     /// Implementation of [Twins: BFT Systems Made Robust](https://arxiv.org/abs/2004.10617).
     fn twins<S, F, L>(seed: u64, n: u32, strategy: Strategy, link: Link, mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: Elector<S>,
     {
-        let faults = max_faults(n);
+        let faults = N3f1::max_faults(n);
         let required_containers = View::new(100);
         let activity_timeout = ViewDelta::new(10);
         let skip_timeout = ViewDelta::new(5);
@@ -5252,7 +5575,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = fixture(&mut context, n);
+            } = fixture(&mut context, &namespace, n);
             let participants: Arc<[_]> = participants.into();
             let mut registrations = register_validators(&mut oracle, &participants).await;
             link_validators(&mut oracle, &participants, Action::Link(link), None).await;
@@ -5277,7 +5600,7 @@ mod tests {
                 // Create forwarder closures for votes
                 let make_vote_forwarder = || {
                     let participants = participants.clone();
-                    move |origin: SplitOrigin, _: &Recipients<_>, message: &Bytes| {
+                    move |origin: SplitOrigin, _: &Recipients<_>, message: &IoBuf| {
                         let msg: Vote<S, D> = Vote::decode(message.clone()).unwrap();
                         let (primary, secondary) =
                             strategy.partitions(msg.view(), participants.as_ref());
@@ -5291,7 +5614,7 @@ mod tests {
                 let make_certificate_forwarder = || {
                     let codec = schemes[idx].certificate_codec_config();
                     let participants = participants.clone();
-                    move |origin: SplitOrigin, _: &Recipients<_>, message: &Bytes| {
+                    move |origin: SplitOrigin, _: &Recipients<_>, message: &IoBuf| {
                         let msg: Certificate<S, D> =
                             Certificate::decode_cfg(&mut message.as_ref(), &codec).unwrap();
                         let (primary, secondary) =
@@ -5303,12 +5626,12 @@ mod tests {
                     }
                 };
                 let make_drop_forwarder =
-                    || move |_: SplitOrigin, _: &Recipients<_>, _: &Bytes| None;
+                    || move |_: SplitOrigin, _: &Recipients<_>, _: &IoBuf| None;
 
                 // Create router closures for votes
                 let make_vote_router = || {
                     let participants = participants.clone();
-                    move |(sender, message): &(_, Bytes)| {
+                    move |(sender, message): &(_, IoBuf)| {
                         let msg: Vote<S, D> = Vote::decode(message.clone()).unwrap();
                         strategy.route(msg.view(), sender, participants.as_ref())
                     }
@@ -5317,7 +5640,7 @@ mod tests {
                 let make_certificate_router = || {
                     let codec = schemes[idx].certificate_codec_config();
                     let participants = participants.clone();
-                    move |(sender, message): &(_, Bytes)| {
+                    move |(sender, message): &(_, IoBuf)| {
                         let msg: Certificate<S, D> =
                             Certificate::decode_cfg(&mut message.as_ref(), &codec).unwrap();
                         strategy.route(msg.view(), sender, participants.as_ref())
@@ -5367,7 +5690,6 @@ mod tests {
                     let context = context.with_label(&label);
 
                     let reporter_config = mocks::reporter::Config {
-                        namespace: namespace.clone(),
                         participants: participants.as_ref().try_into().unwrap(),
                         scheme: schemes[idx].clone(),
                         elector: elector.clone(),
@@ -5401,10 +5723,10 @@ mod tests {
                         automaton: application.clone(),
                         relay: application.clone(),
                         reporter: reporter.clone(),
+                        strategy: Sequential,
                         partition: label,
                         mailbox_size: 1024,
                         epoch: Epoch::new(333),
-                        namespace: namespace.clone(),
                         leader_timeout: Duration::from_secs(1),
                         notarization_timeout: Duration::from_secs(2),
                         nullify_retry: Duration::from_secs(10),
@@ -5427,7 +5749,6 @@ mod tests {
                 let context = context.with_label(&label);
 
                 let reporter_config = mocks::reporter::Config {
-                    namespace: namespace.clone(),
                     participants: participants.as_ref().try_into().unwrap(),
                     scheme: schemes[idx].clone(),
                     elector: elector.clone(),
@@ -5459,10 +5780,10 @@ mod tests {
                     automaton: application.clone(),
                     relay: application.clone(),
                     reporter: reporter.clone(),
+                    strategy: Sequential,
                     partition: label,
                     mailbox_size: 1024,
                     epoch: Epoch::new(333),
-                    namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
                     nullify_retry: Duration::from_secs(10),
@@ -5544,7 +5865,7 @@ mod tests {
     fn test_twins<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: Elector<S>,
     {
         for strategy in [
@@ -5566,7 +5887,9 @@ mod tests {
                     success_rate: 0.75,
                 },
             ] {
-                twins::<S, _, L>(0, 5, strategy, link, |context, n| fixture(context, n));
+                twins::<S, _, L>(0, 5, strategy, link, |namespace, context, n| {
+                    fixture(namespace, context, n)
+                });
             }
         }
     }
@@ -5585,20 +5908,38 @@ mod tests {
 
     #[test_group("slow")]
     #[test_traced]
-    fn test_twins_threshold_min_pk() {
-        test_twins::<_, _, Random>(bls12381_threshold::fixture::<MinPk, _>);
+    fn test_twins_threshold_vrf_min_pk() {
+        test_twins::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinPk, _>);
     }
 
     #[test_group("slow")]
     #[test_traced]
-    fn test_twins_threshold_min_sig() {
-        test_twins::<_, _, Random>(bls12381_threshold::fixture::<MinSig, _>);
+    fn test_twins_threshold_vrf_min_sig() {
+        test_twins::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinSig, _>);
+    }
+
+    #[test_group("slow")]
+    #[test_traced]
+    fn test_twins_threshold_std_min_pk() {
+        test_twins::<_, _, RoundRobin>(bls12381_threshold_std::fixture::<MinPk, _>);
+    }
+
+    #[test_group("slow")]
+    #[test_traced]
+    fn test_twins_threshold_std_min_sig() {
+        test_twins::<_, _, RoundRobin>(bls12381_threshold_std::fixture::<MinSig, _>);
     }
 
     #[test_group("slow")]
     #[test_traced]
     fn test_twins_ed25519() {
         test_twins::<_, _, RoundRobin>(ed25519::fixture);
+    }
+
+    #[test_group("slow")]
+    #[test_traced]
+    fn test_twins_secp256r1() {
+        test_twins::<_, _, RoundRobin>(secp256r1::fixture);
     }
 
     #[test_group("slow")]
@@ -5613,7 +5954,7 @@ mod tests {
                 jitter: Duration::from_millis(150),
                 success_rate: 0.75,
             },
-            bls12381_threshold::fixture::<MinPk, _>,
+            bls12381_threshold_vrf::fixture::<MinPk, _>,
         );
     }
 
@@ -5629,7 +5970,7 @@ mod tests {
                 jitter: Duration::from_millis(150),
                 success_rate: 0.75,
             },
-            bls12381_threshold::fixture::<MinPk, _>,
+            bls12381_threshold_vrf::fixture::<MinPk, _>,
         );
     }
 }

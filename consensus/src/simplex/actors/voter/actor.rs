@@ -1,6 +1,5 @@
 use super::{
     ingress::Message,
-    round::CertifyResult,
     state::{Config as StateConfig, State},
     Config, Mailbox,
 };
@@ -33,10 +32,8 @@ use futures::{
     pin_mut, StreamExt,
 };
 use prometheus_client::metrics::{counter::Counter, family::Family, histogram::Histogram};
-use rand::{CryptoRng, Rng};
+use rand_core::CryptoRngCore;
 use std::{
-    collections::BTreeSet,
-    mem::take,
     num::NonZeroUsize,
     pin::Pin,
     task::{self, Poll},
@@ -92,7 +89,7 @@ impl<'a, V: Viewable, R> Future for Waiter<'a, V, R> {
 
 /// Actor responsible for driving participation in the consensus protocol.
 pub struct Actor<
-    E: Clock + Rng + CryptoRng + Spawner + Storage + Metrics,
+    E: Clock + CryptoRngCore + Spawner + Storage + Metrics,
     S: Scheme<D>,
     L: Elector<S>,
     B: Blocker<PublicKey = S::PublicKey>,
@@ -114,7 +111,6 @@ pub struct Actor<
     write_buffer: NonZeroUsize,
     buffer_pool: PoolRef,
     journal: Option<Journal<E, Artifact<S, D>>>,
-    certification_candidates: BTreeSet<View>,
 
     mailbox_receiver: mpsc::Receiver<Message<S, D>>,
 
@@ -124,7 +120,7 @@ pub struct Actor<
 }
 
 impl<
-        E: Clock + Rng + CryptoRng + Spawner + Storage + Metrics,
+        E: Clock + CryptoRngCore + Spawner + Storage + Metrics,
         S: Scheme<D>,
         L: Elector<S>,
         B: Blocker<PublicKey = S::PublicKey>,
@@ -169,7 +165,6 @@ impl<
             StateConfig {
                 scheme: cfg.scheme,
                 elector: cfg.elector,
-                namespace: cfg.namespace.clone(),
                 epoch: cfg.epoch,
                 activity_timeout: cfg.activity_timeout,
                 leader_timeout: cfg.leader_timeout,
@@ -192,7 +187,6 @@ impl<
                 write_buffer: cfg.write_buffer,
                 buffer_pool: cfg.buffer_pool,
                 journal: None,
-                certification_candidates: BTreeSet::new(),
 
                 mailbox_receiver,
 
@@ -328,24 +322,6 @@ impl<
         Some(Request(context, receiver))
     }
 
-    /// Attempt to certify a proposal for the given view.
-    ///
-    /// If the proposal is not yet available but certification is pending,
-    /// the view is re-added to candidates for later retry.
-    async fn try_certify(&mut self, view: View) -> Option<Request<Rnd, bool>> {
-        match self.state.try_certify(view) {
-            CertifyResult::Ready(proposal) => {
-                let receiver = self.automaton.certify(proposal.payload).await;
-                Some(Request(proposal.round, receiver))
-            }
-            CertifyResult::Pending => {
-                self.certification_candidates.insert(view);
-                None
-            }
-            CertifyResult::Skip => None,
-        }
-    }
-
     /// Handle a timeout.
     async fn handle_timeout<Sp: Sender, Sr: Sender>(
         &mut self,
@@ -423,7 +399,6 @@ impl<
         let artifact = Artifact::Notarization(notarization.clone());
         let (added, equivocator) = self.state.add_notarization(notarization);
         if added {
-            self.certification_candidates.insert(view);
             self.append_journal(view, artifact).await;
         }
         self.block_equivocator(equivocator).await;
@@ -440,9 +415,6 @@ impl<
     ) -> Option<Notarization<S, D>> {
         // Get the notarization before advancing state
         let notarization = self.state.certified(view, success)?;
-
-        // Remove from candidates since certification is complete
-        self.certification_candidates.remove(&view);
 
         // Persist certification result for recovery
         let artifact = Artifact::Certification(Rnd::new(self.state.epoch(), view), success);
@@ -467,14 +439,6 @@ impl<
             self.append_journal(view, artifact).await;
         }
         self.block_equivocator(equivocator).await;
-
-        // Prune certification candidates that are no longer needed. This also
-        // bounds the size of certification_candidates during replay (views are
-        // added when notarizations are replayed, then removed here when
-        // finalizations are replayed).
-        let last_finalized = self.state.last_finalized();
-        self.certification_candidates
-            .retain(|v| *v > last_finalized);
     }
 
     /// Build, persist, and broadcast a notarize vote when this view is ready.
@@ -853,17 +817,13 @@ impl<
                 }
 
                 // Attempt to certify any views that we have notarizations for.
-                // Use split_off to only process views above last_finalized to handle edge cases
-                // where finalization arrives between iterations.
-                for v in take(&mut self.certification_candidates)
-                    .split_off(&self.state.last_finalized().next())
-                {
-                    if let Some(Request(ctx, receiver)) = self.try_certify(v).await {
-                        debug!(%v, "attempting certification");
-                        let view = ctx.view();
-                        let handle = certify_pool.push(async move { (ctx, receiver.await) });
-                        self.state.set_certify_handle(view, handle);
-                    }
+                for proposal in self.state.certify_candidates() {
+                    let round = proposal.round;
+                    let view = round.view();
+                    debug!(%view, "attempting certification");
+                    let receiver = self.automaton.certify(round, proposal.payload).await;
+                    let handle = certify_pool.push(async move { (round, receiver.await) });
+                    self.state.set_certify_handle(view, handle);
                 }
 
                 // Prepare waiters
@@ -883,158 +843,159 @@ impl<
                 // Sync and drop journal
                 self.journal.take().unwrap().sync_all().await.expect("unable to sync journal");
             },
-            _ = self.context.sleep_until(timeout) => {
-                // Trigger the timeout
-                self.handle_timeout(&mut batcher, &mut vote_sender, &mut certificate_sender).await;
-                view = self.state.current_view();
-            },
-            (context, proposed) = propose_wait => {
-                // Clear propose waiter
-                pending_propose = None;
+                _ = self.context.sleep_until(timeout) => {
+                    // Trigger the timeout
+                    self.handle_timeout(&mut batcher, &mut vote_sender, &mut certificate_sender).await;
+                    view = self.state.current_view();
+                },
+                (context, proposed) = propose_wait => {
+                    // Clear propose waiter
+                    pending_propose = None;
 
-                // Try to use result
-                let proposed = match proposed {
-                    Ok(proposed) => proposed,
-                    Err(err) => {
-                        debug!(?err, round = ?context.round, "failed to propose container");
+                    // Try to use result
+                    let proposed = match proposed {
+                        Ok(proposed) => proposed,
+                        Err(err) => {
+                            debug!(?err, round = ?context.round, "failed to propose container");
+                            continue;
+                        }
+                    };
+
+                    // If we have already moved to another view, drop the response as we will
+                    // not broadcast it
+                    let our_round = Rnd::new(self.state.epoch(), self.state.current_view());
+                    if our_round != context.round {
+                        debug!(round = ?context.round, ?our_round, "dropping requested proposal");
                         continue;
                     }
-                };
 
-                // If we have already moved to another view, drop the response as we will
-                // not broadcast it
-                let our_round = Rnd::new(self.state.epoch(), self.state.current_view());
-                if our_round != context.round {
-                    debug!(round = ?context.round, ?our_round, "dropping requested proposal");
-                    continue;
-                }
-
-                // Construct proposal
-                let proposal = Proposal::new(
-                    context.round,
-                    context.parent.0,
-                    proposed,
-                );
-                if !self.state.proposed(proposal) {
-                    warn!(round = ?context.round, "dropped our proposal");
-                    continue;
-                }
-                view = self.state.current_view();
-
-                // Notify application of proposal
-                self.relay.broadcast(proposed).await;
-            },
-            (context, verified) = verify_wait => {
-                // Clear verify waiter
-                pending_verify = None;
-
-                // Try to use result
-                view = context.view();
-                match verified {
-                    Ok(true) => {
-                        // Mark verification complete
-                        self.state.verified(view);
-                    },
-                    Ok(false) => {
-                        // Verification failed for current view proposal, treat as immediate timeout
-                        debug!(round = ?context.round, "proposal failed verification");
-                        self.handle_timeout(&mut batcher, &mut vote_sender, &mut certificate_sender)
-                            .await;
-                    },
-                    Err(err) => {
-                        debug!(?err, round = ?context.round, "failed to verify proposal");
+                    // Construct proposal
+                    let proposal = Proposal::new(
+                        context.round,
+                        context.parent.0,
+                        proposed,
+                    );
+                    if !self.state.proposed(proposal) {
+                        warn!(round = ?context.round, "dropped our proposal");
+                        continue;
                     }
-                };
-            },
-            result = certify_wait => {
-                // Aborted futures are expected when old views are pruned.
-                let Ok((round, certified)) = result else {
-                    continue;
-                };
+                    view = self.state.current_view();
 
-                // Handle response to our certification request.
-                view = round.view();
-                match certified {
-                    Ok(certified) => {
-                        let Some(notarization) = self.handle_certification(view, certified).await
-                        else {
-                            continue;
-                        };
-                        resolver.certified(view, certified).await;
-                        if certified {
-                            self.reporter
-                                .report(Activity::Certification(notarization))
+                    // Notify application of proposal
+                    self.relay.broadcast(proposed).await;
+                },
+                (context, verified) = verify_wait => {
+                    // Clear verify waiter
+                    pending_verify = None;
+
+                    // Try to use result
+                    view = context.view();
+                    match verified {
+                        Ok(true) => {
+                            // Mark verification complete
+                            self.state.verified(view);
+                        },
+                        Ok(false) => {
+                            // Verification failed for current view proposal, treat as immediate timeout
+                            debug!(round = ?context.round, "proposal failed verification");
+                            self.handle_timeout(&mut batcher, &mut vote_sender, &mut certificate_sender)
                                 .await;
+                        },
+                        Err(err) => {
+                            debug!(?err, round = ?context.round, "failed to verify proposal");
                         }
-                    }
-                    Err(err) => {
-                        // The application did not explicitly respond whether certification succeeded.
-                        // Retry the certification request (we should never assume failure here because
-                        // we persist certification results to the journal).
-                        debug!(?err, ?round, "failed to certify proposal");
-                        self.state.retry_certification(view);
-                        self.certification_candidates.insert(view);
-                    }
-                };
-            },
-            mailbox = self.mailbox_receiver.next() => {
-                // Extract message
-                let Some(msg) = mailbox else {
-                    break;
-                };
+                    };
+                },
+                result = certify_wait => {
+                    // Aborted futures are expected when old views are pruned.
+                    let Ok((round, certified)) = result else {
+                        continue;
+                    };
 
-                // Handle messages from resolver and batcher
-                match msg {
-                    Message::Proposal(proposal) => {
-                        view = proposal.view();
-                        if !self.state.is_interesting(view, false) {
-                            trace!(%view, "proposal is not interesting");
-                            continue;
+                    // Handle response to our certification request.
+                    view = round.view();
+                    match certified {
+                        Ok(certified) => {
+                            let Some(notarization) = self.handle_certification(view, certified).await
+                            else {
+                                continue;
+                            };
+                            resolver.certified(view, certified).await;
+                            if certified {
+                                self.reporter
+                                    .report(Activity::Certification(notarization))
+                                    .await;
+                            }
                         }
-                        trace!(%view, "received proposal");
-                        if !self.state.set_proposal(view, proposal) {
-                            continue;
+                        Err(err) => {
+                            // Unlike propose/verify (where failing to act will lead to a timeout
+                            // and subsequent nullification), failing to certify can lead to a halt
+                            // because we'll never exit the view without a notarization + certification.
+                            //
+                            // We do not assume failure here because certification results are persisted
+                            // to the journal and will be recovered on restart.
+                            debug!(?err, ?round, "failed to certify proposal");
                         }
-                    }
-                    Message::Verified(certificate, from_resolver) => {
-                        // Certificates can come from future views (they advance our view)
-                        view = certificate.view();
-                        if !self.state.is_interesting(view, true) {
-                            trace!(%view, "certificate is not interesting");
-                            continue;
-                        }
+                    };
+                },
+                mailbox = self.mailbox_receiver.next() => {
+                    // Extract message
+                    let Some(msg) = mailbox else {
+                        break;
+                    };
 
-                        // Track resolved status to avoid sending back to resolver
-                        match certificate {
-                            Certificate::Notarization(notarization) => {
-                                trace!(%view, from_resolver, "received notarization");
-                                self.handle_notarization(notarization).await;
-                                if from_resolver {
-                                    resolved = Resolved::Notarization;
-                                }
+                    // Handle messages from resolver and batcher
+                    match msg {
+                        Message::Proposal(proposal) => {
+                            view = proposal.view();
+                            if !self.state.is_interesting(view, false) {
+                                trace!(%view, "proposal is not interesting");
+                                continue;
                             }
-                            Certificate::Nullification(nullification) => {
-                                trace!(%view, from_resolver, "received nullification");
-                                if let Some(floor) = self.handle_nullification(nullification).await {
-                                    warn!(?floor, "broadcasting nullification floor");
-                                    self.broadcast_certificate(&mut certificate_sender, floor)
-                                        .await;
-                                }
-                                if from_resolver {
-                                    resolved = Resolved::Nullification;
-                                }
+                            trace!(%view, "received proposal");
+                            if !self.state.set_proposal(view, proposal) {
+                                continue;
                             }
-                            Certificate::Finalization(finalization) => {
-                                trace!(%view, from_resolver, "received finalization");
-                                self.handle_finalization(finalization).await;
-                                if from_resolver {
-                                    resolved = Resolved::Finalization;
+                        }
+                        Message::Verified(certificate, from_resolver) => {
+                            // Certificates can come from future views (they advance our view)
+                            view = certificate.view();
+                            if !self.state.is_interesting(view, true) {
+                                trace!(%view, "certificate is not interesting");
+                                continue;
+                            }
+
+                            // Track resolved status to avoid sending back to resolver
+                            match certificate {
+                                Certificate::Notarization(notarization) => {
+                                    trace!(%view, from_resolver, "received notarization");
+                                    self.handle_notarization(notarization).await;
+                                    if from_resolver {
+                                        resolved = Resolved::Notarization;
+                                    }
+                                }
+                                Certificate::Nullification(nullification) => {
+                                    trace!(%view, from_resolver, "received nullification");
+                                    if let Some(floor) = self.handle_nullification(nullification).await {
+                                        warn!(?floor, "broadcasting nullification floor");
+                                        self.broadcast_certificate(&mut certificate_sender, floor)
+                                            .await;
+                                    }
+                                    if from_resolver {
+                                        resolved = Resolved::Nullification;
+                                    }
+                                }
+                                Certificate::Finalization(finalization) => {
+                                    trace!(%view, from_resolver, "received finalization");
+                                    self.handle_finalization(finalization).await;
+                                    if from_resolver {
+                                        resolved = Resolved::Finalization;
+                                    }
                                 }
                             }
                         }
                     }
-                }
-            },
+                },
             on_end => {
                 // Attempt to send any new view messages
                 //
@@ -1070,7 +1031,7 @@ impl<
                         .update(current_view, leader, self.state.last_finalized())
                         .await;
                     if !is_active && !self.state.is_me(leader) {
-                        debug!(%view, ?leader, "skipping leader timeout due to inactivity");
+                        debug!(%view, %leader, "skipping leader timeout due to inactivity");
                         self.state.expire_round(current_view);
                     }
                 }

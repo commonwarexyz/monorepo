@@ -8,10 +8,11 @@ use commonware_storage::{
     qmdb::any::{ordered::fixed::Db, FixedConfig as Config},
     translator::EightCap,
 };
-use commonware_utils::{sequence::FixedBytes, NZUsize, NZU64};
+use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
 use libfuzzer_sys::fuzz_target;
 use std::{
     collections::{BTreeMap, HashSet},
+    num::NonZeroU16,
     ops::Bound::{Excluded, Unbounded},
 };
 
@@ -19,6 +20,7 @@ type Key = FixedBytes<32>;
 type Value = FixedBytes<64>;
 type RawKey = [u8; 32];
 type RawValue = [u8; 64];
+type OrderedDb = Db<deterministic::Context, Key, Value, Sha256, EightCap>;
 
 const MAX_OPS: usize = 25;
 
@@ -35,7 +37,7 @@ struct FuzzInput {
     operations: Vec<QmdbOperation>,
 }
 
-const PAGE_SIZE: usize = 555;
+const PAGE_SIZE: NonZeroU16 = NZU16!(111);
 const PAGE_CACHE_SIZE: usize = 100;
 
 fn fuzz(data: FuzzInput) {
@@ -52,12 +54,13 @@ fn fuzz(data: FuzzInput) {
             log_write_buffer: NZUsize!(1024),
             translator: EightCap,
             thread_pool: None,
-            buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+            buffer_pool: PoolRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
         };
 
-        let mut db = Db::<_, Key, Value, Sha256, EightCap>::init(context.clone(), cfg.clone())
+        let mut db = OrderedDb::init(context.clone(), cfg.clone())
             .await
-            .expect("init qmdb");
+            .expect("init qmdb")
+            .into_mutable();
         let mut batch = Some(db.start_batch());
         let mut last_commit = None;
 
@@ -99,9 +102,11 @@ fn fuzz(data: FuzzInput) {
                         .await
                         .expect("write batch should not fail");
                     last_commit = Some(Value::new(*value));
-                    db.commit(Some(Value::new(*value)))
+                    let (durable_db, _) = db
+                        .commit(Some(Value::new(*value)))
                         .await
                         .expect("commit should not fail");
+                    db = durable_db.into_merkleized().into_mutable();
 
                     // Restore batch for subsequent operations
                     batch = Some(db.start_batch());
@@ -143,7 +148,8 @@ fn fuzz(data: FuzzInput) {
         db.write_batch(iter)
             .await
             .expect("write batch should not fail");
-        db.commit(None).await.expect("commit should not fail");
+        let (durable_db, _) = db.commit(None).await.expect("commit should not fail");
+        let db = durable_db.into_merkleized();
 
         // Comprehensive final verification - check ALL keys ever touched
         for key in &all_keys {

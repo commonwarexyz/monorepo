@@ -25,7 +25,9 @@ use std::{
 };
 
 /// Implementation of [IndexEntry] for [BTreeOccupiedEntry].
-impl<K: Ord, V: Eq> IndexEntry<V> for BTreeOccupiedEntry<'_, K, Record<V>> {
+impl<K: Ord + Send + Sync, V: Eq + Send + Sync> IndexEntry<V>
+    for BTreeOccupiedEntry<'_, K, Record<V>>
+{
     fn get(&self) -> &V {
         &self.get().value
     }
@@ -38,11 +40,11 @@ impl<K: Ord, V: Eq> IndexEntry<V> for BTreeOccupiedEntry<'_, K, Record<V>> {
 }
 
 /// A cursor for the ordered [Index] that wraps the shared implementation.
-pub struct Cursor<'a, K: Ord, V: Eq> {
+pub struct Cursor<'a, K: Ord + Send + Sync, V: Eq + Send + Sync> {
     inner: CursorImpl<'a, V, BTreeOccupiedEntry<'a, K, Record<V>>>,
 }
 
-impl<'a, K: Ord, V: Eq> Cursor<'a, K, V> {
+impl<'a, K: Ord + Send + Sync, V: Eq + Send + Sync> Cursor<'a, K, V> {
     const fn new(
         entry: BTreeOccupiedEntry<'a, K, Record<V>>,
         keys: &'a Gauge,
@@ -57,7 +59,7 @@ impl<'a, K: Ord, V: Eq> Cursor<'a, K, V> {
     }
 }
 
-impl<K: Ord, V: Eq> CursorTrait for Cursor<'_, K, V> {
+impl<K: Ord + Send + Sync, V: Eq + Send + Sync> CursorTrait for Cursor<'_, K, V> {
     type Value = V;
 
     fn update(&mut self, v: V) {
@@ -83,7 +85,7 @@ impl<K: Ord, V: Eq> CursorTrait for Cursor<'_, K, V> {
 
 /// A memory-efficient index that uses an ordered map internally to map translated keys to arbitrary
 /// values.
-pub struct Index<T: Translator, V: Eq> {
+pub struct Index<T: Translator, V: Eq + Send + Sync> {
     translator: T,
     map: BTreeMap<T::Key, Record<V>>,
 
@@ -92,7 +94,7 @@ pub struct Index<T: Translator, V: Eq> {
     pruned: Counter,
 }
 
-impl<T: Translator, V: Eq> Index<T, V> {
+impl<T: Translator, V: Eq + Send + Sync> Index<T, V> {
     /// Create a new entry in the index.
     fn create(keys: &Gauge, items: &Gauge, vacant: BTreeVacantEntry<'_, T::Key, Record<V>>, v: V) {
         keys.inc();
@@ -149,7 +151,7 @@ impl<T: Translator, V: Eq> Index<T, V> {
     }
 }
 
-impl<T: Translator, V: Eq> Ordered for Index<T, V> {
+impl<T: Translator, V: Eq + Send + Sync> Ordered for Index<T, V> {
     type Iterator<'a>
         = ImmutableCursor<'a, V>
     where
@@ -198,7 +200,7 @@ impl<T: Translator, V: Eq> Ordered for Index<T, V> {
     }
 }
 
-impl<T: Translator, V: Eq> Unordered for Index<T, V> {
+impl<T: Translator, V: Eq + Send + Sync> Unordered for Index<T, V> {
     type Value = V;
     type Cursor<'a>
         = Cursor<'a, T::Key, V>
@@ -320,7 +322,7 @@ impl<T: Translator, V: Eq> Unordered for Index<T, V> {
     }
 }
 
-impl<T: Translator, V: Eq> Drop for Index<T, V> {
+impl<T: Translator, V: Eq + Send + Sync> Drop for Index<T, V> {
     /// To avoid stack overflow on keys with many collisions, we implement an iterative drop (in
     /// lieu of Rust's default recursive drop).
     fn drop(&mut self) {

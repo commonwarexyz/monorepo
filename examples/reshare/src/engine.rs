@@ -22,14 +22,19 @@ use commonware_cryptography::{
     Hasher, Signer,
 };
 use commonware_p2p::{Blocker, Manager, Receiver, Sender};
+use commonware_parallel::Strategy;
 use commonware_runtime::{
     buffer::PoolRef, spawn_cell, Clock, ContextCell, Handle, Metrics, Network, Spawner, Storage,
 };
 use commonware_storage::archive::immutable;
-use commonware_utils::{ordered::Set, union, NZUsize, NZU32, NZU64};
+use commonware_utils::{ordered::Set, union, NZUsize, NZU16, NZU32, NZU64};
 use futures::{channel::mpsc, future::try_join_all};
-use rand::{CryptoRng, Rng};
-use std::{marker::PhantomData, num::NonZero, time::Instant};
+use rand_core::CryptoRngCore;
+use std::{
+    marker::PhantomData,
+    num::{NonZero, NonZeroU16},
+    time::Instant,
+};
 use tracing::{error, info, warn};
 
 const MAILBOX_SIZE: usize = 10;
@@ -40,20 +45,21 @@ const PRUNABLE_ITEMS_PER_SECTION: NonZero<u64> = NZU64!(4_096);
 const IMMUTABLE_ITEMS_PER_SECTION: NonZero<u64> = NZU64!(262_144);
 const FREEZER_TABLE_RESIZE_FREQUENCY: u8 = 4;
 const FREEZER_TABLE_RESIZE_CHUNK_SIZE: u32 = 2u32.pow(16); // 3MB
-const FREEZER_JOURNAL_TARGET_SIZE: u64 = 1024 * 1024 * 1024; // 1GB
-const FREEZER_JOURNAL_COMPRESSION: Option<u8> = Some(3);
+const FREEZER_VALUE_TARGET_SIZE: u64 = 1024 * 1024 * 1024; // 1GB
+const FREEZER_VALUE_COMPRESSION: Option<u8> = Some(3);
 const REPLAY_BUFFER: NonZero<usize> = NZUsize!(8 * 1024 * 1024); // 8MB
 const WRITE_BUFFER: NonZero<usize> = NZUsize!(1024 * 1024); // 1MB
-const BUFFER_POOL_PAGE_SIZE: NonZero<usize> = NZUsize!(4_096); // 4KB
+const BUFFER_POOL_PAGE_SIZE: NonZeroU16 = NZU16!(4_096); // 4KB
 const BUFFER_POOL_CAPACITY: NonZero<usize> = NZUsize!(8_192); // 32MB
 const MAX_REPAIR: NonZero<usize> = NZUsize!(50);
 
-pub struct Config<C, P, B, V>
+pub struct Config<C, P, B, V, T>
 where
     P: Manager<PublicKey = C::PublicKey, Peers = Set<C::PublicKey>>,
     C: Signer,
     B: Blocker<PublicKey = C::PublicKey>,
     V: Variant,
+    T: Strategy,
 {
     pub signer: C,
     pub manager: P,
@@ -64,11 +70,12 @@ where
     pub peer_config: PeerConfig<C::PublicKey>,
     pub partition_prefix: String,
     pub freezer_table_initial_size: u32,
+    pub strategy: T,
 }
 
-pub struct Engine<E, C, P, B, H, V, S, L>
+pub struct Engine<E, C, P, B, H, V, S, L, T>
 where
-    E: Spawner + Metrics + Rng + CryptoRng + Clock + Storage + Network,
+    E: Spawner + Metrics + CryptoRngCore + Clock + Storage + Network,
     C: Signer,
     P: Manager<PublicKey = C::PublicKey, Peers = Set<C::PublicKey>>,
     B: Blocker<PublicKey = C::PublicKey>,
@@ -76,10 +83,11 @@ where
     V: Variant,
     S: Scheme<H::Digest, PublicKey = C::PublicKey>,
     L: Elector<S>,
+    T: Strategy,
     Provider<S, C>: EpochProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
 {
     context: ContextCell<E>,
-    config: Config<C, P, B, V>,
+    config: Config<C, P, B, V, T>,
     dkg: dkg::Actor<E, P, H, C, V>,
     dkg_mailbox: dkg::Mailbox<H, C, V>,
     buffer: buffered::Engine<E, C::PublicKey, Block<H, C, V>>,
@@ -92,6 +100,7 @@ where
         immutable::Archive<E, H::Digest, Finalization<S, H::Digest>>,
         immutable::Archive<E, H::Digest, Block<H, C, V>>,
         FixedEpocher,
+        T,
     >,
     #[allow(clippy::type_complexity)]
     orchestrator: orchestrator::Actor<
@@ -103,13 +112,14 @@ where
         Marshaled<E, S, Application<E, S, H, C, V>, Block<H, C, V>, FixedEpocher>,
         S,
         L,
+        T,
     >,
     orchestrator_mailbox: orchestrator::Mailbox<V, C::PublicKey>,
 }
 
-impl<E, C, P, B, H, V, S, L> Engine<E, C, P, B, H, V, S, L>
+impl<E, C, P, B, H, V, S, L, T> Engine<E, C, P, B, H, V, S, L, T>
 where
-    E: Spawner + Metrics + Rng + CryptoRng + Clock + Storage + Network,
+    E: Spawner + Metrics + CryptoRngCore + Clock + Storage + Network,
     C: Signer,
     P: Manager<PublicKey = C::PublicKey, Peers = Set<C::PublicKey>>,
     B: Blocker<PublicKey = C::PublicKey>,
@@ -117,9 +127,10 @@ where
     V: Variant,
     S: Scheme<H::Digest, PublicKey = C::PublicKey>,
     L: Elector<S>,
+    T: Strategy,
     Provider<S, C>: EpochProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
 {
-    pub async fn new(context: E, config: Config<C, P, B, V>) -> Self {
+    pub async fn new(context: E, config: Config<C, P, B, V, T>) -> Self {
         let buffer_pool = PoolRef::new(BUFFER_POOL_PAGE_SIZE, BUFFER_POOL_CAPACITY);
         let consensus_namespace = union(&config.namespace, b"_CONSENSUS");
         let num_participants = NZU32!(config.peer_config.max_participants_per_round());
@@ -163,13 +174,17 @@ where
                 freezer_table_initial_size: config.freezer_table_initial_size,
                 freezer_table_resize_frequency: FREEZER_TABLE_RESIZE_FREQUENCY,
                 freezer_table_resize_chunk_size: FREEZER_TABLE_RESIZE_CHUNK_SIZE,
-                freezer_journal_partition: format!(
-                    "{}-finalizations-by-height-freezer-journal",
+                freezer_key_partition: format!(
+                    "{}-finalizations-by-height-freezer-key",
                     config.partition_prefix
                 ),
-                freezer_journal_target_size: FREEZER_JOURNAL_TARGET_SIZE,
-                freezer_journal_compression: FREEZER_JOURNAL_COMPRESSION,
-                freezer_journal_buffer_pool: buffer_pool.clone(),
+                freezer_key_buffer_pool: buffer_pool.clone(),
+                freezer_value_partition: format!(
+                    "{}-finalizations-by-height-freezer-value",
+                    config.partition_prefix
+                ),
+                freezer_value_target_size: FREEZER_VALUE_TARGET_SIZE,
+                freezer_value_compression: FREEZER_VALUE_COMPRESSION,
                 ordinal_partition: format!(
                     "{}-finalizations-by-height-ordinal",
                     config.partition_prefix
@@ -177,7 +192,9 @@ where
                 items_per_section: IMMUTABLE_ITEMS_PER_SECTION,
                 codec_config: S::certificate_codec_config_unbounded(),
                 replay_buffer: REPLAY_BUFFER,
-                write_buffer: WRITE_BUFFER,
+                freezer_key_write_buffer: WRITE_BUFFER,
+                freezer_value_write_buffer: WRITE_BUFFER,
+                ordinal_write_buffer: WRITE_BUFFER,
             },
         )
         .await
@@ -200,18 +217,24 @@ where
                 freezer_table_initial_size: config.freezer_table_initial_size,
                 freezer_table_resize_frequency: FREEZER_TABLE_RESIZE_FREQUENCY,
                 freezer_table_resize_chunk_size: FREEZER_TABLE_RESIZE_CHUNK_SIZE,
-                freezer_journal_partition: format!(
-                    "{}-finalized_blocks-freezer-journal",
+                freezer_key_partition: format!(
+                    "{}-finalized_blocks-freezer-key",
                     config.partition_prefix
                 ),
-                freezer_journal_target_size: FREEZER_JOURNAL_TARGET_SIZE,
-                freezer_journal_compression: FREEZER_JOURNAL_COMPRESSION,
-                freezer_journal_buffer_pool: buffer_pool.clone(),
+                freezer_key_buffer_pool: buffer_pool.clone(),
+                freezer_value_partition: format!(
+                    "{}-finalized_blocks-freezer-value",
+                    config.partition_prefix
+                ),
+                freezer_value_target_size: FREEZER_VALUE_TARGET_SIZE,
+                freezer_value_compression: FREEZER_VALUE_COMPRESSION,
                 ordinal_partition: format!("{}-finalized_blocks-ordinal", config.partition_prefix),
                 items_per_section: IMMUTABLE_ITEMS_PER_SECTION,
                 codec_config: num_participants,
                 replay_buffer: REPLAY_BUFFER,
-                write_buffer: WRITE_BUFFER,
+                freezer_key_write_buffer: WRITE_BUFFER,
+                freezer_value_write_buffer: WRITE_BUFFER,
+                ordinal_write_buffer: WRITE_BUFFER,
             },
         )
         .await
@@ -220,11 +243,14 @@ where
 
         // Create the certificate verifier from the initial output (if available).
         // This allows epoch-independent certificate verification after the DKG is complete.
-        let certificate_verifier = config
-            .output
-            .as_ref()
-            .and_then(<Provider<S, C> as EpochProvider>::certificate_verifier);
-        let provider = Provider::new(config.signer.clone(), certificate_verifier);
+        let certificate_verifier = config.output.as_ref().and_then(|output| {
+            <Provider<S, C> as EpochProvider>::certificate_verifier(&consensus_namespace, output)
+        });
+        let provider = Provider::new(
+            consensus_namespace.clone(),
+            config.signer.clone(),
+            certificate_verifier,
+        );
 
         let (marshal, marshal_mailbox, _processed_height) = marshal::Actor::init(
             context.with_label("marshal"),
@@ -240,13 +266,14 @@ where
                         .get()
                         .saturating_mul(SYNCER_ACTIVITY_TIMEOUT_MULTIPLIER),
                 ),
-                namespace: consensus_namespace.clone(),
                 prunable_items_per_section: PRUNABLE_ITEMS_PER_SECTION,
                 buffer_pool: buffer_pool.clone(),
                 replay_buffer: REPLAY_BUFFER,
-                write_buffer: WRITE_BUFFER,
+                key_write_buffer: WRITE_BUFFER,
+                value_write_buffer: WRITE_BUFFER,
                 block_codec_config: num_participants,
                 max_repair: MAX_REPAIR,
+                strategy: config.strategy.clone(),
             },
         )
         .await;
@@ -265,7 +292,7 @@ where
                 application,
                 provider,
                 marshal: marshal_mailbox,
-                namespace: consensus_namespace,
+                strategy: config.strategy.clone(),
                 muxer_size: MAILBOX_SIZE,
                 mailbox_size: MAILBOX_SIZE,
                 partition_prefix: format!("{}_consensus", config.partition_prefix),

@@ -13,6 +13,10 @@
 //!   setup required, and widely supported. Certificates contain individual signatures from each
 //!   signer.
 //!
+//! - [`secp256r1`]: Attributable signatures with individual verification. HSM-friendly, no trusted
+//!   setup required, and widely supported by hardware security modules. Unlike ed25519, does not
+//!   benefit from batch verification. Certificates contain individual signatures from each signer.
+//!
 //! - [`bls12381_multisig`]: Attributable signatures with aggregated verification. Signatures
 //!   can be aggregated into a single multi-signature for compact certificates while preserving
 //!   attribution (signer indices are stored alongside the aggregated signature).
@@ -26,10 +30,10 @@
 //! Signing schemes differ in whether per-participant activities can be used as evidence of
 //! either liveness or of committing a fault:
 //!
-//! - **Attributable Schemes** ([`ed25519`], [`bls12381_multisig`]): Individual signatures can be
-//!   presented to some third party as evidence of either liveness or of committing a fault.
-//!   Certificates contain signer indices alongside individual signatures, enabling secure
-//!   per-participant activity tracking and conflict detection.
+//! - **Attributable Schemes** ([`ed25519`], [`secp256r1`], [`bls12381_multisig`]): Individual
+//!   signatures can be presented to some third party as evidence of either liveness or of
+//!   committing a fault.  Certificates contain signer indices alongside individual signatures,
+//!   enabling secure per-participant activity tracking and conflict detection.
 //!
 //! - **Non-Attributable Schemes** ([`bls12381_threshold`]): Individual signatures cannot be
 //!   presented to some third party as evidence of either liveness or of committing a fault
@@ -57,16 +61,20 @@ pub use crate::{
     bls12381::certificate::{multisig as bls12381_multisig, threshold as bls12381_threshold},
     ed25519::certificate as ed25519,
     impl_certificate_bls12381_multisig, impl_certificate_bls12381_threshold,
-    impl_certificate_ed25519,
+    impl_certificate_ed25519, impl_certificate_secp256r1,
+    secp256r1::certificate as secp256r1,
 };
 use crate::{Digest, PublicKey};
 #[cfg(not(feature = "std"))]
 use alloc::{collections::BTreeSet, sync::Arc, vec::Vec};
 use bytes::{Buf, BufMut, Bytes};
-use commonware_codec::{varint::UInt, Codec, CodecFixed, EncodeSize, Error, Read, ReadExt, Write};
-use commonware_utils::{bitmap::BitMap, ordered::Set};
+use commonware_codec::{
+    types::lazy::Lazy, Codec, CodecFixed, EncodeSize, Error, Read, ReadExt, Write,
+};
+use commonware_parallel::Strategy;
+use commonware_utils::{bitmap::BitMap, ordered::Set, Faults, Participant};
 use core::{fmt::Debug, hash::Hash};
-use rand::{CryptoRng, Rng};
+use rand_core::CryptoRngCore;
 #[cfg(feature = "std")]
 use std::{collections::BTreeSet, sync::Arc, vec::Vec};
 
@@ -74,9 +82,9 @@ use std::{collections::BTreeSet, sync::Arc, vec::Vec};
 #[derive(Clone, Debug)]
 pub struct Attestation<S: Scheme> {
     /// Index of the signer inside the participant set.
-    pub signer: u32,
+    pub signer: Participant,
     /// Scheme-specific signature or share produced for a given subject.
-    pub signature: S::Signature,
+    pub signature: Lazy<S::Signature>,
 }
 
 impl<S: Scheme> PartialEq for Attestation<S> {
@@ -96,14 +104,14 @@ impl<S: Scheme> Hash for Attestation<S> {
 
 impl<S: Scheme> Write for Attestation<S> {
     fn write(&self, writer: &mut impl BufMut) {
-        UInt(self.signer).write(writer);
+        self.signer.write(writer);
         self.signature.write(writer);
     }
 }
 
 impl<S: Scheme> EncodeSize for Attestation<S> {
     fn encode_size(&self) -> usize {
-        UInt(self.signer).encode_size() + self.signature.encode_size()
+        self.signer.encode_size() + self.signature.encode_size()
     }
 }
 
@@ -111,8 +119,8 @@ impl<S: Scheme> Read for Attestation<S> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let signer = UInt::read(reader)?.into();
-        let signature = S::Signature::read(reader)?;
+        let signer = Participant::read(reader)?;
+        let signature = ReadExt::read(reader)?;
 
         Ok(Self { signer, signature })
     }
@@ -124,9 +132,12 @@ where
     S::Signature: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        let signer = u32::arbitrary(u)?;
+        let signer = Participant::arbitrary(u)?;
         let signature = S::Signature::arbitrary(u)?;
-        Ok(Self { signer, signature })
+        Ok(Self {
+            signer,
+            signature: signature.into(),
+        })
     }
 }
 
@@ -135,20 +146,41 @@ pub struct Verification<S: Scheme> {
     /// Contains the attestations accepted by the scheme.
     pub verified: Vec<Attestation<S>>,
     /// Identifies the participant indices rejected during batch verification.
-    pub invalid: Vec<u32>,
+    pub invalid: Vec<Participant>,
 }
 
 impl<S: Scheme> Verification<S> {
     /// Creates a new `Verification` result.
-    pub const fn new(verified: Vec<Attestation<S>>, invalid: Vec<u32>) -> Self {
+    pub const fn new(verified: Vec<Attestation<S>>, invalid: Vec<Participant>) -> Self {
         Self { verified, invalid }
+    }
+}
+
+/// Trait for namespace types that can derive themselves from a base namespace.
+///
+/// This trait is implemented by namespace types to define how they are computed
+/// from a base namespace string.
+pub trait Namespace: Clone + Send + Sync {
+    /// Derive a namespace from the given base.
+    fn derive(namespace: &[u8]) -> Self;
+}
+
+impl Namespace for Vec<u8> {
+    fn derive(namespace: &[u8]) -> Self {
+        namespace.to_vec()
     }
 }
 
 /// Identifies the subject of a signature or certificate.
 pub trait Subject: Clone + Debug + Send + Sync {
-    /// Returns the namespace and message for the subject, given some base namespace.
-    fn namespace_and_message(&self, namespace: &[u8]) -> (Bytes, Bytes);
+    /// Pre-computed namespace(s) for this subject type.
+    type Namespace: Namespace;
+
+    /// Get the namespace bytes for this subject instance.
+    fn namespace<'a>(&self, derived: &'a Self::Namespace) -> &'a [u8];
+
+    /// Get the message bytes for this subject instance.
+    fn message(&self) -> Bytes;
 }
 
 /// Cryptographic surface for multi-party certificate schemes.
@@ -169,26 +201,26 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
 
     /// Returns the index of "self" in the participant set, if available.
     /// Returns `None` if the scheme is a verifier-only instance.
-    fn me(&self) -> Option<u32>;
+    fn me(&self) -> Option<Participant>;
 
     /// Returns the ordered set of participant public identity keys managed by the scheme.
     fn participants(&self) -> &Set<Self::PublicKey>;
 
-    /// Signs a subject using the supplied namespace for domain separation.
+    /// Signs a subject.
     /// Returns `None` if the scheme cannot sign (e.g. it's a verifier-only instance).
-    fn sign<D: Digest>(
-        &self,
-        namespace: &[u8],
-        subject: Self::Subject<'_, D>,
-    ) -> Option<Attestation<Self>>;
+    fn sign<D: Digest>(&self, subject: Self::Subject<'_, D>) -> Option<Attestation<Self>>;
 
     /// Verifies a single attestation against the participant material managed by the scheme.
-    fn verify_attestation<D: Digest>(
+    fn verify_attestation<R, D>(
         &self,
-        namespace: &[u8],
+        rng: &mut R,
         subject: Self::Subject<'_, D>,
         attestation: &Attestation<Self>,
-    ) -> bool;
+        strategy: &impl Strategy,
+    ) -> bool
+    where
+        R: CryptoRngCore,
+        D: Digest;
 
     /// Batch-verifies attestations and separates valid attestations from signer indices that failed
     /// verification.
@@ -196,20 +228,21 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
     /// Callers must not include duplicate attestations from the same signer.
     fn verify_attestations<R, D, I>(
         &self,
-        _rng: &mut R,
-        namespace: &[u8],
+        rng: &mut R,
         subject: Self::Subject<'_, D>,
         attestations: I,
+        strategy: &impl Strategy,
     ) -> Verification<Self>
     where
-        R: Rng + CryptoRng,
+        R: CryptoRngCore,
         D: Digest,
         I: IntoIterator<Item = Attestation<Self>>,
+        I::IntoIter: Send,
     {
         let mut invalid = BTreeSet::new();
 
         let verified = attestations.into_iter().filter_map(|attestation| {
-            if self.verify_attestation(namespace, subject.clone(), &attestation) {
+            if self.verify_attestation(&mut *rng, subject.clone(), &attestation, strategy) {
                 Some(attestation)
             } else {
                 invalid.insert(attestation.signer);
@@ -223,33 +256,44 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
     /// Assembles attestations into a certificate, returning `None` if the threshold is not met.
     ///
     /// Callers must not include duplicate attestations from the same signer.
-    fn assemble<I>(&self, attestations: I) -> Option<Self::Certificate>
+    fn assemble<I, M>(
+        &self,
+        attestations: I,
+        strategy: &impl Strategy,
+    ) -> Option<Self::Certificate>
     where
-        I: IntoIterator<Item = Attestation<Self>>;
+        I: IntoIterator<Item = Attestation<Self>>,
+        I::IntoIter: Send,
+        M: Faults;
 
     /// Verifies a certificate that was recovered or received from the network.
-    fn verify_certificate<R: Rng + CryptoRng, D: Digest>(
+    fn verify_certificate<R, D, M>(
         &self,
         rng: &mut R,
-        namespace: &[u8],
         subject: Self::Subject<'_, D>,
         certificate: &Self::Certificate,
-    ) -> bool;
-
-    /// Verifies a stream of certificates, returning `false` at the first failure.
-    fn verify_certificates<'a, R, D, I>(
-        &self,
-        rng: &mut R,
-        namespace: &[u8],
-        certificates: I,
+        strategy: &impl Strategy,
     ) -> bool
     where
-        R: Rng + CryptoRng,
+        R: CryptoRngCore,
+        D: Digest,
+        M: Faults;
+
+    /// Verifies a stream of certificates, returning `false` at the first failure.
+    fn verify_certificates<'a, R, D, I, M>(
+        &self,
+        rng: &mut R,
+        certificates: I,
+        strategy: &impl Strategy,
+    ) -> bool
+    where
+        R: CryptoRngCore,
         D: Digest,
         I: Iterator<Item = (Self::Subject<'a, D>, &'a Self::Certificate)>,
+        M: Faults,
     {
         for (subject, certificate) in certificates {
-            if !self.verify_certificate(rng, namespace, subject, certificate) {
+            if !self.verify_certificate::<_, _, M>(rng, subject, certificate, strategy) {
                 return false;
             }
         }
@@ -269,7 +313,7 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
     /// and [`bls12381_threshold`]) should return `true`, allowing callers to optimize by
     /// deferring verification until multiple signatures are available.
     ///
-    /// Schemes that don't benefit from batch verification (like `secp256r1`) should
+    /// Schemes that don't benefit from batch verification (like [`secp256r1`]) should
     /// return `false`, indicating that eager per-signature verification is preferred.
     fn is_batchable() -> bool;
 
@@ -326,18 +370,18 @@ impl Signers {
     ///
     /// Panics if the sequence contains indices larger than the size of the participant set
     /// or duplicates.
-    pub fn from(participants: usize, signers: impl IntoIterator<Item = u32>) -> Self {
+    pub fn from(participants: usize, signers: impl IntoIterator<Item = Participant>) -> Self {
         let mut bitmap = BitMap::zeroes(participants as u64);
         for signer in signers.into_iter() {
             assert!(
-                !bitmap.get(signer as u64),
+                !bitmap.get(signer.get() as u64),
                 "duplicate signer index: {signer}",
             );
             // We opt to not assert order here because some signing schemes allow
             // for commutative aggregation of signatures (and sorting is unnecessary
             // overhead).
 
-            bitmap.set(signer as u64, true);
+            bitmap.set(signer.get() as u64, true);
         }
 
         Self { bitmap }
@@ -355,11 +399,11 @@ impl Signers {
     }
 
     /// Iterates over signer indices in ascending order.
-    pub fn iter(&self) -> impl Iterator<Item = u32> + '_ {
+    pub fn iter(&self) -> impl Iterator<Item = Participant> + '_ {
         self.bitmap
             .iter()
             .enumerate()
-            .filter_map(|(index, bit)| bit.then_some(index as u32))
+            .filter_map(|(index, bit)| bit.then_some(Participant::from_usize(index)))
     }
 }
 
@@ -395,7 +439,9 @@ impl arbitrary::Arbitrary<'_> for Signers {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let participants = u.arbitrary_len::<u8>()? % 10;
         let signer_count = u.arbitrary_len::<u8>()?.min(participants);
-        let signers = (0..signer_count as u32).collect::<Vec<_>>();
+        let signers = (0..signer_count as u32)
+            .map(Participant::new)
+            .collect::<Vec<_>>();
         Ok(Self::from(participants, signers))
     }
 }
@@ -458,32 +504,38 @@ mod tests {
 
     #[test]
     fn test_from_signers() {
-        let signers = Signers::from(6, [0, 3, 5]);
+        let signers = Signers::from(6, [0, 3, 5].map(Participant::new));
         let collected: Vec<_> = signers.iter().collect();
-        assert_eq!(collected, vec![0, 3, 5]);
+        assert_eq!(
+            collected,
+            vec![0, 3, 5]
+                .into_iter()
+                .map(Participant::new)
+                .collect::<Vec<_>>()
+        );
         assert_eq!(signers.count(), 3);
     }
 
     #[test]
     #[should_panic(expected = "bit 4 out of bounds (len: 4)")]
     fn test_from_out_of_bounds() {
-        Signers::from(4, [0, 4]);
+        Signers::from(4, [0, 4].map(Participant::new));
     }
 
     #[test]
     #[should_panic(expected = "duplicate signer index: 0")]
     fn test_from_duplicate() {
-        Signers::from(4, [0, 0, 1]);
+        Signers::from(4, [0, 0, 1].map(Participant::new));
     }
 
     #[test]
     fn test_from_not_increasing() {
-        Signers::from(4, [2, 1]);
+        Signers::from(4, [2, 1].map(Participant::new));
     }
 
     #[test]
     fn test_codec_round_trip() {
-        let signers = Signers::from(9, [1, 6]);
+        let signers = Signers::from(9, [1, 6].map(Participant::new));
         let encoded = signers.encode();
         let decoded = Signers::decode_cfg(encoded, &9).unwrap();
         assert_eq!(decoded, signers);
@@ -491,7 +543,7 @@ mod tests {
 
     #[test]
     fn test_decode_respects_participant_limit() {
-        let signers = Signers::from(8, [0, 3, 7]);
+        let signers = Signers::from(8, [0, 3, 7].map(Participant::new));
         let encoded = signers.encode();
         // More participants than expected should fail.
         assert!(Signers::decode_cfg(encoded.clone(), &2).is_err());
@@ -508,18 +560,24 @@ mod tests {
 
         /// Test context type for generic scheme tests.
         #[derive(Clone, Debug)]
-        pub struct TestSubject<'a> {
-            pub message: &'a [u8],
+        pub struct TestSubject {
+            pub message: Bytes,
         }
 
-        impl<'a> Subject for TestSubject<'a> {
-            fn namespace_and_message(&self, namespace: &[u8]) -> (Bytes, Bytes) {
-                (namespace.to_vec().into(), self.message.to_vec().into())
+        impl Subject for TestSubject {
+            type Namespace = Vec<u8>;
+
+            fn namespace<'a>(&self, derived: &'a Self::Namespace) -> &'a [u8] {
+                derived
+            }
+
+            fn message(&self) -> Bytes {
+                self.message.clone()
             }
         }
 
         // Use the macro to generate the test scheme (signer/verifier are unused in conformance tests)
-        impl_certificate_ed25519!(TestSubject<'a>);
+        impl_certificate_ed25519!(TestSubject, Vec<u8>);
 
         commonware_conformance::conformance_tests! {
             CodecConformance<Signers>,

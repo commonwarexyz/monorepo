@@ -5,7 +5,7 @@ use crate::{
     index::unordered::Index,
     journal::{authenticated, contiguous::variable},
     mmr::{mem::Clean, Location, Position, StandardHasher},
-    qmdb::{self, any::VariableValue},
+    qmdb::{self, any::VariableValue, sync::Journal, Durable, Merkleized},
     translator::Translator,
 };
 use commonware_codec::Read;
@@ -14,7 +14,7 @@ use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
 use std::ops::Range;
 
-impl<E, K, V, H, T> qmdb::sync::Database for Db<E, K, V, H, T>
+impl<E, K, V, H, T> qmdb::sync::Database for Db<E, K, V, H, T, Merkleized<H>, Durable>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -102,16 +102,14 @@ where
 
     async fn resize_journal(
         mut journal: Self::Journal,
-        context: Self::Context,
-        config: &Self::Config,
         range: Range<Location>,
     ) -> Result<Self::Journal, qmdb::Error> {
         let size = journal.size();
 
         if size <= range.start {
-            // Create a new journal with the new bounds
-            journal.destroy().await?;
-            Self::create_journal(context, config, range).await
+            // Clear and reuse the journal
+            journal.clear(*range.start).await?;
+            Ok(journal)
         } else {
             // Just prune to the lower bound
             journal.prune(*range.start).await?;
@@ -124,7 +122,10 @@ where
 mod tests {
     use super::*;
     use crate::{
-        qmdb::any::unordered::{sync_tests::SyncTestHarness, Update},
+        qmdb::{
+            any::unordered::{sync_tests::SyncTestHarness, Update},
+            NonDurable, Unmerkleized,
+        },
         translator::TwoCap,
     };
     use commonware_cryptography::{sha256::Digest, Sha256};
@@ -134,13 +135,13 @@ mod tests {
         buffer::PoolRef,
         deterministic::{self, Context},
     };
-    use commonware_utils::{NZUsize, NZU64};
-    use rand::{rngs::StdRng, RngCore as _, SeedableRng as _};
+    use commonware_utils::{test_rng_seeded, NZUsize, NZU16, NZU64};
+    use rand::RngCore as _;
     use rstest::rstest;
-    use std::num::NonZeroU64;
+    use std::num::{NonZeroU16, NonZeroU64, NonZeroUsize};
 
-    const PAGE_SIZE: usize = 99;
-    const PAGE_CACHE_SIZE: usize = 3;
+    const PAGE_SIZE: NonZeroU16 = NZU16!(99);
+    const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(3);
 
     type VarConfig = qmdb::any::VariableConfig<TwoCap, (commonware_codec::RangeCfg<usize>, ())>;
 
@@ -157,12 +158,13 @@ mod tests {
             log_codec_config: ((0..=10000).into(), ()),
             translator: TwoCap,
             thread_pool: None,
-            buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+            buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
 
     /// Type alias for tests
-    type AnyTest = Db<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap>;
+    type AnyTest =
+        Db<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap, Merkleized<Sha256>, Durable>;
 
     fn test_value(i: u64) -> Vec<u8> {
         let len = ((i % 13) + 7) as usize;
@@ -176,9 +178,16 @@ mod tests {
         AnyTest::init(context, config).await.unwrap()
     }
 
-    /// Create n random operations. Some portion of the updates are deletes.
+    /// Create n random operations using the default seed (0).
+    /// Some portion of the updates are deletes.
     fn create_test_ops(n: usize) -> Vec<Operation<Digest, Vec<u8>>> {
-        let mut rng = StdRng::seed_from_u64(1337);
+        create_test_ops_seeded(n, 0)
+    }
+
+    /// Create n random operations using a specific seed.
+    /// Use different seeds when you need non-overlapping keys in the same test.
+    fn create_test_ops_seeded(n: usize, seed: u64) -> Vec<Operation<Digest, Vec<u8>>> {
+        let mut rng = test_rng_seeded(seed);
         let mut prev_key = Digest::random(&mut rng);
         let mut ops = Vec::new();
         for i in 0..n {
@@ -194,8 +203,14 @@ mod tests {
         ops
     }
 
+    type DirtyAnyTest =
+        Db<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap, Unmerkleized, NonDurable>;
+
     /// Applies the given operations to the database.
-    async fn apply_ops(db: &mut AnyTest, ops: Vec<Operation<Digest, Vec<u8>>>) {
+    async fn apply_ops_inner(
+        mut db: DirtyAnyTest,
+        ops: Vec<Operation<Digest, Vec<u8>>>,
+    ) -> DirtyAnyTest {
         for op in ops {
             match op {
                 Operation::Update(Update(key, value)) => {
@@ -205,10 +220,11 @@ mod tests {
                     db.delete(key).await.unwrap();
                 }
                 Operation::CommitFloor(metadata, _) => {
-                    db.commit(metadata).await.unwrap();
+                    db = db.commit(metadata).await.unwrap().0.into_mutable();
                 }
             }
         }
+        db
     }
 
     /// Harness for sync tests.
@@ -229,6 +245,10 @@ mod tests {
             create_test_ops(n)
         }
 
+        fn create_ops_seeded(n: usize, seed: u64) -> Vec<Operation<Digest, Vec<u8>>> {
+            create_test_ops_seeded(n, seed)
+        }
+
         async fn init_db(ctx: Context) -> Self::Db {
             create_test_db(ctx).await
         }
@@ -237,8 +257,14 @@ mod tests {
             AnyTest::init(ctx, config).await.unwrap()
         }
 
-        async fn apply_ops(db: &mut Self::Db, ops: Vec<Operation<Digest, Vec<u8>>>) {
-            apply_ops(db, ops).await
+        async fn apply_ops(db: Self::Db, ops: Vec<Operation<Digest, Vec<u8>>>) -> Self::Db {
+            apply_ops_inner(db.into_mutable(), ops)
+                .await
+                .commit(None)
+                .await
+                .unwrap()
+                .0
+                .into_merkleized()
         }
     }
 

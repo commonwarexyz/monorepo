@@ -16,11 +16,11 @@ use commonware_macros::select_loop;
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Sink, Spawner, Stream};
 use futures::{channel::mpsc, StreamExt};
 use prometheus_client::metrics::{counter::Counter, family::Family, gauge::Gauge};
-use rand::{CryptoRng, Rng};
+use rand_core::CryptoRngCore;
 use std::time::Duration;
 use tracing::debug;
 
-pub struct Actor<E: Spawner + Clock + Rng + CryptoRng + Metrics, O: Sink, I: Stream, C: PublicKey> {
+pub struct Actor<E: Spawner + Clock + CryptoRngCore + Metrics, O: Sink, I: Stream, C: PublicKey> {
     context: ContextCell<E>,
 
     mailbox_size: usize,
@@ -34,10 +34,11 @@ pub struct Actor<E: Spawner + Clock + Rng + CryptoRng + Metrics, O: Sink, I: Str
     connections: Gauge,
     sent_messages: Family<metrics::Message, Counter>,
     received_messages: Family<metrics::Message, Counter>,
+    dropped_messages: Family<metrics::Message, Counter>,
     rate_limited: Family<metrics::Message, Counter>,
 }
 
-impl<E: Spawner + Clock + Rng + CryptoRng + Metrics, O: Sink, I: Stream, C: PublicKey>
+impl<E: Spawner + Clock + CryptoRngCore + Metrics, O: Sink, I: Stream, C: PublicKey>
     Actor<E, O, I, C>
 {
     #[allow(clippy::type_complexity)]
@@ -45,6 +46,7 @@ impl<E: Spawner + Clock + Rng + CryptoRng + Metrics, O: Sink, I: Stream, C: Publ
         let connections = Gauge::default();
         let sent_messages = Family::<metrics::Message, Counter>::default();
         let received_messages = Family::<metrics::Message, Counter>::default();
+        let dropped_messages = Family::<metrics::Message, Counter>::default();
         let rate_limited = Family::<metrics::Message, Counter>::default();
         context.register(
             "connections",
@@ -56,6 +58,11 @@ impl<E: Spawner + Clock + Rng + CryptoRng + Metrics, O: Sink, I: Stream, C: Publ
             "messages_received",
             "messages received",
             received_messages.clone(),
+        );
+        context.register(
+            "messages_dropped",
+            "messages dropped due to full application buffer",
+            dropped_messages.clone(),
         );
         context.register(
             "messages_rate_limited",
@@ -76,6 +83,7 @@ impl<E: Spawner + Clock + Rng + CryptoRng + Metrics, O: Sink, I: Stream, C: Publ
                 connections,
                 sent_messages,
                 received_messages,
+                dropped_messages,
                 rate_limited,
             },
             sender,
@@ -120,6 +128,7 @@ impl<E: Spawner + Clock + Rng + CryptoRng + Metrics, O: Sink, I: Stream, C: Publ
                             let connections = self.connections.clone();
                             let sent_messages = self.sent_messages.clone();
                             let received_messages = self.received_messages.clone();
+                            let dropped_messages = self.dropped_messages.clone();
                             let rate_limited = self.rate_limited.clone();
                             let mut tracker = tracker.clone();
                             let mut router = router.clone();
@@ -142,6 +151,7 @@ impl<E: Spawner + Clock + Rng + CryptoRng + Metrics, O: Sink, I: Stream, C: Publ
                                     peer::Config {
                                         sent_messages,
                                         received_messages,
+                                        dropped_messages,
                                         rate_limited,
                                         mailbox_size: self.mailbox_size,
                                         gossip_bit_vec_frequency: self.gossip_bit_vec_frequency,
@@ -151,8 +161,12 @@ impl<E: Spawner + Clock + Rng + CryptoRng + Metrics, O: Sink, I: Stream, C: Publ
                                     },
                                 );
 
-                                // Register peer with the router
-                                let channels = router.ready(peer.clone(), messenger).await;
+                                // Register peer with the router (may fail during shutdown)
+                                let Some(channels) = router.ready(peer.clone(), messenger).await else {
+                                    debug!(?peer, "router shut down during peer setup");
+                                    connections.dec();
+                                    return;
+                                };
 
                                 // Run peer (greeting is sent first before main loop)
                                 let result = peer_actor

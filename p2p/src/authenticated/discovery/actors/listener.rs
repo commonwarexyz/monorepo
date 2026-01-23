@@ -14,7 +14,7 @@ use commonware_runtime::{
 use commonware_stream::{listen, Config as StreamConfig};
 use commonware_utils::{concurrency::Limiter, net::SubnetMask, IpAddrExt};
 use prometheus_client::metrics::counter::Counter;
-use rand::{CryptoRng, Rng};
+use rand_core::CryptoRngCore;
 use std::{net::SocketAddr, num::NonZeroU32};
 use tracing::debug;
 
@@ -34,7 +34,7 @@ pub struct Config<C: Signer> {
     pub allowed_handshake_rate_per_subnet: Quota,
 }
 
-pub struct Actor<E: Spawner + Clock + Network + Rng + CryptoRng + Metrics, C: Signer> {
+pub struct Actor<E: Spawner + Clock + Network + CryptoRngCore + Metrics, C: Signer> {
     context: ContextCell<E>,
 
     address: SocketAddr,
@@ -49,7 +49,7 @@ pub struct Actor<E: Spawner + Clock + Network + Rng + CryptoRng + Metrics, C: Si
     handshakes_subnet_rate_limited: Counter,
 }
 
-impl<E: Spawner + Clock + Network + Rng + CryptoRng + Metrics, C: Signer> Actor<E, C> {
+impl<E: Spawner + Clock + Network + CryptoRngCore + Metrics, C: Signer> Actor<E, C> {
     pub fn new(context: E, cfg: Config<C>) -> Self {
         // Create metrics
         let handshakes_blocked = Counter::default();
@@ -329,8 +329,7 @@ mod tests {
             };
 
             // Wait for some message or drop.
-            let buf = vec![0u8; 1];
-            let _ = stream.recv(buf).await;
+            let _ = stream.recv(1).await;
             drop((sink, stream));
 
             // Additional attempts should be rate limited immediately.
@@ -338,8 +337,7 @@ mod tests {
                 let (sink, mut stream) = context.dial(address).await.expect("dial");
 
                 // Wait for some message or drop.
-                let buf = vec![0u8; 1];
-                let _ = stream.recv(buf).await;
+                let _ = stream.recv(1).await;
                 drop((sink, stream));
             }
 
@@ -472,8 +470,7 @@ mod tests {
             };
 
             // Wait for some message or drop
-            let buf = vec![0u8; 1];
-            let _ = stream.recv(buf).await;
+            let _ = stream.recv(1).await;
             drop((sink, stream));
 
             // Check metrics - should be blocked because it's a private IP

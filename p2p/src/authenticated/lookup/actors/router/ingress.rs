@@ -1,11 +1,20 @@
 use crate::{
-    authenticated::{data::Data, lookup::channels::Channels, relay::Relay, Mailbox},
+    authenticated::{
+        data::{Data, EncodedData},
+        lookup::{channels::Channels, types},
+        relay::Relay,
+        Mailbox,
+    },
     utils::limited::Connected,
     Channel, Recipients,
 };
-use bytes::Bytes;
+use commonware_codec::Encode;
 use commonware_cryptography::PublicKey;
-use commonware_utils::channels::ring;
+use commonware_runtime::IoBufMut;
+use commonware_utils::{
+    channels::{fallible::AsyncFallibleExt, ring},
+    NZUsize,
+};
 use futures::channel::oneshot;
 
 /// Messages that can be processed by the router.
@@ -14,16 +23,15 @@ pub enum Message<P: PublicKey> {
     /// Notify the router that a peer is ready to communicate.
     Ready {
         peer: P,
-        relay: Relay<Data>,
+        relay: Relay<EncodedData>,
         channels: oneshot::Sender<Channels<P>>,
     },
     /// Notify the router that a peer is no longer available.
     Release { peer: P },
-    /// Send a message to one or more recipients.
+    /// Send pre-encoded data to one or more recipients.
     Content {
         recipients: Recipients<P>,
-        channel: Channel,
-        message: Bytes,
+        encoded: EncodedData,
         priority: bool,
         success: oneshot::Sender<Vec<P>>,
     },
@@ -35,16 +43,16 @@ pub enum Message<P: PublicKey> {
 
 impl<P: PublicKey> Mailbox<Message<P>> {
     /// Notify the router that a peer is ready to communicate.
-    pub async fn ready(&mut self, peer: P, relay: Relay<Data>) -> Channels<P> {
-        let (response, receiver) = oneshot::channel();
-        self.send(Message::Ready {
-            peer,
-            relay,
-            channels: response,
-        })
-        .await
-        .unwrap();
-        receiver.await.unwrap()
+    ///
+    /// Returns `None` if the router has shut down.
+    pub async fn ready(&mut self, peer: P, relay: Relay<EncodedData>) -> Option<Channels<P>> {
+        self.0
+            .request(|channels| Message::Ready {
+                peer,
+                relay,
+                channels,
+            })
+            .await
     }
 
     /// Notify the router that a peer is no longer available.
@@ -52,7 +60,7 @@ impl<P: PublicKey> Mailbox<Message<P>> {
     /// This may fail during shutdown if the router has already exited,
     /// which is harmless since the router no longer tracks any peers.
     pub async fn release(&mut self, peer: P) {
-        let _ = self.send(Message::Release { peer }).await;
+        self.0.send_lossy(Message::Release { peer }).await;
     }
 }
 
@@ -70,25 +78,36 @@ impl<P: PublicKey> Messenger<P> {
     }
 
     /// Sends a message to the given `recipients`.
+    ///
+    /// Encodes the message once and shares the encoded bytes across all recipients.
+    /// Returns an empty list if the router has shut down.
     pub async fn content(
         &mut self,
         recipients: Recipients<P>,
         channel: Channel,
-        message: Bytes,
+        message: IoBufMut,
         priority: bool,
     ) -> Vec<P> {
-        let (sender, receiver) = oneshot::channel();
+        // Build Data and encode Message::Data once for all recipients
+        let data = Data {
+            channel,
+            message: message.freeze(),
+        };
+        let payload_bytes = types::Message::Data(data).encode();
+        let encoded = EncodedData {
+            channel,
+            payload: payload_bytes.into(),
+        };
+
         self.sender
-            .send(Message::Content {
+            .0
+            .request_or_default(|success| Message::Content {
                 recipients,
-                channel,
-                message,
+                encoded,
                 priority,
-                success: sender,
+                success,
             })
             .await
-            .unwrap();
-        receiver.await.unwrap()
     }
 }
 
@@ -96,11 +115,13 @@ impl<P: PublicKey> Connected for Messenger<P> {
     type PublicKey = P;
 
     async fn subscribe(&mut self) -> ring::Receiver<Vec<P>> {
-        let (sender, receiver) = oneshot::channel();
         self.sender
-            .send(Message::SubscribePeers { response: sender })
+            .0
+            .request(|response| Message::SubscribePeers { response })
             .await
-            .unwrap();
-        receiver.await.unwrap()
+            .unwrap_or_else(|| {
+                let (_, rx) = ring::channel(NZUsize!(1));
+                rx
+            })
     }
 }

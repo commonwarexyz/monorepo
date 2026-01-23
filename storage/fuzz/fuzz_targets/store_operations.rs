@@ -2,18 +2,20 @@
 
 use arbitrary::Arbitrary;
 use commonware_cryptography::blake3::Digest;
-use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
+use commonware_runtime::{buffer::PoolRef, deterministic, Metrics, Runner};
 use commonware_storage::{
-    qmdb::store::{Config, Store},
+    qmdb::store::db::{Config, Db},
     translator::TwoCap,
 };
-use commonware_utils::{NZUsize, NZU64};
+use commonware_utils::{NZUsize, NZU16, NZU64};
 use libfuzzer_sys::fuzz_target;
+use std::num::NonZeroU16;
 
 const MAX_OPERATIONS: usize = 50;
 
 type Key = Digest;
 type Value = Vec<u8>;
+type StoreDb = Db<deterministic::Context, Key, Value, TwoCap>;
 
 #[derive(Debug)]
 enum Operation {
@@ -85,7 +87,7 @@ impl<'a> Arbitrary<'a> for FuzzInput {
     }
 }
 
-const PAGE_SIZE: usize = 128;
+const PAGE_SIZE: NonZeroU16 = NZU16!(125);
 const PAGE_CACHE_SIZE: usize = 8;
 
 fn test_config(test_name: &str) -> Config<TwoCap, (commonware_codec::RangeCfg<usize>, ())> {
@@ -96,7 +98,7 @@ fn test_config(test_name: &str) -> Config<TwoCap, (commonware_codec::RangeCfg<us
         log_codec_config: ((0..=10000).into(), ()),
         log_items_per_section: NZU64!(7),
         translator: TwoCap,
-        buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+        buffer_pool: PoolRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
     }
 }
 
@@ -104,75 +106,81 @@ fn fuzz(input: FuzzInput) {
     let runner = deterministic::Runner::default();
 
     runner.start(|context| async move {
-        let mut store =
-            Store::<_, Key, Value, TwoCap>::init(context.clone(), test_config("store_fuzz_test"))
-                .await
-                .expect("Failed to init store");
+        let mut db = StoreDb::init(context.clone(), test_config("store_fuzz_test"))
+            .await
+            .expect("Failed to init db")
+            .into_dirty();
+        let mut restarts = 0usize;
 
         for op in &input.ops {
             match op {
                 Operation::Update { key, value_bytes } => {
-                    store
-                        .update(Digest(*key), value_bytes.clone())
+                    db.update(Digest(*key), value_bytes.clone())
                         .await
                         .expect("Update should not fail");
                 }
 
                 Operation::Delete { key } => {
-                    store
-                        .delete(Digest(*key))
+                    db.delete(Digest(*key))
                         .await
                         .expect("Delete should not fail");
                 }
 
                 Operation::Commit { metadata_bytes } => {
-                    store
+                    let (clean_db, _) = db
                         .commit(metadata_bytes.clone())
                         .await
                         .expect("Commit should not fail");
+                    db = clean_db.into_dirty();
                 }
 
                 Operation::Get { key } => {
-                    let _ = store.get(&Digest(*key)).await;
+                    let _ = db.get(&Digest(*key)).await;
                 }
 
                 Operation::GetMetadata => {
-                    let _ = store.get_metadata().await;
+                    let _ = db.get_metadata().await;
                 }
 
                 Operation::Sync => {
-                    store.sync().await.expect("Sync should not fail");
+                    let (mut clean_db, _) = db.commit(None).await.expect("Commit should not fail");
+                    clean_db.sync().await.expect("Sync should not fail");
+                    db = clean_db.into_dirty();
                 }
 
                 Operation::Prune => {
-                    store
-                        .prune(store.inactivity_floor_loc())
+                    db.prune(db.inactivity_floor_loc())
                         .await
                         .expect("Prune should not fail");
                 }
 
                 Operation::OpCount => {
-                    let _ = store.op_count();
+                    let _ = db.op_count();
                 }
 
                 Operation::InactivityFloorLoc => {
-                    let _ = store.inactivity_floor_loc();
+                    let _ = db.inactivity_floor_loc();
                 }
 
                 Operation::SimulateFailure => {
-                    drop(store);
+                    drop(db);
 
-                    store = Store::<_, Key, Value, TwoCap>::init(
-                        context.clone(),
+                    db = StoreDb::init(
+                        context
+                            .with_label("db")
+                            .with_attribute("instance", restarts),
                         test_config("store_fuzz_test"),
                     )
                     .await
-                    .expect("Failed to init store");
+                    .expect("Failed to init db")
+                    .into_dirty();
+                    restarts += 1;
                 }
             }
         }
 
-        store.destroy().await.expect("Destroy should not fail");
+        let (clean_db, _) = db.commit(None).await.expect("Commit should not fail");
+        clean_db.destroy().await.expect("Destroy should not fail");
     });
 }
 

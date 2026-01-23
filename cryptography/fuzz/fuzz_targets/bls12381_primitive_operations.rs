@@ -4,13 +4,15 @@ use arbitrary::{Arbitrary, Unstructured};
 use commonware_codec::{ReadExt, Write};
 use commonware_cryptography::bls12381::primitives::{
     group::{Private, Scalar, Share, G1, G1_MESSAGE, G2, G2_MESSAGE},
-    ops::*,
+    ops,
     variant::{MinPk, MinSig, Variant},
 };
 use commonware_math::{
     algebra::{Additive, CryptoGroup, Field, HashToGroup, Ring, Space},
     poly::Poly,
 };
+use commonware_parallel::Sequential;
+use commonware_utils::Participant;
 use libfuzzer_sys::fuzz_target;
 use rand::{rngs::StdRng, SeedableRng};
 
@@ -65,7 +67,7 @@ enum FuzzOperation {
     // Key operations
     KeypairGeneration,
     ComputePublicKey {
-        private: Scalar,
+        private: Private,
     },
     SharePublicKey {
         share: Share,
@@ -83,26 +85,17 @@ enum FuzzOperation {
         use_minpk: bool,
     },
 
-    // Single signature operations
+    // Single signature operations (MinPk)
     SignMinPk {
-        private: Scalar,
-        message: Vec<u8>,
-    },
-    SignMinPkWithNamespace {
-        private: Scalar,
+        private: Private,
         namespace: Vec<u8>,
         message: Vec<u8>,
     },
     SignMinPkLowLevel {
-        private: Scalar,
+        private: Private,
         message: Vec<u8>,
     },
     VerifyMinPk {
-        public: G1,
-        message: Vec<u8>,
-        signature: G2,
-    },
-    VerifyMinPkWithNamespace {
         public: G1,
         namespace: Vec<u8>,
         message: Vec<u8>,
@@ -113,25 +106,18 @@ enum FuzzOperation {
         message: Vec<u8>,
         signature: G2,
     },
+
+    // Single signature operations (MinSig)
     SignMinSig {
-        private: Scalar,
-        message: Vec<u8>,
-    },
-    SignMinSigWithNamespace {
-        private: Scalar,
+        private: Private,
         namespace: Vec<u8>,
         message: Vec<u8>,
     },
     SignMinSigLowLevel {
-        private: Scalar,
+        private: Private,
         message: Vec<u8>,
     },
     VerifyMinSig {
-        public: G2,
-        message: Vec<u8>,
-        signature: G1,
-    },
-    VerifyMinSigWithNamespace {
         public: G2,
         namespace: Vec<u8>,
         message: Vec<u8>,
@@ -146,24 +132,21 @@ enum FuzzOperation {
     // Proof of possession
     SignProofOfPossessionMinPk {
         private: Private,
+        namespace: Vec<u8>,
     },
     VerifyProofOfPossessionMinPk {
         public: G1,
+        namespace: Vec<u8>,
         signature: G2,
     },
     SignProofOfPossessionMinSig {
         private: Private,
+        namespace: Vec<u8>,
     },
     VerifyProofOfPossessionMinSig {
         public: G2,
+        namespace: Vec<u8>,
         signature: G1,
-    },
-
-    // Partial signature operations - simplified
-    PartialSignMessage {
-        share: Share,
-        message: Vec<u8>,
-        use_minpk: bool,
     },
 
     // Polynomial operations
@@ -176,20 +159,6 @@ enum FuzzOperation {
         use_g1: bool,
     },
 
-    // Simple aggregate operations
-    AggregatePublicKeysG1 {
-        keys: Vec<G1>,
-    },
-    AggregatePublicKeysG2 {
-        keys: Vec<G2>,
-    },
-    AggregateSignaturesG1 {
-        sigs: Vec<G1>,
-    },
-    AggregateSignaturesG2 {
-        sigs: Vec<G2>,
-    },
-
     // Serialization round-trip
     SerializeScalar {
         scalar: Scalar,
@@ -200,26 +169,23 @@ enum FuzzOperation {
     SerializeG2 {
         point: G2,
     },
-    SerializeShare {
-        share: Share,
-    },
 }
 
 impl<'a> Arbitrary<'a> for FuzzOperation {
     fn arbitrary(u: &mut Unstructured<'a>) -> Result<Self, arbitrary::Error> {
-        let choice = u.int_in_range(0..=42)?;
+        let choice = u.int_in_range(0..=32)?;
 
         match choice {
             0 => Ok(FuzzOperation::ScalarArithmetic {
-                a: arbitrary_scalar(u)?,
-                b: arbitrary_scalar(u)?,
+                a: u.arbitrary()?,
+                b: u.arbitrary()?,
             }),
             1 => Ok(FuzzOperation::ScalarSubtraction {
-                a: arbitrary_scalar(u)?,
-                b: arbitrary_scalar(u)?,
+                a: u.arbitrary()?,
+                b: u.arbitrary()?,
             }),
             2 => Ok(FuzzOperation::ScalarInverse {
-                scalar: arbitrary_scalar(u)?,
+                scalar: u.arbitrary()?,
             }),
             3 => Ok(FuzzOperation::G1Arithmetic {
                 a: arbitrary_g1(u)?,
@@ -227,7 +193,7 @@ impl<'a> Arbitrary<'a> for FuzzOperation {
             }),
             4 => Ok(FuzzOperation::G1ScalarMul {
                 point: arbitrary_g1(u)?,
-                scalar: arbitrary_scalar(u)?,
+                scalar: u.arbitrary()?,
             }),
             5 => Ok(FuzzOperation::G1Msm {
                 points: arbitrary_vec_g1(u, 0, 10)?,
@@ -242,7 +208,7 @@ impl<'a> Arbitrary<'a> for FuzzOperation {
             }),
             8 => Ok(FuzzOperation::G2ScalarMul {
                 point: arbitrary_g2(u)?,
-                scalar: arbitrary_scalar(u)?,
+                scalar: u.arbitrary()?,
             }),
             9 => Ok(FuzzOperation::G2Msm {
                 points: arbitrary_vec_g2(u, 0, 10)?,
@@ -253,7 +219,7 @@ impl<'a> Arbitrary<'a> for FuzzOperation {
             }),
             11 => Ok(FuzzOperation::KeypairGeneration),
             12 => Ok(FuzzOperation::ComputePublicKey {
-                private: arbitrary_scalar(u)?,
+                private: u.arbitrary()?,
             }),
             13 => Ok(FuzzOperation::SharePublicKey {
                 share: arbitrary_share(u)?,
@@ -269,121 +235,83 @@ impl<'a> Arbitrary<'a> for FuzzOperation {
                 use_minpk: u.arbitrary()?,
             }),
             16 => Ok(FuzzOperation::SignMinPk {
-                private: arbitrary_scalar(u)?,
-                message: arbitrary_bytes(u, 0, 100)?,
-            }),
-            17 => Ok(FuzzOperation::SignMinPkWithNamespace {
-                private: arbitrary_scalar(u)?,
+                private: u.arbitrary()?,
                 namespace: arbitrary_bytes(u, 0, 50)?,
                 message: arbitrary_bytes(u, 0, 100)?,
             }),
-            18 => Ok(FuzzOperation::SignMinPkLowLevel {
-                private: arbitrary_scalar(u)?,
+            17 => Ok(FuzzOperation::SignMinPkLowLevel {
+                private: u.arbitrary()?,
                 message: arbitrary_bytes(u, 0, 100)?,
             }),
-            19 => Ok(FuzzOperation::VerifyMinPk {
-                public: arbitrary_g1(u)?,
-                message: arbitrary_bytes(u, 0, 100)?,
-                signature: arbitrary_g2(u)?,
-            }),
-            20 => Ok(FuzzOperation::VerifyMinPkWithNamespace {
+            18 => Ok(FuzzOperation::VerifyMinPk {
                 public: arbitrary_g1(u)?,
                 namespace: arbitrary_bytes(u, 0, 50)?,
                 message: arbitrary_bytes(u, 0, 100)?,
                 signature: arbitrary_g2(u)?,
             }),
-            21 => Ok(FuzzOperation::VerifyMinPkLowLevel {
+            19 => Ok(FuzzOperation::VerifyMinPkLowLevel {
                 public: arbitrary_g1(u)?,
                 message: arbitrary_bytes(u, 0, 100)?,
                 signature: arbitrary_g2(u)?,
             }),
-            22 => Ok(FuzzOperation::SignMinSig {
-                private: arbitrary_scalar(u)?,
-                message: arbitrary_bytes(u, 0, 100)?,
-            }),
-            23 => Ok(FuzzOperation::SignMinSigWithNamespace {
-                private: arbitrary_scalar(u)?,
+            20 => Ok(FuzzOperation::SignMinSig {
+                private: u.arbitrary()?,
                 namespace: arbitrary_bytes(u, 0, 50)?,
                 message: arbitrary_bytes(u, 0, 100)?,
             }),
-            24 => Ok(FuzzOperation::SignMinSigLowLevel {
-                private: arbitrary_scalar(u)?,
+            21 => Ok(FuzzOperation::SignMinSigLowLevel {
+                private: u.arbitrary()?,
                 message: arbitrary_bytes(u, 0, 100)?,
             }),
-            25 => Ok(FuzzOperation::VerifyMinSig {
-                public: arbitrary_g2(u)?,
-                message: arbitrary_bytes(u, 0, 100)?,
-                signature: arbitrary_g1(u)?,
-            }),
-            26 => Ok(FuzzOperation::VerifyMinSigWithNamespace {
+            22 => Ok(FuzzOperation::VerifyMinSig {
                 public: arbitrary_g2(u)?,
                 namespace: arbitrary_bytes(u, 0, 50)?,
                 message: arbitrary_bytes(u, 0, 100)?,
                 signature: arbitrary_g1(u)?,
             }),
-            27 => Ok(FuzzOperation::VerifyMinSigLowLevel {
+            23 => Ok(FuzzOperation::VerifyMinSigLowLevel {
                 public: arbitrary_g2(u)?,
                 message: arbitrary_bytes(u, 0, 100)?,
                 signature: arbitrary_g1(u)?,
             }),
-            28 => Ok(FuzzOperation::SignProofOfPossessionMinPk {
-                private: arbitrary_scalar(u)?,
+            24 => Ok(FuzzOperation::SignProofOfPossessionMinPk {
+                private: u.arbitrary()?,
+                namespace: arbitrary_bytes(u, 0, 50)?,
             }),
-            29 => Ok(FuzzOperation::VerifyProofOfPossessionMinPk {
+            25 => Ok(FuzzOperation::VerifyProofOfPossessionMinPk {
                 public: arbitrary_g1(u)?,
+                namespace: arbitrary_bytes(u, 0, 50)?,
                 signature: arbitrary_g2(u)?,
             }),
-            30 => Ok(FuzzOperation::SignProofOfPossessionMinSig {
-                private: arbitrary_scalar(u)?,
+            26 => Ok(FuzzOperation::SignProofOfPossessionMinSig {
+                private: u.arbitrary()?,
+                namespace: arbitrary_bytes(u, 0, 50)?,
             }),
-            31 => Ok(FuzzOperation::VerifyProofOfPossessionMinSig {
+            27 => Ok(FuzzOperation::VerifyProofOfPossessionMinSig {
                 public: arbitrary_g2(u)?,
+                namespace: arbitrary_bytes(u, 0, 50)?,
                 signature: arbitrary_g1(u)?,
             }),
-            32 => Ok(FuzzOperation::PartialSignMessage {
-                share: arbitrary_share(u)?,
-                message: arbitrary_bytes(u, 0, 100)?,
-                use_minpk: u.arbitrary()?,
-            }),
-            33 => Ok(FuzzOperation::PolyAdd {
+            28 => Ok(FuzzOperation::PolyAdd {
                 a: arbitrary_poly_scalar(u)?,
                 b: arbitrary_poly_scalar(u)?,
             }),
-            34 => Ok(FuzzOperation::PolyCommit {
+            29 => Ok(FuzzOperation::PolyCommit {
                 scalar_poly: arbitrary_poly_scalar(u)?,
                 use_g1: u.arbitrary()?,
             }),
-            35 => Ok(FuzzOperation::AggregatePublicKeysG1 {
-                keys: arbitrary_vec_g1(u, 0, 10)?,
+            30 => Ok(FuzzOperation::SerializeScalar {
+                scalar: u.arbitrary()?,
             }),
-            36 => Ok(FuzzOperation::AggregatePublicKeysG2 {
-                keys: arbitrary_vec_g2(u, 0, 10)?,
-            }),
-            37 => Ok(FuzzOperation::AggregateSignaturesG1 {
-                sigs: arbitrary_vec_g1(u, 0, 10)?,
-            }),
-            38 => Ok(FuzzOperation::AggregateSignaturesG2 {
-                sigs: arbitrary_vec_g2(u, 0, 10)?,
-            }),
-            39 => Ok(FuzzOperation::SerializeScalar {
-                scalar: arbitrary_scalar(u)?,
-            }),
-            40 => Ok(FuzzOperation::SerializeG1 {
+            31 => Ok(FuzzOperation::SerializeG1 {
                 point: arbitrary_g1(u)?,
             }),
-            41 => Ok(FuzzOperation::SerializeG2 {
+            32 => Ok(FuzzOperation::SerializeG2 {
                 point: arbitrary_g2(u)?,
-            }),
-            42 => Ok(FuzzOperation::SerializeShare {
-                share: arbitrary_share(u)?,
             }),
             _ => Ok(FuzzOperation::KeypairGeneration),
         }
     }
-}
-
-fn arbitrary_scalar(u: &mut Unstructured) -> Result<Scalar, arbitrary::Error> {
-    u.arbitrary()
 }
 
 fn arbitrary_g1(u: &mut Unstructured) -> Result<G1, arbitrary::Error> {
@@ -417,16 +345,16 @@ fn arbitrary_g2(u: &mut Unstructured) -> Result<G2, arbitrary::Error> {
 }
 
 fn arbitrary_share(u: &mut Unstructured) -> Result<Share, arbitrary::Error> {
-    Ok(Share {
-        index: u.int_in_range(1..=100)?,
-        private: arbitrary_scalar(u)?,
-    })
+    Ok(Share::new(
+        Participant::new(u.int_in_range(1..=100)?),
+        u.arbitrary()?,
+    ))
 }
 
 fn arbitrary_poly_scalar(u: &mut Unstructured) -> Result<Poly<Scalar>, arbitrary::Error> {
     let degree = u.int_in_range(0..=10)?;
     let seed: [u8; 32] = u.arbitrary()?;
-    let constant = arbitrary_scalar(u)?;
+    let constant: Scalar = u.arbitrary()?;
     let mut rng = StdRng::from_seed(seed);
     Ok(Poly::new_with_constant(&mut rng, degree, constant))
 }
@@ -437,7 +365,7 @@ fn arbitrary_vec_scalar(
     max: usize,
 ) -> Result<Vec<Scalar>, arbitrary::Error> {
     let len = u.int_in_range(min..=max)?;
-    (0..len).map(|_| arbitrary_scalar(u)).collect()
+    (0..len).map(|_| u.arbitrary()).collect()
 }
 
 fn arbitrary_vec_g1(
@@ -499,7 +427,7 @@ fn fuzz(op: FuzzOperation) {
         FuzzOperation::G1Msm { points, scalars } => {
             let len = points.len().min(scalars.len());
             if len > 0 {
-                let _ = G1::msm(&points[..len], &scalars[..len], 1);
+                let _ = G1::msm(&points[..len], &scalars[..len], &Sequential);
             }
         }
 
@@ -518,7 +446,7 @@ fn fuzz(op: FuzzOperation) {
         FuzzOperation::G2Msm { points, scalars } => {
             let len = points.len().min(scalars.len());
             if len > 0 {
-                let _ = G2::msm(&points[..len], &scalars[..len], 1);
+                let _ = G2::msm(&points[..len], &scalars[..len], &Sequential);
             }
         }
 
@@ -531,8 +459,8 @@ fn fuzz(op: FuzzOperation) {
         }
 
         FuzzOperation::ComputePublicKey { private } => {
-            let _pub_pk: G1 = compute_public::<MinPk>(&private);
-            let _pub_sig: G2 = compute_public::<MinSig>(&private);
+            let _pub_pk: G1 = ops::compute_public::<MinPk>(&private);
+            let _pub_sig: G2 = ops::compute_public::<MinSig>(&private);
         }
 
         FuzzOperation::SharePublicKey { share, use_minpk } => {
@@ -545,9 +473,9 @@ fn fuzz(op: FuzzOperation) {
 
         FuzzOperation::HashMessage { message, use_minpk } => {
             if use_minpk {
-                let _: G2 = hash_message::<MinPk>(MinPk::MESSAGE, &message);
+                let _: G2 = ops::hash::<MinPk>(MinPk::MESSAGE, &message);
             } else {
-                let _: G1 = hash_message::<MinSig>(MinSig::MESSAGE, &message);
+                let _: G1 = ops::hash::<MinSig>(MinSig::MESSAGE, &message);
             }
         }
 
@@ -557,50 +485,36 @@ fn fuzz(op: FuzzOperation) {
             use_minpk,
         } => {
             if use_minpk {
-                let _: G2 = hash_message_namespace::<MinPk>(MinPk::MESSAGE, &namespace, &message);
+                let _: G2 = ops::hash_with_namespace::<MinPk>(MinPk::MESSAGE, &namespace, &message);
             } else {
-                let _: G1 = hash_message_namespace::<MinSig>(MinSig::MESSAGE, &namespace, &message);
+                let _: G1 =
+                    ops::hash_with_namespace::<MinSig>(MinSig::MESSAGE, &namespace, &message);
             }
         }
 
-        FuzzOperation::SignMinPk { private, message } => {
-            let sig = sign_message::<MinPk>(&private, None, &message);
-            let pub_key = compute_public::<MinPk>(&private);
-            let _ = verify_message::<MinPk>(&pub_key, None, &message, &sig);
-        }
-
-        FuzzOperation::SignMinPkWithNamespace {
+        FuzzOperation::SignMinPk {
             private,
             namespace,
             message,
         } => {
-            let sig = sign_message::<MinPk>(&private, Some(&namespace), &message);
-            let pub_key = compute_public::<MinPk>(&private);
-            let _ = verify_message::<MinPk>(&pub_key, Some(&namespace), &message, &sig);
+            let sig = ops::sign_message::<MinPk>(&private, &namespace, &message);
+            let pub_key = ops::compute_public::<MinPk>(&private);
+            let _ = ops::verify_message::<MinPk>(&pub_key, &namespace, &message, &sig);
         }
 
         FuzzOperation::SignMinPkLowLevel { private, message } => {
-            // Use built-in DST instead of arbitrary bytes
-            let sig = sign::<MinPk>(&private, MinPk::MESSAGE, &message);
-            let pub_key = compute_public::<MinPk>(&private);
-            let _ = verify::<MinPk>(&pub_key, MinPk::MESSAGE, &message, &sig);
+            let sig = ops::sign::<MinPk>(&private, MinPk::MESSAGE, &message);
+            let pub_key = ops::compute_public::<MinPk>(&private);
+            let _ = ops::verify::<MinPk>(&pub_key, MinPk::MESSAGE, &message, &sig);
         }
 
         FuzzOperation::VerifyMinPk {
-            public,
-            message,
-            signature,
-        } => {
-            let _ = verify_message::<MinPk>(&public, None, &message, &signature);
-        }
-
-        FuzzOperation::VerifyMinPkWithNamespace {
             public,
             namespace,
             message,
             signature,
         } => {
-            let _ = verify_message::<MinPk>(&public, Some(&namespace), &message, &signature);
+            let _ = ops::verify_message::<MinPk>(&public, &namespace, &message, &signature);
         }
 
         FuzzOperation::VerifyMinPkLowLevel {
@@ -608,48 +522,32 @@ fn fuzz(op: FuzzOperation) {
             message,
             signature,
         } => {
-            // Use built-in DST instead of arbitrary bytes
-            let _ = verify::<MinPk>(&public, MinPk::MESSAGE, &message, &signature);
+            let _ = ops::verify::<MinPk>(&public, MinPk::MESSAGE, &message, &signature);
         }
 
-        FuzzOperation::SignMinSig { private, message } => {
-            let sig = sign_message::<MinSig>(&private, None, &message);
-            let pub_key = compute_public::<MinSig>(&private);
-            let _ = verify_message::<MinSig>(&pub_key, None, &message, &sig);
-        }
-
-        FuzzOperation::SignMinSigWithNamespace {
+        FuzzOperation::SignMinSig {
             private,
             namespace,
             message,
         } => {
-            let sig = sign_message::<MinSig>(&private, Some(&namespace), &message);
-            let pub_key = compute_public::<MinSig>(&private);
-            let _ = verify_message::<MinSig>(&pub_key, Some(&namespace), &message, &sig);
+            let sig = ops::sign_message::<MinSig>(&private, &namespace, &message);
+            let pub_key = ops::compute_public::<MinSig>(&private);
+            let _ = ops::verify_message::<MinSig>(&pub_key, &namespace, &message, &sig);
         }
 
         FuzzOperation::SignMinSigLowLevel { private, message } => {
-            // Use built-in DST instead of arbitrary bytes
-            let sig = sign::<MinSig>(&private, MinSig::MESSAGE, &message);
-            let pub_key = compute_public::<MinSig>(&private);
-            let _ = verify::<MinSig>(&pub_key, MinSig::MESSAGE, &message, &sig);
+            let sig = ops::sign::<MinSig>(&private, MinSig::MESSAGE, &message);
+            let pub_key = ops::compute_public::<MinSig>(&private);
+            let _ = ops::verify::<MinSig>(&pub_key, MinSig::MESSAGE, &message, &sig);
         }
 
         FuzzOperation::VerifyMinSig {
-            public,
-            message,
-            signature,
-        } => {
-            let _ = verify_message::<MinSig>(&public, None, &message, &signature);
-        }
-
-        FuzzOperation::VerifyMinSigWithNamespace {
             public,
             namespace,
             message,
             signature,
         } => {
-            let _ = verify_message::<MinSig>(&public, Some(&namespace), &message, &signature);
+            let _ = ops::verify_message::<MinSig>(&public, &namespace, &message, &signature);
         }
 
         FuzzOperation::VerifyMinSigLowLevel {
@@ -657,40 +555,35 @@ fn fuzz(op: FuzzOperation) {
             message,
             signature,
         } => {
-            // Use built-in DST instead of arbitrary bytes
-            let _ = verify::<MinSig>(&public, MinSig::MESSAGE, &message, &signature);
+            let _ = ops::verify::<MinSig>(&public, MinSig::MESSAGE, &message, &signature);
         }
 
-        FuzzOperation::SignProofOfPossessionMinPk { private } => {
-            let sig = sign_proof_of_possession::<MinPk>(&private);
-            let pub_key = compute_public::<MinPk>(&private);
-            let _ = verify_proof_of_possession::<MinPk>(&pub_key, &sig);
+        FuzzOperation::SignProofOfPossessionMinPk { private, namespace } => {
+            let sig = ops::sign_proof_of_possession::<MinPk>(&private, &namespace);
+            let pub_key = ops::compute_public::<MinPk>(&private);
+            let _ = ops::verify_proof_of_possession::<MinPk>(&pub_key, &namespace, &sig);
         }
 
-        FuzzOperation::VerifyProofOfPossessionMinPk { public, signature } => {
-            let _ = verify_proof_of_possession::<MinPk>(&public, &signature);
-        }
-
-        FuzzOperation::SignProofOfPossessionMinSig { private } => {
-            let sig = sign_proof_of_possession::<MinSig>(&private);
-            let pub_key = compute_public::<MinSig>(&private);
-            let _ = verify_proof_of_possession::<MinSig>(&pub_key, &sig);
-        }
-
-        FuzzOperation::VerifyProofOfPossessionMinSig { public, signature } => {
-            let _ = verify_proof_of_possession::<MinSig>(&public, &signature);
-        }
-
-        FuzzOperation::PartialSignMessage {
-            share,
-            message,
-            use_minpk,
+        FuzzOperation::VerifyProofOfPossessionMinPk {
+            public,
+            namespace,
+            signature,
         } => {
-            if use_minpk {
-                let _ = partial_sign_message::<MinPk>(&share, None, &message);
-            } else {
-                let _ = partial_sign_message::<MinSig>(&share, None, &message);
-            }
+            let _ = ops::verify_proof_of_possession::<MinPk>(&public, &namespace, &signature);
+        }
+
+        FuzzOperation::SignProofOfPossessionMinSig { private, namespace } => {
+            let sig = ops::sign_proof_of_possession::<MinSig>(&private, &namespace);
+            let pub_key = ops::compute_public::<MinSig>(&private);
+            let _ = ops::verify_proof_of_possession::<MinSig>(&pub_key, &namespace, &sig);
+        }
+
+        FuzzOperation::VerifyProofOfPossessionMinSig {
+            public,
+            namespace,
+            signature,
+        } => {
+            let _ = ops::verify_proof_of_possession::<MinSig>(&public, &namespace, &signature);
         }
 
         FuzzOperation::PolyAdd { a, b } => {
@@ -706,22 +599,6 @@ fn fuzz(op: FuzzOperation) {
             } else {
                 let _ = Poly::<G2>::commit(scalar_poly);
             }
-        }
-
-        FuzzOperation::AggregatePublicKeysG1 { keys } => {
-            let _ = aggregate_public_keys::<MinPk, _>(&keys);
-        }
-
-        FuzzOperation::AggregatePublicKeysG2 { keys } => {
-            let _ = aggregate_public_keys::<MinSig, _>(&keys);
-        }
-
-        FuzzOperation::AggregateSignaturesG1 { sigs } => {
-            let _ = aggregate_signatures::<MinSig, _>(&sigs);
-        }
-
-        FuzzOperation::AggregateSignaturesG2 { sigs } => {
-            let _ = aggregate_signatures::<MinPk, _>(&sigs);
         }
 
         FuzzOperation::SerializeScalar { scalar } => {
@@ -745,14 +622,6 @@ fn fuzz(op: FuzzOperation) {
             point.write(&mut encoded);
             if let Ok(decoded) = G2::read(&mut encoded.as_slice()) {
                 assert_eq!(point, decoded);
-            }
-        }
-
-        FuzzOperation::SerializeShare { share } => {
-            let mut encoded = Vec::new();
-            share.write(&mut encoded);
-            if let Ok(decoded) = Share::read(&mut encoded.as_slice()) {
-                assert_eq!(share, decoded);
             }
         }
     }

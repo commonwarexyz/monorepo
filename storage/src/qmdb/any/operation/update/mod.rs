@@ -13,7 +13,7 @@ mod unordered;
 pub use unordered::Update as Unordered;
 
 /// An operation that updates a key-value pair.
-pub trait Update<K: Array, V: ValueEncoding>: sealed::Sealed + Clone {
+pub trait Update<K: Array, V: ValueEncoding>: sealed::Sealed + Clone + Send + Sync {
     /// The updated key.
     fn key(&self) -> &K;
 
@@ -36,11 +36,11 @@ mod tests {
     where
         T: Codec + PartialEq + fmt::Debug,
     {
-        let encoded = value.encode().freeze();
+        let encoded = value.encode();
         let decoded = T::decode_cfg(encoded.clone(), cfg).expect("decode");
         assert_eq!(decoded, *value);
         let encoded2 = decoded.encode();
-        assert_eq!(encoded, encoded2.freeze());
+        assert_eq!(encoded, encoded2);
     }
 
     #[test]

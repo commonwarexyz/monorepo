@@ -18,7 +18,7 @@ use commonware_runtime::{
 use commonware_stream::Config as StreamConfig;
 use commonware_utils::union;
 use futures::channel::mpsc;
-use rand::{CryptoRng, Rng};
+use rand_core::CryptoRngCore;
 use std::{collections::HashSet, net::IpAddr};
 use tracing::{debug, info};
 
@@ -26,7 +26,7 @@ use tracing::{debug, info};
 const STREAM_SUFFIX: &[u8] = b"_STREAM";
 
 /// Implementation of an `authenticated` network.
-pub struct Network<E: Spawner + Clock + Rng + CryptoRng + RNetwork + Metrics, C: Signer> {
+pub struct Network<E: Spawner + Clock + CryptoRngCore + RNetwork + Metrics, C: Signer> {
     context: ContextCell<E>,
     cfg: Config<C>,
 
@@ -38,9 +38,7 @@ pub struct Network<E: Spawner + Clock + Rng + CryptoRng + RNetwork + Metrics, C:
     listener: mpsc::Receiver<HashSet<IpAddr>>,
 }
 
-impl<E: Spawner + Clock + Rng + CryptoRng + RNetwork + Resolver + Metrics, C: Signer>
-    Network<E, C>
-{
+impl<E: Spawner + Clock + CryptoRngCore + RNetwork + Resolver + Metrics, C: Signer> Network<E, C> {
     /// Create a new instance of an `authenticated` network.
     ///
     /// # Parameters
@@ -63,6 +61,7 @@ impl<E: Spawner + Clock + Rng + CryptoRng + RNetwork + Resolver + Metrics, C: Si
                 allow_dns: cfg.allow_dns,
                 bypass_ip_check: cfg.bypass_ip_check,
                 listener: listener_mailbox,
+                block_duration: cfg.block_duration,
             },
         );
         let (router, router_mailbox, messenger) = router::Actor::new(
@@ -114,7 +113,8 @@ impl<E: Spawner + Clock + Rng + CryptoRng + RNetwork + Resolver + Metrics, C: Si
     ) {
         let clock = self
             .context
-            .with_label(&format!("channel_{channel}"))
+            .with_label("channel")
+            .with_attribute("idx", channel)
             .take();
         self.channels.register(channel, rate, backlog, clock)
     }

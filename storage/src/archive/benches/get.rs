@@ -13,7 +13,15 @@ use rand::{rngs::StdRng, Rng, SeedableRng};
 use std::{hint::black_box, time::Instant};
 
 /// Items pre-loaded into the archive.
+#[cfg(not(full_bench))]
+const ITEMS: u64 = 10_000;
+#[cfg(full_bench)]
 const ITEMS: u64 = 250_000;
+
+#[cfg(not(full_bench))]
+const READS: [usize; 1] = [1_000];
+#[cfg(full_bench)]
+const READS: [usize; 3] = [1_000, 10_000, 50_000];
 
 fn select_keys(keys: &[Key], reads: usize) -> Vec<Key> {
     let mut rng = StdRng::seed_from_u64(42);
@@ -76,7 +84,7 @@ fn bench_get(c: &mut Criterion) {
             let runner = tokio::Runner::new(cfg.clone());
             for mode in ["serial", "concurrent"] {
                 for pattern in ["key", "index"] {
-                    for reads in [1_000, 10_000, 50_000] {
+                    for reads in READS {
                         let label = format!(
                             "{}/variant={} mode={} pattern={} comp={} reads={}",
                             module_path!(),

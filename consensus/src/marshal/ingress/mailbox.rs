@@ -1,28 +1,27 @@
 use crate::{
     simplex::types::{Activity, Finalization, Notarization},
-    types::Round,
-    Block, Reporter,
+    types::{Height, Round},
+    Block, Heightable, Reporter,
 };
 use commonware_cryptography::{certificate::Scheme, Digest};
 use commonware_storage::archive;
-use commonware_utils::vec::NonEmptyVec;
+use commonware_utils::{channels::fallible::AsyncFallibleExt, vec::NonEmptyVec};
 use futures::{
     channel::{mpsc, oneshot},
     future::BoxFuture,
     stream::{FuturesOrdered, Stream},
-    FutureExt, SinkExt,
+    FutureExt,
 };
 use pin_project::pin_project;
 use std::{
     pin::Pin,
     task::{Context, Poll},
 };
-use tracing::error;
 
 /// An identifier for a block request.
 pub enum Identifier<D: Digest> {
     /// The height of the block to retrieve.
-    Height(u64),
+    Height(Height),
     /// The commitment of the block to retrieve.
     Commitment(D),
     /// The highest finalized block. It may be the case that marshal does not have some of the
@@ -30,9 +29,9 @@ pub enum Identifier<D: Digest> {
     Latest,
 }
 
-// Allows using u64 directly for convenience.
-impl<D: Digest> From<u64> for Identifier<D> {
-    fn from(src: u64) -> Self {
+// Allows using Height directly for convenience.
+impl<D: Digest> From<Height> for Identifier<D> {
+    fn from(src: Height) -> Self {
         Self::Height(src)
     }
 }
@@ -48,7 +47,7 @@ impl<D: Digest> From<&D> for Identifier<D> {
 impl<D: Digest> From<archive::Identifier<'_, D>> for Identifier<D> {
     fn from(src: archive::Identifier<'_, D>) -> Self {
         match src {
-            archive::Identifier::Index(index) => Self::Height(index),
+            archive::Identifier::Index(index) => Self::Height(Height::new(index)),
             archive::Identifier::Key(key) => Self::Commitment(*key),
         }
     }
@@ -66,7 +65,7 @@ pub(crate) enum Message<S: Scheme, B: Block> {
         /// The identifier of the block to get the information of.
         identifier: Identifier<B::Commitment>,
         /// A channel to send the retrieved (height, commitment).
-        response: oneshot::Sender<Option<(u64, B::Commitment)>>,
+        response: oneshot::Sender<Option<(Height, B::Commitment)>>,
     },
     /// A request to retrieve a block by its identifier.
     ///
@@ -81,7 +80,7 @@ pub(crate) enum Message<S: Scheme, B: Block> {
     /// A request to retrieve a finalization by height.
     GetFinalization {
         /// The height of the finalization to retrieve.
-        height: u64,
+        height: Height,
         /// A channel to send the retrieved finalization.
         response: oneshot::Sender<Option<Finalization<S, B::Commitment>>>,
     },
@@ -97,7 +96,7 @@ pub(crate) enum Message<S: Scheme, B: Block> {
     /// target set.
     HintFinalized {
         /// The height of the finalization to fetch.
-        height: u64,
+        height: Height,
         /// Target peers to fetch from. Added to any existing targets for this height.
         targets: NonEmptyVec<S::PublicKey>,
     },
@@ -127,16 +126,25 @@ pub(crate) enum Message<S: Scheme, B: Block> {
     },
     /// Sets the sync starting point (advances if higher than current).
     ///
-    /// Marshal will sync and deliver blocks starting at `floor + 1`. Data at or
-    /// below the floor is pruned.
+    /// Marshal will sync and deliver blocks starting at `floor + 1`. Data below
+    /// the floor is pruned.
     ///
     /// To prune data without affecting the sync starting point (say at some trailing depth
-    /// from tip), prune the finalized stores directly.
+    /// from tip), use [Message::Prune] instead.
     ///
     /// The default floor is 0.
     SetFloor {
         /// The candidate floor height.
-        height: u64,
+        height: Height,
+    },
+    /// Prunes finalized blocks and certificates below the given height.
+    ///
+    /// Unlike [Message::SetFloor], this does not affect the sync starting point.
+    /// The height must be at or below the current floor (last processed height),
+    /// otherwise the prune request is ignored.
+    Prune {
+        /// The minimum height to keep (blocks below this are pruned).
+        height: Height,
     },
 
     // -------------------- Consensus Engine Messages --------------------
@@ -168,23 +176,15 @@ impl<S: Scheme, B: Block> Mailbox<S, B> {
     pub async fn get_info(
         &mut self,
         identifier: impl Into<Identifier<B::Commitment>>,
-    ) -> Option<(u64, B::Commitment)> {
-        let (tx, rx) = oneshot::channel();
-        if self
-            .sender
-            .send(Message::GetInfo {
-                identifier: identifier.into(),
-                response: tx,
+    ) -> Option<(Height, B::Commitment)> {
+        let identifier = identifier.into();
+        self.sender
+            .request(|response| Message::GetInfo {
+                identifier,
+                response,
             })
             .await
-            .is_err()
-        {
-            error!("failed to send get info message to actor: receiver dropped");
-        }
-        rx.await.unwrap_or_else(|_| {
-            error!("failed to get block info: receiver dropped");
-            None
-        })
+            .flatten()
     }
 
     /// A best-effort attempt to retrieve a given block from local
@@ -193,46 +193,26 @@ impl<S: Scheme, B: Block> Mailbox<S, B> {
         &mut self,
         identifier: impl Into<Identifier<B::Commitment>>,
     ) -> Option<B> {
-        let (tx, rx) = oneshot::channel();
-        if self
-            .sender
-            .send(Message::GetBlock {
-                identifier: identifier.into(),
-                response: tx,
+        let identifier = identifier.into();
+        self.sender
+            .request(|response| Message::GetBlock {
+                identifier,
+                response,
             })
             .await
-            .is_err()
-        {
-            error!("failed to send get block message to actor: receiver dropped");
-        }
-        rx.await.unwrap_or_else(|_| {
-            error!("failed to get block: receiver dropped");
-            None
-        })
+            .flatten()
     }
 
     /// A best-effort attempt to retrieve a given [Finalization] from local
     /// storage. It is not an indication to go fetch the [Finalization] from the network.
     pub async fn get_finalization(
         &mut self,
-        height: u64,
+        height: Height,
     ) -> Option<Finalization<S, B::Commitment>> {
-        let (tx, rx) = oneshot::channel();
-        if self
-            .sender
-            .send(Message::GetFinalization {
-                height,
-                response: tx,
-            })
+        self.sender
+            .request(|response| Message::GetFinalization { height, response })
             .await
-            .is_err()
-        {
-            error!("failed to send get finalization message to actor: receiver dropped");
-        }
-        rx.await.unwrap_or_else(|_| {
-            error!("failed to get finalization: receiver dropped");
-            None
-        })
+            .flatten()
     }
 
     /// Hints that a finalized block may be available at the given height.
@@ -250,15 +230,10 @@ impl<S: Scheme, B: Block> Mailbox<S, B> {
     ///
     /// This is fire-and-forget: the finalization will be stored in marshal and delivered
     /// via the normal finalization flow when available.
-    pub async fn hint_finalized(&mut self, height: u64, targets: NonEmptyVec<S::PublicKey>) {
-        if self
-            .sender
-            .send(Message::HintFinalized { height, targets })
-            .await
-            .is_err()
-        {
-            error!("failed to send hint finalized message to actor: receiver dropped");
-        }
+    pub async fn hint_finalized(&mut self, height: Height, targets: NonEmptyVec<S::PublicKey>) {
+        self.sender
+            .send_lossy(Message::HintFinalized { height, targets })
+            .await;
     }
 
     /// A request to retrieve a block by its commitment.
@@ -276,18 +251,13 @@ impl<S: Scheme, B: Block> Mailbox<S, B> {
         commitment: B::Commitment,
     ) -> oneshot::Receiver<B> {
         let (tx, rx) = oneshot::channel();
-        if self
-            .sender
-            .send(Message::Subscribe {
+        self.sender
+            .send_lossy(Message::Subscribe {
                 round,
                 commitment,
                 response: tx,
             })
-            .await
-            .is_err()
-        {
-            error!("failed to send subscribe message to actor: receiver dropped");
-        }
+            .await;
         rx
     }
 
@@ -307,46 +277,38 @@ impl<S: Scheme, B: Block> Mailbox<S, B> {
 
     /// Proposed requests that a proposed block is sent to all peers.
     pub async fn proposed(&mut self, round: Round, block: B) {
-        if self
-            .sender
-            .send(Message::Proposed { round, block })
-            .await
-            .is_err()
-        {
-            error!("failed to send proposed message to actor: receiver dropped");
-        }
+        self.sender
+            .send_lossy(Message::Proposed { round, block })
+            .await;
     }
 
     /// Notifies the actor that a block has been verified.
     pub async fn verified(&mut self, round: Round, block: B) {
-        if self
-            .sender
-            .send(Message::Verified { round, block })
-            .await
-            .is_err()
-        {
-            error!("failed to send verified message to actor: receiver dropped");
-        }
+        self.sender
+            .send_lossy(Message::Verified { round, block })
+            .await;
     }
 
     /// Sets the sync starting point (advances if higher than current).
     ///
-    /// Marshal will sync and deliver blocks starting at `floor + 1`. Data at or
-    /// below the floor is pruned.
+    /// Marshal will sync and deliver blocks starting at `floor + 1`. Data below
+    /// the floor is pruned.
     ///
     /// To prune data without affecting the sync starting point (say at some trailing depth
-    /// from tip), prune the finalized stores directly.
+    /// from tip), use [Self::prune] instead.
     ///
     /// The default floor is 0.
-    pub async fn set_floor(&mut self, height: u64) {
-        if self
-            .sender
-            .send(Message::SetFloor { height })
-            .await
-            .is_err()
-        {
-            error!("failed to send set floor message to actor: receiver dropped");
-        }
+    pub async fn set_floor(&mut self, height: Height) {
+        self.sender.send_lossy(Message::SetFloor { height }).await;
+    }
+
+    /// Prunes finalized blocks and certificates below the given height.
+    ///
+    /// Unlike [Self::set_floor], this does not affect the sync starting point.
+    /// The height must be at or below the current floor (last processed height),
+    /// otherwise the prune request is ignored.
+    pub async fn prune(&mut self, height: Height) {
+        self.sender.send_lossy(Message::Prune { height }).await;
     }
 }
 
@@ -362,9 +324,7 @@ impl<S: Scheme, B: Block> Reporter for Mailbox<S, B> {
                 return;
             }
         };
-        if self.sender.send(message).await.is_err() {
-            error!("failed to report activity to actor: receiver dropped");
-        }
+        self.sender.send_lossy(message).await;
     }
 }
 
@@ -401,12 +361,12 @@ impl<S: Scheme, B: Block> AncestorStream<S, B> {
     /// Panics if the initial blocks are not contiguous in height.
     pub(crate) fn new(marshal: Mailbox<S, B>, initial: impl IntoIterator<Item = B>) -> Self {
         let mut buffered = initial.into_iter().collect::<Vec<B>>();
-        buffered.sort_by_key(Block::height);
+        buffered.sort_by_key(Heightable::height);
 
         // Check that the initial blocks are contiguous in height.
         buffered.windows(2).for_each(|window| {
             assert_eq!(
-                window[0].height() + 1,
+                window[0].height().next(),
                 window[1].height(),
                 "initial blocks must be contiguous in height"
             );
@@ -425,7 +385,7 @@ impl<S: Scheme, B: Block> Stream for AncestorStream<S, B> {
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         // Because marshal cannot currently yield the genesis block, we stop at height 1.
-        const END_BOUND: u64 = 1;
+        const END_BOUND: Height = Height::new(1);
 
         let mut this = self.project();
 

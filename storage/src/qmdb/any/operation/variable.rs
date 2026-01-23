@@ -6,10 +6,10 @@ use crate::{
         VariableValue,
     },
 };
-use bytes::{Buf, BufMut};
 use commonware_codec::{
     varint::UInt, Codec, EncodeSize, Error as CodecError, Read, ReadExt as _, Write,
 };
+use commonware_runtime::{Buf, BufMut};
 use commonware_utils::Array;
 
 impl<K, V, S> EncodeSize for Operation<K, VariableEncoding<V>, S>

@@ -1,4 +1,7 @@
-use crate::{types::Round, Block};
+use crate::{
+    types::{Height, Round},
+    Block,
+};
 use bytes::{Buf, BufMut, Bytes};
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt, Write};
 use commonware_resolver::{p2p::Producer, Consumer};
@@ -104,7 +107,7 @@ impl<B: Block> Producer for Handler<B> {
 #[derive(Clone)]
 pub enum Request<B: Block> {
     Block(B::Commitment),
-    Finalized { height: u64 },
+    Finalized { height: Height },
     Notarized { round: Round },
 }
 
@@ -154,7 +157,7 @@ impl<B: Block> Read for Request<B> {
         let request = match u8::read(buf)? {
             BLOCK_REQUEST => Self::Block(B::Commitment::read(buf)?),
             FINALIZED_REQUEST => Self::Finalized {
-                height: u64::read(buf)?,
+                height: Height::read(buf)?,
             },
             NOTARIZED_REQUEST => Self::Notarized {
                 round: Round::read(buf)?,
@@ -250,7 +253,7 @@ where
                 Ok(Self::Block(commitment))
             }
             1 => {
-                let height = u.arbitrary::<u64>()?;
+                let height = u.arbitrary::<Height>()?;
                 Ok(Self::Finalized { height })
             }
             2 => {
@@ -267,16 +270,19 @@ mod tests {
     use super::*;
     use crate::{
         marshal::mocks::block::Block as TestBlock,
+        simplex::types::Context,
         types::{Epoch, View},
     };
     use commonware_codec::{Encode, ReadExt};
     use commonware_cryptography::{
+        ed25519::PublicKey,
         sha256::{Digest as Sha256Digest, Sha256},
         Hasher as _,
     };
     use std::collections::BTreeSet;
 
-    type B = TestBlock<Sha256Digest>;
+    type Ctx = Context<Sha256Digest, PublicKey>;
+    type B = TestBlock<Sha256Digest, Ctx>;
 
     #[test]
     fn test_subject_block_encoding() {
@@ -297,7 +303,7 @@ mod tests {
 
     #[test]
     fn test_subject_finalized_encoding() {
-        let height = 12345u64;
+        let height = Height::new(12345);
         let request = Request::<B>::Finalized { height };
 
         // Test encoding
@@ -331,9 +337,15 @@ mod tests {
     fn test_subject_hash() {
         use std::collections::HashSet;
 
-        let r1 = Request::<B>::Finalized { height: 100 };
-        let r2 = Request::<B>::Finalized { height: 100 };
-        let r3 = Request::<B>::Finalized { height: 200 };
+        let r1 = Request::<B>::Finalized {
+            height: Height::new(100),
+        };
+        let r2 = Request::<B>::Finalized {
+            height: Height::new(100),
+        };
+        let r3 = Request::<B>::Finalized {
+            height: Height::new(200),
+        };
 
         let mut set = HashSet::new();
         set.insert(r1);
@@ -343,8 +355,12 @@ mod tests {
 
     #[test]
     fn test_subject_predicate() {
-        let r1 = Request::<B>::Finalized { height: 100 };
-        let r2 = Request::<B>::Finalized { height: 200 };
+        let r1 = Request::<B>::Finalized {
+            height: Height::new(100),
+        };
+        let r2 = Request::<B>::Finalized {
+            height: Height::new(200),
+        };
         let r3 = Request::<B>::Notarized {
             round: Round::new(Epoch::new(333), View::new(150)),
         };
@@ -353,7 +369,9 @@ mod tests {
         assert!(predicate(&r2)); // r2.height > r1.height
         assert!(predicate(&r3)); // Different variant (notarized)
 
-        let r1_same = Request::<B>::Finalized { height: 100 };
+        let r1_same = Request::<B>::Finalized {
+            height: Height::new(100),
+        };
         assert!(!predicate(&r1_same)); // Same height, should not pass
     }
 
@@ -361,7 +379,9 @@ mod tests {
     fn test_encode_size() {
         let commitment = Sha256::hash(&[0u8; 32]);
         let r1 = Request::<B>::Block(commitment);
-        let r2 = Request::<B>::Finalized { height: u64::MAX };
+        let r2 = Request::<B>::Finalized {
+            height: Height::new(u64::MAX),
+        };
         let r3 = Request::<B>::Notarized {
             round: Round::new(Epoch::new(333), View::new(0)),
         };
@@ -390,9 +410,15 @@ mod tests {
         }
 
         // Finalized ordering by height
-        let fin1 = Request::<B>::Finalized { height: 100 };
-        let fin2 = Request::<B>::Finalized { height: 200 };
-        let fin3 = Request::<B>::Finalized { height: 200 };
+        let fin1 = Request::<B>::Finalized {
+            height: Height::new(100),
+        };
+        let fin2 = Request::<B>::Finalized {
+            height: Height::new(200),
+        };
+        let fin3 = Request::<B>::Finalized {
+            height: Height::new(200),
+        };
 
         assert!(fin1 < fin2);
         assert!(fin2 > fin1);
@@ -418,7 +444,9 @@ mod tests {
     fn test_request_ord_cross_variant() {
         let commitment = Sha256::hash(b"test");
         let block = Request::<B>::Block(commitment);
-        let finalized = Request::<B>::Finalized { height: 100 };
+        let finalized = Request::<B>::Finalized {
+            height: Height::new(100),
+        };
         let notarized = Request::<B>::Notarized {
             round: Round::new(Epoch::new(333), View::new(200)),
         };
@@ -447,7 +475,9 @@ mod tests {
         let commitment2 = Sha256::hash(b"test2");
         let block1 = Request::<B>::Block(commitment1);
         let block2 = Request::<B>::Block(commitment2);
-        let finalized = Request::<B>::Finalized { height: 100 };
+        let finalized = Request::<B>::Finalized {
+            height: Height::new(100),
+        };
         let notarized = Request::<B>::Notarized {
             round: Round::new(Epoch::new(333), View::new(200)),
         };
@@ -483,12 +513,16 @@ mod tests {
                 round: Round::new(Epoch::new(333), View::new(300)),
             },
             Request::<B>::Block(commitment2),
-            Request::<B>::Finalized { height: 200 },
+            Request::<B>::Finalized {
+                height: Height::new(200),
+            },
             Request::<B>::Block(commitment1),
             Request::<B>::Notarized {
                 round: Round::new(Epoch::new(333), View::new(250)),
             },
-            Request::<B>::Finalized { height: 100 },
+            Request::<B>::Finalized {
+                height: Height::new(100),
+            },
             Request::<B>::Block(commitment3),
         ];
 
@@ -508,8 +542,18 @@ mod tests {
         assert!(matches!(sorted[2], Request::<B>::Block(_)));
 
         // Check that finalized come next
-        assert_eq!(sorted[3], Request::<B>::Finalized { height: 100 });
-        assert_eq!(sorted[4], Request::<B>::Finalized { height: 200 });
+        assert_eq!(
+            sorted[3],
+            Request::<B>::Finalized {
+                height: Height::new(100)
+            }
+        );
+        assert_eq!(
+            sorted[4],
+            Request::<B>::Finalized {
+                height: Height::new(200)
+            }
+        );
 
         // Check that notarized come last
         assert_eq!(
@@ -529,8 +573,12 @@ mod tests {
     #[test]
     fn test_request_ord_edge_cases() {
         // Test with extreme values
-        let min_finalized = Request::<B>::Finalized { height: 0 };
-        let max_finalized = Request::<B>::Finalized { height: u64::MAX };
+        let min_finalized = Request::<B>::Finalized {
+            height: Height::zero(),
+        };
+        let max_finalized = Request::<B>::Finalized {
+            height: Height::new(u64::MAX),
+        };
         let min_notarized = Request::<B>::Notarized {
             round: Round::new(Epoch::new(333), View::new(0)),
         };

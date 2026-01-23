@@ -8,6 +8,7 @@ use crate::{
 };
 use commonware_cryptography::{certificate::Scheme, Digest};
 use commonware_p2p::Blocker;
+use commonware_parallel::Strategy;
 use commonware_runtime::buffer::PoolRef;
 use std::{num::NonZeroUsize, time::Duration};
 
@@ -20,6 +21,7 @@ pub struct Config<
     A: CertifiableAutomaton<Context = Context<D, S::PublicKey>>,
     R: Relay,
     F: Reporter<Activity = Activity<S, D>>,
+    T: Strategy,
 > {
     /// Signing scheme for the consensus engine.
     ///
@@ -58,6 +60,9 @@ pub struct Config<
     /// automatically filter and verify activities based on scheme attributability.
     pub reporter: F,
 
+    /// Strategy for parallel operations.
+    pub strategy: T,
+
     /// Partition for the consensus engine.
     pub partition: String,
 
@@ -67,9 +72,6 @@ pub struct Config<
 
     /// Epoch for the consensus engine. Each running engine should have a unique epoch.
     pub epoch: Epoch,
-
-    /// Prefix for all signed messages to prevent replay attacks.
-    pub namespace: Vec<u8>,
 
     /// Number of bytes to buffer when replaying during startup.
     pub replay_buffer: NonZeroUsize,
@@ -118,7 +120,8 @@ impl<
         A: CertifiableAutomaton<Context = Context<D, S::PublicKey>>,
         R: Relay,
         F: Reporter<Activity = Activity<S, D>>,
-    > Config<S, L, B, D, A, R, F>
+        T: Strategy,
+    > Config<S, L, B, D, A, R, F, T>
 {
     /// Assert enforces that all configuration values are valid.
     pub fn assert(&self) {

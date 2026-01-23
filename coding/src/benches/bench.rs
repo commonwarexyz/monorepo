@@ -1,4 +1,6 @@
 use commonware_coding::{Config, Scheme};
+use commonware_parallel::{Rayon, Sequential};
+use commonware_utils::NZUsize;
 use criterion::{criterion_main, BatchSize, Criterion};
 use rand::{RngCore, SeedableRng as _};
 use rand_chacha::ChaCha8Rng;
@@ -7,7 +9,7 @@ mod no_coding;
 mod reed_solomon;
 mod zoda;
 
-pub(crate) fn benchmark_encode_generic<S: Scheme>(name: &str, c: &mut Criterion) {
+pub(crate) fn bench_encode_generic<S: Scheme>(name: &str, c: &mut Criterion) {
     let mut rng = ChaCha8Rng::seed_from_u64(0);
     let cases = [8, 12, 16, 19, 20, 24].map(|i| 2usize.pow(i));
     for data_length in cases.into_iter() {
@@ -18,6 +20,7 @@ pub(crate) fn benchmark_encode_generic<S: Scheme>(name: &str, c: &mut Criterion)
                     minimum_shards: min as u16,
                     extra_shards: (chunks - min) as u16,
                 };
+                let strategy = Rayon::new(NZUsize!(conc)).unwrap();
                 c.bench_function(
                     &format!("{name}/msg_len={data_length} chunks={chunks} conc={conc}"),
                     |b| {
@@ -28,7 +31,13 @@ pub(crate) fn benchmark_encode_generic<S: Scheme>(name: &str, c: &mut Criterion)
                                 rng.fill_bytes(&mut data);
                                 data
                             },
-                            |data| S::encode(&config, data.as_slice(), conc),
+                            |data| {
+                                if conc > 1 {
+                                    S::encode(&config, data.as_slice(), &strategy).unwrap()
+                                } else {
+                                    S::encode(&config, data.as_slice(), &Sequential).unwrap()
+                                }
+                            },
                             BatchSize::SmallInput,
                         );
                     },
@@ -38,7 +47,7 @@ pub(crate) fn benchmark_encode_generic<S: Scheme>(name: &str, c: &mut Criterion)
     }
 }
 
-pub(crate) fn benchmark_decode_generic<S: Scheme>(name: &str, c: &mut Criterion) {
+pub(crate) fn bench_decode_generic<S: Scheme>(name: &str, c: &mut Criterion) {
     let mut rng = ChaCha8Rng::seed_from_u64(0);
     let cases = [8, 12, 16, 19, 20, 24].map(|i| 2usize.pow(i));
     for data_length in cases.into_iter() {
@@ -49,6 +58,7 @@ pub(crate) fn benchmark_decode_generic<S: Scheme>(name: &str, c: &mut Criterion)
                     minimum_shards: min as u16,
                     extra_shards: (chunks - min) as u16,
                 };
+                let strategy = Rayon::new(NZUsize!(conc)).unwrap();
                 c.bench_function(
                     &format!("{name}/msg_len={data_length} chunks={chunks} conc={conc}"),
                     |b| {
@@ -59,8 +69,11 @@ pub(crate) fn benchmark_decode_generic<S: Scheme>(name: &str, c: &mut Criterion)
                                 rng.fill_bytes(&mut data);
 
                                 // Encode data
-                                let (commitment, mut shards) =
-                                    S::encode(&config, data.as_slice(), conc).unwrap();
+                                let (commitment, mut shards) = if conc > 1 {
+                                    S::encode(&config, data.as_slice(), &strategy).unwrap()
+                                } else {
+                                    S::encode(&config, data.as_slice(), &Sequential).unwrap()
+                                };
 
                                 let my_shard = shards.pop().unwrap();
                                 let reshards = shards
@@ -99,14 +112,25 @@ pub(crate) fn benchmark_decode_generic<S: Scheme>(name: &str, c: &mut Criterion)
                                         .unwrap()
                                     })
                                     .collect::<Vec<_>>();
-                                S::decode(
-                                    &config,
-                                    &commitment,
-                                    checking_data,
-                                    &checked_shards,
-                                    conc,
-                                )
-                                .unwrap();
+                                if conc > 1 {
+                                    S::decode(
+                                        &config,
+                                        &commitment,
+                                        checking_data,
+                                        &checked_shards,
+                                        &strategy,
+                                    )
+                                    .unwrap()
+                                } else {
+                                    S::decode(
+                                        &config,
+                                        &commitment,
+                                        checking_data,
+                                        &checked_shards,
+                                        &Sequential,
+                                    )
+                                    .unwrap()
+                                }
                             },
                             BatchSize::SmallInput,
                         );

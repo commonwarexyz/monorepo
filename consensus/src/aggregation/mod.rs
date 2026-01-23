@@ -19,6 +19,9 @@
 //! - [`ed25519`][scheme::ed25519]: Attributable signatures with individual verification.
 //!   HSM-friendly, no trusted setup required. Certificates contain individual signatures.
 //!
+//! - [`secp256r1`][scheme::secp256r1]: Attributable signatures with individual verification.
+//!   HSM-friendly, no trusted setup required. Certificates contain individual signatures.
+//!
 //! - [`bls12381_multisig`][scheme::bls12381_multisig]: Attributable signatures with aggregated
 //!   verification. Produces compact certificates while preserving signer attribution.
 //!
@@ -47,7 +50,7 @@
 //! The engine does not try to "fill gaps" when certificates are missing. When validators
 //! fall behind or miss signatures for certain indices, the tip may skip ahead and those
 //! certificates may never be emitted by the local engine. Before skipping ahead, we ensure that
-//! at-least-one honest validator has the certificate for any skipped index.
+//! at-least-one honest validator has the certificate for any skipped height.
 //!
 //! Like other consensus primitives, aggregation's design prioritizes doing useful work at tip and
 //! minimal complexity over providing a comprehensive recovery mechanism. As a result, applications that need
@@ -57,7 +60,7 @@
 //! ## Recovering Certificates
 //!
 //! In aggregation, participants never gossip recovered certificates. Rather, they gossip [types::TipAck]s
-//! with signatures over some index and their latest tip. This approach reduces the overhead of running aggregation
+//! with signatures over some height and their latest tip. This approach reduces the overhead of running aggregation
 //! concurrently with a consensus mechanism and consistently results in local recovery on stable networks. To increase
 //! the likelihood of local recovery, participants should tune the [Config::activity_timeout] to a value larger than the expected
 //! drift of online participants (even if all participants are synchronous the tip advancement logic will advance to the `f+1`th highest
@@ -84,8 +87,8 @@ cfg_if::cfg_if! {
 mod tests {
     use super::{mocks, Config, Engine};
     use crate::{
-        aggregation::scheme::{bls12381_multisig, bls12381_threshold, ed25519, Scheme},
-        types::{Epoch, EpochDelta},
+        aggregation::scheme::{bls12381_multisig, bls12381_threshold, ed25519, secp256r1, Scheme},
+        types::{Epoch, EpochDelta, Height, HeightDelta},
     };
     use commonware_cryptography::{
         bls12381::primitives::variant::{MinPk, MinSig},
@@ -95,26 +98,30 @@ mod tests {
     };
     use commonware_macros::{select, test_group, test_traced};
     use commonware_p2p::simulated::{Link, Network, Oracle, Receiver, Sender};
+    use commonware_parallel::Sequential;
     use commonware_runtime::{
         buffer::PoolRef,
         deterministic::{self, Context},
         Clock, Metrics, Quota, Runner, Spawner,
     };
-    use commonware_utils::{NZUsize, NonZeroDuration};
+    use commonware_utils::{
+        channels::fallible::OneshotExt, test_rng, NZUsize, NonZeroDuration, NZU16,
+    };
     use futures::{channel::oneshot, future::join_all};
-    use rand::{rngs::StdRng, Rng, SeedableRng};
+    use rand::{rngs::StdRng, Rng};
     use std::{
         collections::BTreeMap,
-        num::{NonZeroU32, NonZeroUsize},
+        num::{NonZeroU16, NonZeroU32, NonZeroUsize},
         time::Duration,
     };
     use tracing::debug;
 
     type Registrations<P> = BTreeMap<P, (Sender<P, deterministic::Context>, Receiver<P>)>;
 
-    const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
+    const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
     const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
+    const TEST_NAMESPACE: &[u8] = b"my testing namespace";
 
     /// Reliable network link configuration for testing.
     const RELIABLE_LINK: Link = Link {
@@ -185,13 +192,11 @@ mod tests {
     }
 
     /// Spawn aggregation engines for all validators.
-    #[allow(clippy::too_many_arguments)]
     fn spawn_validator_engines<S: Scheme<Sha256Digest, PublicKey = PublicKey>>(
         context: Context,
         fixture: &Fixture<S>,
         registrations: &mut Registrations<PublicKey>,
         oracle: &mut Oracle<PublicKey, deterministic::Context>,
-        namespace: &[u8],
         epoch: Epoch,
         rebroadcast_timeout: Duration,
         incorrect: Vec<usize>,
@@ -218,7 +223,7 @@ mod tests {
 
             // Create reporter with verifier scheme
             let (reporter, reporter_mailbox) =
-                mocks::Reporter::new(context.clone(), namespace, fixture.verifier.clone());
+                mocks::Reporter::new(context.clone(), fixture.verifier.clone());
             context.with_label("reporter").spawn(|_| reporter.run());
             reporters.insert(participant.clone(), reporter_mailbox.clone());
 
@@ -234,18 +239,18 @@ mod tests {
                     automaton,
                     reporter: reporter_mailbox,
                     blocker,
-                    namespace: namespace.to_vec(),
                     priority_acks: false,
                     rebroadcast_timeout: NonZeroDuration::new_panic(rebroadcast_timeout),
                     epoch_bounds: (EpochDelta::new(1), EpochDelta::new(1)),
                     window: std::num::NonZeroU64::new(10).unwrap(),
-                    activity_timeout: 100,
+                    activity_timeout: HeightDelta::new(100),
                     journal_partition: format!("aggregation-{participant}"),
                     journal_write_buffer: NZUsize!(4096),
                     journal_replay_buffer: NZUsize!(4096),
                     journal_heights_per_section: std::num::NonZeroU64::new(6).unwrap(),
                     journal_compression: Some(3),
                     journal_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                    strategy: Sequential,
                 },
             );
 
@@ -260,7 +265,7 @@ mod tests {
     async fn await_reporters<S: Scheme<Sha256Digest, PublicKey = PublicKey>>(
         context: Context,
         reporters: &BTreeMap<PublicKey, mocks::ReporterMailbox<S, Sha256Digest>>,
-        threshold_index: u64,
+        threshold_height: Height,
         threshold_epoch: Epoch,
     ) {
         let mut receivers = Vec::new();
@@ -274,21 +279,24 @@ mod tests {
                 let mut mailbox = mailbox.clone();
                 move |context| async move {
                     loop {
-                        let (index, epoch) = mailbox.get_tip().await.unwrap_or((0, Epoch::zero()));
+                        let (height, epoch) = mailbox
+                            .get_tip()
+                            .await
+                            .unwrap_or((Height::zero(), Epoch::zero()));
                         debug!(
-                            index,
+                            %height,
                             epoch = %epoch,
-                            threshold_index,
+                            %threshold_height,
                             threshold_epoch = %threshold_epoch,
                             ?reporter,
                             "reporter status"
                         );
-                        if index >= threshold_index && epoch >= threshold_epoch {
+                        if height >= threshold_height && epoch >= threshold_epoch {
                             debug!(
                                 ?reporter,
                                 "reporter reached threshold, signaling completion"
                             );
-                            let _ = tx.send(reporter.clone());
+                            tx.send_lossy(reporter.clone());
                             break;
                         }
                         context.sleep(Duration::from_millis(100)).await;
@@ -311,14 +319,13 @@ mod tests {
     fn all_online<S, F>(fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnOnce(&mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnOnce(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
     {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
 
         runner.start(|mut context| async move {
             let num_validators = 4;
-            let fixture = fixture(&mut context, num_validators);
-            let namespace = b"my testing namespace";
+            let fixture = fixture(&mut context, TEST_NAMESPACE, num_validators);
             let epoch = Epoch::new(111);
 
             let (mut oracle, mut registrations) =
@@ -330,13 +337,18 @@ mod tests {
                 &fixture,
                 &mut registrations,
                 &mut oracle,
-                namespace,
                 epoch,
                 Duration::from_secs(5),
                 vec![],
             );
 
-            await_reporters(context.with_label("reporter"), &reporters, 100, epoch).await;
+            await_reporters(
+                context.with_label("reporter"),
+                &reporters,
+                Height::new(100),
+                epoch,
+            )
+            .await;
         });
     }
 
@@ -347,20 +359,20 @@ mod tests {
         all_online(bls12381_multisig::fixture::<MinPk, _>);
         all_online(bls12381_multisig::fixture::<MinSig, _>);
         all_online(ed25519::fixture);
+        all_online(secp256r1::fixture);
     }
 
     /// Test consensus resilience to Byzantine behavior.
     fn byzantine_proposer<S, F>(fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnOnce(&mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnOnce(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
     {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
 
         runner.start(|mut context| async move {
             let num_validators = 4;
-            let fixture = fixture(&mut context, num_validators);
-            let namespace = b"my testing namespace";
+            let fixture = fixture(&mut context, TEST_NAMESPACE, num_validators);
             let epoch = Epoch::new(111);
 
             let (mut oracle, mut registrations) =
@@ -372,13 +384,18 @@ mod tests {
                 &fixture,
                 &mut registrations,
                 &mut oracle,
-                namespace,
                 epoch,
                 Duration::from_secs(5),
                 vec![0],
             );
 
-            await_reporters(context.with_label("reporter"), &reporters, 100, epoch).await;
+            await_reporters(
+                context.with_label("reporter"),
+                &reporters,
+                Height::new(100),
+                epoch,
+            )
+            .await;
         });
     }
 
@@ -389,16 +406,17 @@ mod tests {
         byzantine_proposer(bls12381_multisig::fixture::<MinPk, _>);
         byzantine_proposer(bls12381_multisig::fixture::<MinSig, _>);
         byzantine_proposer(ed25519::fixture);
+        byzantine_proposer(secp256r1::fixture);
     }
 
     fn unclean_byzantine_shutdown<S, F>(fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: Fn(&mut StdRng, u32) -> Fixture<S>,
+        F: Fn(&mut StdRng, &[u8], u32) -> Fixture<S>,
     {
         // Test parameters
         let num_validators = 4;
-        let target_index = 200; // Target multiple rounds of signing
+        let target_height = Height::new(200); // Target multiple rounds of signing
         let min_shutdowns = 4; // Minimum number of shutdowns per validator
         let max_shutdowns = 10; // Maximum number of shutdowns per validator
         let shutdown_range_min = Duration::from_millis(100);
@@ -408,8 +426,8 @@ mod tests {
         let mut prev_checkpoint = None;
 
         // Generate fixture once (persists across restarts)
-        let mut rng = StdRng::seed_from_u64(0);
-        let fixture = fixture(&mut rng, num_validators);
+        let mut rng = test_rng();
+        let fixture = fixture(&mut rng, TEST_NAMESPACE, num_validators);
 
         // Continue until shared reporter reaches target or max shutdowns exceeded
         let mut shutdown_count = 0;
@@ -417,7 +435,6 @@ mod tests {
             let fixture = fixture.clone();
             let f = move |mut context: Context| {
                 async move {
-                    let namespace = b"my testing namespace";
                     let epoch = Epoch::new(111);
 
                     let (oracle, mut registrations) = initialize_simulation(
@@ -431,7 +448,7 @@ mod tests {
                     //
                     // We rely on replay to populate this reporter with a contiguous history of certificates.
                     let (reporter, mut reporter_mailbox) =
-                        mocks::Reporter::new(context.clone(), namespace, fixture.verifier.clone());
+                        mocks::Reporter::new(context.clone(), fixture.verifier.clone());
                     context.with_label("reporter").spawn(|_| reporter.run());
 
                     // Spawn validator engines
@@ -466,18 +483,18 @@ mod tests {
                                 automaton,
                                 reporter: reporter_mailbox.clone(),
                                 blocker,
-                                namespace: namespace.to_vec(),
                                 priority_acks: false,
                                 rebroadcast_timeout,
                                 epoch_bounds: (EpochDelta::new(1), EpochDelta::new(1)),
                                 window: std::num::NonZeroU64::new(10).unwrap(),
-                                activity_timeout: 1_024, // ensure we don't drop any certificates
+                                activity_timeout: HeightDelta::new(1_024), // ensure we don't drop any certificates
                                 journal_partition: format!("unclean_shutdown_test_{participant}"),
                                 journal_write_buffer: NZUsize!(4096),
                                 journal_replay_buffer: NZUsize!(4096),
                                 journal_heights_per_section: std::num::NonZeroU64::new(6).unwrap(),
                                 journal_compression: Some(3),
                                 journal_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                                strategy: Sequential,
                             },
                         );
 
@@ -491,10 +508,10 @@ mod tests {
                             .with_label("completion_watcher")
                             .spawn(move |context| async move {
                                 loop {
-                                    if let Some(tip_index) =
+                                    if let Some(tip_height) =
                                         reporter_mailbox.get_contiguous_tip().await
                                     {
-                                        if tip_index >= target_index {
+                                        if tip_height >= target_height {
                                             break;
                                         }
                                     }
@@ -547,25 +564,25 @@ mod tests {
         unclean_byzantine_shutdown(bls12381_multisig::fixture::<MinPk, _>);
         unclean_byzantine_shutdown(bls12381_multisig::fixture::<MinSig, _>);
         unclean_byzantine_shutdown(ed25519::fixture);
+        unclean_byzantine_shutdown(secp256r1::fixture);
     }
 
-    fn unclean_shutdown_with_unsigned_index<S, F>(fixture: F)
+    fn unclean_shutdown_with_unsigned_height<S, F>(fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: Fn(&mut StdRng, u32) -> Fixture<S>,
+        F: Fn(&mut StdRng, &[u8], u32) -> Fixture<S>,
     {
         // Test parameters
         let num_validators = 4;
-        let skip_index = 50; // Index where no one will sign
-        let window = 10;
-        let target_index = 100;
-        let namespace = b"my testing namespace";
+        let skip_height = Height::new(50); // Height where no one will sign
+        let window = HeightDelta::new(10);
+        let target_height = Height::new(100);
 
         // Generate fixture once (persists across restarts)
-        let mut rng = StdRng::seed_from_u64(0);
-        let fixture = fixture(&mut rng, num_validators);
+        let mut rng = test_rng();
+        let fixture = fixture(&mut rng, TEST_NAMESPACE, num_validators);
 
-        // First run: let validators skip signing at skip_index and reach beyond it
+        // First run: let validators skip signing at skip_height and reach beyond it
         let f = |context: Context| {
             let fixture = fixture.clone();
             async move {
@@ -581,10 +598,10 @@ mod tests {
 
                 // Create a shared reporter
                 let (reporter, mut reporter_mailbox) =
-                    mocks::Reporter::new(context.clone(), namespace, fixture.verifier.clone());
+                    mocks::Reporter::new(context.clone(), fixture.verifier.clone());
                 context.with_label("reporter").spawn(|_| reporter.run());
 
-                // Start validator engines with Skip strategy for skip_index
+                // Start validator engines with Skip strategy for skip_height
                 for (idx, participant) in fixture.participants.iter().enumerate() {
                     let validator_context =
                         context.with_label(&format!("participant_{participant}"));
@@ -596,9 +613,10 @@ mod tests {
                     // Create monitor
                     let monitor = mocks::Monitor::new(epoch);
 
-                    // All validators use Skip strategy for skip_index
-                    let automaton =
-                        mocks::Application::new(mocks::Strategy::Skip { index: skip_index });
+                    // All validators use Skip strategy for skip_height
+                    let automaton = mocks::Application::new(mocks::Strategy::Skip {
+                        height: skip_height,
+                    });
 
                     // Create blocker
                     let blocker = oracle.control(participant.clone());
@@ -612,20 +630,20 @@ mod tests {
                             automaton,
                             reporter: reporter_mailbox.clone(),
                             blocker,
-                            namespace: namespace.to_vec(),
                             priority_acks: false,
                             rebroadcast_timeout: NonZeroDuration::new_panic(Duration::from_millis(
                                 100,
                             )),
                             epoch_bounds: (EpochDelta::new(1), EpochDelta::new(1)),
-                            window: std::num::NonZeroU64::new(window).unwrap(),
-                            activity_timeout: 100,
-                            journal_partition: format!("unsigned_index_test_{participant}"),
+                            window: std::num::NonZeroU64::new(window.get()).unwrap(),
+                            activity_timeout: HeightDelta::new(100),
+                            journal_partition: format!("unsigned_height_test_{participant}"),
                             journal_write_buffer: NZUsize!(4096),
                             journal_replay_buffer: NZUsize!(4096),
                             journal_heights_per_section: std::num::NonZeroU64::new(6).unwrap(),
                             journal_compression: Some(3),
                             journal_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                            strategy: Sequential,
                         },
                     );
 
@@ -633,11 +651,11 @@ mod tests {
                     engine.start((sender, receiver));
                 }
 
-                // Wait for validators to reach target_index (past skip_index)
+                // Wait for validators to reach target_height (past skip_height)
                 loop {
-                    if let Some((tip_index, _)) = reporter_mailbox.get_tip().await {
-                        debug!(tip_index, skip_index, target_index, "reporter status");
-                        if tip_index >= skip_index + window - 1 {
+                    if let Some((tip_height, _)) = reporter_mailbox.get_tip().await {
+                        debug!(%tip_height, %skip_height, %target_height, "reporter status");
+                        if tip_height >= skip_height.saturating_add(window).previous().unwrap() {
                             // max we can proceed before item confirmed
                             return;
                         }
@@ -650,7 +668,7 @@ mod tests {
         let (_, checkpoint) =
             deterministic::Runner::timed(Duration::from_secs(60)).start_and_recover(f);
 
-        // Second run: restart and verify the skip_index gets confirmed
+        // Second run: restart and verify the skip_height gets confirmed
         let f2 = |context: Context| {
             async move {
                 let epoch = Epoch::new(111);
@@ -665,7 +683,7 @@ mod tests {
 
                 // Create a shared reporter
                 let (reporter, mut reporter_mailbox) =
-                    mocks::Reporter::new(context.clone(), namespace, fixture.verifier.clone());
+                    mocks::Reporter::new(context.clone(), fixture.verifier.clone());
                 context.with_label("reporter").spawn(|_| reporter.run());
 
                 // Start validator engines with Correct strategy (will sign everything now)
@@ -695,20 +713,20 @@ mod tests {
                             automaton,
                             reporter: reporter_mailbox.clone(),
                             blocker,
-                            namespace: namespace.to_vec(),
                             priority_acks: false,
                             rebroadcast_timeout: NonZeroDuration::new_panic(Duration::from_millis(
                                 100,
                             )),
                             epoch_bounds: (EpochDelta::new(1), EpochDelta::new(1)),
                             window: std::num::NonZeroU64::new(10).unwrap(),
-                            activity_timeout: 100,
-                            journal_partition: format!("unsigned_index_test_{participant}"),
+                            activity_timeout: HeightDelta::new(100),
+                            journal_partition: format!("unsigned_height_test_{participant}"),
                             journal_write_buffer: NZUsize!(4096),
                             journal_replay_buffer: NZUsize!(4096),
                             journal_heights_per_section: std::num::NonZeroU64::new(6).unwrap(),
                             journal_compression: Some(3),
                             journal_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                            strategy: Sequential,
                         },
                     );
 
@@ -716,14 +734,14 @@ mod tests {
                     engine.start((sender, receiver));
                 }
 
-                // Wait for skip_index to be confirmed (should happen on replay)
+                // Wait for skip_height to be confirmed (should happen on replay)
                 loop {
-                    if let Some(tip_index) = reporter_mailbox.get_contiguous_tip().await {
+                    if let Some(tip_height) = reporter_mailbox.get_contiguous_tip().await {
                         debug!(
-                            tip_index,
-                            skip_index, target_index, "reporter status on restart"
+                            %tip_height,
+                            %skip_height, %target_height, "reporter status on restart"
                         );
-                        if tip_index >= target_index {
+                        if tip_height >= target_height {
                             break;
                         }
                     }
@@ -736,18 +754,19 @@ mod tests {
     }
 
     #[test_traced("INFO")]
-    fn test_unclean_shutdown_with_unsigned_index() {
-        unclean_shutdown_with_unsigned_index(bls12381_threshold::fixture::<MinPk, _>);
-        unclean_shutdown_with_unsigned_index(bls12381_threshold::fixture::<MinSig, _>);
-        unclean_shutdown_with_unsigned_index(bls12381_multisig::fixture::<MinPk, _>);
-        unclean_shutdown_with_unsigned_index(bls12381_multisig::fixture::<MinSig, _>);
-        unclean_shutdown_with_unsigned_index(ed25519::fixture);
+    fn test_unclean_shutdown_with_unsigned_height() {
+        unclean_shutdown_with_unsigned_height(bls12381_threshold::fixture::<MinPk, _>);
+        unclean_shutdown_with_unsigned_height(bls12381_threshold::fixture::<MinSig, _>);
+        unclean_shutdown_with_unsigned_height(bls12381_multisig::fixture::<MinPk, _>);
+        unclean_shutdown_with_unsigned_height(bls12381_multisig::fixture::<MinSig, _>);
+        unclean_shutdown_with_unsigned_height(ed25519::fixture);
+        unclean_shutdown_with_unsigned_height(secp256r1::fixture);
     }
 
     fn slow_and_lossy_links<S, F>(fixture: F, seed: u64) -> String
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnOnce(&mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnOnce(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
     {
         let cfg = deterministic::Config::new()
             .with_seed(seed)
@@ -756,8 +775,7 @@ mod tests {
 
         runner.start(|mut context| async move {
             let num_validators = 4;
-            let fixture = fixture(&mut context, num_validators);
-            let namespace = b"my testing namespace";
+            let fixture = fixture(&mut context, TEST_NAMESPACE, num_validators);
             let epoch = Epoch::new(111);
 
             // Use degraded network links with realistic conditions
@@ -776,13 +794,18 @@ mod tests {
                 &fixture,
                 &mut registrations,
                 &mut oracle,
-                namespace,
                 epoch,
                 Duration::from_secs(2),
                 vec![],
             );
 
-            await_reporters(context.with_label("reporter"), &reporters, 100, epoch).await;
+            await_reporters(
+                context.with_label("reporter"),
+                &reporters,
+                Height::new(100),
+                epoch,
+            )
+            .await;
 
             context.auditor().state()
         })
@@ -795,6 +818,7 @@ mod tests {
         slow_and_lossy_links(bls12381_multisig::fixture::<MinPk, _>, 0);
         slow_and_lossy_links(bls12381_multisig::fixture::<MinSig, _>, 0);
         slow_and_lossy_links(ed25519::fixture, 0);
+        slow_and_lossy_links(secp256r1::fixture, 0);
     }
 
     #[test_group("slow")]
@@ -832,12 +856,18 @@ mod tests {
             let ed_state_2 = slow_and_lossy_links(ed25519::fixture, seed);
             assert_eq!(ed_state_1, ed_state_2);
 
+            // Test secp256r1
+            let secp_state_1 = slow_and_lossy_links(secp256r1::fixture, seed);
+            let secp_state_2 = slow_and_lossy_links(secp256r1::fixture, seed);
+            assert_eq!(secp_state_1, secp_state_2);
+
             let states = [
                 ("threshold-minpk", ts_pk_state_1),
                 ("threshold-minsig", ts_sig_state_1),
                 ("multisig-minpk", ms_pk_state_1),
                 ("multisig-minsig", ms_sig_state_1),
                 ("ed25519", ed_state_1),
+                ("secp256r1", secp_state_1),
             ];
 
             // Sanity check that different types can't be identical
@@ -854,14 +884,13 @@ mod tests {
     fn one_offline<S, F>(fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnOnce(&mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnOnce(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
     {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
 
         runner.start(|mut context| async move {
             let num_validators = 5;
-            let mut fixture = fixture(&mut context, num_validators);
-            let namespace = b"my testing namespace";
+            let mut fixture = fixture(&mut context, TEST_NAMESPACE, num_validators);
             let epoch = Epoch::new(111);
 
             // Truncate to only 4 validators (one offline)
@@ -877,13 +906,18 @@ mod tests {
                 &fixture,
                 &mut registrations,
                 &mut oracle,
-                namespace,
                 epoch,
                 Duration::from_secs(5),
                 vec![],
             );
 
-            await_reporters(context.with_label("reporter"), &reporters, 100, epoch).await;
+            await_reporters(
+                context.with_label("reporter"),
+                &reporters,
+                Height::new(100),
+                epoch,
+            )
+            .await;
         });
     }
 
@@ -894,20 +928,20 @@ mod tests {
         one_offline(bls12381_multisig::fixture::<MinPk, _>);
         one_offline(bls12381_multisig::fixture::<MinSig, _>);
         one_offline(ed25519::fixture);
+        one_offline(secp256r1::fixture);
     }
 
     /// Test consensus recovery after a network partition.
     fn network_partition<S, F>(fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnOnce(&mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnOnce(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
     {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
 
         runner.start(|mut context| async move {
             let num_validators = 4;
-            let fixture = fixture(&mut context, num_validators);
-            let namespace = b"my testing namespace";
+            let fixture = fixture(&mut context, TEST_NAMESPACE, num_validators);
             let epoch = Epoch::new(111);
 
             let (mut oracle, mut registrations) =
@@ -919,7 +953,6 @@ mod tests {
                 &fixture,
                 &mut registrations,
                 &mut oracle,
-                namespace,
                 epoch,
                 Duration::from_secs(5),
                 vec![],
@@ -949,7 +982,13 @@ mod tests {
                 }
             }
 
-            await_reporters(context.with_label("reporter"), &reporters, 100, epoch).await;
+            await_reporters(
+                context.with_label("reporter"),
+                &reporters,
+                Height::new(100),
+                epoch,
+            )
+            .await;
         });
     }
 
@@ -960,20 +999,20 @@ mod tests {
         network_partition(bls12381_multisig::fixture::<MinPk, _>);
         network_partition(bls12381_multisig::fixture::<MinSig, _>);
         network_partition(ed25519::fixture);
+        network_partition(secp256r1::fixture);
     }
 
     /// Test insufficient validator participation (below quorum).
     fn insufficient_validators<S, F>(fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnOnce(&mut deterministic::Context, u32) -> Fixture<S>,
+        F: FnOnce(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
     {
         let runner = deterministic::Runner::timed(Duration::from_secs(15));
 
         runner.start(|mut context| async move {
             let num_validators = 5;
-            let fixture = fixture(&mut context, num_validators);
-            let namespace = b"my testing namespace";
+            let fixture = fixture(&mut context, TEST_NAMESPACE, num_validators);
             let epoch = Epoch::new(111);
 
             // Set up simulated network
@@ -1001,7 +1040,7 @@ mod tests {
 
                 // Create reporter with verifier scheme
                 let (reporter, reporter_mailbox) =
-                    mocks::Reporter::new(context.clone(), namespace, fixture.verifier.clone());
+                    mocks::Reporter::new(context.clone(), fixture.verifier.clone());
                 context.with_label("reporter").spawn(|_| reporter.run());
                 reporters.insert(participant.clone(), reporter_mailbox.clone());
 
@@ -1017,18 +1056,18 @@ mod tests {
                         automaton,
                         reporter: reporter_mailbox,
                         blocker,
-                        namespace: namespace.to_vec(),
                         priority_acks: false,
                         rebroadcast_timeout: NonZeroDuration::new_panic(Duration::from_secs(3)),
                         epoch_bounds: (EpochDelta::new(1), EpochDelta::new(1)),
                         window: std::num::NonZeroU64::new(10).unwrap(),
-                        activity_timeout: 100,
+                        activity_timeout: HeightDelta::new(100),
                         journal_partition: format!("aggregation-{participant}"),
                         journal_write_buffer: NZUsize!(4096),
                         journal_replay_buffer: NZUsize!(4096),
                         journal_heights_per_section: std::num::NonZeroU64::new(6).unwrap(),
                         journal_compression: Some(3),
                         journal_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                        strategy: Sequential,
                     },
                 );
 
@@ -1046,12 +1085,12 @@ mod tests {
                 let (tip, _) = reporter_mailbox
                     .get_tip()
                     .await
-                    .unwrap_or((0, Epoch::zero()));
-                if tip > 0 {
+                    .unwrap_or((Height::zero(), Epoch::zero()));
+                if !tip.is_zero() {
                     any_consensus = true;
                     tracing::warn!(
                         ?validator_pk,
-                        tip,
+                        %tip,
                         "Unexpected consensus with insufficient validators"
                     );
                 }
@@ -1072,5 +1111,6 @@ mod tests {
         insufficient_validators(bls12381_multisig::fixture::<MinPk, _>);
         insufficient_validators(bls12381_multisig::fixture::<MinSig, _>);
         insufficient_validators(ed25519::fixture);
+        insufficient_validators(secp256r1::fixture);
     }
 }

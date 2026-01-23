@@ -11,16 +11,16 @@ use crate::{
         authenticated,
         contiguous::variable::{Config as JournalConfig, Journal},
     },
-    mmr::{journaled::Config as MmrConfig, mem::Clean, Location},
+    mmr::{journaled::Config as MmrConfig, Location},
     qmdb::{
         any::{ordered, value::VariableEncoding, VariableConfig, VariableValue},
         operation::Committable as _,
-        Error,
+        Durable, Error, Merkleized,
     },
     translator::Translator,
 };
 use commonware_codec::Read;
-use commonware_cryptography::{DigestOf, Hasher};
+use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
 use tracing::warn;
@@ -30,11 +30,11 @@ pub type Operation<K, V> = ordered::Operation<K, VariableEncoding<V>>;
 
 /// A key-value QMDB based on an authenticated log of operations, supporting authentication of any
 /// value ever associated with a key.
-pub type Db<E, K, V, H, T, S = Clean<DigestOf<H>>> =
-    super::Db<E, Journal<E, Operation<K, V>>, Index<T, Location>, H, Update<K, V>, S>;
+pub type Db<E, K, V, H, T, S = Merkleized<H>, D = Durable> =
+    super::Db<E, Journal<E, Operation<K, V>>, Index<T, Location>, H, Update<K, V>, S, D>;
 
 impl<E: Storage + Clock + Metrics, K: Array, V: VariableValue, H: Hasher, T: Translator>
-    Db<E, K, V, H, T>
+    Db<E, K, V, H, T, Merkleized<H>, Durable>
 {
     /// Returns a [Db] QMDB initialized from `cfg`. Any uncommitted log operations will be
     /// discarded and the state of the db will be as of the last committed operation.
