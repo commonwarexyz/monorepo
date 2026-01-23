@@ -1153,7 +1153,6 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
             poll_service_active(private_key, &ip, "binary").await?;
             let start_dur = format!("{:.1}s", start_time.elapsed().as_secs_f64());
 
-            let total = format!("{:.1}s", start.elapsed().as_secs_f64());
             info!(
                 ip,
                 instance = instance.name.as_str(),
@@ -1161,7 +1160,6 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
                 download,
                 setup,
                 start = start_dur,
-                total,
                 "configured instance"
             );
             Ok::<String, Error>(ip)
@@ -1211,14 +1209,12 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
             poll_service_active(private_key, &monitoring_ip, "grafana-server").await?;
             let start_dur = format!("{:.1}s", start_time.elapsed().as_secs_f64());
 
-            let total = format!("{:.1}s", start.elapsed().as_secs_f64());
             info!(
                 ip = monitoring_ip.as_str(),
                 deploy,
                 download,
                 setup,
                 start = start_dur,
-                total,
                 "configured monitoring instance"
             );
             Ok::<(), Error>(())
