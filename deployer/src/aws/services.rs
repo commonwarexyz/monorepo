@@ -499,6 +499,15 @@ pub(crate) fn install_monitoring_cmd(
 sudo apt-get update -y
 sudo apt-get install -y unzip adduser libfontconfig1 wget tar
 
+# Clean up any previous download artifacts (allows retries to re-download fresh copies)
+rm -f /home/ubuntu/prometheus.tar.gz /home/ubuntu/loki.zip /home/ubuntu/pyroscope.tar.gz \
+      /home/ubuntu/tempo.tar.gz /home/ubuntu/node_exporter.tar.gz
+rm -rf /home/ubuntu/prometheus-* /home/ubuntu/loki-linux-* /home/ubuntu/pyroscope \
+       /home/ubuntu/tempo /home/ubuntu/node_exporter-*
+
+# Unmask services in case previous attempt left them masked
+sudo systemctl unmask prometheus loki pyroscope tempo node_exporter grafana-server 2>/dev/null || true
+
 # Download all files from S3 concurrently via pre-signed URLs
 {WGET} -O /home/ubuntu/prometheus.tar.gz '{}' &
 {WGET} -O /home/ubuntu/grafana.deb '{}' &
@@ -535,7 +544,7 @@ sudo mkdir -p /opt/prometheus /opt/prometheus/data
 sudo chown -R ubuntu:ubuntu /opt/prometheus
 tar xvfz /home/ubuntu/prometheus.tar.gz -C /home/ubuntu
 sudo mv /home/ubuntu/prometheus-{prometheus_version}.linux-{arch} /opt/prometheus/prometheus-{prometheus_version}.linux-{arch}
-sudo ln -s /opt/prometheus/prometheus-{prometheus_version}.linux-{arch}/prometheus /opt/prometheus/prometheus
+sudo ln -sf /opt/prometheus/prometheus-{prometheus_version}.linux-{arch}/prometheus /opt/prometheus/prometheus
 sudo chmod +x /opt/prometheus/prometheus
 
 # Install Grafana
@@ -568,7 +577,7 @@ sudo mkdir -p /opt/node_exporter
 sudo chown -R ubuntu:ubuntu /opt/node_exporter
 tar xvfz /home/ubuntu/node_exporter.tar.gz -C /home/ubuntu
 sudo mv /home/ubuntu/node_exporter-*.linux-{arch} /opt/node_exporter/
-sudo ln -s /opt/node_exporter/node_exporter-*.linux-{arch}/node_exporter /opt/node_exporter/node_exporter
+sudo ln -sf /opt/node_exporter/node_exporter-*.linux-{arch}/node_exporter /opt/node_exporter/node_exporter
 sudo chmod +x /opt/node_exporter/node_exporter
 
 # Configure Grafana
@@ -673,6 +682,13 @@ pub(crate) fn install_binary_cmd(
 sudo apt-get update -y
 sudo apt-get install -y logrotate jq wget unzip libjemalloc2 linux-tools-common linux-tools-generic linux-tools-$(uname -r)
 
+# Clean up any previous download artifacts (allows retries to re-download fresh copies)
+rm -f /home/ubuntu/promtail.zip /home/ubuntu/node_exporter.tar.gz
+rm -rf /home/ubuntu/promtail-linux-* /home/ubuntu/node_exporter-*
+
+# Unmask services in case previous attempt left them masked
+sudo systemctl unmask promtail node_exporter binary 2>/dev/null || true
+
 # Download all files from S3 concurrently via pre-signed URLs
 {WGET} -O /home/ubuntu/binary '{}' &
 {WGET} -O /home/ubuntu/config.conf '{}' &
@@ -714,7 +730,7 @@ sudo mkdir -p /opt/node_exporter
 sudo chown -R ubuntu:ubuntu /opt/node_exporter
 tar xvfz /home/ubuntu/node_exporter.tar.gz -C /home/ubuntu
 sudo mv /home/ubuntu/node_exporter-*.linux-{arch} /opt/node_exporter/
-sudo ln -s /opt/node_exporter/node_exporter-*.linux-{arch}/node_exporter /opt/node_exporter/node_exporter
+sudo ln -sf /opt/node_exporter/node_exporter-*.linux-{arch}/node_exporter /opt/node_exporter/node_exporter
 sudo chmod +x /opt/node_exporter/node_exporter
 sudo mv /home/ubuntu/node_exporter.service /etc/systemd/system/node_exporter.service
 
@@ -729,7 +745,7 @@ sudo chown root:root /etc/logrotate.d/binary
 echo "0 * * * * /usr/sbin/logrotate /etc/logrotate.d/binary" | crontab -
 
 # Setup pyroscope agent
-sudo ln -s "$(find /usr/lib/linux-tools/*/perf | head -1)" /usr/local/bin/perf
+sudo ln -sf "$(find /usr/lib/linux-tools/*/perf | head -1)" /usr/local/bin/perf
 sudo chmod +x /home/ubuntu/pyroscope-agent.sh
 sudo mv /home/ubuntu/pyroscope-agent.service /etc/systemd/system/pyroscope-agent.service
 sudo mv /home/ubuntu/pyroscope-agent.timer /etc/systemd/system/pyroscope-agent.timer

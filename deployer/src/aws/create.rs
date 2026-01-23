@@ -6,8 +6,8 @@ use crate::aws::{
     s3::{self, *},
     services::*,
     utils::*,
-    Architecture, Config, Error, Host, Hosts, InstanceConfig, CREATED_FILE_NAME, LOGS_PORT,
-    MONITORING_NAME, MONITORING_REGION, PROFILES_PORT, TRACES_PORT,
+    Architecture, Config, Error, Host, Hosts, InstanceConfig, Metadata, CREATED_FILE_NAME,
+    LOGS_PORT, METADATA_FILE_NAME, MONITORING_NAME, MONITORING_REGION, PROFILES_PORT, TRACES_PORT,
 };
 use commonware_cryptography::{Hasher as _, Sha256};
 use futures::{
@@ -60,7 +60,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
     info!(tag = tag.as_str(), "loaded configuration");
 
     // Create a temporary directory for local files
-    let tag_directory = deployer_directory(tag);
+    let tag_directory = deployer_directory(Some(tag));
     if tag_directory.exists() {
         return Err(Error::CreationAttempted);
     }
@@ -106,6 +106,20 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
     // Determine unique regions
     let mut regions: BTreeSet<String> = config.instances.iter().map(|i| i.region.clone()).collect();
     regions.insert(MONITORING_REGION.to_string());
+
+    // Persist deployment metadata early to enable `destroy --tag` on failure
+    let metadata = Metadata {
+        tag: tag.clone(),
+        created_at: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+        regions: regions.iter().cloned().collect(),
+        instance_count: config.instances.len(),
+    };
+    let metadata_file = File::create(tag_directory.join(METADATA_FILE_NAME))?;
+    serde_yaml::to_writer(metadata_file, &metadata)?;
+    info!("persisted deployment metadata");
 
     // Collect instance types by region (for availability zone selection) and unique types (for architecture detection)
     let mut instance_types_by_region: HashMap<String, HashSet<String>> = HashMap::new();

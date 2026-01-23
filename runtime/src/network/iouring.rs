@@ -22,9 +22,10 @@
 //!
 //! This implementation is only available on Linux systems that support io_uring.
 
-use crate::iouring::{self, should_retry};
-use bytes::{Buf, BufMut, BytesMut};
-use commonware_utils::StableBuf;
+use crate::{
+    iouring::{self, should_retry, OpBuffer},
+    IoBufMut, IoBufs,
+};
 use futures::{
     channel::{mpsc, oneshot},
     executor::block_on,
@@ -241,51 +242,45 @@ impl Sink {
 }
 
 impl crate::Sink for Sink {
-    async fn send(&mut self, mut msg: impl Buf + Send) -> Result<(), crate::Error> {
+    async fn send(&mut self, buf: impl Into<IoBufs> + Send) -> Result<(), crate::Error> {
+        // Convert to contiguous IoBuf for io_uring send
+        // (zero-copy if single buffer, copies if multiple)
         // TODO(#2705): Use writev to avoid this copy.
-        let mut msg: StableBuf = {
-            let buf = msg.copy_to_bytes(msg.remaining());
-            BytesMut::from(buf).into()
-        };
+        let mut buf = buf.into().coalesce();
         let mut bytes_sent = 0;
-        let msg_len = msg.len();
+        let buf_len = buf.len();
 
-        while bytes_sent < msg_len {
+        while bytes_sent < buf_len {
             // Figure out how much is left to send and where to send from.
             //
-            // SAFETY: `msg` is a `StableBuf` guaranteeing the memory won't move.
-            // `bytes_sent` is always < `msg_len` due to the loop condition, so
-            // `add(bytes_sent)` stays within bounds and `msg_len - bytes_sent`
+            // SAFETY: `buf` is an `IoBuf` guaranteeing the memory won't move.
+            // `bytes_sent` is always < `buf_len` due to the loop condition, so
+            // `add(bytes_sent)` stays within bounds and `buf_len - bytes_sent`
             // correctly represents the remaining valid bytes.
-            let remaining = unsafe {
-                std::slice::from_raw_parts(
-                    msg.as_mut_ptr().add(bytes_sent) as *const u8,
-                    msg_len - bytes_sent,
-                )
-            };
+            let ptr = unsafe { buf.as_ptr().add(bytes_sent) };
+            let remaining_len = buf_len - bytes_sent;
 
             // Create the io_uring send operation
-            let op = io_uring::opcode::Send::new(
-                self.as_raw_fd(),
-                remaining.as_ptr(),
-                remaining.len() as u32,
-            )
-            .build();
+            let op =
+                io_uring::opcode::Send::new(self.as_raw_fd(), ptr, remaining_len as u32).build();
 
             // Submit the operation to the io_uring event loop
             let (tx, rx) = oneshot::channel();
             self.submitter
-                .send(crate::iouring::Op {
+                .send(iouring::Op {
                     work: op,
                     sender: tx,
-                    buffer: Some(msg),
+                    buffer: Some(OpBuffer::Write(buf)),
                 })
                 .await
                 .map_err(|_| crate::Error::SendFailed)?;
 
-            // Wait for the operation to complete
-            let (result, got_msg) = rx.await.map_err(|_| crate::Error::SendFailed)?;
-            msg = got_msg.unwrap();
+            // Wait for the operation to complete and get the buffer back
+            let (result, returned_buf) = rx.await.map_err(|_| crate::Error::SendFailed)?;
+            buf = match returned_buf.unwrap() {
+                OpBuffer::Write(b) => b,
+                _ => unreachable!(),
+            };
             if should_retry(result) {
                 continue;
             }
@@ -311,7 +306,7 @@ pub struct Stream {
     /// Used to submit recv operations to the io_uring event loop.
     submitter: mpsc::Sender<iouring::Op>,
     /// Internal read buffer.
-    buffer: Vec<u8>,
+    buffer: IoBufMut,
     /// Current read position in the buffer.
     buffer_pos: usize,
     /// Number of valid bytes in the buffer.
@@ -323,7 +318,7 @@ impl Stream {
         Self {
             fd,
             submitter,
-            buffer: vec![0u8; buffer_capacity],
+            buffer: IoBufMut::with_capacity(buffer_capacity),
             buffer_pos: 0,
             buffer_len: 0,
         }
@@ -336,7 +331,7 @@ impl Stream {
     /// Submits a recv operation to io_uring.
     ///
     /// # Arguments
-    /// * `buffer` - Buffer for ownership tracking (kept alive during io_uring op)
+    /// * `buffer` - Buffer for receiving data (kernel writes into this)
     /// * `offset` - Offset into buffer to write received data
     /// * `len` - Maximum bytes to receive
     ///
@@ -344,35 +339,39 @@ impl Stream {
     /// The buffer and either bytes received or an error.
     async fn submit_recv(
         &mut self,
-        mut buffer: StableBuf,
+        mut buffer: IoBufMut,
         offset: usize,
         len: usize,
-    ) -> (StableBuf, Result<usize, crate::Error>) {
+    ) -> (IoBufMut, Result<usize, crate::Error>) {
         loop {
             // SAFETY: offset + len <= buffer.len() as guaranteed by callers.
+            // `buffer` is an `IoBufMut` guaranteeing the memory won't move.
             let ptr = unsafe { buffer.as_mut_ptr().add(offset) };
             let op = io_uring::opcode::Recv::new(self.as_raw_fd(), ptr, len as u32).build();
 
             let (tx, rx) = oneshot::channel();
             if self
                 .submitter
-                .send(crate::iouring::Op {
+                .send(iouring::Op {
                     work: op,
                     sender: tx,
-                    buffer: Some(buffer),
+                    buffer: Some(OpBuffer::Read(buffer)),
                 })
                 .await
                 .is_err()
             {
                 // Channel closed - io_uring thread died, buffer is lost
-                return (StableBuf::default(), Err(crate::Error::RecvFailed));
+                return (IoBufMut::default(), Err(crate::Error::RecvFailed));
             }
 
-            let Ok((result, buf)) = rx.await else {
+            let Ok((result, returned_buf)) = rx.await else {
                 // Channel closed - io_uring thread died, buffer is lost
-                return (StableBuf::default(), Err(crate::Error::RecvFailed));
+                return (IoBufMut::default(), Err(crate::Error::RecvFailed));
             };
-            buffer = buf.unwrap();
+            buffer = match returned_buf.unwrap() {
+                OpBuffer::Read(b) => b,
+                _ => unreachable!(),
+            };
 
             if should_retry(result) {
                 continue;
@@ -396,42 +395,49 @@ impl Stream {
         self.buffer_pos = 0;
         self.buffer_len = 0;
 
-        let buffer: StableBuf = std::mem::take(&mut self.buffer).into();
-        let len = buffer.len();
+        let buffer = std::mem::take(&mut self.buffer);
+        let len = buffer.capacity();
 
         // If the buffer is lost due to a channel error, we don't restore it.
         // Channel errors mean the io_uring thread died, so the stream is unusable anyway.
         let (buffer, result) = self.submit_recv(buffer, 0, len).await;
-        self.buffer = buffer.into();
+        self.buffer = buffer;
         self.buffer_len = result?;
+        // SAFETY: The kernel has written exactly `buffer_len` bytes into the buffer.
+        unsafe { self.buffer.set_len(self.buffer_len) };
         Ok(self.buffer_len)
     }
 }
 
 impl crate::Stream for Stream {
-    async fn recv(&mut self, mut buf: impl BufMut + Send) -> Result<(), crate::Error> {
-        let mut owned_buf: StableBuf = BytesMut::zeroed(buf.remaining_mut()).into();
+    async fn recv(&mut self, len: u64) -> Result<IoBufs, crate::Error> {
+        let len = len as usize;
+        let mut owned_buf = IoBufMut::with_capacity(len);
+        // SAFETY: We will write exactly `len` bytes before returning
+        // (loop continues until bytes_received == len). The buffer contents
+        // are uninitialized but we only write to it, never read.
+        unsafe { owned_buf.set_len(len) };
         let mut bytes_received = 0;
-        let buf_len = owned_buf.len();
 
-        while bytes_received < buf_len {
+        while bytes_received < len {
             // First drain any buffered data
             let buffered = self.buffer_len - self.buffer_pos;
             if buffered > 0 {
-                let to_copy = std::cmp::min(buffered, buf_len - bytes_received);
-                owned_buf.as_mut()[bytes_received..bytes_received + to_copy]
-                    .copy_from_slice(&self.buffer[self.buffer_pos..self.buffer_pos + to_copy]);
+                let to_copy = std::cmp::min(buffered, len - bytes_received);
+                owned_buf.as_mut()[bytes_received..bytes_received + to_copy].copy_from_slice(
+                    &self.buffer.as_ref()[self.buffer_pos..self.buffer_pos + to_copy],
+                );
                 self.buffer_pos += to_copy;
                 bytes_received += to_copy;
                 continue;
             }
 
-            let remaining = buf_len - bytes_received;
+            let remaining = len - bytes_received;
 
             // Skip internal buffer if disabled, or if the read is large enough
             // to fill the buffer and immediately drain it
-            let buffer_len = self.buffer.len();
-            if buffer_len == 0 || remaining >= buffer_len {
+            let buffer_capacity = self.buffer.capacity();
+            if buffer_capacity == 0 || remaining >= buffer_capacity {
                 let (returned_buf, result) =
                     self.submit_recv(owned_buf, bytes_received, remaining).await;
                 owned_buf = returned_buf;
@@ -442,8 +448,7 @@ impl crate::Stream for Stream {
             }
         }
 
-        buf.put_slice(owned_buf.as_ref());
-        Ok(())
+        Ok(IoBufs::from(owned_buf.freeze()))
     }
 }
 
@@ -523,21 +528,19 @@ mod tests {
             let (_addr, _sink, mut stream) = listener.accept().await.unwrap();
 
             // Read a small message (much smaller than the 64KB buffer)
-            let mut buf = [0u8; 10];
-            stream.recv(&mut buf[..]).await.unwrap();
-            buf
+            stream.recv(10).await.unwrap()
         });
 
         // Connect and send a small message
         let (mut sink, _stream) = network.dial(addr).await.unwrap();
         let msg = vec![1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10];
-        sink.send(msg.as_ref()).await.unwrap();
+        sink.send(msg.clone()).await.unwrap();
 
         // Wait for the reader to complete
         let received = reader.await.unwrap();
 
         // Verify we got the right data
-        assert_eq!(received.as_slice(), &msg[..]);
+        assert_eq!(received.coalesce(), msg.as_slice());
     }
 
     #[tokio::test]
@@ -569,8 +572,7 @@ mod tests {
 
             // Try to read 100 bytes, but only 5 will be sent
             let start = Instant::now();
-            let mut buf = [0u8; 100];
-            let result = stream.recv(&mut buf[..]).await;
+            let result = stream.recv(100).await;
             let elapsed = start.elapsed();
 
             (result, elapsed)
@@ -617,10 +619,8 @@ mod tests {
             let (_addr, _sink, mut stream) = listener.accept().await.unwrap();
 
             // Read messages without buffering
-            let mut buf1 = [0u8; 5];
-            let mut buf2 = [0u8; 5];
-            stream.recv(&mut buf1[..]).await.unwrap();
-            stream.recv(&mut buf2[..]).await.unwrap();
+            let buf1 = stream.recv(5).await.unwrap();
+            let buf2 = stream.recv(5).await.unwrap();
             (buf1, buf2)
         });
 
@@ -633,7 +633,7 @@ mod tests {
         let (buf1, buf2) = reader.await.unwrap();
 
         // Verify we got the right data
-        assert_eq!(buf1.as_slice(), &[1u8, 2, 3, 4, 5]);
-        assert_eq!(buf2.as_slice(), &[6u8, 7, 8, 9, 10]);
+        assert_eq!(buf1.coalesce(), &[1u8, 2, 3, 4, 5]);
+        assert_eq!(buf2.coalesce(), &[6u8, 7, 8, 9, 10]);
     }
 }

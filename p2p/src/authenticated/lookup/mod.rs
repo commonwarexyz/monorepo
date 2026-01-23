@@ -28,7 +28,7 @@
 //!
 //! Application-level data is exchanged using the `Data` message type. This structure contains:
 //! - `channel`: A `u32` identifier used to route the message to the correct application handler.
-//! - `message`: The arbitrary application payload as `Bytes`.
+//! - `message`: The arbitrary application payload as `IoBuf`.
 //!
 //! The size of the `message` bytes must not exceed the configured
 //! `max_message_size`. If it does, the sending operation will fail with
@@ -73,7 +73,7 @@
 //! ```rust
 //! use commonware_p2p::{authenticated::lookup::{self, Network}, Address, Manager, Sender, Recipients};
 //! use commonware_cryptography::{ed25519, Signer, PrivateKey as _, PublicKey as _, };
-//! use commonware_runtime::{deterministic, Metrics, Quota, Runner, Spawner};
+//! use commonware_runtime::{deterministic, IoBuf, Metrics, Quota, Runner, Spawner};
 //! use commonware_utils::{NZU32, ordered::Map};
 //! use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 //!
@@ -143,7 +143,7 @@
 //!     network.start();
 //!
 //!     // Example: Use sender
-//!     let _ = sender.send(Recipients::All, bytes::Bytes::from_static(b"hello"), false).await;
+//!     let _ = sender.send(Recipients::All, IoBuf::from(b"hello"), false).await;
 //!
 //!     // Graceful shutdown (stops all spawned tasks)
 //!     context.stop(0, None).await.unwrap();
@@ -291,7 +291,7 @@ mod tests {
                         while received.len() < n - 1 {
                             // Ensure message equals sender identity
                             let (sender, message) = receiver.recv().await.unwrap();
-                            assert_eq!(sender.as_ref(), message.as_ref());
+                            assert_eq!(message, sender.as_ref());
 
                             // Add to received set
                             received.insert(sender);
@@ -323,7 +323,7 @@ mod tests {
                                                 let sent = sender
                                                     .send(
                                                         Recipients::One(pub_key.clone()),
-                                                        public_key.as_ref(),
+                                                        public_key.as_ref().to_vec(),
                                                         true,
                                                     )
                                                     .await
@@ -348,7 +348,7 @@ mod tests {
                                             let mut sent = sender
                                                 .send(
                                                     Recipients::Some(public_keys.clone()),
-                                                    public_key.as_ref(),
+                                                    public_key.as_ref().to_vec(),
                                                     true,
                                                 )
                                                 .await
@@ -373,7 +373,11 @@ mod tests {
                                         // Loop until all peer sends successful
                                         loop {
                                             let mut sent = sender
-                                                .send(Recipients::All, public_key.as_ref(), true)
+                                                .send(
+                                                    Recipients::All,
+                                                    public_key.as_ref().to_vec(),
+                                                    true,
+                                                )
                                                 .await
                                                 .unwrap();
                                             if sent.len() != n - 1 {
@@ -548,7 +552,7 @@ mod tests {
                             // Loop until success
                             loop {
                                 if sender
-                                    .send(Recipients::All, msg.as_ref(), true)
+                                    .send(Recipients::All, msg.as_ref().to_vec(), true)
                                     .await
                                     .unwrap()
                                     .len()
@@ -563,7 +567,7 @@ mod tests {
                         } else {
                             // Ensure message equals sender identity
                             let (sender, message) = receiver.recv().await.unwrap();
-                            assert_eq!(sender.as_ref(), message.as_ref());
+                            assert_eq!(message, sender.as_ref());
                         }
                     });
 
@@ -630,7 +634,7 @@ mod tests {
 
             // Send message
             let recipient = Recipients::One(peers[1].clone());
-            let result = sender.send(recipient, &msg[..], true).await;
+            let result = sender.send(recipient, msg, true).await;
             assert!(matches!(result, Err(Error::MessageTooLarge(_))));
         });
     }
@@ -681,7 +685,7 @@ mod tests {
             loop {
                 // Confirm message is sent to peer
                 let sent = sender0
-                    .send(Recipients::One(pk1.clone()), &msg[..], true)
+                    .send(Recipients::One(pk1.clone()), msg.clone(), true)
                     .await
                     .unwrap();
                 if !sent.is_empty() {
@@ -696,10 +700,7 @@ mod tests {
             // Immediately send the second message to trigger the rate limit.
             // With partial sends, rate-limited recipients return empty vec (not error).
             // Outbound rate limiting skips the peer, returns empty vec.
-            let sent = sender0
-                .send(Recipients::One(pk1), &msg[..], true)
-                .await
-                .unwrap();
+            let sent = sender0.send(Recipients::One(pk1), msg, true).await.unwrap();
             assert!(sent.is_empty());
 
             // Give the metrics time to reflect the rate-limited message.
@@ -820,7 +821,7 @@ mod tests {
                         // Send a message
                         loop {
                             let sent = sender
-                                .send(Recipients::All, pk.as_ref(), true)
+                                .send(Recipients::All, pk.as_ref().to_vec(), true)
                                 .await
                                 .unwrap();
                             if sent.len() >= expected_connections {
@@ -1102,7 +1103,7 @@ mod tests {
                             let mut received = HashSet::new();
                             while received.len() < n - 1 {
                                 let (sender, message) = receiver.recv().await.unwrap();
-                                assert_eq!(sender.as_ref(), message.as_ref());
+                                assert_eq!(message, sender.as_ref());
                                 received.insert(sender);
                             }
                             complete_sender.send(()).await.unwrap();
@@ -1127,7 +1128,7 @@ mod tests {
 
                                         loop {
                                             let mut sent = sender
-                                                .send(Recipients::All, pk.as_ref(), true)
+                                                .send(Recipients::All, pk.as_ref().to_vec(), true)
                                                 .await
                                                 .unwrap();
                                             if sent.len() != n - 1 {
@@ -1232,7 +1233,7 @@ mod tests {
                             let mut received = HashSet::new();
                             while received.len() < n - 1 {
                                 let (sender, message) = receiver.recv().await.unwrap();
-                                assert_eq!(sender.as_ref(), message.as_ref());
+                                assert_eq!(message, sender.as_ref());
                                 received.insert(sender);
                             }
                             complete_sender.send(()).await.unwrap();
@@ -1257,7 +1258,7 @@ mod tests {
 
                                         loop {
                                             let mut sent = sender
-                                                .send(Recipients::All, pk.as_ref(), true)
+                                                .send(Recipients::All, pk.as_ref().to_vec(), true)
                                                 .await
                                                 .unwrap();
                                             if sent.len() != n - 1 {
@@ -1352,7 +1353,7 @@ mod tests {
 
             // Try to send from peer 1 - should not reach anyone since private IPs are blocked
             let sent = sender1
-                .send(Recipients::All, peer1.public_key().as_ref(), true)
+                .send(Recipients::All, peer1.public_key().as_ref().to_vec(), true)
                 .await
                 .unwrap();
             assert!(
@@ -1455,7 +1456,7 @@ mod tests {
                     let sent = sender1
                         .send(
                             Recipients::One(pk0.clone()),
-                            peer1.public_key().as_ref(),
+                            peer1.public_key().as_ref().to_vec(),
                             true,
                         )
                         .await
@@ -1469,7 +1470,7 @@ mod tests {
                 // Verify peer 0 received the message
                 let (sender, msg) = receiver0.recv().await.unwrap();
                 assert_eq!(sender, peer1.public_key());
-                assert_eq!(msg.as_ref(), peer1.public_key().as_ref());
+                assert_eq!(msg, peer1.public_key().as_ref());
             });
         }
     }
@@ -1542,7 +1543,11 @@ mod tests {
                 let sender = sender.as_mut().unwrap();
                 loop {
                     let sent = sender
-                        .send(Recipients::All, peers[i].public_key().as_ref(), true)
+                        .send(
+                            Recipients::All,
+                            peers[i].public_key().as_ref().to_vec(),
+                            true,
+                        )
                         .await
                         .unwrap();
                     if sent.len() == n - 1 {
@@ -1558,7 +1563,7 @@ mod tests {
                 let mut received = HashSet::new();
                 while received.len() < n - 1 {
                     let (sender, message): (ed25519::PublicKey, _) = receiver.recv().await.unwrap();
-                    assert_eq!(sender.as_ref(), message.as_ref());
+                    assert_eq!(message, sender.as_ref());
                     received.insert(sender);
                 }
             }
@@ -1641,7 +1646,7 @@ mod tests {
                         let sent = restarted_sender
                             .send(
                                 Recipients::All,
-                                peers[restart_peer_idx].public_key().as_ref(),
+                                peers[restart_peer_idx].public_key().as_ref().to_vec(),
                                 true,
                             )
                             .await
@@ -1662,7 +1667,7 @@ mod tests {
                             let sent = sender
                                 .send(
                                     Recipients::One(addresses[restart_peer_idx].clone()),
-                                    peers[i].public_key().as_ref(),
+                                    peers[i].public_key().as_ref().to_vec(),
                                     true,
                                 )
                                 .await
@@ -1680,7 +1685,7 @@ mod tests {
                     while received.len() < n - 1 {
                         let (sender, message): (ed25519::PublicKey, _) =
                             restarted_receiver.recv().await.unwrap();
-                        assert_eq!(sender.as_ref(), message.as_ref());
+                        assert_eq!(message, sender.as_ref());
                         received.insert(sender);
                     }
                 }
@@ -1758,7 +1763,11 @@ mod tests {
                 let sender = sender.as_mut().unwrap();
                 loop {
                     let sent = sender
-                        .send(Recipients::All, peers[i].public_key().as_ref(), true)
+                        .send(
+                            Recipients::All,
+                            peers[i].public_key().as_ref().to_vec(),
+                            true,
+                        )
                         .await
                         .unwrap();
                     if sent.len() == n - 1 {
@@ -1774,7 +1783,7 @@ mod tests {
                 let mut received = HashSet::new();
                 while received.len() < n - 1 {
                     let (sender, message): (ed25519::PublicKey, _) = receiver.recv().await.unwrap();
-                    assert_eq!(sender.as_ref(), message.as_ref());
+                    assert_eq!(message, sender.as_ref());
                     received.insert(sender);
                 }
             }
@@ -1849,7 +1858,11 @@ mod tests {
                 let sender = sender.as_mut().unwrap();
                 loop {
                     let sent = sender
-                        .send(Recipients::All, peers[i].public_key().as_ref(), true)
+                        .send(
+                            Recipients::All,
+                            peers[i].public_key().as_ref().to_vec(),
+                            true,
+                        )
                         .await
                         .unwrap();
                     if sent.len() == n - 1 {
@@ -1865,7 +1878,7 @@ mod tests {
                 let mut received = HashSet::new();
                 while received.len() < n - 1 {
                     let (sender, message): (ed25519::PublicKey, _) = receiver.recv().await.unwrap();
-                    assert_eq!(sender.as_ref(), message.as_ref());
+                    assert_eq!(message, sender.as_ref());
                     received.insert(sender);
                 }
             }
@@ -1913,7 +1926,7 @@ mod tests {
 
             // Sender operations should not panic even after shutdown
             let sent = sender
-                .send(Recipients::All, address.as_ref(), true)
+                .send(Recipients::All, address.as_ref().to_vec(), true)
                 .await
                 .unwrap();
             assert!(sent.is_empty());

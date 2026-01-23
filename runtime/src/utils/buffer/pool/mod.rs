@@ -23,11 +23,9 @@
 //! full or partial. A partial page's logical bytes are immutable on commit, and if it's re-written,
 //! it's only to add more bytes after the existing ones.
 
-use crate::{Blob, Error};
-use bytes::{Buf, BufMut};
+use crate::{Blob, Buf, BufMut, Error, IoBufMut};
 use commonware_codec::{EncodeFixed, FixedSize, Read as CodecRead, ReadExt, Write};
 use commonware_cryptography::{crc32, Crc32};
-use commonware_utils::StableBuf;
 
 mod append;
 mod page_cache;
@@ -48,22 +46,24 @@ async fn get_page_from_blob(
     blob: &impl Blob,
     page_num: u64,
     logical_page_size: u64,
-) -> Result<StableBuf, Error> {
+) -> Result<Vec<u8>, Error> {
     let physical_page_size = logical_page_size + CHECKSUM_SIZE;
     let physical_page_start = page_num * physical_page_size;
 
-    let mut page = blob
-        .read_at(vec![0; physical_page_size as usize], physical_page_start)
-        .await?;
+    let page = blob
+        .read_at(
+            physical_page_start,
+            IoBufMut::zeroed(physical_page_size as usize),
+        )
+        .await?
+        .coalesce();
 
     let Some(record) = Checksum::validate_page(page.as_ref()) else {
         return Err(Error::InvalidChecksum);
     };
     let (len, _) = record.get_crc();
 
-    page.truncate(len as usize);
-
-    Ok(page)
+    Ok(page.freeze().slice(..len as usize).into())
 }
 
 /// Describes a CRC record stored at the end of a page.

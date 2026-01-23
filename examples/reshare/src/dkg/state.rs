@@ -25,7 +25,7 @@ use commonware_cryptography::{
     PublicKey, Signer,
 };
 use commonware_parallel::Strategy;
-use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage as RuntimeStorage};
+use commonware_runtime::{buffer::PoolRef, Buf, BufMut, Clock, Metrics, Storage as RuntimeStorage};
 use commonware_storage::{
     journal::segmented::variable::{Config as SVConfig, Journal as SVJournal},
     metadata::{Config as MetadataConfig, Metadata},
@@ -64,7 +64,7 @@ impl<V: Variant, P: PublicKey> EncodeSize for Epoch<V, P> {
 }
 
 impl<V: Variant, P: PublicKey> Write for Epoch<V, P> {
-    fn write(&self, buf: &mut impl bytes::BufMut) {
+    fn write(&self, buf: &mut impl BufMut) {
         self.round.write(buf);
         self.rng_seed.write(buf);
         self.output.write(buf);
@@ -75,10 +75,7 @@ impl<V: Variant, P: PublicKey> Write for Epoch<V, P> {
 impl<V: Variant, P: PublicKey> Read for Epoch<V, P> {
     type Cfg = NonZeroU32;
 
-    fn read_cfg(
-        buf: &mut impl bytes::Buf,
-        cfg: &Self::Cfg,
-    ) -> Result<Self, commonware_codec::Error> {
+    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         Ok(Self {
             round: ReadExt::read(buf)?,
             rng_seed: ReadExt::read(buf)?,
@@ -110,7 +107,7 @@ impl<V: Variant, P: PublicKey> EncodeSize for Event<V, P> {
 }
 
 impl<V: Variant, P: PublicKey> Write for Event<V, P> {
-    fn write(&self, buf: &mut impl bytes::BufMut) {
+    fn write(&self, buf: &mut impl BufMut) {
         match self {
             Self::Dealing(x0, x1, x2) => {
                 0u8.write(buf);
@@ -135,10 +132,7 @@ impl<V: Variant, P: PublicKey> Write for Event<V, P> {
 impl<V: Variant, P: PublicKey> Read for Event<V, P> {
     type Cfg = NonZeroU32;
 
-    fn read_cfg(
-        buf: &mut impl bytes::Buf,
-        cfg: &Self::Cfg,
-    ) -> Result<Self, commonware_codec::Error> {
+    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         let tag = u8::read(buf)?;
         match tag {
             0 => Ok(Self::Dealing(

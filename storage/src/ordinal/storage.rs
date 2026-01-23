@@ -1,13 +1,12 @@
 use super::{Config, Error};
 use crate::{kv, rmap::RMap, Persistable};
-use bytes::{Buf, BufMut};
 use commonware_codec::{
     CodecFixed, CodecFixedShared, Encode, FixedSize, Read, ReadExt, Write as CodecWrite,
 };
 use commonware_cryptography::{crc32, Crc32};
 use commonware_runtime::{
     buffer::{Read as ReadBuffer, Write},
-    Blob, Clock, Error as RError, Metrics, Storage,
+    Blob, Buf, BufMut, Clock, Error as RError, IoBufMut, Metrics, Storage,
 };
 use commonware_utils::{bitmap::BitMap, hex};
 use futures::future::try_join_all;
@@ -270,7 +269,7 @@ impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
         let blob = self.blobs.get(&section).unwrap();
         let offset = (index % items_per_blob) * Record::<V>::SIZE as u64;
         let record = Record::new(value);
-        blob.write_at(record.encode_mut(), offset).await?;
+        blob.write_at(offset, record.encode_mut()).await?;
         self.pending.insert(section);
 
         // Add to intervals
@@ -293,8 +292,10 @@ impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
         let section = index / items_per_blob;
         let blob = self.blobs.get(&section).unwrap();
         let offset = (index % items_per_blob) * Record::<V>::SIZE as u64;
-        let read_buf = vec![0u8; Record::<V>::SIZE];
-        let read_buf = blob.read_at(read_buf, offset).await?;
+        let read_buf = blob
+            .read_at(offset, IoBufMut::zeroed(Record::<V>::SIZE))
+            .await?
+            .coalesce();
         let record = Record::<V>::read(&mut read_buf.as_ref())?;
 
         // If record is valid, return it
