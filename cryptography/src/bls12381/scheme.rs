@@ -224,6 +224,14 @@ impl Deref for PublicKey {
 
 impl From<<MinPk as Variant>::Public> for PublicKey {
     fn from(key: <MinPk as Variant>::Public) -> Self {
+        assert!(
+            !key.is_identity(),
+            "cannot create PublicKey from identity point"
+        );
+        assert!(
+            key.is_in_group(),
+            "cannot create PublicKey from point outside G1"
+        );
         let raw = key.encode_fixed();
         Self { raw, key }
     }
@@ -326,6 +334,14 @@ impl Deref for Signature {
 
 impl From<<MinPk as Variant>::Signature> for Signature {
     fn from(signature: <MinPk as Variant>::Signature) -> Self {
+        assert!(
+            !signature.is_identity(),
+            "cannot create Signature from identity point"
+        );
+        assert!(
+            signature.is_in_group(),
+            "cannot create Signature from point outside G2"
+        );
         let raw = signature.encode_fixed();
         Self { raw, signature }
     }
@@ -470,6 +486,33 @@ mod tests {
         let msg = b"test message";
         let sig = private_key.sign(b"ns", msg);
         assert!(private_key.public_key().verify(b"ns", msg, &sig));
+    }
+
+    #[test]
+    #[should_panic(expected = "cannot create Private from zero scalar")]
+    fn test_private_rejects_zero_scalar() {
+        use commonware_math::algebra::Additive;
+
+        let zero_scalar = group::Scalar::zero();
+        let _ = Private::new(zero_scalar);
+    }
+
+    #[test]
+    #[should_panic(expected = "cannot create PublicKey from identity point")]
+    fn test_from_public_rejects_identity() {
+        use commonware_math::algebra::Additive;
+
+        let identity = group::G1::zero();
+        let _ = PublicKey::from(identity);
+    }
+
+    #[test]
+    #[should_panic(expected = "cannot create Signature from identity point")]
+    fn test_from_signature_rejects_identity() {
+        use commonware_math::algebra::Additive;
+
+        let identity = group::G2::zero();
+        let _ = Signature::from(identity);
     }
 
     #[test]

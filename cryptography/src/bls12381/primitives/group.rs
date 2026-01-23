@@ -414,7 +414,15 @@ pub struct Private {
 
 impl Private {
     /// Creates a new private key from a scalar.
-    pub const fn new(private: Scalar) -> Self {
+    ///
+    /// # Panics
+    ///
+    /// Panics if the scalar is zero.
+    pub fn new(private: Scalar) -> Self {
+        assert!(
+            private != Scalar::zero(),
+            "cannot create Private from zero scalar"
+        );
         Self {
             scalar: Secret::new(private),
         }
@@ -852,6 +860,18 @@ impl G1 {
         Self(p)
     }
 
+    /// Returns true if this point is the identity (infinity).
+    pub fn is_identity(&self) -> bool {
+        // SAFETY: blst_p1_is_inf is safe for any blst_p1.
+        unsafe { blst_p1_is_inf(&self.0) }
+    }
+
+    /// Returns true if this point is in the G1 subgroup.
+    pub fn is_in_group(&self) -> bool {
+        // SAFETY: blst_p1_in_g1 is safe for any blst_p1.
+        unsafe { blst_p1_in_g1(&self.0) }
+    }
+
     /// Batch converts projective G1 points to affine.
     ///
     /// This uses Montgomery's trick to reduce n field inversions to 1,
@@ -1052,18 +1072,21 @@ impl Read for G1 {
                 BLST_ERROR::BLST_BAD_SCALAR => return Err(Invalid("G1", "Bad scalar")),
             }
             blst_p1_from_affine(&mut ret, &affine);
-
-            // Verify that deserialized element isn't infinite
-            if blst_p1_is_inf(&ret) {
-                return Err(Invalid("G1", "Infinity"));
-            }
-
-            // Verify that the deserialized element is in G1
-            if !blst_p1_in_g1(&ret) {
-                return Err(Invalid("G1", "Outside G1"));
-            }
         }
-        Ok(Self(ret))
+
+        let g1 = Self(ret);
+
+        // Verify that deserialized element isn't infinite
+        if g1.is_identity() {
+            return Err(Invalid("G1", "Infinity"));
+        }
+
+        // Verify that the deserialized element is in G1
+        if !g1.is_in_group() {
+            return Err(Invalid("G1", "Outside G1"));
+        }
+
+        Ok(g1)
     }
 }
 
@@ -1287,6 +1310,18 @@ impl G2 {
         Self(p)
     }
 
+    /// Returns true if this point is the identity (infinity).
+    pub fn is_identity(&self) -> bool {
+        // SAFETY: blst_p2_is_inf is safe for any blst_p2.
+        unsafe { blst_p2_is_inf(&self.0) }
+    }
+
+    /// Returns true if this point is in the G2 subgroup.
+    pub fn is_in_group(&self) -> bool {
+        // SAFETY: blst_p2_in_g2 is safe for any blst_p2.
+        unsafe { blst_p2_in_g2(&self.0) }
+    }
+
     /// Batch converts projective G2 points to affine.
     ///
     /// This uses Montgomery's trick to reduce n field inversions to 1,
@@ -1472,18 +1507,21 @@ impl Read for G2 {
                 BLST_ERROR::BLST_BAD_SCALAR => return Err(Invalid("G2", "Bad scalar")),
             }
             blst_p2_from_affine(&mut ret, &affine);
-
-            // Verify that deserialized element isn't infinite
-            if blst_p2_is_inf(&ret) {
-                return Err(Invalid("G2", "Infinity"));
-            }
-
-            // Verify that the deserialized element is in G2
-            if !blst_p2_in_g2(&ret) {
-                return Err(Invalid("G2", "Outside G2"));
-            }
         }
-        Ok(Self(ret))
+
+        let g2 = Self(ret);
+
+        // Verify that deserialized element isn't infinite
+        if g2.is_identity() {
+            return Err(Invalid("G2", "Infinity"));
+        }
+
+        // Verify that the deserialized element is in G2
+        if !g2.is_in_group() {
+            return Err(Invalid("G2", "Outside G2"));
+        }
+
+        Ok(g2)
     }
 }
 
