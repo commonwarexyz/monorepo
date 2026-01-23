@@ -464,6 +464,10 @@ mod tests {
     use commonware_codec::{DecodeExt, Encode};
     use commonware_math::algebra::Random;
     use commonware_utils::test_rng;
+    use std::{
+        cmp::Ordering,
+        hash::{BuildHasher, RandomState},
+    };
 
     fn test_sign_and_verify(
         private_key: PrivateKey,
@@ -880,10 +884,6 @@ mod tests {
 
     #[test]
     fn test_non_canonical_encoding_treated_as_same_identity() {
-        use core::hash::BuildHasher;
-        use curve25519_dalek::edwards::CompressedEdwardsY;
-        use std::hash::RandomState;
-
         // Canonical encoding of identity: y = 1, sign bit = 0.
         let canonical: [u8; 32] = [
             1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
@@ -913,7 +913,7 @@ mod tests {
         assert_eq!(pk1, pk2);
 
         // Verify ordering is consistent.
-        assert_eq!(pk1.cmp(&pk2), core::cmp::Ordering::Equal);
+        assert_eq!(pk1.cmp(&pk2), Ordering::Equal);
 
         // Verify hashes are equal.
         let hash_builder = RandomState::new();
