@@ -227,6 +227,37 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
     }
     info!("observability tools uploaded");
 
+    // Cache apt packages for each architecture
+    info!("caching apt packages in S3");
+    let mut monitoring_apt_urls_by_arch: HashMap<Architecture, HashMap<String, String>> =
+        HashMap::new();
+    let mut binary_apt_urls_by_arch: HashMap<Architecture, HashMap<String, String>> =
+        HashMap::new();
+    for arch in &architectures_needed {
+        // Cache monitoring apt packages
+        let monitoring_packages = crate::aws::aptly::monitoring_packages_with_deps();
+        let monitoring_apt_urls = crate::aws::aptly::cache_apt_packages(
+            &s3_client,
+            &tag_directory,
+            *arch,
+            &monitoring_packages,
+        )
+        .await?;
+        monitoring_apt_urls_by_arch.insert(*arch, monitoring_apt_urls);
+
+        // Cache binary apt packages
+        let binary_packages = crate::aws::aptly::binary_packages_with_deps();
+        let binary_apt_urls = crate::aws::aptly::cache_apt_packages(
+            &s3_client,
+            &tag_directory,
+            *arch,
+            &binary_packages,
+        )
+        .await?;
+        binary_apt_urls_by_arch.insert(*arch, binary_apt_urls);
+    }
+    info!("apt packages cached");
+
     // Collect unique binary and config paths (dedup before hashing)
     let mut unique_binary_paths: BTreeSet<String> = BTreeSet::new();
     let mut unique_config_paths: BTreeSet<String> = BTreeSet::new();
@@ -1032,6 +1063,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
                     pyroscope_script: pyroscope_digest_to_url[pyroscope_digest].clone(),
                     pyroscope_service: pyroscope_agent_service_url.clone(),
                     pyroscope_timer: pyroscope_agent_timer_url.clone(),
+                    apt_packages: binary_apt_urls_by_arch[&arch].clone(),
                 },
                 arch,
             ),
@@ -1061,6 +1093,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
         pyroscope_service: pyroscope_service_url,
         tempo_service: tempo_service_url,
         node_exporter_service: monitoring_node_exporter_service_url.clone(),
+        apt_packages: monitoring_apt_urls_by_arch[&monitoring_architecture].clone(),
     };
 
     // Prepare binary instance configuration futures

@@ -341,6 +341,7 @@ cfg_if::cfg_if! {
         pub use list::list;
         pub mod utils;
         pub mod s3;
+        pub mod aptly;
 
         /// Name of the monitoring instance
         const MONITORING_NAME: &str = "monitoring";

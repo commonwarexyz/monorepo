@@ -1,9 +1,11 @@
 //! Service configuration for Prometheus, Loki, Grafana, Promtail, and a caller-provided binary
 
 use crate::aws::{
+    aptly::{install_cached_packages_cmd, install_kernel_packages_cmd},
     s3::{DEPLOYMENTS_PREFIX, TOOLS_BINARIES_PREFIX, TOOLS_CONFIGS_PREFIX, WGET},
     Architecture,
 };
+use std::collections::HashMap;
 
 /// Deployer version used to namespace static configs in S3
 const DEPLOYER_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -485,6 +487,8 @@ pub struct MonitoringUrls {
     pub pyroscope_service: String,
     pub tempo_service: String,
     pub node_exporter_service: String,
+    /// Pre-signed URLs for cached apt packages (package name -> URL)
+    pub apt_packages: HashMap<String, String>,
 }
 
 /// Command to install monitoring services (Prometheus, Loki, Grafana, Pyroscope, Tempo) on the monitoring instance
@@ -494,10 +498,15 @@ pub(crate) fn install_monitoring_cmd(
     architecture: Architecture,
 ) -> String {
     let arch = architecture.as_str();
+
+    // Generate apt package installation commands from cached packages
+    let apt_packages = crate::aws::aptly::monitoring_packages_with_deps();
+    let apt_install_cmd = install_cached_packages_cmd(&urls.apt_packages, &apt_packages);
+
     format!(
         r#"
-sudo apt-get update -y
-sudo apt-get install -y unzip adduser libfontconfig1 wget tar
+# Install apt packages from S3 cache
+{apt_install_cmd}
 
 # Clean up any previous download artifacts (allows retries to re-download fresh copies)
 rm -f /home/ubuntu/prometheus.tar.gz /home/ubuntu/loki.zip /home/ubuntu/pyroscope.tar.gz \
@@ -667,6 +676,8 @@ pub struct InstanceUrls {
     pub pyroscope_script: String,
     pub pyroscope_service: String,
     pub pyroscope_timer: String,
+    /// Pre-signed URLs for cached apt packages (package name -> URL)
+    pub apt_packages: HashMap<String, String>,
 }
 
 /// Command to install all services on binary instances
@@ -676,11 +687,19 @@ pub(crate) fn install_binary_cmd(
     architecture: Architecture,
 ) -> String {
     let arch = architecture.as_str();
+
+    // Generate apt package installation commands from cached packages
+    let apt_packages = crate::aws::aptly::binary_packages_with_deps();
+    let apt_install_cmd = install_cached_packages_cmd(&urls.apt_packages, &apt_packages);
+    let kernel_install_cmd = install_kernel_packages_cmd();
+
     let mut script = format!(
         r#"
-# Install base tools and dependencies
-sudo apt-get update -y
-sudo apt-get install -y logrotate jq wget unzip libjemalloc2 linux-tools-common linux-tools-generic linux-tools-$(uname -r)
+# Install apt packages from S3 cache
+{apt_install_cmd}
+
+# Install kernel-specific packages (cannot be pre-cached)
+{kernel_install_cmd}
 
 # Clean up any previous download artifacts (allows retries to re-download fresh copies)
 rm -f /home/ubuntu/promtail.zip /home/ubuntu/node_exporter.tar.gz
