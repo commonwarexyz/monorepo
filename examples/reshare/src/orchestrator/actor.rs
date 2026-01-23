@@ -7,7 +7,7 @@ use crate::{
 };
 use commonware_consensus::{
     marshal,
-    simplex::{self, elector::Config as Elector, scheme, types::Context},
+    simplex::{self, elector::Config as Elector, scheme, store::VotesJournal, types::Context},
     types::{Epoch, Epocher, FixedEpocher, ViewDelta},
     CertifiableAutomaton, Relay,
 };
@@ -24,6 +24,8 @@ use commonware_runtime::{
     buffer::PoolRef, spawn_cell, telemetry::metrics::status::GaugeExt, Clock, ContextCell, Handle,
     Metrics, Network, Spawner, Storage,
 };
+use commonware_storage::journal::segmented::variable::Config as JConfig;
+use commonware_storage::journal::segmented::variable::Journal;
 use commonware_utils::{vec::NonEmptyVec, NZUsize, NZU16};
 use futures::{channel::mpsc, StreamExt};
 use prometheus_client::metrics::gauge::Gauge;
@@ -305,6 +307,23 @@ where
     ) -> Handle<()> {
         // Start the new engine
         let elector = L::default();
+        let votes = VotesJournal::from_journal(
+            Journal::init(
+                self.context
+                    .with_label("consensus_engine_voter")
+                    .with_attribute("epoch", epoch),
+                JConfig {
+                    partition: format!("{}_consensus_{}", self.partition_prefix, epoch),
+                    buffer_pool: self.pool_ref.clone(),
+                    write_buffer: NZUsize!(1024 * 1024),
+                    compression: None,
+                    codec_config: scheme.certificate_codec_config(),
+                },
+            )
+            .await
+            .expect("must be able to initialize votes journal"),
+        )
+        .replay_buffer(NZUsize!(1024 * 1024));
         let engine = simplex::Engine::new(
             self.context
                 .with_label("consensus_engine")
@@ -316,11 +335,8 @@ where
                 automaton: self.application.clone(),
                 relay: self.application.clone(),
                 reporter: self.marshal.clone(),
-                partition: format!("{}_consensus_{}", self.partition_prefix, epoch),
                 mailbox_size: 1024,
                 epoch,
-                replay_buffer: NZUsize!(1024 * 1024),
-                write_buffer: NZUsize!(1024 * 1024),
                 leader_timeout: Duration::from_secs(1),
                 notarization_timeout: Duration::from_secs(2),
                 nullify_retry: Duration::from_secs(10),
@@ -328,8 +344,8 @@ where
                 activity_timeout: ViewDelta::new(256),
                 skip_timeout: ViewDelta::new(10),
                 fetch_concurrent: 32,
-                buffer_pool: self.pool_ref.clone(),
                 strategy: self.strategy.clone(),
+                votes,
             },
         );
 

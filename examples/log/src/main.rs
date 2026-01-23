@@ -49,13 +49,15 @@ mod gui;
 
 use clap::{value_parser, Arg, Command};
 use commonware_consensus::{
-    simplex::{self, elector::RoundRobin},
+    simplex::{self, elector::RoundRobin, store::VotesJournal},
     types::{Epoch, ViewDelta},
 };
-use commonware_cryptography::{ed25519, Sha256, Signer as _};
+use commonware_cryptography::{certificate::Scheme as _, ed25519, Sha256, Signer as _};
 use commonware_p2p::{authenticated::discovery, Manager};
 use commonware_parallel::Sequential;
 use commonware_runtime::{buffer::PoolRef, tokio, Metrics, Quota, Runner};
+use commonware_storage::journal::segmented::variable::Config as JConfig;
+use commonware_storage::journal::segmented::variable::Journal;
 use commonware_utils::{ordered::Set, union, NZUsize, TryCollect, NZU16, NZU32};
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -204,6 +206,21 @@ fn main() {
             },
         );
 
+        let votes = VotesJournal::from_journal(
+            Journal::init(
+                context.with_label("engine_voter"),
+                JConfig {
+                    partition: String::from("log"),
+                    buffer_pool: PoolRef::new(NZU16!(16_384), NZUsize!(10_000)),
+                    write_buffer: NZUsize!(1024 * 1024),
+                    compression: None,
+                    codec_config: scheme.certificate_codec_config(),
+                },
+            )
+            .await
+            .expect("must be able to initialize votes journal"),
+        )
+        .replay_buffer(NZUsize!(1024 * 1024));
         // Initialize consensus
         let cfg = simplex::Config {
             scheme,
@@ -212,11 +229,8 @@ fn main() {
             automaton: mailbox.clone(),
             relay: mailbox.clone(),
             reporter: reporter.clone(),
-            partition: String::from("log"),
             mailbox_size: 1024,
             epoch: Epoch::zero(),
-            replay_buffer: NZUsize!(1024 * 1024),
-            write_buffer: NZUsize!(1024 * 1024),
             leader_timeout: Duration::from_secs(1),
             notarization_timeout: Duration::from_secs(2),
             nullify_retry: Duration::from_secs(10),
@@ -224,8 +238,8 @@ fn main() {
             activity_timeout: ViewDelta::new(10),
             skip_timeout: ViewDelta::new(5),
             fetch_concurrent: 32,
-            buffer_pool: PoolRef::new(NZU16!(16_384), NZUsize!(10_000)),
             strategy: Sequential,
+            votes,
         };
         let engine = simplex::Engine::new(context.with_label("engine"), cfg);
 

@@ -15,13 +15,14 @@ use commonware_consensus::{
         elector::Config as Elector,
         mocks::{application, relay, reporter},
         scheme::Scheme,
+        store::VotesJournal,
         Engine,
     },
     types::{Delta, Epoch, View},
     Monitor,
 };
 use commonware_cryptography::{
-    certificate::{self, mocks::Fixture},
+    certificate::{self, mocks::Fixture, Scheme as _},
     ed25519::PublicKey as Ed25519PublicKey,
     sha256::Digest as Sha256Digest,
     Sha256,
@@ -29,6 +30,8 @@ use commonware_cryptography::{
 use commonware_p2p::simulated::{Config as NetworkConfig, Link, Network};
 use commonware_parallel::Sequential;
 use commonware_runtime::{buffer::PoolRef, deterministic, Clock, Metrics, Runner, Spawner};
+use commonware_storage::journal::segmented::variable::Config as JConfig;
+use commonware_storage::journal::segmented::variable::Journal;
 use commonware_utils::{Faults, N3f1, NZUsize, NZU16};
 use futures::{channel::mpsc::Receiver, future::join_all, StreamExt};
 use rand::{rngs::StdRng, RngCore, SeedableRng};
@@ -243,6 +246,21 @@ fn run<P: Simplex>(input: FuzzInput) {
             actor.start();
 
             let blocker = oracle.control(validator.clone());
+            let votes = VotesJournal::from_journal(
+                Journal::init(
+                    context.with_label("engine_voter"),
+                    JConfig {
+                        partition: validator.to_string(),
+                        buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                        write_buffer: NZUsize!(1024 * 1024),
+                        compression: None,
+                        codec_config: schemes[i].certificate_codec_config(),
+                    },
+                )
+                .await
+                .expect("must be able to initialize votes journal"),
+            )
+            .replay_buffer(NZUsize!(1024 * 1024));
             let engine_cfg = config::Config {
                 blocker,
                 scheme: schemes[i].clone(),
@@ -250,7 +268,6 @@ fn run<P: Simplex>(input: FuzzInput) {
                 automaton: application.clone(),
                 relay: application.clone(),
                 reporter: reporter.clone(),
-                partition: validator.to_string(),
                 mailbox_size: 1024,
                 epoch: Epoch::new(EPOCH),
                 leader_timeout: Duration::from_secs(1),
@@ -260,10 +277,8 @@ fn run<P: Simplex>(input: FuzzInput) {
                 activity_timeout: Delta::new(10),
                 skip_timeout: Delta::new(5),
                 fetch_concurrent: 1,
-                replay_buffer: NZUsize!(1024 * 1024),
-                write_buffer: NZUsize!(1024 * 1024),
-                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 strategy: Sequential,
+                votes,
             };
             let engine = Engine::new(context.with_label("engine"), engine_cfg);
             engine.start(pending, recovered, resolver);

@@ -1,5 +1,6 @@
 use super::{
     elector::Config as Elector,
+    store::Votes,
     types::{Activity, Context},
 };
 use crate::{
@@ -9,8 +10,7 @@ use crate::{
 use commonware_cryptography::{certificate::Scheme, Digest};
 use commonware_p2p::Blocker;
 use commonware_parallel::Strategy;
-use commonware_runtime::buffer::PoolRef;
-use std::{num::NonZeroUsize, time::Duration};
+use std::time::Duration;
 
 /// Configuration for the consensus engine.
 pub struct Config<
@@ -22,6 +22,7 @@ pub struct Config<
     R: Relay,
     F: Reporter<Activity = Activity<S, D>>,
     T: Strategy,
+    V: Votes<Scheme = S, Digest = D>,
 > {
     /// Signing scheme for the consensus engine.
     ///
@@ -63,8 +64,11 @@ pub struct Config<
     /// Strategy for parallel operations.
     pub strategy: T,
 
-    /// Partition for the consensus engine.
-    pub partition: String,
+    /// Votes store for the consensus engine.
+    ///
+    /// Provides durable storage for consensus artifacts (votes and certificates) used
+    /// by the voter actor for crash recovery.
+    pub votes: V,
 
     /// Maximum number of messages to buffer on channels inside the consensus
     /// engine before blocking.
@@ -72,15 +76,6 @@ pub struct Config<
 
     /// Epoch for the consensus engine. Each running engine should have a unique epoch.
     pub epoch: Epoch,
-
-    /// Number of bytes to buffer when replaying during startup.
-    pub replay_buffer: NonZeroUsize,
-
-    /// The size of the write buffer to use for each blob in the journal.
-    pub write_buffer: NonZeroUsize,
-
-    /// Buffer pool for the journal.
-    pub buffer_pool: PoolRef,
 
     /// Amount of time to wait for a leader to propose a payload
     /// in a view.
@@ -121,7 +116,8 @@ impl<
         R: Relay,
         F: Reporter<Activity = Activity<S, D>>,
         T: Strategy,
-    > Config<S, L, B, D, A, R, F, T>
+        V: Votes<Scheme = S, Digest = D>,
+    > Config<S, L, B, D, A, R, F, T, V>
 {
     /// Assert enforces that all configuration values are valid.
     pub fn assert(&self) {
