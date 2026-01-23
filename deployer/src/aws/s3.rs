@@ -190,8 +190,8 @@ async fn enable_transfer_acceleration(client: &S3Client, bucket_name: &str) -> R
             operation: super::S3Operation::PutBucketAccelerateConfiguration,
             source: Box::new(aws_sdk_s3::Error::from(e.into_service_error())),
         })?;
-
     info!(bucket = bucket_name, "enabled transfer acceleration");
+
     Ok(())
 }
 
