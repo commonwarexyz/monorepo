@@ -102,7 +102,7 @@ pub async fn ensure_bucket_exists(
                     client_region = region,
                     "bucket exists in different region, using cross-region access"
                 );
-                return Ok(());
+                return enable_transfer_acceleration(client, bucket_name).await;
             } else {
                 // 403 or other error without region header: access denied
                 return Err(Error::S3BucketForbidden {
