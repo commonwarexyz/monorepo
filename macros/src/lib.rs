@@ -12,7 +12,7 @@ use proc_macro_crate::{crate_name, FoundCrate};
 use quote::{format_ident, quote, ToTokens};
 use syn::{
     parse::{Parse, ParseStream, Result},
-    parse_macro_input, Block, Error, Expr, Ident, ItemFn, LitStr, Pat, Token,
+    parse_macro_input, Error, Expr, Ident, ItemFn, LitStr, Pat, Token,
 };
 
 mod nextest;
@@ -304,7 +304,7 @@ struct SelectInput {
 struct Branch {
     pattern: Pat,
     future: Expr,
-    block: Block,
+    body: Expr,
 }
 
 impl Parse for SelectInput {
@@ -316,12 +316,12 @@ impl Parse for SelectInput {
             input.parse::<Token![=]>()?;
             let future: Expr = input.parse()?;
             input.parse::<Token![=>]>()?;
-            let block: Block = input.parse()?;
+            let body: Expr = input.parse()?;
 
             branches.push(Branch {
                 pattern,
                 future,
-                block,
+                body,
             });
 
             if input.peek(Token![,]) {
@@ -340,10 +340,10 @@ impl ToTokens for SelectInput {
         for branch in &self.branches {
             let pattern = &branch.pattern;
             let future = &branch.future;
-            let block = &branch.block;
+            let body = &branch.body;
 
             tokens.extend(quote! {
-                #pattern = #future => #block,
+                #pattern = #future => #body,
             });
         }
     }
@@ -392,12 +392,12 @@ pub fn select(input: TokenStream) -> TokenStream {
     for Branch {
         pattern,
         future,
-        block,
+        body,
     } in branches.into_iter()
     {
         // Generate branch for `select_biased!` macro
         let branch_code = quote! {
-            #pattern = (#future).fuse() => #block,
+            #pattern = (#future).fuse() => #body,
         };
         select_branches.push(branch_code);
     }
@@ -417,13 +417,13 @@ pub fn select(input: TokenStream) -> TokenStream {
 
 /// Input for [select_loop!].
 ///
-/// Parses: `context, [on_start => { block },] on_stopped => { block }, { branches... } [, on_end => { block }]`
+/// Parses: `context, [on_start => expr,] on_stopped => expr, branches... [, on_end => expr]`
 struct SelectLoopInput {
     context: Expr,
-    start_block: Option<Block>,
-    shutdown_block: Block,
+    start_expr: Option<Expr>,
+    shutdown_expr: Expr,
     branches: Vec<Branch>,
-    end_block: Option<Block>,
+    end_expr: Option<Expr>,
 }
 
 impl Parse for SelectLoopInput {
@@ -433,14 +433,14 @@ impl Parse for SelectLoopInput {
         input.parse::<Token![,]>()?;
 
         // Check for optional `on_start =>`
-        let start_block = if input.peek(Ident) {
+        let start_expr = if input.peek(Ident) {
             let ident: Ident = input.fork().parse()?;
             if ident == "on_start" {
                 input.parse::<Ident>()?; // consume the ident
                 input.parse::<Token![=>]>()?;
-                let block: Block = input.parse()?;
+                let expr: Expr = input.parse()?;
                 input.parse::<Token![,]>()?;
-                Some(block)
+                Some(expr)
             } else {
                 None
             }
@@ -458,10 +458,10 @@ impl Parse for SelectLoopInput {
         }
         input.parse::<Token![=>]>()?;
 
-        // Parse shutdown block
-        let shutdown_block: Block = input.parse()?;
+        // Parse shutdown expression
+        let shutdown_expr: Expr = input.parse()?;
 
-        // Parse comma after shutdown block
+        // Parse comma after shutdown expression
         input.parse::<Token![,]>()?;
 
         // Parse branches directly (no surrounding braces)
@@ -480,12 +480,12 @@ impl Parse for SelectLoopInput {
             input.parse::<Token![=]>()?;
             let future: Expr = input.parse()?;
             input.parse::<Token![=>]>()?;
-            let block: Block = input.parse()?;
+            let body: Expr = input.parse()?;
 
             branches.push(Branch {
                 pattern,
                 future,
-                block,
+                body,
             });
 
             if input.peek(Token![,]) {
@@ -496,15 +496,15 @@ impl Parse for SelectLoopInput {
         }
 
         // Check for optional `on_end =>`
-        let end_block = if !input.is_empty() && input.peek(Ident) {
+        let end_expr = if !input.is_empty() && input.peek(Ident) {
             let ident: Ident = input.parse()?;
             if ident == "on_end" {
                 input.parse::<Token![=>]>()?;
-                let block: Block = input.parse()?;
+                let expr: Expr = input.parse()?;
                 if input.peek(Token![,]) {
                     input.parse::<Token![,]>()?;
                 }
-                Some(block)
+                Some(expr)
             } else {
                 return Err(Error::new(ident.span(), "expected `on_end` keyword"));
             }
@@ -514,10 +514,10 @@ impl Parse for SelectLoopInput {
 
         Ok(Self {
             context,
-            start_block,
-            shutdown_block,
+            start_expr,
+            shutdown_expr,
             branches,
-            end_block,
+            end_expr,
         })
     }
 }
@@ -593,10 +593,10 @@ impl Parse for SelectLoopInput {
 pub fn select_loop(input: TokenStream) -> TokenStream {
     let SelectLoopInput {
         context,
-        start_block,
-        shutdown_block,
+        start_expr,
+        shutdown_expr,
         branches,
-        end_block,
+        end_expr,
     } = parse_macro_input!(input as SelectLoopInput);
 
     // Convert branches to tokens for the inner select!
@@ -605,21 +605,27 @@ pub fn select_loop(input: TokenStream) -> TokenStream {
         .map(|b| {
             let pattern = &b.pattern;
             let future = &b.future;
-            let block = &b.block;
-            quote! { #pattern = #future => #block, }
+            let body = &b.body;
+            quote! { #pattern = #future => #body, }
         })
         .collect();
 
-    // Generate on_start and on_end tokens if present
-    let on_start_tokens = start_block.map(|block| {
-        let stmts = block.stmts;
-        quote! { #(#stmts)* }
-    });
+    // Helper to convert an expression to tokens, inlining block contents
+    // to preserve variable scope
+    fn expr_to_tokens(expr: &Expr) -> proc_macro2::TokenStream {
+        match expr {
+            Expr::Block(block) => {
+                let stmts = &block.block.stmts;
+                quote! { #(#stmts)* }
+            }
+            other => quote! { #other; },
+        }
+    }
 
-    let on_end_tokens = end_block.map(|block| {
-        let stmts = block.stmts;
-        quote! { #(#stmts)* }
-    });
+    // Generate on_start and on_end tokens if present
+    let on_start_tokens = start_expr.as_ref().map(expr_to_tokens);
+    let on_end_tokens = end_expr.as_ref().map(expr_to_tokens);
+    let shutdown_tokens = expr_to_tokens(&shutdown_expr);
 
     quote! {
         {
@@ -629,7 +635,7 @@ pub fn select_loop(input: TokenStream) -> TokenStream {
 
                 commonware_macros::select! {
                     _ = &mut shutdown => {
-                        #shutdown_block
+                        #shutdown_tokens
 
                         // Break the loop after handling shutdown. Some implementations
                         // may divert control flow themselves, so this may be unused.

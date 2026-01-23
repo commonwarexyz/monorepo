@@ -180,69 +180,7 @@ mod tests {
     }
 
     #[test]
-    fn test_select_loop_on_start() {
-        block_on(async move {
-            let (mut tx, mut rx) = mpsc::unbounded();
-            tx.send(1).await.unwrap();
-            tx.send(2).await.unwrap();
-            tx.send(3).await.unwrap();
-            drop(tx);
-
-            let mut received = Vec::new();
-            let mut start_count = 0;
-            let mock_context = MockSignaler;
-            select_loop! {
-                mock_context,
-                on_start => {
-                    start_count += 1;
-                },
-                on_stopped => {},
-                msg = rx.next() => {
-                    match msg {
-                        Some(v) => received.push(v),
-                        None => break,
-                    }
-                },
-            }
-            assert_eq!(received, vec![1, 2, 3]);
-            // on_start runs before each iteration: 3 messages + 1 for the None
-            assert_eq!(start_count, 4);
-        });
-    }
-
-    #[test]
-    fn test_select_loop_on_end() {
-        block_on(async move {
-            let (mut tx, mut rx) = mpsc::unbounded();
-            tx.send(1).await.unwrap();
-            tx.send(2).await.unwrap();
-            tx.send(3).await.unwrap();
-            drop(tx);
-
-            let mut received = Vec::new();
-            let mut end_count = 0;
-            let mock_context = MockSignaler;
-            select_loop! {
-                mock_context,
-                on_stopped => {},
-                msg = rx.next() => {
-                    match msg {
-                        Some(v) => received.push(v),
-                        None => break,
-                    }
-                },
-                on_end => {
-                    end_count += 1;
-                },
-            }
-            assert_eq!(received, vec![1, 2, 3]);
-            // on_end runs after each arm: 3 messages, but not after break
-            assert_eq!(end_count, 3);
-        });
-    }
-
-    #[test]
-    fn test_select_loop_on_start_and_on_end() {
+    fn test_select_loop_lifecycle_hooks() {
         block_on(async move {
             let (mut tx, mut rx) = mpsc::unbounded();
             tx.send(10).await.unwrap();
@@ -387,6 +325,88 @@ mod tests {
             // Second iteration: receive 3, push 3*10=30, then on_end pushes 10
             // Third iteration: receive None, break (on_end not called)
             assert_eq!(results, vec![50, 10, 30, 10]);
+        });
+    }
+
+    #[test]
+    fn test_select_braceless_expressions() {
+        block_on(async move {
+            let mut results = Vec::new();
+
+            // Test braceless assignment expression
+            let (mut tx1, mut rx1) = mpsc::unbounded::<i32>();
+            tx1.send(42).await.unwrap();
+            drop(tx1);
+
+            #[allow(unused_assignments)]
+            let mut result = 0;
+            select! {
+                msg = rx1.next() => result = msg.unwrap_or(0),
+            }
+            assert_eq!(result, 42);
+
+            // Test braceless method call
+            let (mut tx2, mut rx2) = mpsc::unbounded();
+            tx2.send(100).await.unwrap();
+            drop(tx2);
+
+            select! {
+                msg = rx2.next() => results.push(msg.unwrap()),
+            }
+
+            // Test braced syntax still works
+            let (mut tx3, mut rx3) = mpsc::unbounded();
+            tx3.send(1).await.unwrap();
+            drop(tx3);
+
+            select! {
+                msg = rx3.next() => if let Some(v) = msg {
+                    results.push(v);
+                },
+            }
+
+            assert_eq!(results, vec![100, 1]);
+        });
+    }
+
+    #[test]
+    fn test_select_loop_braceless_syntax() {
+        block_on(async move {
+            // Test all braceless: on_start, on_stopped, branch, on_end
+            let (mut tx, mut rx) = mpsc::unbounded();
+            tx.send(10).await.unwrap();
+            tx.send(20).await.unwrap();
+            drop(tx);
+
+            let mut start_count = 0;
+            let mut end_count = 0;
+            let mut received = Vec::new();
+            let mock_context = MockSignaler;
+            select_loop! {
+                mock_context,
+                on_start => start_count += 1,
+                on_stopped => {},
+                msg = rx.next() => match msg {
+                    Some(v) => received.push(v),
+                    None => break,
+                },
+                on_end => end_count += 1,
+            }
+            assert_eq!(received, vec![10, 20]);
+            assert_eq!(start_count, 3); // 2 messages + None
+            assert_eq!(end_count, 2); // 2 messages, not break
+
+            // Test braceless on_stopped with immediate shutdown
+            let (_tx2, mut rx2) = mpsc::unbounded::<i32>();
+            #[allow(unused_assignments)]
+            let mut did_shutdown = false;
+            let mock_context2 = MockSignalerResolves;
+            select_loop! {
+                mock_context2,
+                on_stopped => did_shutdown = true,
+                _ = rx2.next() => {},
+            }
+            assert!(did_shutdown);
         });
     }
 }
