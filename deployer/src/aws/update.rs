@@ -32,7 +32,7 @@ pub async fn update(config_path: &PathBuf, concurrency: usize) -> Result<(), Err
     info!(tag = tag.as_str(), "loaded configuration");
 
     // Ensure created file exists
-    let tag_directory = deployer_directory(tag);
+    let tag_directory = deployer_directory(Some(tag));
     let created_file = tag_directory.join(CREATED_FILE_NAME);
     if !created_file.exists() {
         return Err(Error::DeploymentNotComplete(tag.clone()));

@@ -1,9 +1,9 @@
 use super::{Config, Error};
-use bytes::BufMut;
 use commonware_codec::{Codec, FixedSize, ReadExt};
 use commonware_cryptography::{crc32, Crc32};
 use commonware_runtime::{
-    telemetry::metrics::status::GaugeExt, Blob, Clock, Error as RError, Metrics, Storage,
+    telemetry::metrics::status::GaugeExt, Blob, BufMut, Clock, Error as RError, IoBufMut, Metrics,
+    Storage,
 };
 use commonware_utils::Span;
 use futures::{future::try_join_all, lock::Mutex};
@@ -154,8 +154,10 @@ impl<E: Clock + Storage + Metrics, K: Span, V: Codec> Metadata<E, K, V> {
         }
 
         // Read blob
-        let len = len.try_into().map_err(|_| Error::BlobTooLarge(len))?;
-        let buf = blob.read_at(vec![0u8; len], 0).await?;
+        let buf = blob
+            .read_at(0, IoBufMut::zeroed(len as usize))
+            .await?
+            .coalesce();
 
         // Verify integrity.
         //
@@ -215,7 +217,10 @@ impl<E: Clock + Storage + Metrics, K: Span, V: Codec> Metadata<E, K, V> {
         }
 
         // Return info
-        Ok((data, Wrapper::new(blob, version, lengths, buf.into())))
+        Ok((
+            data,
+            Wrapper::new(blob, version, lengths, buf.freeze().into()),
+        ))
     }
 
     /// Get a value from [Metadata] (if it exists).
@@ -382,7 +387,7 @@ impl<E: Clock + Storage + Metrics, K: Span, V: Codec> Metadata<E, K, V> {
                     // Overwrite existing value
                     let encoded = new_value.encode_mut();
                     target.data[info.start..info.start + info.length].copy_from_slice(&encoded);
-                    writes.push(target.blob.write_at(encoded, info.start as u64));
+                    writes.push(target.blob.write_at(info.start as u64, encoded));
                 } else {
                     // Rewrite all
                     overwrite = false;
@@ -402,7 +407,7 @@ impl<E: Clock + Storage + Metrics, K: Span, V: Codec> Metadata<E, K, V> {
             // Update version
             let version = next_version.to_be_bytes();
             target.data[0..8].copy_from_slice(&version);
-            writes.push(target.blob.write_at(version.as_slice().into(), 0));
+            writes.push(target.blob.write_at(0, version.as_slice().into()));
 
             // Update checksum
             let checksum_index = target.data.len() - crc32::Digest::SIZE;
@@ -411,7 +416,7 @@ impl<E: Clock + Storage + Metrics, K: Span, V: Codec> Metadata<E, K, V> {
             writes.push(
                 target
                     .blob
-                    .write_at(checksum.as_slice().into(), checksum_index as u64),
+                    .write_at(checksum_index as u64, checksum.as_slice().into()),
             );
 
             // Persist changes
@@ -439,7 +444,7 @@ impl<E: Clock + Storage + Metrics, K: Span, V: Codec> Metadata<E, K, V> {
         next_data.put_u32(Crc32::checksum(&next_data[..]));
 
         // Write and persist the new data
-        target.blob.write_at(next_data.clone(), 0).await?;
+        target.blob.write_at(0, next_data.clone()).await?;
         if next_data.len() < target.data.len() {
             target.blob.resize(next_data.len() as u64).await?;
         }

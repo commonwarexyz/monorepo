@@ -573,7 +573,6 @@ where
 mod tests {
     use super::*;
     use crate::p2p::mocks::Key as MockKey;
-    use bytes::Buf;
     use commonware_cryptography::{
         ed25519::{PrivateKey, PublicKey},
         Signer,
@@ -581,7 +580,7 @@ mod tests {
     use commonware_p2p::{LimitedSender, Recipients, UnlimitedSender};
     use commonware_runtime::{
         deterministic::{self, Context, Runner},
-        KeyedRateLimiter, Quota, Runner as _, RwLock,
+        IoBufMut, KeyedRateLimiter, Quota, Runner as _, RwLock,
     };
     use commonware_utils::NZU32;
     use std::{fmt, sync::Arc, time::Duration};
@@ -610,7 +609,7 @@ mod tests {
 
         async fn send(
             self,
-            message: impl Buf + Send,
+            message: impl Into<IoBufMut> + Send,
             priority: bool,
         ) -> Result<Vec<Self::PublicKey>, Self::Error> {
             self.sender.send(self.recipients, message, priority).await
@@ -627,7 +626,7 @@ mod tests {
         async fn send(
             &mut self,
             _recipients: Recipients<Self::PublicKey>,
-            _message: impl Buf + Send,
+            _message: impl Into<IoBufMut> + Send,
             _priority: bool,
         ) -> Result<Vec<Self::PublicKey>, Self::Error> {
             Ok(vec![])
@@ -664,7 +663,7 @@ mod tests {
         async fn send(
             &mut self,
             recipients: Recipients<Self::PublicKey>,
-            _message: impl Buf + Send,
+            _message: impl Into<IoBufMut> + Send,
             _priority: bool,
         ) -> Result<Vec<Self::PublicKey>, Self::Error> {
             match recipients {

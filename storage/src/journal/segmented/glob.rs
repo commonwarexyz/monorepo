@@ -28,10 +28,9 @@
 
 use super::manager::{Config as ManagerConfig, Manager, WriteFactory};
 use crate::journal::Error;
-use bytes::BufMut;
 use commonware_codec::{Codec, CodecShared, FixedSize};
 use commonware_cryptography::{crc32, Crc32};
-use commonware_runtime::{Blob as _, Error as RError, Metrics, Storage};
+use commonware_runtime::{Blob as _, BufMut, Error as RError, IoBufMut, Metrics, Storage};
 use std::{io::Cursor, num::NonZeroUsize};
 use zstd::{bulk::compress, decode_all};
 
@@ -113,7 +112,7 @@ impl<E: Storage + Metrics, V: CodecShared> Glob<E, V> {
         let entry_size = u32::try_from(buf.len()).map_err(|_| Error::ValueTooLarge)?;
         let writer = self.manager.get_or_create(section).await?;
         let offset = writer.size().await;
-        writer.write_at(buf, offset).await.map_err(Error::Runtime)?;
+        writer.write_at(offset, buf).await.map_err(Error::Runtime)?;
 
         Ok((offset, entry_size))
     }
@@ -128,11 +127,11 @@ impl<E: Storage + Metrics, V: CodecShared> Glob<E, V> {
             .get(section)?
             .ok_or(Error::SectionOutOfRange(section))?;
 
-        let size_usize = size as usize;
-
         // Read via buffered writer (handles read-through for buffered data)
-        let buf = writer.read_at(vec![0u8; size_usize], offset).await?;
-        let buf = buf.as_ref();
+        let buf = writer
+            .read_at(offset, IoBufMut::zeroed(size as usize))
+            .await?
+            .coalesce();
 
         // Entry format: [compressed_data] [crc32 (4 bytes)]
         if buf.len() < crc32::Digest::SIZE {
@@ -140,9 +139,12 @@ impl<E: Storage + Metrics, V: CodecShared> Glob<E, V> {
         }
 
         let data_len = buf.len() - crc32::Digest::SIZE;
-        let compressed_data = &buf[..data_len];
-        let stored_checksum =
-            u32::from_be_bytes(buf[data_len..].try_into().expect("checksum is 4 bytes"));
+        let compressed_data = &buf.as_ref()[..data_len];
+        let stored_checksum = u32::from_be_bytes(
+            buf.as_ref()[data_len..]
+                .try_into()
+                .expect("checksum is 4 bytes"),
+        );
 
         // Verify checksum
         let checksum = Crc32::checksum(compressed_data);
@@ -373,7 +375,7 @@ mod tests {
             // Corrupt the data by writing directly to the underlying blob
             let writer = glob.manager.blobs.get(&1).unwrap();
             writer
-                .write_at(vec![0xFF, 0xFF, 0xFF, 0xFF], offset)
+                .write_at(offset, vec![0xFF, 0xFF, 0xFF, 0xFF])
                 .await
                 .expect("Failed to corrupt");
             writer.sync().await.expect("Failed to sync");

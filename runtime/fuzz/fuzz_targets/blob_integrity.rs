@@ -15,10 +15,9 @@
 #![no_main]
 
 use arbitrary::{Arbitrary, Unstructured};
-use bytes::Buf;
 use commonware_runtime::{
     buffer::pool::{Append, PoolRef},
-    deterministic, Blob, Error, Runner, Storage,
+    deterministic, Blob, Buf, Error, IoBufMut, Runner, Storage,
 };
 use commonware_utils::{NZUsize, NZU16};
 use libfuzzer_sys::fuzz_target;
@@ -136,11 +135,12 @@ fn fuzz(input: FuzzInput) {
 
         // Read the byte, flip the bit, write it back.
         let byte_buf = blob
-            .read_at(vec![0u8; 1], corrupt_offset)
+            .read_at(corrupt_offset, IoBufMut::zeroed(1))
             .await
-            .expect("cannot read byte to corrupt");
+            .expect("cannot read byte to corrupt")
+            .coalesce();
         let corrupted_byte = byte_buf.as_ref()[0] ^ (1 << corrupt_bit);
-        blob.write_at(vec![corrupted_byte], corrupt_offset)
+        blob.write_at(corrupt_offset, vec![corrupted_byte])
             .await
             .expect("cannot write corrupted byte");
         blob.sync().await.expect("cannot sync corruption");
@@ -252,16 +252,14 @@ fn fuzz(input: FuzzInput) {
                 }
             } else {
                 // Use Append.read_at directly.
-                let buf = vec![0u8; len];
-                let read_result = append.read_at(buf, offset).await;
+                let read_result = append.read_at(offset, IoBufMut::zeroed(len)).await;
 
                 match read_result {
                     Ok(buf) => {
                         // Read succeeded - data must match expected.
-                        let buf: Vec<u8> = buf.into();
                         let expected_slice = &expected_data[offset as usize..offset as usize + len];
                         assert_eq!(
-                            &buf, expected_slice,
+                            buf.coalesce(), expected_slice,
                             "Read via Append returned wrong data at offset {}, len {}",
                             offset, len
                         );

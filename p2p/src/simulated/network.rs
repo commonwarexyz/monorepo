@@ -11,13 +11,12 @@ use crate::{
     utils::limited::{CheckedSender as LimitedCheckedSender, Connected, LimitedSender},
     Channel, Message, Recipients, UnlimitedSender as _,
 };
-use bytes::{Buf, Bytes};
 use commonware_codec::{DecodeExt, FixedSize};
 use commonware_cryptography::PublicKey;
 use commonware_macros::{select, select_loop};
 use commonware_runtime::{
-    spawn_cell, Clock, ContextCell, Handle, Listener as _, Metrics, Network as RNetwork, Quota,
-    Spawner,
+    spawn_cell, Clock, ContextCell, Handle, IoBuf, IoBufMut, Listener as _, Metrics,
+    Network as RNetwork, Quota, Spawner,
 };
 use commonware_stream::utils::codec::{recv_frame, send_frame};
 use commonware_utils::{
@@ -42,7 +41,7 @@ use std::{
 use tracing::{debug, error, trace, warn};
 
 /// Task type representing a message to be sent within the network.
-type Task<P> = (Channel, P, Recipients<P>, Bytes, oneshot::Sender<Vec<P>>);
+type Task<P> = (Channel, P, Recipients<P>, IoBuf, oneshot::Sender<Vec<P>>);
 
 /// Target for a message in a split receiver.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -64,12 +63,12 @@ pub enum SplitOrigin {
 
 /// A function that forwards messages from [SplitOrigin] to [Recipients].
 pub trait SplitForwarder<P: PublicKey>:
-    Fn(SplitOrigin, &Recipients<P>, &Bytes) -> Option<Recipients<P>> + Send + Sync + Clone + 'static
+    Fn(SplitOrigin, &Recipients<P>, &IoBuf) -> Option<Recipients<P>> + Send + Sync + Clone + 'static
 {
 }
 
 impl<P: PublicKey, F> SplitForwarder<P> for F where
-    F: Fn(SplitOrigin, &Recipients<P>, &Bytes) -> Option<Recipients<P>>
+    F: Fn(SplitOrigin, &Recipients<P>, &IoBuf) -> Option<Recipients<P>>
         + Send
         + Sync
         + Clone
@@ -777,18 +776,19 @@ impl<P: PublicKey> crate::UnlimitedSender for UnlimitedSender<P> {
     async fn send(
         &mut self,
         recipients: Recipients<P>,
-        mut message: impl Buf + Send,
+        message: impl Into<IoBufMut> + Send,
         priority: bool,
     ) -> Result<Vec<P>, Error> {
+        let message = message.into().freeze();
+
         // Check message size
-        if message.remaining() > self.max_size as usize {
-            return Err(Error::MessageTooLarge(message.remaining()));
+        if message.len() > self.max_size as usize {
+            return Err(Error::MessageTooLarge(message.len()));
         }
 
         // Send message
         let (sender, receiver) = oneshot::channel();
         let channel = if priority { &self.high } else { &self.low };
-        let message = message.copy_to_bytes(message.remaining());
         if channel
             .unbounded_send((self.channel, self.me.clone(), recipients, message, sender))
             .is_err()
@@ -978,11 +978,11 @@ impl<'a, P: PublicKey, E: Clock, F: SplitForwarder<P>> crate::CheckedSender
 
     async fn send(
         self,
-        mut message: impl Buf + Send,
+        message: impl Into<IoBufMut> + Send,
         priority: bool,
     ) -> Result<Vec<Self::PublicKey>, Self::Error> {
-        // Convert to Bytes here since forwarder needs to inspect the message
-        let message = message.copy_to_bytes(message.remaining());
+        // Convert to IoBuf here since forwarder needs to inspect the message
+        let message = message.into().freeze();
 
         // Determine the set of recipients that will receive the message
         let Some(recipients) = (self.forwarder)(self.replica, &self.recipients, &message) else {
@@ -1179,15 +1179,16 @@ impl<P: PublicKey> Peer<P> {
                                     return;
                                 }
                             };
-                            let Ok(dialer) = P::decode(dialer.as_ref()) else {
+                            let Ok(dialer) = P::decode(dialer.coalesce()) else {
                                 error!("received public key is invalid");
                                 return;
                             };
 
                             // Continually receive messages from the dialer and send them to the inbox
                             while let Ok(data) = recv_frame(&mut stream, max_size).await {
+                                let data = data.coalesce();
                                 let channel = Channel::from_be_bytes(
-                                    data[..Channel::SIZE].try_into().unwrap(),
+                                    data.as_ref()[..Channel::SIZE].try_into().unwrap(),
                                 );
                                 let message = data.slice(Channel::SIZE..);
                                 if let Err(err) = inbox_sender
@@ -1237,7 +1238,7 @@ struct Link {
     sampler: Normal<f64>,
     success_rate: f64,
     // Messages with their receive time for ordered delivery
-    inbox: mpsc::UnboundedSender<(Channel, Bytes, SystemTime)>,
+    inbox: mpsc::UnboundedSender<(Channel, IoBuf, SystemTime)>,
 }
 
 /// Buffered payload waiting for earlier messages on the same link to complete.
@@ -1255,11 +1256,11 @@ impl Link {
     ) -> Self {
         // Spawn a task that will wait for messages to be sent to the link and then send them
         // over the network.
-        let (inbox, mut outbox) = mpsc::unbounded::<(Channel, Bytes, SystemTime)>();
+        let (inbox, mut outbox) = mpsc::unbounded::<(Channel, IoBuf, SystemTime)>();
         context.with_label("link").spawn(move |context| async move {
             // Dial the peer and handshake by sending it the dialer's public key
             let (mut sink, _) = context.dial(socket).await.unwrap();
-            if let Err(err) = send_frame(&mut sink, dialer.as_ref(), max_size).await {
+            if let Err(err) = send_frame(&mut sink, dialer.as_ref().to_vec(), max_size).await {
                 error!(?err, "failed to send public key to listener");
                 return;
             }
@@ -1270,7 +1271,10 @@ impl Link {
                 context.sleep_until(receive_complete_at).await;
 
                 // Send the message
-                let data = Bytes::from_owner(channel.to_be_bytes()).chain(message);
+                let channel_bytes = channel.to_be_bytes();
+                let mut data = Vec::with_capacity(channel_bytes.len() + message.len());
+                data.extend_from_slice(&channel_bytes);
+                data.extend_from_slice(message.as_ref());
                 let _ = send_frame(&mut sink, data, max_size).await;
 
                 // Bump received messages metric
@@ -1291,7 +1295,7 @@ impl Link {
     fn send(
         &mut self,
         channel: Channel,
-        message: Bytes,
+        message: IoBuf,
         receive_complete_at: SystemTime,
     ) -> Result<(), Error> {
         self.inbox
@@ -1305,7 +1309,6 @@ impl Link {
 mod tests {
     use super::*;
     use crate::{Manager, Receiver as _, Recipients, Sender as _};
-    use bytes::Bytes;
     use commonware_cryptography::{ed25519, Signer as _};
     use commonware_runtime::{deterministic, Quota, Runner as _};
     use futures::FutureExt;
@@ -1464,42 +1467,38 @@ mod tests {
                 .unwrap();
 
             // Send messages in both directions
-            let msg_a_to_twin = Bytes::from_static(b"from_a");
-            let msg_b_to_twin = Bytes::from_static(b"from_b");
-            let msg_primary_out = Bytes::from_static(b"primary_out");
-            let msg_secondary_out = Bytes::from_static(b"secondary_out");
             peer_a_sender
-                .send(Recipients::One(twin.clone()), msg_a_to_twin.clone(), false)
+                .send(Recipients::One(twin.clone()), b"from_a", false)
                 .await
                 .unwrap();
             peer_b_sender
-                .send(Recipients::One(twin.clone()), msg_b_to_twin.clone(), false)
+                .send(Recipients::One(twin.clone()), b"from_b", false)
                 .await
                 .unwrap();
             twin_primary_sender
-                .send(Recipients::All, msg_primary_out.clone(), false)
+                .send(Recipients::All, b"primary_out", false)
                 .await
                 .unwrap();
             twin_secondary_sender
-                .send(Recipients::All, msg_secondary_out.clone(), false)
+                .send(Recipients::All, b"secondary_out", false)
                 .await
                 .unwrap();
 
             // Verify routing: peer_a messages go to primary, peer_b to secondary
             let (sender, payload) = twin_primary_recv.recv().await.unwrap();
             assert_eq!(sender, peer_a);
-            assert_eq!(payload, msg_a_to_twin);
+            assert_eq!(payload, b"from_a");
             let (sender, payload) = twin_secondary_recv.recv().await.unwrap();
             assert_eq!(sender, peer_b);
-            assert_eq!(payload, msg_b_to_twin);
+            assert_eq!(payload, b"from_b");
 
             // Verify routing: primary sends to peer_a, secondary to peer_b
             let (sender, payload) = peer_a_recv.recv().await.unwrap();
             assert_eq!(sender, twin);
-            assert_eq!(payload, msg_primary_out);
+            assert_eq!(payload, b"primary_out");
             let (sender, payload) = peer_b_recv.recv().await.unwrap();
             assert_eq!(sender, twin);
-            assert_eq!(payload, msg_secondary_out);
+            assert_eq!(payload, b"secondary_out");
         });
     }
 
@@ -1562,19 +1561,18 @@ mod tests {
                 .unwrap();
 
             // Send a message from peer_c to twin
-            let msg_both = Bytes::from_static(b"to_both");
             peer_c_sender
-                .send(Recipients::One(twin.clone()), msg_both.clone(), false)
+                .send(Recipients::One(twin.clone()), b"to_both", false)
                 .await
                 .unwrap();
 
             // Verify both receivers get the message
             let (sender, payload) = twin_primary_recv.recv().await.unwrap();
             assert_eq!(sender, peer_c);
-            assert_eq!(payload, msg_both);
+            assert_eq!(payload, b"to_both");
             let (sender, payload) = twin_secondary_recv.recv().await.unwrap();
             assert_eq!(sender, peer_c);
-            assert_eq!(payload, msg_both);
+            assert_eq!(payload, b"to_both");
         });
     }
 
@@ -1637,9 +1635,8 @@ mod tests {
                 .unwrap();
 
             // Send a message from peer_c to twin
-            let msg_both = Bytes::from_static(b"to_both");
             let sent = peer_c_sender
-                .send(Recipients::One(twin.clone()), msg_both.clone(), false)
+                .send(Recipients::One(twin.clone()), b"to_both", false)
                 .await
                 .unwrap();
             assert_eq!(sent.len(), 1);
@@ -1651,17 +1648,15 @@ mod tests {
             assert!(twin_secondary_recv.recv().now_or_never().is_none());
 
             // Send a message from twin to peer_c
-            let msg_both = Bytes::from_static(b"to_both");
             let sent = twin_primary_sender
-                .send(Recipients::One(peer_c.clone()), msg_both.clone(), false)
+                .send(Recipients::One(peer_c.clone()), b"to_both", false)
                 .await
                 .unwrap();
             assert_eq!(sent.len(), 0);
 
             // Send a message from twin to peer_c
-            let msg_both = Bytes::from_static(b"to_both");
             let sent = twin_secondary_sender
-                .send(Recipients::One(peer_c.clone()), msg_both.clone(), false)
+                .send(Recipients::One(peer_c.clone()), b"to_both", false)
                 .await
                 .unwrap();
             assert_eq!(sent.len(), 0);
@@ -1808,7 +1803,7 @@ mod tests {
             const COUNT: usize = 50;
             let mut expected = Vec::with_capacity(COUNT);
             for i in 0..COUNT {
-                let msg = Bytes::from(vec![i as u8; 64]);
+                let msg = vec![i as u8; 64];
                 sender
                     .send(Recipients::One(recipient_pk.clone()), msg.clone(), false)
                     .await
@@ -1818,7 +1813,7 @@ mod tests {
 
             for expected_msg in expected {
                 let (_pk, bytes) = receiver.recv().await.unwrap();
-                assert_eq!(bytes, expected_msg);
+                assert_eq!(bytes, expected_msg.as_slice());
             }
 
             drop(oracle);
@@ -1896,7 +1891,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            let big_msg = Bytes::from(vec![7u8; 10_000]);
+            let big_msg = vec![7u8; 10_000];
             let start = context.current();
             sender
                 .send(Recipients::All, big_msg.clone(), false)
@@ -1904,12 +1899,12 @@ mod tests {
                 .unwrap();
 
             let (_pk, received_a) = recv_a.recv().await.unwrap();
-            assert_eq!(received_a, big_msg);
+            assert_eq!(received_a, big_msg.as_slice());
             let elapsed_a = context.current().duration_since(start).unwrap();
             assert!(elapsed_a >= Duration::from_secs(20));
 
             let (_pk, received_b) = recv_b.recv().await.unwrap();
-            assert_eq!(received_b, big_msg);
+            assert_eq!(received_b, big_msg.as_slice());
             let elapsed_b = context.current().duration_since(start).unwrap();
             assert!(elapsed_b >= Duration::from_secs(20));
 

@@ -89,10 +89,24 @@ async fn main() -> std::process::ExitCode {
                         .arg(
                             Arg::new("config")
                                 .long("config")
-                                .required(true)
                                 .help("Path to YAML config file")
                                 .value_parser(clap::value_parser!(PathBuf)),
+                        )
+                        .arg(
+                            Arg::new("tag")
+                                .long("tag")
+                                .help("Deployment tag")
+                                .value_parser(clap::value_parser!(String)),
+                        )
+                        .group(
+                            clap::ArgGroup::new("target")
+                                .args(["config", "tag"])
+                                .required(true),
                         ),
+                )
+                .subcommand(
+                    Command::new(aws::LIST_CMD)
+                        .about("List all active deployments (created but not destroyed)."),
                 )
                 .subcommand(
                     Command::new(aws::CLEAN_CMD)
@@ -172,9 +186,17 @@ async fn main() -> std::process::ExitCode {
                 }
             }
             Some((aws::DESTROY_CMD, matches)) => {
-                let config_path = matches.get_one::<PathBuf>("config").unwrap();
-                if let Err(e) = aws::destroy(config_path).await {
+                let config_path = matches.get_one::<PathBuf>("config");
+                let tag = matches.get_one::<String>("tag").map(|s| s.as_str());
+                if let Err(e) = aws::destroy(config_path, tag).await {
                     error!(error=?e, "failed to destroy EC2 deployment");
+                } else {
+                    return std::process::ExitCode::SUCCESS;
+                }
+            }
+            Some((aws::LIST_CMD, _)) => {
+                if let Err(e) = aws::list() {
+                    error!(error=?e, "failed to list deployments");
                 } else {
                     return std::process::ExitCode::SUCCESS;
                 }

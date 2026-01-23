@@ -1,4 +1,5 @@
 use super::location::Location;
+use bytes::{Buf, BufMut};
 use commonware_codec::ReadExt;
 use core::{
     fmt,
@@ -306,7 +307,7 @@ impl SubAssign<u64> for Position {
 // Codec implementations using varint encoding for efficient storage
 impl commonware_codec::Write for Position {
     #[inline]
-    fn write(&self, buf: &mut impl bytes::BufMut) {
+    fn write(&self, buf: &mut impl BufMut) {
         commonware_codec::varint::UInt(self.0).write(buf);
     }
 }
@@ -322,7 +323,7 @@ impl commonware_codec::Read for Position {
     type Cfg = ();
 
     #[inline]
-    fn read_cfg(buf: &mut impl bytes::Buf, _: &()) -> Result<Self, commonware_codec::Error> {
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, commonware_codec::Error> {
         let value: u64 = commonware_codec::varint::UInt::read(buf)?.into();
         if value <= MAX_POSITION.0 {
             Ok(Self(value))

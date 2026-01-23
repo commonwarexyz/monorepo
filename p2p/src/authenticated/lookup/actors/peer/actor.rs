@@ -1,6 +1,6 @@
 use super::{ingress::Message, Config, Error};
 use crate::authenticated::{
-    data::Data,
+    data::EncodedData,
     lookup::{channels::Channels, metrics, types},
     relay::Relay,
     Mailbox,
@@ -8,7 +8,9 @@ use crate::authenticated::{
 use commonware_codec::{Decode, Encode};
 use commonware_cryptography::PublicKey;
 use commonware_macros::{select, select_loop};
-use commonware_runtime::{Clock, Handle, Metrics, Quota, RateLimiter, Sink, Spawner, Stream};
+use commonware_runtime::{
+    Clock, Handle, IoBuf, Metrics, Quota, RateLimiter, Sink, Spawner, Stream,
+};
 use commonware_stream::{Receiver, Sender};
 use commonware_utils::time::SYSTEM_TIME_PRECISION;
 use futures::{channel::mpsc, StreamExt};
@@ -23,8 +25,8 @@ pub struct Actor<E: Spawner + Clock + Metrics, C: PublicKey> {
     ping_frequency: Duration,
 
     control: mpsc::Receiver<Message>,
-    high: mpsc::Receiver<Data>,
-    low: mpsc::Receiver<Data>,
+    high: mpsc::Receiver<EncodedData>,
+    low: mpsc::Receiver<EncodedData>,
 
     sent_messages: Family<metrics::Message, Counter>,
     received_messages: Family<metrics::Message, Counter>,
@@ -34,7 +36,7 @@ pub struct Actor<E: Spawner + Clock + Metrics, C: PublicKey> {
 }
 
 impl<E: Spawner + Clock + CryptoRngCore + Metrics, C: PublicKey> Actor<E, C> {
-    pub fn new(context: E, cfg: Config) -> (Self, Mailbox<Message>, Relay<Data>) {
+    pub fn new(context: E, cfg: Config) -> (Self, Mailbox<Message>, Relay<EncodedData>) {
         let (control_sender, control_receiver) = Mailbox::new(cfg.mailbox_size);
         let (high_sender, high_receiver) = mpsc::channel(cfg.mailbox_size);
         let (low_sender, low_receiver) = mpsc::channel(cfg.mailbox_size);
@@ -58,22 +60,22 @@ impl<E: Spawner + Clock + CryptoRngCore + Metrics, C: PublicKey> Actor<E, C> {
 
     /// Unpack outbound `msg` and assert the underlying `channel` is registered.
     fn validate_outbound_msg<V>(
-        msg: Option<Data>,
+        msg: Option<EncodedData>,
         rate_limits: &HashMap<u64, V>,
-    ) -> Result<Data, Error> {
-        let data = match msg {
-            Some(data) => data,
+    ) -> Result<EncodedData, Error> {
+        let encoded = match msg {
+            Some(encoded) => encoded,
             None => return Err(Error::PeerDisconnected),
         };
         assert!(
-            rate_limits.contains_key(&data.channel),
+            rate_limits.contains_key(&encoded.channel),
             "outbound message on invalid channel"
         );
-        Ok(data)
+        Ok(encoded)
     }
 
     /// Creates a message from a payload, then sends and increments metrics.
-    async fn send<Si: Sink>(
+    async fn send_payload<Si: Sink>(
         sender: &mut Sender<Si>,
         sent_messages: &Family<metrics::Message, Counter>,
         metric: metrics::Message,
@@ -81,6 +83,18 @@ impl<E: Spawner + Clock + CryptoRngCore + Metrics, C: PublicKey> Actor<E, C> {
     ) -> Result<(), Error> {
         let msg = payload.encode();
         sender.send(msg).await.map_err(Error::SendFailed)?;
+        sent_messages.get_or_create(&metric).inc();
+        Ok(())
+    }
+
+    /// Sends pre-encoded bytes directly to the stream.
+    async fn send_encoded<Si: Sink>(
+        sender: &mut Sender<Si>,
+        sent_messages: &Family<metrics::Message, Counter>,
+        metric: metrics::Message,
+        payload: IoBuf,
+    ) -> Result<(), Error> {
+        sender.send(payload).await.map_err(Error::SendFailed)?;
         sent_messages.get_or_create(&metric).inc();
         Ok(())
     }
@@ -120,7 +134,7 @@ impl<E: Spawner + Clock + CryptoRngCore + Metrics, C: PublicKey> Actor<E, C> {
                     on_stopped => {},
                     _ = context.sleep_until(deadline) => {
                         // Periodically send a ping to the peer
-                        Self::send(
+                        Self::send_payload(
                             &mut conn_sender,
                             &self.sent_messages,
                             metrics::Message::new_ping(&peer),
@@ -142,13 +156,15 @@ impl<E: Spawner + Clock + CryptoRngCore + Metrics, C: PublicKey> Actor<E, C> {
                         }
                     },
                     msg_high = self.high.next() => {
-                        let msg = Self::validate_outbound_msg(msg_high, &rate_limits)?;
-                        Self::send(&mut conn_sender, &self.sent_messages, metrics::Message::new_data(&peer, msg.channel), msg.into())
+                        // Data is already pre-encoded, just forward to stream
+                        let encoded = Self::validate_outbound_msg(msg_high, &rate_limits)?;
+                        Self::send_encoded(&mut conn_sender, &self.sent_messages, metrics::Message::new_data(&peer, encoded.channel), encoded.payload)
                             .await?;
                     },
                     msg_low = self.low.next() => {
-                        let msg = Self::validate_outbound_msg(msg_low, &rate_limits)?;
-                        Self::send(&mut conn_sender, &self.sent_messages, metrics::Message::new_data(&peer, msg.channel), msg.into())
+                        // Data is already pre-encoded, just forward to stream
+                        let encoded = Self::validate_outbound_msg(msg_low, &rate_limits)?;
+                        Self::send_encoded(&mut conn_sender, &self.sent_messages, metrics::Message::new_data(&peer, encoded.channel), encoded.payload)
                             .await?;
                     }
                 }
