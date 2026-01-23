@@ -27,6 +27,7 @@ commonware-parallel.workspace = true
 commonware-utils.workspace = true
 crc-fast = { workspace = true, features = ["panic-handler"] }
 ctutils.workspace = true
+curve25519-dalek = { workspace = true, default-features = false }
 ecdsa.workspace = true
 ed25519-consensus = { workspace = true, default-features = false }
 num-rational = { workspace = true, optional = true }

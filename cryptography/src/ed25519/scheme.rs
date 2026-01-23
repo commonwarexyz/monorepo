@@ -13,6 +13,7 @@ use core::{
     hash::{Hash, Hasher},
     ops::Deref,
 };
+use curve25519_dalek::edwards::CompressedEdwardsY;
 use ed25519_consensus::{self, VerificationKey};
 use rand_core::CryptoRngCore;
 #[cfg(feature = "std")]
@@ -131,10 +132,41 @@ impl arbitrary::Arbitrary<'_> for PrivateKey {
 }
 
 /// Ed25519 Public Key.
-#[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
+///
+/// The `raw` field preserves the original encoding for serialization, while the
+/// `VerificationKey` is constructed from canonicalized bytes. `Eq`, `Ord`, and
+/// `Hash` are based on `key`, ensuring non-canonical encodings of the same curve
+/// point (e.g. ZIP-215) are treated as equal.
+#[derive(Clone)]
 pub struct PublicKey {
     raw: [u8; PUBLIC_KEY_LENGTH],
     key: ed25519_consensus::VerificationKey,
+}
+
+impl PartialEq for PublicKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.key == other.key
+    }
+}
+
+impl Eq for PublicKey {}
+
+impl PartialOrd for PublicKey {
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for PublicKey {
+    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
+        self.key.cmp(&other.key)
+    }
+}
+
+impl Hash for PublicKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.key.hash(state);
+    }
 }
 
 impl From<PrivateKey> for PublicKey {
@@ -180,12 +212,13 @@ impl Read for PublicKey {
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let raw = <[u8; Self::SIZE]>::read(buf)?;
-        let result = VerificationKey::try_from(raw);
-        #[cfg(feature = "std")]
-        let key = result.map_err(|e| CodecError::Wrapped(CURVE_NAME, e.into()))?;
-        #[cfg(not(feature = "std"))]
-        let key = result
-            .map_err(|e| CodecError::Wrapped(CURVE_NAME, alloc::format!("{:?}", e).into()))?;
+
+        // Canonicalize and construct the VerificationKey from canonical bytes.
+        // This ensures consistent Eq/Ord/Hash behavior while preserving the
+        // original encoding in `raw` for serialization.
+        let canonical = canonicalize_public_key(raw)
+            .ok_or(CodecError::Invalid(CURVE_NAME, "invalid curve point"))?;
+        let key = VerificationKey::try_from(canonical).expect("canonical bytes are always valid");
 
         Ok(Self { raw, key })
     }
@@ -214,7 +247,12 @@ impl Deref for PublicKey {
 
 impl From<VerificationKey> for PublicKey {
     fn from(key: VerificationKey) -> Self {
+        // Keep the original bytes for serialization.
         let raw = key.to_bytes();
+        // Create a canonical VerificationKey for consistent Eq/Ord/Hash behavior.
+        let canonical =
+            canonicalize_public_key(raw).expect("VerificationKey bytes are always valid");
+        let key = VerificationKey::try_from(canonical).expect("canonical bytes are always valid");
         Self { raw, key }
     }
 }
@@ -399,6 +437,23 @@ impl Batch {
         self.verifier.queue(item);
         true
     }
+}
+
+/// Canonicalizes Ed25519 public key bytes by decompressing and re-compressing the curve
+/// point.
+///
+/// Ed25519 public keys can have multiple valid encodings for the same curve point due to
+/// non-canonical y-coordinates (ZIP-215). This function ensures a consistent canonical
+/// representation.
+///
+/// Returns `None` if the bytes do not represent a valid curve point.
+fn canonicalize_public_key(bytes: [u8; PUBLIC_KEY_LENGTH]) -> Option<[u8; PUBLIC_KEY_LENGTH]> {
+    Some(
+        CompressedEdwardsY(bytes)
+            .decompress()?
+            .compress()
+            .to_bytes(),
+    )
 }
 
 /// Test vectors sourced from https://datatracker.ietf.org/doc/html/rfc8032#section-7.1.
@@ -821,6 +876,50 @@ mod tests {
     fn test_from_private_key_to_public_key() {
         let private_key = PrivateKey::random(&mut test_rng());
         assert_eq!(private_key.public_key(), PublicKey::from(private_key));
+    }
+
+    #[test]
+    fn test_non_canonical_encoding_treated_as_same_identity() {
+        use core::hash::BuildHasher;
+        use curve25519_dalek::edwards::CompressedEdwardsY;
+        use std::hash::RandomState;
+
+        // Canonical encoding of identity: y = 1, sign bit = 0.
+        let canonical: [u8; 32] = [
+            1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0,
+        ];
+
+        // Non-canonical encoding of the same y: 1 + (2^255 - 19) = 2^255 - 18.
+        let non_canonical: [u8; 32] = [
+            0xee, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+            0xff, 0xff, 0xff, 0x7f,
+        ];
+
+        // Both encodings decompress to the same curve point.
+        let p1 = CompressedEdwardsY(canonical).decompress().unwrap();
+        let p2 = CompressedEdwardsY(non_canonical).decompress().unwrap();
+        assert_eq!(p1, p2);
+
+        let pk1 = PublicKey::decode(canonical.as_ref()).unwrap();
+        let pk2 = PublicKey::decode(non_canonical.as_ref()).unwrap();
+
+        // Original bytes are preserved for serialization.
+        assert_eq!(pk1.as_ref(), &canonical);
+        assert_eq!(pk2.as_ref(), &non_canonical);
+
+        // With canonicalization, both should now be equal.
+        assert_eq!(pk1, pk2);
+
+        // Verify ordering is consistent.
+        assert_eq!(pk1.cmp(&pk2), core::cmp::Ordering::Equal);
+
+        // Verify hashes are equal.
+        let hash_builder = RandomState::new();
+        let hash1 = hash_builder.hash_one(&pk1);
+        let hash2 = hash_builder.hash_one(&pk2);
+        assert_eq!(hash1, hash2);
     }
 
     #[cfg(feature = "arbitrary")]
