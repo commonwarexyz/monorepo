@@ -57,7 +57,7 @@ pub trait Votes: Send + Sync + 'static {
     /// # Returns
     ///
     /// `Ok(())` when the sync completes, or `Err` if syncing fails.
-    fn sync(&self, view: View) -> impl Future<Output = Result<(), Self::Error>> + Send;
+    fn sync(&mut self, view: View) -> impl Future<Output = Result<(), Self::Error>> + Send;
 
     /// Sync all data across all views.
     ///
@@ -67,7 +67,7 @@ pub trait Votes: Send + Sync + 'static {
     /// # Returns
     ///
     /// `Ok(())` when the sync completes, or `Err` if syncing fails.
-    fn sync_all(&self) -> impl Future<Output = Result<(), Self::Error>> + Send;
+    fn sync_all(&mut self) -> impl Future<Output = Result<(), Self::Error>> + Send;
 
     /// Prune all data for views below the given minimum.
     ///
@@ -93,7 +93,9 @@ pub trait Votes: Send + Sync + 'static {
     /// # Returns
     ///
     /// A stream of artifacts on success, or `Err` if replay initialization fails.
-    fn replay(&self) -> impl Future<Output = Result<Self::ReplayStream<'_>, Self::Error>> + Send;
+    fn replay(
+        &mut self,
+    ) -> impl Future<Output = Result<Self::ReplayStream<'_>, Self::Error>> + Send;
 }
 
 /// An Adapter for a [`Journal`] to configure how to replay its buffer.
@@ -150,11 +152,11 @@ where
         Ok(())
     }
 
-    async fn sync(&self, view: View) -> Result<(), Self::Error> {
+    async fn sync(&mut self, view: View) -> Result<(), Self::Error> {
         self.inner.sync(view.get()).await
     }
 
-    async fn sync_all(&self) -> Result<(), Self::Error> {
+    async fn sync_all(&mut self) -> Result<(), Self::Error> {
         self.inner.sync_all().await
     }
 
@@ -163,7 +165,7 @@ where
         Ok(())
     }
 
-    async fn replay(&self) -> Result<Self::ReplayStream<'_>, Self::Error> {
+    async fn replay(&mut self) -> Result<Self::ReplayStream<'_>, Self::Error> {
         let stream = self
             .inner
             .replay(0, 0, self.buffer)
