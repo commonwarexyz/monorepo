@@ -42,6 +42,7 @@ struct ToolUrls {
     jq: String,
     libfontconfig: String,
     unzip: String,
+    adduser: String,
 }
 
 /// Represents a deployed instance with its configuration and public IP
@@ -210,6 +211,13 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
         }
     };
 
+    // Cache adduser (arch-independent) once before the loop
+    let adduser_url = cache_tool(
+        adduser_bin_s3_key(ADDUSER_VERSION),
+        adduser_download_url(ADDUSER_VERSION),
+    )
+    .await?;
+
     // Cache tools for each architecture and store URLs per-architecture
     let mut tool_urls_by_arch: HashMap<Architecture, ToolUrls> = HashMap::new();
     for arch in &architectures_needed {
@@ -247,6 +255,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
                 jq: jq_url,
                 libfontconfig: libfontconfig_url,
                 unzip: unzip_url,
+                adduser: adduser_url.clone(),
             },
         );
     }
@@ -1084,6 +1093,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
         node_exporter_bin: tool_urls.node_exporter.clone(),
         libfontconfig_deb: tool_urls.libfontconfig.clone(),
         unzip_deb: tool_urls.unzip.clone(),
+        adduser_deb: tool_urls.adduser.clone(),
         prometheus_config: prometheus_config_url,
         datasources_yml: datasources_url,
         all_yml: all_yml_url,
