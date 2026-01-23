@@ -20,6 +20,7 @@ use std::{
     net::IpAddr,
     path::PathBuf,
     slice,
+    time::Instant,
 };
 use tokio::process::Command;
 use tracing::info;
@@ -1079,20 +1080,49 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
         .collect();
     let binary_futures = binary_configs.into_iter().map(
         |(instance, deployment_id, ec2_client, ip, bbr_url, urls, arch)| async move {
+            let start = Instant::now();
+
             wait_for_instances_ready(&ec2_client, slice::from_ref(&deployment_id)).await?;
+            let wait_ready_ms = start.elapsed().as_millis();
+
+            let bbr_start = Instant::now();
             enable_bbr(private_key, &ip, &bbr_url).await?;
+            let bbr_ms = bbr_start.elapsed().as_millis();
+
+            let apt_start = Instant::now();
+            ssh_execute(private_key, &ip, install_binary_apt_cmd()).await?;
+            let apt_ms = apt_start.elapsed().as_millis();
+
+            let download_start = Instant::now();
+            ssh_execute(private_key, &ip, &install_binary_download_cmd(&urls)).await?;
+            let download_ms = download_start.elapsed().as_millis();
+
+            let setup_start = Instant::now();
             ssh_execute(
                 private_key,
                 &ip,
-                &install_binary_cmd(&urls, instance.profiling, arch),
+                &install_binary_setup_cmd(instance.profiling, arch),
             )
             .await?;
+            let setup_ms = setup_start.elapsed().as_millis();
+
+            let poll_start = Instant::now();
             poll_service_active(private_key, &ip, "promtail").await?;
             poll_service_active(private_key, &ip, "node_exporter").await?;
             poll_service_active(private_key, &ip, "binary").await?;
+            let poll_ms = poll_start.elapsed().as_millis();
+
+            let total_ms = start.elapsed().as_millis();
             info!(
                 ip = ip.as_str(),
                 instance = instance.name.as_str(),
+                wait_ready_ms,
+                bbr_ms,
+                apt_ms,
+                download_ms,
+                setup_ms,
+                poll_ms,
+                total_ms,
                 "configured instance"
             );
             Ok::<String, Error>(ip)
@@ -1103,32 +1133,66 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
     let (_, all_binary_ips) = tokio::try_join!(
         async {
             // Configure monitoring instance
+            let start = Instant::now();
+
             let monitoring_ec2_client = &ec2_clients[&monitoring_region];
             wait_for_instances_ready(
                 monitoring_ec2_client,
                 slice::from_ref(&monitoring_instance_id),
             )
             .await?;
+            let wait_ready_ms = start.elapsed().as_millis();
+
+            let bbr_start = Instant::now();
             enable_bbr(private_key, &monitoring_ip, &bbr_conf_url).await?;
+            let bbr_ms = bbr_start.elapsed().as_millis();
+
+            let apt_start = Instant::now();
+            ssh_execute(private_key, &monitoring_ip, install_monitoring_apt_cmd()).await?;
+            let apt_ms = apt_start.elapsed().as_millis();
+
+            let download_start = Instant::now();
             ssh_execute(
                 private_key,
                 &monitoring_ip,
-                &install_monitoring_cmd(
-                    &monitoring_urls,
-                    PROMETHEUS_VERSION,
-                    monitoring_architecture,
-                ),
+                &install_monitoring_download_cmd(&monitoring_urls),
             )
             .await?;
+            let download_ms = download_start.elapsed().as_millis();
+
+            let setup_start = Instant::now();
+            ssh_execute(
+                private_key,
+                &monitoring_ip,
+                &install_monitoring_setup_cmd(PROMETHEUS_VERSION, monitoring_architecture),
+            )
+            .await?;
+            let setup_ms = setup_start.elapsed().as_millis();
+
+            let services_start = Instant::now();
             ssh_execute(private_key, &monitoring_ip, start_monitoring_services_cmd()).await?;
+            let services_ms = services_start.elapsed().as_millis();
+
+            let poll_start = Instant::now();
             poll_service_active(private_key, &monitoring_ip, "node_exporter").await?;
             poll_service_active(private_key, &monitoring_ip, "prometheus").await?;
             poll_service_active(private_key, &monitoring_ip, "loki").await?;
             poll_service_active(private_key, &monitoring_ip, "pyroscope").await?;
             poll_service_active(private_key, &monitoring_ip, "tempo").await?;
             poll_service_active(private_key, &monitoring_ip, "grafana-server").await?;
+            let poll_ms = poll_start.elapsed().as_millis();
+
+            let total_ms = start.elapsed().as_millis();
             info!(
                 ip = monitoring_ip.as_str(),
+                wait_ready_ms,
+                bbr_ms,
+                apt_ms,
+                download_ms,
+                setup_ms,
+                services_ms,
+                poll_ms,
+                total_ms,
                 "configured monitoring instance"
             );
             Ok::<(), Error>(())

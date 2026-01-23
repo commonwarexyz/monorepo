@@ -487,18 +487,18 @@ pub struct MonitoringUrls {
     pub node_exporter_service: String,
 }
 
-/// Command to install monitoring services (Prometheus, Loki, Grafana, Pyroscope, Tempo) on the monitoring instance
-pub(crate) fn install_monitoring_cmd(
-    urls: &MonitoringUrls,
-    prometheus_version: &str,
-    architecture: Architecture,
-) -> String {
-    let arch = architecture.as_str();
-    format!(
-        r#"
+/// Phase 1: Install apt packages on monitoring instance
+pub(crate) fn install_monitoring_apt_cmd() -> &'static str {
+    r#"
 sudo apt-get update -y
 sudo apt-get install -y unzip adduser libfontconfig1 wget tar
+"#
+}
 
+/// Phase 2: Download files from S3 on monitoring instance
+pub(crate) fn install_monitoring_download_cmd(urls: &MonitoringUrls) -> String {
+    format!(
+        r#"
 # Clean up any previous download artifacts (allows retries to re-download fresh copies)
 rm -f /home/ubuntu/prometheus.tar.gz /home/ubuntu/loki.zip /home/ubuntu/pyroscope.tar.gz \
       /home/ubuntu/tempo.tar.gz /home/ubuntu/node_exporter.tar.gz
@@ -538,7 +538,36 @@ for f in prometheus.tar.gz grafana.deb loki.zip pyroscope.tar.gz tempo.tar.gz no
         exit 1
     fi
 done
+"#,
+        urls.prometheus_bin,
+        urls.grafana_bin,
+        urls.loki_bin,
+        urls.pyroscope_bin,
+        urls.tempo_bin,
+        urls.node_exporter_bin,
+        urls.prometheus_config,
+        urls.datasources_yml,
+        urls.all_yml,
+        urls.dashboard,
+        urls.loki_yml,
+        urls.pyroscope_yml,
+        urls.tempo_yml,
+        urls.prometheus_service,
+        urls.loki_service,
+        urls.pyroscope_service,
+        urls.tempo_service,
+        urls.node_exporter_service,
+    )
+}
 
+/// Phase 3: Setup services on monitoring instance (does not start them)
+pub(crate) fn install_monitoring_setup_cmd(
+    prometheus_version: &str,
+    architecture: Architecture,
+) -> String {
+    let arch = architecture.as_str();
+    format!(
+        r#"
 # Install Prometheus
 sudo mkdir -p /opt/prometheus /opt/prometheus/data
 sudo chown -R ubuntu:ubuntu /opt/prometheus
@@ -608,25 +637,7 @@ sudo mv /home/ubuntu/loki.service /etc/systemd/system/loki.service
 sudo mv /home/ubuntu/pyroscope.service /etc/systemd/system/pyroscope.service
 sudo mv /home/ubuntu/tempo.service /etc/systemd/system/tempo.service
 sudo mv /home/ubuntu/node_exporter.service /etc/systemd/system/node_exporter.service
-"#,
-        urls.prometheus_bin,
-        urls.grafana_bin,
-        urls.loki_bin,
-        urls.pyroscope_bin,
-        urls.tempo_bin,
-        urls.node_exporter_bin,
-        urls.prometheus_config,
-        urls.datasources_yml,
-        urls.all_yml,
-        urls.dashboard,
-        urls.loki_yml,
-        urls.pyroscope_yml,
-        urls.tempo_yml,
-        urls.prometheus_service,
-        urls.loki_service,
-        urls.pyroscope_service,
-        urls.tempo_service,
-        urls.node_exporter_service,
+"#
     )
 }
 
@@ -669,19 +680,18 @@ pub struct InstanceUrls {
     pub pyroscope_timer: String,
 }
 
-/// Command to install all services on binary instances
-pub(crate) fn install_binary_cmd(
-    urls: &InstanceUrls,
-    profiling: bool,
-    architecture: Architecture,
-) -> String {
-    let arch = architecture.as_str();
-    let mut script = format!(
-        r#"
-# Install base tools and dependencies
+/// Phase 1: Install apt packages on binary instances
+pub(crate) fn install_binary_apt_cmd() -> &'static str {
+    r#"
 sudo apt-get update -y
 sudo apt-get install -y logrotate jq wget unzip libjemalloc2 linux-tools-common linux-tools-generic linux-tools-$(uname -r)
+"#
+}
 
+/// Phase 2: Download files from S3 on binary instances
+pub(crate) fn install_binary_download_cmd(urls: &InstanceUrls) -> String {
+    format!(
+        r#"
 # Clean up any previous download artifacts (allows retries to re-download fresh copies)
 rm -f /home/ubuntu/promtail.zip /home/ubuntu/node_exporter.tar.gz
 rm -rf /home/ubuntu/promtail-linux-* /home/ubuntu/node_exporter-*
@@ -714,7 +724,28 @@ for f in binary config.conf hosts.yaml promtail.zip promtail.yml promtail.servic
         exit 1
     fi
 done
+"#,
+        urls.binary,
+        urls.config,
+        urls.hosts,
+        urls.promtail_bin,
+        urls.promtail_config,
+        urls.promtail_service,
+        urls.node_exporter_bin,
+        urls.node_exporter_service,
+        urls.binary_service,
+        urls.logrotate_conf,
+        urls.pyroscope_script,
+        urls.pyroscope_service,
+        urls.pyroscope_timer,
+    )
+}
 
+/// Phase 3: Setup and start services on binary instances
+pub(crate) fn install_binary_setup_cmd(profiling: bool, architecture: Architecture) -> String {
+    let arch = architecture.as_str();
+    let mut script = format!(
+        r#"
 # Install Promtail
 sudo mkdir -p /opt/promtail /etc/promtail
 sudo chown -R ubuntu:ubuntu /opt/promtail
@@ -755,20 +786,7 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now promtail
 sudo systemctl enable --now node_exporter
 sudo systemctl enable --now binary
-"#,
-        urls.binary,
-        urls.config,
-        urls.hosts,
-        urls.promtail_bin,
-        urls.promtail_config,
-        urls.promtail_service,
-        urls.node_exporter_bin,
-        urls.node_exporter_service,
-        urls.binary_service,
-        urls.logrotate_conf,
-        urls.pyroscope_script,
-        urls.pyroscope_service,
-        urls.pyroscope_timer,
+"#
     );
     if profiling {
         script.push_str(
