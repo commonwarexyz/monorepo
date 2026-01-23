@@ -930,7 +930,7 @@ mod tests {
                 .await
                 .expect("Failed to open legacy blob");
             legacy_blob
-                .write_at(vec![0u8; 1], 0)
+                .write_at(0, vec![0u8; 1])
                 .await
                 .expect("Failed to write legacy blob");
             legacy_blob
@@ -943,7 +943,7 @@ mod tests {
                 .await
                 .expect("Failed to open new blob");
             new_blob
-                .write_at(vec![0u8; 1], 0)
+                .write_at(0, vec![0u8; 1])
                 .await
                 .expect("Failed to write new blob");
             new_blob.sync().await.expect("Failed to sync new blob");
@@ -968,7 +968,7 @@ mod tests {
                 .await
                 .expect("Failed to open legacy blob");
             legacy_blob
-                .write_at(vec![0u8; 1], 0)
+                .write_at(0, vec![0u8; 1])
                 .await
                 .expect("Failed to write legacy blob");
             legacy_blob
