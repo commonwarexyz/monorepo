@@ -1688,9 +1688,8 @@ fn multiple_m_notarizations_per_view_are_retained() {
         .iter()
         .map(|&i| Notarize::sign(&harness.schemes[i], proposal_a.clone()).expect("notarize"))
         .collect();
-    let m_not_a =
-        MNotarization::from_notarizes(&harness.verifier, votes_a.iter(), &Sequential)
-            .expect("m-notarization A");
+    let m_not_a = MNotarization::from_notarizes(&harness.verifier, votes_a.iter(), &Sequential)
+        .expect("m-notarization A");
     let actions = harness
         .state
         .receive_certificate(Certificate::MNotarization(m_not_a));
@@ -1701,9 +1700,8 @@ fn multiple_m_notarizations_per_view_are_retained() {
         .iter()
         .map(|&i| Notarize::sign(&harness.schemes[i], proposal_b.clone()).expect("notarize"))
         .collect();
-    let m_not_b =
-        MNotarization::from_notarizes(&harness.verifier, votes_b.iter(), &Sequential)
-            .expect("m-notarization B");
+    let m_not_b = MNotarization::from_notarizes(&harness.verifier, votes_b.iter(), &Sequential)
+        .expect("m-notarization B");
     let actions = harness
         .state
         .receive_certificate(Certificate::MNotarization(m_not_b));
@@ -2112,7 +2110,6 @@ mod engine_tests {
         types::{Epoch, View, ViewDelta},
         Monitor, Viewable,
     };
-    use bytes::Bytes;
     use commonware_codec::{Decode, DecodeExt};
     use commonware_cryptography::{
         bls12381::primitives::variant::{MinPk, MinSig},
@@ -2130,7 +2127,9 @@ mod engine_tests {
         Recipients,
     };
     use commonware_parallel::Sequential;
-    use commonware_runtime::{buffer::PoolRef, deterministic, Metrics, Quota, Runner, Spawner};
+    use commonware_runtime::{
+        buffer::PoolRef, deterministic, IoBuf, Metrics, Quota, Runner, Spawner,
+    };
     use commonware_utils::{Faults, M5f1, NZUsize, NZU16};
     use futures::{future::join_all, StreamExt};
     use std::{
@@ -2679,7 +2678,7 @@ mod engine_tests {
                 // Create forwarder closures for votes
                 let make_vote_forwarder = || {
                     let participants = participants.clone();
-                    move |origin: SplitOrigin, _: &Recipients<_>, message: &Bytes| {
+                    move |origin: SplitOrigin, _: &Recipients<_>, message: &IoBuf| {
                         let msg: Vote<S, D> = Vote::decode(message.clone()).unwrap();
                         let (primary, secondary) =
                             strategy.partitions(msg.view(), participants.as_ref());
@@ -2694,7 +2693,7 @@ mod engine_tests {
                 let make_certificate_forwarder = || {
                     let codec = schemes[idx].certificate_codec_config();
                     let participants = participants.clone();
-                    move |origin: SplitOrigin, _: &Recipients<_>, message: &Bytes| {
+                    move |origin: SplitOrigin, _: &Recipients<_>, message: &IoBuf| {
                         let msg: Certificate<S, D> =
                             Certificate::decode_cfg(&mut message.as_ref(), &codec).unwrap();
                         let (primary, secondary) =
@@ -2707,12 +2706,12 @@ mod engine_tests {
                 };
 
                 let make_drop_forwarder =
-                    || move |_: SplitOrigin, _: &Recipients<_>, _: &Bytes| None;
+                    || move |_: SplitOrigin, _: &Recipients<_>, _: &IoBuf| None;
 
                 // Create router closures for votes
                 let make_vote_router = || {
                     let participants = participants.clone();
-                    move |(sender, message): &(_, Bytes)| {
+                    move |(sender, message): &(_, IoBuf)| {
                         let msg: Vote<S, D> = Vote::decode(message.clone()).unwrap();
                         strategy.route(msg.view(), sender, participants.as_ref())
                     }
@@ -2722,7 +2721,7 @@ mod engine_tests {
                 let make_certificate_router = || {
                     let codec = schemes[idx].certificate_codec_config();
                     let participants = participants.clone();
-                    move |(sender, message): &(_, Bytes)| {
+                    move |(sender, message): &(_, IoBuf)| {
                         let msg: Certificate<S, D> =
                             Certificate::decode_cfg(&mut message.as_ref(), &codec).unwrap();
                         strategy.route(msg.view(), sender, participants.as_ref())

@@ -766,7 +766,6 @@ where
 #[cfg(test)]
 mod tests {
     use super::Actor;
-    use bytes::{Buf, Bytes};
     use crate::{
         elector::RoundRobin,
         minimmit::{
@@ -777,21 +776,18 @@ mod tests {
         mocks::relay,
         types::{Epoch, Round, View, ViewDelta},
     };
+    use bytes::Bytes;
     use commonware_codec::Read;
     use commonware_cryptography::{
-        certificate::mocks::Fixture,
-        certificate::Scheme as CertificateScheme,
-        ed25519::PublicKey as Ed25519PublicKey,
-        sha256::Digest as Sha256Digest,
-        PublicKey,
-        Sha256,
+        certificate::mocks::Fixture, certificate::Scheme as CertificateScheme,
+        ed25519::PublicKey as Ed25519PublicKey, sha256::Digest as Sha256Digest, PublicKey, Sha256,
     };
-    use commonware_parallel::Sequential;
     use commonware_p2p::{Blocker, CheckedSender, LimitedSender, Recipients};
-    use commonware_runtime::{buffer::PoolRef, deterministic};
+    use commonware_parallel::Sequential;
+    use commonware_runtime::{buffer::PoolRef, deterministic, IoBufMut};
     use commonware_runtime::{Clock, Metrics, Runner, Spawner};
     use commonware_storage::journal::segmented::variable::{Config as JConfig, Journal};
-    use commonware_utils::{test_rng, NZU16, NZUsize, Participant};
+    use commonware_utils::{test_rng, NZUsize, Participant, NZU16};
     use std::{
         convert::Infallible,
         marker::PhantomData,
@@ -846,17 +842,25 @@ mod tests {
         type PublicKey = P;
         type Error = Infallible;
 
-        async fn send(self, mut message: impl Buf + Send, _: bool) -> Result<Vec<P>, Infallible> {
-            let mut buf = vec![0u8; message.remaining()];
-            message.copy_to_slice(&mut buf);
-            self.messages.lock().unwrap().push(buf);
+        async fn send(
+            self,
+            message: impl Into<IoBufMut> + Send,
+            _: bool,
+        ) -> Result<Vec<P>, Infallible> {
+            self.messages
+                .lock()
+                .unwrap()
+                .push(message.into().as_ref().to_vec());
             Ok(Vec::new())
         }
     }
 
     impl<P: PublicKey> LimitedSender for TestSender<P> {
         type PublicKey = P;
-        type Checked<'a> = TestChecked<P> where Self: 'a;
+        type Checked<'a>
+            = TestChecked<P>
+        where
+            Self: 'a;
 
         async fn check<'a>(
             &'a mut self,
@@ -1004,17 +1008,13 @@ mod tests {
                 .take(3)
                 .map(|scheme| Notarize::sign(scheme, proposal.clone()).expect("notarize"))
                 .collect();
-            let m_notarization =
-                MNotarization::from_notarizes(&scheme, votes.iter(), &Sequential)
-                    .expect("m-notarization");
+            let m_notarization = MNotarization::from_notarizes(&scheme, votes.iter(), &Sequential)
+                .expect("m-notarization");
             journal
                 .append(view.get(), Artifact::MNotarization(m_notarization.clone()))
                 .await
                 .expect("append");
-            journal
-                .sync_all()
-                .await
-                .expect("sync");
+            journal.sync_all().await.expect("sync");
             drop(journal);
 
             let cfg = crate::minimmit::actors::voter::Config {
@@ -1058,7 +1058,10 @@ mod tests {
             }
 
             let messages = certificate_sender.take();
-            assert!(!messages.is_empty(), "expected replayed certificate broadcast");
+            assert!(
+                !messages.is_empty(),
+                "expected replayed certificate broadcast"
+            );
 
             let mut buf = Bytes::from(messages[0].clone());
             let decoded = Certificate::<ed25519::Scheme, Sha256Digest>::read_cfg(
