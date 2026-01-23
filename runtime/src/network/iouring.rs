@@ -467,10 +467,11 @@ mod tests {
             iouring::{Config, Network},
             tests,
         },
+        Listener as _, Network as _, Sink as _, Stream as _,
     };
     use commonware_macros::test_group;
     use prometheus_client::registry::Registry;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     #[tokio::test]
     async fn test_trait() {
@@ -512,8 +513,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_small_send_read_quickly() {
-        use crate::{Listener as _, Network as _, Sink as _, Stream as _};
-
         let network = Network::start(
             Config {
                 iouring_config: iouring::Config {
@@ -552,9 +551,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_read_timeout_with_partial_data() {
-        use crate::{Listener as _, Network as _, Sink as _, Stream as _};
-        use std::time::Instant;
-
         // Use a short timeout to make the test fast
         let op_timeout = Duration::from_millis(100);
         let network = Network::start(
@@ -601,8 +597,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_unbuffered_mode() {
-        use crate::{Listener as _, Network as _, Sink as _, Stream as _};
-
         // Set read_buffer_size to 0 to disable buffering
         let network = Network::start(
             Config {
@@ -655,8 +649,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_peek_with_buffered_data() {
-        use crate::{Listener as _, Network as _, Sink as _, Stream as _};
-
         // Use default buffer size to enable buffering
         let network = Network::start(
             Config {
