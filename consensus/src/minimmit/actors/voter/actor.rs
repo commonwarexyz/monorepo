@@ -119,6 +119,7 @@ where
 
     outbound_messages: Family<Outbound, Counter>,
     m_notarization_latency: Histogram,
+    finalization_latency: Histogram,
     recover_latency: histogram::Timed<E>,
     current_view: Gauge,
     skipped_views: Counter,
@@ -150,6 +151,7 @@ where
         // Initialize metrics
         let outbound_messages = Family::<Outbound, Counter>::default();
         let m_notarization_latency = Histogram::new(crate::LATENCY);
+        let finalization_latency = Histogram::new(crate::LATENCY);
         let current_view = Gauge::<i64, AtomicI64>::default();
         let skipped_views = Counter::default();
         context.register(
@@ -161,6 +163,11 @@ where
             "m_notarization_latency",
             "M-notarization latency",
             m_notarization_latency.clone(),
+        );
+        context.register(
+            "finalization_latency",
+            "finalization latency",
+            finalization_latency.clone(),
         );
         let recover_latency = Histogram::new(Buckets::CRYPTOGRAPHY);
         context.register(
@@ -206,6 +213,7 @@ where
 
                 outbound_messages,
                 m_notarization_latency,
+                finalization_latency,
                 recover_latency: histogram::Timed::new(recover_latency, clock),
                 current_view,
                 skipped_views,
@@ -714,6 +722,10 @@ where
                         Artifact::Nullification(n.clone())
                     }
                     Certificate::Finalization(f) => {
+                        // Only the leader sees an unbiased latency sample, so record it now.
+                        if let Some(elapsed) = self.leader_elapsed(view) {
+                            self.finalization_latency.observe(elapsed);
+                        }
                         self.reporter
                             .report(Activity::Finalization(f.clone()))
                             .await;
@@ -727,7 +739,12 @@ where
                 egress.broadcast_certificate(certificate).await;
             }
             Action::Finalized(finalization) => {
-                info!(view = %finalization.view(), "finalized");
+                let view = finalization.view();
+                info!(%view, "finalized");
+                // Only the leader sees an unbiased latency sample, so record it now.
+                if let Some(elapsed) = self.leader_elapsed(view) {
+                    self.finalization_latency.observe(elapsed);
+                }
                 self.reporter
                     .report(Activity::Finalization(finalization.clone()))
                     .await;
