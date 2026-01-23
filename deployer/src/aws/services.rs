@@ -44,6 +44,9 @@ pub const JQ_VERSION: &str = "1.7.1-3build1";
 /// Version of libfontconfig1 package for Ubuntu 24.04
 pub const LIBFONTCONFIG1_VERSION: &str = "2.15.0-1.1ubuntu2";
 
+/// Version of unzip package for Ubuntu 24.04
+pub const UNZIP_VERSION: &str = "6.0-28ubuntu4";
+
 // S3 key functions for tool binaries
 //
 // Convention: {TOOLS_BINARIES_PREFIX}/{tool}/{version}/{platform}/{filename}
@@ -135,6 +138,13 @@ pub(crate) fn jq_bin_s3_key(version: &str, architecture: Architecture) -> String
 pub(crate) fn libfontconfig_bin_s3_key(version: &str, architecture: Architecture) -> String {
     format!(
         "{TOOLS_BINARIES_PREFIX}/libfontconfig1/{version}/linux-{arch}/libfontconfig1_{version}_{arch}.deb",
+        arch = architecture.as_str()
+    )
+}
+
+pub(crate) fn unzip_bin_s3_key(version: &str, architecture: Architecture) -> String {
+    format!(
+        "{TOOLS_BINARIES_PREFIX}/unzip/{version}/linux-{arch}/unzip_{version}_{arch}.deb",
         arch = architecture.as_str()
     )
 }
@@ -361,6 +371,18 @@ pub(crate) fn libfontconfig_download_url(version: &str, architecture: Architectu
     )
 }
 
+/// Returns the download URL for unzip from Ubuntu archive
+pub(crate) fn unzip_download_url(version: &str, architecture: Architecture) -> String {
+    let base = match architecture {
+        Architecture::Arm64 => "http://ports.ubuntu.com/ubuntu-ports/pool/main/u/unzip",
+        Architecture::X86_64 => "http://archive.ubuntu.com/ubuntu/pool/main/u/unzip",
+    };
+    format!(
+        "{base}/unzip_{version}_{arch}.deb",
+        arch = architecture.as_str()
+    )
+}
+
 /// YAML configuration for Grafana datasources (Prometheus, Loki, Tempo, and Pyroscope)
 pub const DATASOURCES_YML: &str = r#"
 apiVersion: 1
@@ -562,6 +584,7 @@ pub struct MonitoringUrls {
     pub tempo_bin: String,
     pub node_exporter_bin: String,
     pub libfontconfig_deb: String,
+    pub unzip_deb: String,
     pub prometheus_config: String,
     pub datasources_yml: String,
     pub all_yml: String,
@@ -582,7 +605,8 @@ pub(crate) fn install_monitoring_download_cmd(urls: &MonitoringUrls) -> String {
         r#"
 # Clean up any previous download artifacts (allows retries to re-download fresh copies)
 rm -f /home/ubuntu/prometheus.tar.gz /home/ubuntu/loki.zip /home/ubuntu/pyroscope.tar.gz \
-      /home/ubuntu/tempo.tar.gz /home/ubuntu/node_exporter.tar.gz /home/ubuntu/libfontconfig1.deb
+      /home/ubuntu/tempo.tar.gz /home/ubuntu/node_exporter.tar.gz /home/ubuntu/libfontconfig1.deb \
+      /home/ubuntu/unzip.deb
 rm -rf /home/ubuntu/prometheus-* /home/ubuntu/loki-linux-* /home/ubuntu/pyroscope \
        /home/ubuntu/tempo /home/ubuntu/node_exporter-*
 
@@ -597,6 +621,7 @@ sudo systemctl unmask prometheus loki pyroscope tempo node_exporter grafana-serv
 {WGET} -O /home/ubuntu/tempo.tar.gz '{}' &
 {WGET} -O /home/ubuntu/node_exporter.tar.gz '{}' &
 {WGET} -O /home/ubuntu/libfontconfig1.deb '{}' &
+{WGET} -O /home/ubuntu/unzip.deb '{}' &
 {WGET} -O /home/ubuntu/prometheus.yml '{}' &
 {WGET} -O /home/ubuntu/datasources.yml '{}' &
 {WGET} -O /home/ubuntu/all.yml '{}' &
@@ -613,7 +638,7 @@ wait
 
 # Verify all downloads succeeded
 for f in prometheus.tar.gz grafana.deb loki.zip pyroscope.tar.gz tempo.tar.gz node_exporter.tar.gz \
-         libfontconfig1.deb prometheus.yml datasources.yml all.yml dashboard.json loki.yml \
+         libfontconfig1.deb unzip.deb prometheus.yml datasources.yml all.yml dashboard.json loki.yml \
          pyroscope.yml tempo.yml prometheus.service loki.service pyroscope.service tempo.service \
          node_exporter.service; do
     if [ ! -f "/home/ubuntu/$f" ]; then
@@ -629,6 +654,7 @@ done
         urls.tempo_bin,
         urls.node_exporter_bin,
         urls.libfontconfig_deb,
+        urls.unzip_deb,
         urls.prometheus_config,
         urls.datasources_yml,
         urls.all_yml,
@@ -652,6 +678,9 @@ pub(crate) fn install_monitoring_setup_cmd(
     let arch = architecture.as_str();
     format!(
         r#"
+# Install unzip (needed to extract loki)
+sudo dpkg -i /home/ubuntu/unzip.deb
+
 # Install Prometheus
 sudo mkdir -p /opt/prometheus /opt/prometheus/data
 sudo chown -R ubuntu:ubuntu /opt/prometheus
@@ -764,6 +793,7 @@ pub struct InstanceUrls {
     pub pyroscope_timer: String,
     pub libjemalloc_deb: String,
     pub logrotate_deb: String,
+    pub unzip_deb: String,
     pub jq_deb: Option<String>,
 }
 
@@ -795,7 +825,7 @@ pub(crate) fn install_binary_download_cmd(urls: &InstanceUrls) -> String {
         r#"
 # Clean up any previous download artifacts (allows retries to re-download fresh copies)
 rm -f /home/ubuntu/promtail.zip /home/ubuntu/node_exporter.tar.gz \
-      /home/ubuntu/libjemalloc2.deb /home/ubuntu/logrotate.deb /home/ubuntu/jq.deb
+      /home/ubuntu/libjemalloc2.deb /home/ubuntu/logrotate.deb /home/ubuntu/unzip.deb /home/ubuntu/jq.deb
 rm -rf /home/ubuntu/promtail-linux-* /home/ubuntu/node_exporter-*
 
 # Unmask services in case previous attempt left them masked
@@ -817,13 +847,14 @@ sudo systemctl unmask promtail node_exporter binary 2>/dev/null || true
 {WGET} -O /home/ubuntu/pyroscope-agent.timer '{}' &
 {WGET} -O /home/ubuntu/libjemalloc2.deb '{}' &
 {WGET} -O /home/ubuntu/logrotate.deb '{}' &
+{WGET} -O /home/ubuntu/unzip.deb '{}' &
 {jq_download}wait
 
 # Verify all downloads succeeded
 for f in binary config.conf hosts.yaml promtail.zip promtail.yml promtail.service \
          node_exporter.tar.gz node_exporter.service binary.service logrotate.conf \
          pyroscope-agent.sh pyroscope-agent.service pyroscope-agent.timer \
-         libjemalloc2.deb logrotate.deb{jq_verify}; do
+         libjemalloc2.deb logrotate.deb unzip.deb{jq_verify}; do
     if [ ! -f "/home/ubuntu/$f" ]; then
         echo "ERROR: Failed to download $f" >&2
         exit 1
@@ -845,6 +876,7 @@ done
         urls.pyroscope_timer,
         urls.libjemalloc_deb,
         urls.logrotate_deb,
+        urls.unzip_deb,
     )
 }
 
@@ -874,7 +906,8 @@ sudo mv /home/ubuntu/pyroscope-agent.timer /etc/systemd/system/pyroscope-agent.t
     };
     format!(
         r#"
-# Install deb packages (libjemalloc2, logrotate, jq if profiling)
+# Install deb packages (unzip, libjemalloc2, logrotate, jq if profiling)
+sudo dpkg -i /home/ubuntu/unzip.deb
 sudo dpkg -i /home/ubuntu/libjemalloc2.deb
 sudo dpkg -i /home/ubuntu/logrotate.deb
 {jq_install}
@@ -1184,6 +1217,10 @@ mod tests {
             libfontconfig_bin_s3_key("2.15.0-1.1ubuntu2", arch),
             "tools/binaries/libfontconfig1/2.15.0-1.1ubuntu2/linux-arm64/libfontconfig1_2.15.0-1.1ubuntu2_arm64.deb"
         );
+        assert_eq!(
+            unzip_bin_s3_key("6.0-28ubuntu4", arch),
+            "tools/binaries/unzip/6.0-28ubuntu4/linux-arm64/unzip_6.0-28ubuntu4_arm64.deb"
+        );
     }
 
     #[test]
@@ -1232,6 +1269,10 @@ mod tests {
         assert_eq!(
             libfontconfig_bin_s3_key("2.15.0-1.1ubuntu2", arch),
             "tools/binaries/libfontconfig1/2.15.0-1.1ubuntu2/linux-amd64/libfontconfig1_2.15.0-1.1ubuntu2_amd64.deb"
+        );
+        assert_eq!(
+            unzip_bin_s3_key("6.0-28ubuntu4", arch),
+            "tools/binaries/unzip/6.0-28ubuntu4/linux-amd64/unzip_6.0-28ubuntu4_amd64.deb"
         );
     }
 

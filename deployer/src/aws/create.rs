@@ -41,6 +41,7 @@ struct ToolUrls {
     logrotate: String,
     jq: String,
     libfontconfig: String,
+    unzip: String,
 }
 
 /// Represents a deployed instance with its configuration and public IP
@@ -213,7 +214,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
     let mut tool_urls_by_arch: HashMap<Architecture, ToolUrls> = HashMap::new();
     for arch in &architectures_needed {
         let [prometheus_url, grafana_url, loki_url, pyroscope_url, tempo_url, node_exporter_url, promtail_url,
-             libjemalloc_url, logrotate_url, jq_url, libfontconfig_url]: [String; 11] =
+             libjemalloc_url, logrotate_url, jq_url, libfontconfig_url, unzip_url]: [String; 12] =
             try_join_all([
                 cache_tool(prometheus_bin_s3_key(PROMETHEUS_VERSION, *arch), prometheus_download_url(PROMETHEUS_VERSION, *arch)),
                 cache_tool(grafana_bin_s3_key(GRAFANA_VERSION, *arch), grafana_download_url(GRAFANA_VERSION, *arch)),
@@ -226,6 +227,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
                 cache_tool(logrotate_bin_s3_key(LOGROTATE_VERSION, *arch), logrotate_download_url(LOGROTATE_VERSION, *arch)),
                 cache_tool(jq_bin_s3_key(JQ_VERSION, *arch), jq_download_url(JQ_VERSION, *arch)),
                 cache_tool(libfontconfig_bin_s3_key(LIBFONTCONFIG1_VERSION, *arch), libfontconfig_download_url(LIBFONTCONFIG1_VERSION, *arch)),
+                cache_tool(unzip_bin_s3_key(UNZIP_VERSION, *arch), unzip_download_url(UNZIP_VERSION, *arch)),
             ])
             .await?
             .try_into()
@@ -244,6 +246,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
                 logrotate: logrotate_url,
                 jq: jq_url,
                 libfontconfig: libfontconfig_url,
+                unzip: unzip_url,
             },
         );
     }
@@ -1061,6 +1064,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
                     pyroscope_timer: pyroscope_agent_timer_url.clone(),
                     libjemalloc_deb: tool_urls.libjemalloc.clone(),
                     logrotate_deb: tool_urls.logrotate.clone(),
+                    unzip_deb: tool_urls.unzip.clone(),
                     jq_deb,
                 },
                 arch,
@@ -1079,6 +1083,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
         tempo_bin: tool_urls.tempo.clone(),
         node_exporter_bin: tool_urls.node_exporter.clone(),
         libfontconfig_deb: tool_urls.libfontconfig.clone(),
+        unzip_deb: tool_urls.unzip.clone(),
         prometheus_config: prometheus_config_url,
         datasources_yml: datasources_url,
         all_yml: all_yml_url,
