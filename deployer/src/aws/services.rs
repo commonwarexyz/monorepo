@@ -53,6 +53,12 @@ pub const ADDUSER_VERSION: &str = "3.137ubuntu1";
 /// Version of musl package for Ubuntu 24.04
 pub const MUSL_VERSION: &str = "1.2.4-2";
 
+/// Ubuntu package archive base URL for arm64
+const UBUNTU_ARCHIVE_ARM64: &str = "http://ports.ubuntu.com/ubuntu-ports/pool";
+
+/// Ubuntu package archive base URL for x86_64
+const UBUNTU_ARCHIVE_X86_64: &str = "http://archive.ubuntu.com/ubuntu/pool";
+
 // S3 key functions for tool binaries
 //
 // Convention: {TOOLS_BINARIES_PREFIX}/{tool}/{version}/{platform}/{filename}
@@ -340,11 +346,11 @@ pub(crate) fn samply_download_url(version: &str, architecture: Architecture) -> 
 /// Returns the download URL for libjemalloc2 from Ubuntu archive
 pub(crate) fn libjemalloc_download_url(version: &str, architecture: Architecture) -> String {
     let base = match architecture {
-        Architecture::Arm64 => "http://ports.ubuntu.com/ubuntu-ports/pool/universe/j/jemalloc",
-        Architecture::X86_64 => "http://archive.ubuntu.com/ubuntu/pool/universe/j/jemalloc",
+        Architecture::Arm64 => UBUNTU_ARCHIVE_ARM64,
+        Architecture::X86_64 => UBUNTU_ARCHIVE_X86_64,
     };
     format!(
-        "{base}/libjemalloc2_{version}_{arch}.deb",
+        "{base}/universe/j/jemalloc/libjemalloc2_{version}_{arch}.deb",
         arch = architecture.as_str()
     )
 }
@@ -352,11 +358,11 @@ pub(crate) fn libjemalloc_download_url(version: &str, architecture: Architecture
 /// Returns the download URL for logrotate from Ubuntu archive
 pub(crate) fn logrotate_download_url(version: &str, architecture: Architecture) -> String {
     let base = match architecture {
-        Architecture::Arm64 => "http://ports.ubuntu.com/ubuntu-ports/pool/main/l/logrotate",
-        Architecture::X86_64 => "http://archive.ubuntu.com/ubuntu/pool/main/l/logrotate",
+        Architecture::Arm64 => UBUNTU_ARCHIVE_ARM64,
+        Architecture::X86_64 => UBUNTU_ARCHIVE_X86_64,
     };
     format!(
-        "{base}/logrotate_{version}_{arch}.deb",
+        "{base}/main/l/logrotate/logrotate_{version}_{arch}.deb",
         arch = architecture.as_str()
     )
 }
@@ -364,11 +370,11 @@ pub(crate) fn logrotate_download_url(version: &str, architecture: Architecture) 
 /// Returns the download URL for jq from Ubuntu archive
 pub(crate) fn jq_download_url(version: &str, architecture: Architecture) -> String {
     let base = match architecture {
-        Architecture::Arm64 => "http://ports.ubuntu.com/ubuntu-ports/pool/main/j/jq",
-        Architecture::X86_64 => "http://archive.ubuntu.com/ubuntu/pool/main/j/jq",
+        Architecture::Arm64 => UBUNTU_ARCHIVE_ARM64,
+        Architecture::X86_64 => UBUNTU_ARCHIVE_X86_64,
     };
     format!(
-        "{base}/jq_{version}_{arch}.deb",
+        "{base}/main/j/jq/jq_{version}_{arch}.deb",
         arch = architecture.as_str()
     )
 }
@@ -376,11 +382,11 @@ pub(crate) fn jq_download_url(version: &str, architecture: Architecture) -> Stri
 /// Returns the download URL for libfontconfig1 from Ubuntu archive
 pub(crate) fn libfontconfig_download_url(version: &str, architecture: Architecture) -> String {
     let base = match architecture {
-        Architecture::Arm64 => "http://ports.ubuntu.com/ubuntu-ports/pool/main/f/fontconfig",
-        Architecture::X86_64 => "http://archive.ubuntu.com/ubuntu/pool/main/f/fontconfig",
+        Architecture::Arm64 => UBUNTU_ARCHIVE_ARM64,
+        Architecture::X86_64 => UBUNTU_ARCHIVE_X86_64,
     };
     format!(
-        "{base}/libfontconfig1_{version}_{arch}.deb",
+        "{base}/main/f/fontconfig/libfontconfig1_{version}_{arch}.deb",
         arch = architecture.as_str()
     )
 }
@@ -388,27 +394,27 @@ pub(crate) fn libfontconfig_download_url(version: &str, architecture: Architectu
 /// Returns the download URL for unzip from Ubuntu archive
 pub(crate) fn unzip_download_url(version: &str, architecture: Architecture) -> String {
     let base = match architecture {
-        Architecture::Arm64 => "http://ports.ubuntu.com/ubuntu-ports/pool/main/u/unzip",
-        Architecture::X86_64 => "http://archive.ubuntu.com/ubuntu/pool/main/u/unzip",
+        Architecture::Arm64 => UBUNTU_ARCHIVE_ARM64,
+        Architecture::X86_64 => UBUNTU_ARCHIVE_X86_64,
     };
     format!(
-        "{base}/unzip_{version}_{arch}.deb",
+        "{base}/main/u/unzip/unzip_{version}_{arch}.deb",
         arch = architecture.as_str()
     )
 }
 
 /// Returns the download URL for adduser from Ubuntu archive (arch-independent)
 pub(crate) fn adduser_download_url(version: &str) -> String {
-    format!("http://archive.ubuntu.com/ubuntu/pool/main/a/adduser/adduser_{version}_all.deb")
+    format!("{UBUNTU_ARCHIVE_X86_64}/main/a/adduser/adduser_{version}_all.deb")
 }
 
 pub(crate) fn musl_download_url(version: &str, architecture: Architecture) -> String {
     let base = match architecture {
-        Architecture::Arm64 => "http://ports.ubuntu.com/ubuntu-ports/pool/universe/m/musl",
-        Architecture::X86_64 => "http://archive.ubuntu.com/ubuntu/pool/universe/m/musl",
+        Architecture::Arm64 => UBUNTU_ARCHIVE_ARM64,
+        Architecture::X86_64 => UBUNTU_ARCHIVE_X86_64,
     };
     format!(
-        "{base}/musl_{version}_{arch}.deb",
+        "{base}/universe/m/musl/musl_{version}_{arch}.deb",
         arch = architecture.as_str()
     )
 }
