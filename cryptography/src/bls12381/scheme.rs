@@ -417,7 +417,7 @@ mod tests {
     use super::*;
     use crate::{bls12381, Verifier as _};
     use commonware_codec::{DecodeExt, Encode};
-    use commonware_math::algebra::Random;
+    use commonware_math::algebra::{Additive, Random};
     use commonware_utils::test_rng;
 
     #[test]
@@ -491,8 +491,6 @@ mod tests {
     #[test]
     #[should_panic(expected = "cannot create Private from zero scalar")]
     fn test_private_rejects_zero_scalar() {
-        use commonware_math::algebra::Additive;
-
         let zero_scalar = group::Scalar::zero();
         let _ = Private::new(zero_scalar);
     }
@@ -500,8 +498,6 @@ mod tests {
     #[test]
     #[should_panic(expected = "cannot create PublicKey from identity point")]
     fn test_from_public_rejects_identity() {
-        use commonware_math::algebra::Additive;
-
         let identity = group::G1::zero();
         let _ = PublicKey::from(identity);
     }
@@ -509,8 +505,6 @@ mod tests {
     #[test]
     #[should_panic(expected = "cannot create Signature from identity point")]
     fn test_from_signature_rejects_identity() {
-        use commonware_math::algebra::Additive;
-
         let identity = group::G2::zero();
         let _ = Signature::from(identity);
     }
