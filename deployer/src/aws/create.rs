@@ -825,7 +825,6 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
     // Cache static config files globally (these don't change between deployments)
     info!("uploading config files to S3");
     let [
-        bbr_conf_url,
         datasources_url,
         all_yml_url,
         loki_yml_url,
@@ -840,8 +839,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
         logrotate_conf_url,
         pyroscope_agent_service_url,
         pyroscope_agent_timer_url,
-    ]: [String; 15] = try_join_all([
-        cache_and_presign(&s3_client, BUCKET_NAME, &bbr_config_s3_key(), UploadSource::Static(BBR_CONF.as_bytes()), PRESIGN_DURATION),
+    ]: [String; 14] = try_join_all([
         cache_and_presign(&s3_client, BUCKET_NAME, &grafana_datasources_s3_key(), UploadSource::Static(DATASOURCES_YML.as_bytes()), PRESIGN_DURATION),
         cache_and_presign(&s3_client, BUCKET_NAME, &grafana_dashboards_s3_key(), UploadSource::Static(ALL_YML.as_bytes()), PRESIGN_DURATION),
         cache_and_presign(&s3_client, BUCKET_NAME, &loki_config_s3_key(), UploadSource::Static(LOKI_CONFIG.as_bytes()), PRESIGN_DURATION),
@@ -1117,20 +1115,19 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
             let deployment_id = deployment.id.clone();
             let ec2_client = ec2_clients[&instance.region].clone();
             let ip = deployment.ip.clone();
-            let bbr_url = bbr_conf_url.clone();
             let (urls, arch) = instance_urls_map.remove(&instance.name).unwrap();
-            (instance, deployment_id, ec2_client, ip, bbr_url, urls, arch)
+            (instance, deployment_id, ec2_client, ip, urls, arch)
         })
         .collect();
     let binary_futures = binary_configs.into_iter().map(
-        |(instance, deployment_id, ec2_client, ip, bbr_url, urls, arch)| async move {
+        |(instance, deployment_id, ec2_client, ip, urls, arch)| async move {
             let start = Instant::now();
 
             wait_for_instances_ready(&ec2_client, slice::from_ref(&deployment_id)).await?;
             let wait_ready_ms = start.elapsed().as_millis();
 
             let bbr_start = Instant::now();
-            enable_bbr(private_key, &ip, &bbr_url).await?;
+            enable_bbr(private_key, &ip).await?;
             let bbr_ms = bbr_start.elapsed().as_millis();
 
             let apt_ms = if let Some(apt_cmd) = install_binary_apt_cmd(instance.profiling) {
@@ -1192,7 +1189,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
             let wait_ready_ms = start.elapsed().as_millis();
 
             let bbr_start = Instant::now();
-            enable_bbr(private_key, &monitoring_ip, &bbr_conf_url).await?;
+            enable_bbr(private_key, &monitoring_ip).await?;
             let bbr_ms = bbr_start.elapsed().as_millis();
 
             let download_start = Instant::now();

@@ -1,6 +1,6 @@
 //! Utility functions for interacting with EC2 instances
 
-use crate::aws::{s3::WGET, Error};
+use crate::aws::Error;
 use std::path::Path;
 use tokio::{
     fs::File,
@@ -157,18 +157,14 @@ pub async fn scp_download(
     Err(Error::SshFailed)
 }
 
-/// Enables BBR on a remote instance by downloading config from S3 and applying sysctl settings.
-pub async fn enable_bbr(key_file: &str, ip: &str, bbr_conf_url: &str) -> Result<(), Error> {
-    let download_cmd = format!("{WGET} -O /home/ubuntu/99-bbr.conf '{bbr_conf_url}'");
-    ssh_execute(key_file, ip, &download_cmd).await?;
+/// Enables BBR on a remote instance with inlined config (single SSH command).
+pub async fn enable_bbr(key_file: &str, ip: &str) -> Result<(), Error> {
     ssh_execute(
         key_file,
         ip,
-        "sudo mv /home/ubuntu/99-bbr.conf /etc/sysctl.d/99-bbr.conf",
+        r#"echo -e "net.core.default_qdisc=fq\nnet.ipv4.tcp_congestion_control=bbr" | sudo tee /etc/sysctl.d/99-bbr.conf >/dev/null && sudo sysctl -p /etc/sysctl.d/99-bbr.conf"#,
     )
-    .await?;
-    ssh_execute(key_file, ip, "sudo sysctl -p /etc/sysctl.d/99-bbr.conf").await?;
-    Ok(())
+    .await
 }
 
 /// Converts an IP address to a CIDR block

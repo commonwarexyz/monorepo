@@ -217,10 +217,6 @@ pub fn pyroscope_agent_timer_s3_key() -> String {
 
 // S3 key functions for system configs
 
-pub fn bbr_config_s3_key() -> String {
-    format!("{TOOLS_CONFIGS_PREFIX}/{DEPLOYER_VERSION}/system/bbr.conf")
-}
-
 pub fn logrotate_config_s3_key() -> String {
     format!("{TOOLS_CONFIGS_PREFIX}/{DEPLOYER_VERSION}/system/logrotate.conf")
 }
@@ -1060,9 +1056,6 @@ pub const LOGROTATE_CONF: &str = r#"
 }
 "#;
 
-/// Configuration for BBR sysctl settings
-pub const BBR_CONF: &str = "net.core.default_qdisc=fq\nnet.ipv4.tcp_congestion_control=bbr\n";
-
 /// Generates systemd service file content for the deployed binary
 pub(crate) fn binary_service(architecture: Architecture) -> String {
     let lib_arch = architecture.linux_lib();
@@ -1348,10 +1341,6 @@ mod tests {
         assert_eq!(
             pyroscope_agent_timer_s3_key(),
             format!("tools/configs/{version}/pyroscope/agent.timer")
-        );
-        assert_eq!(
-            bbr_config_s3_key(),
-            format!("tools/configs/{version}/system/bbr.conf")
         );
         assert_eq!(
             logrotate_config_s3_key(),
