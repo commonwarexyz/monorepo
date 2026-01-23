@@ -711,6 +711,9 @@ pub(crate) fn install_monitoring_setup_cmd(
     let arch = architecture.as_str();
     format!(
         r#"
+# Enable BBR congestion control
+echo -e "net.core.default_qdisc=fq\nnet.ipv4.tcp_congestion_control=bbr" | sudo tee /etc/sysctl.d/99-bbr.conf >/dev/null && sudo sysctl -p /etc/sysctl.d/99-bbr.conf
+
 # Install unzip (needed to extract loki) and adduser (needed for grafana)
 sudo dpkg -i /home/ubuntu/unzip.deb
 sudo dpkg -i /home/ubuntu/adduser.deb
@@ -941,6 +944,9 @@ sudo mv /home/ubuntu/pyroscope-agent.timer /etc/systemd/system/pyroscope-agent.t
     };
     format!(
         r#"
+# Enable BBR congestion control
+echo -e "net.core.default_qdisc=fq\nnet.ipv4.tcp_congestion_control=bbr" | sudo tee /etc/sysctl.d/99-bbr.conf >/dev/null && sudo sysctl -p /etc/sysctl.d/99-bbr.conf
+
 # Install deb packages (unzip, libjemalloc2, logrotate, jq if profiling)
 sudo dpkg -i /home/ubuntu/unzip.deb
 sudo dpkg -i /home/ubuntu/libjemalloc2.deb

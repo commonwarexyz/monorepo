@@ -1138,7 +1138,6 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
             let download = format!("{:.1}s", download_start.elapsed().as_secs_f64());
 
             let setup_start = Instant::now();
-            enable_bbr(private_key, &ip).await?;
             ssh_execute(
                 private_key,
                 &ip,
@@ -1190,7 +1189,6 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
             let download = format!("{:.1}s", download_start.elapsed().as_secs_f64());
 
             let setup_start = Instant::now();
-            enable_bbr(private_key, &monitoring_ip).await?;
             ssh_execute(
                 private_key,
                 &monitoring_ip,

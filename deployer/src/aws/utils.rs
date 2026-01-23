@@ -157,16 +157,6 @@ pub async fn scp_download(
     Err(Error::SshFailed)
 }
 
-/// Enables BBR on a remote instance with inlined config (single SSH command).
-pub async fn enable_bbr(key_file: &str, ip: &str) -> Result<(), Error> {
-    ssh_execute(
-        key_file,
-        ip,
-        r#"echo -e "net.core.default_qdisc=fq\nnet.ipv4.tcp_congestion_control=bbr" | sudo tee /etc/sysctl.d/99-bbr.conf >/dev/null && sudo sysctl -p /etc/sysctl.d/99-bbr.conf"#,
-    )
-    .await
-}
-
 /// Converts an IP address to a CIDR block
 pub fn exact_cidr(ip: &str) -> String {
     format!("{ip}/32")
