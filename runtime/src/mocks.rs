@@ -80,8 +80,8 @@ impl SinkTrait for Sink {
                 .as_ref()
                 .is_some_and(|(requested, _)| *requested <= channel.buffer.len())
             {
-                let (requested, os_send) = channel.waiter.take().unwrap();
                 // Send up to read_buffer_size bytes (but at least requested amount)
+                let (requested, os_send) = channel.waiter.take().unwrap();
                 let send_amount = channel
                     .buffer
                     .len()
@@ -357,6 +357,36 @@ mod tests {
 
             // Peek is now empty
             assert!(stream.peek(100).is_empty());
+        });
+    }
+
+    #[test]
+    fn test_peek_after_recv_wakeup() {
+        let (mut sink, mut stream) = Channel::init_with_read_buffer_size(64);
+
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Spawn recv that will block waiting
+            let (tx, rx) = futures::channel::oneshot::channel();
+            let recv_handle = context.clone().spawn(|_| async move {
+                let data = stream.recv(3).await.unwrap();
+                tx.send(stream).ok();
+                data
+            });
+
+            // Let recv set up waiter
+            context.sleep(Duration::from_millis(10)).await;
+
+            // Send more than requested
+            sink.send(b"ABCDEFGHIJ".as_slice()).await.unwrap();
+
+            // Recv gets its 3 bytes
+            let received = recv_handle.await.unwrap();
+            assert_eq!(received.coalesce(), b"ABC");
+
+            // Get stream back and verify peek sees remaining data
+            let stream = rx.await.unwrap();
+            assert_eq!(stream.peek(100), b"DEFGHIJ");
         });
     }
 

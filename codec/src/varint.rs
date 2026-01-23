@@ -760,6 +760,26 @@ mod tests {
         test_single_bits::<u128>();
     }
 
+    #[test]
+    fn test_max_varint_size_constants() {
+        let mut buf = Vec::new();
+
+        write(u16::MAX, &mut buf);
+        assert_eq!(buf.len(), MAX_U16_VARINT_SIZE);
+        buf.clear();
+
+        write(u32::MAX, &mut buf);
+        assert_eq!(buf.len(), MAX_U32_VARINT_SIZE);
+        buf.clear();
+
+        write(u64::MAX, &mut buf);
+        assert_eq!(buf.len(), MAX_U64_VARINT_SIZE);
+        buf.clear();
+
+        write(u128::MAX, &mut buf);
+        assert_eq!(buf.len(), MAX_U128_VARINT_SIZE);
+    }
+
     #[cfg(feature = "arbitrary")]
     mod conformance {
         use super::*;
