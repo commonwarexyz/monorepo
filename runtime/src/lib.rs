@@ -633,6 +633,15 @@ pub trait Stream: Sync + Send + 'static {
     ///
     /// If the stream returns an error, partially read data may be discarded.
     fn recv(&mut self, len: u64) -> impl Future<Output = Result<IoBufs, Error>> + Send;
+
+    /// Peek at buffered data without consuming.
+    ///
+    /// Returns up to `max_len` bytes from the internal buffer, or an empty slice
+    /// if no data is currently buffered. This does not perform any I/O or block.
+    ///
+    /// This is useful e.g. for parsing length prefixes without committing to a read
+    /// or paying the cost of async.
+    fn peek(&self, max_len: u64) -> &[u8];
 }
 
 /// Interface to interact with storage.
