@@ -150,7 +150,9 @@ impl PublicKey {
         let payload = namespace
             .map(|namespace| Cow::Owned(union_unique(namespace, msg)))
             .unwrap_or_else(|| Cow::Borrowed(msg));
-        self.key.verify(&sig.signature, &payload).is_ok()
+        self.key
+            .verify(&ed25519_consensus::Signature::from(sig.raw), &payload)
+            .is_ok()
     }
 }
 
@@ -229,10 +231,24 @@ impl arbitrary::Arbitrary<'_> for PublicKey {
 }
 
 /// Ed25519 Signature.
+///
+/// This signature is *non-malleable*: an adversary with access to many messages
+/// and signatures, verifying against an honestly generated public key, cannot
+/// find a new signature which will verify, even by tampering or modify the signatures
+/// that it has seen previously.
+///
+/// Like any signature, it's also not possible to have a signature verifying
+/// against one message also verify against another.
+///
+/// This property does not hold for maliciously generated public keys. In particular,
+/// it's possible to craft public keys (which would otherwise not be honestly generatable)
+/// for which a signature will verify against any message.
 #[derive(Clone, Eq, PartialEq)]
 pub struct Signature {
+    // There's not really a point in storing an [`ed25519_consensus::Signature`],
+    // because that type is easily created form this byte array, just by copying
+    // those bytes, so we can do that only when we actually need to verify the sig.
     raw: [u8; SIGNATURE_LENGTH],
-    signature: ed25519_consensus::Signature,
 }
 
 impl crate::Signature for Signature {}
@@ -248,8 +264,7 @@ impl Read for Signature {
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let raw = <[u8; Self::SIZE]>::read(buf)?;
-        let signature = ed25519_consensus::Signature::from(raw);
-        Ok(Self { raw, signature })
+        Ok(Self { raw })
     }
 }
 
@@ -295,10 +310,7 @@ impl Deref for Signature {
 impl From<ed25519_consensus::Signature> for Signature {
     fn from(value: ed25519_consensus::Signature) -> Self {
         let raw = value.to_bytes();
-        Self {
-            raw,
-            signature: value,
-        }
+        Self { raw }
     }
 }
 
@@ -377,7 +389,7 @@ impl Batch {
             .unwrap_or_else(|| Cow::Borrowed(message));
         let item = ed25519_consensus::batch::Item::from((
             public_key.key.into(),
-            signature.signature,
+            ed25519_consensus::Signature::from(signature.raw),
             &payload,
         ));
         self.verifier.queue(item);
