@@ -415,6 +415,14 @@ pub fn select(input: TokenStream) -> TokenStream {
     .into()
 }
 
+/// Branch for [select_loop!] with optional `else` clause for `Some` patterns.
+struct SelectLoopBranch {
+    pattern: Pat,
+    future: Expr,
+    else_body: Option<Expr>,
+    body: Expr,
+}
+
 /// Input for [select_loop!].
 ///
 /// Parses: `context, [on_start => expr,] on_stopped => expr, branches... [, on_end => expr]`
@@ -422,7 +430,7 @@ struct SelectLoopInput {
     context: Expr,
     start_expr: Option<Expr>,
     shutdown_expr: Expr,
-    branches: Vec<Branch>,
+    branches: Vec<SelectLoopBranch>,
     end_expr: Option<Expr>,
 }
 
@@ -479,12 +487,22 @@ impl Parse for SelectLoopInput {
             let pattern = Pat::parse_single(input)?;
             input.parse::<Token![=]>()?;
             let future: Expr = input.parse()?;
+
+            // Parse optional else clause: `else expr`
+            let else_body = if input.peek(Token![else]) {
+                input.parse::<Token![else]>()?;
+                Some(input.parse::<Expr>()?)
+            } else {
+                None
+            };
+
             input.parse::<Token![=>]>()?;
             let body: Expr = input.parse()?;
 
-            branches.push(Branch {
+            branches.push(SelectLoopBranch {
                 pattern,
                 future,
+                else_body,
                 body,
             });
 
@@ -541,6 +559,7 @@ impl Parse for SelectLoopInput {
 ///     on_start => { /* optional: runs at start of each iteration */ },
 ///     on_stopped => { cleanup },
 ///     pattern = future => block,
+///     pattern = future else diverge => block,  // let-else for refutable patterns
 ///     // ...
 ///     on_end => { /* optional: runs after non-shutdown arm completes */ },
 /// }
@@ -560,6 +579,38 @@ impl Parse for SelectLoopInput {
 ///
 /// The `shutdown` variable (the future from `context.stopped()`) is accessible in the
 /// shutdown block, allowing explicit cleanup such as `drop(shutdown)` before breaking or returning.
+///
+/// # Refutable Patterns with `else`
+///
+/// For refutable patterns (patterns that may not match), use the `else` clause to specify
+/// what happens when the pattern fails to match. This uses Rust's let-else syntax internally:
+///
+/// ```rust,ignore
+/// // Option handling
+/// Some(msg) = rx.next() else break => { handle(msg); }
+/// Some(msg) = rx.next() else return => { handle(msg); }
+/// Some(msg) = rx.next() else continue => { handle(msg); }
+///
+/// // Result handling
+/// Ok(value) = result_stream.next() else break => { process(value); }
+///
+/// // Enum variants
+/// MyEnum::Data(x) = stream.next() else continue => { use_data(x); }
+/// ```
+///
+/// This replaces the common pattern:
+/// ```rust,ignore
+/// // Before
+/// msg = mailbox.next() => {
+///     let Some(msg) = msg else { break };
+///     // use msg
+/// }
+///
+/// // After
+/// Some(msg) = mailbox.next() else break => {
+///     // use msg directly
+/// }
+/// ```
 ///
 /// # Example
 ///
@@ -599,6 +650,30 @@ pub fn select_loop(input: TokenStream) -> TokenStream {
         end_expr,
     } = parse_macro_input!(input as SelectLoopInput);
 
+    fn is_irrefutable(pat: &Pat) -> bool {
+        match pat {
+            Pat::Wild(_) | Pat::Rest(_) => true,
+            Pat::Ident(i) => i.subpat.as_ref().is_none_or(|(_, p)| is_irrefutable(p)),
+            Pat::Type(t) => is_irrefutable(&t.pat),
+            Pat::Tuple(t) => t.elems.iter().all(is_irrefutable),
+            Pat::Reference(r) => is_irrefutable(&r.pat),
+            Pat::Paren(p) => is_irrefutable(&p.pat),
+            _ => false,
+        }
+    }
+
+    for b in &branches {
+        if b.else_body.is_none() && !is_irrefutable(&b.pattern) {
+            return Error::new_spanned(
+                &b.pattern,
+                "refutable patterns require an else clause: \
+                 `Some(msg) = future else break => { ... }`",
+            )
+            .to_compile_error()
+            .into();
+        }
+    }
+
     // Convert branches to tokens for the inner select!
     let branch_tokens: Vec<_> = branches
         .iter()
@@ -606,7 +681,21 @@ pub fn select_loop(input: TokenStream) -> TokenStream {
             let pattern = &b.pattern;
             let future = &b.future;
             let body = &b.body;
-            quote! { #pattern = #future => #body, }
+
+            // If else clause is present, use let-else to unwrap
+            b.else_body.as_ref().map_or_else(
+                // No else: normal pattern binding (already validated as irrefutable)
+                || quote! { #pattern = #future => #body, },
+                // With else: use let-else for refutable patterns
+                |else_expr| {
+                    quote! {
+                        __select_result = #future => {
+                            let #pattern = __select_result else { #else_expr };
+                            #body
+                        },
+                    }
+                },
+            )
         })
         .collect();
 
