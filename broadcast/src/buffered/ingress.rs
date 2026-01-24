@@ -16,7 +16,7 @@ pub enum Message<P: PublicKey, M: Committable + Digestible> {
         responder: oneshot::Sender<Vec<P>>,
     },
 
-    /// Subscribe to a message by peer (optionally), commitment, and digest (optionally).
+    /// Subscribe to a message by commitment.
     ///
     /// The responder will be sent the first message for an commitment when it is available; either
     /// instantly (if cached) or when it is received from the network. The request can be canceled
@@ -48,7 +48,7 @@ impl<P: PublicKey, M: Committable + Digestible + Codec> Mailbox<P, M> {
         Self { sender }
     }
 
-    /// Subscribe to a message by peer (optionally), commitment, and digest (optionally).
+    /// Subscribe to a message by commitment.
     ///
     /// The responder will be sent the first message for an commitment when it is available; either
     /// instantly (if cached) or when it is received from the network. The request can be canceled
