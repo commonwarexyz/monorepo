@@ -23,6 +23,7 @@
 )]
 
 use commonware_macros::{ready, ready_mod, select};
+#[ready(2)]
 use commonware_parallel::{Rayon, ThreadPool};
 use prometheus_client::registry::Metric;
 #[ready(2)]
@@ -40,17 +41,19 @@ use thiserror::Error;
 mod macros;
 
 ready_mod!(0, pub mod deterministic);
-pub mod mocks;
+ready_mod!(2, pub mod mocks);
 cfg_if::cfg_if! {
     if #[cfg(not(target_arch = "wasm32"))] {
         ready_mod!(2, pub mod tokio);
         pub mod benchmarks;
     }
 }
-pub mod iobuf;
+commonware_macros::ready_scope!(2 {
+    pub mod iobuf;
+    pub use iobuf::{IoBuf, IoBufMut, IoBufs, IoBufsMut};
+});
 /// Re-export of `Buf` and `BufMut` traits for usage with [I/O buffers](iobuf).
 pub use bytes::{Buf, BufMut};
-pub use iobuf::{IoBuf, IoBufMut, IoBufs, IoBufsMut};
 mod network;
 mod process;
 mod storage;
@@ -550,219 +553,223 @@ cfg_if::cfg_if! {
     }
 }
 
-/// Syntactic sugar for the type of [Sink] used by a given [Network] N.
-pub type SinkOf<N> = <<N as Network>::Listener as Listener>::Sink;
+commonware_macros::ready_scope!(2 {
+    /// Syntactic sugar for the type of [Sink] used by a given [Network] N.
+    pub type SinkOf<N> = <<N as Network>::Listener as Listener>::Sink;
 
-/// Syntactic sugar for the type of [Stream] used by a given [Network] N.
-pub type StreamOf<N> = <<N as Network>::Listener as Listener>::Stream;
+    /// Syntactic sugar for the type of [Stream] used by a given [Network] N.
+    pub type StreamOf<N> = <<N as Network>::Listener as Listener>::Stream;
 
-/// Syntactic sugar for the type of [Listener] used by a given [Network] N.
-pub type ListenerOf<N> = <N as crate::Network>::Listener;
+    /// Syntactic sugar for the type of [Listener] used by a given [Network] N.
+    pub type ListenerOf<N> = <N as crate::Network>::Listener;
 
-/// Interface that any runtime must implement to create
-/// network connections.
-pub trait Network: Clone + Send + Sync + 'static {
-    /// The type of [Listener] that's returned when binding to a socket.
-    /// Accepting a connection returns a [Sink] and [Stream] which are defined
-    /// by the [Listener] and used to send and receive data over the connection.
-    type Listener: Listener;
+    /// Interface that any runtime must implement to create
+    /// network connections.
+    pub trait Network: Clone + Send + Sync + 'static {
+        /// The type of [Listener] that's returned when binding to a socket.
+        /// Accepting a connection returns a [Sink] and [Stream] which are defined
+        /// by the [Listener] and used to send and receive data over the connection.
+        type Listener: Listener;
 
-    /// Bind to the given socket address.
-    fn bind(
-        &self,
-        socket: SocketAddr,
-    ) -> impl Future<Output = Result<Self::Listener, Error>> + Send;
+        /// Bind to the given socket address.
+        fn bind(
+            &self,
+            socket: SocketAddr,
+        ) -> impl Future<Output = Result<Self::Listener, Error>> + Send;
 
-    /// Dial the given socket address.
-    fn dial(
-        &self,
-        socket: SocketAddr,
-    ) -> impl Future<Output = Result<(SinkOf<Self>, StreamOf<Self>), Error>> + Send;
-}
-
-/// Interface for DNS resolution.
-pub trait Resolver: Clone + Send + Sync + 'static {
-    /// Resolve a hostname to IP addresses.
-    ///
-    /// Returns a list of IP addresses that the hostname resolves to.
-    fn resolve(
-        &self,
-        host: &str,
-    ) -> impl Future<Output = Result<Vec<std::net::IpAddr>, Error>> + Send;
-}
-
-/// Interface that any runtime must implement to handle
-/// incoming network connections.
-pub trait Listener: Sync + Send + 'static {
-    /// The type of [Sink] that's returned when accepting a connection.
-    /// This is used to send data to the remote connection.
-    type Sink: Sink;
-    /// The type of [Stream] that's returned when accepting a connection.
-    /// This is used to receive data from the remote connection.
-    type Stream: Stream;
-
-    /// Accept an incoming connection.
-    fn accept(
-        &mut self,
-    ) -> impl Future<Output = Result<(SocketAddr, Self::Sink, Self::Stream), Error>> + Send;
-
-    /// Returns the local address of the listener.
-    fn local_addr(&self) -> Result<SocketAddr, std::io::Error>;
-}
-
-/// Interface that any runtime must implement to send
-/// messages over a network connection.
-pub trait Sink: Sync + Send + 'static {
-    /// Send a message to the sink.
-    ///
-    /// # Warning
-    ///
-    /// If the sink returns an error, part of the message may still be delivered.
-    fn send(
-        &mut self,
-        buf: impl Into<IoBufs> + Send,
-    ) -> impl Future<Output = Result<(), Error>> + Send;
-}
-
-/// Interface that any runtime must implement to receive
-/// messages over a network connection.
-pub trait Stream: Sync + Send + 'static {
-    /// Receive exactly `len` bytes from the stream.
-    ///
-    /// The runtime allocates the buffer and returns it as `IoBufs`.
-    ///
-    /// # Warning
-    ///
-    /// If the stream returns an error, partially read data may be discarded.
-    fn recv(&mut self, len: u64) -> impl Future<Output = Result<IoBufs, Error>> + Send;
-
-    /// Peek at buffered data without consuming.
-    ///
-    /// Returns up to `max_len` bytes from the internal buffer, or an empty slice
-    /// if no data is currently buffered. This does not perform any I/O or block.
-    ///
-    /// This is useful e.g. for parsing length prefixes without committing to a read
-    /// or paying the cost of async.
-    fn peek(&self, max_len: u64) -> &[u8];
-}
-
-/// Interface to interact with storage.
-///
-/// To support storage implementations that enable concurrent reads and
-/// writes, blobs are responsible for maintaining synchronization.
-///
-/// Storage can be backed by a local filesystem, cloud storage, etc.
-///
-/// # Partition Names
-///
-/// Partition names must be non-empty and contain only ASCII alphanumeric
-/// characters, dashes (`-`), or underscores (`_`). Names containing other
-/// characters (e.g., `/`, `.`, spaces) will return an error.
-pub trait Storage: Clone + Send + Sync + 'static {
-    /// The readable/writeable storage buffer that can be opened by this Storage.
-    type Blob: Blob;
-
-    /// [`Storage::open_versioned`] with [`DEFAULT_BLOB_VERSION`] as the only value
-    /// in the versions range. The blob version is omitted from the return value.
-    fn open(
-        &self,
-        partition: &str,
-        name: &[u8],
-    ) -> impl Future<Output = Result<(Self::Blob, u64), Error>> + Send {
-        async move {
-            let (blob, size, _) = self
-                .open_versioned(partition, name, DEFAULT_BLOB_VERSION..=DEFAULT_BLOB_VERSION)
-                .await?;
-            Ok((blob, size))
-        }
+        /// Dial the given socket address.
+        fn dial(
+            &self,
+            socket: SocketAddr,
+        ) -> impl Future<Output = Result<(SinkOf<Self>, StreamOf<Self>), Error>> + Send;
     }
 
-    /// Open an existing blob in a given partition or create a new one, returning
-    /// the blob and its length.
-    ///
-    /// Multiple instances of the same blob can be opened concurrently, however,
-    /// writing to the same blob concurrently may lead to undefined behavior.
-    ///
-    /// An Ok result indicates the blob is durably created (or already exists).
-    ///
-    /// # Versions
-    ///
-    /// Blobs are versioned. If the blob's version is not in `versions`, returns
-    /// [Error::BlobVersionMismatch].
-    ///
-    /// # Returns
-    ///
-    /// A tuple of (blob, logical_size, blob_version).
-    fn open_versioned(
-        &self,
-        partition: &str,
-        name: &[u8],
-        versions: std::ops::RangeInclusive<u16>,
-    ) -> impl Future<Output = Result<(Self::Blob, u64, u16), Error>> + Send;
+    /// Interface for DNS resolution.
+    pub trait Resolver: Clone + Send + Sync + 'static {
+        /// Resolve a hostname to IP addresses.
+        ///
+        /// Returns a list of IP addresses that the hostname resolves to.
+        fn resolve(
+            &self,
+            host: &str,
+        ) -> impl Future<Output = Result<Vec<std::net::IpAddr>, Error>> + Send;
+    }
 
-    /// Remove a blob from a given partition.
-    ///
-    /// If no `name` is provided, the entire partition is removed.
-    ///
-    /// An Ok result indicates the blob is durably removed.
-    fn remove(
-        &self,
-        partition: &str,
-        name: Option<&[u8]>,
-    ) -> impl Future<Output = Result<(), Error>> + Send;
+    /// Interface that any runtime must implement to handle
+    /// incoming network connections.
+    pub trait Listener: Sync + Send + 'static {
+        /// The type of [Sink] that's returned when accepting a connection.
+        /// This is used to send data to the remote connection.
+        type Sink: Sink;
+        /// The type of [Stream] that's returned when accepting a connection.
+        /// This is used to receive data from the remote connection.
+        type Stream: Stream;
 
-    /// Return all blobs in a given partition.
-    fn scan(&self, partition: &str) -> impl Future<Output = Result<Vec<Vec<u8>>, Error>> + Send;
-}
+        /// Accept an incoming connection.
+        fn accept(
+            &mut self,
+        ) -> impl Future<Output = Result<(SocketAddr, Self::Sink, Self::Stream), Error>> + Send;
 
-/// Interface to read and write to a blob.
-///
-/// To support blob implementations that enable concurrent reads and
-/// writes, blobs are responsible for maintaining synchronization.
-///
-/// Cloning a blob is similar to wrapping a single file descriptor in
-/// a lock whereas opening a new blob (of the same name) is similar to
-/// opening a new file descriptor. If multiple blobs are opened with the same
-/// name, they are not expected to coordinate access to underlying storage
-/// and writing to both is undefined behavior.
-///
-/// When a blob is dropped, any unsynced changes may be discarded. Implementations
-/// may attempt to sync during drop but errors will go unhandled. Call `sync`
-/// before dropping to ensure all changes are durably persisted.
-#[allow(clippy::len_without_is_empty)]
-pub trait Blob: Clone + Send + Sync + 'static {
-    /// Read into caller-provided buffer(s) at the given offset.
-    ///
-    /// The caller provides the buffer, and the implementation fills it with data
-    /// read from the blob starting at `offset`. Returns the same buffer, filled
-    /// with data.
-    ///
-    /// # Contract
-    ///
-    /// - The output `IoBufsMut` is the same as the input, with data filled from offset
-    /// - The total bytes read equals the total initialized length of the input buffer(s)
-    fn read_at(
-        &self,
-        offset: u64,
-        buf: impl Into<IoBufsMut> + Send,
-    ) -> impl Future<Output = Result<IoBufsMut, Error>> + Send;
+        /// Returns the local address of the listener.
+        fn local_addr(&self) -> Result<SocketAddr, std::io::Error>;
+    }
 
-    /// Write `buf` to the blob at the given offset.
-    fn write_at(
-        &self,
-        offset: u64,
-        buf: impl Into<IoBufs> + Send,
-    ) -> impl Future<Output = Result<(), Error>> + Send;
+    /// Interface that any runtime must implement to send
+    /// messages over a network connection.
+    pub trait Sink: Sync + Send + 'static {
+        /// Send a message to the sink.
+        ///
+        /// # Warning
+        ///
+        /// If the sink returns an error, part of the message may still be delivered.
+        fn send(
+            &mut self,
+            buf: impl Into<IoBufs> + Send,
+        ) -> impl Future<Output = Result<(), Error>> + Send;
+    }
 
-    /// Resize the blob to the given length.
+    /// Interface that any runtime must implement to receive
+    /// messages over a network connection.
+    pub trait Stream: Sync + Send + 'static {
+        /// Receive exactly `len` bytes from the stream.
+        ///
+        /// The runtime allocates the buffer and returns it as `IoBufs`.
+        ///
+        /// # Warning
+        ///
+        /// If the stream returns an error, partially read data may be discarded.
+        fn recv(&mut self, len: u64) -> impl Future<Output = Result<IoBufs, Error>> + Send;
+
+        /// Peek at buffered data without consuming.
+        ///
+        /// Returns up to `max_len` bytes from the internal buffer, or an empty slice
+        /// if no data is currently buffered. This does not perform any I/O or block.
+        ///
+        /// This is useful e.g. for parsing length prefixes without committing to a read
+        /// or paying the cost of async.
+        fn peek(&self, max_len: u64) -> &[u8];
+    }
+});
+
+commonware_macros::ready_scope!(2 {
+    /// Interface to interact with storage.
     ///
-    /// If the length is greater than the current length, the blob is extended with zeros.
-    /// If the length is less than the current length, the blob is resized.
-    fn resize(&self, len: u64) -> impl Future<Output = Result<(), Error>> + Send;
+    /// To support storage implementations that enable concurrent reads and
+    /// writes, blobs are responsible for maintaining synchronization.
+    ///
+    /// Storage can be backed by a local filesystem, cloud storage, etc.
+    ///
+    /// # Partition Names
+    ///
+    /// Partition names must be non-empty and contain only ASCII alphanumeric
+    /// characters, dashes (`-`), or underscores (`_`). Names containing other
+    /// characters (e.g., `/`, `.`, spaces) will return an error.
+    pub trait Storage: Clone + Send + Sync + 'static {
+        /// The readable/writeable storage buffer that can be opened by this Storage.
+        type Blob: Blob;
 
-    /// Ensure all pending data is durably persisted.
-    fn sync(&self) -> impl Future<Output = Result<(), Error>> + Send;
-}
+        /// [`Storage::open_versioned`] with [`DEFAULT_BLOB_VERSION`] as the only value
+        /// in the versions range. The blob version is omitted from the return value.
+        fn open(
+            &self,
+            partition: &str,
+            name: &[u8],
+        ) -> impl Future<Output = Result<(Self::Blob, u64), Error>> + Send {
+            async move {
+                let (blob, size, _) = self
+                    .open_versioned(partition, name, DEFAULT_BLOB_VERSION..=DEFAULT_BLOB_VERSION)
+                    .await?;
+                Ok((blob, size))
+            }
+        }
+
+        /// Open an existing blob in a given partition or create a new one, returning
+        /// the blob and its length.
+        ///
+        /// Multiple instances of the same blob can be opened concurrently, however,
+        /// writing to the same blob concurrently may lead to undefined behavior.
+        ///
+        /// An Ok result indicates the blob is durably created (or already exists).
+        ///
+        /// # Versions
+        ///
+        /// Blobs are versioned. If the blob's version is not in `versions`, returns
+        /// [Error::BlobVersionMismatch].
+        ///
+        /// # Returns
+        ///
+        /// A tuple of (blob, logical_size, blob_version).
+        fn open_versioned(
+            &self,
+            partition: &str,
+            name: &[u8],
+            versions: std::ops::RangeInclusive<u16>,
+        ) -> impl Future<Output = Result<(Self::Blob, u64, u16), Error>> + Send;
+
+        /// Remove a blob from a given partition.
+        ///
+        /// If no `name` is provided, the entire partition is removed.
+        ///
+        /// An Ok result indicates the blob is durably removed.
+        fn remove(
+            &self,
+            partition: &str,
+            name: Option<&[u8]>,
+        ) -> impl Future<Output = Result<(), Error>> + Send;
+
+        /// Return all blobs in a given partition.
+        fn scan(&self, partition: &str) -> impl Future<Output = Result<Vec<Vec<u8>>, Error>> + Send;
+    }
+
+    /// Interface to read and write to a blob.
+    ///
+    /// To support blob implementations that enable concurrent reads and
+    /// writes, blobs are responsible for maintaining synchronization.
+    ///
+    /// Cloning a blob is similar to wrapping a single file descriptor in
+    /// a lock whereas opening a new blob (of the same name) is similar to
+    /// opening a new file descriptor. If multiple blobs are opened with the same
+    /// name, they are not expected to coordinate access to underlying storage
+    /// and writing to both is undefined behavior.
+    ///
+    /// When a blob is dropped, any unsynced changes may be discarded. Implementations
+    /// may attempt to sync during drop but errors will go unhandled. Call `sync`
+    /// before dropping to ensure all changes are durably persisted.
+    #[allow(clippy::len_without_is_empty)]
+    pub trait Blob: Clone + Send + Sync + 'static {
+        /// Read into caller-provided buffer(s) at the given offset.
+        ///
+        /// The caller provides the buffer, and the implementation fills it with data
+        /// read from the blob starting at `offset`. Returns the same buffer, filled
+        /// with data.
+        ///
+        /// # Contract
+        ///
+        /// - The output `IoBufsMut` is the same as the input, with data filled from offset
+        /// - The total bytes read equals the total initialized length of the input buffer(s)
+        fn read_at(
+            &self,
+            offset: u64,
+            buf: impl Into<IoBufsMut> + Send,
+        ) -> impl Future<Output = Result<IoBufsMut, Error>> + Send;
+
+        /// Write `buf` to the blob at the given offset.
+        fn write_at(
+            &self,
+            offset: u64,
+            buf: impl Into<IoBufs> + Send,
+        ) -> impl Future<Output = Result<(), Error>> + Send;
+
+        /// Resize the blob to the given length.
+        ///
+        /// If the length is greater than the current length, the blob is extended with zeros.
+        /// If the length is less than the current length, the blob is resized.
+        fn resize(&self, len: u64) -> impl Future<Output = Result<(), Error>> + Send;
+
+        /// Ensure all pending data is durably persisted.
+        fn sync(&self) -> impl Future<Output = Result<(), Error>> + Send;
+    }
+});
 
 #[cfg(test)]
 mod tests {

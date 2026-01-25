@@ -59,6 +59,7 @@ commonware_macros::ready_scope!(2 {
 /// This trait is required for blocks used with deferred verification in [CertifiableAutomaton].
 /// It allows the verification context to be derived directly from the block when a validator
 /// needs to participate in certification but never verified the block locally (necessary for liveness).
+#[commonware_macros::ready(2)]
 pub trait CertifiableBlock: Block {
     /// The consensus context type stored in this block.
     type Context: Clone;

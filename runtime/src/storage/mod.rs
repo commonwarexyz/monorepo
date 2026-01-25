@@ -1,6 +1,7 @@
 //! Implementations of the `Storage` trait that can be used by the runtime.
 
 use crate::{Buf, BufMut};
+#[ready(2)]
 use commonware_codec::{DecodeExt, FixedSize, Read as CodecRead, Write as CodecWrite};
 use commonware_macros::{ready, ready_mod};
 #[ready(2)]

@@ -1,4 +1,6 @@
-use crate::{signal, Error, Handle, SinkOf, StreamOf};
+use crate::{signal, Error, Handle};
+#[ready(2)]
+use crate::{SinkOf, StreamOf};
 use commonware_macros::ready;
 #[ready(2)]
 use commonware_parallel::ThreadPool;
@@ -212,54 +214,56 @@ where
     }
 }
 
-impl<C> crate::Network for Cell<C>
-where
-    C: crate::Network,
-{
-    type Listener = <C as crate::Network>::Listener;
+commonware_macros::ready_scope!(2 {
+    impl<C> crate::Network for Cell<C>
+    where
+        C: crate::Network,
+    {
+        type Listener = <C as crate::Network>::Listener;
 
-    fn bind(
-        &self,
-        socket: SocketAddr,
-    ) -> impl Future<Output = Result<Self::Listener, Error>> + Send {
-        self.as_present().bind(socket)
+        fn bind(
+            &self,
+            socket: SocketAddr,
+        ) -> impl Future<Output = Result<Self::Listener, Error>> + Send {
+            self.as_present().bind(socket)
+        }
+
+        fn dial(
+            &self,
+            socket: SocketAddr,
+        ) -> impl Future<Output = Result<(SinkOf<Self>, StreamOf<Self>), Error>> + Send {
+            self.as_present().dial(socket)
+        }
     }
 
-    fn dial(
-        &self,
-        socket: SocketAddr,
-    ) -> impl Future<Output = Result<(SinkOf<Self>, StreamOf<Self>), Error>> + Send {
-        self.as_present().dial(socket)
-    }
-}
+    impl<C> crate::Storage for Cell<C>
+    where
+        C: crate::Storage,
+    {
+        type Blob = <C as crate::Storage>::Blob;
 
-impl<C> crate::Storage for Cell<C>
-where
-    C: crate::Storage,
-{
-    type Blob = <C as crate::Storage>::Blob;
+        fn open_versioned(
+            &self,
+            partition: &str,
+            name: &[u8],
+            versions: RangeInclusive<u16>,
+        ) -> impl Future<Output = Result<(Self::Blob, u64, u16), Error>> + Send {
+            self.as_present().open_versioned(partition, name, versions)
+        }
 
-    fn open_versioned(
-        &self,
-        partition: &str,
-        name: &[u8],
-        versions: RangeInclusive<u16>,
-    ) -> impl Future<Output = Result<(Self::Blob, u64, u16), Error>> + Send {
-        self.as_present().open_versioned(partition, name, versions)
-    }
+        fn remove(
+            &self,
+            partition: &str,
+            name: Option<&[u8]>,
+        ) -> impl Future<Output = Result<(), Error>> + Send {
+            self.as_present().remove(partition, name)
+        }
 
-    fn remove(
-        &self,
-        partition: &str,
-        name: Option<&[u8]>,
-    ) -> impl Future<Output = Result<(), Error>> + Send {
-        self.as_present().remove(partition, name)
+        fn scan(&self, partition: &str) -> impl Future<Output = Result<Vec<Vec<u8>>, Error>> + Send {
+            self.as_present().scan(partition)
+        }
     }
-
-    fn scan(&self, partition: &str) -> impl Future<Output = Result<Vec<Vec<u8>>, Error>> + Send {
-        self.as_present().scan(partition)
-    }
-}
+});
 
 impl<C> RngCore for Cell<C>
 where
@@ -297,6 +301,7 @@ where
 
 impl<C> ReasonablyRealtime for Cell<C> where C: ReasonablyRealtime {}
 
+#[commonware_macros::ready(2)]
 impl<C> crate::Resolver for Cell<C>
 where
     C: crate::Resolver,
