@@ -413,7 +413,7 @@ mod tests {
                                                 )
                                                 .await
                                                 .unwrap();
-                                            if sent.len() != n - 1 {
+                                            if sent.len() != recipients.len() {
                                                 context.sleep(Duration::from_millis(100)).await;
                                                 continue;
                                             }
@@ -436,7 +436,7 @@ mod tests {
                                                 .send(Recipients::All, msg.as_ref().to_vec(), true)
                                                 .await
                                                 .unwrap();
-                                            if sent.len() != n - 1 {
+                                            if sent.len() != recipients.len() {
                                                 context.sleep(Duration::from_millis(100)).await;
                                                 continue;
                                             }
@@ -1214,7 +1214,7 @@ mod tests {
                                                 .send(Recipients::All, msg.as_ref().to_vec(), true)
                                                 .await
                                                 .unwrap();
-                                            if sent.len() != n - 1 {
+                                            if sent.len() != recipients.len() {
                                                 context.sleep(Duration::from_millis(100)).await;
                                                 continue;
                                             }
@@ -1441,7 +1441,7 @@ mod tests {
                                                 .send(Recipients::All, msg.as_ref().to_vec(), true)
                                                 .await
                                                 .unwrap();
-                                            if sent.len() != n - 1 {
+                                            if sent.len() != recipients.len() {
                                                 context.sleep(Duration::from_millis(100)).await;
                                                 continue;
                                             }
