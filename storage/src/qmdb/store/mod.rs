@@ -10,7 +10,7 @@ use crate::{
     mmr::{Location, Proof},
     qmdb::Error,
 };
-use commonware_codec::Codec;
+use commonware_codec::CodecShared;
 use commonware_cryptography::Digest;
 use core::future::Future;
 use std::num::NonZeroU64;
@@ -26,7 +26,7 @@ mod private {
 }
 
 /// Trait for valid store state types.
-pub trait State: private::Sealed + Sized {}
+pub trait State: private::Sealed + Sized + Send + Sync {}
 
 /// Marker type for a store in a "durable" state (no uncommitted operations).
 #[derive(Clone, Copy, Debug)]
@@ -47,8 +47,8 @@ impl private::Sealed for NonDurable {}
 impl State for NonDurable {}
 
 /// A trait for a store based on an append-only log of operations.
-pub trait LogStore {
-    type Value: Codec + Clone;
+pub trait LogStore: Send + Sync {
+    type Value: CodecShared + Clone;
 
     /// Returns true if there are no active keys in the database.
     fn is_empty(&self) -> bool;
@@ -62,13 +62,13 @@ pub trait LogStore {
     fn inactivity_floor_loc(&self) -> Location;
 
     /// Get the metadata associated with the last commit.
-    fn get_metadata(&self) -> impl Future<Output = Result<Option<Self::Value>, Error>>;
+    fn get_metadata(&self) -> impl Future<Output = Result<Option<Self::Value>, Error>> + Send;
 }
 
 /// A trait for stores that can be pruned.
 pub trait PrunableStore: LogStore {
     /// Prune historical operations prior to `loc`.
-    fn prune(&mut self, loc: Location) -> impl Future<Output = Result<(), Error>>;
+    fn prune(&mut self, loc: Location) -> impl Future<Output = Result<(), Error>> + Send;
 }
 
 /// A trait for stores that support authentication through merkleization and inclusion proofs.
@@ -98,7 +98,8 @@ pub trait MerkleizedStore: LogStore {
         &self,
         start_loc: Location,
         max_ops: NonZeroU64,
-    ) -> impl Future<Output = Result<(Proof<Self::Digest>, Vec<Self::Operation>), Error>> {
+    ) -> impl Future<Output = Result<(Proof<Self::Digest>, Vec<Self::Operation>), Error>> + Send
+    {
         self.historical_proof(self.op_count(), start_loc, max_ops)
     }
 
@@ -121,5 +122,29 @@ pub trait MerkleizedStore: LogStore {
         historical_size: Location,
         start_loc: Location,
         max_ops: NonZeroU64,
-    ) -> impl Future<Output = Result<(Proof<Self::Digest>, Vec<Self::Operation>), Error>>;
+    ) -> impl Future<Output = Result<(Proof<Self::Digest>, Vec<Self::Operation>), Error>> + Send;
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::{LogStore, MerkleizedStore, PrunableStore};
+    use crate::mmr::Location;
+    use commonware_utils::NZU64;
+
+    pub fn assert_send<T: Send>(_: T) {}
+
+    #[allow(dead_code)]
+    pub fn assert_log_store<T: LogStore>(db: &T) {
+        assert_send(db.get_metadata());
+    }
+
+    #[allow(dead_code)]
+    pub fn assert_prunable_store<T: PrunableStore>(db: &mut T, loc: Location) {
+        assert_send(db.prune(loc));
+    }
+
+    #[allow(dead_code)]
+    pub fn assert_merkleized_store<T: MerkleizedStore>(db: &T, loc: Location) {
+        assert_send(db.proof(loc, NZU64!(1)));
+    }
 }

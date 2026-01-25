@@ -7,6 +7,7 @@ use crate::{
 };
 use commonware_codec::{Decode, DecodeExt, Encode};
 use commonware_cryptography::{certificate::Scheme, Digest};
+use commonware_parallel::Sequential;
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt, StreamExt,
@@ -77,7 +78,7 @@ where
             match msg {
                 Message::Ack(ack) => {
                     // Verify properly constructed (not needed in production)
-                    assert!(ack.verify(&mut self.rng, &self.scheme));
+                    assert!(ack.verify(&mut self.rng, &self.scheme, &Sequential));
 
                     // Test encoding/decoding
                     let encoded = ack.encode();
@@ -91,7 +92,7 @@ where
                 }
                 Message::Certified(certificate) => {
                     // Verify certificate
-                    assert!(certificate.verify(&mut self.rng, &self.scheme));
+                    assert!(certificate.verify(&mut self.rng, &self.scheme, &Sequential));
 
                     // Test encoding/decoding
                     let encoded = certificate.encode();

@@ -1,5 +1,4 @@
-use crate::Error;
-use commonware_utils::StableBuf;
+use crate::{Buf, Error, IoBufs, IoBufsMut};
 use prometheus_client::{
     metrics::{counter::Counter, gauge::Gauge},
     registry::Registry,
@@ -72,6 +71,11 @@ impl<S> Storage<S> {
             metrics: Metrics::new(registry).into(),
         }
     }
+
+    /// Get a reference to the inner storage.
+    pub const fn inner(&self) -> &S {
+        &self.inner
+    }
 }
 
 impl<S: crate::Storage> crate::Storage for Storage<S> {
@@ -135,19 +139,20 @@ impl Drop for MetricsHandle {
 impl<B: crate::Blob> crate::Blob for Blob<B> {
     async fn read_at(
         &self,
-        buf: impl Into<StableBuf> + Send,
         offset: u64,
-    ) -> Result<StableBuf, Error> {
-        let read = self.inner.read_at(buf, offset).await?;
+        buf: impl Into<IoBufsMut> + Send,
+    ) -> Result<IoBufsMut, Error> {
+        let buf = buf.into();
+        let read = self.inner.read_at(offset, buf).await?;
         self.metrics.storage_reads.inc();
         self.metrics.storage_read_bytes.inc_by(read.len() as u64);
         Ok(read)
     }
 
-    async fn write_at(&self, buf: impl Into<StableBuf> + Send, offset: u64) -> Result<(), Error> {
+    async fn write_at(&self, offset: u64, buf: impl Into<IoBufs> + Send) -> Result<(), Error> {
         let buf = buf.into();
-        let buf_len = buf.len();
-        self.inner.write_at(buf, offset).await?;
+        let buf_len = buf.remaining();
+        self.inner.write_at(offset, buf).await?;
         self.metrics.storage_writes.inc();
         self.metrics.storage_write_bytes.inc_by(buf_len as u64);
         Ok(())
@@ -167,7 +172,7 @@ mod tests {
     use super::*;
     use crate::{
         storage::{memory::Storage as MemoryStorage, tests::run_storage_tests},
-        Blob, Storage as _,
+        Blob, IoBufMut, Storage as _,
     };
     use prometheus_client::registry::Registry;
 
@@ -198,7 +203,7 @@ mod tests {
         );
 
         // Write data to the blob
-        blob.write_at(b"hello world".to_vec(), 0).await.unwrap();
+        blob.write_at(0, b"hello world").await.unwrap();
         let writes = storage.metrics.storage_writes.get();
         let write_bytes = storage.metrics.storage_write_bytes.get();
         assert_eq!(
@@ -211,8 +216,8 @@ mod tests {
         );
 
         // Read data from the blob
-        let read = blob.read_at(vec![0; 11], 0).await.unwrap();
-        assert_eq!(read.as_ref(), b"hello world");
+        let read = blob.read_at(0, IoBufMut::zeroed(11)).await.unwrap();
+        assert_eq!(read.coalesce(), b"hello world");
         let reads = storage.metrics.storage_reads.get();
         let read_bytes = storage.metrics.storage_read_bytes.get();
         assert_eq!(
@@ -306,10 +311,10 @@ mod tests {
         );
 
         // Use the clones for some operations to verify they share metrics
-        blob.write_at(b"hello".to_vec(), 0).await.unwrap();
-        clone1.write_at(b"world".to_vec(), 5).await.unwrap();
-        let _ = clone1.read_at(vec![0; 10], 0).await.unwrap();
-        let _ = clone2.read_at(vec![0; 10], 0).await.unwrap();
+        blob.write_at(0, b"hello").await.unwrap();
+        clone1.write_at(5, b"world").await.unwrap();
+        let _ = clone1.read_at(0, IoBufMut::zeroed(10)).await.unwrap();
+        let _ = clone2.read_at(0, IoBufMut::zeroed(10)).await.unwrap();
 
         // Verify that operations on clones update the shared metrics
         assert_eq!(

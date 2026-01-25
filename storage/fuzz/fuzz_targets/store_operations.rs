@@ -2,13 +2,14 @@
 
 use arbitrary::Arbitrary;
 use commonware_cryptography::blake3::Digest;
-use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
+use commonware_runtime::{buffer::PoolRef, deterministic, Metrics, Runner};
 use commonware_storage::{
     qmdb::store::db::{Config, Db},
     translator::TwoCap,
 };
-use commonware_utils::{NZUsize, NZU64};
+use commonware_utils::{NZUsize, NZU16, NZU64};
 use libfuzzer_sys::fuzz_target;
+use std::num::NonZeroU16;
 
 const MAX_OPERATIONS: usize = 50;
 
@@ -86,7 +87,7 @@ impl<'a> Arbitrary<'a> for FuzzInput {
     }
 }
 
-const PAGE_SIZE: usize = 128;
+const PAGE_SIZE: NonZeroU16 = NZU16!(125);
 const PAGE_CACHE_SIZE: usize = 8;
 
 fn test_config(test_name: &str) -> Config<TwoCap, (commonware_codec::RangeCfg<usize>, ())> {
@@ -97,7 +98,7 @@ fn test_config(test_name: &str) -> Config<TwoCap, (commonware_codec::RangeCfg<us
         log_codec_config: ((0..=10000).into(), ()),
         log_items_per_section: NZU64!(7),
         translator: TwoCap,
-        buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+        buffer_pool: PoolRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
     }
 }
 
@@ -109,6 +110,7 @@ fn fuzz(input: FuzzInput) {
             .await
             .expect("Failed to init db")
             .into_dirty();
+        let mut restarts = 0usize;
 
         for op in &input.ops {
             match op {
@@ -163,10 +165,16 @@ fn fuzz(input: FuzzInput) {
                 Operation::SimulateFailure => {
                     drop(db);
 
-                    db = StoreDb::init(context.clone(), test_config("store_fuzz_test"))
-                        .await
-                        .expect("Failed to init db")
-                        .into_dirty();
+                    db = StoreDb::init(
+                        context
+                            .with_label("db")
+                            .with_attribute("instance", restarts),
+                        test_config("store_fuzz_test"),
+                    )
+                    .await
+                    .expect("Failed to init db")
+                    .into_dirty();
+                    restarts += 1;
                 }
             }
         }

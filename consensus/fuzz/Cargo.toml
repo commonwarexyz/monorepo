@@ -10,15 +10,15 @@ cargo-fuzz = true
 
 [dependencies]
 arbitrary = { workspace = true, features = ["derive"] }
-bytes.workspace = true
 commonware-codec.workspace = true
 commonware-consensus = { workspace = true, features = ["arbitrary", "fuzz"] }
 commonware-cryptography.workspace = true
 commonware-macros.workspace = true
 commonware-math.workspace = true
 commonware-p2p.workspace = true
+commonware-parallel.workspace = true
 commonware-runtime.workspace = true
-commonware-utils.workspace = true
+commonware-utils = { workspace = true, features = ["arbitrary"] }
 futures.workspace = true
 libfuzzer-sys.workspace = true
 rand.workspace = true

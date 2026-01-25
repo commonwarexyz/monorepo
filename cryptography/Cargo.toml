@@ -25,8 +25,12 @@ commonware-codec.workspace = true
 commonware-math.workspace = true
 commonware-parallel.workspace = true
 commonware-utils.workspace = true
+crc-fast = { workspace = true, features = ["panic-handler"] }
+ctutils.workspace = true
 ecdsa.workspace = true
 ed25519-consensus = { workspace = true, default-features = false }
+num-rational = { workspace = true, optional = true }
+num-traits = { workspace = true, optional = true }
 p256 = { workspace = true, features = ["ecdsa"] }
 rand.workspace = true
 rand_chacha.workspace = true
@@ -49,6 +53,7 @@ features = ["js"]
 anyhow.workspace = true
 commonware-conformance.workspace = true
 commonware-math = { workspace = true, features = ["test_strategies"] }
+crc.workspace = true
 criterion.workspace = true
 proptest.workspace = true
 rayon.workspace = true
@@ -80,9 +85,13 @@ std = [
 	"commonware-math/std",
 	"commonware-parallel/std",
 	"commonware-utils/std",
+	"crc-fast/std",
 	"ecdsa/std",
 	"ed25519-consensus/std",
 	"getrandom/std",
+	"num-rational",
+	"num-traits",
+	"num-traits?/std",
 	"p256/std",
 	"rand/std",
 	"rand/std_rng",
@@ -127,3 +136,8 @@ path = "src/lthash/benches/bench.rs"
 name = "handshake"
 harness = false
 path = "src/handshake/benches/bench.rs"
+
+[[bench]]
+name = "bloomfilter"
+harness = false
+path = "src/bloomfilter/benches/bench.rs"

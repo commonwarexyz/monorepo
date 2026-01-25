@@ -8,7 +8,7 @@ use crate::{
     certificate::{mocks::Fixture, Scheme},
     ed25519,
 };
-use commonware_utils::ordered::Set;
+use commonware_utils::{ordered::Set, N3f1};
 use rand::{CryptoRng, RngCore};
 
 /// Builds ed25519 identities and matching BLS12-381 threshold schemes.
@@ -39,8 +39,8 @@ where
         })
         .collect();
 
-    let (output, shares) =
-        deal::<V, _>(rng, Default::default(), participants.clone()).expect("deal should succeed");
+    let (output, shares) = deal::<V, _, N3f1>(rng, Default::default(), participants.clone())
+        .expect("deal should succeed");
     let polynomial = output.public().clone();
 
     let schemes = shares

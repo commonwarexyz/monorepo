@@ -404,13 +404,14 @@ mod test {
     use crate::{mmr::StandardHasher as Standard, qmdb::verify_proof};
     use commonware_cryptography::Sha256;
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic, Runner as _};
-    use commonware_utils::{NZUsize, NZU64};
+    use commonware_runtime::{deterministic, Metrics, Runner as _};
+    use commonware_utils::{NZUsize, NZU16, NZU64};
     use rand::Rng;
+    use std::num::NonZeroU16;
 
     // Use some weird sizes here to test boundary conditions.
-    const PAGE_SIZE: usize = 101;
-    const PAGE_CACHE_SIZE: usize = 11;
+    const PAGE_SIZE: NonZeroU16 = NZU16!(101);
+    const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(11);
 
     fn db_config(suffix: &str) -> Config<(commonware_codec::RangeCfg<usize>, ())> {
         Config {
@@ -424,7 +425,7 @@ mod test {
             log_codec_config: ((0..=10000).into(), ()),
             log_items_per_section: NZU64!(7),
             thread_pool: None,
-            buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+            buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
 
@@ -445,7 +446,7 @@ mod test {
     pub fn test_keyless_db_empty() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let db = open_db(context.clone()).await;
+            let db = open_db(context.with_label("db1")).await;
             assert_eq!(db.op_count(), 1); // initial commit should exist
             assert_eq!(db.oldest_retained_loc(), Location::new_unchecked(0));
 
@@ -458,7 +459,7 @@ mod test {
             let mut db = db.into_mutable();
             db.append(v1).await.unwrap();
             drop(db); // Simulate failed commit
-            let db = open_db(context.clone()).await;
+            let db = open_db(context.with_label("db2")).await;
             assert_eq!(db.root(), root);
             assert_eq!(db.op_count(), 1);
             assert_eq!(db.get_metadata().await.unwrap(), None);
@@ -477,7 +478,7 @@ mod test {
             let root = db.root();
 
             // Commit op should remain after reopen even without clean shutdown.
-            let db = open_db(context.clone()).await;
+            let db = open_db(context.with_label("db3")).await;
             assert_eq!(db.op_count(), 2); // commit op should remain after re-open.
             assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
             assert_eq!(db.root(), root);
@@ -492,7 +493,7 @@ mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Build a db with 2 values and make sure we can get them back.
-            let db = open_db(context.clone()).await;
+            let db = open_db(context.with_label("db1")).await;
             let mut db = db.into_mutable();
 
             let v1 = vec![1u8; 8];
@@ -513,7 +514,7 @@ mod test {
             let root = db.root();
             db.sync().await.unwrap();
             drop(db);
-            let db = open_db(context.clone()).await;
+            let db = open_db(context.with_label("db2")).await;
             assert_eq!(db.op_count(), 4);
             assert_eq!(db.root(), root);
 
@@ -526,13 +527,13 @@ mod test {
 
             // Make sure uncommitted items get rolled back.
             drop(db); // Simulate failed commit
-            let db = open_db(context.clone()).await;
+            let db = open_db(context.with_label("db3")).await;
             assert_eq!(db.op_count(), 4);
             assert_eq!(db.root(), root);
 
             // Make sure commit operation remains after drop/reopen.
             drop(db);
-            let db = open_db(context.clone()).await;
+            let db = open_db(context.with_label("db4")).await;
             assert_eq!(db.op_count(), 4);
             assert_eq!(db.root(), root);
 
@@ -553,7 +554,7 @@ mod test {
         let executor = deterministic::Runner::default();
         const ELEMENTS: usize = 1000;
         executor.start(|mut context| async move {
-            let db = open_db(context.clone()).await;
+            let db = open_db(context.with_label("db1")).await;
             let root = db.root();
             let mut db = db.into_mutable();
 
@@ -562,7 +563,7 @@ mod test {
             // Simulate a failure before committing.
             drop(db);
             // Should rollback to the previous root.
-            let db = open_db(context.clone()).await;
+            let db = open_db(context.with_label("db2")).await;
             assert_eq!(root, db.root());
 
             // Re-apply the updates and commit them this time.
@@ -579,7 +580,7 @@ mod test {
             // Simulate a failure.
             drop(db);
             // Should rollback to the previous root.
-            let db = open_db(context.clone()).await;
+            let db = open_db(context.with_label("db3")).await;
             assert_eq!(root, db.root());
 
             // Re-apply the updates and commit them this time.
@@ -591,7 +592,7 @@ mod test {
 
             // Make sure we can reopen and get back to the same state.
             drop(db);
-            let db = open_db(context.clone()).await;
+            let db = open_db(context.with_label("db4")).await;
             assert_eq!(db.op_count(), 2 * ELEMENTS as u64 + 3);
             assert_eq!(db.root(), root);
 
@@ -605,7 +606,7 @@ mod test {
     fn test_keyless_db_non_empty_db_recovery() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
-            let db = open_db(context.clone()).await;
+            let db = open_db(context.with_label("db1")).await;
 
             // Append many values then commit.
             const ELEMENTS: usize = 200;
@@ -617,7 +618,7 @@ mod test {
             let op_count = db.op_count();
 
             // Reopen DB without clean shutdown and make sure the state is the same.
-            let db = open_db(context.clone()).await;
+            let db = open_db(context.with_label("db2")).await;
             assert_eq!(db.op_count(), op_count);
             assert_eq!(db.root(), root);
             assert_eq!(db.last_commit_loc(), op_count - 1);
@@ -626,36 +627,38 @@ mod test {
             // Insert many operations without commit, then simulate failure.
             async fn recover_from_failure(
                 mut context: deterministic::Context,
+                label1: &str,
+                label2: &str,
                 root: <Sha256 as Hasher>::Digest,
                 op_count: Location,
             ) {
-                let mut db = open_db(context.clone()).await.into_mutable();
+                let mut db = open_db(context.with_label(label1)).await.into_mutable();
 
                 // Append operations and simulate failure.
                 append_elements(&mut db, &mut context, ELEMENTS).await;
                 drop(db);
-                let db = open_db(context.clone()).await;
+                let db = open_db(context.with_label(label2)).await;
                 assert_eq!(db.op_count(), op_count);
                 assert_eq!(db.root(), root);
             }
 
-            recover_from_failure(context.clone(), root, op_count).await;
+            recover_from_failure(context.with_label("recovery1"), "a", "b", root, op_count).await;
 
             // Repeat recover_from_failure tests after successfully pruning to the last commit.
-            let mut db = open_db(context.clone()).await;
+            let mut db = open_db(context.with_label("db3")).await;
             db.prune(db.last_commit_loc()).await.unwrap();
             assert_eq!(db.op_count(), op_count);
             assert_eq!(db.root(), root);
             db.sync().await.unwrap();
             drop(db);
 
-            recover_from_failure(context.clone(), root, op_count).await;
+            recover_from_failure(context.with_label("recovery2"), "c", "d", root, op_count).await;
 
             // Apply the ops one last time but fully commit them this time, then clean up.
-            let mut db = open_db(context.clone()).await.into_mutable();
+            let mut db = open_db(context.with_label("db4")).await.into_mutable();
             append_elements(&mut db, &mut context, ELEMENTS).await;
             let (_durable, _) = db.commit(None).await.unwrap();
-            let db = open_db(context.clone()).await;
+            let db = open_db(context.with_label("db5")).await;
             assert!(db.op_count() > op_count);
             assert_ne!(db.root(), root);
             assert_eq!(db.last_commit_loc(), db.op_count() - 1);
@@ -671,11 +674,11 @@ mod test {
         const ELEMENTS: u64 = 1000;
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let db = open_db(context.clone()).await;
+            let db = open_db(context.with_label("db1")).await;
             let root = db.root();
 
             // Reopen DB without clean shutdown and make sure the state is the same.
-            let db = open_db(context.clone()).await;
+            let db = open_db(context.with_label("db2")).await;
             assert_eq!(db.op_count(), 1); // initial commit should exist
             assert_eq!(db.root(), root);
 
@@ -690,7 +693,7 @@ mod test {
             let mut db = db.into_mutable();
             apply_ops(&mut db).await;
             drop(db);
-            let db = open_db(context.clone()).await;
+            let db = open_db(context.with_label("db3")).await;
             assert_eq!(db.op_count(), 1); // initial commit should exist
             assert_eq!(db.root(), root);
 
@@ -698,7 +701,7 @@ mod test {
             let mut db = db.into_mutable();
             apply_ops(&mut db).await;
             drop(db);
-            let db = open_db(context.clone()).await;
+            let db = open_db(context.with_label("db4")).await;
             assert_eq!(db.op_count(), 1); // initial commit should exist
             assert_eq!(db.root(), root);
 
@@ -708,7 +711,7 @@ mod test {
             apply_ops(&mut db).await;
             apply_ops(&mut db).await;
             drop(db);
-            let db = open_db(context.clone()).await;
+            let db = open_db(context.with_label("db5")).await;
             assert_eq!(db.op_count(), 1); // initial commit should exist
             assert_eq!(db.root(), root);
             assert_eq!(db.last_commit_loc(), Location::new_unchecked(0));
@@ -717,7 +720,7 @@ mod test {
             let mut db = db.into_mutable();
             apply_ops(&mut db).await;
             let (_db, _) = db.commit(None).await.unwrap();
-            let db = open_db(context.clone()).await;
+            let db = open_db(context.with_label("db6")).await;
             assert!(db.op_count() > 1);
             assert_ne!(db.root(), root);
 
@@ -830,7 +833,7 @@ mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut hasher = Standard::<Sha256>::new();
-            let db = open_db(context.clone()).await;
+            let db = open_db(context.with_label("db1")).await;
             let mut db = db.into_mutable();
 
             // Build a db with some values
@@ -872,7 +875,7 @@ mod test {
 
             db.sync().await.unwrap();
             drop(db);
-            let mut db = open_db(context.clone()).await;
+            let mut db = open_db(context.with_label("db2")).await;
             assert_eq!(db.root(), root);
             assert_eq!(db.op_count(), 2 * ELEMENTS + 3);
             assert!(db.oldest_retained_loc() <= PRUNE_LOC);
@@ -960,7 +963,7 @@ mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Create initial database with committed data
-            let db = open_db(context.clone()).await;
+            let db = open_db(context.with_label("db1")).await;
             let mut db = db.into_mutable();
 
             // Add some initial operations and commit
@@ -982,7 +985,7 @@ mod test {
             drop(db);
 
             // Reopen database
-            let db = open_db(context.clone()).await;
+            let db = open_db(context.with_label("db2")).await;
 
             // Verify correct recovery
             assert_eq!(
@@ -1027,7 +1030,7 @@ mod test {
             drop(db);
 
             // Reopen and verify correct recovery
-            let db = open_db(context.clone()).await;
+            let db = open_db(context.with_label("db3")).await;
             assert_eq!(
                 db.op_count(),
                 new_committed_size,
@@ -1129,5 +1132,31 @@ mod test {
 
             db.destroy().await.unwrap();
         });
+    }
+
+    use crate::{
+        kv::tests::assert_send,
+        qmdb::store::tests::{assert_log_store, assert_merkleized_store, assert_prunable_store},
+    };
+
+    #[allow(dead_code)]
+    fn assert_clean_db_futures_are_send(db: &mut CleanDb, loc: Location) {
+        assert_log_store(db);
+        assert_prunable_store(db, loc);
+        assert_merkleized_store(db, loc);
+        assert_send(db.sync());
+        assert_send(db.get(loc));
+    }
+
+    #[allow(dead_code)]
+    fn assert_mutable_db_futures_are_send(db: &mut MutableDb, loc: Location, value: Vec<u8>) {
+        assert_log_store(db);
+        assert_send(db.get(loc));
+        assert_send(db.append(value));
+    }
+
+    #[allow(dead_code)]
+    fn assert_mutable_db_commit_is_send(db: MutableDb) {
+        assert_send(db.commit(None));
     }
 }

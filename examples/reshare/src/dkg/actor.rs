@@ -8,7 +8,6 @@ use crate::{
     setup::PeerConfig,
     BLOCKS_PER_EPOCH,
 };
-use bytes::{Buf, BufMut};
 use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write};
 use commonware_consensus::types::{Epoch, EpochPhase, Epocher, FixedEpocher};
 use commonware_cryptography::{
@@ -24,9 +23,10 @@ use commonware_math::algebra::Random;
 use commonware_p2p::{utils::mux::Muxer, Manager, Receiver, Recipients, Sender};
 use commonware_parallel::Sequential;
 use commonware_runtime::{
-    spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner, Storage as RuntimeStorage,
+    spawn_cell, Buf, BufMut, Clock, ContextCell, Handle, Metrics, Spawner,
+    Storage as RuntimeStorage,
 };
-use commonware_utils::{ordered::Set, Acknowledgement as _, NZU32};
+use commonware_utils::{ordered::Set, Acknowledgement as _, N3f1, NZU32};
 use futures::{channel::mpsc, StreamExt};
 use prometheus_client::metrics::counter::Counter;
 use rand_core::CryptoRngCore;
@@ -210,7 +210,7 @@ where
                 output,
                 share,
             };
-            storage.append_epoch(initial_state).await;
+            storage.set_epoch(Epoch::zero(), initial_state).await;
         }
 
         // Start a muxer for the physical channel used by DKG/reshare
@@ -297,7 +297,7 @@ where
                 .expect("should be able to create channel");
 
             // Prepare round info
-            let round = Info::new(
+            let round = Info::new::<N3f1>(
                 namespace::APPLICATION,
                 epoch.get(),
                 epoch_state.output.clone(),
@@ -310,7 +310,7 @@ where
             // Initialize dealer state if we are a dealer (factory handles log submission check)
             let mut dealer_state: Option<Dealer<V, C>> = am_dealer
                 .then(|| {
-                    storage.create_dealer(
+                    storage.create_dealer::<C, N3f1>(
                         epoch,
                         self.signer.clone(),
                         round.clone(),
@@ -322,7 +322,9 @@ where
 
             // Initialize player state if we are a player
             let mut player_state: Option<Player<V, C>> = am_player
-                .then(|| storage.create_player(epoch, self.signer.clone(), round.clone()))
+                .then(|| {
+                    storage.create_player::<C, N3f1>(epoch, self.signer.clone(), round.clone())
+                })
                 .flatten();
 
             select_loop! {
@@ -348,7 +350,7 @@ where
                                 Message::Dealer(pub_msg, priv_msg) => {
                                     if let Some(ref mut ps) = player_state {
                                         let response = ps
-                                            .handle(
+                                            .handle::<_, N3f1>(
                                                 &mut storage,
                                                 epoch,
                                                 sender_pk.clone(),
@@ -443,7 +445,7 @@ where
                             // At or past the midpoint, finalize dealer if not already done.
                             if matches!(phase, EpochPhase::Midpoint | EpochPhase::Late) {
                                 if let Some(ref mut ds) = dealer_state {
-                                    ds.finalize();
+                                    ds.finalize::<N3f1>();
                                 }
                             }
 
@@ -458,7 +460,7 @@ where
                             let logs = storage.logs(epoch);
                             let (success, next_round, next_output, next_share) =
                                 if let Some(ps) = player_state.take() {
-                                    match ps.finalize(logs, &Sequential) {
+                                    match ps.finalize::<N3f1>(logs, &Sequential) {
                                         Ok((new_output, new_share)) => (
                                             true,
                                             epoch_state.round + 1,
@@ -473,7 +475,7 @@ where
                                         ),
                                     }
                                 } else {
-                                    match observe(round.clone(), logs, &Sequential) {
+                                    match observe::<_, _, N3f1>(round.clone(), logs, &Sequential) {
                                         Ok(output) => (true, epoch_state.round + 1, Some(output), None),
                                         Err(_) => (
                                             false,
@@ -499,12 +501,15 @@ where
                                 self.failed_epochs.inc();
                             }
                             storage
-                                .append_epoch(EpochState {
-                                    round: next_round,
-                                    rng_seed: Summary::random(&mut self.context),
-                                    output: next_output.clone(),
-                                    share: next_share.clone(),
-                                })
+                                .set_epoch(
+                                    epoch.next(),
+                                    EpochState {
+                                        round: next_round,
+                                        rng_seed: Summary::random(&mut self.context),
+                                        output: next_output.clone(),
+                                        share: next_share.clone(),
+                                    },
+                                )
                                 .await;
 
                             // Acknowledge block processing before callback
@@ -559,7 +564,7 @@ where
                 if let Some(ref mut ps) = player_state {
                     // Handle as player
                     let ack = match ps
-                        .handle(storage, epoch, self_pk.clone(), pub_msg, priv_msg)
+                        .handle::<_, N3f1>(storage, epoch, self_pk.clone(), pub_msg, priv_msg)
                         .await
                     {
                         Some(ack) => ack,

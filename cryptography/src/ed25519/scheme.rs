@@ -1,4 +1,4 @@
-use crate::{Array, BatchVerifier};
+use crate::{BatchVerifier, Secret};
 #[cfg(not(feature = "std"))]
 use alloc::{
     borrow::{Cow, ToOwned},
@@ -7,7 +7,7 @@ use alloc::{
 use bytes::{Buf, BufMut};
 use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
 use commonware_math::algebra::Random;
-use commonware_utils::{hex, union_unique, Span};
+use commonware_utils::{hex, union_unique, Array, Span};
 use core::{
     fmt::{Debug, Display},
     hash::{Hash, Hasher},
@@ -17,7 +17,7 @@ use ed25519_consensus::{self, VerificationKey};
 use rand_core::CryptoRngCore;
 #[cfg(feature = "std")]
 use std::borrow::{Cow, ToOwned};
-use zeroize::{Zeroize, ZeroizeOnDrop};
+use zeroize::Zeroizing;
 
 const CURVE_NAME: &str = "ed25519";
 const PRIVATE_KEY_LENGTH: usize = 32;
@@ -25,10 +25,9 @@ const PUBLIC_KEY_LENGTH: usize = 32;
 const SIGNATURE_LENGTH: usize = 64;
 
 /// Ed25519 Private Key.
-#[derive(Clone, Zeroize, ZeroizeOnDrop)]
+#[derive(Clone, Debug)]
 pub struct PrivateKey {
-    raw: [u8; PRIVATE_KEY_LENGTH],
-    key: ed25519_consensus::SigningKey,
+    key: Secret<ed25519_consensus::SigningKey>,
 }
 
 impl crate::PrivateKey for PrivateKey {}
@@ -42,11 +41,9 @@ impl crate::Signer for PrivateKey {
     }
 
     fn public_key(&self) -> Self::PublicKey {
-        let raw = self.key.verification_key().to_bytes();
-        Self::PublicKey {
-            raw,
-            key: self.key.verification_key().to_owned(),
-        }
+        self.key.expose(|key| Self::PublicKey {
+            key: key.verification_key().to_owned(),
+        })
     }
 }
 
@@ -56,22 +53,22 @@ impl PrivateKey {
         let payload = namespace
             .map(|namespace| Cow::Owned(union_unique(namespace, msg)))
             .unwrap_or_else(|| Cow::Borrowed(msg));
-        let sig = self.key.sign(&payload);
-        Signature::from(sig)
+        self.key.expose(|key| Signature::from(key.sign(&payload)))
     }
 }
 
 impl Random for PrivateKey {
     fn random(rng: impl CryptoRngCore) -> Self {
         let key = ed25519_consensus::SigningKey::new(rng);
-        let raw = key.to_bytes();
-        Self { raw, key }
+        Self {
+            key: Secret::new(key),
+        }
     }
 }
 
 impl Write for PrivateKey {
     fn write(&self, buf: &mut impl BufMut) {
-        self.raw.write(buf);
+        self.key.expose(|key| key.as_bytes().write(buf));
     }
 }
 
@@ -79,9 +76,11 @@ impl Read for PrivateKey {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        let raw = <[u8; Self::SIZE]>::read(buf)?;
-        let key = ed25519_consensus::SigningKey::from(raw);
-        Ok(Self { raw, key })
+        let raw = Zeroizing::new(<[u8; Self::SIZE]>::read(buf)?);
+        let key = ed25519_consensus::SigningKey::from(*raw);
+        Ok(Self {
+            key: Secret::new(key),
+        })
     }
 }
 
@@ -89,65 +88,17 @@ impl FixedSize for PrivateKey {
     const SIZE: usize = PRIVATE_KEY_LENGTH;
 }
 
-impl Span for PrivateKey {}
-
-impl Array for PrivateKey {}
-
-impl Eq for PrivateKey {}
-
-impl Hash for PrivateKey {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.raw.hash(state);
-    }
-}
-
-impl PartialEq for PrivateKey {
-    fn eq(&self, other: &Self) -> bool {
-        self.raw == other.raw
-    }
-}
-
-impl Ord for PrivateKey {
-    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
-        self.raw.cmp(&other.raw)
-    }
-}
-
-impl PartialOrd for PrivateKey {
-    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl AsRef<[u8]> for PrivateKey {
-    fn as_ref(&self) -> &[u8] {
-        &self.raw
-    }
-}
-
-impl Deref for PrivateKey {
-    type Target = [u8];
-    fn deref(&self) -> &[u8] {
-        &self.raw
-    }
-}
-
 impl From<ed25519_consensus::SigningKey> for PrivateKey {
     fn from(key: ed25519_consensus::SigningKey) -> Self {
-        let raw = key.to_bytes();
-        Self { raw, key }
-    }
-}
-
-impl Debug for PrivateKey {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "{}", hex(&self.raw))
+        Self {
+            key: Secret::new(key),
+        }
     }
 }
 
 impl Display for PrivateKey {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "{}", hex(&self.raw))
+        write!(f, "{:?}", self)
     }
 }
 
@@ -161,20 +112,25 @@ impl arbitrary::Arbitrary<'_> for PrivateKey {
     }
 }
 
+#[cfg(test)]
+impl PartialEq for PrivateKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.key
+            .expose(|key1| other.key.expose(|key2| key1.as_bytes() == key2.as_bytes()))
+    }
+}
+
 /// Ed25519 Public Key.
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct PublicKey {
-    raw: [u8; PUBLIC_KEY_LENGTH],
     key: ed25519_consensus::VerificationKey,
 }
 
 impl From<PrivateKey> for PublicKey {
     fn from(value: PrivateKey) -> Self {
-        let raw = value.key.verification_key().to_bytes();
-        Self {
-            raw,
-            key: value.key.verification_key(),
-        }
+        value.key.expose(|key| Self {
+            key: key.verification_key(),
+        })
     }
 }
 
@@ -194,13 +150,15 @@ impl PublicKey {
         let payload = namespace
             .map(|namespace| Cow::Owned(union_unique(namespace, msg)))
             .unwrap_or_else(|| Cow::Borrowed(msg));
-        self.key.verify(&sig.signature, &payload).is_ok()
+        self.key
+            .verify(&ed25519_consensus::Signature::from(sig.raw), &payload)
+            .is_ok()
     }
 }
 
 impl Write for PublicKey {
     fn write(&self, buf: &mut impl BufMut) {
-        self.raw.write(buf);
+        self.key.as_bytes().write(buf);
     }
 }
 
@@ -216,7 +174,7 @@ impl Read for PublicKey {
         let key = result
             .map_err(|e| CodecError::Wrapped(CURVE_NAME, alloc::format!("{:?}", e).into()))?;
 
-        Ok(Self { raw, key })
+        Ok(Self { key })
     }
 }
 
@@ -230,33 +188,32 @@ impl Array for PublicKey {}
 
 impl AsRef<[u8]> for PublicKey {
     fn as_ref(&self) -> &[u8] {
-        &self.raw
+        self.key.as_ref()
     }
 }
 
 impl Deref for PublicKey {
     type Target = [u8];
     fn deref(&self) -> &[u8] {
-        &self.raw
+        self.key.as_ref()
     }
 }
 
 impl From<VerificationKey> for PublicKey {
     fn from(key: VerificationKey) -> Self {
-        let raw = key.to_bytes();
-        Self { raw, key }
+        Self { key }
     }
 }
 
 impl Debug for PublicKey {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "{}", hex(&self.raw))
+        write!(f, "{}", hex(self))
     }
 }
 
 impl Display for PublicKey {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "{}", hex(&self.raw))
+        write!(f, "{}", hex(self))
     }
 }
 
@@ -274,10 +231,21 @@ impl arbitrary::Arbitrary<'_> for PublicKey {
 }
 
 /// Ed25519 Signature.
+///
+/// Signatures from honestly generated keys are *non-malleable*: an adversary
+/// with access to many messages and signatures, verifying against an honestly
+/// generated public key, cannot find a new signature which will verify, even by
+/// tampering or modifying the signatures that it has seen previously.
+///
+/// Like any signature, it's also not possible to have a signature that verifies against
+/// one message also verify against another. This property does not hold for maliciously
+/// generated public keys. In particular, it's possible to craft public keys (which would
+/// otherwise not be honestly generatable) for which a signature will verify against any message.
 #[derive(Clone, Eq, PartialEq)]
 pub struct Signature {
+    /// Because [`ed25519_consensus::Signature`] can be created from this byte array
+    /// with minimal overhead, we only store the raw bytes.
     raw: [u8; SIGNATURE_LENGTH],
-    signature: ed25519_consensus::Signature,
 }
 
 impl crate::Signature for Signature {}
@@ -293,8 +261,7 @@ impl Read for Signature {
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let raw = <[u8; Self::SIZE]>::read(buf)?;
-        let signature = ed25519_consensus::Signature::from(raw);
-        Ok(Self { raw, signature })
+        Ok(Self { raw })
     }
 }
 
@@ -340,10 +307,7 @@ impl Deref for Signature {
 impl From<ed25519_consensus::Signature> for Signature {
     fn from(value: ed25519_consensus::Signature) -> Self {
         let raw = value.to_bytes();
-        Self {
-            raw,
-            signature: value,
-        }
+        Self { raw }
     }
 }
 
@@ -422,7 +386,7 @@ impl Batch {
             .unwrap_or_else(|| Cow::Borrowed(message));
         let item = ed25519_consensus::batch::Item::from((
             public_key.key.into(),
-            signature.signature,
+            ed25519_consensus::Signature::from(signature.raw),
             &payload,
         ));
         self.verifier.queue(item);
@@ -434,11 +398,10 @@ impl Batch {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ed25519;
+    use crate::{ed25519, Signer as _};
     use commonware_codec::{DecodeExt, Encode};
     use commonware_math::algebra::Random;
     use commonware_utils::test_rng;
-    use rand::rngs::OsRng;
 
     fn test_sign_and_verify(
         private_key: PrivateKey,
@@ -593,7 +556,7 @@ mod tests {
     #[should_panic]
     fn bad_signature() {
         let (private_key, public_key, message, _) = vector_1();
-        let private_key_2 = PrivateKey::random(&mut OsRng);
+        let private_key_2 = PrivateKey::random(&mut test_rng());
         let bad_signature = private_key_2.sign_inner(None, &message);
         test_sign_and_verify(private_key, public_key, &message, bad_signature);
     }
@@ -828,6 +791,29 @@ mod tests {
         }
         let bad_signature = Signature::decode(bad_signature.as_ref()).unwrap();
         assert!(!public_key.verify_inner(None, &message, &bad_signature));
+    }
+
+    #[test]
+    fn test_from_signing_key() {
+        let signing_key = ed25519_consensus::SigningKey::new(test_rng());
+        let expected_public = signing_key.verification_key();
+        let private_key = PrivateKey::from(signing_key);
+        assert_eq!(private_key.public_key().key, expected_public);
+    }
+
+    #[test]
+    fn test_private_key_redacted() {
+        let private_key = PrivateKey::random(&mut test_rng());
+        let debug = format!("{:?}", private_key);
+        let display = format!("{}", private_key);
+        assert!(debug.contains("REDACTED"));
+        assert!(display.contains("REDACTED"));
+    }
+
+    #[test]
+    fn test_from_private_key_to_public_key() {
+        let private_key = PrivateKey::random(&mut test_rng());
+        assert_eq!(private_key.public_key(), PublicKey::from(private_key));
     }
 
     #[cfg(feature = "arbitrary")]

@@ -8,6 +8,7 @@
 //! * <https://github.com/celo-org/celo-threshold-bls-rs>: Operations over the BLS12-381 scalar field, GJKR99, and Desmedt97.
 //! * <https://github.com/filecoin-project/blstrs> + <https://github.com/MystenLabs/fastcrypto>: Implementing operations over
 //!   the BLS12-381 scalar field with <https://github.com/supranational/blst>.
+//! * <https://github.com/supranational/blst/blob/v0.3.13/bindings/rust/src/pippenger.rs>: Parallel MSM using tile-based Pippenger.
 //!
 //! # Example
 //!
@@ -16,14 +17,14 @@
 //!     primitives::{ops::{self, threshold}, variant::MinSig, sharing::Mode},
 //!     dkg,
 //! };
-//! use commonware_utils::NZU32;
+//! use commonware_utils::{NZU32, N3f1};
 //! use rand::rngs::OsRng;
 //!
 //! // Configure number of players
 //! let n = NZU32!(5);
 //!
 //! // Generate commitment and shares
-//! let (sharing, shares) = dkg::deal_anonymous::<MinSig>(&mut OsRng, Mode::default(), n);
+//! let (sharing, shares) = dkg::deal_anonymous::<MinSig, N3f1>(&mut OsRng, Mode::default(), n);
 //!
 //! // Generate partial signatures from shares
 //! let namespace = b"demo";
@@ -36,7 +37,7 @@
 //! }
 //!
 //! // Aggregate partial signatures
-//! let threshold_sig = threshold::recover::<MinSig, _>(&sharing, &partials).unwrap();
+//! let threshold_sig = threshold::recover::<MinSig, _, N3f1>(&sharing, &partials, &commonware_parallel::Sequential).unwrap();
 //!
 //! // Verify threshold signature
 //! let threshold_pub = sharing.public();

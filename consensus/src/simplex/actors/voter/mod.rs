@@ -51,13 +51,19 @@ mod tests {
     use super::*;
     use crate::{
         simplex::{
-            actors::{batcher, resolver, resolver::MailboxMessage},
+            actors::{
+                batcher,
+                resolver::{self, MailboxMessage},
+            },
             elector::{Config as ElectorConfig, Elector, Random, RoundRobin, RoundRobinElector},
-            mocks,
-            scheme::{bls12381_multisig, bls12381_threshold, ed25519, secp256r1, Scheme},
+            mocks, quorum,
+            scheme::{
+                bls12381_multisig, bls12381_threshold::vrf as bls12381_threshold_vrf, ed25519,
+                secp256r1, Scheme,
+            },
             types::{Certificate, Finalization, Finalize, Notarization, Notarize, Proposal, Vote},
         },
-        types::{Round, View},
+        types::{Participant, Round, View},
         Viewable,
     };
     use commonware_codec::Encode;
@@ -68,18 +74,22 @@ mod tests {
         sha256::Digest as Sha256Digest,
         Hasher as _, Sha256,
     };
-    use commonware_macros::{select, test_traced};
+    use commonware_macros::{select, test_collect_traces, test_traced};
     use commonware_p2p::simulated::{Config as NConfig, Network};
-    use commonware_runtime::{deterministic, Clock, Metrics, Quota, Runner};
-    use commonware_utils::{quorum, NZUsize};
+    use commonware_parallel::Sequential;
+    use commonware_runtime::{
+        deterministic, telemetry::traces::collector::TraceStorage, Clock, Metrics, Quota, Runner,
+    };
+    use commonware_utils::{NZUsize, NZU16};
     use futures::{channel::mpsc, FutureExt, StreamExt};
     use std::{
-        num::NonZeroU32,
+        num::{NonZeroU16, NonZeroU32},
         sync::{Arc, Mutex},
         time::Duration,
     };
+    use tracing::Level;
 
-    const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
+    const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
     const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
 
@@ -96,7 +106,7 @@ mod tests {
             .take(count as usize)
             .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
             .collect();
-        let certificate = Notarization::from_notarizes(&schemes[0], &votes)
+        let certificate = Notarization::from_notarizes(&schemes[0], &votes, &Sequential)
             .expect("notarization requires a quorum of votes");
         (votes, certificate)
     }
@@ -114,7 +124,7 @@ mod tests {
             .take(count as usize)
             .map(|scheme| Finalize::sign(scheme, proposal.clone()).unwrap())
             .collect();
-        let certificate = Finalization::from_finalizes(&schemes[0], &votes)
+        let certificate = Finalization::from_finalizes(&schemes[0], &votes, &Sequential)
             .expect("finalization requires a quorum of votes");
         (votes, certificate)
     }
@@ -480,8 +490,8 @@ mod tests {
 
     #[test_traced]
     fn test_stale_backfill() {
-        stale_backfill::<_, _, Random>(bls12381_threshold::fixture::<MinPk, _>);
-        stale_backfill::<_, _, Random>(bls12381_threshold::fixture::<MinSig, _>);
+        stale_backfill::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        stale_backfill::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinSig, _>);
         stale_backfill::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>);
         stale_backfill::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>);
         stale_backfill::<_, _, RoundRobin>(ed25519::fixture);
@@ -766,8 +776,8 @@ mod tests {
 
     #[test_traced]
     fn test_append_old_interesting_view() {
-        append_old_interesting_view::<_, _, Random>(bls12381_threshold::fixture::<MinPk, _>);
-        append_old_interesting_view::<_, _, Random>(bls12381_threshold::fixture::<MinSig, _>);
+        append_old_interesting_view::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        append_old_interesting_view::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinSig, _>);
         append_old_interesting_view::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>);
         append_old_interesting_view::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>);
         append_old_interesting_view::<_, _, RoundRobin>(ed25519::fixture);
@@ -887,10 +897,10 @@ mod tests {
     #[test_traced]
     fn test_finalization_without_notarization_certificate() {
         finalization_without_notarization_certificate::<_, _, Random>(
-            bls12381_threshold::fixture::<MinPk, _>,
+            bls12381_threshold_vrf::fixture::<MinPk, _>,
         );
         finalization_without_notarization_certificate::<_, _, Random>(
-            bls12381_threshold::fixture::<MinSig, _>,
+            bls12381_threshold_vrf::fixture::<MinSig, _>,
         );
         finalization_without_notarization_certificate::<_, _, RoundRobin>(
             bls12381_multisig::fixture::<MinPk, _>,
@@ -1035,8 +1045,10 @@ mod tests {
 
     #[test_traced]
     fn test_certificate_conflicts_proposal() {
-        certificate_conflicts_proposal::<_, _, Random>(bls12381_threshold::fixture::<MinPk, _>);
-        certificate_conflicts_proposal::<_, _, Random>(bls12381_threshold::fixture::<MinSig, _>);
+        certificate_conflicts_proposal::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        certificate_conflicts_proposal::<_, _, Random>(
+            bls12381_threshold_vrf::fixture::<MinSig, _>,
+        );
         certificate_conflicts_proposal::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>);
         certificate_conflicts_proposal::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>);
         certificate_conflicts_proposal::<_, _, RoundRobin>(ed25519::fixture);
@@ -1164,8 +1176,10 @@ mod tests {
 
     #[test_traced]
     fn test_proposal_conflicts_certificate() {
-        proposal_conflicts_certificate::<_, _, Random>(bls12381_threshold::fixture::<MinPk, _>);
-        proposal_conflicts_certificate::<_, _, Random>(bls12381_threshold::fixture::<MinSig, _>);
+        proposal_conflicts_certificate::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        proposal_conflicts_certificate::<_, _, Random>(
+            bls12381_threshold_vrf::fixture::<MinSig, _>,
+        );
         proposal_conflicts_certificate::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>);
         proposal_conflicts_certificate::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>);
         proposal_conflicts_certificate::<_, _, RoundRobin>(ed25519::fixture);
@@ -1335,8 +1349,8 @@ mod tests {
 
     #[test_traced]
     fn test_certificate_verifies_proposal() {
-        certificate_verifies_proposal::<_, _, Random>(bls12381_threshold::fixture::<MinPk, _>);
-        certificate_verifies_proposal::<_, _, Random>(bls12381_threshold::fixture::<MinSig, _>);
+        certificate_verifies_proposal::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        certificate_verifies_proposal::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinSig, _>);
         certificate_verifies_proposal::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>);
         certificate_verifies_proposal::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>);
         certificate_verifies_proposal::<_, _, RoundRobin>(ed25519::fixture);
@@ -1386,10 +1400,10 @@ mod tests {
             let temp_elector: RoundRobinElector<S> =
                 elector_config.clone().build(schemes[0].participants());
             let leader_idx = temp_elector.elect(view2_round, None);
-            let leader = participants[leader_idx as usize].clone();
+            let leader = participants[usize::from(leader_idx)].clone();
 
             // Create a voter with the leader's identity
-            let leader_scheme = schemes[leader_idx as usize].clone();
+            let leader_scheme = schemes[usize::from(leader_idx)].clone();
 
             // Setup application mock with some latency so we can inject peer
             // message before automaton completes
@@ -1560,8 +1574,8 @@ mod tests {
 
     #[test_traced]
     fn test_drop_our_proposal_on_conflict() {
-        drop_our_proposal_on_conflict(bls12381_threshold::fixture::<MinPk, _>);
-        drop_our_proposal_on_conflict(bls12381_threshold::fixture::<MinSig, _>);
+        drop_our_proposal_on_conflict(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        drop_our_proposal_on_conflict(bls12381_threshold_vrf::fixture::<MinSig, _>);
         drop_our_proposal_on_conflict(bls12381_multisig::fixture::<MinPk, _>);
         drop_our_proposal_on_conflict(bls12381_multisig::fixture::<MinSig, _>);
         drop_our_proposal_on_conflict(ed25519::fixture);
@@ -1639,7 +1653,7 @@ mod tests {
                 write_buffer: NZUsize!(1024 * 1024),
                 buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
-            let (voter, mut mailbox) = Actor::new(context.clone(), voter_cfg);
+            let (voter, mut mailbox) = Actor::new(context.with_label("voter"), voter_cfg);
 
             // Resolver and batcher mailboxes
             let (resolver_sender, mut resolver_receiver) = mpsc::channel(8);
@@ -1729,7 +1743,7 @@ mod tests {
                 write_buffer: NZUsize!(1024 * 1024),
                 buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
-            let (voter, _mailbox) = Actor::new(context.clone(), voter_cfg);
+            let (voter, _mailbox) = Actor::new(context.with_label("voter_restarted"), voter_cfg);
 
             // Resolver and batcher mailboxes
             let (resolver_sender, mut resolver_receiver) = mpsc::channel(8);
@@ -1787,8 +1801,8 @@ mod tests {
 
     #[test_traced]
     fn test_populate_resolver_on_restart() {
-        populate_resolver_on_restart::<_, _, Random>(bls12381_threshold::fixture::<MinPk, _>);
-        populate_resolver_on_restart::<_, _, Random>(bls12381_threshold::fixture::<MinSig, _>);
+        populate_resolver_on_restart::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        populate_resolver_on_restart::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinSig, _>);
         populate_resolver_on_restart::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>);
         populate_resolver_on_restart::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>);
         populate_resolver_on_restart::<_, _, RoundRobin>(ed25519::fixture);
@@ -1889,8 +1903,8 @@ mod tests {
 
     #[test_traced]
     fn test_finalization_from_resolver() {
-        finalization_from_resolver::<_, _, Random>(bls12381_threshold::fixture::<MinPk, _>);
-        finalization_from_resolver::<_, _, Random>(bls12381_threshold::fixture::<MinSig, _>);
+        finalization_from_resolver::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        finalization_from_resolver::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinSig, _>);
         finalization_from_resolver::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>);
         finalization_from_resolver::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>);
         finalization_from_resolver::<_, _, RoundRobin>(ed25519::fixture);
@@ -2011,8 +2025,8 @@ mod tests {
 
     #[test_traced]
     fn test_no_resolver_boomerang() {
-        no_resolver_boomerang::<_, _, Random>(bls12381_threshold::fixture::<MinPk, _>);
-        no_resolver_boomerang::<_, _, Random>(bls12381_threshold::fixture::<MinSig, _>);
+        no_resolver_boomerang::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        no_resolver_boomerang::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinSig, _>);
         no_resolver_boomerang::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>);
         no_resolver_boomerang::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>);
         no_resolver_boomerang::<_, _, RoundRobin>(ed25519::fixture);
@@ -2166,8 +2180,8 @@ mod tests {
                 current_view = new_view;
 
                 // Check if we're NOT the leader for this view
-                if leader != 0 {
-                    break (current_view, participants[leader as usize].clone());
+                if leader != Participant::new(0) {
+                    break (current_view, participants[usize::from(leader)].clone());
                 }
 
                 // We're the leader, advance to next view
@@ -2225,10 +2239,10 @@ mod tests {
     #[test_traced]
     fn test_verification_failure_emits_nullify_immediately() {
         verification_failure_emits_nullify_immediately::<_, _, Random>(
-            bls12381_threshold::fixture::<MinPk, _>,
+            bls12381_threshold_vrf::fixture::<MinPk, _>,
         );
         verification_failure_emits_nullify_immediately::<_, _, Random>(
-            bls12381_threshold::fixture::<MinSig, _>,
+            bls12381_threshold_vrf::fixture::<MinSig, _>,
         );
         verification_failure_emits_nullify_immediately::<_, _, RoundRobin>(
             bls12381_multisig::fixture::<MinPk, _>,
@@ -2323,7 +2337,7 @@ mod tests {
                 write_buffer: NZUsize!(1024 * 1024),
                 buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
-            let (voter, mut mailbox) = Actor::new(context.clone(), voter_cfg);
+            let (voter, mut mailbox) = Actor::new(context.with_label("voter"), voter_cfg);
 
             let (resolver_sender, _) = mpsc::channel(8);
             let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
@@ -2456,7 +2470,7 @@ mod tests {
                 write_buffer: NZUsize!(1024 * 1024),
                 buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
-            let (voter, _) = Actor::new(context.clone(), voter_cfg);
+            let (voter, _) = Actor::new(context.with_label("voter_restarted"), voter_cfg);
 
             let (resolver_sender, _) = mpsc::channel(8);
             let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
@@ -2498,8 +2512,12 @@ mod tests {
 
     #[test_traced]
     fn test_no_recertification_after_replay() {
-        no_recertification_after_replay::<_, _, Random>(bls12381_threshold::fixture::<MinPk, _>);
-        no_recertification_after_replay::<_, _, Random>(bls12381_threshold::fixture::<MinSig, _>);
+        no_recertification_after_replay::<_, _, Random>(
+            bls12381_threshold_vrf::fixture::<MinPk, _>,
+        );
+        no_recertification_after_replay::<_, _, Random>(
+            bls12381_threshold_vrf::fixture::<MinSig, _>,
+        );
         no_recertification_after_replay::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>);
         no_recertification_after_replay::<_, _, RoundRobin>(
             bls12381_multisig::fixture::<MinSig, _>,
@@ -2692,10 +2710,10 @@ mod tests {
     #[test_traced]
     fn test_certification_cancelled_on_finalization() {
         certification_cancelled_on_finalization::<_, _, Random>(
-            bls12381_threshold::fixture::<MinPk, _>,
+            bls12381_threshold_vrf::fixture::<MinPk, _>,
         );
         certification_cancelled_on_finalization::<_, _, Random>(
-            bls12381_threshold::fixture::<MinSig, _>,
+            bls12381_threshold_vrf::fixture::<MinSig, _>,
         );
         certification_cancelled_on_finalization::<_, _, RoundRobin>(
             bls12381_multisig::fixture::<MinPk, _>,
@@ -2769,7 +2787,7 @@ mod tests {
             .await;
             assert_ne!(
                 built_elector.elect(Round::new(Epoch::new(333), target_view), None),
-                0,
+                Participant::new(0),
                 "we should not be leader at view 3"
             );
 
@@ -2822,8 +2840,8 @@ mod tests {
 
     #[test_traced]
     fn test_certification_after_timeout() {
-        certification_after_timeout::<_, _>(bls12381_threshold::fixture::<MinPk, _>);
-        certification_after_timeout::<_, _>(bls12381_threshold::fixture::<MinSig, _>);
+        certification_after_timeout::<_, _>(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        certification_after_timeout::<_, _>(bls12381_threshold_vrf::fixture::<MinSig, _>);
         certification_after_timeout::<_, _>(bls12381_multisig::fixture::<MinPk, _>);
         certification_after_timeout::<_, _>(bls12381_multisig::fixture::<MinSig, _>);
         certification_after_timeout::<_, _>(ed25519::fixture);
@@ -2892,7 +2910,7 @@ mod tests {
             .await;
             assert_ne!(
                 built_elector.elect(Round::new(Epoch::new(333), target_view), None),
-                0,
+                Participant::new(0),
                 "we should not be leader at view 3"
             );
 
@@ -2973,10 +2991,10 @@ mod tests {
     #[test_traced]
     fn test_certification_after_notarize_timeout_as_follower() {
         certification_after_notarize_timeout_as_follower::<_, _>(
-            bls12381_threshold::fixture::<MinPk, _>,
+            bls12381_threshold_vrf::fixture::<MinPk, _>,
         );
         certification_after_notarize_timeout_as_follower::<_, _>(
-            bls12381_threshold::fixture::<MinSig, _>,
+            bls12381_threshold_vrf::fixture::<MinSig, _>,
         );
         certification_after_notarize_timeout_as_follower::<_, _>(
             bls12381_multisig::fixture::<MinPk, _>,
@@ -3050,7 +3068,7 @@ mod tests {
             .await;
             assert_eq!(
                 built_elector.elect(Round::new(Epoch::new(333), target_view), None),
-                0,
+                Participant::new(0),
                 "we should be leader at view 2"
             );
 
@@ -3120,10 +3138,10 @@ mod tests {
     #[test_traced]
     fn test_certification_after_notarize_timeout_as_leader() {
         certification_after_notarize_timeout_as_leader::<_, _>(
-            bls12381_threshold::fixture::<MinPk, _>,
+            bls12381_threshold_vrf::fixture::<MinPk, _>,
         );
         certification_after_notarize_timeout_as_leader::<_, _>(
-            bls12381_threshold::fixture::<MinSig, _>,
+            bls12381_threshold_vrf::fixture::<MinSig, _>,
         );
         certification_after_notarize_timeout_as_leader::<_, _>(
             bls12381_multisig::fixture::<MinPk, _>,
@@ -3133,5 +3151,347 @@ mod tests {
         );
         certification_after_notarize_timeout_as_leader::<_, _>(ed25519::fixture);
         certification_after_notarize_timeout_as_leader::<_, _>(secp256r1::fixture);
+    }
+
+    /// Tests that when certification returns a cancelled receiver, the voter doesn't hang
+    /// and continues to make progress (via voting to nullify the view that could not be certified).
+    fn cancelled_certification_does_not_hang<S, F>(mut fixture: F, traces: TraceStorage)
+    where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+    {
+        let n = 5;
+        let quorum = quorum(n);
+        let namespace = b"consensus".to_vec();
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|mut context| async move {
+            // Create simulated network
+            let (network, oracle) = Network::new(
+                context.with_label("network"),
+                NConfig {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: true,
+                    tracked_peer_sets: None,
+                },
+            );
+            network.start();
+
+            // Get participants
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = fixture(&mut context, &namespace, n);
+
+            let elector = RoundRobin::<Sha256>::default();
+
+            // Set up voter with Certifier::Cancel
+            let (mut mailbox, mut batcher_receiver, _, relay, _) = setup_voter(
+                &mut context,
+                &oracle,
+                &participants,
+                &schemes,
+                elector,
+                Duration::from_millis(500),
+                Duration::from_millis(500),
+                Duration::from_millis(500),
+                mocks::application::Certifier::Cancel,
+            )
+            .await;
+
+            // Advance to view 3 where we're a follower.
+            // With RoundRobin, epoch=333, n=5: leader = (333 + view) % 5
+            // View 3: leader = 1 (not us)
+            let target_view = View::new(3);
+            let parent_payload = advance_to_view(
+                &mut mailbox,
+                &mut batcher_receiver,
+                &schemes,
+                quorum,
+                target_view,
+            )
+            .await;
+
+            // Broadcast the payload contents so verification can complete.
+            let proposal = Proposal::new(
+                Round::new(Epoch::new(333), target_view),
+                target_view.previous().unwrap(),
+                Sha256::hash(b"test_proposal"),
+            );
+            let leader = participants[1].clone();
+            let contents = (proposal.round, parent_payload, 0u64).encode();
+            relay
+                .broadcast(&leader, (proposal.payload, contents))
+                .await;
+            mailbox.proposal(proposal.clone()).await;
+
+            // Build and send notarization so the voter tries to certify
+            let (_, notarization) = build_notarization(&schemes, &proposal, quorum);
+            mailbox
+                .resolved(Certificate::Notarization(notarization))
+                .await;
+
+            // Certification will be cancelled, so the voter should eventually timeout
+            // and emit a nullify vote.
+            loop {
+                select! {
+                    msg = batcher_receiver.next() => {
+                        match msg.unwrap() {
+                            batcher::Message::Constructed(Vote::Nullify(nullify)) if nullify.view() == target_view => {
+                                break;
+                            }
+                            batcher::Message::Update { active, .. } => active.send(true).unwrap(),
+                            _ => {}
+                        }
+                    },
+                    _ = context.sleep(Duration::from_secs(5)) => {
+                        panic!(
+                            "voter should emit nullify for view {target_view} despite cancelled certification",
+                        );
+                    },
+                }
+            }
+
+            // Verify the "failed to certify proposal" log was emitted with the correct round
+            let expected_round = format!("Round {{ epoch: Epoch(333), view: View({target_view}) }}");
+            traces
+                .get_by_level(Level::DEBUG)
+                .expect_event(|event| {
+                    event.metadata.content == "failed to certify proposal"
+                        && event
+                            .metadata
+                            .fields
+                            .iter()
+                            .any(|(name, value)| name == "err" && value == "Canceled")
+                        && event
+                            .metadata
+                            .fields
+                            .iter()
+                            .any(|(name, value)| name == "round" && value == &expected_round)
+                })
+                .unwrap();
+        });
+    }
+
+    #[test_collect_traces]
+    fn test_cancelled_certification_does_not_hang(traces: TraceStorage) {
+        cancelled_certification_does_not_hang(
+            bls12381_threshold_vrf::fixture::<MinPk, _>,
+            traces.clone(),
+        );
+        cancelled_certification_does_not_hang(
+            bls12381_threshold_vrf::fixture::<MinSig, _>,
+            traces.clone(),
+        );
+        cancelled_certification_does_not_hang(
+            bls12381_multisig::fixture::<MinPk, _>,
+            traces.clone(),
+        );
+        cancelled_certification_does_not_hang(
+            bls12381_multisig::fixture::<MinSig, _>,
+            traces.clone(),
+        );
+        cancelled_certification_does_not_hang(ed25519::fixture, traces.clone());
+        cancelled_certification_does_not_hang(secp256r1::fixture, traces);
+    }
+
+    /// Demonstrates that validators in future views cannot retroactively help
+    /// stuck validators escape via nullification.
+    ///
+    /// This test extends the previous scenario to show that:
+    /// 1. A stuck validator (view 3) cannot be rescued by notarizations from future views
+    /// 2. The only escape route is a finalization certificate (which requires Byzantine cooperation)
+    ///
+    /// Once the f+1 honest validators certify view 3 and advance to view 4,
+    /// they can only vote to nullify view 4 (their current view) without equivocating.
+    /// The `handle_timeout` function only votes to nullify `self.view` (current view).
+    fn only_finalization_rescues_validator<S, F>(mut fixture: F)
+    where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+    {
+        let n = 4;
+        let quorum = quorum(n);
+        let namespace = b"future_notarization_no_rescue".to_vec();
+        let executor = deterministic::Runner::timed(Duration::from_secs(60));
+        executor.start(|mut context| async move {
+            // Create simulated network
+            let (network, oracle) = Network::new(
+                context.with_label("network"),
+                NConfig {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: true,
+                    tracked_peer_sets: None,
+                },
+            );
+            network.start();
+
+            // Get participants
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = fixture(&mut context, &namespace, n);
+
+            // Setup voter with Certifier::Cancel to simulate missing verification context.
+            let elector = RoundRobin::<Sha256>::default();
+            let (mut mailbox, mut batcher_receiver, _, relay, _) = setup_voter(
+                &mut context,
+                &oracle,
+                &participants,
+                &schemes,
+                elector.clone(),
+                Duration::from_secs(2),
+                Duration::from_secs(3),
+                Duration::from_secs(1),
+                mocks::application::Certifier::Cancel,
+            )
+            .await;
+
+            // Advance to view 3
+            let view_3 = View::new(3);
+            let parent_payload = advance_to_view(
+                &mut mailbox,
+                &mut batcher_receiver,
+                &schemes,
+                quorum,
+                view_3,
+            )
+            .await;
+
+            let proposal_3 = Proposal::new(
+                Round::new(Epoch::new(333), view_3),
+                view_3.previous().unwrap(),
+                Sha256::hash(b"view_3_proposal"),
+            );
+            let leader = participants[1].clone();
+            let contents = (proposal_3.round, parent_payload, 0u64).encode();
+            relay
+                .broadcast(&leader, (proposal_3.payload, contents))
+                .await;
+            mailbox.proposal(proposal_3.clone()).await;
+
+            let (_, notarization_3) = build_notarization(&schemes, &proposal_3, quorum);
+            mailbox
+                .resolved(Certificate::Notarization(notarization_3))
+                .await;
+
+            // Wait for the first nullify vote (confirms stuck state)
+            loop {
+                select! {
+                    msg = batcher_receiver.next() => {
+                        match msg.unwrap() {
+                            batcher::Message::Constructed(Vote::Nullify(n)) if n.view() == view_3 => break,
+                            batcher::Message::Update { active, .. } => active.send(true).unwrap(),
+                            _ => {}
+                        }
+                    },
+                    _ = context.sleep(Duration::from_secs(10)) => {
+                        panic!("expected nullify vote for view 3");
+                    },
+                }
+            }
+
+            // Now simulate what the "advanced" validators (f+1 honest with context) are doing:
+            // They certified view 3 and advanced to view 4, where they're making progress.
+            // Send a notarization for view 4 to the stuck validator.
+            let view_4 = View::new(4);
+            let proposal_4 = Proposal::new(
+                Round::new(Epoch::new(333), view_4),
+                view_3, // Parent is view 3 (certified by the advanced validators)
+                Sha256::hash(b"view_4_proposal"),
+            );
+            let (_, notarization_4) = build_notarization(&schemes, &proposal_4, quorum);
+
+            // Send the view 4 notarization to the stuck validator
+            mailbox
+                .resolved(Certificate::Notarization(notarization_4))
+                .await;
+
+            // The stuck validator should still not advance.
+            //
+            // Receiving a notarization for view 4 doesn't help because:
+            // 1. add_notarization() does not call enter_view() - it only adds to certification_candidates
+            // 2. To advance past view 3, the validator needs EITHER:
+            //    a. Certification of view 3 to succeed (impossible - no context)
+            //    b. A nullification certificate for view 3 (impossible - only f votes)
+            //    c. A finalization certificate (requires Byzantine to vote finalize)
+            let advanced = loop {
+                select! {
+                    msg = batcher_receiver.next() => {
+                        match msg.unwrap() {
+                            batcher::Message::Update { current, active, .. } => {
+                                active.send(true).unwrap();
+                                if current > view_3 {
+                                    break true;
+                                }
+                            }
+                            batcher::Message::Constructed(Vote::Nullify(n)) => {
+                                // Still voting nullify for view 3 - expected
+                                assert_eq!(n.view(), view_3, "should only vote nullify for stuck view");
+                            }
+                            _ => {}
+                        }
+                    },
+                    _ = context.sleep(Duration::from_secs(5)) => {
+                        break false;
+                    },
+                }
+            };
+
+            assert!(
+                !advanced,
+                "receiving a notarization for view 4 should NOT rescue the stuck validator - \
+                 they still can't certify view 3 (no context) and can't form a nullification \
+                 (not enough votes). The f+1 honest validators who advanced to view 4 cannot \
+                 retroactively help because they can only vote nullify for their current view (4), \
+                 not for view 3."
+            );
+
+            // HOWEVER: A finalization certificate WOULD rescue the stuck validator.
+            // If the Byzantine validators eventually cooperate and vote finalize,
+            // the finalization would abort the stuck certification and advance the view.
+            //
+            // Let's demonstrate this escape route works (if Byzantine cooperate):
+            let (_, finalization_4) = build_finalization(&schemes, &proposal_4, quorum);
+            mailbox
+                .resolved(Certificate::Finalization(finalization_4))
+                .await;
+
+            // Now the validator SHOULD advance (finalization aborts stuck certification)
+            let rescued = loop {
+                select! {
+                    msg = batcher_receiver.next() => {
+                        if let batcher::Message::Update { current, active, .. } = msg.unwrap() {
+                            active.send(true).unwrap();
+                            if current > view_4 {
+                                break true;
+                            }
+                        }
+                    },
+                    _ = context.sleep(Duration::from_secs(5)) => {
+                        break false;
+                    },
+                }
+            };
+
+            assert!(
+                rescued,
+                "a finalization certificate SHOULD rescue the stuck validator - \
+                 this is the ONLY escape route, but it requires Byzantine cooperation \
+                 (they must vote finalize). If Byzantine permanently withhold finalize votes, \
+                 the stuck validators are permanently excluded from consensus."
+            );
+        });
+    }
+
+    #[test_traced]
+    fn test_only_finalization_rescues_validator() {
+        only_finalization_rescues_validator::<_, _>(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        only_finalization_rescues_validator::<_, _>(bls12381_threshold_vrf::fixture::<MinSig, _>);
+        only_finalization_rescues_validator::<_, _>(bls12381_multisig::fixture::<MinPk, _>);
+        only_finalization_rescues_validator::<_, _>(bls12381_multisig::fixture::<MinSig, _>);
+        only_finalization_rescues_validator::<_, _>(ed25519::fixture);
+        only_finalization_rescues_validator::<_, _>(secp256r1::fixture);
     }
 }

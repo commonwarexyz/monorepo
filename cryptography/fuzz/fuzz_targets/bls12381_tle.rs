@@ -10,7 +10,7 @@ use common::{
 use commonware_codec::ReadExt;
 use commonware_cryptography::bls12381::{
     primitives::{
-        group::Scalar,
+        group::Private,
         ops::{compute_public, sign_message},
         variant::{MinPk, MinSig, Variant},
     },
@@ -22,37 +22,37 @@ use rand::{rngs::StdRng, SeedableRng};
 #[derive(Debug, Clone)]
 enum FuzzOperation {
     EncryptDecryptMinPk {
-        master_secret: Scalar,
+        master_secret: Private,
         namespace: Vec<u8>,
         target: Vec<u8>,
         message: [u8; 32],
         rng_seed: u64,
     },
     EncryptDecryptMinSig {
-        master_secret: Scalar,
+        master_secret: Private,
         namespace: Vec<u8>,
         target: Vec<u8>,
         message: [u8; 32],
         rng_seed: u64,
     },
     DecryptWithWrongKeyMinPk {
-        master_secret1: Scalar,
-        master_secret2: Scalar,
+        master_secret1: Private,
+        master_secret2: Private,
         namespace: Vec<u8>,
         target: Vec<u8>,
         message: [u8; 32],
         rng_seed: u64,
     },
     DecryptWithWrongKeyMinSig {
-        master_secret1: Scalar,
-        master_secret2: Scalar,
+        master_secret1: Private,
+        master_secret2: Private,
         namespace: Vec<u8>,
         target: Vec<u8>,
         message: [u8; 32],
         rng_seed: u64,
     },
     TamperedCiphertextMinPk {
-        master_secret: Scalar,
+        master_secret: Private,
         namespace: Vec<u8>,
         target: Vec<u8>,
         message: [u8; 32],
@@ -61,7 +61,7 @@ enum FuzzOperation {
         rng_seed: u64,
     },
     TamperedCiphertextMinSig {
-        master_secret: Scalar,
+        master_secret: Private,
         namespace: Vec<u8>,
         target: Vec<u8>,
         message: [u8; 32],
@@ -85,37 +85,37 @@ impl<'a> Arbitrary<'a> for FuzzOperation {
 
         match choice {
             0 => Ok(FuzzOperation::EncryptDecryptMinPk {
-                master_secret: common::arbitrary_scalar(u)?,
+                master_secret: u.arbitrary()?,
                 namespace: common::arbitrary_bytes(u, 0, 50)?,
                 target: common::arbitrary_bytes(u, 0, 100)?,
                 message: u.arbitrary()?,
                 rng_seed: u.arbitrary()?,
             }),
             1 => Ok(FuzzOperation::EncryptDecryptMinSig {
-                master_secret: common::arbitrary_scalar(u)?,
+                master_secret: u.arbitrary()?,
                 namespace: common::arbitrary_bytes(u, 0, 50)?,
                 target: common::arbitrary_bytes(u, 0, 100)?,
                 message: u.arbitrary()?,
                 rng_seed: u.arbitrary()?,
             }),
             2 => Ok(FuzzOperation::DecryptWithWrongKeyMinPk {
-                master_secret1: common::arbitrary_scalar(u)?,
-                master_secret2: common::arbitrary_scalar(u)?,
+                master_secret1: u.arbitrary()?,
+                master_secret2: u.arbitrary()?,
                 namespace: common::arbitrary_bytes(u, 0, 50)?,
                 target: common::arbitrary_bytes(u, 0, 100)?,
                 message: u.arbitrary()?,
                 rng_seed: u.arbitrary()?,
             }),
             3 => Ok(FuzzOperation::DecryptWithWrongKeyMinSig {
-                master_secret1: common::arbitrary_scalar(u)?,
-                master_secret2: common::arbitrary_scalar(u)?,
+                master_secret1: u.arbitrary()?,
+                master_secret2: u.arbitrary()?,
                 namespace: common::arbitrary_bytes(u, 0, 50)?,
                 target: common::arbitrary_bytes(u, 0, 100)?,
                 message: u.arbitrary()?,
                 rng_seed: u.arbitrary()?,
             }),
             4 => Ok(FuzzOperation::TamperedCiphertextMinPk {
-                master_secret: common::arbitrary_scalar(u)?,
+                master_secret: u.arbitrary()?,
                 namespace: common::arbitrary_bytes(u, 0, 50)?,
                 target: common::arbitrary_bytes(u, 0, 100)?,
                 message: u.arbitrary()?,
@@ -124,7 +124,7 @@ impl<'a> Arbitrary<'a> for FuzzOperation {
                 rng_seed: u.arbitrary()?,
             }),
             5 => Ok(FuzzOperation::TamperedCiphertextMinSig {
-                master_secret: common::arbitrary_scalar(u)?,
+                master_secret: u.arbitrary()?,
                 namespace: common::arbitrary_bytes(u, 0, 50)?,
                 target: common::arbitrary_bytes(u, 0, 100)?,
                 message: u.arbitrary()?,

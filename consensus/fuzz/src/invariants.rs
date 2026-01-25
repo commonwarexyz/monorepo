@@ -3,12 +3,12 @@ use commonware_consensus::simplex::{
     elector::Config as Elector, mocks::reporter::Reporter, scheme::Scheme,
 };
 use commonware_cryptography::sha256::Digest as Sha256Digest;
-use commonware_utils::quorum;
+use commonware_utils::{Faults, N3f1};
 use rand_core::CryptoRngCore;
 use std::collections::{HashMap, HashSet};
 
 pub fn check(n: u32, replicas: Vec<ReplicaState>) {
-    let threshold = quorum(n) as usize;
+    let threshold = N3f1::quorum(n) as usize;
 
     // Invariant: agreement
     // All replicas that finalized a given view must have the same digest for that view.

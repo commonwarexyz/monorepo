@@ -21,16 +21,18 @@ use commonware_p2p::{
 };
 use commonware_parallel::Strategy;
 use commonware_runtime::{
-    buffer::PoolRef, spawn_cell, Clock, ContextCell, Handle, Metrics, Network, Spawner, Storage,
+    buffer::PoolRef, spawn_cell, telemetry::metrics::status::GaugeExt, Clock, ContextCell, Handle,
+    Metrics, Network, Spawner, Storage,
 };
-use commonware_utils::{vec::NonEmptyVec, NZUsize};
+use commonware_utils::{vec::NonEmptyVec, NZUsize, NZU16};
 use futures::{channel::mpsc, StreamExt};
+use prometheus_client::metrics::gauge::Gauge;
 use rand_core::CryptoRngCore;
 use std::{collections::BTreeMap, marker::PhantomData, time::Duration};
 use tracing::{debug, info, warn};
 
 /// Configuration for the orchestrator.
-pub struct Config<B, V, C, H, A, S, L, St>
+pub struct Config<B, V, C, H, A, S, L, T>
 where
     B: Blocker<PublicKey = C::PublicKey>,
     V: Variant,
@@ -40,12 +42,13 @@ where
         + Relay<Digest = H::Digest>,
     S: Scheme,
     L: Elector<S>,
-    St: Strategy,
+    T: Strategy,
 {
     pub oracle: B,
     pub application: A,
-    pub provider: Provider<S, C, St>,
+    pub provider: Provider<S, C>,
     pub marshal: marshal::Mailbox<S, Block<H, C, V>>,
+    pub strategy: T,
 
     pub muxer_size: usize,
     pub mailbox_size: usize,
@@ -56,7 +59,7 @@ where
     pub _phantom: PhantomData<L>,
 }
 
-pub struct Actor<E, B, V, C, H, A, S, L, St>
+pub struct Actor<E, B, V, C, H, A, S, L, T>
 where
     E: Spawner + Metrics + CryptoRngCore + Clock + Storage + Network,
     B: Blocker<PublicKey = C::PublicKey>,
@@ -67,9 +70,8 @@ where
         + Relay<Digest = H::Digest>,
     S: Scheme,
     L: Elector<S>,
-    St: Strategy,
-    Provider<S, C, St>:
-        EpochProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S, Strategy = St>,
+    T: Strategy,
+    Provider<S, C>: EpochProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
 {
     context: ContextCell<E>,
     mailbox: mpsc::Receiver<Message<V, C::PublicKey>>,
@@ -77,15 +79,19 @@ where
 
     oracle: B,
     marshal: marshal::Mailbox<S, Block<H, C, V>>,
-    provider: Provider<S, C, St>,
+    provider: Provider<S, C>,
+    strategy: T,
 
     muxer_size: usize,
     partition_prefix: String,
     pool_ref: PoolRef,
+
+    latest_epoch: Gauge,
+
     _phantom: PhantomData<L>,
 }
 
-impl<E, B, V, C, H, A, S, L, St> Actor<E, B, V, C, H, A, S, L, St>
+impl<E, B, V, C, H, A, S, L, T> Actor<E, B, V, C, H, A, S, L, T>
 where
     E: Spawner + Metrics + CryptoRngCore + Clock + Storage + Network,
     B: Blocker<PublicKey = C::PublicKey>,
@@ -96,16 +102,19 @@ where
         + Relay<Digest = H::Digest>,
     S: scheme::Scheme<H::Digest, PublicKey = C::PublicKey>,
     L: Elector<S>,
-    St: Strategy,
-    Provider<S, C, St>:
-        EpochProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S, Strategy = St>,
+    T: Strategy,
+    Provider<S, C>: EpochProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
 {
     pub fn new(
         context: E,
-        config: Config<B, V, C, H, A, S, L, St>,
+        config: Config<B, V, C, H, A, S, L, T>,
     ) -> (Self, Mailbox<V, C::PublicKey>) {
         let (sender, mailbox) = mpsc::channel(config.mailbox_size);
-        let pool_ref = PoolRef::new(NZUsize!(16_384), NZUsize!(10_000));
+        let pool_ref = PoolRef::new(NZU16!(16_384), NZUsize!(10_000));
+
+        // Register latest_epoch gauge for Grafana integration
+        let latest_epoch = Gauge::default();
+        context.register("latest_epoch", "current epoch", latest_epoch.clone());
 
         (
             Self {
@@ -115,9 +124,11 @@ where
                 oracle: config.oracle,
                 marshal: config.marshal,
                 provider: config.provider,
+                strategy: config.strategy,
                 muxer_size: config.muxer_size,
                 partition_prefix: config.partition_prefix,
                 pool_ref,
+                latest_epoch,
                 _phantom: PhantomData,
             },
             Mailbox::new(sender),
@@ -253,6 +264,7 @@ where
                             )
                             .await;
                         engines.insert(transition.epoch, engine);
+                        let _ = self.latest_epoch.try_set(transition.epoch.get());
 
                         info!(epoch = %transition.epoch, "entered epoch");
                     }
@@ -294,7 +306,9 @@ where
         // Start the new engine
         let elector = L::default();
         let engine = simplex::Engine::new(
-            self.context.with_label("consensus_engine"),
+            self.context
+                .with_label("consensus_engine")
+                .with_attribute("epoch", epoch),
             simplex::Config {
                 scheme,
                 elector,
@@ -315,6 +329,7 @@ where
                 skip_timeout: ViewDelta::new(10),
                 fetch_concurrent: 32,
                 buffer_pool: self.pool_ref.clone(),
+                strategy: self.strategy.clone(),
             },
         );
 

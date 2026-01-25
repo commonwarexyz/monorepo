@@ -5,19 +5,18 @@ use crate::{
 };
 use commonware_cryptography::{certificate::Scheme, Digest};
 use commonware_storage::archive;
-use commonware_utils::vec::NonEmptyVec;
+use commonware_utils::{channels::fallible::AsyncFallibleExt, vec::NonEmptyVec};
 use futures::{
     channel::{mpsc, oneshot},
     future::BoxFuture,
     stream::{FuturesOrdered, Stream},
-    FutureExt, SinkExt,
+    FutureExt,
 };
 use pin_project::pin_project;
 use std::{
     pin::Pin,
     task::{Context, Poll},
 };
-use tracing::error;
 
 /// An identifier for a block request.
 pub enum Identifier<D: Digest> {
@@ -127,15 +126,24 @@ pub(crate) enum Message<S: Scheme, B: Block> {
     },
     /// Sets the sync starting point (advances if higher than current).
     ///
-    /// Marshal will sync and deliver blocks starting at `floor + 1`. Data at or
-    /// below the floor is pruned.
+    /// Marshal will sync and deliver blocks starting at `floor + 1`. Data below
+    /// the floor is pruned.
     ///
     /// To prune data without affecting the sync starting point (say at some trailing depth
-    /// from tip), prune the finalized stores directly.
+    /// from tip), use [Message::Prune] instead.
     ///
     /// The default floor is 0.
     SetFloor {
         /// The candidate floor height.
+        height: Height,
+    },
+    /// Prunes finalized blocks and certificates below the given height.
+    ///
+    /// Unlike [Message::SetFloor], this does not affect the sync starting point.
+    /// The height must be at or below the current floor (last processed height),
+    /// otherwise the prune request is ignored.
+    Prune {
+        /// The minimum height to keep (blocks below this are pruned).
         height: Height,
     },
 
@@ -169,22 +177,14 @@ impl<S: Scheme, B: Block> Mailbox<S, B> {
         &mut self,
         identifier: impl Into<Identifier<B::Commitment>>,
     ) -> Option<(Height, B::Commitment)> {
-        let (tx, rx) = oneshot::channel();
-        if self
-            .sender
-            .send(Message::GetInfo {
-                identifier: identifier.into(),
-                response: tx,
+        let identifier = identifier.into();
+        self.sender
+            .request(|response| Message::GetInfo {
+                identifier,
+                response,
             })
             .await
-            .is_err()
-        {
-            error!("failed to send get info message to actor: receiver dropped");
-        }
-        rx.await.unwrap_or_else(|_| {
-            error!("failed to get block info: receiver dropped");
-            None
-        })
+            .flatten()
     }
 
     /// A best-effort attempt to retrieve a given block from local
@@ -193,22 +193,14 @@ impl<S: Scheme, B: Block> Mailbox<S, B> {
         &mut self,
         identifier: impl Into<Identifier<B::Commitment>>,
     ) -> Option<B> {
-        let (tx, rx) = oneshot::channel();
-        if self
-            .sender
-            .send(Message::GetBlock {
-                identifier: identifier.into(),
-                response: tx,
+        let identifier = identifier.into();
+        self.sender
+            .request(|response| Message::GetBlock {
+                identifier,
+                response,
             })
             .await
-            .is_err()
-        {
-            error!("failed to send get block message to actor: receiver dropped");
-        }
-        rx.await.unwrap_or_else(|_| {
-            error!("failed to get block: receiver dropped");
-            None
-        })
+            .flatten()
     }
 
     /// A best-effort attempt to retrieve a given [Finalization] from local
@@ -217,22 +209,10 @@ impl<S: Scheme, B: Block> Mailbox<S, B> {
         &mut self,
         height: Height,
     ) -> Option<Finalization<S, B::Commitment>> {
-        let (tx, rx) = oneshot::channel();
-        if self
-            .sender
-            .send(Message::GetFinalization {
-                height,
-                response: tx,
-            })
+        self.sender
+            .request(|response| Message::GetFinalization { height, response })
             .await
-            .is_err()
-        {
-            error!("failed to send get finalization message to actor: receiver dropped");
-        }
-        rx.await.unwrap_or_else(|_| {
-            error!("failed to get finalization: receiver dropped");
-            None
-        })
+            .flatten()
     }
 
     /// Hints that a finalized block may be available at the given height.
@@ -251,14 +231,9 @@ impl<S: Scheme, B: Block> Mailbox<S, B> {
     /// This is fire-and-forget: the finalization will be stored in marshal and delivered
     /// via the normal finalization flow when available.
     pub async fn hint_finalized(&mut self, height: Height, targets: NonEmptyVec<S::PublicKey>) {
-        if self
-            .sender
-            .send(Message::HintFinalized { height, targets })
-            .await
-            .is_err()
-        {
-            error!("failed to send hint finalized message to actor: receiver dropped");
-        }
+        self.sender
+            .send_lossy(Message::HintFinalized { height, targets })
+            .await;
     }
 
     /// A request to retrieve a block by its commitment.
@@ -276,18 +251,13 @@ impl<S: Scheme, B: Block> Mailbox<S, B> {
         commitment: B::Commitment,
     ) -> oneshot::Receiver<B> {
         let (tx, rx) = oneshot::channel();
-        if self
-            .sender
-            .send(Message::Subscribe {
+        self.sender
+            .send_lossy(Message::Subscribe {
                 round,
                 commitment,
                 response: tx,
             })
-            .await
-            .is_err()
-        {
-            error!("failed to send subscribe message to actor: receiver dropped");
-        }
+            .await;
         rx
     }
 
@@ -307,46 +277,38 @@ impl<S: Scheme, B: Block> Mailbox<S, B> {
 
     /// Proposed requests that a proposed block is sent to all peers.
     pub async fn proposed(&mut self, round: Round, block: B) {
-        if self
-            .sender
-            .send(Message::Proposed { round, block })
-            .await
-            .is_err()
-        {
-            error!("failed to send proposed message to actor: receiver dropped");
-        }
+        self.sender
+            .send_lossy(Message::Proposed { round, block })
+            .await;
     }
 
     /// Notifies the actor that a block has been verified.
     pub async fn verified(&mut self, round: Round, block: B) {
-        if self
-            .sender
-            .send(Message::Verified { round, block })
-            .await
-            .is_err()
-        {
-            error!("failed to send verified message to actor: receiver dropped");
-        }
+        self.sender
+            .send_lossy(Message::Verified { round, block })
+            .await;
     }
 
     /// Sets the sync starting point (advances if higher than current).
     ///
-    /// Marshal will sync and deliver blocks starting at `floor + 1`. Data at or
-    /// below the floor is pruned.
+    /// Marshal will sync and deliver blocks starting at `floor + 1`. Data below
+    /// the floor is pruned.
     ///
     /// To prune data without affecting the sync starting point (say at some trailing depth
-    /// from tip), prune the finalized stores directly.
+    /// from tip), use [Self::prune] instead.
     ///
     /// The default floor is 0.
     pub async fn set_floor(&mut self, height: Height) {
-        if self
-            .sender
-            .send(Message::SetFloor { height })
-            .await
-            .is_err()
-        {
-            error!("failed to send set floor message to actor: receiver dropped");
-        }
+        self.sender.send_lossy(Message::SetFloor { height }).await;
+    }
+
+    /// Prunes finalized blocks and certificates below the given height.
+    ///
+    /// Unlike [Self::set_floor], this does not affect the sync starting point.
+    /// The height must be at or below the current floor (last processed height),
+    /// otherwise the prune request is ignored.
+    pub async fn prune(&mut self, height: Height) {
+        self.sender.send_lossy(Message::Prune { height }).await;
     }
 }
 
@@ -362,9 +324,7 @@ impl<S: Scheme, B: Block> Reporter for Mailbox<S, B> {
                 return;
             }
         };
-        if self.sender.send(message).await.is_err() {
-            error!("failed to report activity to actor: receiver dropped");
-        }
+        self.sender.send_lossy(message).await;
     }
 }
 

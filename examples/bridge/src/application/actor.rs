@@ -16,6 +16,7 @@ use commonware_cryptography::{
     bls12381::primitives::variant::{MinSig, Variant},
     Hasher,
 };
+use commonware_parallel::Sequential;
 use commonware_runtime::{Sink, Spawner, Stream};
 use commonware_stream::{Receiver, Sender};
 use futures::{channel::mpsc, StreamExt};
@@ -104,7 +105,11 @@ impl<R: CryptoRngCore + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R,
 
                             // Verify certificate
                             assert!(
-                                finalization.verify(&mut self.context, &self.other_network),
+                                finalization.verify(
+                                    &mut self.context,
+                                    &self.other_network,
+                                    &Sequential
+                                ),
                                 "indexer is corrupt"
                             );
 
@@ -177,8 +182,11 @@ impl<R: CryptoRngCore + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R,
                             let _ = response.send(true);
                         }
                         BlockFormat::Bridge(finalization) => {
-                            let result =
-                                finalization.verify(&mut self.context, &self.other_network);
+                            let result = finalization.verify(
+                                &mut self.context,
+                                &self.other_network,
+                                &Sequential,
+                            );
                             let _ = response.send(result);
                         }
                     }
@@ -187,16 +195,10 @@ impl<R: CryptoRngCore + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R,
                     let view = activity.view();
                     match activity {
                         Activity::Notarization(notarization) => {
-                            let proposal_signature = notarization.certificate.vote_signature;
-                            let seed_signature = notarization.certificate.seed_signature;
-
-                            info!(%view, payload = ?notarization.proposal.payload, signature = ?proposal_signature, seed = ?seed_signature, "notarized");
+                            info!(%view, payload = ?notarization.proposal.payload, signature = ?notarization.certificate, "notarized");
                         }
                         Activity::Finalization(finalization) => {
-                            let proposal_signature = finalization.certificate.vote_signature;
-                            let seed_signature = finalization.certificate.seed_signature;
-
-                            info!(%view, payload = ?finalization.proposal.payload, signature = ?proposal_signature, seed = ?seed_signature, "finalized");
+                            info!(%view, payload = ?finalization.proposal.payload, signature = ?finalization.certificate, "finalized");
 
                             // Post finalization
                             let msg =
@@ -221,10 +223,7 @@ impl<R: CryptoRngCore + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R,
                             debug!(%view, success, "finalization posted");
                         }
                         Activity::Nullification(nullification) => {
-                            let round_signature = nullification.certificate.vote_signature;
-                            let seed_signature = nullification.certificate.seed_signature;
-
-                            info!(%view, signature = ?round_signature, seed = ?seed_signature, "nullified");
+                            info!(%view, signature = ?nullification.certificate, "nullified");
                         }
                         _ => {}
                     }

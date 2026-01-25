@@ -22,10 +22,8 @@
     html_favicon_url = "https://commonware.xyz/favicon.ico"
 )]
 
-use bytes::{Buf, BufMut};
 use commonware_macros::select;
 use commonware_parallel::{Rayon, ThreadPool};
-use commonware_utils::StableBuf;
 use prometheus_client::registry::Metric;
 use rayon::ThreadPoolBuildError;
 use std::{
@@ -48,11 +46,15 @@ cfg_if::cfg_if! {
         pub mod benchmarks;
     }
 }
+pub mod iobuf;
+/// Re-export of `Buf` and `BufMut` traits for usage with [I/O buffers](iobuf).
+pub use bytes::{Buf, BufMut};
+pub use iobuf::{IoBuf, IoBufMut, IoBufs, IoBufsMut};
 mod network;
 mod process;
 mod storage;
 pub mod telemetry;
-mod utils;
+pub mod utils;
 pub use utils::*;
 #[cfg(any(feature = "iouring-storage", feature = "iouring-network"))]
 mod iouring;
@@ -111,8 +113,12 @@ pub enum Error {
         expected: std::ops::RangeInclusive<u16>,
         found: u16,
     },
+    #[error("invalid or missing checksum")]
+    InvalidChecksum,
     #[error("offset overflow")]
     OffsetOverflow,
+    #[error("immutable blob")]
+    ImmutableBlob,
     #[error("io error: {0}")]
     Io(#[from] IoError),
 }
@@ -270,9 +276,97 @@ pub trait Metrics: Clone + Send + Sync + 'static {
     ///
     /// This is commonly used to create a nested context for `register`.
     ///
-    /// It is not permitted for any implementation to use `METRICS_PREFIX` as the start of a
-    /// label (reserved for metrics for the runtime).
+    /// Labels must start with `[a-zA-Z]` and contain only `[a-zA-Z0-9_]`. It is not permitted for
+    /// any implementation to use `METRICS_PREFIX` as the start of a label (reserved for metrics for the runtime).
     fn with_label(&self, label: &str) -> Self;
+
+    /// Create a new instance of `Metrics` with an additional attribute (key-value pair) applied
+    /// to all metrics registered in this context and any child contexts.
+    ///
+    /// Unlike [`Metrics::with_label`] which affects the metric name prefix, `with_attribute` adds
+    /// a key-value pair that appears as a separate dimension in the metric output. This is
+    /// useful for instrumenting n-ary data structures in a way that is easy to manage downstream.
+    ///
+    /// Keys must start with `[a-zA-Z]` and contain only `[a-zA-Z0-9_]`. Values can be any string.
+    ///
+    /// # Labeling Children
+    ///
+    /// Attributes apply to the entire subtree of contexts. When you call `with_attribute`, the
+    /// label is automatically added to all metrics registered in that context and any child
+    /// contexts created via `with_label`:
+    ///
+    /// ```text
+    /// context
+    ///   |-- with_label("orchestrator")
+    ///         |-- with_attribute("epoch", "5")
+    ///               |-- counter: votes        -> orchestrator_votes{epoch="5"}
+    ///               |-- counter: proposals    -> orchestrator_proposals{epoch="5"}
+    ///               |-- with_label("engine")
+    ///                     |-- gauge: height   -> orchestrator_engine_height{epoch="5"}
+    /// ```
+    ///
+    /// This pattern avoids wrapping every metric in a `Family` and avoids polluting metric
+    /// names with dynamic values like `orchestrator_epoch_5_votes`.
+    ///
+    /// _Using attributes does not reduce cardinality (N epochs still means N time series).
+    /// Attributes just make metrics easier to query, filter, and aggregate._
+    ///
+    /// # Family Label Conflicts
+    ///
+    /// When using `Family` metrics, avoid using attribute keys that match the Family's label field names.
+    /// If a conflict occurs, the encoded output will contain duplicate labels (e.g., `{env="prod",env="staging"}`),
+    /// which is invalid Prometheus format and may cause scraping issues.
+    ///
+    /// ```ignore
+    /// #[derive(EncodeLabelSet)]
+    /// struct Labels { env: String }
+    ///
+    /// // BAD: attribute "env" conflicts with Family field "env"
+    /// let ctx = context.with_attribute("env", "prod");
+    /// let family: Family<Labels, Counter> = Family::default();
+    /// ctx.register("requests", "help", family);
+    /// // Produces invalid: requests_total{env="prod",env="staging"}
+    ///
+    /// // GOOD: use distinct names
+    /// let ctx = context.with_attribute("region", "us_east");
+    /// // Produces valid: requests_total{region="us_east",env="staging"}
+    /// ```
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Instead of creating epoch-specific metric names:
+    /// let ctx = context.with_label(&format!("consensus_engine_{}", epoch));
+    /// // Produces: consensus_engine_5_votes_total, consensus_engine_6_votes_total, ...
+    ///
+    /// // Use attributes to add epoch as a label dimension:
+    /// let ctx = context.with_label("consensus_engine").with_attribute("epoch", epoch);
+    /// // Produces: consensus_engine_votes_total{epoch="5"}, consensus_engine_votes_total{epoch="6"}, ...
+    /// ```
+    ///
+    /// Multiple attributes can be chained:
+    /// ```ignore
+    /// let ctx = context
+    ///     .with_label("engine")
+    ///     .with_attribute("region", "us_east")
+    ///     .with_attribute("instance", "i1");
+    /// // Produces: engine_requests_total{region="us_east",instance="i1"} 42
+    /// ```
+    ///
+    /// # Querying The Latest Attribute
+    ///
+    /// To query the latest attribute value dynamically, create a gauge to track the current value:
+    /// ```ignore
+    /// // Create a gauge to track the current epoch
+    /// let latest_epoch = Gauge::<i64>::default();
+    /// context.with_label("orchestrator").register("latest_epoch", "current epoch", latest_epoch.clone());
+    /// latest_epoch.set(current_epoch);
+    /// // Produces: orchestrator_latest_epoch 5
+    /// ```
+    ///
+    /// Then create a dashboard variable `$latest_epoch` with query `max(orchestrator_latest_epoch)`
+    /// and use it in panel queries: `consensus_engine_votes_total{epoch="$latest_epoch"}`
+    fn with_attribute(&self, key: &str, value: impl std::fmt::Display) -> Self;
 
     /// Prefix the given label with the current context's label.
     ///
@@ -293,9 +387,16 @@ pub trait Metrics: Clone + Send + Sync + 'static {
     /// Register a metric with the runtime.
     ///
     /// Any registered metric will include (as a prefix) the label of the current context.
+    ///
+    /// Names must start with `[a-zA-Z]` and contain only `[a-zA-Z0-9_]`.
     fn register<N: Into<String>, H: Into<String>>(&self, name: N, help: H, metric: impl Metric);
 
     /// Encode all metrics into a buffer.
+    ///
+    /// To ensure downstream analytics tools work correctly, users must never duplicate metrics
+    /// (via the concatenation of nested `with_label` and `register` calls). This can be avoided
+    /// by using `with_label` to create new context instances (ensures all context instances are
+    /// namespaced).
     fn encode(&self) -> String;
 }
 
@@ -515,19 +616,32 @@ pub trait Sink: Sync + Send + 'static {
     /// # Warning
     ///
     /// If the sink returns an error, part of the message may still be delivered.
-    fn send(&mut self, msg: impl Buf + Send) -> impl Future<Output = Result<(), Error>> + Send;
+    fn send(
+        &mut self,
+        buf: impl Into<IoBufs> + Send,
+    ) -> impl Future<Output = Result<(), Error>> + Send;
 }
 
 /// Interface that any runtime must implement to receive
 /// messages over a network connection.
 pub trait Stream: Sync + Send + 'static {
-    /// Receive a message from the stream, storing it in the given buffer.
-    /// Reads exactly the number of bytes that fit in the buffer.
+    /// Receive exactly `len` bytes from the stream.
+    ///
+    /// The runtime allocates the buffer and returns it as `IoBufs`.
     ///
     /// # Warning
     ///
     /// If the stream returns an error, partially read data may be discarded.
-    fn recv(&mut self, buf: impl BufMut + Send) -> impl Future<Output = Result<(), Error>> + Send;
+    fn recv(&mut self, len: u64) -> impl Future<Output = Result<IoBufs, Error>> + Send;
+
+    /// Peek at buffered data without consuming.
+    ///
+    /// Returns up to `max_len` bytes from the internal buffer, or an empty slice
+    /// if no data is currently buffered. This does not perform any I/O or block.
+    ///
+    /// This is useful e.g. for parsing length prefixes without committing to a read
+    /// or paying the cost of async.
+    fn peek(&self, max_len: u64) -> &[u8];
 }
 
 /// Interface to interact with storage.
@@ -553,15 +667,9 @@ pub trait Storage: Clone + Send + Sync + 'static {
         partition: &str,
         name: &[u8],
     ) -> impl Future<Output = Result<(Self::Blob, u64), Error>> + Send {
-        let partition = partition.to_string();
-        let name = name.to_vec();
         async move {
             let (blob, size, _) = self
-                .open_versioned(
-                    &partition,
-                    &name,
-                    DEFAULT_BLOB_VERSION..=DEFAULT_BLOB_VERSION,
-                )
+                .open_versioned(partition, name, DEFAULT_BLOB_VERSION..=DEFAULT_BLOB_VERSION)
                 .await?;
             Ok((blob, size))
         }
@@ -621,21 +729,27 @@ pub trait Storage: Clone + Send + Sync + 'static {
 /// before dropping to ensure all changes are durably persisted.
 #[allow(clippy::len_without_is_empty)]
 pub trait Blob: Clone + Send + Sync + 'static {
-    /// Read from the blob at the given offset.
+    /// Read into caller-provided buffer(s) at the given offset.
     ///
-    /// `read_at` does not return the number of bytes read because it
-    /// only returns once the entire buffer has been filled.
+    /// The caller provides the buffer, and the implementation fills it with data
+    /// read from the blob starting at `offset`. Returns the same buffer, filled
+    /// with data.
+    ///
+    /// # Contract
+    ///
+    /// - The output `IoBufsMut` is the same as the input, with data filled from offset
+    /// - The total bytes read equals the total initialized length of the input buffer(s)
     fn read_at(
         &self,
-        buf: impl Into<StableBuf> + Send,
         offset: u64,
-    ) -> impl Future<Output = Result<StableBuf, Error>> + Send;
+        buf: impl Into<IoBufsMut> + Send,
+    ) -> impl Future<Output = Result<IoBufsMut, Error>> + Send;
 
     /// Write `buf` to the blob at the given offset.
     fn write_at(
         &self,
-        buf: impl Into<StableBuf> + Send,
         offset: u64,
+        buf: impl Into<IoBufs> + Send,
     ) -> impl Future<Output = Result<(), Error>> + Send;
 
     /// Resize the blob to the given length.
@@ -660,7 +774,10 @@ mod tests {
         future::{pending, ready},
         join, pin_mut, FutureExt, SinkExt, StreamExt,
     };
-    use prometheus_client::metrics::counter::Counter;
+    use prometheus_client::{
+        encoding::EncodeLabelSet,
+        metrics::{counter::Counter, family::Family},
+    };
     use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
     use std::{
         collections::HashMap,
@@ -972,7 +1089,7 @@ mod tests {
 
             // Write data to the blob
             let data = b"Hello, Storage!";
-            blob.write_at(Vec::from(data), 0)
+            blob.write_at(0, data)
                 .await
                 .expect("Failed to write to blob");
 
@@ -981,10 +1098,10 @@ mod tests {
 
             // Read data from the blob
             let read = blob
-                .read_at(vec![0; data.len()], 0)
+                .read_at(0, IoBufMut::zeroed(data.len()))
                 .await
                 .expect("Failed to read from blob");
-            assert_eq!(read.as_ref(), data);
+            assert_eq!(read.coalesce(), data);
 
             // Sync the blob
             blob.sync().await.expect("Failed to sync blob");
@@ -1005,10 +1122,10 @@ mod tests {
 
             // Read data part of message back
             let read = blob
-                .read_at(vec![0u8; 7], 7)
+                .read_at(7, IoBufMut::zeroed(7))
                 .await
                 .expect("Failed to read data");
-            assert_eq!(read.as_ref(), b"Storage");
+            assert_eq!(read.coalesce(), b"Storage");
 
             // Sync the blob
             blob.sync().await.expect("Failed to sync blob");
@@ -1055,41 +1172,43 @@ mod tests {
             // Write data at different offsets
             let data1 = b"Hello";
             let data2 = b"World";
-            blob.write_at(Vec::from(data1), 0)
+            blob.write_at(0, data1)
                 .await
                 .expect("Failed to write data1");
-            blob.write_at(Vec::from(data2), 5)
+            blob.write_at(5, data2)
                 .await
                 .expect("Failed to write data2");
 
             // Read data back
             let read = blob
-                .read_at(vec![0u8; 10], 0)
+                .read_at(0, IoBufMut::zeroed(10))
                 .await
                 .expect("Failed to read data");
+            let read = read.coalesce();
             assert_eq!(&read.as_ref()[..5], data1);
             assert_eq!(&read.as_ref()[5..], data2);
 
             // Read past end of blob
-            let result = blob.read_at(vec![0u8; 10], 10).await;
+            let result = blob.read_at(10, IoBufMut::zeroed(10)).await;
             assert!(result.is_err());
 
             // Rewrite data without affecting length
             let data3 = b"Store";
-            blob.write_at(Vec::from(data3), 5)
+            blob.write_at(5, data3)
                 .await
                 .expect("Failed to write data3");
 
             // Read data back
             let read = blob
-                .read_at(vec![0u8; 10], 0)
+                .read_at(0, IoBufMut::zeroed(10))
                 .await
                 .expect("Failed to read data");
+            let read = read.coalesce();
             assert_eq!(&read.as_ref()[..5], data1);
             assert_eq!(&read.as_ref()[5..], data3);
 
             // Read past end of blob
-            let result = blob.read_at(vec![0u8; 10], 10).await;
+            let result = blob.read_at(10, IoBufMut::zeroed(10)).await;
             assert!(result.is_err());
         });
     }
@@ -1109,7 +1228,7 @@ mod tests {
                 .expect("Failed to open blob");
 
             let data = b"some data";
-            blob.write_at(data.to_vec(), 0)
+            blob.write_at(0, data.to_vec())
                 .await
                 .expect("Failed to write");
             blob.sync().await.expect("Failed to sync after write");
@@ -1130,15 +1249,15 @@ mod tests {
             assert_eq!(len, new_len);
 
             // Read original data
-            let read_buf = blob.read_at(vec![0; data.len()], 0).await.unwrap();
-            assert_eq!(read_buf.as_ref(), data);
+            let read_buf = blob.read_at(0, IoBufMut::zeroed(data.len())).await.unwrap();
+            assert_eq!(read_buf.coalesce(), data);
 
             // Read extended part (should be zeros)
             let extended_part = blob
-                .read_at(vec![0; data.len()], data.len() as u64)
+                .read_at(data.len() as u64, IoBufMut::zeroed(data.len()))
                 .await
                 .unwrap();
-            assert_eq!(extended_part.as_ref(), vec![0; data.len()].as_slice());
+            assert_eq!(extended_part.coalesce(), vec![0; data.len()].as_slice());
 
             // Truncate the blob
             blob.resize(data.len() as u64).await.unwrap();
@@ -1149,8 +1268,8 @@ mod tests {
             assert_eq!(size, data.len() as u64);
 
             // Read truncated data
-            let read_buf = blob.read_at(vec![0; data.len()], 0).await.unwrap();
-            assert_eq!(read_buf.as_ref(), data);
+            let read_buf = blob.read_at(0, IoBufMut::zeroed(data.len())).await.unwrap();
+            assert_eq!(read_buf.coalesce(), data);
             blob.sync().await.unwrap();
         });
     }
@@ -1173,10 +1292,10 @@ mod tests {
                     .expect("Failed to open blob");
 
                 // Write data at different offsets
-                blob.write_at(Vec::from(data1), 0)
+                blob.write_at(0, data1)
                     .await
                     .expect("Failed to write data1");
-                blob.write_at(Vec::from(data2), 5 + additional as u64)
+                blob.write_at(5 + additional as u64, data2)
                     .await
                     .expect("Failed to write data2");
 
@@ -1194,9 +1313,10 @@ mod tests {
 
                 // Read data back
                 let read = blob
-                    .read_at(vec![0u8; 10 + additional], 0)
+                    .read_at(0, IoBufMut::zeroed(10 + additional))
                     .await
                     .expect("Failed to read data");
+                let read = read.coalesce();
                 assert_eq!(&read.as_ref()[..5], b"Hello");
                 assert_eq!(&read.as_ref()[5 + additional..], b"World");
             }
@@ -1218,17 +1338,17 @@ mod tests {
                 .expect("Failed to open blob");
 
             // Read data past file length (empty file)
-            let result = blob.read_at(vec![0u8; 10], 0).await;
+            let result = blob.read_at(0, IoBufMut::zeroed(10)).await;
             assert!(result.is_err());
 
             // Write data to the blob
             let data = b"Hello, Storage!".to_vec();
-            blob.write_at(data, 0)
+            blob.write_at(0, data)
                 .await
                 .expect("Failed to write to blob");
 
             // Read data past file length (non-empty file)
-            let result = blob.read_at(vec![0u8; 20], 0).await;
+            let result = blob.read_at(0, IoBufMut::zeroed(20)).await;
             assert!(result.is_err());
         })
     }
@@ -1249,7 +1369,7 @@ mod tests {
 
             // Write data to the blob
             let data = b"Hello, Storage!";
-            blob.write_at(Vec::from(data), 0)
+            blob.write_at(0, data)
                 .await
                 .expect("Failed to write to blob");
 
@@ -1259,22 +1379,24 @@ mod tests {
             // Read data from the blob in clone
             let check1 = context.with_label("check1").spawn({
                 let blob = blob.clone();
+                let data_len = data.len();
                 move |_| async move {
                     let read = blob
-                        .read_at(vec![0u8; data.len()], 0)
+                        .read_at(0, IoBufMut::zeroed(data_len))
                         .await
                         .expect("Failed to read from blob");
-                    assert_eq!(read.as_ref(), data);
+                    assert_eq!(read.coalesce(), data);
                 }
             });
             let check2 = context.with_label("check2").spawn({
                 let blob = blob.clone();
+                let data_len = data.len();
                 move |_| async move {
                     let read = blob
-                        .read_at(vec![0; data.len()], 0)
+                        .read_at(0, IoBufMut::zeroed(data_len))
                         .await
                         .expect("Failed to read from blob");
-                    assert_eq!(read.as_ref(), data);
+                    assert_eq!(read.coalesce(), data);
                 }
             });
 
@@ -1285,10 +1407,10 @@ mod tests {
 
             // Read data from the blob
             let read = blob
-                .read_at(vec![0; data.len()], 0)
+                .read_at(0, IoBufMut::zeroed(data.len()))
                 .await
                 .expect("Failed to read from blob");
-            assert_eq!(read.as_ref(), data);
+            assert_eq!(read.coalesce(), data);
 
             // Drop the blob
             drop(blob);
@@ -2046,40 +2168,493 @@ mod tests {
         });
     }
 
-    fn test_metrics_label<R: Runner>(runner: R)
+    fn test_metrics_with_attribute<R: Runner>(runner: R)
     where
         R::Context: Metrics,
     {
         runner.start(|context| async move {
-            context.with_label(METRICS_PREFIX);
-        })
+            // Create context with a attribute
+            let ctx_epoch5 = context
+                .with_label("consensus")
+                .with_attribute("epoch", "e5");
+
+            // Register a metric with the attribute
+            let counter = Counter::<u64>::default();
+            ctx_epoch5.register("votes", "vote count", counter.clone());
+            counter.inc();
+
+            // Encode and verify the attribute appears as a label
+            let buffer = context.encode();
+            assert!(
+                buffer.contains("consensus_votes_total{epoch=\"e5\"} 1"),
+                "Expected metric with epoch attribute, got: {}",
+                buffer
+            );
+
+            // Create context with different epoch attribute (same metric name)
+            let ctx_epoch6 = context
+                .with_label("consensus")
+                .with_attribute("epoch", "e6");
+            let counter2 = Counter::<u64>::default();
+            ctx_epoch6.register("votes", "vote count", counter2.clone());
+            counter2.inc();
+            counter2.inc();
+
+            // Both should appear in encoded output with canonical format (single HELP/TYPE)
+            let buffer = context.encode();
+            assert!(
+                buffer.contains("consensus_votes_total{epoch=\"e5\"} 1"),
+                "Expected metric with epoch=e5, got: {}",
+                buffer
+            );
+            assert!(
+                buffer.contains("consensus_votes_total{epoch=\"e6\"} 2"),
+                "Expected metric with epoch=e6, got: {}",
+                buffer
+            );
+
+            // Verify canonical format: HELP and TYPE should appear exactly once
+            assert_eq!(
+                buffer.matches("# HELP consensus_votes").count(),
+                1,
+                "HELP should appear exactly once, got: {}",
+                buffer
+            );
+            assert_eq!(
+                buffer.matches("# TYPE consensus_votes").count(),
+                1,
+                "TYPE should appear exactly once, got: {}",
+                buffer
+            );
+
+            // Multiple attributes
+            let ctx_multi = context
+                .with_label("engine")
+                .with_attribute("region", "us")
+                .with_attribute("instance", "i1");
+            let counter3 = Counter::<u64>::default();
+            ctx_multi.register("requests", "request count", counter3.clone());
+            counter3.inc();
+
+            let buffer = context.encode();
+            assert!(
+                buffer.contains("engine_requests_total{instance=\"i1\",region=\"us\"} 1"),
+                "Expected metric with sorted attributes, got: {}",
+                buffer
+            );
+        });
     }
 
-    fn test_metrics_label_empty<R: Runner>(runner: R)
-    where
-        R::Context: Metrics,
-    {
-        runner.start(|context| async move {
-            context.with_label("");
-        })
+    #[test]
+    fn test_deterministic_metrics_with_attribute() {
+        let executor = deterministic::Runner::default();
+        test_metrics_with_attribute(executor);
     }
 
-    fn test_metrics_label_invalid_first_char<R: Runner>(runner: R)
-    where
-        R::Context: Metrics,
-    {
-        runner.start(|context| async move {
-            context.with_label("1invalid");
-        })
+    #[test]
+    fn test_tokio_metrics_with_attribute() {
+        let runner = tokio::Runner::default();
+        test_metrics_with_attribute(runner);
     }
 
-    fn test_metrics_label_invalid_char<R: Runner>(runner: R)
+    fn test_metrics_attribute_with_nested_label<R: Runner>(runner: R)
     where
         R::Context: Metrics,
     {
         runner.start(|context| async move {
-            context.with_label("invalid-label");
-        })
+            // Create context with attribute, then nest a label
+            let ctx = context
+                .with_label("orchestrator")
+                .with_attribute("epoch", "e5")
+                .with_label("engine");
+
+            // Register a metric
+            let counter = Counter::<u64>::default();
+            ctx.register("votes", "vote count", counter.clone());
+            counter.inc();
+
+            // Verify the attribute is preserved through the nested label
+            let buffer = context.encode();
+            assert!(
+                buffer.contains("orchestrator_engine_votes_total{epoch=\"e5\"} 1"),
+                "Expected metric with preserved epoch attribute, got: {}",
+                buffer
+            );
+
+            // Multiple levels of nesting with attributes at different levels
+            let ctx2 = context
+                .with_label("outer")
+                .with_attribute("region", "us")
+                .with_label("middle")
+                .with_attribute("az", "east")
+                .with_label("inner");
+
+            let counter2 = Counter::<u64>::default();
+            ctx2.register("requests", "request count", counter2.clone());
+            counter2.inc();
+            counter2.inc();
+
+            let buffer = context.encode();
+            assert!(
+                buffer.contains("outer_middle_inner_requests_total{az=\"east\",region=\"us\"} 2"),
+                "Expected metric with all attributes preserved and sorted, got: {}",
+                buffer
+            );
+        });
+    }
+
+    #[test]
+    fn test_deterministic_metrics_attribute_with_nested_label() {
+        let executor = deterministic::Runner::default();
+        test_metrics_attribute_with_nested_label(executor);
+    }
+
+    #[test]
+    fn test_tokio_metrics_attribute_with_nested_label() {
+        let runner = tokio::Runner::default();
+        test_metrics_attribute_with_nested_label(runner);
+    }
+
+    fn test_metrics_attributes_isolated_between_contexts<R: Runner>(runner: R)
+    where
+        R::Context: Metrics,
+    {
+        runner.start(|context| async move {
+            // Create two separate sub-contexts, each with their own attribute
+            let ctx_a = context.with_label("component_a").with_attribute("epoch", 1);
+            let ctx_b = context.with_label("component_b").with_attribute("epoch", 2);
+
+            // Register metrics in ctx_a
+            let c1 = Counter::<u64>::default();
+            ctx_a.register("requests", "help", c1);
+
+            // Register metrics in ctx_b
+            let c2 = Counter::<u64>::default();
+            ctx_b.register("requests", "help", c2);
+
+            // Register another metric in ctx_a AFTER ctx_b was used
+            let c3 = Counter::<u64>::default();
+            ctx_a.register("errors", "help", c3);
+
+            let output = context.encode();
+
+            // ctx_a metrics should only have epoch=1
+            assert!(
+                output.contains("component_a_requests_total{epoch=\"1\"} 0"),
+                "ctx_a requests should have epoch=1: {output}"
+            );
+            assert!(
+                output.contains("component_a_errors_total{epoch=\"1\"} 0"),
+                "ctx_a errors should have epoch=1: {output}"
+            );
+            assert!(
+                !output.contains("component_a_requests_total{epoch=\"2\"}"),
+                "ctx_a requests should not have epoch=2: {output}"
+            );
+
+            // ctx_b metrics should only have epoch=2
+            assert!(
+                output.contains("component_b_requests_total{epoch=\"2\"} 0"),
+                "ctx_b should have epoch=2: {output}"
+            );
+            assert!(
+                !output.contains("component_b_requests_total{epoch=\"1\"}"),
+                "ctx_b should not have epoch=1: {output}"
+            );
+        });
+    }
+
+    #[test]
+    fn test_deterministic_metrics_attributes_isolated_between_contexts() {
+        let executor = deterministic::Runner::default();
+        test_metrics_attributes_isolated_between_contexts(executor);
+    }
+
+    #[test]
+    fn test_tokio_metrics_attributes_isolated_between_contexts() {
+        let runner = tokio::Runner::default();
+        test_metrics_attributes_isolated_between_contexts(runner);
+    }
+
+    fn test_metrics_attributes_sorted_deterministically<R: Runner>(runner: R)
+    where
+        R::Context: Metrics,
+    {
+        runner.start(|context| async move {
+            // Create two contexts with same attributes but different order
+            let ctx_ab = context
+                .with_label("service")
+                .with_attribute("region", "us")
+                .with_attribute("env", "prod");
+
+            let ctx_ba = context
+                .with_label("service")
+                .with_attribute("env", "prod")
+                .with_attribute("region", "us");
+
+            // Register via first context
+            let c1 = Counter::<u64>::default();
+            ctx_ab.register("requests", "help", c1.clone());
+            c1.inc();
+
+            // Register via second context - same attributes, different metric
+            let c2 = Counter::<u64>::default();
+            ctx_ba.register("errors", "help", c2.clone());
+            c2.inc();
+            c2.inc();
+
+            let output = context.encode();
+
+            // Both should have the same label order (alphabetically sorted: env, region)
+            assert!(
+                output.contains("service_requests_total{env=\"prod\",region=\"us\"} 1"),
+                "requests should have sorted labels: {output}"
+            );
+            assert!(
+                output.contains("service_errors_total{env=\"prod\",region=\"us\"} 2"),
+                "errors should have sorted labels: {output}"
+            );
+
+            // Should NOT have reverse order
+            assert!(
+                !output.contains("region=\"us\",env=\"prod\""),
+                "should not have unsorted label order: {output}"
+            );
+        });
+    }
+
+    #[test]
+    fn test_deterministic_metrics_attributes_sorted_deterministically() {
+        let executor = deterministic::Runner::default();
+        test_metrics_attributes_sorted_deterministically(executor);
+    }
+
+    #[test]
+    fn test_tokio_metrics_attributes_sorted_deterministically() {
+        let runner = tokio::Runner::default();
+        test_metrics_attributes_sorted_deterministically(runner);
+    }
+
+    fn test_metrics_nested_labels_with_attributes<R: Runner>(runner: R)
+    where
+        R::Context: Metrics,
+    {
+        runner.start(|context| async move {
+            // Service A: plain, no nested labels
+            let svc_a = context.with_label("service_a");
+
+            // Service A with attribute (same top-level label, different context)
+            let svc_a_v2 = context.with_label("service_a").with_attribute("version", 2);
+
+            // Service B with nested label: service_b_worker
+            let svc_b_worker = context.with_label("service_b").with_label("worker");
+
+            // Service B with nested label AND attribute
+            let svc_b_worker_shard = context
+                .with_label("service_b")
+                .with_label("worker")
+                .with_attribute("shard", 99);
+
+            // Service B different nested label: service_b_manager
+            let svc_b_manager = context.with_label("service_b").with_label("manager");
+
+            // Service C: plain, proves no cross-service contamination
+            let svc_c = context.with_label("service_c");
+
+            // Register metrics in all contexts
+            let c1 = Counter::<u64>::default();
+            svc_a.register("requests", "help", c1);
+
+            let c2 = Counter::<u64>::default();
+            svc_a_v2.register("requests", "help", c2);
+
+            let c3 = Counter::<u64>::default();
+            svc_b_worker.register("tasks", "help", c3);
+
+            let c4 = Counter::<u64>::default();
+            svc_b_worker_shard.register("tasks", "help", c4);
+
+            let c5 = Counter::<u64>::default();
+            svc_b_manager.register("decisions", "help", c5);
+
+            let c6 = Counter::<u64>::default();
+            svc_c.register("requests", "help", c6);
+
+            let output = context.encode();
+
+            // Service A plain and attributed both exist independently
+            assert!(
+                output.contains("service_a_requests_total 0"),
+                "svc_a plain should exist: {output}"
+            );
+            assert!(
+                output.contains("service_a_requests_total{version=\"2\"} 0"),
+                "svc_a_v2 should have version=2: {output}"
+            );
+
+            // Service B worker: plain and attributed versions
+            assert!(
+                output.contains("service_b_worker_tasks_total 0"),
+                "svc_b_worker plain should exist: {output}"
+            );
+            assert!(
+                output.contains("service_b_worker_tasks_total{shard=\"99\"} 0"),
+                "svc_b_worker_shard should have shard=99: {output}"
+            );
+
+            // Service B manager: no attributes
+            assert!(
+                output.contains("service_b_manager_decisions_total 0"),
+                "svc_b_manager should have no attributes: {output}"
+            );
+            assert!(
+                !output.contains("service_b_manager_decisions_total{"),
+                "svc_b_manager should have no attributes at all: {output}"
+            );
+
+            // Service C: no attributes, no contamination
+            assert!(
+                output.contains("service_c_requests_total 0"),
+                "svc_c should have no attributes: {output}"
+            );
+            assert!(
+                !output.contains("service_c_requests_total{"),
+                "svc_c should have no attributes at all: {output}"
+            );
+
+            // Cross-contamination checks
+            assert!(
+                !output.contains("service_b_manager_decisions_total{shard="),
+                "svc_b_manager should not have shard: {output}"
+            );
+            assert!(
+                !output.contains("service_a_requests_total{shard="),
+                "svc_a should not have shard: {output}"
+            );
+            assert!(
+                !output.contains("service_c_requests_total{version="),
+                "svc_c should not have version: {output}"
+            );
+        });
+    }
+
+    #[test]
+    fn test_deterministic_metrics_nested_labels_with_attributes() {
+        let executor = deterministic::Runner::default();
+        test_metrics_nested_labels_with_attributes(executor);
+    }
+
+    #[test]
+    fn test_tokio_metrics_nested_labels_with_attributes() {
+        let runner = tokio::Runner::default();
+        test_metrics_nested_labels_with_attributes(runner);
+    }
+
+    fn test_metrics_family_with_attributes<R: Runner>(runner: R)
+    where
+        R::Context: Metrics,
+    {
+        runner.start(|context| async move {
+            #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+            struct RequestLabels {
+                method: String,
+                status: u16,
+            }
+
+            // Create context with attribute
+            let ctx = context
+                .with_label("api")
+                .with_attribute("region", "us_east")
+                .with_attribute("env", "prod");
+
+            // Register a Family metric
+            let requests: Family<RequestLabels, Counter<u64>> = Family::default();
+            ctx.register("requests", "HTTP requests", requests.clone());
+
+            // Increment counters for different label combinations
+            requests
+                .get_or_create(&RequestLabels {
+                    method: "GET".to_string(),
+                    status: 200,
+                })
+                .inc();
+            requests
+                .get_or_create(&RequestLabels {
+                    method: "POST".to_string(),
+                    status: 201,
+                })
+                .inc();
+            requests
+                .get_or_create(&RequestLabels {
+                    method: "GET".to_string(),
+                    status: 404,
+                })
+                .inc();
+
+            let output = context.encode();
+
+            // Context attributes appear first (alphabetically sorted), then Family labels
+            // Context attributes: env="prod", region="us_east"
+            // Family labels: method, status
+            assert!(
+                output.contains(
+                    "api_requests_total{env=\"prod\",region=\"us_east\",method=\"GET\",status=\"200\"} 1"
+                ),
+                "GET 200 should have merged labels: {output}"
+            );
+            assert!(
+                output.contains(
+                    "api_requests_total{env=\"prod\",region=\"us_east\",method=\"POST\",status=\"201\"} 1"
+                ),
+                "POST 201 should have merged labels: {output}"
+            );
+            assert!(
+                output.contains(
+                    "api_requests_total{env=\"prod\",region=\"us_east\",method=\"GET\",status=\"404\"} 1"
+                ),
+                "GET 404 should have merged labels: {output}"
+            );
+
+            // Create another context WITHOUT attributes to verify isolation
+            let ctx_plain = context.with_label("api_plain");
+            let plain_requests: Family<RequestLabels, Counter<u64>> = Family::default();
+            ctx_plain.register("requests", "HTTP requests", plain_requests.clone());
+
+            plain_requests
+                .get_or_create(&RequestLabels {
+                    method: "DELETE".to_string(),
+                    status: 204,
+                })
+                .inc();
+
+            let output = context.encode();
+
+            // Plain context should have Family labels but no context attributes
+            assert!(
+                output.contains("api_plain_requests_total{method=\"DELETE\",status=\"204\"} 1"),
+                "plain DELETE should have only family labels: {output}"
+            );
+            assert!(
+                !output.contains("api_plain_requests_total{env="),
+                "plain should not have env attribute: {output}"
+            );
+            assert!(
+                !output.contains("api_plain_requests_total{region="),
+                "plain should not have region attribute: {output}"
+            );
+        });
+    }
+
+    #[test]
+    fn test_deterministic_metrics_family_with_attributes() {
+        let executor = deterministic::Runner::default();
+        test_metrics_family_with_attributes(executor);
+    }
+
+    #[test]
+    fn test_tokio_metrics_family_with_attributes() {
+        let runner = tokio::Runner::default();
+        test_metrics_family_with_attributes(runner);
     }
 
     #[test]
@@ -2344,34 +2919,6 @@ mod tests {
     fn test_deterministic_metrics() {
         let executor = deterministic::Runner::default();
         test_metrics(executor);
-    }
-
-    #[test]
-    #[should_panic]
-    fn test_deterministic_metrics_label() {
-        let executor = deterministic::Runner::default();
-        test_metrics_label(executor);
-    }
-
-    #[test]
-    #[should_panic(expected = "label must start with [a-zA-Z]")]
-    fn test_deterministic_metrics_label_empty() {
-        let executor = deterministic::Runner::default();
-        test_metrics_label_empty(executor);
-    }
-
-    #[test]
-    #[should_panic(expected = "label must start with [a-zA-Z]")]
-    fn test_deterministic_metrics_label_invalid_first_char() {
-        let executor = deterministic::Runner::default();
-        test_metrics_label_invalid_first_char(executor);
-    }
-
-    #[test]
-    #[should_panic(expected = "label must only contain [a-zA-Z0-9_]")]
-    fn test_deterministic_metrics_label_invalid_char() {
-        let executor = deterministic::Runner::default();
-        test_metrics_label_invalid_char(executor);
     }
 
     #[test_collect_traces]
@@ -2718,34 +3265,6 @@ mod tests {
     }
 
     #[test]
-    #[should_panic]
-    fn test_tokio_metrics_label() {
-        let executor = tokio::Runner::default();
-        test_metrics_label(executor);
-    }
-
-    #[test]
-    #[should_panic(expected = "label must start with [a-zA-Z]")]
-    fn test_tokio_metrics_label_empty() {
-        let executor = tokio::Runner::default();
-        test_metrics_label_empty(executor);
-    }
-
-    #[test]
-    #[should_panic(expected = "label must start with [a-zA-Z]")]
-    fn test_tokio_metrics_label_invalid_first_char() {
-        let executor = tokio::Runner::default();
-        test_metrics_label_invalid_first_char(executor);
-    }
-
-    #[test]
-    #[should_panic(expected = "label must only contain [a-zA-Z0-9_]")]
-    fn test_tokio_metrics_label_invalid_char() {
-        let executor = tokio::Runner::default();
-        test_metrics_label_invalid_char(executor);
-    }
-
-    #[test]
     fn test_tokio_process_rss_metric() {
         let executor = tokio::Runner::default();
         executor.start(|context| async move {
@@ -2803,15 +3322,15 @@ mod tests {
             async fn read_line<St: Stream>(stream: &mut St) -> Result<String, Error> {
                 let mut line = Vec::new();
                 loop {
-                    let mut byte = [0u8; 1];
-                    stream.recv(&mut byte[..]).await?;
-                    if byte[0] == b'\n' {
+                    let received = stream.recv(1).await?;
+                    let byte = received.coalesce().as_ref()[0];
+                    if byte == b'\n' {
                         if line.last() == Some(&b'\r') {
                             line.pop(); // Remove trailing \r
                         }
                         break;
                     }
-                    line.push(byte[0]);
+                    line.push(byte);
                 }
                 String::from_utf8(line).map_err(|_| Error::ReadFailed)
             }
@@ -2837,9 +3356,8 @@ mod tests {
                 stream: &mut St,
                 content_length: usize,
             ) -> Result<String, Error> {
-                let mut read = vec![0; content_length];
-                stream.recv(&mut read[..]).await?;
-                String::from_utf8(read).map_err(|_| Error::ReadFailed)
+                let received = stream.recv(content_length as u64).await?;
+                String::from_utf8(received.coalesce().into()).map_err(|_| Error::ReadFailed)
             }
 
             // Simulate a client connecting to the server

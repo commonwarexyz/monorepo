@@ -11,7 +11,8 @@ use commonware_cryptography::{
     certificate::{self, Attestation, Scheme, Subject},
     Digest,
 };
-use commonware_utils::union;
+use commonware_parallel::Strategy;
+use commonware_utils::{union, N3f1};
 use futures::channel::oneshot;
 use rand_core::CryptoRngCore;
 use std::hash::Hash;
@@ -181,12 +182,12 @@ impl<S: Scheme, D: Digest> Ack<S, D> {
     ///
     /// Returns `true` if the attestation is valid for the given namespace and public key.
     /// Domain separation is automatically applied to prevent signature reuse.
-    pub fn verify<R>(&self, rng: &mut R, scheme: &S) -> bool
+    pub fn verify<R>(&self, rng: &mut R, scheme: &S, strategy: &impl Strategy) -> bool
     where
         R: CryptoRngCore,
         S: scheme::Scheme<D>,
     {
-        scheme.verify_attestation::<_, D>(rng, &self.item, &self.attestation)
+        scheme.verify_attestation::<_, D>(rng, &self.item, &self.attestation, strategy)
     }
 
     /// Creates a new acknowledgment by signing an item with a validator's key.
@@ -313,27 +314,29 @@ pub struct Certificate<S: Scheme, D: Digest> {
 }
 
 impl<S: Scheme, D: Digest> Certificate<S, D> {
-    pub fn from_acks<'a>(scheme: &S, acks: impl IntoIterator<Item = &'a Ack<S, D>>) -> Option<Self>
+    pub fn from_acks<'a, I>(scheme: &S, acks: I, strategy: &impl Strategy) -> Option<Self>
     where
         S: scheme::Scheme<D>,
+        I: IntoIterator<Item = &'a Ack<S, D>>,
+        I::IntoIter: Send,
     {
         let mut iter = acks.into_iter().peekable();
         let item = iter.peek()?.item.clone();
         let attestations = iter
             .filter(|ack| ack.item == item)
             .map(|ack| ack.attestation.clone());
-        let certificate = scheme.assemble(attestations)?;
+        let certificate = scheme.assemble::<_, N3f1>(attestations.into_iter(), strategy)?;
 
         Some(Self { item, certificate })
     }
 
     /// Verifies the recovered certificate for the item.
-    pub fn verify<R>(&self, rng: &mut R, scheme: &S) -> bool
+    pub fn verify<R>(&self, rng: &mut R, scheme: &S, strategy: &impl Strategy) -> bool
     where
         R: CryptoRngCore,
         S: scheme::Scheme<D>,
     {
-        scheme.verify_certificate::<_, D>(rng, &self.item, &self.certificate)
+        scheme.verify_certificate::<_, D, N3f1>(rng, &self.item, &self.certificate, strategy)
     }
 }
 
@@ -464,7 +467,8 @@ mod tests {
         certificate::mocks::Fixture,
         Hasher, Sha256,
     };
-    use commonware_utils::{ordered::Quorum, test_rng};
+    use commonware_parallel::Sequential;
+    use commonware_utils::{ordered::Quorum, test_rng, N3f1};
     use rand::rngs::StdRng;
 
     const NAMESPACE: &[u8] = b"test";
@@ -504,7 +508,7 @@ mod tests {
         // Verify the restored ack
         assert_eq!(restored_ack.item, item);
         assert_eq!(restored_ack.epoch, Epoch::new(1));
-        assert!(restored_ack.verify(&mut rng, &schemes[0]));
+        assert!(restored_ack.verify(&mut rng, &schemes[0], &Sequential));
 
         // Test TipAck codec
         let tip_ack = TipAck {
@@ -533,12 +537,12 @@ mod tests {
         // Collect enough acks for a certificate
         let acks: Vec<_> = schemes
             .iter()
-            .take(schemes[0].participants().quorum() as usize)
+            .take(schemes[0].participants().quorum::<N3f1>() as usize)
             .filter_map(|scheme| Ack::sign(scheme, Epoch::new(1), item.clone()))
             .collect();
 
-        let certificate = Certificate::from_acks(&schemes[0], &acks).unwrap();
-        assert!(certificate.verify(&mut rng, &schemes[0]));
+        let certificate = Certificate::from_acks(&schemes[0], &acks, &Sequential).unwrap();
+        assert!(certificate.verify(&mut rng, &schemes[0], &Sequential));
 
         let activity_certified = Activity::Certified(certificate.clone());
         let encoded_certified = activity_certified.encode();
@@ -546,7 +550,7 @@ mod tests {
             Activity::decode_cfg(encoded_certified, &cfg).unwrap();
         if let Activity::Certified(restored) = restored_activity_certified {
             assert_eq!(restored.item, item);
-            assert!(restored.verify(&mut rng, &schemes[0]));
+            assert!(restored.verify(&mut rng, &schemes[0], &Sequential));
         } else {
             panic!("Expected Activity::Certified");
         }

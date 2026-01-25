@@ -5,15 +5,15 @@ use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
 use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
 use commonware_storage::{
     mmr::Location,
-    qmdb::{
-        current::{unordered::fixed::Db as Current, FixedConfig as Config},
-        store::MerkleizedStore as _,
-    },
+    qmdb::current::{unordered::fixed::Db as Current, FixedConfig as Config},
     translator::TwoCap,
 };
-use commonware_utils::{sequence::FixedBytes, NZUsize, NZU64};
+use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
 use libfuzzer_sys::fuzz_target;
-use std::{collections::HashMap, num::NonZeroU64};
+use std::{
+    collections::HashMap,
+    num::{NonZeroU16, NonZeroU64},
+};
 
 type Key = FixedBytes<32>;
 type Value = FixedBytes<32>;
@@ -68,7 +68,7 @@ impl<'a> Arbitrary<'a> for FuzzInput {
     }
 }
 
-const PAGE_SIZE: usize = 88;
+const PAGE_SIZE: NonZeroU16 = NZU16!(88);
 const PAGE_CACHE_SIZE: usize = 8;
 const MMR_ITEMS_PER_BLOB: u64 = 11;
 const LOG_ITEMS_PER_BLOB: u64 = 7;
@@ -89,7 +89,7 @@ fn fuzz(data: FuzzInput) {
             log_write_buffer: NZUsize!(WRITE_BUFFER_SIZE),
             bitmap_metadata_partition: "fuzz_current_bitmap_metadata".into(),
             translator: TwoCap,
-            buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+            buffer_pool: PoolRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
             thread_pool: None,
         };
 

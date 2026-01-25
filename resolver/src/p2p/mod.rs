@@ -84,7 +84,7 @@ mod tests {
         simulated::{Link, Network, Oracle, Receiver, Sender},
         Blocker, Manager,
     };
-    use commonware_runtime::{deterministic, Clock, Metrics, Quota, Runner};
+    use commonware_runtime::{count_running_tasks, deterministic, Clock, Metrics, Quota, Runner};
     use commonware_utils::{non_empty_vec, NZU32};
     use futures::StreamExt;
     use std::{collections::HashMap, num::NonZeroU32, time::Duration};
@@ -1772,5 +1772,181 @@ mod tests {
                 Event::Failed(_) => panic!("Fetch failed unexpectedly"),
             }
         });
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn spawn_actors_with_handles(
+        context: deterministic::Context,
+        oracle: &Oracle<PublicKey, deterministic::Context>,
+        schemes: Vec<PrivateKey>,
+        connections: Vec<(
+            Sender<PublicKey, deterministic::Context>,
+            Receiver<PublicKey>,
+        )>,
+        consumers: Vec<Consumer<Key, Bytes>>,
+        producers: Vec<Producer<Key, Bytes>>,
+    ) -> (
+        Vec<Mailbox<Key, PublicKey>>,
+        Vec<commonware_runtime::Handle<()>>,
+    ) {
+        let actor_context = context.with_label("actor");
+        let mut mailboxes = Vec::new();
+        let mut handles = Vec::new();
+
+        for (idx, ((scheme, conn), (consumer, producer))) in schemes
+            .into_iter()
+            .zip(connections)
+            .zip(consumers.into_iter().zip(producers))
+            .enumerate()
+        {
+            let ctx = actor_context.with_label(&format!("peer_{idx}"));
+            let public_key = scheme.public_key();
+            let (engine, mailbox) = Engine::new(
+                ctx,
+                Config {
+                    manager: oracle.manager(),
+                    blocker: oracle.control(public_key.clone()),
+                    consumer,
+                    producer,
+                    mailbox_size: MAILBOX_SIZE,
+                    me: Some(public_key),
+                    initial: INITIAL_DURATION,
+                    timeout: TIMEOUT,
+                    fetch_retry_timeout: FETCH_RETRY_TIMEOUT,
+                    priority_requests: false,
+                    priority_responses: false,
+                },
+            );
+            handles.push(engine.start(conn));
+            mailboxes.push(mailbox);
+        }
+
+        (mailboxes, handles)
+    }
+
+    #[test_traced]
+    fn test_operations_after_shutdown_do_not_panic() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let (mut oracle, schemes, peers, connections) =
+                setup_network_and_peers(&context, &[1, 2]).await;
+
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+
+            let key = Key(1);
+            let mut prod2 = Producer::default();
+            prod2.insert(key.clone(), Bytes::from("data for key 1"));
+
+            let (cons1, mut cons_out1) = Consumer::new();
+
+            let (mut mailboxes, handles) = spawn_actors_with_handles(
+                context.clone(),
+                &oracle,
+                schemes,
+                connections,
+                vec![cons1, Consumer::dummy()],
+                vec![Producer::default(), prod2],
+            );
+
+            // Fetch to verify network is functional
+            mailboxes[0].fetch(key.clone()).await;
+            let event = cons_out1.next().await.unwrap();
+            match event {
+                Event::Success(_, value) => assert_eq!(value, Bytes::from("data for key 1")),
+                Event::Failed(_) => panic!("Fetch failed unexpectedly"),
+            }
+
+            // Abort all actors
+            for handle in handles {
+                handle.abort();
+            }
+            context.sleep(Duration::from_millis(100)).await;
+
+            // All operations should not panic after shutdown
+
+            // Fetch should not panic
+            let key2 = Key(2);
+            mailboxes[0].fetch(key2.clone()).await;
+
+            // Cancel should not panic
+            mailboxes[0].cancel(key2.clone()).await;
+
+            // Clear should not panic
+            mailboxes[0].clear().await;
+
+            // Retain should not panic
+            mailboxes[0].retain(|_| true).await;
+
+            // Fetch targeted should not panic
+            mailboxes[0]
+                .fetch_targeted(Key(3), non_empty_vec![peers[1].clone()])
+                .await;
+        });
+    }
+
+    fn clean_shutdown(seed: u64) {
+        let cfg = deterministic::Config::default()
+            .with_seed(seed)
+            .with_timeout(Some(Duration::from_secs(30)));
+        let executor = deterministic::Runner::new(cfg);
+        executor.start(|context| async move {
+            let (mut oracle, schemes, peers, connections) =
+                setup_network_and_peers(&context, &[1, 2]).await;
+
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+
+            let key = Key(1);
+            let mut prod2 = Producer::default();
+            prod2.insert(key.clone(), Bytes::from("data for key 1"));
+
+            let (cons1, mut cons_out1) = Consumer::new();
+
+            let (mut mailboxes, handles) = spawn_actors_with_handles(
+                context.clone(),
+                &oracle,
+                schemes,
+                connections,
+                vec![cons1, Consumer::dummy()],
+                vec![Producer::default(), prod2],
+            );
+
+            // Allow tasks to start
+            context.sleep(Duration::from_millis(100)).await;
+
+            // Count running tasks under the actor prefix
+            let running_before = count_running_tasks(&context, "actor");
+            assert!(
+                running_before > 0,
+                "at least one actor task should be running"
+            );
+
+            // Verify network is functional
+            mailboxes[0].fetch(key.clone()).await;
+            let event = cons_out1.next().await.unwrap();
+            match event {
+                Event::Success(_, value) => assert_eq!(value, Bytes::from("data for key 1")),
+                Event::Failed(_) => panic!("Fetch failed unexpectedly"),
+            }
+
+            // Abort all actors
+            for handle in handles {
+                handle.abort();
+            }
+            context.sleep(Duration::from_millis(100)).await;
+
+            // Verify all actor tasks are stopped
+            let running_after = count_running_tasks(&context, "actor");
+            assert_eq!(
+                running_after, 0,
+                "all actor tasks should be stopped, but {running_after} still running"
+            );
+        });
+    }
+
+    #[test]
+    fn test_clean_shutdown() {
+        for seed in 0..25 {
+            clean_shutdown(seed);
+        }
     }
 }

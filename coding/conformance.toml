@@ -8,7 +8,7 @@ hash = "edc22446bb2952609d0c8daccf2d22f8ad2b71eedfcf45296c3f4db49d78404a"
 
 ["commonware_coding::reed_solomon::tests::conformance::CodecConformance<Chunk<Sha256>>"]
 n_cases = 65536
-hash = "7d6e1b7080b182d7b63a261faea8acd77c528c7b0ab99af750d9695457c0f2e3"
+hash = "45545e4d4aeb18b8bdb019e630fb9a1fa6dda9ed32b2d529a9213ec07ccab07c"
 
 ["commonware_coding::test::conformance::CodecConformance<Config>"]
 n_cases = 65536
@@ -16,8 +16,8 @@ hash = "1a412c5c279f981857081765537b85474184048d1b17053394f94fc42ac1dbf4"
 
 ["commonware_coding::zoda::tests::conformance::CodecConformance<ReShard<Sha256>>"]
 n_cases = 65536
-hash = "e71cd9c877d6e43195d41a00e840e67f134ce425f2c89a1c252fd0131a35cb75"
+hash = "0571442797c611b3822c8a9c54138de9f54fc5b9daaf01796f611a5c74466710"
 
 ["commonware_coding::zoda::tests::conformance::CodecConformance<Shard<Sha256>>"]
 n_cases = 65536
-hash = "0f69b872f96f5ee24a7f707dc496a7a4721d7f48dd17cb6792d514612ab1376f"
+hash = "fbf783e8550fe15cd7000f8185e1ca3bc9641ba0baf156ba6365d3b224e2222d"

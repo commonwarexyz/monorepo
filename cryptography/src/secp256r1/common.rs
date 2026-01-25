@@ -1,10 +1,4 @@
-cfg_if::cfg_if! {
-    if #[cfg(feature = "std")] {
-        use std::borrow::ToOwned;
-    } else {
-        use alloc::borrow::ToOwned;
-    }
-}
+use crate::Secret;
 use bytes::{Buf, BufMut};
 use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
 use commonware_math::algebra::Random;
@@ -16,34 +10,39 @@ use core::{
 };
 use p256::ecdsa::{SigningKey, VerifyingKey};
 use rand_core::CryptoRngCore;
-use zeroize::{Zeroize, ZeroizeOnDrop};
+use zeroize::Zeroizing;
 
 pub const CURVE_NAME: &str = "secp256r1";
 pub const PRIVATE_KEY_LENGTH: usize = 32;
 pub const PUBLIC_KEY_LENGTH: usize = 33; // Y-Parity || X
 
 /// Internal Secp256r1 Private Key storage.
-#[derive(Clone, Eq, PartialEq, ZeroizeOnDrop)]
+#[derive(Clone, Debug)]
 pub struct PrivateKeyInner {
-    raw: [u8; PRIVATE_KEY_LENGTH],
-    pub key: SigningKey,
+    raw: Secret<[u8; PRIVATE_KEY_LENGTH]>,
+    pub(crate) key: Secret<SigningKey>,
 }
 
-impl Zeroize for PrivateKeyInner {
-    fn zeroize(&mut self) {
-        self.raw.zeroize();
-
-        // skip zeroizing `key` here, `ZeroizeOnDrop` is implemented for `SigningKey` and
-        // can't be called directly.
-        //
-        // Reference: <https://github.com/RustCrypto/signatures/blob/a83c494216b6f3dacba5d4e4376785e2ea142044/ecdsa/src/signing.rs#L487-L493>
+impl PartialEq for PrivateKeyInner {
+    fn eq(&self, other: &Self) -> bool {
+        self.raw == other.raw
     }
 }
 
+impl Eq for PrivateKeyInner {}
+
 impl PrivateKeyInner {
     pub fn new(key: SigningKey) -> Self {
-        let raw = key.to_bytes().into();
-        Self { raw, key }
+        let raw = Zeroizing::new(key.to_bytes().into());
+        Self {
+            raw: Secret::new(*raw),
+            key: Secret::new(key),
+        }
+    }
+
+    /// Returns the `VerifyingKey` corresponding to this private key.
+    pub fn verifying_key(&self) -> VerifyingKey {
+        self.key.expose(|key| *key.verifying_key())
     }
 }
 
@@ -55,7 +54,7 @@ impl Random for PrivateKeyInner {
 
 impl Write for PrivateKeyInner {
     fn write(&self, buf: &mut impl BufMut) {
-        self.raw.write(buf);
+        self.raw.expose(|raw| raw.write(buf));
     }
 }
 
@@ -63,54 +62,19 @@ impl Read for PrivateKeyInner {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        let raw = <[u8; PRIVATE_KEY_LENGTH]>::read(buf)?;
-        let result = SigningKey::from_slice(&raw);
+        let raw = Zeroizing::new(<[u8; PRIVATE_KEY_LENGTH]>::read(buf)?);
+        let key = SigningKey::from_slice(raw.as_ref());
         #[cfg(feature = "std")]
-        let key = result.map_err(|e| CodecError::Wrapped(CURVE_NAME, e.into()))?;
+        let key = key.map_err(|e| CodecError::Wrapped(CURVE_NAME, e.into()))?;
         #[cfg(not(feature = "std"))]
-        let key = result
-            .map_err(|e| CodecError::Wrapped(CURVE_NAME, alloc::format!("{:?}", e).into()))?;
-        Ok(Self { raw, key })
+        let key =
+            key.map_err(|e| CodecError::Wrapped(CURVE_NAME, alloc::format!("{:?}", e).into()))?;
+        Ok(Self::new(key))
     }
 }
 
 impl FixedSize for PrivateKeyInner {
     const SIZE: usize = PRIVATE_KEY_LENGTH;
-}
-
-impl Span for PrivateKeyInner {}
-
-impl Array for PrivateKeyInner {}
-
-impl Hash for PrivateKeyInner {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.raw.hash(state);
-    }
-}
-
-impl Ord for PrivateKeyInner {
-    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
-        self.raw.cmp(&other.raw)
-    }
-}
-
-impl PartialOrd for PrivateKeyInner {
-    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl AsRef<[u8]> for PrivateKeyInner {
-    fn as_ref(&self) -> &[u8] {
-        &self.raw
-    }
-}
-
-impl Deref for PrivateKeyInner {
-    type Target = [u8];
-    fn deref(&self) -> &[u8] {
-        &self.raw
-    }
 }
 
 impl From<SigningKey> for PrivateKeyInner {
@@ -119,15 +83,9 @@ impl From<SigningKey> for PrivateKeyInner {
     }
 }
 
-impl Debug for PrivateKeyInner {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "{}", hex(&self.raw))
-    }
-}
-
 impl Display for PrivateKeyInner {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "{}", hex(&self.raw))
+        write!(f, "{:?}", self)
     }
 }
 
@@ -157,7 +115,7 @@ impl PublicKeyInner {
     }
 
     pub fn from_private_key(private_key: &PrivateKeyInner) -> Self {
-        Self::new(private_key.key.verifying_key().to_owned())
+        Self::new(private_key.verifying_key())
     }
 
     /// aws-lc-rs can decompress keys, but since we already have the key parsed
@@ -273,41 +231,6 @@ macro_rules! impl_private_key_wrapper {
 
         impl commonware_codec::FixedSize for $name {
             const SIZE: usize = PRIVATE_KEY_LENGTH;
-        }
-
-        impl commonware_utils::Span for $name {}
-
-        impl commonware_utils::Array for $name {}
-
-        impl core::hash::Hash for $name {
-            fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
-                self.0.hash(state);
-            }
-        }
-
-        impl Ord for $name {
-            fn cmp(&self, other: &Self) -> core::cmp::Ordering {
-                self.0.cmp(&other.0)
-            }
-        }
-
-        impl PartialOrd for $name {
-            fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
-                Some(self.cmp(other))
-            }
-        }
-
-        impl AsRef<[u8]> for $name {
-            fn as_ref(&self) -> &[u8] {
-                self.0.as_ref()
-            }
-        }
-
-        impl core::ops::Deref for $name {
-            type Target = [u8];
-            fn deref(&self) -> &[u8] {
-                &self.0
-            }
         }
 
         impl From<p256::ecdsa::SigningKey> for $name {
@@ -875,6 +798,15 @@ pub(crate) mod tests {
             508033812c776a0e00c003c7e0d628e50736c7512df0acfa9f2320bd102229f46495ae6d0857cc452a84",
         );
         (public_key, sig, message, true)
+    }
+
+    #[test]
+    fn test_private_key_redacted() {
+        let private_key = create_private_key();
+        let debug = format!("{:?}", private_key);
+        let display = format!("{}", private_key);
+        assert!(debug.contains("REDACTED"));
+        assert!(display.contains("REDACTED"));
     }
 
     #[cfg(feature = "arbitrary")]

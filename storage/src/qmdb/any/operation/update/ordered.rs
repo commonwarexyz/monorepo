@@ -3,10 +3,10 @@ use crate::qmdb::any::{
     value::{FixedEncoding, ValueEncoding, VariableEncoding},
     FixedValue, VariableValue,
 };
-use bytes::{Buf, BufMut};
 use commonware_codec::{
     Encode as _, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt as _, Write,
 };
+use commonware_runtime::{Buf, BufMut};
 use commonware_utils::{hex, Array};
 use std::fmt;
 

@@ -12,6 +12,7 @@ use commonware_math::{
     poly::Poly,
 };
 use commonware_parallel::Sequential;
+use commonware_utils::Participant;
 use libfuzzer_sys::fuzz_target;
 use rand::{rngs::StdRng, SeedableRng};
 
@@ -66,7 +67,7 @@ enum FuzzOperation {
     // Key operations
     KeypairGeneration,
     ComputePublicKey {
-        private: Scalar,
+        private: Private,
     },
     SharePublicKey {
         share: Share,
@@ -86,12 +87,12 @@ enum FuzzOperation {
 
     // Single signature operations (MinPk)
     SignMinPk {
-        private: Scalar,
+        private: Private,
         namespace: Vec<u8>,
         message: Vec<u8>,
     },
     SignMinPkLowLevel {
-        private: Scalar,
+        private: Private,
         message: Vec<u8>,
     },
     VerifyMinPk {
@@ -108,12 +109,12 @@ enum FuzzOperation {
 
     // Single signature operations (MinSig)
     SignMinSig {
-        private: Scalar,
+        private: Private,
         namespace: Vec<u8>,
         message: Vec<u8>,
     },
     SignMinSigLowLevel {
-        private: Scalar,
+        private: Private,
         message: Vec<u8>,
     },
     VerifyMinSig {
@@ -176,15 +177,15 @@ impl<'a> Arbitrary<'a> for FuzzOperation {
 
         match choice {
             0 => Ok(FuzzOperation::ScalarArithmetic {
-                a: arbitrary_scalar(u)?,
-                b: arbitrary_scalar(u)?,
+                a: u.arbitrary()?,
+                b: u.arbitrary()?,
             }),
             1 => Ok(FuzzOperation::ScalarSubtraction {
-                a: arbitrary_scalar(u)?,
-                b: arbitrary_scalar(u)?,
+                a: u.arbitrary()?,
+                b: u.arbitrary()?,
             }),
             2 => Ok(FuzzOperation::ScalarInverse {
-                scalar: arbitrary_scalar(u)?,
+                scalar: u.arbitrary()?,
             }),
             3 => Ok(FuzzOperation::G1Arithmetic {
                 a: arbitrary_g1(u)?,
@@ -192,7 +193,7 @@ impl<'a> Arbitrary<'a> for FuzzOperation {
             }),
             4 => Ok(FuzzOperation::G1ScalarMul {
                 point: arbitrary_g1(u)?,
-                scalar: arbitrary_scalar(u)?,
+                scalar: u.arbitrary()?,
             }),
             5 => Ok(FuzzOperation::G1Msm {
                 points: arbitrary_vec_g1(u, 0, 10)?,
@@ -207,7 +208,7 @@ impl<'a> Arbitrary<'a> for FuzzOperation {
             }),
             8 => Ok(FuzzOperation::G2ScalarMul {
                 point: arbitrary_g2(u)?,
-                scalar: arbitrary_scalar(u)?,
+                scalar: u.arbitrary()?,
             }),
             9 => Ok(FuzzOperation::G2Msm {
                 points: arbitrary_vec_g2(u, 0, 10)?,
@@ -218,7 +219,7 @@ impl<'a> Arbitrary<'a> for FuzzOperation {
             }),
             11 => Ok(FuzzOperation::KeypairGeneration),
             12 => Ok(FuzzOperation::ComputePublicKey {
-                private: arbitrary_scalar(u)?,
+                private: u.arbitrary()?,
             }),
             13 => Ok(FuzzOperation::SharePublicKey {
                 share: arbitrary_share(u)?,
@@ -234,12 +235,12 @@ impl<'a> Arbitrary<'a> for FuzzOperation {
                 use_minpk: u.arbitrary()?,
             }),
             16 => Ok(FuzzOperation::SignMinPk {
-                private: arbitrary_scalar(u)?,
+                private: u.arbitrary()?,
                 namespace: arbitrary_bytes(u, 0, 50)?,
                 message: arbitrary_bytes(u, 0, 100)?,
             }),
             17 => Ok(FuzzOperation::SignMinPkLowLevel {
-                private: arbitrary_scalar(u)?,
+                private: u.arbitrary()?,
                 message: arbitrary_bytes(u, 0, 100)?,
             }),
             18 => Ok(FuzzOperation::VerifyMinPk {
@@ -254,12 +255,12 @@ impl<'a> Arbitrary<'a> for FuzzOperation {
                 signature: arbitrary_g2(u)?,
             }),
             20 => Ok(FuzzOperation::SignMinSig {
-                private: arbitrary_scalar(u)?,
+                private: u.arbitrary()?,
                 namespace: arbitrary_bytes(u, 0, 50)?,
                 message: arbitrary_bytes(u, 0, 100)?,
             }),
             21 => Ok(FuzzOperation::SignMinSigLowLevel {
-                private: arbitrary_scalar(u)?,
+                private: u.arbitrary()?,
                 message: arbitrary_bytes(u, 0, 100)?,
             }),
             22 => Ok(FuzzOperation::VerifyMinSig {
@@ -274,7 +275,7 @@ impl<'a> Arbitrary<'a> for FuzzOperation {
                 signature: arbitrary_g1(u)?,
             }),
             24 => Ok(FuzzOperation::SignProofOfPossessionMinPk {
-                private: arbitrary_scalar(u)?,
+                private: u.arbitrary()?,
                 namespace: arbitrary_bytes(u, 0, 50)?,
             }),
             25 => Ok(FuzzOperation::VerifyProofOfPossessionMinPk {
@@ -283,7 +284,7 @@ impl<'a> Arbitrary<'a> for FuzzOperation {
                 signature: arbitrary_g2(u)?,
             }),
             26 => Ok(FuzzOperation::SignProofOfPossessionMinSig {
-                private: arbitrary_scalar(u)?,
+                private: u.arbitrary()?,
                 namespace: arbitrary_bytes(u, 0, 50)?,
             }),
             27 => Ok(FuzzOperation::VerifyProofOfPossessionMinSig {
@@ -300,7 +301,7 @@ impl<'a> Arbitrary<'a> for FuzzOperation {
                 use_g1: u.arbitrary()?,
             }),
             30 => Ok(FuzzOperation::SerializeScalar {
-                scalar: arbitrary_scalar(u)?,
+                scalar: u.arbitrary()?,
             }),
             31 => Ok(FuzzOperation::SerializeG1 {
                 point: arbitrary_g1(u)?,
@@ -311,10 +312,6 @@ impl<'a> Arbitrary<'a> for FuzzOperation {
             _ => Ok(FuzzOperation::KeypairGeneration),
         }
     }
-}
-
-fn arbitrary_scalar(u: &mut Unstructured) -> Result<Scalar, arbitrary::Error> {
-    u.arbitrary()
 }
 
 fn arbitrary_g1(u: &mut Unstructured) -> Result<G1, arbitrary::Error> {
@@ -348,16 +345,16 @@ fn arbitrary_g2(u: &mut Unstructured) -> Result<G2, arbitrary::Error> {
 }
 
 fn arbitrary_share(u: &mut Unstructured) -> Result<Share, arbitrary::Error> {
-    Ok(Share {
-        index: u.int_in_range(1..=100)?,
-        private: arbitrary_scalar(u)?,
-    })
+    Ok(Share::new(
+        Participant::new(u.int_in_range(1..=100)?),
+        u.arbitrary()?,
+    ))
 }
 
 fn arbitrary_poly_scalar(u: &mut Unstructured) -> Result<Poly<Scalar>, arbitrary::Error> {
     let degree = u.int_in_range(0..=10)?;
     let seed: [u8; 32] = u.arbitrary()?;
-    let constant = arbitrary_scalar(u)?;
+    let constant: Scalar = u.arbitrary()?;
     let mut rng = StdRng::from_seed(seed);
     Ok(Poly::new_with_constant(&mut rng, degree, constant))
 }
@@ -368,7 +365,7 @@ fn arbitrary_vec_scalar(
     max: usize,
 ) -> Result<Vec<Scalar>, arbitrary::Error> {
     let len = u.int_in_range(min..=max)?;
-    (0..len).map(|_| arbitrary_scalar(u)).collect()
+    (0..len).map(|_| u.arbitrary()).collect()
 }
 
 fn arbitrary_vec_g1(

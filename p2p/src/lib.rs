@@ -10,8 +10,8 @@
     html_favicon_url = "https://commonware.xyz/favicon.ico"
 )]
 
-use bytes::{Buf, Bytes};
 use commonware_cryptography::PublicKey;
+use commonware_runtime::{IoBuf, IoBufMut};
 use commonware_utils::ordered::Set;
 use futures::channel::mpsc;
 use std::{error::Error as StdError, fmt::Debug, future::Future, time::SystemTime};
@@ -27,7 +27,7 @@ pub use types::{Address, Ingress};
 ///
 /// This message is guaranteed to adhere to the configuration of the channel and
 /// will already be decrypted and authenticated.
-pub type Message<P> = (P, Bytes);
+pub type Message<P> = (P, IoBuf);
 
 /// Alias for identifying communication channels.
 pub type Channel = u64;
@@ -59,14 +59,22 @@ pub trait UnlimitedSender: Clone + Send + Sync + 'static {
     /// # Returns
     ///
     /// A vector of recipients that the message was sent to, or an error if the
-    /// message could not be sent (e.g., too large).
+    /// message could not be sent due to a validation failure (e.g., too large).
     ///
     /// Note: a successful send does not guarantee that the recipient will
     /// receive the message.
+    ///
+    /// # Graceful Shutdown
+    ///
+    /// Implementations must handle internal channel closures gracefully during
+    /// shutdown. If the underlying network is shutting down, this method should
+    /// return `Ok` (possibly with an empty or partial recipient list) rather
+    /// than an error. Errors should only be returned for validation failures
+    /// that the caller can act upon.
     fn send(
         &mut self,
         recipients: Recipients<Self::PublicKey>,
-        message: impl Buf + Send,
+        message: impl Into<IoBufMut> + Send,
         priority: bool,
     ) -> impl Future<Output = Result<Vec<Self::PublicKey>, Self::Error>> + Send;
 }
@@ -120,13 +128,21 @@ pub trait CheckedSender: Send {
     /// # Returns
     ///
     /// A vector of recipients that the message was sent to, or an error if the
-    /// message could not be sent (e.g., too large).
+    /// message could not be sent due to a validation failure (e.g., too large).
     ///
     /// Note: a successful send does not guarantee that the recipient will
     /// receive the message.
+    ///
+    /// # Graceful Shutdown
+    ///
+    /// Implementations must handle internal channel closures gracefully during
+    /// shutdown. If the underlying network is shutting down, this method should
+    /// return `Ok` (possibly with an empty or partial recipient list) rather
+    /// than an error. Errors should only be returned for validation failures
+    /// that the caller can act upon.
     fn send(
         self,
-        message: impl Buf + Send,
+        message: impl Into<IoBufMut> + Send,
         priority: bool,
     ) -> impl Future<Output = Result<Vec<Self::PublicKey>, Self::Error>> + Send;
 }
@@ -150,14 +166,22 @@ pub trait Sender: LimitedSender {
     /// # Returns
     ///
     /// A vector of recipients that the message was sent to, or an error if the
-    /// message could not be sent (e.g., too large).
+    /// message could not be sent due to a validation failure (e.g., too large).
     ///
     /// Note: a successful send does not guarantee that the recipient will
     /// receive the message.
+    ///
+    /// # Graceful Shutdown
+    ///
+    /// Implementations must handle internal channel closures gracefully during
+    /// shutdown. If the underlying network is shutting down, this method should
+    /// return `Ok` (possibly with an empty or partial recipient list) rather
+    /// than an error. Errors should only be returned for validation failures
+    /// that the caller can act upon.
     fn send(
         &mut self,
         recipients: Recipients<Self::PublicKey>,
-        message: impl Buf + Send,
+        message: impl Into<IoBufMut> + Send,
         priority: bool,
     ) -> impl Future<
         Output = Result<Vec<Self::PublicKey>, <Self::Checked<'_> as CheckedSender>::Error>,

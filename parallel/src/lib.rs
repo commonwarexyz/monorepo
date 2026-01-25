@@ -16,6 +16,8 @@
 //! - [`map_collect_vec`](Strategy::map_collect_vec): Maps elements and collects into a `Vec`
 //! - [`map_init_collect_vec`](Strategy::map_init_collect_vec): Like `map_collect_vec` with
 //!   per-partition initialization
+//! - [`map_partition_collect_vec`](Strategy::map_partition_collect_vec): Maps elements, collecting
+//!   successful results and tracking indices of filtered elements
 //!
 //! Two implementations are provided:
 //!
@@ -280,6 +282,101 @@ pub trait Strategy: Clone + Send + Sync + fmt::Debug + 'static {
             },
         )
     }
+
+    /// Maps each element, filtering out `None` results and tracking their keys.
+    ///
+    /// This is a convenience method that applies `map_op` to each element. The
+    /// closure returns `(key, Option<value>)`. Elements where the option is `Some`
+    /// have their values collected into the first vector. Elements where the option
+    /// is `None` have their keys collected into the second vector.
+    ///
+    /// # Arguments
+    ///
+    /// - `iter`: The collection to map over
+    /// - `map_op`: The mapping function returning `(K, Option<U>)`
+    ///
+    /// # Returns
+    ///
+    /// A tuple of `(results, filtered_keys)` where:
+    /// - `results`: Values from successful mappings (where `map_op` returned `Some`)
+    /// - `filtered_keys`: Keys where `map_op` returned `None`
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use commonware_parallel::{Strategy, Sequential};
+    ///
+    /// let strategy = Sequential;
+    /// let data = vec![1, 2, 3, 4, 5];
+    ///
+    /// let (evens, odd_values): (Vec<i32>, Vec<i32>) = strategy.map_partition_collect_vec(
+    ///     data.iter(),
+    ///     |&x| (x, if x % 2 == 0 { Some(x * 10) } else { None }),
+    /// );
+    ///
+    /// assert_eq!(evens, vec![20, 40]);
+    /// assert_eq!(odd_values, vec![1, 3, 5]);
+    /// ```
+    fn map_partition_collect_vec<I, F, K, U>(&self, iter: I, map_op: F) -> (Vec<U>, Vec<K>)
+    where
+        I: IntoIterator<IntoIter: Send, Item: Send> + Send,
+        F: Fn(I::Item) -> (K, Option<U>) + Send + Sync,
+        K: Send,
+        U: Send,
+    {
+        self.fold(
+            iter,
+            || (Vec::new(), Vec::new()),
+            |(mut results, mut filtered), item| {
+                let (key, value) = map_op(item);
+                match value {
+                    Some(v) => results.push(v),
+                    None => filtered.push(key),
+                }
+                (results, filtered)
+            },
+            |(mut r1, mut f1), (r2, f2)| {
+                r1.extend(r2);
+                f1.extend(f2);
+                (r1, f1)
+            },
+        )
+    }
+
+    /// Executes two closures, potentially in parallel, and returns both results.
+    ///
+    /// For [`Sequential`], this executes `a` then `b` on the current thread.
+    /// For [`Rayon`], this executes `a` and `b` in parallel using the thread pool.
+    ///
+    /// # Arguments
+    ///
+    /// - `a`: First closure to execute
+    /// - `b`: Second closure to execute
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use commonware_parallel::{Strategy, Sequential};
+    ///
+    /// let strategy = Sequential;
+    ///
+    /// let (sum, product) = strategy.join(
+    ///     || (1..=5).sum::<i32>(),
+    ///     || (1..=5).product::<i32>(),
+    /// );
+    ///
+    /// assert_eq!(sum, 15);
+    /// assert_eq!(product, 120);
+    /// ```
+    fn join<A, B, RA, RB>(&self, a: A, b: B) -> (RA, RB)
+    where
+        A: FnOnce() -> RA + Send,
+        B: FnOnce() -> RB + Send,
+        RA: Send,
+        RB: Send;
+
+    /// Return the number of threads that are available, as a hint to chunking.
+    fn parallelism_hint(&self) -> usize;
 }
 
 /// A sequential execution strategy.
@@ -327,6 +424,20 @@ impl Strategy for Sequential {
         let mut init_val = init();
         iter.into_iter()
             .fold(identity(), |acc, item| fold_op(acc, &mut init_val, item))
+    }
+
+    fn join<A, B, RA, RB>(&self, a: A, b: B) -> (RA, RB)
+    where
+        A: FnOnce() -> RA + Send,
+        B: FnOnce() -> RB + Send,
+        RA: Send,
+        RB: Send,
+    {
+        (a(), b())
+    }
+
+    fn parallelism_hint(&self) -> usize {
+        1
     }
 }
 
@@ -434,6 +545,20 @@ cfg_if! {
                         .reduce(&identity, reduce_op)
                 })
             }
+
+            fn join<A, B, RA, RB>(&self, a: A, b: B) -> (RA, RB)
+            where
+                A: FnOnce() -> RA + Send,
+                B: FnOnce() -> RB + Send,
+                RA: Send,
+                RB: Send,
+            {
+                self.thread_pool.install(|| rayon::join(a, b))
+            }
+
+            fn parallelism_hint(&self) -> usize {
+                self.thread_pool.current_num_threads()
+            }
         }
     }
 }
@@ -535,6 +660,26 @@ mod test {
             );
 
             prop_assert_eq!(via_map, via_fold_init);
+        }
+
+        #[test]
+        fn map_partition_collect_vec_returns_valid_results(data in prop::collection::vec(any::<i32>(), 0..500)) {
+            let s = Sequential;
+
+            let map_op = |&x: &i32| {
+                let value = if x % 2 == 0 { Some(x.wrapping_mul(2)) } else { None };
+                (x, value)
+            };
+
+            let (results, filtered) = s.map_partition_collect_vec(data.iter(), map_op);
+
+            // Verify results contains doubled even numbers
+            let expected_results: Vec<i32> = data.iter().filter(|&&x| x % 2 == 0).map(|&x| x.wrapping_mul(2)).collect();
+            prop_assert_eq!(results, expected_results);
+
+            // Verify filtered contains odd numbers
+            let expected_filtered: Vec<i32> = data.iter().filter(|&&x| x % 2 != 0).copied().collect();
+            prop_assert_eq!(filtered, expected_filtered);
         }
     }
 }

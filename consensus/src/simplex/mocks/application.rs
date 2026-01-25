@@ -12,9 +12,10 @@ use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::{Digest, Hasher, PublicKey};
 use commonware_macros::select_loop;
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Spawner};
+use commonware_utils::channels::fallible::{AsyncFallibleExt, OneshotExt};
 use futures::{
     channel::{mpsc, oneshot},
-    SinkExt, StreamExt,
+    StreamExt,
 };
 use rand::{Rng, RngCore};
 use rand_distr::{Distribution, Normal};
@@ -40,6 +41,7 @@ pub enum Message<D: Digest, P: PublicKey> {
         response: oneshot::Sender<bool>,
     },
     Certify {
+        round: Round,
         payload: D,
         response: oneshot::Sender<bool>,
     },
@@ -66,18 +68,16 @@ impl<D: Digest, P: PublicKey> Au for Mailbox<D, P> {
     async fn genesis(&mut self, epoch: Epoch) -> Self::Digest {
         let (response, receiver) = oneshot::channel();
         self.sender
-            .send(Message::Genesis { epoch, response })
-            .await
-            .expect("Failed to send genesis");
+            .send_lossy(Message::Genesis { epoch, response })
+            .await;
         receiver.await.expect("Failed to receive genesis")
     }
 
     async fn propose(&mut self, context: Self::Context) -> oneshot::Receiver<Self::Digest> {
         let (response, receiver) = oneshot::channel();
         self.sender
-            .send(Message::Propose { context, response })
-            .await
-            .expect("Failed to send propose");
+            .send_lossy(Message::Propose { context, response })
+            .await;
         receiver
     }
 
@@ -88,27 +88,26 @@ impl<D: Digest, P: PublicKey> Au for Mailbox<D, P> {
     ) -> oneshot::Receiver<bool> {
         let (response, receiver) = oneshot::channel();
         self.sender
-            .send(Message::Verify {
+            .send_lossy(Message::Verify {
                 context,
                 payload,
                 response,
             })
-            .await
-            .expect("Failed to send verify");
+            .await;
         receiver
     }
 }
 
 impl<D: Digest, P: PublicKey> CAu for Mailbox<D, P> {
-    async fn certify(&mut self, payload: Self::Digest) -> oneshot::Receiver<bool> {
+    async fn certify(&mut self, round: Round, payload: Self::Digest) -> oneshot::Receiver<bool> {
         let (tx, rx) = oneshot::channel();
         self.sender
-            .send(Message::Certify {
+            .send_lossy(Message::Certify {
+                round,
                 payload,
                 response: tx,
             })
-            .await
-            .expect("Failed to send certify");
+            .await;
         rx
     }
 }
@@ -117,10 +116,7 @@ impl<D: Digest, P: PublicKey> Re for Mailbox<D, P> {
     type Digest = D;
 
     async fn broadcast(&mut self, payload: Self::Digest) {
-        self.sender
-            .send(Message::Broadcast { payload })
-            .await
-            .expect("Failed to send broadcast");
+        self.sender.send_lossy(Message::Broadcast { payload }).await;
     }
 }
 
@@ -138,6 +134,10 @@ pub enum Certifier<D: Digest> {
     Sometimes,
     /// A custom predicate function.
     Custom(Box<dyn Fn(D) -> bool + Send + 'static>),
+    /// Drop the sender without responding, causing the receiver to be cancelled.
+    /// This simulates scenarios where the automaton cannot determine certification
+    /// (e.g., missing verification context in Marshaled).
+    Cancel,
 }
 
 pub struct Config<H: Hasher, P: PublicKey> {
@@ -295,7 +295,7 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
         true
     }
 
-    async fn certify(&mut self, payload: H::Digest, _contents: Bytes) -> bool {
+    async fn certify(&mut self, payload: H::Digest, _contents: Bytes) -> Option<bool> {
         // Simulate the certify latency
         let duration = self.certify_latency.sample(&mut self.context);
         self.context
@@ -304,9 +304,10 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
 
         // Use configured predicate to determine certification
         match &self.should_certify {
-            Certifier::Always => true,
-            Certifier::Sometimes => (payload.as_ref().last().copied().unwrap_or(0) % 11) < 9,
-            Certifier::Custom(func) => func(payload),
+            Certifier::Always => Some(true),
+            Certifier::Sometimes => Some((payload.as_ref().last().copied().unwrap_or(0) % 11) < 9),
+            Certifier::Custom(func) => Some(func(payload)),
+            Certifier::Cancel => None,
         }
     }
 
@@ -342,16 +343,16 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
                 match message {
                     Message::Genesis { epoch, response } => {
                         let digest = self.genesis(epoch);
-                        let _ = response.send(digest);
+                        response.send_lossy(digest);
                     }
                     Message::Propose { context, response } => {
                         let digest = self.propose(context).await;
-                        let _ = response.send(digest);
+                        response.send_lossy(digest);
                     }
                     Message::Verify { context, payload, response } => {
                         if let Some(contents) = seen.get(&payload) {
                             let verified = self.verify(context, payload, contents.clone()).await;
-                            let _ = response.send(verified);
+                            response.send_lossy(verified);
                         } else {
                             waiters
                                 .entry(payload)
@@ -359,10 +360,13 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
                                 .push((context, response));
                         }
                     }
-                    Message::Certify { payload, response } => {
+                    Message::Certify { round: _, payload, response } => {
                         let contents = seen.get(&payload).cloned().unwrap_or_default();
-                        let certified = self.certify(payload, contents).await;
-                        let _ = response.send(certified);
+                        // If certify returns None (Cancel mode), drop the sender without
+                        // responding, causing the receiver to return Err(Canceled).
+                        if let Some(certified) = self.certify(payload, contents).await {
+                            response.send_lossy(certified);
+                        }
                     }
                     Message::Broadcast { payload } => {
                         self.broadcast(payload).await;
@@ -378,7 +382,7 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
                 if let Some(waiters) = waiters.remove(&digest) {
                     for (context, sender) in waiters {
                         let verified = self.verify(context, digest, contents.clone()).await;
-                        sender.send(verified).expect("Failed to send verification");
+                        sender.send_lossy(verified);
                     }
                 }
             }

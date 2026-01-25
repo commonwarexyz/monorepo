@@ -248,7 +248,7 @@ where
 
 impl<T, E, C, S> Certificates for prunable::Archive<T, E, C, Finalization<S, C>>
 where
-    T: Translator<Key = C> + Send + Sync + 'static,
+    T: Translator,
     E: Storage + Metrics + Clock,
     C: Digest,
     S: Scheme,
@@ -284,7 +284,7 @@ where
 
 impl<T, E, B> Blocks for prunable::Archive<T, E, B::Commitment, B>
 where
-    T: Translator<Key = B::Commitment> + Send + Sync + 'static,
+    T: Translator,
     E: Storage + Metrics + Clock,
     B: Block,
 {

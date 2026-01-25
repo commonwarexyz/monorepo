@@ -94,6 +94,7 @@ use commonware_codec::{EncodeSize, FixedSize, Read, ReadExt, Write};
 use commonware_math::algebra::CryptoGroup;
 use commonware_utils::sequence::FixedBytes;
 use rand_core::CryptoRngCore;
+use zeroize::Zeroizing;
 
 /// Domain separation tag for hashing the `h3` message to a scalar.
 const DST: DST = b"TLE_BLS12381_XMD:SHA-256_SSWU_RO_H3_";
@@ -170,7 +171,8 @@ mod hash {
     pub fn h2(gt: &GT) -> Block {
         let mut hasher = Sha256::new();
         hasher.update(b"h2");
-        hasher.update(&gt.as_slice());
+        let gt = Zeroizing::new(gt.as_slice());
+        hasher.update(gt.as_ref());
         hasher.finalize().into()
     }
 
@@ -179,7 +181,7 @@ mod hash {
     /// Used to derive the random scalar r using RFC9380 hash-to-field.
     pub fn h3(sigma: &Block, message: &[u8]) -> Scalar {
         // Combine sigma and message
-        let mut combined = Vec::with_capacity(sigma.len() + message.len());
+        let mut combined = Zeroizing::new(Vec::with_capacity(sigma.len() + message.len()));
         combined.extend_from_slice(sigma.as_ref());
         combined.extend_from_slice(message);
 
@@ -277,9 +279,9 @@ pub fn encrypt<R: CryptoRngCore, V: Variant>(
     let q_id = hash_with_namespace::<V>(V::MESSAGE, namespace, target);
 
     // Generate random sigma
-    let mut sigma_array = [0u8; BLOCK_SIZE];
-    rng.fill_bytes(&mut sigma_array);
-    let sigma = Block::new(sigma_array);
+    let mut sigma_array = Zeroizing::new([0u8; BLOCK_SIZE]);
+    rng.fill_bytes(sigma_array.as_mut());
+    let sigma = Zeroizing::new(Block::new(*sigma_array));
 
     // Derive scalar r from sigma and message
     let r = hash::h3(&sigma, message.as_ref());
@@ -296,11 +298,11 @@ pub fn encrypt<R: CryptoRngCore, V: Variant>(
     let gt = V::pairing(&r_pub, &q_id);
 
     // Compute V = sigma XOR H2(e(P_pub, Q_id)^r)
-    let h2_value = hash::h2(&gt);
+    let h2_value = Zeroizing::new(hash::h2(&gt));
     let v = xor(&sigma, &h2_value);
 
     // Compute W = M XOR H4(sigma)
-    let h4_value = hash::h4(&sigma);
+    let h4_value = Zeroizing::new(hash::h4(&sigma));
     let w = xor(message, &h4_value);
 
     Ciphertext { u, v, w }

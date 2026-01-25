@@ -6,17 +6,18 @@ use commonware_cryptography::{
     ed25519::PrivateKey,
     Signer,
 };
-use commonware_utils::{quorum, TryCollect};
+use commonware_parallel::Sequential;
+use commonware_utils::{Faults, N3f1, TryCollect};
 use criterion::{criterion_group, BatchSize, Criterion};
 use rand::{rngs::StdRng, SeedableRng};
 use std::hint::black_box;
 
-fn benchmark_threshold_recover(c: &mut Criterion) {
+fn bench_threshold_recover(c: &mut Criterion) {
     let mut rng = StdRng::seed_from_u64(0);
     let namespace = b"benchmark";
     let msg = b"hello";
     for &n in &[5, 10, 20, 50, 100, 250, 500] {
-        let t = quorum(n);
+        let t = N3f1::quorum(n);
         c.bench_function(&format!("{}/n={} t={}", module_path!(), n, t), |b| {
             b.iter_batched(
                 || {
@@ -24,8 +25,9 @@ fn benchmark_threshold_recover(c: &mut Criterion) {
                         .map(|i| PrivateKey::from_seed(i as u64).public_key())
                         .try_collect()
                         .unwrap();
-                    let (public, shares) = deal::<MinSig, _>(&mut rng, Default::default(), players)
-                        .expect("deal should succeed");
+                    let (public, shares) =
+                        deal::<MinSig, _, N3f1>(&mut rng, Default::default(), players)
+                            .expect("deal should succeed");
                     (
                         public,
                         shares
@@ -41,9 +43,10 @@ fn benchmark_threshold_recover(c: &mut Criterion) {
                 },
                 |(public, partials)| {
                     black_box(
-                        primitives::ops::threshold::recover::<MinSig, _>(
+                        primitives::ops::threshold::recover::<MinSig, _, N3f1>(
                             public.public(),
                             &partials,
+                            &Sequential,
                         )
                         .unwrap(),
                     );
@@ -54,4 +57,4 @@ fn benchmark_threshold_recover(c: &mut Criterion) {
     }
 }
 
-criterion_group!(benches, benchmark_threshold_recover);
+criterion_group!(benches, bench_threshold_recover);

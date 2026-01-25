@@ -91,16 +91,29 @@ impl<E: Storage + Clock + Metrics, K: Array, V: VariableValue, H: Hasher, T: Tra
 #[cfg(test)]
 pub(super) mod test {
     use super::*;
-    use crate::{index::Unordered as _, qmdb::store::batch_tests, translator::TwoCap};
+    use crate::{
+        index::Unordered as _,
+        kv::tests::{assert_batchable, assert_deletable, assert_gettable, assert_send},
+        mmr::Location,
+        qmdb::{
+            store::{
+                batch_tests,
+                tests::{assert_log_store, assert_merkleized_store, assert_prunable_store},
+            },
+            NonDurable, Unmerkleized,
+        },
+        translator::TwoCap,
+    };
     use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
     use commonware_macros::test_traced;
     use commonware_math::algebra::Random;
     use commonware_runtime::{buffer::PoolRef, deterministic, Runner as _};
-    use commonware_utils::{NZUsize, NZU64};
+    use commonware_utils::{NZUsize, NZU16, NZU64};
     use rand::RngCore;
+    use std::num::{NonZeroU16, NonZeroUsize};
 
-    const PAGE_SIZE: usize = 77;
-    const PAGE_CACHE_SIZE: usize = 9;
+    const PAGE_SIZE: NonZeroU16 = NZU16!(77);
+    const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(9);
 
     fn db_config(suffix: &str) -> VariableConfig<TwoCap, (commonware_codec::RangeCfg<usize>, ())> {
         VariableConfig {
@@ -115,7 +128,7 @@ pub(super) mod test {
             log_codec_config: ((0..=10000).into(), ()),
             translator: TwoCap,
             thread_pool: None,
-            buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+            buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
 
@@ -157,7 +170,7 @@ pub(super) mod test {
     pub fn test_any_variable_db_log_replay() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut db = open_db(context.clone()).await.into_mutable();
+            let mut db = open_db(context.with_label("first")).await.into_mutable();
 
             // Update the same key many times.
             const UPDATES: u64 = 100;
@@ -171,7 +184,7 @@ pub(super) mod test {
 
             // Simulate a failed commit and test that the log replay doesn't leave behind old data.
             drop(db);
-            let db = open_db(context.clone()).await;
+            let db = open_db(context.with_label("second")).await;
             let iter = db.snapshot.get(&k);
             assert_eq!(iter.cloned().collect::<Vec<_>>().len(), 1);
             assert_eq!(db.root(), root);
@@ -201,7 +214,7 @@ pub(super) mod test {
         // Build a db with 1000 keys, some of which we update and some of which we delete.
         const ELEMENTS: u64 = 1000;
         executor.start(|context| async move {
-            let db = open_db(context.clone()).await;
+            let db = open_db(context.with_label("open1")).await;
             let root = db.root();
             let mut db = db.into_mutable();
 
@@ -213,7 +226,7 @@ pub(super) mod test {
 
             // Simulate a failure and test that we rollback to the previous root.
             drop(db);
-            let db = open_db(context.clone()).await;
+            let db = open_db(context.with_label("open2")).await;
             assert_eq!(root, db.root());
 
             // re-apply the updates and commit them this time.
@@ -239,7 +252,7 @@ pub(super) mod test {
 
             // Simulate a failure and test that we rollback to the previous root.
             drop(db);
-            let db = open_db(context.clone()).await;
+            let db = open_db(context.with_label("open3")).await;
             assert_eq!(root, db.root());
 
             // Re-apply updates for every 3rd key and commit them this time.
@@ -267,7 +280,7 @@ pub(super) mod test {
 
             // Simulate a failure and test that we rollback to the previous root.
             drop(db);
-            let db = open_db(context.clone()).await;
+            let db = open_db(context.with_label("open4")).await;
             assert_eq!(root, db.root());
 
             // Re-delete every 7th key and commit this time.
@@ -297,7 +310,7 @@ pub(super) mod test {
             drop(db);
 
             // Confirm state is preserved after reopen.
-            let db = open_db(context.clone()).await;
+            let db = open_db(context.with_label("open5")).await;
             assert_eq!(root, db.root());
             assert_eq!(db.op_count(), 1961);
             assert_eq!(
@@ -429,5 +442,50 @@ pub(super) mod test {
                 nodes_to_pin(pos).map(|p| *map.get(&p).unwrap()).collect()
             }
         }
+    }
+
+    /// Regression test for https://github.com/commonwarexyz/monorepo/issues/2787
+    #[allow(dead_code, clippy::manual_async_fn)]
+    fn issue_2787_regression(
+        db: &crate::qmdb::immutable::Immutable<
+            deterministic::Context,
+            Digest,
+            Vec<u8>,
+            Sha256,
+            TwoCap,
+        >,
+        key: Digest,
+    ) -> impl std::future::Future<Output = ()> + Send + use<'_> {
+        async move {
+            let _ = db.get(&key).await;
+        }
+    }
+
+    type MutableDb =
+        Db<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap, Unmerkleized, NonDurable>;
+
+    #[allow(dead_code)]
+    fn assert_merkleized_db_futures_are_send(db: &mut AnyTest, key: Digest, loc: Location) {
+        assert_gettable(db, &key);
+        assert_log_store(db);
+        assert_prunable_store(db, loc);
+        assert_merkleized_store(db, loc);
+        assert_send(db.sync());
+    }
+
+    #[allow(dead_code)]
+    fn assert_mutable_db_futures_are_send(db: &mut MutableDb, key: Digest, value: Vec<u8>) {
+        assert_gettable(db, &key);
+        assert_log_store(db);
+        assert_send(db.update(key, value.clone()));
+        assert_send(db.create(key, value.clone()));
+        assert_deletable(db, key);
+        assert_batchable(db, key, value);
+        assert_send(db.get_with_loc(&key));
+    }
+
+    #[allow(dead_code)]
+    fn assert_mutable_db_commit_is_send(db: MutableDb) {
+        assert_send(db.commit(None));
     }
 }

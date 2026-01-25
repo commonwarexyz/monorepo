@@ -1,34 +1,42 @@
 ["commonware_cryptography::blake3::tests::conformance::CodecConformance<Digest>"]
 n_cases = 65536
-hash = "c0501d4a691d1fccec7c5906e8608228569d24164150edd215838593e3b77512"
+hash = "d01e3ef0dd81919abd3f149649940ae2e8cff6dc4aa9f927d544aece387b12d1"
 
-["commonware_cryptography::bloomfilter::tests::conformance::CodecConformance<BloomFilter>"]
+["commonware_cryptography::bloomfilter::conformance::CodecConformance<BloomFilter>"]
 n_cases = 65536
-hash = "a75d6312366816126114abdc9d7fbd246891cab210eeae6a02781625aa1ad6a4"
+hash = "064cd9eab1a79b2270de039d6105df261954aa1fc8df1fbd55ecf6f18f43f437"
+
+["commonware_cryptography::bloomfilter::conformance::RationalOptimalBits"]
+n_cases = 1024
+hash = "f631238a016fb44fd2dee9eeb5bd20fc5052f33434810599b8ba6535e2ad8e97"
 
 ["commonware_cryptography::bls12381::certificate::multisig::tests::conformance::CodecConformance<Certificate<MinSig>>"]
 n_cases = 65536
-hash = "300d04d83f33581f5bce771224f35a4f41a50887e6f83648a43013d8e8292815"
+hash = "ad245f64a57c96036599647eaf509937173e9de01503a9e6494f29571191ade1"
+
+["commonware_cryptography::bls12381::certificate::threshold::tests::conformance::CodecConformance<Certificate<MinSig>>"]
+n_cases = 65536
+hash = "ba2d888e6d1050e6a361aa79430c1bb03d90eb8e74b9715b1d7d01c35a495e1d"
 
 ["commonware_cryptography::bls12381::dkg::test::conformance::CodecConformance<AckOrReveal<ed25519::PublicKey>>"]
 n_cases = 65536
-hash = "0081c641fd7d19194dcb85e69527d4e4fb6f722f10029ed754813e97da825e89"
+hash = "97c266fb7821326e6333be0859025c774220c8d010e488d2fd13a743e4135f64"
 
 ["commonware_cryptography::bls12381::dkg::test::conformance::CodecConformance<DealerLog<MinPk,ed25519::PublicKey>>"]
 n_cases = 65536
-hash = "3e767ce51ac143eafca5219f8eceb85691233cf61d7a14aa3928d4e2fce722b6"
+hash = "ef8d69a3cbafc5e3f8f98755337acacc6609e92d3fdee0e4576481190cb421b4"
 
 ["commonware_cryptography::bls12381::dkg::test::conformance::CodecConformance<DealerPrivMsg>"]
 n_cases = 65536
-hash = "d112d774a4c9b012b53e44dc2a3487a0e2f87cd7b14fb8433ec7cea4997f440a"
+hash = "2d443ed310b383cab74abec888d0637ab81435779e274ed7be84adc7b10e2f86"
 
 ["commonware_cryptography::bls12381::dkg::test::conformance::CodecConformance<DealerPubMsg<MinPk>>"]
 n_cases = 65536
-hash = "139de299840056ff78ed2df6417c1d7961ff9d3ff948fa8636ac210b729f2b50"
+hash = "0a15ca78d654be68bb78cf58cfd1da568f8f1585878f081735939f02da161b22"
 
 ["commonware_cryptography::bls12381::dkg::test::conformance::CodecConformance<DealerResult<ed25519::PublicKey>>"]
 n_cases = 65536
-hash = "06cd5f1dca291e1812e01a82474926520794c8844813d64882c9a1cd6106e771"
+hash = "1a05e4e910dd186bd81189d79eaf1b4c211012d07f534ddaa38ab9705d80fa62"
 
 ["commonware_cryptography::bls12381::dkg::test::conformance::CodecConformance<Output<MinPk,ed25519::PublicKey>>"]
 n_cases = 65536
@@ -40,43 +48,47 @@ hash = "0cbb8c8644dffe0be78d1307fb5034dd804921d66799c1aaec3d335b44e9616c"
 
 ["commonware_cryptography::bls12381::dkg::test::conformance::CodecConformance<SignedDealerLog<MinPk,ed25519::PrivateKey>>"]
 n_cases = 65536
-hash = "e8cbe13694013344c0b673ad87be6b7517943f68ab6254d35b13aa2aa9c39809"
+hash = "fca94fb3b0df54a6a34edfbb8aeef28490262daf97870e12f869aee6cf7f7e67"
 
 ["commonware_cryptography::bls12381::primitives::group::tests::conformance::CodecConformance<G1>"]
 n_cases = 65536
-hash = "5c46f1b09e85d595727cfe40dd5c9687e17ae63fbd162d97bbdd89ea44fa4fd0"
+hash = "ba2d888e6d1050e6a361aa79430c1bb03d90eb8e74b9715b1d7d01c35a495e1d"
 
 ["commonware_cryptography::bls12381::primitives::group::tests::conformance::CodecConformance<G2>"]
 n_cases = 65536
-hash = "4164fc177bf0652f3711b2d86a975f604fdc5092a1d9c7110223d02d88bf5f79"
+hash = "683a309d5fefb8e0ab6778c22e66bd43e139c5f56204df932fd81052792adf4b"
+
+["commonware_cryptography::bls12381::primitives::group::tests::conformance::CodecConformance<Private>"]
+n_cases = 65536
+hash = "2d443ed310b383cab74abec888d0637ab81435779e274ed7be84adc7b10e2f86"
 
 ["commonware_cryptography::bls12381::primitives::group::tests::conformance::CodecConformance<Scalar>"]
 n_cases = 65536
-hash = "d112d774a4c9b012b53e44dc2a3487a0e2f87cd7b14fb8433ec7cea4997f440a"
+hash = "2d443ed310b383cab74abec888d0637ab81435779e274ed7be84adc7b10e2f86"
 
 ["commonware_cryptography::bls12381::primitives::group::tests::conformance::CodecConformance<Share>"]
 n_cases = 65536
-hash = "169550a1597994aad7ba634091b89633424be84f6753fe95542d2f3fd4108b9f"
+hash = "7595e042deed41454a74a89e13ecb304a04d0087c9d0760c2ed7940b06a53d78"
 
 ["commonware_cryptography::bls12381::primitives::ops::aggregate::tests::conformance::CodecConformance<Message<MinSig>>"]
 n_cases = 65536
-hash = "5c46f1b09e85d595727cfe40dd5c9687e17ae63fbd162d97bbdd89ea44fa4fd0"
+hash = "ba2d888e6d1050e6a361aa79430c1bb03d90eb8e74b9715b1d7d01c35a495e1d"
 
 ["commonware_cryptography::bls12381::primitives::ops::aggregate::tests::conformance::CodecConformance<PublicKey<MinSig>>"]
 n_cases = 65536
-hash = "4164fc177bf0652f3711b2d86a975f604fdc5092a1d9c7110223d02d88bf5f79"
+hash = "683a309d5fefb8e0ab6778c22e66bd43e139c5f56204df932fd81052792adf4b"
 
 ["commonware_cryptography::bls12381::primitives::ops::aggregate::tests::conformance::CodecConformance<Signature<MinSig>>"]
 n_cases = 65536
-hash = "5c46f1b09e85d595727cfe40dd5c9687e17ae63fbd162d97bbdd89ea44fa4fd0"
+hash = "ba2d888e6d1050e6a361aa79430c1bb03d90eb8e74b9715b1d7d01c35a495e1d"
 
 ["commonware_cryptography::bls12381::primitives::variant::tests::conformance::CodecConformance<PartialSignature<MinPk>>"]
 n_cases = 65536
-hash = "bfc57df8e3724885def12e03d36d9e86cf31c75e4cf607c546f87078f9d946f4"
+hash = "f022eac985ba0e1cd501cb3988f8d05f0c7e4c491447ff069e0a5ae8e93eac4a"
 
 ["commonware_cryptography::bls12381::primitives::variant::tests::conformance::CodecConformance<PartialSignature<MinSig>>"]
 n_cases = 65536
-hash = "0299c49bd0391e42ddc93659602e864cdec806c460262d4b72b69193ef64aee1"
+hash = "7eb431ae7ecc27666f9ca1614f23940fedbc7a49eb59ef2af0d95af422fb73a4"
 
 ["commonware_cryptography::bls12381::scheme::tests::conformance::CodecConformance<PrivateKey>"]
 n_cases = 65536
@@ -92,7 +104,7 @@ hash = "dcc604b71699aa675d3f3a033a6975b8fb9e1dde6809ba5c37d516cf13dce75d"
 
 ["commonware_cryptography::bls12381::tle::tests::conformance::CodecConformance<Ciphertext<MinPk>>"]
 n_cases = 65536
-hash = "731c5d3dfb09b6e6f1cf50136ba82f036fffab855ec953be59877bb95a48e1dd"
+hash = "d764de51d89d256bfd2ffcf39a3497fa3e5e27a60cc7da5363b47f5a9390f655"
 
 ["commonware_cryptography::certificate::tests::conformance::CodecConformance<Attestation<Scheme>>"]
 n_cases = 65536
@@ -101,6 +113,10 @@ hash = "42867052b1619b912d08f0a6bf5f964f587897a0eed8612732fd27813f6c03bd"
 ["commonware_cryptography::certificate::tests::conformance::CodecConformance<Signers>"]
 n_cases = 65536
 hash = "41ef7a306dd2032d7d1b73fe2799cff6f2e8fb1edcd02a0b9798f18f900a19fa"
+
+["commonware_cryptography::crc32::tests::conformance::CodecConformance<Digest>"]
+n_cases = 65536
+hash = "d0101a0688d45c8f7428b3861ed6e7e77c2ed25033cb7d6b47b3fa58148a3f18"
 
 ["commonware_cryptography::ed25519::certificate::tests::conformance::CodecConformance<Certificate>"]
 n_cases = 65536
@@ -164,7 +180,7 @@ hash = "05880099d66c9e04ab2d4bf5dfa3fecfc4fb114264ca3b4a0c3b4816332414b9"
 
 ["commonware_cryptography::sha256::tests::conformance::CodecConformance<Digest>"]
 n_cases = 65536
-hash = "c0501d4a691d1fccec7c5906e8608228569d24164150edd215838593e3b77512"
+hash = "d65ced18cacd65769e8f9732131a06216e6600d5a115c4ed7483a8530813ddcd"
 
 ["commonware_cryptography::transcript::test::conformance::CodecConformance<Summary>"]
 n_cases = 65536

@@ -12,16 +12,16 @@ use commonware_storage::{
     },
     translator::TwoCap,
 };
-use commonware_utils::{NZUsize, NZU64};
+use commonware_utils::{NZUsize, NZU16, NZU64};
 use libfuzzer_sys::fuzz_target;
 use rand::{rngs::StdRng, Rng, SeedableRng};
-use std::num::NonZeroU64;
+use std::num::{NonZeroU16, NonZeroU64};
 
 const MAX_OPERATIONS: usize = 50;
 const MAX_KEY_SIZE: usize = 32;
 const MAX_VALUE_SIZE: usize = 256;
 const MAX_PROOF_OPS: u64 = 100;
-const PAGE_SIZE: usize = 77;
+const PAGE_SIZE: NonZeroU16 = NZU16!(77);
 const PAGE_CACHE_SIZE: usize = 9;
 const ITEMS_PER_SECTION: u64 = 5;
 const ITEMS_PER_BLOB: u64 = 11;
@@ -103,7 +103,7 @@ fn db_config(suffix: &str) -> Config<TwoCap, (RangeCfg<usize>, ())> {
         log_write_buffer: NZUsize!(1024),
         translator: TwoCap,
         thread_pool: None,
-        buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+        buffer_pool: PoolRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
     }
 }
 

@@ -26,11 +26,11 @@
 //! ```
 
 use super::primitives::{
-    group::{self, Scalar},
+    group::{self, Private},
     ops,
     variant::{MinPk, Variant},
 };
-use crate::{Array, BatchVerifier, Signer as _};
+use crate::{BatchVerifier, Secret, Signer as _};
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 use bytes::{Buf, BufMut};
@@ -39,27 +39,35 @@ use commonware_codec::{
 };
 use commonware_math::algebra::Random;
 use commonware_parallel::Sequential;
-use commonware_utils::{hex, Span};
+use commonware_utils::{hex, Array, Span};
 use core::{
     fmt::{Debug, Display, Formatter},
     hash::{Hash, Hasher},
     ops::Deref,
 };
 use rand_core::CryptoRngCore;
-use zeroize::{Zeroize, ZeroizeOnDrop};
+use zeroize::Zeroizing;
 
 const CURVE_NAME: &str = "bls12381";
 
 /// BLS12-381 private key.
-#[derive(Clone, Eq, PartialEq, Zeroize, ZeroizeOnDrop)]
+#[derive(Clone, Debug)]
 pub struct PrivateKey {
-    raw: [u8; group::PRIVATE_KEY_LENGTH],
-    key: group::Private,
+    raw: Secret<[u8; group::PRIVATE_KEY_LENGTH]>,
+    key: Private,
 }
+
+impl PartialEq for PrivateKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.raw == other.raw
+    }
+}
+
+impl Eq for PrivateKey {}
 
 impl Write for PrivateKey {
     fn write(&self, buf: &mut impl BufMut) {
-        self.raw.write(buf);
+        self.raw.expose(|raw| raw.write(buf));
     }
 }
 
@@ -67,10 +75,13 @@ impl Read for PrivateKey {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        let raw = <[u8; Self::SIZE]>::read(buf)?;
-        let key = group::Private::decode(raw.as_ref())
-            .map_err(|e| CodecError::Wrapped(CURVE_NAME, e.into()))?;
-        Ok(Self { raw, key })
+        let raw = Zeroizing::new(<[u8; Self::SIZE]>::read(buf)?);
+        let key =
+            Private::decode(raw.as_ref()).map_err(|e| CodecError::Wrapped(CURVE_NAME, e.into()))?;
+        Ok(Self {
+            raw: Secret::new(*raw),
+            key,
+        })
     }
 }
 
@@ -78,57 +89,19 @@ impl FixedSize for PrivateKey {
     const SIZE: usize = group::PRIVATE_KEY_LENGTH;
 }
 
-impl Span for PrivateKey {}
-
-impl Array for PrivateKey {}
-
-impl Hash for PrivateKey {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.raw.hash(state);
-    }
-}
-
-impl Ord for PrivateKey {
-    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
-        self.raw.cmp(&other.raw)
-    }
-}
-
-impl PartialOrd for PrivateKey {
-    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl AsRef<[u8]> for PrivateKey {
-    fn as_ref(&self) -> &[u8] {
-        &self.raw
-    }
-}
-
-impl Deref for PrivateKey {
-    type Target = [u8];
-    fn deref(&self) -> &[u8] {
-        &self.raw
-    }
-}
-
-impl From<Scalar> for PrivateKey {
-    fn from(key: Scalar) -> Self {
-        let raw = key.encode_fixed();
-        Self { raw, key }
-    }
-}
-
-impl Debug for PrivateKey {
-    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
-        write!(f, "{}", hex(&self.raw))
+impl From<Private> for PrivateKey {
+    fn from(key: Private) -> Self {
+        let raw = Zeroizing::new(key.expose(|s| s.encode_fixed()));
+        Self {
+            raw: Secret::new(*raw),
+            key,
+        }
     }
 }
 
 impl Display for PrivateKey {
     fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
-        write!(f, "{}", hex(&self.raw))
+        write!(f, "{:?}", self)
     }
 }
 
@@ -150,8 +123,7 @@ impl crate::Signer for PrivateKey {
 impl Random for PrivateKey {
     fn random(mut rng: impl CryptoRngCore) -> Self {
         let (private, _) = ops::keypair::<_, MinPk>(&mut rng);
-        let raw = private.encode_fixed();
-        Self { raw, key: private }
+        private.into()
     }
 }
 
@@ -427,8 +399,10 @@ impl BatchVerifier<PublicKey> for Batch {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bls12381;
+    use crate::{bls12381, Verifier as _};
     use commonware_codec::{DecodeExt, Encode};
+    use commonware_math::algebra::Random;
+    use commonware_utils::test_rng;
 
     #[test]
     fn test_codec_private_key() {
@@ -485,6 +459,27 @@ mod tests {
                 .unwrap()
                 .as_ref(),
         )
+    }
+
+    #[test]
+    fn test_from_private() {
+        let mut rng = test_rng();
+        let private = Private::random(&mut rng);
+        let private_key = PrivateKey::from(private);
+        // Verify the key works by signing and verifying
+        let msg = b"test message";
+        let sig = private_key.sign(b"ns", msg);
+        assert!(private_key.public_key().verify(b"ns", msg, &sig));
+    }
+
+    #[test]
+    fn test_private_key_redacted() {
+        let mut rng = test_rng();
+        let private_key = PrivateKey::random(&mut rng);
+        let debug = format!("{:?}", private_key);
+        let display = format!("{}", private_key);
+        assert!(debug.contains("REDACTED"));
+        assert!(display.contains("REDACTED"));
     }
 
     #[cfg(feature = "arbitrary")]

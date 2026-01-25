@@ -11,24 +11,25 @@
 //! is already taken care of for you if you use the provided `deserialize` function.
 
 use super::variant::Variant;
+use crate::Secret;
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
 use blst::{
     blst_bendian_from_fp12, blst_bendian_from_scalar, blst_expand_message_xmd, blst_fp12, blst_fr,
     blst_fr_add, blst_fr_cneg, blst_fr_from_scalar, blst_fr_from_uint64, blst_fr_inverse,
     blst_fr_mul, blst_fr_sub, blst_hash_to_g1, blst_hash_to_g2, blst_keygen, blst_p1,
-    blst_p1_add_or_double, blst_p1_affine, blst_p1_cneg, blst_p1_compress, blst_p1_from_affine,
-    blst_p1_in_g1, blst_p1_is_inf, blst_p1_mult, blst_p1_to_affine, blst_p1_uncompress,
-    blst_p1s_mult_pippenger, blst_p1s_mult_pippenger_scratch_sizeof, blst_p2,
-    blst_p2_add_or_double, blst_p2_affine, blst_p2_cneg, blst_p2_compress, blst_p2_from_affine,
-    blst_p2_in_g2, blst_p2_is_inf, blst_p2_mult, blst_p2_to_affine, blst_p2_uncompress,
-    blst_p2s_mult_pippenger, blst_p2s_mult_pippenger_scratch_sizeof, blst_scalar,
-    blst_scalar_from_be_bytes, blst_scalar_from_bendian, blst_scalar_from_fr, blst_sk_check,
-    BLS12_381_G1, BLS12_381_G2, BLST_ERROR,
+    blst_p1_add_or_double, blst_p1_affine, blst_p1_cneg, blst_p1_compress, blst_p1_double,
+    blst_p1_from_affine, blst_p1_in_g1, blst_p1_is_inf, blst_p1_mult, blst_p1_to_affine,
+    blst_p1_uncompress, blst_p1s_mult_pippenger, blst_p1s_mult_pippenger_scratch_sizeof,
+    blst_p1s_tile_pippenger, blst_p1s_to_affine, blst_p2, blst_p2_add_or_double, blst_p2_affine,
+    blst_p2_cneg, blst_p2_compress, blst_p2_double, blst_p2_from_affine, blst_p2_in_g2,
+    blst_p2_is_inf, blst_p2_mult, blst_p2_to_affine, blst_p2_uncompress, blst_p2s_mult_pippenger,
+    blst_p2s_mult_pippenger_scratch_sizeof, blst_p2s_tile_pippenger, blst_p2s_to_affine,
+    blst_scalar, blst_scalar_from_be_bytes, blst_scalar_from_bendian, blst_scalar_from_fr,
+    blst_sk_check, Pairing, BLS12_381_G1, BLS12_381_G2, BLST_ERROR,
 };
 use bytes::{Buf, BufMut};
 use commonware_codec::{
-    varint::UInt,
     EncodeSize,
     Error::{self, Invalid},
     FixedSize, Read, ReadExt, Write,
@@ -37,16 +38,173 @@ use commonware_math::algebra::{
     Additive, CryptoGroup, Field, HashToGroup, Multiplicative, Object, Random, Ring, Space,
 };
 use commonware_parallel::Strategy;
-use commonware_utils::hex;
+use commonware_utils::{hex, Participant};
 use core::{
     fmt::{Debug, Display, Formatter},
     hash::{Hash, Hasher},
-    mem::MaybeUninit,
+    iter,
     ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign},
     ptr,
 };
+use ctutils::{Choice, CtEq};
 use rand_core::CryptoRngCore;
-use zeroize::{Zeroize, ZeroizeOnDrop};
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
+
+fn all_zero(bytes: &[u8]) -> Choice {
+    bytes
+        .iter()
+        .fold(Choice::TRUE, |acc, b| acc & b.ct_eq(&0u8))
+}
+
+/// Calculate the optimal window size for Pippenger's algorithm.
+///
+/// Reference: <https://github.com/supranational/blst/blob/v0.3.13/bindings/rust/src/pippenger.rs#L540-L550>
+const fn pippenger_window_size(npoints: usize) -> usize {
+    let wbits = (usize::BITS - npoints.leading_zeros()) as usize;
+    if wbits > 13 {
+        wbits - 4
+    } else if wbits > 5 {
+        wbits - 3
+    } else {
+        2
+    }
+}
+
+/// Calculate the grid breakdown for parallel MSM.
+/// Returns (nx, ny, window) where nx*ny is the number of tiles.
+///
+/// Reference: <https://github.com/supranational/blst/blob/v0.3.13/bindings/rust/src/pippenger.rs#L503-L538>
+fn msm_breakdown(nbits: usize, window: usize, ncpus: usize) -> (usize, usize, usize) {
+    let num_bits = |l: usize| (usize::BITS - l.leading_zeros()) as usize;
+
+    let (nx, wnd) = if nbits > window * ncpus {
+        let mut wnd = num_bits(ncpus / 4);
+        if (window + wnd) > 18 {
+            wnd = window.saturating_sub(wnd).max(1);
+        } else {
+            wnd = (nbits / window).div_ceil(ncpus);
+            if (nbits / (window + 1)).div_ceil(ncpus) < wnd {
+                wnd = window + 1;
+            } else {
+                wnd = window;
+            }
+        }
+        (1, wnd)
+    } else {
+        let mut nx = 2usize;
+        let mut wnd = window.saturating_sub(2).max(1);
+        while (nbits / wnd + 1) * nx < ncpus {
+            nx += 1;
+            let new_wnd = window.saturating_sub(num_bits(3 * nx / 2));
+            if new_wnd == 0 {
+                break;
+            }
+            wnd = new_wnd;
+        }
+        nx -= 1;
+        wnd = window.saturating_sub(num_bits(3 * nx / 2)).max(1);
+        (nx, wnd)
+    };
+
+    let ny = nbits / wnd + 1;
+    let final_wnd = nbits / ny + 1;
+
+    (nx, ny, final_wnd)
+}
+
+/// A tile in the parallel MSM grid.
+struct Tile {
+    /// Starting point index in the input array.
+    x: usize,
+    /// Number of points to process in this tile.
+    dx: usize,
+    /// Starting bit position for scalar window.
+    y: usize,
+}
+
+/// Build a grid of tiles for parallel MSM computation.
+/// Tiles are ordered from highest bit row to lowest.
+fn build_tiles(npoints: usize, nx: usize, ny: usize, window: usize) -> Vec<Tile> {
+    let mut tiles = Vec::with_capacity(nx * ny);
+    let dx = npoints / nx;
+
+    // First row (highest bits)
+    let mut y = window * (ny - 1);
+    for i in 0..nx {
+        let x = i * dx;
+        let tile_dx = if i == nx - 1 { npoints - x } else { dx };
+        tiles.push(Tile { x, dx: tile_dx, y });
+    }
+
+    // Remaining rows
+    while y != 0 {
+        y -= window;
+        for i in 0..nx {
+            let x = i * dx;
+            let tile_dx = if i == nx - 1 { npoints - x } else { dx };
+            tiles.push(Tile { x, dx: tile_dx, y });
+        }
+    }
+
+    tiles
+}
+
+/// Generic parallel MSM implementation that works for both G1 and G2.
+///
+/// Takes closures for the type-specific blst operations to avoid code duplication.
+#[allow(clippy::too_many_arguments)]
+fn msm_parallel_generic<A, P, R>(
+    affine_points: &[A],
+    scalars: &[u8],
+    nbits: usize,
+    ncpus: usize,
+    strategy: &impl Strategy,
+    compute_tile: impl Fn(&[A], &[u8], &Tile, usize, usize, usize) -> P + Sync,
+    add: impl Fn(&P, &P) -> P,
+    double: impl Fn(&P) -> P,
+    from_projective: impl Fn(P) -> R,
+) -> R
+where
+    A: Sync,
+    P: Default + Send,
+{
+    let npoints = affine_points.len();
+    let nbytes = nbits.div_ceil(8);
+    let (nx, ny, window) = msm_breakdown(nbits, pippenger_window_size(npoints), ncpus);
+    let tiles = build_tiles(npoints, nx, ny, window);
+
+    // Compute all tiles in parallel
+    let tile_results: Vec<(usize, usize, P)> =
+        strategy.map_collect_vec(tiles.iter().enumerate(), |(idx, tile)| {
+            let result = compute_tile(affine_points, scalars, tile, nbytes, nbits, window);
+            (idx / nx, idx % nx, result)
+        });
+
+    // Combine results by row
+    let mut row_sums: Vec<Option<P>> = (0..ny).map(|_| None).collect();
+    for (row, _col, point) in tile_results {
+        row_sums[row] = Some(match row_sums[row].take() {
+            Some(sum) => add(&sum, &point),
+            None => point,
+        });
+    }
+
+    // Combine rows with doubling (highest bits first)
+    let mut result = P::default();
+    for (i, row_sum) in row_sums.into_iter().enumerate() {
+        if let Some(sum) = row_sum {
+            result = add(&result, &sum);
+        }
+        // Double `window` times for all but the last row
+        if i < ny - 1 {
+            for _ in 0..window {
+                result = double(&result);
+            }
+        }
+    }
+
+    from_projective(result)
+}
 
 /// Domain separation tag used when hashing a message to a curve (G1 or G2).
 ///
@@ -70,38 +228,79 @@ pub struct Scalar(blst_fr);
 #[cfg(feature = "arbitrary")]
 impl arbitrary::Arbitrary<'_> for Scalar {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        // Generate 32 bytes and convert to scalar with automatic modular reduction
-        let bytes = u.arbitrary::<[u8; SCALAR_LENGTH]>()?;
-        let mut fr = blst_fr::default();
-        // SAFETY: bytes is a valid 32-byte array; blst_scalar_from_bendian handles reduction.
-        unsafe {
-            let mut scalar = blst_scalar::default();
-            blst_scalar_from_bendian(&mut scalar, bytes.as_ptr());
-            blst_fr_from_scalar(&mut fr, &scalar);
-        }
-        let result = Self(fr);
-        // We avoid generating zero scalars, since this module assumes that scalars
-        // can't be zero, since they're punned to private keys.
-        if result == <Self as Additive>::zero() {
-            Ok(BLST_FR_ONE)
-        } else {
-            Ok(result)
-        }
+        let ikm = u.arbitrary::<[u8; IKM_LENGTH]>()?;
+        Ok(Self::from_ikm(&ikm))
     }
 }
 
 /// Number of bytes required to encode a scalar in its canonical
-/// little‑endian form (`32 × 8 = 256 bits`).
+/// big-endian form (`32 × 8 = 256 bits`).
 ///
-/// Because `r` is only 255 bits wide, the most‑significant byte is always in
-/// the range `0x00‥=0x7f`, leaving the top bit clear.
+/// Because `r` is only 255 bits wide, the most-significant byte is always in
+/// the range `0x00..=0x7f`, leaving the top bit clear.
 pub const SCALAR_LENGTH: usize = 32;
 
-/// Effective bit‑length of the field modulus `r` (`⌈log_2 r⌉ = 255`).
+/// Effective bit-length of the field modulus `r` (`ceil(log_2 r) = 255`).
 ///
-/// Useful for constant‑time exponentiation loops and for validating that a
-/// decoded integer lies in the range `0 ≤ x < r`.
+/// Useful for constant-time exponentiation loops and for validating that a
+/// decoded integer lies in the range `0 <= x < r`.
 const SCALAR_BITS: usize = 255;
+
+/// Number of scalar bits for SmallScalar (128 bits).
+///
+/// 128 bits provides sufficient security (2^-128 collision probability)
+/// while roughly halving MSM computation time compared to full 255-bit scalars.
+const SMALL_SCALAR_BITS: usize = 128;
+
+/// Number of bytes for SmallScalar (16 bytes = 128 bits).
+const SMALL_SCALAR_LENGTH: usize = 16;
+
+/// Number of bytes of input key material for BLS key generation.
+const IKM_LENGTH: usize = 64;
+
+/// Minimum number of points required to use parallel MSM.
+const MIN_PARALLEL_POINTS: usize = 32;
+
+/// A 128-bit scalar for use in batch verification random challenges.
+///
+/// This provides 128-bit security which is sufficient for preventing
+/// forgery attacks in batch verification while reducing computational cost
+/// compared to full 255-bit scalars.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SmallScalar {
+    /// Stored as blst_scalar with only lower 128 bits populated.
+    inner: blst_scalar,
+}
+
+impl SmallScalar {
+    /// Generates a random 128-bit scalar.
+    pub fn random(mut rng: impl CryptoRngCore) -> Self {
+        // blst_scalar is 32 bytes
+        let mut bytes = [0u8; 32];
+        // Fill the last 16 bytes (128 bits) with entropy.
+        // In big-endian, bytes[16..32] are the least significant.
+        // Leaving bytes[0..16] as zero ensures the scalar is < 2^128.
+        rng.fill_bytes(&mut bytes[SMALL_SCALAR_LENGTH..]);
+
+        let mut scalar = blst_scalar::default();
+        // SAFETY: bytes is a valid 32-byte array.
+        unsafe {
+            blst_scalar_from_bendian(&mut scalar, bytes.as_ptr());
+        }
+        Self { inner: scalar }
+    }
+
+    pub const fn as_bytes(&self) -> &[u8] {
+        self.inner.b.as_slice()
+    }
+
+    /// Returns the zero scalar.
+    pub fn zero() -> Self {
+        Self {
+            inner: blst_scalar::default(),
+        }
+    }
+}
 
 /// This constant serves as the multiplicative identity (i.e., "one") in the
 /// BLS12-381 finite field, ensuring that arithmetic is carried out within the
@@ -208,26 +407,80 @@ impl GT {
 }
 
 /// The private key type.
-pub type Private = Scalar;
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Private {
+    scalar: Secret<Scalar>,
+}
+
+impl Private {
+    /// Creates a new private key from a scalar.
+    pub const fn new(private: Scalar) -> Self {
+        Self {
+            scalar: Secret::new(private),
+        }
+    }
+
+    /// Temporarily exposes the inner scalar to a closure.
+    ///
+    /// See [`Secret::expose`](crate::Secret::expose) for more details.
+    pub fn expose<R>(&self, f: impl for<'a> FnOnce(&'a Scalar) -> R) -> R {
+        self.scalar.expose(f)
+    }
+
+    /// Consumes the private key and returns the inner scalar.
+    ///
+    /// See [`Secret::expose_unwrap`](crate::Secret::expose_unwrap) for more details.
+    pub fn expose_unwrap(self) -> Scalar {
+        self.scalar.expose_unwrap()
+    }
+}
+
+impl Write for Private {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.expose(|scalar| scalar.write(buf));
+    }
+}
+
+impl Read for Private {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
+        let scalar = Scalar::read(buf)?;
+        Ok(Self::new(scalar))
+    }
+}
+
+impl FixedSize for Private {
+    const SIZE: usize = PRIVATE_KEY_LENGTH;
+}
+
+impl Random for Private {
+    fn random(rng: impl CryptoRngCore) -> Self {
+        Self::new(Scalar::random(rng))
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl arbitrary::Arbitrary<'_> for Private {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(Self::new(u.arbitrary::<Scalar>()?))
+    }
+}
 
 /// The private key length.
 pub const PRIVATE_KEY_LENGTH: usize = SCALAR_LENGTH;
 
 impl Scalar {
-    /// Generate a non-zero scalar from the randomly populated buffer.
-    fn from_bytes(mut ikm: [u8; 64]) -> Self {
+    /// Creates a scalar from input key material.
+    /// Uses IETF BLS KeyGen which loops internally until a non-zero value is produced.
+    fn from_ikm(ikm: &[u8; IKM_LENGTH]) -> Self {
         let mut sc = blst_scalar::default();
         let mut ret = blst_fr::default();
         // SAFETY: ikm is a valid 64-byte buffer; blst_keygen handles null key_info.
         unsafe {
-            // blst_keygen loops until a non-zero value is produced (in accordance with IETF BLS KeyGen 4+).
             blst_keygen(&mut sc, ikm.as_ptr(), ikm.len(), ptr::null(), 0);
             blst_fr_from_scalar(&mut ret, &sc);
         }
-
-        // Zeroize the ikm buffer
-        ikm.zeroize();
-
         Self(ret)
     }
 
@@ -247,7 +500,7 @@ impl Scalar {
         // in the scalar field after modular reduction, maintaining the security
         // properties required by the hash-to-field construction.
         const L: usize = 48;
-        let mut uniform_bytes = [0u8; L];
+        let mut uniform_bytes = Zeroizing::new([0u8; L]);
         // SAFETY: All buffers are valid with correct lengths; blst handles empty inputs.
         unsafe {
             blst_expand_message_xmd(
@@ -285,9 +538,9 @@ impl Scalar {
         Self(ret)
     }
 
-    /// Encodes the scalar into a slice.
-    fn as_slice(&self) -> [u8; Self::SIZE] {
-        let mut slice = [0u8; Self::SIZE];
+    /// Encodes the scalar into a byte array.
+    fn as_slice(&self) -> Zeroizing<[u8; Self::SIZE]> {
+        let mut slice = Zeroizing::new([0u8; Self::SIZE]);
         // SAFETY: All pointers valid; blst_bendian_from_scalar writes exactly 32 bytes.
         unsafe {
             let mut scalar = blst_scalar::default();
@@ -309,7 +562,7 @@ impl Scalar {
 impl Write for Scalar {
     fn write(&self, buf: &mut impl BufMut) {
         let slice = self.as_slice();
-        buf.put_slice(&slice);
+        buf.put_slice(slice.as_ref());
     }
 }
 
@@ -317,7 +570,7 @@ impl Read for Scalar {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let bytes = <[u8; Self::SIZE]>::read(buf)?;
+        let bytes = Zeroizing::new(<[u8; Self::SIZE]>::read(buf)?);
         let mut ret = blst_fr::default();
         // SAFETY: bytes is a valid 32-byte array. blst_sk_check validates non-zero and in-range.
         // We use blst_sk_check instead of blst_scalar_fr_check because it also checks non-zero
@@ -345,7 +598,13 @@ impl FixedSize for Scalar {
 impl Hash for Scalar {
     fn hash<H: Hasher>(&self, state: &mut H) {
         let slice = self.as_slice();
-        state.write(&slice);
+        state.write(slice.as_ref());
+    }
+}
+
+impl CtEq for Scalar {
+    fn ct_eq(&self, other: &Self) -> ctutils::Choice {
+        self.0.l.ct_eq(&other.0.l)
     }
 }
 
@@ -363,13 +622,13 @@ impl Ord for Scalar {
 
 impl Debug for Scalar {
     fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
-        write!(f, "{}", hex(&self.as_slice()))
+        write!(f, "Scalar([REDACTED])")
     }
 }
 
 impl Display for Scalar {
     fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
-        write!(f, "{}", hex(&self.as_slice()))
+        write!(f, "[REDACTED]")
     }
 }
 
@@ -486,41 +745,40 @@ impl Field for Scalar {
 impl Random for Scalar {
     /// Returns a random non-zero scalar.
     fn random(mut rng: impl CryptoRngCore) -> Self {
-        let mut ikm = [0u8; 64];
-        rng.fill_bytes(&mut ikm);
-        Self::from_bytes(ikm)
+        let mut ikm = Zeroizing::new([0u8; IKM_LENGTH]);
+        rng.fill_bytes(ikm.as_mut());
+        Self::from_ikm(&ikm)
     }
 }
 
 /// A share of a threshold signing key.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Share {
     /// The share's index in the polynomial.
-    pub index: u32,
+    pub index: Participant,
     /// The scalar corresponding to the share's secret.
     pub private: Private,
 }
 
-impl AsRef<Private> for Share {
-    fn as_ref(&self) -> &Private {
-        &self.private
-    }
-}
-
 impl Share {
+    /// Creates a new `Share` with the given index and private key.
+    pub const fn new(index: Participant, private: Private) -> Self {
+        Self { index, private }
+    }
+
     /// Returns the public key corresponding to the share.
     ///
     /// This can be verified against the public polynomial.
     pub fn public<V: Variant>(&self) -> V::Public {
-        V::Public::generator() * &self.private
+        self.private
+            .expose(|private| V::Public::generator() * private)
     }
 }
 
 impl Write for Share {
     fn write(&self, buf: &mut impl BufMut) {
-        UInt(self.index).write(buf);
-        self.private.write(buf);
+        self.index.write(buf);
+        self.private.expose(|private| private.write(buf));
     }
 }
 
@@ -528,7 +786,7 @@ impl Read for Share {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let index = UInt::read(buf)?.into();
+        let index = Participant::read(buf)?;
         let private = Private::read(buf)?;
         Ok(Self { index, private })
     }
@@ -536,19 +794,22 @@ impl Read for Share {
 
 impl EncodeSize for Share {
     fn encode_size(&self) -> usize {
-        UInt(self.index).encode_size() + self.private.encode_size()
+        self.index.encode_size() + self.private.expose(|private| private.encode_size())
     }
 }
 
 impl Display for Share {
     fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
-        write!(f, "Share(index={}, private={})", self.index, self.private)
+        write!(f, "{:?}", self)
     }
 }
 
-impl Debug for Share {
-    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
-        write!(f, "Share(index={}, private={})", self.index, self.private)
+#[cfg(feature = "arbitrary")]
+impl arbitrary::Arbitrary<'_> for Share {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let index = u.arbitrary()?;
+        let private = u.arbitrary::<Private>()?;
+        Ok(Self { index, private })
     }
 }
 
@@ -589,6 +850,177 @@ impl G1 {
     /// Creates a G1 point from a raw `blst_p1`.
     pub(crate) const fn from_blst_p1(p: blst_p1) -> Self {
         Self(p)
+    }
+
+    /// Batch converts projective G1 points to affine.
+    ///
+    /// This uses Montgomery's trick to reduce n field inversions to 1,
+    /// providing significant speedup over converting points individually.
+    pub fn batch_to_affine(points: &[Self]) -> Vec<blst_p1_affine> {
+        if points.is_empty() {
+            return Vec::new();
+        }
+
+        let n = points.len();
+        let mut out = vec![blst_p1_affine::default(); n];
+
+        // SAFETY: blst_p1s_to_affine batch converts projective points to affine.
+        // The function uses Montgomery's trick internally for efficiency.
+        // All pointers are valid and point to properly sized arrays.
+        unsafe {
+            let points_ptr: Vec<*const blst_p1> = points.iter().map(|p| &p.0 as *const _).collect();
+            blst_p1s_to_affine(out.as_mut_ptr(), points_ptr.as_ptr(), n);
+        }
+
+        out
+    }
+
+    /// Checks that `sum_i (p1[i] ⊙ p2[i]) + t1 ⊙ t2 == 0`.
+    ///
+    /// `p1` and `p2` MUST have the same length.
+    #[must_use]
+    pub(crate) fn multi_pairing_check(p1: &[Self], p2: &[G2], t1: &Self, t2: &G2) -> bool {
+        assert_eq!(p1.len(), p2.len());
+        // We deal with group elements directly, so there's no need for hashing,
+        // or a domain separation tag, hence `false`, `&[]`.
+        let mut pairing = Pairing::new(false, &[]);
+        let p1_affine = Self::batch_to_affine(p1);
+        let p2_affine = G2::batch_to_affine(p2);
+        for (p1, p2) in iter::once((&t1.as_blst_p1_affine(), &t2.as_blst_p2_affine()))
+            .chain(p1_affine.iter().zip(p2_affine.iter()))
+        {
+            pairing.raw_aggregate(p2, p1);
+        }
+
+        // These final two steps check that the sum of the pairings is equal to 0.
+        pairing.commit();
+        // Passing `None` here indicates that our target is 0.
+        pairing.finalverify(None)
+    }
+
+    fn msm_inner<'a>(
+        iter: impl Iterator<Item = (&'a Self, &'a [u8])>,
+        nbits: usize,
+        strategy: &impl Strategy,
+    ) -> Self {
+        // Filter out zero points/scalars and convert to blst types.
+        // `blst` does not filter out infinity, so we must ensure it is impossible.
+        //
+        // Sources:
+        // * https://github.com/supranational/blst/blob/cbc7e166a10d7286b91a3a7bea341e708962db13/src/multi_scalar.c#L10-L12
+        // * https://github.com/MystenLabs/fastcrypto/blob/0acf0ff1a163c60e0dec1e16e4fbad4a4cf853bd/fastcrypto/src/groups/bls12381.rs#L160-L194
+        let nbytes = nbits.div_ceil(8);
+        let (points_filtered, scalars_filtered): (Vec<_>, Vec<_>) = iter
+            .filter_map(|(point, scalar)| {
+                if *point == Self::zero() || all_zero(scalar).into() {
+                    return None;
+                }
+                Some((point, scalar))
+            })
+            .unzip();
+
+        if points_filtered.is_empty() {
+            return Self::zero();
+        }
+        let npoints = points_filtered.len();
+        let ncpus = strategy.parallelism_hint();
+
+        // Convert to affine points
+        let affine_points = Self::batch_to_affine(&points_filtered);
+
+        // Flatten scalars into contiguous byte array
+        let scalar_bytes: Vec<u8> = scalars_filtered
+            .iter()
+            .flat_map(|s| s[..nbytes].iter().copied())
+            .collect();
+
+        // For small inputs or single CPU, use single-threaded path
+        if ncpus < 2 || npoints < MIN_PARALLEL_POINTS {
+            return Self::msm_sequential(&affine_points, &scalar_bytes, nbits);
+        }
+
+        // Parallel MSM using tile_pippenger
+        Self::msm_parallel(&affine_points, &scalar_bytes, nbits, ncpus, strategy)
+    }
+
+    fn msm_sequential(affine_points: &[blst_p1_affine], scalars: &[u8], nbits: usize) -> Self {
+        let npoints = affine_points.len();
+
+        // SAFETY: blst_p1s_mult_pippenger_scratch_sizeof returns size in bytes for valid input.
+        let scratch_size = unsafe { blst_p1s_mult_pippenger_scratch_sizeof(npoints) };
+        assert_eq!(scratch_size % 8, 0, "scratch_size must be multiple of 8");
+        let mut scratch = vec![0u64; scratch_size / 8];
+
+        // blst uses null-terminated pointer arrays
+        let p: [*const blst_p1_affine; 2] = [affine_points.as_ptr(), ptr::null()];
+        let s: [*const u8; 2] = [scalars.as_ptr(), ptr::null()];
+
+        let mut result = blst_p1::default();
+        // SAFETY: All pointer arrays are valid and point to data that outlives this call.
+        unsafe {
+            blst_p1s_mult_pippenger(
+                &mut result,
+                p.as_ptr(),
+                npoints,
+                s.as_ptr(),
+                nbits,
+                scratch.as_mut_ptr(),
+            );
+        }
+        Self::from_blst_p1(result)
+    }
+
+    fn msm_parallel(
+        affine_points: &[blst_p1_affine],
+        scalars: &[u8],
+        nbits: usize,
+        ncpus: usize,
+        strategy: &impl Strategy,
+    ) -> Self {
+        // SAFETY: blst_p1s_mult_pippenger_scratch_sizeof(0) returns base scratch size.
+        let scratch_size = unsafe { blst_p1s_mult_pippenger_scratch_sizeof(0) } / 8;
+
+        msm_parallel_generic(
+            affine_points,
+            scalars,
+            nbits,
+            ncpus,
+            strategy,
+            |points, scalars, tile, nbytes, nbits, window| {
+                let mut scratch = vec![0u64; scratch_size << (window - 1)];
+                let mut result = blst_p1::default();
+                // blst uses null-terminated pointer arrays
+                let p: [*const blst_p1_affine; 2] = [points[tile.x..].as_ptr(), ptr::null()];
+                let s: [*const u8; 2] = [scalars[tile.x * nbytes..].as_ptr(), ptr::null()];
+                // SAFETY: All pointers valid, scratch sized correctly for window.
+                unsafe {
+                    blst_p1s_tile_pippenger(
+                        &mut result,
+                        p.as_ptr(),
+                        tile.dx,
+                        s.as_ptr(),
+                        nbits,
+                        scratch.as_mut_ptr(),
+                        tile.y,
+                        window,
+                    );
+                }
+                result
+            },
+            |a, b| {
+                let mut result = blst_p1::default();
+                // SAFETY: blst_p1_add_or_double is safe for valid blst_p1 points.
+                unsafe { blst_p1_add_or_double(&mut result, a, b) };
+                result
+            },
+            |a| {
+                let mut result = blst_p1::default();
+                // SAFETY: blst_p1_double is safe for valid blst_p1 points.
+                unsafe { blst_p1_double(&mut result, a) };
+                result
+            },
+            Self::from_blst_p1,
+        )
     }
 }
 
@@ -745,68 +1177,48 @@ impl<'a> Mul<&'a Scalar> for G1 {
     }
 }
 
-impl Space<Scalar> for G1 {
-    /// Performs multi-scalar multiplication (MSM) on G1 points using Pippenger's algorithm.
-    /// Computes `sum(scalars[i] * points[i])`.
-    ///
-    /// Filters out pairs where the point is the identity element (infinity).
-    /// Returns an error if the lengths of the input slices mismatch.
-    fn msm(points: &[Self], scalars: &[Scalar], _strategy: &impl Strategy) -> Self {
-        // Assert input validity
-        assert_eq!(points.len(), scalars.len(), "mismatched lengths");
-
-        // Prepare points (affine) and scalars (raw blst_scalar)
-        let mut points_filtered = Vec::with_capacity(points.len());
-        let mut scalars_filtered = Vec::with_capacity(scalars.len());
-        for (point, scalar) in points.iter().zip(scalars.iter()) {
-            // `blst` does not filter out infinity, so we must ensure it is impossible.
-            //
-            // Sources:
-            // * https://github.com/supranational/blst/blob/cbc7e166a10d7286b91a3a7bea341e708962db13/src/multi_scalar.c#L10-L12
-            // * https://github.com/MystenLabs/fastcrypto/blob/0acf0ff1a163c60e0dec1e16e4fbad4a4cf853bd/fastcrypto/src/groups/bls12381.rs#L160-L194
-            if *point == Self::zero() || *scalar == Scalar::zero() {
-                continue;
-            }
-
-            // Add to filtered vectors
-            points_filtered.push(point.as_blst_p1_affine());
-            scalars_filtered.push(scalar.as_blst_scalar());
-        }
-
-        // If all points were filtered, return zero.
-        if points_filtered.is_empty() {
-            return Self::zero();
-        }
-
-        // Create vectors of pointers for the blst API.
-        // These vectors hold pointers *to* the elements in the filtered vectors above.
-        let points: Vec<*const blst_p1_affine> =
-            points_filtered.iter().map(|p| p as *const _).collect();
-        let scalars: Vec<*const u8> = scalars_filtered.iter().map(|s| s.b.as_ptr()).collect();
-
-        // Allocate scratch space for Pippenger's algorithm.
-        // SAFETY: blst_p1s_mult_pippenger_scratch_sizeof returns size in bytes for valid input.
-        let scratch_size = unsafe { blst_p1s_mult_pippenger_scratch_sizeof(points.len()) };
-        // Ensure scratch_size is a multiple of 8 to avoid truncation in division.
-        assert_eq!(scratch_size % 8, 0, "scratch_size must be multiple of 8");
-        let mut scratch = vec![MaybeUninit::<u64>::uninit(); scratch_size / 8];
-
-        // Perform multi-scalar multiplication
-        let mut msm_result = blst_p1::default();
-        // SAFETY: All pointer arrays are valid and point to data that outlives this call.
-        // points_filtered and scalars_filtered remain alive until after this block.
+impl<'a> MulAssign<&'a SmallScalar> for G1 {
+    fn mul_assign(&mut self, rhs: &'a SmallScalar) {
+        let ptr = &raw mut self.0;
+        // SAFETY: blst_p1_mult supports in-place (ret==a). Using SMALL_SCALAR_BITS (128)
+        // processes only the lower 128 bits of the scalar, halving computation time.
         unsafe {
-            blst_p1s_mult_pippenger(
-                &mut msm_result,
-                points.as_ptr(),
-                points.len(),
-                scalars.as_ptr(),
-                SCALAR_BITS, // Using SCALAR_BITS (255) ensures full scalar range
-                scratch.as_mut_ptr() as *mut _,
-            );
+            blst_p1_mult(ptr, ptr, rhs.inner.b.as_ptr(), SMALL_SCALAR_BITS);
         }
+    }
+}
 
-        Self::from_blst_p1(msm_result)
+impl<'a> Mul<&'a SmallScalar> for G1 {
+    type Output = Self;
+
+    fn mul(mut self, rhs: &'a SmallScalar) -> Self::Output {
+        self *= rhs;
+        self
+    }
+}
+
+impl Space<Scalar> for G1 {
+    fn msm(points: &[Self], scalars: &[Scalar], strategy: &impl Strategy) -> Self {
+        assert_eq!(points.len(), scalars.len(), "mismatched lengths");
+        let scalar_bytes: Vec<_> = scalars.iter().map(|s| s.as_blst_scalar()).collect();
+        Self::msm_inner(
+            points
+                .iter()
+                .zip(scalar_bytes.iter().map(|s| s.b.as_slice())),
+            SCALAR_BITS,
+            strategy,
+        )
+    }
+}
+
+impl Space<SmallScalar> for G1 {
+    fn msm(points: &[Self], scalars: &[SmallScalar], strategy: &impl Strategy) -> Self {
+        assert_eq!(points.len(), scalars.len(), "mismatched lengths");
+        Self::msm_inner(
+            points.iter().zip(scalars.iter().map(|s| s.as_bytes())),
+            SMALL_SCALAR_BITS,
+            strategy,
+        )
     }
 }
 
@@ -873,6 +1285,162 @@ impl G2 {
     /// Creates a G2 point from a raw `blst_p2`.
     pub(crate) const fn from_blst_p2(p: blst_p2) -> Self {
         Self(p)
+    }
+
+    /// Batch converts projective G2 points to affine.
+    ///
+    /// This uses Montgomery's trick to reduce n field inversions to 1,
+    /// providing significant speedup over converting points individually.
+    pub fn batch_to_affine(points: &[Self]) -> Vec<blst_p2_affine> {
+        if points.is_empty() {
+            return Vec::new();
+        }
+
+        let n = points.len();
+        let mut out = vec![blst_p2_affine::default(); n];
+
+        // SAFETY: blst_p2s_to_affine batch converts projective points to affine.
+        // The function uses Montgomery's trick internally for efficiency.
+        // All pointers are valid and point to properly sized arrays.
+        unsafe {
+            let points_ptr: Vec<*const blst_p2> = points.iter().map(|p| &p.0 as *const _).collect();
+            blst_p2s_to_affine(out.as_mut_ptr(), points_ptr.as_ptr(), n);
+        }
+
+        out
+    }
+
+    /// Checks that `sum_i (p1[i] ⊙ p2[i]) + t1 ⊙ t2 == 0`.
+    ///
+    /// `p1` and `p2` MUST have the same length.
+    #[must_use]
+    pub(crate) fn multi_pairing_check(p1: &[Self], p2: &[G1], t1: &Self, t2: &G1) -> bool {
+        G1::multi_pairing_check(p2, p1, t2, t1)
+    }
+
+    fn msm_inner<'a>(
+        iter: impl Iterator<Item = (&'a Self, &'a [u8])>,
+        nbits: usize,
+        strategy: &impl Strategy,
+    ) -> Self {
+        // Filter out zero points/scalars and convert to blst types.
+        // `blst` does not filter out infinity, so we must ensure it is impossible.
+        //
+        // Sources:
+        // * https://github.com/supranational/blst/blob/cbc7e166a10d7286b91a3a7bea341e708962db13/src/multi_scalar.c#L10-L12
+        // * https://github.com/MystenLabs/fastcrypto/blob/0acf0ff1a163c60e0dec1e16e4fbad4a4cf853bd/fastcrypto/src/groups/bls12381.rs#L160-L194
+        let nbytes = nbits.div_ceil(8);
+        let (points_filtered, scalars_filtered): (Vec<_>, Vec<_>) = iter
+            .filter_map(|(point, scalar)| {
+                if *point == Self::zero() || all_zero(scalar).into() {
+                    return None;
+                }
+                Some((point, scalar))
+            })
+            .unzip();
+
+        if points_filtered.is_empty() {
+            return Self::zero();
+        }
+        let npoints = points_filtered.len();
+        let ncpus = strategy.parallelism_hint();
+
+        // Convert to affine points
+        let affine_points = Self::batch_to_affine(&points_filtered);
+
+        // Flatten scalars into contiguous byte array
+        let scalar_bytes: Vec<u8> = scalars_filtered
+            .iter()
+            .flat_map(|s| s[..nbytes].iter().copied())
+            .collect();
+
+        // For small inputs or single CPU, use single-threaded path
+        if ncpus < 2 || npoints < MIN_PARALLEL_POINTS {
+            return Self::msm_sequential(&affine_points, &scalar_bytes, nbits);
+        }
+
+        // Parallel MSM using tile_pippenger
+        Self::msm_parallel(&affine_points, &scalar_bytes, nbits, ncpus, strategy)
+    }
+
+    fn msm_sequential(affine_points: &[blst_p2_affine], scalars: &[u8], nbits: usize) -> Self {
+        let npoints = affine_points.len();
+
+        // SAFETY: blst_p2s_mult_pippenger_scratch_sizeof returns size in bytes for valid input.
+        let scratch_size = unsafe { blst_p2s_mult_pippenger_scratch_sizeof(npoints) };
+        assert_eq!(scratch_size % 8, 0, "scratch_size must be multiple of 8");
+        let mut scratch = vec![0u64; scratch_size / 8];
+
+        // blst uses null-terminated pointer arrays
+        let p: [*const blst_p2_affine; 2] = [affine_points.as_ptr(), ptr::null()];
+        let s: [*const u8; 2] = [scalars.as_ptr(), ptr::null()];
+
+        let mut result = blst_p2::default();
+        // SAFETY: All pointer arrays are valid and point to data that outlives this call.
+        unsafe {
+            blst_p2s_mult_pippenger(
+                &mut result,
+                p.as_ptr(),
+                npoints,
+                s.as_ptr(),
+                nbits,
+                scratch.as_mut_ptr(),
+            );
+        }
+        Self::from_blst_p2(result)
+    }
+
+    fn msm_parallel(
+        affine_points: &[blst_p2_affine],
+        scalars: &[u8],
+        nbits: usize,
+        ncpus: usize,
+        strategy: &impl Strategy,
+    ) -> Self {
+        // SAFETY: blst_p2s_mult_pippenger_scratch_sizeof(0) returns base scratch size.
+        let scratch_size = unsafe { blst_p2s_mult_pippenger_scratch_sizeof(0) } / 8;
+
+        msm_parallel_generic(
+            affine_points,
+            scalars,
+            nbits,
+            ncpus,
+            strategy,
+            |points, scalars, tile, nbytes, nbits, window| {
+                let mut scratch = vec![0u64; scratch_size << (window - 1)];
+                let mut result = blst_p2::default();
+                // blst uses null-terminated pointer arrays
+                let p: [*const blst_p2_affine; 2] = [points[tile.x..].as_ptr(), ptr::null()];
+                let s: [*const u8; 2] = [scalars[tile.x * nbytes..].as_ptr(), ptr::null()];
+                // SAFETY: All pointers valid, scratch sized correctly for window.
+                unsafe {
+                    blst_p2s_tile_pippenger(
+                        &mut result,
+                        p.as_ptr(),
+                        tile.dx,
+                        s.as_ptr(),
+                        nbits,
+                        scratch.as_mut_ptr(),
+                        tile.y,
+                        window,
+                    );
+                }
+                result
+            },
+            |a, b| {
+                let mut result = blst_p2::default();
+                // SAFETY: blst_p2_add_or_double is safe for valid blst_p2 points.
+                unsafe { blst_p2_add_or_double(&mut result, a, b) };
+                result
+            },
+            |a| {
+                let mut result = blst_p2::default();
+                // SAFETY: blst_p2_double is safe for valid blst_p2 points.
+                unsafe { blst_p2_double(&mut result, a) };
+                result
+            },
+            Self::from_blst_p2,
+        )
     }
 }
 
@@ -1029,65 +1597,48 @@ impl<'a> Mul<&'a Scalar> for G2 {
     }
 }
 
-impl Space<Scalar> for G2 {
-    /// Performs multi-scalar multiplication (MSM) on G2 points using Pippenger's algorithm.
-    /// Computes `sum(scalars[i] * points[i])`.
-    ///
-    /// Filters out pairs where the point is the identity element (infinity).
-    /// Returns an error if the lengths of the input slices mismatch.
-    fn msm(points: &[Self], scalars: &[Scalar], _strategy: &impl Strategy) -> Self {
-        // Assert input validity
-        assert_eq!(points.len(), scalars.len(), "mismatched lengths");
-
-        // Prepare points (affine) and scalars (raw blst_scalar), filtering identity points
-        let mut points_filtered = Vec::with_capacity(points.len());
-        let mut scalars_filtered = Vec::with_capacity(scalars.len());
-        for (point, scalar) in points.iter().zip(scalars.iter()) {
-            // `blst` does not filter out infinity, so we must ensure it is impossible.
-            //
-            // Sources:
-            // * https://github.com/supranational/blst/blob/cbc7e166a10d7286b91a3a7bea341e708962db13/src/multi_scalar.c#L10-L12
-            // * https://github.com/MystenLabs/fastcrypto/blob/0acf0ff1a163c60e0dec1e16e4fbad4a4cf853bd/fastcrypto/src/groups/bls12381.rs#L160-L194
-            if *point == Self::zero() || *scalar == Scalar::zero() {
-                continue;
-            }
-            points_filtered.push(point.as_blst_p2_affine());
-            scalars_filtered.push(scalar.as_blst_scalar());
-        }
-
-        // If all points were filtered, return zero.
-        if points_filtered.is_empty() {
-            return Self::zero();
-        }
-
-        // Create vectors of pointers for the blst API
-        let points: Vec<*const blst_p2_affine> =
-            points_filtered.iter().map(|p| p as *const _).collect();
-        let scalars: Vec<*const u8> = scalars_filtered.iter().map(|s| s.b.as_ptr()).collect();
-
-        // Allocate scratch space for Pippenger algorithm
-        // SAFETY: blst_p2s_mult_pippenger_scratch_sizeof returns size in bytes for valid input.
-        let scratch_size = unsafe { blst_p2s_mult_pippenger_scratch_sizeof(points.len()) };
-        // Ensure scratch_size is a multiple of 8 to avoid truncation in division.
-        assert_eq!(scratch_size % 8, 0, "scratch_size must be multiple of 8");
-        let mut scratch = vec![MaybeUninit::<u64>::uninit(); scratch_size / 8];
-
-        // Perform multi-scalar multiplication
-        let mut msm_result = blst_p2::default();
-        // SAFETY: All pointer arrays are valid and point to data that outlives this call.
-        // points_filtered and scalars_filtered remain alive until after this block.
+impl<'a> MulAssign<&'a SmallScalar> for G2 {
+    fn mul_assign(&mut self, rhs: &'a SmallScalar) {
+        let ptr = &raw mut self.0;
+        // SAFETY: blst_p2_mult supports in-place (ret==a). Using SMALL_SCALAR_BITS (128)
+        // processes only the lower 128 bits of the scalar, halving computation time.
         unsafe {
-            blst_p2s_mult_pippenger(
-                &mut msm_result,
-                points.as_ptr(),
-                points.len(),
-                scalars.as_ptr(),
-                SCALAR_BITS, // Using SCALAR_BITS (255) ensures full scalar range
-                scratch.as_mut_ptr() as *mut _,
-            );
+            blst_p2_mult(ptr, ptr, rhs.inner.b.as_ptr(), SMALL_SCALAR_BITS);
         }
+    }
+}
 
-        Self::from_blst_p2(msm_result)
+impl<'a> Mul<&'a SmallScalar> for G2 {
+    type Output = Self;
+
+    fn mul(mut self, rhs: &'a SmallScalar) -> Self::Output {
+        self *= rhs;
+        self
+    }
+}
+
+impl Space<Scalar> for G2 {
+    fn msm(points: &[Self], scalars: &[Scalar], strategy: &impl Strategy) -> Self {
+        assert_eq!(points.len(), scalars.len(), "mismatched lengths");
+        let scalar_bytes: Vec<_> = scalars.iter().map(|s| s.as_blst_scalar()).collect();
+        Self::msm_inner(
+            points
+                .iter()
+                .zip(scalar_bytes.iter().map(|s| s.b.as_slice())),
+            SCALAR_BITS,
+            strategy,
+        )
+    }
+}
+
+impl Space<SmallScalar> for G2 {
+    fn msm(points: &[Self], scalars: &[SmallScalar], strategy: &impl Strategy) -> Self {
+        assert_eq!(points.len(), scalars.len(), "mismatched lengths");
+        Self::msm_inner(
+            points.iter().zip(scalars.iter().map(|s| s.as_bytes())),
+            SMALL_SCALAR_BITS,
+            strategy,
+        )
     }
 }
 
@@ -1126,19 +1677,26 @@ impl HashToGroup for G2 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bls12381::primitives::group::Scalar;
     use commonware_codec::{DecodeExt, Encode};
-    use commonware_math::algebra::test_suites;
-    use commonware_parallel::Sequential;
+    use commonware_math::algebra::{test_suites, Random};
+    use commonware_parallel::{Rayon, Sequential};
     use commonware_utils::test_rng;
     use proptest::{prelude::*, strategy::Strategy};
-    use std::collections::{BTreeSet, HashMap};
+    use rand::{rngs::StdRng, SeedableRng};
+    use std::{
+        collections::{BTreeSet, HashMap},
+        num::NonZeroUsize,
+    };
 
     impl Arbitrary for Scalar {
         type Parameters = ();
         type Strategy = BoxedStrategy<Self>;
 
         fn arbitrary_with(_args: Self::Parameters) -> Self::Strategy {
-            any::<[u8; 64]>().prop_map(Self::from_bytes).boxed()
+            any::<[u8; 32]>()
+                .prop_map(|seed| Self::random(&mut StdRng::from_seed(seed)))
+                .boxed()
         }
     }
 
@@ -1445,27 +2003,20 @@ mod tests {
         let mut scalar_set = BTreeSet::new();
         let mut g1_set = BTreeSet::new();
         let mut g2_set = BTreeSet::new();
-        let mut share_set = BTreeSet::new();
         while scalar_set.len() < NUM_ITEMS {
             let scalar = Scalar::random(&mut rng);
             let g1 = G1::generator() * &scalar;
             let g2 = G2::generator() * &scalar;
-            let share = Share {
-                index: scalar_set.len() as u32,
-                private: scalar.clone(),
-            };
 
             scalar_set.insert(scalar);
             g1_set.insert(g1);
             g2_set.insert(g2);
-            share_set.insert(share);
         }
 
         // Verify that the sets contain the expected number of unique items.
         assert_eq!(scalar_set.len(), NUM_ITEMS);
         assert_eq!(g1_set.len(), NUM_ITEMS);
         assert_eq!(g2_set.len(), NUM_ITEMS);
-        assert_eq!(share_set.len(), NUM_ITEMS);
 
         // Verify that `BTreeSet` iteration is sorted, which relies on `Ord`.
         let scalars: Vec<_> = scalar_set.iter().collect();
@@ -1474,20 +2025,16 @@ mod tests {
         assert!(g1s.windows(2).all(|w| w[0] <= w[1]));
         let g2s: Vec<_> = g2_set.iter().collect();
         assert!(g2s.windows(2).all(|w| w[0] <= w[1]));
-        let shares: Vec<_> = share_set.iter().collect();
-        assert!(shares.windows(2).all(|w| w[0] <= w[1]));
 
         // Test that we can use these types as keys in hash maps, which relies on `Hash` and `Eq`.
         let scalar_map: HashMap<_, _> = scalar_set.iter().cloned().zip(0..).collect();
         let g1_map: HashMap<_, _> = g1_set.iter().cloned().zip(0..).collect();
         let g2_map: HashMap<_, _> = g2_set.iter().cloned().zip(0..).collect();
-        let share_map: HashMap<_, _> = share_set.iter().cloned().zip(0..).collect();
 
         // Verify that the maps contain the expected number of unique items.
         assert_eq!(scalar_map.len(), NUM_ITEMS);
         assert_eq!(g1_map.len(), NUM_ITEMS);
         assert_eq!(g2_map.len(), NUM_ITEMS);
-        assert_eq!(share_map.len(), NUM_ITEMS);
     }
 
     #[test]
@@ -1541,6 +2088,128 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_secret_scalar_equality() {
+        let mut rng = test_rng();
+        let scalar1 = Scalar::random(&mut rng);
+        let scalar2 = scalar1.clone();
+        let scalar3 = Scalar::random(&mut rng);
+
+        let s1 = Secret::new(scalar1);
+        let s2 = Secret::new(scalar2);
+        let s3 = Secret::new(scalar3);
+
+        // Same scalar should be equal
+        assert_eq!(s1, s2);
+        // Different scalars should (very likely) be different
+        assert_ne!(s1, s3);
+    }
+
+    #[test]
+    fn test_share_redacted() {
+        let mut rng = test_rng();
+        let share = Share::new(Participant::new(1), Private::random(&mut rng));
+        let debug = format!("{:?}", share);
+        let display = format!("{}", share);
+        assert!(debug.contains("REDACTED"));
+        assert!(display.contains("REDACTED"));
+    }
+
+    fn test_msm_parallel_impl<G>(points: Vec<G>, scalars: Vec<Scalar>)
+    where
+        G: Space<Scalar> + PartialEq + Debug + Copy,
+    {
+        let par = Rayon::new(NonZeroUsize::new(8).unwrap()).unwrap();
+        let seq = G::msm(&points, &scalars, &Sequential);
+        assert_eq!(seq, G::msm(&points, &scalars, &par));
+    }
+
+    fn test_msm_parallel_edge_cases_impl<G>(
+        points: Vec<G>,
+        scalars: Vec<Scalar>,
+        single_point: G,
+        single_scalar: Scalar,
+        idx: usize,
+    ) where
+        G: Space<Scalar> + Additive + PartialEq + Debug + Copy,
+        for<'a> G: Mul<&'a Scalar, Output = G>,
+    {
+        let par = Rayon::new(NonZeroUsize::new(8).unwrap()).unwrap();
+        let n = points.len();
+
+        // All zero scalars
+        assert_eq!(G::msm(&points, &vec![Scalar::zero(); n], &par), G::zero());
+
+        // All identity points
+        assert_eq!(G::msm(&vec![G::zero(); n], &scalars, &par), G::zero());
+
+        // Single nonzero among zeros
+        let mut pts = vec![G::zero(); n];
+        let mut scalars = vec![Scalar::zero(); n];
+        pts[idx] = single_point;
+        scalars[idx] = single_scalar.clone();
+        assert_eq!(G::msm(&pts, &scalars, &par), single_point * &single_scalar);
+    }
+
+    proptest! {
+        #[test]
+        fn test_msm_parallel_g1(
+            points in prop::collection::vec(any::<G1>(), MIN_PARALLEL_POINTS..=100),
+            scalars in prop::collection::vec(any::<Scalar>(), MIN_PARALLEL_POINTS..=100),
+        ) {
+            let n = points.len().min(scalars.len());
+            test_msm_parallel_impl(
+                points.into_iter().take(n).collect(),
+                scalars.into_iter().take(n).collect(),
+            );
+        }
+
+        #[test]
+        fn test_msm_parallel_g2(
+            points in prop::collection::vec(any::<G2>(), MIN_PARALLEL_POINTS..=100),
+            scalars in prop::collection::vec(any::<Scalar>(), MIN_PARALLEL_POINTS..=100),
+        ) {
+            let n = points.len().min(scalars.len());
+            test_msm_parallel_impl(
+                points.into_iter().take(n).collect(),
+                scalars.into_iter().take(n).collect(),
+            );
+        }
+
+        #[test]
+        fn test_msm_parallel_edge_cases_g1(
+            points in prop::collection::vec(any::<G1>(), 50..=50),
+            scalars in prop::collection::vec(any::<Scalar>(), 50..=50),
+            single_point in any::<G1>(),
+            single_scalar in any::<Scalar>(),
+            idx in 0usize..50,
+        ) {
+            test_msm_parallel_edge_cases_impl(points, scalars, single_point, single_scalar, idx);
+        }
+
+        #[test]
+        fn test_msm_parallel_edge_cases_g2(
+            points in prop::collection::vec(any::<G2>(), 50..=50),
+            scalars in prop::collection::vec(any::<Scalar>(), 50..=50),
+            single_point in any::<G2>(),
+            single_scalar in any::<Scalar>(),
+            idx in 0usize..50,
+        ) {
+            test_msm_parallel_edge_cases_impl(points, scalars, single_point, single_scalar, idx);
+        }
+    }
+
+    #[test]
+    fn test_msm_breakdown_high_parallelism() {
+        for npoints in [32, 50, 100, 200] {
+            let window = pippenger_window_size(npoints);
+            for ncpus in [64, 128, 256, 512, 1024, 2048] {
+                let (nx, ny, final_wnd) = msm_breakdown(SCALAR_BITS, window, ncpus);
+                assert!(nx >= 1 && ny >= 1 && final_wnd >= 1);
+            }
+        }
+    }
+
     #[cfg(feature = "arbitrary")]
     mod conformance {
         use super::*;
@@ -1549,6 +2218,7 @@ mod tests {
         commonware_conformance::conformance_tests! {
             CodecConformance<G1>,
             CodecConformance<G2>,
+            CodecConformance<Private>,
             CodecConformance<Scalar>,
             CodecConformance<Share>
         }

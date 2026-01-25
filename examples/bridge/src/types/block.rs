@@ -1,8 +1,8 @@
 use crate::Scheme;
-use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error, Read, ReadExt, Write};
 use commonware_consensus::simplex::types::Finalization;
 use commonware_cryptography::Digest;
+use commonware_runtime::{Buf, BufMut};
 
 /// Enum representing the valid formats for blocks.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,13 +63,16 @@ mod tests {
     use super::*;
     use commonware_codec::{DecodeExt, Encode, FixedSize};
     use commonware_consensus::{
-        simplex::{scheme::bls12381_threshold, types::Proposal},
+        simplex::types::Proposal,
         types::{Epoch, Round, View},
     };
     use commonware_cryptography::{
-        bls12381::primitives::{
-            group::{self},
-            variant::{MinSig, Variant},
+        bls12381::{
+            certificate::threshold::Certificate,
+            primitives::{
+                group,
+                variant::{MinSig, Variant},
+            },
         },
         sha256::Digest as Sha256Digest,
     };
@@ -82,20 +85,15 @@ mod tests {
 
     fn new_finalization() -> Finalization<Scheme, Sha256Digest> {
         let scalar = group::Scalar::random(&mut test_rng());
-        let mut proposal_signature = <MinSig as Variant>::Signature::generator();
-        proposal_signature *= &scalar;
-        let mut seed_signature = <MinSig as Variant>::Signature::generator();
-        seed_signature *= &scalar;
+        let mut signature = <MinSig as Variant>::Signature::generator();
+        signature *= &scalar;
         Finalization {
             proposal: Proposal {
                 round: Round::new(Epoch::new(333), View::new(12345)),
                 parent: View::new(54321),
                 payload: new_digest(),
             },
-            certificate: bls12381_threshold::Signature::<MinSig> {
-                vote_signature: proposal_signature,
-                seed_signature,
-            },
+            certificate: Certificate::new(signature),
         }
     }
 

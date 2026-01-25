@@ -2,18 +2,19 @@
 
 use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
-use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
+use commonware_runtime::{buffer::PoolRef, deterministic, Metrics, Runner};
 use commonware_storage::mmr::{
     journaled::{CleanMmr, Config, DirtyMmr, Mmr, SyncConfig},
     location::{Location, LocationRangeExt},
     Position, StandardHasher as Standard,
 };
-use commonware_utils::{NZUsize, NZU64};
+use commonware_utils::{NZUsize, NZU16, NZU64};
 use libfuzzer_sys::fuzz_target;
+use std::num::NonZeroU16;
 
 const MAX_OPERATIONS: usize = 200;
 const MAX_DATA_SIZE: usize = 64;
-const PAGE_SIZE: usize = 111;
+const PAGE_SIZE: NonZeroU16 = NZU16!(111);
 const PAGE_CACHE_SIZE: usize = 5;
 const ITEMS_PER_BLOB: u64 = 7;
 
@@ -88,7 +89,7 @@ fn test_config(partition_suffix: &str) -> Config {
         items_per_blob: NZU64!(ITEMS_PER_BLOB),
         write_buffer: NZUsize!(1024),
         thread_pool: None,
-        buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+        buffer_pool: PoolRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
     }
 }
 
@@ -116,6 +117,7 @@ fn fuzz(input: FuzzInput) {
 
         let mut historical_sizes = Vec::new();
         let mut mmr = MmrState::Clean(mmr);
+        let mut restarts = 0usize;
 
         for op in input.operations {
             mmr = match op {
@@ -285,8 +287,9 @@ fn fuzz(input: FuzzInput) {
                             let range =
                                 Location::new(start_loc).unwrap()..Location::new(end_loc).unwrap();
 
-                            if let Ok(historical_proof) =
-                                mmr.historical_range_proof(mmr.size(), range.clone()).await
+                            if let Ok(historical_proof) = mmr
+                                .historical_range_proof(mmr.leaves(), range.clone())
+                                .await
                             {
                                 let root = mmr.root();
                                 assert!(historical_proof.verify_range_inclusion(
@@ -430,15 +433,20 @@ fn fuzz(input: FuzzInput) {
                     // Init a new MMR
                     drop(mmr);
                     let new_mmr = Mmr::init(
-                        context.clone(),
+                        context
+                            .with_label("mmr")
+                            .with_attribute("instance", restarts),
                         &mut hasher,
                         test_config("fuzz_test_mmr_journaled"),
                     )
                     .await
                     .unwrap();
-                    // Reset tracking variables to match recovered state
-                    leaves.clear();
-                    historical_sizes.clear();
+                    restarts += 1;
+
+                    // Truncate tracking variables to match recovered state
+                    let recovered_leaves = new_mmr.leaves().as_u64() as usize;
+                    leaves.truncate(recovered_leaves);
+                    historical_sizes.truncate(recovered_leaves);
                     MmrState::Clean(new_mmr)
                 }
 
@@ -460,13 +468,20 @@ fn fuzz(input: FuzzInput) {
                         pinned_nodes: None,
                     };
 
-                    if let Ok(sync_mmr) =
-                        CleanMmr::init_sync(context.clone(), sync_config, &mut hasher).await
+                    if let Ok(sync_mmr) = CleanMmr::init_sync(
+                        context
+                            .with_label("sync")
+                            .with_attribute("instance", restarts),
+                        sync_config,
+                        &mut hasher,
+                    )
+                    .await
                     {
                         assert!(sync_mmr.size() <= upper_bound_pos);
                         assert_eq!(sync_mmr.pruned_to_pos(), lower_bound_pos);
                         sync_mmr.destroy().await.unwrap();
                     }
+                    restarts += 1;
                     mmr
                 }
             };

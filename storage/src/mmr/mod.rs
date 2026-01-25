@@ -73,7 +73,9 @@ pub mod location;
 pub mod mem;
 pub mod position;
 pub mod proof;
-pub mod stability;
+
+#[cfg(test)]
+pub(crate) mod conformance;
 
 cfg_if::cfg_if! {
     if #[cfg(feature = "std")] {
@@ -87,7 +89,7 @@ cfg_if::cfg_if! {
 pub use hasher::Standard as StandardHasher;
 pub use location::{Location, LocationError, MAX_LOCATION};
 pub use position::{Position, MAX_POSITION};
-pub use proof::Proof;
+pub use proof::{Proof, MAX_PROOF_DIGESTS_PER_ELEMENT};
 use thiserror::Error;
 
 /// Errors that can occur when interacting with an MMR.
@@ -138,4 +140,13 @@ pub enum Error {
     InvalidPinnedNodes,
     #[error("data corrupted: {0}")]
     DataCorrupted(&'static str),
+}
+
+impl From<LocationError> for Error {
+    fn from(err: LocationError) -> Self {
+        match err {
+            LocationError::NonLeaf(pos) => Self::PositionNotLeaf(pos),
+            LocationError::Overflow(pos) => Self::InvalidPosition(pos),
+        }
+    }
 }

@@ -20,6 +20,23 @@
 //! exposed. For applications only interested in collecting evidence for liveness/faults, use [`reporter::AttributableReporter`]
 //! which automatically handles filtering and verification based on scheme (hiding votes/proofs that are not attributable). If
 //! full observability is desired, process all messages passed through the [`crate::Reporter`] interface.
+//!
+//! # BLS12-381 Threshold Variants
+//!
+//! The [`bls12381_threshold`] module provides two variants:
+//!
+//! - [`bls12381_threshold::standard`]: Standard threshold signatures. Certificates contain only a
+//!   vote signature recovered from partial signatures.
+//!
+//! - [`bls12381_threshold::vrf`]: Threshold VRF (Verifiable Random Function) that produces both
+//!   vote signatures and per-round seed signatures. The seed can be used for randomness (e.g.,
+//!   leader election, timelock encryption).
+//!
+//! **Security Warning for VRF Usage**: It is **not safe** to use a round's randomness to drive
+//! execution in that same round. A malicious leader can selectively distribute blocks to gain
+//! early visibility of the randomness output, then choose nullification if the outcome is
+//! unfavorable. Applications should employ a "commit-then-reveal" pattern by binding randomness
+//! requests in finalized blocks **before** the reveal occurs (e.g., `draw(view+100)`).
 
 use crate::simplex::types::Subject;
 use bytes::Bytes;

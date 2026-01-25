@@ -24,7 +24,6 @@ commonware-macros.workspace = true
 commonware-parallel = { workspace = true, optional = true, features = ["std"] }
 commonware-runtime = { workspace = true, optional = true }
 commonware-utils = { workspace = true, default-features = false }
-crc32fast = { workspace = true, optional = true }
 futures = { workspace = true, optional = true }
 futures-util = { workspace = true, optional = true }
 prometheus-client = { workspace = true, optional = true }
@@ -53,7 +52,6 @@ std = [
 	"commonware-parallel?/std",
 	"commonware-runtime",
 	"commonware-utils/std",
-	"crc32fast/std",
 	"futures",
 	"futures-util",
 	"prometheus-client",
@@ -77,9 +75,15 @@ bench = false
 crate-type = ["rlib", "cdylib"]
 
 [[bench]]
-name = "qmdb"
+name = "qmdb_generate"
 harness = false
-path = "src/qmdb/benches/bench.rs"
+path = "src/qmdb/benches/generate_bench.rs"
+required-features = ["test-traits"]
+
+[[bench]]
+name = "qmdb_init"
+harness = false
+path = "src/qmdb/benches/init_bench.rs"
 required-features = ["test-traits"]
 
 [[bench]]

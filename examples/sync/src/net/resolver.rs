@@ -1,6 +1,6 @@
 use super::{io, wire};
 use crate::net::request_id;
-use commonware_codec::{Encode, Read};
+use commonware_codec::{EncodeShared, Read};
 use commonware_cryptography::Digest;
 use commonware_runtime::{Network, Spawner};
 use commonware_storage::{mmr::Location, qmdb::sync};
@@ -14,7 +14,7 @@ use std::num::NonZeroU64;
 #[derive(Clone)]
 pub struct Resolver<Op, D>
 where
-    Op: Read<Cfg = ()> + Encode + Send + Sync + 'static,
+    Op: Read<Cfg = ()> + EncodeShared + 'static,
     D: Digest,
 {
     request_id_generator: request_id::Generator,
@@ -23,7 +23,7 @@ where
 
 impl<Op, D> Resolver<Op, D>
 where
-    Op: Send + Sync + Read<Cfg = ()> + Encode,
+    Op: Read<Cfg = ()> + EncodeShared,
     D: Digest,
 {
     /// Returns a resolver connected to the server at the given address.
@@ -72,7 +72,7 @@ where
 
 impl<Op, D> sync::resolver::Resolver for Resolver<Op, D>
 where
-    Op: Clone + Send + Sync + Read<Cfg = ()> + Encode,
+    Op: Clone + Read<Cfg = ()> + EncodeShared,
     D: Digest,
 {
     type Digest = D;

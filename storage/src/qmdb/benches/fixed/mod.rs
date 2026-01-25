@@ -24,9 +24,9 @@ use commonware_storage::{
     },
     translator::EightCap,
 };
-use commonware_utils::{NZUsize, NZU64};
+use commonware_utils::{NZUsize, NZU16, NZU64};
 use rand::{rngs::StdRng, RngCore, SeedableRng};
-use std::num::{NonZeroU64, NonZeroUsize};
+use std::num::{NonZeroU16, NonZeroU64, NonZeroUsize};
 
 pub mod generate;
 pub mod init;
@@ -77,7 +77,7 @@ const CHUNK_SIZE: usize = 32;
 const THREADS: NonZeroUsize = NZUsize!(8);
 
 /// Use a "prod sized" page size to test the performance of the journal.
-const PAGE_SIZE: NonZeroUsize = NZUsize!(16384);
+const PAGE_SIZE: NonZeroU16 = NZU16!(16384);
 
 /// The number of pages to cache in the buffer pool.
 const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10_000);

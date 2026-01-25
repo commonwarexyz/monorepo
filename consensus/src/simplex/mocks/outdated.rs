@@ -13,7 +13,7 @@ use commonware_cryptography::{certificate::Scheme, Hasher};
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Spawner};
 use rand_core::CryptoRngCore;
-use std::{collections::HashMap, marker::PhantomData};
+use std::collections::HashMap;
 use tracing::debug;
 
 pub struct Config<S: Scheme> {
@@ -27,8 +27,6 @@ pub struct Outdated<E: Clock + CryptoRngCore + Spawner, S: Scheme, H: Hasher> {
 
     history: HashMap<View, Proposal<H::Digest>>,
     view_delta: ViewDelta,
-
-    _hasher: PhantomData<H>,
 }
 
 impl<E, S, H> Outdated<E, S, H>
@@ -44,8 +42,6 @@ where
 
             history: HashMap::new(),
             view_delta: cfg.view_delta,
-
-            _hasher: PhantomData,
         }
     }
 

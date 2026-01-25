@@ -28,6 +28,8 @@ use rand_core::CryptoRngCore;
 pub use sha256::{CoreSha256, Sha256};
 pub mod blake3;
 pub use blake3::{Blake3, CoreBlake3};
+pub mod crc32;
+pub use crc32::Crc32;
 pub mod bloomfilter;
 pub use bloomfilter::BloomFilter;
 #[cfg(feature = "std")]
@@ -35,6 +37,8 @@ pub mod handshake;
 pub mod lthash;
 pub use lthash::LtHash;
 pub mod secp256r1;
+pub mod secret;
+pub use secret::Secret;
 pub mod transcript;
 
 /// Produces [Signature]s over messages that can be verified with a corresponding [PublicKey].
@@ -72,7 +76,7 @@ pub trait Signer: Random + Send + Sync + Clone + 'static {
 }
 
 /// A [Signer] that can be serialized/deserialized.
-pub trait PrivateKey: Signer + Sized + ReadExt + Encode + PartialEq + Array {}
+pub trait PrivateKey: Signer + Sized + ReadExt + Encode {}
 
 /// Verifies [Signature]s over messages.
 pub trait Verifier {
@@ -236,10 +240,10 @@ pub trait Hasher: Default + Clone + Send + Sync + 'static {
 mod tests {
     use super::*;
     use commonware_codec::{DecodeExt, FixedSize};
-    use rand::rngs::OsRng;
+    use commonware_utils::test_rng;
 
     fn test_validate<C: PrivateKey>() {
-        let private_key = C::random(&mut OsRng);
+        let private_key = C::random(&mut test_rng());
         let public_key = private_key.public_key();
         assert!(C::PublicKey::decode(public_key.as_ref()).is_ok());
     }

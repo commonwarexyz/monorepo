@@ -10,11 +10,10 @@ cargo-fuzz = true
 
 [dependencies]
 arbitrary = { workspace = true, features = ["derive"] }
-bytes.workspace = true
 commonware-codec.workspace = true
 commonware-cryptography.workspace = true
 commonware-runtime.workspace = true
-commonware-storage = { workspace = true, features = ["std", "fuzzing", "test-traits"] }
+commonware-storage = { workspace = true, features = ["std", "fuzzing", "test-traits", "arbitrary"] }
 commonware-utils.workspace = true
 futures.workspace = true
 libfuzzer-sys.workspace = true
@@ -175,13 +174,6 @@ doc = false
 bench = false
 
 [[bin]]
-name = "cache_operations"
-path = "fuzz_targets/cache_operations.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
 name = "qmdb_immutable"
 path = "fuzz_targets/qmdb_immutable.rs"
 test = false
@@ -219,6 +211,20 @@ bench = false
 [[bin]]
 name = "proof_store"
 path = "fuzz_targets/proof_store.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "cache_operations"
+path = "fuzz_targets/cache_operations.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "oversized_recovery"
+path = "fuzz_targets/oversized_recovery.rs"
 test = false
 doc = false
 bench = false

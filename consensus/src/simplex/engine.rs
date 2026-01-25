@@ -8,6 +8,7 @@ use crate::{simplex::scheme::Scheme, CertifiableAutomaton, Relay, Reporter};
 use commonware_cryptography::Digest;
 use commonware_macros::select;
 use commonware_p2p::{Blocker, Receiver, Sender};
+use commonware_parallel::Strategy;
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner, Storage};
 use rand_core::CryptoRngCore;
 use tracing::debug;
@@ -22,16 +23,17 @@ pub struct Engine<
     A: CertifiableAutomaton<Context = Context<D, S::PublicKey>, Digest = D>,
     R: Relay<Digest = D>,
     F: Reporter<Activity = Activity<S, D>>,
+    T: Strategy,
 > {
     context: ContextCell<E>,
 
     voter: voter::Actor<E, S, L, B, D, A, R, F>,
     voter_mailbox: voter::Mailbox<S, D>,
 
-    batcher: batcher::Actor<E, S, B, D, F>,
+    batcher: batcher::Actor<E, S, B, D, F, T>,
     batcher_mailbox: batcher::Mailbox<S, D>,
 
-    resolver: resolver::Actor<E, S, B, D>,
+    resolver: resolver::Actor<E, S, B, D, T>,
     resolver_mailbox: resolver::Mailbox<S, D>,
 }
 
@@ -44,10 +46,11 @@ impl<
         A: CertifiableAutomaton<Context = Context<D, S::PublicKey>, Digest = D>,
         R: Relay<Digest = D>,
         F: Reporter<Activity = Activity<S, D>>,
-    > Engine<E, S, L, B, D, A, R, F>
+        T: Strategy,
+    > Engine<E, S, L, B, D, A, R, F, T>
 {
     /// Create a new `simplex` consensus engine.
-    pub fn new(context: E, cfg: Config<S, L, B, D, A, R, F>) -> Self {
+    pub fn new(context: E, cfg: Config<S, L, B, D, A, R, F, T>) -> Self {
         // Ensure configuration is valid
         cfg.assert();
 
@@ -58,6 +61,7 @@ impl<
                 scheme: cfg.scheme.clone(),
                 blocker: cfg.blocker.clone(),
                 reporter: cfg.reporter.clone(),
+                strategy: cfg.strategy.clone(),
                 epoch: cfg.epoch,
                 mailbox_size: cfg.mailbox_size,
                 activity_timeout: cfg.activity_timeout,
@@ -94,6 +98,7 @@ impl<
             resolver::Config {
                 blocker: cfg.blocker,
                 scheme: cfg.scheme,
+                strategy: cfg.strategy,
                 mailbox_size: cfg.mailbox_size,
                 epoch: cfg.epoch,
                 fetch_concurrent: cfg.fetch_concurrent,

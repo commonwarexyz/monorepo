@@ -3,7 +3,7 @@
 use arbitrary::{Arbitrary, Unstructured};
 use commonware_cryptography::{sha256::Digest, Sha256};
 use commonware_storage::{
-    mmr::{Location, Position, Proof, StandardHasher as Standard},
+    mmr::{Location, Proof, StandardHasher as Standard},
     qmdb::verify::verify_multi_proof,
 };
 use libfuzzer_sys::fuzz_target;
@@ -20,7 +20,7 @@ struct OperationInput {
 
 #[derive(Arbitrary, Debug)]
 struct FuzzInput {
-    proof_size: u64,
+    proof_leaves: Location,
     digests: Vec<[u8; 32]>,
     operations: Vec<OperationInput>,
     root: [u8; 32],
@@ -37,7 +37,7 @@ fn fuzz(input: FuzzInput) {
         .collect::<Vec<_>>();
 
     let proof = Proof {
-        size: Position::new(input.proof_size),
+        leaves: input.proof_leaves,
         digests,
     };
 

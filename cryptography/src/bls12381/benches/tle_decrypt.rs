@@ -6,7 +6,7 @@ use criterion::{criterion_group, BatchSize, Criterion};
 use rand::thread_rng;
 use std::hint::black_box;
 
-fn benchmark_tle_decrypt(c: &mut Criterion) {
+fn bench_tle_decrypt(c: &mut Criterion) {
     let mut rng = thread_rng();
     let (master_secret, master_public) = ops::keypair::<_, MinSig>(&mut rng);
     let target = 10u64.to_be_bytes();
@@ -27,5 +27,5 @@ fn benchmark_tle_decrypt(c: &mut Criterion) {
 criterion_group! {
     name = benches;
     config = Criterion::default().sample_size(10);
-    targets = benchmark_tle_decrypt
+    targets = bench_tle_decrypt
 }

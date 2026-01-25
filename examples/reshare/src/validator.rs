@@ -14,7 +14,6 @@ use commonware_cryptography::{
     bls12381::primitives::variant::MinSig, ed25519, Hasher, Sha256, Signer,
 };
 use commonware_p2p::authenticated::discovery;
-use commonware_parallel::Rayon;
 use commonware_runtime::{tokio, Metrics, Quota, RayonPoolSpawner};
 use commonware_utils::{union, union_unique, NZUsize, NZU32};
 use futures::future::try_join_all;
@@ -43,12 +42,8 @@ pub async fn run<S, L>(
 ) where
     S: Scheme<<Sha256 as Hasher>::Digest, PublicKey = ed25519::PublicKey>,
     L: Elector<S>,
-    Provider<S, ed25519::PrivateKey, Rayon>: EpochProvider<
-        Variant = MinSig,
-        PublicKey = ed25519::PublicKey,
-        Scheme = S,
-        Strategy = Rayon,
-    >,
+    Provider<S, ed25519::PrivateKey>:
+        EpochProvider<Variant = MinSig, PublicKey = ed25519::PublicKey, Scheme = S>,
 {
     // Load the participant configuration.
     let config_str = std::fs::read_to_string(&args.config_path)
@@ -186,7 +181,7 @@ mod test {
         deterministic::{self, Runner},
         Clock, Handle, Quota, Runner as _, Spawner,
     };
-    use commonware_utils::{union, TryCollect};
+    use commonware_utils::{union, N3f1, TryCollect};
     use futures::{
         channel::{mpsc, oneshot},
         SinkExt, StreamExt,
@@ -276,6 +271,7 @@ mod test {
         participants: BTreeMap<PublicKey, (PrivateKey, Option<Share>)>,
         handles: BTreeMap<PublicKey, Handle<()>>,
         failures: HashSet<u64>,
+        restart_counts: BTreeMap<PublicKey, u32>,
     }
 
     impl Team {
@@ -290,8 +286,9 @@ mod test {
                 num_participants_per_round: per_round.to_vec(),
                 participants: participants.keys().cloned().try_collect().unwrap(),
             };
-            let (output, shares) = deal(&mut rng, Default::default(), peer_config.dealers(0))
-                .expect("deal should succeed");
+            let (output, shares) =
+                deal::<MinSig, _, N3f1>(&mut rng, Default::default(), peer_config.dealers(0))
+                    .expect("deal should succeed");
             for (key, share) in shares.into_iter() {
                 if let Some((_, maybe_share)) = participants.get_mut(&key) {
                     *maybe_share = Some(share);
@@ -303,6 +300,7 @@ mod test {
                 participants,
                 handles: Default::default(),
                 failures: HashSet::new(),
+                restart_counts: Default::default(),
             }
         }
 
@@ -323,6 +321,7 @@ mod test {
                 participants,
                 handles: Default::default(),
                 failures: HashSet::new(),
+                restart_counts: Default::default(),
             }
         }
 
@@ -335,12 +334,8 @@ mod test {
         ) where
             S: Scheme<<Sha256 as Hasher>::Digest, PublicKey = PublicKey>,
             L: Elector<S>,
-            Provider<S, PrivateKey, Sequential>: EpochProvider<
-                Variant = MinSig,
-                PublicKey = PublicKey,
-                Scheme = S,
-                Strategy = Sequential,
-            >,
+            Provider<S, PrivateKey>:
+                EpochProvider<Variant = MinSig, PublicKey = PublicKey, Scheme = S>,
         {
             if let Some(handle) = self.handles.remove(&pk) {
                 handle.abort();
@@ -349,7 +344,7 @@ mod test {
                 return;
             };
 
-            let mut control = oracle.control(pk.clone());
+            let control = oracle.control(pk.clone());
             let votes = control.register(VOTE_CHANNEL, TEST_QUOTA).await.unwrap();
             let certificates = control
                 .register(CERTIFICATE_CHANNEL, TEST_QUOTA)
@@ -374,6 +369,9 @@ mod test {
                 },
             );
 
+            let restart_count = self.restart_counts.entry(pk.clone()).or_insert(0);
+            let validator_ctx = ctx.with_label(&format!("validator_{pk}_{restart_count}"));
+            *restart_count += 1;
             let resolver_cfg = marshal_resolver::Config {
                 public_key: pk.clone(),
                 manager: oracle.manager(),
@@ -385,9 +383,10 @@ mod test {
                 priority_requests: false,
                 priority_responses: false,
             };
-            let marshal = marshal_resolver::init(ctx, resolver_cfg, marshal);
+            let marshal =
+                marshal_resolver::init(&validator_ctx.with_label("marshal"), resolver_cfg, marshal);
             let engine = engine::Engine::<_, _, _, _, Sha256, MinSig, S, L, _>::new(
-                ctx.with_label(&format!("validator_{}", &pk)),
+                validator_ctx.with_label("consensus"),
                 engine::Config {
                     signer: sk.clone(),
                     manager: oracle.manager(),
@@ -428,10 +427,8 @@ mod test {
                 self.start_one::<EdScheme, RoundRobin>(ctx, oracle, updates, pk)
                     .await;
             } else {
-                self.start_one::<ThresholdScheme<MinSig, Sequential>, Random>(
-                    ctx, oracle, updates, pk,
-                )
-                .await;
+                self.start_one::<ThresholdScheme<MinSig>, Random>(ctx, oracle, updates, pk)
+                    .await;
             }
         }
 
@@ -725,7 +722,7 @@ mod test {
                         if team.output.is_none() {
                             team.start_one::<EdScheme, RoundRobin>(&ctx, &mut oracle, updates_in.clone(), pk).await;
                         } else {
-                            team.start_one::<ThresholdScheme<MinSig, Sequential>, Random>(&ctx, &mut oracle, updates_in.clone(), pk).await;
+                            team.start_one::<ThresholdScheme<MinSig>, Random>(&ctx, &mut oracle, updates_in.clone(), pk).await;
                         }
                     },
                     _ = crash_receiver.next() => {

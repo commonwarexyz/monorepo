@@ -9,7 +9,7 @@ mod no_coding;
 mod reed_solomon;
 mod zoda;
 
-pub(crate) fn benchmark_encode_generic<S: Scheme>(name: &str, c: &mut Criterion) {
+pub(crate) fn bench_encode_generic<S: Scheme>(name: &str, c: &mut Criterion) {
     let mut rng = ChaCha8Rng::seed_from_u64(0);
     let cases = [8, 12, 16, 19, 20, 24].map(|i| 2usize.pow(i));
     for data_length in cases.into_iter() {
@@ -47,7 +47,7 @@ pub(crate) fn benchmark_encode_generic<S: Scheme>(name: &str, c: &mut Criterion)
     }
 }
 
-pub(crate) fn benchmark_decode_generic<S: Scheme>(name: &str, c: &mut Criterion) {
+pub(crate) fn bench_decode_generic<S: Scheme>(name: &str, c: &mut Criterion) {
     let mut rng = ChaCha8Rng::seed_from_u64(0);
     let cases = [8, 12, 16, 19, 20, 24].map(|i| 2usize.pow(i));
     for data_length in cases.into_iter() {

@@ -4,18 +4,18 @@ use arbitrary::Arbitrary;
 use commonware_cryptography::{sha256::Digest, Sha256};
 use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
 use commonware_storage::{
-    mmr::{Location, Position, Proof, StandardHasher as Standard},
+    mmr::{Location, Proof, StandardHasher as Standard},
     qmdb::{
         any::{ordered::fixed::Db, FixedConfig as Config},
         verify_proof,
     },
     translator::EightCap,
 };
-use commonware_utils::{sequence::FixedBytes, NZUsize, NZU64};
+use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
 use libfuzzer_sys::fuzz_target;
 use std::{
     collections::{HashMap, HashSet},
-    num::NonZeroU64,
+    num::{NonZeroU16, NonZeroU64},
 };
 
 type Key = FixedBytes<32>;
@@ -44,7 +44,7 @@ enum QmdbOperation {
     ArbitraryProof {
         start_loc: u64,
         max_ops: NonZeroU64,
-        proof_size: u64,
+        proof_leaves: Location,
         digests: Vec<[u8; 32]>,
     },
     Get {
@@ -60,7 +60,7 @@ struct FuzzInput {
     operations: Vec<QmdbOperation>,
 }
 
-const PAGE_SIZE: usize = 555;
+const PAGE_SIZE: NonZeroU16 = NZU16!(555);
 const PAGE_CACHE_SIZE: usize = 100;
 
 fn fuzz(data: FuzzInput) {
@@ -78,7 +78,7 @@ fn fuzz(data: FuzzInput) {
             log_write_buffer: NZUsize!(1024),
             translator: EightCap,
             thread_pool: None,
-            buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+            buffer_pool: PoolRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
         };
 
         let mut db = Db::<_, Key, Value, Sha256, EightCap>::init(context.clone(), cfg.clone())
@@ -174,11 +174,11 @@ fn fuzz(data: FuzzInput) {
                     }
                 }
 
-                QmdbOperation::ArbitraryProof { start_loc, max_ops , proof_size, digests} => {
+                QmdbOperation::ArbitraryProof { start_loc, max_ops , proof_leaves, digests} => {
                     let actual_op_count = db.op_count();
 
                     let proof = Proof {
-                        size: Position::new(*proof_size),
+                        leaves: *proof_leaves,
                         digests: digests.iter().map(|d| Digest::from(*d)).collect(),
                     };
 

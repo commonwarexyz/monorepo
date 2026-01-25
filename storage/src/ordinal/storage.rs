@@ -1,10 +1,12 @@
 use super::{Config, Error};
 use crate::{kv, rmap::RMap, Persistable};
-use bytes::{Buf, BufMut};
-use commonware_codec::{CodecFixed, Encode, FixedSize, Read, ReadExt, Write as CodecWrite};
+use commonware_codec::{
+    CodecFixed, CodecFixedShared, Encode, FixedSize, Read, ReadExt, Write as CodecWrite,
+};
+use commonware_cryptography::{crc32, Crc32};
 use commonware_runtime::{
     buffer::{Read as ReadBuffer, Write},
-    Blob, Clock, Error as RError, Metrics, Storage,
+    Blob, Buf, BufMut, Clock, Error as RError, IoBufMut, Metrics, Storage,
 };
 use commonware_utils::{bitmap::BitMap, hex};
 use futures::future::try_join_all;
@@ -24,17 +26,17 @@ struct Record<V: CodecFixed<Cfg = ()>> {
 
 impl<V: CodecFixed<Cfg = ()>> Record<V> {
     fn new(value: V) -> Self {
-        let crc = crc32fast::hash(&value.encode());
+        let crc = Crc32::checksum(&value.encode());
         Self { value, crc }
     }
 
     fn is_valid(&self) -> bool {
-        self.crc == crc32fast::hash(&self.value.encode())
+        self.crc == Crc32::checksum(&self.value.encode())
     }
 }
 
 impl<V: CodecFixed<Cfg = ()>> FixedSize for Record<V> {
-    const SIZE: usize = V::SIZE + u32::SIZE;
+    const SIZE: usize = V::SIZE + crc32::Digest::SIZE;
 }
 
 impl<V: CodecFixed<Cfg = ()>> CodecWrite for Record<V> {
@@ -267,7 +269,7 @@ impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
         let blob = self.blobs.get(&section).unwrap();
         let offset = (index % items_per_blob) * Record::<V>::SIZE as u64;
         let record = Record::new(value);
-        blob.write_at(record.encode_mut(), offset).await?;
+        blob.write_at(offset, record.encode_mut()).await?;
         self.pending.insert(section);
 
         // Add to intervals
@@ -290,8 +292,10 @@ impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
         let section = index / items_per_blob;
         let blob = self.blobs.get(&section).unwrap();
         let offset = (index % items_per_blob) * Record::<V>::SIZE as u64;
-        let read_buf = vec![0u8; Record::<V>::SIZE];
-        let read_buf = blob.read_at(read_buf, offset).await?;
+        let read_buf = blob
+            .read_at(offset, IoBufMut::zeroed(Record::<V>::SIZE))
+            .await?
+            .coalesce();
         let record = Record::<V>::read(&mut read_buf.as_ref())?;
 
         // If record is valid, return it
@@ -414,7 +418,7 @@ impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
     }
 }
 
-impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> kv::Gettable for Ordinal<E, V> {
+impl<E: Storage + Metrics + Clock, V: CodecFixedShared> kv::Gettable for Ordinal<E, V> {
     type Key = u64;
     type Value = V;
     type Error = Error;
@@ -424,13 +428,13 @@ impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> kv::Gettable for Ord
     }
 }
 
-impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> kv::Updatable for Ordinal<E, V> {
+impl<E: Storage + Metrics + Clock, V: CodecFixedShared> kv::Updatable for Ordinal<E, V> {
     async fn update(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
         self.put(key, value).await
     }
 }
 
-impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Persistable for Ordinal<E, V> {
+impl<E: Storage + Metrics + Clock, V: CodecFixedShared> Persistable for Ordinal<E, V> {
     type Error = Error;
 
     async fn commit(&mut self) -> Result<(), Self::Error> {
@@ -453,5 +457,25 @@ mod conformance {
 
     commonware_conformance::conformance_tests! {
         CodecConformance<Record<u32>>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::kv::tests::{assert_gettable, assert_send, assert_updatable};
+    use commonware_runtime::deterministic::Context;
+
+    type TestOrdinal = Ordinal<Context, u64>;
+
+    #[allow(dead_code)]
+    fn assert_ordinal_futures_are_send(ordinal: &mut TestOrdinal, key: u64) {
+        assert_gettable(ordinal, &key);
+        assert_updatable(ordinal, key, 0u64);
+    }
+
+    #[allow(dead_code)]
+    fn assert_ordinal_destroy_is_send(ordinal: TestOrdinal) {
+        assert_send(ordinal.destroy());
     }
 }

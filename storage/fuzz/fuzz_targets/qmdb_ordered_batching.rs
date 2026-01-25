@@ -8,10 +8,11 @@ use commonware_storage::{
     qmdb::any::{ordered::fixed::Db, FixedConfig as Config},
     translator::EightCap,
 };
-use commonware_utils::{sequence::FixedBytes, NZUsize, NZU64};
+use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
 use libfuzzer_sys::fuzz_target;
 use std::{
     collections::{BTreeMap, HashSet},
+    num::NonZeroU16,
     ops::Bound::{Excluded, Unbounded},
 };
 
@@ -36,7 +37,7 @@ struct FuzzInput {
     operations: Vec<QmdbOperation>,
 }
 
-const PAGE_SIZE: usize = 555;
+const PAGE_SIZE: NonZeroU16 = NZU16!(111);
 const PAGE_CACHE_SIZE: usize = 100;
 
 fn fuzz(data: FuzzInput) {
@@ -53,7 +54,7 @@ fn fuzz(data: FuzzInput) {
             log_write_buffer: NZUsize!(1024),
             translator: EightCap,
             thread_pool: None,
-            buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+            buffer_pool: PoolRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
         };
 
         let mut db = OrderedDb::init(context.clone(), cfg.clone())

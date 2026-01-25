@@ -2,9 +2,9 @@ use crate::{
     mmr::Location,
     qmdb::sync::{self, error::EngineError},
 };
-use bytes::{Buf, BufMut};
 use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt as _, Write};
 use commonware_cryptography::Digest;
+use commonware_runtime::{Buf, BufMut};
 use std::ops::Range;
 
 /// Target state to sync to

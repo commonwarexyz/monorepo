@@ -4,7 +4,7 @@ use arbitrary::Arbitrary;
 use commonware_consensus::{
     simplex::{
         elector::{Config as ElectorConfig, Elector, Random, RoundRobin},
-        scheme::{bls12381_threshold, ed25519},
+        scheme::{bls12381_threshold::vrf as bls12381_threshold_vrf, ed25519},
     },
     types::{Round, View},
 };
@@ -24,8 +24,8 @@ use rand::{rngs::StdRng, SeedableRng};
 enum FuzzElector {
     RoundRobin,
     RoundRobinShuffled([u8; 32]),
-    RandomMinPk(bls12381_threshold::Signature<MinPk>),
-    RandomMinSig(bls12381_threshold::Signature<MinSig>),
+    RandomMinPk(bls12381_threshold_vrf::Certificate<MinPk>),
+    RandomMinSig(bls12381_threshold_vrf::Certificate<MinSig>),
 }
 
 #[derive(Arbitrary, Debug)]
@@ -60,10 +60,10 @@ where
     // For view 1 certificate should be None, for other views use provided certificate
     if input.round.view() == View::new(1) {
         let leader = elector.elect(input.round, None);
-        assert!(leader < participants.len() as u32);
+        assert!(leader.get() < participants.len() as u32);
     } else {
         let leader = elector.elect(input.round, certificate);
-        assert!(leader < participants.len() as u32);
+        assert!(leader.get() < participants.len() as u32);
     }
 }
 
@@ -76,10 +76,10 @@ fuzz_target!(|input: FuzzInput| {
             fuzz::<ed25519::Scheme, _>(&input, RoundRobin::<Sha256>::shuffled(seed), None);
         }
         FuzzElector::RandomMinPk(certificate) => {
-            fuzz::<bls12381_threshold::Scheme<_, MinPk>, _>(&input, Random, Some(certificate));
+            fuzz::<bls12381_threshold_vrf::Scheme<_, MinPk>, _>(&input, Random, Some(certificate));
         }
         FuzzElector::RandomMinSig(certificate) => {
-            fuzz::<bls12381_threshold::Scheme<_, MinSig>, _>(&input, Random, Some(certificate));
+            fuzz::<bls12381_threshold_vrf::Scheme<_, MinSig>, _>(&input, Random, Some(certificate));
         }
     }
 });

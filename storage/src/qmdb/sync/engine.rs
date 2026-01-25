@@ -272,13 +272,7 @@ where
         self,
         new_target: Target<DB::Digest>,
     ) -> Result<Self, Error<DB, R>> {
-        let journal = DB::resize_journal(
-            self.journal,
-            self.context.clone(),
-            &self.config,
-            new_target.range.clone(),
-        )
-        .await?;
+        let journal = DB::resize_journal(self.journal, new_target.range.clone()).await?;
 
         Ok(Self {
             outstanding_requests: Requests::new(),
@@ -533,7 +527,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mmr::{Position, Proof};
+    use crate::mmr::Proof;
     use commonware_cryptography::sha256;
     use futures::channel::oneshot;
 
@@ -548,7 +542,7 @@ mod tests {
                 start_loc: Location::new_unchecked(0),
                 result: Ok(FetchResult {
                     proof: Proof {
-                        size: Position::new(0),
+                        leaves: Location::new_unchecked(0),
                         digests: vec![],
                     },
                     operations: vec![],

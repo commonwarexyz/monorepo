@@ -38,7 +38,7 @@ fn bench_prove_range(c: &mut Criterion) {
                         let mut hasher = Sha256::new();
                         let range_leaves = &elements[start..=end];
                         assert!(proof
-                            .verify(&mut hasher, start as u32, range_leaves, &root)
+                            .verify_range_inclusion(&mut hasher, start as u32, range_leaves, &root)
                             .is_ok());
                     },
                     criterion::BatchSize::SmallInput,
