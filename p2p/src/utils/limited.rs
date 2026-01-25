@@ -1,9 +1,8 @@
 //! Rate-limited [`UnlimitedSender`] wrapper.
 
 use crate::{Recipients, UnlimitedSender};
-use bytes::Buf;
 use commonware_cryptography::PublicKey;
-use commonware_runtime::{Clock, KeyedRateLimiter, Quota};
+use commonware_runtime::{Clock, IoBufMut, KeyedRateLimiter, Quota};
 use commonware_utils::channels::ring;
 use futures::{lock::Mutex, Future, FutureExt, StreamExt};
 use std::{cmp, fmt, sync::Arc, time::SystemTime};
@@ -203,7 +202,7 @@ impl<'a, S: UnlimitedSender> crate::CheckedSender for CheckedSender<'a, S> {
 
     async fn send(
         self,
-        message: impl Buf + Send,
+        message: impl Into<IoBufMut> + Send,
         priority: bool,
     ) -> Result<Vec<Self::PublicKey>, Self::Error> {
         self.sender.send(self.recipients, message, priority).await
@@ -214,14 +213,13 @@ impl<'a, S: UnlimitedSender> crate::CheckedSender for CheckedSender<'a, S> {
 mod tests {
     use super::*;
     use crate::CheckedSender as _;
-    use bytes::Bytes;
     use commonware_cryptography::{ed25519, Signer as _};
-    use commonware_runtime::{deterministic::Runner, Quota, Runner as _};
+    use commonware_runtime::{deterministic::Runner, IoBuf, Quota, Runner as _};
     use commonware_utils::{channels::ring, NZUsize, NZU32};
     use thiserror::Error;
 
     type PublicKey = ed25519::PublicKey;
-    type SentMessage = (Recipients<PublicKey>, Bytes, bool);
+    type SentMessage = (Recipients<PublicKey>, IoBuf, bool);
 
     #[derive(Debug, Error)]
     #[error("mock send error")]
@@ -251,7 +249,7 @@ mod tests {
         async fn send(
             &mut self,
             recipients: Recipients<Self::PublicKey>,
-            mut message: impl Buf + Send,
+            message: impl Into<IoBufMut> + Send,
             priority: bool,
         ) -> Result<Vec<Self::PublicKey>, Self::Error> {
             let sent_to = match &recipients {
@@ -259,7 +257,7 @@ mod tests {
                 Recipients::Some(pks) => pks.clone(),
                 Recipients::All => Vec::new(),
             };
-            let message = message.copy_to_bytes(message.remaining());
+            let message = message.into().freeze();
             self.sent.lock().await.push((recipients, message, priority));
             Ok(sent_to)
         }
@@ -308,7 +306,7 @@ mod tests {
 
             let peer = key(1);
             let checked = limited.check(Recipients::One(peer.clone())).await.unwrap();
-            let sent_to = checked.send(Bytes::from("hello"), false).await.unwrap();
+            let sent_to = checked.send(IoBuf::from(b"hello"), false).await.unwrap();
             assert_eq!(sent_to, vec![peer]);
         });
     }
@@ -325,7 +323,7 @@ mod tests {
 
             // First check should succeed and consume the quota
             let checked = limited.check(Recipients::One(peer.clone())).await.unwrap();
-            checked.send(Bytes::from("first"), false).await.unwrap();
+            checked.send(IoBuf::from(b"first"), false).await.unwrap();
 
             // Second check should fail (rate limited)
             let result = limited.check(Recipients::One(peer)).await;
@@ -345,7 +343,7 @@ mod tests {
                 .check(Recipients::Some(peers_list.clone()))
                 .await
                 .unwrap();
-            let sent_to = checked.send(Bytes::from("hello"), false).await.unwrap();
+            let sent_to = checked.send(IoBuf::from(b"hello"), false).await.unwrap();
             assert_eq!(sent_to.len(), 3);
         });
     }
@@ -364,7 +362,7 @@ mod tests {
 
             // Rate limit peer1 by sending to it first
             let checked = limited.check(Recipients::One(peer1.clone())).await.unwrap();
-            checked.send(Bytes::from("limit"), false).await.unwrap();
+            checked.send(IoBuf::from(b"limit"), false).await.unwrap();
 
             // Now check with all three peers - peer1 should be filtered out
             let checked = limited
@@ -375,7 +373,7 @@ mod tests {
                 ]))
                 .await
                 .unwrap();
-            let sent_to = checked.send(Bytes::from("filtered"), false).await.unwrap();
+            let sent_to = checked.send(IoBuf::from(b"filtered"), false).await.unwrap();
 
             // peer1 should be filtered out since it's rate limited
             assert_eq!(sent_to.len(), 2);
@@ -401,7 +399,7 @@ mod tests {
                 .check(Recipients::One(peer1.clone()))
                 .await
                 .unwrap()
-                .send(Bytes::from("limit1"), false)
+                .send(IoBuf::from(b"limit1"), false)
                 .await
                 .unwrap();
 
@@ -409,7 +407,7 @@ mod tests {
                 .check(Recipients::One(peer2.clone()))
                 .await
                 .unwrap()
-                .send(Bytes::from("limit2"), false)
+                .send(IoBuf::from(b"limit2"), false)
                 .await
                 .unwrap();
 
@@ -443,7 +441,7 @@ mod tests {
 
             // First call establishes subscription - no known peers yet
             let checked = limited.check(Recipients::All).await.unwrap();
-            let sent_to = checked.send(Bytes::from("empty"), false).await.unwrap();
+            let sent_to = checked.send(IoBuf::from(b"empty"), false).await.unwrap();
             assert!(sent_to.is_empty());
 
             // Verify that the sender received the message with empty Recipients::Some
@@ -478,13 +476,13 @@ mod tests {
                 .check(Recipients::One(peer1.clone()))
                 .await
                 .unwrap()
-                .send(Bytes::from("limit"), false)
+                .send(IoBuf::from(b"limit"), false)
                 .await
                 .unwrap();
 
             // Check All should filter out peer1
             let checked = limited.check(Recipients::All).await.unwrap();
-            let sent_to = checked.send(Bytes::from("filtered"), false).await.unwrap();
+            let sent_to = checked.send(IoBuf::from(b"filtered"), false).await.unwrap();
 
             assert_eq!(sent_to.len(), 1);
             assert!(!sent_to.contains(&peer1));
@@ -514,7 +512,7 @@ mod tests {
                 .check(Recipients::One(peer1.clone()))
                 .await
                 .unwrap()
-                .send(Bytes::from("limit1"), false)
+                .send(IoBuf::from(b"limit1"), false)
                 .await
                 .unwrap();
 
@@ -522,7 +520,7 @@ mod tests {
                 .check(Recipients::One(peer2.clone()))
                 .await
                 .unwrap()
-                .send(Bytes::from("limit2"), false)
+                .send(IoBuf::from(b"limit2"), false)
                 .await
                 .unwrap();
 
@@ -562,7 +560,7 @@ mod tests {
                 .check(Recipients::One(peer))
                 .await
                 .unwrap()
-                .send(Bytes::from("priority"), true)
+                .send(IoBuf::from(b"priority"), true)
                 .await
                 .unwrap();
 
@@ -588,7 +586,7 @@ mod tests {
                 .check(Recipients::One(peer.clone()))
                 .await
                 .unwrap()
-                .send(Bytes::from("limit"), false)
+                .send(IoBuf::from(b"limit"), false)
                 .await
                 .unwrap();
 

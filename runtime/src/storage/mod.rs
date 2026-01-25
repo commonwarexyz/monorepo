@@ -1,8 +1,6 @@
 //! Implementations of the `Storage` trait that can be used by the runtime.
 
-#[ready(2)]
-use bytes::{Buf, BufMut};
-#[ready(2)]
+use crate::{Buf, BufMut};
 use commonware_codec::{DecodeExt, FixedSize, Read as CodecRead, Write as CodecWrite};
 use commonware_macros::{ready, ready_mod};
 #[ready(2)]
@@ -206,7 +204,7 @@ pub fn validate_partition_name(partition: &str) -> Result<(), crate::Error> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::{Header, HeaderError};
-    use crate::{Blob, Storage};
+    use crate::{Blob, Buf, IoBuf, IoBufMut, IoBufsMut, Storage};
     use commonware_codec::{DecodeExt, Encode};
 
     #[test]
@@ -299,6 +297,7 @@ pub(crate) mod tests {
         test_resize_then_open(&storage).await;
         test_partition_name_validation(&storage).await;
         test_blob_version_mismatch(&storage).await;
+        test_read_at_returns_same_buffer(&storage).await;
     }
 
     /// Test opening a blob, writing to it, and reading back the data.
@@ -310,11 +309,11 @@ pub(crate) mod tests {
         let (blob, len) = storage.open("partition", b"test_blob").await.unwrap();
         assert_eq!(len, 0);
 
-        blob.write_at(Vec::from("hello world"), 0).await.unwrap();
-        let read = blob.read_at(vec![0; 11], 0).await.unwrap();
+        blob.write_at(0, b"hello world").await.unwrap();
+        let read = blob.read_at(0, IoBufMut::zeroed(11)).await.unwrap();
 
         assert_eq!(
-            read.as_ref(),
+            read.coalesce(),
             b"hello world",
             "Blob content does not match expected value"
         );
@@ -370,15 +369,13 @@ pub(crate) mod tests {
         let (blob, _) = storage.open("partition", b"test_blob").await.unwrap();
 
         // Initialize blob with data of sufficient length first
-        blob.write_at(b"concurrent write".to_vec(), 0)
-            .await
-            .unwrap();
+        blob.write_at(0, b"concurrent write").await.unwrap();
 
         // Read and write concurrently
         let write_task = tokio::spawn({
             let blob = blob.clone();
             async move {
-                blob.write_at(b"concurrent write".to_vec(), 0)
+                blob.write_at(0, IoBuf::from(b"concurrent write"))
                     .await
                     .unwrap();
             }
@@ -386,14 +383,14 @@ pub(crate) mod tests {
 
         let read_task = tokio::spawn({
             let blob = blob.clone();
-            async move { blob.read_at(vec![0; 16], 0).await.unwrap() }
+            async move { blob.read_at(0, IoBufMut::zeroed(16)).await.unwrap() }
         });
 
         write_task.await.unwrap();
         let buffer = read_task.await.unwrap();
 
         assert_eq!(
-            buffer.as_ref(),
+            buffer.coalesce(),
             b"concurrent write",
             "Concurrent access failed"
         );
@@ -408,11 +405,15 @@ pub(crate) mod tests {
         let (blob, _) = storage.open("partition", b"large_blob").await.unwrap();
 
         let large_data = vec![42u8; 10 * 1024 * 1024]; // 10 MB
-        blob.write_at(large_data.clone(), 0).await.unwrap();
+        blob.write_at(0, large_data.clone()).await.unwrap();
 
-        let read = blob.read_at(vec![0; 10 * 1024 * 1024], 0).await.unwrap();
+        let read = blob
+            .read_at(0, IoBufMut::zeroed(10 * 1024 * 1024))
+            .await
+            .unwrap()
+            .coalesce();
 
-        assert_eq!(read.as_ref(), large_data, "Large data read/write failed");
+        assert_eq!(read, large_data.as_slice(), "Large data read/write failed");
     }
 
     /// Test overwriting data in a blob.
@@ -427,17 +428,20 @@ pub(crate) mod tests {
             .unwrap();
 
         // Write initial data
-        blob.write_at(b"initial data".to_vec(), 0).await.unwrap();
+        blob.write_at(0, b"initial data").await.unwrap();
 
         // Overwrite part of the data
-        blob.write_at(b"overwrite".to_vec(), 8).await.unwrap();
+        blob.write_at(8, b"overwrite").await.unwrap();
 
         // Read back the data
-        let read = blob.read_at(vec![0; 17], 0).await.unwrap();
+        let read = blob
+            .read_at(0, IoBufMut::zeroed(17))
+            .await
+            .unwrap()
+            .coalesce();
 
         assert_eq!(
-            read.as_ref(),
-            b"initial overwrite",
+            read, b"initial overwrite",
             "Data was not overwritten correctly"
         );
     }
@@ -454,10 +458,10 @@ pub(crate) mod tests {
             .unwrap();
 
         // Write some data
-        blob.write_at(b"hello".to_vec(), 0).await.unwrap();
+        blob.write_at(0, b"hello").await.unwrap();
 
         // Attempt to read beyond the written data
-        let result = blob.read_at(vec![0; 10], 6).await;
+        let result = blob.read_at(6, IoBufMut::zeroed(10)).await;
 
         assert!(
             result.is_err(),
@@ -477,17 +481,15 @@ pub(crate) mod tests {
             .unwrap();
 
         // Write data at a large offset
-        blob.write_at(b"offset data".to_vec(), 10_000)
-            .await
-            .unwrap();
+        blob.write_at(10_000, b"offset data").await.unwrap();
 
         // Read back the data
-        let read = blob.read_at(vec![0; 11], 10_000).await.unwrap();
-        assert_eq!(
-            read.as_ref(),
-            b"offset data",
-            "Data at large offset is incorrect"
-        );
+        let read = blob
+            .read_at(10_000, IoBufMut::zeroed(11))
+            .await
+            .unwrap()
+            .coalesce();
+        assert_eq!(read, b"offset data", "Data at large offset is incorrect");
     }
 
     /// Test appending data to a blob.
@@ -502,14 +504,18 @@ pub(crate) mod tests {
             .unwrap();
 
         // Write initial data
-        blob.write_at(b"first".to_vec(), 0).await.unwrap();
+        blob.write_at(0, b"first").await.unwrap();
 
         // Append data
-        blob.write_at(b"second".to_vec(), 5).await.unwrap();
+        blob.write_at(5, b"second").await.unwrap();
 
         // Read back the data
-        let read = blob.read_at(vec![0; 11], 0).await.unwrap();
-        assert_eq!(read.as_ref(), b"firstsecond", "Appended data is incorrect");
+        let read = blob
+            .read_at(0, IoBufMut::zeroed(11))
+            .await
+            .unwrap()
+            .coalesce();
+        assert_eq!(read, b"firstsecond", "Appended data is incorrect");
     }
 
     /// Test reading and writing with interleaved offsets.
@@ -521,15 +527,23 @@ pub(crate) mod tests {
         let (blob, _) = storage.open("partition", b"test_blob").await.unwrap();
 
         // Write data at different offsets
-        blob.write_at(b"first".to_vec(), 0).await.unwrap();
-        blob.write_at(b"second".to_vec(), 10).await.unwrap();
+        blob.write_at(0, b"first").await.unwrap();
+        blob.write_at(10, b"second").await.unwrap();
 
         // Read back the data
-        let read = blob.read_at(vec![0; 5], 0).await.unwrap();
-        assert_eq!(read.as_ref(), b"first", "Data at offset 0 is incorrect");
+        let read = blob
+            .read_at(0, IoBufMut::zeroed(5))
+            .await
+            .unwrap()
+            .coalesce();
+        assert_eq!(read, b"first", "Data at offset 0 is incorrect");
 
-        let read = blob.read_at(vec![0; 6], 10).await.unwrap();
-        assert_eq!(read.as_ref(), b"second", "Data at offset 10 is incorrect");
+        let read = blob
+            .read_at(10, IoBufMut::zeroed(6))
+            .await
+            .unwrap()
+            .coalesce();
+        assert_eq!(read, b"second", "Data at offset 10 is incorrect");
     }
 
     /// Test writing and reading large data in chunks.
@@ -549,16 +563,19 @@ pub(crate) mod tests {
 
         // Write data in chunks
         for i in 0..num_chunks {
-            blob.write_at(data.clone(), (i * chunk_size) as u64)
+            blob.write_at((i * chunk_size) as u64, data.clone())
                 .await
                 .unwrap();
         }
 
         // Read back the data in chunks
-        let mut read = vec![0u8; chunk_size].into();
         for i in 0..num_chunks {
-            read = blob.read_at(read, (i * chunk_size) as u64).await.unwrap();
-            assert_eq!(read.as_ref(), data, "Chunk {i} is incorrect");
+            let read = blob
+                .read_at((i * chunk_size) as u64, IoBufMut::zeroed(chunk_size))
+                .await
+                .unwrap()
+                .coalesce();
+            assert_eq!(read, data.as_slice(), "Chunk {i} is incorrect");
         }
     }
 
@@ -573,7 +590,7 @@ pub(crate) mod tests {
             .await
             .unwrap();
 
-        let result = blob.read_at(vec![0; 1], 0).await;
+        let result = blob.read_at(0, IoBufMut::zeroed(1)).await;
         assert!(
             result.is_err(),
             "Reading from an empty blob should return an error"
@@ -592,16 +609,16 @@ pub(crate) mod tests {
             .unwrap();
 
         // Write overlapping data
-        blob.write_at(b"overlap".to_vec(), 0).await.unwrap();
-        blob.write_at(b"map".to_vec(), 4).await.unwrap();
+        blob.write_at(0, b"overlap").await.unwrap();
+        blob.write_at(4, b"map").await.unwrap();
 
         // Read back the data
-        let read = blob.read_at(vec![0; 7], 0).await.unwrap();
-        assert_eq!(
-            read.as_ref(),
-            b"overmap",
-            "Overlapping writes are incorrect"
-        );
+        let read = blob
+            .read_at(0, IoBufMut::zeroed(7))
+            .await
+            .unwrap()
+            .coalesce();
+        assert_eq!(read, b"overmap", "Overlapping writes are incorrect");
     }
 
     async fn test_resize_then_open<S>(storage: &S)
@@ -616,7 +633,7 @@ pub(crate) mod tests {
                 .unwrap();
 
             // Write some data
-            blob.write_at(b"hello world".to_vec(), 0).await.unwrap();
+            blob.write_at(0, b"hello world").await.unwrap();
 
             // Resize the blob
             blob.resize(5).await.unwrap();
@@ -633,8 +650,12 @@ pub(crate) mod tests {
         assert_eq!(len, 5, "Blob length after resize is incorrect");
 
         // Read back the data
-        let read = blob.read_at(vec![0; 5], 0).await.unwrap();
-        assert_eq!(read.as_ref(), b"hello", "Resized data is incorrect");
+        let read = blob
+            .read_at(0, IoBufMut::zeroed(5))
+            .await
+            .unwrap()
+            .coalesce();
+        assert_eq!(read, b"hello", "Resized data is incorrect");
     }
 
     /// Test that partition names are validated correctly.
@@ -740,5 +761,69 @@ pub(crate) mod tests {
             ),
             "Expected BlobVersionMismatch error"
         );
+    }
+
+    /// Test that read_at returns the same buffer that was passed in (contract verification).
+    async fn test_read_at_returns_same_buffer<S>(storage: &S)
+    where
+        S: Storage + Send + Sync,
+        S::Blob: Send + Sync,
+    {
+        let (blob, _) = storage
+            .open("test_read_at_contract", b"blob")
+            .await
+            .unwrap();
+
+        // Write test data
+        blob.write_at(0, b"hello world").await.unwrap();
+
+        // Test with single buffer - verify same buffer is returned
+        let input_buf = IoBufMut::zeroed(11);
+        let input_ptr = input_buf.as_ref().as_ptr();
+        let output = blob.read_at(0, input_buf).await.unwrap();
+        assert!(
+            output.is_single(),
+            "Single input should return single output"
+        );
+        let output_ptr = output.chunk().as_ptr();
+        assert_eq!(
+            input_ptr, output_ptr,
+            "read_at must return the same buffer that was passed in"
+        );
+        assert_eq!(output.chunk(), b"hello world");
+
+        // Test with chunked buffers - verify same buffers are returned with correct data
+        let buf1 = IoBufMut::zeroed(5);
+        let buf2 = IoBufMut::zeroed(6);
+        let ptr1 = buf1.as_ref().as_ptr();
+        let ptr2 = buf2.as_ref().as_ptr();
+        let input_bufs = IoBufsMut::from(vec![buf1, buf2]);
+        assert!(!input_bufs.is_single(), "Should be chunked");
+
+        let output = blob.read_at(0, input_bufs).await.unwrap();
+        assert!(
+            !output.is_single(),
+            "Chunked input should return chunked output"
+        );
+
+        // Verify the buffers are the same and contain correct data
+        match output {
+            IoBufsMut::Chunked(chunks) => {
+                assert_eq!(chunks.len(), 2);
+                assert_eq!(
+                    chunks[0].as_ref().as_ptr(),
+                    ptr1,
+                    "First chunk must be the same buffer"
+                );
+                assert_eq!(
+                    chunks[1].as_ref().as_ptr(),
+                    ptr2,
+                    "Second chunk must be the same buffer"
+                );
+                assert_eq!(chunks[0], b"hello");
+                assert_eq!(chunks[1], b" world");
+            }
+            _ => panic!("Expected Chunked variant"),
+        }
     }
 }

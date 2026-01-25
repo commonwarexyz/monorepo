@@ -1,5 +1,6 @@
-use bytes::{Buf, BufMut, Bytes};
+use crate::Channel;
 use commonware_codec::{varint::UInt, EncodeSize, Error, RangeCfg, Read, ReadExt as _, Write};
+use commonware_runtime::{Buf, BufMut, IoBuf};
 
 /// Data is an arbitrary message sent between peers.
 #[derive(Clone, Debug, PartialEq)]
@@ -10,7 +11,7 @@ pub struct Data {
     pub channel: u64,
 
     /// The payload of the message.
-    pub message: Bytes,
+    pub message: IoBuf,
 }
 
 impl EncodeSize for Data {
@@ -31,9 +32,23 @@ impl Read for Data {
 
     fn read_cfg(buf: &mut impl Buf, range: &Self::Cfg) -> Result<Self, Error> {
         let channel = UInt::read(buf)?.into();
-        let message = Bytes::read_cfg(buf, range)?;
+        let message = IoBuf::read_cfg(buf, range)?;
         Ok(Self { channel, message })
     }
+}
+
+/// Pre-encoded data ready for transmission.
+///
+/// Contains the channel ID (for metrics) and the pre-encoded payload bytes.
+/// The `payload` field contains the fully encoded `Payload::Data(...)` bytes,
+/// ready to be sent directly to the stream layer.
+#[derive(Clone, Debug)]
+pub struct EncodedData {
+    /// The channel this data belongs to (used for metrics/logging).
+    pub channel: Channel,
+
+    /// Pre-encoded `Payload::Data(...)` bytes ready for transmission.
+    pub payload: IoBuf,
 }
 
 #[cfg(feature = "arbitrary")]
@@ -43,7 +58,7 @@ impl arbitrary::Arbitrary<'_> for Data {
         let message = {
             let size = u.int_in_range(0..=1024)?;
             let bytes = u.bytes(size)?;
-            Bytes::from(bytes.to_vec())
+            IoBuf::copy_from_slice(bytes)
         };
         Ok(Self { channel, message })
     }
@@ -51,15 +66,14 @@ impl arbitrary::Arbitrary<'_> for Data {
 
 #[cfg(test)]
 mod tests {
-    use crate::authenticated::data::Data;
-    use bytes::Bytes;
+    use super::*;
     use commonware_codec::{Decode as _, Encode as _, Error};
 
     #[test]
     fn test_data_codec() {
         let original = Data {
             channel: 12345,
-            message: Bytes::from("Hello, world!"),
+            message: IoBuf::from(b"Hello, world!"),
         };
         let encoded = original.encode();
         let decoded = Data::decode_cfg(encoded, &(13..=13).into()).unwrap();

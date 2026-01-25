@@ -6,9 +6,10 @@
 //! that recovery doesn't panic and leaves the journal in a consistent state.
 
 use arbitrary::{Arbitrary, Result, Unstructured};
-use bytes::{Buf, BufMut};
 use commonware_codec::{FixedSize, Read, ReadExt, Write};
-use commonware_runtime::{buffer::PoolRef, deterministic, Blob as _, Runner, Storage as _};
+use commonware_runtime::{
+    buffer::PoolRef, deterministic, Blob as _, Buf, BufMut, Metrics, Runner, Storage as _,
+};
 use commonware_storage::journal::segmented::oversized::{Config, Oversized, Record};
 use commonware_utils::{NZUsize, NZU16};
 use libfuzzer_sys::fuzz_target;
@@ -179,7 +180,7 @@ fn fuzz(input: FuzzInput) {
 
         // Phase 1: Create valid data
         let mut oversized: Oversized<_, TestEntry, TestValue> =
-            Oversized::init(context.clone(), cfg.clone())
+            Oversized::init(context.with_label("initial"), cfg.clone())
                 .await
                 .expect("Failed to init");
 
@@ -239,7 +240,7 @@ fn fuzz(input: FuzzInput) {
                     {
                         if size > 0 {
                             let offset = (size * (*offset_factor as u64)) / 256;
-                            let _ = blob.write_at(data.to_vec(), offset).await;
+                            let _ = blob.write_at(offset, data.to_vec()).await;
                             let _ = blob.sync().await;
                         }
                     }
@@ -254,7 +255,7 @@ fn fuzz(input: FuzzInput) {
                     {
                         if size > 0 {
                             let offset = (size * (*offset_factor as u64)) / 256;
-                            let _ = blob.write_at(data.to_vec(), offset).await;
+                            let _ = blob.write_at(offset, data.to_vec()).await;
                             let _ = blob.sync().await;
                         }
                     }
@@ -273,7 +274,7 @@ fn fuzz(input: FuzzInput) {
                     if let Ok((blob, size)) =
                         context.open(INDEX_PARTITION, &section.to_be_bytes()).await
                     {
-                        let _ = blob.write_at(garbage.to_vec(), size).await;
+                        let _ = blob.write_at(size, garbage.to_vec()).await;
                         let _ = blob.sync().await;
                     }
                 }
@@ -281,7 +282,7 @@ fn fuzz(input: FuzzInput) {
                     if let Ok((blob, size)) =
                         context.open(VALUE_PARTITION, &section.to_be_bytes()).await
                     {
-                        let _ = blob.write_at(garbage.to_vec(), size).await;
+                        let _ = blob.write_at(size, garbage.to_vec()).await;
                         let _ = blob.sync().await;
                     }
                 }
@@ -290,7 +291,7 @@ fn fuzz(input: FuzzInput) {
 
         // Phase 3: Recovery - this should not panic
         let mut recovered: Oversized<_, TestEntry, TestValue> =
-            Oversized::init(context.clone(), cfg.clone())
+            Oversized::init(context.with_label("recovered"), cfg.clone())
                 .await
                 .expect("Recovery should not fail");
 

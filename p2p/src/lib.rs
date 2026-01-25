@@ -15,8 +15,8 @@ use commonware_macros::{ready_mod, ready_scope};
 ready_mod!(0, pub mod simulated);
 
 ready_scope!(2 {
-    use bytes::{Buf, Bytes};
     use commonware_cryptography::PublicKey;
+    use commonware_runtime::{IoBuf, IoBufMut};
     use commonware_utils::ordered::Set;
     use futures::channel::mpsc;
     use std::{error::Error as StdError, fmt::Debug, future::Future, time::SystemTime};
@@ -31,7 +31,7 @@ ready_scope!(2 {
     ///
     /// This message is guaranteed to adhere to the configuration of the channel and
     /// will already be decrypted and authenticated.
-    pub type Message<P> = (P, Bytes);
+    pub type Message<P> = (P, IoBuf);
 
     /// Alias for identifying communication channels.
     pub type Channel = u64;
@@ -78,7 +78,7 @@ ready_scope!(2 {
         fn send(
             &mut self,
             recipients: Recipients<Self::PublicKey>,
-            message: impl Buf + Send,
+            message: impl Into<IoBufMut> + Send,
             priority: bool,
         ) -> impl Future<Output = Result<Vec<Self::PublicKey>, Self::Error>> + Send;
     }
@@ -146,7 +146,7 @@ ready_scope!(2 {
         /// that the caller can act upon.
         fn send(
             self,
-            message: impl Buf + Send,
+            message: impl Into<IoBufMut> + Send,
             priority: bool,
         ) -> impl Future<Output = Result<Vec<Self::PublicKey>, Self::Error>> + Send;
     }
@@ -185,7 +185,7 @@ ready_scope!(2 {
         fn send(
             &mut self,
             recipients: Recipients<Self::PublicKey>,
-            message: impl Buf + Send,
+            message: impl Into<IoBufMut> + Send,
             priority: bool,
         ) -> impl Future<
             Output = Result<Vec<Self::PublicKey>, <Self::Checked<'_> as CheckedSender>::Error>,

@@ -1504,7 +1504,9 @@ mod tests {
     use crate::FutureExt;
     #[cfg(feature = "external")]
     use crate::Spawner;
-    use crate::{deterministic, reschedule, Blob, Metrics, Resolver, Runner as _, Storage};
+    use crate::{
+        deterministic, reschedule, Blob, IoBufMut, Metrics, Resolver, Runner as _, Storage,
+    };
     use futures::stream::{FuturesUnordered, StreamExt as _};
 
     async fn task(i: usize) -> usize {
@@ -1652,7 +1654,7 @@ mod tests {
         // Run some tasks, sync storage, and recover the runtime
         let (state, checkpoint) = executor1.start_and_recover(|context| async move {
             let (blob, _) = context.open(partition, name).await.unwrap();
-            blob.write_at(Vec::from(data), 0).await.unwrap();
+            blob.write_at(0, data).await.unwrap();
             blob.sync().await.unwrap();
             context.auditor().state()
         });
@@ -1665,8 +1667,8 @@ mod tests {
         executor.start(|context| async move {
             let (blob, len) = context.open(partition, name).await.unwrap();
             assert_eq!(len, data.len() as u64);
-            let read = blob.read_at(vec![0; data.len()], 0).await.unwrap();
-            assert_eq!(read.as_ref(), data);
+            let read = blob.read_at(0, IoBufMut::zeroed(data.len())).await.unwrap();
+            assert_eq!(read.coalesce(), data);
         });
     }
 
@@ -1692,13 +1694,13 @@ mod tests {
         let executor = deterministic::Runner::default();
         let partition = "test_partition";
         let name = b"test_blob";
-        let data = Vec::from("Hello, world!");
+        let data = b"Hello, world!";
 
         // Run some tasks without syncing storage
         let (_, checkpoint) = executor.start_and_recover(|context| async move {
             let context = context.clone();
             let (blob, _) = context.open(partition, name).await.unwrap();
-            blob.write_at(data, 0).await.unwrap();
+            blob.write_at(0, data).await.unwrap();
         });
 
         // Recover the runtime

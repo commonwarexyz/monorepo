@@ -24,7 +24,26 @@ async function triggerIndexing() {
   if (!response.ok) {
     throw new Error(`Failed to trigger indexing: ${response.status}`);
   }
-  console.log("Indexing triggered successfully");
+  console.log("Indexing triggered");
+}
+
+async function waitForIndexing() {
+  console.log("Waiting for indexing to complete...");
+  const transport = new StreamableHTTPClientTransport(new URL(BASE_URL));
+  const client = new Client({ name: "integration-test", version: "1.0.0" }, { capabilities: {} });
+  await client.connect(transport);
+
+  while (true) {
+    const result = await client.callTool({ name: "list_versions", arguments: {} });
+    if (!result.isError) {
+      console.log("Indexing complete");
+      break;
+    }
+    console.log("  Still waiting...");
+    await sleep(1000);
+  }
+
+  await client.close();
 }
 
 async function testCors() {
@@ -296,12 +315,9 @@ async function main() {
     // Test server info via MCP protocol
     await testServerInfo();
 
-    // Trigger indexing and wait for it to complete
+    // Trigger indexing and poll until a version is available
     await triggerIndexing();
-
-    // Wait a bit for indexing to complete (it fetches files from commonware.xyz)
-    console.log("Waiting for indexing to complete...");
-    await sleep(30000);
+    await waitForIndexing();
 
     // Test MCP tools
     await testMcpTools();

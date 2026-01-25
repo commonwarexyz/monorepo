@@ -2,7 +2,7 @@
 
 use arbitrary::{Arbitrary, Result, Unstructured};
 use commonware_cryptography::{Hasher as _, Sha256};
-use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
+use commonware_runtime::{buffer::PoolRef, deterministic, Metrics, Runner};
 use commonware_storage::journal::contiguous::fixed::{Config as JournalConfig, Journal};
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use futures::{pin_mut, StreamExt};
@@ -71,6 +71,7 @@ fn fuzz(input: FuzzInput) {
         let mut next_value = 0u64;
         let mut journal_size = 0u64;
         let mut oldest_retained_pos = 0u64;
+        let mut restarts = 0usize;
 
         for op in input.operations.iter() {
             match op {
@@ -135,7 +136,15 @@ fn fuzz(input: FuzzInput) {
 
                 JournalOperation::Restart => {
                     drop(journal);
-                    journal = Journal::init(context.clone(), cfg.clone()).await.unwrap();
+                    journal = Journal::init(
+                        context
+                            .with_label("journal")
+                            .with_attribute("instance", restarts),
+                        cfg.clone(),
+                    )
+                    .await
+                    .unwrap();
+                    restarts += 1;
                     // Reset tracking variables to match recovered state
                     journal_size = journal.size();
                     oldest_retained_pos = journal.oldest_retained_pos().unwrap_or(0);

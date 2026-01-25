@@ -305,7 +305,7 @@ pub async fn run(
                             chrono::Local::now().format("%m/%d %H:%M:%S"),
                             &peer[..4],
                             &peer[peer.len() - 4..],
-                            String::from_utf8_lossy(&msg)
+                            String::from_utf8_lossy(msg.as_ref())
                         ).into());
                     }
                     Err(err) => {

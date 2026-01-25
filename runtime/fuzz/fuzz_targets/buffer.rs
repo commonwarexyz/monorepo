@@ -6,7 +6,7 @@ use commonware_runtime::{
         pool::{Append, PoolRef},
         Read, Write,
     },
-    deterministic, Blob, Runner, Storage,
+    deterministic, Blob, IoBufMut, Runner, Storage,
 };
 use commonware_utils::{NZUsize, NZU16};
 use libfuzzer_sys::fuzz_target;
@@ -100,7 +100,7 @@ fn fuzz(input: FuzzInput) {
         let prefill = (input.seed as usize) & 0x0FFF;
         if prefill > 0 && initial_size == 0 {
             let initial_data: Vec<u8> = (0..prefill).map(|i| i as u8).collect();
-            let _ = blob.write_at(initial_data, 0).await;
+            let _ = blob.write_at(0, initial_data).await;
         }
 
         let mut read_buffer = None;
@@ -126,7 +126,7 @@ fn fuzz(input: FuzzInput) {
                     if size == 0 && blob_size > 0 {
                         let data: Vec<u8> = (0..blob_size).map(|i| i as u8).collect();
                         if (0u64).checked_add(data.len() as u64).is_some() {
-                            blob.write_at(data, 0).await.expect("cannot write");
+                            blob.write_at(0, data).await.expect("cannot write");
                         }
                     }
 
@@ -219,7 +219,7 @@ fn fuzz(input: FuzzInput) {
                         };
                         let offset = offset as u64;
                         if offset.checked_add(data.len() as u64).is_some() {
-                            let _ = writer.write_at(data.to_vec(), offset).await;
+                            let _ = writer.write_at(offset, data.to_vec()).await;
                         }
                     }
                 }
@@ -316,8 +316,7 @@ fn fuzz(input: FuzzInput) {
                         let size = (data_size as usize).clamp(0, MAX_SIZE);
                         let offset = offset as u64;
                         if offset.checked_add(size as u64).is_some() {
-                            let buf = vec![0u8; size];
-                            let _ = writer.read_at(buf, offset).await;
+                            let _ = writer.read_at(offset, IoBufMut::zeroed(size)).await;
                         }
                     }
                 }
@@ -345,8 +344,7 @@ fn fuzz(input: FuzzInput) {
                         let size = (data_size as usize).clamp(0, MAX_SIZE);
                         let offset = offset as u64;
                         if offset.checked_add(size as u64).is_some() {
-                            let buf = vec![0u8; size];
-                            let _ = append.read_at(buf, offset).await;
+                            let _ = append.read_at(offset, IoBufMut::zeroed(size)).await;
                         }
                     }
                 }

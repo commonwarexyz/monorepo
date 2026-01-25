@@ -142,11 +142,9 @@ mod priority_set;
 #[cfg(feature = "std")]
 pub use priority_set::PrioritySet;
 #[cfg(feature = "std")]
-pub mod futures;
-mod stable_buf;
-pub use stable_buf::StableBuf;
-#[cfg(feature = "std")]
 pub mod concurrency;
+#[cfg(feature = "std")]
+pub mod futures;
 
 /// Returns a seeded RNG for deterministic testing.
 ///

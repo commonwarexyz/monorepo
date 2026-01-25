@@ -18,7 +18,7 @@ use crate::{
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 use bytes::{Buf, BufMut};
-use commonware_codec::{EncodeSize, Error, Read, ReadRangeExt, Write};
+use commonware_codec::{types::lazy::Lazy, EncodeSize, Error, Read, ReadRangeExt, Write};
 use commonware_utils::{
     ordered::{Quorum, Set},
     Faults, Participant,
@@ -87,7 +87,7 @@ impl<N: Namespace> Generic<N> {
 
         Some(Attestation {
             signer: *index,
-            signature,
+            signature: signature.into(),
         })
     }
 
@@ -105,11 +105,14 @@ impl<N: Namespace> Generic<N> {
         let Some(public_key) = self.participants.key(attestation.signer) else {
             return false;
         };
+        let Some(signature) = attestation.signature.get() else {
+            return false;
+        };
 
         public_key.verify(
             subject.namespace(&self.namespace),
             &subject.message(),
-            &attestation.signature,
+            signature,
         )
     }
 
@@ -140,15 +143,23 @@ impl<N: Namespace> Generic<N> {
                 invalid.insert(attestation.signer);
                 continue;
             };
+            let Some(signature) = attestation.signature.get() else {
+                invalid.insert(attestation.signer);
+                continue;
+            };
 
-            batch.add(namespace, &message, public_key, &attestation.signature);
+            batch.add(namespace, &message, public_key, signature);
             candidates.push((attestation, public_key));
         }
 
         if !candidates.is_empty() && !batch.verify(rng) {
             // Batch failed: fall back to per-signer verification to isolate faulty attestations.
             for (attestation, public_key) in &candidates {
-                if !public_key.verify(namespace, &message, &attestation.signature) {
+                let Some(signature) = attestation.signature.get() else {
+                    invalid.insert(attestation.signer);
+                    continue;
+                };
+                if !public_key.verify(namespace, &message, signature) {
                     invalid.insert(attestation.signer);
                 }
             }
@@ -194,8 +205,12 @@ impl<N: Namespace> Generic<N> {
                 invalid.insert(attestation.signer);
                 continue;
             };
+            let Some(signature) = attestation.signature.get() else {
+                invalid.insert(attestation.signer);
+                continue;
+            };
 
-            if public_key.verify(namespace, &message, &attestation.signature) {
+            if public_key.verify(namespace, &message, signature) {
                 verified.push(attestation);
             } else {
                 invalid.insert(attestation.signer);
@@ -218,7 +233,7 @@ impl<N: Namespace> Generic<N> {
             if usize::from(signer) >= self.participants.len() {
                 return None;
             }
-
+            let signature = signature.get().cloned()?;
             entries.push((signer, signature));
         }
         if entries.len() < self.participants.quorum::<M>() as usize {
@@ -229,6 +244,7 @@ impl<N: Namespace> Generic<N> {
         entries.sort_by_key(|(signer, _)| *signer);
         let (signer, signatures): (Vec<Participant>, Vec<_>) = entries.into_iter().unzip();
         let signers = Signers::from(self.participants.len(), signer);
+        let signatures = signatures.into_iter().map(Lazy::from).collect();
 
         Some(Certificate {
             signers,
@@ -272,6 +288,9 @@ impl<N: Namespace> Generic<N> {
         let message = subject.message();
         for (signer, signature) in certificate.signers.iter().zip(&certificate.signatures) {
             let Some(public_key) = self.participants.key(signer) else {
+                return false;
+            };
+            let Some(signature) = signature.get() else {
                 return false;
             };
 
@@ -333,6 +352,9 @@ impl<N: Namespace> Generic<N> {
         let message = subject.message();
         for (signer, signature) in certificate.signers.iter().zip(&certificate.signatures) {
             let Some(public_key) = self.participants.key(signer) else {
+                return false;
+            };
+            let Some(signature) = signature.get() else {
                 return false;
             };
             if !public_key.verify(namespace, &message, signature) {
@@ -409,7 +431,7 @@ pub struct Certificate {
     /// Bitmap of participant indices that contributed signatures.
     pub signers: Signers,
     /// Ed25519 signatures emitted by the respective participants ordered by signer index.
-    pub signatures: Vec<Ed25519Signature>,
+    pub signatures: Vec<Lazy<Ed25519Signature>>,
 }
 
 #[cfg(feature = "arbitrary")]
@@ -417,7 +439,7 @@ impl arbitrary::Arbitrary<'_> for Certificate {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let signers = Signers::arbitrary(u)?;
         let signatures = (0..signers.count())
-            .map(|_| u.arbitrary::<Ed25519Signature>())
+            .map(|_| u.arbitrary::<Ed25519Signature>().map(Lazy::from))
             .collect::<arbitrary::Result<Vec<_>>>()?;
         Ok(Self {
             signers,
@@ -451,7 +473,7 @@ impl Read for Certificate {
             ));
         }
 
-        let signatures = Vec::<Ed25519Signature>::read_range(reader, ..=*participants)?;
+        let signatures = Vec::<Lazy<Ed25519Signature>>::read_range(reader, ..=*participants)?;
         if signers.count() != signatures.len() {
             return Err(Error::Invalid(
                 "cryptography::ed25519::certificate::Certificate",

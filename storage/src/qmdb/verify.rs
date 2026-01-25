@@ -1,10 +1,9 @@
 use crate::mmr::{
-    proof, verification, verification::ProofStore, Error, Location, Position, Proof,
+    verification, verification::ProofStore, Error, Location, Position, Proof,
     StandardHasher as Standard,
 };
 use commonware_codec::Encode;
 use commonware_cryptography::{Digest, Hasher};
-use core::ops::Range;
 
 /// Verify that a [Proof] is valid for a range of operations and a target root.
 pub fn verify_proof<Op, H, D>(
@@ -57,40 +56,6 @@ where
     proof.verify_range_inclusion_and_extract_digests(hasher, &elements, start_loc, target_root)
 }
 
-/// Calculate the digests required to construct a [Proof] for a range of operations.
-///
-/// # Errors
-///
-/// Returns [crate::mmr::Error::LocationOverflow] if `op_count` or an element in `range` >
-/// [crate::mmr::MAX_LOCATION].
-///
-/// Returns [crate::mmr::Error::RangeOutOfBounds] if the last element position in `range`
-/// is out of bounds for the MMR size.
-pub fn digests_required_for_proof<D: Digest>(
-    op_count: Location,
-    range: Range<Location>,
-) -> Result<Vec<Position>, crate::mmr::Error> {
-    let mmr_size = Position::try_from(op_count)?;
-    proof::nodes_required_for_range_proof(mmr_size, range)
-}
-
-/// Create a [Proof] from a op_count and a list of digests.
-///
-/// To compute the digests required for a [Proof], use [digests_required_for_proof].
-///
-/// # Errors
-///
-/// Returns [crate::mmr::Error::LocationOverflow] if `op_count` > [crate::mmr::MAX_LOCATION].
-pub fn create_proof<D: Digest>(
-    op_count: Location,
-    digests: Vec<D>,
-) -> Result<Proof<D>, crate::mmr::Error> {
-    Ok(Proof::<D> {
-        size: Position::try_from(op_count)?,
-        digests,
-    })
-}
-
 /// Verify a [Proof] and convert it into a [ProofStore].
 pub fn create_proof_store<Op, H, D>(
     hasher: &mut Standard<H>,
@@ -117,8 +82,8 @@ where
 pub fn create_proof_store_from_digests<D: Digest>(
     proof: &Proof<D>,
     digests: Vec<(Position, D)>,
-) -> ProofStore<D> {
-    ProofStore::new_from_digests(proof.size, digests)
+) -> Result<ProofStore<D>, Error> {
+    ProofStore::new_from_digests(proof.leaves, digests)
 }
 
 /// Create a Multi-Proof for specific operations (identified by location) from a [ProofStore].
@@ -343,57 +308,6 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_create_proof() {
-        const OP_COUNT: Location = Location::new_unchecked(15);
-
-        let executor = deterministic::Runner::default();
-        executor.start(|_| async move {
-            let mut hasher = test_hasher();
-            let mut mmr = CleanMmr::new(&mut hasher);
-
-            // Build MMR with test operations
-
-            let operations: Vec<u64> = (0..*OP_COUNT).collect();
-            let mut positions = Vec::new();
-            for op in &operations {
-                let encoded = op.encode();
-                positions.push(mmr.add(&mut hasher, &encoded));
-            }
-            let root = mmr.root();
-
-            // The size here is the number of leaves added (15 in this case)
-            let start_loc = Location::new_unchecked(3u64);
-            let end_loc = Location::new_unchecked(8u64);
-
-            // Get required digests (note: range is exclusive, so end_loc + 1)
-            let end_plus_one = end_loc.checked_add(1).expect("test location in bounds");
-            let required_positions =
-                digests_required_for_proof::<Digest>(OP_COUNT, start_loc..end_plus_one).unwrap();
-
-            // Fetch the actual digests
-            let mut digests = Vec::new();
-            for pos in required_positions {
-                if let Some(digest) = mmr.get_node(pos) {
-                    digests.push(digest);
-                }
-            }
-
-            // Construct proof
-            let proof = create_proof(OP_COUNT, digests.clone()).expect("test locations valid");
-            assert_eq!(proof.size, Position::try_from(OP_COUNT).unwrap());
-            assert_eq!(proof.digests.len(), digests.len());
-
-            assert!(verify_proof(
-                &mut hasher,
-                &proof,
-                start_loc,
-                &operations[*start_loc as usize..=*end_loc as usize],
-                root,
-            ));
-        });
-    }
-
-    #[test_traced]
     fn test_create_proof_store() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
@@ -503,7 +417,7 @@ mod tests {
             .unwrap();
 
             // Create proof store from digests
-            let proof_store = create_proof_store_from_digests(&proof, digests);
+            let proof_store = create_proof_store_from_digests(&proof, digests).unwrap();
 
             // Verify we can use the proof store
             let sub_proof = verification::range_proof(

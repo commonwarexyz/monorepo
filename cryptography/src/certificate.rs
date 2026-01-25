@@ -70,7 +70,9 @@ use crate::{Digest, PublicKey};
 #[cfg(not(feature = "std"))]
 use alloc::{collections::BTreeSet, sync::Arc, vec::Vec};
 use bytes::{Buf, BufMut, Bytes};
-use commonware_codec::{Codec, CodecFixed, EncodeSize, Error, Read, ReadExt, Write};
+use commonware_codec::{
+    types::lazy::Lazy, Codec, CodecFixed, EncodeSize, Error, Read, ReadExt, Write,
+};
 use commonware_parallel::Strategy;
 use commonware_utils::{bitmap::BitMap, ordered::Set, Faults, Participant};
 use core::{fmt::Debug, hash::Hash};
@@ -84,7 +86,7 @@ pub struct Attestation<S: Scheme> {
     /// Index of the signer inside the participant set.
     pub signer: Participant,
     /// Scheme-specific signature or share produced for a given subject.
-    pub signature: S::Signature,
+    pub signature: Lazy<S::Signature>,
 }
 
 impl<S: Scheme> PartialEq for Attestation<S> {
@@ -120,7 +122,7 @@ impl<S: Scheme> Read for Attestation<S> {
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let signer = Participant::read(reader)?;
-        let signature = S::Signature::read(reader)?;
+        let signature = ReadExt::read(reader)?;
 
         Ok(Self { signer, signature })
     }
@@ -134,7 +136,10 @@ where
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let signer = Participant::arbitrary(u)?;
         let signature = S::Signature::arbitrary(u)?;
-        Ok(Self { signer, signature })
+        Ok(Self {
+            signer,
+            signature: signature.into(),
+        })
     }
 }
 
@@ -222,7 +227,8 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
     /// Batch-verifies attestations and separates valid attestations from signer indices that failed
     /// verification.
     ///
-    /// Callers must not include duplicate attestations from the same signer.
+    /// Callers must not include duplicate attestations from the same signer. Passing duplicates
+    /// is undefined behavior, implementations may panic or produce incorrect results.
     fn verify_attestations<R, D, I>(
         &self,
         rng: &mut R,
@@ -234,6 +240,7 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
         R: CryptoRngCore,
         D: Digest,
         I: IntoIterator<Item = Attestation<Self>>,
+        I::IntoIter: Send,
     {
         let mut invalid = BTreeSet::new();
 
@@ -251,7 +258,8 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
 
     /// Assembles attestations into a certificate, returning `None` if the threshold is not met.
     ///
-    /// Callers must not include duplicate attestations from the same signer.
+    /// Callers must not include duplicate attestations from the same signer. Passing duplicates
+    /// is undefined behavior, implementations may panic or produce incorrect results.
     fn assemble<I, M>(
         &self,
         attestations: I,
@@ -259,6 +267,7 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
     ) -> Option<Self::Certificate>
     where
         I: IntoIterator<Item = Attestation<Self>>,
+        I::IntoIter: Send,
         M: Faults;
 
     /// Verifies a certificate that was recovered or received from the network.

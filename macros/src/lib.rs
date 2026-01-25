@@ -13,7 +13,7 @@ use quote::{format_ident, quote, ToTokens};
 use syn::{
     braced,
     parse::{Parse, ParseStream, Result},
-    parse_macro_input, Block, Error, Expr, Ident, ItemFn, LitInt, LitStr, Pat, Token, Visibility,
+    parse_macro_input, Error, Expr, Ident, ItemFn, LitInt, LitStr, Pat, Token, Visibility,
 };
 
 mod nextest;
@@ -482,7 +482,7 @@ struct SelectInput {
 struct Branch {
     pattern: Pat,
     future: Expr,
-    block: Block,
+    body: Expr,
 }
 
 impl Parse for SelectInput {
@@ -494,12 +494,12 @@ impl Parse for SelectInput {
             input.parse::<Token![=]>()?;
             let future: Expr = input.parse()?;
             input.parse::<Token![=>]>()?;
-            let block: Block = input.parse()?;
+            let body: Expr = input.parse()?;
 
             branches.push(Branch {
                 pattern,
                 future,
-                block,
+                body,
             });
 
             if input.peek(Token![,]) {
@@ -518,10 +518,10 @@ impl ToTokens for SelectInput {
         for branch in &self.branches {
             let pattern = &branch.pattern;
             let future = &branch.future;
-            let block = &branch.block;
+            let body = &branch.body;
 
             tokens.extend(quote! {
-                #pattern = #future => #block,
+                #pattern = #future => #body,
             });
         }
     }
@@ -570,12 +570,12 @@ pub fn select(input: TokenStream) -> TokenStream {
     for Branch {
         pattern,
         future,
-        block,
+        body,
     } in branches.into_iter()
     {
         // Generate branch for `select_biased!` macro
         let branch_code = quote! {
-            #pattern = (#future).fuse() => #block,
+            #pattern = (#future).fuse() => #body,
         };
         select_branches.push(branch_code);
     }
@@ -595,11 +595,13 @@ pub fn select(input: TokenStream) -> TokenStream {
 
 /// Input for [select_loop!].
 ///
-/// Parses: `context, on_stopped => { block }, { branches... }`
+/// Parses: `context, [on_start => expr,] on_stopped => expr, branches... [, on_end => expr]`
 struct SelectLoopInput {
     context: Expr,
-    shutdown_block: Block,
+    start_expr: Option<Expr>,
+    shutdown_expr: Expr,
     branches: Vec<Branch>,
+    end_expr: Option<Expr>,
 }
 
 impl Parse for SelectLoopInput {
@@ -607,6 +609,22 @@ impl Parse for SelectLoopInput {
         // Parse context expression
         let context: Expr = input.parse()?;
         input.parse::<Token![,]>()?;
+
+        // Check for optional `on_start =>`
+        let start_expr = if input.peek(Ident) {
+            let ident: Ident = input.fork().parse()?;
+            if ident == "on_start" {
+                input.parse::<Ident>()?; // consume the ident
+                input.parse::<Token![=>]>()?;
+                let expr: Expr = input.parse()?;
+                input.parse::<Token![,]>()?;
+                Some(expr)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
 
         // Parse `on_stopped =>`
         let on_stopped_ident: Ident = input.parse()?;
@@ -618,25 +636,34 @@ impl Parse for SelectLoopInput {
         }
         input.parse::<Token![=>]>()?;
 
-        // Parse shutdown block
-        let shutdown_block: Block = input.parse()?;
+        // Parse shutdown expression
+        let shutdown_expr: Expr = input.parse()?;
 
-        // Parse comma after shutdown block
+        // Parse comma after shutdown expression
         input.parse::<Token![,]>()?;
 
         // Parse branches directly (no surrounding braces)
+        // Stop when we see `on_end` or reach end of input
         let mut branches = Vec::new();
         while !input.is_empty() {
+            // Check if next token is `on_end`
+            if input.peek(Ident) {
+                let ident: Ident = input.fork().parse()?;
+                if ident == "on_end" {
+                    break;
+                }
+            }
+
             let pattern = Pat::parse_single(input)?;
             input.parse::<Token![=]>()?;
             let future: Expr = input.parse()?;
             input.parse::<Token![=>]>()?;
-            let block: Block = input.parse()?;
+            let body: Expr = input.parse()?;
 
             branches.push(Branch {
                 pattern,
                 future,
-                block,
+                body,
             });
 
             if input.peek(Token![,]) {
@@ -646,10 +673,29 @@ impl Parse for SelectLoopInput {
             }
         }
 
+        // Check for optional `on_end =>`
+        let end_expr = if !input.is_empty() && input.peek(Ident) {
+            let ident: Ident = input.parse()?;
+            if ident == "on_end" {
+                input.parse::<Token![=>]>()?;
+                let expr: Expr = input.parse()?;
+                if input.peek(Token![,]) {
+                    input.parse::<Token![,]>()?;
+                }
+                Some(expr)
+            } else {
+                return Err(Error::new(ident.span(), "expected `on_end` keyword"));
+            }
+        } else {
+            None
+        };
+
         Ok(Self {
             context,
-            shutdown_block,
+            start_expr,
+            shutdown_expr,
             branches,
+            end_expr,
         })
     }
 }
@@ -670,11 +716,25 @@ impl Parse for SelectLoopInput {
 /// ```rust,ignore
 /// select_loop! {
 ///     context,
+///     on_start => { /* optional: runs at start of each iteration */ },
 ///     on_stopped => { cleanup },
 ///     pattern = future => block,
 ///     // ...
+///     on_end => { /* optional: runs after non-shutdown arm completes */ },
 /// }
 /// ```
+///
+/// The order of blocks matches execution order:
+/// 1. `on_start` (optional) - Runs at the start of each loop iteration, before the select.
+///    Can use `continue` to skip the select or `break` to exit the loop.
+/// 2. `on_stopped` (required) - The shutdown handler, executed when shutdown is signaled.
+/// 3. Select arms - The futures to select over.
+/// 4. `on_end` (optional) - Runs after a non-shutdown arm completes. Skipped when shutdown
+///    is triggered. Useful for post-processing that should happen after each arm.
+///
+/// All blocks share the same lexical scope within the loop body. Variables declared in
+/// `on_start` are visible in the select arms, `on_stopped`, and `on_end`. This allows
+/// preparing state in `on_start` and using it throughout the iteration.
 ///
 /// The `shutdown` variable (the future from `context.stopped()`) is accessible in the
 /// shutdown block, allowing explicit cleanup such as `drop(shutdown)` before breaking or returning.
@@ -685,14 +745,24 @@ impl Parse for SelectLoopInput {
 /// use commonware_macros::select_loop;
 ///
 /// async fn run(context: impl commonware_runtime::Spawner) {
+///     let mut counter = 0;
 ///     select_loop! {
 ///         context,
+///         on_start => {
+///             // Prepare state for this iteration (visible in arms and on_end)
+///             let start_time = std::time::Instant::now();
+///             counter += 1;
+///         },
 ///         on_stopped => {
-///             println!("shutting down");
+///             println!("shutting down after {} iterations", counter);
 ///             drop(shutdown);
 ///         },
 ///         msg = receiver.recv() => {
 ///             println!("received: {:?}", msg);
+///         },
+///         on_end => {
+///             // Access variables from on_start
+///             println!("iteration took {:?}", start_time.elapsed());
 ///         },
 ///     }
 /// }
@@ -701,8 +771,10 @@ impl Parse for SelectLoopInput {
 pub fn select_loop(input: TokenStream) -> TokenStream {
     let SelectLoopInput {
         context,
-        shutdown_block,
+        start_expr,
+        shutdown_expr,
         branches,
+        end_expr,
     } = parse_macro_input!(input as SelectLoopInput);
 
     // Convert branches to tokens for the inner select!
@@ -711,18 +783,37 @@ pub fn select_loop(input: TokenStream) -> TokenStream {
         .map(|b| {
             let pattern = &b.pattern;
             let future = &b.future;
-            let block = &b.block;
-            quote! { #pattern = #future => #block, }
+            let body = &b.body;
+            quote! { #pattern = #future => #body, }
         })
         .collect();
+
+    // Helper to convert an expression to tokens, inlining block contents
+    // to preserve variable scope
+    fn expr_to_tokens(expr: &Expr) -> proc_macro2::TokenStream {
+        match expr {
+            Expr::Block(block) => {
+                let stmts = &block.block.stmts;
+                quote! { #(#stmts)* }
+            }
+            other => quote! { #other; },
+        }
+    }
+
+    // Generate on_start and on_end tokens if present
+    let on_start_tokens = start_expr.as_ref().map(expr_to_tokens);
+    let on_end_tokens = end_expr.as_ref().map(expr_to_tokens);
+    let shutdown_tokens = expr_to_tokens(&shutdown_expr);
 
     quote! {
         {
             let mut shutdown = #context.stopped();
             loop {
+                #on_start_tokens
+
                 commonware_macros::select! {
                     _ = &mut shutdown => {
-                        #shutdown_block
+                        #shutdown_tokens
 
                         // Break the loop after handling shutdown. Some implementations
                         // may divert control flow themselves, so this may be unused.
@@ -731,6 +822,8 @@ pub fn select_loop(input: TokenStream) -> TokenStream {
                     },
                     #(#branch_tokens)*
                 }
+
+                #on_end_tokens
             }
         }
     }

@@ -1,6 +1,7 @@
 //! Decorator for a cryptographic hasher that implements the MMR-specific hashing logic.
 
 use super::Position;
+use crate::mmr::Location;
 use commonware_cryptography::{Digest, Hasher as CHasher};
 
 /// A trait for computing the various digests of an MMR.
@@ -23,7 +24,7 @@ pub trait Hasher: Send + Sync {
     /// decreasing order of height.
     fn root<'a>(
         &mut self,
-        size: Position,
+        leaves: Location,
         peak_digests: impl Iterator<Item = &'a Self::Digest>,
     ) -> Self::Digest;
 
@@ -102,10 +103,10 @@ impl<H: CHasher> Hasher for Standard<H> {
 
     fn root<'a>(
         &mut self,
-        size: Position,
+        leaves: Location,
         peak_digests: impl Iterator<Item = &'a H::Digest>,
     ) -> H::Digest {
-        self.hasher.update(&size.to_be_bytes());
+        self.hasher.update(&leaves.to_be_bytes());
         for digest in peak_digests {
             self.update_with_digest(digest);
         }
@@ -121,7 +122,7 @@ impl<H: CHasher> Hasher for Standard<H> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mmr::{mem::Mmr, Position};
+    use crate::mmr::{mem::Mmr, Location};
     use alloc::vec::Vec;
     use commonware_cryptography::{Hasher as CHasher, Sha256};
 
@@ -210,7 +211,7 @@ mod tests {
         let d4 = test_digest::<H>(4);
 
         let empty_vec: Vec<H::Digest> = Vec::new();
-        let empty_out = mmr_hasher.root(Position::new(0), empty_vec.iter());
+        let empty_out = mmr_hasher.root(Location::new_unchecked(0), empty_vec.iter());
         assert_ne!(
             empty_out,
             test_digest::<H>(0),
@@ -220,22 +221,22 @@ mod tests {
         assert_eq!(empty_out, Mmr::empty_mmr_root(mmr_hasher.inner()));
 
         let digests = [d1, d2, d3, d4];
-        let out = mmr_hasher.root(Position::new(10), digests.iter());
+        let out = mmr_hasher.root(Location::new_unchecked(10), digests.iter());
         assert_ne!(out, test_digest::<H>(0), "root should be non-zero");
         assert_ne!(out, empty_out, "root should differ from empty MMR");
 
-        let mut out2 = mmr_hasher.root(Position::new(10), digests.iter());
+        let mut out2 = mmr_hasher.root(Location::new_unchecked(10), digests.iter());
         assert_eq!(out, out2, "root should be computed consistently");
 
-        out2 = mmr_hasher.root(Position::new(11), digests.iter());
+        out2 = mmr_hasher.root(Location::new_unchecked(11), digests.iter());
         assert_ne!(out, out2, "root should change with different position");
 
         let digests = [d1, d2, d4, d3];
-        out2 = mmr_hasher.root(Position::new(10), digests.iter());
+        out2 = mmr_hasher.root(Location::new_unchecked(10), digests.iter());
         assert_ne!(out, out2, "root should change with different digest order");
 
         let digests = [d1, d2, d3];
-        out2 = mmr_hasher.root(Position::new(10), digests.iter());
+        out2 = mmr_hasher.root(Location::new_unchecked(10), digests.iter());
         assert_ne!(
             out, out2,
             "root should change with different number of hashes"

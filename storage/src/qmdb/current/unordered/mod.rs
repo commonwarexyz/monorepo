@@ -7,3 +7,5 @@
 //! - [fixed]: Variant optimized for values of fixed size.
 
 pub mod fixed;
+#[cfg(any(test, feature = "test-traits"))]
+mod test_trait_impls;

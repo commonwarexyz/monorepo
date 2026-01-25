@@ -1,9 +1,9 @@
 use super::block::BlockFormat;
 use crate::Scheme;
-use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error, Read, ReadExt, Write};
 use commonware_consensus::simplex::types::Finalization;
 use commonware_cryptography::Digest;
+use commonware_runtime::{Buf, BufMut};
 
 /// Enum representing responses from the indexer to validators.
 ///
@@ -81,7 +81,10 @@ mod tests {
         types::{Epoch, Round, View},
     };
     use commonware_cryptography::{
-        bls12381::primitives::{group, variant::MinSig},
+        bls12381::{
+            certificate::threshold::Certificate,
+            primitives::{group, variant::MinSig},
+        },
         sha256::Digest as Sha256Digest,
     };
     use commonware_math::algebra::{CryptoGroup, Random as _};
@@ -105,7 +108,7 @@ mod tests {
                 parent: View::new(54321),
                 payload: new_digest(),
             },
-            certificate: signature,
+            certificate: Certificate::new(signature),
         }
     }
 

@@ -24,7 +24,7 @@ use commonware_cryptography::{
     certificate::{Provider, Scheme},
     Digest, PublicKey, Signer,
 };
-use commonware_macros::select;
+use commonware_macros::select_loop;
 use commonware_p2p::{
     utils::codec::{wrap, WrappedSender},
     Receiver, Recipients, Sender,
@@ -291,7 +291,6 @@ impl<
         let mut node_sender = chunk_network.0;
         let mut node_receiver = chunk_network.1;
         let (mut ack_sender, mut ack_receiver) = wrap((), ack_network.0, ack_network.1);
-        let mut shutdown = self.context.stopped();
 
         // Tracks if there is an outstanding proposal request to the automaton.
         let mut pending: Option<(Context<C::PublicKey>, oneshot::Receiver<D>)> = None;
@@ -310,180 +309,176 @@ impl<
             }
         }
 
-        loop {
-            // Request a new proposal if necessary
-            if pending.is_none() {
-                if let Some(context) = self.should_propose() {
-                    let receiver = self.automaton.propose(context.clone()).await;
-                    pending = Some((context, receiver));
+        select_loop! {
+            self.context,
+            on_start => {
+                // Request a new proposal if necessary
+                if pending.is_none() {
+                    if let Some(context) = self.should_propose() {
+                        let receiver = self.automaton.propose(context.clone()).await;
+                        pending = Some((context, receiver));
+                    }
                 }
-            }
 
-            // Create deadline futures.
-            //
-            // If the deadline is None, the future will never resolve.
-            let rebroadcast = match self.rebroadcast_deadline {
-                Some(deadline) => Either::Left(self.context.sleep_until(deadline)),
-                None => Either::Right(future::pending()),
-            };
-            let propose = match &mut pending {
-                Some((_context, receiver)) => Either::Left(receiver),
-                None => Either::Right(futures::future::pending()),
-            };
-
-            // Process the next event
-            select! {
-                // Handle shutdown signal
-                _ = &mut shutdown => {
-                    debug!("shutdown");
+                // Create deadline futures.
+                //
+                // If the deadline is None, the future will never resolve.
+                let rebroadcast = match self.rebroadcast_deadline {
+                    Some(deadline) => Either::Left(self.context.sleep_until(deadline)),
+                    None => Either::Right(future::pending()),
+                };
+                let propose = match &mut pending {
+                    Some((_context, receiver)) => Either::Left(receiver),
+                    None => Either::Right(futures::future::pending()),
+                };
+            },
+            on_stopped => {
+                debug!("shutdown");
+            },
+            // Handle refresh epoch deadline
+            epoch = epoch_updates.next() => {
+                // Error handling
+                let Some(epoch) = epoch else {
+                    error!("epoch subscription failed");
                     break;
-                },
+                };
 
-                // Handle refresh epoch deadline
-                epoch = epoch_updates.next() => {
-                    // Error handling
-                    let Some(epoch) = epoch else {
-                        error!("epoch subscription failed");
-                        break;
-                    };
+                // Refresh the epoch
+                debug!(current = %self.epoch, new = %epoch, "refresh epoch");
+                assert!(epoch >= self.epoch);
+                self.epoch = epoch;
+                continue;
+            },
 
-                    // Refresh the epoch
-                    debug!(current = %self.epoch, new = %epoch, "refresh epoch");
-                    assert!(epoch >= self.epoch);
-                    self.epoch = epoch;
+            // Handle rebroadcast deadline
+            _ = rebroadcast => {
+                if let Some(ref signer) = self.sequencer_signer {
+                    debug!(epoch = %self.epoch, sender = ?signer.public_key(), "rebroadcast");
+                    if let Err(err) = self.rebroadcast(&mut node_sender).await {
+                        info!(?err, "rebroadcast failed");
+                        continue;
+                    }
+                }
+            },
+
+            // Propose a new chunk
+            receiver = propose => {
+                // Clear the pending proposal
+                let (context, _) = pending.take().unwrap();
+                debug!(height = %context.height, "propose");
+
+                // Error handling for dropped proposals
+                let Ok(payload) = receiver else {
+                    warn!(?context, "automaton dropped proposal");
                     continue;
-                },
+                };
 
-                // Handle rebroadcast deadline
-                _ = rebroadcast => {
-                    if let Some(ref signer) = self.sequencer_signer {
-                        debug!(epoch = %self.epoch, sender = ?signer.public_key(), "rebroadcast");
-                        if let Err(err) = self.rebroadcast(&mut node_sender).await {
-                            info!(?err, "rebroadcast failed");
-                            continue;
-                        }
+                // Propose the chunk
+                if let Err(err) = self.propose(context.clone(), payload, &mut node_sender).await {
+                    warn!(?err, ?context, "propose new failed");
+                    continue;
+                }
+            },
+
+            // Handle incoming nodes
+            msg = node_receiver.recv() => {
+                // Error handling
+                let (sender, msg) = match msg {
+                    Ok(r) => r,
+                    Err(err) => {
+                        error!(?err, "node receiver failed");
+                        break;
                     }
-                },
+                };
+                let mut guard = self.metrics.nodes.guard(Status::Invalid);
 
-                // Propose a new chunk
-                receiver = propose => {
-                    // Clear the pending proposal
-                    let (context, _) = pending.take().unwrap();
-                    debug!(height = %context.height, "propose");
-
-                    // Error handling for dropped proposals
-                    let Ok(payload) = receiver else {
-                        warn!(?context, "automaton dropped proposal");
-                        continue;
-                    };
-
-                    // Propose the chunk
-                    if let Err(err) = self.propose(context.clone(), payload, &mut node_sender).await {
-                        warn!(?err, ?context, "propose new failed");
+                // Decode using staged decoding with epoch-aware certificate bounds
+                let node = match Node::read_staged(&mut msg.as_ref(), &self.validators_provider) {
+                    Ok(node) => node,
+                    Err(err) => {
+                        debug!(?err, ?sender, "node decode failed");
                         continue;
                     }
-                },
-
-                // Handle incoming nodes
-                msg = node_receiver.recv() => {
-                    // Error handling
-                    let (sender, msg) = match msg {
-                        Ok(r) => r,
-                        Err(err) => {
-                            error!(?err, "node receiver failed");
-                            break;
-                        }
-                    };
-                    let mut guard = self.metrics.nodes.guard(Status::Invalid);
-
-                    // Decode using staged decoding with epoch-aware certificate bounds
-                    let node = match Node::read_staged(&mut msg.as_ref(), &self.validators_provider) {
-                        Ok(node) => node,
-                        Err(err) => {
-                            debug!(?err, ?sender, "node decode failed");
-                            continue;
-                        }
-                    };
-                    let result = match self.validate_node(&node, &sender) {
-                        Ok(result) => result,
-                        Err(err) => {
-                            debug!(?err, ?sender, "node validate failed");
-                            continue;
-                        }
-                    };
-
-                    // Initialize journal for sequencer if it does not exist
-                    self.journal_prepare(&sender).await;
-
-                    // Handle the parent certificate
-                    if let Some(parent_chunk) = result {
-                        let parent = node.parent.as_ref().unwrap();
-                        self.handle_certificate(&parent_chunk, parent.epoch, parent.certificate.clone()).await;
-                    }
-
-                    // Process the node
-                    //
-                    // Note, this node may be a duplicate. If it is, we will attempt to verify it and vote
-                    // on it again (our original vote may have been lost).
-                    self.handle_node(&node).await;
-                    debug!(?sender, height = %node.chunk.height, "node");
-                    guard.set(Status::Success);
-                },
-
-                // Handle incoming acks
-                msg = ack_receiver.recv() => {
-                    // Error handling
-                    let (sender, msg) = match msg {
-                        Ok(r) => r,
-                        Err(err) => {
-                            warn!(?err, "ack receiver failed");
-                            break;
-                        }
-                    };
-                    let mut guard = self.metrics.acks.guard(Status::Invalid);
-                    let ack = match msg {
-                        Ok(ack) => ack,
-                        Err(err) => {
-                            debug!(?err, ?sender, "ack decode failed");
-                            continue;
-                        }
-                    };
-                    if let Err(err) = self.validate_ack(&ack, &sender) {
-                        debug!(?err, ?sender, "ack validate failed");
-                        continue;
-                    };
-                    if let Err(err) = self.handle_ack(&ack).await {
-                        debug!(?err, ?sender, "ack handle failed");
-                        guard.set(Status::Failure);
+                };
+                let result = match self.validate_node(&node, &sender) {
+                    Ok(result) => result,
+                    Err(err) => {
+                        debug!(?err, ?sender, "node validate failed");
                         continue;
                     }
-                    debug!(?sender, epoch = %ack.epoch, sequencer = ?ack.chunk.sequencer, height = %ack.chunk.height, "ack");
-                    guard.set(Status::Success);
-                },
+                };
 
-                // Handle completed verification futures.
-                verify = self.pending_verifies.next_completed() => {
-                    let Verify { timer, context, payload, result } = verify;
-                    drop(timer); // Record metric. Explicitly reference timer to avoid lint warning.
-                    match result {
-                        Err(err) => {
-                            warn!(?err, ?context, "verified returned error");
-                            self.metrics.verify.inc(Status::Dropped);
-                        }
-                        Ok(false) => {
-                            debug!(?context, "verified was false");
-                            self.metrics.verify.inc(Status::Failure);
-                        }
-                        Ok(true) => {
-                            debug!(?context, "verified");
-                            self.metrics.verify.inc(Status::Success);
-                            if let Err(err) = self.handle_app_verified(&context, &payload, &mut ack_sender).await {
-                                debug!(?err, ?context, ?payload, "verified handle failed");
-                            }
-                        },
+                // Initialize journal for sequencer if it does not exist
+                self.journal_prepare(&sender).await;
+
+                // Handle the parent certificate
+                if let Some(parent_chunk) = result {
+                    let parent = node.parent.as_ref().unwrap();
+                    self.handle_certificate(&parent_chunk, parent.epoch, parent.certificate.clone()).await;
+                }
+
+                // Process the node
+                //
+                // Note, this node may be a duplicate. If it is, we will attempt to verify it and vote
+                // on it again (our original vote may have been lost).
+                self.handle_node(&node).await;
+                debug!(?sender, height = %node.chunk.height, "node");
+                guard.set(Status::Success);
+            },
+
+            // Handle incoming acks
+            msg = ack_receiver.recv() => {
+                // Error handling
+                let (sender, msg) = match msg {
+                    Ok(r) => r,
+                    Err(err) => {
+                        warn!(?err, "ack receiver failed");
+                        break;
                     }
-                },
-            }
+                };
+                let mut guard = self.metrics.acks.guard(Status::Invalid);
+                let ack = match msg {
+                    Ok(ack) => ack,
+                    Err(err) => {
+                        debug!(?err, ?sender, "ack decode failed");
+                        continue;
+                    }
+                };
+                if let Err(err) = self.validate_ack(&ack, &sender) {
+                    debug!(?err, ?sender, "ack validate failed");
+                    continue;
+                };
+                if let Err(err) = self.handle_ack(&ack).await {
+                    debug!(?err, ?sender, "ack handle failed");
+                    guard.set(Status::Failure);
+                    continue;
+                }
+                debug!(?sender, epoch = %ack.epoch, sequencer = ?ack.chunk.sequencer, height = %ack.chunk.height, "ack");
+                guard.set(Status::Success);
+            },
+
+            // Handle completed verification futures.
+            verify = self.pending_verifies.next_completed() => {
+                let Verify { timer, context, payload, result } = verify;
+                drop(timer); // Record metric. Explicitly reference timer to avoid lint warning.
+                match result {
+                    Err(err) => {
+                        warn!(?err, ?context, "verified returned error");
+                        self.metrics.verify.inc(Status::Dropped);
+                    }
+                    Ok(false) => {
+                        debug!(?context, "verified was false");
+                        self.metrics.verify.inc(Status::Failure);
+                    }
+                    Ok(true) => {
+                        debug!(?context, "verified");
+                        self.metrics.verify.inc(Status::Success);
+                        if let Err(err) = self.handle_app_verified(&context, &payload, &mut ack_sender).await {
+                            debug!(?err, ?context, ?payload, "verified handle failed");
+                        }
+                    },
+                }
+            },
         }
 
         // Sync and drop all journals, regardless of how we exit the loop

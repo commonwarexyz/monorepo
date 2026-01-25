@@ -66,9 +66,13 @@ hash = "ada5da872b95b6369905c2fca454f3276935a380d3da91190bc04f1602e7c501"
 n_cases = 512
 hash = "506b5a02d1a7c3e249f514b889e6099c27bb0723ebc711514263f0c71f0676ef"
 
+["commonware_storage::mmr::conformance::MmrRootStability"]
+n_cases = 200
+hash = "fa3102022fb8dabb5b1e559db14608a413b101f092f893a9e3fd331c26bc1604"
+
 ["commonware_storage::mmr::proof::tests::conformance::CodecConformance<Proof<Sha256Digest>>"]
 n_cases = 65536
-hash = "9658f1ff018c2339049b7bcba191d3202844e28d3bf3001da851c9be505232ed"
+hash = "c849cdcfb590075f4ab2b835288951e64fb0afef704d272e4df36cfae48b9275"
 
 ["commonware_storage::ordinal::storage::conformance::CodecConformance<Record<u32>>"]
 n_cases = 65536

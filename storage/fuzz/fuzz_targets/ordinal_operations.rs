@@ -1,7 +1,7 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use commonware_runtime::{deterministic, Runner};
+use commonware_runtime::{deterministic, Metrics, Runner};
 use commonware_storage::ordinal::{Config, Ordinal};
 use commonware_utils::{sequence::FixedBytes, NZUsize, NZU64};
 use libfuzzer_sys::fuzz_target;
@@ -82,6 +82,7 @@ fn fuzz(input: FuzzInput) {
             replay_buffer: NZUsize!(64 * 1024),
         };
         let mut store = Some(Ordinal::<_, FixedBytes<32>>::init(context.clone(), cfg.clone()).await.expect("failed to init ordinal"));
+        let mut restarts = 0usize;
 
         // Run operations
         let mut expected_data: HashMap<u64, FixedBytes<32>> = HashMap::new();
@@ -250,9 +251,10 @@ fn fuzz(input: FuzzInput) {
                         synced_data = expected_data.clone();
 
                         // Reopen and verify synced data persisted
-                        match Ordinal::<_, FixedBytes<32>>::init(context.clone(), cfg.clone()).await
+                        match Ordinal::<_, FixedBytes<32>>::init(context.with_label("ordinal").with_attribute("instance", restarts), cfg.clone()).await
                         {
                             Ok(new_ordinal) => {
+                                restarts += 1;
                                 // Verify all synced data is still accessible
                                 for (&index, expected_value) in synced_data.iter() {
                                     match new_ordinal.get(index).await {

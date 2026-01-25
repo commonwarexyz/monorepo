@@ -635,7 +635,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
     }
 
     /// Analogous to range_proof but for a previous database state. Specifically, the state when the
-    /// MMR had `size` nodes.
+    /// MMR had `leaves` leaves.
     ///
     /// Locations are validated by [verification::historical_range_proof].
     ///
@@ -646,10 +646,10 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
     /// Returns [Error::Empty] if the range is empty.
     pub async fn historical_range_proof(
         &self,
-        size: Position,
+        leaves: Location,
         range: Range<Location>,
     ) -> Result<Proof<D>, Error> {
-        verification::historical_range_proof(self, size, range).await
+        verification::historical_range_proof(self, leaves, range).await
     }
 
     /// Prune as many nodes as possible, leaving behind at most items_per_blob nodes in the current
@@ -833,8 +833,8 @@ impl<E: RStorage + Clock + Metrics + Sync, D: Digest> Storage<D> for CleanMmr<E,
 mod tests {
     use super::*;
     use crate::mmr::{
-        hasher::Hasher as _, location::LocationRangeExt as _, stability::ROOTS, Location,
-        StandardHasher as Standard,
+        conformance::build_test_mmr, hasher::Hasher as _, location::LocationRangeExt as _, mem,
+        Location, StandardHasher as Standard,
     };
     use commonware_cryptography::{
         sha256::{self, Digest},
@@ -842,7 +842,7 @@ mod tests {
     };
     use commonware_macros::test_traced;
     use commonware_runtime::{buffer::PoolRef, deterministic, Blob as _, Runner};
-    use commonware_utils::{hex, NZUsize, NZU16, NZU64};
+    use commonware_utils::{NZUsize, NZU16, NZU64};
     use std::num::NonZeroU16;
 
     fn test_digest(v: usize) -> Digest {
@@ -863,49 +863,36 @@ mod tests {
         }
     }
 
-    pub async fn build_batched_and_check_test_roots_journaled<E: RStorage + Clock + Metrics>(
-        journaled_mmr: CleanMmr<E, sha256::Digest>,
-    ) -> CleanMmr<E, sha256::Digest> {
-        let mut hasher: Standard<Sha256> = Standard::new();
-
-        // First element transitions Clean -> Dirty explicitly
-        let mut dirty_mmr = journaled_mmr.into_dirty();
-        hasher.inner().update(&0u64.to_be_bytes());
-        let element = hasher.inner().finalize();
-        dirty_mmr.add(&mut hasher, &element).await.unwrap();
-
-        // Subsequent elements keep it Dirty
-        for i in 1u64..199 {
-            hasher.inner().update(&i.to_be_bytes());
-            let element = hasher.inner().finalize();
-            dirty_mmr.add(&mut hasher, &element).await.unwrap();
-        }
-
-        let journaled_mmr = dirty_mmr.merkleize(&mut hasher);
-
-        assert_eq!(
-            hex(&journaled_mmr.root()),
-            ROOTS[199],
-            "Root after 200 elements"
-        );
-
-        journaled_mmr
-    }
-
-    /// Test that the MMR root computation remains stable.
+    /// Test that the journaled MMR produces the same root as the in-memory reference.
     #[test]
-    fn test_journaled_mmr_root_stability() {
+    fn test_journaled_mmr_batched_root() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mmr = Mmr::init(
+            const NUM_ELEMENTS: u64 = 199;
+            let mut hasher: Standard<Sha256> = Standard::new();
+            let test_mmr = mem::CleanMmr::new(&mut hasher);
+            let test_mmr = build_test_mmr(&mut hasher, test_mmr, NUM_ELEMENTS);
+            let expected_root = test_mmr.root();
+
+            let mut journaled_mmr = Mmr::init(
                 context.clone(),
                 &mut Standard::<Sha256>::new(),
                 test_config(),
             )
             .await
-            .unwrap();
-            let mmr = build_batched_and_check_test_roots_journaled(mmr).await;
-            mmr.destroy().await.unwrap();
+            .unwrap()
+            .into_dirty();
+
+            for i in 0u64..NUM_ELEMENTS {
+                hasher.inner().update(&i.to_be_bytes());
+                let element = hasher.inner().finalize();
+                journaled_mmr.add(&mut hasher, &element).await.unwrap();
+            }
+
+            let journaled_mmr = journaled_mmr.merkleize(&mut hasher);
+            assert_eq!(journaled_mmr.root(), *expected_root);
+
+            journaled_mmr.destroy().await.unwrap();
         });
     }
 
@@ -977,33 +964,42 @@ mod tests {
     fn test_journaled_mmr_pop() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
+            const NUM_ELEMENTS: u64 = 200;
+
             let mut hasher: Standard<Sha256> = Standard::new();
             let mut mmr = Mmr::init(context.clone(), &mut hasher, test_config())
                 .await
                 .unwrap();
 
             let mut c_hasher = Sha256::new();
-            for i in 0u64..199 {
+            for i in 0u64..NUM_ELEMENTS {
                 c_hasher.update(&i.to_be_bytes());
                 let element = c_hasher.finalize();
                 mmr.add(&mut hasher, &element).await.unwrap();
             }
-            assert_eq!(ROOTS[199], hex(&mmr.root()));
 
-            // Pop off one node at a time without syncing until empty, confirming the root is still
-            // is as expected.
-            for i in (0..199u64).rev() {
+            // Pop off one node at a time without syncing until empty, confirming the root matches.
+            for i in (0..NUM_ELEMENTS).rev() {
                 assert!(mmr.pop(&mut hasher, 1).await.is_ok());
                 let root = mmr.root();
-                let expected_root = ROOTS[i as usize];
-                assert_eq!(hex(&root), expected_root);
+                let mut reference_mmr = mem::CleanMmr::new(&mut hasher);
+                for j in 0..i {
+                    c_hasher.update(&j.to_be_bytes());
+                    let element = c_hasher.finalize();
+                    reference_mmr.add(&mut hasher, &element);
+                }
+                assert_eq!(
+                    root,
+                    *reference_mmr.root(),
+                    "root mismatch after pop at {i}"
+                );
             }
             assert!(matches!(mmr.pop(&mut hasher, 1).await, Err(Error::Empty)));
             assert!(mmr.pop(&mut hasher, 0).await.is_ok());
 
             // Repeat the test though sync part of the way to tip to test crossing the boundary from
             // cached to uncached leaves, and pop 2 at a time instead of just 1.
-            for i in 0u64..199 {
+            for i in 0u64..NUM_ELEMENTS {
                 c_hasher.update(&i.to_be_bytes());
                 let element = c_hasher.finalize();
                 mmr.add(&mut hasher, &element).await.unwrap();
@@ -1011,18 +1007,21 @@ mod tests {
                     mmr.sync().await.unwrap();
                 }
             }
-            for i in (0..198u64).rev().step_by(2) {
+            for i in (0..NUM_ELEMENTS - 1).rev().step_by(2) {
                 assert!(mmr.pop(&mut hasher, 2).await.is_ok(), "at position {i:?}");
                 let root = mmr.root();
-                let expected_root = ROOTS[i as usize];
-                assert_eq!(hex(&root), expected_root, "at position {i:?}");
+                let reference_mmr = mem::CleanMmr::new(&mut hasher);
+                let reference_mmr = build_test_mmr(&mut hasher, reference_mmr, i);
+                assert_eq!(
+                    root,
+                    *reference_mmr.root(),
+                    "root mismatch at position {i:?}"
+                );
             }
-            assert_eq!(mmr.size(), 1);
-            assert!(mmr.pop(&mut hasher, 1).await.is_ok()); // pop the last element
             assert!(matches!(mmr.pop(&mut hasher, 99).await, Err(Error::Empty)));
 
             // Repeat one more time only after pruning the MMR first.
-            for i in 0u64..199 {
+            for i in 0u64..NUM_ELEMENTS {
                 c_hasher.update(&i.to_be_bytes());
                 let element = c_hasher.finalize();
                 mmr.add(&mut hasher, &element).await.unwrap();
@@ -1384,17 +1383,17 @@ mod tests {
                 elements.push(test_digest(i));
                 positions.push(mmr.add(&mut hasher, &elements[i]).await.unwrap());
             }
-            let original_size = mmr.size();
+            let original_leaves = mmr.leaves();
 
             // Historical proof should match "regular" proof when historical size == current database size
             let historical_proof = mmr
                 .historical_range_proof(
-                    original_size,
+                    original_leaves,
                     Location::new_unchecked(2)..Location::new_unchecked(6),
                 )
                 .await
                 .unwrap();
-            assert_eq!(historical_proof.size, original_size);
+            assert_eq!(historical_proof.leaves, original_leaves);
             let root = mmr.root();
             assert!(historical_proof.verify_range_inclusion(
                 &mut hasher,
@@ -1406,7 +1405,7 @@ mod tests {
                 .range_proof(Location::new_unchecked(2)..Location::new_unchecked(6))
                 .await
                 .unwrap();
-            assert_eq!(regular_proof.size, historical_proof.size);
+            assert_eq!(regular_proof.leaves, historical_proof.leaves);
             assert_eq!(regular_proof.digests, historical_proof.digests);
 
             // Add more elements to the MMR
@@ -1416,12 +1415,12 @@ mod tests {
             }
             let new_historical_proof = mmr
                 .historical_range_proof(
-                    original_size,
+                    original_leaves,
                     Location::new_unchecked(2)..Location::new_unchecked(6),
                 )
                 .await
                 .unwrap();
-            assert_eq!(new_historical_proof.size, historical_proof.size);
+            assert_eq!(new_historical_proof.leaves, historical_proof.leaves);
             assert_eq!(new_historical_proof.digests, historical_proof.digests);
 
             mmr.destroy().await.unwrap();
@@ -1468,19 +1467,19 @@ mod tests {
             for elt in elements.iter().take(41) {
                 ref_mmr.add(&mut hasher, elt).await.unwrap();
             }
-            let historical_size = ref_mmr.size();
+            let historical_leaves = ref_mmr.leaves();
             let historical_root = ref_mmr.root();
 
             // Test proof at historical position after pruning
             let historical_proof = mmr
                 .historical_range_proof(
-                    historical_size,
+                    historical_leaves,
                     Location::new_unchecked(35)..Location::new_unchecked(39), // Start after prune point to end at historical size
                 )
                 .await
                 .unwrap();
 
-            assert_eq!(historical_proof.size, historical_size);
+            assert_eq!(historical_proof.leaves, historical_leaves);
 
             // Verify proof works despite pruning
             assert!(historical_proof.verify_range_inclusion(
@@ -1545,12 +1544,12 @@ mod tests {
             for elt in elements.iter().take(*range.end as usize) {
                 ref_mmr.add(&mut hasher, elt).await.unwrap();
             }
-            let historical_size = ref_mmr.size();
+            let historical_leaves = ref_mmr.leaves();
             let expected_root = ref_mmr.root();
 
             // Generate proof from full MMR
             let proof = mmr
-                .historical_range_proof(historical_size, range.clone())
+                .historical_range_proof(historical_leaves, range.clone())
                 .await
                 .unwrap();
 
@@ -1581,7 +1580,7 @@ mod tests {
             // Test single element proof at historical position
             let single_proof = mmr
                 .historical_range_proof(
-                    Position::new(1),
+                    Location::new_unchecked(1),
                     Location::new_unchecked(0)..Location::new_unchecked(1),
                 )
                 .await

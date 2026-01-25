@@ -1,5 +1,4 @@
-use crate::{mocks, Error};
-use bytes::{Buf, BufMut};
+use crate::{mocks, Error, IoBufs};
 use futures::{channel::mpsc, SinkExt as _, StreamExt as _};
 use std::{
     collections::HashMap,
@@ -17,8 +16,8 @@ pub struct Sink {
 }
 
 impl crate::Sink for Sink {
-    async fn send(&mut self, msg: impl Buf + Send) -> Result<(), Error> {
-        self.sender.send(msg).await.map_err(|_| Error::SendFailed)
+    async fn send(&mut self, buf: impl Into<IoBufs> + Send) -> Result<(), Error> {
+        self.sender.send(buf).await.map_err(|_| Error::SendFailed)
     }
 }
 
@@ -28,8 +27,12 @@ pub struct Stream {
 }
 
 impl crate::Stream for Stream {
-    async fn recv(&mut self, buf: impl BufMut + Send) -> Result<(), Error> {
-        self.receiver.recv(buf).await.map_err(|_| Error::RecvFailed)
+    async fn recv(&mut self, len: u64) -> Result<IoBufs, Error> {
+        self.receiver.recv(len).await.map_err(|_| Error::RecvFailed)
+    }
+
+    fn peek(&self, max_len: u64) -> &[u8] {
+        self.receiver.peek(max_len)
     }
 }
 
