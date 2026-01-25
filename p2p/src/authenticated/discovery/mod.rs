@@ -397,7 +397,7 @@ mod tests {
                                             }
                                         }
                                     }
-                                    Mode::Some => {
+                                    Mode::Some | Mode::All => {
                                         // Get all peers not including self
                                         let mut recipients = addresses.clone();
                                         recipients.remove(i);
@@ -407,33 +407,16 @@ mod tests {
                                         loop {
                                             let mut sent = sender
                                                 .send(
-                                                    Recipients::Some(recipients.clone()),
+                                                    match mode {
+                                                        Mode::Some => {
+                                                            Recipients::Some(recipients.clone())
+                                                        }
+                                                        Mode::All => Recipients::All,
+                                                        _ => unreachable!(),
+                                                    },
                                                     msg.as_ref().to_vec(),
                                                     true,
                                                 )
-                                                .await
-                                                .unwrap();
-                                            if sent.len() != recipients.len() {
-                                                context.sleep(Duration::from_millis(100)).await;
-                                                continue;
-                                            }
-
-                                            // Compare to expected
-                                            sent.sort();
-                                            assert_eq!(sent, recipients);
-                                            break;
-                                        }
-                                    }
-                                    Mode::All => {
-                                        // Get all peers not including self
-                                        let mut recipients = addresses.clone();
-                                        recipients.remove(i);
-                                        recipients.sort();
-
-                                        // Loop until all peer sends successful
-                                        loop {
-                                            let mut sent = sender
-                                                .send(Recipients::All, msg.as_ref().to_vec(), true)
                                                 .await
                                                 .unwrap();
                                             if sent.len() != recipients.len() {

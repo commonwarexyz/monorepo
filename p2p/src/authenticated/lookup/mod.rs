@@ -269,17 +269,6 @@ mod tests {
             network.start();
 
             // Send/Receive messages
-            let mut public_keys = peers
-                .iter()
-                .filter_map(|(pk, _)| {
-                    if pk != &public_key {
-                        Some(pk.clone())
-                    } else {
-                        None
-                    }
-                })
-                .collect::<Vec<_>>();
-            public_keys.sort();
             context.with_label("agent").spawn({
                 let mut complete_sender = complete_sender.clone();
                 let peers = peers.clone();
@@ -337,7 +326,7 @@ mod tests {
                                             }
                                         }
                                     }
-                                    Mode::Some => {
+                                    Mode::Some | Mode::All => {
                                         // Get all peers not including self
                                         let mut recipients: Vec<_> = peers
                                             .iter()
@@ -351,38 +340,13 @@ mod tests {
                                         loop {
                                             let mut sent = sender
                                                 .send(
-                                                    Recipients::Some(recipients.clone()),
-                                                    public_key.as_ref().to_vec(),
-                                                    true,
-                                                )
-                                                .await
-                                                .unwrap();
-                                            if sent.len() != recipients.len() {
-                                                context.sleep(Duration::from_millis(100)).await;
-                                                continue;
-                                            }
-
-                                            // Compare to expected
-                                            sent.sort();
-                                            assert_eq!(sent, recipients);
-                                            break;
-                                        }
-                                    }
-                                    Mode::All => {
-                                        // Get all peers not including self
-                                        let mut recipients: Vec<_> = peers
-                                            .iter()
-                                            .enumerate()
-                                            .filter(|(j, _)| i != *j)
-                                            .map(|(_, (pk, _))| pk.clone())
-                                            .collect();
-                                        recipients.sort();
-
-                                        // Loop until all peer sends successful
-                                        loop {
-                                            let mut sent = sender
-                                                .send(
-                                                    Recipients::All,
+                                                    match mode {
+                                                        Mode::Some => {
+                                                            Recipients::Some(recipients.clone())
+                                                        }
+                                                        Mode::All => Recipients::All,
+                                                        _ => unreachable!(),
+                                                    },
                                                     public_key.as_ref().to_vec(),
                                                     true,
                                                 )
