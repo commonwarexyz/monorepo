@@ -76,7 +76,7 @@ pub trait Signer: Random + Send + Sync + Clone + 'static {
 }
 
 /// A [Signer] that can be serialized/deserialized.
-pub trait PrivateKey: Signer + Sized + ReadExt + Encode + PartialEq {}
+pub trait PrivateKey: Signer + Sized + ReadExt + Encode {}
 
 /// Verifies [Signature]s over messages.
 pub trait Verifier {
