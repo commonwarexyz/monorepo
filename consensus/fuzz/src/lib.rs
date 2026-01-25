@@ -1,11 +1,13 @@
 pub mod disrupter;
 pub mod invariants;
 pub mod simplex;
+pub mod strategy;
 pub mod types;
 pub mod utils;
 
 use crate::{
     disrupter::Disrupter,
+    strategy::{AnyScope, SmallScope, StrategyChoice},
     utils::{link_peers, max_faults, register, Action, Partition},
 };
 use arbitrary::Arbitrary;
@@ -73,6 +75,7 @@ pub struct FuzzInput {
     rng: RefCell<StdRng>,
     pub configuration: (u32, u32, u32),
     pub partition: Partition,
+    pub strategy: StrategyChoice,
 }
 
 impl FuzzInput {
@@ -141,6 +144,13 @@ impl Arbitrary<'_> for FuzzInput {
         let required_containers =
             u.int_in_range(MIN_REQUIRED_CONTAINERS..=MAX_REQUIRED_CONTINERS)?;
 
+        // SmallScope mutations - 75%, AnyScope mutations - 25%
+        let strategy = if u.int_in_range(0..=3)? == 0 {
+            StrategyChoice::AnyScope
+        } else {
+            StrategyChoice::SmallScope
+        };
+
         let mut raw_bytes = Vec::new();
         for _ in 0..MAX_RAW_BYTES {
             match u.arbitrary::<u8>() {
@@ -163,6 +173,7 @@ impl Arbitrary<'_> for FuzzInput {
             required_containers,
             offset: RefCell::new(0),
             rng: RefCell::new(StdRng::from_seed(prng_seed)),
+            strategy,
         })
     }
 }
@@ -245,17 +256,19 @@ fn run<P: simplex::Simplex>(input: FuzzInput) {
 
             let (vote_network, certificate_network, resolver_network) =
                 registrations.remove(&validator).unwrap();
-            let disrupter = Disrupter::<_, _>::new(
-                context.with_label("disrupter"),
-                validator.clone(),
-                scheme,
-                participants
-                    .clone()
-                    .try_into()
-                    .expect("public keys are unique"),
-                input.clone(),
-            );
-            disrupter.start(vote_network, certificate_network, resolver_network);
+            let disrupter_context = context.with_label("disrupter");
+            match input.strategy {
+                StrategyChoice::SmallScope => {
+                    let disrupter =
+                        Disrupter::new(disrupter_context, scheme, input.clone(), SmallScope);
+                    disrupter.start(vote_network, certificate_network, resolver_network);
+                }
+                StrategyChoice::AnyScope => {
+                    let disrupter =
+                        Disrupter::new(disrupter_context, scheme, input.clone(), AnyScope);
+                    disrupter.start(vote_network, certificate_network, resolver_network);
+                }
+            }
         }
 
         for i in (f as usize)..(n as usize) {
@@ -559,22 +572,31 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
 
             let mutator_label = format!("twin_{idx}_secondary");
             let mutator_context = context.with_label(&mutator_label);
-            let disrupter = Disrupter::<_, _>::new(
-                mutator_context.with_label("disrupter"),
-                validator.clone(),
-                scheme.clone(),
-                participants
-                    .as_ref()
-                    .to_vec()
-                    .try_into()
-                    .expect("public keys are unique"),
-                input.clone(),
-            );
-            disrupter.start(
-                (vote_sender_secondary, vote_receiver_secondary),
-                (certificate_sender_secondary, certificate_receiver_secondary),
-                (resolver_sender_secondary, resolver_receiver_secondary),
-            );
+            let disrupter_context = mutator_context.with_label("disrupter");
+            match input.strategy {
+                StrategyChoice::SmallScope => {
+                    let disrupter = Disrupter::new(
+                        disrupter_context,
+                        scheme.clone(),
+                        input.clone(),
+                        SmallScope,
+                    );
+                    disrupter.start(
+                        (vote_sender_secondary, vote_receiver_secondary),
+                        (certificate_sender_secondary, certificate_receiver_secondary),
+                        (resolver_sender_secondary, resolver_receiver_secondary),
+                    );
+                }
+                StrategyChoice::AnyScope => {
+                    let disrupter =
+                        Disrupter::new(disrupter_context, scheme.clone(), input.clone(), AnyScope);
+                    disrupter.start(
+                        (vote_sender_secondary, vote_receiver_secondary),
+                        (certificate_sender_secondary, certificate_receiver_secondary),
+                        (resolver_sender_secondary, resolver_receiver_secondary),
+                    );
+                }
+            }
         }
 
         for (idx, validator) in participants.iter().enumerate().skip(f as usize) {

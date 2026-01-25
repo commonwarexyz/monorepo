@@ -120,7 +120,7 @@ impl Simplex for SimplexSecp256r1 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{fuzz, utils::Partition, FuzzInput, N4C3F1};
+    use crate::{fuzz, strategy::StrategyChoice, utils::Partition, FuzzInput, N4C3F1};
     use commonware_macros::{test_group, test_traced};
     use proptest::prelude::*;
     use rand::{rngs::StdRng, RngCore, SeedableRng};
@@ -153,6 +153,7 @@ mod tests {
             rng: RefCell::new(StdRng::seed_from_u64(seed)),
             required_containers: containers,
             degraded_network_node: false,
+            strategy: StrategyChoice::SmallScope,
         }
     }
 
@@ -171,6 +172,7 @@ mod tests {
                 rng: RefCell::new(StdRng::seed_from_u64(seed)),
                 required_containers: PROPERTY_TEST_CONTAINERS,
                 degraded_network_node: false,
+                strategy: StrategyChoice::SmallScope,
             }
         })
     }

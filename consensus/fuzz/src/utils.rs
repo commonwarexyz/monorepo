@@ -7,6 +7,8 @@ use std::{collections::HashMap, num::NonZeroU32};
 /// Default rate limit set high enough to not interfere with normal operation
 const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
 
+// We use static thresholds to eliminate potential critical bugs
+// if the threshold functions (e.g., `max_faults`, `quorum`) in the codebase are changed.
 const THRESHOLD_TABLE: &[(u32, u32, u32)] = &[
     // n, f, q
     (1, 0, 1),
