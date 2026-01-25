@@ -10,16 +10,12 @@
     html_favicon_url = "https://commonware.xyz/favicon.ico"
 )]
 
-use commonware_macros::{ready_mod, ready_scope};
+commonware_macros::ready_scope!(0 {
+    mod no_coding;
+    pub use no_coding::{Error as NoCodingError, NoCoding};
+});
 
-ready_mod!(0, mod no_coding);
-#[cfg(not(min_readiness_1))]
-#[cfg(not(min_readiness_2))]
-#[cfg(not(min_readiness_3))]
-#[cfg(not(min_readiness_4))]
-pub use no_coding::{Error as NoCodingError, NoCoding};
-
-ready_scope!(1 {
+commonware_macros::ready_scope!(1 {
     mod reed_solomon;
     pub use reed_solomon::{Error as ReedSolomonError, ReedSolomon};
 
@@ -27,7 +23,7 @@ ready_scope!(1 {
     pub use zoda::{Error as ZodaError, Zoda};
 });
 
-ready_scope!(2 {
+commonware_macros::ready_scope!(2 {
     use bytes::Buf;
     use commonware_codec::{Codec, FixedSize, Read, Write};
     use commonware_cryptography::Digest;

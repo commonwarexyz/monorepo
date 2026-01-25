@@ -16,9 +16,7 @@ Augment the development of primitives with procedural macros.
 Marks an item with a readiness level (0-4). When building with `RUSTFLAGS="--cfg min_readiness_N"`, items with readiness less than N are excluded.
 
 ```rust
-use commonware_macros::ready;
-
-#[ready(2)]
+#[commonware_macros::ready(2)]
 pub mod stable_api {
     // All items in this module are at readiness level 2
 }
@@ -28,14 +26,23 @@ Apply at whatever granularity makes sense (individual items, impl blocks, or mod
 
 See the [Readiness section](https://github.com/commonwarexyz/monorepo#readiness) in the main README for level definitions.
 
+### `ready_scope!`
+
+Group multiple items under a single readiness level:
+
+```rust
+commonware_macros::ready_scope!(2 {
+    pub struct Config { }
+    pub fn process() { }
+});
+```
+
 ### `#[test_async]`
 
 Run a test function asynchronously without binding to a particular executor.
 
 ```rust
-use commonware_macros::test_async;
-
-#[test_async]
+#[commonware_macros::test_async]
 async fn test_async_fn() {
     assert_eq!(2 + 2, 4);
 }

@@ -25,9 +25,7 @@ mod nextest;
 ///
 /// # Example
 /// ```rust,ignore
-/// use commonware_macros::ready;
-///
-/// #[ready(2)]  // excluded at levels 3, 4
+/// #[commonware_macros::ready(2)]  // excluded at levels 3, 4
 /// pub struct StableApi { }
 /// ```
 #[proc_macro_attribute]
@@ -87,9 +85,7 @@ impl Parse for ReadyModInput {
 ///
 /// # Example
 /// ```rust,ignore
-/// use commonware_macros::ready_mod;
-///
-/// ready_mod!(2, pub mod stable_module);
+/// commonware_macros::ready_mod!(2, pub mod stable_module);
 /// ```
 #[proc_macro]
 pub fn ready_mod(input: TokenStream) -> TokenStream {
@@ -151,9 +147,7 @@ impl Parse for ReadyScopeInput {
 ///
 /// # Example
 /// ```rust,ignore
-/// use commonware_macros::ready_scope;
-///
-/// ready_scope!(2 {
+/// commonware_macros::ready_scope!(2 {
 ///     pub mod stable_module;
 ///     pub use crate::stable_module::Item;
 /// });
@@ -202,9 +196,7 @@ pub fn ready_scope(input: TokenStream) -> TokenStream {
 ///
 /// # Example
 /// ```rust
-/// use commonware_macros::test_async;
-///
-/// #[test_async]
+/// #[commonware_macros::test_async]
 /// async fn test_async_fn() {
 ///    assert_eq!(2 + 2, 4);
 /// }
@@ -247,10 +239,9 @@ pub fn test_async(_: TokenStream, item: TokenStream) -> TokenStream {
 ///
 /// # Example
 /// ```rust
-/// use commonware_macros::test_traced;
 /// use tracing::{debug, info};
 ///
-/// #[test_traced("INFO")]
+/// #[commonware_macros::test_traced("INFO")]
 /// fn test_info_level() {
 ///     info!("This is an info log");
 ///     debug!("This is a debug log (won't be shown)");
@@ -373,11 +364,10 @@ pub fn test_group(attr: TokenStream, item: TokenStream) -> TokenStream {
 ///
 /// # Example
 /// ```rust,ignore
-/// use commonware_macros::test_collect_traces;
 /// use commonware_runtime::telemetry::traces::collector::TraceStorage;
 /// use tracing::{debug, info};
 ///
-/// #[test_collect_traces("INFO")]
+/// #[commonware_macros::test_collect_traces("INFO")]
 /// fn test_info_level(traces: TraceStorage) {
 ///     // Filter applies to console output (FmtLayer)
 ///     info!("This is an info log");
@@ -541,16 +531,15 @@ impl ToTokens for SelectInput {
 ///
 /// ```rust
 /// use std::time::Duration;
-/// use commonware_macros::select;
 /// use futures::executor::block_on;
 /// use futures_timer::Delay;
 ///
 /// async fn task() -> usize {
 ///     42
 /// }
-//
+///
 /// block_on(async move {
-///     select! {
+///     commonware_macros::select! {
 ///         _ = Delay::new(Duration::from_secs(1)) => {
 ///             println!("timeout fired");
 ///         },
@@ -714,7 +703,7 @@ impl Parse for SelectLoopInput {
 /// # Syntax
 ///
 /// ```rust,ignore
-/// select_loop! {
+/// commonware_macros::select_loop! {
 ///     context,
 ///     on_start => { /* optional: runs at start of each iteration */ },
 ///     on_stopped => { cleanup },
@@ -742,11 +731,9 @@ impl Parse for SelectLoopInput {
 /// # Example
 ///
 /// ```rust,ignore
-/// use commonware_macros::select_loop;
-///
 /// async fn run(context: impl commonware_runtime::Spawner) {
 ///     let mut counter = 0;
-///     select_loop! {
+///     commonware_macros::select_loop! {
 ///         context,
 ///         on_start => {
 ///             // Prepare state for this iteration (visible in arms and on_end)

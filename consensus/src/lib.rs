@@ -10,52 +10,49 @@
     html_favicon_url = "https://commonware.xyz/favicon.ico"
 )]
 
-#[ready(2)]
-use commonware_codec::Codec;
-#[ready(2)]
-use commonware_cryptography::{Committable, Digestible};
-use commonware_macros::{ready, ready_mod};
+commonware_macros::ready_scope!(1 {
+    pub mod aggregation;
+    pub mod ordered_broadcast;
+});
 
-ready_mod!(1, pub mod aggregation);
-ready_mod!(1, pub mod ordered_broadcast);
-ready_mod!(2, pub mod simplex);
-ready_mod!(2, pub mod types);
+commonware_macros::ready_scope!(2 {
+    use commonware_codec::Codec;
+    use commonware_cryptography::{Committable, Digestible};
 
-#[ready(2)]
-use types::{Epoch, Height, View};
+    pub mod simplex;
+    pub mod types;
 
-/// Epochable is a trait that provides access to the epoch number.
-/// Any consensus message or object that is associated with a specific epoch should implement this.
-#[ready(2)]
-pub trait Epochable {
-    /// Returns the epoch associated with this object.
-    fn epoch(&self) -> Epoch;
-}
+    use types::{Epoch, Height, View};
 
-/// Heightable is a trait that provides access to the height.
-/// Any consensus message or object that is associated with a specific height should implement this.
-#[ready(2)]
-pub trait Heightable {
-    /// Returns the height associated with this object.
-    fn height(&self) -> Height;
-}
+    /// Epochable is a trait that provides access to the epoch number.
+    /// Any consensus message or object that is associated with a specific epoch should implement this.
+    pub trait Epochable {
+        /// Returns the epoch associated with this object.
+        fn epoch(&self) -> Epoch;
+    }
 
-/// Viewable is a trait that provides access to the view (round) number.
-/// Any consensus message or object that is associated with a specific view should implement this.
-#[ready(2)]
-pub trait Viewable {
-    /// Returns the view associated with this object.
-    fn view(&self) -> View;
-}
+    /// Heightable is a trait that provides access to the height.
+    /// Any consensus message or object that is associated with a specific height should implement this.
+    pub trait Heightable {
+        /// Returns the height associated with this object.
+        fn height(&self) -> Height;
+    }
 
-/// Block is the interface for a block in the blockchain.
-///
-/// Blocks are used to track the progress of the consensus engine.
-#[ready(2)]
-pub trait Block: Heightable + Codec + Digestible + Committable + Send + Sync + 'static {
-    /// Get the parent block's digest.
-    fn parent(&self) -> Self::Commitment;
-}
+    /// Viewable is a trait that provides access to the view (round) number.
+    /// Any consensus message or object that is associated with a specific view should implement this.
+    pub trait Viewable {
+        /// Returns the view associated with this object.
+        fn view(&self) -> View;
+    }
+
+    /// Block is the interface for a block in the blockchain.
+    ///
+    /// Blocks are used to track the progress of the consensus engine.
+    pub trait Block: Heightable + Codec + Digestible + Committable + Send + Sync + 'static {
+        /// Get the parent block's digest.
+        fn parent(&self) -> Self::Commitment;
+    }
+});
 
 /// CertifiableBlock extends [Block] with consensus context information.
 ///
@@ -78,14 +75,22 @@ cfg_if::cfg_if! {
         use std::future::Future;
         use commonware_runtime::{Spawner, Metrics, Clock};
         use rand::Rng;
-use crate::types::Round;
+        use crate::types::Round;
         use commonware_cryptography::certificate::Scheme;
 
-        ready_mod!(1, pub mod application);
-        ready_mod!(2, pub mod marshal);
+        // File modules in proc macro input are unstable, so use raw cfg attributes
+        #[cfg(not(min_readiness_2))]
+        #[cfg(not(min_readiness_3))]
+        #[cfg(not(min_readiness_4))]
+        pub mod application;
 
-        #[ready(2)]
+        #[cfg(not(min_readiness_3))]
+        #[cfg(not(min_readiness_4))]
+        pub mod marshal;
+        #[cfg(not(min_readiness_3))]
+        #[cfg(not(min_readiness_4))]
         use crate::marshal::ingress::mailbox::AncestorStream;
+
         mod reporter;
         pub use reporter::*;
 
@@ -97,7 +102,7 @@ use crate::types::Round;
 
         /// Automaton is the interface responsible for driving the consensus forward by proposing new payloads
         /// and verifying payloads proposed by other participants.
-        #[ready(2)]
+        #[commonware_macros::ready(2)]
         pub trait Automaton: Clone + Send + 'static {
             /// Context is metadata provided by the consensus engine associated with a given payload.
             ///
@@ -136,7 +141,7 @@ use crate::types::Round;
         /// This trait is required by consensus implementations (like Simplex) that support a certification
         /// phase between notarization and finalization. Applications that do not need custom certification
         /// logic can use the default implementation which always certifies.
-        #[ready(2)]
+        #[commonware_macros::ready(2)]
         pub trait CertifiableAutomaton: Automaton {
             /// Determine whether a verified payload is safe to commit.
             ///
@@ -167,7 +172,7 @@ use crate::types::Round;
 
         /// Application is a minimal interface for standard implementations that operate over a stream
         /// of epoched blocks.
-        #[ready(1)]
+        #[commonware_macros::ready(1)]
         pub trait Application<E>: Clone + Send + 'static
         where
             E: Rng + Spawner + Metrics + Clock
@@ -201,7 +206,7 @@ use crate::types::Round;
         /// erasure coding, for example, verification only serves to verify the integrity of the
         /// received shard relative to the consensus commitment, and can therefore be
         /// hidden from the application.
-        #[ready(1)]
+        #[commonware_macros::ready(1)]
         pub trait VerifyingApplication<E>: Application<E>
         where
             E: Rng + Spawner + Metrics + Clock

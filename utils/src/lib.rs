@@ -11,12 +11,7 @@ extern crate alloc;
 
 #[cfg(not(feature = "std"))]
 use alloc::{boxed::Box, string::String, vec::Vec};
-#[ready(2)]
-use bytes::Buf;
 use bytes::{BufMut, BytesMut};
-#[ready(2)]
-use commonware_codec::{varint::UInt, EncodeSize, Error as CodecError, Read, ReadExt, Write};
-use commonware_macros::{ready, ready_mod};
 use core::{
     fmt::{Debug, Write as FmtWrite},
     time::Duration,
@@ -24,23 +19,15 @@ use core::{
 
 pub mod faults;
 pub use faults::{Faults, N3f1, N5f1};
-ready_mod!(2, pub mod sequence);
-#[ready(2)]
-pub use sequence::{Array, Span};
 #[cfg(feature = "std")]
 pub mod acknowledgement;
 #[cfg(feature = "std")]
 pub use acknowledgement::Acknowledgement;
-ready_mod!(2, pub mod bitmap);
 #[cfg(feature = "std")]
 pub mod channels;
 pub mod hex_literal;
-ready_mod!(2, pub mod hostname);
-#[ready(2)]
-pub use hostname::Hostname;
 #[cfg(feature = "std")]
 pub mod net;
-ready_mod!(2, pub mod ordered);
 pub mod vec;
 
 /// Represents a participant/validator index within a consensus committee.
@@ -85,29 +72,38 @@ impl core::fmt::Display for Participant {
     }
 }
 
-#[ready(2)]
-impl Read for Participant {
-    type Cfg = ();
+commonware_macros::ready_scope!(2 {
+    use bytes::Buf;
+    use commonware_codec::{varint::UInt, EncodeSize, Error as CodecError, Read, ReadExt, Write};
 
-    fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, CodecError> {
-        let value: u32 = UInt::read(buf)?.into();
-        Ok(Self(value))
-    }
-}
+    pub mod sequence;
+    pub use sequence::{Array, Span};
+    pub mod bitmap;
+    pub mod hostname;
+    pub use hostname::Hostname;
+    pub mod ordered;
 
-#[ready(2)]
-impl Write for Participant {
-    fn write(&self, buf: &mut impl BufMut) {
-        UInt(self.0).write(buf);
-    }
-}
+    impl Read for Participant {
+        type Cfg = ();
 
-#[ready(2)]
-impl EncodeSize for Participant {
-    fn encode_size(&self) -> usize {
-        UInt(self.0).encode_size()
+        fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, CodecError> {
+            let value: u32 = UInt::read(buf)?.into();
+            Ok(Self(value))
+        }
     }
-}
+
+    impl Write for Participant {
+        fn write(&self, buf: &mut impl bytes::BufMut) {
+            UInt(self.0).write(buf);
+        }
+    }
+
+    impl EncodeSize for Participant {
+        fn encode_size(&self) -> usize {
+            UInt(self.0).encode_size()
+        }
+    }
+});
 
 /// A type that can be constructed from an iterator, possibly failing.
 pub trait TryFromIterator<T>: Sized {
@@ -221,7 +217,7 @@ pub fn union(a: &[u8], b: &[u8]) -> Vec<u8> {
 /// Concatenate a namespace and a message, prepended by a varint encoding of the namespace length.
 ///
 /// This produces a unique byte sequence (i.e. no collisions) for each `(namespace, msg)` pair.
-#[ready(2)]
+#[commonware_macros::ready(2)]
 pub fn union_unique(namespace: &[u8], msg: &[u8]) -> Vec<u8> {
     use commonware_codec::EncodeSize;
     let len_prefix = namespace.len();
