@@ -196,7 +196,7 @@ where
                 0 => self.send_random_vote(&mut vote_sender).await,
                 1 => self.send_proposal(&mut vote_sender).await,
                 2 => {
-                    // Equivocation attack: send multiple different proposals
+                    // Equivocation style: send multiple different proposals
                     self.send_proposal(&mut vote_sender).await;
                     self.send_proposal(&mut vote_sender).await;
                 }
@@ -244,10 +244,10 @@ where
     }
 
     async fn handle_vote(&mut self, sender: &mut impl Sender, msg: Vec<u8>) {
+        // Optionally send mutated vote
         if self.fuzz_input.random_bool() {
-            let _ = sender
-                .send(Recipients::All, Bytes::from(msg.clone()), true)
-                .await;
+            let mutated = self.mutate_bytes(&msg);
+            let _ = sender.send(Recipients::All, &mutated[..], true).await;
         }
 
         let Ok(vote) = Vote::<S, Sha256Digest>::read(&mut msg.as_slice()) else {
@@ -258,70 +258,57 @@ where
             Vote::Notarize(notarize) => {
                 self.latest_proposals.push_back(notarize.proposal.clone());
 
-                if self.fuzz_input.random_bool() {
-                    let mutated = self.mutate_bytes(&msg);
-                    let _ = sender.send(Recipients::All, &mutated[..], true).await;
-                } else {
-                    let proposal = self.strategy.mutate_proposal(
-                        &self.fuzz_input,
-                        &notarize.proposal,
-                        self.last_vote_view,
-                        self.last_finalized_view,
-                        self.last_notarized_view,
-                        self.last_nullified_view,
-                    );
-                    if let Some(v) = Notarize::sign(&self.scheme, proposal) {
-                        let msg = Vote::<S, Sha256Digest>::Notarize(v).encode();
-                        let _ = sender.send(Recipients::All, msg, true).await;
-                    }
+                let proposal = self.strategy.mutate_proposal(
+                    &self.fuzz_input,
+                    &notarize.proposal,
+                    self.last_vote_view,
+                    self.last_finalized_view,
+                    self.last_notarized_view,
+                    self.last_nullified_view,
+                );
+                if let Some(v) = Notarize::sign(&self.scheme, proposal) {
+                    let msg = Vote::<S, Sha256Digest>::Notarize(v).encode();
+                    let _ = sender.send(Recipients::All, msg, true).await;
                 }
             }
             Vote::Finalize(finalize) => {
-                if self.fuzz_input.random_bool() {
-                    let mutated = self.mutate_bytes(&msg);
-                    let _ = sender.send(Recipients::All, &mutated[..], true).await;
-                } else {
-                    let proposal = self.strategy.mutate_proposal(
-                        &self.fuzz_input,
-                        &finalize.proposal,
-                        self.last_vote_view,
-                        self.last_finalized_view,
-                        self.last_notarized_view,
-                        self.last_nullified_view,
-                    );
-                    if let Some(v) = Finalize::sign(&self.scheme, proposal) {
-                        let msg = Vote::<S, Sha256Digest>::Finalize(v).encode();
-                        let _ = sender.send(Recipients::All, msg, true).await;
-                    }
+                let proposal = self.strategy.mutate_proposal(
+                    &self.fuzz_input,
+                    &finalize.proposal,
+                    self.last_vote_view,
+                    self.last_finalized_view,
+                    self.last_notarized_view,
+                    self.last_nullified_view,
+                );
+                if let Some(v) = Finalize::sign(&self.scheme, proposal) {
+                    let msg = Vote::<S, Sha256Digest>::Finalize(v).encode();
+                    let _ = sender.send(Recipients::All, msg, true).await;
                 }
             }
             Vote::Nullify(_) => {
-                if self.fuzz_input.random_bool() {
-                    let mutated = self.mutate_bytes(&msg);
-                    let _ = sender.send(Recipients::All, &mutated[..], true).await;
-                } else {
-                    let v = self.strategy.mutate_nullify_view(
-                        &self.fuzz_input,
-                        self.last_vote_view,
-                        self.last_finalized_view,
-                        self.last_notarized_view,
-                        self.last_nullified_view,
-                    );
-                    let round = Round::new(Epoch::new(EPOCH), View::new(v));
-                    if let Some(v) = Nullify::<S>::sign::<Sha256Digest>(&self.scheme, round) {
-                        let msg = Vote::<S, Sha256Digest>::Nullify(v).encode();
-                        let _ = sender.send(Recipients::All, msg, true).await;
-                    }
+                let v = self.strategy.mutate_nullify_view(
+                    &self.fuzz_input,
+                    self.last_vote_view,
+                    self.last_finalized_view,
+                    self.last_notarized_view,
+                    self.last_nullified_view,
+                );
+                let round = Round::new(Epoch::new(EPOCH), View::new(v));
+                if let Some(v) = Nullify::<S>::sign::<Sha256Digest>(&self.scheme, round) {
+                    let msg = Vote::<S, Sha256Digest>::Nullify(v).encode();
+                    let _ = sender.send(Recipients::All, msg, true).await;
                 }
             }
         }
     }
 
     async fn handle_certificate(&mut self, sender: &mut impl Sender, msg: Vec<u8>) {
+        // Optionally send mutated certificate
         if self.fuzz_input.random_bool() {
-            let _ = sender
-                .send(Recipients::All, Bytes::from(msg.clone()), true)
-                .await;
+            let cert = self
+                .strategy
+                .mutate_certificate_bytes(&self.fuzz_input, &msg);
+            let _ = sender.send(Recipients::All, &cert[..], true).await;
         }
 
         let cfg = self.scheme.certificate_codec_config();
@@ -340,37 +327,15 @@ where
                 self.last_finalized_view = f.view().get();
             }
         }
-
-        // Optionally send mutated certificate
-        if self.fuzz_input.random_bool() {
-            let mutated = self.mutate_bytes(&msg);
-            let _ = sender.send(Recipients::All, &mutated[..], true).await;
-        }
     }
 
     async fn handle_resolver(&mut self, sender: &mut impl Sender, msg: Vec<u8>) {
-        // Randomly forward, drop, or respond with malformed data to resolver requests
-        match self.fuzz_input.random_byte() % 4 {
-            0 => {
-                let _ = sender.send(Recipients::All, Bytes::from(msg), true).await;
-            }
-            1 => {
-                // Send mutated resolver response
-                let mutated = self.mutate_bytes(&msg);
-                let _ = sender
-                    .send(Recipients::All, Bytes::from(mutated), true)
-                    .await;
-            }
-            2 => {
-                // Send random garbage as resolver response
-                let garbage = self.bytes();
-                let _ = sender
-                    .send(Recipients::All, Bytes::from(garbage), true)
-                    .await;
-            }
-            _ => {
-                // Drop the message (ignore resolver request)
-            }
+        // Optionally send malformed resolver data
+        if self.fuzz_input.random_bool() {
+            let mutated = self.strategy.mutate_resolver_bytes(&self.fuzz_input, &msg);
+            let _ = sender
+                .send(Recipients::All, Bytes::from(mutated), true)
+                .await;
         }
     }
 
@@ -398,12 +363,17 @@ where
         // Send 10 messages to victim
         for _ in 0..10 {
             let proposal = self.get_proposal();
+            let proposal = self.strategy.mutate_proposal(
+                &self.fuzz_input,
+                &proposal,
+                self.last_vote_view,
+                self.last_finalized_view,
+                self.last_notarized_view,
+                self.last_nullified_view,
+            );
             let msg = proposal.encode();
             let _ = sender
                 .send(Recipients::One(victim.clone()), msg, true)
-                .await;
-            // Also send a random vote directly to the victim to vary disruption.
-            self.send_random_vote_to(sender, Recipients::One(victim.clone()))
                 .await;
         }
     }

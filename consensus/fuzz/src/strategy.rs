@@ -66,6 +66,10 @@ pub trait Strategy: Send + Sync {
     ) -> u64;
 
     fn random_payload(&self, input: &FuzzInput) -> Sha256Digest;
+
+    fn mutate_certificate_bytes(&self, input: &FuzzInput, cert: &[u8]) -> Vec<u8>;
+
+    fn mutate_resolver_bytes(&self, input: &FuzzInput, msg: &[u8]) -> Vec<u8>;
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -212,6 +216,14 @@ impl Strategy for SmallScope {
 
     fn random_payload(&self, input: &FuzzInput) -> Sha256Digest {
         random_payload(input)
+    }
+
+    fn mutate_certificate_bytes(&self, input: &FuzzInput, cert: &[u8]) -> Vec<u8> {
+        tweak_bytes(input, cert)
+    }
+
+    fn mutate_resolver_bytes(&self, input: &FuzzInput, msg: &[u8]) -> Vec<u8> {
+        tweak_bytes(input, msg)
     }
 }
 
@@ -375,6 +387,30 @@ impl Strategy for AnyScope {
     fn random_payload(&self, input: &FuzzInput) -> Sha256Digest {
         random_payload(input)
     }
+
+    fn mutate_certificate_bytes(&self, input: &FuzzInput, cert: &[u8]) -> Vec<u8> {
+        if cert.is_empty() {
+            return vec![0];
+        }
+        let len = cert.len();
+        let mut bytes = input.random(len);
+        if bytes.len() < len {
+            bytes.resize(len, 0);
+        }
+        bytes
+    }
+
+    fn mutate_resolver_bytes(&self, input: &FuzzInput, msg: &[u8]) -> Vec<u8> {
+        if msg.is_empty() {
+            return vec![0];
+        }
+        let len = msg.len();
+        let mut bytes = input.random(len);
+        if bytes.len() < len {
+            bytes.resize(len, 0);
+        }
+        bytes
+    }
 }
 
 fn proposal_with_view(proposal: &Proposal<Sha256Digest>, view: u64) -> Proposal<Sha256Digest> {
@@ -417,6 +453,17 @@ fn tweak_payload(input: &FuzzInput, payload: Sha256Digest) -> Sha256Digest {
     let bit = input.random_byte() % 8;
     bytes[idx] ^= 1 << bit;
     Sha256Digest(bytes)
+}
+
+fn tweak_bytes(input: &FuzzInput, bytes: &[u8]) -> Vec<u8> {
+    if bytes.is_empty() {
+        return vec![0];
+    }
+    let mut out = bytes.to_vec();
+    let idx = (input.random_u64() as usize) % out.len();
+    let bit = input.random_byte() % 8;
+    out[idx] ^= 1 << bit;
+    out
 }
 
 fn random_payload(input: &FuzzInput) -> Sha256Digest {
