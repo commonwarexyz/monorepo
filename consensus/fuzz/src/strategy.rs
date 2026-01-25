@@ -92,8 +92,13 @@ impl Strategy for SmallScope {
             last_notarized_view,
             last_nullified_view,
         );
-        let parent =
-            self.random_parent_view(input, view, last_finalized_view, last_notarized_view, last_nullified_view);
+        let parent = self.random_parent_view(
+            input,
+            view,
+            last_finalized_view,
+            last_notarized_view,
+            last_nullified_view,
+        );
         let payload = self.random_payload(input);
         Proposal::new(
             Round::new(Epoch::new(EPOCH), View::new(view)),
@@ -172,7 +177,9 @@ impl Strategy for SmallScope {
     ) -> u64 {
         match input.random_byte() % 8 {
             0 => {
-                let hi = last_notarized_view.min(last_vote_view).max(last_finalized_view);
+                let hi = last_notarized_view
+                    .min(last_vote_view)
+                    .max(last_finalized_view);
                 sample_inclusive(input, last_finalized_view, hi)
             }
             1 => last_vote_view,
@@ -193,13 +200,14 @@ impl Strategy for SmallScope {
         last_notarized_view: u64,
         last_nullified_view: u64,
     ) -> u64 {
-        random_parent_view(
-            input,
-            last_vote_view,
-            last_finalized_view,
-            last_notarized_view,
-            last_nullified_view,
-        )
+        match input.random_byte() % 6 {
+            0 => last_vote_view.saturating_sub(1),
+            1 => last_finalized_view,
+            2 => last_notarized_view.saturating_sub(1),
+            3 => last_notarized_view,
+            4 => last_nullified_view.saturating_sub(1),
+            _ => last_finalized_view.saturating_sub(1),
+        }
     }
 
     fn random_payload(&self, input: &FuzzInput) -> Sha256Digest {
@@ -225,8 +233,13 @@ impl Strategy for AnyScope {
             last_notarized_view,
             last_nullified_view,
         );
-        let parent =
-            self.random_parent_view(input, view, last_finalized_view, last_notarized_view, last_nullified_view);
+        let parent = self.random_parent_view(
+            input,
+            view,
+            last_finalized_view,
+            last_notarized_view,
+            last_nullified_view,
+        );
         let payload = self.random_payload(input);
         Proposal::new(
             Round::new(Epoch::new(EPOCH), View::new(view)),
@@ -260,14 +273,14 @@ impl Strategy for AnyScope {
         last_notarized_view: u64,
         last_nullified_view: u64,
     ) -> Proposal<Sha256Digest> {
-        let base_view = proposal.view().get();
+        let view = proposal.view().get();
         match input.random_byte() % 4 {
             0 => proposal_with_payload(proposal, random_payload(input)),
             1 => proposal_with_view(
                 proposal,
                 random_view(
                     input,
-                    base_view,
+                    view,
                     last_finalized_view,
                     last_notarized_view,
                     last_nullified_view,
@@ -277,7 +290,7 @@ impl Strategy for AnyScope {
                 proposal,
                 random_parent_view(
                     input,
-                    base_view,
+                    view,
                     last_finalized_view,
                     last_notarized_view,
                     last_nullified_view,
@@ -286,14 +299,14 @@ impl Strategy for AnyScope {
             _ => {
                 let view = random_view(
                     input,
-                    base_view,
+                    view,
                     last_finalized_view,
                     last_notarized_view,
                     last_nullified_view,
                 );
                 let parent = random_parent_view(
                     input,
-                    base_view,
+                    view,
                     last_finalized_view,
                     last_notarized_view,
                     last_nullified_view,
@@ -436,7 +449,9 @@ fn random_view(
             }
         }
         2 => {
-            let hi = last_notarized_view.min(last_vote_view).max(last_finalized_view);
+            let hi = last_notarized_view
+                .min(last_vote_view)
+                .max(last_finalized_view);
             sample_inclusive(input, last_finalized_view, hi)
         }
         3 => {
@@ -448,9 +463,9 @@ fn random_view(
             add_or_sample_at_or_above(input, last_vote_view, k)
         }
         5 => {
-            let base = last_vote_view.max(last_nullified_view);
+            let view = last_vote_view.max(last_nullified_view);
             let k = 1 + (input.random_byte() as u64 % 10);
-            add_or_sample_at_or_above(input, base, k)
+            add_or_sample_at_or_above(input, view, k)
         }
         _ => input.random_u64(),
     }
