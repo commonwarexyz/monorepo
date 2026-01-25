@@ -14,13 +14,13 @@ use crate::authenticated::{
 use commonware_cryptography::Signer;
 use commonware_macros::select_loop;
 use commonware_runtime::{
-    spawn_cell, Clock, ContextCell, Handle, Metrics, Network, SinkOf, Spawner, StreamOf,
+    spawn_cell, Clock, ContextCell, Handle, Metrics, Network, Resolver, SinkOf, Spawner, StreamOf,
 };
 use commonware_stream::{dial, Config as StreamConfig};
 use commonware_utils::SystemTimeExt;
-use governor::clock::Clock as GClock;
 use prometheus_client::metrics::{counter::Counter, family::Family};
-use rand::{seq::SliceRandom, CryptoRng, Rng};
+use rand::seq::SliceRandom;
+use rand_core::CryptoRngCore;
 use std::time::Duration;
 use tracing::debug;
 
@@ -40,10 +40,13 @@ pub struct Config<C: Signer> {
     /// a single peer by preventing dialing it as fast as possible. This should make it easier for
     /// other peers to dial us.
     pub query_frequency: Duration,
+
+    /// Whether to allow dialing private IP addresses after DNS resolution.
+    pub allow_private_ips: bool,
 }
 
 /// Actor responsible for dialing peers and establishing outgoing connections.
-pub struct Actor<E: Spawner + Clock + GClock + Network + Metrics, C: Signer> {
+pub struct Actor<E: Spawner + Clock + Network + Resolver + Metrics, C: Signer> {
     context: ContextCell<E>,
 
     // ---------- State ----------
@@ -54,13 +57,14 @@ pub struct Actor<E: Spawner + Clock + GClock + Network + Metrics, C: Signer> {
     stream_cfg: StreamConfig<C>,
     dial_frequency: Duration,
     query_frequency: Duration,
+    allow_private_ips: bool,
 
     // ---------- Metrics ----------
     /// The number of dial attempts made to each peer.
     attempts: Family<metrics::Peer, Counter>,
 }
 
-impl<E: Spawner + Clock + GClock + Network + Rng + CryptoRng + Metrics, C: Signer> Actor<E, C> {
+impl<E: Spawner + Clock + Network + Resolver + CryptoRngCore + Metrics, C: Signer> Actor<E, C> {
     pub fn new(context: E, cfg: Config<C>) -> Self {
         let attempts = Family::<metrics::Peer, Counter>::default();
         context.register(
@@ -74,6 +78,7 @@ impl<E: Spawner + Clock + GClock + Network + Rng + CryptoRng + Metrics, C: Signe
             stream_cfg: cfg.stream_cfg,
             dial_frequency: cfg.dial_frequency,
             query_frequency: cfg.query_frequency,
+            allow_private_ips: cfg.allow_private_ips,
             attempts,
         }
     }
@@ -86,7 +91,7 @@ impl<E: Spawner + Clock + GClock + Network + Rng + CryptoRng + Metrics, C: Signe
         supervisor: &mut Mailbox<spawner::Message<SinkOf<E>, StreamOf<E>, C::PublicKey>>,
     ) {
         // Extract metadata from the reservation
-        let Metadata::Dialer(peer, address) = reservation.metadata().clone() else {
+        let Metadata::Dialer(peer, ingress) = reservation.metadata().clone() else {
             unreachable!("unexpected reservation metadata");
         };
 
@@ -99,7 +104,19 @@ impl<E: Spawner + Clock + GClock + Network + Rng + CryptoRng + Metrics, C: Signe
         self.context.with_label("dialer").spawn({
             let config = self.stream_cfg.clone();
             let mut supervisor = supervisor.clone();
-            move |context| async move {
+            let allow_private_ips = self.allow_private_ips;
+            move |mut context| async move {
+                // Resolve ingress to socket addresses (filtered by private IP policy)
+                let addresses: Vec<_> = ingress
+                    .resolve_filtered(&context, allow_private_ips)
+                    .await
+                    .map(Iterator::collect)
+                    .unwrap_or_default();
+                let Some(&address) = addresses.choose(&mut context) else {
+                    debug!(?ingress, "failed to resolve or no valid addresses");
+                    return;
+                };
+
                 // Attempt to dial peer
                 let (sink, stream) = match context.dial(address).await {
                     Ok(stream) => stream,
@@ -108,7 +125,7 @@ impl<E: Spawner + Clock + GClock + Network + Rng + CryptoRng + Metrics, C: Signe
                         return;
                     }
                 };
-                debug!(?peer, ?address, "dialed peer");
+                debug!(?peer, ?ingress, "dialed peer");
 
                 // Upgrade connection
                 let instance = match dial(context, config, peer.clone(), stream, sink).await {
@@ -118,7 +135,7 @@ impl<E: Spawner + Clock + GClock + Network + Rng + CryptoRng + Metrics, C: Signe
                         return;
                     }
                 };
-                debug!(?peer, ?address, "upgraded connection");
+                debug!(?peer, ?ingress, "upgraded connection");
 
                 // Start peer to handle messages
                 supervisor.spawn(instance, reservation).await;

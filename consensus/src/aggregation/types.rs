@@ -1,17 +1,20 @@
 //! Types used in [aggregation](super).
 
-use crate::{aggregation::scheme, types::Epoch};
-use bytes::{Buf, BufMut, Bytes};
-use commonware_codec::{
-    varint::UInt, Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write,
+use crate::{
+    aggregation::scheme,
+    types::{Epoch, Height},
+    Heightable,
 };
+use bytes::{Buf, BufMut, Bytes};
+use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write};
 use commonware_cryptography::{
-    certificate::{Attestation, Scheme, Subject},
+    certificate::{self, Attestation, Scheme, Subject},
     Digest,
 };
-use commonware_utils::union;
+use commonware_parallel::Strategy;
+use commonware_utils::{union, N3f1};
 use futures::channel::oneshot;
-use rand::{CryptoRng, Rng};
+use rand_core::CryptoRngCore;
 use std::hash::Hash;
 
 /// Error that may be encountered when interacting with `aggregation`.
@@ -50,17 +53,17 @@ pub enum Error {
     #[error("Invalid ack epoch {0} outside bounds {1} - {2}")]
     AckEpochOutsideBounds(Epoch, Epoch, Epoch),
     /// The acknowledgment's height is outside the accepted bounds
-    #[error("Non-useful ack index {0}")]
-    AckIndex(Index),
+    #[error("Non-useful ack height {0}")]
+    AckHeight(Height),
     /// The acknowledgment's digest is incorrect
     #[error("Invalid ack digest {0}")]
-    AckDigest(Index),
-    /// Duplicate acknowledgment for the same index
-    #[error("Duplicate ack from sender {0} for index {1}")]
-    AckDuplicate(String, Index),
-    /// The acknowledgement is for an index that already has a certificate
-    #[error("Ack for index {0} already has been certified")]
-    AckCertified(Index),
+    AckDigest(Height),
+    /// Duplicate acknowledgment for the same height
+    #[error("Duplicate ack from sender {0} for height {1}")]
+    AckDuplicate(String, Height),
+    /// The acknowledgement is for a height that already has a certificate
+    #[error("Ack for height {0} already has been certified")]
+    AckCertified(Height),
     /// The epoch is unknown
     #[error("Unknown epoch {0}")]
     UnknownEpoch(Epoch),
@@ -72,10 +75,6 @@ impl Error {
         matches!(self, Self::PeerMismatch | Self::InvalidAckSignature)
     }
 }
-
-/// Index represents the sequential position of items being aggregated.
-/// Indices are monotonically increasing within each epoch.
-pub type Index = u64;
 
 /// Suffix used to identify an acknowledgment (ack) namespace for domain separation.
 /// Used when signing and verifying acks to prevent signature reuse across different message types.
@@ -90,19 +89,38 @@ fn ack_namespace(namespace: &[u8]) -> Vec<u8> {
     union(namespace, ACK_SUFFIX)
 }
 
+/// Namespace type for aggregation acknowledgments.
+///
+/// This type encapsulates the pre-computed namespace bytes used for signing and
+/// verifying acks.
+#[derive(Clone, Debug)]
+pub struct Namespace(Vec<u8>);
+
+impl certificate::Namespace for Namespace {
+    fn derive(namespace: &[u8]) -> Self {
+        Self(ack_namespace(namespace))
+    }
+}
+
 /// Item represents a single element being aggregated in the protocol.
-/// Each item has a unique index and contains a digest that validators sign.
+/// Each item has a unique height and contains a digest that validators sign.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Item<D: Digest> {
     /// Sequential position of this item within the current epoch
-    pub index: Index,
+    pub height: Height,
     /// Cryptographic digest of the data being aggregated
     pub digest: D,
 }
 
+impl<D: Digest> Heightable for Item<D> {
+    fn height(&self) -> Height {
+        self.height
+    }
+}
+
 impl<D: Digest> Write for Item<D> {
     fn write(&self, writer: &mut impl BufMut) {
-        UInt(self.index).write(writer);
+        self.height.write(writer);
         self.digest.write(writer);
     }
 }
@@ -111,21 +129,27 @@ impl<D: Digest> Read for Item<D> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        let index = UInt::read(reader)?.into();
+        let height = Height::read(reader)?;
         let digest = D::read(reader)?;
-        Ok(Self { index, digest })
+        Ok(Self { height, digest })
     }
 }
 
 impl<D: Digest> EncodeSize for Item<D> {
     fn encode_size(&self) -> usize {
-        UInt(self.index).encode_size() + self.digest.encode_size()
+        self.height.encode_size() + self.digest.encode_size()
     }
 }
 
 impl<D: Digest> Subject for &Item<D> {
-    fn namespace_and_message(&self, namespace: &[u8]) -> (Bytes, Bytes) {
-        (ack_namespace(namespace).into(), self.encode().freeze())
+    type Namespace = Namespace;
+
+    fn namespace<'a>(&self, derived: &'a Self::Namespace) -> &'a [u8] {
+        &derived.0
+    }
+
+    fn message(&self) -> Bytes {
+        self.encode()
     }
 }
 
@@ -135,9 +159,9 @@ where
     D: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        let index = u.arbitrary::<u64>()?;
+        let height = u.arbitrary::<Height>()?;
         let digest = u.arbitrary::<D>()?;
-        Ok(Self { index, digest })
+        Ok(Self { height, digest })
     }
 }
 
@@ -158,11 +182,12 @@ impl<S: Scheme, D: Digest> Ack<S, D> {
     ///
     /// Returns `true` if the attestation is valid for the given namespace and public key.
     /// Domain separation is automatically applied to prevent signature reuse.
-    pub fn verify(&self, scheme: &S, namespace: &[u8]) -> bool
+    pub fn verify<R>(&self, rng: &mut R, scheme: &S, strategy: &impl Strategy) -> bool
     where
+        R: CryptoRngCore,
         S: scheme::Scheme<D>,
     {
-        scheme.verify_attestation::<D>(namespace, &self.item, &self.attestation)
+        scheme.verify_attestation::<_, D>(rng, &self.item, &self.attestation, strategy)
     }
 
     /// Creates a new acknowledgment by signing an item with a validator's key.
@@ -172,11 +197,11 @@ impl<S: Scheme, D: Digest> Ack<S, D> {
     /// # Determinism
     ///
     /// Signatures produced by this function are deterministic and safe for consensus.
-    pub fn sign(scheme: &S, namespace: &[u8], epoch: Epoch, item: Item<D>) -> Option<Self>
+    pub fn sign(scheme: &S, epoch: Epoch, item: Item<D>) -> Option<Self>
     where
         S: scheme::Scheme<D>,
     {
-        let attestation = scheme.sign::<D>(namespace, &item)?;
+        let attestation = scheme.sign::<D>(&item)?;
         Some(Self {
             item,
             epoch,
@@ -236,8 +261,8 @@ where
 /// This combines a validator's vote with their view of consensus progress.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct TipAck<S: Scheme, D: Digest> {
-    /// The peer's local view of the tip (the lowest index that is not yet confirmed).
-    pub tip: Index,
+    /// The peer's local view of the tip (the lowest height that is not yet confirmed).
+    pub tip: Height,
 
     /// The peer's acknowledgement (vote) for an item.
     pub ack: Ack<S, D>,
@@ -245,7 +270,7 @@ pub struct TipAck<S: Scheme, D: Digest> {
 
 impl<S: Scheme, D: Digest> Write for TipAck<S, D> {
     fn write(&self, writer: &mut impl BufMut) {
-        UInt(self.tip).write(writer);
+        self.tip.write(writer);
         self.ack.write(writer);
     }
 }
@@ -254,7 +279,7 @@ impl<S: Scheme, D: Digest> Read for TipAck<S, D> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        let tip = UInt::read(reader)?.into();
+        let tip = Height::read(reader)?;
         let ack = Ack::read(reader)?;
         Ok(Self { tip, ack })
     }
@@ -262,7 +287,7 @@ impl<S: Scheme, D: Digest> Read for TipAck<S, D> {
 
 impl<S: Scheme, D: Digest> EncodeSize for TipAck<S, D> {
     fn encode_size(&self) -> usize {
-        UInt(self.tip).encode_size() + self.ack.encode_size()
+        self.tip.encode_size() + self.ack.encode_size()
     }
 }
 
@@ -273,7 +298,7 @@ where
     Ack<S, D>: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        let tip = u.arbitrary::<u64>()?;
+        let tip = u.arbitrary::<Height>()?;
         let ack = u.arbitrary::<Ack<S, D>>()?;
         Ok(Self { tip, ack })
     }
@@ -289,27 +314,29 @@ pub struct Certificate<S: Scheme, D: Digest> {
 }
 
 impl<S: Scheme, D: Digest> Certificate<S, D> {
-    pub fn from_acks<'a>(scheme: &S, acks: impl IntoIterator<Item = &'a Ack<S, D>>) -> Option<Self>
+    pub fn from_acks<'a, I>(scheme: &S, acks: I, strategy: &impl Strategy) -> Option<Self>
     where
         S: scheme::Scheme<D>,
+        I: IntoIterator<Item = &'a Ack<S, D>>,
+        I::IntoIter: Send,
     {
         let mut iter = acks.into_iter().peekable();
         let item = iter.peek()?.item.clone();
         let attestations = iter
             .filter(|ack| ack.item == item)
             .map(|ack| ack.attestation.clone());
-        let certificate = scheme.assemble(attestations)?;
+        let certificate = scheme.assemble::<_, N3f1>(attestations.into_iter(), strategy)?;
 
         Some(Self { item, certificate })
     }
 
     /// Verifies the recovered certificate for the item.
-    pub fn verify<R>(&self, rng: &mut R, scheme: &S, namespace: &[u8]) -> bool
+    pub fn verify<R>(&self, rng: &mut R, scheme: &S, strategy: &impl Strategy) -> bool
     where
-        R: Rng + CryptoRng,
+        R: CryptoRngCore,
         S: scheme::Scheme<D>,
     {
-        scheme.verify_certificate::<_, D>(rng, namespace, &self.item, &self.certificate)
+        scheme.verify_certificate::<_, D, N3f1>(rng, &self.item, &self.certificate, strategy)
     }
 }
 
@@ -360,8 +387,8 @@ pub enum Activity<S: Scheme, D: Digest> {
     /// Certified an [Item].
     Certified(Certificate<S, D>),
 
-    /// Moved the tip to a new index.
-    Tip(Index),
+    /// Moved the tip to a new height.
+    Tip(Height),
 }
 
 impl<S: Scheme, D: Digest> Write for Activity<S, D> {
@@ -375,9 +402,9 @@ impl<S: Scheme, D: Digest> Write for Activity<S, D> {
                 1u8.write(writer);
                 certificate.write(writer);
             }
-            Self::Tip(index) => {
+            Self::Tip(height) => {
                 2u8.write(writer);
-                UInt(*index).write(writer);
+                height.write(writer);
             }
         }
     }
@@ -390,7 +417,7 @@ impl<S: Scheme, D: Digest> Read for Activity<S, D> {
         match u8::read(reader)? {
             0 => Ok(Self::Ack(Ack::read(reader)?)),
             1 => Ok(Self::Certified(Certificate::read_cfg(reader, cfg)?)),
-            2 => Ok(Self::Tip(UInt::read(reader)?.into())),
+            2 => Ok(Self::Tip(Height::read(reader)?)),
             _ => Err(CodecError::Invalid(
                 "consensus::aggregation::Activity",
                 "Invalid type",
@@ -404,7 +431,7 @@ impl<S: Scheme, D: Digest> EncodeSize for Activity<S, D> {
         1 + match self {
             Self::Ack(ack) => ack.encode_size(),
             Self::Certified(certificate) => certificate.encode_size(),
-            Self::Tip(index) => UInt(*index).encode_size(),
+            Self::Tip(height) => height.encode_size(),
         }
     }
 }
@@ -421,7 +448,7 @@ where
         match choice {
             0 => Ok(Self::Ack(u.arbitrary::<Ack<S, D>>()?)),
             1 => Ok(Self::Certified(u.arbitrary::<Certificate<S, D>>()?)),
-            2 => Ok(Self::Tip(u.arbitrary::<u64>()?)),
+            2 => Ok(Self::Tip(u.arbitrary::<Height>()?)),
             _ => unreachable!(),
         }
     }
@@ -430,7 +457,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::aggregation::scheme::{bls12381_multisig, bls12381_threshold, ed25519, Scheme};
+    use crate::aggregation::scheme::{
+        bls12381_multisig, bls12381_threshold, ed25519, secp256r1, Scheme,
+    };
     use bytes::BytesMut;
     use commonware_codec::{Decode, DecodeExt, Encode};
     use commonware_cryptography::{
@@ -438,21 +467,13 @@ mod tests {
         certificate::mocks::Fixture,
         Hasher, Sha256,
     };
-    use commonware_utils::ordered::Quorum;
-    use rand::{rngs::StdRng, SeedableRng};
+    use commonware_parallel::Sequential;
+    use commonware_utils::{ordered::Quorum, test_rng, N3f1};
+    use rand::rngs::StdRng;
 
     const NAMESPACE: &[u8] = b"test";
 
     type Sha256Digest = <Sha256 as Hasher>::Digest;
-
-    /// Generate a fixture using the provided generator function.
-    fn setup<S, F>(n: u32, fixture: F) -> Fixture<S>
-    where
-        F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
-    {
-        let mut rng = StdRng::seed_from_u64(0);
-        fixture(&mut rng, n)
-    }
 
     #[test]
     fn test_ack_namespace() {
@@ -464,12 +485,13 @@ mod tests {
     fn codec<S, F>(fixture: F)
     where
         S: Scheme<Sha256Digest>,
-        F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
+        F: FnOnce(&mut StdRng, &[u8], u32) -> Fixture<S>,
     {
-        let fixture = setup(4, fixture);
+        let mut rng = test_rng();
+        let fixture = fixture(&mut rng, NAMESPACE, 4);
         let schemes = &fixture.schemes;
         let item = Item {
-            index: 100,
+            height: Height::new(100),
             digest: Sha256::hash(b"test_item"),
         };
 
@@ -478,7 +500,7 @@ mod tests {
         assert_eq!(item, restored_item);
 
         // Test Ack creation and codec
-        let ack = Ack::sign(&schemes[0], NAMESPACE, Epoch::new(1), item.clone()).unwrap();
+        let ack = Ack::sign(&schemes[0], Epoch::new(1), item.clone()).unwrap();
         let cfg = schemes[0].certificate_codec_config();
         let encoded_ack = ack.encode();
         let restored_ack: Ack<S, Sha256Digest> = Ack::decode(encoded_ack).unwrap();
@@ -486,16 +508,16 @@ mod tests {
         // Verify the restored ack
         assert_eq!(restored_ack.item, item);
         assert_eq!(restored_ack.epoch, Epoch::new(1));
-        assert!(restored_ack.verify(&schemes[0], NAMESPACE));
+        assert!(restored_ack.verify(&mut rng, &schemes[0], &Sequential));
 
         // Test TipAck codec
         let tip_ack = TipAck {
             ack: ack.clone(),
-            tip: 42,
+            tip: Height::new(42),
         };
         let encoded_tip_ack = tip_ack.encode();
         let restored_tip_ack: TipAck<S, Sha256Digest> = TipAck::decode(encoded_tip_ack).unwrap();
-        assert_eq!(restored_tip_ack.tip, 42);
+        assert_eq!(restored_tip_ack.tip, Height::new(42));
         assert_eq!(restored_tip_ack.ack.item, item);
         assert_eq!(restored_tip_ack.ack.epoch, Epoch::new(1));
 
@@ -515,13 +537,12 @@ mod tests {
         // Collect enough acks for a certificate
         let acks: Vec<_> = schemes
             .iter()
-            .take(schemes[0].participants().quorum() as usize)
-            .filter_map(|scheme| Ack::sign(scheme, NAMESPACE, Epoch::new(1), item.clone()))
+            .take(schemes[0].participants().quorum::<N3f1>() as usize)
+            .filter_map(|scheme| Ack::sign(scheme, Epoch::new(1), item.clone()))
             .collect();
 
-        let certificate = Certificate::from_acks(&schemes[0], &acks).unwrap();
-        let mut rng = StdRng::seed_from_u64(0);
-        assert!(certificate.verify(&mut rng, &schemes[0], NAMESPACE));
+        let certificate = Certificate::from_acks(&schemes[0], &acks, &Sequential).unwrap();
+        assert!(certificate.verify(&mut rng, &schemes[0], &Sequential));
 
         let activity_certified = Activity::Certified(certificate.clone());
         let encoded_certified = activity_certified.encode();
@@ -529,18 +550,18 @@ mod tests {
             Activity::decode_cfg(encoded_certified, &cfg).unwrap();
         if let Activity::Certified(restored) = restored_activity_certified {
             assert_eq!(restored.item, item);
-            assert!(restored.verify(&mut rng, &schemes[0], NAMESPACE));
+            assert!(restored.verify(&mut rng, &schemes[0], &Sequential));
         } else {
             panic!("Expected Activity::Certified");
         }
 
         // Test Activity codec - Tip variant
-        let activity_tip: Activity<S, Sha256Digest> = Activity::Tip(123);
+        let activity_tip: Activity<S, Sha256Digest> = Activity::Tip(Height::new(123));
         let encoded_tip = activity_tip.encode();
         let restored_activity_tip: Activity<S, Sha256Digest> =
             Activity::decode_cfg(encoded_tip, &cfg).unwrap();
-        if let Activity::Tip(index) = restored_activity_tip {
-            assert_eq!(index, 123);
+        if let Activity::Tip(height) = restored_activity_tip {
+            assert_eq!(height, Height::new(123));
         } else {
             panic!("Expected Activity::Tip");
         }
@@ -549,6 +570,7 @@ mod tests {
     #[test]
     fn test_codec() {
         codec(ed25519::fixture);
+        codec(secp256r1::fixture);
         codec(bls12381_multisig::fixture::<MinPk, _>);
         codec(bls12381_multisig::fixture::<MinSig, _>);
         codec(bls12381_threshold::fixture::<MinPk, _>);
@@ -558,9 +580,9 @@ mod tests {
     fn activity_invalid_enum<S, F>(fixture: F)
     where
         S: Scheme<Sha256Digest>,
-        F: FnOnce(&mut StdRng, u32) -> Fixture<S>,
+        F: FnOnce(&mut StdRng, &[u8], u32) -> Fixture<S>,
     {
-        let fixture = setup(4, fixture);
+        let fixture = fixture(&mut test_rng(), NAMESPACE, 4);
         let mut buf = BytesMut::new();
         3u8.write(&mut buf); // Invalid discriminant
 
@@ -578,6 +600,7 @@ mod tests {
     #[test]
     fn test_activity_invalid_enum() {
         activity_invalid_enum(ed25519::fixture);
+        activity_invalid_enum(secp256r1::fixture);
         activity_invalid_enum(bls12381_multisig::fixture::<MinPk, _>);
         activity_invalid_enum(bls12381_multisig::fixture::<MinSig, _>);
         activity_invalid_enum(bls12381_threshold::fixture::<MinPk, _>);

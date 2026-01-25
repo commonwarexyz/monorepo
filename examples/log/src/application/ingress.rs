@@ -1,4 +1,7 @@
-use commonware_consensus::{simplex::types::Context, types::Epoch, Automaton as Au, Relay as Re};
+use commonware_consensus::{
+    simplex::types::Context, types::Epoch, Automaton as Au, CertifiableAutomaton as CAu,
+    Relay as Re,
+};
 use commonware_cryptography::{ed25519::PublicKey, Digest};
 use futures::{
     channel::{mpsc, oneshot},
@@ -73,6 +76,10 @@ impl<D: Digest> Au for Mailbox<D> {
             .expect("Failed to send verify");
         receiver
     }
+}
+
+impl<D: Digest> CAu for Mailbox<D> {
+    // Uses default certify implementation which always returns true
 }
 
 impl<D: Digest> Re for Mailbox<D> {

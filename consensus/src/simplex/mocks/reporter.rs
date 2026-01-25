@@ -2,8 +2,8 @@
 //! records votes/faults, and exposes a simple subscription.
 use crate::{
     simplex::{
-        scheme::{self, SeededScheme},
-        select_leader,
+        elector::{Config as ElectorConfig, Elector},
+        scheme,
         types::{
             Activity, Attributable, ConflictingFinalize, ConflictingNotarize, Finalization,
             Finalize, Notarization, Notarize, Nullification, Nullify, NullifyFinalize, Subject,
@@ -14,9 +14,14 @@ use crate::{
 };
 use commonware_codec::{Decode, DecodeExt, Encode};
 use commonware_cryptography::{certificate::Scheme, Digest};
-use commonware_utils::ordered::Set;
+use commonware_parallel::Sequential;
+use commonware_utils::{
+    channels::fallible::AsyncFallibleExt,
+    ordered::{Quorum, Set},
+    N3f1,
+};
 use futures::channel::mpsc::{Receiver, Sender};
-use rand::{CryptoRng, Rng};
+use rand_core::CryptoRngCore;
 use std::{
     collections::{HashMap, HashSet},
     hash::Hash,
@@ -29,22 +34,21 @@ type Faults<S, D> = HashMap<<S as Scheme>::PublicKey, HashMap<View, HashSet<Acti
 
 /// Reporter configuration used in tests.
 #[derive(Clone, Debug)]
-pub struct Config<S: Scheme> {
-    pub namespace: Vec<u8>,
+pub struct Config<S: Scheme, L: ElectorConfig<S>> {
     pub participants: Set<S::PublicKey>,
     pub scheme: S,
+    pub elector: L,
 }
 
 #[derive(Clone)]
-pub struct Reporter<E: Rng + CryptoRng, S: SeededScheme, D: Digest> {
+pub struct Reporter<E: CryptoRngCore, S: Scheme, L: ElectorConfig<S>, D: Digest> {
     context: E,
     pub participants: Set<S::PublicKey>,
     scheme: S,
-
-    namespace: Vec<u8>,
+    elector: L::Elector,
 
     pub leaders: Arc<Mutex<HashMap<View, S::PublicKey>>>,
-    pub seeds: Arc<Mutex<HashMap<View, Option<S::Seed>>>>,
+    pub certified: Arc<Mutex<HashSet<View>>>,
     pub notarizes: Arc<Mutex<Participation<S::PublicKey, D>>>,
     pub notarizations: Arc<Mutex<HashMap<View, Notarization<S, D>>>>,
     pub nullifies: Arc<Mutex<HashMap<View, HashSet<S::PublicKey>>>>,
@@ -58,20 +62,24 @@ pub struct Reporter<E: Rng + CryptoRng, S: SeededScheme, D: Digest> {
     subscribers: Arc<Mutex<Vec<Sender<View>>>>,
 }
 
-impl<E, S, D> Reporter<E, S, D>
+impl<E, S, L, D> Reporter<E, S, L, D>
 where
-    E: Rng + CryptoRng,
-    S: SeededScheme,
+    E: CryptoRngCore,
+    S: Scheme,
+    L: ElectorConfig<S>,
     D: Digest + Eq + Hash + Clone,
 {
-    pub fn new(context: E, cfg: Config<S>) -> Self {
+    pub fn new(context: E, cfg: Config<S, L>) -> Self {
+        // Build elector with participants
+        let elector = cfg.elector.build(&cfg.participants);
+
         Self {
             context,
-            namespace: cfg.namespace,
             participants: cfg.participants,
             scheme: cfg.scheme,
+            elector,
             leaders: Arc::new(Mutex::new(HashMap::new())),
-            seeds: Arc::new(Mutex::new(HashMap::new())),
+            certified: Arc::new(Mutex::new(HashSet::new())),
             notarizes: Arc::new(Mutex::new(HashMap::new())),
             notarizations: Arc::new(Mutex::new(HashMap::new())),
             nullifies: Arc::new(Mutex::new(HashMap::new())),
@@ -85,21 +93,25 @@ where
         }
     }
 
-    fn record_leader(&self, round: Round, seed: Option<S::Seed>) {
-        // We use the seed from view N to select the leader for view N+1
+    fn certified(&self, round: Round, certificate: &S::Certificate) {
+        // Record that this view has a certificate
+        self.certified.lock().unwrap().insert(round.view());
+
+        // We use the certificate from view N to determine the leader for view N+1.
         let next_round = Round::new(round.epoch(), round.view().next());
         let mut leaders = self.leaders.lock().unwrap();
         leaders.entry(next_round.view()).or_insert_with(|| {
-            let (leader, _) = select_leader::<S>(self.participants.as_ref(), next_round, seed);
-            leader
+            let leader = self.elector.elect(next_round, Some(certificate));
+            self.participants.key(leader).cloned().unwrap()
         });
     }
 }
 
-impl<E, S, D> crate::Reporter for Reporter<E, S, D>
+impl<E, S, L, D> crate::Reporter for Reporter<E, S, L, D>
 where
-    E: Clone + Rng + CryptoRng + Send + Sync + 'static,
+    E: Clone + CryptoRngCore + Send + Sync + 'static,
     S: scheme::Scheme<D>,
+    L: ElectorConfig<S>,
     D: Digest + Eq + Hash + Clone,
 {
     type Activity = Activity<S, D>;
@@ -111,14 +123,14 @@ where
         let verified = activity.verified();
         match &activity {
             Activity::Notarize(notarize) => {
-                if !notarize.verify(&self.scheme, &self.namespace) {
+                if !notarize.verify(&mut self.context, &self.scheme, &Sequential) {
                     assert!(!verified);
                     *self.invalid.lock().unwrap() += 1;
                     return;
                 }
                 let encoded = notarize.encode();
                 Notarize::<S, D>::decode(encoded).unwrap();
-                let public_key = self.participants[notarize.signer() as usize].clone();
+                let public_key = self.participants.key(notarize.signer()).unwrap().clone();
                 self.notarizes
                     .lock()
                     .unwrap()
@@ -128,16 +140,16 @@ where
                     .or_default()
                     .insert(public_key);
             }
-            Activity::Notarization(notarization) => {
+            Activity::Notarization(notarization) | Activity::Certification(notarization) => {
                 // Verify notarization
                 let view = notarization.view();
-                if !self.scheme.verify_certificate::<_, D>(
+                if !self.scheme.verify_certificate::<_, D, N3f1>(
                     &mut self.context,
-                    &self.namespace,
                     Subject::Notarize {
                         proposal: &notarization.proposal,
                     },
                     &notarization.certificate,
+                    &Sequential,
                 ) {
                     assert!(!verified);
                     *self.invalid.lock().unwrap() += 1;
@@ -150,21 +162,17 @@ where
                     .lock()
                     .unwrap()
                     .insert(view, notarization.clone());
-                let seed = self
-                    .scheme
-                    .seed(notarization.round(), &notarization.certificate);
-                self.seeds.lock().unwrap().insert(view, seed.clone());
-                self.record_leader(notarization.round(), seed);
+                self.certified(notarization.round(), &notarization.certificate);
             }
             Activity::Nullify(nullify) => {
-                if !nullify.verify(&self.scheme, &self.namespace) {
+                if !nullify.verify(&mut self.context, &self.scheme, &Sequential) {
                     assert!(!verified);
                     *self.invalid.lock().unwrap() += 1;
                     return;
                 }
                 let encoded = nullify.encode();
                 Nullify::<S>::decode(encoded).unwrap();
-                let public_key = self.participants[nullify.signer() as usize].clone();
+                let public_key = self.participants.key(nullify.signer()).unwrap().clone();
                 self.nullifies
                     .lock()
                     .unwrap()
@@ -175,13 +183,13 @@ where
             Activity::Nullification(nullification) => {
                 // Verify nullification
                 let view = nullification.view();
-                if !self.scheme.verify_certificate::<_, D>(
+                if !self.scheme.verify_certificate::<_, D, N3f1>(
                     &mut self.context,
-                    &self.namespace,
                     Subject::Nullify {
                         round: nullification.round,
                     },
                     &nullification.certificate,
+                    &Sequential,
                 ) {
                     assert!(!verified);
                     *self.invalid.lock().unwrap() += 1;
@@ -194,21 +202,17 @@ where
                     .lock()
                     .unwrap()
                     .insert(view, nullification.clone());
-                let seed = self
-                    .scheme
-                    .seed(nullification.round, &nullification.certificate);
-                self.seeds.lock().unwrap().insert(view, seed.clone());
-                self.record_leader(nullification.round, seed);
+                self.certified(nullification.round, &nullification.certificate);
             }
             Activity::Finalize(finalize) => {
-                if !finalize.verify(&self.scheme, &self.namespace) {
+                if !finalize.verify(&mut self.context, &self.scheme, &Sequential) {
                     assert!(!verified);
                     *self.invalid.lock().unwrap() += 1;
                     return;
                 }
                 let encoded = finalize.encode();
                 Finalize::<S, D>::decode(encoded).unwrap();
-                let public_key = self.participants[finalize.signer() as usize].clone();
+                let public_key = self.participants.key(finalize.signer()).unwrap().clone();
                 self.finalizes
                     .lock()
                     .unwrap()
@@ -221,13 +225,13 @@ where
             Activity::Finalization(finalization) => {
                 // Verify finalization
                 let view = finalization.view();
-                if !self.scheme.verify_certificate::<_, D>(
+                if !self.scheme.verify_certificate::<_, D, N3f1>(
                     &mut self.context,
-                    &self.namespace,
                     Subject::Finalize {
                         proposal: &finalization.proposal,
                     },
                     &finalization.certificate,
+                    &Sequential,
                 ) {
                     assert!(!verified);
                     *self.invalid.lock().unwrap() += 1;
@@ -240,29 +244,25 @@ where
                     .lock()
                     .unwrap()
                     .insert(view, finalization.clone());
-                let seed = self
-                    .scheme
-                    .seed(finalization.round(), &finalization.certificate);
-                self.seeds.lock().unwrap().insert(view, seed.clone());
-                self.record_leader(finalization.round(), seed);
+                self.certified(finalization.round(), &finalization.certificate);
 
                 // Send message to subscribers
                 *self.latest.lock().unwrap() = finalization.view();
                 let mut subscribers = self.subscribers.lock().unwrap();
                 for subscriber in subscribers.iter_mut() {
-                    let _ = subscriber.try_send(finalization.view());
+                    subscriber.try_send_lossy(finalization.view());
                 }
             }
             Activity::ConflictingNotarize(conflicting) => {
                 let view = conflicting.view();
-                if !conflicting.verify(&self.scheme, &self.namespace) {
+                if !conflicting.verify(&mut self.context, &self.scheme, &Sequential) {
                     assert!(!verified);
                     *self.invalid.lock().unwrap() += 1;
                     return;
                 }
                 let encoded = conflicting.encode();
                 ConflictingNotarize::<S, D>::decode(encoded).unwrap();
-                let public_key = self.participants[conflicting.signer() as usize].clone();
+                let public_key = self.participants.key(conflicting.signer()).unwrap().clone();
                 self.faults
                     .lock()
                     .unwrap()
@@ -274,14 +274,14 @@ where
             }
             Activity::ConflictingFinalize(conflicting) => {
                 let view = conflicting.view();
-                if !conflicting.verify(&self.scheme, &self.namespace) {
+                if !conflicting.verify(&mut self.context, &self.scheme, &Sequential) {
                     assert!(!verified);
                     *self.invalid.lock().unwrap() += 1;
                     return;
                 }
                 let encoded = conflicting.encode();
                 ConflictingFinalize::<S, D>::decode(encoded).unwrap();
-                let public_key = self.participants[conflicting.signer() as usize].clone();
+                let public_key = self.participants.key(conflicting.signer()).unwrap().clone();
                 self.faults
                     .lock()
                     .unwrap()
@@ -293,14 +293,14 @@ where
             }
             Activity::NullifyFinalize(conflicting) => {
                 let view = conflicting.view();
-                if !conflicting.verify(&self.scheme, &self.namespace) {
+                if !conflicting.verify(&mut self.context, &self.scheme, &Sequential) {
                     assert!(!verified);
                     *self.invalid.lock().unwrap() += 1;
                     return;
                 }
                 let encoded = conflicting.encode();
                 NullifyFinalize::<S, D>::decode(encoded).unwrap();
-                let public_key = self.participants[conflicting.signer() as usize].clone();
+                let public_key = self.participants.key(conflicting.signer()).unwrap().clone();
                 self.faults
                     .lock()
                     .unwrap()
@@ -314,10 +314,11 @@ where
     }
 }
 
-impl<E, S, D> Monitor for Reporter<E, S, D>
+impl<E, S, L, D> Monitor for Reporter<E, S, L, D>
 where
-    E: Clone + Rng + CryptoRng + Send + Sync + 'static,
-    S: SeededScheme,
+    E: Clone + CryptoRngCore + Send + Sync + 'static,
+    S: Scheme,
+    L: ElectorConfig<S>,
     D: Digest + Eq + Hash + Clone,
 {
     type Index = View;

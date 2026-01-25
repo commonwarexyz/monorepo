@@ -1,7 +1,6 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use bytes::{Buf, BufMut};
 use commonware_codec::{
     Encode, EncodeSize, Error as CodecError, FixedSize, RangeCfg, Read, ReadExt, ReadRangeExt,
     Write,
@@ -15,15 +14,18 @@ use commonware_cryptography::{
     sha256::Digest,
     Committable, Digestible, Hasher, Sha256, Signer,
 };
-use commonware_p2p::{Blocker, Receiver, Recipients, Sender};
-use commonware_runtime::{deterministic, Clock, Runner};
+use commonware_p2p::{Blocker, CheckedSender, LimitedSender, Receiver, Recipients};
+use commonware_runtime::{deterministic, Buf, BufMut, Clock, IoBuf, IoBufMut, Metrics, Runner};
 use futures::{
     channel::{mpsc, oneshot},
     StreamExt,
 };
 use libfuzzer_sys::fuzz_target;
 use rand::{rngs::StdRng, Rng, SeedableRng};
-use std::{collections::HashMap, time::Duration};
+use std::{
+    collections::HashMap,
+    time::{Duration, SystemTime},
+};
 
 const MAX_LEN: usize = 1_000_000;
 const MAX_OPERATIONS: usize = 256;
@@ -208,14 +210,27 @@ struct MockSender;
 #[error("mock send error")]
 struct MockSendError;
 
-impl Sender for MockSender {
+impl LimitedSender for MockSender {
+    type PublicKey = PublicKey;
+    type Checked<'a> = MockCheckedSender;
+
+    async fn check(
+        &mut self,
+        _recipients: Recipients<Self::PublicKey>,
+    ) -> Result<Self::Checked<'_>, SystemTime> {
+        Ok(MockCheckedSender)
+    }
+}
+
+struct MockCheckedSender;
+
+impl CheckedSender for MockCheckedSender {
     type Error = MockSendError;
     type PublicKey = PublicKey;
 
     async fn send(
-        &mut self,
-        _recipients: Recipients<Self::PublicKey>,
-        _message: bytes::Bytes,
+        self,
+        _message: impl Into<IoBufMut> + Send,
         _priority: bool,
     ) -> Result<Vec<Self::PublicKey>, Self::Error> {
         Ok(vec![])
@@ -235,11 +250,11 @@ impl Receiver for MockReceiver {
     type Error = MockRecvError;
     type PublicKey = PublicKey;
 
-    async fn recv(&mut self) -> Result<(Self::PublicKey, bytes::Bytes), Self::Error> {
+    async fn recv(&mut self) -> Result<(Self::PublicKey, IoBuf), Self::Error> {
         let (pk, msg) = self.rx.next().await.ok_or(MockRecvError)?;
         match msg {
             Ok(req) => {
-                let mut buf = bytes::BytesMut::new();
+                let mut buf = IoBufMut::with_capacity(req.encode_size());
                 req.write(&mut buf);
                 Ok((pk, buf.freeze()))
             }
@@ -303,6 +318,7 @@ fn fuzz(input: FuzzInput) {
         let mut mailboxes: HashMap<usize, Mailbox<PublicKey, FuzzRequest>> = HashMap::new();
         let mut handlers: HashMap<usize, FuzzHandler> = HashMap::new();
         let mut monitors: HashMap<usize, FuzzMonitor> = HashMap::new();
+        let mut restarts = 0usize;
 
         for i in 2..5 {
             let seed = rng.gen();
@@ -413,7 +429,13 @@ fn fuzz(input: FuzzInput) {
                         response_codec: RangeCfg::from(..=MAX_LEN),
                     };
 
-                    let (engine, mailbox) = Engine::new(context.clone(), config);
+                    let (engine, mailbox) = Engine::new(
+                        context
+                            .with_label("engine")
+                            .with_attribute("instance", restarts),
+                        config,
+                    );
+                    restarts += 1;
                     mailboxes.insert(idx, mailbox);
 
                     let (_tx, _rx) = mpsc::unbounded();

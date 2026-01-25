@@ -1,29 +1,64 @@
 //! A collection of authenticated databases inspired by QMDB (Quick Merkle Database).
+//!
 //! # Terminology
 //!
-//! A _key_ in an authenticated database either has a _value_ or it doesn't. Two types of
-//! _operations_ can be applied to the db to modify the state of a specific key. A key that has a
-//! value can change to one without a value through the _delete_ operation. The _update_ operation
-//! gives a key a specific value whether it previously had no value or had a different value.
+//! A database's state is derived from an append-only log of state-changing _operations_.
+//!
+//! In a _keyed_ database, a _key_ either has a _value_ or it doesn't, and different types of
+//! operations modify the state of a specific key. A key that has a value can change to one without
+//! a value through the _delete_ operation. The _update_ operation gives a key a specific value. We
+//! sometimes call an update for a key that doesn't already have a value a _create_ operation, but
+//! its representation in the log is the same.
 //!
 //! Keys with values are called _active_. An operation is called _active_ if (1) its key is active,
 //! (2) it is an update operation, and (3) it is the most recent operation for that key.
+//!
+//! # Database States
+//!
+//! An _authenticated_ database can be in one of four states based on two orthogonal dimensions:
+//! - Merkleization: [Merkleized] (has computed root) or [Unmerkleized] (root not yet computed)
+//! - Durability   : [Durable] (committed to disk) or [NonDurable] (uncommitted changes)
+//!
+//! We call the combined (Merkleized,Durable) state the _Clean_ state.
+//!
+//! We call the combined (Unmerkleized,NonDurable) state the _Mutable_ state since it's the only
+//! state in which the database state (as reflected by its `root`) can be changed.
+//!
+//! State transitions result from `into_mutable()`, `into_merkleized()`, and `commit()`:
+//! - `init()`                                      → `Clean`
+//! - `Clean.into_mutable()`                        → `Mutable`
+//! - `(Unmerkleized,Durable).into_mutable()`       → `Mutable`
+//! - `(Merkleized,NonDurable).into_mutable()`      → `Mutable`
+//! - `(Unmerkleized,Durable).into_merkleized()`    → `Clean`
+//! - `Mutable.into_merkleized()`                   → `(Merkleized,NonDurable)`
+//! - `Mutable.commit()`                            → `(Unmerkleized,Durable)`
+//!
+//! An authenticated database implements [store::LogStore] in every state, and keyed databases
+//! additionally implement [crate::kv::Gettable]. Additional functionality in other states includes:
+//!
+//! - Clean: [store::MerkleizedStore], [store::PrunableStore], [super::Persistable]
+//! - (Merkleized,NonDurable): [store::MerkleizedStore], [store::PrunableStore]
+//!
+//! Keyed databases additionally implement:
+//! - Mutable: [crate::kv::Deletable], [crate::kv::Batchable]
 //!
 //! # Acknowledgments
 //!
 //! The following resources were used as references when implementing this crate:
 //!
 //! * [QMDB: Quick Merkle Database](https://arxiv.org/abs/2501.05262)
-//! * [Merkle Mountain Ranges](https://github.com/opentimestamps/opentimestamps-server/blob/master/doc/merkle-mountain-range.md)
+//! * [Merkle Mountain
+//!   Ranges](https://github.com/opentimestamps/opentimestamps-server/blob/master/doc/merkle-mountain-range.md)
 
 use crate::{
     index::{Cursor, Unordered as Index},
     journal::contiguous::{Contiguous, MutableContiguous},
-    mmr::Location,
-    qmdb::operation::Operation,
+    mmr::{mem::State as MerkleizationState, Location},
+    qmdb::{operation::Operation, store::State as DurabilityState},
     DirtyAuthenticatedBitMap,
 };
-use commonware_cryptography::Digest;
+use commonware_cryptography::{Digest, DigestOf};
+use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::NZUsize;
 use core::num::NonZeroUsize;
 use futures::{pin_mut, StreamExt as _};
@@ -38,9 +73,8 @@ pub mod store;
 pub mod sync;
 pub mod verify;
 pub use verify::{
-    create_multi_proof, create_proof, create_proof_store, create_proof_store_from_digests,
-    digests_required_for_proof, extract_pinned_nodes, verify_multi_proof, verify_proof,
-    verify_proof_and_extract_digests,
+    create_multi_proof, create_proof_store, create_proof_store_from_digests, extract_pinned_nodes,
+    verify_multi_proof, verify_proof, verify_proof_and_extract_digests,
 };
 
 /// Errors that can occur when interacting with an authenticated database.
@@ -87,6 +121,15 @@ impl From<crate::journal::authenticated::Error> for Error {
         }
     }
 }
+
+/// Type alias for merkleized state of a QMDB.
+pub type Merkleized<H> = crate::mmr::mem::Clean<DigestOf<H>>;
+/// Type alias for unmerkleized state of a QMDB.
+pub type Unmerkleized = crate::mmr::mem::Dirty;
+/// Type alias for durable state of a QMDB.
+pub type Durable = store::Durable;
+/// Type alias for non-durable state of a QMDB.
+pub type NonDurable = store::NonDurable;
 
 /// The size of the read buffer to use for replaying the operations log when rebuilding the
 /// snapshot.
@@ -359,9 +402,13 @@ where
     /// # Panics
     ///
     /// Panics if there is not at least one active operation above the inactivity floor.
-    pub(crate) async fn raise_floor_with_bitmap<D: Digest, const N: usize>(
+    pub(crate) async fn raise_floor_with_bitmap<
+        E: Storage + Clock + Metrics,
+        D: Digest,
+        const N: usize,
+    >(
         &mut self,
-        status: &mut DirtyAuthenticatedBitMap<D, N>,
+        status: &mut DirtyAuthenticatedBitMap<E, D, N>,
         mut inactivity_floor_loc: Location,
     ) -> Result<Location, Error>
     where

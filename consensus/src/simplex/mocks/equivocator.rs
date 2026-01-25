@@ -3,46 +3,57 @@
 use super::relay::Relay;
 use crate::{
     simplex::{
+        elector::{Config as ElectorConfig, Elector},
         scheme::Scheme,
-        select_leader,
         types::{Certificate, Notarize, Proposal, Vote},
     },
-    types::{Epoch, Round, View},
+    types::{Epoch, Participant, Round, View},
 };
 use commonware_codec::{Decode, Encode};
 use commonware_cryptography::{certificate, Hasher};
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Spawner};
+use commonware_utils::ordered::Quorum;
 use rand::{seq::IteratorRandom, Rng};
 use std::{collections::HashSet, sync::Arc};
 
-pub struct Config<S: certificate::Scheme, H: Hasher> {
+pub struct Config<S: certificate::Scheme, L: ElectorConfig<S>, H: Hasher> {
     pub scheme: S,
-    pub namespace: Vec<u8>,
+    pub elector: L,
     pub epoch: Epoch,
     pub relay: Arc<Relay<H::Digest, S::PublicKey>>,
     pub hasher: H,
 }
 
-pub struct Equivocator<E: Clock + Rng + Spawner, S: Scheme<H::Digest>, H: Hasher> {
+pub struct Equivocator<
+    E: Clock + Rng + Spawner,
+    S: Scheme<H::Digest>,
+    L: ElectorConfig<S>,
+    H: Hasher,
+> {
     context: ContextCell<E>,
     scheme: S,
-    namespace: Vec<u8>,
+    elector: L::Elector,
     epoch: Epoch,
     relay: Arc<Relay<H::Digest, S::PublicKey>>,
     hasher: H,
     sent: HashSet<View>,
 }
 
-impl<E: Clock + Rng + Spawner, S: Scheme<H::Digest>, H: Hasher> Equivocator<E, S, H> {
-    pub fn new(context: E, cfg: Config<S, H>) -> Self {
+impl<E: Clock + Rng + Spawner, S: Scheme<H::Digest>, L: ElectorConfig<S>, H: Hasher>
+    Equivocator<E, S, L, H>
+{
+    pub fn new(context: E, cfg: Config<S, L, H>) -> Self {
+        // Build elector with participants
+        let elector = cfg.elector.build(cfg.scheme.participants());
+
         Self {
             context: ContextCell::new(context),
             scheme: cfg.scheme,
-            namespace: cfg.namespace,
             epoch: cfg.epoch,
             relay: cfg.relay,
             hasher: cfg.hasher,
+            elector,
             sent: HashSet::new(),
         }
     }
@@ -71,7 +82,7 @@ impl<E: Clock + Rng + Spawner, S: Scheme<H::Digest>, H: Hasher> Equivocator<E, S
             let (_, certificate) = certificate_receiver.recv().await.unwrap();
 
             // Parse certificate
-            let (view, parent, seed) = match Certificate::<S, H::Digest>::decode_cfg(
+            let (view, parent, certificate) = match Certificate::<S, H::Digest>::decode_cfg(
                 certificate,
                 &self.scheme.certificate_codec_config(),
             )
@@ -80,14 +91,12 @@ impl<E: Clock + Rng + Spawner, S: Scheme<H::Digest>, H: Hasher> Equivocator<E, S
                 Certificate::Notarization(notarization) => (
                     notarization.proposal.round.view(),
                     notarization.proposal.payload,
-                    self.scheme
-                        .seed(notarization.proposal.round, &notarization.certificate),
+                    notarization.certificate,
                 ),
                 Certificate::Finalization(finalization) => (
                     finalization.proposal.round.view(),
                     finalization.proposal.payload,
-                    self.scheme
-                        .seed(finalization.proposal.round, &finalization.certificate),
+                    finalization.certificate,
                 ),
                 _ => continue, // we don't build on nullifications to avoid tracking complexity
             };
@@ -102,8 +111,7 @@ impl<E: Clock + Rng + Spawner, S: Scheme<H::Digest>, H: Hasher> Equivocator<E, S
             let next_round = Round::new(self.epoch, next_view);
 
             // Check if we are the leader for the next view, otherwise move on
-            let (_, leader) =
-                select_leader::<S>(self.scheme.participants().as_ref(), next_round, seed);
+            let leader = self.elector.elect(next_round, Some(&certificate));
             if leader != self.scheme.me().unwrap() {
                 continue;
             }
@@ -114,7 +122,7 @@ impl<E: Clock + Rng + Spawner, S: Scheme<H::Digest>, H: Hasher> Equivocator<E, S
                 .participants()
                 .iter()
                 .enumerate()
-                .filter(|(index, _)| *index as u32 != self.scheme.me().unwrap())
+                .filter(|(index, _)| Participant::from_usize(*index) != self.scheme.me().unwrap())
                 .choose(&mut self.context)
                 .unwrap();
 
@@ -132,37 +140,41 @@ impl<E: Clock + Rng + Spawner, S: Scheme<H::Digest>, H: Hasher> Equivocator<E, S
             let proposal_b = Proposal::new(next_round, view, digest_b);
 
             // Broadcast payloads via relay so nodes can verify
-            let me = &self.scheme.participants()[self.scheme.me().unwrap() as usize];
-            self.relay.broadcast(me, (digest_a, payload_a.into())).await;
-            self.relay.broadcast(me, (digest_b, payload_b.into())).await;
+            let me = self
+                .scheme
+                .participants()
+                .key(self.scheme.me().unwrap())
+                .unwrap();
+            self.relay.broadcast(me, (digest_a, payload_a)).await;
+            self.relay.broadcast(me, (digest_b, payload_b)).await;
 
             // Notarize proposal A and send it to victim only
-            let notarize_a = Notarize::<S, _>::sign(&self.scheme, &self.namespace, proposal_a)
-                .expect("sign failed");
+            let notarize_a = Notarize::<S, _>::sign(&self.scheme, proposal_a).expect("sign failed");
             vote_sender
                 .send(
                     Recipients::One(victim.clone()),
-                    Vote::Notarize(notarize_a).encode().into(),
+                    Vote::Notarize(notarize_a).encode(),
                     true,
                 )
                 .await
                 .expect("send failed");
 
             // Notarize proposal B and send it to everyone else
-            let notarize_b = Notarize::<S, _>::sign(&self.scheme, &self.namespace, proposal_b)
-                .expect("sign failed");
+            let notarize_b = Notarize::<S, _>::sign(&self.scheme, proposal_b).expect("sign failed");
             let non_victims: Vec<_> = self
                 .scheme
                 .participants()
                 .iter()
                 .enumerate()
-                .filter(|(index, key)| *index as u32 != self.scheme.me().unwrap() && *key != victim)
+                .filter(|(index, key)| {
+                    Participant::from_usize(*index) != self.scheme.me().unwrap() && *key != victim
+                })
                 .map(|(_, key)| key.clone())
                 .collect();
             vote_sender
                 .send(
                     Recipients::Some(non_victims),
-                    Vote::Notarize(notarize_b).encode().into(),
+                    Vote::Notarize(notarize_b).encode(),
                     true,
                 )
                 .await

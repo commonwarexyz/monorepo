@@ -6,7 +6,7 @@
 
 use super::Error;
 use futures::Stream;
-use std::num::NonZeroUsize;
+use std::{future::Future, num::NonZeroUsize};
 use tracing::warn;
 
 pub mod fixed;
@@ -19,7 +19,7 @@ mod tests;
 ///
 /// A contiguous journal maintains a consecutively increasing position counter where each
 /// appended item receives a unique position starting from 0.
-pub trait Contiguous {
+pub trait Contiguous: Send + Sync {
     /// The type of items stored in the journal.
     type Item;
 
@@ -57,8 +57,8 @@ pub trait Contiguous {
         start_pos: u64,
         buffer: NonZeroUsize,
     ) -> impl std::future::Future<
-        Output = Result<impl Stream<Item = Result<(u64, Self::Item), Error>> + '_, Error>,
-    >;
+        Output = Result<impl Stream<Item = Result<(u64, Self::Item), Error>> + Send + '_, Error>,
+    > + Send;
 
     /// Read the item at the given position.
     ///
@@ -66,11 +66,11 @@ pub trait Contiguous {
     ///
     /// - Returns [Error::ItemPruned] if the item at `position` has been pruned.
     /// - Returns [Error::ItemOutOfRange] if the item at `position` does not exist.
-    fn read(&self, position: u64) -> impl std::future::Future<Output = Result<Self::Item, Error>>;
+    fn read(&self, position: u64) -> impl Future<Output = Result<Self::Item, Error>> + Send;
 }
 
 /// A [Contiguous] journal that supports appending, rewinding, and pruning.
-pub trait MutableContiguous: Contiguous {
+pub trait MutableContiguous: Contiguous + Send + Sync {
     /// Append a new item to the journal, returning its position.
     ///
     /// Positions are consecutively increasing starting from 0. The position of each item
@@ -81,8 +81,10 @@ pub trait MutableContiguous: Contiguous {
     ///
     /// Returns an error if the underlying storage operation fails or if the item cannot
     /// be encoded.
-    fn append(&mut self, item: Self::Item)
-        -> impl std::future::Future<Output = Result<u64, Error>>;
+    fn append(
+        &mut self,
+        item: Self::Item,
+    ) -> impl std::future::Future<Output = Result<u64, Error>> + Send;
 
     /// Prune items at positions strictly less than `min_position`.
     ///
@@ -102,7 +104,7 @@ pub trait MutableContiguous: Contiguous {
     fn prune(
         &mut self,
         min_position: u64,
-    ) -> impl std::future::Future<Output = Result<bool, Error>>;
+    ) -> impl std::future::Future<Output = Result<bool, Error>> + Send;
 
     /// Rewind the journal to the given size, discarding items from the end.
     ///
@@ -126,7 +128,7 @@ pub trait MutableContiguous: Contiguous {
     ///
     /// Returns [Error::InvalidRewind] if size is invalid (too large or points to pruned data).
     /// Returns an error if the underlying storage operation fails.
-    fn rewind(&mut self, size: u64) -> impl std::future::Future<Output = Result<(), Error>>;
+    fn rewind(&mut self, size: u64) -> impl std::future::Future<Output = Result<(), Error>> + Send;
 
     /// Rewinds the journal to the last item matching `predicate`. If no item matches, the journal
     /// is rewound to the pruning boundary, discarding all unpruned items.
@@ -137,9 +139,9 @@ pub trait MutableContiguous: Contiguous {
     fn rewind_to<'a, P>(
         &'a mut self,
         mut predicate: P,
-    ) -> impl std::future::Future<Output = Result<u64, Error>> + 'a
+    ) -> impl std::future::Future<Output = Result<u64, Error>> + Send + 'a
     where
-        P: FnMut(&Self::Item) -> bool + 'a,
+        P: FnMut(&Self::Item) -> bool + Send + 'a,
     {
         async move {
             let journal_size = self.size();
@@ -163,28 +165,4 @@ pub trait MutableContiguous: Contiguous {
             Ok(rewind_size)
         }
     }
-}
-
-pub trait PersistableContiguous: MutableContiguous {
-    /// Durably persist the journal but does not write all data, potentially leaving recovery
-    /// required on startup.
-    ///
-    /// For a stronger guarantee that eliminates potential recovery, use [Self::sync] instead.
-    fn commit(&mut self) -> impl std::future::Future<Output = Result<(), Error>>;
-
-    /// Durably persist the journal and write all data, guaranteeing no recovery will be required
-    /// on startup.
-    ///
-    /// This provides a stronger guarantee than [Self::commit] but may be slower.
-    fn sync(&mut self) -> impl std::future::Future<Output = Result<(), Error>>;
-
-    /// Close the journal, syncing all pending writes and releasing resources.
-    fn close(self) -> impl std::future::Future<Output = Result<(), Error>>;
-
-    /// Destroy the journal, removing all associated storage.
-    ///
-    /// This method consumes the journal and deletes all persisted data including blobs,
-    /// metadata, and any other storage artifacts. Use this for cleanup in tests or when
-    /// permanently removing a journal.
-    fn destroy(self) -> impl std::future::Future<Output = Result<(), Error>>;
 }

@@ -1,6 +1,6 @@
-use super::types::{Activity, Index};
+use super::types::Activity;
 use crate::{
-    types::{Epoch, EpochDelta},
+    types::{Epoch, EpochDelta, Height, HeightDelta},
     Automaton, Monitor, Reporter,
 };
 use commonware_cryptography::{
@@ -8,6 +8,7 @@ use commonware_cryptography::{
     Digest,
 };
 use commonware_p2p::Blocker;
+use commonware_parallel::Strategy;
 use commonware_runtime::buffer::PoolRef;
 use commonware_utils::NonZeroDuration;
 use std::num::{NonZeroU64, NonZeroUsize};
@@ -16,10 +17,11 @@ use std::num::{NonZeroU64, NonZeroUsize};
 pub struct Config<
     P: Provider<Scope = Epoch>,
     D: Digest,
-    A: Automaton<Context = Index, Digest = D>,
+    A: Automaton<Context = Height, Digest = D>,
     Z: Reporter<Activity = Activity<P::Scheme, D>>,
     M: Monitor<Index = Epoch>,
     B: Blocker<PublicKey = <P::Scheme as Scheme>::PublicKey>,
+    T: Strategy,
 > {
     /// Tracks the current state of consensus (to determine which participants should
     /// be involved in the current broadcast attempt).
@@ -39,10 +41,6 @@ pub struct Config<
     /// Blocking is handled by [commonware_p2p].
     pub blocker: B,
 
-    /// The application namespace used to sign over different types of messages.
-    /// Used to prevent replay attacks on other applications.
-    pub namespace: Vec<u8>,
-
     /// Whether acks are sent as priority.
     pub priority_acks: bool,
 
@@ -61,8 +59,8 @@ pub struct Config<
     /// The number of chunks to process concurrently.
     pub window: NonZeroU64,
 
-    /// Number of indices to track below the tip when collecting acks and/or pruning.
-    pub activity_timeout: u64,
+    /// Number of heights to track below the tip when collecting acks and/or pruning.
+    pub activity_timeout: HeightDelta,
 
     /// Partition for the [commonware_storage::journal::segmented::variable::Journal].
     pub journal_partition: String,
@@ -81,4 +79,7 @@ pub struct Config<
 
     /// Buffer pool for the journal.
     pub journal_buffer_pool: PoolRef,
+
+    /// Strategy for parallel operations.
+    pub strategy: T,
 }

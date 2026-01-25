@@ -15,7 +15,6 @@ workspace = true
 
 [dependencies]
 anyhow.workspace = true
-bytes.workspace = true
 clap = { workspace = true, features = ["derive"] }
 commonware-broadcast.workspace = true
 commonware-codec.workspace = true
@@ -24,12 +23,12 @@ commonware-cryptography.workspace = true
 commonware-macros.workspace = true
 commonware-math.workspace = true
 commonware-p2p.workspace = true
+commonware-parallel = { workspace = true, features = ["std"] }
 commonware-resolver.workspace = true
 commonware-runtime.workspace = true
 commonware-storage.workspace = true
 commonware-utils.workspace = true
 futures.workspace = true
-governor.workspace = true
 prometheus-client.workspace = true
 rand.workspace = true
 rand_core.workspace = true

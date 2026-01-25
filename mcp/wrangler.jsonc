@@ -1,0 +1,44 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "commonware-mcp",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-04-01",
+  "compatibility_flags": [
+    "nodejs_compat"
+  ],
+  // Durable Objects are used by the MCP agent for maintaining SSE connections
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "MCP",
+        "class_name": "CommonwareMCP"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": [
+        "CommonwareMCP"
+      ]
+    }
+  ],
+  // D1 database for full-text search index
+  "d1_databases": [
+    {
+      "binding": "SEARCH_DB",
+      "database_name": "commonware-mcp-search",
+      "database_id": "7bf98ab1-5cb2-4617-887a-a617b1ad05af"
+    }
+  ],
+  // Environment variables for the base URL
+  "vars": {
+    "BASE_URL": "https://commonware.xyz"
+  },
+  // Scheduled trigger for syncing versions (runs every 10 minutes)
+  "triggers": {
+    "crons": [
+      "*/10 * * * *"
+    ]
+  }
+}

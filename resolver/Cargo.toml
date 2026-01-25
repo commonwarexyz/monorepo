@@ -15,17 +15,15 @@ workspace = true
 
 [dependencies]
 arbitrary = { workspace = true, optional = true, features = ["derive"] }
-bimap.workspace = true
 bytes.workspace = true
 commonware-codec.workspace = true
 commonware-cryptography.workspace = true
 commonware-macros.workspace = true
 commonware-p2p.workspace = true
-commonware-runtime.workspace = true
+commonware-runtime = { workspace = true, features = ["test-utils"] }
 commonware-stream.workspace = true
 commonware-utils.workspace = true
 futures.workspace = true
-governor.workspace = true
 prometheus-client.workspace = true
 rand.workspace = true
 thiserror.workspace = true
@@ -50,6 +48,7 @@ arbitrary = [
 	"commonware-codec/arbitrary",
 	"commonware-cryptography/arbitrary",
 	"commonware-p2p/arbitrary",
+	"commonware-runtime/arbitrary",
 	"commonware-utils/arbitrary",
 	"dep:arbitrary",
 ]

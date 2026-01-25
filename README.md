@@ -22,6 +22,7 @@ _Primitives are designed for deployment in adversarial environments. If you find
 * [deployer](./deployer/README.md): Deploy infrastructure across cloud providers.
 * [math](./math/README.md): Create and manipulate mathematical objects.
 * [p2p](./p2p/README.md): Communicate with authenticated peers over encrypted connections.
+* [parallel](./parallel/README.md): Parallelize fold operations with pluggable execution strategies.
 * [resolver](./resolver/README.md): Resolve data identified by a fixed-length key.
 * [runtime](./runtime/README.md): Execute asynchronous tasks with a configurable scheduler.
 * [storage](./storage/README.md): Persist and retrieve data from an abstract store.
@@ -48,6 +49,7 @@ _Sometimes, we opt to maintain software that is neither a primitive nor an examp
 * [docs](./docs): Access information about Commonware at https://commonware.xyz.
 * [docker](./docker): Dockerfiles used for cross-compilation and CI.
 * [macros](./macros/README.md): Augment the development of primitives with procedural macros.
+* [mcp](./mcp/README.md): Interact with the Commonware Library via MCP at https://mcp.commonware.xyz.
 * [pipeline](./pipeline): Mechanisms under development.
 * [utils](./utils/README.md): Leverage common functionality across multiple primitives.
 
@@ -60,6 +62,28 @@ This repository is dual-licensed under both the [Apache 2.0](./LICENSE-APACHE) a
 We encourage external contributors to submit issues and pull requests to the Commonware Library. To learn more, please refer to our [contributing guidelines](./CONTRIBUTING.md).
 
 All work is coordinated via the [tracker](https://github.com/orgs/commonwarexyz/projects/2). If something in [the backlog](https://github.com/orgs/commonwarexyz/projects/2/views/3) looks particularly useful, leave a comment so we can prioritize it!
+
+## MCP Support (for LLMs)
+
+Make your LLM more effective by connecting to the [Commonware Library MCP server](https://mcp.commonware.xyz). Learn more [here](https://commonware.xyz/mcp).
+
+### Claude Code
+
+```bash
+claude mcp add --transport http commonware-library https://mcp.commonware.xyz
+```
+
+### Cursor
+
+```json
+{
+  "mcpServers": {
+    "commonware-library": {
+      "url": "https://mcp.commonware.xyz"
+    }
+  }
+}
+```
 
 ## Support
 

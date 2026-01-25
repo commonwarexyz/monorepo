@@ -7,13 +7,14 @@ use crate::{
 };
 use clap::{Args, Parser, Subcommand};
 use commonware_codec::Encode;
+use commonware_consensus::simplex::elector::{Random, RoundRobin};
 use commonware_cryptography::{bls12381::primitives::variant::MinSig, ed25519::PublicKey};
 use commonware_runtime::{
     tokio::{self, telemetry::Logging},
     Metrics, Runner,
 };
-use commonware_utils::hex;
-use std::{future::Future, path::PathBuf, pin::Pin};
+use commonware_utils::{hex, NZU64};
+use std::{future::Future, num::NonZeroU64, path::PathBuf, pin::Pin};
 use tracing::Level;
 
 mod application;
@@ -75,7 +76,7 @@ impl UpdateCallBack<MinSig, PublicKey> for SaveFileOnUpdate {
 ///
 /// Production systems should use a much larger value, as safety in the DKG/reshare depends on
 /// synchrony. All players must be online for a small duration during this window.
-pub const BLOCKS_PER_EPOCH: u64 = 200;
+pub const BLOCKS_PER_EPOCH: NonZeroU64 = NZU64!(200);
 
 /// Reshare example CLI.
 #[derive(Parser)]
@@ -171,12 +172,20 @@ fn main() {
             Subcommands::Setup(args) => setup::run(args),
             Subcommands::Dkg(args) => {
                 let config_path = args.config_path.clone();
-                validator::run::<EdScheme>(context, args, SaveFileOnUpdate::boxed(config_path))
-                    .await;
+                validator::run::<EdScheme, RoundRobin>(
+                    context,
+                    args,
+                    SaveFileOnUpdate::boxed(config_path),
+                )
+                .await;
             }
             Subcommands::Validator(args) => {
-                validator::run::<ThresholdScheme<MinSig>>(context, args, ContinueOnUpdate::boxed())
-                    .await
+                validator::run::<ThresholdScheme<MinSig>, Random>(
+                    context,
+                    args,
+                    ContinueOnUpdate::boxed(),
+                )
+                .await
             }
         }
     });

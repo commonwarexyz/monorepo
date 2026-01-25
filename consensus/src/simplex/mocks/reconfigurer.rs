@@ -15,13 +15,11 @@ use tracing::debug;
 
 pub struct Config<S: Scheme> {
     pub scheme: S,
-    pub namespace: Vec<u8>,
 }
 
 pub struct Reconfigurer<E: Spawner, S: Scheme, H: Hasher> {
     context: ContextCell<E>,
     scheme: S,
-    namespace: Vec<u8>,
     _hasher: PhantomData<H>,
 }
 
@@ -35,7 +33,6 @@ where
         Self {
             context: ContextCell::new(context),
             scheme: cfg.scheme,
-            namespace: cfg.namespace,
             _hasher: PhantomData,
         }
     }
@@ -66,8 +63,8 @@ where
                     proposal.round = (new_epoch, old_round.view()).into();
 
                     // Sign and broadcast
-                    let n = Notarize::sign(&self.scheme, &self.namespace, proposal).unwrap();
-                    let msg = Vote::Notarize(n).encode().into();
+                    let n = Notarize::sign(&self.scheme, proposal).unwrap();
+                    let msg = Vote::Notarize(n).encode();
                     sender.send(Recipients::All, msg, true).await.unwrap();
                 }
                 Vote::Finalize(finalize) => {
@@ -78,8 +75,8 @@ where
                     proposal.round = (new_epoch, old_round.view()).into();
 
                     // Sign and broadcast
-                    let f = Finalize::sign(&self.scheme, &self.namespace, proposal).unwrap();
-                    let msg = Vote::Finalize(f).encode().into();
+                    let f = Finalize::sign(&self.scheme, proposal).unwrap();
+                    let msg = Vote::Finalize(f).encode();
                     sender.send(Recipients::All, msg, true).await.unwrap();
                 }
                 Vote::Nullify(nullify) => {
@@ -88,8 +85,8 @@ where
                     let new_epoch = old_round.epoch().next();
                     let new_round = (new_epoch, old_round.view()).into();
 
-                    let n = Nullify::sign(&self.scheme, &self.namespace, new_round).unwrap();
-                    let msg = Vote::<S, H::Digest>::Nullify(n).encode().into();
+                    let n = Nullify::sign(&self.scheme, new_round).unwrap();
+                    let msg = Vote::<S, H::Digest>::Nullify(n).encode();
                     sender.send(Recipients::All, msg, true).await.unwrap();
                 }
             }

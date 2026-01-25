@@ -4,17 +4,13 @@
 //! with both empty and already-initialized databases.
 
 use clap::{Arg, Command};
-use commonware_codec::{Encode, Read};
+use commonware_codec::{EncodeShared, Read};
 use commonware_runtime::{
     tokio as tokio_runtime, Clock, Metrics, Network, Runner, Spawner, Storage,
 };
 use commonware_storage::qmdb::sync;
 use commonware_sync::{
-    any, crate_version,
-    databases::{DatabaseType, Syncable},
-    immutable,
-    net::Resolver,
-    Digest, Error, Key,
+    any, crate_version, databases::DatabaseType, immutable, net::Resolver, Digest, Error, Key,
 };
 use commonware_utils::DurationExt;
 use futures::channel::mpsc;
@@ -67,7 +63,7 @@ async fn target_update_task<E, Op, D>(
 ) -> Result<(), Error>
 where
     E: Clock,
-    Op: Read<Cfg = ()> + Encode + Send + Sync,
+    Op: Read<Cfg = ()> + EncodeShared,
     D: commonware_cryptography::Digest,
 {
     let mut current_target = initial_target;
@@ -130,7 +126,7 @@ where
             let resolver = resolver.clone();
             let initial_target_clone = initial_target.clone();
             let target_update_interval = config.target_update_interval;
-            context.with_label("target-update").spawn(move |context| {
+            context.with_label("target_update").spawn(move |context| {
                 target_update_task(
                     context,
                     resolver,
@@ -161,7 +157,6 @@ where
             sync_interval = ?config.sync_interval,
             "✅ Any sync completed successfully"
         );
-        database.close().await?;
         target_update_handle.abort();
         context.sleep(config.sync_interval).await;
         iteration += 1;
@@ -191,7 +186,7 @@ where
             let resolver = resolver.clone();
             let initial_target_clone = initial_target.clone();
             let target_update_interval = config.target_update_interval;
-            context.with_label("target-update").spawn(move |context| {
+            context.with_label("target_update").spawn(move |context| {
                 target_update_task(
                     context,
                     resolver,
@@ -222,7 +217,6 @@ where
             sync_interval = ?config.sync_interval,
             "✅ Immutable sync completed successfully"
         );
-        database.close().await?;
         target_update_handle.abort();
         context.sleep(config.sync_interval).await;
         iteration += 1;

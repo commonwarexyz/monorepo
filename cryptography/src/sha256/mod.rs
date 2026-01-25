@@ -64,10 +64,6 @@ impl Sha256 {
 impl Hasher for Sha256 {
     type Digest = Digest;
 
-    const EMPTY: Self::Digest = Digest(hex!(
-        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-    ));
-
     fn update(&mut self, message: &[u8]) -> &mut Self {
         self.hasher.update(message);
         self
@@ -87,9 +83,18 @@ impl Hasher for Sha256 {
 
 /// Digest of a SHA-256 hashing operation.
 #[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash)]
-#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[repr(transparent)]
 pub struct Digest(pub [u8; DIGEST_LENGTH]);
+
+#[cfg(feature = "arbitrary")]
+impl<'a> arbitrary::Arbitrary<'a> for Digest {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
+        // Generate random bytes and compute their Sha256 hash
+        let len = u.int_in_range(0..=256)?;
+        let data = u.bytes(len)?;
+        Ok(Sha256::hash(data))
+    }
+}
 
 impl Write for Digest {
     fn write(&self, buf: &mut impl BufMut) {
@@ -145,7 +150,9 @@ impl Display for Digest {
     }
 }
 
-impl crate::Digest for Digest {}
+impl crate::Digest for Digest {
+    const EMPTY: Self = Self([0u8; DIGEST_LENGTH]);
+}
 
 impl Random for Digest {
     fn random(mut rng: impl CryptoRngCore) -> Self {
@@ -195,14 +202,6 @@ mod tests {
     #[test]
     fn test_sha256_len() {
         assert_eq!(Digest::SIZE, DIGEST_LENGTH);
-    }
-
-    #[test]
-    fn test_sha256_empty() {
-        let empty_digest = Sha256::EMPTY;
-        let expected_digest = Sha256::new().finalize();
-
-        assert_eq!(empty_digest, expected_digest);
     }
 
     #[test]

@@ -7,12 +7,17 @@ use crate::{
             Notarization, Nullification, NullifyFinalize, Proposal, Vote, VoteTracker,
         },
     },
+    types::Participant,
     Reporter,
 };
 use commonware_cryptography::Digest;
 use commonware_p2p::Blocker;
-use commonware_utils::ordered::{Quorum, Set};
-use rand::{CryptoRng, Rng};
+use commonware_parallel::Strategy;
+use commonware_utils::{
+    ordered::{Quorum, Set},
+    N3f1,
+};
+use rand_core::CryptoRngCore;
 use tracing::warn;
 
 /// Per-view state for vote accumulation and certificate tracking.
@@ -55,7 +60,7 @@ impl<
     > Round<S, B, D, R>
 {
     pub fn new(participants: Set<S::PublicKey>, scheme: S, blocker: B, reporter: R) -> Self {
-        let quorum = participants.quorum();
+        let quorum = participants.quorum::<N3f1>();
         let len = participants.len();
         Self {
             participants,
@@ -281,7 +286,7 @@ impl<
     /// Sets the leader for this view. If the leader's vote has already been
     /// received, this will also set the leader's proposal (filtering out votes
     /// for other proposals).
-    pub fn set_leader(&mut self, leader: u32) {
+    pub fn set_leader(&mut self, leader: Participant) {
         self.verifier.set_leader(leader);
     }
 
@@ -289,7 +294,7 @@ impl<
     /// 1. We haven't already processed this (called at most once per round).
     /// 2. The leader's proposal is known.
     /// 3. We are not the leader (leaders don't need to forward their own proposal).
-    pub fn forward_proposal(&mut self, me: u32) -> Option<Proposal<D>> {
+    pub fn forward_proposal(&mut self, me: Participant) -> Option<Proposal<D>> {
         if self.proposal_sent {
             return None;
         }
@@ -301,7 +306,7 @@ impl<
         Some(proposal)
     }
 
-    pub const fn ready_notarizes(&self) -> bool {
+    pub fn ready_notarizes(&self) -> bool {
         // Don't bother verifying if we already have a certificate
         if self.has_notarization() {
             return false;
@@ -309,15 +314,15 @@ impl<
         self.verifier.ready_notarizes()
     }
 
-    pub fn verify_notarizes<E: Rng + CryptoRng>(
+    pub fn verify_notarizes<E: CryptoRngCore>(
         &mut self,
         rng: &mut E,
-        namespace: &[u8],
-    ) -> (Vec<Vote<S, D>>, Vec<u32>) {
-        self.verifier.verify_notarizes(rng, namespace)
+        strategy: &impl Strategy,
+    ) -> (Vec<Vote<S, D>>, Vec<Participant>) {
+        self.verifier.verify_notarizes(rng, strategy)
     }
 
-    pub const fn ready_nullifies(&self) -> bool {
+    pub fn ready_nullifies(&self) -> bool {
         // Don't bother verifying if we already have a certificate
         if self.has_nullification() {
             return false;
@@ -325,15 +330,15 @@ impl<
         self.verifier.ready_nullifies()
     }
 
-    pub fn verify_nullifies<E: Rng + CryptoRng>(
+    pub fn verify_nullifies<E: CryptoRngCore>(
         &mut self,
         rng: &mut E,
-        namespace: &[u8],
-    ) -> (Vec<Vote<S, D>>, Vec<u32>) {
-        self.verifier.verify_nullifies(rng, namespace)
+        strategy: &impl Strategy,
+    ) -> (Vec<Vote<S, D>>, Vec<Participant>) {
+        self.verifier.verify_nullifies(rng, strategy)
     }
 
-    pub const fn ready_finalizes(&self) -> bool {
+    pub fn ready_finalizes(&self) -> bool {
         // Don't bother verifying if we already have a certificate
         if self.has_finalization() {
             return false;
@@ -341,15 +346,24 @@ impl<
         self.verifier.ready_finalizes()
     }
 
-    pub fn verify_finalizes<E: Rng + CryptoRng>(
+    pub fn verify_finalizes<E: CryptoRngCore>(
         &mut self,
         rng: &mut E,
-        namespace: &[u8],
-    ) -> (Vec<Vote<S, D>>, Vec<u32>) {
-        self.verifier.verify_finalizes(rng, namespace)
+        strategy: &impl Strategy,
+    ) -> (Vec<Vote<S, D>>, Vec<Participant>) {
+        self.verifier.verify_finalizes(rng, strategy)
     }
 
-    pub fn is_active(&self, leader: u32) -> bool {
+    /// Returns true if the leader was active in this round.
+    ///
+    /// We use pending votes to determine activeness because we only verify the first
+    /// `2f+1` votes. If we used verified, we would always consider the slowest `f` peers offline.
+    ///
+    /// This approach does mean, however, that we may consider a peer active that has sent an invalid
+    /// vote (this is fine and preferred to verifying all votes from all peers in each round). Recall,
+    /// the purpose of this mechanism is to minimize the timeout for crashed peers (not some tool to detect
+    /// and skip Byzantine leaders, which is only possible once we detect incorrect behavior and block them for).
+    pub fn is_active(&self, leader: Participant) -> bool {
         self.pending_votes.has_notarize(leader)
             || self.pending_votes.has_nullify(leader)
             || self.pending_votes.has_finalize(leader)
@@ -373,15 +387,19 @@ impl<
     /// Attempts to construct a notarization certificate from verified votes.
     ///
     /// Returns the certificate if we have quorum and haven't already constructed one.
-    pub fn try_construct_notarization(&mut self, scheme: &S) -> Option<Notarization<S, D>> {
+    pub fn try_construct_notarization(
+        &mut self,
+        scheme: &S,
+        strategy: &impl Strategy,
+    ) -> Option<Notarization<S, D>> {
         if self.has_notarization() {
             return None;
         }
-        if self.verified_votes.len_notarizes() < self.participants.quorum() {
+        if self.verified_votes.len_notarizes() < self.participants.quorum::<N3f1>() {
             return None;
         }
         let notarization =
-            Notarization::from_notarizes(scheme, self.verified_votes.iter_notarizes())?;
+            Notarization::from_notarizes(scheme, self.verified_votes.iter_notarizes(), strategy)?;
         self.set_notarization(notarization.clone());
         Some(notarization)
     }
@@ -389,15 +407,19 @@ impl<
     /// Attempts to construct a nullification certificate from verified votes.
     ///
     /// Returns the certificate if we have quorum and haven't already constructed one.
-    pub fn try_construct_nullification(&mut self, scheme: &S) -> Option<Nullification<S>> {
+    pub fn try_construct_nullification(
+        &mut self,
+        scheme: &S,
+        strategy: &impl Strategy,
+    ) -> Option<Nullification<S>> {
         if self.has_nullification() {
             return None;
         }
-        if self.verified_votes.len_nullifies() < self.participants.quorum() {
+        if self.verified_votes.len_nullifies() < self.participants.quorum::<N3f1>() {
             return None;
         }
         let nullification =
-            Nullification::from_nullifies(scheme, self.verified_votes.iter_nullifies())?;
+            Nullification::from_nullifies(scheme, self.verified_votes.iter_nullifies(), strategy)?;
         self.set_nullification(nullification.clone());
         Some(nullification)
     }
@@ -405,15 +427,19 @@ impl<
     /// Attempts to construct a finalization certificate from verified votes.
     ///
     /// Returns the certificate if we have quorum and haven't already constructed one.
-    pub fn try_construct_finalization(&mut self, scheme: &S) -> Option<Finalization<S, D>> {
+    pub fn try_construct_finalization(
+        &mut self,
+        scheme: &S,
+        strategy: &impl Strategy,
+    ) -> Option<Finalization<S, D>> {
         if self.has_finalization() {
             return None;
         }
-        if self.verified_votes.len_finalizes() < self.participants.quorum() {
+        if self.verified_votes.len_finalizes() < self.participants.quorum::<N3f1>() {
             return None;
         }
         let finalization =
-            Finalization::from_finalizes(scheme, self.verified_votes.iter_finalizes())?;
+            Finalization::from_finalizes(scheme, self.verified_votes.iter_finalizes(), strategy)?;
         self.set_finalization(finalization.clone());
         Some(finalization)
     }

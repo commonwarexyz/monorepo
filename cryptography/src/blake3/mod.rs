@@ -58,10 +58,6 @@ impl Clone for Blake3 {
 impl Hasher for Blake3 {
     type Digest = Digest;
 
-    const EMPTY: Self::Digest = Digest(hex!(
-        "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262"
-    ));
-
     fn update(&mut self, message: &[u8]) -> &mut Self {
         #[cfg(not(feature = "parallel"))]
         self.hasher.update(message);
@@ -97,9 +93,18 @@ impl Hasher for Blake3 {
 
 /// Digest of a BLAKE3 hashing operation.
 #[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash)]
-#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[repr(transparent)]
 pub struct Digest(pub [u8; DIGEST_LENGTH]);
+
+#[cfg(feature = "arbitrary")]
+impl<'a> arbitrary::Arbitrary<'a> for Digest {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
+        // Generate random bytes and compute their Blake3 hash
+        let len = u.int_in_range(0..=256)?;
+        let data = u.bytes(len)?;
+        Ok(Blake3::hash(data))
+    }
+}
 
 impl Write for Digest {
     fn write(&self, buf: &mut impl BufMut) {
@@ -161,7 +166,9 @@ impl Display for Digest {
     }
 }
 
-impl crate::Digest for Digest {}
+impl crate::Digest for Digest {
+    const EMPTY: Self = Self([0u8; DIGEST_LENGTH]);
+}
 
 impl Random for Digest {
     fn random(mut rng: impl CryptoRngCore) -> Self {
@@ -211,14 +218,6 @@ mod tests {
     #[test]
     fn test_blake3_len() {
         assert_eq!(Digest::SIZE, DIGEST_LENGTH);
-    }
-
-    #[test]
-    fn test_blake3_empty() {
-        let empty_digest = Blake3::EMPTY;
-        let expected_digest = Blake3::new().finalize();
-
-        assert_eq!(empty_digest, expected_digest);
     }
 
     #[test]

@@ -18,6 +18,12 @@
 //! need to enable this feature. It is commonly used when testing consensus with external execution environments
 //! that use their own runtime (but are deterministic over some set of inputs).**
 //!
+//! # Metrics
+//!
+//! This runtime enforces metrics are unique and well-formed:
+//! - Labels must start with `[a-zA-Z]` and contain only `[a-zA-Z0-9_]`
+//! - Metric names must be unique (panics on duplicate registration)
+//!
 //! # Example
 //!
 //! ```rust
@@ -47,15 +53,19 @@ use crate::{
     },
     telemetry::metrics::task::Label,
     utils::{
+        add_attribute,
         signal::{Signal, Stopper},
         supervision::Tree,
-        Panicker,
+        MetricEncoder, Panicker,
     },
-    Clock, Error, Execution, Handle, ListenerOf, Panicked, METRICS_PREFIX,
+    validate_label, Clock, Error, Execution, Handle, ListenerOf, Metrics as _, Panicked,
+    Spawner as _, METRICS_PREFIX,
 };
 #[cfg(feature = "external")]
 use crate::{Blocker, Pacer};
+use commonware_codec::Encode;
 use commonware_macros::select;
+use commonware_parallel::ThreadPool;
 use commonware_utils::{hex, time::SYSTEM_TIME_PRECISION, SystemTimeExt};
 #[cfg(feature = "external")]
 use futures::task::noop_waker;
@@ -73,11 +83,15 @@ use prometheus_client::{
     registry::{Metric, Registry},
 };
 use rand::{prelude::SliceRandom, rngs::StdRng, CryptoRng, RngCore, SeedableRng};
+use rand_core::CryptoRngCore;
+use rayon::{ThreadPoolBuildError, ThreadPoolBuilder};
 use sha2::{Digest as _, Sha256};
 use std::{
-    collections::{BTreeMap, BinaryHeap},
+    borrow::Cow,
+    collections::{BTreeMap, BinaryHeap, HashMap, HashSet},
     mem::{replace, take},
-    net::SocketAddr,
+    net::{IpAddr, SocketAddr},
+    num::NonZeroUsize,
     panic::{catch_unwind, resume_unwind, AssertUnwindSafe},
     pin::Pin,
     sync::{Arc, Mutex, Weak},
@@ -85,6 +99,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tracing::{info_span, trace, Instrument};
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 #[derive(Debug)]
 struct Metrics {
@@ -178,11 +193,13 @@ impl Auditor {
     }
 }
 
+/// A dynamic RNG that can safely be sent between threads.
+pub type BoxDynRng = Box<dyn CryptoRngCore + Send + 'static>;
+
 /// Configuration for the `deterministic` runtime.
-#[derive(Clone)]
 pub struct Config {
-    /// Seed for the random number generator.
-    seed: u64,
+    /// Random number generator.
+    rng: BoxDynRng,
 
     /// The cycle duration determines how much time is advanced after each iteration of the event
     /// loop. This is useful to prevent starvation if some task never yields.
@@ -197,9 +214,9 @@ pub struct Config {
 
 impl Config {
     /// Returns a new [Config] with default values.
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
-            seed: 42,
+            rng: Box::new(StdRng::seed_from_u64(42)),
             cycle: Duration::from_millis(1),
             timeout: None,
             catch_panics: false,
@@ -208,10 +225,20 @@ impl Config {
 
     // Setters
     /// See [Config]
-    pub const fn with_seed(mut self, seed: u64) -> Self {
-        self.seed = seed;
+    pub fn with_seed(self, seed: u64) -> Self {
+        self.with_rng(Box::new(StdRng::seed_from_u64(seed)))
+    }
+
+    /// Provide the config with a dynamic RNG directly.
+    ///
+    /// This can be useful for, e.g. fuzzing, where beyond just having randomness,
+    /// you might want to control specific bytes of the RNG. By taking in a dynamic
+    /// RNG object, any behavior is possible.
+    pub fn with_rng(mut self, rng: BoxDynRng) -> Self {
+        self.rng = rng;
         self
     }
+
     /// See [Config]
     pub const fn with_cycle(mut self, cycle: Duration) -> Self {
         self.cycle = cycle;
@@ -229,10 +256,6 @@ impl Config {
     }
 
     // Getters
-    /// See [Config]
-    pub const fn seed(&self) -> u64 {
-        self.seed
-    }
     /// See [Config]
     pub const fn cycle(&self) -> Duration {
         self.cycle
@@ -265,19 +288,24 @@ impl Default for Config {
     }
 }
 
+/// Key for detecting duplicate metric registrations: (metric_name, attributes).
+type MetricKey = (String, Vec<(String, String)>);
+
 /// Deterministic runtime that randomly selects tasks to run based on a seed.
 pub struct Executor {
     registry: Mutex<Registry>,
+    registered_metrics: Mutex<HashSet<MetricKey>>,
     cycle: Duration,
     deadline: Option<SystemTime>,
     metrics: Arc<Metrics>,
     auditor: Arc<Auditor>,
-    rng: Mutex<StdRng>,
+    rng: Mutex<BoxDynRng>,
     time: Mutex<SystemTime>,
     tasks: Arc<Tasks>,
     sleeping: Mutex<BinaryHeap<Alarm>>,
     shutdown: Mutex<Stopper>,
     panicker: Panicker,
+    dns: Mutex<HashMap<String, Vec<IpAddr>>>,
 }
 
 impl Executor {
@@ -358,9 +386,10 @@ pub struct Checkpoint {
     cycle: Duration,
     deadline: Option<SystemTime>,
     auditor: Arc<Auditor>,
-    rng: Mutex<StdRng>,
+    rng: Mutex<BoxDynRng>,
     time: Mutex<SystemTime>,
     storage: Arc<Storage>,
+    dns: Mutex<HashMap<String, Vec<IpAddr>>>,
     catch_panics: bool,
 }
 
@@ -409,11 +438,7 @@ impl Runner {
     /// Initialize a new `deterministic` runtime with the default configuration
     /// and the provided seed.
     pub fn seeded(seed: u64) -> Self {
-        let cfg = Config {
-            seed,
-            ..Config::default()
-        };
-        Self::new(cfg)
+        Self::new(Config::default().with_seed(seed))
     }
 
     /// Initialize a new `deterministic` runtime with the default configuration
@@ -601,6 +626,7 @@ impl Runner {
             rng: executor.rng,
             time: executor.time,
             storage,
+            dns: executor.dns,
             catch_panics: executor.panicker.catch(),
         };
 
@@ -779,6 +805,7 @@ type Storage = MeteredStorage<AuditedStorage<MemStorage>>;
 /// runtime.
 pub struct Context {
     name: String,
+    attributes: Vec<(String, String)>,
     executor: Weak<Executor>,
     network: Arc<Network>,
     storage: Arc<Storage>,
@@ -792,6 +819,7 @@ impl Clone for Context {
         let (child, _) = Tree::child(&self.tree);
         Self {
             name: self.name.clone(),
+            attributes: self.attributes.clone(),
             executor: self.executor.clone(),
             network: self.network.clone(),
             storage: self.storage.clone(),
@@ -828,21 +856,24 @@ impl Context {
 
         let executor = Arc::new(Executor {
             registry: Mutex::new(registry),
+            registered_metrics: Mutex::new(HashSet::new()),
             cycle: cfg.cycle,
             deadline,
             metrics,
             auditor,
-            rng: Mutex::new(StdRng::seed_from_u64(cfg.seed)),
+            rng: Mutex::new(cfg.rng),
             time: Mutex::new(start_time),
             tasks: Arc::new(Tasks::new()),
             sleeping: Mutex::new(BinaryHeap::new()),
             shutdown: Mutex::new(Stopper::default()),
             panicker,
+            dns: Mutex::new(HashMap::new()),
         });
 
         (
             Self {
                 name: String::new(),
+                attributes: Vec::new(),
                 executor: Arc::downgrade(&executor),
                 network: Arc::new(network),
                 storage: Arc::new(storage),
@@ -887,9 +918,11 @@ impl Context {
             auditor: checkpoint.auditor,
             rng: checkpoint.rng,
             time: checkpoint.time,
+            dns: checkpoint.dns,
 
             // New state for the new runtime
             registry: Mutex::new(registry),
+            registered_metrics: Mutex::new(HashSet::new()),
             metrics,
             tasks: Arc::new(Tasks::new()),
             sleeping: Mutex::new(BinaryHeap::new()),
@@ -899,6 +932,7 @@ impl Context {
         (
             Self {
                 name: String::new(),
+                attributes: Vec::new(),
                 executor: Arc::downgrade(&executor),
                 network: Arc::new(network),
                 storage: checkpoint.storage,
@@ -924,6 +958,36 @@ impl Context {
     /// Get a reference to the [Auditor].
     pub fn auditor(&self) -> Arc<Auditor> {
         self.executor().auditor.clone()
+    }
+
+    /// Compute a [Sha256] digest of all storage contents.
+    pub fn storage_audit(&self) -> Digest {
+        self.storage.inner().inner().audit()
+    }
+
+    /// Register a DNS mapping for a hostname.
+    ///
+    /// If `addrs` is `None`, the mapping is removed.
+    /// If `addrs` is `Some`, the mapping is added or updated.
+    pub fn resolver_register(&self, host: impl Into<String>, addrs: Option<Vec<IpAddr>>) {
+        // Update the auditor
+        let executor = self.executor();
+        let host = host.into();
+        executor.auditor.event(b"resolver_register", |hasher| {
+            hasher.update(host.as_bytes());
+            hasher.update(addrs.encode());
+        });
+
+        // Update the DNS mapping
+        let mut dns = executor.dns.lock().unwrap();
+        match addrs {
+            Some(addrs) => {
+                dns.insert(host, addrs);
+            }
+            None => {
+                dns.remove(&host);
+            }
+        }
     }
 }
 
@@ -966,9 +1030,11 @@ impl crate::Spawner for Context {
         // Spawn the task (we don't care about Model)
         let executor = self.executor();
         let future: BoxFuture<'_, T> = if is_instrumented {
-            f(self)
-                .instrument(info_span!(parent: None, "task", name = %label.name()))
-                .boxed()
+            let span = info_span!(parent: None, "task", name = %label.name());
+            for (key, value) in &self.attributes {
+                span.set_attribute(key.clone(), value.clone());
+            }
+            f(self).instrument(span).boxed()
         } else {
             f(self).boxed()
         };
@@ -1022,8 +1088,32 @@ impl crate::Spawner for Context {
     }
 }
 
+impl crate::RayonPoolSpawner for Context {
+    fn create_pool(&self, concurrency: NonZeroUsize) -> Result<ThreadPool, ThreadPoolBuildError> {
+        let mut builder = ThreadPoolBuilder::new().num_threads(concurrency.get());
+
+        if rayon::current_thread_index().is_none() {
+            builder = builder.use_current_thread()
+        }
+
+        builder
+            .spawn_handler(move |thread| {
+                self.with_label("rayon_thread")
+                    .dedicated()
+                    .spawn(move |_| async move { thread.run() });
+                Ok(())
+            })
+            .build()
+            .map(Arc::new)
+    }
+}
+
 impl crate::Metrics for Context {
     fn with_label(&self, label: &str) -> Self {
+        // Validate label format (must match [a-zA-Z][a-zA-Z0-9_]*)
+        validate_label(label);
+
+        // Construct the full label name
         let name = {
             let prefix = self.name.clone();
             if prefix.is_empty() {
@@ -1042,6 +1132,22 @@ impl crate::Metrics for Context {
         }
     }
 
+    fn with_attribute(&self, key: &str, value: impl std::fmt::Display) -> Self {
+        // Validate label format (must match [a-zA-Z][a-zA-Z0-9_]*)
+        validate_label(key);
+
+        // Add the attribute to the list of attributes
+        let mut attributes = self.attributes.clone();
+        assert!(
+            add_attribute(&mut attributes, key, value),
+            "duplicate attribute key: {key}"
+        );
+        Self {
+            attributes,
+            ..self.clone()
+        }
+    }
+
     fn label(&self) -> String {
         self.name.clone()
     }
@@ -1051,11 +1157,15 @@ impl crate::Metrics for Context {
         let name = name.into();
         let help = help.into();
 
-        // Register metric
+        // Name metric
         let executor = self.executor();
         executor.auditor.event(b"register", |hasher| {
             hasher.update(name.as_bytes());
             hasher.update(help.as_bytes());
+            for (k, v) in &self.attributes {
+                hasher.update(k.as_bytes());
+                hasher.update(v.as_bytes());
+            }
         });
         let prefixed_name = {
             let prefix = &self.name;
@@ -1065,19 +1175,34 @@ impl crate::Metrics for Context {
                 format!("{}_{}", *prefix, name)
             }
         };
-        executor
-            .registry
+
+        // Check for duplicate registration (O(1) lookup)
+        let metric_key = (prefixed_name.clone(), self.attributes.clone());
+        let is_new = executor
+            .registered_metrics
             .lock()
             .unwrap()
-            .register(prefixed_name, help, metric);
+            .insert(metric_key);
+        assert!(
+            is_new,
+            "duplicate metric: {} with attributes {:?}",
+            prefixed_name, self.attributes
+        );
+
+        // Apply attributes to the registry (in sorted order)
+        let mut registry = executor.registry.lock().unwrap();
+        let sub_registry = self.attributes.iter().fold(&mut *registry, |reg, (k, v)| {
+            reg.sub_registry_with_label((Cow::Owned(k.clone()), Cow::Owned(v.clone())))
+        });
+        sub_registry.register(prefixed_name, help, metric);
     }
 
     fn encode(&self) -> String {
         let executor = self.executor();
         executor.auditor.event(b"encode", |_| {});
-        let mut buffer = String::new();
-        encode(&mut buffer, &executor.registry.lock().unwrap()).expect("encoding failed");
-        buffer
+        let mut encoder = MetricEncoder::new();
+        encode(&mut encoder, &executor.registry.lock().unwrap()).expect("encoding failed");
+        encoder.into_string()
     }
 }
 
@@ -1291,6 +1416,23 @@ impl crate::Network for Context {
     }
 }
 
+impl crate::Resolver for Context {
+    async fn resolve(&self, host: &str) -> Result<Vec<IpAddr>, Error> {
+        // Get the record
+        let executor = self.executor();
+        let dns = executor.dns.lock().unwrap();
+        let result = dns.get(host).cloned();
+        drop(dns);
+
+        // Update the auditor
+        executor.auditor.event(b"resolve", |hasher| {
+            hasher.update(host.as_bytes());
+            hasher.update(result.encode());
+        });
+        result.ok_or_else(|| Error::ResolveFailed(host.to_string()))
+    }
+}
+
 impl RngCore for Context {
     fn next_u32(&mut self) -> u32 {
         let executor = self.executor();
@@ -1333,8 +1475,13 @@ impl CryptoRng for Context {}
 impl crate::Storage for Context {
     type Blob = <Storage as crate::Storage>::Blob;
 
-    async fn open(&self, partition: &str, name: &[u8]) -> Result<(Self::Blob, u64), Error> {
-        self.storage.open(partition, name).await
+    async fn open_versioned(
+        &self,
+        partition: &str,
+        name: &[u8],
+        versions: std::ops::RangeInclusive<u16>,
+    ) -> Result<(Self::Blob, u64, u16), Error> {
+        self.storage.open_versioned(partition, name, versions).await
     }
 
     async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
@@ -1353,7 +1500,33 @@ mod tests {
     use crate::FutureExt;
     #[cfg(feature = "external")]
     use crate::Spawner;
-    use crate::{deterministic, reschedule, utils::run_tasks, Blob, Metrics, Runner as _, Storage};
+    use crate::{
+        deterministic, reschedule, Blob, IoBufMut, Metrics, Resolver, Runner as _, Storage,
+    };
+    use futures::stream::{FuturesUnordered, StreamExt as _};
+
+    async fn task(i: usize) -> usize {
+        for _ in 0..5 {
+            reschedule().await;
+        }
+        i
+    }
+
+    fn run_tasks(tasks: usize, runner: deterministic::Runner) -> (String, Vec<usize>) {
+        runner.start(|context| async move {
+            let mut handles = FuturesUnordered::new();
+            for i in 0..=tasks - 1 {
+                handles.push(context.clone().spawn(move |_| task(i)));
+            }
+
+            let mut outputs = Vec::new();
+            while let Some(result) = handles.next().await {
+                outputs.push(result.unwrap());
+            }
+            assert_eq!(outputs.len(), tasks);
+            (context.auditor().state(), outputs)
+        })
+    }
     use commonware_macros::test_traced;
     #[cfg(not(feature = "external"))]
     use futures::future::pending;
@@ -1477,7 +1650,7 @@ mod tests {
         // Run some tasks, sync storage, and recover the runtime
         let (state, checkpoint) = executor1.start_and_recover(|context| async move {
             let (blob, _) = context.open(partition, name).await.unwrap();
-            blob.write_at(Vec::from(data), 0).await.unwrap();
+            blob.write_at(0, data).await.unwrap();
             blob.sync().await.unwrap();
             context.auditor().state()
         });
@@ -1490,8 +1663,8 @@ mod tests {
         executor.start(|context| async move {
             let (blob, len) = context.open(partition, name).await.unwrap();
             assert_eq!(len, data.len() as u64);
-            let read = blob.read_at(vec![0; data.len()], 0).await.unwrap();
-            assert_eq!(read.as_ref(), data);
+            let read = blob.read_at(0, IoBufMut::zeroed(data.len())).await.unwrap();
+            assert_eq!(read.coalesce(), data);
         });
     }
 
@@ -1517,13 +1690,13 @@ mod tests {
         let executor = deterministic::Runner::default();
         let partition = "test_partition";
         let name = b"test_blob";
-        let data = Vec::from("Hello, world!");
+        let data = b"Hello, world!";
 
         // Run some tasks without syncing storage
         let (_, checkpoint) = executor.start_and_recover(|context| async move {
             let context = context.clone();
             let (blob, _) = context.open(partition, name).await.unwrap();
-            blob.write_at(data, 0).await.unwrap();
+            blob.write_at(0, data).await.unwrap();
         });
 
         // Recover the runtime
@@ -1533,6 +1706,36 @@ mod tests {
         executor.start(|context| async move {
             let (_, len) = context.open(partition, name).await.unwrap();
             assert_eq!(len, 0);
+        });
+    }
+
+    #[test]
+    fn test_recover_dns_mappings_persist() {
+        // Initialize the first runtime
+        let executor = deterministic::Runner::default();
+        let host = "example.com";
+        let addrs = vec![
+            IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 1, 1)),
+            IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 1, 2)),
+        ];
+
+        // Register DNS mapping and recover the runtime
+        let (state, checkpoint) = executor.start_and_recover({
+            let addrs = addrs.clone();
+            |context| async move {
+                context.resolver_register(host, Some(addrs));
+                context.auditor().state()
+            }
+        });
+
+        // Verify auditor state is the same
+        assert_eq!(state, checkpoint.auditor.state());
+
+        // Check that DNS mappings persist after recovery
+        let executor = Runner::from(checkpoint);
+        executor.start(move |context| async move {
+            let resolved = context.resolve(host).await.unwrap();
+            assert_eq!(resolved, addrs);
         });
     }
 
@@ -1725,6 +1928,54 @@ mod tests {
                 })
                 .expect("missing runtime_iterations_total metric");
             assert!(iterations > 500);
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "label must start with [a-zA-Z]")]
+    fn test_metrics_label_empty() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            context.with_label("");
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "label must start with [a-zA-Z]")]
+    fn test_metrics_label_invalid_first_char() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            context.with_label("1invalid");
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "label must only contain [a-zA-Z0-9_]")]
+    fn test_metrics_label_invalid_char() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            context.with_label("invalid-label");
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "using runtime label is not allowed")]
+    fn test_metrics_label_reserved_prefix() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            context.with_label(METRICS_PREFIX);
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "duplicate attribute key: epoch")]
+    fn test_metrics_duplicate_attribute_panics() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let _ = context
+                .with_label("test")
+                .with_attribute("epoch", "old")
+                .with_attribute("epoch", "new");
         });
     }
 }

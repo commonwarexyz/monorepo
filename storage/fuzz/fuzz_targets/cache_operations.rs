@@ -8,7 +8,7 @@ use libfuzzer_sys::{
     fuzz_target,
 };
 use rand::{rngs::StdRng, SeedableRng};
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, num::NonZeroU16};
 
 const MAX_OPERATIONS: usize = 50;
 const MAX_INDEX: u64 = 10000;
@@ -21,8 +21,8 @@ const MIN_REPLAY_BUFFER: usize = 256;
 const MAX_REPLAY_BUFFER: usize = 2 * 8192;
 const MIN_COMPRESSION_LEVEL: u8 = 1;
 const MAX_COMPRESSION_LEVEL: u8 = 21;
-const MIN_BUFFER_POOL_PAGE_SIZE: usize = 512;
-const MAX_BUFFER_POOL_PAGE_SIZE: usize = 4096;
+const MIN_BUFFER_POOL_PAGE_SIZE: u16 = 511;
+const MAX_BUFFER_POOL_PAGE_SIZE: u16 = 4097;
 const MIN_BUFFER_POOL_CAPACITY: usize = 10;
 const MAX_BUFFER_POOL_CAPACITY: usize = 64;
 
@@ -35,7 +35,6 @@ enum Operation {
     NextGap { from: u64 },
     MissingItems { from: u64, limit: usize },
     Sync,
-    Close,
     Prune { min: u64 },
     Reinit,
 }
@@ -46,7 +45,7 @@ struct CacheConfig {
     write_buffer: usize,
     replay_buffer: usize,
     compression: Option<u8>,
-    buffer_pool_pages_size: usize,
+    buffer_pool_pages_size: NonZeroU16,
     buffer_pool_capacity: usize,
 }
 
@@ -72,7 +71,8 @@ impl<'a> Arbitrary<'a> for FuzzInput {
             None
         };
         let buffer_pool_pages_size =
-            u.int_in_range(MIN_BUFFER_POOL_PAGE_SIZE..=MAX_BUFFER_POOL_PAGE_SIZE)?;
+            NonZeroU16::new(u.int_in_range(MIN_BUFFER_POOL_PAGE_SIZE..=MAX_BUFFER_POOL_PAGE_SIZE)?)
+                .unwrap();
         let buffer_pool_capacity =
             u.int_in_range(MIN_BUFFER_POOL_CAPACITY..=MAX_BUFFER_POOL_CAPACITY)?;
 
@@ -89,7 +89,7 @@ impl<'a> Arbitrary<'a> for FuzzInput {
         let mut operations = Vec::with_capacity(num_operations);
 
         for _ in 0..num_operations {
-            let op = match u8::arbitrary(u)? % 10 {
+            let op = match u8::arbitrary(u)? % 9 {
                 0 => Operation::Put {
                     index: u64::arbitrary(u)? % MAX_INDEX,
                     value: u32::arbitrary(u)? % MAX_VALUE,
@@ -112,7 +112,6 @@ impl<'a> Arbitrary<'a> for FuzzInput {
                 7 => Operation::Prune {
                     min: u64::arbitrary(u)? % MAX_INDEX,
                 },
-                8 => Operation::Close,
                 _ => Operation::Reinit,
             };
             operations.push(op);
@@ -139,7 +138,7 @@ fn fuzz(input: FuzzInput) {
             replay_buffer: NZUsize!(input.config.replay_buffer),
             items_per_blob: NZU64!(input.config.items_per_blob),
             buffer_pool: PoolRef::new(
-                NZUsize!(input.config.buffer_pool_pages_size),
+                input.config.buffer_pool_pages_size,
                 NZUsize!(input.config.buffer_pool_capacity),
             ),
         };
@@ -262,12 +261,6 @@ fn fuzz(input: FuzzInput) {
                     }
                 }
 
-                Operation::Close => {
-                    if let Some(cache) = cache_opt.take() {
-                        cache.close().await.expect("Close should not error");
-                    }
-                }
-
                 Operation::Reinit => {
                     if cache_opt.is_none() {
                         let cache = Cache::<_, u32>::init(context.clone(), cfg.clone())
@@ -281,8 +274,8 @@ fn fuzz(input: FuzzInput) {
             }
         }
 
-        if let Some(cache) = cache_opt {
-            cache.close().await.ok();
+        if let Some(mut cache) = cache_opt {
+            cache.sync().await.ok();
         }
     });
 }

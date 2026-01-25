@@ -1,22 +1,27 @@
-use super::types::{Activity, Context};
+use super::{
+    elector::Config as Elector,
+    types::{Activity, Context},
+};
 use crate::{
     types::{Epoch, ViewDelta},
-    Automaton, Relay, Reporter,
+    CertifiableAutomaton, Relay, Reporter,
 };
 use commonware_cryptography::{certificate::Scheme, Digest};
 use commonware_p2p::Blocker;
+use commonware_parallel::Strategy;
 use commonware_runtime::buffer::PoolRef;
-use governor::Quota;
 use std::{num::NonZeroUsize, time::Duration};
 
 /// Configuration for the consensus engine.
 pub struct Config<
     S: Scheme,
+    L: Elector<S>,
     B: Blocker<PublicKey = S::PublicKey>,
     D: Digest,
-    A: Automaton<Context = Context<D, S::PublicKey>>,
+    A: CertifiableAutomaton<Context = Context<D, S::PublicKey>>,
     R: Relay,
     F: Reporter<Activity = Activity<S, D>>,
+    T: Strategy,
 > {
     /// Signing scheme for the consensus engine.
     ///
@@ -28,6 +33,14 @@ pub struct Config<
     /// remain stable across both key spaces; if the order diverges, validators will reject votes as coming from
     /// the wrong validator.
     pub scheme: S,
+
+    /// Leader election configuration.
+    ///
+    /// Determines how leaders are selected for each view. Built-in options include
+    /// [`RoundRobin`](super::elector::RoundRobin) for deterministic rotation and
+    /// [`Random`](super::elector::Random) for unpredictable selection using BLS
+    /// threshold signatures.
+    pub elector: L,
 
     /// Blocker for the network.
     ///
@@ -47,6 +60,9 @@ pub struct Config<
     /// automatically filter and verify activities based on scheme attributability.
     pub reporter: F,
 
+    /// Strategy for parallel operations.
+    pub strategy: T,
+
     /// Partition for the consensus engine.
     pub partition: String,
 
@@ -56,9 +72,6 @@ pub struct Config<
 
     /// Epoch for the consensus engine. Each running engine should have a unique epoch.
     pub epoch: Epoch,
-
-    /// Prefix for all signed messages to prevent replay attacks.
-    pub namespace: Vec<u8>,
 
     /// Number of bytes to buffer when replaying during startup.
     pub replay_buffer: NonZeroUsize,
@@ -95,23 +108,20 @@ pub struct Config<
     /// Timeout to wait for a peer to respond to a request.
     pub fetch_timeout: Duration,
 
-    /// Maximum rate of requests to send to a given peer.
-    ///
-    /// Inbound rate limiting is handled by [commonware_p2p].
-    pub fetch_rate_per_peer: Quota,
-
     /// Number of concurrent requests to make at once.
     pub fetch_concurrent: usize,
 }
 
 impl<
         S: Scheme,
+        L: Elector<S>,
         B: Blocker<PublicKey = S::PublicKey>,
         D: Digest,
-        A: Automaton<Context = Context<D, S::PublicKey>>,
+        A: CertifiableAutomaton<Context = Context<D, S::PublicKey>>,
         R: Relay,
         F: Reporter<Activity = Activity<S, D>>,
-    > Config<S, B, D, A, R, F>
+        T: Strategy,
+    > Config<S, L, B, D, A, R, F, T>
 {
     /// Assert enforces that all configuration values are valid.
     pub fn assert(&self) {

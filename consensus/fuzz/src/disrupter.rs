@@ -1,6 +1,5 @@
 use crate::{types::Message, FuzzInput, EPOCH};
 use arbitrary::Arbitrary;
-use bytes::Bytes;
 use commonware_codec::{Encode, Read, ReadExt};
 use commonware_consensus::{
     simplex::{
@@ -13,9 +12,9 @@ use commonware_consensus::{
 use commonware_cryptography::{ed25519::PublicKey, sha256::Digest as Sha256Digest};
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
-use commonware_runtime::{Clock, Handle, Spawner};
+use commonware_runtime::{Clock, Handle, IoBuf, Spawner};
 use commonware_utils::ordered::{Quorum, Set};
-use rand::{CryptoRng, Rng};
+use rand_core::CryptoRngCore;
 use std::time::Duration;
 
 const TIMEOUT: Duration = Duration::from_millis(500);
@@ -30,12 +29,11 @@ pub enum Mutation {
 }
 
 /// Byzantine actor that disrupts consensus by sending malformed/mutated messages.
-pub struct Disrupter<E: Clock + Spawner + Rng + CryptoRng, S: Scheme<Sha256Digest>> {
+pub struct Disrupter<E: Clock + Spawner + CryptoRngCore, S: Scheme<Sha256Digest>> {
     context: E,
     validator: PublicKey,
     scheme: S,
     participants: Set<PublicKey>,
-    namespace: Vec<u8>,
     fuzz_input: FuzzInput,
     last_vote: u64,
     last_finalized: u64,
@@ -43,7 +41,7 @@ pub struct Disrupter<E: Clock + Spawner + Rng + CryptoRng, S: Scheme<Sha256Diges
     last_notarized: u64,
 }
 
-impl<E: Clock + Spawner + Rng + CryptoRng, S: Scheme<Sha256Digest>> Disrupter<E, S>
+impl<E: Clock + Spawner + CryptoRngCore, S: Scheme<Sha256Digest>> Disrupter<E, S>
 where
     <S::Certificate as Read>::Cfg: Default,
 {
@@ -52,7 +50,6 @@ where
         validator: PublicKey,
         scheme: S,
         participants: Set<PublicKey>,
-        namespace: Vec<u8>,
         fuzz_input: FuzzInput,
     ) -> Self {
         Self {
@@ -64,7 +61,6 @@ where
             validator,
             scheme,
             participants,
-            namespace,
             fuzz_input,
         }
     }
@@ -188,12 +184,12 @@ where
             select! {
                 result = vote_receiver.recv().fuse() => {
                     if let Ok((_, msg)) = result {
-                        self.handle_vote(&mut vote_sender, msg.to_vec()).await;
+                        self.handle_vote(&mut vote_sender, msg.into()).await;
                     }
                 },
                 result = cert_receiver.recv().fuse() => {
                     if let Ok((_, msg)) = result {
-                        self.handle_certificate(&mut cert_sender, msg.to_vec()).await;
+                        self.handle_certificate(&mut cert_sender, msg.into()).await;
                     }
                 },
                 // We ignore resolver messages
@@ -207,7 +203,7 @@ where
     async fn handle_vote(&mut self, sender: &mut impl Sender, msg: Vec<u8>) {
         if self.fuzz_input.random_bool() {
             let _ = sender
-                .send(Recipients::All, Bytes::from(msg.clone()), true)
+                .send(Recipients::All, IoBuf::from(msg.clone()), true)
                 .await;
         }
 
@@ -219,11 +215,11 @@ where
             Vote::Notarize(notarize) => {
                 if self.fuzz_input.random_bool() {
                     let mutated = self.mutate_bytes(&msg);
-                    let _ = sender.send(Recipients::All, mutated.into(), true).await;
+                    let _ = sender.send(Recipients::All, mutated, true).await;
                 } else {
                     let proposal = self.mutate_proposal(&notarize.proposal);
-                    if let Some(v) = Notarize::sign(&self.scheme, &self.namespace, proposal) {
-                        let msg = Vote::<S, Sha256Digest>::Notarize(v).encode().into();
+                    if let Some(v) = Notarize::sign(&self.scheme, proposal) {
+                        let msg = Vote::<S, Sha256Digest>::Notarize(v).encode();
                         let _ = sender.send(Recipients::All, msg, true).await;
                     }
                 }
@@ -231,11 +227,11 @@ where
             Vote::Finalize(finalize) => {
                 if self.fuzz_input.random_bool() {
                     let mutated = self.mutate_bytes(&msg);
-                    let _ = sender.send(Recipients::All, mutated.into(), true).await;
+                    let _ = sender.send(Recipients::All, mutated, true).await;
                 } else {
                     let proposal = self.mutate_proposal(&finalize.proposal);
-                    if let Some(v) = Finalize::sign(&self.scheme, &self.namespace, proposal) {
-                        let msg = Vote::<S, Sha256Digest>::Finalize(v).encode().into();
+                    if let Some(v) = Finalize::sign(&self.scheme, proposal) {
+                        let msg = Vote::<S, Sha256Digest>::Finalize(v).encode();
                         let _ = sender.send(Recipients::All, msg, true).await;
                     }
                 }
@@ -243,14 +239,12 @@ where
             Vote::Nullify(_) => {
                 if self.fuzz_input.random_bool() {
                     let mutated = self.mutate_bytes(&msg);
-                    let _ = sender.send(Recipients::All, mutated.into(), true).await;
+                    let _ = sender.send(Recipients::All, mutated, true).await;
                 } else {
                     let v = self.random_view(self.last_vote);
                     let round = Round::new(Epoch::new(EPOCH), View::new(v));
-                    if let Some(v) =
-                        Nullify::<S>::sign::<Sha256Digest>(&self.scheme, &self.namespace, round)
-                    {
-                        let msg = Vote::<S, Sha256Digest>::Nullify(v).encode().into();
+                    if let Some(v) = Nullify::<S>::sign::<Sha256Digest>(&self.scheme, round) {
+                        let msg = Vote::<S, Sha256Digest>::Nullify(v).encode();
                         let _ = sender.send(Recipients::All, msg, true).await;
                     }
                 }
@@ -261,7 +255,7 @@ where
     async fn handle_certificate(&mut self, sender: &mut impl Sender, msg: Vec<u8>) {
         if self.fuzz_input.random_bool() {
             let _ = sender
-                .send(Recipients::All, Bytes::from(msg.clone()), true)
+                .send(Recipients::All, IoBuf::from(msg.clone()), true)
                 .await;
         }
 
@@ -285,7 +279,7 @@ where
         // Optionally send mutated certificate
         if self.fuzz_input.random_bool() {
             let mutated = self.mutate_bytes(&msg);
-            let _ = sender.send(Recipients::All, mutated.into(), true).await;
+            let _ = sender.send(Recipients::All, mutated, true).await;
         }
     }
 
@@ -332,20 +326,20 @@ where
 
         if self.participants.index(&self.validator).is_none() {
             let bytes = self.bytes();
-            let _ = sender.send(Recipients::All, bytes.into(), true).await;
+            let _ = sender.send(Recipients::All, bytes, true).await;
             return;
         }
 
         match self.message() {
             Message::Notarize => {
-                if let Some(vote) = Notarize::sign(&self.scheme, &self.namespace, proposal) {
-                    let msg = Vote::<S, Sha256Digest>::Notarize(vote).encode().into();
+                if let Some(vote) = Notarize::sign(&self.scheme, proposal) {
+                    let msg = Vote::<S, Sha256Digest>::Notarize(vote).encode();
                     let _ = sender.send(Recipients::All, msg, true).await;
                 }
             }
             Message::Finalize => {
-                if let Some(vote) = Finalize::sign(&self.scheme, &self.namespace, proposal) {
-                    let msg = Vote::<S, Sha256Digest>::Finalize(vote).encode().into();
+                if let Some(vote) = Finalize::sign(&self.scheme, proposal) {
+                    let msg = Vote::<S, Sha256Digest>::Finalize(vote).encode();
                     let _ = sender.send(Recipients::All, msg, true).await;
                 }
             }
@@ -354,16 +348,14 @@ where
                     Epoch::new(EPOCH),
                     View::new(self.random_view(self.last_vote)),
                 );
-                if let Some(vote) =
-                    Nullify::<S>::sign::<Sha256Digest>(&self.scheme, &self.namespace, round)
-                {
-                    let msg = Vote::<S, Sha256Digest>::Nullify(vote).encode().into();
+                if let Some(vote) = Nullify::<S>::sign::<Sha256Digest>(&self.scheme, round) {
+                    let msg = Vote::<S, Sha256Digest>::Nullify(vote).encode();
                     let _ = sender.send(Recipients::All, msg, true).await;
                 }
             }
             Message::Random => {
                 let bytes = self.bytes();
-                let _ = sender.send(Recipients::All, bytes.into(), true).await;
+                let _ = sender.send(Recipients::All, bytes, true).await;
             }
         }
     }

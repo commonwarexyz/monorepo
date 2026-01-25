@@ -1,36 +1,37 @@
 use crate::{
     ordered_broadcast::{
         scheme,
-        types::{Activity, Chunk, Lock, Proposal},
+        types::{Activity, Chunk, ChunkVerifier, Lock, Proposal},
     },
-    types::Epoch,
+    types::{Epoch, Height},
 };
 use commonware_codec::{Decode, DecodeExt, Encode};
 use commonware_cryptography::{certificate::Scheme, Digest, PublicKey};
+use commonware_parallel::Sequential;
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt, StreamExt,
 };
-use rand::{CryptoRng, Rng};
+use rand_core::CryptoRngCore;
 use std::collections::{btree_map::Entry, BTreeMap, HashMap, HashSet};
 
 #[allow(clippy::large_enum_variant)]
 enum Message<C: PublicKey, S: Scheme, D: Digest> {
     Proposal(Proposal<C, D>),
     Locked(Lock<C, S, D>),
-    GetTip(C, oneshot::Sender<Option<(u64, Epoch)>>),
-    GetContiguousTip(C, oneshot::Sender<Option<u64>>),
-    Get(C, u64, oneshot::Sender<Option<(D, Epoch)>>),
+    GetTip(C, oneshot::Sender<Option<(Height, Epoch)>>),
+    GetContiguousTip(C, oneshot::Sender<Option<Height>>),
+    Get(C, Height, oneshot::Sender<Option<(D, Epoch)>>),
 }
 
-pub struct Reporter<R: Rng + CryptoRng, C: PublicKey, S: Scheme, D: Digest> {
+pub struct Reporter<R: CryptoRngCore, C: PublicKey, S: Scheme, D: Digest> {
     mailbox: mpsc::Receiver<Message<C, S, D>>,
 
     // RNG used for signature verification with scheme.
     rng: R,
 
-    // Application namespace
-    namespace: Vec<u8>,
+    // Verifier for node signatures.
+    chunk_verifier: ChunkVerifier,
 
     // Scheme for verification
     scheme: S,
@@ -40,25 +41,25 @@ pub struct Reporter<R: Rng + CryptoRng, C: PublicKey, S: Scheme, D: Digest> {
     limit_misses: Option<usize>,
 
     // All known digests
-    digests: HashMap<C, BTreeMap<u64, (D, Epoch)>>,
+    digests: HashMap<C, BTreeMap<Height, (D, Epoch)>>,
 
     // Highest contiguous known height for each sequencer
-    contiguous: HashMap<C, u64>,
+    contiguous: HashMap<C, Height>,
 
     // Highest known height (and epoch) for each sequencer
-    highest: HashMap<C, (u64, Epoch)>,
+    highest: HashMap<C, (Height, Epoch)>,
 }
 
 impl<R, C, S, D> Reporter<R, C, S, D>
 where
-    R: Rng + CryptoRng,
+    R: CryptoRngCore,
     C: PublicKey,
     S: Scheme,
     D: Digest,
 {
     pub fn new(
         rng: R,
-        namespace: &[u8],
+        chunk_verifier: ChunkVerifier,
         scheme: S,
         limit_misses: Option<usize>,
     ) -> (Self, Mailbox<C, S, D>) {
@@ -67,7 +68,7 @@ where
             Self {
                 rng,
                 mailbox: receiver,
-                namespace: namespace.to_vec(),
+                chunk_verifier,
                 scheme,
                 proposals: HashSet::new(),
                 limit_misses,
@@ -88,7 +89,7 @@ where
             match msg {
                 Message::Proposal(proposal) => {
                     // Verify properly constructed (not needed in production)
-                    if !proposal.verify(&self.namespace) {
+                    if !proposal.verify(&self.chunk_verifier) {
                         panic!("Invalid proof");
                     }
 
@@ -101,7 +102,7 @@ where
                 }
                 Message::Locked(lock) => {
                     // Verify properly constructed (not needed in production)
-                    if !lock.verify(&mut self.rng, &self.namespace, &self.scheme) {
+                    if !lock.verify(&mut self.rng, &self.scheme, &Sequential) {
                         panic!("Invalid proof");
                     }
 
@@ -145,7 +146,7 @@ where
                         .highest
                         .get(&chunk.sequencer)
                         .copied()
-                        .unwrap_or((0, Epoch::zero()));
+                        .unwrap_or((Height::zero(), Epoch::zero()));
                     if chunk.height > highest.0 {
                         self.highest
                             .insert(chunk.sequencer.clone(), (chunk.height, lock.epoch));
@@ -153,12 +154,12 @@ where
 
                     // Update the highest contiguous height
                     let highest = self.contiguous.get(&chunk.sequencer);
-                    if (highest.is_none() && chunk.height == 0)
-                        || (highest.is_some() && chunk.height == highest.unwrap() + 1)
+                    if (highest.is_none() && chunk.height.is_zero())
+                        || (highest.is_some() && chunk.height == highest.unwrap().next())
                     {
                         let mut contiguous = chunk.height;
-                        while digests.contains_key(&(contiguous + 1)) {
-                            contiguous += 1;
+                        while digests.contains_key(&contiguous.next()) {
+                            contiguous = contiguous.next();
                         }
                         self.contiguous.insert(chunk.sequencer, contiguous);
                     }
@@ -211,7 +212,7 @@ impl<C: PublicKey, S: Scheme, D: Digest> crate::Reporter for Mailbox<C, S, D> {
 }
 
 impl<C: PublicKey, S: Scheme, D: Digest> Mailbox<C, S, D> {
-    pub async fn get_tip(&mut self, sequencer: C) -> Option<(u64, Epoch)> {
+    pub async fn get_tip(&mut self, sequencer: C) -> Option<(Height, Epoch)> {
         let (sender, receiver) = oneshot::channel();
         self.sender
             .send(Message::GetTip(sequencer, sender))
@@ -220,7 +221,7 @@ impl<C: PublicKey, S: Scheme, D: Digest> Mailbox<C, S, D> {
         receiver.await.unwrap()
     }
 
-    pub async fn get_contiguous_tip(&mut self, sequencer: C) -> Option<u64> {
+    pub async fn get_contiguous_tip(&mut self, sequencer: C) -> Option<Height> {
         let (sender, receiver) = oneshot::channel();
         self.sender
             .send(Message::GetContiguousTip(sequencer, sender))
@@ -229,7 +230,7 @@ impl<C: PublicKey, S: Scheme, D: Digest> Mailbox<C, S, D> {
         receiver.await.unwrap()
     }
 
-    pub async fn get(&mut self, sequencer: C, height: u64) -> Option<(D, Epoch)> {
+    pub async fn get(&mut self, sequencer: C, height: Height) -> Option<(D, Epoch)> {
         let (sender, receiver) = oneshot::channel();
         self.sender
             .send(Message::Get(sequencer, height, sender))

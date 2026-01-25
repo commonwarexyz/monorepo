@@ -24,8 +24,10 @@
 //! The shared secret can then be used to derive to AEAD keys, for the sending data ([SendCipher])
 //! and receiving data ([RecvCipher]). These use ChaCha20-Poly1305 as the AEAD. Each direction has
 //! a 12 byte counter to used as a nonce, with every call to [SendCipher::send] on one end,
-//! or [RecvCipher::recv] on the other end incrementing this counter.
-//! Note that this guarantees that messages sent are received in order.
+//! or [RecvCipher::recv] on the other end incrementing this counter. This guarantees that if
+//! a message is successfully received, then it was delivered in order. Re-ordering messages on
+//! the wire will have the effect of producing errors on the receiving end, but not of producing
+//! successful messages in a different order.
 //!
 //! # Security Features
 //!
@@ -48,6 +50,9 @@ use key_exchange::{EphemeralPublicKey, SecretKey};
 
 mod cipher;
 pub use cipher::{RecvCipher, SendCipher, CIPHERTEXT_OVERHEAD};
+
+#[cfg(all(test, feature = "arbitrary"))]
+mod conformance;
 
 const NAMESPACE: &[u8] = b"_COMMONWARE_CRYPTOGRAPHY_HANDSHAKE";
 const LABEL_CIPHER_L2D: &[u8] = b"cipher_l2d";
@@ -294,10 +299,12 @@ pub fn dial_end<P: PublicKey>(
     {
         return Err(Error::HandshakeFailed);
     }
-    let Some(secret) = esk.exchange(&msg.epk) else {
+    let Some(shared) = esk.exchange(&msg.epk) else {
         return Err(Error::HandshakeFailed);
     };
-    transcript.commit(secret.as_ref());
+    shared
+        .secret
+        .expose(|secret| transcript.commit(secret.as_ref()));
     let recv = RecvCipher::new(transcript.noise(LABEL_CIPHER_L2D));
     let send = SendCipher::new(transcript.noise(LABEL_CIPHER_D2L));
     let confirmation_l2d = transcript.fork(LABEL_CONFIRMATION_L2D).summarize();
@@ -347,10 +354,12 @@ pub fn listen_start<S: Signer, P: PublicKey>(
         .commit(current_time.encode())
         .commit(epk.encode())
         .sign(&my_identity);
-    let Some(secret) = esk.exchange(&msg.epk) else {
+    let Some(shared) = esk.exchange(&msg.epk) else {
         return Err(Error::HandshakeFailed);
     };
-    transcript.commit(secret.as_ref());
+    shared
+        .secret
+        .expose(|secret| transcript.commit(secret.as_ref()));
     let send = SendCipher::new(transcript.noise(LABEL_CIPHER_L2D));
     let recv = RecvCipher::new(transcript.noise(LABEL_CIPHER_D2L));
     let confirmation_l2d = transcript.fork(LABEL_CONFIRMATION_L2D).summarize();
@@ -386,8 +395,7 @@ mod test {
     use crate::{ed25519::PrivateKey, transcript::Transcript, Signer};
     use commonware_codec::{Codec, DecodeExt};
     use commonware_math::algebra::Random;
-    use rand::SeedableRng;
-    use rand_chacha::ChaCha8Rng;
+    use commonware_utils::test_rng;
 
     fn test_encode_roundtrip<T: Codec<Cfg = ()> + PartialEq>(value: &T) {
         assert!(value == &<T as DecodeExt<_>>::decode(value.encode()).unwrap());
@@ -395,7 +403,7 @@ mod test {
 
     #[test]
     fn test_can_setup_and_send_messages() -> Result<(), Error> {
-        let mut rng = ChaCha8Rng::seed_from_u64(0);
+        let mut rng = test_rng();
         let dialer_crypto = PrivateKey::random(&mut rng);
         let listener_crypto = PrivateKey::random(&mut rng);
 
@@ -442,7 +450,7 @@ mod test {
 
     #[test]
     fn test_mismatched_namespace_fails() {
-        let mut rng = ChaCha8Rng::seed_from_u64(0);
+        let mut rng = test_rng();
         let dialer_crypto = PrivateKey::random(&mut rng);
         let listener_crypto = PrivateKey::random(&mut rng);
 

@@ -16,42 +16,42 @@ use commonware_cryptography::{
     bls12381::primitives::variant::{MinSig, Variant},
     Hasher,
 };
+use commonware_parallel::Sequential;
 use commonware_runtime::{Sink, Spawner, Stream};
 use commonware_stream::{Receiver, Sender};
 use futures::{channel::mpsc, StreamExt};
-use rand::{CryptoRng, Rng};
+use rand::Rng;
+use rand_core::CryptoRngCore;
 use tracing::{debug, info};
 
 /// Genesis message to use during initialization.
 const GENESIS: &[u8] = b"commonware is neat";
 
 /// Application actor.
-pub struct Application<R: Rng + CryptoRng + Spawner, H: Hasher, Si: Sink, St: Stream> {
+pub struct Application<R: CryptoRngCore + Spawner, H: Hasher, Si: Sink, St: Stream> {
     context: R,
     indexer: (Sender<Si>, Receiver<St>),
-    namespace: Vec<u8>,
-    public: <MinSig as Variant>::Public,
-    other_certificate_verifier: Scheme,
+    this_network: <MinSig as Variant>::Public,
+    other_network: Scheme,
     hasher: H,
     mailbox: mpsc::Receiver<Message<H::Digest>>,
 }
 
-impl<R: Rng + CryptoRng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St> {
+impl<R: CryptoRngCore + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St> {
     /// Create a new application actor.
     pub fn new(context: R, config: Config<H, Si, St>) -> (Self, Scheme, Mailbox<H::Digest>) {
         let (sender, mailbox) = mpsc::channel(config.mailbox_size);
+        let this_network = *config.this_network.identity();
         (
             Self {
                 context,
                 indexer: config.indexer,
-                namespace: config.namespace,
-                public: *config.identity.public(),
-                other_certificate_verifier: Scheme::certificate_verifier(config.other_public),
+                this_network,
+                other_network: config.other_network,
                 hasher: config.hasher,
                 mailbox,
             },
-            Scheme::signer(config.participants, config.identity, config.share)
-                .expect("share must be in participants"),
+            config.this_network,
             Mailbox::new(sender),
         )
     }
@@ -81,11 +81,11 @@ impl<R: Rng + CryptoRng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<
                             // Fetch a certificate from the indexer for the other network
                             let msg =
                                 Inbound::GetFinalization::<H::Digest>(inbound::GetFinalization {
-                                    network: *self.other_certificate_verifier.identity(),
+                                    network: *self.other_network.identity(),
                                 })
                                 .encode();
                             indexer_sender
-                                .send(&msg)
+                                .send(msg)
                                 .await
                                 .expect("failed to send finalization to indexer");
                             let result = indexer_receiver
@@ -107,8 +107,8 @@ impl<R: Rng + CryptoRng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<
                             assert!(
                                 finalization.verify(
                                     &mut self.context,
-                                    &self.other_certificate_verifier,
-                                    &self.namespace
+                                    &self.other_network,
+                                    &Sequential
                                 ),
                                 "indexer is corrupt"
                             );
@@ -125,12 +125,12 @@ impl<R: Rng + CryptoRng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<
 
                     // Publish to indexer
                     let msg = Inbound::PutBlock::<H::Digest>(inbound::PutBlock {
-                        network: self.public,
+                        network: self.this_network,
                         block,
                     })
                     .encode();
                     indexer_sender
-                        .send(&msg)
+                        .send(msg)
                         .await
                         .expect("failed to send block to indexer");
                     let result = indexer_receiver
@@ -153,12 +153,12 @@ impl<R: Rng + CryptoRng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<
                 Message::Verify { payload, response } => {
                     // Fetch payload from indexer
                     let msg = Inbound::GetBlock(inbound::GetBlock {
-                        network: self.public,
+                        network: self.this_network,
                         digest: payload,
                     })
                     .encode();
                     indexer_sender
-                        .send(&msg)
+                        .send(msg)
                         .await
                         .expect("failed to send block to indexer");
                     let result = indexer_receiver
@@ -184,8 +184,8 @@ impl<R: Rng + CryptoRng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<
                         BlockFormat::Bridge(finalization) => {
                             let result = finalization.verify(
                                 &mut self.context,
-                                &self.other_certificate_verifier,
-                                &self.namespace,
+                                &self.other_network,
+                                &Sequential,
                             );
                             let _ = response.send(result);
                         }
@@ -195,26 +195,20 @@ impl<R: Rng + CryptoRng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<
                     let view = activity.view();
                     match activity {
                         Activity::Notarization(notarization) => {
-                            let proposal_signature = notarization.certificate.vote_signature;
-                            let seed_signature = notarization.certificate.seed_signature;
-
-                            info!(%view, payload = ?notarization.proposal.payload, signature = ?proposal_signature, seed = ?seed_signature, "notarized");
+                            info!(%view, payload = ?notarization.proposal.payload, signature = ?notarization.certificate, "notarized");
                         }
                         Activity::Finalization(finalization) => {
-                            let proposal_signature = finalization.certificate.vote_signature;
-                            let seed_signature = finalization.certificate.seed_signature;
-
-                            info!(%view, payload = ?finalization.proposal.payload, signature = ?proposal_signature, seed = ?seed_signature, "finalized");
+                            info!(%view, payload = ?finalization.proposal.payload, signature = ?finalization.certificate, "finalized");
 
                             // Post finalization
                             let msg =
                                 Inbound::PutFinalization::<H::Digest>(inbound::PutFinalization {
-                                    network: self.public,
+                                    network: self.this_network,
                                     finalization,
                                 })
                                 .encode();
                             indexer_sender
-                                .send(&msg)
+                                .send(msg)
                                 .await
                                 .expect("failed to send finalization to indexer");
                             let result = indexer_receiver
@@ -229,10 +223,7 @@ impl<R: Rng + CryptoRng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<
                             debug!(%view, success, "finalization posted");
                         }
                         Activity::Nullification(nullification) => {
-                            let round_signature = nullification.certificate.vote_signature;
-                            let seed_signature = nullification.certificate.seed_signature;
-
-                            info!(%view, signature = ?round_signature, seed = ?seed_signature, "nullified");
+                            info!(%view, signature = ?nullification.certificate, "nullified");
                         }
                         _ => {}
                     }

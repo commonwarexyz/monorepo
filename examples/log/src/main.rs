@@ -49,14 +49,14 @@ mod gui;
 
 use clap::{value_parser, Arg, Command};
 use commonware_consensus::{
-    simplex,
+    simplex::{self, elector::RoundRobin},
     types::{Epoch, ViewDelta},
 };
 use commonware_cryptography::{ed25519, Sha256, Signer as _};
 use commonware_p2p::{authenticated::discovery, Manager};
-use commonware_runtime::{buffer::PoolRef, tokio, Metrics, Runner};
-use commonware_utils::{ordered::Set, union, NZUsize, TryCollect, NZU32};
-use governor::Quota;
+use commonware_parallel::Sequential;
+use commonware_runtime::{buffer::PoolRef, tokio, Metrics, Quota, Runner};
+use commonware_utils::{ordered::Set, union, NZUsize, TryCollect, NZU16, NZU32};
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     str::FromStr,
@@ -136,7 +136,7 @@ fn main() {
             let verifier = ed25519::PrivateKey::from_seed(bootstrapper_key).public_key();
             let bootstrapper_address =
                 SocketAddr::from_str(parts[1]).expect("Bootstrapper address not well-formed");
-            bootstrapper_identities.push((verifier, bootstrapper_address));
+            bootstrapper_identities.push((verifier, bootstrapper_address.into()));
         }
     }
 
@@ -193,24 +193,25 @@ fn main() {
 
         // Initialize application
         let namespace = union(APPLICATION_NAMESPACE, b"_CONSENSUS");
+        let scheme = application::Scheme::signer(&namespace, validators.clone(), signer.clone())
+            .expect("private key must be in participants");
         let (application, scheme, reporter, mailbox) = application::Application::new(
             context.with_label("application"),
             application::Config {
                 hasher: Sha256::default(),
+                scheme,
                 mailbox_size: 1024,
-                participants: validators.clone(),
-                private_key: signer.clone(),
             },
         );
 
         // Initialize consensus
         let cfg = simplex::Config {
             scheme,
+            elector: RoundRobin::<Sha256>::default(),
             blocker: oracle,
             automaton: mailbox.clone(),
             relay: mailbox.clone(),
             reporter: reporter.clone(),
-            namespace,
             partition: String::from("log"),
             mailbox_size: 1024,
             epoch: Epoch::zero(),
@@ -223,8 +224,8 @@ fn main() {
             activity_timeout: ViewDelta::new(10),
             skip_timeout: ViewDelta::new(5),
             fetch_concurrent: 32,
-            fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
-            buffer_pool: PoolRef::new(NZUsize!(16_384), NZUsize!(10_000)),
+            buffer_pool: PoolRef::new(NZU16!(16_384), NZUsize!(10_000)),
+            strategy: Sequential,
         };
         let engine = simplex::Engine::new(context.with_label("engine"), cfg);
 

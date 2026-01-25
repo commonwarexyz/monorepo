@@ -13,18 +13,18 @@ use commonware_runtime::Metrics;
 /// (untranslated) key are used to determine the partition, and the translator is used by the
 /// partition-specific indices on the key after stripping this prefix. The value of `P` should be
 /// small, typically 1 or 2. Anything larger than 3 will fail to compile.
-pub struct Index<T: Translator, V: Eq, const P: usize> {
+pub struct Index<T: Translator, V: Eq + Send + Sync, const P: usize> {
     partitions: Vec<OrderedIndex<T, V>>,
 }
 
-impl<T: Translator, V: Eq, const P: usize> Index<T, V, P> {
+impl<T: Translator, V: Eq + Send + Sync, const P: usize> Index<T, V, P> {
     /// Create a new [Index] with the given translator and metrics registry.
     pub fn new(ctx: impl Metrics, translator: T) -> Self {
         let partition_count = 1 << (P * 8);
         let mut partitions = Vec::with_capacity(partition_count);
         for i in 0..partition_count {
             partitions.push(OrderedIndex::new(
-                ctx.with_label(&format!("partition_{i}")),
+                ctx.with_label("partition").with_attribute("idx", i),
                 translator.clone(),
             ));
         }
@@ -48,7 +48,7 @@ impl<T: Translator, V: Eq, const P: usize> Index<T, V, P> {
     }
 }
 
-impl<T: Translator, V: Eq, const P: usize> UnorderedTrait for Index<T, V, P> {
+impl<T: Translator, V: Eq + Send + Sync, const P: usize> UnorderedTrait for Index<T, V, P> {
     type Value = V;
     type Cursor<'a>
         = <OrderedIndex<T, V> as UnorderedTrait>::Cursor<'a>
@@ -143,13 +143,13 @@ impl<T: Translator, V: Eq, const P: usize> UnorderedTrait for Index<T, V, P> {
     }
 }
 
-impl<T: Translator, V: Eq, const P: usize> OrderedTrait for Index<T, V, P> {
+impl<T: Translator, V: Eq + Send + Sync, const P: usize> OrderedTrait for Index<T, V, P> {
     type Iterator<'a>
         = <OrderedIndex<T, V> as OrderedTrait>::Iterator<'a>
     where
         Self: 'a;
 
-    fn prev_translated_key<'a>(&'a self, key: &[u8]) -> Option<Self::Iterator<'a>>
+    fn prev_translated_key<'a>(&'a self, key: &[u8]) -> Option<(Self::Iterator<'a>, bool)>
     where
         Self::Value: 'a,
     {
@@ -157,22 +157,22 @@ impl<T: Translator, V: Eq, const P: usize> OrderedTrait for Index<T, V, P> {
         {
             let partition = &self.partitions[partition_index];
             let iter = partition.prev_translated_key_no_cycle(sub_key);
-            if iter.is_some() {
-                return iter;
+            if let Some(iter) = iter {
+                return Some((iter, false));
             }
         }
 
         for partition in self.partitions[..partition_index].iter().rev() {
             let iter = partition.last_translated_key();
-            if iter.is_some() {
-                return iter;
+            if let Some(iter) = iter {
+                return Some((iter, false));
             }
         }
 
-        self.last_translated_key()
+        self.last_translated_key().map(|iter| (iter, true))
     }
 
-    fn next_translated_key<'a>(&'a self, key: &[u8]) -> Option<Self::Iterator<'a>>
+    fn next_translated_key<'a>(&'a self, key: &[u8]) -> Option<(Self::Iterator<'a>, bool)>
     where
         Self::Value: 'a,
     {
@@ -180,19 +180,19 @@ impl<T: Translator, V: Eq, const P: usize> OrderedTrait for Index<T, V, P> {
         {
             let partition = &self.partitions[partition_index];
             let iter = partition.next_translated_key_no_cycle(sub_key);
-            if iter.is_some() {
-                return iter;
+            if let Some(iter) = iter {
+                return Some((iter, false));
             }
         }
 
         for partition in self.partitions[partition_index + 1..].iter() {
             let iter = partition.first_translated_key();
-            if iter.is_some() {
-                return iter;
+            if let Some(iter) = iter {
+                return Some((iter, false));
             }
         }
 
-        self.first_translated_key()
+        self.first_translated_key().map(|iter| (iter, true))
     }
 
     fn first_translated_key<'a>(&'a self) -> Option<Self::Iterator<'a>>
@@ -264,14 +264,22 @@ mod tests {
             assert_eq!(last.next(), Some(&42));
             assert!(last.next().is_none());
 
-            assert_eq!(index.prev_translated_key(key).unwrap().next(), Some(&42));
-            assert_eq!(index.next_translated_key(key).unwrap().next(), Some(&42));
+            let (mut iter, wrapped) = index.prev_translated_key(key).unwrap();
+            assert!(wrapped);
+            assert_eq!(iter.next(), Some(&42));
+            assert!(iter.next().is_none());
+            let (mut iter, wrapped) = index.next_translated_key(key).unwrap();
+            assert!(wrapped);
+            assert_eq!(iter.next(), Some(&42));
+            assert!(iter.next().is_none());
 
-            let mut next = index.next_translated_key(b"\x00").unwrap();
+            let (mut next, wrapped) = index.next_translated_key(b"\x00").unwrap();
+            assert!(!wrapped);
             assert_eq!(next.next(), Some(&42));
             assert!(next.next().is_none());
 
-            let mut prev = index.prev_translated_key(b"\xff\x00").unwrap();
+            let (mut prev, wrapped) = index.prev_translated_key(b"\xff\x00").unwrap();
+            assert!(!wrapped);
             assert_eq!(prev.next(), Some(&42));
             assert!(prev.next().is_none());
         });
@@ -305,14 +313,15 @@ mod tests {
             assert_eq!(*last_translated_key, (255u64 << 8) | 255);
 
             let last = [255u8, 255u8];
-            let next = index.next_translated_key(&last).unwrap().next();
-            assert_eq!(next, Some(first_translated_key));
+            let (mut iter, wrapped) = index.next_translated_key(&last).unwrap();
+            assert!(wrapped);
+            assert_eq!(iter.next(), Some(first_translated_key));
 
             for b1 in 0..=255u8 {
                 for b2 in 0..=255u8 {
                     let key = [b1, b2];
                     if !(b1 == 255 && b2 == 255) {
-                        let mut iter = index.next_translated_key(&key).unwrap();
+                        let (mut iter, _) = index.next_translated_key(&key).unwrap();
                         let next = *iter.next().unwrap();
                         assert_eq!(next, ((b1 as u64) << 8 | b2 as u64) + 1);
                         let next = *iter.next().unwrap();
@@ -320,7 +329,7 @@ mod tests {
                         assert!(iter.next().is_none());
                     }
                     if !(b1 == 0 && b2 == 0) {
-                        let mut iter = index.prev_translated_key(&key).unwrap();
+                        let (mut iter, _) = index.prev_translated_key(&key).unwrap();
                         let prev = *iter.next().unwrap();
                         assert_eq!(prev, ((b1 as u64) << 8 | b2 as u64) - 1);
                         let prev = *iter.next().unwrap();
@@ -350,67 +359,77 @@ mod tests {
             assert_eq!(index.keys(), 3);
 
             // First translated key is 0b.
-            let mut next = index.first_translated_key().unwrap();
-            assert_eq!(*next.next().unwrap(), 1);
-            assert_eq!(next.next(), None);
+            let mut iter = index.first_translated_key().unwrap();
+            assert_eq!(iter.next(), Some(&1));
+            assert_eq!(iter.next(), None);
 
             // Next translated key to 0x00 is 0b02.
-            let mut next = index.next_translated_key(&[0x00]).unwrap();
-            assert_eq!(*next.next().unwrap(), 1);
-            assert_eq!(next.next(), None);
+            let (mut iter, wrapped) = index.next_translated_key(&[0x00]).unwrap();
+            assert!(!wrapped);
+            assert_eq!(iter.next(), Some(&1));
+            assert_eq!(iter.next(), None);
 
             // Next translated key to 0x0b02 is 1c.
-            let mut next = index.next_translated_key(&hex!("0x0b02F2")).unwrap();
-            assert_eq!(*next.next().unwrap(), 21);
-            assert_eq!(*next.next().unwrap(), 22);
-            assert_eq!(next.next(), None);
+            let (mut iter, wrapped) = index.next_translated_key(&hex!("0x0b02F2")).unwrap();
+            assert!(!wrapped);
+            assert_eq!(iter.next(), Some(&21));
+            assert_eq!(iter.next(), Some(&22));
+            assert_eq!(iter.next(), None);
 
             // Next translated key to 0x1b is 1c.
-            let mut next = index.next_translated_key(&hex!("0x1b010203")).unwrap();
-            assert_eq!(*next.next().unwrap(), 21);
-            assert_eq!(*next.next().unwrap(), 22);
-            assert_eq!(next.next(), None);
+            let (mut iter, wrapped) = index.next_translated_key(&hex!("0x1b010203")).unwrap();
+            assert!(!wrapped);
+            assert_eq!(iter.next(), Some(&21));
+            assert_eq!(iter.next(), Some(&22));
+            assert_eq!(iter.next(), None);
 
             // Next translated key to 0x2a is 2d.
-            let mut next = index.next_translated_key(&hex!("0x2a01020304")).unwrap();
-            assert_eq!(*next.next().unwrap(), 3);
-            assert_eq!(next.next(), None);
+            let (mut iter, wrapped) = index.next_translated_key(&hex!("0x2a01020304")).unwrap();
+            assert!(!wrapped);
+            assert_eq!(iter.next(), Some(&3));
+            assert_eq!(iter.next(), None);
 
             // Next translated key to 0x2d is 0b.
-            let mut next = index.next_translated_key(k3).unwrap();
-            assert_eq!(*next.next().unwrap(), 1);
-            assert_eq!(next.next(), None);
+            let (mut iter, wrapped) = index.next_translated_key(k3).unwrap();
+            assert!(wrapped);
+            assert_eq!(iter.next(), Some(&1));
+            assert_eq!(iter.next(), None);
 
             // Another cycle around case.
-            let mut next = index.next_translated_key(&hex!("0x2eFF")).unwrap();
-            assert_eq!(*next.next().unwrap(), 1);
-            assert_eq!(next.next(), None);
+            let (mut iter, wrapped) = index.next_translated_key(&hex!("0x2eFF")).unwrap();
+            assert!(wrapped);
+            assert_eq!(iter.next(), Some(&1));
+            assert_eq!(iter.next(), None);
 
             // Previous translated key is the last key due to cycling.
-            let mut prev = index.prev_translated_key(k1).unwrap();
-            assert_eq!(*prev.next().unwrap(), 3);
-            assert_eq!(prev.next(), None);
+            let (mut iter, wrapped) = index.prev_translated_key(k1).unwrap();
+            assert!(wrapped);
+            assert_eq!(iter.next(), Some(&3));
+            assert_eq!(iter.next(), None);
 
             // Previous translated key is 0b.
-            let mut prev = index.prev_translated_key(&hex!("0x0c0102")).unwrap();
-            assert_eq!(*prev.next().unwrap(), 1);
-            assert_eq!(prev.next(), None);
+            let (mut iter, wrapped) = index.prev_translated_key(&hex!("0x0c0102")).unwrap();
+            assert!(!wrapped);
+            assert_eq!(iter.next(), Some(&1));
+            assert_eq!(iter.next(), None);
 
             // Previous translated key is 1c.
-            let mut prev = index.prev_translated_key(&hex!("0x1d0102")).unwrap();
-            assert_eq!(*prev.next().unwrap(), 21);
-            assert_eq!(*prev.next().unwrap(), 22);
-            assert_eq!(prev.next(), None);
+            let (mut iter, wrapped) = index.prev_translated_key(&hex!("0x1d0102")).unwrap();
+            assert!(!wrapped);
+            assert_eq!(iter.next(), Some(&21));
+            assert_eq!(iter.next(), Some(&22));
+            assert_eq!(iter.next(), None);
 
             // Previous translated key is 2d.
-            let mut prev = index.prev_translated_key(&hex!("0xCC0102")).unwrap();
-            assert_eq!(*prev.next().unwrap(), 3);
-            assert_eq!(prev.next(), None);
+            let (mut iter, wrapped) = index.prev_translated_key(&hex!("0xCC0102")).unwrap();
+            assert!(!wrapped);
+            assert_eq!(iter.next(), Some(&3));
+            assert_eq!(iter.next(), None);
 
             // Last translated key is 2d.
-            let mut last = index.last_translated_key().unwrap();
-            assert_eq!(*last.next().unwrap(), 3);
-            assert_eq!(last.next(), None);
+            let mut iter = index.last_translated_key().unwrap();
+            assert_eq!(iter.next(), Some(&3));
+            assert_eq!(iter.next(), None);
         });
     }
 }

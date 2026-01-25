@@ -6,6 +6,10 @@ hash = "c49f13e5df245eb2343e64a24eaa4dc9d9b6f698dcc50622953216a44302dc86"
 n_cases = 65536
 hash = "07161626ba27702dd0c4699ac8bc20bf0d2c8fb6e378644b7899af0d4a060dbd"
 
+["commonware_utils::hostname::tests::conformance::CodecConformance<Hostname>"]
+n_cases = 65536
+hash = "7e48234785aa28a959d63b7e477ac404cc07930c159501b2f7303ff461036fd0"
+
 ["commonware_utils::ordered::test::conformance::CodecConformance<BiMap<u32,u32>>"]
 n_cases = 65536
 hash = "256ec1e04a9ad4b493d52f559f6c4142592e4642937e04ade19edc19d088046e"
@@ -37,3 +41,7 @@ hash = "73102c8e2c269bbe2afd67158252c90a683a347e7ba623e8a1b383197c0d848a"
 ["commonware_utils::sequence::unit::test::conformance::CodecConformance<Unit>"]
 n_cases = 65536
 hash = "07854d2fef297a06ba81685e660c332de36d5d18d546927d30daad6d7fda1541"
+
+["commonware_utils::tests::conformance::CodecConformance<Participant>"]
+n_cases = 65536
+hash = "f0b66ee345e9e295c50b522d9cf3501d95cd70cecfe7bfd315c970ffa78ede40"

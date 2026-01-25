@@ -1,6 +1,6 @@
 //! Interface for a store of finalized blocks, used by [Actor](super::Actor).
 
-use crate::{simplex::types::Finalization, Block};
+use crate::{simplex::types::Finalization, types::Height, Block};
 use commonware_cryptography::{certificate::Scheme, Committable, Digest};
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_storage::{
@@ -37,7 +37,7 @@ pub trait Certificates: Send + Sync + 'static {
     /// `Ok(())` once the write is synced, or `Err` if persistence fails.
     fn put(
         &mut self,
-        height: u64,
+        height: Height,
         commitment: Self::Commitment,
         finalization: Finalization<Self::Scheme, Self::Commitment>,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send;
@@ -71,13 +71,13 @@ pub trait Certificates: Send + Sync + 'static {
     /// # Returns
     ///
     /// `Ok(())` when pruning is applied or unnecessary; `Err` if pruning fails.
-    fn prune(&mut self, min: u64) -> impl Future<Output = Result<(), Self::Error>> + Send;
+    fn prune(&mut self, min: Height) -> impl Future<Output = Result<(), Self::Error>> + Send;
 
     /// Retrieves the highest stored finalization's application height.
     ///
     /// # Returns
     /// `Some(height)` if there are any stored finalizations, or `None` if the store is empty.
-    fn last_index(&self) -> Option<u64>;
+    fn last_index(&self) -> Option<Height>;
 }
 
 /// Durable store for finalized [Blocks](Block) keyed by height and commitment.
@@ -129,7 +129,7 @@ pub trait Blocks: Send + Sync + 'static {
     /// # Returns
     ///
     /// `Ok(())` when pruning is applied or unnecessary; `Err` if pruning fails.
-    fn prune(&mut self, min: u64) -> impl Future<Output = Result<(), Self::Error>> + Send;
+    fn prune(&mut self, min: Height) -> impl Future<Output = Result<(), Self::Error>> + Send;
 
     /// Returns up to `max` missing items starting from `start`.
     ///
@@ -138,22 +138,22 @@ pub trait Blocks: Send + Sync + 'static {
     ///
     /// # Arguments
     ///
-    /// * `start`: The index to start searching from (inclusive).
+    /// * `start`: The height to start searching from (inclusive).
     /// * `max`: The maximum number of missing items to return.
     ///
     /// # Returns
     ///
-    /// A vector containing up to `max` missing indices from gaps between ranges.
+    /// A vector containing up to `max` missing heights from gaps between ranges.
     /// The vector may contain fewer than `max` items if there aren't enough gaps.
     /// If there are no more ranges after the current position, no items are returned.
-    fn missing_items(&self, start: u64, max: usize) -> Vec<u64>;
+    fn missing_items(&self, start: Height, max: usize) -> Vec<Height>;
 
     /// Finds the end of the range containing `value` and the start of the
     /// range succeeding `value`. This method is useful for identifying gaps around a given point.
     ///
     /// # Arguments
     ///
-    /// - `value`: The `u64` value to query around.
+    /// - `value`: The height to query around.
     ///
     /// # Behavior
     ///
@@ -166,10 +166,10 @@ pub trait Blocks: Send + Sync + 'static {
     ///
     /// # Returns
     ///
-    /// A tuple `(Option<u64>, Option<u64>)` where:
+    /// A tuple `(Option<Height>, Option<Height>)` where:
     /// - The first element (`current_range_end`) is `Some(end)` of the range that contains `value`. It's `None` if `value` is before all ranges, the store is empty, or `value` is not in any range.
     /// - The second element (`next_range_start`) is `Some(start)` of the first range that begins strictly after `value`. It's `None` if no range starts after `value` or the store is empty.
-    fn next_gap(&self, value: u64) -> (Option<u64>, Option<u64>);
+    fn next_gap(&self, value: Height) -> (Option<Height>, Option<Height>);
 }
 
 impl<E, C, S> Certificates for immutable::Archive<E, C, Finalization<S, C>>
@@ -184,11 +184,11 @@ where
 
     async fn put(
         &mut self,
-        height: u64,
+        height: Height,
         commitment: Self::Commitment,
         finalization: Finalization<S, Self::Commitment>,
     ) -> Result<(), Self::Error> {
-        self.put_sync(height, commitment, finalization).await
+        self.put_sync(height.get(), commitment, finalization).await
     }
 
     async fn get(
@@ -198,13 +198,13 @@ where
         <Self as Archive>::get(self, id).await
     }
 
-    async fn prune(&mut self, _: u64) -> Result<(), Self::Error> {
+    async fn prune(&mut self, _: Height) -> Result<(), Self::Error> {
         // Pruning is a no-op for immutable archives.
         Ok(())
     }
 
-    fn last_index(&self) -> Option<u64> {
-        <Self as Archive>::last_index(self)
+    fn last_index(&self) -> Option<Height> {
+        <Self as Archive>::last_index(self).map(Height::new)
     }
 }
 
@@ -217,7 +217,7 @@ where
     type Error = archive::Error;
 
     async fn put(&mut self, block: Self::Block) -> Result<(), Self::Error> {
-        self.put_sync(block.height(), block.commitment(), block)
+        self.put_sync(block.height().get(), block.commitment(), block)
             .await
     }
 
@@ -228,23 +228,27 @@ where
         <Self as Archive>::get(self, id).await
     }
 
-    async fn prune(&mut self, _: u64) -> Result<(), Self::Error> {
+    async fn prune(&mut self, _: Height) -> Result<(), Self::Error> {
         // Pruning is a no-op for immutable archives.
         Ok(())
     }
 
-    fn missing_items(&self, start: u64, max: usize) -> Vec<u64> {
-        <Self as Archive>::missing_items(self, start, max)
+    fn missing_items(&self, start: Height, max: usize) -> Vec<Height> {
+        <Self as Archive>::missing_items(self, start.get(), max)
+            .into_iter()
+            .map(Height::new)
+            .collect()
     }
 
-    fn next_gap(&self, value: u64) -> (Option<u64>, Option<u64>) {
-        <Self as Archive>::next_gap(self, value)
+    fn next_gap(&self, value: Height) -> (Option<Height>, Option<Height>) {
+        let (a, b) = <Self as Archive>::next_gap(self, value.get());
+        (a.map(Height::new), b.map(Height::new))
     }
 }
 
 impl<T, E, C, S> Certificates for prunable::Archive<T, E, C, Finalization<S, C>>
 where
-    T: Translator<Key = C> + Send + Sync + 'static,
+    T: Translator,
     E: Storage + Metrics + Clock,
     C: Digest,
     S: Scheme,
@@ -255,11 +259,11 @@ where
 
     async fn put(
         &mut self,
-        height: u64,
+        height: Height,
         commitment: Self::Commitment,
         finalization: Finalization<S, Self::Commitment>,
     ) -> Result<(), Self::Error> {
-        self.put_sync(height, commitment, finalization).await
+        self.put_sync(height.get(), commitment, finalization).await
     }
 
     async fn get(
@@ -269,18 +273,18 @@ where
         <Self as Archive>::get(self, id).await
     }
 
-    async fn prune(&mut self, min: u64) -> Result<(), Self::Error> {
-        Self::prune(self, min).await
+    async fn prune(&mut self, min: Height) -> Result<(), Self::Error> {
+        Self::prune(self, min.get()).await
     }
 
-    fn last_index(&self) -> Option<u64> {
-        <Self as Archive>::last_index(self)
+    fn last_index(&self) -> Option<Height> {
+        <Self as Archive>::last_index(self).map(Height::new)
     }
 }
 
 impl<T, E, B> Blocks for prunable::Archive<T, E, B::Commitment, B>
 where
-    T: Translator<Key = B::Commitment> + Send + Sync + 'static,
+    T: Translator,
     E: Storage + Metrics + Clock,
     B: Block,
 {
@@ -288,7 +292,7 @@ where
     type Error = archive::Error;
 
     async fn put(&mut self, block: Self::Block) -> Result<(), Self::Error> {
-        self.put_sync(block.height(), block.commitment(), block)
+        self.put_sync(block.height().get(), block.commitment(), block)
             .await
     }
 
@@ -299,15 +303,19 @@ where
         <Self as Archive>::get(self, id).await
     }
 
-    async fn prune(&mut self, min: u64) -> Result<(), Self::Error> {
-        Self::prune(self, min).await
+    async fn prune(&mut self, min: Height) -> Result<(), Self::Error> {
+        Self::prune(self, min.get()).await
     }
 
-    fn missing_items(&self, start: u64, max: usize) -> Vec<u64> {
-        <Self as Archive>::missing_items(self, start, max)
+    fn missing_items(&self, start: Height, max: usize) -> Vec<Height> {
+        <Self as Archive>::missing_items(self, start.get(), max)
+            .into_iter()
+            .map(Height::new)
+            .collect()
     }
 
-    fn next_gap(&self, value: u64) -> (Option<u64>, Option<u64>) {
-        <Self as Archive>::next_gap(self, value)
+    fn next_gap(&self, value: Height) -> (Option<Height>, Option<Height>) {
+        let (a, b) = <Self as Archive>::next_gap(self, value.get());
+        (a.map(Height::new), b.map(Height::new))
     }
 }

@@ -7,9 +7,14 @@ use commonware_runtime::{
 use criterion::{criterion_group, Criterion};
 use std::time::{Duration, Instant};
 
+#[cfg(not(full_bench))]
+const ITEMS: [u64; 1] = [10_000];
+#[cfg(full_bench)]
+const ITEMS: [u64; 4] = [10_000, 50_000, 100_000, 500_000];
+
 fn bench_restart(c: &mut Criterion) {
     let cfg = Config::default();
-    for items in [10_000, 50_000, 100_000, 500_000] {
+    for items in ITEMS {
         // Populate the freezer with random keys
         let builder = commonware_runtime::tokio::Runner::new(cfg.clone());
         builder.start(|ctx| async move {
@@ -27,9 +32,8 @@ fn bench_restart(c: &mut Criterion) {
                 let mut total = Duration::ZERO;
                 for _ in 0..iters {
                     let start = Instant::now();
-                    let store = init(ctx.clone()).await; // replay happens inside init
+                    let _store = init(ctx.clone()).await; // replay happens inside init
                     total += start.elapsed();
-                    store.close().await.unwrap();
                 }
                 total
             });

@@ -2,12 +2,17 @@
 //! database with variable-sized values.
 
 use crate::variable::{
-    gen_random_kv, get_any_ordered, get_any_unordered, get_store, Variant, VARIANTS,
+    any_cfg, gen_random_kv, get_any_ordered, get_any_unordered, Digest, OVariableDb, UVariableDb,
+    Variant, THREADS, VARIANTS,
 };
 use commonware_runtime::{
     benchmarks::{context, tokio},
     tokio::{Config, Runner},
-    Runner as _,
+    RayonPoolSpawner, Runner as _,
+};
+use commonware_storage::qmdb::{
+    any::states::{CleanAny, MutableAny, UnmerkleizedDurableAny},
+    store::LogStore,
 };
 use criterion::{criterion_group, Criterion};
 use std::time::Instant;
@@ -26,40 +31,45 @@ cfg_if::cfg_if! {
     }
 }
 
+/// Helper function to setup a database with random data, prune, and close it.
+async fn setup_db<C>(db: C, elements: u64, operations: u64)
+where
+    C: CleanAny<Key = Digest>,
+    C::Mutable: MutableAny<Key = Digest> + LogStore<Value = Vec<u8>>,
+    <C::Mutable as MutableAny>::Durable:
+        UnmerkleizedDurableAny<Mutable = C::Mutable, Merkleized = C>,
+{
+    let mutable = db.into_mutable();
+    let durable = gen_random_kv(mutable, elements, operations, COMMIT_FREQUENCY).await;
+    let mut clean = durable.into_merkleized().await.unwrap();
+    clean.prune(clean.inactivity_floor_loc()).await.unwrap();
+    clean.sync().await.unwrap();
+    drop(clean);
+}
+
 /// Benchmark the initialization of a large randomly generated any db.
 fn bench_variable_init(c: &mut Criterion) {
     let cfg = Config::default();
     for elements in ELEMENTS {
         for operations in OPERATIONS {
             for variant in VARIANTS {
+                // Setup phase: create and populate the database
                 let runner = Runner::new(cfg.clone());
                 runner.start(|ctx| async move {
                     match variant {
-                        Variant::Store => {
-                            let db = get_store(ctx.clone()).await;
-                            let mut db =
-                                gen_random_kv(db, elements, operations, COMMIT_FREQUENCY).await;
-                            db.prune(db.inactivity_floor_loc()).await.unwrap();
-                            db.close().await.unwrap();
-                        }
                         Variant::AnyUnordered => {
                             let db = get_any_unordered(ctx.clone()).await;
-                            let mut db =
-                                gen_random_kv(db, elements, operations, COMMIT_FREQUENCY).await;
-                            db.prune(db.inactivity_floor_loc()).await.unwrap();
-                            db.close().await.unwrap();
+                            setup_db(db, elements, operations).await;
                         }
                         Variant::AnyOrdered => {
                             let db = get_any_ordered(ctx.clone()).await;
-                            let mut db =
-                                gen_random_kv(db, elements, operations, COMMIT_FREQUENCY).await;
-                            db.prune(db.inactivity_floor_loc()).await.unwrap();
-                            db.close().await.unwrap();
+                            setup_db(db, elements, operations).await;
                         }
                     }
                 });
-                let runner = tokio::Runner::new(cfg.clone());
 
+                // Benchmark phase: measure initialization time
+                let runner = tokio::Runner::new(cfg.clone());
                 c.bench_function(
                     &format!(
                         "{}/variant={} elements={} operations={}",
@@ -71,23 +81,25 @@ fn bench_variable_init(c: &mut Criterion) {
                     |b| {
                         b.to_async(&runner).iter_custom(|iters| async move {
                             let ctx = context::get::<commonware_runtime::tokio::Context>();
+                            let pool = ctx.clone().create_pool(THREADS).unwrap();
+                            let any_cfg = any_cfg(pool);
+
+                            // Start the timer here to avoid including time to allocate buffer pool,
+                            // thread pool, and other shared structures.
                             let start = Instant::now();
                             for _ in 0..iters {
                                 match variant {
-                                    Variant::Store => {
-                                        let db = get_store(ctx.clone()).await;
-                                        assert_ne!(db.op_count(), 0);
-                                        db.close().await.unwrap();
-                                    }
                                     Variant::AnyUnordered => {
-                                        let db = get_any_unordered(ctx.clone()).await;
+                                        let db = UVariableDb::init(ctx.clone(), any_cfg.clone())
+                                            .await
+                                            .unwrap();
                                         assert_ne!(db.op_count(), 0);
-                                        db.close().await.unwrap();
                                     }
                                     Variant::AnyOrdered => {
-                                        let db = get_any_ordered(ctx.clone()).await;
+                                        let db = OVariableDb::init(ctx.clone(), any_cfg.clone())
+                                            .await
+                                            .unwrap();
                                         assert_ne!(db.op_count(), 0);
-                                        db.close().await.unwrap();
                                     }
                                 }
                             }
@@ -97,14 +109,10 @@ fn bench_variable_init(c: &mut Criterion) {
                     },
                 );
 
+                // Cleanup phase: destroy the database
                 let runner = Runner::new(cfg.clone());
                 runner.start(|ctx| async move {
-                    // Clean up the databases after the benchmark.
                     match variant {
-                        Variant::Store => {
-                            let db = get_store(ctx).await;
-                            db.destroy().await.unwrap();
-                        }
                         Variant::AnyUnordered => {
                             let db = get_any_unordered(ctx).await;
                             db.destroy().await.unwrap();

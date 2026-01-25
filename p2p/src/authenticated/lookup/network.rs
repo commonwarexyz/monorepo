@@ -13,13 +13,12 @@ use crate::{
 use commonware_cryptography::Signer;
 use commonware_macros::select;
 use commonware_runtime::{
-    spawn_cell, Clock, ContextCell, Handle, Metrics, Network as RNetwork, Spawner,
+    spawn_cell, Clock, ContextCell, Handle, Metrics, Network as RNetwork, Quota, Resolver, Spawner,
 };
 use commonware_stream::Config as StreamConfig;
 use commonware_utils::union;
 use futures::channel::mpsc;
-use governor::{clock::ReasonablyRealtime, Quota};
-use rand::{CryptoRng, Rng};
+use rand_core::CryptoRngCore;
 use std::{collections::HashSet, net::IpAddr};
 use tracing::{debug, info};
 
@@ -27,10 +26,7 @@ use tracing::{debug, info};
 const STREAM_SUFFIX: &[u8] = b"_STREAM";
 
 /// Implementation of an `authenticated` network.
-pub struct Network<
-    E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metrics,
-    C: Signer,
-> {
+pub struct Network<E: Spawner + Clock + CryptoRngCore + RNetwork + Metrics, C: Signer> {
     context: ContextCell<E>,
     cfg: Config<C>,
 
@@ -42,9 +38,7 @@ pub struct Network<
     listener: mpsc::Receiver<HashSet<IpAddr>>,
 }
 
-impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metrics, C: Signer>
-    Network<E, C>
-{
+impl<E: Spawner + Clock + CryptoRngCore + RNetwork + Resolver + Metrics, C: Signer> Network<E, C> {
     /// Create a new instance of an `authenticated` network.
     ///
     /// # Parameters
@@ -64,7 +58,10 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
                 tracked_peer_sets: cfg.tracked_peer_sets,
                 allowed_connection_rate_per_peer: cfg.allowed_connection_rate_per_peer,
                 allow_private_ips: cfg.allow_private_ips,
+                allow_dns: cfg.allow_dns,
+                bypass_ip_check: cfg.bypass_ip_check,
                 listener: listener_mailbox,
+                block_duration: cfg.block_duration,
             },
         );
         let (router, router_mailbox, messenger) = router::Actor::new(
@@ -116,7 +113,8 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
     ) {
         let clock = self
             .context
-            .with_label(&format!("channel_{channel}"))
+            .with_label("channel")
+            .with_attribute("idx", channel)
             .take();
         self.channels.register(channel, rate, backlog, clock)
     }
@@ -141,7 +139,6 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
             spawner::Config {
                 mailbox_size: self.cfg.mailbox_size,
                 ping_frequency: self.cfg.ping_frequency,
-                allowed_ping_rate: self.cfg.allowed_ping_rate,
             },
         );
         let mut spawner_task =
@@ -151,7 +148,10 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
         let stream_cfg = StreamConfig {
             signing_key: self.cfg.crypto,
             namespace: union(&self.cfg.namespace, STREAM_SUFFIX),
-            max_message_size: self.cfg.max_message_size + types::MAX_PAYLOAD_DATA_OVERHEAD,
+            max_message_size: self
+                .cfg
+                .max_message_size
+                .saturating_add(types::MAX_PAYLOAD_DATA_OVERHEAD),
             synchrony_bound: self.cfg.synchrony_bound,
             max_handshake_age: self.cfg.max_handshake_age,
             handshake_timeout: self.cfg.handshake_timeout,
@@ -161,7 +161,8 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
             listener::Config {
                 address: self.cfg.listen,
                 stream_cfg: stream_cfg.clone(),
-                attempt_unregistered_handshakes: self.cfg.attempt_unregistered_handshakes,
+                allow_private_ips: self.cfg.allow_private_ips,
+                bypass_ip_check: self.cfg.bypass_ip_check,
                 max_concurrent_handshakes: self.cfg.max_concurrent_handshakes,
                 allowed_handshake_rate_per_ip: self.cfg.allowed_handshake_rate_per_ip,
                 allowed_handshake_rate_per_subnet: self.cfg.allowed_handshake_rate_per_subnet,
@@ -178,6 +179,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
                 stream_cfg,
                 dial_frequency: self.cfg.dial_frequency,
                 query_frequency: self.cfg.query_frequency,
+                allow_private_ips: self.cfg.allow_private_ips,
             },
         );
         let mut dialer_task = dialer.start(self.tracker_mailbox, spawner_mailbox);

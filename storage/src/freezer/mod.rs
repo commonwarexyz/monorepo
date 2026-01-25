@@ -10,8 +10,13 @@
 //!
 //! # Format
 //!
-//! The [Freezer] uses a two-level architecture: an extendible hash table (written in a single [commonware_runtime::Blob])
-//! that maps keys to locations and a [crate::journal::segmented::variable::Journal] that stores key-value data.
+//! The [Freezer] uses a three-level architecture:
+//! 1. An extendible hash table (written in a single [commonware_runtime::Blob]) that maps keys to locations
+//! 2. A key index journal ([crate::journal::segmented::fixed]) that stores keys and collision chain pointers
+//! 3. A value journal ([crate::journal::segmented::glob]) that stores the actual values
+//!
+//! These journals are combined via [crate::journal::segmented::oversized], which coordinates
+//! crash recovery between them.
 //!
 //! ```text
 //! +-----------------------------------------------------------------+
@@ -23,10 +28,18 @@
 //!         |         |         |         |         |         |
 //!         v         v         v         v         v         v
 //! +-----------------------------------------------------------------+
-//! |                             Journal                             |
-//! |  Section 0: [Record 0][Record 1][Record 2]...                   |
-//! |  Section 1: [Record 10][Record 11][Record 12]...                |
-//! |  Section N: [Record 100][Record 101][Record 102]...             |
+//! |                      Key Index Journal                          |
+//! |  Section 0: [Entry 0][Entry 1][Entry 2]...                      |
+//! |  Section 1: [Entry 10][Entry 11][Entry 12]...                   |
+//! |  Section N: [Entry 100][Entry 101][Entry 102]...                |
+//! +-------|---------|---------|---------|---------|---------|-------+
+//!         |         |         |         |         |         |
+//!         v         v         v         v         v         v
+//! +-----------------------------------------------------------------+
+//! |                        Value Journal                            |
+//! |  Section 0: [Value 0][Value 1][Value 2]...                      |
+//! |  Section 1: [Value 10][Value 11][Value 12]...                   |
+//! |  Section N: [Value 100][Value 101][Value 102]...                |
 //! +-----------------------------------------------------------------+
 //! ```
 //!
@@ -50,50 +63,61 @@
 //! +-----------------+-------------------+
 //! ```
 //!
-//! The journal stores variable-sized records, each containing a key-value pair and an optional pointer
-//! to the next record in the collision chain (for keys that hash to the same table index).
+//! The key index journal stores fixed-size entries containing a key, a pointer to the value in the
+//! value journal, and an optional pointer to the next entry in the collision chain (for keys that
+//! hash to the same table index).
 //!
 //! ```text
 //! +-------------------------------------+
-//! |           Journal Record            |
+//! |        Key Index Entry              |
 //! +-------------------------------------+
-//! | Key:   Array                        |
-//! | Value: Codec                        |
-//! | Next:  Option<(u64, u32)>           |
+//! | Key:           Array                |
+//! | Value Offset:  u64                  |
+//! | Value Size:    u32                  |
+//! | Next:          Option<(u64, u32)>   |
 //! +-------------------------------------+
 //! ```
 //!
+//! The value journal stores the actual encoded values at the offsets referenced by the key index entries.
+//!
 //! # Traversing Conflicts
 //!
-//! When multiple keys hash to the same table index, they form a linked list within the journal:
+//! When multiple keys hash to the same table index, they form a linked list within the key index
+//! journal. Each key index entry points to its value in the value journal:
 //!
 //! ```text
 //! Hash Table:
-//! [Index 42]      +-------------------+
-//!                 | section: 2        |
-//!                 | offset: 768       |
-//!                 +---------+---------+
-//!                           |
-//! Journal:                  v
-//! [Section 2]     +-----+------------+-----+-----+-----+-----+-----+-----+
-//!                 | ... | Key: "foo" | ... | ... | ... | ... | ... | ... |
-//!                 |     | Value: 42  |     |     |     |     |     |     |
-//!                 |     | Next:(1,512)---+ |     |     |     |     |     |
-//!                 +-----+------------+---+-+-----+-----+-----+-----+-----+
-//!                                        |
-//!                                        v
-//! [Section 1]     +-----+-----+-----+------------+-----+-----+-----+-----+
-//!                 | ... | ... | ... | Key: "bar" | ... | ... | ... | ... |
-//!                 |     |     |     | Value: 84  |     |     |     |     |
-//!                 |     |     | +---| Next:(0,256)     |     |     |     |
-//!                 +-----+-----+-+---+------------+-----+-----+-----+-----+
-//!                               |
-//!                               v
-//! [Section 0]     +-----+------------+-----+-----+-----+-----+-----+-----+
-//!                 | ... | Key: "baz" | ... | ... | ... | ... | ... | ... |
-//!                 |     | Value: 126 |     |     |     |     |     |     |
-//!                 |     | Next: None |     |     |     |     |     |     |
-//!                 +-----+------------+-----+-----+-----+-----+-----+-----+
+//! [Index 42]         +-------------------+
+//!                    | section: 2        |
+//!                    | offset: 768       |
+//!                    +---------+---------+
+//!                              |
+//! Key Index Journal:           v
+//! [Section 2]        +-----------------------+
+//!                    | Key: "foo"            |
+//!                    | ValOff: 100           |
+//!                    | ValSize: 20           |
+//!                    | Next: (1, 512) -------+---+
+//!                    +-----------------------+   |
+//!                                                v
+//! [Section 1]        +-----------------------+
+//!                    | Key: "bar"            |
+//!                    | ValOff: 50            |
+//!                    | ValSize: 20           |
+//!                    | Next: (0, 256) -------+---+
+//!                    +-----------------------+   |
+//!                                                v
+//! [Section 0]        +-----------------------+
+//!                    | Key: "baz"            |
+//!                    | ValOff: 0             |
+//!                    | ValSize: 20           |
+//!                    | Next: None            |
+//!                    +-----------------------+
+//!
+//! Value Journal:
+//! [Section 0]        [Value: 126 @ offset 0 ]
+//! [Section 1]        [Value: 84  @ offset 50]
+//! [Section 2]        [Value: 42  @ offset 100]
 //! ```
 //!
 //! New entries are prepended to the chain, becoming the new head. During lookup, the chain
@@ -140,17 +164,19 @@
 //! ```rust
 //! use commonware_runtime::{Spawner, Runner, deterministic, buffer::PoolRef};
 //! use commonware_storage::freezer::{Freezer, Config, Identifier};
-//! use commonware_utils::{sequence::FixedBytes, NZUsize};
+//! use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16};
 //!
 //! let executor = deterministic::Runner::default();
 //! executor.start(|context| async move {
 //!     // Create a freezer
 //!     let cfg = Config {
-//!         journal_partition: "freezer_journal".into(),
-//!         journal_compression: Some(3),
-//!         journal_write_buffer: NZUsize!(1024 * 1024), // 1MB
-//!         journal_target_size: 100 * 1024 * 1024, // 100MB
-//!         journal_buffer_pool: PoolRef::new(NZUsize!(1024), NZUsize!(10)),
+//!         key_partition: "freezer_key_index".into(),
+//!         key_write_buffer: NZUsize!(1024 * 1024), // 1MB
+//!         key_buffer_pool: PoolRef::new(NZU16!(1024), NZUsize!(10)),
+//!         value_partition: "freezer_value_journal".into(),
+//!         value_compression: Some(3),
+//!         value_write_buffer: NZUsize!(1024 * 1024), // 1MB
+//!         value_target_size: 100 * 1024 * 1024, // 100MB
 //!         table_partition: "freezer_table".into(),
 //!         table_initial_size: 65_536, // ~3MB initial table size
 //!         table_resize_frequency: 4, // Force resize once 4 writes to the same entry occur
@@ -203,20 +229,26 @@ pub enum Error {
 /// Configuration for [Freezer].
 #[derive(Clone)]
 pub struct Config<C> {
-    /// The [commonware_runtime::Storage] partition to use for storing the journal.
-    pub journal_partition: String,
+    /// The [commonware_runtime::Storage] partition for the key index journal.
+    pub key_partition: String,
 
-    /// The compression level to use for the [crate::journal::segmented::variable::Journal].
-    pub journal_compression: Option<u8>,
+    /// The size of the write buffer for the key index journal.
+    pub key_write_buffer: NonZeroUsize,
 
-    /// The size of the write buffer to use for the journal.
-    pub journal_write_buffer: NonZeroUsize,
+    /// The buffer pool for the key index journal.
+    pub key_buffer_pool: PoolRef,
 
-    /// The target size of each journal before creating a new one.
-    pub journal_target_size: u64,
+    /// The [commonware_runtime::Storage] partition for the value journal.
+    pub value_partition: String,
 
-    /// The buffer pool to use for the journal.
-    pub journal_buffer_pool: PoolRef,
+    /// The compression level for the value journal.
+    pub value_compression: Option<u8>,
+
+    /// The size of the write buffer for the value journal.
+    pub value_write_buffer: NonZeroUsize,
+
+    /// The target size of each value journal section before creating a new one.
+    pub value_target_size: u64,
 
     /// The [commonware_runtime::Storage] partition to use for storing the table.
     pub table_partition: String,
@@ -243,17 +275,18 @@ mod tests {
     use super::*;
     use commonware_codec::DecodeExt;
     use commonware_macros::{test_group, test_traced};
-    use commonware_runtime::{deterministic, Blob, Metrics, Runner, Storage};
-    use commonware_utils::{hex, sequence::FixedBytes, NZUsize};
+    use commonware_runtime::{deterministic, Blob, IoBufMut, Metrics, Runner, Storage};
+    use commonware_utils::{hex, sequence::FixedBytes, NZUsize, NZU16};
     use rand::{Rng, RngCore};
+    use std::num::NonZeroU16;
 
-    const DEFAULT_JOURNAL_WRITE_BUFFER: usize = 1024;
-    const DEFAULT_JOURNAL_TARGET_SIZE: u64 = 10 * 1024 * 1024;
+    const DEFAULT_WRITE_BUFFER: usize = 1024;
+    const DEFAULT_VALUE_TARGET_SIZE: u64 = 10 * 1024 * 1024;
     const DEFAULT_TABLE_INITIAL_SIZE: u32 = 256;
     const DEFAULT_TABLE_RESIZE_FREQUENCY: u8 = 4;
     const DEFAULT_TABLE_RESIZE_CHUNK_SIZE: u32 = 128; // force multiple chunks
     const DEFAULT_TABLE_REPLAY_BUFFER: usize = 64 * 1024; // 64KB
-    const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
+    const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
 
     fn test_key(key: &str) -> FixedBytes<64> {
@@ -270,11 +303,13 @@ mod tests {
         executor.start(|context| async move {
             // Initialize the freezer
             let cfg = Config {
-                journal_partition: "test_journal".into(),
-                journal_compression: compression,
-                journal_write_buffer: NZUsize!(DEFAULT_JOURNAL_WRITE_BUFFER),
-                journal_target_size: DEFAULT_JOURNAL_TARGET_SIZE,
-                journal_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                key_partition: "test_key_index".into(),
+                key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                key_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                value_partition: "test_value_journal".into(),
+                value_compression: compression,
+                value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                value_target_size: DEFAULT_VALUE_TARGET_SIZE,
                 table_partition: "test_table".into(),
                 table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
@@ -338,11 +373,13 @@ mod tests {
         executor.start(|context| async move {
             // Initialize the freezer
             let cfg = Config {
-                journal_partition: "test_journal".into(),
-                journal_compression: None,
-                journal_write_buffer: NZUsize!(DEFAULT_JOURNAL_WRITE_BUFFER),
-                journal_target_size: DEFAULT_JOURNAL_TARGET_SIZE,
-                journal_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                key_partition: "test_key_index".into(),
+                key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                key_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                value_partition: "test_value_journal".into(),
+                value_compression: None,
+                value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                value_target_size: DEFAULT_VALUE_TARGET_SIZE,
                 table_partition: "test_table".into(),
                 table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
@@ -389,11 +426,13 @@ mod tests {
         executor.start(|context| async move {
             // Initialize the freezer with a very small table to force collisions
             let cfg = Config {
-                journal_partition: "test_journal".into(),
-                journal_compression: None,
-                journal_write_buffer: NZUsize!(DEFAULT_JOURNAL_WRITE_BUFFER),
-                journal_target_size: DEFAULT_JOURNAL_TARGET_SIZE,
-                journal_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                key_partition: "test_key_index".into(),
+                key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                key_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                value_partition: "test_value_journal".into(),
+                value_compression: None,
+                value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                value_target_size: DEFAULT_VALUE_TARGET_SIZE,
                 table_partition: "test_table".into(),
                 table_initial_size: 4, // Very small to force collisions
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
@@ -450,11 +489,13 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                journal_partition: "test_journal".into(),
-                journal_compression: None,
-                journal_write_buffer: NZUsize!(DEFAULT_JOURNAL_WRITE_BUFFER),
-                journal_target_size: DEFAULT_JOURNAL_TARGET_SIZE,
-                journal_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                key_partition: "test_key_index".into(),
+                key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                key_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                value_partition: "test_value_journal".into(),
+                value_compression: None,
+                value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                value_target_size: DEFAULT_VALUE_TARGET_SIZE,
                 table_partition: "test_table".into(),
                 table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
@@ -465,10 +506,12 @@ mod tests {
 
             // Insert data and close the freezer
             let checkpoint = {
-                let mut freezer =
-                    Freezer::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone())
-                        .await
-                        .expect("Failed to initialize freezer");
+                let mut freezer = Freezer::<_, FixedBytes<64>, i32>::init(
+                    context.with_label("first"),
+                    cfg.clone(),
+                )
+                .await
+                .expect("Failed to initialize freezer");
 
                 let keys = vec![
                     (test_key("persist1"), 100),
@@ -489,7 +532,7 @@ mod tests {
             // Reopen and verify data persisted
             {
                 let freezer = Freezer::<_, FixedBytes<64>, i32>::init_with_checkpoint(
-                    context.clone(),
+                    context.with_label("second"),
                     cfg.clone(),
                     Some(checkpoint),
                 )
@@ -520,11 +563,13 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                journal_partition: "test_journal".into(),
-                journal_compression: None,
-                journal_write_buffer: NZUsize!(DEFAULT_JOURNAL_WRITE_BUFFER),
-                journal_target_size: DEFAULT_JOURNAL_TARGET_SIZE,
-                journal_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                key_partition: "test_key_index".into(),
+                key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                key_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                value_partition: "test_value_journal".into(),
+                value_compression: None,
+                value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                value_target_size: DEFAULT_VALUE_TARGET_SIZE,
                 table_partition: "test_table".into(),
                 table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
@@ -535,10 +580,12 @@ mod tests {
 
             // First, create some committed data and close the freezer
             let checkpoint = {
-                let mut freezer =
-                    Freezer::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone())
-                        .await
-                        .expect("Failed to initialize freezer");
+                let mut freezer = Freezer::<_, FixedBytes<64>, i32>::init(
+                    context.with_label("first"),
+                    cfg.clone(),
+                )
+                .await
+                .expect("Failed to initialize freezer");
 
                 freezer
                     .put(test_key("committed1"), 1)
@@ -569,7 +616,7 @@ mod tests {
             // Reopen and verify only committed data is present
             {
                 let freezer = Freezer::<_, FixedBytes<64>, i32>::init_with_checkpoint(
-                    context.clone(),
+                    context.with_label("second"),
                     cfg.clone(),
                     Some(checkpoint),
                 )
@@ -619,11 +666,13 @@ mod tests {
         executor.start(|context| async move {
             // Initialize the freezer
             let cfg = Config {
-                journal_partition: "test_journal".into(),
-                journal_compression: None,
-                journal_write_buffer: NZUsize!(DEFAULT_JOURNAL_WRITE_BUFFER),
-                journal_target_size: DEFAULT_JOURNAL_TARGET_SIZE,
-                journal_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                key_partition: "test_key_index".into(),
+                key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                key_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                value_partition: "test_value_journal".into(),
+                value_compression: None,
+                value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                value_target_size: DEFAULT_VALUE_TARGET_SIZE,
                 table_partition: "test_table".into(),
                 table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
@@ -632,10 +681,12 @@ mod tests {
                 codec_config: (),
             };
             {
-                let mut freezer =
-                    Freezer::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone())
-                        .await
-                        .expect("Failed to initialize freezer");
+                let mut freezer = Freezer::<_, FixedBytes<64>, i32>::init(
+                    context.with_label("first"),
+                    cfg.clone(),
+                )
+                .await
+                .expect("Failed to initialize freezer");
 
                 freezer
                     .put(test_key("destroy1"), 1)
@@ -652,9 +703,12 @@ mod tests {
 
             // Try to create a new freezer - it should be empty
             {
-                let freezer = Freezer::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone())
-                    .await
-                    .expect("Failed to initialize freezer");
+                let freezer = Freezer::<_, FixedBytes<64>, i32>::init(
+                    context.with_label("second"),
+                    cfg.clone(),
+                )
+                .await
+                .expect("Failed to initialize freezer");
 
                 // Should not find any data
                 assert!(freezer
@@ -678,11 +732,13 @@ mod tests {
         executor.start(|context| async move {
             // Initialize the freezer
             let cfg = Config {
-                journal_partition: "test_journal".into(),
-                journal_compression: None,
-                journal_write_buffer: NZUsize!(DEFAULT_JOURNAL_WRITE_BUFFER),
-                journal_target_size: DEFAULT_JOURNAL_TARGET_SIZE,
-                journal_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                key_partition: "test_key_index".into(),
+                key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                key_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                value_partition: "test_value_journal".into(),
+                value_compression: None,
+                value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                value_target_size: DEFAULT_VALUE_TARGET_SIZE,
                 table_partition: "test_table".into(),
                 table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
@@ -691,10 +747,12 @@ mod tests {
                 codec_config: (),
             };
             let checkpoint = {
-                let mut freezer =
-                    Freezer::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone())
-                        .await
-                        .expect("Failed to initialize freezer");
+                let mut freezer = Freezer::<_, FixedBytes<64>, i32>::init(
+                    context.with_label("first"),
+                    cfg.clone(),
+                )
+                .await
+                .expect("Failed to initialize freezer");
 
                 freezer.put(test_key("key1"), 42).await.unwrap();
                 freezer.sync().await.unwrap();
@@ -705,14 +763,14 @@ mod tests {
             {
                 let (blob, _) = context.open(&cfg.table_partition, b"table").await.unwrap();
                 // Write incomplete table entry (only 10 bytes instead of 24)
-                blob.write_at(vec![0xFF; 10], 0).await.unwrap();
+                blob.write_at(0, vec![0xFF; 10]).await.unwrap();
                 blob.sync().await.unwrap();
             }
 
             // Reopen and verify it handles the corruption
             {
                 let freezer = Freezer::<_, FixedBytes<64>, i32>::init_with_checkpoint(
-                    context.clone(),
+                    context.with_label("second"),
                     cfg.clone(),
                     Some(checkpoint),
                 )
@@ -736,11 +794,13 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                journal_partition: "test_journal".into(),
-                journal_compression: None,
-                journal_write_buffer: NZUsize!(DEFAULT_JOURNAL_WRITE_BUFFER),
-                journal_target_size: DEFAULT_JOURNAL_TARGET_SIZE,
-                journal_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                key_partition: "test_key_index".into(),
+                key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                key_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                value_partition: "test_value_journal".into(),
+                value_compression: None,
+                value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                value_target_size: DEFAULT_VALUE_TARGET_SIZE,
                 table_partition: "test_table".into(),
                 table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
@@ -751,10 +811,12 @@ mod tests {
 
             // Create freezer with data
             let checkpoint = {
-                let mut freezer =
-                    Freezer::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone())
-                        .await
-                        .expect("Failed to initialize freezer");
+                let mut freezer = Freezer::<_, FixedBytes<64>, i32>::init(
+                    context.with_label("first"),
+                    cfg.clone(),
+                )
+                .await
+                .expect("Failed to initialize freezer");
 
                 freezer.put(test_key("key1"), 42).await.unwrap();
                 freezer.sync().await.unwrap();
@@ -765,18 +827,18 @@ mod tests {
             {
                 let (blob, _) = context.open(&cfg.table_partition, b"table").await.unwrap();
                 // Read the first entry
-                let entry_data = blob.read_at(vec![0u8; 24], 0).await.unwrap();
-                let mut corrupted = entry_data.as_ref().to_vec();
+                let entry_data = blob.read_at(0, IoBufMut::zeroed(24)).await.unwrap();
+                let mut corrupted = entry_data.coalesce();
                 // Corrupt the CRC (last 4 bytes of the entry)
-                corrupted[20] ^= 0xFF;
-                blob.write_at(corrupted, 0).await.unwrap();
+                corrupted.as_mut()[20] ^= 0xFF;
+                blob.write_at(0, corrupted).await.unwrap();
                 blob.sync().await.unwrap();
             }
 
             // Reopen and verify it handles invalid CRC
             {
                 let freezer = Freezer::<_, FixedBytes<64>, i32>::init_with_checkpoint(
-                    context.clone(),
+                    context.with_label("second"),
                     cfg.clone(),
                     Some(checkpoint),
                 )
@@ -800,11 +862,13 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                journal_partition: "test_journal".into(),
-                journal_compression: None,
-                journal_write_buffer: NZUsize!(DEFAULT_JOURNAL_WRITE_BUFFER),
-                journal_target_size: DEFAULT_JOURNAL_TARGET_SIZE,
-                journal_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                key_partition: "test_key_index".into(),
+                key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                key_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                value_partition: "test_value_journal".into(),
+                value_compression: None,
+                value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                value_target_size: DEFAULT_VALUE_TARGET_SIZE,
                 table_partition: "test_table".into(),
                 table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
@@ -815,10 +879,12 @@ mod tests {
 
             // Create freezer with data
             let checkpoint = {
-                let mut freezer =
-                    Freezer::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone())
-                        .await
-                        .expect("Failed to initialize freezer");
+                let mut freezer = Freezer::<_, FixedBytes<64>, i32>::init(
+                    context.with_label("first"),
+                    cfg.clone(),
+                )
+                .await
+                .expect("Failed to initialize freezer");
 
                 freezer.put(test_key("key1"), 42).await.unwrap();
                 freezer.sync().await.unwrap();
@@ -829,7 +895,7 @@ mod tests {
             {
                 let (blob, size) = context.open(&cfg.table_partition, b"table").await.unwrap();
                 // Append garbage data
-                blob.write_at(hex!("0xdeadbeef").to_vec(), size)
+                blob.write_at(size, hex!("0xdeadbeef").to_vec())
                     .await
                     .unwrap();
                 blob.sync().await.unwrap();
@@ -838,7 +904,7 @@ mod tests {
             // Reopen and verify it handles extra bytes gracefully
             {
                 let freezer = Freezer::<_, FixedBytes<64>, i32>::init_with_checkpoint(
-                    context.clone(),
+                    context.with_label("second"),
                     cfg.clone(),
                     Some(checkpoint),
                 )
@@ -875,11 +941,13 @@ mod tests {
         executor.start(|context| async move {
             // Initialize the freezer
             let cfg = Config {
-                journal_partition: "test_journal".into(),
-                journal_compression: None,
-                journal_write_buffer: NZUsize!(DEFAULT_JOURNAL_WRITE_BUFFER),
-                journal_target_size: DEFAULT_JOURNAL_TARGET_SIZE,
-                journal_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                key_partition: "test_key_index".into(),
+                key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                key_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                value_partition: "test_value_journal".into(),
+                value_compression: None,
+                value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                value_target_size: DEFAULT_VALUE_TARGET_SIZE,
                 table_partition: "test_table".into(),
                 table_initial_size: 2, // Very small initial size to force multiple resizes
                 table_resize_frequency: 2, // Resize after 2 items per entry
@@ -887,9 +955,10 @@ mod tests {
                 table_replay_buffer: NZUsize!(DEFAULT_TABLE_REPLAY_BUFFER),
                 codec_config: (),
             };
-            let mut freezer = Freezer::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone())
-                .await
-                .expect("Failed to initialize freezer");
+            let mut freezer =
+                Freezer::<_, FixedBytes<64>, i32>::init(context.with_label("first"), cfg.clone())
+                    .await
+                    .expect("Failed to initialize freezer");
 
             // Insert many keys to force multiple table resizes
             // Table will grow from 2 -> 4 -> 8 -> 16 -> 32 -> 64 -> 128 -> 256 -> 512 -> 1024
@@ -916,7 +985,7 @@ mod tests {
             // Close and reopen to verify persistence
             let checkpoint = freezer.close().await.expect("Failed to close");
             let freezer = Freezer::<_, FixedBytes<64>, i32>::init_with_checkpoint(
-                context.clone(),
+                context.with_label("second"),
                 cfg.clone(),
                 Some(checkpoint),
             )
@@ -935,7 +1004,7 @@ mod tests {
 
             // Verify metrics show resize operations occurred
             let buffer = context.encode();
-            assert!(buffer.contains("resizes_total 8"), "{}", buffer);
+            assert!(buffer.contains("first_resizes_total 8"), "{}", buffer);
         });
     }
 
@@ -944,11 +1013,13 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                journal_partition: "test_journal".into(),
-                journal_compression: None,
-                journal_write_buffer: NZUsize!(DEFAULT_JOURNAL_WRITE_BUFFER),
-                journal_target_size: DEFAULT_JOURNAL_TARGET_SIZE,
-                journal_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                key_partition: "test_key_index".into(),
+                key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                key_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                value_partition: "test_value_journal".into(),
+                value_compression: None,
+                value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                value_target_size: DEFAULT_VALUE_TARGET_SIZE,
                 table_partition: "test_table".into(),
                 table_initial_size: 2,
                 table_resize_frequency: 1,
@@ -961,19 +1032,22 @@ mod tests {
                 .unwrap();
 
             // Insert keys to trigger resize
+            // key0 -> entry 0, key2 -> entry 1
             freezer.put(test_key("key0"), 0).await.unwrap();
-            freezer.put(test_key("key1"), 1).await.unwrap();
+            freezer.put(test_key("key2"), 1).await.unwrap();
             freezer.sync().await.unwrap(); // should start resize
 
             // Verify resize started
             assert!(freezer.resizing().is_some());
 
             // Insert during resize (to first entry)
-            freezer.put(test_key("key2"), 2).await.unwrap();
+            // key6 -> entry 0
+            freezer.put(test_key("key6"), 2).await.unwrap();
             assert!(context.encode().contains("unnecessary_writes_total 1"));
             assert_eq!(freezer.resizable(), 3);
 
             // Insert another key (to unmodified entry)
+            // key3 -> entry 1
             freezer.put(test_key("key3"), 3).await.unwrap();
             assert!(context.encode().contains("unnecessary_writes_total 1"));
             assert_eq!(freezer.resizable(), 3);
@@ -984,17 +1058,21 @@ mod tests {
             assert_eq!(freezer.resizable(), 2);
 
             // More inserts
+            // key4 -> entry 1, key7 -> entry 0
             freezer.put(test_key("key4"), 4).await.unwrap();
-            freezer.put(test_key("key5"), 5).await.unwrap();
+            freezer.put(test_key("key7"), 5).await.unwrap();
             freezer.sync().await.unwrap();
 
             // Another resize should've started
             assert!(freezer.resizing().is_some());
 
             // Verify all can be retrieved during resize
-            for i in 0..6 {
-                let key = test_key(&format!("key{i}"));
-                assert_eq!(freezer.get(Identifier::Key(&key)).await.unwrap(), Some(i));
+            let keys = ["key0", "key2", "key6", "key3", "key4", "key7"];
+            for (i, k) in keys.iter().enumerate() {
+                assert_eq!(
+                    freezer.get(Identifier::Key(&test_key(k))).await.unwrap(),
+                    Some(i as i32)
+                );
             }
 
             // Sync until resize completes
@@ -1012,11 +1090,13 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                journal_partition: "test_journal".into(),
-                journal_compression: None,
-                journal_write_buffer: NZUsize!(DEFAULT_JOURNAL_WRITE_BUFFER),
-                journal_target_size: DEFAULT_JOURNAL_TARGET_SIZE,
-                journal_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                key_partition: "test_key_index".into(),
+                key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                key_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                value_partition: "test_value_journal".into(),
+                value_compression: None,
+                value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                value_target_size: DEFAULT_VALUE_TARGET_SIZE,
                 table_partition: "test_table".into(),
                 table_initial_size: 2,
                 table_resize_frequency: 1,
@@ -1027,14 +1107,17 @@ mod tests {
 
             // Create freezer and then shutdown uncleanly
             let checkpoint = {
-                let mut freezer =
-                    Freezer::<_, FixedBytes<64>, i32>::init(context.clone(), cfg.clone())
-                        .await
-                        .unwrap();
+                let mut freezer = Freezer::<_, FixedBytes<64>, i32>::init(
+                    context.with_label("first"),
+                    cfg.clone(),
+                )
+                .await
+                .unwrap();
 
                 // Insert keys to trigger resize
+                // key0 -> entry 0, key2 -> entry 1
                 freezer.put(test_key("key0"), 0).await.unwrap();
-                freezer.put(test_key("key1"), 1).await.unwrap();
+                freezer.put(test_key("key2"), 1).await.unwrap();
                 let checkpoint = freezer.sync().await.unwrap();
 
                 // Verify resize started
@@ -1045,7 +1128,7 @@ mod tests {
 
             // Reopen freezer
             let mut freezer = Freezer::<_, FixedBytes<64>, i32>::init_with_checkpoint(
-                context.clone(),
+                context.with_label("second"),
                 cfg.clone(),
                 Some(checkpoint),
             )
@@ -1069,16 +1152,16 @@ mod tests {
     }
 
     fn test_operations_and_restart(num_keys: usize) -> String {
-        // Initialize the deterministic context
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
-            // Initialize the freezer
             let cfg = Config {
-                journal_partition: "test_journal".into(),
-                journal_compression: None,
-                journal_write_buffer: NZUsize!(DEFAULT_JOURNAL_WRITE_BUFFER),
-                journal_target_size: 128, // Force multiple journal sections
-                journal_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                key_partition: "test_key_index".into(),
+                key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                key_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                value_partition: "test_value_journal".into(),
+                value_compression: None,
+                value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                value_target_size: 128, // Force multiple journal sections
                 table_partition: "test_table".into(),
                 table_initial_size: 8,     // Small table to force collisions
                 table_resize_frequency: 2, // Force resize frequently
@@ -1086,10 +1169,12 @@ mod tests {
                 table_replay_buffer: NZUsize!(DEFAULT_TABLE_REPLAY_BUFFER),
                 codec_config: (),
             };
-            let mut freezer =
-                Freezer::<_, FixedBytes<96>, FixedBytes<256>>::init(context.clone(), cfg.clone())
-                    .await
-                    .expect("Failed to initialize freezer");
+            let mut freezer = Freezer::<_, FixedBytes<96>, FixedBytes<256>>::init(
+                context.with_label("init1"),
+                cfg.clone(),
+            )
+            .await
+            .expect("Failed to initialize freezer");
 
             // Generate and insert random key-value pairs
             let mut pairs = Vec::new();
@@ -1157,7 +1242,7 @@ mod tests {
 
             // Reopen the freezer
             let mut freezer = Freezer::<_, FixedBytes<96>, FixedBytes<256>>::init_with_checkpoint(
-                context.clone(),
+                context.with_label("init2"),
                 cfg.clone(),
                 Some(checkpoint),
             )
@@ -1228,11 +1313,13 @@ mod tests {
         executor.start(|context| async move {
             // Initialize the freezer
             let cfg = Config {
-                journal_partition: "test_journal".into(),
-                journal_compression: None,
-                journal_write_buffer: NZUsize!(DEFAULT_JOURNAL_WRITE_BUFFER),
-                journal_target_size: DEFAULT_JOURNAL_TARGET_SIZE,
-                journal_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                key_partition: "test_key_index".into(),
+                key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                key_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                value_partition: "test_value_journal".into(),
+                value_compression: None,
+                value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                value_target_size: DEFAULT_VALUE_TARGET_SIZE,
                 table_partition: "test_table".into(),
                 table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,

@@ -23,7 +23,6 @@ commonware-runtime.workspace = true
 commonware-utils.workspace = true
 crossterm.workspace = true
 futures.workspace = true
-governor.workspace = true
 prometheus-client.workspace = true
 ratatui.workspace = true
 serde_json.workspace = true

@@ -1,8 +1,9 @@
 //! Mock sender implementations for testing.
 
-use bytes::Bytes;
 use commonware_cryptography::PublicKey;
-use commonware_p2p::{Recipients, Sender};
+use commonware_p2p::{CheckedSender, LimitedSender, Recipients};
+use commonware_runtime::IoBufMut;
+use std::time::SystemTime;
 use thiserror::Error;
 
 /// Errors that can be returned by [Failing].
@@ -27,14 +28,28 @@ impl<P: PublicKey> Failing<P> {
     }
 }
 
-impl<P: PublicKey> Sender for Failing<P> {
+impl<P: PublicKey> LimitedSender for Failing<P> {
+    type PublicKey = P;
+    type Checked<'a> = CheckedFailing<P>;
+
+    async fn check(&mut self, _recipients: Recipients<P>) -> Result<Self::Checked<'_>, SystemTime> {
+        Ok(CheckedFailing {
+            _phantom: std::marker::PhantomData,
+        })
+    }
+}
+
+pub struct CheckedFailing<P: PublicKey> {
+    _phantom: std::marker::PhantomData<P>,
+}
+
+impl<P: PublicKey> CheckedSender for CheckedFailing<P> {
     type PublicKey = P;
     type Error = Error;
 
     async fn send(
-        &mut self,
-        _recipients: Recipients<P>,
-        _message: Bytes,
+        self,
+        _message: impl Into<IoBufMut> + Send,
         _priority: bool,
     ) -> Result<Vec<P>, Self::Error> {
         Err(Error::Failed)

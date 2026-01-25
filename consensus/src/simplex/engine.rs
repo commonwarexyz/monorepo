@@ -1,51 +1,56 @@
 use super::{
     actors::{batcher, resolver, voter},
     config::Config,
+    elector::Config as Elector,
     types::{Activity, Context},
 };
-use crate::{simplex::scheme::Scheme, Automaton, Relay, Reporter};
+use crate::{simplex::scheme::Scheme, CertifiableAutomaton, Relay, Reporter};
 use commonware_cryptography::Digest;
 use commonware_macros::select;
 use commonware_p2p::{Blocker, Receiver, Sender};
+use commonware_parallel::Strategy;
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner, Storage};
-use governor::clock::Clock as GClock;
-use rand::{CryptoRng, Rng};
+use rand_core::CryptoRngCore;
 use tracing::debug;
 
 /// Instance of `simplex` consensus engine.
 pub struct Engine<
-    E: Clock + GClock + Rng + CryptoRng + Spawner + Storage + Metrics,
+    E: Clock + CryptoRngCore + Spawner + Storage + Metrics,
     S: Scheme<D>,
+    L: Elector<S>,
     B: Blocker<PublicKey = S::PublicKey>,
     D: Digest,
-    A: Automaton<Context = Context<D, S::PublicKey>, Digest = D>,
+    A: CertifiableAutomaton<Context = Context<D, S::PublicKey>, Digest = D>,
     R: Relay<Digest = D>,
     F: Reporter<Activity = Activity<S, D>>,
+    T: Strategy,
 > {
     context: ContextCell<E>,
 
-    voter: voter::Actor<E, S, B, D, A, R, F>,
+    voter: voter::Actor<E, S, L, B, D, A, R, F>,
     voter_mailbox: voter::Mailbox<S, D>,
 
-    batcher: batcher::Actor<E, S, B, D, F>,
+    batcher: batcher::Actor<E, S, B, D, F, T>,
     batcher_mailbox: batcher::Mailbox<S, D>,
 
-    resolver: resolver::Actor<E, S, B, D>,
+    resolver: resolver::Actor<E, S, B, D, T>,
     resolver_mailbox: resolver::Mailbox<S, D>,
 }
 
 impl<
-        E: Clock + GClock + Rng + CryptoRng + Spawner + Storage + Metrics,
+        E: Clock + CryptoRngCore + Spawner + Storage + Metrics,
         S: Scheme<D>,
+        L: Elector<S>,
         B: Blocker<PublicKey = S::PublicKey>,
         D: Digest,
-        A: Automaton<Context = Context<D, S::PublicKey>, Digest = D>,
+        A: CertifiableAutomaton<Context = Context<D, S::PublicKey>, Digest = D>,
         R: Relay<Digest = D>,
         F: Reporter<Activity = Activity<S, D>>,
-    > Engine<E, S, B, D, A, R, F>
+        T: Strategy,
+    > Engine<E, S, L, B, D, A, R, F, T>
 {
     /// Create a new `simplex` consensus engine.
-    pub fn new(context: E, cfg: Config<S, B, D, A, R, F>) -> Self {
+    pub fn new(context: E, cfg: Config<S, L, B, D, A, R, F, T>) -> Self {
         // Ensure configuration is valid
         cfg.assert();
 
@@ -56,8 +61,8 @@ impl<
                 scheme: cfg.scheme.clone(),
                 blocker: cfg.blocker.clone(),
                 reporter: cfg.reporter.clone(),
+                strategy: cfg.strategy.clone(),
                 epoch: cfg.epoch,
-                namespace: cfg.namespace.clone(),
                 mailbox_size: cfg.mailbox_size,
                 activity_timeout: cfg.activity_timeout,
                 skip_timeout: cfg.skip_timeout,
@@ -69,6 +74,7 @@ impl<
             context.with_label("voter"),
             voter::Config {
                 scheme: cfg.scheme.clone(),
+                elector: cfg.elector,
                 blocker: cfg.blocker.clone(),
                 automaton: cfg.automaton,
                 relay: cfg.relay,
@@ -76,7 +82,6 @@ impl<
                 partition: cfg.partition,
                 mailbox_size: cfg.mailbox_size,
                 epoch: cfg.epoch,
-                namespace: cfg.namespace.clone(),
                 leader_timeout: cfg.leader_timeout,
                 notarization_timeout: cfg.notarization_timeout,
                 nullify_retry: cfg.nullify_retry,
@@ -93,12 +98,11 @@ impl<
             resolver::Config {
                 blocker: cfg.blocker,
                 scheme: cfg.scheme,
+                strategy: cfg.strategy,
                 mailbox_size: cfg.mailbox_size,
                 epoch: cfg.epoch,
-                namespace: cfg.namespace,
                 fetch_concurrent: cfg.fetch_concurrent,
                 fetch_timeout: cfg.fetch_timeout,
-                fetch_rate_per_peer: cfg.fetch_rate_per_peer,
             },
         );
 

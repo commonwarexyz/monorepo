@@ -1,10 +1,14 @@
 use crate::{signal, Error, Handle, SinkOf, StreamOf};
+use commonware_parallel::ThreadPool;
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use prometheus_client::registry::Metric;
 use rand::{CryptoRng, RngCore};
+use rayon::ThreadPoolBuildError;
 use std::{
     future::Future,
     net::SocketAddr,
+    num::NonZeroUsize,
+    ops::RangeInclusive,
     time::{Duration, SystemTime},
 };
 
@@ -63,26 +67,36 @@ impl<C> Cell<C> {
         }
     }
 
-    /// Consume the slot, returning the context and panicking if it is missing.
-    pub fn into(self) -> C {
+    /// Returns a reference to the context.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the context is missing.
+    pub fn as_present(&self) -> &C {
         match self {
             Self::Present(context) => context,
             Self::Missing => panic!("{}", MISSING_CONTEXT),
         }
     }
-}
 
-impl<C> AsRef<C> for Cell<C> {
-    fn as_ref(&self) -> &C {
+    /// Returns a mutable reference to the context.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the context is missing.
+    pub fn as_present_mut(&mut self) -> &mut C {
         match self {
             Self::Present(context) => context,
             Self::Missing => panic!("{}", MISSING_CONTEXT),
         }
     }
-}
 
-impl<C> AsMut<C> for Cell<C> {
-    fn as_mut(&mut self) -> &mut C {
+    /// Consume the slot, returning the context.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the context is missing.
+    pub fn into_present(self) -> C {
         match self {
             Self::Present(context) => context,
             Self::Missing => panic!("{}", MISSING_CONTEXT),
@@ -95,15 +109,15 @@ where
     C: crate::Spawner,
 {
     fn dedicated(self) -> Self {
-        Self::Present(self.into().dedicated())
+        Self::Present(self.into_present().dedicated())
     }
 
     fn shared(self, blocking: bool) -> Self {
-        Self::Present(self.into().shared(blocking))
+        Self::Present(self.into_present().shared(blocking))
     }
 
     fn instrumented(self) -> Self {
-        Self::Present(self.into().instrumented())
+        Self::Present(self.into_present().instrumented())
     }
 
     fn spawn<F, Fut, T>(self, f: F) -> Handle<T>
@@ -112,7 +126,8 @@ where
         Fut: Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
-        self.into().spawn(move |context| f(Self::Present(context)))
+        self.into_present()
+            .spawn(move |context| f(Self::Present(context)))
     }
 
     fn stop(
@@ -120,11 +135,20 @@ where
         value: i32,
         timeout: Option<Duration>,
     ) -> impl Future<Output = Result<(), Error>> + Send {
-        self.into().stop(value, timeout)
+        self.into_present().stop(value, timeout)
     }
 
     fn stopped(&self) -> signal::Signal {
-        self.as_ref().stopped()
+        self.as_present().stopped()
+    }
+}
+
+impl<C> crate::RayonPoolSpawner for Cell<C>
+where
+    C: crate::RayonPoolSpawner,
+{
+    fn create_pool(&self, concurrency: NonZeroUsize) -> Result<ThreadPool, ThreadPoolBuildError> {
+        self.as_present().create_pool(concurrency)
     }
 }
 
@@ -133,19 +157,23 @@ where
     C: crate::Metrics,
 {
     fn label(&self) -> String {
-        self.as_ref().label()
+        self.as_present().label()
     }
 
     fn with_label(&self, label: &str) -> Self {
-        Self::Present(self.as_ref().with_label(label))
+        Self::Present(self.as_present().with_label(label))
     }
 
     fn register<N: Into<String>, H: Into<String>>(&self, name: N, help: H, metric: impl Metric) {
-        self.as_ref().register(name, help, metric)
+        self.as_present().register(name, help, metric)
     }
 
     fn encode(&self) -> String {
-        self.as_ref().encode()
+        self.as_present().encode()
+    }
+
+    fn with_attribute(&self, key: &str, value: impl std::fmt::Display) -> Self {
+        Self::Present(self.as_present().with_attribute(key, value))
     }
 }
 
@@ -154,15 +182,15 @@ where
     C: crate::Clock,
 {
     fn current(&self) -> SystemTime {
-        self.as_ref().current()
+        self.as_present().current()
     }
 
     fn sleep(&self, duration: Duration) -> impl Future<Output = ()> + Send + 'static {
-        self.as_ref().sleep(duration)
+        self.as_present().sleep(duration)
     }
 
     fn sleep_until(&self, deadline: SystemTime) -> impl Future<Output = ()> + Send + 'static {
-        self.as_ref().sleep_until(deadline)
+        self.as_present().sleep_until(deadline)
     }
 }
 
@@ -176,7 +204,7 @@ where
         F: Future<Output = T> + Send + 'a,
         T: Send + 'a,
     {
-        self.as_ref().pace(latency, future)
+        self.as_present().pace(latency, future)
     }
 }
 
@@ -190,14 +218,14 @@ where
         &self,
         socket: SocketAddr,
     ) -> impl Future<Output = Result<Self::Listener, Error>> + Send {
-        self.as_ref().bind(socket)
+        self.as_present().bind(socket)
     }
 
     fn dial(
         &self,
         socket: SocketAddr,
     ) -> impl Future<Output = Result<(SinkOf<Self>, StreamOf<Self>), Error>> + Send {
-        self.as_ref().dial(socket)
+        self.as_present().dial(socket)
     }
 }
 
@@ -207,12 +235,13 @@ where
 {
     type Blob = <C as crate::Storage>::Blob;
 
-    fn open(
+    fn open_versioned(
         &self,
         partition: &str,
         name: &[u8],
-    ) -> impl Future<Output = Result<(Self::Blob, u64), Error>> + Send {
-        self.as_ref().open(partition, name)
+        versions: RangeInclusive<u16>,
+    ) -> impl Future<Output = Result<(Self::Blob, u64, u16), Error>> + Send {
+        self.as_present().open_versioned(partition, name, versions)
     }
 
     fn remove(
@@ -220,11 +249,11 @@ where
         partition: &str,
         name: Option<&[u8]>,
     ) -> impl Future<Output = Result<(), Error>> + Send {
-        self.as_ref().remove(partition, name)
+        self.as_present().remove(partition, name)
     }
 
     fn scan(&self, partition: &str) -> impl Future<Output = Result<Vec<Vec<u8>>, Error>> + Send {
-        self.as_ref().scan(partition)
+        self.as_present().scan(partition)
     }
 }
 
@@ -233,19 +262,19 @@ where
     C: RngCore,
 {
     fn next_u32(&mut self) -> u32 {
-        self.as_mut().next_u32()
+        self.as_present_mut().next_u32()
     }
 
     fn next_u64(&mut self) -> u64 {
-        self.as_mut().next_u64()
+        self.as_present_mut().next_u64()
     }
 
     fn fill_bytes(&mut self, dest: &mut [u8]) {
-        self.as_mut().fill_bytes(dest)
+        self.as_present_mut().fill_bytes(dest)
     }
 
     fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand::Error> {
-        self.as_mut().try_fill_bytes(dest)
+        self.as_present_mut().try_fill_bytes(dest)
     }
 }
 
@@ -258,8 +287,20 @@ where
     type Instant = <C as GClock>::Instant;
 
     fn now(&self) -> Self::Instant {
-        self.as_ref().now()
+        self.as_present().now()
     }
 }
 
 impl<C> ReasonablyRealtime for Cell<C> where C: ReasonablyRealtime {}
+
+impl<C> crate::Resolver for Cell<C>
+where
+    C: crate::Resolver,
+{
+    fn resolve(
+        &self,
+        host: &str,
+    ) -> impl Future<Output = Result<Vec<std::net::IpAddr>, crate::Error>> + Send {
+        self.as_present().resolve(host)
+    }
+}

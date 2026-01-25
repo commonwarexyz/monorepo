@@ -6,7 +6,6 @@ use crate::authenticated::discovery::{
 };
 use commonware_codec::Error as CodecError;
 use commonware_cryptography::PublicKey;
-use governor::Quota;
 use prometheus_client::metrics::{counter::Counter, family::Family};
 use std::time::Duration;
 use thiserror::Error;
@@ -20,14 +19,13 @@ pub use ingress::Message;
 pub struct Config<C: PublicKey> {
     pub mailbox_size: usize,
     pub gossip_bit_vec_frequency: Duration,
-    pub allowed_bit_vec_rate: Quota,
     pub max_peer_set_size: u64,
-    pub allowed_peers_rate: Quota,
     pub peer_gossip_max_count: usize,
     pub info_verifier: InfoVerifier<C>,
 
     pub sent_messages: Family<metrics::Message, Counter>,
     pub received_messages: Family<metrics::Message, Counter>,
+    pub dropped_messages: Family<metrics::Message, Counter>,
     pub rate_limited: Family<metrics::Message, Counter>,
 }
 
@@ -49,4 +47,10 @@ pub enum Error {
     InvalidChannel,
     #[error("types: {0}")]
     Types(types::Error),
+    #[error("missing greeting")]
+    MissingGreeting,
+    #[error("duplicate greeting")]
+    DuplicateGreeting,
+    #[error("greeting public key mismatch")]
+    GreetingMismatch,
 }

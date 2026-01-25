@@ -45,8 +45,9 @@ mod tests {
         simulated::{Link, Network, Oracle, Receiver, Sender},
         Recipients,
     };
-    use commonware_runtime::{deterministic, Clock, Error, Metrics, Runner};
-    use governor::Quota;
+    use commonware_runtime::{
+        count_running_tasks, deterministic, Clock, Error, Metrics, Quota, Runner,
+    };
     use std::{collections::BTreeMap, num::NonZeroU32, time::Duration};
 
     // Number of messages to cache per sender
@@ -65,14 +66,24 @@ mod tests {
     /// Default rate limit set high enough to not interfere with normal operation
     const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
 
-    type Registrations = BTreeMap<PublicKey, (Sender<PublicKey>, Receiver<PublicKey>)>;
+    type Registrations = BTreeMap<
+        PublicKey,
+        (
+            Sender<PublicKey, deterministic::Context>,
+            Receiver<PublicKey>,
+        ),
+    >;
 
     async fn initialize_simulation(
         context: deterministic::Context,
         num_peers: u32,
         success_rate: f64,
-    ) -> (Vec<PublicKey>, Registrations, Oracle<PublicKey>) {
-        let (network, mut oracle) = Network::<deterministic::Context, PublicKey>::new(
+    ) -> (
+        Vec<PublicKey>,
+        Registrations,
+        Oracle<PublicKey, deterministic::Context>,
+    ) {
+        let (network, oracle) = Network::<deterministic::Context, PublicKey>::new(
             context.with_label("network"),
             commonware_p2p::simulated::Config {
                 max_size: 1024 * 1024,
@@ -125,7 +136,7 @@ mod tests {
     ) -> BTreeMap<PublicKey, Mailbox<PublicKey, TestMessage>> {
         let mut mailboxes = BTreeMap::new();
         while let Some((peer, network)) = registrations.pop_first() {
-            let context = context.with_label(&peer.to_string());
+            let context = context.with_label(&format!("peer_{}", peer));
             let config = Config {
                 public_key: peer.clone(),
                 mailbox_size: 1024,
@@ -771,5 +782,145 @@ mod tests {
                 .unwrap();
             assert_eq!(recv.await.unwrap(), wanted);
         });
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn spawn_peer_engines_with_handles(
+        context: deterministic::Context,
+        registrations: &mut Registrations,
+    ) -> (
+        BTreeMap<PublicKey, Mailbox<PublicKey, TestMessage>>,
+        Vec<commonware_runtime::Handle<()>>,
+    ) {
+        let mut mailboxes = BTreeMap::new();
+        let mut handles = Vec::new();
+        let engine_context = context.with_label("engine");
+        while let Some((peer, network)) = registrations.pop_first() {
+            let ctx = engine_context.with_label(&format!("peer_{}", peer));
+            let config = Config {
+                public_key: peer.clone(),
+                mailbox_size: 1024,
+                deque_size: CACHE_SIZE,
+                priority: false,
+                codec_config: RangeCfg::from(..),
+            };
+            let (engine, engine_mailbox) =
+                Engine::<_, PublicKey, TestMessage>::new(ctx.clone(), config);
+            mailboxes.insert(peer.clone(), engine_mailbox);
+            handles.push(engine.start(network));
+        }
+        (mailboxes, handles)
+    }
+
+    #[test_traced]
+    fn test_operations_after_shutdown_do_not_panic() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(5));
+        runner.start(|context| async move {
+            let (peers, mut registrations, _oracle) =
+                initialize_simulation(context.clone(), 2, 1.0).await;
+            let (mut mailboxes, handles) =
+                spawn_peer_engines_with_handles(context.clone(), &mut registrations);
+
+            // Broadcast a message to verify network is functional
+            let message = TestMessage::shared(b"test message");
+            let mut mailbox = mailboxes.remove(&peers[0]).unwrap();
+            let result = mailbox
+                .broadcast(Recipients::All, message.clone())
+                .await
+                .await;
+            assert!(result.is_ok(), "broadcast should succeed before shutdown");
+
+            // Abort all engine handles
+            for handle in handles {
+                handle.abort();
+            }
+            context.sleep(Duration::from_millis(100)).await;
+
+            // All operations should not panic after shutdown
+
+            // Broadcast should not panic
+            let result = mailbox
+                .broadcast(Recipients::All, message.clone())
+                .await
+                .await;
+            assert!(
+                result.is_err() || result.unwrap().is_empty(),
+                "broadcast after shutdown should fail or return empty"
+            );
+
+            // Subscribe should not panic (returns Canceled since engine is down)
+            let commitment = message.commitment();
+            let receiver = mailbox.subscribe(None, commitment, None).await;
+            let result = receiver.await;
+            assert!(
+                result.is_err(),
+                "subscribe after shutdown should return Canceled"
+            );
+
+            // Get should not panic
+            let result = mailbox.get(None, commitment, None).await;
+            assert!(result.is_empty(), "get after shutdown should return empty");
+        });
+    }
+
+    fn clean_shutdown(seed: u64) {
+        let cfg = deterministic::Config::new()
+            .with_seed(seed)
+            .with_timeout(Some(Duration::from_secs(30)));
+        let runner = deterministic::Runner::new(cfg);
+        runner.start(|context| async move {
+            let (peers, mut registrations, _oracle) =
+                initialize_simulation(context.clone(), 2, 1.0).await;
+
+            let (mailboxes, handles) =
+                spawn_peer_engines_with_handles(context.clone(), &mut registrations);
+
+            // Allow tasks to start
+            context.sleep(Duration::from_millis(100)).await;
+
+            // Count running tasks under the engine prefix
+            let running_before = count_running_tasks(&context, "engine");
+            assert!(
+                running_before > 0,
+                "at least one engine task should be running"
+            );
+
+            // Verify network is functional
+            let message = TestMessage::shared(b"test message");
+            let mut mailbox = mailboxes.get(&peers[0]).unwrap().clone();
+            let result = mailbox
+                .broadcast(Recipients::All, message.clone())
+                .await
+                .await;
+            assert!(result.is_ok(), "broadcast should succeed");
+
+            // Wait for propagation
+            context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
+
+            // Verify message received
+            let mut peer_mailbox = mailboxes.get(&peers[1]).unwrap().clone();
+            let received = peer_mailbox.get(None, message.commitment(), None).await;
+            assert_eq!(received, vec![message]);
+
+            // Abort all engine handles
+            for handle in handles {
+                handle.abort();
+            }
+            context.sleep(Duration::from_millis(100)).await;
+
+            // Verify all engine tasks are stopped
+            let running_after = count_running_tasks(&context, "engine");
+            assert_eq!(
+                running_after, 0,
+                "all engine tasks should be stopped, but {running_after} still running"
+            );
+        });
+    }
+
+    #[test]
+    fn test_clean_shutdown() {
+        for seed in 0..25 {
+            clean_shutdown(seed);
+        }
     }
 }

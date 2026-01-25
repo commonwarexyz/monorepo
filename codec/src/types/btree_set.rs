@@ -8,54 +8,13 @@ extern crate alloc;
 use crate::{
     codec::{EncodeSize, Read, Write},
     error::Error,
+    types::read_ordered_set,
     RangeCfg,
 };
 use alloc::collections::BTreeSet;
 use bytes::{Buf, BufMut};
-use core::cmp::Ordering;
 
 const BTREESET_TYPE: &str = "BTreeSet";
-
-/// Read items from [Buf] in ascending order.
-fn read_ordered_set<K, F>(
-    buf: &mut impl Buf,
-    len: usize,
-    cfg: &K::Cfg,
-    mut insert: F,
-    set_type: &'static str,
-) -> Result<(), Error>
-where
-    K: Read + Ord,
-    F: FnMut(K) -> bool,
-{
-    let mut last: Option<K> = None;
-    for _ in 0..len {
-        // Read item
-        let item = K::read_cfg(buf, cfg)?;
-
-        // Check if items are in ascending order
-        if let Some(ref last) = last {
-            match item.cmp(last) {
-                Ordering::Equal => return Err(Error::Invalid(set_type, "Duplicate item")),
-                Ordering::Less => return Err(Error::Invalid(set_type, "Items must ascend")),
-                _ => {}
-            }
-        }
-
-        // Add previous item, if exists
-        if let Some(last) = last.take() {
-            insert(last);
-        }
-        last = Some(item);
-    }
-
-    // Add last item, if exists
-    if let Some(last) = last {
-        insert(last);
-    }
-
-    Ok(())
-}
 
 // ---------- BTreeSet ----------
 

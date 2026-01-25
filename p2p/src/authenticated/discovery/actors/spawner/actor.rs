@@ -15,25 +15,17 @@ use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Sink, Spawner, Stream};
 use futures::{channel::mpsc, StreamExt};
-use governor::{clock::ReasonablyRealtime, Quota};
 use prometheus_client::metrics::{counter::Counter, family::Family, gauge::Gauge};
-use rand::{CryptoRng, Rng};
+use rand_core::CryptoRngCore;
 use std::time::Duration;
 use tracing::debug;
 
-pub struct Actor<
-    E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics,
-    O: Sink,
-    I: Stream,
-    C: PublicKey,
-> {
+pub struct Actor<E: Spawner + Clock + CryptoRngCore + Metrics, O: Sink, I: Stream, C: PublicKey> {
     context: ContextCell<E>,
 
     mailbox_size: usize,
     gossip_bit_vec_frequency: Duration,
-    allowed_bit_vec_rate: Quota,
     max_peer_set_size: u64,
-    allowed_peers_rate: Quota,
     peer_gossip_max_count: usize,
     info_verifier: InfoVerifier<C>,
 
@@ -42,21 +34,19 @@ pub struct Actor<
     connections: Gauge,
     sent_messages: Family<metrics::Message, Counter>,
     received_messages: Family<metrics::Message, Counter>,
+    dropped_messages: Family<metrics::Message, Counter>,
     rate_limited: Family<metrics::Message, Counter>,
 }
 
-impl<
-        E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics,
-        O: Sink,
-        I: Stream,
-        C: PublicKey,
-    > Actor<E, O, I, C>
+impl<E: Spawner + Clock + CryptoRngCore + Metrics, O: Sink, I: Stream, C: PublicKey>
+    Actor<E, O, I, C>
 {
     #[allow(clippy::type_complexity)]
     pub fn new(context: E, cfg: Config<C>) -> (Self, Mailbox<Message<O, I, C>>) {
         let connections = Gauge::default();
         let sent_messages = Family::<metrics::Message, Counter>::default();
         let received_messages = Family::<metrics::Message, Counter>::default();
+        let dropped_messages = Family::<metrics::Message, Counter>::default();
         let rate_limited = Family::<metrics::Message, Counter>::default();
         context.register(
             "connections",
@@ -70,6 +60,11 @@ impl<
             received_messages.clone(),
         );
         context.register(
+            "messages_dropped",
+            "messages dropped due to full application buffer",
+            dropped_messages.clone(),
+        );
+        context.register(
             "messages_rate_limited",
             "messages rate limited",
             rate_limited.clone(),
@@ -81,15 +76,14 @@ impl<
                 context: ContextCell::new(context),
                 mailbox_size: cfg.mailbox_size,
                 gossip_bit_vec_frequency: cfg.gossip_bit_vec_frequency,
-                allowed_bit_vec_rate: cfg.allowed_bit_vec_rate,
                 max_peer_set_size: cfg.max_peer_set_size,
-                allowed_peers_rate: cfg.allowed_peers_rate,
                 peer_gossip_max_count: cfg.peer_gossip_max_count,
                 info_verifier: cfg.info_verifier,
                 receiver,
                 connections,
                 sent_messages,
                 received_messages,
+                dropped_messages,
                 rate_limited,
             },
             sender,
@@ -134,39 +128,49 @@ impl<
                             let connections = self.connections.clone();
                             let sent_messages = self.sent_messages.clone();
                             let received_messages = self.received_messages.clone();
+                            let dropped_messages = self.dropped_messages.clone();
                             let rate_limited = self.rate_limited.clone();
                             let mut tracker = tracker.clone();
                             let mut router = router.clone();
                             let is_dialer = matches!(reservation.metadata(), Metadata::Dialer(..));
                             let info_verifier = self.info_verifier.clone();
                             move |context| async move {
+                                // Get greeting from tracker (returns None if not eligible)
+                                let Some(greeting) = tracker.connect(peer.clone(), is_dialer).await
+                                else {
+                                    debug!(?peer, "peer not eligible");
+                                    connections.dec();
+                                    drop(reservation);
+                                    return;
+                                };
+
                                 // Create peer
                                 debug!(?peer, "peer started");
-                                let (peer_actor, peer_mailbox, messenger) = peer::Actor::new(
+                                let (peer_actor, messenger) = peer::Actor::new(
                                     context,
                                     peer::Config {
                                         sent_messages,
                                         received_messages,
+                                        dropped_messages,
                                         rate_limited,
                                         mailbox_size: self.mailbox_size,
                                         gossip_bit_vec_frequency: self.gossip_bit_vec_frequency,
-                                        allowed_bit_vec_rate: self.allowed_bit_vec_rate,
                                         max_peer_set_size: self.max_peer_set_size,
-                                        allowed_peers_rate: self.allowed_peers_rate,
                                         peer_gossip_max_count: self.peer_gossip_max_count,
                                         info_verifier,
                                     },
                                 );
 
-                                // Register peer with the router
-                                let channels = router.ready(peer.clone(), messenger).await;
+                                // Register peer with the router (may fail during shutdown)
+                                let Some(channels) = router.ready(peer.clone(), messenger).await else {
+                                    debug!(?peer, "router shut down during peer setup");
+                                    connections.dec();
+                                    return;
+                                };
 
-                                // Register peer with tracker
-                                tracker.connect(peer.clone(), is_dialer, peer_mailbox).await;
-
-                                // Run peer
+                                // Run peer (greeting is sent first before main loop)
                                 let result = peer_actor
-                                    .run(peer.clone(), connection, tracker, channels)
+                                    .run(peer.clone(), greeting, connection, tracker, channels)
                                     .await;
                                 connections.dec();
 

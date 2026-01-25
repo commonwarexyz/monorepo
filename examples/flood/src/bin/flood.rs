@@ -4,22 +4,30 @@ use commonware_cryptography::{
     ed25519::{PrivateKey, PublicKey},
     Signer as _,
 };
-use commonware_deployer::ec2::{Hosts, METRICS_PORT};
+use commonware_deployer::aws::{Hosts, METRICS_PORT};
 use commonware_flood::Config;
 use commonware_p2p::{authenticated::discovery, Manager, Receiver, Recipients, Sender};
-use commonware_runtime::{tokio, Metrics, Runner, Spawner};
+use commonware_runtime::{
+    telemetry::metrics::histogram::HistogramExt, tokio, Buf, Metrics, Quota, Runner, Spawner,
+};
 use commonware_utils::{from_hex_formatted, ordered::Set, union, TryCollect, NZU32};
 use futures::future::try_join_all;
-use governor::Quota;
-use prometheus_client::metrics::counter::Counter;
-use rand::{rngs::StdRng, RngCore, SeedableRng};
+use prometheus_client::metrics::{counter::Counter, histogram::Histogram};
+use rand::{rngs::SmallRng, RngCore, SeedableRng};
 use std::{
     collections::HashMap,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     str::FromStr,
     sync::atomic::AtomicU64,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tracing::{error, info, Level};
+
+/// Histogram buckets for latency measurement (in seconds).
+/// Range from 1ms to 1s for cross-machine network latency.
+const LATENCY_BUCKETS: [f64; 10] = [
+    0.001, 0.002, 0.005, 0.010, 0.020, 0.050, 0.100, 0.200, 0.500, 1.0,
+];
 
 const FLOOD_NAMESPACE: &[u8] = b"_COMMONWARE_EXAMPLES_FLOOD";
 
@@ -48,7 +56,8 @@ fn main() {
     // Load config
     let config_file = matches.get_one::<String>("config").unwrap();
     let config_file = std::fs::read_to_string(config_file).expect("Could not read config file");
-    let config: Config = serde_yaml::from_str(&config_file).expect("Could not parse config file");
+    let mut config: Config =
+        serde_yaml::from_str(&config_file).expect("Could not parse config file");
 
     // Parse config
     info!(peers = peers.len(), "loaded peers");
@@ -59,6 +68,9 @@ fn main() {
     // Initialize runtime
     let cfg = tokio::Config::new().with_worker_threads(config.worker_threads);
     let executor = tokio::Runner::new(cfg);
+
+    // Enforce minimum message size of 8 bytes for timestamp
+    config.message_size = config.message_size.max(8);
 
     // Start runtime
     executor.start(|context| async move {
@@ -109,7 +121,7 @@ fn main() {
             let bootstrapper_socket = format!("{}:{}", ip, config.port);
             let bootstrapper_socket = SocketAddr::from_str(&bootstrapper_socket)
                 .expect("Could not parse bootstrapper socket");
-            bootstrappers.push((key, bootstrapper_socket));
+            bootstrappers.push((key, bootstrapper_socket.into()));
         }
 
         // Configure network
@@ -144,16 +156,21 @@ fn main() {
         let flood_sender = context
             .with_label("flood_sender")
             .spawn(move |context| async move {
-                let mut rng = StdRng::seed_from_u64(0);
+                let mut rng = SmallRng::seed_from_u64(0);
                 let messages: Counter<u64, AtomicU64> = Counter::default();
                 context.register("messages", "Sent messages", messages.clone());
                 loop {
-                    // Create message
-                    let mut msg = vec![0; config.message_size];
-                    rng.fill_bytes(&mut msg);
+                    // Create message with timestamp in first 8 bytes
+                    let mut msg = vec![0u8; config.message_size as usize];
+                    let now = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap()
+                        .as_nanos() as u64;
+                    msg[0..8].copy_from_slice(&now.to_le_bytes());
+                    rng.fill_bytes(&mut msg[8..]);
 
                     // Send to all peers
-                    if let Err(e) = flood_sender.send(Recipients::All, msg.into(), true).await {
+                    if let Err(e) = flood_sender.send(Recipients::All, msg, true).await {
                         error!(?e, "could not send flood message");
                     }
                     messages.inc();
@@ -163,13 +180,22 @@ fn main() {
             context
                 .with_label("flood_receiver")
                 .spawn(move |context| async move {
-                    let messages: Counter<u64, AtomicU64> = Counter::default();
-                    context.register("messages", "Received messages", messages.clone());
+                    let latency = Histogram::new(LATENCY_BUCKETS);
+                    context.register("latency", "Message latency in seconds", latency.clone());
                     loop {
-                        if let Err(e) = flood_receiver.recv().await {
-                            error!(?e, "could not receive flood message");
+                        match flood_receiver.recv().await {
+                            Ok((_sender, mut msg)) => {
+                                if msg.len() < 8 {
+                                    continue;
+                                }
+                                let sent_ns = msg.get_u64_le();
+                                let sent_time = UNIX_EPOCH + Duration::from_nanos(sent_ns);
+                                latency.observe_between(sent_time, SystemTime::now());
+                            }
+                            Err(e) => {
+                                error!(?e, "could not receive flood message");
+                            }
                         }
-                        messages.inc();
                     }
                 });
 

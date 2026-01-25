@@ -1,11 +1,14 @@
 use crate::types::{Finalization, Notarization, Nullification, ReplicaState};
+use commonware_consensus::simplex::{
+    elector::Config as Elector, mocks::reporter::Reporter, scheme::Scheme,
+};
 use commonware_cryptography::sha256::Digest as Sha256Digest;
-use commonware_utils::quorum;
-use rand::{CryptoRng, Rng};
+use commonware_utils::{Faults, N3f1};
+use rand_core::CryptoRngCore;
 use std::collections::{HashMap, HashSet};
 
 pub fn check(n: u32, replicas: Vec<ReplicaState>) {
-    let threshold = quorum(n) as usize;
+    let threshold = N3f1::quorum(n) as usize;
 
     // Invariant: agreement
     // All replicas that finalized a given view must have the same digest for that view.
@@ -166,12 +169,11 @@ pub fn check(n: u32, replicas: Vec<ReplicaState>) {
     }
 }
 
-pub fn extract<E, S>(
-    reporters: Vec<commonware_consensus::simplex::mocks::reporter::Reporter<E, S, Sha256Digest>>,
-) -> Vec<ReplicaState>
+pub fn extract<E, S, L>(reporters: Vec<Reporter<E, S, L, Sha256Digest>>) -> Vec<ReplicaState>
 where
-    E: Rng + CryptoRng,
-    S: commonware_consensus::simplex::scheme::Scheme<Sha256Digest>,
+    E: CryptoRngCore,
+    S: Scheme<Sha256Digest>,
+    L: Elector<S>,
 {
     reporters
         .iter()

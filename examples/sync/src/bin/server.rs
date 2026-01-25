@@ -1,5 +1,5 @@
 //! Server that serves operations and proofs to clients attempting to sync a
-//! [commonware_storage::qmdb::any::unordered::fixed::Any] database.
+//! [commonware_storage::qmdb::any::unordered::fixed::Db] database.
 
 use clap::{Arg, Command};
 use commonware_codec::{DecodeExt, Encode, Read};
@@ -57,8 +57,8 @@ struct Config {
 
 /// Server state containing the database and metrics.
 struct State<DB> {
-    /// The database wrapped in async mutex.
-    database: RwLock<DB>,
+    /// The database wrapped in async mutex with Option to allow ownership transfers.
+    database: RwLock<Option<DB>>,
     /// Request counter for metrics.
     request_counter: Counter,
     /// Error counter for metrics.
@@ -75,7 +75,7 @@ impl<DB> State<DB> {
         E: Metrics,
     {
         let state = Self {
-            database: RwLock::new(database),
+            database: RwLock::new(Some(database)),
             request_counter: Counter::default(),
             error_counter: Counter::default(),
             ops_counter: Counter::default(),
@@ -116,11 +116,19 @@ where
         let new_operations_len = new_operations.len();
         // Add operations to database and get the new root
         let root = {
-            let mut database = state.database.write().await;
-            if let Err(err) = DB::add_operations(&mut *database, new_operations).await {
-                error!(?err, "failed to add operations to database");
+            let mut db_opt = state.database.write().await;
+            let database = db_opt.take().expect("database should exist");
+            match database.add_operations(new_operations).await {
+                Ok(database) => {
+                    let root = database.root();
+                    *db_opt = Some(database);
+                    root
+                }
+                Err(err) => {
+                    error!(?err, "failed to add operations to database");
+                    return Err(err.into());
+                }
             }
-            DB::root(&*database)
         };
         state.ops_counter.inc_by(new_operations_len as u64);
         let root_hex = root
@@ -150,7 +158,8 @@ where
 
     // Get the current database state
     let (root, lower_bound, upper_bound) = {
-        let database = state.database.read().await;
+        let db_opt = state.database.read().await;
+        let database = db_opt.as_ref().expect("database should exist");
         (database.root(), database.lower_bound(), database.op_count())
     };
     let response = wire::GetSyncTargetResponse::<Key> {
@@ -176,7 +185,8 @@ where
     state.request_counter.inc();
     request.validate()?;
 
-    let database = state.database.read().await;
+    let db_opt = state.database.read().await;
+    let database = db_opt.as_ref().expect("database should exist");
 
     // Check if we have enough operations
     let db_size = database.op_count();
@@ -206,7 +216,7 @@ where
         .historical_proof(request.op_count, request.start_loc, max_ops)
         .await;
 
-    drop(database);
+    drop(db_opt);
 
     let (proof, operations) = result.map_err(|err| {
         warn!(?err, "failed to generate historical proof");
@@ -303,7 +313,7 @@ where
             match incoming {
                 Ok(message_data) => {
                     // Parse the message.
-                    let message = match wire::Message::decode(&message_data[..]) {
+                    let message = match wire::Message::decode(message_data.coalesce()) {
                         Ok(msg) => msg,
                         Err(err) => {
                             warn!(client_addr = %client_addr, ?err, "failed to parse message");
@@ -314,7 +324,7 @@ where
 
                     // Start a new task to handle the message.
                     // The response will be sent on `response_sender`.
-                    context.with_label("request-handler").spawn({
+                    context.with_label("request_handler").spawn({
                         let state = state.clone();
                         let mut response_sender = response_sender.clone();
                         move |_| async move {
@@ -336,8 +346,8 @@ where
         outgoing = response_receiver.next() => {
             if let Some(response) = outgoing {
                 // We have a response to send to the client.
-                let response_data = response.encode().to_vec();
-                if let Err(err) = send_frame(&mut sink, &response_data, MAX_MESSAGE_SIZE).await {
+                let response_data = response.encode();
+                if let Err(err) = send_frame(&mut sink, response_data, MAX_MESSAGE_SIZE).await {
                     info!(client_addr = %client_addr, ?err, "send failed (client likely disconnected)");
                     state.error_counter.inc();
                     return Ok(());
@@ -354,10 +364,10 @@ where
 
 /// Initialize and display database state with initial operations.
 async fn initialize_database<DB, E>(
-    database: &mut DB,
+    database: DB,
     config: &Config,
     context: &mut E,
-) -> Result<(), Box<dyn std::error::Error>>
+) -> Result<DB, Box<dyn std::error::Error>>
 where
     DB: Syncable,
     E: RngCore,
@@ -370,10 +380,7 @@ where
         operations_len = initial_ops.len(),
         "creating initial operations"
     );
-    DB::add_operations(database, initial_ops).await?;
-
-    // Commit the database to ensure operations are persisted
-    database.commit().await?;
+    let database = database.add_operations(initial_ops).await?;
 
     // Display database state
     let root = database.root();
@@ -389,14 +396,14 @@ where
         DB::name()
     );
 
-    Ok(())
+    Ok(database)
 }
 
 /// Run a generic server with the given database.
 async fn run_helper<DB, E>(
     mut context: E,
     config: Config,
-    mut database: DB,
+    database: DB,
 ) -> Result<(), Box<dyn std::error::Error>>
 where
     DB: Syncable + Send + Sync + 'static,
@@ -405,7 +412,7 @@ where
 {
     info!("starting {} database server", DB::name());
 
-    initialize_database(&mut database, &config, &mut context).await?;
+    let database = initialize_database(database, &config, &mut context).await?;
 
     // Create listener to accept connections
     let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, config.port));

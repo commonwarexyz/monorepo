@@ -1,5 +1,5 @@
+use crate::Ingress;
 use commonware_cryptography::PublicKey;
-use std::net::SocketAddr;
 
 /// Metadata for a peer connection.
 #[derive(Clone, Debug)]
@@ -8,8 +8,8 @@ pub enum Metadata<P: PublicKey> {
     ///
     /// Contains:
     /// - The public key of the peer.
-    /// - The socket address of the peer.
-    Dialer(P, SocketAddr),
+    /// - The ingress address of the peer.
+    Dialer(P, Ingress),
 
     /// We are the Listener.
     ///

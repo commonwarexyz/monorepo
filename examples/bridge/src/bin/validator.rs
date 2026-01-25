@@ -4,7 +4,7 @@ use commonware_bridge::{
 };
 use commonware_codec::{Decode, DecodeExt};
 use commonware_consensus::{
-    simplex::{self, Engine},
+    simplex::{self, elector::RoundRobin, scheme::bls12381_threshold::standard::Scheme, Engine},
     types::{Epoch, ViewDelta},
 };
 use commonware_cryptography::{
@@ -16,10 +16,11 @@ use commonware_cryptography::{
     ed25519, Sha256, Signer as _,
 };
 use commonware_p2p::{authenticated, Manager};
-use commonware_runtime::{buffer::PoolRef, tokio, Metrics, Network, Runner};
+use commonware_runtime::{
+    buffer::PoolRef, tokio, Metrics, Network, Quota, RayonPoolSpawner, Runner,
+};
 use commonware_stream::{dial, Config as StreamConfig};
-use commonware_utils::{from_hex, ordered::Set, union, NZUsize, TryCollect, NZU32};
-use governor::Quota;
+use commonware_utils::{from_hex, ordered::Set, union, NZUsize, TryCollect, NZU16, NZU32};
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     str::FromStr,
@@ -104,7 +105,7 @@ fn main() {
             let verifier = ed25519::PrivateKey::from_seed(bootstrapper_key).public_key();
             let bootstrapper_address =
                 SocketAddr::from_str(parts[1]).expect("Bootstrapper address not well-formed");
-            bootstrapper_identities.push((verifier, bootstrapper_address));
+            bootstrapper_identities.push((verifier, bootstrapper_address.into()));
         }
     }
 
@@ -218,18 +219,20 @@ fn main() {
         );
 
         // Initialize application
+        let strategy = context.clone().create_strategy(NZUsize!(2)).unwrap();
         let consensus_namespace = union(APPLICATION_NAMESPACE, CONSENSUS_SUFFIX);
+        let this_network =
+            Scheme::signer(&consensus_namespace, validators.clone(), identity, share)
+                .expect("share must be in participants");
+        let other_network = Scheme::certificate_verifier(&consensus_namespace, other_public);
         let (application, scheme, mailbox) = application::Application::new(
             context.with_label("application"),
             application::Config {
                 indexer,
-                namespace: consensus_namespace.clone(),
-                identity,
-                other_public,
                 hasher: Sha256::default(),
+                this_network,
+                other_network,
                 mailbox_size: 1024,
-                participants: validators.clone(),
-                share,
             },
         );
 
@@ -238,6 +241,7 @@ fn main() {
             context.with_label("engine"),
             simplex::Config {
                 scheme,
+                elector: RoundRobin::<Sha256>::default(),
                 blocker: oracle,
                 automaton: mailbox.clone(),
                 relay: mailbox.clone(),
@@ -245,7 +249,6 @@ fn main() {
                 partition: String::from("log"),
                 mailbox_size: 1024,
                 epoch: Epoch::zero(),
-                namespace: consensus_namespace,
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 leader_timeout: Duration::from_secs(1),
@@ -255,8 +258,8 @@ fn main() {
                 activity_timeout: ViewDelta::new(10),
                 skip_timeout: ViewDelta::new(5),
                 fetch_concurrent: 32,
-                fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
-                buffer_pool: PoolRef::new(NZUsize!(16_384), NZUsize!(10_000)),
+                buffer_pool: PoolRef::new(NZU16!(16_384), NZUsize!(10_000)),
+                strategy,
             },
         );
 

@@ -1,22 +1,25 @@
 use crate::{
-    types::{Epoch, ViewDelta},
+    types::{Epoch, Epocher, ViewDelta},
     Block,
 };
 use commonware_cryptography::certificate::Provider;
+use commonware_parallel::Strategy;
 use commonware_runtime::buffer::PoolRef;
 use std::num::{NonZeroU64, NonZeroUsize};
 
 /// Marshal configuration.
-pub struct Config<B, P>
+pub struct Config<B, P, ES, T>
 where
     B: Block,
     P: Provider<Scope = Epoch>,
+    ES: Epocher,
+    T: Strategy,
 {
     /// Provider for epoch-specific signing schemes.
     pub provider: P,
 
-    /// The length of an epoch in number of blocks.
-    pub epoch_length: u64,
+    /// Configuration for epoch lengths across block height ranges.
+    pub epocher: ES,
 
     /// The prefix to use for all partitions.
     pub partition_prefix: String,
@@ -29,9 +32,6 @@ where
     /// Useful for keeping around information that peers may desire to have.
     pub view_retention_timeout: ViewDelta,
 
-    /// Namespace for proofs.
-    pub namespace: Vec<u8>,
-
     /// Prunable archive partition prefix.
     pub prunable_items_per_section: NonZeroU64,
 
@@ -41,12 +41,18 @@ where
     /// The size of the replay buffer for storage archives.
     pub replay_buffer: NonZeroUsize,
 
-    /// The size of the write buffer for storage archives.
-    pub write_buffer: NonZeroUsize,
+    /// The size of the write buffer for the key journal of storage archives.
+    pub key_write_buffer: NonZeroUsize,
+
+    /// The size of the write buffer for the value journal of storage archives.
+    pub value_write_buffer: NonZeroUsize,
 
     /// Codec configuration for block type.
     pub block_codec_config: B::Cfg,
 
     /// Maximum number of blocks to repair at once.
     pub max_repair: NonZeroUsize,
+
+    /// Strategy for parallel operations.
+    pub strategy: T,
 }

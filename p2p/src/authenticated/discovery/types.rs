@@ -1,15 +1,11 @@
-use crate::authenticated::data::Data;
-use bytes::{Buf, BufMut};
+use crate::{authenticated::data::Data, Ingress};
 use commonware_codec::{
-    varint::UInt, Encode, EncodeSize, Error as CodecError, Read, ReadExt, ReadRangeExt, Write,
+    config::RangeCfg, varint::UInt, Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write,
 };
 use commonware_cryptography::{PublicKey, Signer};
-use commonware_runtime::Clock;
-use commonware_utils::{IpAddrExt, SystemTimeExt};
-use std::{
-    net::{IpAddr, SocketAddr},
-    time::Duration,
-};
+use commonware_runtime::{Buf, BufMut, Clock};
+use commonware_utils::SystemTimeExt;
+use std::time::Duration;
 use thiserror::Error;
 
 /// Errors that can occur when interacting with [crate::authenticated::discovery::types].
@@ -17,8 +13,6 @@ use thiserror::Error;
 pub enum Error {
     #[error("too many peers: {0}")]
     TooManyPeers(usize),
-    #[error("private IPs not allowed: {0}")]
-    PrivateIPsNotAllowed(IpAddr),
     #[error("received self")]
     ReceivedSelf,
     #[error("invalid signature")]
@@ -33,14 +27,16 @@ pub enum Error {
 /// - 1: Payload enum value
 /// - 10: Channel varint
 /// - 5: Message length varint (lengths longer than 32 bits are forbidden by the codec)
-pub const MAX_PAYLOAD_DATA_OVERHEAD: usize = 1 + 10 + 5;
+pub const MAX_PAYLOAD_DATA_OVERHEAD: u32 = 1 + 10 + 5;
 
-/// Prefix byte used to identify a [Payload] with variant BitVec.
-const BIT_VEC_PREFIX: u8 = 0;
-/// Prefix byte used to identify a [Payload] with variant Peers.
-const PEERS_PREFIX: u8 = 1;
 /// Prefix byte used to identify a [Payload] with variant Data.
-const DATA_PREFIX: u8 = 2;
+const DATA_PREFIX: u8 = 0;
+/// Prefix byte used to identify a [Payload] with variant Greeting.
+const GREETING_PREFIX: u8 = 1;
+/// Prefix byte used to identify a [Payload] with variant BitVec.
+const BIT_VEC_PREFIX: u8 = 2;
+/// Prefix byte used to identify a [Payload] with variant Peers.
+const PEERS_PREFIX: u8 = 3;
 
 // Use chunk size of 1 to minimize encoded size.
 type BitMap = commonware_utils::bitmap::BitMap<1>;
@@ -63,6 +59,16 @@ pub struct PayloadConfig {
 /// Payload is the only allowed message format that can be sent between peers.
 #[derive(Clone, Debug)]
 pub enum Payload<C: PublicKey> {
+    /// Arbitrary data sent between peers.
+    Data(Data),
+
+    /// A greeting message containing the peer's own information.
+    ///
+    /// This must be the first message sent after connection establishment.
+    /// The connection will be terminated if this message is not received first
+    /// or if it is received more than once.
+    Greeting(Info<C>),
+
     /// Bit vector that represents the peers a peer knows about.
     ///
     /// Also used as a ping message to keep the connection alive.
@@ -70,17 +76,15 @@ pub enum Payload<C: PublicKey> {
 
     /// A vector of verifiable peer information.
     Peers(Vec<Info<C>>),
-
-    /// Arbitrary data sent between peers.
-    Data(Data),
 }
 
 impl<C: PublicKey> EncodeSize for Payload<C> {
     fn encode_size(&self) -> usize {
         (match self {
+            Self::Data(data) => data.encode_size(),
+            Self::Greeting(info) => info.encode_size(),
             Self::BitVec(bit_vec) => bit_vec.encode_size(),
             Self::Peers(peers) => peers.encode_size(),
-            Self::Data(data) => data.encode_size(),
         }) + 1
     }
 }
@@ -88,6 +92,14 @@ impl<C: PublicKey> EncodeSize for Payload<C> {
 impl<C: PublicKey> Write for Payload<C> {
     fn write(&self, buf: &mut impl BufMut) {
         match self {
+            Self::Data(data) => {
+                DATA_PREFIX.write(buf);
+                data.write(buf);
+            }
+            Self::Greeting(info) => {
+                GREETING_PREFIX.write(buf);
+                info.write(buf);
+            }
             Self::BitVec(bit_vec) => {
                 BIT_VEC_PREFIX.write(buf);
                 bit_vec.write(buf);
@@ -95,10 +107,6 @@ impl<C: PublicKey> Write for Payload<C> {
             Self::Peers(peers) => {
                 PEERS_PREFIX.write(buf);
                 peers.write(buf);
-            }
-            Self::Data(data) => {
-                DATA_PREFIX.write(buf);
-                data.write(buf);
             }
         }
     }
@@ -116,22 +124,23 @@ impl<C: PublicKey> Read for Payload<C> {
 
         let payload_type = <u8>::read(buf)?;
         match payload_type {
+            DATA_PREFIX => {
+                let data = Data::read_cfg(buf, &(..=*max_data_length).into())?;
+                Ok(Self::Data(data))
+            }
+            GREETING_PREFIX => {
+                let info = Info::<C>::read(buf)?;
+                Ok(Self::Greeting(info))
+            }
             BIT_VEC_PREFIX => {
                 let bit_vec = BitVec::read_cfg(buf, max_bit_vec)?;
                 Ok(Self::BitVec(bit_vec))
             }
             PEERS_PREFIX => {
-                let peers = Vec::<Info<C>>::read_range(buf, ..=*max_peers)?;
+                let peers = Vec::<Info<C>>::read_cfg(buf, &(RangeCfg::new(..=*max_peers), ()))?;
                 Ok(Self::Peers(peers))
             }
-            DATA_PREFIX => {
-                let data = Data::read_cfg(buf, &(..=*max_data_length).into())?;
-                Ok(Self::Data(data))
-            }
-            _ => Err(CodecError::Invalid(
-                "p2p::authenticated::discovery::Payload",
-                "Invalid type",
-            )),
+            other => Err(CodecError::InvalidEnum(other)),
         }
     }
 }
@@ -143,11 +152,12 @@ where
     C::Signature: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        let choice = u.int_in_range(0..=2)?;
+        let choice = u.int_in_range(0..=3)?;
         match choice {
-            0 => Ok(Self::BitVec(u.arbitrary()?)),
-            1 => Ok(Self::Peers(u.arbitrary()?)),
-            2 => Ok(Self::Data(u.arbitrary()?)),
+            0 => Ok(Self::Data(u.arbitrary()?)),
+            1 => Ok(Self::Greeting(u.arbitrary()?)),
+            2 => Ok(Self::BitVec(u.arbitrary()?)),
+            3 => Ok(Self::Peers(u.arbitrary()?)),
             _ => unreachable!(),
         }
     }
@@ -189,22 +199,22 @@ impl Read for BitVec {
     }
 }
 
-/// A signed message from a peer attesting to its own socket address and public key at a given time.
+/// A signed message from a peer attesting to its own ingress address and public key at a given time.
 ///
-/// This is used to share the peer's socket address and public key with other peers in a verified
+/// This is used to share the peer's ingress address and public key with other peers in a verified
 /// manner.
 #[derive(Clone, Debug)]
 pub struct Info<C: PublicKey> {
-    /// The socket address of the peer.
-    pub socket: SocketAddr,
+    /// The ingress address of the peer (how to dial them).
+    pub ingress: Ingress,
 
-    /// The timestamp (epoch milliseconds) at which the socket was signed over.
+    /// The timestamp (epoch milliseconds) at which the ingress was signed over.
     pub timestamp: u64,
 
     /// The public key of the peer.
     pub public_key: C,
 
-    /// The peer's signature over the socket and timestamp.
+    /// The peer's signature over the ingress and timestamp.
     pub signature: C::Signature,
 }
 
@@ -213,7 +223,7 @@ impl<C: PublicKey> Info<C> {
     pub fn verify(&self, namespace: &[u8]) -> bool {
         self.public_key.verify(
             namespace,
-            &(self.socket, self.timestamp).encode(),
+            &(self.ingress.clone(), self.timestamp).encode(),
             &self.signature,
         )
     }
@@ -221,30 +231,24 @@ impl<C: PublicKey> Info<C> {
     /// Create a new [InfoVerifier] with the provided configuration.
     pub const fn verifier(
         me: C,
-        allow_private_ips: bool,
         peer_gossip_max_count: usize,
         synchrony_bound: Duration,
         ip_namespace: Vec<u8>,
     ) -> InfoVerifier<C> {
-        InfoVerifier::new(
-            me,
-            allow_private_ips,
-            peer_gossip_max_count,
-            synchrony_bound,
-            ip_namespace,
-        )
+        InfoVerifier::new(me, peer_gossip_max_count, synchrony_bound, ip_namespace)
     }
 
     /// Sign the [Info] message.
     pub fn sign<Sk: Signer<PublicKey = C, Signature = C::Signature>>(
         signer: &Sk,
         namespace: &[u8],
-        socket: SocketAddr,
+        ingress: impl Into<Ingress>,
         timestamp: u64,
     ) -> Self {
-        let signature = signer.sign(namespace, &(socket, timestamp).encode());
+        let ingress = ingress.into();
+        let signature = signer.sign(namespace, &(ingress.clone(), timestamp).encode());
         Self {
-            socket,
+            ingress,
             timestamp,
             public_key: signer.public_key(),
             signature,
@@ -254,7 +258,7 @@ impl<C: PublicKey> Info<C> {
 
 impl<C: PublicKey> EncodeSize for Info<C> {
     fn encode_size(&self) -> usize {
-        self.socket.encode_size()
+        self.ingress.encode_size()
             + UInt(self.timestamp).encode_size()
             + self.public_key.encode_size()
             + self.signature.encode_size()
@@ -263,7 +267,7 @@ impl<C: PublicKey> EncodeSize for Info<C> {
 
 impl<C: PublicKey> Write for Info<C> {
     fn write(&self, buf: &mut impl BufMut) {
-        self.socket.write(buf);
+        self.ingress.write(buf);
         UInt(self.timestamp).write(buf);
         self.public_key.write(buf);
         self.signature.write(buf);
@@ -273,13 +277,13 @@ impl<C: PublicKey> Write for Info<C> {
 impl<C: PublicKey> Read for Info<C> {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        let socket = SocketAddr::read(buf)?;
+    fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, CodecError> {
+        let ingress = Ingress::read(buf)?;
         let timestamp = UInt::read(buf)?.into();
         let public_key = C::read(buf)?;
         let signature = C::Signature::read(buf)?;
         Ok(Self {
-            socket,
+            ingress,
             timestamp,
             public_key,
             signature,
@@ -294,13 +298,13 @@ where
     C::Signature: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        let socket = u.arbitrary()?;
+        let ingress = u.arbitrary()?;
         let timestamp = u.arbitrary()?;
         let public_key = u.arbitrary()?;
         let signature = u.arbitrary()?;
 
         Ok(Self {
-            socket,
+            ingress,
             timestamp,
             public_key,
             signature,
@@ -313,9 +317,6 @@ where
 pub struct InfoVerifier<C: PublicKey> {
     /// The [PublicKey] of the verifier.
     me: C,
-
-    /// Whether to allow private IPs.
-    allow_private_ips: bool,
 
     /// The maximum number of [Info] allowable in a single message.
     peer_gossip_max_count: usize,
@@ -332,14 +333,12 @@ impl<C: PublicKey> InfoVerifier<C> {
     /// Create a new [InfoVerifier] with the provided configuration.
     const fn new(
         me: C,
-        allow_private_ips: bool,
         peer_gossip_max_count: usize,
         synchrony_bound: Duration,
         ip_namespace: Vec<u8>,
     ) -> Self {
         Self {
             me,
-            allow_private_ips,
             peer_gossip_max_count,
             synchrony_bound,
             ip_namespace,
@@ -359,12 +358,6 @@ impl<C: PublicKey> InfoVerifier<C> {
         // for selecting a random subset of peers when there are too many) and allow
         // for duplicates (no need to create an additional set to check this)
         for info in infos {
-            // Check if IP is allowed
-            #[allow(unstable_name_collisions)]
-            if !self.allow_private_ips && !info.socket.ip().is_global() {
-                return Err(Error::PrivateIPsNotAllowed(info.socket.ip()));
-            }
-
             // Check if peer is us
             if info.public_key == self.me {
                 return Err(Error::ReceivedSelf);
@@ -390,20 +383,19 @@ impl<C: PublicKey> InfoVerifier<C> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bytes::{Bytes, BytesMut};
-    use commonware_codec::{Decode, DecodeRangeExt};
+    use commonware_codec::{Decode, DecodeExt};
     use commonware_cryptography::secp256r1::standard::{PrivateKey, PublicKey};
     use commonware_math::algebra::Random;
-    use commonware_runtime::{deterministic, Clock, Runner};
-    use std::time::Duration;
+    use commonware_runtime::{deterministic, Clock, IoBuf, Runner};
+    use commonware_utils::{hostname, test_rng};
+    use std::{net::SocketAddr, time::Duration};
 
     const NAMESPACE: &[u8] = b"test";
 
-    fn signed_peer_info() -> Info<PublicKey> {
-        let mut rng = rand::thread_rng();
-        let c = PrivateKey::random(&mut rng);
+    fn signed_peer_info(rng: &mut impl rand_core::CryptoRngCore) -> Info<PublicKey> {
+        let c = PrivateKey::random(rng);
         Info {
-            socket: SocketAddr::from(([127, 0, 0, 1], 8080)),
+            ingress: Ingress::Socket(SocketAddr::from(([127, 0, 0, 1], 8080))),
             timestamp: 1234567890,
             public_key: c.public_key(),
             signature: c.sign(NAMESPACE, &[1, 2, 3, 4, 5]),
@@ -422,25 +414,35 @@ mod tests {
 
     #[test]
     fn test_signed_peer_info_codec() {
-        let original = vec![signed_peer_info(), signed_peer_info(), signed_peer_info()];
+        let mut rng = test_rng();
+        let original = vec![
+            signed_peer_info(&mut rng),
+            signed_peer_info(&mut rng),
+            signed_peer_info(&mut rng),
+        ];
         let encoded = original.encode();
-        let decoded = Vec::<Info<PublicKey>>::decode_range(encoded, 3..=3).unwrap();
+        let decoded =
+            Vec::<Info<PublicKey>>::decode_cfg(encoded, &(RangeCfg::new(3..=3), ())).unwrap();
         for (original, decoded) in original.iter().zip(decoded.iter()) {
-            assert_eq!(original.socket, decoded.socket);
+            assert_eq!(original.ingress, decoded.ingress);
             assert_eq!(original.timestamp, decoded.timestamp);
             assert_eq!(original.public_key, decoded.public_key);
             assert_eq!(original.signature, decoded.signature);
         }
 
-        let too_short = Vec::<Info<PublicKey>>::decode_range(original.encode(), ..3);
+        let too_short =
+            Vec::<Info<PublicKey>>::decode_cfg(original.encode(), &(RangeCfg::new(..3), ()));
         assert!(matches!(too_short, Err(CodecError::InvalidLength(3))));
 
-        let too_long = Vec::<Info<PublicKey>>::decode_range(original.encode(), 4..);
+        let too_long =
+            Vec::<Info<PublicKey>>::decode_cfg(original.encode(), &(RangeCfg::new(4..), ()));
         assert!(matches!(too_long, Err(CodecError::InvalidLength(3))));
     }
 
     #[test]
     fn test_payload_codec() {
+        let mut rng = test_rng();
+
         // Config for the codec
         let cfg = PayloadConfig {
             max_bit_vec: 1024,
@@ -448,12 +450,24 @@ mod tests {
             max_data_length: 100,
         };
 
+        // Test Greeting
+        let original = signed_peer_info(&mut rng);
+        let encoded = Payload::Greeting(original.clone()).encode();
+        let decoded = match Payload::<PublicKey>::decode_cfg(encoded, &cfg) {
+            Ok(Payload::<PublicKey>::Greeting(info)) => info,
+            _ => panic!("Expected Greeting payload"),
+        };
+        assert_eq!(original.ingress, decoded.ingress);
+        assert_eq!(original.timestamp, decoded.timestamp);
+        assert_eq!(original.public_key, decoded.public_key);
+        assert_eq!(original.signature, decoded.signature);
+
         // Test BitVec
         let original = BitVec {
             index: 1234,
             bits: BitMap::ones(100),
         };
-        let encoded: BytesMut = Payload::<PublicKey>::BitVec(original.clone()).encode();
+        let encoded = Payload::<PublicKey>::BitVec(original.clone()).encode();
         let decoded = match Payload::<PublicKey>::decode_cfg(encoded, &cfg) {
             Ok(Payload::<PublicKey>::BitVec(b)) => b,
             _ => panic!(),
@@ -461,14 +475,14 @@ mod tests {
         assert_eq!(original, decoded);
 
         // Test Peers
-        let original = vec![signed_peer_info(), signed_peer_info()];
+        let original = vec![signed_peer_info(&mut rng), signed_peer_info(&mut rng)];
         let encoded = Payload::Peers(original.clone()).encode();
         let decoded = match Payload::<PublicKey>::decode_cfg(encoded, &cfg) {
             Ok(Payload::<PublicKey>::Peers(p)) => p,
             _ => panic!(),
         };
         for (a, b) in original.iter().zip(decoded.iter()) {
-            assert_eq!(a.socket, b.socket);
+            assert_eq!(a.ingress, b.ingress);
             assert_eq!(a.timestamp, b.timestamp);
             assert_eq!(a.public_key, b.public_key);
             assert_eq!(a.signature, b.signature);
@@ -477,7 +491,7 @@ mod tests {
         // Test Data
         let original = Data {
             channel: 12345,
-            message: Bytes::from("Hello, world!"),
+            message: IoBuf::from(b"Hello, world!"),
         };
         let encoded = Payload::<PublicKey>::Data(original.clone()).encode();
         let decoded = match Payload::<PublicKey>::decode_cfg(encoded, &cfg) {
@@ -494,7 +508,8 @@ mod tests {
             max_peers: 10,
             max_data_length: 100,
         };
-        let invalid_payload = [3, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
+        // Type byte 4 is invalid (Data=0, Greeting=1, BitVec=2, Peers=3)
+        let invalid_payload = [4, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
         let result = Payload::<PublicKey>::decode_cfg(&invalid_payload[..], &cfg);
         assert!(result.is_err());
     }
@@ -517,12 +532,13 @@ mod tests {
 
     #[test]
     fn test_payload_peers_respects_limit() {
+        let mut rng = test_rng();
         let cfg = PayloadConfig {
             max_bit_vec: 1024,
             max_peers: 1,
             max_data_length: 32,
         };
-        let peers = vec![signed_peer_info(), signed_peer_info()];
+        let peers = vec![signed_peer_info(&mut rng), signed_peer_info(&mut rng)];
         let encoded = Payload::Peers(peers).encode();
         let err = Payload::<PublicKey>::decode_cfg(encoded, &cfg).unwrap_err();
         assert!(matches!(err, CodecError::InvalidLength(2)));
@@ -537,7 +553,7 @@ mod tests {
         };
         let encoded = Payload::<PublicKey>::Data(Data {
             channel: 1,
-            message: Bytes::from_static(b"hello"),
+            message: IoBuf::from(b"hello"),
         })
         .encode();
         let err = Payload::<PublicKey>::decode_cfg(encoded, &cfg).unwrap_err();
@@ -546,7 +562,7 @@ mod tests {
 
     #[test]
     fn test_max_payload_data_overhead() {
-        let message = Bytes::from(vec![0; 1 << 29]);
+        let message = IoBuf::from(vec![0; 1 << 29]);
         let message_len = message.len();
         let payload = Payload::<PublicKey>::Data(Data {
             channel: u64::MAX,
@@ -554,7 +570,7 @@ mod tests {
         });
         assert_eq!(
             payload.encode_size(),
-            message_len + MAX_PAYLOAD_DATA_OVERHEAD
+            message_len + MAX_PAYLOAD_DATA_OVERHEAD as usize
         );
     }
 
@@ -566,7 +582,6 @@ mod tests {
             let peer_key = PrivateKey::random(&mut context);
             let validator = Info::verifier(
                 validator_key.public_key(),
-                false,
                 4,
                 Duration::from_secs(30),
                 NAMESPACE.to_vec(),
@@ -608,7 +623,6 @@ mod tests {
             };
             let validator = Info::verifier(
                 validator_key.public_key(),
-                true,
                 1,
                 synchrony_bound,
                 NAMESPACE.to_vec(),
@@ -619,38 +633,12 @@ mod tests {
     }
 
     #[test]
-    fn info_verifier_rejects_private_ips_when_disallowed() {
-        let executor = deterministic::Runner::default();
-        executor.start(|mut context| async move {
-            let validator_key = PrivateKey::random(&mut context);
-            let peer_key = PrivateKey::random(&mut context);
-            let validator = Info::verifier(
-                validator_key.public_key(),
-                false,
-                4,
-                Duration::from_secs(30),
-                NAMESPACE.to_vec(),
-            );
-            let timestamp = context.current().epoch().as_millis() as u64;
-            let peer = Info::sign(
-                &peer_key,
-                NAMESPACE,
-                SocketAddr::from(([192, 168, 1, 1], 8080)),
-                timestamp,
-            );
-            let err = validator.validate(&context, &[peer]).unwrap_err();
-            assert!(matches!(err, Error::PrivateIPsNotAllowed(_)));
-        });
-    }
-
-    #[test]
     fn info_verifier_rejects_self() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             let validator_key = PrivateKey::random(&mut context);
             let validator = Info::verifier(
                 validator_key.public_key(),
-                true,
                 4,
                 Duration::from_secs(30),
                 NAMESPACE.to_vec(),
@@ -676,7 +664,6 @@ mod tests {
             let synchrony_bound = Duration::from_secs(30);
             let validator = Info::verifier(
                 validator_key.public_key(),
-                true,
                 4,
                 synchrony_bound,
                 NAMESPACE.to_vec(),
@@ -704,7 +691,6 @@ mod tests {
             let synchrony_bound = Duration::from_secs(30);
             let validator = Info::verifier(
                 validator_key.public_key(),
-                true,
                 4,
                 synchrony_bound,
                 NAMESPACE.to_vec(),
@@ -735,7 +721,6 @@ mod tests {
             let peer_key = PrivateKey::random(&mut context);
             let validator = Info::verifier(
                 validator_key.public_key(),
-                true,
                 4,
                 Duration::from_secs(30),
                 NAMESPACE.to_vec(),
@@ -749,6 +734,94 @@ mod tests {
             );
             let err = validator.validate(&context, &[peer]).unwrap_err();
             assert!(matches!(err, Error::InvalidSignature));
+        });
+    }
+
+    #[test]
+    fn info_with_dns_ingress_sign_and_verify() {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context| async move {
+            let peer_key = PrivateKey::random(&mut context);
+            let timestamp = context.current().epoch().as_millis() as u64;
+            let dns_ingress = Ingress::Dns {
+                host: hostname!("node.example.com"),
+                port: 8080,
+            };
+            let peer = Info::sign(&peer_key, NAMESPACE, dns_ingress.clone(), timestamp);
+
+            assert_eq!(peer.ingress, dns_ingress);
+            assert_eq!(peer.timestamp, timestamp);
+            assert_eq!(peer.public_key, peer_key.public_key());
+            assert!(peer.verify(NAMESPACE));
+        });
+    }
+
+    #[test]
+    fn info_with_dns_ingress_codec() {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context| async move {
+            let peer_key = PrivateKey::random(&mut context);
+            let timestamp = context.current().epoch().as_millis() as u64;
+            let dns_ingress = Ingress::Dns {
+                host: hostname!("validator-1.network.io"),
+                port: 9090,
+            };
+            let original = Info::sign(&peer_key, NAMESPACE, dns_ingress.clone(), timestamp);
+            let encoded = original.encode();
+            let decoded = Info::<PublicKey>::decode(encoded).unwrap();
+
+            assert_eq!(decoded.ingress, dns_ingress);
+            assert_eq!(decoded.timestamp, timestamp);
+            assert_eq!(decoded.public_key, original.public_key);
+            assert_eq!(decoded.signature, original.signature);
+            assert!(decoded.verify(NAMESPACE));
+        });
+    }
+
+    #[test]
+    fn info_verifier_accepts_dns_ingress() {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context| async move {
+            let validator_key = PrivateKey::random(&mut context);
+            let peer_key = PrivateKey::random(&mut context);
+            let validator = Info::verifier(
+                validator_key.public_key(),
+                4,
+                Duration::from_secs(30),
+                NAMESPACE.to_vec(),
+            );
+            let timestamp = context.current().epoch().as_millis() as u64;
+            let dns_ingress = Ingress::Dns {
+                host: hostname!("peer.network.com"),
+                port: 8080,
+            };
+            let peer = Info::sign(&peer_key, NAMESPACE, dns_ingress, timestamp);
+            assert!(validator.validate(&context, &[peer]).is_ok());
+        });
+    }
+
+    #[test]
+    fn info_verifier_accepts_dns_ingress_with_internal_hostname() {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context| async move {
+            let validator_key = PrivateKey::random(&mut context);
+            let peer_key = PrivateKey::random(&mut context);
+            let validator = Info::verifier(
+                validator_key.public_key(),
+                4,
+                Duration::from_secs(30),
+                NAMESPACE.to_vec(),
+            );
+            let timestamp = context.current().epoch().as_millis() as u64;
+            let dns_ingress = Ingress::Dns {
+                host: hostname!("internal.local"),
+                port: 8080,
+            };
+            let peer = Info::sign(&peer_key, NAMESPACE, dns_ingress, timestamp);
+            assert!(
+                validator.validate(&context, &[peer]).is_ok(),
+                "DNS ingress should be accepted"
+            );
         });
     }
 

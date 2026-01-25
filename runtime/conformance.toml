@@ -1,0 +1,11 @@
+["commonware_runtime::iobuf::tests::conformance::CodecConformance<IoBuf>"]
+n_cases = 65536
+hash = "b9218555b17220499ccf2b9dc98ce40132e4cd674ea4add3faa90e24731e907c"
+
+["commonware_runtime::storage::tests::conformance::CodecConformance<Header>"]
+n_cases = 65536
+hash = "541c356728d47b13f1d3ac800926ef3ae2396c82f5d4e043f5c7641c4c22b4b9"
+
+["commonware_runtime::utils::buffer::pool::tests::conformance::CodecConformance<Checksum>"]
+n_cases = 65536
+hash = "2ca927141b521b7cccc541ec0df8614e418d317fc864ce11f428aefb330cf256"

@@ -2,7 +2,7 @@ use commonware_cryptography::{Hasher, Sha256};
 use commonware_runtime::Metrics;
 use commonware_storage::{
     index::{ordered, partitioned, unordered, Unordered},
-    translator::{FourCap, TwoCap},
+    translator::{Cap, FourCap, TwoCap},
 };
 use criterion::{criterion_group, Criterion};
 use prometheus_client::registry::Metric;
@@ -63,6 +63,10 @@ impl Metrics for DummyMetrics {
     }
 
     fn register<N: Into<String>, H: Into<String>>(&self, _: N, _: H, _: impl Metric) {}
+
+    fn with_attribute(&self, _: &str, _: impl std::fmt::Display) -> Self {
+        Self
+    }
 }
 
 fn bench_insert(c: &mut Criterion) {
@@ -97,12 +101,9 @@ fn bench_insert(c: &mut Criterion) {
                                 total += run_benchmark(&mut index, &kvs_data);
                             }
                             Variant::PartitionedUnordered1 => {
-                                // For apples to apples behavior (in terms of # of collision) we'd
-                                // ideally like a "ThreeCap" translator when there is a 1-byte
-                                // prefix, but that's not currently a thing.
                                 let mut index = partitioned::unordered::Index::<_, _, 1>::new(
                                     DummyMetrics,
-                                    FourCap,
+                                    Cap::<3>::new(),
                                 );
                                 total += run_benchmark(&mut index, &kvs_data);
                             }
@@ -116,14 +117,14 @@ fn bench_insert(c: &mut Criterion) {
                             Variant::PartitionedOrdered1 => {
                                 let mut index = partitioned::ordered::Index::<_, _, 1>::new(
                                     DummyMetrics,
-                                    FourCap,
+                                    Cap::<3>::new(),
                                 );
                                 total += run_benchmark(&mut index, &kvs_data);
                             }
                             Variant::PartitionedOrdered2 => {
                                 let mut index = partitioned::ordered::Index::<_, _, 2>::new(
                                     DummyMetrics,
-                                    TwoCap,
+                                    Cap::<2>::new(),
                                 );
                                 total += run_benchmark(&mut index, &kvs_data);
                             }

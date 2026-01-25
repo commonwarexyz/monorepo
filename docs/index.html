@@ -4,6 +4,8 @@
 <head>
     <meta content="text/html; charset=utf-8" http-equiv="Content-Type">
     <meta name="viewport" content="width=device-width, initial-scale=1, minimum-scale=1" />
+    <link rel="preload" href="/style.css" as="style">
+    <link rel="preload" href="/shared.js" as="script">
     <link rel="icon" href="/favicon.ico" type="image/x-icon">
 
     <title>commonware</title>
@@ -11,6 +13,8 @@
     <meta name="keywords" content="commonware, open source, common goods, software, internet, ownership, trust, blockchain, decentralization, crypto">
 
     <link rel="canonical" href="https://commonware.xyz/" />
+    <link rel="sitemap" type="application/xml" href="/sitemap.xml">
+    <link rel="alternate" type="text/plain" href="/llms.txt" title="LLM-focused documentation">
 
     <meta property="og:url" content="https://commonware.xyz/" />
     <meta property="og:type" content="website" />
@@ -82,14 +86,20 @@
         <p>Encode data to enable recovery from a subset of fragments.</p>
         <h3><a href="https://docs.rs/commonware-collector">collector</a></h3>
         <p>Collect responses to committable requests.</p>
+        <h3><a href="https://docs.rs/commonware-conformance">conformance</a></h3>
+        <p>Automatically assert the stability of encoding and mechanisms over time.</p>
         <h3><a href="https://docs.rs/commonware-consensus">consensus</a></h3>
         <p>Order opaque messages in a Byzantine environment.</p>
         <h3><a href="https://docs.rs/commonware-cryptography">cryptography</a></h3>
         <p>Generate keys, sign arbitrary messages, and deterministically verify signatures.</p>
         <h3><a href="https://docs.rs/commonware-deployer">deployer</a></h3>
         <p>Deploy infrastructure across cloud providers.</p>
+        <h3><a href="https://docs.rs/commonware-math">math</a></h3>
+        <p>Create and manipulate mathematical objects.</p>
         <h3><a href="https://docs.rs/commonware-p2p">p2p</a></h3>
         <p>Communicate with authenticated peers over encrypted connections.</p>
+        <h3><a href="https://docs.rs/commonware-parallel">parallel</a></h3>
+        <p>Parallelize fold operations with pluggable execution strategies.</p>
         <h3><a href="https://docs.rs/commonware-resolver">resolver</a></h3>
         <p>Resolve data identified by a fixed-length key.</p>
         <h3><a href="https://docs.rs/commonware-runtime">runtime</a></h3>
@@ -120,6 +130,12 @@
         <p>Synchronize state between a server and client.</p>
 
         <h2>Blogs</h2>
+        <h3><a href="/blogs/conformance.html">Change is the Only Constant</a></h3>
+        <div class="meta">
+            <div class="author">By <a href="https://x.com/vex_0x">Ben Clabby</a></div>
+            <div class="date">December 19, 2025</div>
+        </div>
+        <p>Picture this: Your team is scrambling to get the latest release of a project out, and in one of several hasty PR reviews, your fancy LLM code reviewers overlook a breaking change to the protocol. You cut the release, and during your celebratory dinner, you notice you've got 26 unread messages on Slack.</p>
         <h3><a href="/blogs/qmdb.html">QMDB All The Things</a></h3>
         <div class="meta">
             <div class="author">By <a href="https://x.com/_patrickogrady">Patrick O'Grady</a></div>

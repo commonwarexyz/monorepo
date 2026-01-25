@@ -1,12 +1,12 @@
 use super::block::BlockFormat;
 use crate::Scheme;
-use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error, FixedSize, Read, ReadExt, Write};
 use commonware_consensus::simplex::types::Finalization;
 use commonware_cryptography::{
     bls12381::primitives::variant::{MinSig, Variant},
     Digest,
 };
+use commonware_runtime::{Buf, BufMut};
 
 /// Enum representing incoming messages from validators to the indexer.
 ///
@@ -215,15 +215,15 @@ mod tests {
     use super::*;
     use commonware_codec::{DecodeExt, Encode};
     use commonware_consensus::{
-        simplex::{scheme::bls12381_threshold, types::Proposal},
+        simplex::types::Proposal,
         types::{Epoch, Round, View},
     };
     use commonware_cryptography::{
-        bls12381::primitives::group::{self},
+        bls12381::{certificate::threshold::Certificate, primitives::group},
         sha256::Digest as Sha256Digest,
     };
     use commonware_math::algebra::{CryptoGroup, Random as _};
-    use rand::thread_rng;
+    use commonware_utils::test_rng;
 
     fn new_block() -> BlockFormat<Sha256Digest> {
         BlockFormat::Random(12345678901234567890)
@@ -235,27 +235,22 @@ mod tests {
 
     fn new_group_public() -> <MinSig as Variant>::Public {
         let mut result = <MinSig as Variant>::Public::generator();
-        let scalar = group::Scalar::random(&mut thread_rng());
+        let scalar = group::Scalar::random(&mut test_rng());
         result *= &scalar;
         result
     }
 
     fn new_finalization() -> Finalization<Scheme, Sha256Digest> {
-        let scalar = group::Scalar::random(&mut thread_rng());
-        let mut proposal_signature = <MinSig as Variant>::Signature::generator();
-        proposal_signature *= &scalar;
-        let mut seed_signature = <MinSig as Variant>::Signature::generator();
-        seed_signature *= &scalar;
+        let scalar = group::Scalar::random(&mut test_rng());
+        let mut signature = <MinSig as Variant>::Signature::generator();
+        signature *= &scalar;
         Finalization {
             proposal: Proposal {
                 round: Round::new(Epoch::new(333), View::new(12345)),
                 parent: View::new(54321),
                 payload: new_digest(),
             },
-            certificate: bls12381_threshold::Signature::<MinSig> {
-                vote_signature: proposal_signature,
-                seed_signature,
-            },
+            certificate: Certificate::new(signature),
         }
     }
 

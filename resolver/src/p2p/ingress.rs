@@ -1,7 +1,7 @@
 use crate::Resolver;
 use commonware_cryptography::PublicKey;
-use commonware_utils::Span;
-use futures::{channel::mpsc, SinkExt};
+use commonware_utils::{channels::fallible::AsyncFallibleExt, vec::NonEmptyVec, Span};
+use futures::channel::mpsc;
 
 type Predicate<K> = Box<dyn Fn(&K) -> bool + Send>;
 
@@ -12,8 +12,8 @@ pub struct FetchRequest<K, P> {
     /// Target peers to restrict the fetch to.
     ///
     /// - `None`: No targeting (or clear existing targeting), try any available peer
-    /// - `Some(peers)`: Only try the specified peers (must be non-empty)
-    pub targets: Option<Vec<P>>,
+    /// - `Some(peers)`: Only try the specified peers
+    pub targets: Option<NonEmptyVec<P>>,
 }
 
 /// Messages that can be sent to the peer actor.
@@ -47,18 +47,18 @@ impl<K, P> Mailbox<K, P> {
 
 impl<K: Span, P: PublicKey> Resolver for Mailbox<K, P> {
     type Key = K;
+    type PublicKey = P;
 
     /// Send a fetch request to the peer actor.
     ///
     /// If a fetch is already in progress for this key, this clears any existing
     /// targets for that key (the fetch will try any available peer).
     ///
-    /// Panics if the send fails.
+    /// If the engine has shut down, this is a no-op.
     async fn fetch(&mut self, key: Self::Key) {
         self.sender
-            .send(Message::Fetch(vec![FetchRequest { key, targets: None }]))
-            .await
-            .expect("Failed to send fetch");
+            .send_lossy(Message::Fetch(vec![FetchRequest { key, targets: None }]))
+            .await;
     }
 
     /// Send a fetch request to the peer actor for a batch of keys.
@@ -66,109 +66,71 @@ impl<K: Span, P: PublicKey> Resolver for Mailbox<K, P> {
     /// If a fetch is already in progress for any key, this clears any existing
     /// targets for that key (the fetch will try any available peer).
     ///
-    /// Panics if the send fails.
+    /// If the engine has shut down, this is a no-op.
     async fn fetch_all(&mut self, keys: Vec<Self::Key>) {
         self.sender
-            .send(Message::Fetch(
+            .send_lossy(Message::Fetch(
                 keys.into_iter()
                     .map(|key| FetchRequest { key, targets: None })
                     .collect(),
             ))
-            .await
-            .expect("Failed to send fetch_all");
+            .await;
+    }
+
+    /// Send a targeted fetch request to the peer actor.
+    ///
+    /// If the engine has shut down, this is a no-op.
+    async fn fetch_targeted(&mut self, key: Self::Key, targets: NonEmptyVec<Self::PublicKey>) {
+        self.sender
+            .send_lossy(Message::Fetch(vec![FetchRequest {
+                key,
+                targets: Some(targets),
+            }]))
+            .await;
+    }
+
+    /// Send targeted fetch requests to the peer actor for a batch of keys.
+    ///
+    /// If the engine has shut down, this is a no-op.
+    async fn fetch_all_targeted(
+        &mut self,
+        requests: Vec<(Self::Key, NonEmptyVec<Self::PublicKey>)>,
+    ) {
+        self.sender
+            .send_lossy(Message::Fetch(
+                requests
+                    .into_iter()
+                    .map(|(key, targets)| FetchRequest {
+                        key,
+                        targets: Some(targets),
+                    })
+                    .collect(),
+            ))
+            .await;
     }
 
     /// Send a cancel request to the peer actor.
     ///
-    /// Panics if the send fails.
+    /// If the engine has shut down, this is a no-op.
     async fn cancel(&mut self, key: Self::Key) {
-        self.sender
-            .send(Message::Cancel { key })
-            .await
-            .expect("Failed to send cancel_fetch");
+        self.sender.send_lossy(Message::Cancel { key }).await;
     }
 
-    /// Send a cancel all request to the peer actor.
+    /// Send a retain request to the peer actor.
     ///
-    /// Panics if the send fails.
+    /// If the engine has shut down, this is a no-op.
     async fn retain(&mut self, predicate: impl Fn(&Self::Key) -> bool + Send + 'static) {
         self.sender
-            .send(Message::Retain {
+            .send_lossy(Message::Retain {
                 predicate: Box::new(predicate),
             })
-            .await
-            .expect("Failed to send retain");
+            .await;
     }
 
     /// Send a clear request to the peer actor.
     ///
-    /// Panics if the send fails.
+    /// If the engine has shut down, this is a no-op.
     async fn clear(&mut self) {
-        self.sender
-            .send(Message::Clear)
-            .await
-            .expect("Failed to send cancel_all");
-    }
-}
-
-impl<K: Span, P: PublicKey> Mailbox<K, P> {
-    /// Send a fetch request restricted to specific target peers.
-    ///
-    /// Only target peers are tried, there is no fallback to other peers. Targets
-    /// persist through transient failures (timeout, "no data" response, send failure)
-    /// since the peer might be slow or might receive the data later.
-    ///
-    /// If a fetch is already in progress for this key, the new targets are added
-    /// to the existing target set. To clear targeting and fall back to any peer,
-    /// call [`fetch`](Self::fetch) instead.
-    ///
-    /// Targets are automatically cleared when the fetch succeeds or is canceled.
-    /// When a peer is blocked (sent invalid data), only that peer is removed
-    /// from the target set.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `targets` is empty or if the send fails.
-    pub async fn fetch_targeted(&mut self, key: K, targets: Vec<P>) {
-        assert!(
-            !targets.is_empty(),
-            "targets must not be empty; use fetch() for untargeted requests"
-        );
-        self.sender
-            .send(Message::Fetch(vec![FetchRequest {
-                key,
-                targets: Some(targets),
-            }]))
-            .await
-            .expect("Failed to send fetch_targeted");
-    }
-
-    /// Send fetch requests for multiple keys, each with their own targets.
-    ///
-    /// See [`fetch_targeted`](Self::fetch_targeted) for details on target behavior.
-    ///
-    /// # Panics
-    ///
-    /// Panics if any `targets` is empty or if the send fails.
-    pub async fn fetch_all_targeted(&mut self, requests: Vec<(K, Vec<P>)>) {
-        self.sender
-            .send(Message::Fetch(
-                requests
-                    .into_iter()
-                    .map(|(key, targets)| {
-                        assert!(
-                            !targets.is_empty(),
-                            "targets must not be empty; use fetch() for untargeted requests"
-                        );
-
-                        FetchRequest {
-                            key,
-                            targets: Some(targets),
-                        }
-                    })
-                    .collect(),
-            ))
-            .await
-            .expect("Failed to send fetch_all_targeted");
+        self.sender.send_lossy(Message::Clear).await;
     }
 }

@@ -7,7 +7,7 @@ use libfuzzer_sys::fuzz_target;
 use std::time::Duration;
 
 static NAMESPACE: &[u8] = b"fuzz_transport";
-const MAX_MESSAGE_SIZE: usize = 64 * 1024; // 64KB buffer
+const MAX_MESSAGE_SIZE: u32 = 64 * 1024; // 64KB buffer
 
 fn fuzz(data: &[u8]) {
     let executor = deterministic::Runner::default();
@@ -62,13 +62,13 @@ fn fuzz(data: &[u8]) {
         assert_eq!(listener_peer, dialer_crypto.public_key());
 
         for chunk in data.chunks(1024) {
-            dialer_sender.send(chunk).await.unwrap();
+            dialer_sender.send(chunk.to_vec()).await.unwrap();
             let recv_result = listener_receiver.recv().await.unwrap();
-            assert_eq!(recv_result, chunk);
+            assert_eq!(recv_result.coalesce(), chunk);
 
-            listener_sender.send(chunk).await.unwrap();
+            listener_sender.send(chunk.to_vec()).await.unwrap();
             let recv_result = dialer_receiver.recv().await.unwrap();
-            assert_eq!(recv_result, chunk);
+            assert_eq!(recv_result.coalesce(), chunk);
         }
     });
 }

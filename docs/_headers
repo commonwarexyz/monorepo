@@ -1,0 +1,29 @@
+# Cloudflare Pages custom headers
+# https://developers.cloudflare.com/pages/configuration/headers/
+
+# Metadata files
+/sitemap.xml
+  Content-Type: application/xml; charset=utf-8
+
+/robots.txt
+  Content-Type: text/plain; charset=utf-8
+
+/llms.txt
+  Content-Type: text/plain; charset=utf-8
+
+# Source code files
+/code/*.rs
+  Content-Type: text/plain; charset=utf-8
+
+/code/*.md
+  Content-Type: text/plain; charset=utf-8
+
+/code/*.toml
+  Content-Type: text/plain; charset=utf-8
+
+# Static assets
+/*.css
+  Content-Type: text/css; charset=utf-8
+
+/*.js
+  Content-Type: text/javascript; charset=utf-8

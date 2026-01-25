@@ -5,10 +5,9 @@
 //! Signing schemes differ in whether per-validator activities can be used as evidence of either
 //! liveness or of committing a fault:
 //!
-//! - **Attributable Schemes** ([`ed25519`], [`bls12381_multisig`]): Individual signatures can be presented
-//!   to some third party as evidence of either liveness or of committing a fault. Certificates contain signer
-//!   indices alongside individual signatures, enabling secure per-validator activity tracking and
-//!   conflict detection.
+//! - **Attributable Schemes** ([`ed25519`], [`bls12381_multisig`], [`secp256r1`]): Individual signatures can be
+//!   presented to some third party as evidence of either liveness or of committing a fault. Certificates contain signer
+//!   indices alongside individual signatures, enabling secure per-validator activity tracking and conflict detection.
 //!
 //! - **Non-Attributable schemes** ([`bls12381_threshold`]): Individual signatures cannot be presented
 //!   to some third party as evidence of either liveness or of committing a fault because they can be forged
@@ -17,12 +16,29 @@
 //!   Because peer connections are authenticated, evidence can be used locally (as it must be sent by said participant)
 //!   but can't be used by an external observer.
 //!
-//! The [`certificate::Scheme::is_attributable()`] method signals whether evidence can be safely
+//! The [`certificate::Scheme::is_attributable()`] associated function signals whether evidence can be safely
 //! exposed. For applications only interested in collecting evidence for liveness/faults, use [`reporter::AttributableReporter`]
 //! which automatically handles filtering and verification based on scheme (hiding votes/proofs that are not attributable). If
 //! full observability is desired, process all messages passed through the [`crate::Reporter`] interface.
+//!
+//! # BLS12-381 Threshold Variants
+//!
+//! The [`bls12381_threshold`] module provides two variants:
+//!
+//! - [`bls12381_threshold::standard`]: Standard threshold signatures. Certificates contain only a
+//!   vote signature recovered from partial signatures.
+//!
+//! - [`bls12381_threshold::vrf`]: Threshold VRF (Verifiable Random Function) that produces both
+//!   vote signatures and per-round seed signatures. The seed can be used for randomness (e.g.,
+//!   leader election, timelock encryption).
+//!
+//! **Security Warning for VRF Usage**: It is **not safe** to use a round's randomness to drive
+//! execution in that same round. A malicious leader can selectively distribute blocks to gain
+//! early visibility of the randomness output, then choose nullification if the outcome is
+//! unfavorable. Applications should employ a "commit-then-reveal" pattern by binding randomness
+//! requests in finalized blocks **before** the reveal occurs (e.g., `draw(view+100)`).
 
-use crate::{simplex::types::Subject, types::Round};
+use crate::simplex::types::Subject;
 use bytes::Bytes;
 use commonware_codec::Encode;
 use commonware_cryptography::{certificate, Digest};
@@ -31,32 +47,62 @@ use commonware_utils::union;
 pub mod bls12381_multisig;
 pub mod bls12381_threshold;
 pub mod ed25519;
+pub mod secp256r1;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub mod reporter;
 
-impl<'a, D: Digest> certificate::Subject for Subject<'a, D> {
-    fn namespace_and_message(&self, namespace: &[u8]) -> (Bytes, Bytes) {
-        vote_namespace_and_message(namespace, self)
+/// Pre-computed namespaces for simplex voting subjects.
+///
+/// This struct holds the pre-computed namespace bytes for each vote type.
+#[derive(Clone, Debug)]
+pub struct Namespace {
+    /// Namespace for notarize votes/certificates.
+    pub notarize: Vec<u8>,
+    /// Namespace for nullify votes/certificates.
+    pub nullify: Vec<u8>,
+    /// Namespace for finalize votes/certificates.
+    pub finalize: Vec<u8>,
+    /// Namespace for seed signatures (used by threshold schemes).
+    pub seed: Vec<u8>,
+}
+
+impl Namespace {
+    /// Creates a new SimplexNamespace from a base namespace.
+    pub fn new(namespace: &[u8]) -> Self {
+        Self {
+            notarize: notarize_namespace(namespace),
+            nullify: nullify_namespace(namespace),
+            finalize: finalize_namespace(namespace),
+            seed: seed_namespace(namespace),
+        }
     }
 }
 
-/// Extension trait for schemes that can derive randomness from certificates.
-///
-/// Some signing schemes (like [`bls12381_threshold`]) produce certificates that contain
-/// embedded randomness which can be extracted and used for leader election or other
-/// protocol-level randomness requirements. This trait provides a uniform interface for
-/// extracting that randomness when available.
-///
-/// Schemes that do not support embedded randomness (like [`ed25519`] and [`bls12381_multisig`])
-/// implement this trait but return `None` from [`SeededScheme::seed`].
-pub trait SeededScheme: certificate::Scheme {
-    /// Randomness seed derived from a certificate, if the scheme supports it.
-    type Seed: Clone + Encode + Send;
+impl certificate::Namespace for Namespace {
+    fn derive(namespace: &[u8]) -> Self {
+        Self::new(namespace)
+    }
+}
 
-    /// Extracts randomness seed, if provided by the scheme, derived from the certificate
-    /// for the given round.
-    fn seed(&self, round: Round, certificate: &Self::Certificate) -> Option<Self::Seed>;
+impl<'a, D: Digest> certificate::Subject for Subject<'a, D> {
+    type Namespace = Namespace;
+
+    fn namespace<'b>(&self, derived: &'b Self::Namespace) -> &'b [u8] {
+        match self {
+            Self::Notarize { .. } => &derived.notarize,
+            Self::Nullify { .. } => &derived.nullify,
+            Self::Finalize { .. } => &derived.finalize,
+        }
+    }
+
+    fn message(&self) -> Bytes {
+        match self {
+            Self::Notarize { proposal } => proposal.encode(),
+            Self::Nullify { round } => round.encode(),
+            Self::Finalize { proposal } => proposal.encode(),
+        }
+    }
 }
 
 /// Marker trait for signing schemes compatible with `simplex`.
@@ -64,9 +110,12 @@ pub trait SeededScheme: certificate::Scheme {
 /// This trait binds a [`certificate::Scheme`] to the [`Subject`] subject type
 /// used by the simplex protocol. It is automatically implemented for any scheme
 /// whose subject type matches `Subject<'a, D>`.
-pub trait Scheme<D: Digest>: for<'a> SeededScheme<Subject<'a, D> = Subject<'a, D>> {}
+pub trait Scheme<D: Digest>: for<'a> certificate::Scheme<Subject<'a, D> = Subject<'a, D>> {}
 
-impl<D: Digest, S> Scheme<D> for S where S: for<'a> SeededScheme<Subject<'a, D> = Subject<'a, D>> {}
+impl<D: Digest, S> Scheme<D> for S where
+    S: for<'a> certificate::Scheme<Subject<'a, D> = Subject<'a, D>>
+{
+}
 
 // Constants for domain separation in signature verification
 // These are used to prevent cross-protocol attacks and message-type confusion
@@ -101,48 +150,4 @@ pub(crate) fn nullify_namespace(namespace: &[u8]) -> Vec<u8> {
 #[inline]
 pub(crate) fn finalize_namespace(namespace: &[u8]) -> Vec<u8> {
     union(namespace, FINALIZE_SUFFIX)
-}
-
-/// Produces the vote namespace and message bytes for a given vote context.
-///
-/// Returns the final namespace (with the context-specific suffix) and the
-/// serialized message to sign or verify.
-#[inline]
-pub(crate) fn vote_namespace_and_message<D: Digest>(
-    namespace: &[u8],
-    subject: &Subject<'_, D>,
-) -> (Bytes, Bytes) {
-    match subject {
-        Subject::Notarize { proposal } => (
-            notarize_namespace(namespace).into(),
-            proposal.encode().freeze(),
-        ),
-        Subject::Nullify { round } => {
-            (nullify_namespace(namespace).into(), round.encode().freeze())
-        }
-        Subject::Finalize { proposal } => (
-            finalize_namespace(namespace).into(),
-            proposal.encode().freeze(),
-        ),
-    }
-}
-
-/// Produces the seed namespace and message bytes for a given vote context.
-///
-/// Returns the final namespace (with the seed suffix) and the serialized
-/// message to sign or verify.
-#[inline]
-pub(crate) fn seed_namespace_and_message<D: Digest>(
-    namespace: &[u8],
-    subject: &Subject<'_, D>,
-) -> (Bytes, Bytes) {
-    (
-        seed_namespace(namespace).into(),
-        match subject {
-            Subject::Notarize { proposal } | Subject::Finalize { proposal } => {
-                proposal.round.encode().freeze()
-            }
-            Subject::Nullify { round } => round.encode().freeze(),
-        },
-    )
 }

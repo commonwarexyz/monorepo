@@ -22,8 +22,10 @@
 //!
 //! This implementation is only available on Linux systems that support io_uring.
 
-use crate::iouring::{self, should_retry};
-use commonware_utils::StableBuf;
+use crate::{
+    iouring::{self, should_retry, OpBuffer},
+    IoBufMut, IoBufs,
+};
 use futures::{
     channel::{mpsc, oneshot},
     executor::block_on,
@@ -39,13 +41,31 @@ use std::{
 use tokio::net::{TcpListener, TcpStream};
 use tracing::warn;
 
-#[derive(Clone, Debug, Default)]
+/// Default read buffer size (64 KB).
+const DEFAULT_READ_BUFFER_SIZE: usize = 64 * 1024;
+
+#[derive(Clone, Debug)]
 pub struct Config {
     /// If Some, explicitly sets TCP_NODELAY on the socket.
     /// Otherwise uses system default.
     pub tcp_nodelay: Option<bool>,
     /// Configuration for the iouring instance.
     pub iouring_config: iouring::Config,
+    /// Size of the read buffer for batching network reads.
+    ///
+    /// A larger buffer reduces syscall overhead by reading more data per call,
+    /// but uses more memory per connection. Defaults to 64 KB.
+    pub read_buffer_size: usize,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            tcp_nodelay: None,
+            iouring_config: iouring::Config::default(),
+            read_buffer_size: DEFAULT_READ_BUFFER_SIZE,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -58,6 +78,8 @@ pub struct Network {
     send_submitter: mpsc::Sender<iouring::Op>,
     /// Used to submit recv operations to the recv io_uring event loop.
     recv_submitter: mpsc::Sender<iouring::Op>,
+    /// Size of the read buffer for batching network reads.
+    read_buffer_size: usize,
 }
 
 impl Network {
@@ -96,6 +118,7 @@ impl Network {
             tcp_nodelay: cfg.tcp_nodelay,
             send_submitter,
             recv_submitter,
+            read_buffer_size: cfg.read_buffer_size,
         })
     }
 }
@@ -112,6 +135,7 @@ impl crate::Network for Network {
             inner: listener,
             send_submitter: self.send_submitter.clone(),
             recv_submitter: self.recv_submitter.clone(),
+            read_buffer_size: self.read_buffer_size,
         })
     }
 
@@ -139,14 +163,8 @@ impl crate::Network for Network {
 
         let fd = Arc::new(OwnedFd::from(stream));
         Ok((
-            Sink {
-                fd: fd.clone(),
-                submitter: self.send_submitter.clone(),
-            },
-            Stream {
-                fd,
-                submitter: self.recv_submitter.clone(),
-            },
+            Sink::new(fd.clone(), self.send_submitter.clone()),
+            Stream::new(fd, self.recv_submitter.clone(), self.read_buffer_size),
         ))
     }
 }
@@ -161,6 +179,8 @@ pub struct Listener {
     send_submitter: mpsc::Sender<iouring::Op>,
     /// Used to submit recv operations to the recv io_uring event loop.
     recv_submitter: mpsc::Sender<iouring::Op>,
+    /// Size of the read buffer for batching network reads.
+    read_buffer_size: usize,
 }
 
 impl crate::Listener for Listener {
@@ -194,14 +214,8 @@ impl crate::Listener for Listener {
 
         Ok((
             remote_addr,
-            Sink {
-                fd: fd.clone(),
-                submitter: self.send_submitter.clone(),
-            },
-            Stream {
-                fd,
-                submitter: self.recv_submitter.clone(),
-            },
+            Sink::new(fd.clone(), self.send_submitter.clone()),
+            Stream::new(fd, self.recv_submitter.clone(), self.read_buffer_size),
         ))
     }
 
@@ -218,53 +232,55 @@ pub struct Sink {
 }
 
 impl Sink {
+    const fn new(fd: Arc<OwnedFd>, submitter: mpsc::Sender<iouring::Op>) -> Self {
+        Self { fd, submitter }
+    }
+
     fn as_raw_fd(&self) -> Fd {
         Fd(self.fd.as_raw_fd())
     }
 }
 
 impl crate::Sink for Sink {
-    async fn send(&mut self, msg: impl Into<StableBuf> + Send) -> Result<(), crate::Error> {
-        let mut msg = msg.into();
+    async fn send(&mut self, buf: impl Into<IoBufs> + Send) -> Result<(), crate::Error> {
+        // Convert to contiguous IoBuf for io_uring send
+        // (zero-copy if single buffer, copies if multiple)
+        // TODO(#2705): Use writev to avoid this copy.
+        let mut buf = buf.into().coalesce();
         let mut bytes_sent = 0;
-        let msg_len = msg.len();
+        let buf_len = buf.len();
 
-        while bytes_sent < msg_len {
+        while bytes_sent < buf_len {
             // Figure out how much is left to send and where to send from.
             //
-            // SAFETY: `msg` is a `StableBuf` guaranteeing the memory won't move.
-            // `bytes_sent` is always < `msg_len` due to the loop condition, so
-            // `add(bytes_sent)` stays within bounds and `msg_len - bytes_sent`
+            // SAFETY: `buf` is an `IoBuf` guaranteeing the memory won't move.
+            // `bytes_sent` is always < `buf_len` due to the loop condition, so
+            // `add(bytes_sent)` stays within bounds and `buf_len - bytes_sent`
             // correctly represents the remaining valid bytes.
-            let remaining = unsafe {
-                std::slice::from_raw_parts(
-                    msg.as_mut_ptr().add(bytes_sent) as *const u8,
-                    msg_len - bytes_sent,
-                )
-            };
+            let ptr = unsafe { buf.as_ptr().add(bytes_sent) };
+            let remaining_len = buf_len - bytes_sent;
 
             // Create the io_uring send operation
-            let op = io_uring::opcode::Send::new(
-                self.as_raw_fd(),
-                remaining.as_ptr(),
-                remaining.len() as u32,
-            )
-            .build();
+            let op =
+                io_uring::opcode::Send::new(self.as_raw_fd(), ptr, remaining_len as u32).build();
 
             // Submit the operation to the io_uring event loop
             let (tx, rx) = oneshot::channel();
             self.submitter
-                .send(crate::iouring::Op {
+                .send(iouring::Op {
                     work: op,
                     sender: tx,
-                    buffer: Some(msg),
+                    buffer: Some(OpBuffer::Write(buf)),
                 })
                 .await
                 .map_err(|_| crate::Error::SendFailed)?;
 
-            // Wait for the operation to complete
-            let (result, got_msg) = rx.await.map_err(|_| crate::Error::SendFailed)?;
-            msg = got_msg.unwrap();
+            // Wait for the operation to complete and get the buffer back
+            let (result, returned_buf) = rx.await.map_err(|_| crate::Error::SendFailed)?;
+            buf = match returned_buf.unwrap() {
+                OpBuffer::Write(b) => b,
+                _ => unreachable!(),
+            };
             if should_retry(result) {
                 continue;
             }
@@ -282,70 +298,164 @@ impl crate::Sink for Sink {
 }
 
 /// Implementation of [crate::Stream] for an io-uring [Network].
+///
+/// Uses an internal buffer to reduce syscall overhead. Multiple small reads
+/// can be satisfied from the buffer without additional network operations.
 pub struct Stream {
     fd: Arc<OwnedFd>,
     /// Used to submit recv operations to the io_uring event loop.
     submitter: mpsc::Sender<iouring::Op>,
+    /// Internal read buffer.
+    buffer: IoBufMut,
+    /// Current read position in the buffer.
+    buffer_pos: usize,
+    /// Number of valid bytes in the buffer.
+    buffer_len: usize,
 }
 
 impl Stream {
+    fn new(fd: Arc<OwnedFd>, submitter: mpsc::Sender<iouring::Op>, buffer_capacity: usize) -> Self {
+        Self {
+            fd,
+            submitter,
+            buffer: IoBufMut::with_capacity(buffer_capacity),
+            buffer_pos: 0,
+            buffer_len: 0,
+        }
+    }
+
     fn as_raw_fd(&self) -> Fd {
         Fd(self.fd.as_raw_fd())
     }
-}
 
-impl crate::Stream for Stream {
-    async fn recv(&mut self, buf: impl Into<StableBuf> + Send) -> Result<StableBuf, crate::Error> {
-        let mut bytes_received = 0;
-        let mut buf = buf.into();
-        let buf_len = buf.len();
-        while bytes_received < buf_len {
-            // Figure out how much is left to read and where to read into.
-            //
-            // SAFETY: `buf` is a `StableBuf` guaranteeing the memory won't move.
-            // `bytes_received` is always < `buf_len` due to the loop condition, so
-            // `add(bytes_received)` stays within bounds and `buf_len - bytes_received`
-            // correctly represents the remaining valid bytes.
-            let remaining = unsafe {
-                std::slice::from_raw_parts_mut(
-                    buf.as_mut_ptr().add(bytes_received),
-                    buf_len - bytes_received,
-                )
-            };
+    /// Submits a recv operation to io_uring.
+    ///
+    /// # Arguments
+    /// * `buffer` - Buffer for receiving data (kernel writes into this)
+    /// * `offset` - Offset into buffer to write received data
+    /// * `len` - Maximum bytes to receive
+    ///
+    /// # Returns
+    /// The buffer and either bytes received or an error.
+    async fn submit_recv(
+        &mut self,
+        mut buffer: IoBufMut,
+        offset: usize,
+        len: usize,
+    ) -> (IoBufMut, Result<usize, crate::Error>) {
+        loop {
+            // SAFETY: offset + len <= buffer.len() as guaranteed by callers.
+            // `buffer` is an `IoBufMut` guaranteeing the memory won't move.
+            let ptr = unsafe { buffer.as_mut_ptr().add(offset) };
+            let op = io_uring::opcode::Recv::new(self.as_raw_fd(), ptr, len as u32).build();
 
-            // Create the io_uring recv operation
-            let op = io_uring::opcode::Recv::new(
-                self.as_raw_fd(),
-                remaining.as_mut_ptr(),
-                remaining.len() as u32,
-            )
-            .build();
-
-            // Submit the operation to the io_uring event loop
             let (tx, rx) = oneshot::channel();
-            self.submitter
-                .send(crate::iouring::Op {
+            if self
+                .submitter
+                .send(iouring::Op {
                     work: op,
                     sender: tx,
-                    buffer: Some(buf),
+                    buffer: Some(OpBuffer::Read(buffer)),
                 })
                 .await
-                .map_err(|_| crate::Error::RecvFailed)?;
+                .is_err()
+            {
+                // Channel closed - io_uring thread died, buffer is lost
+                return (IoBufMut::default(), Err(crate::Error::RecvFailed));
+            }
 
-            // Wait for the operation to complete
-            let (result, got_buf) = rx.await.map_err(|_| crate::Error::RecvFailed)?;
-            buf = got_buf.unwrap();
+            let Ok((result, returned_buf)) = rx.await else {
+                // Channel closed - io_uring thread died, buffer is lost
+                return (IoBufMut::default(), Err(crate::Error::RecvFailed));
+            };
+            buffer = match returned_buf.unwrap() {
+                OpBuffer::Read(b) => b,
+                _ => unreachable!(),
+            };
+
             if should_retry(result) {
                 continue;
             }
 
-            // Non-positive result indicates an error or EOF.
             if result <= 0 {
-                return Err(crate::Error::RecvFailed);
+                let err = if result == -libc::ETIMEDOUT {
+                    crate::Error::Timeout
+                } else {
+                    crate::Error::RecvFailed
+                };
+                return (buffer, Err(err));
             }
-            bytes_received += result as usize;
+
+            return (buffer, Ok(result as usize));
         }
-        Ok(buf)
+    }
+
+    /// Fills the internal buffer by reading from the socket via io_uring.
+    async fn fill_buffer(&mut self) -> Result<usize, crate::Error> {
+        self.buffer_pos = 0;
+        self.buffer_len = 0;
+
+        let buffer = std::mem::take(&mut self.buffer);
+        let len = buffer.capacity();
+
+        // If the buffer is lost due to a channel error, we don't restore it.
+        // Channel errors mean the io_uring thread died, so the stream is unusable anyway.
+        let (buffer, result) = self.submit_recv(buffer, 0, len).await;
+        self.buffer = buffer;
+        self.buffer_len = result?;
+        // SAFETY: The kernel has written exactly `buffer_len` bytes into the buffer.
+        unsafe { self.buffer.set_len(self.buffer_len) };
+        Ok(self.buffer_len)
+    }
+}
+
+impl crate::Stream for Stream {
+    async fn recv(&mut self, len: u64) -> Result<IoBufs, crate::Error> {
+        let len = len as usize;
+        let mut owned_buf = IoBufMut::with_capacity(len);
+        // SAFETY: We will write exactly `len` bytes before returning
+        // (loop continues until bytes_received == len). The buffer contents
+        // are uninitialized but we only write to it, never read.
+        unsafe { owned_buf.set_len(len) };
+        let mut bytes_received = 0;
+
+        while bytes_received < len {
+            // First drain any buffered data
+            let buffered = self.buffer_len - self.buffer_pos;
+            if buffered > 0 {
+                let to_copy = std::cmp::min(buffered, len - bytes_received);
+                owned_buf.as_mut()[bytes_received..bytes_received + to_copy].copy_from_slice(
+                    &self.buffer.as_ref()[self.buffer_pos..self.buffer_pos + to_copy],
+                );
+                self.buffer_pos += to_copy;
+                bytes_received += to_copy;
+                continue;
+            }
+
+            let remaining = len - bytes_received;
+
+            // Skip internal buffer if disabled, or if the read is large enough
+            // to fill the buffer and immediately drain it
+            let buffer_capacity = self.buffer.capacity();
+            if buffer_capacity == 0 || remaining >= buffer_capacity {
+                let (returned_buf, result) =
+                    self.submit_recv(owned_buf, bytes_received, remaining).await;
+                owned_buf = returned_buf;
+                bytes_received += result?;
+            } else {
+                // Fill internal buffer, then loop will copy
+                self.fill_buffer().await?;
+            }
+        }
+
+        Ok(IoBufs::from(owned_buf.freeze()))
+    }
+
+    fn peek(&self, max_len: u64) -> &[u8] {
+        let max_len = max_len as usize;
+        let buffered = self.buffer_len - self.buffer_pos;
+        let len = std::cmp::min(buffered, max_len);
+        &self.buffer.as_ref()[self.buffer_pos..self.buffer_pos + len]
     }
 }
 
@@ -357,10 +467,11 @@ mod tests {
             iouring::{Config, Network},
             tests,
         },
+        Listener as _, Network as _, Sink as _, Stream as _,
     };
     use commonware_macros::test_group;
     use prometheus_client::registry::Registry;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     #[tokio::test]
     async fn test_trait() {
@@ -398,5 +509,195 @@ mod tests {
             .expect("Failed to start io_uring")
         })
         .await;
+    }
+
+    #[tokio::test]
+    async fn test_small_send_read_quickly() {
+        let network = Network::start(
+            Config {
+                iouring_config: iouring::Config {
+                    force_poll: Duration::from_millis(100),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            &mut Registry::default(),
+        )
+        .expect("Failed to start io_uring");
+
+        // Bind a listener
+        let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        // Spawn a task to accept and read
+        let reader = tokio::spawn(async move {
+            let (_addr, _sink, mut stream) = listener.accept().await.unwrap();
+
+            // Read a small message (much smaller than the 64KB buffer)
+            stream.recv(10).await.unwrap()
+        });
+
+        // Connect and send a small message
+        let (mut sink, _stream) = network.dial(addr).await.unwrap();
+        let msg = vec![1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+        sink.send(msg.clone()).await.unwrap();
+
+        // Wait for the reader to complete
+        let received = reader.await.unwrap();
+
+        // Verify we got the right data
+        assert_eq!(received.coalesce(), msg.as_slice());
+    }
+
+    #[tokio::test]
+    async fn test_read_timeout_with_partial_data() {
+        // Use a short timeout to make the test fast
+        let op_timeout = Duration::from_millis(100);
+        let network = Network::start(
+            Config {
+                iouring_config: iouring::Config {
+                    op_timeout: Some(op_timeout),
+                    force_poll: Duration::from_millis(10),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            &mut Registry::default(),
+        )
+        .expect("Failed to start io_uring");
+
+        // Bind a listener
+        let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let reader = tokio::spawn(async move {
+            let (_addr, _sink, mut stream) = listener.accept().await.unwrap();
+
+            // Try to read 100 bytes, but only 5 will be sent
+            let start = Instant::now();
+            let result = stream.recv(100).await;
+            let elapsed = start.elapsed();
+
+            (result, elapsed)
+        });
+
+        // Connect and send only partial data
+        let (mut sink, _stream) = network.dial(addr).await.unwrap();
+        sink.send([1u8, 2, 3, 4, 5].as_slice()).await.unwrap();
+
+        // Wait for the reader to complete
+        let (result, elapsed) = reader.await.unwrap();
+        assert!(matches!(result, Err(crate::Error::Timeout)));
+
+        // Verify the timeout occurred around the expected time
+        assert!(elapsed >= op_timeout);
+        // Allow some margin for timing variance
+        assert!(elapsed < op_timeout * 3);
+    }
+
+    #[tokio::test]
+    async fn test_unbuffered_mode() {
+        // Set read_buffer_size to 0 to disable buffering
+        let network = Network::start(
+            Config {
+                read_buffer_size: 0,
+                iouring_config: iouring::Config {
+                    force_poll: Duration::from_millis(100),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            &mut Registry::default(),
+        )
+        .expect("Failed to start io_uring");
+
+        // Bind a listener
+        let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        // Spawn a task to accept and read
+        let reader = tokio::spawn(async move {
+            let (_addr, _sink, mut stream) = listener.accept().await.unwrap();
+
+            // In unbuffered mode, peek should always return empty
+            assert!(stream.peek(100).is_empty());
+
+            // Read messages without buffering
+            let buf1 = stream.recv(5).await.unwrap();
+
+            // Even after recv, peek should be empty in unbuffered mode
+            assert!(stream.peek(100).is_empty());
+
+            let buf2 = stream.recv(5).await.unwrap();
+            assert!(stream.peek(100).is_empty());
+
+            (buf1, buf2)
+        });
+
+        // Connect and send two messages
+        let (mut sink, _stream) = network.dial(addr).await.unwrap();
+        sink.send([1u8, 2, 3, 4, 5].as_slice()).await.unwrap();
+        sink.send([6u8, 7, 8, 9, 10].as_slice()).await.unwrap();
+
+        // Wait for the reader to complete
+        let (buf1, buf2) = reader.await.unwrap();
+
+        // Verify we got the right data
+        assert_eq!(buf1.coalesce(), &[1u8, 2, 3, 4, 5]);
+        assert_eq!(buf2.coalesce(), &[6u8, 7, 8, 9, 10]);
+    }
+
+    #[tokio::test]
+    async fn test_peek_with_buffered_data() {
+        // Use default buffer size to enable buffering
+        let network = Network::start(
+            Config {
+                iouring_config: iouring::Config {
+                    force_poll: Duration::from_millis(100),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            &mut Registry::default(),
+        )
+        .expect("Failed to start io_uring");
+
+        let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let reader = tokio::spawn(async move {
+            let (_addr, _sink, mut stream) = listener.accept().await.unwrap();
+
+            // Initially peek should be empty (no data received yet)
+            assert!(stream.peek(100).is_empty());
+
+            // Receive partial data - this should buffer more than requested
+            let first = stream.recv(5).await.unwrap();
+            assert_eq!(first.coalesce(), b"hello");
+
+            // Peek should show remaining buffered data
+            let peeked = stream.peek(100);
+            assert!(!peeked.is_empty());
+            assert_eq!(peeked, b" world");
+
+            // Peek again should return the same (non-consuming)
+            assert_eq!(stream.peek(100), b" world");
+
+            // Peek with max_len should truncate
+            assert_eq!(stream.peek(3), b" wo");
+
+            // Receive the rest
+            let rest = stream.recv(6).await.unwrap();
+            assert_eq!(rest.coalesce(), b" world");
+
+            // Peek should be empty after consuming all buffered data
+            assert!(stream.peek(100).is_empty());
+        });
+
+        // Connect and send data
+        let (mut sink, _stream) = network.dial(addr).await.unwrap();
+        sink.send(b"hello world").await.unwrap();
+
+        reader.await.unwrap();
     }
 }

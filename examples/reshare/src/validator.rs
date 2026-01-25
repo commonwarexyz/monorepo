@@ -6,15 +6,17 @@ use crate::{
     engine, namespace,
     setup::{ParticipantConfig, PeerConfig},
 };
-use commonware_consensus::{marshal::resolver::p2p as marshal_resolver, simplex::scheme::Scheme};
+use commonware_consensus::{
+    marshal::resolver::p2p as marshal_resolver,
+    simplex::{elector::Config as Elector, scheme::Scheme},
+};
 use commonware_cryptography::{
     bls12381::primitives::variant::MinSig, ed25519, Hasher, Sha256, Signer,
 };
-use commonware_p2p::{authenticated::discovery, utils::requester};
-use commonware_runtime::{tokio, Metrics};
-use commonware_utils::{union, union_unique, NZU32};
+use commonware_p2p::authenticated::discovery;
+use commonware_runtime::{tokio, Metrics, Quota, RayonPoolSpawner};
+use commonware_utils::{union, union_unique, NZUsize, NZU32};
 use futures::future::try_join_all;
-use governor::Quota;
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     time::Duration,
@@ -27,19 +29,19 @@ const RESOLVER_CHANNEL: u64 = 2;
 const BROADCASTER_CHANNEL: u64 = 3;
 const MARSHAL_CHANNEL: u64 = 4;
 const DKG_CHANNEL: u64 = 5;
-const ORCHESTRATOR_CHANNEL: u64 = 6;
 
 const MAILBOX_SIZE: usize = 10;
 const MESSAGE_BACKLOG: usize = 10;
-const MAX_MESSAGE_SIZE: usize = 1024 * 1024;
+const MAX_MESSAGE_SIZE: u32 = 1024 * 1024;
 
 /// Run the validator node service.
-pub async fn run<S>(
+pub async fn run<S, L>(
     context: tokio::Context,
     args: super::ParticipantArgs,
     callback: Box<dyn UpdateCallBack<MinSig, ed25519::PublicKey>>,
 ) where
     S: Scheme<<Sha256 as Hasher>::Digest, PublicKey = ed25519::PublicKey>,
+    L: Elector<S>,
     Provider<S, ed25519::PrivateKey>:
         EpochProvider<Variant = MinSig, PublicKey = ed25519::PublicKey, Scheme = S>,
 {
@@ -71,7 +73,11 @@ pub async fn run<S>(
         &p2p_namespace,
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), config.port),
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), config.port),
-        config.bootstrappers.clone().into_iter().collect::<Vec<_>>(),
+        config
+            .bootstrappers
+            .iter()
+            .map(|(k, v)| (k.clone(), (*v).into()))
+            .collect::<Vec<_>>(),
         MAX_MESSAGE_SIZE,
     );
     p2p_cfg.mailbox_size = MAILBOX_SIZE;
@@ -93,9 +99,6 @@ pub async fn run<S>(
     let marshal_limit = Quota::per_second(NZU32!(8));
     let marshal = network.register(MARSHAL_CHANNEL, marshal_limit, MESSAGE_BACKLOG);
 
-    let orchestrator_limit = Quota::per_second(NZU32!(1));
-    let orchestrator = network.register(ORCHESTRATOR_CHANNEL, orchestrator_limit, MESSAGE_BACKLOG);
-
     let dkg_limit = Quota::per_second(NZU32!(128));
     let dkg = network.register(DKG_CHANNEL, dkg_limit, MESSAGE_BACKLOG);
 
@@ -105,19 +108,16 @@ pub async fn run<S>(
         manager: oracle.clone(),
         blocker: oracle.clone(),
         mailbox_size: 200,
-        requester_config: requester::Config {
-            me: Some(config.signing_key.public_key()),
-            rate_limit: marshal_limit,
-            initial: Duration::from_secs(1),
-            timeout: Duration::from_secs(2),
-        },
+        initial: Duration::from_secs(1),
+        timeout: Duration::from_secs(2),
         fetch_retry_timeout: Duration::from_millis(100),
         priority_requests: false,
         priority_responses: false,
     };
     let marshal = marshal_resolver::init(&context, resolver_cfg, marshal);
 
-    let engine = engine::Engine::<_, _, _, _, Sha256, MinSig, S>::new(
+    let strategy = context.clone().create_strategy(NZUsize!(2)).unwrap();
+    let engine = engine::Engine::<_, _, _, _, Sha256, MinSig, S, L, _>::new(
         context.with_label("engine"),
         engine::Config {
             signer: config.signing_key.clone(),
@@ -129,6 +129,7 @@ pub async fn run<S>(
             partition_prefix: "engine".to_string(),
             freezer_table_initial_size: 1024 * 1024, // 100mb
             peer_config,
+            strategy,
         },
     )
     .await;
@@ -140,7 +141,6 @@ pub async fn run<S>(
         resolver,
         broadcaster,
         dkg,
-        orchestrator,
         marshal,
         callback,
     );
@@ -158,7 +158,10 @@ mod test {
         dkg::{PostUpdate, Update},
     };
     use anyhow::anyhow;
-    use commonware_consensus::types::Epoch;
+    use commonware_consensus::{
+        simplex::elector::{Random, RoundRobin},
+        types::Epoch,
+    };
     use commonware_cryptography::{
         bls12381::{
             dkg::{deal, Output},
@@ -173,16 +176,16 @@ mod test {
         utils::mux,
         Message, Receiver,
     };
+    use commonware_parallel::Sequential;
     use commonware_runtime::{
         deterministic::{self, Runner},
-        Clock, Handle, Runner as _, Spawner,
+        Clock, Handle, Quota, Runner as _, Spawner,
     };
-    use commonware_utils::{union, TryCollect};
+    use commonware_utils::{union, N3f1, TryCollect};
     use futures::{
         channel::{mpsc, oneshot},
         SinkExt, StreamExt,
     };
-    use governor::Quota;
     use rand::seq::SliceRandom;
     use rand_core::CryptoRngCore;
     use std::{
@@ -268,6 +271,7 @@ mod test {
         participants: BTreeMap<PublicKey, (PrivateKey, Option<Share>)>,
         handles: BTreeMap<PublicKey, Handle<()>>,
         failures: HashSet<u64>,
+        restart_counts: BTreeMap<PublicKey, u32>,
     }
 
     impl Team {
@@ -282,8 +286,9 @@ mod test {
                 num_participants_per_round: per_round.to_vec(),
                 participants: participants.keys().cloned().try_collect().unwrap(),
             };
-            let (output, shares) = deal(&mut rng, Default::default(), peer_config.dealers(0))
-                .expect("deal should succeed");
+            let (output, shares) =
+                deal::<MinSig, _, N3f1>(&mut rng, Default::default(), peer_config.dealers(0))
+                    .expect("deal should succeed");
             for (key, share) in shares.into_iter() {
                 if let Some((_, maybe_share)) = participants.get_mut(&key) {
                     *maybe_share = Some(share);
@@ -295,6 +300,7 @@ mod test {
                 participants,
                 handles: Default::default(),
                 failures: HashSet::new(),
+                restart_counts: Default::default(),
             }
         }
 
@@ -315,17 +321,19 @@ mod test {
                 participants,
                 handles: Default::default(),
                 failures: HashSet::new(),
+                restart_counts: Default::default(),
             }
         }
 
-        async fn start_one<S>(
+        async fn start_one<S, L>(
             &mut self,
             ctx: &deterministic::Context,
-            oracle: &mut Oracle<PublicKey>,
+            oracle: &mut Oracle<PublicKey, deterministic::Context>,
             updates: mpsc::Sender<TeamUpdate>,
             pk: PublicKey,
         ) where
             S: Scheme<<Sha256 as Hasher>::Digest, PublicKey = PublicKey>,
+            L: Elector<S>,
             Provider<S, PrivateKey>:
                 EpochProvider<Variant = MinSig, PublicKey = PublicKey, Scheme = S>,
         {
@@ -336,7 +344,7 @@ mod test {
                 return;
             };
 
-            let mut control = oracle.control(pk.clone());
+            let control = oracle.control(pk.clone());
             let votes = control.register(VOTE_CHANNEL, TEST_QUOTA).await.unwrap();
             let certificates = control
                 .register(CERTIFICATE_CHANNEL, TEST_QUOTA)
@@ -360,29 +368,25 @@ mod test {
                     failures: self.failures.clone(),
                 },
             );
-            let orchestrator = control
-                .register(ORCHESTRATOR_CHANNEL, TEST_QUOTA)
-                .await
-                .unwrap();
 
+            let restart_count = self.restart_counts.entry(pk.clone()).or_insert(0);
+            let validator_ctx = ctx.with_label(&format!("validator_{pk}_{restart_count}"));
+            *restart_count += 1;
             let resolver_cfg = marshal_resolver::Config {
                 public_key: pk.clone(),
                 manager: oracle.manager(),
                 blocker: oracle.control(pk.clone()),
                 mailbox_size: 200,
-                requester_config: requester::Config {
-                    me: Some(pk.clone()),
-                    rate_limit: Quota::per_second(NZU32!(5)),
-                    initial: Duration::from_secs(1),
-                    timeout: Duration::from_secs(2),
-                },
+                initial: Duration::from_secs(1),
+                timeout: Duration::from_secs(2),
                 fetch_retry_timeout: Duration::from_millis(100),
                 priority_requests: false,
                 priority_responses: false,
             };
-            let marshal = marshal_resolver::init(ctx, resolver_cfg, marshal);
-            let engine = engine::Engine::<_, _, _, _, Sha256, MinSig, S>::new(
-                ctx.with_label(&format!("validator_{}", &pk)),
+            let marshal =
+                marshal_resolver::init(&validator_ctx.with_label("marshal"), resolver_cfg, marshal);
+            let engine = engine::Engine::<_, _, _, _, Sha256, MinSig, S, L, _>::new(
+                validator_ctx.with_label("consensus"),
                 engine::Config {
                     signer: sk.clone(),
                     manager: oracle.manager(),
@@ -393,6 +397,7 @@ mod test {
                     partition_prefix: format!("validator_{}", &pk),
                     freezer_table_initial_size: 1024, // 1mb
                     peer_config: self.peer_config.clone(),
+                    strategy: Sequential,
                 },
             )
             .await;
@@ -403,19 +408,37 @@ mod test {
                 resolver,
                 broadcast,
                 dkg,
-                orchestrator,
                 marshal,
                 UpdateHandler::boxed(pk.clone(), updates.clone()),
             );
             self.handles.insert(pk, handle);
         }
 
+        /// Start a participant using the appropriate scheme based on whether
+        /// we have an initial output (reshare mode) or not (DKG mode).
+        async fn start_participant(
+            &mut self,
+            ctx: &deterministic::Context,
+            oracle: &mut Oracle<PublicKey, deterministic::Context>,
+            updates: mpsc::Sender<TeamUpdate>,
+            pk: PublicKey,
+        ) {
+            if self.output.is_none() {
+                self.start_one::<EdScheme, RoundRobin>(ctx, oracle, updates, pk)
+                    .await;
+            } else {
+                self.start_one::<ThresholdScheme<MinSig>, Random>(ctx, oracle, updates, pk)
+                    .await;
+            }
+        }
+
         async fn start(
             &mut self,
             ctx: &deterministic::Context,
-            oracle: &mut Oracle<PublicKey>,
+            oracle: &mut Oracle<PublicKey, deterministic::Context>,
             link: Link,
             updates: mpsc::Sender<TeamUpdate>,
+            delayed: &HashSet<PublicKey>,
         ) {
             // Add links between all participants
             for v1 in self.participants.keys() {
@@ -430,33 +453,37 @@ mod test {
                 }
             }
 
-            // Start all participants (even if not active at first)
+            // Start participants that aren't delayed
             for pk in self.participants.keys().cloned().collect::<Vec<_>>() {
-                if self.output.is_none() {
-                    self.start_one::<EdScheme>(ctx, oracle, updates.clone(), pk.clone())
-                        .await;
-                } else {
-                    self.start_one::<ThresholdScheme<MinSig>>(
-                        ctx,
-                        oracle,
-                        updates.clone(),
-                        pk.clone(),
-                    )
-                    .await;
+                if delayed.contains(&pk) {
+                    info!(?pk, "delayed participant");
+                    continue;
                 }
+                self.start_participant(ctx, oracle, updates.clone(), pk)
+                    .await;
             }
         }
     }
 
-    /// Configuration for simulating participant crashes during a test.
+    /// Configuration for simulating participant unavailability during a test.
     #[derive(Clone)]
-    struct Crash {
-        /// How often to trigger crashes.
-        frequency: Duration,
-        /// How long crashed participants stay offline before restarting.
-        downtime: Duration,
-        /// Number of participants to crash each time.
-        count: usize,
+    enum Crash {
+        /// Randomly crash participants periodically.
+        Random {
+            /// How often to trigger crashes.
+            frequency: Duration,
+            /// How long crashed participants stay offline before restarting.
+            downtime: Duration,
+            /// Number of participants to crash each time.
+            count: usize,
+        },
+        /// Delay some participants from starting until after N epochs.
+        Delay {
+            /// Number of participants to delay.
+            count: usize,
+            /// Number of epochs to wait before starting delayed participants.
+            after: u64,
+        },
     }
 
     #[derive(Clone)]
@@ -520,20 +547,35 @@ mod test {
             };
             team.failures = self.failures.clone();
 
+            // Determine which participants should be delayed
+            let delayed: HashSet<PublicKey> = if let Some(Crash::Delay { count, .. }) = &self.crash
+            {
+                team.participants.keys().take(*count).cloned().collect()
+            } else {
+                HashSet::new()
+            };
+
             let (updates_in, mut updates_out) = mpsc::channel(0);
             let (restart_sender, mut restart_receiver) = mpsc::channel::<PublicKey>(10);
-            team.start(&ctx, &mut oracle, self.link.clone(), updates_in.clone())
-                .await;
+            team.start(
+                &ctx,
+                &mut oracle,
+                self.link.clone(),
+                updates_in.clone(),
+                &delayed,
+            )
+            .await;
 
-            // Set up crash ticker if needed
+            // Set up crash ticker if needed (only for Random crashes)
             let mut outputs = Vec::<Option<Output<MinSig, PublicKey>>>::new();
             let mut status = BTreeMap::<PublicKey, Epoch>::new();
-            let mut current_epoch = Epoch::zero();
             let mut successes = 0u64;
             let mut failures = 0u64;
+            let mut delayed_started = false;
+            let mut delayed_acknowledged: HashSet<PublicKey> = HashSet::new();
             let (crash_sender, mut crash_receiver) = mpsc::channel::<()>(1);
-            if let Some(crash) = &self.crash {
-                let frequency = crash.frequency;
+            if let Some(Crash::Random { frequency, .. }) = &self.crash {
+                let frequency = *frequency;
                 let mut crash_sender = crash_sender.clone();
                 ctx.clone().spawn(move |ctx| async move {
                     loop {
@@ -558,8 +600,14 @@ mod test {
                                 failures += 1;
                                 (epoch, None)
                             }
-                            Update::Success { epoch, output, .. } => {
+                            Update::Success { epoch, output, share } => {
                                 info!(epoch = ?epoch, pk = ?update.pk, ?output, "DKG success");
+
+                                // Check if a delayed participant got an acknowledged share
+                                if delayed.contains(&update.pk) && share.is_some() && output.revealed().position(&update.pk).is_none() {
+                                    info!(pk = ?update.pk, "delayed participant acknowledged");
+                                    delayed_acknowledged.insert(update.pk.clone());
+                                }
 
                                 (epoch, Some(output))
                             }
@@ -571,25 +619,25 @@ mod test {
                         }
                         status.insert(update.pk, epoch);
 
-                        match outputs.get(epoch.get() as usize) {
-                            None => {
-                                if output.is_some() {
-                                    successes += 1;
-                                }
-                                outputs.push(output);
+                        // If this is a new output, increment successes
+                        if let Some(o) = outputs.get(epoch.get() as usize) {
+                            if o.as_ref() != output.as_ref() {
+                                return Err(anyhow!("mismatched outputs {o:?} != {output:?}"));
                             }
-                            Some(o) => {
-                                if o.as_ref() != output.as_ref() {
-                                    return Err(anyhow!("mismatched outputs {o:?} != {output:?}"));
-                                }
+                        } else {
+                            if output.is_some() {
+                                successes += 1;
                             }
+                            outputs.push(output);
                         }
+
+                        // If we've reached the target number of successes, record the epoch (recall, epoch increases even after failure)
                         if successes >= target {
                             success_target_reached_epoch = Some(epoch);
                         }
-                        let all_reached_epoch = status.values().filter(|e| matches!(success_target_reached_epoch, Some(target) if **e >= target)
-                        ).count() >= self.total as usize;
 
+                        // If all have reached the epoch, stop
+                        let all_reached_epoch = status.values().filter(|e| matches!(success_target_reached_epoch, Some(target) if **e >= target)).count() >= self.total as usize;
                         let post_update = if all_reached_epoch {
                             PostUpdate::Stop
                         } else {
@@ -603,16 +651,67 @@ mod test {
                                 continue;
                         }
 
-                        if status.values().filter(|x| **x >= epoch).count() >= self.total as usize {
-                            if successes >= target {
-                                return Ok(PlanResult {
-                                    state: ctx.auditor().state(),
-                                    failures,
-                                });
-                            } else {
-                                current_epoch = current_epoch.next();
-                            }
+                        // Check if all active participants have reported
+                        let active_count = if delayed_started {
+                            self.total as usize
+                        } else {
+                            self.total as usize - delayed.len()
+                        };
+                        if status.len() < active_count {
+                            continue;
                         }
+
+                        // Compute the minimum epoch that all active participants have reached
+                        let min_epoch = status.values().min().copied().unwrap_or(Epoch::zero());
+                        if successes >= target {
+                            // Wait for all active participants to reach the target epoch
+                            if let Some(target_epoch) = success_target_reached_epoch {
+                                if min_epoch < target_epoch {
+                                    continue;
+                                }
+                            }
+                            // Verify all delayed participants got acknowledged shares
+                            if matches!(self.crash, Some(Crash::Delay { .. })) {
+                                let unacknowledged: Vec<_> = delayed
+                                    .iter()
+                                    .filter(|pk| !delayed_acknowledged.contains(*pk))
+                                    .collect();
+                                if !unacknowledged.is_empty() {
+                                    return Err(anyhow!(
+                                        "delayed participants not acknowledged: {:?}",
+                                        unacknowledged
+                                    ));
+                                }
+                            }
+                            return Ok(PlanResult {
+                                state: ctx.auditor().state(),
+                                failures,
+                            });
+                        }
+
+                        // Start delayed participants after the specified number of epochs
+                        if delayed_started {
+                            continue;
+                        }
+                        let Some(Crash::Delay { after, .. }) = &self.crash else {
+                            continue;
+                        };
+                        // min_epoch.next() represents the number of completed epochs
+                        // (e.g., if min_epoch=1, epochs 0 and 1 are complete, so 2 epochs done)
+                        if min_epoch.next().get() < *after {
+                            continue;
+                        }
+                        info!(epoch = ?min_epoch, "starting delayed participants");
+                        for pk in delayed.iter() {
+                            team.start_participant(
+                                &ctx,
+                                &mut oracle,
+                                updates_in.clone(),
+                                pk.clone(),
+                            )
+                            .await;
+                        }
+                        delayed_started = true;
                     },
                     pk = restart_receiver.next() => {
                         let Some(pk) = pk else {
@@ -621,39 +720,40 @@ mod test {
 
                         info!(pk = ?pk, "restarting participant");
                         if team.output.is_none() {
-                            team.start_one::<EdScheme>(&ctx, &mut oracle, updates_in.clone(), pk).await;
+                            team.start_one::<EdScheme, RoundRobin>(&ctx, &mut oracle, updates_in.clone(), pk).await;
                         } else {
-                            team.start_one::<ThresholdScheme<MinSig>>(&ctx, &mut oracle, updates_in.clone(), pk).await;
+                            team.start_one::<ThresholdScheme<MinSig>, Random>(&ctx, &mut oracle, updates_in.clone(), pk).await;
                         }
                     },
                     _ = crash_receiver.next() => {
-                        // Crash ticker fired
-                        if let Some(crash) = &self.crash {
-                            // Pick multiple random participants to crash
-                            let all_participants: Vec<PublicKey> = team.participants.keys().cloned().collect();
-                            let crash_count = crash.count.min(all_participants.len());
-                            let to_crash: Vec<PublicKey> = all_participants.choose_multiple(&mut ctx, crash_count).cloned().collect();
+                        // Crash ticker fired (only for Random crashes)
+                        let Some(Crash::Random { count, downtime, .. }) = &self.crash else {
+                            continue;
+                        };
 
-                            for pk in to_crash {
-                                // Try to abort the handle if it exists
-                                if let Some(handle) = team.handles.remove(&pk) {
-                                    handle.abort();
-                                    info!(pk = ?pk, "crashed participant");
+                        // Pick multiple random participants to crash
+                        let all_participants: Vec<PublicKey> = team.participants.keys().cloned().collect();
+                        let crash_count = (*count).min(all_participants.len());
+                        let to_crash: Vec<PublicKey> = all_participants.choose_multiple(&mut ctx, crash_count).cloned().collect();
+                        for pk in to_crash {
+                            // Try to abort the handle if it exists
+                            let Some(handle) = team.handles.remove(&pk) else {
+                                debug!(pk = ?pk, "participant already crashed");
+                                continue;
+                            };
+                            handle.abort();
+                            info!(pk = ?pk, "crashed participant");
 
-                                    // Schedule restart after downtime
-                                    let mut restart_sender = restart_sender.clone();
-                                    let downtime = crash.downtime;
-                                    let pk_clone = pk.clone();
-                                    ctx.clone().spawn(move |ctx| async move {
-                                        if downtime > Duration::ZERO {
-                                            ctx.sleep(downtime).await;
-                                        }
-                                        let _ = restart_sender.send(pk_clone).await;
-                                    });
-                                } else {
-                                    debug!(pk = ?pk, "participant already crashed");
+                            // Schedule restart after downtime
+                            let mut restart_sender = restart_sender.clone();
+                            let downtime = *downtime;
+                            let pk_clone = pk.clone();
+                            ctx.clone().spawn(move |ctx| async move {
+                                if downtime > Duration::ZERO {
+                                    ctx.sleep(downtime).await;
                                 }
-                            }
+                                let _ = restart_sender.send(pk_clone).await;
+                            });
                         }
                     },
                 }
@@ -758,6 +858,46 @@ mod test {
                 success_rate: 1.0,
             },
             mode: Mode::Dkg,
+            crash: None,
+            failures: HashSet::new(),
+        }
+        .run()
+        .unwrap();
+    }
+
+    #[test_group("slow")]
+    #[test_traced("DEBUG")]
+    fn dkg_single_participant_single_epoch() {
+        Plan {
+            seed: 0,
+            total: 1,
+            per_round: vec![1],
+            link: Link {
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(1),
+                success_rate: 1.0,
+            },
+            mode: Mode::Dkg,
+            crash: None,
+            failures: HashSet::new(),
+        }
+        .run()
+        .unwrap();
+    }
+
+    #[test_group("slow")]
+    #[test_traced("DEBUG")]
+    fn reshare_single_participant_two_epochs() {
+        Plan {
+            seed: 0,
+            total: 1,
+            per_round: vec![1],
+            link: Link {
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(1),
+                success_rate: 1.0,
+            },
+            mode: Mode::Reshare(2),
             crash: None,
             failures: HashSet::new(),
         }
@@ -918,7 +1058,7 @@ mod test {
                 success_rate: 1.0,
             },
             mode: Mode::Dkg,
-            crash: Some(Crash {
+            crash: Some(Crash::Random {
                 frequency: Duration::from_secs(4),
                 downtime: Duration::from_secs(1),
                 count: 1,
@@ -942,7 +1082,7 @@ mod test {
                 success_rate: 1.0,
             },
             mode: Mode::Reshare(4),
-            crash: Some(Crash {
+            crash: Some(Crash::Random {
                 frequency: Duration::from_secs(4),
                 downtime: Duration::from_secs(1),
                 count: 1,
@@ -966,7 +1106,7 @@ mod test {
                 success_rate: 1.0,
             },
             mode: Mode::Dkg,
-            crash: Some(Crash {
+            crash: Some(Crash::Random {
                 frequency: Duration::from_secs(2),
                 downtime: Duration::from_millis(500),
                 count: 3,
@@ -990,10 +1130,58 @@ mod test {
                 success_rate: 1.0,
             },
             mode: Mode::Reshare(4),
-            crash: Some(Crash {
+            crash: Some(Crash::Random {
                 frequency: Duration::from_secs(2),
                 downtime: Duration::from_millis(500),
                 count: 3,
+            }),
+            failures: HashSet::new(),
+        }
+        .run()
+        .unwrap();
+    }
+
+    #[test_group("slow")]
+    #[test_traced("INFO")]
+    fn dkg_four_epochs_with_total_shutdown() {
+        Plan {
+            seed: 0,
+            total: 4,
+            per_round: vec![4],
+            link: Link {
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(1),
+                success_rate: 1.0,
+            },
+            mode: Mode::Dkg,
+            crash: Some(Crash::Random {
+                frequency: Duration::from_secs(2),
+                downtime: Duration::from_millis(500),
+                count: 4,
+            }),
+            failures: HashSet::new(),
+        }
+        .run()
+        .unwrap();
+    }
+
+    #[test_group("slow")]
+    #[test_traced("INFO")]
+    fn reshare_four_epochs_with_total_shutdown() {
+        Plan {
+            seed: 0,
+            total: 4,
+            per_round: vec![4],
+            link: Link {
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(1),
+                success_rate: 1.0,
+            },
+            mode: Mode::Reshare(4),
+            crash: Some(Crash::Random {
+                frequency: Duration::from_secs(4),
+                downtime: Duration::from_secs(1),
+                count: 4,
             }),
             failures: HashSet::new(),
         }
@@ -1076,6 +1264,66 @@ mod test {
             mode: Mode::Dkg,
             crash: None,
             failures: HashSet::from([0, 1]),
+        }
+        .run()
+        .unwrap();
+    }
+
+    #[test_group("slow")]
+    #[test_traced("INFO")]
+    fn dkg_with_delay() {
+        Plan {
+            seed: 0,
+            total: 5,
+            per_round: vec![5],
+            link: Link {
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(1),
+                success_rate: 1.0,
+            },
+            mode: Mode::Dkg,
+            crash: Some(Crash::Delay { count: 1, after: 2 }),
+            failures: HashSet::from([0, 1, 2, 3, 4]),
+        }
+        .run()
+        .unwrap();
+    }
+
+    #[test_group("slow")]
+    #[test_traced("INFO")]
+    fn reshare_with_delay() {
+        Plan {
+            seed: 0,
+            total: 5,
+            per_round: vec![5],
+            link: Link {
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(1),
+                success_rate: 1.0,
+            },
+            mode: Mode::Reshare(5),
+            crash: Some(Crash::Delay { count: 1, after: 2 }),
+            failures: HashSet::from([3]),
+        }
+        .run()
+        .unwrap();
+    }
+
+    #[test_group("slow")]
+    #[test_traced("INFO")]
+    fn reshare_with_delay_subset() {
+        Plan {
+            seed: 0,
+            total: 5,
+            per_round: vec![4, 5],
+            link: Link {
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(1),
+                success_rate: 1.0,
+            },
+            mode: Mode::Reshare(8),
+            crash: Some(Crash::Delay { count: 1, after: 2 }),
+            failures: HashSet::from([3]),
         }
         .run()
         .unwrap();

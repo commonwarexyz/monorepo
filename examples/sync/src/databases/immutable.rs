@@ -8,13 +8,16 @@ use commonware_storage::{
     qmdb::{
         self,
         immutable::{self, Config},
+        Durable, Merkleized,
     },
 };
-use commonware_utils::{NZUsize, NZU64};
+use commonware_utils::{NZUsize, NZU16, NZU64};
 use std::{future::Future, num::NonZeroU64};
+use tracing::error;
 
-/// Database type alias.
-pub type Database<E> = immutable::Immutable<E, Key, Value, Hasher, Translator>;
+/// Database type alias for the clean (merkleized, durable) state.
+pub type Database<E> =
+    immutable::Immutable<E, Key, Value, Hasher, Translator, Merkleized<Hasher>, Durable>;
 
 /// Operation type alias.
 pub type Operation = immutable::Operation<Key, Value>;
@@ -33,7 +36,7 @@ pub fn create_config() -> Config<Translator, ()> {
         log_write_buffer: NZUsize!(1024),
         translator: commonware_storage::translator::EightCap,
         thread_pool: None,
-        buffer_pool: commonware_runtime::buffer::PoolRef::new(NZUsize!(1024), NZUsize!(10)),
+        buffer_pool: commonware_runtime::buffer::PoolRef::new(NZU16!(1024), NZUsize!(10)),
     }
 }
 
@@ -79,24 +82,34 @@ where
     }
 
     async fn add_operations(
-        database: &mut Self,
+        self,
         operations: Vec<Self::Operation>,
-    ) -> Result<(), commonware_storage::qmdb::Error> {
-        for operation in operations {
+    ) -> Result<Self, commonware_storage::qmdb::Error> {
+        if operations.last().is_none() || !operations.last().unwrap().is_commit() {
+            // Ignore bad inputs rather than return errors.
+            error!("operations must end with a commit");
+            return Ok(self);
+        }
+        let mut db = self.into_mutable();
+        let num_ops = operations.len();
+
+        for (i, operation) in operations.into_iter().enumerate() {
             match operation {
                 Operation::Set(key, value) => {
-                    database.set(key, value).await?;
+                    db.set(key, value).await?;
                 }
                 Operation::Commit(metadata) => {
-                    database.commit(metadata).await?;
+                    let (durable_db, _) = db.commit(metadata).await?;
+                    if i == num_ops - 1 {
+                        // Last operation - return the clean database
+                        return Ok(durable_db.into_merkleized());
+                    }
+                    // Not the last operation - continue in mutable state
+                    db = durable_db.into_mutable();
                 }
             }
         }
-        Ok(())
-    }
-
-    async fn commit(&mut self) -> Result<(), commonware_storage::qmdb::Error> {
-        self.commit(None).await
+        unreachable!("operations must end with a commit");
     }
 
     fn root(&self) -> Key {
@@ -109,7 +122,6 @@ where
 
     fn lower_bound(&self) -> Location {
         self.oldest_retained_loc()
-            .unwrap_or(Location::new(0).unwrap())
     }
 
     fn historical_proof(

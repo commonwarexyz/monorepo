@@ -1,4 +1,3 @@
-use crate::Message;
 use arbitrary::Unstructured;
 use commonware_codec::ReadExt;
 use commonware_cryptography::bls12381::{
@@ -12,6 +11,7 @@ use commonware_math::{
     algebra::{Additive, CryptoGroup},
     poly::Poly,
 };
+use commonware_utils::Participant;
 use rand::{rngs::StdRng, SeedableRng};
 
 #[allow(unused)]
@@ -60,6 +60,8 @@ pub fn arbitrary_vec_g2(
     (0..len).map(|_| arbitrary_g2(u)).collect()
 }
 
+pub type Message = (Vec<u8>, Vec<u8>);
+
 #[allow(unused)]
 pub fn arbitrary_messages(
     u: &mut Unstructured,
@@ -67,12 +69,7 @@ pub fn arbitrary_messages(
     max: usize,
 ) -> Result<Vec<Message>, arbitrary::Error> {
     (0..u.int_in_range(min..=max)?)
-        .map(|_| {
-            Ok((
-                arbitrary_optional_bytes(u, 50)?,
-                arbitrary_bytes(u, 0, 100)?,
-            ))
-        })
+        .map(|_| Ok((arbitrary_bytes(u, 0, 50)?, arbitrary_bytes(u, 0, 100)?)))
         .collect()
 }
 
@@ -99,23 +96,18 @@ pub fn arbitrary_bytes(
 }
 
 #[allow(unused)]
-pub fn arbitrary_scalar(u: &mut Unstructured) -> Result<Scalar, arbitrary::Error> {
-    u.arbitrary()
-}
-
-#[allow(unused)]
 pub fn arbitrary_share(u: &mut Unstructured) -> Result<Share, arbitrary::Error> {
-    Ok(Share {
-        index: u.int_in_range(1..=100)?,
-        private: arbitrary_scalar(u)?,
-    })
+    Ok(Share::new(
+        Participant::new(u.int_in_range(1..=100)?),
+        u.arbitrary()?,
+    ))
 }
 
 #[allow(unused)]
 pub fn arbitrary_poly_scalar(u: &mut Unstructured) -> Result<Poly<Scalar>, arbitrary::Error> {
     let degree = u.int_in_range(0..=10)?;
     let seed: [u8; 32] = u.arbitrary()?;
-    let constant = arbitrary_scalar(u)?;
+    let constant: Scalar = u.arbitrary()?;
     let mut rng = StdRng::from_seed(seed);
     Ok(Poly::new_with_constant(&mut rng, degree, constant))
 }
@@ -137,7 +129,7 @@ pub fn arbitrary_partial_sig_g1(
     u: &mut Unstructured,
 ) -> Result<PartialSignature<MinSig>, arbitrary::Error> {
     Ok(PartialSignature {
-        index: u.int_in_range(1..=100)?,
+        index: u.arbitrary()?,
         value: arbitrary_g1(u)?,
     })
 }
@@ -147,7 +139,7 @@ pub fn arbitrary_partial_sig_g2(
     u: &mut Unstructured,
 ) -> Result<PartialSignature<MinPk>, arbitrary::Error> {
     Ok(PartialSignature {
-        index: u.int_in_range(1..=100)?,
+        index: u.arbitrary()?,
         value: arbitrary_g2(u)?,
     })
 }
@@ -159,7 +151,7 @@ pub fn arbitrary_vec_scalar(
     max: usize,
 ) -> Result<Vec<Scalar>, arbitrary::Error> {
     let len = u.int_in_range(min..=max)?;
-    (0..len).map(|_| arbitrary_scalar(u)).collect()
+    (0..len).map(|_| u.arbitrary()).collect()
 }
 
 #[allow(unused)]

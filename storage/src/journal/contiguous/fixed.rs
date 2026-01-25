@@ -1,4 +1,4 @@
-//! An append-only log for storing fixed length items on disk.
+//! An append-only log for storing fixed length _items_ on disk.
 //!
 //! In addition to replay, stored items can be fetched directly by their `position` in the journal,
 //! where position is defined as the item's order of insertion starting from 0, unaffected by
@@ -8,28 +8,28 @@
 //!
 //! # Format
 //!
-//! Data stored in a `fixed::Journal` is persisted in one of many Blobs within a caller-provided
-//! `partition`. Each `Blob` contains a configurable maximum of `items_per_blob`, with each item
-//! followed by its checksum (CRC32):
+//! Data stored in a `fixed::Journal` is persisted in one of many Blobs. Each `Blob` contains a
+//! configurable maximum of `items_per_blob`, with page-level data integrity provided by a buffer
+//! pool.
 //!
 //! ```text
-//! +--------+-----------+--------+-----------+--------+----------+-------------+
-//! | item_0 | C(Item_0) | item_1 | C(Item_1) |   ...  | item_n-1 | C(Item_n-1) |
-//! +--------+-----------+--------+----0------+--------+----------+-------------+
+//! +--------+----- --+--- -+----------+
+//! | item_0 | item_1 | ... | item_n-1 |
+//! +--------+-----------+--------+----0
 //!
-//! n = config.items_per_blob, C = CRC32
+//! n = config.items_per_blob
 //! ```
 //!
 //! The most recent blob may not necessarily be full, in which case it will contain fewer than the
 //! maximum number of items.
 //!
-//! A fetched or replayed item's checksum is always computed and checked against the stored value
-//! before it is returned. If the checksums do not match, an error is returned instead.
+//! Data fetched from disk is always checked for integrity before being returned. If the data is
+//! found to be invalid, an error is returned instead.
 //!
 //! # Open Blobs
 //!
 //! All `Blobs` in a given `partition` are kept open during the lifetime of `Journal`. You can limit
-//! the number of open blobs by using a higher number of `items_per_blob` or pruning old items.
+//! the number of open blobs by using a higher number of `items_per_blob` and/or pruning old items.
 //!
 //! # Consistency
 //!
@@ -44,41 +44,33 @@
 //!
 //! # State Sync
 //!
-//! `Journal::init_sync` allows for initializing a journal for use in state sync.
-//! When opened in this mode, we attempt to populate the journal within the given range
-//! with persisted data.
-//! If the journal is empty, we create a fresh journal at the specified position.
-//! If the journal is not empty, we prune the journal to the specified lower bound and rewind to
-//! the specified upper bound.
+//! `Journal::init_sync` initializes a journal for state sync, handling existing data appropriately:
+//! - If no data exists, creates a journal at the sync range start
+//! - If data exists within range, prunes to the lower bound
+//! - If data exceeds the range, returns an error
+//! - If data is stale (before range), destroys and recreates
 //!
 //! # Replay
 //!
 //! The `replay` method supports fast reading of all unpruned items into memory.
 
-use crate::journal::{
-    contiguous::{MutableContiguous, PersistableContiguous},
-    Error,
+use crate::{
+    journal::{
+        contiguous::MutableContiguous,
+        segmented::fixed::{Config as SegmentedConfig, Journal as SegmentedJournal},
+        Error,
+    },
+    mmr::Location,
+    Persistable,
 };
-use bytes::BufMut;
-use commonware_codec::{CodecFixed, DecodeExt as _, FixedSize};
-use commonware_runtime::{
-    buffer::{Append, PoolRef, Read},
-    telemetry::metrics::status::GaugeExt,
-    Blob, Error as RError, Metrics, Storage,
-};
-use commonware_utils::hex;
-use futures::{
-    future::try_join_all,
-    stream::{self, Stream},
-    StreamExt,
-};
-use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
+use commonware_codec::CodecFixedShared;
+use commonware_runtime::{buffer::PoolRef, Metrics, Storage};
+use futures::{stream::Stream, StreamExt};
 use std::{
-    collections::BTreeMap,
-    marker::PhantomData,
     num::{NonZeroU64, NonZeroUsize},
+    ops::Range,
 };
-use tracing::{debug, trace, warn};
+use tracing::debug;
 
 /// Configuration for `Journal` storage.
 #[derive(Clone)]
@@ -100,223 +92,211 @@ pub struct Config {
 }
 
 /// Implementation of `Journal` storage.
-pub struct Journal<E: Storage + Metrics, A: CodecFixed> {
-    pub(crate) context: E,
-    pub(crate) cfg: Config,
+///
+/// This is implemented as a wrapper around [SegmentedJournal] that provides position-based access
+/// where positions are automatically mapped to (section, position_in_section) pairs.
+///
+/// # Repair
+///
+/// Like
+/// [sqlite](https://github.com/sqlite/sqlite/blob/8658a8df59f00ec8fcfea336a2a6a4b5ef79d2ee/src/wal.c#L1504-L1505)
+/// and
+/// [rocksdb](https://github.com/facebook/rocksdb/blob/0c533e61bc6d89fdf1295e8e0bcee4edb3aef401/include/rocksdb/options.h#L441-L445),
+/// the first invalid data read will be considered the new end of the journal (and the
+/// underlying blob will be truncated to the last valid item). Repair is performed
+/// by the underlying [SegmentedJournal] during init.
+pub struct Journal<E: Storage + Metrics, A: CodecFixedShared> {
+    inner: SegmentedJournal<E, A>,
 
-    /// Stores the historical blobs. A BTreeMap allows iterating over them from oldest to newest.
-    ///
-    /// # Invariants
-    ///
-    /// - Indices are consecutive and without gaps.
-    /// - Contains only full blobs.
-    /// - Never contains the most recent blob.
-    pub(crate) blobs: BTreeMap<u64, Append<E::Blob>>,
+    /// The maximum number of items per blob (section).
+    items_per_blob: u64,
 
-    /// The most recent blob.
-    ///
-    /// # Invariant
-    ///
-    /// Always has room for at least one more item (and may be empty).
-    pub(crate) tail: Append<E::Blob>,
-
-    /// The index of the most recent blob.
-    pub(crate) tail_index: u64,
-
-    /// Cached size of the journal.
-    pub(crate) size: u64,
-
-    /// Cached pruning boundary.
-    pub(crate) pruning_boundary: u64,
-
-    pub(crate) tracked: Gauge,
-    pub(crate) synced: Counter,
-    pub(crate) pruned: Counter,
-
-    pub(crate) _array: PhantomData<A>,
+    /// Total number of items appended (not affected by pruning).
+    size: u64,
 }
 
-impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> Journal<E, A> {
-    pub(crate) const CHUNK_SIZE: usize = u32::SIZE + A::SIZE;
-    pub(crate) const CHUNK_SIZE_U64: u64 = Self::CHUNK_SIZE as u64;
+impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
+    /// Size of each entry in bytes.
+    pub const CHUNK_SIZE: usize = SegmentedJournal::<E, A>::CHUNK_SIZE;
+
+    /// Size of each entry in bytes (as u64).
+    pub const CHUNK_SIZE_U64: u64 = Self::CHUNK_SIZE as u64;
 
     /// Initialize a new `Journal` instance.
     ///
     /// All backing blobs are opened but not read during initialization. The `replay` method can be
     /// used to iterate over all items in the `Journal`.
-    ///
-    /// # Repair
-    ///
-    /// Like [sqlite](https://github.com/sqlite/sqlite/blob/8658a8df59f00ec8fcfea336a2a6a4b5ef79d2ee/src/wal.c#L1504-L1505)
-    /// and [rocksdb](https://github.com/facebook/rocksdb/blob/0c533e61bc6d89fdf1295e8e0bcee4edb3aef401/include/rocksdb/options.h#L441-L445),
-    /// the first invalid data read will be considered the new end of the journal (and the underlying [Blob] will be truncated to the last
-    /// valid item).
     pub async fn init(context: E, cfg: Config) -> Result<Self, Error> {
-        // Iterate over blobs in partition
-        let mut blobs = BTreeMap::new();
-        let stored_blobs = match context.scan(&cfg.partition).await {
-            Ok(blobs) => blobs,
-            Err(RError::PartitionMissing(_)) => Vec::new(),
-            Err(err) => return Err(Error::Runtime(err)),
+        let items_per_blob = cfg.items_per_blob.get();
+
+        let segmented_cfg = SegmentedConfig {
+            partition: cfg.partition,
+            buffer_pool: cfg.buffer_pool,
+            write_buffer: cfg.write_buffer,
         };
-        for name in stored_blobs {
-            let (blob, size) = context
-                .open(&cfg.partition, &name)
-                .await
-                .map_err(Error::Runtime)?;
-            let index = match name.try_into() {
-                Ok(index) => u64::from_be_bytes(index),
-                Err(nm) => return Err(Error::InvalidBlobName(hex(&nm))),
-            };
-            debug!(blob = index, size, "loaded blob");
-            blobs.insert(index, (blob, size));
-        }
 
-        // Check that there are no gaps in the historical blobs and that they are all full.
-        let full_size = cfg.items_per_blob.get() * Self::CHUNK_SIZE_U64;
-        if !blobs.is_empty() {
-            let mut it = blobs.keys().rev();
-            let mut prev_index = *it.next().unwrap();
-            for index in it {
-                let (_, size) = blobs.get(index).unwrap();
-                if *index != prev_index - 1 {
-                    return Err(Error::MissingBlob(prev_index - 1));
-                }
-                prev_index = *index;
-                if *size != full_size {
-                    // Non-final blobs that have invalid sizes are not recoverable.
-                    return Err(Error::InvalidBlobSize(*index, *size));
-                }
+        let mut inner = SegmentedJournal::init(context, segmented_cfg).await?;
+
+        // Calculate size and pruning_boundary from the inner journal's state
+        let oldest_section = inner.oldest_section();
+        let newest_section = inner.newest_section();
+
+        let size = match (oldest_section, newest_section) {
+            (Some(_), Some(newest)) => {
+                // Compute size from the tail (newest) section
+                let tail_len = inner.section_len(newest).await?;
+                newest * items_per_blob + tail_len
             }
-        } else {
-            debug!("no blobs found");
-            let (blob, size) = context.open(&cfg.partition, &0u64.to_be_bytes()).await?;
-            assert_eq!(size, 0);
-            blobs.insert(0, (blob, size));
-        }
-
-        // Initialize metrics.
-        let tracked = Gauge::default();
-        let synced = Counter::default();
-        let pruned = Counter::default();
-        context.register("tracked", "Number of blobs", tracked.clone());
-        context.register("synced", "Number of syncs", synced.clone());
-        context.register("pruned", "Number of blobs pruned", pruned.clone());
-        let _ = tracked.try_set(blobs.len());
-
-        // Initialize the tail blob.
-        let (mut tail_index, (mut tail, mut tail_size)) = blobs.pop_last().unwrap();
-
-        // Trim invalid items from the tail blob.
-        tail_size = Self::trim_tail(&tail, tail_size, tail_index).await?;
-        if tail_size > full_size {
-            return Err(Error::InvalidBlobSize(tail_index, tail_size));
-        }
-
-        // If the tail blob is full we need to start a new one to maintain its invariant that there
-        // is always room for another item.
-        if tail_size == full_size {
-            warn!(
-                blob = tail_index,
-                "tail blob is full, creating a new empty one"
-            );
-            blobs.insert(tail_index, (tail, tail_size));
-            tail_index += 1;
-            (tail, tail_size) = context
-                .open(&cfg.partition, &tail_index.to_be_bytes())
-                .await?;
-            assert_eq!(tail_size, 0);
-            tracked.inc();
-        }
-
-        // Wrap all blobs with Append wrappers.
-        // TODO(https://github.com/commonwarexyz/monorepo/issues/1219): Consider creating an
-        // Immutable wrapper which doesn't allocate a write buffer for these.
-        let blobs = try_join_all(blobs.into_iter().map(|(index, (blob, size))| {
-            let pool = cfg.buffer_pool.clone();
-            async move {
-                let blob = Append::new(blob, size, cfg.write_buffer, pool).await?;
-                Ok::<_, Error>((index, (blob, size)))
-            }
-        }))
-        .await?;
-        let tail = Append::new(tail, tail_size, cfg.write_buffer, cfg.buffer_pool.clone()).await?;
-        let size = tail_index * cfg.items_per_blob.get() + (tail_size / Self::CHUNK_SIZE_U64);
-        let pruning_boundary = if blobs.is_empty() {
-            tail_index * cfg.items_per_blob.get()
-        } else {
-            blobs[0].0 * cfg.items_per_blob.get()
+            _ => 0,
         };
-        assert!(size >= pruning_boundary);
+
+        // Invariant: Tail blob must exist, even if empty. This ensures we can reconstruct size on
+        // reopen even after pruning all items. The tail blob is at `size / items_per_blob` (where
+        // the next append would go).
+        let tail_section = size / items_per_blob;
+        inner.ensure_section_exists(tail_section).await?;
 
         Ok(Self {
-            context,
-            cfg,
-            blobs: blobs
-                .into_iter()
-                .map(|(index, (blob, _))| (index, blob))
-                .collect(),
-            tail,
-            tail_index,
+            inner,
+            items_per_blob,
             size,
-            pruning_boundary,
-            tracked,
-            synced,
-            pruned,
-            _array: PhantomData,
         })
     }
 
-    /// Trim any invalid data found at the end of the tail blob and return the new size. The new
-    /// size will be less than or equal to the originally provided size, and a multiple of the item
-    /// size.
-    async fn trim_tail(
-        tail: &<E as Storage>::Blob,
-        mut tail_size: u64,
-        tail_index: u64,
-    ) -> Result<u64, Error> {
-        let mut truncated = false;
-        if !tail_size.is_multiple_of(Self::CHUNK_SIZE_U64) {
-            warn!(
-                blob = tail_index,
-                invalid_size = tail_size,
-                "last blob size is not a multiple of item size, truncating"
-            );
-            tail_size -= tail_size % Self::CHUNK_SIZE_U64;
-            tail.resize(tail_size).await?;
-            truncated = true;
-        }
+    /// Initialize a new `Journal` instance in a pruned state at a given size.
+    ///
+    /// This is used for state sync to create a journal that appears to have had `size` items
+    /// appended and then pruned up to that point.
+    ///
+    /// # Arguments
+    /// * `context` - The storage context
+    /// * `cfg` - Configuration for the journal
+    /// * `size` - The number of operations that have been "pruned"
+    ///
+    /// # Behavior
+    /// - Creates only the tail blob at the section that would contain position `size-1`
+    /// - The items in the tail blob before `size` are filled with zeros (dummy data)
+    /// - `oldest_retained_pos()` returns the start of the tail section, matching behavior if the
+    ///   journal were reopened normally
+    /// - Positions within the tail section but before `size` contain dummy zero data
+    ///
+    /// # Invariants
+    /// - The directory given by `cfg.partition` should be empty
+    pub async fn init_at_size(context: E, cfg: Config, size: u64) -> Result<Self, Error> {
+        let items_per_blob = cfg.items_per_blob.get();
 
-        // Truncate any records with failing checksums. This can happen if the file system allocated
-        // extra space for a blob but there was a crash before any data was written to that space.
-        while tail_size > 0 {
-            let offset = tail_size - Self::CHUNK_SIZE_U64;
-            let read = tail.read_at(vec![0u8; Self::CHUNK_SIZE], offset).await?;
-            match Self::verify_integrity(read.as_ref()) {
-                Ok(_) => break, // Valid item found, we can stop truncating.
-                Err(Error::ChecksumMismatch(_, _)) => {
-                    warn!(blob = tail_index, offset, "checksum mismatch: truncating",);
-                    tail_size -= Self::CHUNK_SIZE_U64;
-                    tail.resize(tail_size).await?;
-                    truncated = true;
-                }
-                Err(err) => return Err(err),
+        // Calculate the tail blob section and items within it
+        let tail_section = size / items_per_blob;
+        let tail_items = size % items_per_blob;
+
+        // Initialize the segmented journal (empty)
+        let segmented_cfg = SegmentedConfig {
+            partition: cfg.partition,
+            buffer_pool: cfg.buffer_pool,
+            write_buffer: cfg.write_buffer,
+        };
+
+        let mut inner = SegmentedJournal::init(context, segmented_cfg).await?;
+
+        // Initialize the tail section with zero-filled items if needed. This uses resize internally
+        // which appropriately uses the underlying page-oriented layout with checksums.
+        inner.init_section_at_size(tail_section, tail_items).await?;
+        inner.sync_all().await?;
+
+        Ok(Self {
+            inner,
+            items_per_blob,
+            size,
+        })
+    }
+
+    /// Initialize a journal for synchronization, reusing existing data if possible.
+    ///
+    /// Handles sync scenarios based on existing journal data vs. the given sync range:
+    ///
+    /// 1. **No existing data**: Creates journal at `range.start` (or empty if `range.start == 0`)
+    /// 2. **Data within range**: Prunes to `range.start` and reuses existing data
+    /// 3. **Data exceeds range**: Returns error
+    /// 4. **Stale data**: Destroys and recreates at `range.start`
+    pub(crate) async fn init_sync(
+        context: E,
+        cfg: Config,
+        range: Range<u64>,
+    ) -> Result<Self, crate::qmdb::Error> {
+        assert!(!range.is_empty(), "range must not be empty");
+
+        debug!(
+            range.start,
+            range.end,
+            items_per_blob = cfg.items_per_blob.get(),
+            "initializing contiguous fixed journal for sync"
+        );
+
+        let mut journal = Self::init(context.with_label("journal"), cfg.clone()).await?;
+        let size = journal.size();
+
+        // No existing data - initialize at the start of the sync range if needed
+        if size == 0 {
+            if range.start == 0 {
+                debug!("no existing journal data, returning empty journal");
+                return Ok(journal);
+            } else {
+                debug!(
+                    range.start,
+                    "no existing journal data, initializing at sync range start"
+                );
+                journal.destroy().await?;
+                return Ok(Self::init_at_size(context, cfg, range.start).await?);
             }
         }
 
-        // If we truncated the blob, make sure to sync it.
-        if truncated {
-            tail.sync().await?;
+        // Check if data exceeds the sync range
+        if size > range.end {
+            return Err(crate::qmdb::Error::UnexpectedData(Location::new_unchecked(
+                size,
+            )));
         }
 
-        Ok(tail_size)
+        // If all existing data is before our sync range, destroy and recreate fresh
+        if size <= range.start {
+            debug!(
+                size,
+                range.start, "existing journal data is stale, re-initializing at start position"
+            );
+            journal.destroy().await?;
+            return Ok(Self::init_at_size(context, cfg, range.start).await?);
+        }
+
+        // Prune to lower bound if needed
+        let oldest = journal.oldest_retained_pos();
+        if let Some(oldest_pos) = oldest {
+            if oldest_pos < range.start {
+                debug!(
+                    oldest_pos,
+                    range.start, "pruning journal to sync range start"
+                );
+                journal.prune(range.start).await?;
+            }
+        }
+
+        Ok(journal)
+    }
+
+    /// Convert a global position to (section, position_in_section).
+    #[inline]
+    const fn position_to_section(&self, position: u64) -> (u64, u64) {
+        let section = position / self.items_per_blob;
+        let pos_in_section = position % self.items_per_blob;
+        (section, pos_in_section)
     }
 
     /// Sync any pending updates to disk.
+    ///
+    /// Only the tail section can have pending updates since historical sections are synced
+    /// when they become full.
     pub async fn sync(&mut self) -> Result<(), Error> {
-        self.synced.inc();
-        debug!(blob = self.tail_index, "syncing blob");
-        self.tail.sync().await.map_err(Error::Runtime)
+        let tail_section = self.size / self.items_per_blob;
+        self.inner.sync(tail_section).await
     }
 
     /// Return the total number of items in the journal, irrespective of pruning. The next value
@@ -328,58 +308,24 @@ impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> Journal<E, A> {
     /// Append a new item to the journal. Return the item's position in the journal, or error if the
     /// operation fails.
     pub async fn append(&mut self, item: A) -> Result<u64, Error> {
-        // There should always be room to append an item in the newest blob
-        let mut size = self.tail.size().await;
-        assert!(size < self.cfg.items_per_blob.get() * Self::CHUNK_SIZE_U64);
-        assert_eq!(size % Self::CHUNK_SIZE_U64, 0);
-        let mut buf: Vec<u8> = Vec::with_capacity(Self::CHUNK_SIZE);
-        let item = item.encode();
-        let checksum = crc32fast::hash(&item);
-        buf.extend_from_slice(&item);
-        buf.put_u32(checksum);
+        let position = self.size;
+        let (section, _pos_in_section) = self.position_to_section(position);
 
-        // Write the item to the blob
-        let item_pos =
-            (size / Self::CHUNK_SIZE_U64) + self.cfg.items_per_blob.get() * self.tail_index;
-        self.tail.append(buf).await?;
-        trace!(blob = self.tail_index, pos = item_pos, "appended item");
-        size += Self::CHUNK_SIZE_U64;
-
-        // If the tail blob is now full we need to create a new empty one to fulfill the invariant
-        // that the tail blob always has room for a new element.
-        if size == self.cfg.items_per_blob.get() * Self::CHUNK_SIZE_U64 {
-            // Sync the tail blob before creating a new one so if we crash we don't end up with a
-            // non-full historical blob.
-            self.tail.sync().await?;
-
-            // Create a new empty blob.
-            let next_blob_index = self.tail_index + 1;
-            debug!(blob = next_blob_index, "creating next blob");
-            let (next_blob, size) = self
-                .context
-                .open(&self.cfg.partition, &next_blob_index.to_be_bytes())
-                .await?;
-            assert_eq!(size, 0);
-            let next_blob = Append::new(
-                next_blob,
-                size,
-                self.cfg.write_buffer,
-                self.cfg.buffer_pool.clone(),
-            )
-            .await?;
-            self.tracked.inc();
-
-            // Move the old tail blob to the historical blobs map and set the new blob as the tail.
-            let old_tail = std::mem::replace(&mut self.tail, next_blob);
-            assert!(self.blobs.insert(self.tail_index, old_tail).is_none());
-            self.tail_index = next_blob_index;
-        }
+        self.inner.append(section, item).await?;
         self.size += 1;
 
-        Ok(item_pos)
+        // If we just filled up a section, sync it and create the next tail blob. This maintains the
+        // invariant that the tail blob always exists.
+        if self.size.is_multiple_of(self.items_per_blob) {
+            self.inner.sync(section).await?;
+            // Create the new tail blob.
+            self.inner.ensure_section_exists(section + 1).await?;
+        }
+
+        Ok(position)
     }
 
-    /// Rewind the journal to the given `size`. Returns [Error::MissingBlob] if the rewind point
+    /// Rewind the journal to the given `size`. Returns [Error::InvalidRewind] if the rewind point
     /// precedes the oldest retained element point. The journal is not synced after rewinding.
     ///
     /// # Warnings
@@ -388,32 +334,21 @@ impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> Journal<E, A> {
     /// * This operation is not atomic, but it will always leave the journal in a consistent state
     ///   in the event of failure since blobs are always removed from newest to oldest.
     pub async fn rewind(&mut self, size: u64) -> Result<(), Error> {
-        match size.cmp(&self.size()) {
+        match size.cmp(&self.size) {
             std::cmp::Ordering::Greater => return Err(Error::InvalidRewind(size)),
             std::cmp::Ordering::Equal => return Ok(()),
             std::cmp::Ordering::Less => {}
         }
-        let rewind_to_blob_index = size / self.cfg.items_per_blob;
-        if rewind_to_blob_index < self.oldest_blob_index() {
+
+        if size < self.pruning_boundary() {
             return Err(Error::InvalidRewind(size));
         }
-        let rewind_to_offset = (size % self.cfg.items_per_blob) * Self::CHUNK_SIZE_U64;
 
-        // Remove blobs until we reach the rewind point.  Blobs must be removed in reverse order to
-        // preserve consistency in the event of failures.
-        while rewind_to_blob_index < self.tail_index {
-            let (blob_index, mut new_tail) = self.blobs.pop_last().unwrap();
-            assert_eq!(blob_index, self.tail_index - 1);
-            std::mem::swap(&mut self.tail, &mut new_tail);
-            self.remove_blob(self.tail_index, new_tail).await?;
-            self.tail_index -= 1;
-        }
+        let (section, pos_in_section) = self.position_to_section(size);
+        let byte_offset = pos_in_section * SegmentedJournal::<E, A>::CHUNK_SIZE as u64;
 
-        // Truncate the tail blob to the correct offset.
-        self.tail.resize(rewind_to_offset).await?;
-
+        self.inner.rewind(section, byte_offset).await?;
         self.size = size;
-        assert!(size >= self.pruning_boundary);
 
         Ok(())
     }
@@ -421,17 +356,19 @@ impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> Journal<E, A> {
     /// Return the position of the oldest item in the journal that remains readable.
     ///
     /// Note that this value could be older than the `min_item_pos` last passed to prune.
-    pub const fn oldest_retained_pos(&self) -> Option<u64> {
-        if self.pruning_boundary == self.size {
+    pub fn oldest_retained_pos(&self) -> Option<u64> {
+        if self.pruning_boundary() == self.size {
             return None;
         }
-
-        Some(self.pruning_boundary)
+        Some(self.pruning_boundary())
     }
 
     /// Return the location before which all items have been pruned.
-    pub const fn pruning_boundary(&self) -> u64 {
-        self.pruning_boundary
+    pub fn pruning_boundary(&self) -> u64 {
+        self.inner
+            .oldest_section()
+            .expect("journal should have at least one section")
+            * self.items_per_blob
     }
 
     /// Read the item at position `pos` in the journal.
@@ -441,131 +378,74 @@ impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> Journal<E, A> {
     ///  - [Error::ItemPruned] if the item at position `pos` is pruned.
     ///  - [Error::ItemOutOfRange] if the item at position `pos` does not exist.
     pub async fn read(&self, pos: u64) -> Result<A, Error> {
-        let blob_index = pos / self.cfg.items_per_blob.get();
-        if blob_index > self.tail_index {
+        if pos >= self.size {
             return Err(Error::ItemOutOfRange(pos));
         }
-
-        let offset = (pos % self.cfg.items_per_blob.get()) * Self::CHUNK_SIZE_U64;
-
-        let blob = if blob_index == self.tail_index {
-            if offset >= self.tail.size().await {
-                return Err(Error::ItemOutOfRange(pos));
-            }
-            &self.tail
-        } else {
-            self.blobs.get(&blob_index).ok_or(Error::ItemPruned(pos))?
-        };
-
-        let read = blob.read_at(vec![0u8; Self::CHUNK_SIZE], offset).await?;
-        Self::verify_integrity(read.as_ref())
-    }
-
-    /// Verify the integrity of the Array + checksum in `buf`, returning:
-    /// - The array if it is valid,
-    /// - Error::ChecksumMismatch if the checksum is invalid, or
-    /// - Error::Codec if the array could not be decoded after passing the checksum check.
-    ///
-    ///  Error::Codec likely indicates a logic error rather than a corruption issue.
-    fn verify_integrity(buf: &[u8]) -> Result<A, Error> {
-        let stored_checksum = u32::from_be_bytes(buf[A::SIZE..].try_into().unwrap());
-        let checksum = crc32fast::hash(&buf[..A::SIZE]);
-        if checksum != stored_checksum {
-            return Err(Error::ChecksumMismatch(stored_checksum, checksum));
+        if pos < self.pruning_boundary() {
+            return Err(Error::ItemPruned(pos));
         }
-        A::decode(&buf[..A::SIZE]).map_err(Error::Codec)
+
+        // Get the relevant blob to read from.
+        let (section, pos_in_section) = self.position_to_section(pos);
+
+        self.inner.get(section, pos_in_section).await.map_err(|e| {
+            // Since we check bounds above, any failure here is unexpected.
+            match e {
+                Error::SectionOutOfRange(e)
+                | Error::AlreadyPrunedToSection(e)
+                | Error::ItemOutOfRange(e) => {
+                    Error::Corruption(format!("section/item should be found, but got: {e}"))
+                }
+                other => other,
+            }
+        })
     }
 
     /// Returns an ordered stream of all items in the journal with position >= `start_pos`.
     ///
-    /// # Panics
-    ///
-    /// Panics `start_pos` exceeds log size.
-    ///
     /// # Integrity
     ///
-    /// If any corrupted data is found, the stream will return an error.
+    /// If any corrupted data is found, or if any non-tail section has fewer items than
+    /// `items_per_blob`, the stream will return an error.
     pub async fn replay(
         &self,
         buffer: NonZeroUsize,
         start_pos: u64,
     ) -> Result<impl Stream<Item = Result<(u64, A), Error>> + '_, Error> {
-        assert!(start_pos <= self.size());
+        if start_pos > self.size {
+            return Err(Error::ItemOutOfRange(start_pos));
+        }
 
-        // Collect all blobs to replay paired with their index.
-        let items_per_blob = self.cfg.items_per_blob.get();
-        let start_blob = start_pos / items_per_blob;
-        assert!(start_blob <= self.tail_index);
-        let blobs = self.blobs.range(start_blob..).collect::<Vec<_>>();
-        let full_size = items_per_blob * Self::CHUNK_SIZE_U64;
-        let mut blob_plus = blobs
-            .into_iter()
-            .map(|(blob_index, blob)| (*blob_index, blob.clone_blob(), full_size))
-            .collect::<Vec<_>>();
+        let (start_section, start_pos_in_section) = self.position_to_section(start_pos);
+        let items_per_blob = self.items_per_blob;
 
-        // Include the tail blob.
-        self.tail.sync().await?; // make sure no data is buffered
-        let tail_size = self.tail.size().await;
-        blob_plus.push((self.tail_index, self.tail.clone_blob(), tail_size));
-        let start_offset = (start_pos % items_per_blob) * Self::CHUNK_SIZE_U64;
+        // Check all non-tail sections in range are complete before starting the stream.
+        let oldest = self.inner.oldest_section().unwrap_or(start_section);
+        if let Some(newest) = self.inner.newest_section() {
+            for section in start_section.max(oldest)..newest {
+                let len = self.inner.section_len(section).await?;
+                if len < items_per_blob {
+                    return Err(Error::Corruption(format!(
+                        "section {section} incomplete: expected {items_per_blob} items, got {len}"
+                    )));
+                }
+            }
+        }
 
-        // Replay all blobs in order and stream items as they are read (to avoid occupying too much
-        // memory with buffered data).
-        let stream = stream::iter(blob_plus).flat_map(move |(blob_index, blob, size)| {
-            // Create a new reader and buffer for each blob. Preallocating the buffer here to avoid
-            // a per-iteration allocation improves performance by ~20%.
-            let mut reader = Read::new(blob, size, buffer);
-            let buf = vec![0u8; Self::CHUNK_SIZE];
-            let initial_offset = if blob_index == start_blob {
-                // If this is the very first blob then we need to seek to the starting position.
-                reader.seek_to(start_offset).expect("invalid start_pos");
-                start_offset
-            } else {
-                0
-            };
+        let inner_stream = self
+            .inner
+            .replay(start_section, start_pos_in_section, buffer)
+            .await?;
 
-            stream::unfold(
-                (buf, reader, initial_offset),
-                move |(mut buf, mut reader, offset)| async move {
-                    if offset >= reader.blob_size() {
-                        return None;
-                    }
-
-                    // Even though we are reusing the buffer, `read_exact` will overwrite any
-                    // previous data, so there's no need to explicitly clear it.
-                    let item_pos = items_per_blob * blob_index + offset / Self::CHUNK_SIZE_U64;
-                    match reader.read_exact(&mut buf, Self::CHUNK_SIZE).await {
-                        Ok(()) => {
-                            let next_offset = offset + Self::CHUNK_SIZE_U64;
-                            let result = Self::verify_integrity(&buf).map(|item| (item_pos, item));
-                            if result.is_err() {
-                                warn!("corrupted item at {item_pos}");
-                            }
-                            Some((result, (buf, reader, next_offset)))
-                        }
-                        Err(err) => {
-                            warn!(
-                                item_pos,
-                                err = err.to_string(),
-                                "error reading item during replay"
-                            );
-                            Some((Err(Error::Runtime(err)), (buf, reader, size)))
-                        }
-                    }
-                },
-            )
+        // Transform (section, pos_in_section, item) to (global_pos, item).
+        let stream = inner_stream.map(move |result| {
+            result.map(|(section, pos_in_section, item)| {
+                let global_pos = section * items_per_blob + pos_in_section;
+                (global_pos, item)
+            })
         });
 
         Ok(stream)
-    }
-
-    /// Return the index of blob containing the oldest retained items.
-    fn oldest_blob_index(&self) -> u64 {
-        if self.blobs.is_empty() {
-            self.tail_index
-        } else {
-            *self.blobs.first_key_value().unwrap().0
-        }
     }
 
     /// Allow the journal to prune items older than `min_item_pos`. The journal may not prune all
@@ -575,78 +455,45 @@ impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> Journal<E, A> {
     /// Note that this operation may NOT be atomic, however it's guaranteed not to leave gaps in the
     /// event of failure as items are always pruned in order from oldest to newest.
     pub async fn prune(&mut self, min_item_pos: u64) -> Result<bool, Error> {
-        let oldest_blob_index = self.oldest_blob_index();
-        let new_oldest_blob =
-            std::cmp::min(min_item_pos / self.cfg.items_per_blob, self.tail_index);
+        // Calculate the section that would contain min_item_pos
+        let target_section = min_item_pos / self.items_per_blob;
 
-        let mut pruned = false;
-        for index in oldest_blob_index..new_oldest_blob {
-            pruned = true;
-            let blob = self.blobs.remove(&index).unwrap();
-            self.remove_blob(index, blob).await?;
-            self.pruned.inc();
-        }
-        if pruned {
-            self.pruning_boundary = new_oldest_blob * self.cfg.items_per_blob.get();
-        }
+        // Calculate the tail section.
+        let tail_section = self.size / self.items_per_blob;
 
-        Ok(pruned)
-    }
+        // Cap to tail section. The tail section is guaranteed to exist by our invariant.
+        let min_section = std::cmp::min(target_section, tail_section);
 
-    /// Safely removes any previously tracked blob from underlying storage.
-    async fn remove_blob(&mut self, index: u64, blob: Append<E::Blob>) -> Result<(), Error> {
-        drop(blob);
-        self.context
-            .remove(&self.cfg.partition, Some(&index.to_be_bytes()))
-            .await?;
-        debug!(blob = index, "removed blob");
-        self.tracked.dec();
-
-        Ok(())
-    }
-
-    /// Syncs and closes all open sections.
-    pub async fn close(self) -> Result<(), Error> {
-        for (i, blob) in self.blobs.into_iter() {
-            blob.sync().await?;
-            debug!(blob = i, "synced blob");
-        }
-        self.tail.sync().await?;
-        debug!(blob = self.tail_index, "synced tail");
-
-        Ok(())
+        self.inner.prune(min_section).await
     }
 
     /// Remove any underlying blobs created by the journal.
     pub async fn destroy(self) -> Result<(), Error> {
-        for (i, blob) in self.blobs.into_iter() {
-            drop(blob);
-            debug!(blob = i, "destroyed blob");
-            self.context
-                .remove(&self.cfg.partition, Some(&i.to_be_bytes()))
-                .await?;
-        }
+        self.inner.destroy().await
+    }
 
-        drop(self.tail);
-        debug!(blob = self.tail_index, "destroyed blob");
-        self.context
-            .remove(&self.cfg.partition, Some(&self.tail_index.to_be_bytes()))
+    /// Clear all data and reset the journal to a new starting position.
+    ///
+    /// Unlike `destroy`, this keeps the journal alive so it can be reused.
+    /// After clearing, the journal will behave as if initialized with `init_at_size(new_size)`.
+    pub(crate) async fn clear_to_size(&mut self, new_size: u64) -> Result<(), Error> {
+        self.inner.clear().await?;
+
+        // Initialize the tail section if needed
+        let tail_section = new_size / self.items_per_blob;
+        let tail_items = new_size % self.items_per_blob;
+        self.inner
+            .init_section_at_size(tail_section, tail_items)
             .await?;
+        self.inner.sync_all().await?;
 
-        match self.context.remove(&self.cfg.partition, None).await {
-            Ok(()) => {}
-            Err(RError::PartitionMissing(_)) => {
-                // Partition already removed or never existed.
-            }
-            Err(err) => return Err(Error::Runtime(err)),
-        }
-
+        self.size = new_size;
         Ok(())
     }
 }
 
 // Implement Contiguous trait for fixed-length journals
-impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> super::Contiguous for Journal<E, A> {
+impl<E: Storage + Metrics, A: CodecFixedShared> super::Contiguous for Journal<E, A> {
     type Item = A;
 
     fn size(&self) -> u64 {
@@ -674,7 +521,7 @@ impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> super::Contiguous for Journa
     }
 }
 
-impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> MutableContiguous for Journal<E, A> {
+impl<E: Storage + Metrics, A: CodecFixedShared> MutableContiguous for Journal<E, A> {
     async fn append(&mut self, item: Self::Item) -> Result<u64, Error> {
         Self::append(self, item).await
     }
@@ -688,17 +535,15 @@ impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> MutableContiguous for Journa
     }
 }
 
-impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> PersistableContiguous for Journal<E, A> {
+impl<E: Storage + Metrics, A: CodecFixedShared> Persistable for Journal<E, A> {
+    type Error = Error;
+
     async fn commit(&mut self) -> Result<(), Error> {
         Self::sync(self).await
     }
 
     async fn sync(&mut self) -> Result<(), Error> {
         Self::sync(self).await
-    }
-
-    async fn close(self) -> Result<(), Error> {
-        Self::close(self).await
     }
 
     async fn destroy(self) -> Result<(), Error> {
@@ -713,12 +558,13 @@ mod tests {
     use commonware_macros::test_traced;
     use commonware_runtime::{
         deterministic::{self, Context},
-        Blob, Runner, Storage,
+        Blob, Metrics, Runner, Storage,
     };
-    use commonware_utils::{NZUsize, NZU64};
+    use commonware_utils::{NZUsize, NZU16, NZU64};
     use futures::{pin_mut, StreamExt};
+    use std::num::NonZeroU16;
 
-    const PAGE_SIZE: NonZeroUsize = NZUsize!(44);
+    const PAGE_SIZE: NonZeroU16 = NZU16!(44);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(3);
 
     /// Generate a SHA-256 digest for the given value.
@@ -744,12 +590,9 @@ mod tests {
         executor.start(|context| async move {
             // Initialize the journal, allowing a max of 2 items per blob.
             let cfg = test_cfg(NZU64!(2));
-            let mut journal = Journal::init(context.clone(), cfg.clone())
+            let mut journal = Journal::init(context.with_label("first"), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
-
-            let buffer = context.encode();
-            assert!(buffer.contains("tracked 1"));
 
             // Append an item to the journal
             let mut pos = journal
@@ -758,12 +601,12 @@ mod tests {
                 .expect("failed to append data 0");
             assert_eq!(pos, 0);
 
-            // Close the journal
-            journal.close().await.expect("Failed to close journal");
+            // Drop the journal and re-initialize it to simulate a restart
+            journal.sync().await.expect("Failed to sync journal");
+            drop(journal);
 
-            // Re-initialize the journal to simulate a restart
             let cfg = test_cfg(NZU64!(2));
-            let mut journal = Journal::init(context.clone(), cfg.clone())
+            let mut journal = Journal::init(context.with_label("second"), cfg.clone())
                 .await
                 .expect("failed to re-initialize journal");
             assert_eq!(journal.size(), 1);
@@ -779,8 +622,6 @@ mod tests {
                 .await
                 .expect("failed to append data 2");
             assert_eq!(pos, 2);
-            let buffer = context.encode();
-            assert!(buffer.contains("tracked 2"));
 
             // Read the items back
             let item0 = journal.read(0).await.expect("failed to read data 0");
@@ -794,20 +635,13 @@ mod tests {
 
             // Sync the journal
             journal.sync().await.expect("failed to sync journal");
-            let buffer = context.encode();
-            assert!(buffer.contains("synced_total 1"));
 
             // Pruning to 1 should be a no-op because there's no blob with only older items.
             journal.prune(1).await.expect("failed to prune journal 1");
-            let buffer = context.encode();
-            assert!(buffer.contains("tracked 2"));
 
             // Pruning to 2 should allow the first blob to be pruned.
             journal.prune(2).await.expect("failed to prune journal 2");
             assert_eq!(journal.oldest_retained_pos(), Some(2));
-            let buffer = context.encode();
-            assert!(buffer.contains("tracked 1"));
-            assert!(buffer.contains("pruned_total 1"));
 
             // Reading from the first blob should fail since it's now pruned
             let result0 = journal.read(0).await;
@@ -830,8 +664,8 @@ mod tests {
 
             // Check no-op pruning
             journal.prune(0).await.expect("no-op pruning failed");
-            assert_eq!(journal.oldest_blob_index(), 1);
-            assert_eq!(journal.tail_index, 5);
+            assert_eq!(journal.inner.oldest_section(), Some(1));
+            assert_eq!(journal.inner.newest_section(), Some(5));
             assert_eq!(journal.oldest_retained_pos(), Some(2));
 
             // Prune first 3 blobs (6 items)
@@ -839,25 +673,19 @@ mod tests {
                 .prune(3 * cfg.items_per_blob.get())
                 .await
                 .expect("failed to prune journal 2");
+            assert_eq!(journal.inner.oldest_section(), Some(3));
+            assert_eq!(journal.inner.newest_section(), Some(5));
             assert_eq!(journal.oldest_retained_pos(), Some(6));
-            let buffer = context.encode();
-            assert_eq!(journal.oldest_blob_index(), 3);
-            assert_eq!(journal.tail_index, 5);
-            assert!(buffer.contains("tracked 3"));
-            assert!(buffer.contains("pruned_total 3"));
 
             // Try pruning (more than) everything in the journal.
             journal
                 .prune(10000)
                 .await
                 .expect("failed to max-prune journal");
-            let buffer = context.encode();
             let size = journal.size();
             assert_eq!(size, 10);
-            assert_eq!(journal.oldest_blob_index(), 5);
-            assert_eq!(journal.tail_index, 5);
-            assert!(buffer.contains("tracked 1"));
-            assert!(buffer.contains("pruned_total 5"));
+            assert_eq!(journal.inner.oldest_section(), Some(5));
+            assert_eq!(journal.inner.newest_section(), Some(5));
             // Since the size of the journal is currently a multiple of items_per_blob, the newest blob
             // will be empty, and there will be no retained items.
             assert_eq!(journal.oldest_retained_pos(), None);
@@ -895,7 +723,7 @@ mod tests {
         const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(10000);
         executor.start(|context| async move {
             let cfg = test_cfg(ITEMS_PER_BLOB);
-            let mut journal = Journal::init(context.clone(), cfg.clone())
+            let mut journal = Journal::init(context.with_label("first"), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
             // Append 2 blobs worth of items.
@@ -905,9 +733,10 @@ mod tests {
                     .await
                     .expect("failed to append data");
             }
-            // Close, reopen, then read back.
-            journal.close().await.expect("failed to close journal");
-            let journal = Journal::init(context.clone(), cfg.clone())
+            // Sync, reopen, then read back.
+            journal.sync().await.expect("failed to sync journal");
+            drop(journal);
+            let journal = Journal::init(context.with_label("second"), cfg.clone())
                 .await
                 .expect("failed to re-initialize journal");
             for i in 0u64..10000 {
@@ -928,7 +757,7 @@ mod tests {
         executor.start(|context| async move {
             // Initialize the journal, allowing a max of 7 items per blob.
             let cfg = test_cfg(ITEMS_PER_BLOB);
-            let mut journal = Journal::init(context.clone(), cfg.clone())
+            let mut journal = Journal::init(context.with_label("first"), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
 
@@ -940,9 +769,6 @@ mod tests {
                     .expect("failed to append data");
                 assert_eq!(pos, i);
             }
-
-            let buffer = context.encode();
-            assert!(buffer.contains("tracked 101"));
 
             // Read them back the usual way.
             for i in 0u64..(ITEMS_PER_BLOB.get() * 100 + ITEMS_PER_BLOB.get() / 2) {
@@ -978,41 +804,43 @@ mod tests {
                     assert_eq!(i as u64, *pos);
                 }
             }
-            journal.close().await.expect("Failed to close journal");
 
-            // Corrupt one of the checksums and make sure it's detected.
-            let checksum_offset = Digest::SIZE as u64
-                + (ITEMS_PER_BLOB.get() / 2) * (Digest::SIZE + u32::SIZE) as u64;
+            journal.sync().await.expect("Failed to sync journal");
+            drop(journal);
+
+            // Corrupt one of the bytes and make sure it's detected.
             let (blob, _) = context
                 .open(&cfg.partition, &40u64.to_be_bytes())
                 .await
                 .expect("Failed to open blob");
-            // Write incorrect checksum
-            let bad_checksum = 123456789u32;
-            blob.write_at(bad_checksum.to_be_bytes().to_vec(), checksum_offset)
+            // Write junk bytes.
+            let bad_bytes = 123456789u32;
+            blob.write_at(1, bad_bytes.to_be_bytes().to_vec())
                 .await
-                .expect("Failed to write incorrect checksum");
-            let corrupted_item_pos = 40 * ITEMS_PER_BLOB.get() + ITEMS_PER_BLOB.get() / 2;
+                .expect("Failed to write bad bytes");
             blob.sync().await.expect("Failed to sync blob");
 
             // Re-initialize the journal to simulate a restart
-            let journal = Journal::init(context.clone(), cfg.clone())
+            let journal = Journal::init(context.with_label("second"), cfg.clone())
                 .await
                 .expect("Failed to re-initialize journal");
 
-            // Make sure reading the corrupted item fails with appropriate error.
-            let err = journal.read(corrupted_item_pos).await.unwrap_err();
-            assert!(matches!(err, Error::ChecksumMismatch(x, _) if x == bad_checksum));
+            // Make sure reading an item that resides in the corrupted page fails.
+            let err = journal
+                .read(40 * ITEMS_PER_BLOB.get() + 1)
+                .await
+                .unwrap_err();
+            assert!(matches!(err, Error::Runtime(_)));
 
-            // Replay all items, making sure the checksum mismatch error is handled correctly.
+            // Replay all items.
             {
+                let mut error_found = false;
                 let stream = journal
                     .replay(NZUsize!(1024), 0)
                     .await
                     .expect("failed to replay journal");
                 let mut items = Vec::new();
                 pin_mut!(stream);
-                let mut error_count = 0;
                 while let Some(result) = stream.next().await {
                     match result {
                         Ok((pos, item)) => {
@@ -1020,19 +848,14 @@ mod tests {
                             items.push(pos);
                         }
                         Err(err) => {
-                            error_count += 1;
-                            assert!(matches!(err, Error::ChecksumMismatch(_, _)));
+                            error_found = true;
+                            assert!(matches!(err, Error::Runtime(_)));
+                            break;
                         }
                     }
                 }
-                assert_eq!(error_count, 1);
-                // Result will be missing only the one corrupted value.
-                assert_eq!(
-                    items.len(),
-                    ITEMS_PER_BLOB.get() as usize * 100 + ITEMS_PER_BLOB.get() as usize / 2 - 1
-                );
+                assert!(error_found); // error should abort replay
             }
-            journal.close().await.expect("Failed to close journal");
         });
     }
 
@@ -1045,7 +868,7 @@ mod tests {
         executor.start(|context| async move {
             // Initialize the journal, allowing a max of 7 items per blob.
             let cfg = test_cfg(ITEMS_PER_BLOB);
-            let mut journal = Journal::init(context.clone(), cfg.clone())
+            let mut journal = Journal::init(context.with_label("first"), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
 
@@ -1057,31 +880,86 @@ mod tests {
                     .expect("failed to append data");
                 assert_eq!(pos, i);
             }
-            journal.close().await.expect("Failed to close journal");
-
-            let buffer = context.encode();
-            assert!(buffer.contains("tracked 101"));
+            journal.sync().await.expect("Failed to sync journal");
+            drop(journal);
 
             // Manually truncate a non-tail blob to make sure it's detected during initialization.
+            // The segmented journal will trim the incomplete blob on init, resulting in the blob
+            // missing one item. This should be detected during init because all non-tail blobs
+            // must be full.
             let (blob, size) = context
                 .open(&cfg.partition, &40u64.to_be_bytes())
                 .await
                 .expect("Failed to open blob");
             blob.resize(size - 1).await.expect("Failed to corrupt blob");
             blob.sync().await.expect("Failed to sync blob");
-            let result = Journal::<_, Digest>::init(context.clone(), cfg.clone()).await;
-            assert!(matches!(
-                result.err().unwrap(),
-                Error::InvalidBlobSize(_, _)
-            ));
 
-            // Delete a blob and make sure the gap is detected during initialization.
-            context
-                .remove(&cfg.partition, Some(&40u64.to_be_bytes()))
+            // The segmented journal will trim the incomplete blob on init, resulting in the blob
+            // missing one item. This should be detected as corruption during replay.
+            let journal = Journal::<_, Digest>::init(context.with_label("second"), cfg.clone())
                 .await
-                .expect("Failed to remove blob");
-            let result = Journal::<_, Digest>::init(context.clone(), cfg.clone()).await;
-            assert!(matches!(result.err().unwrap(), Error::MissingBlob(n) if n == 40));
+                .expect("failed to initialize journal");
+
+            // Journal size is computed from the tail section, so it's unchanged
+            // despite the corruption in section 40.
+            let expected_size = ITEMS_PER_BLOB.get() * 100 + ITEMS_PER_BLOB.get() / 2;
+            assert_eq!(journal.size(), expected_size);
+
+            // Replay should detect corruption (incomplete section) in section 40
+            match journal.replay(NZUsize!(1024), 0).await {
+                Err(Error::Corruption(msg)) => {
+                    assert!(
+                        msg.contains("section 40"),
+                        "Error should mention section 40, got: {msg}"
+                    );
+                }
+                Err(e) => panic!("Expected Corruption error for section 40, got: {:?}", e),
+                Ok(_) => panic!("Expected replay to fail with corruption"),
+            };
+        });
+    }
+
+    #[test_traced]
+    fn test_fixed_journal_replay_with_missing_historical_blob() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(NZU64!(2));
+            let mut journal = Journal::init(context.with_label("first"), cfg.clone())
+                .await
+                .expect("failed to initialize journal");
+
+            for i in 0u64..5 {
+                journal
+                    .append(test_digest(i))
+                    .await
+                    .expect("failed to append data");
+            }
+            journal.sync().await.expect("failed to sync journal");
+            drop(journal);
+
+            context
+                .remove(&cfg.partition, Some(&1u64.to_be_bytes()))
+                .await
+                .expect("failed to remove blob");
+
+            // Init won't detect the corruption.
+            let result = Journal::<_, Digest>::init(context.with_label("second"), cfg.clone())
+                .await
+                .expect("init shouldn't fail");
+
+            // But replay will.
+            match result.replay(NZUsize!(1024), 0).await {
+                Err(Error::Corruption(_)) => {}
+                Err(err) => panic!("expected Corruption, got: {err}"),
+                Ok(_) => panic!("expected Corruption, got ok"),
+            };
+
+            // As will trying to read an item that was in the deleted blob.
+            match result.read(2).await {
+                Err(Error::Corruption(_)) => {}
+                Err(err) => panic!("expected Corruption, got: {err}"),
+                Ok(_) => panic!("expected Corruption, got ok"),
+            };
         });
     }
 
@@ -1094,7 +972,7 @@ mod tests {
         executor.start(|context| async move {
             // Initialize the journal, allowing a max of 7 items per blob.
             let cfg = test_cfg(ITEMS_PER_BLOB);
-            let mut journal = Journal::init(context.clone(), cfg.clone())
+            let mut journal = Journal::init(context.with_label("first"), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
 
@@ -1107,34 +985,11 @@ mod tests {
                     .expect("failed to append data");
             }
             assert_eq!(journal.size(), item_count);
-            journal.close().await.expect("Failed to close journal");
+            journal.sync().await.expect("Failed to sync journal");
+            drop(journal);
 
-            // Truncate the tail blob by one byte, which should result in the 3rd item being
-            // trimmed.
-            let (blob, size) = context
-                .open(&cfg.partition, &1u64.to_be_bytes())
-                .await
-                .expect("Failed to open blob");
-            blob.resize(size - 1).await.expect("Failed to corrupt blob");
-
-            // Write incorrect checksum into the second item in the blob, which should result in the
-            // second item being trimmed.
-            let checksum_offset = Digest::SIZE + u32::SIZE + Digest::SIZE;
-
-            let bad_checksum = 123456789u32;
-            blob.write_at(bad_checksum.to_be_bytes().to_vec(), checksum_offset as u64)
-                .await
-                .expect("Failed to write incorrect checksum");
-            blob.sync().await.expect("Failed to sync blob");
-
-            let journal = Journal::<_, Digest>::init(context.clone(), cfg.clone())
-                .await
-                .unwrap();
-
-            // Confirm 2 items were trimmed.
-            assert_eq!(journal.size(), item_count - 2);
-
-            // Corrupt the last item, ensuring last blob is trimmed to empty state.
+            // Truncate the tail blob by one byte, which should result in the last item being
+            // discarded during replay (detected via corruption).
             let (blob, size) = context
                 .open(&cfg.partition, &1u64.to_be_bytes())
                 .await
@@ -1142,12 +997,13 @@ mod tests {
             blob.resize(size - 1).await.expect("Failed to corrupt blob");
             blob.sync().await.expect("Failed to sync blob");
 
-            let journal = Journal::<_, Digest>::init(context.clone(), cfg.clone())
+            let journal = Journal::<_, Digest>::init(context.with_label("second"), cfg.clone())
                 .await
                 .unwrap();
 
-            // Confirm last item in blob was trimmed.
-            assert_eq!(journal.size(), item_count - 3);
+            // The truncation invalidates the last page (bad checksum), which is removed.
+            // This loses one item.
+            assert_eq!(journal.size(), item_count - 1);
 
             // Cleanup.
             journal.destroy().await.expect("Failed to destroy journal");
@@ -1180,9 +1036,6 @@ mod tests {
                 assert_eq!(pos, i);
             }
 
-            let buffer = context.encode();
-            assert!(buffer.contains("tracked 101"));
-
             // Replay should return all items except the first `START_POS`.
             {
                 let stream = journal
@@ -1194,7 +1047,7 @@ mod tests {
                 while let Some(result) = stream.next().await {
                     match result {
                         Ok((pos, item)) => {
-                            assert!(pos >= START_POS, "pos={pos}");
+                            assert!(pos >= START_POS, "pos={pos}, expected >= {START_POS}");
                             assert_eq!(
                                 test_digest(pos),
                                 item,
@@ -1231,7 +1084,7 @@ mod tests {
         executor.start(|context| async move {
             // Initialize the journal, allowing a max of 3 items per blob.
             let cfg = test_cfg(NZU64!(3));
-            let mut journal = Journal::init(context.clone(), cfg.clone())
+            let mut journal = Journal::init(context.with_label("first"), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
             for i in 0..5 {
@@ -1241,9 +1094,8 @@ mod tests {
                     .expect("failed to append data");
             }
             assert_eq!(journal.size(), 5);
-            let buffer = context.encode();
-            assert!(buffer.contains("tracked 2"));
-            journal.close().await.expect("Failed to close journal");
+            journal.sync().await.expect("Failed to sync journal");
+            drop(journal);
 
             // Manually truncate most recent blob to simulate a partial write.
             let (blob, size) = context
@@ -1255,30 +1107,22 @@ mod tests {
             blob.sync().await.expect("Failed to sync blob");
 
             // Re-initialize the journal to simulate a restart
-            let journal = Journal::<_, Digest>::init(context.clone(), cfg.clone())
+            let journal = Journal::<_, Digest>::init(context.with_label("second"), cfg.clone())
                 .await
                 .expect("Failed to re-initialize journal");
-            // the last corrupted item should get discarded
+            // The truncation invalidates the last page, which is removed. This loses one item.
             assert_eq!(journal.size(), 4);
-            let buffer = context.encode();
-            assert!(buffer.contains("tracked 2"));
-            journal.close().await.expect("Failed to close journal");
+            drop(journal);
 
-            // Delete the tail blob to simulate a sync() that wrote the last blob at the point it
-            // was entirely full, but a crash happened before the next empty blob could be created.
+            // Delete the second blob and re-init
             context
                 .remove(&cfg.partition, Some(&1u64.to_be_bytes()))
                 .await
                 .expect("Failed to remove blob");
-            let journal = Journal::<_, Digest>::init(context.clone(), cfg.clone())
+            let journal = Journal::<_, Digest>::init(context.with_label("third"), cfg.clone())
                 .await
                 .expect("Failed to re-initialize journal");
-            assert_eq!(journal.size(), 3);
-            let buffer = context.encode();
-            // Even though it was deleted, tail blob should be re-created and left empty by the
-            // recovery code. This means we have 2 blobs total, with 3 items in the first, and none
-            // in the tail.
-            assert!(buffer.contains("tracked 2"));
+            // Only the first blob remains
             assert_eq!(journal.size(), 3);
 
             journal.destroy().await.unwrap();
@@ -1291,7 +1135,7 @@ mod tests {
         executor.start(|context| async move {
             // Initialize the journal, allowing a max of 10 items per blob.
             let cfg = test_cfg(NZU64!(10));
-            let mut journal = Journal::init(context.clone(), cfg.clone())
+            let mut journal = Journal::init(context.with_label("first"), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
             // Add only a single item
@@ -1300,7 +1144,8 @@ mod tests {
                 .await
                 .expect("failed to append data");
             assert_eq!(journal.size(), 1);
-            journal.close().await.expect("Failed to close journal");
+            journal.sync().await.expect("Failed to sync journal");
+            drop(journal);
 
             // Manually truncate most recent blob to simulate a partial write.
             let (blob, size) = context
@@ -1312,7 +1157,7 @@ mod tests {
             blob.sync().await.expect("Failed to sync blob");
 
             // Re-initialize the journal to simulate a restart
-            let mut journal = Journal::<_, Digest>::init(context.clone(), cfg.clone())
+            let mut journal = Journal::<_, Digest>::init(context.with_label("second"), cfg.clone())
                 .await
                 .expect("Failed to re-initialize journal");
 
@@ -1331,13 +1176,13 @@ mod tests {
         });
     }
 
-    #[test_traced]
+    #[test_traced("DEBUG")]
     fn test_fixed_journal_recover_from_unwritten_data() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Initialize the journal, allowing a max of 10 items per blob.
             let cfg = test_cfg(NZU64!(10));
-            let mut journal = Journal::init(context.clone(), cfg.clone())
+            let mut journal = Journal::init(context.with_label("first"), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
 
@@ -1347,43 +1192,34 @@ mod tests {
                 .await
                 .expect("failed to append data");
             assert_eq!(journal.size(), 1);
-            journal.close().await.expect("Failed to close journal");
+            journal.sync().await.expect("Failed to sync journal");
+            drop(journal);
 
-            // Manually extend the blob by an amount at least some multiple of the chunk size to
-            // simulate a failure where the file was extended, but no bytes were written due to
-            // failure.
+            // Manually extend the blob to simulate a failure where the file was extended, but no
+            // bytes were written due to failure.
             let (blob, size) = context
                 .open(&cfg.partition, &0u64.to_be_bytes())
                 .await
                 .expect("Failed to open blob");
-            blob.write_at(vec![0u8; Digest::SIZE * 3 - 1], size)
+            blob.write_at(size, vec![0u8; PAGE_SIZE.get() as usize * 3])
                 .await
                 .expect("Failed to extend blob");
             blob.sync().await.expect("Failed to sync blob");
 
             // Re-initialize the journal to simulate a restart
-            let mut journal = Journal::<_, Digest>::init(context.clone(), cfg.clone())
+            let mut journal = Journal::<_, Digest>::init(context.with_label("second"), cfg.clone())
                 .await
                 .expect("Failed to re-initialize journal");
 
-            // Ensure we've recovered to the state of a single item.
+            // The zero-filled pages are detected as invalid (bad checksum) and truncated.
+            // No items should be lost since we called sync before the corruption.
             assert_eq!(journal.size(), 1);
-            assert_eq!(journal.oldest_retained_pos(), Some(0));
 
             // Make sure journal still works for appending.
             journal
                 .append(test_digest(1))
                 .await
                 .expect("failed to append data");
-            assert_eq!(journal.size(), 2);
-
-            // Get the value of the first item
-            let item = journal.read(0).await.unwrap();
-            assert_eq!(item, test_digest(0));
-
-            // Get the value of new item
-            let item = journal.read(1).await.unwrap();
-            assert_eq!(item, test_digest(1));
 
             journal.destroy().await.unwrap();
         });
@@ -1395,7 +1231,7 @@ mod tests {
         executor.start(|context| async move {
             // Initialize the journal, allowing a max of 2 items per blob.
             let cfg = test_cfg(NZU64!(2));
-            let mut journal = Journal::init(context.clone(), cfg.clone())
+            let mut journal = Journal::init(context.with_label("first"), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
             assert!(matches!(journal.rewind(0).await, Ok(())));
@@ -1422,20 +1258,14 @@ mod tests {
                     .expect("failed to append data");
                 assert_eq!(pos, i);
             }
-            let buffer = context.encode();
-            assert!(buffer.contains("tracked 4"));
             assert_eq!(journal.size(), 7);
 
             // rewind back to item #4, which should prune 2 blobs
             assert!(matches!(journal.rewind(4).await, Ok(())));
             assert_eq!(journal.size(), 4);
-            let buffer = context.encode();
-            assert!(buffer.contains("tracked 3"));
 
             // rewind back to empty and ensure all blobs are rewound over
             assert!(matches!(journal.rewind(0).await, Ok(())));
-            let buffer = context.encode();
-            assert!(buffer.contains("tracked 1"));
             assert_eq!(journal.size(), 0);
 
             // stress test: add 100 items, rewind 49, repeat x10.
@@ -1451,12 +1281,13 @@ mod tests {
             const ITEMS_REMAINING: u64 = 10 * (100 - 49);
             assert_eq!(journal.size(), ITEMS_REMAINING);
 
-            journal.close().await.expect("Failed to close journal");
+            journal.sync().await.expect("Failed to sync journal");
+            drop(journal);
 
             // Repeat with a different blob size (3 items per blob)
             let mut cfg = test_cfg(NZU64!(3));
             cfg.partition = "test_partition_2".into();
-            let mut journal = Journal::init(context.clone(), cfg.clone())
+            let mut journal = Journal::init(context.with_label("second"), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
             for _ in 0..10 {
@@ -1470,12 +1301,14 @@ mod tests {
             }
             assert_eq!(journal.size(), ITEMS_REMAINING);
 
-            journal.close().await.expect("Failed to close journal");
+            journal.sync().await.expect("Failed to sync journal");
+            drop(journal);
 
             // Make sure re-opened journal is as expected
-            let mut journal: Journal<_, Digest> = Journal::init(context.clone(), cfg.clone())
-                .await
-                .expect("failed to re-initialize journal");
+            let mut journal: Journal<_, Digest> =
+                Journal::init(context.with_label("third"), cfg.clone())
+                    .await
+                    .expect("failed to re-initialize journal");
             assert_eq!(journal.size(), 10 * (100 - 49));
 
             // Make sure rewinding works after pruning
@@ -1496,68 +1329,575 @@ mod tests {
         });
     }
 
-    /// Protect against accidental changes to the journal disk format.
+    /// Test recovery when blob is truncated to a page boundary with item size not dividing page size.
+    ///
+    /// This tests the scenario where:
+    /// 1. Items (32 bytes) don't divide evenly into page size (44 bytes)
+    /// 2. Data spans multiple pages
+    /// 3. Blob is truncated to a page boundary (simulating crash before last page was written)
+    /// 4. Journal should recover correctly on reopen
     #[test_traced]
-    fn test_journal_conformance() {
-        // Initialize the deterministic context
+    fn test_fixed_journal_recover_from_page_boundary_truncation() {
         let executor = deterministic::Runner::default();
-
-        // Start the test within the executor
-        executor.start(|context| async move {
-            // Create a journal configuration
-            let cfg = test_cfg(NZU64!(60));
-
-            // Initialize the journal
-            let mut journal = Journal::init(context.clone(), cfg.clone())
+        executor.start(|context: Context| async move {
+            // Use a small items_per_blob to keep the test focused on a single blob
+            let cfg = test_cfg(NZU64!(100));
+            let mut journal = Journal::init(context.with_label("first"), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
 
-            // Append 100 items to the journal
-            for i in 0..100 {
+            // Item size is 32 bytes (Digest), page size is 44 bytes.
+            // 32 doesn't divide 44, so items will cross page boundaries.
+            // Physical page size = 44 + 12 (CRC) = 56 bytes.
+            //
+            // Write enough items to span multiple pages:
+            // - 10 items = 320 logical bytes
+            // - This spans ceil(320/44) = 8 logical pages
+            for i in 0u64..10 {
                 journal
                     .append(test_digest(i))
                     .await
-                    .expect("Failed to append data");
+                    .expect("failed to append data");
             }
+            assert_eq!(journal.size(), 10);
+            journal.sync().await.expect("Failed to sync journal");
+            drop(journal);
 
-            // Close the journal
-            journal.close().await.expect("Failed to close journal");
-
-            // Hash blob contents
+            // Open the blob directly and truncate to a page boundary.
+            // Physical page size = PAGE_SIZE + CHECKSUM_SIZE = 44 + 12 = 56
+            let physical_page_size = PAGE_SIZE.get() as u64 + 12;
             let (blob, size) = context
                 .open(&cfg.partition, &0u64.to_be_bytes())
                 .await
                 .expect("Failed to open blob");
-            assert!(size > 0);
-            let buf = blob
-                .read_at(vec![0u8; size as usize], 0)
+
+            // Calculate how many full physical pages we have and truncate to lose the last one.
+            let full_pages = size / physical_page_size;
+            assert!(full_pages >= 2, "need at least 2 pages for this test");
+            let truncate_to = (full_pages - 1) * physical_page_size;
+
+            blob.resize(truncate_to)
                 .await
-                .expect("Failed to read blob");
-            let digest = Sha256::hash(buf.as_ref());
-            assert_eq!(
-                hex(&digest),
-                "ed2ea67208cde2ee8c16cca5aa4f369f55b1402258c6b7760e5baf134e38944a",
-            );
-            blob.sync().await.expect("Failed to sync blob");
-            let (blob, size) = context
-                .open(&cfg.partition, &1u64.to_be_bytes())
-                .await
-                .expect("Failed to open blob");
-            assert!(size > 0);
-            let buf = blob
-                .read_at(vec![0u8; size as usize], 0)
-                .await
-                .expect("Failed to read blob");
-            let digest = Sha256::hash(buf.as_ref());
-            assert_eq!(
-                hex(&digest),
-                "cc7efd4fc999aff36b9fd4213ba8da5810dc1849f92ae2ddf7c6dc40545f9aff",
-            );
+                .expect("Failed to truncate blob");
             blob.sync().await.expect("Failed to sync blob");
 
-            let journal = Journal::<Context, Digest>::init(context.clone(), cfg.clone())
+            // Re-initialize the journal - it should recover by truncating to valid data
+            let journal = Journal::<_, Digest>::init(context.with_label("second"), cfg.clone())
+                .await
+                .expect("Failed to re-initialize journal after page truncation");
+
+            // The journal should have fewer items now (those that fit in the remaining pages).
+            // With logical page size 44 and item size 32:
+            // - After truncating to (full_pages-1) physical pages, we have (full_pages-1)*44 logical bytes
+            // - Number of complete items = floor(logical_bytes / 32)
+            let remaining_logical_bytes = (full_pages - 1) * PAGE_SIZE.get() as u64;
+            let expected_items = remaining_logical_bytes / 32; // 32 = Digest::SIZE
+            assert_eq!(
+                journal.size(),
+                expected_items,
+                "Journal should recover to {} items after truncation",
+                expected_items
+            );
+
+            // Verify we can still read the remaining items
+            for i in 0..expected_items {
+                let item = journal
+                    .read(i)
+                    .await
+                    .expect("failed to read recovered item");
+                assert_eq!(item, test_digest(i), "item {} mismatch after recovery", i);
+            }
+
+            journal.destroy().await.expect("Failed to destroy journal");
+        });
+    }
+
+    /// Test the contiguous fixed journal with items_per_blob: 1.
+    ///
+    /// This is an edge case where each item creates its own blob, and the
+    /// tail blob is always empty after sync (because the item fills the blob
+    /// and a new empty one is created).
+    #[test_traced]
+    fn test_single_item_per_blob() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "single_item_per_blob".into(),
+                items_per_blob: NZU64!(1),
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                write_buffer: NZUsize!(2048),
+            };
+
+            // === Test 1: Basic single item operation ===
+            let mut journal = Journal::init(context.with_label("first"), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
+
+            // Verify empty state
+            assert_eq!(journal.size(), 0);
+            assert_eq!(journal.oldest_retained_pos(), None);
+
+            // Append 1 item
+            let pos = journal
+                .append(test_digest(0))
+                .await
+                .expect("failed to append");
+            assert_eq!(pos, 0);
+            assert_eq!(journal.size(), 1);
+
+            // Sync
+            journal.sync().await.expect("failed to sync");
+
+            // Read from size() - 1
+            let value = journal
+                .read(journal.size() - 1)
+                .await
+                .expect("failed to read");
+            assert_eq!(value, test_digest(0));
+
+            // === Test 2: Multiple items with single item per blob ===
+            for i in 1..10u64 {
+                let pos = journal
+                    .append(test_digest(i))
+                    .await
+                    .expect("failed to append");
+                assert_eq!(pos, i);
+                assert_eq!(journal.size(), i + 1);
+
+                // Verify we can read the just-appended item at size() - 1
+                let value = journal
+                    .read(journal.size() - 1)
+                    .await
+                    .expect("failed to read");
+                assert_eq!(value, test_digest(i));
+            }
+
+            // Verify all items can be read
+            for i in 0..10u64 {
+                assert_eq!(journal.read(i).await.unwrap(), test_digest(i));
+            }
+
+            journal.sync().await.expect("failed to sync");
+
+            // === Test 3: Pruning with single item per blob ===
+            // Prune to position 5 (removes positions 0-4)
+            journal.prune(5).await.expect("failed to prune");
+
+            // Size should still be 10
+            assert_eq!(journal.size(), 10);
+
+            // oldest_retained_pos should be 5
+            assert_eq!(journal.oldest_retained_pos(), Some(5));
+
+            // Reading from size() - 1 (position 9) should still work
+            let value = journal
+                .read(journal.size() - 1)
+                .await
+                .expect("failed to read");
+            assert_eq!(value, test_digest(9));
+
+            // Reading from pruned positions should return ItemPruned
+            for i in 0..5 {
+                assert!(matches!(journal.read(i).await, Err(Error::ItemPruned(_))));
+            }
+
+            // Reading from retained positions should work
+            for i in 5..10u64 {
+                assert_eq!(journal.read(i).await.unwrap(), test_digest(i));
+            }
+
+            // Append more items after pruning
+            for i in 10..15u64 {
+                let pos = journal
+                    .append(test_digest(i))
+                    .await
+                    .expect("failed to append");
+                assert_eq!(pos, i);
+
+                // Verify we can read from size() - 1
+                let value = journal
+                    .read(journal.size() - 1)
+                    .await
+                    .expect("failed to read");
+                assert_eq!(value, test_digest(i));
+            }
+
+            journal.sync().await.expect("failed to sync");
+            drop(journal);
+
+            // === Test 4: Restart persistence with single item per blob ===
+            let journal = Journal::<_, Digest>::init(context.with_label("second"), cfg.clone())
+                .await
+                .expect("failed to re-initialize journal");
+
+            // Verify size is preserved
+            assert_eq!(journal.size(), 15);
+
+            // Verify oldest_retained_pos is preserved
+            assert_eq!(journal.oldest_retained_pos(), Some(5));
+
+            // Reading from size() - 1 should work after restart
+            let value = journal
+                .read(journal.size() - 1)
+                .await
+                .expect("failed to read");
+            assert_eq!(value, test_digest(14));
+
+            // Reading all retained positions should work
+            for i in 5..15u64 {
+                assert_eq!(journal.read(i).await.unwrap(), test_digest(i));
+            }
+
+            journal.destroy().await.expect("failed to destroy journal");
+
+            // === Test 5: Restart after pruning with non-zero index ===
+            // Fresh journal for this test
+            let mut journal = Journal::init(context.with_label("third"), cfg.clone())
+                .await
+                .expect("failed to initialize journal");
+
+            // Append 10 items (positions 0-9)
+            for i in 0..10u64 {
+                journal.append(test_digest(i + 100)).await.unwrap();
+            }
+
+            // Prune to position 5 (removes positions 0-4)
+            journal.prune(5).await.unwrap();
+            assert_eq!(journal.size(), 10);
+            assert_eq!(journal.oldest_retained_pos(), Some(5));
+
+            // Sync and restart
+            journal.sync().await.unwrap();
+            drop(journal);
+
+            // Re-open journal
+            let journal = Journal::<_, Digest>::init(context.with_label("fourth"), cfg.clone())
+                .await
+                .expect("failed to re-initialize journal");
+
+            // Verify state after restart
+            assert_eq!(journal.size(), 10);
+            assert_eq!(journal.oldest_retained_pos(), Some(5));
+
+            // Reading from size() - 1 (position 9) should work
+            let value = journal.read(journal.size() - 1).await.unwrap();
+            assert_eq!(value, test_digest(109));
+
+            // Verify all retained positions (5-9) work
+            for i in 5..10u64 {
+                assert_eq!(journal.read(i).await.unwrap(), test_digest(i + 100));
+            }
+
+            journal.destroy().await.expect("failed to destroy journal");
+
+            // === Test 6: Prune all items (edge case) ===
+            let mut journal = Journal::init(context.clone(), cfg.clone())
+                .await
+                .expect("failed to initialize journal");
+
+            for i in 0..5u64 {
+                journal.append(test_digest(i + 200)).await.unwrap();
+            }
+            journal.sync().await.unwrap();
+
+            // Prune all items
+            journal.prune(5).await.unwrap();
+            assert_eq!(journal.size(), 5); // Size unchanged
+            assert_eq!(journal.oldest_retained_pos(), None); // All pruned
+
+            // size() - 1 = 4, but position 4 is pruned
+            let result = journal.read(journal.size() - 1).await;
+            assert!(matches!(result, Err(Error::ItemPruned(4))));
+
+            // After appending, reading works again
+            journal.append(test_digest(205)).await.unwrap();
+            assert_eq!(journal.oldest_retained_pos(), Some(5));
+            assert_eq!(
+                journal.read(journal.size() - 1).await.unwrap(),
+                test_digest(205)
+            );
+
+            journal.destroy().await.expect("failed to destroy journal");
+        });
+    }
+
+    #[test_traced]
+    fn test_fixed_journal_init_at_size_zero() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(NZU64!(5));
+            let mut journal = Journal::<_, Digest>::init_at_size(context.clone(), cfg.clone(), 0)
+                .await
+                .unwrap();
+
+            assert_eq!(journal.size(), 0);
+            assert_eq!(journal.oldest_retained_pos(), None);
+
+            // Next append should get position 0
+            let pos = journal.append(test_digest(100)).await.unwrap();
+            assert_eq!(pos, 0);
+            assert_eq!(journal.size(), 1);
+            assert_eq!(journal.read(0).await.unwrap(), test_digest(100));
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_fixed_journal_init_at_size_section_boundary() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(NZU64!(5));
+
+            // Initialize at position 10 (exactly at section 2 boundary with items_per_blob=5)
+            let mut journal = Journal::<_, Digest>::init_at_size(context.clone(), cfg.clone(), 10)
+                .await
+                .unwrap();
+
+            assert_eq!(journal.size(), 10);
+            assert_eq!(journal.oldest_retained_pos(), None);
+
+            // Next append should get position 10
+            let pos = journal.append(test_digest(1000)).await.unwrap();
+            assert_eq!(pos, 10);
+            assert_eq!(journal.size(), 11);
+            assert_eq!(journal.read(10).await.unwrap(), test_digest(1000));
+
+            // Can continue appending
+            let pos = journal.append(test_digest(1001)).await.unwrap();
+            assert_eq!(pos, 11);
+            assert_eq!(journal.read(11).await.unwrap(), test_digest(1001));
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_fixed_journal_init_at_size_mid_section() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(NZU64!(5));
+
+            // Initialize at position 7 (middle of section 1 with items_per_blob=5)
+            // This creates section 1 with zero-filled items at positions 5 and 6
+            let mut journal = Journal::<_, Digest>::init_at_size(context.clone(), cfg.clone(), 7)
+                .await
+                .unwrap();
+
+            assert_eq!(journal.size(), 7);
+            // Fixed journal creates zero-filled items, so oldest_retained_pos is the start of the section
+            assert_eq!(journal.oldest_retained_pos(), Some(5));
+
+            // Next append should get position 7
+            let pos = journal.append(test_digest(700)).await.unwrap();
+            assert_eq!(pos, 7);
+            assert_eq!(journal.size(), 8);
+            assert_eq!(journal.read(7).await.unwrap(), test_digest(700));
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_fixed_journal_init_at_size_persistence() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(NZU64!(5));
+
+            // Initialize at position 15
+            let mut journal =
+                Journal::<_, Digest>::init_at_size(context.with_label("first"), cfg.clone(), 15)
+                    .await
+                    .unwrap();
+
+            // Append some items
+            for i in 0..5u64 {
+                let pos = journal.append(test_digest(1500 + i)).await.unwrap();
+                assert_eq!(pos, 15 + i);
+            }
+
+            assert_eq!(journal.size(), 20);
+
+            // Sync and reopen
+            journal.sync().await.unwrap();
+            drop(journal);
+
+            let mut journal = Journal::<_, Digest>::init(context.with_label("second"), cfg.clone())
+                .await
+                .unwrap();
+
+            // Size and data should be preserved
+            assert_eq!(journal.size(), 20);
+            assert_eq!(journal.oldest_retained_pos(), Some(15));
+
+            // Verify data
+            for i in 0..5u64 {
+                assert_eq!(journal.read(15 + i).await.unwrap(), test_digest(1500 + i));
+            }
+
+            // Can continue appending
+            let pos = journal.append(test_digest(9999)).await.unwrap();
+            assert_eq!(pos, 20);
+            assert_eq!(journal.read(20).await.unwrap(), test_digest(9999));
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_fixed_journal_init_at_size_persistence_without_data() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(NZU64!(5));
+
+            // Initialize at position 15
+            let journal =
+                Journal::<_, Digest>::init_at_size(context.with_label("first"), cfg.clone(), 15)
+                    .await
+                    .unwrap();
+
+            assert_eq!(journal.size(), 15);
+            assert_eq!(journal.oldest_retained_pos(), None);
+
+            // Drop without writing any data
+            drop(journal);
+
+            // Reopen and verify size persisted
+            let mut journal = Journal::<_, Digest>::init(context.with_label("second"), cfg.clone())
+                .await
+                .unwrap();
+
+            assert_eq!(journal.size(), 15);
+            assert_eq!(journal.oldest_retained_pos(), None);
+
+            // Can append starting at position 15
+            let pos = journal.append(test_digest(1500)).await.unwrap();
+            assert_eq!(pos, 15);
+            assert_eq!(journal.read(15).await.unwrap(), test_digest(1500));
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_fixed_journal_init_at_size_large_offset() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(NZU64!(5));
+
+            // Initialize at a large position (position 1000)
+            let mut journal =
+                Journal::<_, Digest>::init_at_size(context.clone(), cfg.clone(), 1000)
+                    .await
+                    .unwrap();
+
+            assert_eq!(journal.size(), 1000);
+            assert_eq!(journal.oldest_retained_pos(), None);
+
+            // Next append should get position 1000
+            let pos = journal.append(test_digest(100000)).await.unwrap();
+            assert_eq!(pos, 1000);
+            assert_eq!(journal.read(1000).await.unwrap(), test_digest(100000));
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_fixed_journal_init_at_size_prune_and_append() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(NZU64!(5));
+
+            // Initialize at position 20
+            let mut journal = Journal::<_, Digest>::init_at_size(context.clone(), cfg.clone(), 20)
+                .await
+                .unwrap();
+
+            // Append items 20-29
+            for i in 0..10u64 {
+                journal.append(test_digest(2000 + i)).await.unwrap();
+            }
+
+            assert_eq!(journal.size(), 30);
+
+            // Prune to position 25
+            journal.prune(25).await.unwrap();
+
+            assert_eq!(journal.size(), 30);
+            assert_eq!(journal.oldest_retained_pos(), Some(25));
+
+            // Verify remaining items are readable
+            for i in 25..30u64 {
+                assert_eq!(journal.read(i).await.unwrap(), test_digest(2000 + (i - 20)));
+            }
+
+            // Continue appending
+            let pos = journal.append(test_digest(3000)).await.unwrap();
+            assert_eq!(pos, 30);
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_fixed_journal_clear_to_size() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(NZU64!(10));
+            let mut journal = Journal::init(context.with_label("journal"), cfg.clone())
+                .await
+                .expect("failed to initialize journal");
+
+            // Append 25 items (positions 0-24, spanning 3 blobs)
+            for i in 0..25u64 {
+                journal.append(test_digest(i)).await.unwrap();
+            }
+            assert_eq!(journal.size(), 25);
+            journal.sync().await.unwrap();
+
+            // Clear to position 100, effectively resetting the journal
+            journal.clear_to_size(100).await.unwrap();
+            assert_eq!(journal.size(), 100);
+
+            // Old positions should fail
+            for i in 0..25 {
+                assert!(matches!(journal.read(i).await, Err(Error::ItemPruned(_))));
+            }
+
+            // Verify size persists after restart without writing any data
+            drop(journal);
+            let mut journal =
+                Journal::<_, Digest>::init(context.with_label("journal_after_clear"), cfg.clone())
+                    .await
+                    .expect("failed to re-initialize journal after clear");
+            assert_eq!(journal.size(), 100);
+
+            // Append new data starting at position 100
+            for i in 100..105u64 {
+                let pos = journal.append(test_digest(i)).await.unwrap();
+                assert_eq!(pos, i);
+            }
+            assert_eq!(journal.size(), 105);
+
+            // New positions should be readable
+            for i in 100..105u64 {
+                assert_eq!(journal.read(i).await.unwrap(), test_digest(i));
+            }
+
+            // Sync and re-init to verify persistence
+            journal.sync().await.unwrap();
+            drop(journal);
+
+            let journal = Journal::<_, Digest>::init(context.with_label("journal_reopened"), cfg)
+                .await
+                .expect("failed to re-initialize journal");
+
+            assert_eq!(journal.size(), 105);
+            for i in 100..105u64 {
+                assert_eq!(journal.read(i).await.unwrap(), test_digest(i));
+            }
+
             journal.destroy().await.unwrap();
         });
     }

@@ -20,11 +20,13 @@
 //!
 //! This implementation is only available on Linux systems that support io_uring.
 
+use super::Header;
 use crate::{
-    iouring::{self, should_retry},
-    Blob as _, Error,
+    iouring::{self, should_retry, OpBuffer},
+    Error, IoBufMut, IoBufs, IoBufsMut,
 };
-use commonware_utils::{from_hex, hex, StableBuf};
+use commonware_codec::Encode;
+use commonware_utils::{from_hex, hex};
 use futures::{
     channel::{mpsc, oneshot},
     executor::block_on,
@@ -34,7 +36,8 @@ use io_uring::{opcode, types};
 use prometheus_client::registry::Registry;
 use std::{
     fs::{self, File},
-    io::Error as IoError,
+    io::{Error as IoError, Read, Seek, SeekFrom, Write},
+    ops::RangeInclusive,
     os::fd::AsRawFd,
     path::{Path, PathBuf},
     sync::Arc,
@@ -99,7 +102,12 @@ impl Storage {
 impl crate::Storage for Storage {
     type Blob = Blob;
 
-    async fn open(&self, partition: &str, name: &[u8]) -> Result<(Blob, u64), Error> {
+    async fn open_versioned(
+        &self,
+        partition: &str,
+        name: &[u8],
+        versions: RangeInclusive<u16>,
+    ) -> Result<(Blob, u64, u16), Error> {
         super::validate_partition_name(partition)?;
 
         // Construct the full path
@@ -115,7 +123,7 @@ impl crate::Storage for Storage {
         fs::create_dir_all(parent).map_err(|_| Error::PartitionCreationFailed(partition.into()))?;
 
         // Open the file, creating it if it doesn't exist
-        let file = fs::OpenOptions::new()
+        let mut file = fs::OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
@@ -124,27 +132,44 @@ impl crate::Storage for Storage {
             .map_err(|e| Error::BlobOpenFailed(partition.into(), hex(name), e))?;
 
         // Assume empty files are newly created. Existing empty files will be synced too; that's OK.
-        let len = file.metadata().map_err(|_| Error::ReadFailed)?.len();
-        let newly_created = len == 0;
+        let raw_len = file.metadata().map_err(|_| Error::ReadFailed)?.len();
 
-        // Create the blob
-        let blob = Blob::new(partition.into(), name, file, self.io_sender.clone());
+        // Handle header: new/corrupted blobs get a fresh header written,
+        // existing blobs have their header read.
+        let (blob_version, logical_len) = if Header::missing(raw_len) {
+            // New (or corrupted) blob - truncate and write header with latest version
+            let (header, blob_version) = Header::new(&versions);
+            file.set_len(Header::SIZE_U64)
+                .map_err(|e| Error::BlobResizeFailed(partition.into(), hex(name), e))?;
+            file.seek(SeekFrom::Start(0))
+                .map_err(|_| Error::WriteFailed)?;
+            file.write_all(&header.encode())
+                .map_err(|_| Error::WriteFailed)?;
+            file.sync_all()
+                .map_err(|e| Error::BlobSyncFailed(partition.into(), hex(name), e))?;
 
-        // Only sync if we created a new file
-        if newly_created {
-            // Sync the blob to ensure it is durably created
-            blob.sync().await?;
-
-            // Sync the parent directory to ensure the directory entry is durable
-            sync_dir(parent)?;
-
-            // Sync storage directory if parent directory did not exist
-            if !parent_existed {
-                sync_dir(&self.storage_directory)?;
+            // For new files, sync the parent directory to ensure the directory entry is durable.
+            if raw_len == 0 {
+                sync_dir(parent)?;
+                if !parent_existed {
+                    sync_dir(&self.storage_directory)?;
+                }
             }
-        }
 
-        Ok((blob, len))
+            (blob_version, 0)
+        } else {
+            // Existing blob - read and validate header
+            file.seek(SeekFrom::Start(0))
+                .map_err(|_| Error::ReadFailed)?;
+            let mut header_bytes = [0u8; Header::SIZE];
+            file.read_exact(&mut header_bytes)
+                .map_err(|_| Error::ReadFailed)?;
+            Header::from(header_bytes, raw_len, &versions)
+                .map_err(|e| e.into_error(partition, name))?
+        };
+
+        let blob = Blob::new(partition.into(), name, file, self.io_sender.clone());
+        Ok((blob, logical_len, blob_version))
     }
 
     async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
@@ -235,31 +260,38 @@ impl Blob {
 impl crate::Blob for Blob {
     async fn read_at(
         &self,
-        buf: impl Into<StableBuf> + Send,
         offset: u64,
-    ) -> Result<StableBuf, Error> {
-        let mut buf = buf.into();
+        buf: impl Into<IoBufsMut> + Send,
+    ) -> Result<IoBufsMut, Error> {
+        let input_buf = buf.into();
+
+        // For single buffers, read directly into them (zero-copy).
+        // For chunked buffers, use a temporary and copy to preserve the input structure.
+        let buf_len = input_buf.len();
+        let (mut io_buf, original_bufs) = match input_buf {
+            IoBufsMut::Single(buf) => (buf, None),
+            IoBufsMut::Chunked(bufs) => (IoBufMut::zeroed(buf_len), Some(bufs)),
+        };
+
         let fd = types::Fd(self.file.as_raw_fd());
         let mut bytes_read = 0;
-        let buf_len = buf.len();
         let mut io_sender = self.io_sender.clone();
+        let offset = offset
+            .checked_add(Header::SIZE_U64)
+            .ok_or(Error::OffsetOverflow)?;
         while bytes_read < buf_len {
             // Figure out how much is left to read and where to read into.
             //
-            // SAFETY: `buf` is a `StableBuf` guaranteeing the memory won't move.
+            // SAFETY: IoBufMut wraps BytesMut which has stable memory addresses.
             // `bytes_read` is always < `buf_len` due to the loop condition, so
             // `add(bytes_read)` stays within bounds and `buf_len - bytes_read`
             // correctly represents the remaining valid bytes.
-            let remaining = unsafe {
-                std::slice::from_raw_parts_mut(
-                    buf.as_mut_ptr().add(bytes_read),
-                    buf_len - bytes_read,
-                )
-            };
+            let ptr = unsafe { io_buf.as_mut_ptr().add(bytes_read) };
+            let remaining_len = buf_len - bytes_read;
             let offset = offset + bytes_read as u64;
 
             // Create an operation to do the read
-            let op = opcode::Read::new(fd, remaining.as_mut_ptr(), remaining.len() as _)
+            let op = opcode::Read::new(fd, ptr, remaining_len as _)
                 .offset(offset as _)
                 .build();
 
@@ -269,14 +301,17 @@ impl crate::Blob for Blob {
                 .send(iouring::Op {
                     work: op,
                     sender,
-                    buffer: Some(buf),
+                    buffer: Some(OpBuffer::Read(io_buf)),
                 })
                 .await
                 .map_err(|_| Error::ReadFailed)?;
 
             // Wait for the result
             let (result, got_buf) = receiver.await.map_err(|_| Error::ReadFailed)?;
-            buf = got_buf.unwrap();
+            io_buf = match got_buf {
+                Some(OpBuffer::Read(b)) => b,
+                _ => return Err(Error::ReadFailed),
+            };
             if should_retry(result) {
                 continue;
             }
@@ -290,32 +325,48 @@ impl crate::Blob for Blob {
             }
             bytes_read += op_bytes_read;
         }
-        Ok(buf)
+
+        // Return the same buffer structure as input
+        match original_bufs {
+            None => Ok(IoBufsMut::Single(io_buf)),
+            Some(mut bufs) => {
+                // Copy from temporary buffer to the original chunked buffers
+                let mut offset = 0;
+                for buf in bufs.iter_mut() {
+                    let len = buf.len();
+                    buf.as_mut()
+                        .copy_from_slice(&io_buf.as_ref()[offset..offset + len]);
+                    offset += len;
+                }
+                Ok(IoBufsMut::Chunked(bufs))
+            }
+        }
     }
 
-    async fn write_at(&self, buf: impl Into<StableBuf> + Send, offset: u64) -> Result<(), Error> {
-        let mut buf = buf.into();
+    async fn write_at(&self, offset: u64, buf: impl Into<IoBufs> + Send) -> Result<(), Error> {
+        // Convert to contiguous IoBuf for io_uring write
+        // (zero-copy if single buffer, copies if multiple)
+        let mut buf = buf.into().coalesce();
         let fd = types::Fd(self.file.as_raw_fd());
         let mut bytes_written = 0;
         let buf_len = buf.len();
         let mut io_sender = self.io_sender.clone();
+        let offset = offset
+            .checked_add(Header::SIZE_U64)
+            .ok_or(Error::OffsetOverflow)?;
         while bytes_written < buf_len {
             // Figure out how much is left to write and where to write from.
             //
-            // SAFETY: `buf` is a `StableBuf` guaranteeing the memory won't move.
+            // SAFETY: IoBuf wraps Bytes which has stable memory addresses.
             // `bytes_written` is always < `buf_len` due to the loop condition, so
             // `add(bytes_written)` stays within bounds and `buf_len - bytes_written`
             // correctly represents the remaining valid bytes.
-            let remaining = unsafe {
-                std::slice::from_raw_parts(
-                    buf.as_mut_ptr().add(bytes_written) as *const u8,
-                    buf_len - bytes_written,
-                )
-            };
+            let ptr = unsafe { buf.as_ptr().add(bytes_written) };
+            let remaining_len = buf_len - bytes_written;
             let offset = offset + bytes_written as u64;
 
             // Create an operation to do the write
-            let op = opcode::Write::new(fd, remaining.as_ptr(), remaining.len() as _)
+            let op = opcode::Write::new(fd, ptr, remaining_len as _)
                 .offset(offset as _)
                 .build();
 
@@ -325,14 +376,17 @@ impl crate::Blob for Blob {
                 .send(iouring::Op {
                     work: op,
                     sender,
-                    buffer: Some(buf),
+                    buffer: Some(OpBuffer::Write(buf)),
                 })
                 .await
                 .map_err(|_| Error::WriteFailed)?;
 
             // Wait for the result
             let (return_value, got_buf) = receiver.await.map_err(|_| Error::WriteFailed)?;
-            buf = got_buf.unwrap();
+            buf = match got_buf {
+                Some(OpBuffer::Write(b)) => b,
+                _ => return Err(Error::WriteFailed),
+            };
             if should_retry(return_value) {
                 continue;
             }
@@ -348,6 +402,9 @@ impl crate::Blob for Blob {
 
     // TODO: Make this async. See https://github.com/commonwarexyz/monorepo/issues/831
     async fn resize(&self, len: u64) -> Result<(), Error> {
+        let len = len
+            .checked_add(Header::SIZE_U64)
+            .ok_or(Error::OffsetOverflow)?;
         self.file.set_len(len).map_err(|e| {
             Error::BlobResizeFailed(self.partition.clone(), hex(&self.name), IoError::other(e))
         })
@@ -404,8 +461,8 @@ impl crate::Blob for Blob {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::storage::tests::run_storage_tests;
+    use super::{Header, *};
+    use crate::{storage::tests::run_storage_tests, Blob, IoBufMut, Storage as _};
     use rand::{Rng as _, SeedableRng as _};
     use std::env;
 
@@ -430,5 +487,128 @@ mod tests {
         let (storage, storage_directory) = create_test_storage();
         run_storage_tests(storage).await;
         let _ = std::fs::remove_dir_all(storage_directory);
+    }
+
+    #[tokio::test]
+    async fn test_blob_header_handling() {
+        let (storage, storage_directory) = create_test_storage();
+
+        // Test 1: New blob returns logical size 0 and correct application version
+        let (blob, size) = storage.open("partition", b"test").await.unwrap();
+        assert_eq!(size, 0, "new blob should have logical size 0");
+
+        // Verify raw file has 8 bytes (header only)
+        let file_path = storage_directory.join("partition").join(hex(b"test"));
+        let metadata = std::fs::metadata(&file_path).unwrap();
+        assert_eq!(
+            metadata.len(),
+            Header::SIZE_U64,
+            "raw file should have 8-byte header"
+        );
+
+        // Test 2: Logical offset handling - write at offset 0 stores at raw offset 8
+        let data = b"hello world";
+        blob.write_at(0, data.to_vec()).await.unwrap();
+        blob.sync().await.unwrap();
+
+        // Verify raw file size
+        let metadata = std::fs::metadata(&file_path).unwrap();
+        assert_eq!(metadata.len(), Header::SIZE_U64 + data.len() as u64);
+
+        // Verify raw file layout
+        let raw_content = std::fs::read(&file_path).unwrap();
+        assert_eq!(&raw_content[..Header::MAGIC_LENGTH], &Header::MAGIC);
+        // Header version (bytes 4-5) and App version (bytes 6-7)
+        assert_eq!(
+            &raw_content[Header::MAGIC_LENGTH..Header::MAGIC_LENGTH + Header::VERSION_LENGTH],
+            &Header::RUNTIME_VERSION.to_be_bytes()
+        );
+        // Data should start at offset 8
+        assert_eq!(&raw_content[Header::SIZE..], data);
+
+        // Test 3: Read at logical offset 0 returns data from raw offset 8
+        let read_buf = blob
+            .read_at(0, IoBufMut::zeroed(data.len()))
+            .await
+            .unwrap()
+            .coalesce();
+        assert_eq!(read_buf, data);
+
+        // Test 4: Resize with logical length
+        blob.resize(5).await.unwrap();
+        blob.sync().await.unwrap();
+        let metadata = std::fs::metadata(&file_path).unwrap();
+        assert_eq!(
+            metadata.len(),
+            Header::SIZE_U64 + 5,
+            "resize(5) should result in 13 raw bytes"
+        );
+
+        // resize(0) should leave only header
+        blob.resize(0).await.unwrap();
+        blob.sync().await.unwrap();
+        let metadata = std::fs::metadata(&file_path).unwrap();
+        assert_eq!(
+            metadata.len(),
+            Header::SIZE_U64,
+            "resize(0) should leave only header"
+        );
+
+        // Test 5: Reopen existing blob preserves header and returns correct logical size
+        blob.write_at(0, b"test data".to_vec()).await.unwrap();
+        blob.sync().await.unwrap();
+        drop(blob);
+
+        let (blob2, size2) = storage.open("partition", b"test").await.unwrap();
+        assert_eq!(size2, 9, "reopened blob should have logical size 9");
+        let read_buf = blob2
+            .read_at(0, IoBufMut::zeroed(9))
+            .await
+            .unwrap()
+            .coalesce();
+        assert_eq!(read_buf, b"test data");
+        drop(blob2);
+
+        // Test 6: Corrupted blob recovery (0 < raw_size < 8)
+        // Manually create a corrupted file with only 4 bytes
+        let corrupted_path = storage_directory.join("partition").join(hex(b"corrupted"));
+        std::fs::write(&corrupted_path, vec![0u8; 4]).unwrap();
+
+        // Opening should truncate and write fresh header
+        let (blob3, size3) = storage.open("partition", b"corrupted").await.unwrap();
+        assert_eq!(size3, 0, "corrupted blob should return logical size 0");
+
+        // Verify raw file now has proper 8-byte header
+        let metadata = std::fs::metadata(&corrupted_path).unwrap();
+        assert_eq!(
+            metadata.len(),
+            Header::SIZE_U64,
+            "corrupted blob should be reset to header-only"
+        );
+
+        // Cleanup
+        drop(blob3);
+        let _ = std::fs::remove_dir_all(&storage_directory);
+    }
+
+    #[tokio::test]
+    async fn test_blob_magic_mismatch() {
+        let (storage, storage_directory) = create_test_storage();
+
+        // Create the partition directory
+        let partition_path = storage_directory.join("partition");
+        std::fs::create_dir_all(&partition_path).unwrap();
+
+        // Manually create a file with invalid magic bytes
+        let bad_magic_path = partition_path.join(hex(b"bad_magic"));
+        std::fs::write(&bad_magic_path, vec![0u8; Header::SIZE]).unwrap();
+
+        // Opening should fail with corrupt error
+        let result = storage.open("partition", b"bad_magic").await;
+        assert!(
+            matches!(result, Err(crate::Error::BlobCorrupt(_, _, reason)) if reason.contains("invalid magic"))
+        );
+
+        let _ = std::fs::remove_dir_all(&storage_directory);
     }
 }

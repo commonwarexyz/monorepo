@@ -35,8 +35,7 @@ impl<R: Rng + Spawner, H: Hasher> Application<R, H> {
                 hasher: config.hasher,
                 mailbox,
             },
-            Scheme::signer(config.participants, config.private_key)
-                .expect("private key must be in participants"),
+            config.scheme,
             Reporter::new(),
             Mailbox::new(sender),
         )

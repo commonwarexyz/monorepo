@@ -1,7 +1,6 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use bytes::{Buf, BufMut};
 use commonware_broadcast::{
     buffered::{Config, Engine, Mailbox},
     Broadcaster,
@@ -13,8 +12,7 @@ use commonware_cryptography::{
     Committable, Digestible, Hasher, Sha256, Signer,
 };
 use commonware_p2p::{simulated::Network, Recipients};
-use commonware_runtime::{deterministic, Clock, Metrics, Runner};
-use governor::Quota;
+use commonware_runtime::{deterministic, Buf, BufMut, Clock, Metrics, Quota, Runner};
 use libfuzzer_sys::fuzz_target;
 use rand::{seq::SliceRandom, SeedableRng};
 use std::{collections::BTreeMap, num::NonZeroU32, time::Duration};
@@ -190,7 +188,7 @@ fn fuzz(input: FuzzInput) {
     let executor = deterministic::Runner::default();
     executor.start(|context| async move {
         // Create network
-        let (network, mut oracle) = Network::<deterministic::Context, PublicKey>::new(
+        let (network, oracle) = Network::<deterministic::Context, PublicKey>::new(
             context.with_label("network"),
             commonware_p2p::simulated::Config {
                 max_size: 1024 * 1024,
@@ -226,7 +224,7 @@ fn fuzz(input: FuzzInput) {
             };
 
             // Create engine
-            let engine_context = context.with_label(&format!("peer_{i}"));
+            let engine_context = context.with_label("peer").with_attribute("index", i);
             let (engine, mailbox) =
                 Engine::<_, PublicKey, FuzzMessage>::new(engine_context, config);
             mailboxes.insert(public_key.clone(), mailbox);

@@ -8,13 +8,8 @@ use crate::{
     setup::PeerConfig,
     BLOCKS_PER_EPOCH,
 };
-use bytes::{Buf, BufMut};
 use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write};
-use commonware_consensus::{
-    types::Epoch,
-    utils::{epoch as compute_epoch, is_last_block_in_epoch, relative_height_in_epoch},
-    Reporter,
-};
+use commonware_consensus::types::{Epoch, EpochPhase, Epocher, FixedEpocher};
 use commonware_cryptography::{
     bls12381::{
         dkg::{observe, DealerPrivMsg, DealerPubMsg, Info, Output, PlayerAck},
@@ -26,11 +21,14 @@ use commonware_cryptography::{
 use commonware_macros::select_loop;
 use commonware_math::algebra::Random;
 use commonware_p2p::{utils::mux::Muxer, Manager, Receiver, Recipients, Sender};
+use commonware_parallel::Sequential;
 use commonware_runtime::{
-    spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner, Storage as RuntimeStorage,
+    spawn_cell, Buf, BufMut, Clock, ContextCell, Handle, Metrics, Spawner,
+    Storage as RuntimeStorage,
 };
-use commonware_utils::{ordered::Set, Acknowledgement as _, NZU32};
+use commonware_utils::{ordered::Set, Acknowledgement as _, N3f1, NZU32};
 use futures::{channel::mpsc, StreamExt};
+use prometheus_client::metrics::counter::Counter;
 use rand_core::CryptoRngCore;
 use std::num::NonZeroU32;
 use tracing::{debug, info, warn};
@@ -110,6 +108,11 @@ where
     signer: C,
     peer_config: PeerConfig<C::PublicKey>,
     partition_prefix: String,
+
+    successful_epochs: Counter,
+    failed_epochs: Counter,
+    our_reveals: Counter,
+    all_reveals: Counter,
 }
 
 impl<E, P, H, C, V> Actor<E, P, H, C, V>
@@ -122,7 +125,23 @@ where
 {
     /// Create a new DKG [Actor] and its associated [Mailbox].
     pub async fn init(context: E, config: Config<C, P>) -> (Self, Mailbox<H, C, V>) {
+        // Create mailbox
         let (sender, mailbox) = mpsc::channel(config.mailbox_size);
+
+        // Create metrics
+        let successful_epochs = Counter::default();
+        let failed_epochs = Counter::default();
+        let our_reveals = Counter::default();
+        let all_reveals = Counter::default();
+        context.register(
+            "successful_epochs",
+            "successful epochs",
+            successful_epochs.clone(),
+        );
+        context.register("failed_epochs", "failed epochs", failed_epochs.clone());
+        context.register("our_reveals", "our share was revealed", our_reveals.clone());
+        context.register("all_reveals", "all share reveals", all_reveals.clone());
+
         (
             Self {
                 context: ContextCell::new(context),
@@ -131,6 +150,11 @@ where
                 signer: config.signer,
                 peer_config: config.peer_config,
                 partition_prefix: config.partition_prefix,
+
+                successful_epochs,
+                failed_epochs,
+                our_reveals,
+                all_reveals,
             },
             Mailbox::new(sender),
         )
@@ -141,7 +165,7 @@ where
         mut self,
         output: Option<Output<V, C::PublicKey>>,
         share: Option<Share>,
-        orchestrator: impl Reporter<Activity = orchestrator::Message<V, C::PublicKey>>,
+        orchestrator: orchestrator::Mailbox<V, C::PublicKey>,
         dkg: (
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
@@ -161,7 +185,7 @@ where
         mut self,
         output: Option<Output<V, C::PublicKey>>,
         share: Option<Share>,
-        mut orchestrator: impl Reporter<Activity = orchestrator::Message<V, C::PublicKey>>,
+        mut orchestrator: orchestrator::Mailbox<V, C::PublicKey>,
         (sender, receiver): (
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
@@ -170,6 +194,7 @@ where
     ) {
         let max_read_size = NZU32!(self.peer_config.max_participants_per_round());
         let is_dkg = output.is_none();
+        let epocher = FixedEpocher::new(BLOCKS_PER_EPOCH);
 
         // Initialize persistent state
         let mut storage = Storage::init(
@@ -185,7 +210,7 @@ where
                 output,
                 share,
             };
-            storage.append_epoch(initial_state).await;
+            storage.set_epoch(Epoch::zero(), initial_state).await;
         }
 
         // Start a muxer for the physical channel used by DKG/reshare
@@ -263,9 +288,7 @@ where
                 share: epoch_state.share.clone(),
                 dealers: dealers.clone(),
             };
-            orchestrator
-                .report(orchestrator::Message::Enter(transition))
-                .await;
+            orchestrator.enter(transition).await;
 
             // Register a channel for this round
             let (mut round_sender, mut round_receiver) = dkg_mux
@@ -274,7 +297,7 @@ where
                 .expect("should be able to create channel");
 
             // Prepare round info
-            let round = Info::new(
+            let round = Info::new::<N3f1>(
                 namespace::APPLICATION,
                 epoch.get(),
                 epoch_state.output.clone(),
@@ -287,7 +310,7 @@ where
             // Initialize dealer state if we are a dealer (factory handles log submission check)
             let mut dealer_state: Option<Dealer<V, C>> = am_dealer
                 .then(|| {
-                    storage.create_dealer(
+                    storage.create_dealer::<C, N3f1>(
                         epoch,
                         self.signer.clone(),
                         round.clone(),
@@ -299,7 +322,9 @@ where
 
             // Initialize player state if we are a player
             let mut player_state: Option<Player<V, C>> = am_player
-                .then(|| storage.create_player(epoch, self.signer.clone(), round.clone()))
+                .then(|| {
+                    storage.create_player::<C, N3f1>(epoch, self.signer.clone(), round.clone())
+                })
                 .flatten();
 
             select_loop! {
@@ -325,7 +350,7 @@ where
                                 Message::Dealer(pub_msg, priv_msg) => {
                                     if let Some(ref mut ps) = player_state {
                                         let response = ps
-                                            .handle(
+                                            .handle::<_, N3f1>(
                                                 &mut storage,
                                                 epoch,
                                                 sender_pk.clone(),
@@ -334,7 +359,7 @@ where
                                             )
                                             .await;
                                         if let Some(ack) = response {
-                                            let payload = Message::<V, C::PublicKey>::Ack(ack).encode().freeze();
+                                            let payload = Message::<V, C::PublicKey>::Ack(ack).encode();
                                             if let Err(e) = round_sender
                                                 .send(Recipients::One(sender_pk.clone()), payload, true)
                                                 .await
@@ -374,24 +399,17 @@ where
                             }
                         }
                         MailboxMessage::Finalized { block, response } => {
-                            let block_epoch = compute_epoch(BLOCKS_PER_EPOCH, block.height);
-                            let relative_height =
-                                relative_height_in_epoch(BLOCKS_PER_EPOCH, block.height);
-                            let mid_point = BLOCKS_PER_EPOCH / 2;
-                            info!(epoch = %block_epoch, relative_height, "processing finalized block");
+                            let bounds = epocher.containing(block.height).expect("block height covered by epoch strategy");
+                            let block_epoch = bounds.epoch();
+                            let phase = bounds.phase();
+                            let relative_height = bounds.relative();
+                            info!(epoch = %block_epoch, relative_height = %relative_height, "processing finalized block");
 
                             // Skip blocks from previous epochs (can happen on restart if we
                             // persisted state but crashed before acknowledging)
                             if block_epoch < epoch {
                                 response.acknowledge();
                                 continue;
-                            }
-
-                            // Inform the orchestrator of the epoch exit after first finalization
-                            if relative_height == 0 {
-                                if let Some(prev) = block_epoch.previous() {
-                                    orchestrator.report(orchestrator::Message::Exit(prev)).await;
-                                }
                             }
 
                             // Process dealer log from block if present
@@ -410,7 +428,7 @@ where
                             }
 
                             // In the first half of the epoch, continuously distribute shares
-                            if relative_height < mid_point {
+                            if phase == EpochPhase::Early {
                                 if let Some(ref mut ds) = dealer_state {
                                     Self::distribute_shares(
                                         &self_pk,
@@ -425,15 +443,14 @@ where
                             }
 
                             // At or past the midpoint, finalize dealer if not already done.
-                            // The >= check handles restart after midpoint acknowledgment.
-                            if relative_height >= mid_point {
+                            if matches!(phase, EpochPhase::Midpoint | EpochPhase::Late) {
                                 if let Some(ref mut ds) = dealer_state {
-                                    ds.finalize();
+                                    ds.finalize::<N3f1>();
                                 }
                             }
 
                             // Continue if not the last block in the epoch
-                            if is_last_block_in_epoch(BLOCKS_PER_EPOCH, block.height).is_none() {
+                            if block.height != bounds.last() {
                                 // Acknowledge block processing
                                 response.acknowledge();
                                 continue;
@@ -443,7 +460,7 @@ where
                             let logs = storage.logs(epoch);
                             let (success, next_round, next_output, next_share) =
                                 if let Some(ps) = player_state.take() {
-                                    match ps.finalize(logs, 1) {
+                                    match ps.finalize::<N3f1>(logs, &Sequential) {
                                         Ok((new_output, new_share)) => (
                                             true,
                                             epoch_state.round + 1,
@@ -458,7 +475,7 @@ where
                                         ),
                                     }
                                 } else {
-                                    match observe(round.clone(), logs, 1) {
+                                    match observe::<_, _, N3f1>(round.clone(), logs, &Sequential) {
                                         Ok(output) => (true, epoch_state.round + 1, Some(output), None),
                                         Err(_) => (
                                             false,
@@ -470,16 +487,29 @@ where
                                 };
                             if success {
                                 info!(?epoch, "epoch succeeded");
+                                self.successful_epochs.inc();
+
+                                // Record reveals
+                                let output = next_output.as_ref().expect("output exists on success");
+                                let revealed = output.revealed();
+                                self.all_reveals.inc_by(revealed.len() as u64);
+                                if revealed.position(&self_pk).is_some() {
+                                    self.our_reveals.inc();
+                                }
                             } else {
                                 warn!(?epoch, "epoch failed");
+                                self.failed_epochs.inc();
                             }
                             storage
-                                .append_epoch(EpochState {
-                                    round: next_round,
-                                    rng_seed: Summary::random(&mut self.context),
-                                    output: next_output.clone(),
-                                    share: next_share.clone(),
-                                })
+                                .set_epoch(
+                                    epoch.next(),
+                                    EpochState {
+                                        round: next_round,
+                                        rng_seed: Summary::random(&mut self.context),
+                                        output: next_output.clone(),
+                                        share: next_share.clone(),
+                                    },
+                                )
                                 .await;
 
                             // Acknowledge block processing before callback
@@ -496,14 +526,15 @@ where
                                 Update::Failure { epoch }
                             };
 
+                            // Exit the engine for this epoch now that the boundary is finalized
+                            orchestrator
+                                .exit(epoch)
+                                .await;
+
                             // If the update is stop, wait forever.
                             if let PostUpdate::Stop = callback.on_update(update).await {
                                 // Close the mailbox to prevent accepting any new messages
                                 drop(self.mailbox);
-                                // Exit last consensus instance to avoid useless work while we wait for shutdown
-                                orchestrator
-                                    .report(orchestrator::Message::Exit(epoch))
-                                    .await;
                                 // Keep running until killed to keep the orchestrator mailbox alive
                                 info!("DKG complete; waiting for shutdown...");
                                 futures::future::pending::<()>().await;
@@ -533,7 +564,7 @@ where
                 if let Some(ref mut ps) = player_state {
                     // Handle as player
                     let ack = match ps
-                        .handle(storage, epoch, self_pk.clone(), pub_msg, priv_msg)
+                        .handle::<_, N3f1>(storage, epoch, self_pk.clone(), pub_msg, priv_msg)
                         .await
                     {
                         Some(ack) => ack,
@@ -549,9 +580,7 @@ where
             }
 
             // Send to remote player
-            let payload = Message::<V, C::PublicKey>::Dealer(pub_msg, priv_msg)
-                .encode()
-                .freeze();
+            let payload = Message::<V, C::PublicKey>::Dealer(pub_msg, priv_msg).encode();
             match sender
                 .send(Recipients::One(player.clone()), payload, true)
                 .await

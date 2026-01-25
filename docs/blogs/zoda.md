@@ -6,7 +6,7 @@ published-time: "2025-11-04T00:00:00Z"
 modified-time: "2025-11-04T00:00:00Z"
 author: "Lucas Meier"
 author_twitter: "https://x.com/cronokirby"
-url: "https://commonware.xyz/blogs/zoda.html"
+url: "https://commonware.xyz/blogs/zoda"
 image: "https://commonware.xyz/imgs/zoda-card.png"
 katex: true
 ---

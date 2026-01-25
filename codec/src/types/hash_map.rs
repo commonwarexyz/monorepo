@@ -302,7 +302,7 @@ mod tests {
         let mut map = HashMap::new();
         map.insert(1u32, 100u64);
 
-        let mut encoded = map.encode();
+        let mut encoded = map.encode_mut();
         encoded.put_u8(0xFF); // Add extra byte
 
         // Use decode_cfg which enforces buffer is fully consumed

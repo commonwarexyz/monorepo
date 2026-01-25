@@ -39,9 +39,9 @@ pub mod unordered;
 ///
 /// _If you don't need advanced functionality, just use `insert()`, `insert_and_prune()`, or
 /// `remove()` from [Unordered] instead._
-pub trait Cursor {
+pub trait Cursor: Send + Sync {
     /// The type of values the cursor iterates over.
-    type Value: Eq;
+    type Value: Eq + Send + Sync;
 
     /// Advances the cursor to the next value in the chain, returning a reference to it.
     ///
@@ -103,9 +103,9 @@ pub trait Cursor {
 
 /// A trait defining the operations provided by a memory-efficient index that maps translated keys
 /// to arbitrary values, with no ordering assumed over the key space.
-pub trait Unordered {
+pub trait Unordered: Send + Sync {
     /// The type of values the index stores.
-    type Value: Eq;
+    type Value: Eq + Send + Sync;
 
     /// The type of cursor returned by this index to iterate over values with conflicting keys.
     type Cursor<'a>: Cursor<Value = Self::Value>
@@ -113,7 +113,7 @@ pub trait Unordered {
         Self: 'a;
 
     /// Returns an iterator over all values associated with a translated key.
-    fn get<'a>(&'a self, key: &[u8]) -> impl Iterator<Item = &'a Self::Value> + 'a
+    fn get<'a>(&'a self, key: &[u8]) -> impl Iterator<Item = &'a Self::Value> + Send + 'a
     where
         Self::Value: 'a;
 
@@ -163,24 +163,34 @@ pub trait Unordered {
 
 /// A trait defining the additional operations provided by a memory-efficient index that allows
 /// ordered traversal of the indexed keys.
-pub trait Ordered: Unordered {
-    type Iterator<'a>: Iterator<Item = &'a Self::Value>
+pub trait Ordered: Unordered + Send + Sync {
+    type Iterator<'a>: Iterator<Item = &'a Self::Value> + Send
     where
         Self: 'a;
 
     // Returns an iterator over all values associated with a translated key that lexicographically
     // precedes the result of translating `key`. The implementation will cycle around to the last
-    // translated key if `key` is less than or equal to the first translated key. Returns None if
-    // there are no keys in the index.
-    fn prev_translated_key<'a>(&'a self, key: &[u8]) -> Option<Self::Iterator<'a>>
+    // translated key if `key` is less than or equal to the first translated key. The returned
+    // boolean indicates whether the result is from cycling. Returns None if there are no keys in
+    // the index.
+    fn prev_translated_key<'a>(&'a self, key: &[u8]) -> Option<(Self::Iterator<'a>, bool)>
     where
         Self::Value: 'a;
 
     // Returns an iterator over all values associated with a translated key that lexicographically
     // follows the result of translating `key`. The implementation will cycle around to the first
-    // translated key if `key` is greater than or equal to the last translated key. Returns None if
-    // there are no keys in the index.
-    fn next_translated_key<'a>(&'a self, key: &[u8]) -> Option<Self::Iterator<'a>>
+    // translated key if `key` is greater than or equal to the last translated key. The returned
+    // boolean indicates whether the result is from cycling. Returns None if there are no keys in
+    // the index.
+    ///
+    /// For example, if the translator is looking only at the first byte of a key, and the index
+    /// contains values for translated keys 0b, 1c, and 2d, then `get_next([0b, 01, 02, ...])` would
+    /// return the values associated with 1c, `get_next([2a, 01, 02, ...])` would return the values
+    /// associated with 2d, and `get_next([2d])` would "cycle around" to the values associated with
+    /// 0b, returning true for the bool. Because values associated with the same translated key can
+    /// appear in any order, keys with the same first byte in this example would need to be ordered
+    /// by the caller if a full ordering over the untranslated keyspace is desired.
+    fn next_translated_key<'a>(&'a self, key: &[u8]) -> Option<(Self::Iterator<'a>, bool)>
     where
         Self::Value: 'a;
 
@@ -207,7 +217,7 @@ mod tests {
         translator::{OneCap, TwoCap},
     };
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic, Runner};
+    use commonware_runtime::{deterministic, Metrics, Runner};
     use rand::Rng;
     use std::{
         collections::HashMap,
@@ -304,13 +314,13 @@ mod tests {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             {
-                let mut index = new_partitioned_unordered(context.clone());
+                let mut index = new_partitioned_unordered(context.with_label("unordered"));
                 assert_eq!(index.keys(), 0);
                 run_index_basic(&mut index);
                 assert_eq!(index.keys(), 0);
             }
             {
-                let mut index = new_partitioned_ordered(context);
+                let mut index = new_partitioned_ordered(context.with_label("ordered"));
                 assert_eq!(index.keys(), 0);
                 run_index_basic(&mut index);
                 assert_eq!(index.keys(), 0);
@@ -384,11 +394,11 @@ mod tests {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             {
-                let mut index = new_partitioned_unordered(context.clone());
+                let mut index = new_partitioned_unordered(context.with_label("unordered"));
                 run_index_cursor_find(&mut index);
             }
             {
-                let mut index = new_partitioned_ordered(context);
+                let mut index = new_partitioned_ordered(context.with_label("ordered"));
                 run_index_cursor_find(&mut index);
             }
         });
@@ -442,7 +452,7 @@ mod tests {
         let runner = deterministic::Runner::default();
         runner.start(|mut context| async move {
             {
-                let mut index = new_partitioned_unordered(context.clone());
+                let mut index = new_partitioned_unordered(context.with_label("unordered"));
                 run_index_many_keys(&mut index, |bytes| context.fill(bytes));
             }
         });
@@ -507,11 +517,11 @@ mod tests {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             {
-                let mut index = new_partitioned_unordered(context.clone());
+                let mut index = new_partitioned_unordered(context.with_label("unordered"));
                 run_index_key_lengths_and_metrics(&mut index);
             }
             {
-                let mut index = new_partitioned_ordered(context);
+                let mut index = new_partitioned_ordered(context.with_label("ordered"));
                 run_index_key_lengths_and_metrics(&mut index);
             }
         });
@@ -550,11 +560,11 @@ mod tests {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             {
-                let mut index = new_partitioned_unordered(context.clone());
+                let mut index = new_partitioned_unordered(context.with_label("unordered"));
                 run_index_value_order(&mut index);
             }
             {
-                let mut index = new_partitioned_ordered(context);
+                let mut index = new_partitioned_ordered(context.with_label("ordered"));
                 run_index_value_order(&mut index);
             }
         });
@@ -593,11 +603,11 @@ mod tests {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             {
-                let mut index = new_partitioned_unordered(context.clone());
+                let mut index = new_partitioned_unordered(context.with_label("unordered"));
                 run_index_remove_specific(&mut index);
             }
             {
-                let mut index = new_partitioned_ordered(context);
+                let mut index = new_partitioned_ordered(context.with_label("ordered"));
                 run_index_remove_specific(&mut index);
             }
         });
@@ -647,11 +657,11 @@ mod tests {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             {
-                let mut index = new_partitioned_unordered(context.clone());
+                let mut index = new_partitioned_unordered(context.with_label("unordered"));
                 run_index_empty_key(&mut index);
             }
             {
-                let mut index = new_partitioned_ordered(context);
+                let mut index = new_partitioned_ordered(context.with_label("ordered"));
                 run_index_empty_key(&mut index);
             }
         });
@@ -696,11 +706,11 @@ mod tests {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             {
-                let mut index = new_partitioned_unordered(context.clone());
+                let mut index = new_partitioned_unordered(context.with_label("unordered"));
                 run_index_mutate_through_iterator(&mut index);
             }
             {
-                let mut index = new_partitioned_ordered(context);
+                let mut index = new_partitioned_ordered(context.with_label("ordered"));
                 run_index_mutate_through_iterator(&mut index);
             }
         });
@@ -751,11 +761,11 @@ mod tests {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             {
-                let mut index = new_partitioned_unordered(context.clone());
+                let mut index = new_partitioned_unordered(context.with_label("unordered"));
                 run_index_mutate_middle_of_four(&mut index);
             }
             {
-                let mut index = new_partitioned_ordered(context);
+                let mut index = new_partitioned_ordered(context.with_label("ordered"));
                 run_index_mutate_middle_of_four(&mut index);
             }
         });
@@ -845,11 +855,11 @@ mod tests {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             {
-                let mut index = new_partitioned_unordered(context.clone());
+                let mut index = new_partitioned_unordered(context.with_label("unordered"));
                 run_index_remove_through_iterator(&mut index);
             }
             {
-                let mut index = new_partitioned_ordered(context);
+                let mut index = new_partitioned_ordered(context.with_label("ordered"));
                 run_index_remove_through_iterator(&mut index);
             }
         });
@@ -911,11 +921,11 @@ mod tests {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             {
-                let mut index = new_partitioned_unordered(context.clone());
+                let mut index = new_partitioned_unordered(context.with_label("unordered"));
                 run_index_insert_through_iterator(&mut index);
             }
             {
-                let mut index = new_partitioned_ordered(context);
+                let mut index = new_partitioned_ordered(context.with_label("ordered"));
                 run_index_insert_through_iterator(&mut index);
             }
         });
@@ -955,11 +965,11 @@ mod tests {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             {
-                let mut index = new_partitioned_unordered(context.clone());
+                let mut index = new_partitioned_unordered(context.with_label("unordered"));
                 run_index_cursor_insert_after_done_appends(&mut index);
             }
             {
-                let mut index = new_partitioned_ordered(context);
+                let mut index = new_partitioned_ordered(context.with_label("ordered"));
                 run_index_cursor_insert_after_done_appends(&mut index);
             }
         });
@@ -1010,11 +1020,11 @@ mod tests {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             {
-                let mut index = new_partitioned_unordered(context.clone());
+                let mut index = new_partitioned_unordered(context.with_label("unordered"));
                 run_index_remove_to_nothing_then_add(&mut index);
             }
             {
-                let mut index = new_partitioned_ordered(context);
+                let mut index = new_partitioned_ordered(context.with_label("ordered"));
                 run_index_remove_to_nothing_then_add(&mut index);
             }
         });
@@ -1054,11 +1064,11 @@ mod tests {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             {
-                let mut index = new_partitioned_unordered(context.clone());
+                let mut index = new_partitioned_unordered(context.with_label("unordered"));
                 run_index_insert_and_remove_cursor(&mut index);
             }
             {
-                let mut index = new_partitioned_ordered(context);
+                let mut index = new_partitioned_ordered(context.with_label("ordered"));
                 run_index_insert_and_remove_cursor(&mut index);
             }
         });
@@ -1095,11 +1105,11 @@ mod tests {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             {
-                let mut index = new_partitioned_unordered(context.clone());
+                let mut index = new_partitioned_unordered(context.with_label("unordered"));
                 run_index_insert_and_prune_vacant(&mut index);
             }
             {
-                let mut index = new_partitioned_ordered(context);
+                let mut index = new_partitioned_ordered(context.with_label("ordered"));
                 run_index_insert_and_prune_vacant(&mut index);
             }
         });
@@ -1137,11 +1147,11 @@ mod tests {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             {
-                let mut index = new_partitioned_unordered(context.clone());
+                let mut index = new_partitioned_unordered(context.with_label("unordered"));
                 run_index_insert_and_prune_replace_one(&mut index);
             }
             {
-                let mut index = new_partitioned_ordered(context);
+                let mut index = new_partitioned_ordered(context.with_label("ordered"));
                 run_index_insert_and_prune_replace_one(&mut index);
             }
         });
@@ -1183,11 +1193,11 @@ mod tests {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             {
-                let mut index = new_partitioned_unordered(context.clone());
+                let mut index = new_partitioned_unordered(context.with_label("unordered"));
                 run_index_insert_and_prune_dead_insert(&mut index);
             }
             {
-                let mut index = new_partitioned_ordered(context);
+                let mut index = new_partitioned_ordered(context.with_label("ordered"));
                 run_index_insert_and_prune_dead_insert(&mut index);
             }
         });
@@ -1259,11 +1269,15 @@ mod tests {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             {
-                let index = Arc::new(Mutex::new(new_partitioned_unordered(context.clone())));
+                let index = Arc::new(Mutex::new(new_partitioned_unordered(
+                    context.with_label("unordered"),
+                )));
                 run_index_cursor_across_threads(index);
             }
             {
-                let index = Arc::new(Mutex::new(new_partitioned_ordered(context)));
+                let index = Arc::new(Mutex::new(new_partitioned_ordered(
+                    context.with_label("ordered"),
+                )));
                 run_index_cursor_across_threads(index);
             }
         });
@@ -1307,11 +1321,11 @@ mod tests {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             {
-                let mut index = new_partitioned_unordered(context.clone());
+                let mut index = new_partitioned_unordered(context.with_label("unordered"));
                 run_index_remove_middle_then_next(&mut index);
             }
             {
-                let mut index = new_partitioned_ordered(context);
+                let mut index = new_partitioned_ordered(context.with_label("ordered"));
                 run_index_remove_middle_then_next(&mut index);
             }
         });
@@ -1360,11 +1374,11 @@ mod tests {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             {
-                let mut index = new_partitioned_unordered(context.clone());
+                let mut index = new_partitioned_unordered(context.with_label("unordered"));
                 run_index_remove_to_nothing(&mut index);
             }
             {
-                let mut index = new_partitioned_ordered(context);
+                let mut index = new_partitioned_ordered(context.with_label("ordered"));
                 run_index_remove_to_nothing(&mut index);
             }
         });
@@ -1402,11 +1416,11 @@ mod tests {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             {
-                let mut index = new_partitioned_unordered(context.clone());
+                let mut index = new_partitioned_unordered(context.with_label("unordered"));
                 run_index_cursor_update_before_next_panics(&mut index);
             }
             {
-                let mut index = new_partitioned_ordered(context);
+                let mut index = new_partitioned_ordered(context.with_label("ordered"));
                 run_index_cursor_update_before_next_panics(&mut index);
             }
         });
@@ -1444,11 +1458,11 @@ mod tests {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             {
-                let mut index = new_partitioned_unordered(context.clone());
+                let mut index = new_partitioned_unordered(context.with_label("unordered"));
                 run_index_cursor_delete_before_next_panics(&mut index);
             }
             {
-                let mut index = new_partitioned_ordered(context);
+                let mut index = new_partitioned_ordered(context.with_label("ordered"));
                 run_index_cursor_delete_before_next_panics(&mut index);
             }
         });
@@ -1488,11 +1502,11 @@ mod tests {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             {
-                let mut index = new_partitioned_unordered(context.clone());
+                let mut index = new_partitioned_unordered(context.with_label("unordered"));
                 run_index_cursor_update_after_done(&mut index);
             }
             {
-                let mut index = new_partitioned_ordered(context);
+                let mut index = new_partitioned_ordered(context.with_label("ordered"));
                 run_index_cursor_update_after_done(&mut index);
             }
         });
@@ -1530,11 +1544,11 @@ mod tests {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             {
-                let mut index = new_partitioned_unordered(context.clone());
+                let mut index = new_partitioned_unordered(context.with_label("unordered"));
                 run_index_cursor_insert_before_next(&mut index);
             }
             {
-                let mut index = new_partitioned_ordered(context);
+                let mut index = new_partitioned_ordered(context.with_label("ordered"));
                 run_index_cursor_insert_before_next(&mut index);
             }
         });
@@ -1574,11 +1588,11 @@ mod tests {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             {
-                let mut index = new_partitioned_unordered(context.clone());
+                let mut index = new_partitioned_unordered(context.with_label("unordered"));
                 run_index_cursor_delete_after_done(&mut index);
             }
             {
-                let mut index = new_partitioned_ordered(context);
+                let mut index = new_partitioned_ordered(context.with_label("ordered"));
                 run_index_cursor_delete_after_done(&mut index);
             }
         });
@@ -1622,11 +1636,11 @@ mod tests {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             {
-                let mut index = new_partitioned_unordered(context.clone());
+                let mut index = new_partitioned_unordered(context.with_label("unordered"));
                 run_index_cursor_insert_with_next(&mut index);
             }
             {
-                let mut index = new_partitioned_ordered(context);
+                let mut index = new_partitioned_ordered(context.with_label("ordered"));
                 run_index_cursor_insert_with_next(&mut index);
             }
         });
@@ -1699,11 +1713,11 @@ mod tests {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             {
-                let mut index = new_partitioned_unordered(context.clone());
+                let mut index = new_partitioned_unordered(context.with_label("unordered"));
                 run_index_cursor_delete_last_then_next(&mut index);
             }
             {
-                let mut index = new_partitioned_ordered(context);
+                let mut index = new_partitioned_ordered(context.with_label("ordered"));
                 run_index_cursor_delete_last_then_next(&mut index);
             }
         });
@@ -1821,11 +1835,11 @@ mod tests {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             {
-                let mut index = new_partitioned_unordered(context.clone());
+                let mut index = new_partitioned_unordered(context.with_label("unordered"));
                 run_index_delete_first_and_insert(&mut index);
             }
             {
-                let mut index = new_partitioned_ordered(context);
+                let mut index = new_partitioned_ordered(context.with_label("ordered"));
                 run_index_delete_first_and_insert(&mut index);
             }
         });
@@ -1864,11 +1878,11 @@ mod tests {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             {
-                let mut index = new_partitioned_unordered(context.clone());
+                let mut index = new_partitioned_unordered(context.with_label("unordered"));
                 run_index_insert_at_entry_then_next(&mut index);
             }
             {
-                let mut index = new_partitioned_ordered(context);
+                let mut index = new_partitioned_ordered(context.with_label("ordered"));
                 run_index_insert_at_entry_then_next(&mut index);
             }
         });
@@ -1909,11 +1923,11 @@ mod tests {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             {
-                let mut index = new_partitioned_unordered(context.clone());
+                let mut index = new_partitioned_unordered(context.with_label("unordered"));
                 run_index_insert_at_entry_then_delete_head(&mut index);
             }
             {
-                let mut index = new_partitioned_ordered(context);
+                let mut index = new_partitioned_ordered(context.with_label("ordered"));
                 run_index_insert_at_entry_then_delete_head(&mut index);
             }
         });
@@ -1955,11 +1969,11 @@ mod tests {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             {
-                let mut index = new_partitioned_unordered(context.clone());
+                let mut index = new_partitioned_unordered(context.with_label("unordered"));
                 run_index_delete_then_insert_without_next(&mut index);
             }
             {
-                let mut index = new_partitioned_ordered(context);
+                let mut index = new_partitioned_ordered(context.with_label("ordered"));
                 run_index_delete_then_insert_without_next(&mut index);
             }
         });
@@ -2000,11 +2014,11 @@ mod tests {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             {
-                let mut index = new_partitioned_unordered(context.clone());
+                let mut index = new_partitioned_unordered(context.with_label("unordered"));
                 run_index_inserts_without_next(&mut index);
             }
             {
-                let mut index = new_partitioned_ordered(context);
+                let mut index = new_partitioned_ordered(context.with_label("ordered"));
                 run_index_inserts_without_next(&mut index);
             }
         });
@@ -2050,11 +2064,11 @@ mod tests {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             {
-                let mut index = new_partitioned_unordered(context.clone());
+                let mut index = new_partitioned_unordered(context.with_label("unordered"));
                 run_index_delete_last_then_insert_while_done(&mut index);
             }
             {
-                let mut index = new_partitioned_ordered(context);
+                let mut index = new_partitioned_ordered(context.with_label("ordered"));
                 run_index_delete_last_then_insert_while_done(&mut index);
             }
         });
@@ -2098,11 +2112,11 @@ mod tests {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             {
-                let mut index = new_partitioned_unordered(context.clone());
+                let mut index = new_partitioned_unordered(context.with_label("unordered"));
                 run_index_drop_mid_iteration_relinks(&mut index);
             }
             {
-                let mut index = new_partitioned_ordered(context);
+                let mut index = new_partitioned_ordered(context.with_label("ordered"));
                 run_index_drop_mid_iteration_relinks(&mut index);
             }
         });
@@ -2140,11 +2154,11 @@ mod tests {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             {
-                let mut index = new_partitioned_unordered(context.clone());
+                let mut index = new_partitioned_unordered(context.with_label("unordered"));
                 run_index_update_before_next_panics(&mut index);
             }
             {
-                let mut index = new_partitioned_ordered(context);
+                let mut index = new_partitioned_ordered(context.with_label("ordered"));
                 run_index_update_before_next_panics(&mut index);
             }
         });
@@ -2186,11 +2200,11 @@ mod tests {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             {
-                let mut index = new_partitioned_unordered(context.clone());
+                let mut index = new_partitioned_unordered(context.with_label("unordered"));
                 run_index_entry_replacement_not_a_collision(&mut index);
             }
             {
-                let mut index = new_partitioned_ordered(context);
+                let mut index = new_partitioned_ordered(context.with_label("ordered"));
                 run_index_entry_replacement_not_a_collision(&mut index);
             }
         });
@@ -2225,11 +2239,11 @@ mod tests {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             {
-                let mut index = new_partitioned_unordered(context.clone());
+                let mut index = new_partitioned_unordered(context.with_label("unordered"));
                 run_index_large_collision_chain_stack_overflow(&mut index);
             }
             {
-                let mut index = new_partitioned_ordered(context);
+                let mut index = new_partitioned_ordered(context.with_label("ordered"));
                 run_index_large_collision_chain_stack_overflow(&mut index);
             }
         });

@@ -1,6 +1,6 @@
 use crate::authenticated::data::Data;
-use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error, Read, ReadExt, Write};
+use commonware_runtime::{Buf, BufMut};
 
 /// The maximum overhead (in bytes) when encoding a [Data].
 ///
@@ -8,20 +8,20 @@ use commonware_codec::{EncodeSize, Error, Read, ReadExt, Write};
 /// - 1: Message enum discriminant
 /// - 10: Channel varint
 /// - 5: Message length varint (lengths longer than 32 bits are forbidden by the codec)
-pub const MAX_PAYLOAD_DATA_OVERHEAD: usize = 1 + 10 + 5;
-
-/// Prefix that identifies the message as a Ping message.
-pub const PING_MESSAGE_PREFIX: u8 = 0;
+pub const MAX_PAYLOAD_DATA_OVERHEAD: u32 = 1 + 10 + 5;
 
 /// Prefix that identifies the message as a Data message.
-pub const DATA_MESSAGE_PREFIX: u8 = 1;
+pub const DATA_PREFIX: u8 = 0;
+
+/// Prefix that identifies the message as a Ping message.
+pub const PING_PREFIX: u8 = 1;
 
 /// The messages that can be sent between peers.
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub enum Message {
-    Ping,
     Data(Data),
+    Ping,
 }
 
 impl From<Data> for Message {
@@ -33,8 +33,8 @@ impl From<Data> for Message {
 impl EncodeSize for Message {
     fn encode_size(&self) -> usize {
         (match self {
-            Self::Ping => 0, // Ping has no payload
             Self::Data(data) => data.encode_size(),
+            Self::Ping => 0, // Ping has no payload
         }) + 1 // 1 bytes for Message discriminant
     }
 }
@@ -42,12 +42,12 @@ impl EncodeSize for Message {
 impl Write for Message {
     fn write(&self, buf: &mut impl BufMut) {
         match self {
-            Self::Ping => {
-                PING_MESSAGE_PREFIX.write(buf); // Discriminant for Ping
-            }
             Self::Data(data) => {
-                DATA_MESSAGE_PREFIX.write(buf); // Discriminant for Data
+                DATA_PREFIX.write(buf); // Discriminant for Data
                 data.write(buf);
+            }
+            Self::Ping => {
+                PING_PREFIX.write(buf); // Discriminant for Ping
             }
         }
     }
@@ -59,15 +59,12 @@ impl Read for Message {
     fn read_cfg(buf: &mut impl Buf, max_data_length: &Self::Cfg) -> Result<Self, Error> {
         let message_type = <u8>::read(buf)?;
         match message_type {
-            PING_MESSAGE_PREFIX => Ok(Self::Ping),
-            DATA_MESSAGE_PREFIX => {
+            DATA_PREFIX => {
                 let data = Data::read_cfg(buf, &(..=*max_data_length).into())?;
                 Ok(Self::Data(data))
             }
-            _ => Err(Error::Invalid(
-                "p2p::authenticated::lookup::Message",
-                "Invalid type",
-            )),
+            PING_PREFIX => Ok(Self::Ping),
+            other => Err(Error::InvalidEnum(other)),
         }
     }
 }
@@ -75,12 +72,12 @@ impl Read for Message {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bytes::Bytes;
     use commonware_codec::{Decode as _, Encode as _, Error};
+    use commonware_runtime::IoBuf;
 
     #[test]
     fn test_max_payload_overhead() {
-        let message = Bytes::from(vec![0; 1 << 29]);
+        let message = IoBuf::from(vec![0; 1 << 29]);
         let message_len = message.len();
         let payload = Message::Data(Data {
             channel: u64::MAX,
@@ -88,7 +85,7 @@ mod tests {
         });
         assert_eq!(
             payload.encode_size(),
-            message_len + MAX_PAYLOAD_DATA_OVERHEAD
+            message_len + MAX_PAYLOAD_DATA_OVERHEAD as usize
         );
     }
 
@@ -96,15 +93,15 @@ mod tests {
     fn test_decode_data_within_limit() {
         let payload = Message::Data(Data {
             channel: 7,
-            message: Bytes::from_static(b"ping"),
+            message: IoBuf::from(b"ping"),
         });
-        let encoded = payload.encode().freeze();
+        let encoded = payload.encode();
 
         let decoded = Message::decode_cfg(encoded, &4).expect("within limit");
         match decoded {
             Message::Data(data) => {
                 assert_eq!(data.channel, 7);
-                assert_eq!(data.message, Bytes::from_static(b"ping"));
+                assert_eq!(data.message, IoBuf::from(b"ping"));
             }
             other => panic!("unexpected message variant: {other:?}"),
         }
@@ -114,9 +111,9 @@ mod tests {
     fn test_decode_data_exceeding_limit() {
         let payload = Message::Data(Data {
             channel: 9,
-            message: Bytes::from_static(b"hello"),
+            message: IoBuf::from(b"hello"),
         });
-        let encoded = payload.encode().freeze();
+        let encoded = payload.encode();
 
         let result = Message::decode_cfg(encoded, &4);
         assert!(matches!(result, Err(Error::InvalidLength(5))));

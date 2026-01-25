@@ -55,15 +55,15 @@
 //!   Hash(14,                                                  // first peak
 //!     Hash(6,
 //!       Hash(2, Hash(0, element_0), Hash(1, element_1)),
-//!       Hash(5, Hash(3, element_2), Hash(4, element_4))
+//!       Hash(5, Hash(3, element_2), Hash(4, element_3))
 //!     )
 //!     Hash(13,
-//!       Hash(9, Hash(7, element_7), Hash(8, element_8)),
-//!       Hash(12, Hash(10, element_10), Hash(11, element_11))
+//!       Hash(9, Hash(7, element_4), Hash(8, element_5)),
+//!       Hash(12, Hash(10, element_6), Hash(11, element_7))
 //!     )
 //!   )
-//!   Hash(17, Hash(15, element_15), Hash(16, element_16))      // second peak
-//!   Hash(18, element_18)                                      // third peak
+//!   Hash(17, Hash(15, element_8), Hash(16, element_9))        // second peak
+//!   Hash(18, element_10)                                      // third peak
 //! )
 //! ```
 
@@ -73,7 +73,9 @@ pub mod location;
 pub mod mem;
 pub mod position;
 pub mod proof;
-pub mod stability;
+
+#[cfg(test)]
+pub(crate) mod conformance;
 
 cfg_if::cfg_if! {
     if #[cfg(feature = "std")] {
@@ -87,7 +89,7 @@ cfg_if::cfg_if! {
 pub use hasher::Standard as StandardHasher;
 pub use location::{Location, LocationError, MAX_LOCATION};
 pub use position::{Position, MAX_POSITION};
-pub use proof::Proof;
+pub use proof::{Proof, MAX_PROOF_DIGESTS_PER_ELEMENT};
 use thiserror::Error;
 
 /// Errors that can occur when interacting with an MMR.
@@ -138,4 +140,13 @@ pub enum Error {
     InvalidPinnedNodes,
     #[error("data corrupted: {0}")]
     DataCorrupted(&'static str),
+}
+
+impl From<LocationError> for Error {
+    fn from(err: LocationError) -> Self {
+        match err {
+            LocationError::NonLeaf(pos) => Self::PositionNotLeaf(pos),
+            LocationError::Overflow(pos) => Self::InvalidPosition(pos),
+        }
+    }
 }

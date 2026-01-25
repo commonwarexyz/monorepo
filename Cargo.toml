@@ -12,6 +12,7 @@ members = [
     "macros",
     "math",
     "p2p",
+    "parallel",
     "resolver",
     "runtime",
     "storage",
@@ -41,10 +42,11 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.0.63"
+version = "0.0.65"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 homepage = "https://commonware.xyz"
+rust-version = "1.91.1"
 
 [workspace.lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(full_bench)', 'cfg(generate_conformance_tests)'] }
@@ -65,10 +67,11 @@ suspicious_op_assign_impl = "allow"
 anyhow = { version = "1.0.99", default-features = false }
 arbitrary = "1.4.1"
 async-lock = "3.4.0"
-aws-config = "1.8.10"
-aws-sdk-ec2 = "1.187.0"
+aws-config = "1.8.12"
+aws-lc-rs = "1.15.2"
+aws-sdk-ec2 = "1.200.0"
+aws-sdk-s3 = "1.91.0"
 axum = "0.8.1"
-bimap = "0.6.3"
 blake3 = { version = "1.8.2", default-features = false }
 blst = { version = "0.3.13", default-features = false }
 bytes = { version = "1.7.1", default-features = false }
@@ -77,27 +80,30 @@ chacha20poly1305 = { version = "0.10.1", default-features = false }
 chrono = "0.4.39"
 clap = "4.5.18"
 colored = "3.0.0"
-commonware-broadcast = { version = "0.0.63", path = "broadcast" }
-commonware-codec = { version = "0.0.63", path = "codec", default-features = false }
-commonware-coding = { version = "0.0.63", path = "coding" }
-commonware-collector = { version = "0.0.63", path = "collector" }
-commonware-conformance = { version = "0.0.63", path = "conformance" }
-commonware-conformance-macros = { version = "0.0.63", path = "conformance/macros" }
-commonware-consensus = { version = "0.0.63", path = "consensus" }
-commonware-cryptography = { version = "0.0.63", path = "cryptography", default-features = false }
-commonware-deployer = { version = "0.0.63", path = "deployer", default-features = false }
-commonware-macros = { version = "0.0.63", path = "macros" }
-commonware-math = { version = "0.0.63", path = "math", default-features = false }
-commonware-p2p = { version = "0.0.63", path = "p2p" }
-commonware-resolver = { version = "0.0.63", path = "resolver" }
-commonware-runtime = { version = "0.0.63", path = "runtime" }
-commonware-storage = { version = "0.0.63", path = "storage", default-features = false }
-commonware-stream = { version = "0.0.63", path = "stream" }
-commonware-utils = { version = "0.0.63", path = "utils", default-features = false }
+commonware-broadcast = { version = "0.0.65", path = "broadcast" }
+commonware-codec = { version = "0.0.65", path = "codec", default-features = false }
+commonware-coding = { version = "0.0.65", path = "coding" }
+commonware-collector = { version = "0.0.65", path = "collector" }
+commonware-conformance = { version = "0.0.65", path = "conformance" }
+commonware-conformance-macros = { version = "0.0.65", path = "conformance/macros" }
+commonware-consensus = { version = "0.0.65", path = "consensus" }
+commonware-cryptography = { version = "0.0.65", path = "cryptography", default-features = false }
+commonware-deployer = { version = "0.0.65", path = "deployer", default-features = false }
+commonware-macros = { version = "0.0.65", path = "macros" }
+commonware-math = { version = "0.0.65", path = "math", default-features = false }
+commonware-p2p = { version = "0.0.65", path = "p2p" }
+commonware-parallel = { version = "0.0.65", path = "parallel", default-features = false }
+commonware-resolver = { version = "0.0.65", path = "resolver" }
+commonware-runtime = { version = "0.0.65", path = "runtime" }
+commonware-storage = { version = "0.0.65", path = "storage", default-features = false }
+commonware-stream = { version = "0.0.65", path = "stream" }
+commonware-utils = { version = "0.0.65", path = "utils", default-features = false }
 console-subscriber = "0.5.0"
-crc32fast = "1.5.0"
+crc = "3.4.0"
+crc-fast = { version = "1.10.0", default-features = false }
 criterion = "0.7.0"
 crossterm = "0.29.0"
+ctutils = "0.3.1"
 ecdsa = { version = "0.16.9", default-features = false }
 ed25519-consensus = { version = "2.1.0", default-features = false }
 ed25519-zebra = "4.1.0"
@@ -113,7 +119,7 @@ libfuzzer-sys = "0.4.9"
 num-bigint = { version = "0.4.6", default-features = false }
 num-integer = "0.1.46"
 num-rational = { version = "0.4.2", features = ["num-bigint"] }
-num-traits = "0.2.19"
+num-traits = { version = "0.2.19", default-features = false }
 opentelemetry = "0.31.0"
 opentelemetry-otlp = "0.31.0"
 opentelemetry_sdk = "0.31.0"
