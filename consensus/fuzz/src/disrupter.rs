@@ -30,10 +30,10 @@ pub struct Disrupter<
     scheme: S,
     fuzz_input: FuzzInput,
     strategy: St,
-    last_vote: u64,
-    last_finalized: u64,
-    last_nullified: u64,
-    last_notarized: u64,
+    last_vote_view: u64,
+    last_finalized_view: u64,
+    last_nullified_view: u64,
+    last_notarized_view: u64,
     latest_proposals: VecDeque<Proposal<Sha256Digest>>,
 }
 
@@ -44,10 +44,10 @@ where
 {
     pub fn new(context: E, scheme: S, fuzz_input: FuzzInput, strategy: St) -> Self {
         Self {
-            last_vote: 0,
-            last_finalized: 0,
-            last_nullified: 0,
-            last_notarized: 0,
+            last_vote_view: 0,
+            last_finalized_view: 0,
+            last_nullified_view: 0,
+            last_notarized_view: 0,
             latest_proposals: VecDeque::new(),
             context,
             scheme,
@@ -67,9 +67,9 @@ where
 
     fn prune_latest_proposals(&mut self) {
         let active_range_size = self
-            .last_notarized
-            .max(self.last_vote)
-            .saturating_sub(self.last_finalized)
+            .last_notarized_view
+            .max(self.last_vote_view)
+            .saturating_sub(self.last_finalized_view)
             .saturating_add(1);
 
         let keep_count = (active_range_size.max(LATEST_PROPOSALS_MIN_LEN))
@@ -83,17 +83,17 @@ where
     fn get_proposal(&mut self) -> Proposal<Sha256Digest> {
         let random_proposal = self.strategy.random_proposal(
             &self.fuzz_input,
-            self.last_vote,
-            self.last_finalized,
-            self.last_notarized,
-            self.last_nullified,
+            self.last_vote_view,
+            self.last_finalized_view,
+            self.last_notarized_view,
+            self.last_nullified_view,
         );
         let v = self.strategy.random_view_for_proposal(
             &self.fuzz_input,
-            self.last_vote,
-            self.last_finalized,
-            self.last_notarized,
-            self.last_nullified,
+            self.last_vote_view,
+            self.last_finalized_view,
+            self.last_notarized_view,
+            self.last_nullified_view,
         );
 
         let proposal = match self.fuzz_input.random_byte() % 5 {
@@ -253,7 +253,7 @@ where
         let Ok(vote) = Vote::<S, Sha256Digest>::read(&mut msg.as_slice()) else {
             return;
         };
-        self.last_vote = vote.view().get();
+        self.last_vote_view = vote.view().get();
         match vote {
             Vote::Notarize(notarize) => {
                 self.latest_proposals.push_back(notarize.proposal.clone());
@@ -265,10 +265,10 @@ where
                     let proposal = self.strategy.mutate_proposal(
                         &self.fuzz_input,
                         &notarize.proposal,
-                        self.last_vote,
-                        self.last_finalized,
-                        self.last_notarized,
-                        self.last_nullified,
+                        self.last_vote_view,
+                        self.last_finalized_view,
+                        self.last_notarized_view,
+                        self.last_nullified_view,
                     );
                     if let Some(v) = Notarize::sign(&self.scheme, proposal) {
                         let msg = Vote::<S, Sha256Digest>::Notarize(v).encode();
@@ -284,10 +284,10 @@ where
                     let proposal = self.strategy.mutate_proposal(
                         &self.fuzz_input,
                         &finalize.proposal,
-                        self.last_vote,
-                        self.last_finalized,
-                        self.last_notarized,
-                        self.last_nullified,
+                        self.last_vote_view,
+                        self.last_finalized_view,
+                        self.last_notarized_view,
+                        self.last_nullified_view,
                     );
                     if let Some(v) = Finalize::sign(&self.scheme, proposal) {
                         let msg = Vote::<S, Sha256Digest>::Finalize(v).encode();
@@ -302,10 +302,10 @@ where
                 } else {
                     let v = self.strategy.mutate_nullify_view(
                         &self.fuzz_input,
-                        self.last_vote,
-                        self.last_finalized,
-                        self.last_notarized,
-                        self.last_nullified,
+                        self.last_vote_view,
+                        self.last_finalized_view,
+                        self.last_notarized_view,
+                        self.last_nullified_view,
                     );
                     let round = Round::new(Epoch::new(EPOCH), View::new(v));
                     if let Some(v) = Nullify::<S>::sign::<Sha256Digest>(&self.scheme, round) {
@@ -331,13 +331,13 @@ where
 
         match cert {
             Certificate::Notarization(n) => {
-                self.last_notarized = n.view().get();
+                self.last_notarized_view = n.view().get();
             }
             Certificate::Nullification(n) => {
-                self.last_nullified = n.view().get();
+                self.last_nullified_view = n.view().get();
             }
             Certificate::Finalization(f) => {
-                self.last_finalized = f.view().get();
+                self.last_finalized_view = f.view().get();
             }
         }
 
@@ -413,10 +413,10 @@ where
         let proposal = self.strategy.mutate_proposal(
             &self.fuzz_input,
             &proposal,
-            self.last_vote,
-            self.last_finalized,
-            self.last_notarized,
-            self.last_nullified,
+            self.last_vote_view,
+            self.last_finalized_view,
+            self.last_notarized_view,
+            self.last_nullified_view,
         );
         let msg = proposal.encode();
         let _ = sender.send(Recipients::All, msg, true).await;
@@ -443,10 +443,10 @@ where
                 let proposal = self.strategy.mutate_proposal(
                     &self.fuzz_input,
                     &proposal,
-                    self.last_vote,
-                    self.last_finalized,
-                    self.last_notarized,
-                    self.last_nullified,
+                    self.last_vote_view,
+                    self.last_finalized_view,
+                    self.last_notarized_view,
+                    self.last_nullified_view,
                 );
                 if let Some(vote) = Notarize::sign(&self.scheme, proposal) {
                     let msg = Vote::<S, Sha256Digest>::Notarize(vote).encode();
@@ -457,10 +457,10 @@ where
                 let proposal = self.strategy.mutate_proposal(
                     &self.fuzz_input,
                     &proposal,
-                    self.last_vote,
-                    self.last_finalized,
-                    self.last_notarized,
-                    self.last_nullified,
+                    self.last_vote_view,
+                    self.last_finalized_view,
+                    self.last_notarized_view,
+                    self.last_nullified_view,
                 );
                 if let Some(vote) = Finalize::sign(&self.scheme, proposal) {
                     let msg = Vote::<S, Sha256Digest>::Finalize(vote).encode();
@@ -470,10 +470,10 @@ where
             Message::Nullify => {
                 let view = self.strategy.mutate_nullify_view(
                     &self.fuzz_input,
-                    self.last_vote,
-                    self.last_finalized,
-                    self.last_notarized,
-                    self.last_nullified,
+                    self.last_vote_view,
+                    self.last_finalized_view,
+                    self.last_notarized_view,
+                    self.last_nullified_view,
                 );
                 let round = Round::new(Epoch::new(EPOCH), View::new(view));
                 if let Some(vote) = Nullify::<S>::sign::<Sha256Digest>(&self.scheme, round) {

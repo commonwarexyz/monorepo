@@ -10,10 +10,10 @@ pub trait Strategy: Send + Sync {
     fn random_proposal(
         &self,
         input: &FuzzInput,
-        last_vote: u64,
-        last_finalized: u64,
-        last_notarized: u64,
-        last_nullified: u64,
+        last_vote_view: u64,
+        last_finalized_view: u64,
+        last_notarized_view: u64,
+        last_nullified_view: u64,
     ) -> Proposal<Sha256Digest>;
 
     fn proposal_with_view(
@@ -32,37 +32,37 @@ pub trait Strategy: Send + Sync {
         &self,
         input: &FuzzInput,
         proposal: &Proposal<Sha256Digest>,
-        last_vote: u64,
-        last_finalized: u64,
-        last_notarized: u64,
-        last_nullified: u64,
+        last_vote_view: u64,
+        last_finalized_view: u64,
+        last_notarized_view: u64,
+        last_nullified_view: u64,
     ) -> Proposal<Sha256Digest>;
 
     fn mutate_nullify_view(
         &self,
         input: &FuzzInput,
         last_vote: u64,
-        last_finalized: u64,
-        last_notarized: u64,
-        last_nullified: u64,
+        last_finalized_view: u64,
+        last_notarized_view: u64,
+        last_nullified_view: u64,
     ) -> u64;
 
     fn random_view_for_proposal(
         &self,
         input: &FuzzInput,
-        current_view: u64,
-        last_finalized: u64,
-        last_notarized: u64,
-        last_nullified: u64,
+        last_vote_view: u64,
+        last_finalized_view: u64,
+        last_notarized_view: u64,
+        last_nullified_view: u64,
     ) -> u64;
 
     fn random_parent_view(
         &self,
         input: &FuzzInput,
-        base_view: u64,
-        last_finalized: u64,
-        last_notarized: u64,
-        last_nullified: u64,
+        last_vote_view: u64,
+        last_finalized_view: u64,
+        last_notarized_view: u64,
+        last_nullified_view: u64,
     ) -> u64;
 
     fn random_payload(&self, input: &FuzzInput) -> Sha256Digest;
@@ -80,20 +80,20 @@ impl Strategy for SmallScope {
     fn random_proposal(
         &self,
         input: &FuzzInput,
-        last_vote: u64,
-        last_finalized: u64,
-        last_notarized: u64,
-        last_nullified: u64,
+        last_vote_view: u64,
+        last_finalized_view: u64,
+        last_notarized_view: u64,
+        last_nullified_view: u64,
     ) -> Proposal<Sha256Digest> {
         let view = self.random_view_for_proposal(
             input,
-            last_vote,
-            last_finalized,
-            last_notarized,
-            last_nullified,
+            last_vote_view,
+            last_finalized_view,
+            last_notarized_view,
+            last_nullified_view,
         );
         let parent =
-            self.random_parent_view(input, view, last_finalized, last_notarized, last_nullified);
+            self.random_parent_view(input, view, last_finalized_view, last_notarized_view, last_nullified_view);
         let payload = self.random_payload(input);
         Proposal::new(
             Round::new(Epoch::new(EPOCH), View::new(view)),
@@ -122,73 +122,83 @@ impl Strategy for SmallScope {
         &self,
         input: &FuzzInput,
         proposal: &Proposal<Sha256Digest>,
-        _last_vote: u64,
-        _last_finalized: u64,
-        _last_notarized: u64,
-        _last_nullified: u64,
+        _last_vote_view: u64,
+        _last_finalized_view: u64,
+        _last_notarized_view: u64,
+        _last_nullified_view: u64,
     ) -> Proposal<Sha256Digest> {
         let view = proposal.view().get();
         let parent = proposal.parent.get();
-        match input.random_byte() % 4 {
+        match input.random_byte() % 5 {
             0 => proposal_with_view(proposal, view.saturating_add(1)),
             1 => proposal_with_view(proposal, view.saturating_sub(1)),
             2 => proposal_with_parent(proposal, parent.saturating_add(1)),
-            _ => proposal_with_parent(proposal, parent.saturating_sub(1)),
+            3 => proposal_with_parent(proposal, parent.saturating_sub(1)),
+            _ => proposal_with_payload(proposal, tweak_payload(input, proposal.payload)),
         }
     }
 
     fn mutate_nullify_view(
         &self,
         input: &FuzzInput,
-        last_vote: u64,
-        _last_finalized: u64,
-        last_notarized: u64,
-        _last_nullified: u64,
+        last_vote_view: u64,
+        last_finalized_view: u64,
+        last_notarized_view: u64,
+        last_nullified_view: u64,
     ) -> u64 {
-        match input.random_byte() % 4 {
-            0 => last_vote.saturating_add(1),
-            1 => last_vote.saturating_sub(1),
-            2 => last_notarized.saturating_add(1),
-            _ => last_notarized.saturating_sub(1),
+        match input.random_byte() % 12 {
+            0 => last_vote_view,
+            1 => last_vote_view.saturating_add(1),
+            2 => last_vote_view.saturating_sub(1),
+            3 => last_notarized_view,
+            4 => last_notarized_view.saturating_add(1),
+            5 => last_notarized_view.saturating_sub(1),
+            6 => last_finalized_view,
+            7 => last_finalized_view.saturating_add(1),
+            8 => last_finalized_view.saturating_sub(1),
+            9 => last_nullified_view,
+            10 => last_nullified_view.saturating_add(1),
+            _ => last_nullified_view.saturating_sub(1),
         }
     }
 
     fn random_view_for_proposal(
         &self,
         input: &FuzzInput,
-        current_view: u64,
-        last_finalized: u64,
-        last_notarized: u64,
-        last_nullified: u64,
+        last_vote_view: u64,
+        last_finalized_view: u64,
+        last_notarized_view: u64,
+        last_nullified_view: u64,
     ) -> u64 {
-        match input.random_byte() % 7 {
+        match input.random_byte() % 8 {
             0 => {
-                let hi = last_notarized.min(current_view).max(last_finalized);
-                sample_inclusive(input, last_finalized, hi)
+                let hi = last_notarized_view.min(last_vote_view).max(last_finalized_view);
+                sample_inclusive(input, last_finalized_view, hi)
             }
-            1 => current_view,
-            2 => current_view.saturating_add(1),
-            3 => last_notarized.saturating_add(1),
-            4 => last_notarized.saturating_add(2),
-            5 => last_nullified.saturating_add(1),
-            _ => input.random_u64(),
+            1 => last_vote_view,
+            2 => last_vote_view.saturating_add(1),
+            3 => last_vote_view.saturating_sub(1),
+            4 => last_notarized_view.saturating_add(1),
+            5 => last_notarized_view.saturating_sub(1),
+            6 => last_nullified_view.saturating_add(1),
+            _ => last_nullified_view.saturating_sub(1),
         }
     }
 
     fn random_parent_view(
         &self,
         input: &FuzzInput,
-        base_view: u64,
-        last_finalized: u64,
-        last_notarized: u64,
-        last_nullified: u64,
+        last_vote_view: u64,
+        last_finalized_view: u64,
+        last_notarized_view: u64,
+        last_nullified_view: u64,
     ) -> u64 {
         random_parent_view(
             input,
-            base_view,
-            last_finalized,
-            last_notarized,
-            last_nullified,
+            last_vote_view,
+            last_finalized_view,
+            last_notarized_view,
+            last_nullified_view,
         )
     }
 
@@ -203,20 +213,20 @@ impl Strategy for AnyScope {
     fn random_proposal(
         &self,
         input: &FuzzInput,
-        last_vote: u64,
-        last_finalized: u64,
-        last_notarized: u64,
-        last_nullified: u64,
+        last_vote_view: u64,
+        last_finalized_view: u64,
+        last_notarized_view: u64,
+        last_nullified_view: u64,
     ) -> Proposal<Sha256Digest> {
         let view = self.random_view_for_proposal(
             input,
-            last_vote,
-            last_finalized,
-            last_notarized,
-            last_nullified,
+            last_vote_view,
+            last_finalized_view,
+            last_notarized_view,
+            last_nullified_view,
         );
         let parent =
-            self.random_parent_view(input, view, last_finalized, last_notarized, last_nullified);
+            self.random_parent_view(input, view, last_finalized_view, last_notarized_view, last_nullified_view);
         let payload = self.random_payload(input);
         Proposal::new(
             Round::new(Epoch::new(EPOCH), View::new(view)),
@@ -245,10 +255,10 @@ impl Strategy for AnyScope {
         &self,
         input: &FuzzInput,
         proposal: &Proposal<Sha256Digest>,
-        _last_vote: u64,
-        last_finalized: u64,
-        last_notarized: u64,
-        last_nullified: u64,
+        _last_vote_view: u64,
+        last_finalized_view: u64,
+        last_notarized_view: u64,
+        last_nullified_view: u64,
     ) -> Proposal<Sha256Digest> {
         let base_view = proposal.view().get();
         match input.random_byte() % 4 {
@@ -258,9 +268,9 @@ impl Strategy for AnyScope {
                 random_view(
                     input,
                     base_view,
-                    last_finalized,
-                    last_notarized,
-                    last_nullified,
+                    last_finalized_view,
+                    last_notarized_view,
+                    last_nullified_view,
                 ),
             ),
             2 => proposal_with_parent(
@@ -268,25 +278,25 @@ impl Strategy for AnyScope {
                 random_parent_view(
                     input,
                     base_view,
-                    last_finalized,
-                    last_notarized,
-                    last_nullified,
+                    last_finalized_view,
+                    last_notarized_view,
+                    last_nullified_view,
                 ),
             ),
             _ => {
                 let view = random_view(
                     input,
                     base_view,
-                    last_finalized,
-                    last_notarized,
-                    last_nullified,
+                    last_finalized_view,
+                    last_notarized_view,
+                    last_nullified_view,
                 );
                 let parent = random_parent_view(
                     input,
                     base_view,
-                    last_finalized,
-                    last_notarized,
-                    last_nullified,
+                    last_finalized_view,
+                    last_notarized_view,
+                    last_nullified_view,
                 );
                 let payload = random_payload(input);
                 Proposal::new(
@@ -301,51 +311,51 @@ impl Strategy for AnyScope {
     fn mutate_nullify_view(
         &self,
         input: &FuzzInput,
-        last_vote: u64,
-        last_finalized: u64,
-        last_notarized: u64,
-        last_nullified: u64,
+        last_vote_view: u64,
+        last_finalized_view: u64,
+        last_notarized_view: u64,
+        last_nullified_view: u64,
     ) -> u64 {
         random_view(
             input,
-            last_vote,
-            last_finalized,
-            last_notarized,
-            last_nullified,
+            last_vote_view,
+            last_finalized_view,
+            last_notarized_view,
+            last_nullified_view,
         )
     }
 
     fn random_view_for_proposal(
         &self,
         input: &FuzzInput,
-        current_view: u64,
-        last_finalized: u64,
-        last_notarized: u64,
-        last_nullified: u64,
+        last_view_view: u64,
+        last_finalized_view: u64,
+        last_notarized_view: u64,
+        last_nullified_view: u64,
     ) -> u64 {
         random_view(
             input,
-            current_view,
-            last_finalized,
-            last_notarized,
-            last_nullified,
+            last_view_view,
+            last_finalized_view,
+            last_notarized_view,
+            last_nullified_view,
         )
     }
 
     fn random_parent_view(
         &self,
         input: &FuzzInput,
-        base_view: u64,
-        last_finalized: u64,
-        last_notarized: u64,
-        last_nullified: u64,
+        last_vote_view: u64,
+        last_finalized_view: u64,
+        last_notarized_view: u64,
+        last_nullified_view: u64,
     ) -> u64 {
         random_parent_view(
             input,
-            base_view,
-            last_finalized,
-            last_notarized,
-            last_nullified,
+            last_vote_view,
+            last_finalized_view,
+            last_notarized_view,
+            last_nullified_view,
         )
     }
 
@@ -388,6 +398,14 @@ fn proposal_with_payload(
     )
 }
 
+fn tweak_payload(input: &FuzzInput, payload: Sha256Digest) -> Sha256Digest {
+    let mut bytes = payload.0;
+    let idx = (input.random_u64() as usize) % bytes.len();
+    let bit = input.random_byte() % 8;
+    bytes[idx] ^= 1 << bit;
+    Sha256Digest(bytes)
+}
+
 fn random_payload(input: &FuzzInput) -> Sha256Digest {
     let bytes = input.random(32);
     let mut arr = [0u8; 32];
@@ -397,40 +415,40 @@ fn random_payload(input: &FuzzInput) -> Sha256Digest {
 
 fn random_view(
     input: &FuzzInput,
-    current_view: u64,
-    last_finalized: u64,
-    last_notarized: u64,
-    last_nullified: u64,
+    last_vote_view: u64,
+    last_finalized_view: u64,
+    last_notarized_view: u64,
+    last_nullified_view: u64,
 ) -> u64 {
     match input.random_byte() % 7 {
         0 => {
-            if last_finalized == 0 {
-                last_finalized
+            if last_finalized_view == 0 {
+                last_finalized_view
             } else {
-                sample_inclusive(input, 0, last_finalized - 1)
+                sample_inclusive(input, 0, last_finalized_view - 1)
             }
         }
         1 => {
-            if current_view <= last_finalized {
-                last_finalized
+            if last_vote_view <= last_finalized_view {
+                last_finalized_view
             } else {
-                sample_inclusive(input, last_finalized, current_view)
+                sample_inclusive(input, last_finalized_view, last_vote_view)
             }
         }
         2 => {
-            let hi = last_notarized.min(current_view).max(last_finalized);
-            sample_inclusive(input, last_finalized, hi)
+            let hi = last_notarized_view.min(last_vote_view).max(last_finalized_view);
+            sample_inclusive(input, last_finalized_view, hi)
         }
         3 => {
             let k = 1 + (input.random_byte() as u64 % 4);
-            add_or_sample_at_or_above(input, current_view, k)
+            add_or_sample_at_or_above(input, last_vote_view, k)
         }
         4 => {
             let k = 5 + (input.random_byte() as u64 % 6);
-            add_or_sample_at_or_above(input, current_view, k)
+            add_or_sample_at_or_above(input, last_vote_view, k)
         }
         5 => {
-            let base = current_view.max(last_nullified);
+            let base = last_vote_view.max(last_nullified_view);
             let k = 1 + (input.random_byte() as u64 % 10);
             add_or_sample_at_or_above(input, base, k)
         }
@@ -440,17 +458,17 @@ fn random_view(
 
 fn random_parent_view(
     input: &FuzzInput,
-    base_view: u64,
-    last_finalized: u64,
-    last_notarized: u64,
-    last_nullified: u64,
+    last_vote_view: u64,
+    last_finalized_view: u64,
+    last_notarized_view: u64,
+    last_nullified_view: u64,
 ) -> u64 {
     random_view(
         input,
-        base_view.saturating_sub(1),
-        last_finalized,
-        last_notarized,
-        last_nullified,
+        last_vote_view.saturating_sub(1),
+        last_finalized_view,
+        last_notarized_view,
+        last_nullified_view,
     )
 }
 
