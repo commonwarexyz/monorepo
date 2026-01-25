@@ -779,13 +779,16 @@ mod tests {
     use bytes::Bytes;
     use commonware_codec::Read;
     use commonware_cryptography::{
-        certificate::mocks::Fixture, certificate::Scheme as CertificateScheme,
-        ed25519::PublicKey as Ed25519PublicKey, sha256::Digest as Sha256Digest, PublicKey, Sha256,
+        certificate::{mocks::Fixture, Scheme as CertificateScheme},
+        ed25519::PublicKey as Ed25519PublicKey,
+        sha256::Digest as Sha256Digest,
+        PublicKey, Sha256,
     };
     use commonware_p2p::{Blocker, CheckedSender, LimitedSender, Recipients};
     use commonware_parallel::Sequential;
-    use commonware_runtime::{buffer::PoolRef, deterministic, IoBufMut};
-    use commonware_runtime::{Clock, Metrics, Runner, Spawner};
+    use commonware_runtime::{
+        buffer::PoolRef, deterministic, Clock, IoBufMut, Metrics, Runner, Spawner,
+    };
     use commonware_storage::journal::segmented::variable::{Config as JConfig, Journal};
     use commonware_utils::{test_rng, NZUsize, Participant, NZU16};
     use std::{
@@ -888,7 +891,7 @@ mod tests {
 
             let elector = RoundRobin::<commonware_cryptography::Sha256>::default();
             let reporter_cfg = reporter::Config {
-                participants: participants.clone(),
+                participants,
                 scheme: scheme.clone(),
                 elector: elector.clone(),
             };
@@ -897,8 +900,8 @@ mod tests {
             let relay = Arc::new(relay::Relay::new());
             let application_cfg = application::Config {
                 hasher: Sha256::default(),
-                relay: relay.clone(),
-                me: me.clone(),
+                relay,
+                me,
                 propose_latency: (1.0, 0.0),
                 verify_latency: (1.0, 0.0),
                 certify_latency: (1.0, 0.0),
@@ -911,11 +914,11 @@ mod tests {
             let leader_timeout = Duration::from_secs(3);
             let notarization_timeout = Duration::from_secs(5);
             let cfg = crate::minimmit::actors::voter::Config {
-                scheme: scheme.clone(),
+                scheme,
                 elector,
                 blocker: NoopBlocker,
                 automaton: application.clone(),
-                relay: application.clone(),
+                relay: application,
                 reporter,
                 strategy: Sequential,
                 partition: "voter_timeout".to_string(),

@@ -184,7 +184,7 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
     /// This is important for crash recovery: after restart, `notarizes_verified`
     /// is 0, but if we have an MNotarization certificate, we know M-quorum was
     /// reached and should batch toward L-quorum rather than M-quorum.
-    pub fn mark_m_quorum_reached(&mut self) {
+    pub const fn mark_m_quorum_reached(&mut self) {
         // Only update if we haven't already verified M-quorum worth of votes
         if self.notarizes_verified < self.m_quorum {
             self.notarizes_verified = self.m_quorum;

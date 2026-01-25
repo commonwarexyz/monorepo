@@ -218,7 +218,7 @@ where
     /// Called when an MNotarization certificate exists (either newly created or
     /// recovered from journal). This allows batching toward L-quorum even after
     /// crash recovery where the verified vote count is lost.
-    pub fn mark_m_quorum_reached(&mut self) {
+    pub const fn mark_m_quorum_reached(&mut self) {
         self.verifier.mark_m_quorum_reached();
     }
 
