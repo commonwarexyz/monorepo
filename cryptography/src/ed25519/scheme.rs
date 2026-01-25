@@ -232,22 +232,19 @@ impl arbitrary::Arbitrary<'_> for PublicKey {
 
 /// Ed25519 Signature.
 ///
-/// This signature is *non-malleable*: an adversary with access to many messages
-/// and signatures, verifying against an honestly generated public key, cannot
-/// find a new signature which will verify, even by tampering or modify the signatures
-/// that it has seen previously.
+/// Signatures from honestly generated keys are *non-malleable*: an adversary
+/// with access to many messages and signatures, verifying against an honestly
+/// generated public key, cannot find a new signature which will verify, even by
+/// tampering or modifying the signatures that it has seen previously.
 ///
-/// Like any signature, it's also not possible to have a signature verifying
-/// against one message also verify against another.
-///
-/// This property does not hold for maliciously generated public keys. In particular,
-/// it's possible to craft public keys (which would otherwise not be honestly generatable)
-/// for which a signature will verify against any message.
+/// Like any signature, it's also not possible to have a signature that verifies against
+/// one message also verify against another. This property does not hold for maliciously
+/// generated public keys. In particular, it's possible to craft public keys (which would
+/// otherwise not be honestly generatable) for which a signature will verify against any message.
 #[derive(Clone, Eq, PartialEq)]
 pub struct Signature {
-    // There's not really a point in storing an [`ed25519_consensus::Signature`],
-    // because that type is easily created form this byte array, just by copying
-    // those bytes, so we can do that only when we actually need to verify the sig.
+    /// Because [`ed25519_consensus::Signature`] can be created from this byte array
+    /// with minimal overhead, we only store the raw bytes.
     raw: [u8; SIGNATURE_LENGTH],
 }
 
