@@ -719,7 +719,8 @@ pub(crate) fn install_monitoring_setup_cmd(
 ) -> String {
     let arch = architecture.as_str();
     format!(
-        r#"
+        r#"set -e
+
 # Enable BBR congestion control
 echo -e "net.core.default_qdisc=fq\nnet.ipv4.tcp_congestion_control=bbr" | sudo tee /etc/sysctl.d/99-bbr.conf >/dev/null && sudo sysctl -p /etc/sysctl.d/99-bbr.conf
 
@@ -803,7 +804,8 @@ sudo mv /home/ubuntu/node_exporter.service /etc/systemd/system/node_exporter.ser
 
 /// Continuation of monitoring install command (services startup)
 pub const fn start_monitoring_services_cmd() -> &'static str {
-    r#"
+    r#"set -e
+
 sudo chown -R grafana:grafana /etc/grafana /var/lib/grafana
 
 # Start services
@@ -849,8 +851,7 @@ pub struct InstanceUrls {
 pub(crate) const fn install_binary_apt_cmd(profiling: bool) -> Option<&'static str> {
     if profiling {
         Some(
-            r#"
-while sudo fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; do sleep 5; done
+            r#"set -e
 sudo apt-get update -y
 sudo apt-get install -y linux-tools-common linux-tools-generic linux-tools-$(uname -r)
 "#,
@@ -952,7 +953,8 @@ sudo mv /home/ubuntu/pyroscope-agent.timer /etc/systemd/system/pyroscope-agent.t
         ""
     };
     format!(
-        r#"
+        r#"set -e
+
 # Enable BBR congestion control
 echo -e "net.core.default_qdisc=fq\nnet.ipv4.tcp_congestion_control=bbr" | sudo tee /etc/sysctl.d/99-bbr.conf >/dev/null && sudo sysctl -p /etc/sysctl.d/99-bbr.conf
 
