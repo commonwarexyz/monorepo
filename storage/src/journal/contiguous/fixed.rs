@@ -53,7 +53,7 @@
 //!
 //! `Journal::init_sync` initializes a journal for state sync, handling existing data appropriately:
 //! - If no data exists, creates a journal at the sync range start
-//! - If data exists within range, prunes to the lower bound
+//! - If data exists within range, prunes toward the lower bound (section-aligned)
 //! - If data exceeds the range, returns an error
 //! - If data is stale (before range), destroys and recreates
 //!
@@ -458,7 +458,9 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     /// Handles sync scenarios based on existing journal data vs. the given sync range:
     ///
     /// 1. **No existing data**: Creates journal at `range.start` (or empty if `range.start == 0`)
-    /// 2. **Data within range**: Prunes to `range.start` and reuses existing data
+    /// 2. **Data within range**: Prunes toward `range.start` and reuses existing data.
+    ///    Since prune only removes complete sections, some items before `range.start`
+    ///    may be retained (from the section boundary to `range.start - 1`).
     /// 3. **Data exceeds range**: Returns error
     /// 4. **Stale data**: Destroys and recreates at `range.start`
     pub(crate) async fn init_sync(

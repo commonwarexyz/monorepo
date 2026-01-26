@@ -274,7 +274,8 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Journal<E, V> {
     /// - Stale (all data strictly before `range.start`): destroys existing data and returns an
     ///   empty journal.
     /// - Overlap within [`range.start`, `range.end`]:
-    ///   - Prunes to `range.start`
+    ///   - Prunes toward `range.start` (section-aligned, so some items before
+    ///     `range.start` may be retained)
     /// - Unexpected data beyond `range.end`: returns [crate::qmdb::Error::UnexpectedData].
     ///
     /// # Arguments
