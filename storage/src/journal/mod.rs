@@ -5,10 +5,9 @@
 //! to serve as a backing store for some in-memory data structure, or as a building block for a more
 //! complex construction that prescribes some meaning to items in the log.
 
-use commonware_macros::stability_mod;
 use thiserror::Error;
 
-stability_mod!(BETA, pub mod authenticated);
+commonware_macros::stability_mod!(BETA, pub mod authenticated);
 pub mod contiguous;
 pub mod segmented;
 

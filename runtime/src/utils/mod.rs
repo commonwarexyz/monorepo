@@ -1,6 +1,5 @@
 //! Utility functions for interacting with any runtime.
 
-use commonware_macros::stability_mod;
 use futures::task::ArcWake;
 use std::{
     any::Any,
@@ -11,7 +10,7 @@ use std::{
     task::{Context, Poll},
 };
 
-stability_mod!(GAMMA, pub mod buffer);
+commonware_macros::stability_mod!(GAMMA, pub mod buffer);
 pub mod signal;
 
 mod handle;
