@@ -368,16 +368,16 @@ mod tests {
                     let sender = context
                         .with_label("sender")
                         .spawn(move |context| async move {
+                            // Get all peers not including self
+                            let mut recipients = addresses.clone();
+                            recipients.remove(i);
+                            recipients.sort();
+
                             // Loop forever to account for unexpected message drops
                             loop {
                                 match mode {
                                     Mode::One => {
-                                        for (j, recipient) in addresses.iter().enumerate() {
-                                            // Don't send message to self
-                                            if i == j {
-                                                continue;
-                                            }
-
+                                        for recipient in &recipients {
                                             // Loop until success
                                             loop {
                                                 let sent = sender
@@ -398,11 +398,6 @@ mod tests {
                                         }
                                     }
                                     Mode::Some | Mode::All => {
-                                        // Get all peers not including self
-                                        let mut recipients = addresses.clone();
-                                        recipients.remove(i);
-                                        recipients.sort();
-
                                         // Loop until all peer sends successful
                                         loop {
                                             let mut sent = sender
