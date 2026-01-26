@@ -543,7 +543,7 @@ impl<
         }
 
         // Check for certificate thresholds and finalization
-        self.check_thresholds(resolver, vote_sender, certificate_sender, view)
+        self.check_thresholds(resolver, certificate_sender, view)
             .await;
     }
 
@@ -592,10 +592,9 @@ impl<
     }
 
     /// Checks for certificate thresholds and finalization after adding a vote.
-    async fn check_thresholds<Sp: Sender, Sr: Sender>(
+    async fn check_thresholds<Sr: Sender>(
         &mut self,
         resolver: &mut resolver::Mailbox<S, D>,
-        vote_sender: &mut WrappedSender<Sp, Vote<S, D>>,
         certificate_sender: &mut WrappedSender<Sr, Certificate<S, D>>,
         view: View,
     ) {
@@ -666,10 +665,6 @@ impl<
             // Finalization triggers pruning
             self.prune_views().await;
         }
-
-        // Check for nullify-by-contradiction
-        self.try_broadcast_nullify_by_contradiction(vote_sender, view)
-            .await;
     }
 
     /// Build, persist, and broadcast a notarize vote when this view is ready.
@@ -841,7 +836,7 @@ impl<
             .await;
 
         // Check thresholds after adding local votes to potentially form certificates
-        self.check_thresholds(resolver, vote_sender, certificate_sender, view)
+        self.check_thresholds(resolver, certificate_sender, view)
             .await;
     }
 
