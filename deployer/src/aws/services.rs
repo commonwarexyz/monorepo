@@ -719,13 +719,14 @@ pub(crate) fn install_monitoring_setup_cmd(
 ) -> String {
     let arch = architecture.as_str();
     format!(
-        r#"
+        r#"set -e
+
 # Enable BBR congestion control
 echo -e "net.core.default_qdisc=fq\nnet.ipv4.tcp_congestion_control=bbr" | sudo tee /etc/sysctl.d/99-bbr.conf >/dev/null && sudo sysctl -p /etc/sysctl.d/99-bbr.conf
 
-# Install deb packages (retry loop handles dpkg lock contention)
-until sudo dpkg -i /home/ubuntu/unzip.deb; do sleep 5; done
-until sudo dpkg -i /home/ubuntu/adduser.deb; do sleep 5; done
+# Install deb packages
+sudo dpkg -i /home/ubuntu/unzip.deb
+sudo dpkg -i /home/ubuntu/adduser.deb
 
 # Install Prometheus
 sudo mkdir -p /opt/prometheus /opt/prometheus/data
@@ -736,9 +737,9 @@ sudo ln -sf /opt/prometheus/prometheus-{prometheus_version}.linux-{arch}/prometh
 sudo chmod +x /opt/prometheus/prometheus
 
 # Install Grafana dependencies (libfontconfig1, musl) and Grafana
-until sudo dpkg -i /home/ubuntu/libfontconfig1.deb; do sleep 5; done
-until sudo dpkg -i /home/ubuntu/musl.deb; do sleep 5; done
-until sudo dpkg -i /home/ubuntu/grafana.deb; do sleep 5; done
+sudo dpkg -i /home/ubuntu/libfontconfig1.deb
+sudo dpkg -i /home/ubuntu/musl.deb
+sudo dpkg -i /home/ubuntu/grafana.deb
 
 # Install Loki
 sudo mkdir -p /opt/loki /loki/index /loki/index_cache /loki/chunks /loki/compactor /loki/wal
@@ -803,7 +804,8 @@ sudo mv /home/ubuntu/node_exporter.service /etc/systemd/system/node_exporter.ser
 
 /// Continuation of monitoring install command (services startup)
 pub const fn start_monitoring_services_cmd() -> &'static str {
-    r#"
+    r#"set -e
+
 sudo chown -R grafana:grafana /etc/grafana /var/lib/grafana
 
 # Start services
@@ -849,8 +851,7 @@ pub struct InstanceUrls {
 pub(crate) const fn install_binary_apt_cmd(profiling: bool) -> Option<&'static str> {
     if profiling {
         Some(
-            r#"
-while sudo fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; do sleep 5; done
+            r#"set -e
 sudo apt-get update -y
 sudo apt-get install -y linux-tools-common linux-tools-generic linux-tools-$(uname -r)
 "#,
@@ -931,7 +932,7 @@ done
 pub(crate) fn install_binary_setup_cmd(profiling: bool, architecture: Architecture) -> String {
     let arch = architecture.as_str();
     let jq_install = if profiling {
-        "until sudo dpkg -i /home/ubuntu/jq.deb; do sleep 5; done\n"
+        "sudo dpkg -i /home/ubuntu/jq.deb\n"
     } else {
         ""
     };
@@ -952,14 +953,15 @@ sudo mv /home/ubuntu/pyroscope-agent.timer /etc/systemd/system/pyroscope-agent.t
         ""
     };
     format!(
-        r#"
+        r#"set -e
+
 # Enable BBR congestion control
 echo -e "net.core.default_qdisc=fq\nnet.ipv4.tcp_congestion_control=bbr" | sudo tee /etc/sysctl.d/99-bbr.conf >/dev/null && sudo sysctl -p /etc/sysctl.d/99-bbr.conf
 
-# Install deb packages (retry loop handles dpkg lock contention)
-until sudo dpkg -i /home/ubuntu/unzip.deb; do sleep 5; done
-until sudo dpkg -i /home/ubuntu/libjemalloc2.deb; do sleep 5; done
-until sudo dpkg -i /home/ubuntu/logrotate.deb; do sleep 5; done
+# Install deb packages
+sudo dpkg -i /home/ubuntu/unzip.deb
+sudo dpkg -i /home/ubuntu/libjemalloc2.deb
+sudo dpkg -i /home/ubuntu/logrotate.deb
 {jq_install}
 # Install Promtail
 sudo mkdir -p /opt/promtail /etc/promtail
