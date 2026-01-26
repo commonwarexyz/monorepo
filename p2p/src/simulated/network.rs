@@ -1759,8 +1759,21 @@ mod tests {
             let next = network.get_next_socket();
             assert_eq!(next, original);
             let next = network.get_next_socket();
-            original.set_port(1);
-            assert_eq!(next, original);
+            let expected = match original.port().checked_add(1) {
+                Some(port) => {
+                    original.set_port(port);
+                    original
+                }
+                None => {
+                    let ip = match original.ip() {
+                        IpAddr::V4(ipv4) => ipv4,
+                        _ => unreachable!(),
+                    };
+                    let next_ip = Ipv4Addr::to_bits(ip).wrapping_add(1);
+                    SocketAddr::new(IpAddr::V4(Ipv4Addr::from_bits(next_ip)), 0)
+                }
+            };
+            assert_eq!(next, expected);
 
             // Test that the port number overflows correctly
             let max_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(255, 0, 255, 255)), 65535);
