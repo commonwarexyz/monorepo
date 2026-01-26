@@ -12,11 +12,10 @@ use commonware_macros::ready_mod;
 
 ready_mod!(GAMMA, pub mod algebra);
 // Raw cfg required: inline module contains external submodule (Rust #54727)
-// TESTED: excluded at WIRE_STABLE, API_STABLE, or PRODUCTION
 #[cfg(not(min_readiness_GAMMA))]
 #[cfg(not(min_readiness_DELTA))]
 #[cfg(not(min_readiness_EPSILON))]
-pub mod fields {
+pub mod fields { // BETA
     pub mod goldilocks;
 }
 ready_mod!(BETA, pub mod ntt);

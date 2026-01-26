@@ -18,7 +18,7 @@ build *args='':
     cargo build $@
 
 # Runs pre-flight lints + tests before making a pull-request
-pre-pr: lint test-docs test
+pre-pr: lint test-docs test check-readiness
 
 # Fixes the formatting of the workspace
 fix-fmt:

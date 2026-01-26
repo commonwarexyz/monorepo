@@ -22,14 +22,14 @@ use rand_core::CryptoRngCore;
 // "macro-expanded macro_export macros cannot be referred to by absolute paths" error.
 #[cfg(not(min_readiness_DELTA))]
 #[cfg(not(min_readiness_EPSILON))]
-pub mod bls12381; // WIRE_STABLE
+pub mod bls12381; // GAMMA
 #[cfg(not(min_readiness_DELTA))]
 #[cfg(not(min_readiness_EPSILON))]
-pub mod ed25519; // WIRE_STABLE
+pub mod ed25519; // GAMMA
 #[cfg(not(min_readiness_GAMMA))]
 #[cfg(not(min_readiness_DELTA))]
 #[cfg(not(min_readiness_EPSILON))]
-pub mod secp256r1; // TESTED
+pub mod secp256r1; // BETA
 
 commonware_macros::ready_scope!(BETA {
     pub mod bloomfilter;

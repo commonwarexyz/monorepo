@@ -61,7 +61,7 @@ ready_scope!(GAMMA {
 
 For modules containing `#[macro_export]` macros, you **must** use raw `#[cfg(...)]` attributes. Due to a Rust limitation, macro-expanded modules cannot have their exported macros referenced by absolute paths. The readiness macros above won't work for these modules.
 
-Use one `#[cfg(not(...))]` per level above the item's readiness:
+Use one `#[cfg(not(min_readiness_X))]` for each level above the item's readiness:
 
 ```rust
 // GAMMA: excluded at DELTA or EPSILON

@@ -113,7 +113,8 @@ fn level_name(level: u8) -> &'static str {
 pub fn ready(attr: TokenStream, item: TokenStream) -> TokenStream {
     let level = parse_macro_input!(attr as ReadinessLevel);
 
-    // Generate cfg attributes: ready(N) excludes item when any of min_readiness_(N+1..=4) is set.
+    // Generate cfg attributes for each level above this item's level.
+    // #[ready(BETA)] expands to #[cfg(not(min_readiness_GAMMA))] #[cfg(not(min_readiness_DELTA))] #[cfg(not(min_readiness_EPSILON))]
     let mut cfg_attrs = Vec::new();
     for exclude_level in (level.value + 1)..=4 {
         let cfg_name = format_ident!("min_readiness_{}", level_name(exclude_level));
@@ -170,7 +171,6 @@ pub fn ready_mod(input: TokenStream) -> TokenStream {
         name,
     } = parse_macro_input!(input as ReadyModInput);
 
-    // Generate cfg attributes: ready_mod!(N, ...) excludes module when any of min_readiness_(N+1..=4) is set.
     let mut cfg_attrs = Vec::new();
     for exclude_level in (level.value + 1)..=4 {
         let cfg_name = format_ident!("min_readiness_{}", level_name(exclude_level));
@@ -224,7 +224,6 @@ impl Parse for ReadyScopeInput {
 pub fn ready_scope(input: TokenStream) -> TokenStream {
     let ReadyScopeInput { level, items } = parse_macro_input!(input as ReadyScopeInput);
 
-    // Generate cfg attributes: ready_scope!(N { ... }) excludes items when any of min_readiness_(N+1..=4) is set.
     let mut cfg_attrs = Vec::new();
     for exclude_level in (level.value + 1)..=4 {
         let cfg_name = format_ident!("min_readiness_{}", level_name(exclude_level));

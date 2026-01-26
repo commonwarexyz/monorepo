@@ -80,17 +80,15 @@ cfg_if::cfg_if! {
         use crate::types::Round;
         use commonware_cryptography::certificate::Scheme;
 
-        // File modules in proc macro input are unstable, so use raw cfg attributes
-        // TESTED: excluded at WIRE_STABLE, API_STABLE, or PRODUCTION
+        // File modules in proc macro input are unstable, so use raw cfg attributes.
         #[cfg(not(min_readiness_GAMMA))]
         #[cfg(not(min_readiness_DELTA))]
         #[cfg(not(min_readiness_EPSILON))]
-        pub mod application;
+        pub mod application; // BETA
 
-        // WIRE_STABLE: excluded at API_STABLE or PRODUCTION
         #[cfg(not(min_readiness_DELTA))]
         #[cfg(not(min_readiness_EPSILON))]
-        pub mod marshal;
+        pub mod marshal; // GAMMA
         #[cfg(not(min_readiness_DELTA))]
         #[cfg(not(min_readiness_EPSILON))]
         use crate::marshal::ingress::mailbox::AncestorStream;
