@@ -134,6 +134,7 @@ pub struct Journal<E: Clock + Storage + Metrics, A: CodecFixedShared> {
     ///
     /// When the journal is pruned, `metadata` must be persisted AFTER the inner journal is
     /// persisted to ensure that its pruning boundary is never after the inner journal's size.
+    // TODO(#2939): Remove metadata
     metadata: Metadata<E, u64, Vec<u8>>,
 
     /// The position before which all items have been pruned.
