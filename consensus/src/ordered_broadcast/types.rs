@@ -368,13 +368,15 @@ impl Namespace for AckNamespace {
 /// Context for signing/verifying validator acknowledgments.
 ///
 /// This is used as the context type for `Scheme` implementations for validators.
-/// It contains the chunk being acknowledged and the epoch of the validator set.
+/// It contains the chunk being acknowledged.
+///
+/// Note: epoch is NOT included here because the p2p channel is already muxed by epoch,
+/// so including it in the signature is redundant. Not signing over epoch allows
+/// certificates to be verified without knowing the epoch.
 #[derive(Debug, Clone)]
 pub struct AckSubject<'a, P: PublicKey, D: Digest> {
     /// The chunk being acknowledged.
     pub chunk: &'a Chunk<P, D>,
-    /// The epoch of the validator set.
-    pub epoch: Epoch,
 }
 
 impl<P: PublicKey, D: Digest> certificate::Subject for AckSubject<'_, P, D> {
@@ -385,11 +387,10 @@ impl<P: PublicKey, D: Digest> certificate::Subject for AckSubject<'_, P, D> {
     }
 
     fn message(&self) -> Bytes {
-        let mut message =
-            BytesMut::with_capacity(self.chunk.encode_size() + self.epoch.encode_size());
-        self.chunk.write(&mut message);
-        self.epoch.write(&mut message);
-        message.freeze()
+        // Note: epoch is NOT included in signed data. The p2p channel is already
+        // muxed by epoch, so including it in the signature is redundant. Not signing
+        // over epoch allows certificates to be verified without knowing the epoch.
+        self.chunk.encode().into()
     }
 }
 
@@ -662,7 +663,6 @@ impl<P: PublicKey, S: Scheme, D: Digest> Node<P, S, D> {
             .ok_or(Error::UnknownScheme(parent.epoch))?;
         let ctx = AckSubject {
             chunk: &parent_chunk,
-            epoch: parent.epoch,
         };
         if !parent_scheme.verify_certificate::<R, D, N3f1>(rng, ctx, &parent.certificate, strategy)
         {
@@ -758,12 +758,16 @@ where
 ///
 /// When a validator receives and validates a chunk, it sends an Ack containing:
 /// 1. The chunk being acknowledged
-/// 2. The current epoch
-/// 3. An attestation over the chunk and epoch
+/// 2. The current epoch (for routing, not signed over)
+/// 3. An attestation over the chunk
 ///
 /// These attestations from validators can be aggregated to form a certificate
 /// once enough validators (a quorum) have acknowledged the chunk. This certificate
 /// serves as proof that the chunk was reliably broadcast.
+///
+/// Note: The epoch is included in the message for routing purposes but is NOT
+/// signed over. The p2p channel is already muxed by epoch, making it redundant
+/// to include in the signature.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Ack<P: PublicKey, S: Scheme, D: Digest> {
     /// Chunk that is being acknowledged.
@@ -802,7 +806,6 @@ impl<P: PublicKey, S: Scheme, D: Digest> Ack<P, S, D> {
     {
         let ctx = AckSubject {
             chunk: &self.chunk,
-            epoch: self.epoch,
         };
         scheme.verify_attestation::<_, D>(rng, ctx, &self.attestation, strategy)
     }
@@ -815,10 +818,7 @@ impl<P: PublicKey, S: Scheme, D: Digest> Ack<P, S, D> {
     where
         S: scheme::Scheme<P, D>,
     {
-        let ctx = AckSubject {
-            chunk: &chunk,
-            epoch,
-        };
+        let ctx = AckSubject { chunk: &chunk };
         let attestation = scheme.sign::<D>(ctx)?;
         Some(Self::new(chunk, epoch, attestation))
     }
@@ -1063,8 +1063,11 @@ impl<P: PublicKey, S: Scheme, D: Digest> Lock<P, S, D> {
 
     /// Verify the Lock.
     ///
-    /// This ensures that the certificate is valid for the given chunk and epoch,
-    /// using the provided scheme.
+    /// This ensures that the certificate is valid for the given chunk, using
+    /// the provided scheme.
+    ///
+    /// Note: The epoch field is used for routing but is NOT verified as part
+    /// of the certificate signature.
     ///
     /// Returns true if the signature is valid, false otherwise.
     pub fn verify<R>(&self, rng: &mut R, scheme: &S, strategy: &impl Strategy) -> bool
@@ -1074,7 +1077,6 @@ impl<P: PublicKey, S: Scheme, D: Digest> Lock<P, S, D> {
     {
         let ctx = AckSubject {
             chunk: &self.chunk,
-            epoch: self.epoch,
         };
         scheme.verify_certificate::<R, D, N3f1>(rng, ctx, &self.certificate, strategy)
     }
@@ -1202,10 +1204,7 @@ mod tests {
         let quorum = N3f1::quorum(fixture.schemes.len() as u32) as usize;
 
         // Generate acks from quorum validators
-        let ctx = AckSubject {
-            chunk: &chunk,
-            epoch,
-        };
+        let ctx = AckSubject { chunk: &chunk };
         let attestations: Vec<_> = fixture.schemes[..quorum]
             .iter()
             .map(|scheme| scheme.sign::<Sha256Digest>(ctx.clone()).unwrap())
@@ -1266,7 +1265,6 @@ mod tests {
         // Generate parent certificate
         let parent_ctx = AckSubject {
             chunk: &parent_chunk,
-            epoch: parent_epoch,
         };
         let parent_attestations: Vec<_> = fixture.schemes[..quorum]
             .iter()
@@ -1347,7 +1345,6 @@ mod tests {
         let parent_epoch = Epoch::new(5);
         let parent_ctx = AckSubject {
             chunk: &genesis_chunk,
-            epoch: parent_epoch,
         };
 
         // Collect signatures from a quorum of validators to form the parent certificate.
@@ -1420,10 +1417,7 @@ mod tests {
         );
         let epoch = Epoch::new(5);
 
-        let ctx = AckSubject {
-            chunk: &chunk,
-            epoch,
-        };
+        let ctx = AckSubject { chunk: &chunk };
         let attestation = fixture.schemes[0]
             .sign::<Sha256Digest>(ctx)
             .expect("Should sign vote");
@@ -1487,10 +1481,7 @@ mod tests {
         let epoch = Epoch::new(5);
 
         // Generate votes from quorum validators
-        let ctx = AckSubject {
-            chunk: &chunk,
-            epoch,
-        };
+        let ctx = AckSubject { chunk: &chunk };
         let attestations: Vec<_> = fixture.schemes[..quorum]
             .iter()
             .map(|scheme| scheme.sign::<Sha256Digest>(ctx.clone()).unwrap())
@@ -1569,10 +1560,7 @@ mod tests {
         let quorum = N3f1::quorum(fixture.schemes.len() as u32) as usize;
 
         // Generate votes from quorum validators
-        let ctx = AckSubject {
-            chunk: &chunk,
-            epoch,
-        };
+        let ctx = AckSubject { chunk: &chunk };
         let attestations: Vec<_> = fixture.schemes[..quorum]
             .iter()
             .map(|scheme| scheme.sign::<Sha256Digest>(ctx.clone()).unwrap())
@@ -1635,7 +1623,6 @@ mod tests {
         // Create certificate for parent
         let parent_ctx = AckSubject {
             chunk: &parent_chunk,
-            epoch: parent_epoch,
         };
         let parent_attestations: Vec<_> = fixture.schemes[..quorum]
             .iter()
@@ -1706,10 +1693,7 @@ mod tests {
         let quorum = N3f1::quorum(fixture.schemes.len() as u32) as usize;
 
         // Create quorum votes
-        let ctx = AckSubject {
-            chunk: &chunk,
-            epoch,
-        };
+        let ctx = AckSubject { chunk: &chunk };
         let attestations: Vec<_> = fixture.schemes[..quorum]
             .iter()
             .map(|scheme| scheme.sign::<Sha256Digest>(ctx.clone()).unwrap())
@@ -1750,10 +1734,7 @@ mod tests {
         let quorum = N3f1::quorum(fixture.schemes.len() as u32) as usize;
 
         // Create certificate
-        let ctx = AckSubject {
-            chunk: &chunk,
-            epoch,
-        };
+        let ctx = AckSubject { chunk: &chunk };
         let attestations: Vec<_> = fixture.schemes[..quorum]
             .iter()
             .map(|scheme| scheme.sign::<Sha256Digest>(ctx.clone()).unwrap())
@@ -1867,7 +1848,6 @@ mod tests {
         // Generate a valid certificate for the parent
         let parent_ctx = AckSubject {
             chunk: &parent_chunk,
-            epoch,
         };
         let parent_attestations: Vec<_> = fixture.schemes[..quorum]
             .iter()
@@ -1898,10 +1878,10 @@ mod tests {
             .is_ok());
 
         // Now create a parent with invalid certificate
-        // Generate certificate with the wrong keys (sign with schemes[1..] but pretend it's from schemes[0..])
+        // Generate certificate for a different chunk (wrong payload)
+        let wrong_chunk = Chunk::new(public_key, 0, sample_digest(99));
         let wrong_ctx = AckSubject {
-            chunk: &parent_chunk,
-            epoch: Epoch::new(99), // Different epoch to get different signatures
+            chunk: &wrong_chunk,
         };
         let wrong_attestations: Vec<_> = fixture.schemes[..quorum]
             .iter()
@@ -1911,7 +1891,7 @@ mod tests {
             .assemble::<_, N3f1>(wrong_attestations, &Sequential)
             .expect("Should assemble certificate");
 
-        // Create parent with certificate signed for wrong context (wrong epoch)
+        // Create parent with certificate signed for wrong chunk (wrong payload)
         let wrong_parent =
             Parent::<S, Sha256Digest>::new(parent_chunk.payload, epoch, wrong_certificate);
 
@@ -1922,7 +1902,7 @@ mod tests {
             Some(wrong_parent),
         );
 
-        // Verification should fail because the parent certificate was signed for different epoch
+        // Verification should fail because the parent certificate was signed for different chunk
         assert!(matches!(
             node.verify(&mut rng, &verifier, &provider, &Sequential),
             Err(Error::InvalidCertificate)
@@ -1960,10 +1940,7 @@ mod tests {
         assert!(ack.verify(&mut rng, &fixture.verifier, &Sequential));
 
         // Create an ack with tampered signature by signing with a different scheme
-        let ctx = AckSubject {
-            chunk: &chunk,
-            epoch,
-        };
+        let ctx = AckSubject { chunk: &chunk };
         let mut tampered_vote = fixture.schemes[1]
             .sign::<Sha256Digest>(ctx)
             .expect("Should sign vote");
@@ -2034,10 +2011,7 @@ mod tests {
         let quorum_size = N3f1::quorum(fixture.schemes.len() as u32) as usize;
 
         // Generate certificate
-        let ctx = AckSubject {
-            chunk: &chunk,
-            epoch,
-        };
+        let ctx = AckSubject { chunk: &chunk };
         let attestations: Vec<_> = fixture.schemes[..quorum_size]
             .iter()
             .map(|scheme| scheme.sign::<Sha256Digest>(ctx.clone()).unwrap())
@@ -2140,7 +2114,6 @@ mod tests {
         let dummy_epoch = Epoch::new(5);
         let ctx = AckSubject {
             chunk: &dummy_chunk,
-            epoch: dummy_epoch,
         };
         let attestations: Vec<_> = fixture.schemes[..quorum_size]
             .iter()
@@ -2225,7 +2198,6 @@ mod tests {
         let parent_epoch = Epoch::new(5);
         let parent_ctx = AckSubject {
             chunk: &parent_chunk,
-            epoch: parent_epoch,
         };
         let parent_attestations: Vec<_> = fixture.schemes[..N3f1::quorum(4) as usize]
             .iter()
