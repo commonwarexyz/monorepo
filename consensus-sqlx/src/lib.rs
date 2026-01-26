@@ -12,6 +12,15 @@ use commonware_cryptography::{certificate::Scheme, Digest};
 use futures::Stream;
 use sqlx::{Error, PgPool};
 use std::{marker::PhantomData, pin::Pin};
+use tracing::instrument;
+
+pub struct Config<C> {
+    /// Codec configuration.
+    pub codec_config: C,
+
+    /// The connection to the Postgres database (pool of clients).
+    pub pg_pool: PgPool,
+}
 
 /// SQLx-backed storage for consensus artifacts.
 ///
@@ -31,38 +40,87 @@ use std::{marker::PhantomData, pin::Pin};
 /// );
 /// CREATE INDEX IF NOT EXISTS idx_consensus_votes_epoch_view ON consensus_votes(epoch, view);
 /// ```
-pub struct VotesSqlx<S, D>
+pub struct VotesSqlx<E, S, D>
 where
     S: Scheme,
 {
-    pool: PgPool,
-    cfg: <S::Certificate as CodecRead>::Cfg,
+    _context: E,
+    _lock_id: i64,
+    pg_pool: PgPool,
+    codec_config: <S::Certificate as CodecRead>::Cfg,
     _marker: PhantomData<D>,
 }
 
-impl<S, D> VotesSqlx<S, D>
+impl<E, S, D> VotesSqlx<E, S, D>
 where
+    E: commonware_runtime::Metrics,
     S: Scheme,
     D: Digest,
 {
     /// Creates a new SQLx-backed votes store.
     ///
+    /// Acquires an exclusive session-level advisory lock to ensure only one
+    /// writer can access the votes table at a time. The lock is held for the
+    /// lifetime of the connection pool.
+    ///
+    /// Note that the lock ID is derived from the context label: if another
+    /// part of the system wants to create a lock, it needs to have a different
+    /// label than the one provided here.
+    ///
     /// # Arguments
     ///
-    /// * `pool` - The SQLx PostgreSQL connection pool.
-    /// * `table` - The name of the table to use for storage.
-    /// * `cfg` - The codec configuration for decoding certificates.
-    pub fn new(pool: PgPool, cfg: <S::Certificate as CodecRead>::Cfg) -> Self {
-        Self {
-            pool,
-            cfg,
-            _marker: PhantomData,
+    /// * `context` - the runtime context.
+    /// * `cfg` - the [`Config`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the exclusive lock cannot be acquired (another
+    /// instance already holds it).
+    #[instrument(skip_all, err)]
+    pub async fn init(
+        context: E,
+        cfg: Config<<S::Certificate as CodecRead>::Cfg>,
+    ) -> Result<Self, Error> {
+        let Config {
+            codec_config,
+            pg_pool,
+        } = cfg;
+
+        // Derive lock ID from table name to make it table-specific.
+        // Blake3 was present in the dependencies and this is a one-time hash.
+        // Considerations of performance or cryptographic resistance are not important.
+        let lock_id = {
+            let mut hasher = blake3::Hasher::new();
+            hasher.update(context.label().as_bytes());
+            let hash: [u8; _] = hasher.finalize().into();
+            i64::from_be_bytes([
+                hash[0], hash[1], hash[2], hash[3], hash[4], hash[5], hash[6], hash[7],
+            ])
+        };
+        let acquired: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock($1)")
+            .bind(lock_id)
+            .fetch_one(&pg_pool)
+            .await?;
+
+        if !acquired {
+            return Err(Error::Protocol(format!(
+                "failed to acquire exclusive write lock with ID `{lock_id}`: another instance holds the lock"
+            )));
         }
+
+        Ok(Self {
+            _context: context,
+            _lock_id: lock_id,
+            pg_pool,
+            codec_config,
+            _marker: PhantomData,
+        })
     }
 }
 
-impl<S, D> Votes for VotesSqlx<S, D>
+impl<E, S, D> Votes for VotesSqlx<E, S, D>
 where
+    E: commonware_runtime::Metrics,
     S: Scheme,
     S::Certificate: Unpin,
     S::Signature: Unpin,
@@ -90,7 +148,7 @@ where
             .bind(epoch.get() as i64)
             .bind(view.get() as i64)
             .bind(data.as_ref())
-            .execute(&self.pool)
+            .execute(&self.pg_pool)
             .await?;
         Ok(())
     }
@@ -111,7 +169,7 @@ where
         sqlx::query("DELETE FROM consensus_votes WHERE epoch = $1 AND view < $2 ")
             .bind(epoch.get() as i64)
             .bind(min.get() as i64)
-            .execute(&self.pool)
+            .execute(&self.pg_pool)
             .await?;
         Ok(())
     }
@@ -119,7 +177,7 @@ where
     async fn replay(&mut self, epoch: Epoch) -> Result<Self::ReplayStream<'_>, Self::Error> {
         use sqlx::Row as _;
 
-        let cfg = self.cfg.clone();
+        let cfg = self.codec_config.clone();
         let stream = sqlx::query(
             "SELECT artifact FROM consensus_votes WHERE epoch = $1 ORDER BY view ASC, id ASC",
         )
@@ -129,7 +187,7 @@ where
             Artifact::decode_cfg(&mut &bytes[..], &cfg)
                 .map_err(|err| sqlx::Error::Decode(err.into()))
         })
-        .fetch(&self.pool);
+        .fetch(&self.pg_pool);
         Ok(Box::pin(stream))
     }
 }

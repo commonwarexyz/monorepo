@@ -1263,11 +1263,14 @@ dependencies = [
 name = "commonware-consensus-sqlx"
 version = "0.0.65"
 dependencies = [
+ "blake3",
  "commonware-codec",
  "commonware-consensus",
  "commonware-cryptography",
+ "commonware-runtime",
  "futures",
  "sqlx",
+ "tracing",
 ]
 
 [[package]]

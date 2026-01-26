@@ -72,7 +72,7 @@ use commonware_consensus::{
     simplex::{self, elector::RoundRobin, store::VotesJournal},
     types::{Epoch, ViewDelta},
 };
-use commonware_cryptography::{certificate::Scheme as _, ed25519, sha256, Sha256, Signer as _};
+use commonware_cryptography::{certificate::Scheme as _, ed25519, Sha256, Signer as _};
 use commonware_p2p::{authenticated::discovery, Manager};
 use commonware_parallel::Sequential;
 use commonware_runtime::{buffer::PoolRef, tokio, Metrics, Quota, Runner};
@@ -242,10 +242,15 @@ fn main() {
                     .await
                     .expect("must be able to run migration to create votes table");
 
-                commonware_consensus_sqlx::VotesSqlx::<application::Scheme, sha256::Digest>::new(
-                    pg_pool,
-                    scheme.certificate_codec_config(),
+                commonware_consensus_sqlx::VotesSqlx::init(
+                    context.with_label("engine_voter"),
+                    commonware_consensus_sqlx::Config {
+                        codec_config: scheme.certificate_codec_config(),
+                        pg_pool,
+                    },
                 )
+                .await
+                .expect("failed to acquire exclusive write lock")
                 .into()
             } else {
                 VotesJournal::from_journal(

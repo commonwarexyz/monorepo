@@ -20,7 +20,7 @@ where
     D: Digest,
 {
     Journal(VotesJournal<E, S, D>),
-    Database(VotesSqlx<S, D>),
+    Database(VotesSqlx<E, S, D>),
 }
 
 impl<E, S, D> From<VotesJournal<E, S, D>> for DatabaseOrJournal<E, S, D>
@@ -34,13 +34,13 @@ where
     }
 }
 
-impl<E, S, D> From<VotesSqlx<S, D>> for DatabaseOrJournal<E, S, D>
+impl<E, S, D> From<VotesSqlx<E, S, D>> for DatabaseOrJournal<E, S, D>
 where
     E: Storage + Metrics,
     S: Scheme,
     D: Digest,
 {
-    fn from(value: VotesSqlx<S, D>) -> Self {
+    fn from(value: VotesSqlx<E, S, D>) -> Self {
         Self::Database(value)
     }
 }
