@@ -1,5 +1,6 @@
 use crate::types::{self, Ingress};
-use std::net::IpAddr;
+use commonware_utils::IpAddrExt;
+use std::{collections::BTreeSet, net::IpAddr};
 
 /// Represents information known about a peer's address.
 #[derive(Clone, Debug)]
@@ -41,38 +42,51 @@ pub struct Record {
 
     /// If `true`, the record should persist even if the peer is not part of any peer sets.
     persistent: bool,
+
+    /// All egress IPs seen for this peer while in an active peer set.
+    /// Used for accepting incoming connections from any tracked IP.
+    tracked_ips: BTreeSet<IpAddr>,
 }
 
 impl Record {
     // ---------- Constructors ----------
 
     /// Create a new record with a known address.
-    pub const fn known(addr: types::Address) -> Self {
+    pub fn known(addr: types::Address) -> Self {
+        let egress_ip = addr.egress_ip();
         Self {
             address: Address::Known(addr),
             status: Status::Inert,
             sets: 0,
             persistent: false,
+            tracked_ips: BTreeSet::from([egress_ip]),
         }
     }
 
     /// Create a new record with the local node's information.
-    pub const fn myself() -> Self {
+    #[allow(clippy::missing_const_for_fn)] // BTreeSet::new() is not const
+    pub fn myself() -> Self {
         Self {
             address: Address::Myself,
             status: Status::Inert,
             sets: 0,
             persistent: true,
+            tracked_ips: BTreeSet::new(),
         }
     }
 
     // ---------- Setters ----------
 
     /// Update the record with a new address.
+    ///
+    /// Adds the new egress IP to the set of tracked IPs.
     pub fn update(&mut self, addr: types::Address) {
         match &mut self.address {
             Address::Myself => {}
-            Address::Known(existing) => *existing = addr,
+            Address::Known(existing) => {
+                self.tracked_ips.insert(addr.egress_ip());
+                *existing = addr;
+            }
         }
     }
 
@@ -155,7 +169,7 @@ impl Record {
     ///
     /// A peer is acceptable if:
     /// - The peer is eligible (in a peer set, not ourselves)
-    /// - The source IP matches the expected egress IP for this peer (if not bypass_ip_check)
+    /// - The source IP is in the tracked IPs for this peer (if not bypass_ip_check)
     /// - We are not already connected or reserved
     pub fn acceptable(&self, source_ip: IpAddr, bypass_ip_check: bool) -> bool {
         if !self.eligible() || self.status != Status::Inert {
@@ -164,10 +178,7 @@ impl Record {
         if bypass_ip_check {
             return true;
         }
-        match &self.address {
-            Address::Known(addr) => addr.egress_ip() == source_ip,
-            Address::Myself => false,
-        }
+        self.tracked_ips.contains(&source_ip)
     }
 
     /// Return the ingress address for dialing, if known.
@@ -179,11 +190,25 @@ impl Record {
     }
 
     /// Return the egress IP for filtering, if known.
+    #[cfg(test)]
     pub const fn egress_ip(&self) -> Option<IpAddr> {
         match &self.address {
             Address::Myself => None,
             Address::Known(addr) => Some(addr.egress_ip()),
         }
+    }
+
+    /// Return all tracked IPs for this peer, with optional private IP filtering.
+    pub fn ips(&self, allow_private_ips: bool) -> impl Iterator<Item = IpAddr> + '_ {
+        self.tracked_ips
+            .iter()
+            .copied()
+            .filter(move |ip| allow_private_ips || IpAddrExt::is_global(ip))
+    }
+
+    /// Clear all tracked IPs.
+    pub fn clear_ips(&mut self) {
+        self.tracked_ips.clear();
     }
 
     /// Returns `true` if the peer is reserved (or active).
@@ -545,5 +570,134 @@ mod tests {
             !record_dns.dialable(false, false),
             "DNS ingress should NOT be dialable when allow_dns=false"
         );
+    }
+
+    #[test]
+    fn test_tracked_ips_initial() {
+        let public_socket = SocketAddr::from(([8, 8, 8, 8], 8080));
+        let record = Record::known(types::Address::Symmetric(public_socket));
+        let ips: Vec<_> = record.ips(true).collect();
+        assert_eq!(ips.len(), 1);
+        assert!(ips.contains(&public_socket.ip()));
+    }
+
+    #[test]
+    fn test_tracked_ips_accumulate_on_update() {
+        let ip1: IpAddr = [8, 8, 8, 8].into();
+        let ip2: IpAddr = [1, 1, 1, 1].into();
+        let ip3: IpAddr = [9, 9, 9, 9].into();
+
+        let socket1 = SocketAddr::new(ip1, 8080);
+        let socket2 = SocketAddr::new(ip2, 8080);
+        let socket3 = SocketAddr::new(ip3, 8080);
+
+        let mut record = Record::known(types::Address::Symmetric(socket1));
+
+        // Initial IP tracked
+        let ips: Vec<_> = record.ips(true).collect();
+        assert_eq!(ips.len(), 1);
+        assert!(ips.contains(&ip1));
+
+        // Update with new IP - both should be tracked
+        record.update(types::Address::Symmetric(socket2));
+        let ips: Vec<_> = record.ips(true).collect();
+        assert_eq!(ips.len(), 2);
+        assert!(ips.contains(&ip1));
+        assert!(ips.contains(&ip2));
+
+        // Update with another new IP - all three should be tracked
+        record.update(types::Address::Symmetric(socket3));
+        let ips: Vec<_> = record.ips(true).collect();
+        assert_eq!(ips.len(), 3);
+        assert!(ips.contains(&ip1));
+        assert!(ips.contains(&ip2));
+        assert!(ips.contains(&ip3));
+
+        // Update with duplicate IP - still three IPs
+        record.update(types::Address::Symmetric(socket1));
+        let ips: Vec<_> = record.ips(true).collect();
+        assert_eq!(ips.len(), 3);
+    }
+
+    #[test]
+    fn test_tracked_ips_filter_private() {
+        let public_ip: IpAddr = [8, 8, 8, 8].into();
+        let private_ip: IpAddr = [10, 0, 0, 1].into();
+
+        let public_socket = SocketAddr::new(public_ip, 8080);
+        let private_socket = SocketAddr::new(private_ip, 8080);
+
+        let mut record = Record::known(types::Address::Symmetric(public_socket));
+        record.update(types::Address::Symmetric(private_socket));
+
+        // With allow_private_ips=true, both IPs returned
+        let ips: Vec<_> = record.ips(true).collect();
+        assert_eq!(ips.len(), 2);
+        assert!(ips.contains(&public_ip));
+        assert!(ips.contains(&private_ip));
+
+        // With allow_private_ips=false, only public IP returned
+        let ips: Vec<_> = record.ips(false).collect();
+        assert_eq!(ips.len(), 1);
+        assert!(ips.contains(&public_ip));
+        assert!(!ips.contains(&private_ip));
+    }
+
+    #[test]
+    fn test_clear_ips() {
+        let ip1: IpAddr = [8, 8, 8, 8].into();
+        let ip2: IpAddr = [1, 1, 1, 1].into();
+
+        let socket1 = SocketAddr::new(ip1, 8080);
+        let socket2 = SocketAddr::new(ip2, 8080);
+
+        let mut record = Record::known(types::Address::Symmetric(socket1));
+        record.update(types::Address::Symmetric(socket2));
+
+        // Two IPs tracked
+        let ips: Vec<_> = record.ips(true).collect();
+        assert_eq!(ips.len(), 2);
+
+        // Clear IPs
+        record.clear_ips();
+
+        // No IPs tracked after clear
+        let ips: Vec<_> = record.ips(true).collect();
+        assert_eq!(ips.len(), 0);
+    }
+
+    #[test]
+    fn test_acceptable_checks_all_tracked_ips() {
+        let ip1: IpAddr = [8, 8, 8, 8].into();
+        let ip2: IpAddr = [1, 1, 1, 1].into();
+        let wrong_ip: IpAddr = [9, 9, 9, 9].into();
+
+        let socket1 = SocketAddr::new(ip1, 8080);
+        let socket2 = SocketAddr::new(ip2, 8080);
+
+        let mut record = Record::known(types::Address::Symmetric(socket1));
+        record.increment();
+        record.update(types::Address::Symmetric(socket2));
+
+        // Both tracked IPs should be acceptable
+        assert!(
+            record.acceptable(ip1, false),
+            "First tracked IP should be acceptable"
+        );
+        assert!(
+            record.acceptable(ip2, false),
+            "Second tracked IP should be acceptable"
+        );
+        assert!(
+            !record.acceptable(wrong_ip, false),
+            "Untracked IP should not be acceptable"
+        );
+    }
+
+    #[test]
+    fn test_myself_has_no_tracked_ips() {
+        let record = Record::myself();
+        let ips: Vec<_> = record.ips(true).collect();
+        assert_eq!(ips.len(), 0, "Myself record should have no tracked IPs");
     }
 }
