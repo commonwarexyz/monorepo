@@ -952,7 +952,16 @@ where
     /// should have the associated block (in the `finalized_blocks` archive) for the information
     /// returned.
     async fn get_latest(&mut self) -> Option<(Height, B::Commitment, Round)> {
-        let height = self.finalizations_by_height.last_index().await.ok()??;
+        let height = match self.finalizations_by_height.last_index().await {
+            Err(err) => {
+                warn!(
+                    error = &err as &dyn std::error::Error,
+                    "unable to read latest available finalized height",
+                );
+                return None;
+            }
+            Ok(height) => height?,
+        };
         let finalization = self
             .get_finalization_by_height(height)
             .await
@@ -994,9 +1003,18 @@ where
     ) {
         let start = self.last_processed_height.next();
         'cache_repair: loop {
-            let Ok((gap_start, Some(gap_end))) = self.finalized_blocks.next_gap(start).await else {
+            let (gap_start, gap_end) = match self.finalized_blocks.next_gap(start).await {
+                Err(err) => {
+                    warn!(
+                        error = &err as &dyn std::error::Error,
+                        "unable to query storage for missing gaps",
+                    );
+                    return;
+                }
+                Ok((gap_start, Some(gap_end))) => (gap_start, gap_end),
+
                 // No gaps detected
-                return;
+                _ => return,
             };
 
             // Attempt to repair the gap backwards from the end of the gap, using
@@ -1038,18 +1056,37 @@ where
         // closest to the application's processed height if finalizations
         // for the requests' heights exist. If not, we rely on the recursive
         // digest fetches above.
-        if let Ok(missing_items) = self
+        match self
             .finalized_blocks
             .missing_items(start, self.max_repair.get())
             .await
         {
-            let requests = missing_items
-                .filter_map(|item| async move { item.ok() })
-                .map(|height| Request::<B>::Finalized { height })
-                .collect::<Vec<_>>()
-                .await;
-            if !requests.is_empty() {
-                resolver.fetch_all(requests).await
+            Err(error) => {
+                warn!(
+                    error = &error as &dyn std::error::Error,
+                    "unable to determine missing finalized blocks in local storage",
+                );
+            }
+            Ok(missing_items) => {
+                let requests = missing_items
+                    .filter_map(|item| async move {
+                        match item {
+                            Err(err) => {
+                                warn!(
+                                    error = &err as &dyn std::error::Error,
+                                    "skipping faulty height",
+                                );
+                                None
+                            }
+                            Ok(height) => Some(height),
+                        }
+                    })
+                    .map(|height| Request::<B>::Finalized { height })
+                    .collect::<Vec<_>>()
+                    .await;
+                if !requests.is_empty() {
+                    resolver.fetch_all(requests).await
+                }
             }
         }
     }
