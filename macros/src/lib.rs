@@ -18,32 +18,105 @@ use syn::{
 
 mod nextest;
 
-/// Marks an item with a readiness level (0-4).
+/// Readiness level input that accepts either a literal integer or a named constant.
+///
+/// Named constants:
+/// - `EXPERIMENTAL` = 0: Little testing, breaking changes expected
+/// - `TESTED` = 1: Decent coverage, wire format unstable
+/// - `WIRE_STABLE` = 2: Wire/storage format stable, API may change
+/// - `API_STABLE` = 3: API + wire stable
+/// - `PRODUCTION` = 4: Audited, deployed in production
+#[allow(dead_code)]
+struct ReadinessLevel {
+    value: u8,
+    span: Span,
+}
+
+impl Parse for ReadinessLevel {
+    fn parse(input: ParseStream<'_>) -> Result<Self> {
+        let lookahead = input.lookahead1();
+        if lookahead.peek(LitInt) {
+            let lit: LitInt = input.parse()?;
+            let value: u8 = lit
+                .base10_parse()
+                .map_err(|_| Error::new(lit.span(), "readiness level must be 0, 1, 2, 3, or 4"))?;
+            if value > 4 {
+                return Err(Error::new(
+                    lit.span(),
+                    "readiness level must be 0, 1, 2, 3, or 4",
+                ));
+            }
+            Ok(Self {
+                value,
+                span: lit.span(),
+            })
+        } else if lookahead.peek(Ident) {
+            let ident: Ident = input.parse()?;
+            let value = match ident.to_string().as_str() {
+                "EXPERIMENTAL" => 0,
+                "TESTED" => 1,
+                "WIRE_STABLE" => 2,
+                "API_STABLE" => 3,
+                "PRODUCTION" => 4,
+                _ => {
+                    return Err(Error::new(
+                        ident.span(),
+                        "expected readiness level: EXPERIMENTAL, TESTED, WIRE_STABLE, API_STABLE, PRODUCTION, or 0-4",
+                    ));
+                }
+            };
+            Ok(Self {
+                value,
+                span: ident.span(),
+            })
+        } else {
+            Err(lookahead.error())
+        }
+    }
+}
+
+/// Marks an item with a readiness level.
 ///
 /// When building with `RUSTFLAGS="--cfg min_readiness_N"`, items with readiness
 /// less than N are excluded. Unmarked items are always included.
 ///
+/// # Readiness Levels
+///
+/// | Level | Name | Description |
+/// |-------|------|-------------|
+/// | 0 | `EXPERIMENTAL` | Little testing, breaking changes expected |
+/// | 1 | `TESTED` | Decent coverage, wire format unstable |
+/// | 2 | `WIRE_STABLE` | Wire/storage format stable, API may change |
+/// | 3 | `API_STABLE` | API + wire stable |
+/// | 4 | `PRODUCTION` | Audited, deployed in production |
+///
 /// # Example
 /// ```rust,ignore
-/// #[commonware_macros::ready(2)]  // excluded at levels 3, 4
+/// use commonware_macros::ready;
+///
+/// #[ready(WIRE_STABLE)]  // excluded at levels 3, 4
 /// pub struct StableApi { }
 /// ```
+/// Map level number to named constant for cfg flag
+fn level_name(level: u8) -> &'static str {
+    match level {
+        0 => "EXPERIMENTAL",
+        1 => "TESTED",
+        2 => "WIRE_STABLE",
+        3 => "API_STABLE",
+        4 => "PRODUCTION",
+        _ => unreachable!(),
+    }
+}
+
 #[proc_macro_attribute]
 pub fn ready(attr: TokenStream, item: TokenStream) -> TokenStream {
-    let level = parse_macro_input!(attr as LitInt);
-    let level_value: u8 = match level.base10_parse() {
-        Ok(v) if v <= 4 => v,
-        _ => {
-            return Error::new(level.span(), "readiness level must be 0, 1, 2, 3, or 4")
-                .to_compile_error()
-                .into();
-        }
-    };
+    let level = parse_macro_input!(attr as ReadinessLevel);
 
-    // Generate cfg attributes: ready(N) excludes item when min_readiness_(N+1..=4) is set
+    // Generate cfg attributes: ready(N) excludes item when any of min_readiness_(N+1..=4) is set.
     let mut cfg_attrs = Vec::new();
-    for exclude_level in (level_value + 1)..=4 {
-        let cfg_name = format_ident!("min_readiness_{}", exclude_level);
+    for exclude_level in (level.value + 1)..=4 {
+        let cfg_name = format_ident!("min_readiness_{}", level_name(exclude_level));
         cfg_attrs.push(quote! { #[cfg(not(#cfg_name))] });
     }
 
@@ -58,14 +131,14 @@ pub fn ready(attr: TokenStream, item: TokenStream) -> TokenStream {
 
 /// Input for the `ready_mod!` macro: `level, visibility mod name`
 struct ReadyModInput {
-    level: LitInt,
+    level: ReadinessLevel,
     visibility: Visibility,
     name: Ident,
 }
 
 impl Parse for ReadyModInput {
     fn parse(input: ParseStream<'_>) -> Result<Self> {
-        let level: LitInt = input.parse()?;
+        let level: ReadinessLevel = input.parse()?;
         input.parse::<Token![,]>()?;
         let visibility: Visibility = input.parse()?;
         input.parse::<Token![mod]>()?;
@@ -78,14 +151,16 @@ impl Parse for ReadyModInput {
     }
 }
 
-/// Marks a module with a readiness level (0-4).
+/// Marks a module with a readiness level.
 ///
 /// When building with `RUSTFLAGS="--cfg min_readiness_N"`, modules with readiness
 /// less than N are excluded.
 ///
 /// # Example
 /// ```rust,ignore
-/// commonware_macros::ready_mod!(2, pub mod stable_module);
+/// use commonware_macros::ready_mod;
+///
+/// ready_mod!(WIRE_STABLE, pub mod stable_module);
 /// ```
 #[proc_macro]
 pub fn ready_mod(input: TokenStream) -> TokenStream {
@@ -95,19 +170,10 @@ pub fn ready_mod(input: TokenStream) -> TokenStream {
         name,
     } = parse_macro_input!(input as ReadyModInput);
 
-    let level_value: u8 = match level.base10_parse() {
-        Ok(v) if v <= 4 => v,
-        _ => {
-            return Error::new(level.span(), "readiness level must be 0, 1, 2, 3, or 4")
-                .to_compile_error()
-                .into();
-        }
-    };
-
-    // Generate cfg attributes: ready_mod!(N, ...) excludes module when min_readiness_(N+1..=4) is set
+    // Generate cfg attributes: ready_mod!(N, ...) excludes module when any of min_readiness_(N+1..=4) is set.
     let mut cfg_attrs = Vec::new();
-    for exclude_level in (level_value + 1)..=4 {
-        let cfg_name = format_ident!("min_readiness_{}", exclude_level);
+    for exclude_level in (level.value + 1)..=4 {
+        let cfg_name = format_ident!("min_readiness_{}", level_name(exclude_level));
         cfg_attrs.push(quote! { #[cfg(not(#cfg_name))] });
     }
 
@@ -121,13 +187,13 @@ pub fn ready_mod(input: TokenStream) -> TokenStream {
 
 /// Input for the `ready_scope!` macro: `level { items... }`
 struct ReadyScopeInput {
-    level: LitInt,
+    level: ReadinessLevel,
     items: Vec<syn::Item>,
 }
 
 impl Parse for ReadyScopeInput {
     fn parse(input: ParseStream<'_>) -> Result<Self> {
-        let level: LitInt = input.parse()?;
+        let level: ReadinessLevel = input.parse()?;
         let content;
         braced!(content in input);
 
@@ -140,14 +206,16 @@ impl Parse for ReadyScopeInput {
     }
 }
 
-/// Marks all items within a scope with a readiness level (0-4).
+/// Marks all items within a scope with a readiness level.
 ///
 /// When building with `RUSTFLAGS="--cfg min_readiness_N"`, items with readiness
 /// less than N are excluded.
 ///
 /// # Example
 /// ```rust,ignore
-/// commonware_macros::ready_scope!(2 {
+/// use commonware_macros::ready_scope;
+///
+/// ready_scope!(WIRE_STABLE {
 ///     pub mod stable_module;
 ///     pub use crate::stable_module::Item;
 /// });
@@ -156,19 +224,10 @@ impl Parse for ReadyScopeInput {
 pub fn ready_scope(input: TokenStream) -> TokenStream {
     let ReadyScopeInput { level, items } = parse_macro_input!(input as ReadyScopeInput);
 
-    let level_value: u8 = match level.base10_parse() {
-        Ok(v) if v <= 4 => v,
-        _ => {
-            return Error::new(level.span(), "readiness level must be 0, 1, 2, 3, or 4")
-                .to_compile_error()
-                .into();
-        }
-    };
-
-    // Generate cfg attributes: ready_scope!(N { ... }) excludes items when min_readiness_(N+1..=4) is set
+    // Generate cfg attributes: ready_scope!(N { ... }) excludes items when any of min_readiness_(N+1..=4) is set.
     let mut cfg_attrs = Vec::new();
-    for exclude_level in (level_value + 1)..=4 {
-        let cfg_name = format_ident!("min_readiness_{}", exclude_level);
+    for exclude_level in (level.value + 1)..=4 {
+        let cfg_name = format_ident!("min_readiness_{}", level_name(exclude_level));
         cfg_attrs.push(quote! { #[cfg(not(#cfg_name))] });
     }
 

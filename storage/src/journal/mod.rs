@@ -8,7 +8,7 @@
 use commonware_macros::ready_mod;
 use thiserror::Error;
 
-ready_mod!(1, pub mod authenticated);
+ready_mod!(TESTED, pub mod authenticated);
 pub mod contiguous;
 pub mod segmented;
 

@@ -1,16 +1,16 @@
 //! Implementations of the `Storage` trait that can be used by the runtime.
 
 use crate::{Buf, BufMut};
-#[ready(2)]
+#[ready(WIRE_STABLE)]
 use commonware_codec::{DecodeExt, FixedSize, Read as CodecRead, Write as CodecWrite};
 use commonware_macros::{ready, ready_mod};
-#[ready(2)]
+#[ready(WIRE_STABLE)]
 use commonware_utils::hex;
-#[ready(2)]
+#[ready(WIRE_STABLE)]
 use std::ops::RangeInclusive;
 
 /// Errors that can occur when validating a blob header.
-#[ready(2)]
+#[ready(WIRE_STABLE)]
 #[derive(Debug)]
 pub(crate) enum HeaderError {
     InvalidMagic {
@@ -27,7 +27,7 @@ pub(crate) enum HeaderError {
     },
 }
 
-#[ready(2)]
+#[ready(WIRE_STABLE)]
 impl HeaderError {
     /// Converts this error into an [`Error`](enum@crate::Error) with partition and name context.
     pub(crate) fn into_error(self, partition: &str, name: &[u8]) -> crate::Error {
@@ -49,13 +49,13 @@ impl HeaderError {
     }
 }
 
-ready_mod!(0, pub mod audited);
+ready_mod!(EXPERIMENTAL, pub mod audited);
 #[cfg(feature = "iouring-storage")]
-ready_mod!(1, pub mod iouring);
-ready_mod!(0, pub mod memory);
-ready_mod!(2, pub mod metered);
+ready_mod!(TESTED, pub mod iouring);
+ready_mod!(EXPERIMENTAL, pub mod memory);
+ready_mod!(WIRE_STABLE, pub mod metered);
 #[cfg(all(not(target_arch = "wasm32"), not(feature = "iouring-storage")))]
-ready_mod!(2, pub mod tokio);
+ready_mod!(WIRE_STABLE, pub mod tokio);
 
 /// Fixed-size header at the start of each [crate::Blob].
 ///
@@ -63,7 +63,7 @@ ready_mod!(2, pub mod tokio);
 /// - Bytes 0-3: [Header::MAGIC]
 /// - Bytes 4-5: Runtime Version (u16)
 /// - Bytes 6-7: Blob Version (u16)
-#[ready(2)]
+#[ready(WIRE_STABLE)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Header {
     magic: [u8; Self::MAGIC_LENGTH],
@@ -71,7 +71,7 @@ pub(crate) struct Header {
     pub(crate) blob_version: u16,
 }
 
-#[ready(2)]
+#[ready(WIRE_STABLE)]
 impl Header {
     /// Size of the header in bytes.
     pub(crate) const SIZE: usize = 8;
@@ -145,12 +145,12 @@ impl Header {
     }
 }
 
-#[ready(2)]
+#[ready(WIRE_STABLE)]
 impl FixedSize for Header {
     const SIZE: usize = Self::SIZE;
 }
 
-#[ready(2)]
+#[ready(WIRE_STABLE)]
 impl CodecWrite for Header {
     fn write(&self, buf: &mut impl BufMut) {
         buf.put_slice(&self.magic);
@@ -159,7 +159,7 @@ impl CodecWrite for Header {
     }
 }
 
-#[ready(2)]
+#[ready(WIRE_STABLE)]
 impl CodecRead for Header {
     type Cfg = ();
     fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
@@ -179,7 +179,7 @@ impl CodecRead for Header {
 }
 
 #[cfg(feature = "arbitrary")]
-#[ready(2)]
+#[ready(WIRE_STABLE)]
 impl arbitrary::Arbitrary<'_> for Header {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let version: u16 = u.arbitrary()?;

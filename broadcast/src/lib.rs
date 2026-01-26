@@ -7,7 +7,7 @@
 
 use commonware_macros::ready_scope;
 
-ready_scope!(2 {
+ready_scope!(WIRE_STABLE {
     use commonware_codec::Codec;
     use futures::channel::oneshot;
     use std::future::Future;

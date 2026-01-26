@@ -11,7 +11,7 @@ use crate::{
     },
     Persistable,
 };
-#[commonware_macros::ready(1)]
+#[commonware_macros::ready(TESTED)]
 use crate::mmr::Location;
 use commonware_codec::{Codec, CodecShared};
 use commonware_runtime::{buffer::PoolRef, Metrics, Storage};
@@ -230,7 +230,7 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
     /// * `size()` returns `size`
     /// * `oldest_retained_pos()` returns `None` (fully pruned)
     /// * Next append receives position `size`
-    #[commonware_macros::ready(1)]
+    #[commonware_macros::ready(TESTED)]
     pub async fn init_at_size(context: E, cfg: Config<V::Cfg>, size: u64) -> Result<Self, Error> {
         // Initialize empty data journal
         let data = variable::Journal::init(
@@ -291,7 +291,7 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
     ///
     /// # Errors
     /// Returns [crate::qmdb::Error::UnexpectedData] if existing data extends beyond `range.end`.
-    #[commonware_macros::ready(1)]
+    #[commonware_macros::ready(TESTED)]
     pub(crate) async fn init_sync(
         context: E,
         cfg: Config<V::Cfg>,

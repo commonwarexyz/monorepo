@@ -19,15 +19,19 @@ use rand_chacha::ChaCha20Rng;
 use rand_core::CryptoRngCore;
 
 // Use raw cfg for modules containing #[macro_export] macros to avoid
-// "macro-expanded macro_export macros cannot be referred to by absolute paths" error
-#[cfg(not(any(min_readiness_3, min_readiness_4)))]
-pub mod bls12381;
-#[cfg(not(any(min_readiness_3, min_readiness_4)))]
-pub mod ed25519;
-#[cfg(not(any(min_readiness_2, min_readiness_3, min_readiness_4)))]
-pub mod secp256r1;
+// "macro-expanded macro_export macros cannot be referred to by absolute paths" error.
+#[cfg(not(min_readiness_API_STABLE))]
+#[cfg(not(min_readiness_PRODUCTION))]
+pub mod bls12381; // WIRE_STABLE
+#[cfg(not(min_readiness_API_STABLE))]
+#[cfg(not(min_readiness_PRODUCTION))]
+pub mod ed25519; // WIRE_STABLE
+#[cfg(not(min_readiness_WIRE_STABLE))]
+#[cfg(not(min_readiness_API_STABLE))]
+#[cfg(not(min_readiness_PRODUCTION))]
+pub mod secp256r1; // TESTED
 
-commonware_macros::ready_scope!(1 {
+commonware_macros::ready_scope!(TESTED {
     pub mod bloomfilter;
     pub use crate::bloomfilter::BloomFilter;
 
@@ -35,7 +39,7 @@ commonware_macros::ready_scope!(1 {
     pub use crate::lthash::LtHash;
 });
 
-commonware_macros::ready_scope!(2 {
+commonware_macros::ready_scope!(WIRE_STABLE {
     use commonware_codec::{Encode, ReadExt};
     use commonware_math::algebra::Random;
     use commonware_utils::Array;

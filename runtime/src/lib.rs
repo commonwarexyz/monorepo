@@ -23,10 +23,10 @@
 )]
 
 use commonware_macros::{ready, ready_mod, select};
-#[ready(2)]
+#[ready(WIRE_STABLE)]
 use commonware_parallel::{Rayon, ThreadPool};
 use prometheus_client::registry::Metric;
-#[ready(2)]
+#[ready(WIRE_STABLE)]
 use rayon::ThreadPoolBuildError;
 use std::{
     future::Future,
@@ -40,15 +40,15 @@ use thiserror::Error;
 #[macro_use]
 mod macros;
 
-ready_mod!(0, pub mod deterministic);
-ready_mod!(2, pub mod mocks);
+ready_mod!(EXPERIMENTAL, pub mod deterministic);
+ready_mod!(WIRE_STABLE, pub mod mocks);
 cfg_if::cfg_if! {
     if #[cfg(not(target_arch = "wasm32"))] {
-        ready_mod!(2, pub mod tokio);
+        ready_mod!(WIRE_STABLE, pub mod tokio);
         pub mod benchmarks;
     }
 }
-commonware_macros::ready_scope!(2 {
+commonware_macros::ready_scope!(WIRE_STABLE {
     pub mod iobuf;
     pub use iobuf::{IoBuf, IoBufMut, IoBufs, IoBufsMut};
 });
@@ -246,7 +246,7 @@ pub trait Spawner: Clone + Send + Sync + 'static {
 
 /// Trait for creating [rayon]-compatible thread pools with each worker thread
 /// placed on dedicated threads via [Spawner].
-#[ready(2)]
+#[ready(WIRE_STABLE)]
 pub trait RayonPoolSpawner: Spawner + Metrics {
     /// Creates a clone-able [rayon]-compatible thread pool with [Spawner::spawn].
     ///
@@ -553,7 +553,7 @@ cfg_if::cfg_if! {
     }
 }
 
-commonware_macros::ready_scope!(2 {
+commonware_macros::ready_scope!(WIRE_STABLE {
     /// Syntactic sugar for the type of [Sink] used by a given [Network] N.
     pub type SinkOf<N> = <<N as Network>::Listener as Listener>::Sink;
 
@@ -651,7 +651,7 @@ commonware_macros::ready_scope!(2 {
     }
 });
 
-commonware_macros::ready_scope!(2 {
+commonware_macros::ready_scope!(WIRE_STABLE {
     /// Interface to interact with storage.
     ///
     /// To support storage implementations that enable concurrent reads and

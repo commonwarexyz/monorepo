@@ -11,23 +11,23 @@
 )]
 #![cfg_attr(not(feature = "std"), no_std)]
 
-#[commonware_macros::ready(1)]
+#[commonware_macros::ready(TESTED)]
 extern crate alloc;
 
-commonware_macros::ready_scope!(1 {
+commonware_macros::ready_scope!(TESTED {
     pub mod mmr;
 });
 
 cfg_if::cfg_if! {
     if #[cfg(feature = "std")] {
-        commonware_macros::ready_scope!(1 {
+        commonware_macros::ready_scope!(TESTED {
             pub mod qmdb;
             mod bitmap;
             pub use crate::bitmap::{BitMap as AuthenticatedBitMap, CleanBitMap as CleanAuthenticatedBitMap, DirtyBitMap as DirtyAuthenticatedBitMap};
             pub mod bmt;
         });
 
-        commonware_macros::ready_scope!(2 {
+        commonware_macros::ready_scope!(WIRE_STABLE {
             pub mod archive;
             pub mod cache;
             pub mod freezer;

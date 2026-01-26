@@ -12,7 +12,7 @@
 
 use commonware_macros::ready_scope;
 
-ready_scope!(2 {
+ready_scope!(WIRE_STABLE {
     pub mod encrypted;
     pub mod utils;
 });

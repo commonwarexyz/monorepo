@@ -58,4 +58,4 @@
 
 use commonware_macros::ready_mod;
 
-ready_mod!(0, pub mod aws);
+ready_mod!(EXPERIMENTAL, pub mod aws);

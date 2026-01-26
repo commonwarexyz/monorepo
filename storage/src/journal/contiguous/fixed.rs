@@ -62,7 +62,7 @@ use crate::{
     },
     Persistable,
 };
-#[commonware_macros::ready(1)]
+#[commonware_macros::ready(TESTED)]
 use crate::mmr::Location;
 use commonware_codec::CodecFixedShared;
 use commonware_runtime::{buffer::PoolRef, Metrics, Storage};
@@ -183,7 +183,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     ///
     /// # Invariants
     /// - The directory given by `cfg.partition` should be empty
-    #[commonware_macros::ready(1)]
+    #[commonware_macros::ready(TESTED)]
     pub async fn init_at_size(context: E, cfg: Config, size: u64) -> Result<Self, Error> {
         let items_per_blob = cfg.items_per_blob.get();
 
@@ -220,7 +220,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     /// 2. **Data within range**: Prunes to `range.start` and reuses existing data
     /// 3. **Data exceeds range**: Returns error
     /// 4. **Stale data**: Destroys and recreates at `range.start`
-    #[commonware_macros::ready(1)]
+    #[commonware_macros::ready(TESTED)]
     pub(crate) async fn init_sync(
         context: E,
         cfg: Config,

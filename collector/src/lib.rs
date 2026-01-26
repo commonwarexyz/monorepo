@@ -12,7 +12,7 @@
 
 use commonware_macros::ready_scope;
 
-ready_scope!(1 {
+ready_scope!(TESTED {
     use commonware_codec::Codec;
     use commonware_cryptography::{Committable, Digestible, PublicKey};
     use commonware_p2p::Recipients;

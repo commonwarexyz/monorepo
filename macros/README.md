@@ -9,33 +9,70 @@ Augment the development of primitives with procedural macros.
 
 `commonware-macros` is **ALPHA** software and is not yet recommended for production use. Developers should expect breaking changes and occasional instability.
 
-## Macros
+## Readiness Macros
 
-### `#[ready(N)]`
+### Readiness Levels
 
-Marks an item with a readiness level (0-4). When building with `RUSTFLAGS="--cfg min_readiness_N"`, items with readiness less than N are excluded.
+| Level | Name | Description |
+|-------|------|-------------|
+| 0 | `EXPERIMENTAL` | Little testing, breaking changes expected |
+| 1 | `TESTED` | Decent coverage, wire format unstable |
+| 2 | `WIRE_STABLE` | Wire/storage format stable, API may change |
+| 3 | `API_STABLE` | API + wire stable |
+| 4 | `PRODUCTION` | Audited, deployed in production |
+
+### `#[ready(LEVEL)]`
+
+Marks an item with a readiness level. When building with `RUSTFLAGS="--cfg min_readiness_N"`, items with readiness less than N are excluded.
 
 ```rust
-#[commonware_macros::ready(2)]
+use commonware_macros::ready;
+
+#[ready(WIRE_STABLE)]
 pub mod stable_api {
-    // All items in this module are at readiness level 2
+    // Excluded when building with min_readiness_3 or higher
 }
 ```
 
-Apply at whatever granularity makes sense (individual items, impl blocks, or modules). Building with `min_readiness_3` will exclude items marked `#[ready(0)]`, `#[ready(1)]`, or `#[ready(2)]`.
+### `ready_mod!`
 
-See the [Readiness section](https://github.com/commonwarexyz/monorepo#readiness) in the main README for level definitions.
+Marks a file module with a readiness level:
+
+```rust
+use commonware_macros::ready_mod;
+
+ready_mod!(WIRE_STABLE, pub mod stable_module);
+```
 
 ### `ready_scope!`
 
-Group multiple items under a single readiness level:
+Groups multiple items under a single readiness level:
 
 ```rust
-commonware_macros::ready_scope!(2 {
+use commonware_macros::ready_scope;
+
+ready_scope!(WIRE_STABLE {
     pub struct Config { }
     pub fn process() { }
 });
 ```
+
+### Raw `#[cfg(...)]` for `#[macro_export]` Modules
+
+For modules containing `#[macro_export]` macros, you **must** use raw `#[cfg(...)]` attributes. Due to a Rust limitation, macro-expanded modules cannot have their exported macros referenced by absolute paths. The readiness macros above won't work for these modules.
+
+Use one `#[cfg(not(...))]` per level above the item's readiness:
+
+```rust
+// WIRE_STABLE: excluded at API_STABLE or PRODUCTION
+#[cfg(not(min_readiness_API_STABLE))]
+#[cfg(not(min_readiness_PRODUCTION))]
+pub mod module_with_exported_macros;
+```
+
+See the [Readiness section](https://github.com/commonwarexyz/monorepo#readiness) in the main README for more details.
+
+## Other Macros
 
 ### `#[test_async]`
 

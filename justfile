@@ -97,32 +97,50 @@ regenerate-conformance *args='':
 # Packages to exclude from readiness checks (examples, fuzz targets, deployer)
 readiness_excludes := "--exclude commonware-deployer --exclude commonware-bridge --exclude commonware-chat --exclude commonware-estimator --exclude commonware-flood --exclude commonware-log --exclude commonware-sync --exclude commonware-broadcast-fuzz --exclude commonware-codec-fuzz --exclude commonware-coding-fuzz --exclude commonware-collector-fuzz --exclude commonware-consensus-fuzz --exclude commonware-cryptography-fuzz --exclude commonware-p2p-fuzz --exclude commonware-runtime-fuzz --exclude commonware-storage-fuzz --exclude commonware-stream-fuzz --exclude commonware-utils-fuzz"
 
-# Check readiness builds. Optionally specify level (1-4) and/or crate (-p <crate>).
-# Examples: just check-readiness, just check-readiness 3, just check-readiness 2 -p commonware-cryptography, just check-readiness -p commonware-codec
+# Check readiness builds. Optionally specify level (1-4 or name) and/or crate (-p <crate>).
+# Examples: just check-readiness, just check-readiness 3, just check-readiness API_STABLE, just check-readiness WIRE_STABLE -p commonware-cryptography
 check-readiness *args='':
     #!/usr/bin/env bash
     all_args="{{ args }}"
     level=""
     extra_args=""
-    # Check if first arg is a number 1-4
-    if [[ "$all_args" =~ ^[1-4](\ |$) ]]; then
-        level="${all_args%% *}"
+    # Level names in order (index 0-4)
+    declare -a LEVEL_NAMES=(EXPERIMENTAL TESTED WIRE_STABLE API_STABLE PRODUCTION)
+    # Convert name to number
+    name_to_num() {
+        case "$1" in
+            EXPERIMENTAL) echo 0 ;;
+            TESTED) echo 1 ;;
+            WIRE_STABLE) echo 2 ;;
+            API_STABLE) echo 3 ;;
+            PRODUCTION) echo 4 ;;
+            *) echo "" ;;
+        esac
+    }
+    # Check if first arg is a level (number 1-4 or name)
+    first_arg="${all_args%% *}"
+    if [[ "$first_arg" =~ ^[1-4]$ ]]; then
+        level="$first_arg"
         extra_args="${all_args#* }"
-        # Handle case where level is the only arg
-        if [ "$extra_args" = "$level" ]; then
-            extra_args=""
-        fi
+        if [ "$extra_args" = "$first_arg" ]; then extra_args=""; fi
     else
-        extra_args="$all_args"
+        num=$(name_to_num "$first_arg")
+        if [ -n "$num" ]; then
+            level="$num"
+            extra_args="${all_args#* }"
+            if [ "$extra_args" = "$first_arg" ]; then extra_args=""; fi
+        else
+            extra_args="$all_args"
+        fi
     fi
     if [ -z "$level" ]; then
         for l in 1 2 3 4; do
-            echo "Checking min_readiness_$l..."
-            RUSTFLAGS="--cfg min_readiness_$l" cargo build --workspace --lib {{ readiness_excludes }} $extra_args || exit 1
+            echo "Checking min_readiness_${LEVEL_NAMES[$l]}..."
+            RUSTFLAGS="--cfg min_readiness_${LEVEL_NAMES[$l]}" cargo build --workspace --lib {{ readiness_excludes }} $extra_args || exit 1
         done
         echo "All readiness levels pass!"
     else
-        echo "Checking min_readiness_$level..."
-        RUSTFLAGS="--cfg min_readiness_$level" cargo build --workspace --lib {{ readiness_excludes }} $extra_args
+        echo "Checking min_readiness_${LEVEL_NAMES[$level]}..."
+        RUSTFLAGS="--cfg min_readiness_${LEVEL_NAMES[$level]}" cargo build --workspace --lib {{ readiness_excludes }} $extra_args
     fi
 
