@@ -1,4 +1,4 @@
-use commonware_macros::{stability, stability_cfg_scope, stability_scope};
+use commonware_macros::{stability, stability_scope};
 
 // All items at level 4 so they're always available
 #[stability(EPSILON)]
@@ -117,8 +117,8 @@ mod stability_scope_level_2_tests {
     }
 }
 
-// Test stability_cfg_scope! macro (combines cfg predicate with stability level)
-stability_cfg_scope!(EPSILON, cfg(test) {
+// Test stability_scope! with cfg predicate
+stability_scope!(EPSILON, cfg(test) {
     const fn cfg_scope_fn() -> u8 {
         55
     }
@@ -135,25 +135,25 @@ stability_cfg_scope!(EPSILON, cfg(test) {
 });
 
 #[test]
-fn test_stability_cfg_scope() {
+fn test_stability_scope_with_cfg() {
     assert_eq!(cfg_scope_fn(), 55);
     let s = CfgScopeStruct::new();
     assert_eq!(s.value, 555);
 }
 
-// Test stability_cfg_scope! at GAMMA level
+// Test stability_scope! with cfg at GAMMA level
 #[stability(GAMMA)]
-mod stability_cfg_scope_level_2_tests {
-    use commonware_macros::stability_cfg_scope;
+mod stability_scope_with_cfg_level_2_tests {
+    use commonware_macros::stability_scope;
 
-    stability_cfg_scope!(GAMMA, cfg(test) {
+    stability_scope!(GAMMA, cfg(test) {
         pub const fn cfg_scope_level_2_fn() -> u8 {
             33
         }
     });
 
     #[test]
-    fn test_stability_cfg_scope_level_2() {
+    fn test_stability_scope_with_cfg_level_2() {
         assert_eq!(cfg_scope_level_2_fn(), 33);
     }
 }

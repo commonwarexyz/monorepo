@@ -445,7 +445,7 @@ commonware_macros::stability_scope!(GAMMA {
     }
 });
 
-commonware_macros::stability_cfg_scope!(GAMMA, cfg(feature = "std") {
+commonware_macros::stability_scope!(GAMMA, cfg(feature = "std") {
     /// A clone-able wrapper around a [rayon]-compatible thread pool.
     pub type ThreadPool = Arc<RThreadPool>;
 

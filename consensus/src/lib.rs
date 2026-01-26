@@ -66,7 +66,7 @@ commonware_macros::stability_scope!(GAMMA {
     }
 });
 
-commonware_macros::stability_cfg_scope!(GAMMA, cfg(not(target_arch = "wasm32")) {
+commonware_macros::stability_scope!(GAMMA, cfg(not(target_arch = "wasm32")) {
     use commonware_cryptography::Digest;
     use commonware_cryptography::certificate::Scheme;
     use commonware_utils::channels::fallible::OneshotExt;
@@ -202,7 +202,7 @@ commonware_macros::stability_cfg_scope!(GAMMA, cfg(not(target_arch = "wasm32")) 
     }
 });
 
-commonware_macros::stability_cfg_scope!(BETA, cfg(not(target_arch = "wasm32")) {
+commonware_macros::stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     pub mod application;
 
     /// Application is a minimal interface for standard implementations that operate over a stream
