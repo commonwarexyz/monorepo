@@ -4,7 +4,10 @@
 //! authenticated [crate::bitmap::CleanBitMap] over the activity status of each operation. The two
 //! structures are "grafted" together to minimize proof sizes.
 
-use crate::{qmdb::any::FixedConfig as AnyFixedConfig, translator::Translator};
+use crate::{
+    qmdb::any::{FixedConfig as AnyFixedConfig, VariableConfig as AnyVariableConfig},
+    translator::Translator,
+};
 use commonware_parallel::ThreadPool;
 use commonware_runtime::buffer::PoolRef;
 use std::num::{NonZeroU64, NonZeroUsize};
@@ -51,28 +54,102 @@ pub struct FixedConfig<T: Translator> {
     pub buffer_pool: PoolRef,
 }
 
-impl<T: Translator> FixedConfig<T> {
-    /// Convert this config to an [AnyFixedConfig] used to initialize the authenticated log.
-    pub fn to_any_config(self) -> AnyFixedConfig<T> {
-        AnyFixedConfig {
-            mmr_journal_partition: self.mmr_journal_partition,
-            mmr_metadata_partition: self.mmr_metadata_partition,
-            mmr_items_per_blob: self.mmr_items_per_blob,
-            mmr_write_buffer: self.mmr_write_buffer,
-            log_journal_partition: self.log_journal_partition,
-            log_items_per_blob: self.log_items_per_blob,
-            log_write_buffer: self.log_write_buffer,
-            translator: self.translator,
-            thread_pool: self.thread_pool,
-            buffer_pool: self.buffer_pool,
+impl<T: Translator> From<FixedConfig<T>> for AnyFixedConfig<T> {
+    fn from(cfg: FixedConfig<T>) -> Self {
+        Self {
+            mmr_journal_partition: cfg.mmr_journal_partition,
+            mmr_metadata_partition: cfg.mmr_metadata_partition,
+            mmr_items_per_blob: cfg.mmr_items_per_blob,
+            mmr_write_buffer: cfg.mmr_write_buffer,
+            log_journal_partition: cfg.log_journal_partition,
+            log_items_per_blob: cfg.log_items_per_blob,
+            log_write_buffer: cfg.log_write_buffer,
+            translator: cfg.translator,
+            thread_pool: cfg.thread_pool,
+            buffer_pool: cfg.buffer_pool,
         }
     }
+}
+
+#[derive(Clone)]
+pub struct VariableConfig<T: Translator, C> {
+    /// The name of the storage partition used for the MMR's backing journal.
+    pub mmr_journal_partition: String,
+
+    /// The items per blob configuration value used by the MMR journal.
+    pub mmr_items_per_blob: NonZeroU64,
+
+    /// The size of the write buffer to use for each blob in the MMR journal.
+    pub mmr_write_buffer: NonZeroUsize,
+
+    /// The name of the storage partition used for the MMR's metadata.
+    pub mmr_metadata_partition: String,
+
+    /// The name of the storage partition used to persist the log of operations.
+    pub log_partition: String,
+
+    /// The size of the write buffer to use for each blob in the log journal.
+    pub log_write_buffer: NonZeroUsize,
+
+    /// Optional compression level (using `zstd`) to apply to log data before storing.
+    pub log_compression: Option<u8>,
+
+    /// The codec configuration to use for the log.
+    pub log_codec_config: C,
+
+    /// The items per blob configuration value used by the log journal.
+    pub log_items_per_blob: NonZeroU64,
+
+    /// The name of the storage partition used for the bitmap metadata.
+    pub bitmap_metadata_partition: String,
+
+    /// The translator used by the compressed index.
+    pub translator: T,
+
+    /// An optional thread pool to use for parallelizing batch operations.
+    pub thread_pool: Option<ThreadPool>,
+
+    /// The buffer pool to use for caching data.
+    pub buffer_pool: PoolRef,
+}
+
+impl<T: Translator, C> From<VariableConfig<T, C>> for AnyVariableConfig<T, C> {
+    fn from(cfg: VariableConfig<T, C>) -> Self {
+        Self {
+            mmr_journal_partition: cfg.mmr_journal_partition,
+            mmr_metadata_partition: cfg.mmr_metadata_partition,
+            mmr_items_per_blob: cfg.mmr_items_per_blob,
+            mmr_write_buffer: cfg.mmr_write_buffer,
+            log_items_per_blob: cfg.log_items_per_blob,
+            log_partition: cfg.log_partition,
+            log_write_buffer: cfg.log_write_buffer,
+            log_compression: cfg.log_compression,
+            log_codec_config: cfg.log_codec_config,
+            translator: cfg.translator,
+            thread_pool: cfg.thread_pool,
+            buffer_pool: cfg.buffer_pool,
+        }
+    }
+}
+
+/// Extension trait for Current QMDB types that exposes bitmap information for testing.
+#[cfg(any(test, feature = "test-traits"))]
+pub trait BitmapPrunedBits {
+    /// Returns the number of bits that have been pruned from the bitmap.
+    fn pruned_bits(&self) -> u64;
+
+    /// Returns the value of the bit at the given index.
+    fn get_bit(&self, index: u64) -> bool;
+
+    /// Returns the position of the oldest retained bit.
+    fn oldest_retained(&self) -> u64;
 }
 
 #[cfg(test)]
 pub mod tests {
     //! Shared test utilities for Current QMDB variants.
 
+    pub use super::BitmapPrunedBits;
     use crate::{
         kv::{Deletable as _, Updatable as _},
         qmdb::{
@@ -282,6 +359,253 @@ pub mod tests {
             assert_eq!(db.root(), scenario_2_root);
 
             db.destroy().await.unwrap();
+        });
+    }
+
+    /// Run `test_different_pruning_delays_same_root` against a database factory.
+    ///
+    /// This test verifies that pruning operations do not affect the root hash - two databases
+    /// with identical operations but different pruning schedules should have the same root.
+    pub fn test_different_pruning_delays_same_root<C, F, Fut>(mut open_db: F)
+    where
+        C: CleanAny,
+        C::Key: TestKey,
+        <C as LogStore>::Value: TestValue,
+        F: FnMut(Context, String) -> Fut + Clone,
+        Fut: Future<Output = C>,
+    {
+        const NUM_OPERATIONS: u64 = 1000;
+
+        let executor = deterministic::Runner::default();
+        let mut open_db_clone = open_db.clone();
+        executor.start(|context| async move {
+            // Create two databases that are identical other than how they are pruned.
+            let mut db_no_pruning: C = open_db_clone(
+                context.with_label("no_pruning"),
+                "no_pruning_test".to_string(),
+            )
+            .await;
+            let mut db_pruning: C =
+                open_db(context.with_label("pruning"), "pruning_test".to_string()).await;
+
+            let mut db_no_pruning_mut = db_no_pruning.into_mutable();
+            let mut db_pruning_mut = db_pruning.into_mutable();
+
+            // Apply identical operations to both databases, but only prune one.
+            for i in 0..NUM_OPERATIONS {
+                let key: C::Key = TestKey::from_seed(i);
+                let value: <C as LogStore>::Value = TestValue::from_seed(i * 1000);
+
+                db_no_pruning_mut.update(key, value.clone()).await.unwrap();
+                db_pruning_mut.update(key, value).await.unwrap();
+
+                // Commit periodically
+                if i % 50 == 49 {
+                    let (db_1, _) = db_no_pruning_mut.commit(None).await.unwrap();
+                    let clean_no_pruning: C = db_1.into_merkleized().await.unwrap();
+                    let (db_2, _) = db_pruning_mut.commit(None).await.unwrap();
+                    let mut clean_pruning: C = db_2.into_merkleized().await.unwrap();
+                    clean_pruning
+                        .prune(clean_no_pruning.inactivity_floor_loc())
+                        .await
+                        .unwrap();
+                    db_no_pruning_mut = clean_no_pruning.into_mutable();
+                    db_pruning_mut = clean_pruning.into_mutable();
+                }
+            }
+
+            // Final commit
+            let (db_1, _) = db_no_pruning_mut.commit(None).await.unwrap();
+            db_no_pruning = db_1.into_merkleized().await.unwrap();
+            let (db_2, _) = db_pruning_mut.commit(None).await.unwrap();
+            db_pruning = db_2.into_merkleized().await.unwrap();
+
+            // Get roots from both databases - they should match
+            let root_no_pruning = db_no_pruning.root();
+            let root_pruning = db_pruning.root();
+            assert_eq!(root_no_pruning, root_pruning);
+
+            // Also verify inactivity floors match
+            assert_eq!(
+                db_no_pruning.inactivity_floor_loc(),
+                db_pruning.inactivity_floor_loc()
+            );
+
+            db_no_pruning.destroy().await.unwrap();
+            db_pruning.destroy().await.unwrap();
+        });
+    }
+
+    /// Run `test_sync_persists_bitmap_pruning_boundary` against a database factory.
+    ///
+    /// This test verifies that calling `sync()` persists the bitmap pruning boundary that was
+    /// set during `into_merkleized()`. If `sync()` didn't call `write_pruned`, the
+    /// `pruned_bits()` count would be 0 after reopen instead of the expected value.
+    pub fn test_sync_persists_bitmap_pruning_boundary<C, F, Fut>(mut open_db: F)
+    where
+        C: CleanAny + BitmapPrunedBits,
+        C::Key: TestKey,
+        <C as LogStore>::Value: TestValue,
+        F: FnMut(Context, String) -> Fut + Clone,
+        Fut: Future<Output = C>,
+    {
+        const ELEMENTS: u64 = 500;
+
+        let executor = deterministic::Runner::default();
+        let mut open_db_clone = open_db.clone();
+        executor.start(|mut context| async move {
+            let partition = "sync_bitmap_pruning".to_string();
+            let rng_seed = context.next_u64();
+            let db: C = open_db_clone(context.with_label("first"), partition.clone()).await;
+
+            // Apply random operations with commits to advance the inactivity floor.
+            let db = apply_random_ops::<C>(ELEMENTS, true, rng_seed, db.into_mutable())
+                .await
+                .unwrap();
+            let (db, _) = db.commit(None).await.unwrap();
+            let mut db: C = db.into_merkleized().await.unwrap();
+
+            // The bitmap should have been pruned during into_merkleized().
+            let pruned_bits_before = db.pruned_bits();
+            warn!(
+                "pruned_bits_before={}, inactivity_floor={}, op_count={}",
+                pruned_bits_before,
+                *db.inactivity_floor_loc(),
+                *db.op_count()
+            );
+
+            // Verify we actually have some pruning (otherwise the test is meaningless).
+            assert!(
+                pruned_bits_before > 0,
+                "Expected bitmap to have pruned bits after merkleization"
+            );
+
+            // Call sync() WITHOUT calling prune(). The bitmap pruning boundary was set
+            // during into_merkleized(), and sync() should persist it.
+            db.sync().await.unwrap();
+
+            // Record the root before dropping.
+            let root_before = db.root();
+            drop(db);
+
+            // Reopen the database.
+            let db: C = open_db(context.with_label("second"), partition).await;
+
+            // The pruned bits count should match. If sync() didn't persist the bitmap pruned
+            // state, this would be 0.
+            let pruned_bits_after = db.pruned_bits();
+            warn!("pruned_bits_after={}", pruned_bits_after);
+
+            assert_eq!(
+                pruned_bits_after, pruned_bits_before,
+                "Bitmap pruned bits mismatch after reopen - sync() may not have called write_pruned()"
+            );
+
+            // Also verify the root matches.
+            assert_eq!(db.root(), root_before);
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Run `test_current_db_build_big` against a database factory.
+    ///
+    /// This test builds a database with 1000 keys, updates some, deletes some, and verifies that
+    /// the final state matches an independently computed HashMap. It also verifies that the state
+    /// persists correctly after close and reopen.
+    ///
+    /// The `expected_op_count` and `expected_inactivity_floor` parameters specify the expected
+    /// values after commit + merkleize + prune. These differ between ordered and unordered variants.
+    pub fn test_current_db_build_big<C, F, Fut>(
+        mut open_db: F,
+        expected_op_count: u64,
+        expected_inactivity_floor: u64,
+    ) where
+        C: CleanAny,
+        C::Key: TestKey,
+        <C as LogStore>::Value: TestValue,
+        F: FnMut(Context, String) -> Fut + Clone,
+        Fut: Future<Output = C>,
+    {
+        use crate::mmr::Location;
+
+        const ELEMENTS: u64 = 1000;
+
+        let executor = deterministic::Runner::default();
+        let mut open_db_clone = open_db.clone();
+        executor.start(|context| async move {
+            let mut db = open_db_clone(context.with_label("first"), "build_big".to_string())
+                .await
+                .into_mutable();
+
+            let mut map = std::collections::HashMap::<C::Key, <C as LogStore>::Value>::default();
+            for i in 0u64..ELEMENTS {
+                let k: C::Key = TestKey::from_seed(i);
+                let v: <C as LogStore>::Value = TestValue::from_seed(i * 1000);
+                db.update(k, v.clone()).await.unwrap();
+                map.insert(k, v);
+            }
+
+            // Update every 3rd key
+            for i in 0u64..ELEMENTS {
+                if i % 3 != 0 {
+                    continue;
+                }
+                let k: C::Key = TestKey::from_seed(i);
+                let v: <C as LogStore>::Value = TestValue::from_seed((i + 1) * 10000);
+                db.update(k, v.clone()).await.unwrap();
+                map.insert(k, v);
+            }
+
+            // Delete every 7th key
+            for i in 0u64..ELEMENTS {
+                if i % 7 != 1 {
+                    continue;
+                }
+                let k: C::Key = TestKey::from_seed(i);
+                db.delete(k).await.unwrap();
+                map.remove(&k);
+            }
+
+            // Test that commit + sync w/ pruning will raise the activity floor.
+            let (db, _) = db.commit(None).await.unwrap();
+            let mut db: C = db.into_merkleized().await.unwrap();
+            db.sync().await.unwrap();
+            db.prune(db.inactivity_floor_loc()).await.unwrap();
+
+            // Verify expected state after prune.
+            assert_eq!(db.op_count(), Location::new_unchecked(expected_op_count));
+            assert_eq!(
+                db.inactivity_floor_loc(),
+                Location::new_unchecked(expected_inactivity_floor)
+            );
+
+            // Record root before dropping.
+            let root = db.root();
+            db.sync().await.unwrap();
+            drop(db);
+
+            // Reopen the db and verify it has exactly the same state.
+            let db: C = open_db(context.with_label("second"), "build_big".to_string()).await;
+            assert_eq!(root, db.root());
+            assert_eq!(db.op_count(), Location::new_unchecked(expected_op_count));
+            assert_eq!(
+                db.inactivity_floor_loc(),
+                Location::new_unchecked(expected_inactivity_floor)
+            );
+
+            // Confirm the db's state matches that of the separate map we computed independently.
+            for i in 0u64..ELEMENTS {
+                let k: C::Key = TestKey::from_seed(i);
+                if let Some(map_value) = map.get(&k) {
+                    let Some(db_value) = db.get(&k).await.unwrap() else {
+                        panic!("key not found in db: {k}");
+                    };
+                    assert_eq!(*map_value, db_value);
+                } else {
+                    assert!(db.get(&k).await.unwrap().is_none());
+                }
+            }
         });
     }
 }

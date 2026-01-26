@@ -43,6 +43,21 @@ impl<E: Storage + Clock + Metrics, K: Array, V: VariableValue, H: Hasher, T: Tra
         context: E,
         cfg: VariableConfig<T, <Operation<K, V> as Read>::Cfg>,
     ) -> Result<Self, Error> {
+        Self::init_with_callback(context, cfg, None, |_, _| {}).await
+    }
+
+    /// Initialize the DB, invoking `callback` for each operation processed during recovery.
+    ///
+    /// If `known_inactivity_floor` is provided and is less than the log's actual inactivity floor,
+    /// `callback` is invoked with `(false, None)` for each location in the gap. Then, as the
+    /// snapshot is built from the log, `callback` is invoked for each operation with its activity
+    /// status and previous location (if any).
+    pub(crate) async fn init_with_callback(
+        context: E,
+        cfg: VariableConfig<T, <Operation<K, V> as Read>::Cfg>,
+        known_inactivity_floor: Option<Location>,
+        callback: impl FnMut(bool, Option<Location>),
+    ) -> Result<Self, Error> {
         let mmr_config = MmrConfig {
             journal_partition: cfg.mmr_journal_partition,
             metadata_partition: cfg.mmr_metadata_partition,
@@ -76,13 +91,8 @@ impl<E: Storage + Clock + Metrics, K: Array, V: VariableValue, H: Hasher, T: Tra
             log.sync().await?;
         }
 
-        let log = Self::init_from_log(
-            Index::new(context.with_label("index"), cfg.translator),
-            log,
-            None,
-            |_, _| {},
-        )
-        .await?;
+        let index = Index::new(context.with_label("index"), cfg.translator);
+        let log = Self::init_from_log(index, log, known_inactivity_floor, callback).await?;
 
         Ok(log)
     }

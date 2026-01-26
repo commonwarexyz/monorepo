@@ -111,15 +111,6 @@ where
         grafting_height::<N>()
     }
 
-    /// Return the number of bits that have been pruned from the status bitmap.
-    ///
-    /// This is primarily useful for testing that the bitmap pruning boundary is correctly
-    /// persisted across restarts.
-    #[cfg(test)]
-    pub(super) const fn bitmap_pruned_bits(&self) -> u64 {
-        self.status.pruned_bits()
-    }
-
     /// Returns a proof that the specified range of operations are part of the database, along with
     /// the operations from the range. A truncated range (from hitting the max) can be detected by
     /// looking at the length of the returned operations vector. Also returns the bitmap chunks
