@@ -12,7 +12,12 @@ use commonware_macros::ready_mod;
 
 ready_mod!(GAMMA, pub mod algebra);
 // Use cfg_ready! for inline module with external submodule (Rust #54727)
-commonware_utils::cfg_ready!(BETA, pub mod fields { pub mod goldilocks; });
+commonware_utils::cfg_ready!(
+    BETA,
+    pub mod fields {
+        pub mod goldilocks;
+    }
+);
 ready_mod!(BETA, pub mod ntt);
 ready_mod!(GAMMA, pub mod poly);
 #[cfg(test)]

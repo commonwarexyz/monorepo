@@ -467,34 +467,33 @@ where
     }
 }
 
-mod macros {
-    /// Generates a BLS12-381 threshold signing scheme wrapper for a specific protocol.
-    ///
-    /// This macro creates a complete wrapper struct with constructors, `Scheme` trait
-    /// implementation, and a `fixture` function for testing.
-    ///
-    /// # Parameters
-    ///
-    /// - `$subject`: The subject type used as `Scheme::Subject<'a, D>`. Use `'a` and `D`
-    ///   in the subject type to bind to the GAT lifetime and digest type parameters.
-    ///
-    /// - `$namespace`: The namespace type that implements [`Namespace`](crate::certificate::Namespace).
-    ///   This type pre-computes and stores any protocol-specific namespace bytes derived from
-    ///   a base namespace. The scheme calls `$namespace::derive(base)` at construction time
-    ///   to create the namespace, then passes it to `Subject::namespace()` during signing
-    ///   and verification. For simple protocols with only a base namespace, `Vec<u8>` can be used directly.
-    ///   For protocols with multiple message types, a custom struct can pre-compute all variants.
-    ///
-    /// # Example
-    /// ```ignore
-    /// // For non-generic subject types with a single namespace:
-    /// impl_certificate_bls12381_threshold!(MySubject, Vec<u8>);
-    ///
-    /// // For protocols with generic subject types:
-    /// impl_certificate_bls12381_threshold!(Subject<'a, D>, Namespace);
-    /// ```
-    #[macro_export]
-    macro_rules! impl_certificate_bls12381_threshold {
+/// Generates a BLS12-381 threshold signing scheme wrapper for a specific protocol.
+///
+/// This macro creates a complete wrapper struct with constructors, `Scheme` trait
+/// implementation, and a `fixture` function for testing.
+///
+/// # Parameters
+///
+/// - `$subject`: The subject type used as `Scheme::Subject<'a, D>`. Use `'a` and `D`
+///   in the subject type to bind to the GAT lifetime and digest type parameters.
+///
+/// - `$namespace`: The namespace type that implements [`Namespace`](crate::certificate::Namespace).
+///   This type pre-computes and stores any protocol-specific namespace bytes derived from
+///   a base namespace. The scheme calls `$namespace::derive(base)` at construction time
+///   to create the namespace, then passes it to `Subject::namespace()` during signing
+///   and verification. For simple protocols with only a base namespace, `Vec<u8>` can be used directly.
+///   For protocols with multiple message types, a custom struct can pre-compute all variants.
+///
+/// # Example
+/// ```ignore
+/// // For non-generic subject types with a single namespace:
+/// impl_certificate_bls12381_threshold!(MySubject, Vec<u8>);
+///
+/// // For protocols with generic subject types:
+/// impl_certificate_bls12381_threshold!(Subject<'a, D>, Namespace);
+/// ```
+#[macro_export]
+macro_rules! impl_certificate_bls12381_threshold {
         ($subject:ty, $namespace:ty) => {
             /// Generates a test fixture with Ed25519 identities and BLS12-381 threshold schemes.
             ///
@@ -708,7 +707,6 @@ mod macros {
             }
         };
     }
-}
 
 #[cfg(test)]
 mod tests {
@@ -723,7 +721,6 @@ mod tests {
         },
         certificate::Scheme as _,
         ed25519::{self, PrivateKey as Ed25519PrivateKey},
-        impl_certificate_bls12381_threshold,
         sha256::Digest as Sha256Digest,
         Signer as _,
     };

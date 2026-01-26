@@ -329,19 +329,18 @@ impl Read for Certificate {
     }
 }
 
-mod macros {
-    /// Generates a Secp256r1 signing scheme wrapper for a specific protocol.
-    ///
-    /// This macro creates a complete wrapper struct with constructors, `Scheme` trait
-    /// implementation, and a `fixture` function for testing.
-    /// The only required parameter is the `Subject` type, which varies per protocol.
-    ///
-    /// # Example
-    /// ```ignore
-    /// impl_certificate_secp256r1!(VoteSubject<'a, D>);
-    /// ```
-    #[macro_export]
-    macro_rules! impl_certificate_secp256r1 {
+/// Generates a Secp256r1 signing scheme wrapper for a specific protocol.
+///
+/// This macro creates a complete wrapper struct with constructors, `Scheme` trait
+/// implementation, and a `fixture` function for testing.
+/// The only required parameter is the `Subject` type, which varies per protocol.
+///
+/// # Example
+/// ```ignore
+/// impl_certificate_secp256r1!(VoteSubject<'a, D>);
+/// ```
+#[macro_export]
+macro_rules! impl_certificate_secp256r1 {
         ($subject:ty, $namespace:ty) => {
             /// Generates a test fixture with Ed25519 identities and Secp256r1 signing schemes.
             ///
@@ -528,14 +527,11 @@ mod macros {
             }
         };
     }
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        certificate::Scheme as _, impl_certificate_secp256r1, sha256::Digest as Sha256Digest,
-    };
+    use crate::{certificate::Scheme as _, sha256::Digest as Sha256Digest};
     use bytes::Bytes;
     use commonware_codec::{Decode, Encode};
     use commonware_math::algebra::Random;

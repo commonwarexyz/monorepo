@@ -18,10 +18,18 @@ use rand::SeedableRng as _;
 use rand_chacha::ChaCha20Rng;
 use rand_core::CryptoRngCore;
 
-// Use cfg_ready! for modules containing #[macro_export] macros (proc macros don't work).
-commonware_utils::cfg_ready!(GAMMA, pub mod bls12381;);
-commonware_utils::cfg_ready!(GAMMA, pub mod ed25519;);
-commonware_utils::cfg_ready!(BETA, pub mod secp256r1;);
+// Modules containing #[macro_export] macros must use direct cfg attributes
+// instead of cfg_ready! to avoid macro_expanded_macro_exports_accessed_by_absolute_paths warning.
+#[cfg(not(min_readiness_DELTA))]
+#[cfg(not(min_readiness_EPSILON))]
+pub mod bls12381;
+#[cfg(not(min_readiness_DELTA))]
+#[cfg(not(min_readiness_EPSILON))]
+pub mod ed25519;
+#[cfg(not(min_readiness_GAMMA))]
+#[cfg(not(min_readiness_DELTA))]
+#[cfg(not(min_readiness_EPSILON))]
+pub mod secp256r1;
 
 commonware_macros::ready_scope!(BETA {
     pub mod bloomfilter;
