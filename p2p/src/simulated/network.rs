@@ -1,4 +1,5 @@
 //! Implementation of a simulated p2p network.
+//! Implementation of a simulated p2p network.
 
 use super::{
     ingress::{self, Oracle},
@@ -176,7 +177,12 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
     /// Returns a tuple containing the network instance and the oracle that can
     /// be used to modify the state of the network during context.
     pub fn new(mut context: E, cfg: Config) -> (Self, Oracle<P, E>) {
-        let base_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::from_bits(context.next_u32())), 0);
+        let ip = Ipv4Addr::from_bits(context.next_u32());
+        let mut port = context.next_u32() as u16;
+        if port == 0 {
+            port = 1;
+        }
+        let base_addr = SocketAddr::new(IpAddr::V4(ip), port);
         Self::new_with_base_addr(context, cfg, base_addr)
     }
 
