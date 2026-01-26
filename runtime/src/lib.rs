@@ -21,7 +21,7 @@
     html_favicon_url = "https://commonware.xyz/favicon.ico"
 )]
 
-use commonware_macros::{stability, stability_mod, select};
+use commonware_macros::{select, stability, stability_mod};
 #[stability(GAMMA)]
 use commonware_parallel::{Rayon, ThreadPool};
 use prometheus_client::registry::Metric;

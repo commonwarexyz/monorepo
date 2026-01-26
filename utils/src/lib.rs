@@ -492,7 +492,7 @@ mod tests {
     #[test]
     fn test_union() {
         // Test case 0: empty slices
-        assert_eq!(union(&[], &[]), []);
+        assert_eq!(union(&[], &[]), Vec::<u8>::new());
 
         // Test case 1: empty and non-empty slices
         assert_eq!(union(&[], &hex!("0x010203")), hex!("0x010203"));

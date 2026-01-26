@@ -387,7 +387,7 @@ where
 /// - `$subject`: The subject type used as `Scheme::Subject<'a, D>`. Use `'a` and `D`
 ///   in the subject type to bind to the GAT lifetime and digest type parameters.
 ///
-/// - `$namespace`: The namespace type that implements [`Namespace`](crate::certificate::Namespace).
+/// - `$namespace`: The namespace type that implements [`Namespace`].
 ///   This type pre-computes and stores any protocol-specific namespace bytes derived from
 ///   a base namespace. The scheme calls `$namespace::derive(base)` at construction time
 ///   to create the namespace, then passes it to `Subject::namespace()` during signing

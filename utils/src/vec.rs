@@ -453,7 +453,6 @@ mod tests {
     use crate::{NZUsize, TryCollect};
     #[stability(GAMMA)]
     use commonware_codec::{Error as CodecError, RangeCfg};
-    use commonware_macros::ready;
     use std::num::NonZeroUsize;
 
     #[test]
