@@ -952,7 +952,7 @@ where
     /// should have the associated block (in the `finalized_blocks` archive) for the information
     /// returned.
     async fn get_latest(&mut self) -> Option<(Height, B::Commitment, Round)> {
-        let height = self.finalizations_by_height.last_index()?;
+        let height = self.finalizations_by_height.last_index().await.ok()??;
         let finalization = self
             .get_finalization_by_height(height)
             .await
@@ -994,7 +994,7 @@ where
     ) {
         let start = self.last_processed_height.next();
         'cache_repair: loop {
-            let (gap_start, Some(gap_end)) = self.finalized_blocks.next_gap(start) else {
+            let Ok((gap_start, Some(gap_end))) = self.finalized_blocks.next_gap(start).await else {
                 // No gaps detected
                 return;
             };
@@ -1038,15 +1038,19 @@ where
         // closest to the application's processed height if finalizations
         // for the requests' heights exist. If not, we rely on the recursive
         // digest fetches above.
-        let missing_items = self
+        if let Ok(missing_items) = self
             .finalized_blocks
-            .missing_items(start, self.max_repair.get());
-        let requests = missing_items
-            .into_iter()
-            .map(|height| Request::<B>::Finalized { height })
-            .collect::<Vec<_>>();
-        if !requests.is_empty() {
-            resolver.fetch_all(requests).await
+            .missing_items(start, self.max_repair.get())
+            .await
+        {
+            let requests = missing_items
+                .filter_map(|item| async move { item.ok() })
+                .map(|height| Request::<B>::Finalized { height })
+                .collect::<Vec<_>>()
+                .await;
+            if !requests.is_empty() {
+                resolver.fetch_all(requests).await
+            }
         }
     }
 
