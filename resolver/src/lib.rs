@@ -5,9 +5,7 @@
     html_favicon_url = "https://commonware.xyz/favicon.ico"
 )]
 
-use commonware_macros::stability_scope;
-
-stability_scope!(GAMMA {
+commonware_macros::stability_scope!(GAMMA {
     use commonware_cryptography::PublicKey;
     use commonware_utils::{vec::NonEmptyVec, Span};
     use std::future::Future;
