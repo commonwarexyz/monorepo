@@ -213,9 +213,7 @@ commonware_macros::stability_scope!(GAMMA {
     pub use config::RangeCfg;
     pub use error::Error;
     pub use extensions::*;
-});
 
-commonware_macros::stability_scope!(GAMMA {
     #[cfg(feature = "arbitrary")]
     pub mod conformance;
 
