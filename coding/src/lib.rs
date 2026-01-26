@@ -15,19 +15,17 @@ commonware_macros::stability_scope!(ALPHA {
 });
 
 commonware_macros::stability_scope!(BETA {
-    mod reed_solomon;
-    pub use reed_solomon::{Error as ReedSolomonError, ReedSolomon};
-
-    mod zoda;
-    pub use zoda::{Error as ZodaError, Zoda};
-});
-
-commonware_macros::stability_scope!(GAMMA {
     use bytes::Buf;
     use commonware_codec::{Codec, FixedSize, Read, Write};
     use commonware_cryptography::Digest;
     use commonware_parallel::Strategy;
     use std::fmt::Debug;
+
+    mod reed_solomon;
+    pub use reed_solomon::{Error as ReedSolomonError, ReedSolomon};
+
+    mod zoda;
+    pub use zoda::{Error as ZodaError, Zoda};
 
     /// Configuration common to all encoding schemes.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -127,84 +125,84 @@ commonware_macros::stability_scope!(GAMMA {
     /// assert_eq!(&data[..], &data3[..]);
     /// ```
     pub trait Scheme: Debug + Clone + Send + Sync + 'static {
-    /// A commitment attesting to the shards of data.
-    type Commitment: Digest;
-    /// A shard of data, to be received by a participant.
-    type Shard: Clone + Eq + Codec<Cfg = CodecConfig> + Send + Sync + 'static;
-    /// A shard shared with other participants, to aid them in reconstruction.
-    ///
-    /// In most cases, this will be the same as `Shard`, but some schemes might
-    /// have extra information in `Shard` that may not be necessary to reconstruct
-    /// the data.
-    type ReShard: Clone + Eq + Codec<Cfg = CodecConfig> + Send + Sync + 'static;
-    /// Data which can assist in checking shards.
-    type CheckingData: Clone + Send;
-    /// A shard that has been checked for inclusion in the commitment.
-    ///
-    /// This allows excluding [Scheme::ReShard]s which are invalid, and shouldn't
-    /// be considered as progress towards meeting the minimum number of shards.
-    type CheckedShard;
-    type Error: std::fmt::Debug;
+        /// A commitment attesting to the shards of data.
+        type Commitment: Digest;
+        /// A shard of data, to be received by a participant.
+        type Shard: Clone + Eq + Codec<Cfg = CodecConfig> + Send + Sync + 'static;
+        /// A shard shared with other participants, to aid them in reconstruction.
+        ///
+        /// In most cases, this will be the same as `Shard`, but some schemes might
+        /// have extra information in `Shard` that may not be necessary to reconstruct
+        /// the data.
+        type ReShard: Clone + Eq + Codec<Cfg = CodecConfig> + Send + Sync + 'static;
+        /// Data which can assist in checking shards.
+        type CheckingData: Clone + Send;
+        /// A shard that has been checked for inclusion in the commitment.
+        ///
+        /// This allows excluding [Scheme::ReShard]s which are invalid, and shouldn't
+        /// be considered as progress towards meeting the minimum number of shards.
+        type CheckedShard;
+        type Error: std::fmt::Debug;
 
-    /// Encode a piece of data, returning a commitment, along with shards, and proofs.
-    ///
-    /// Each shard and proof is intended for exactly one participant. The number of shards returned
-    /// should equal `config.minimum_shards + config.extra_shards`.
-    #[allow(clippy::type_complexity)]
-    fn encode(
-        config: &Config,
-        data: impl Buf,
-        strategy: &impl Strategy,
-    ) -> Result<(Self::Commitment, Vec<Self::Shard>), Self::Error>;
+        /// Encode a piece of data, returning a commitment, along with shards, and proofs.
+        ///
+        /// Each shard and proof is intended for exactly one participant. The number of shards returned
+        /// should equal `config.minimum_shards + config.extra_shards`.
+        #[allow(clippy::type_complexity)]
+        fn encode(
+            config: &Config,
+            data: impl Buf,
+            strategy: &impl Strategy,
+        ) -> Result<(Self::Commitment, Vec<Self::Shard>), Self::Error>;
 
-    /// Take your own shard, check it, and produce a [Scheme::ReShard] to forward to others.
-    ///
-    /// This takes in an index, which is the index you expect the shard to be.
-    ///
-    /// This will produce a [Scheme::CheckedShard] which counts towards the minimum
-    /// number of shards you need to reconstruct the data, in [Scheme::decode].
-    ///
-    /// You also get [Scheme::CheckingData], which has information you can use to check
-    /// the shards you receive from others.
-    #[allow(clippy::type_complexity)]
-    fn reshard(
-        config: &Config,
-        commitment: &Self::Commitment,
-        index: u16,
-        shard: Self::Shard,
-    ) -> Result<(Self::CheckingData, Self::CheckedShard, Self::ReShard), Self::Error>;
+        /// Take your own shard, check it, and produce a [Scheme::ReShard] to forward to others.
+        ///
+        /// This takes in an index, which is the index you expect the shard to be.
+        ///
+        /// This will produce a [Scheme::CheckedShard] which counts towards the minimum
+        /// number of shards you need to reconstruct the data, in [Scheme::decode].
+        ///
+        /// You also get [Scheme::CheckingData], which has information you can use to check
+        /// the shards you receive from others.
+        #[allow(clippy::type_complexity)]
+        fn reshard(
+            config: &Config,
+            commitment: &Self::Commitment,
+            index: u16,
+            shard: Self::Shard,
+        ) -> Result<(Self::CheckingData, Self::CheckedShard, Self::ReShard), Self::Error>;
 
-    /// Check the integrity of a reshard, producing a checked shard.
-    ///
-    /// This requires the [Scheme::CheckingData] produced by [Scheme::reshard].
-    ///
-    /// This takes in an index, to make sure that the reshard you're checking
-    /// is associated with the participant you expect it to be.
-    fn check(
-        config: &Config,
-        commitment: &Self::Commitment,
-        checking_data: &Self::CheckingData,
-        index: u16,
-        reshard: Self::ReShard,
-    ) -> Result<Self::CheckedShard, Self::Error>;
+        /// Check the integrity of a reshard, producing a checked shard.
+        ///
+        /// This requires the [Scheme::CheckingData] produced by [Scheme::reshard].
+        ///
+        /// This takes in an index, to make sure that the reshard you're checking
+        /// is associated with the participant you expect it to be.
+        fn check(
+            config: &Config,
+            commitment: &Self::Commitment,
+            checking_data: &Self::CheckingData,
+            index: u16,
+            reshard: Self::ReShard,
+        ) -> Result<Self::CheckedShard, Self::Error>;
 
-    /// Decode the data from shards received from other participants.
-    ///
-    /// The data must be decodeable with as few as `config.minimum_shards`,
-    /// including your own shard.
-    ///
-    /// Calls to this function with the same commitment, but with different shards,
-    /// or shards in a different should also result in the same output data, or in failure.
-    /// In other words, when using the decoding function in a broader system, you
-    /// get a guarantee that every participant decoding will see the same final
-    /// data, even if they receive different shards, or receive them in a different order.
-    fn decode(
-        config: &Config,
-        commitment: &Self::Commitment,
-        checking_data: Self::CheckingData,
-        shards: &[Self::CheckedShard],
-        strategy: &impl Strategy,
-    ) -> Result<Vec<u8>, Self::Error>;
+        /// Decode the data from shards received from other participants.
+        ///
+        /// The data must be decodeable with as few as `config.minimum_shards`,
+        /// including your own shard.
+        ///
+        /// Calls to this function with the same commitment, but with different shards,
+        /// or shards in a different should also result in the same output data, or in failure.
+        /// In other words, when using the decoding function in a broader system, you
+        /// get a guarantee that every participant decoding will see the same final
+        /// data, even if they receive different shards, or receive them in a different order.
+        fn decode(
+            config: &Config,
+            commitment: &Self::Commitment,
+            checking_data: Self::CheckingData,
+            shards: &[Self::CheckedShard],
+            strategy: &impl Strategy,
+        ) -> Result<Vec<u8>, Self::Error>;
     }
 
     /// A marker trait indicating that [Scheme::check] proves validity of the encoding.
