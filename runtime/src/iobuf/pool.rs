@@ -580,59 +580,80 @@ impl PooledBufMut {
         self.len = 0;
     }
 
-    /// Reserves capacity for at least `additional` more bytes.
+    /// Resizes the buffer to `new_len`, filling new bytes with `value`.
     ///
-    /// If the current buffer doesn't have enough space, this will:
+    /// If `new_len` is less than the current length, the buffer is truncated.
+    /// If `new_len` is greater and exceeds capacity, this will:
     /// 1. Try to get a larger buffer from the pool
     /// 2. Fall back to direct allocation if the pool is exhausted
     ///
-    /// Data from `cursor..len` is copied to the new buffer, and the cursor is reset to 0.
-    pub fn reserve(&mut self, additional: usize) {
-        let required = self.len() + additional;
-        if required <= self.capacity() - self.cursor {
-            return; // Already have enough space
+    /// When a larger buffer is obtained, data from `cursor..len` is copied
+    /// to the new buffer, and the cursor is reset to 0.
+    pub fn resize(&mut self, new_len: usize, value: u8) {
+        let current_len = self.len();
+
+        if new_len <= current_len {
+            // Truncating - just adjust length (cursor stays the same)
+            self.len = self.cursor + new_len;
+            return;
         }
 
-        // Need a bigger buffer
-        let new_capacity = required.next_power_of_two().max(page_size());
+        // Growing - check if we need a bigger buffer
+        let required_capacity = self.cursor + new_len;
+        if required_capacity > self.capacity() {
+            // Need a bigger buffer
+            let new_capacity = required_capacity.next_power_of_two().max(page_size());
 
-        // Try to get from pool first, fall back to direct allocation
-        let (new_buffer, new_pool) = self
-            .pool
-            .upgrade()
-            .and_then(|pool| {
-                let idx = pool.config.class_index(new_capacity)?;
-                let buf = pool.try_alloc(idx)?;
-                Some((buf, Arc::downgrade(&pool)))
-            })
-            .unwrap_or_else(|| (AlignedBuffer::new(new_capacity), Weak::new()));
+            // Try to get from pool first, fall back to direct allocation
+            let (new_buffer, new_pool) = self
+                .pool
+                .upgrade()
+                .and_then(|pool| {
+                    let idx = pool.config.class_index(new_capacity)?;
+                    let buf = pool.try_alloc(idx)?;
+                    Some((buf, Arc::downgrade(&pool)))
+                })
+                .unwrap_or_else(|| (AlignedBuffer::new(new_capacity), Weak::new()));
 
-        // Copy existing data (only the readable portion: cursor..len)
-        let data_len = self.len();
-        if data_len > 0 {
-            // SAFETY: Both pointers are valid, non-overlapping, and data_len bytes are initialized.
-            unsafe {
-                std::ptr::copy_nonoverlapping(
-                    self.buffer.as_ptr().add(self.cursor),
-                    new_buffer.as_ptr(),
-                    data_len,
-                );
+            // Copy existing data (only the readable portion: cursor..len)
+            if current_len > 0 {
+                // SAFETY: Both pointers are valid, non-overlapping, and current_len bytes are initialized.
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        self.buffer.as_ptr().add(self.cursor),
+                        new_buffer.as_ptr(),
+                        current_len,
+                    );
+                }
             }
+
+            // Return old buffer to pool (if it came from one)
+            // SAFETY: We're replacing the buffer, and no other code will access the old one.
+            let old_buffer = unsafe { ManuallyDrop::take(&mut self.buffer) };
+            if let Some(pool) = self.pool.upgrade() {
+                pool.return_buffer(old_buffer);
+            }
+            // If no pool, old_buffer is dropped here
+
+            // Install new buffer with cursor reset to 0
+            self.buffer = ManuallyDrop::new(new_buffer);
+            self.cursor = 0;
+            self.len = current_len;
+            self.pool = new_pool;
         }
 
-        // Return old buffer to pool (if it came from one)
-        // SAFETY: We're replacing the buffer, and no other code will access the old one.
-        let old_buffer = unsafe { ManuallyDrop::take(&mut self.buffer) };
-        if let Some(pool) = self.pool.upgrade() {
-            pool.return_buffer(old_buffer);
+        // Fill new bytes with value
+        let fill_start = self.len;
+        let fill_end = self.cursor + new_len;
+        // SAFETY: We verified capacity above, and fill_start..fill_end is within bounds.
+        unsafe {
+            std::ptr::write_bytes(
+                self.buffer.as_ptr().add(fill_start),
+                value,
+                fill_end - fill_start,
+            );
         }
-        // If no pool, old_buffer is dropped here
-
-        // Install new buffer
-        self.buffer = ManuallyDrop::new(new_buffer);
-        self.cursor = 0;
-        self.len = data_len;
-        self.pool = new_pool;
+        self.len = fill_end;
     }
 
     /// Freezes the buffer into an immutable `IoBuf`.
@@ -1198,5 +1219,90 @@ mod tests {
 
         let storage_cfg = pools.storage().config();
         assert_eq!(storage_cfg.max_per_class, 32);
+    }
+
+    #[test]
+    fn test_pooled_resize_grow_within_capacity() {
+        let page = page_size();
+        let mut registry = test_registry();
+        let pool = BufferPool::new(
+            BufferPoolConfig {
+                min_size: page,
+                max_size: page,
+                max_per_class: 10,
+                prefill: false,
+            },
+            &mut registry,
+        );
+
+        let mut buf = pool.alloc(100).unwrap();
+
+        // Write some initial data
+        buf.put_slice(b"hello");
+        assert_eq!(buf.len(), 5);
+
+        // Grow within capacity
+        buf.resize(10, 0);
+        assert_eq!(buf.len(), 10);
+        assert_eq!(&buf.as_ref()[..5], b"hello");
+        assert_eq!(&buf.as_ref()[5..], &[0, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn test_pooled_resize_truncate() {
+        let page = page_size();
+        let mut registry = test_registry();
+        let pool = BufferPool::new(
+            BufferPoolConfig {
+                min_size: page,
+                max_size: page,
+                max_per_class: 10,
+                prefill: false,
+            },
+            &mut registry,
+        );
+
+        let mut buf = pool.alloc(100).unwrap();
+
+        // Write some initial data
+        buf.put_slice(b"hello world");
+        assert_eq!(buf.len(), 11);
+
+        // Truncate
+        buf.resize(5, 0);
+        assert_eq!(buf.len(), 5);
+        assert_eq!(buf.as_ref(), b"hello");
+    }
+
+    #[test]
+    fn test_pooled_resize_grow_beyond_capacity() {
+        let page = page_size();
+        let mut registry = test_registry();
+        let pool = BufferPool::new(
+            BufferPoolConfig {
+                min_size: page,
+                max_size: page * 4,
+                max_per_class: 10,
+                prefill: false,
+            },
+            &mut registry,
+        );
+
+        let mut buf = pool.alloc(100).unwrap();
+        let original_capacity = buf.capacity();
+
+        // Write some initial data
+        buf.put_slice(b"hello");
+        assert_eq!(buf.len(), 5);
+
+        // Grow beyond capacity - should get a new buffer from the pool
+        let new_size = original_capacity + 100;
+        buf.resize(new_size, 0xAB);
+        assert!(buf.capacity() >= new_size);
+        assert_eq!(buf.len(), new_size);
+        // Original data should be preserved
+        assert_eq!(&buf.as_ref()[..5], b"hello");
+        // New bytes should be filled with 0xAB
+        assert!(buf.as_ref()[5..].iter().all(|&b| b == 0xAB));
     }
 }

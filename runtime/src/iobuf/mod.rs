@@ -303,33 +303,13 @@ impl IoBufMut {
     /// If `new_len` is less than the current length, the buffer is truncated.
     /// If `new_len` is greater, the buffer is extended with `value` bytes.
     ///
-    /// # Panics
-    ///
-    /// Panics if called on a pooled buffer and `new_len` exceeds capacity.
-    /// Pooled buffers have fixed capacity and cannot grow.
+    /// For pooled buffers, if the new length exceeds capacity, a larger buffer
+    /// will be obtained from the pool (or allocated directly if the pool is exhausted).
     #[inline]
     pub fn resize(&mut self, new_len: usize, value: u8) {
         match &mut self.inner {
             IoBufMutInner::Owned(b) => b.resize(new_len, value),
-            IoBufMutInner::Pooled(b) => {
-                let current_len = b.len();
-                if new_len <= current_len {
-                    // SAFETY: Truncating to a smaller length is always safe.
-                    unsafe { b.set_len(new_len) };
-                } else {
-                    assert!(
-                        new_len <= b.capacity(),
-                        "cannot resize pooled buffer beyond capacity"
-                    );
-                    // Fill new bytes with value
-                    let ptr = b.as_mut_ptr();
-                    // SAFETY: We just verified new_len <= capacity.
-                    unsafe {
-                        std::ptr::write_bytes(ptr.add(current_len), value, new_len - current_len);
-                        b.set_len(new_len);
-                    }
-                }
-            }
+            IoBufMutInner::Pooled(b) => b.resize(new_len, value),
         }
     }
 
