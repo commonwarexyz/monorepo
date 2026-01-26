@@ -91,7 +91,7 @@ commonware_macros::stability_scope!(GAMMA {
     }
 
     /// A [Signer] that can be serialized/deserialized.
-    pub trait PrivateKey: Signer + Sized + ReadExt + Encode + PartialEq {}
+    pub trait PrivateKey: Signer + Sized + ReadExt + Encode {}
 
     /// Verifies [Signature]s over messages.
     pub trait Verifier {
@@ -511,6 +511,7 @@ mod tests {
         assert_eq!(secp256r1::recoverable::PublicKey::SIZE, 33);
         assert_eq!(secp256r1::recoverable::Signature::SIZE, 65);
     }
+
     fn test_hasher_multiple_runs<H: Hasher>() {
         // Generate initial hash
         let mut hasher = H::new();
