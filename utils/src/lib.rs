@@ -9,6 +9,43 @@
 #[cfg(not(feature = "std"))]
 extern crate alloc;
 
+/// Applies readiness cfg attributes to an item.
+///
+/// Use this for modules containing `#[macro_export]` macros where proc macros don't work.
+///
+/// # Example
+/// ```rust,ignore
+/// commonware_utils::cfg_ready!(GAMMA, pub mod my_module;);
+/// ```
+#[macro_export]
+macro_rules! cfg_ready {
+    (ALPHA, $($item:tt)*) => {
+        #[cfg(not(min_readiness_BETA))]
+        #[cfg(not(min_readiness_GAMMA))]
+        #[cfg(not(min_readiness_DELTA))]
+        #[cfg(not(min_readiness_EPSILON))]
+        $($item)*
+    };
+    (BETA, $($item:tt)*) => {
+        #[cfg(not(min_readiness_GAMMA))]
+        #[cfg(not(min_readiness_DELTA))]
+        #[cfg(not(min_readiness_EPSILON))]
+        $($item)*
+    };
+    (GAMMA, $($item:tt)*) => {
+        #[cfg(not(min_readiness_DELTA))]
+        #[cfg(not(min_readiness_EPSILON))]
+        $($item)*
+    };
+    (DELTA, $($item:tt)*) => {
+        #[cfg(not(min_readiness_EPSILON))]
+        $($item)*
+    };
+    (EPSILON, $($item:tt)*) => {
+        $($item)*
+    };
+}
+
 #[cfg(not(feature = "std"))]
 use alloc::{boxed::Box, string::String, vec::Vec};
 use bytes::{BufMut, BytesMut};

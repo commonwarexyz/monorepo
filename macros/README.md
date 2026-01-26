@@ -57,17 +57,12 @@ ready_scope!(GAMMA {
 });
 ```
 
-### Raw `#[cfg(...)]` for `#[macro_export]` Modules
+### `cfg_ready!` for `#[macro_export]` Modules
 
-For modules containing `#[macro_export]` macros, you **must** use raw `#[cfg(...)]` attributes. Due to a Rust limitation, macro-expanded modules cannot have their exported macros referenced by absolute paths. The readiness macros above won't work for these modules.
-
-Use one `#[cfg(not(min_readiness_X))]` for each level above the item's readiness:
+For modules containing `#[macro_export]` macros, proc macros don't work. Use the `cfg_ready!` declarative macro from `commonware_utils`:
 
 ```rust
-// GAMMA: excluded at DELTA or EPSILON
-#[cfg(not(min_readiness_DELTA))]
-#[cfg(not(min_readiness_EPSILON))]
-pub mod module_with_exported_macros;
+commonware_utils::cfg_ready!(GAMMA, pub mod module_with_exported_macros;);
 ```
 
 See the [Readiness section](https://github.com/commonwarexyz/monorepo#readiness) in the main README for more details.

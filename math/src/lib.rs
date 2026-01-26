@@ -11,13 +11,8 @@ extern crate alloc;
 use commonware_macros::ready_mod;
 
 ready_mod!(GAMMA, pub mod algebra);
-// Raw cfg required: inline module contains external submodule (Rust #54727)
-#[cfg(not(min_readiness_GAMMA))]
-#[cfg(not(min_readiness_DELTA))]
-#[cfg(not(min_readiness_EPSILON))]
-pub mod fields { // BETA
-    pub mod goldilocks;
-}
+// Use cfg_ready! for inline module with external submodule (Rust #54727)
+commonware_utils::cfg_ready!(BETA, pub mod fields { pub mod goldilocks; });
 ready_mod!(BETA, pub mod ntt);
 ready_mod!(GAMMA, pub mod poly);
 #[cfg(test)]
