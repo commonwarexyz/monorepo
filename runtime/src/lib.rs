@@ -21,12 +21,8 @@
     html_favicon_url = "https://commonware.xyz/favicon.ico"
 )]
 
-use commonware_macros::{select, stability, stability_mod};
-#[stability(GAMMA)]
-use commonware_parallel::{Rayon, ThreadPool};
+use commonware_macros::{select, stability, stability_mod, stability_scope};
 use prometheus_client::registry::Metric;
-#[stability(GAMMA)]
-use rayon::ThreadPoolBuildError;
 use std::{
     future::Future,
     io::Error as IoError,
@@ -47,7 +43,10 @@ cfg_if::cfg_if! {
         pub mod benchmarks;
     }
 }
-commonware_macros::stability_scope!(GAMMA {
+stability_scope!(GAMMA {
+    use commonware_parallel::{Rayon, ThreadPool};
+    use rayon::ThreadPoolBuildError;
+
     pub mod iobuf;
     pub use iobuf::{IoBuf, IoBufMut, IoBufs, IoBufsMut};
 });
@@ -56,20 +55,25 @@ pub use bytes::{Buf, BufMut};
 mod network;
 mod process;
 mod storage;
-pub mod telemetry;
-pub mod utils;
-pub use utils::*;
+stability_mod!(GAMMA, pub mod telemetry);
+stability_mod!(GAMMA, pub mod utils);
+stability_scope!(GAMMA {
+    pub use utils::*;
+});
 #[cfg(any(feature = "iouring-storage", feature = "iouring-network"))]
 mod iouring;
 
 /// Prefix for runtime metrics.
 const METRICS_PREFIX: &str = "runtime";
 
-/// Default [`Blob`] version used when no version is specified via [`Storage::open`].
-pub const DEFAULT_BLOB_VERSION: u16 = 0;
+stability_scope!(GAMMA {
+    /// Default [`Blob`] version used when no version is specified via [`Storage::open`].
+    pub const DEFAULT_BLOB_VERSION: u16 = 0;
+});
 
 /// Errors that can occur when interacting with the runtime.
 #[derive(Error, Debug)]
+#[commonware_macros::stability(GAMMA)]
 pub enum Error {
     #[error("exited")]
     Exited,
@@ -128,6 +132,7 @@ pub enum Error {
 
 /// Interface that any task scheduler must implement to start
 /// running tasks.
+#[stability(GAMMA)]
 pub trait Runner {
     /// Context defines the environment available to tasks.
     /// Example of possible services provided by the context include:
@@ -148,6 +153,7 @@ pub trait Runner {
 }
 
 /// Interface that any task scheduler must implement to spawn tasks.
+#[stability(GAMMA)]
 pub trait Spawner: Clone + Send + Sync + 'static {
     /// Return a [`Spawner`] that schedules tasks onto the runtime's shared executor.
     ///
@@ -271,6 +277,7 @@ pub trait RayonPoolSpawner: Spawner + Metrics {
 }
 
 /// Interface to register and encode metrics.
+#[stability(GAMMA)]
 pub trait Metrics: Clone + Send + Sync + 'static {
     /// Get the current label of the context.
     fn label(&self) -> String;
@@ -405,12 +412,14 @@ pub trait Metrics: Clone + Send + Sync + 'static {
 }
 
 /// Re-export of [governor::Quota] for rate limiting configuration.
+#[stability(GAMMA)]
 pub use governor::Quota;
 
 /// A direct (non-keyed) rate limiter using the provided [governor::clock::Clock] `C`.
 ///
 /// This is a convenience type alias for creating single-entity rate limiters.
 /// For per-key rate limiting, use [KeyedRateLimiter].
+#[stability(GAMMA)]
 pub type RateLimiter<C> = governor::RateLimiter<
     governor::state::NotKeyed,
     governor::state::InMemoryState,
@@ -424,6 +433,7 @@ pub type RateLimiter<C> = governor::RateLimiter<
 /// using governor's [HashMapStateStore].
 ///
 /// [HashMapStateStore]: governor::state::keyed::HashMapStateStore
+#[stability(GAMMA)]
 pub type KeyedRateLimiter<K, C> = governor::RateLimiter<
     K,
     governor::state::keyed::HashMapStateStore<K>,
@@ -436,6 +446,7 @@ pub type KeyedRateLimiter<K, C> = governor::RateLimiter<
 ///
 /// It is necessary to mock time to provide deterministic execution
 /// of arbitrary tasks.
+#[stability(GAMMA)]
 pub trait Clock:
     governor::clock::Clock<Instant = SystemTime>
     + governor::clock::ReasonablyRealtime

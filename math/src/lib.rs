@@ -21,4 +21,4 @@ commonware_utils::stability_cfg!(
 stability_mod!(BETA, pub mod ntt);
 stability_mod!(GAMMA, pub mod poly);
 #[cfg(test)]
-pub mod test;
+pub(crate) mod test;
