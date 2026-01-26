@@ -7,11 +7,11 @@ Augment the development of primitives with procedural macros.
 
 ## Status
 
-Stability varies by primitive. See [README](https://github.com/commonwarexyz/monorepo#readiness) for details.
+Stability varies by primitive. See [README](https://github.com/commonwarexyz/monorepo#stability) for details.
 
-## Readiness Macros
+## Stability Macros
 
-### Readiness Levels
+### Stability Levels
 
 | Level | Name | Description |
 |-------|------|-------------|
@@ -21,51 +21,51 @@ Stability varies by primitive. See [README](https://github.com/commonwarexyz/mon
 | 3 | `DELTA` | API + wire stable |
 | 4 | `EPSILON` | Audited, deployed in production |
 
-### `#[ready(LEVEL)]`
+### `#[stability(LEVEL)]`
 
-Marks an item with a readiness level. When building with `RUSTFLAGS="--cfg min_readiness_X"`, items with readiness less than X are excluded.
+Marks an item with a stability level. When building with `RUSTFLAGS="--cfg commonware_stability_X"`, items with stability less than X are excluded.
 
 ```rust
-use commonware_macros::ready;
+use commonware_macros::stability;
 
-#[ready(GAMMA)]
+#[stability(GAMMA)]
 pub mod stable_api {
-    // Excluded when building with min_readiness_DELTA or higher
+    // Excluded when building with commonware_stability_DELTA or higher
 }
 ```
 
-### `ready_mod!`
+### `stability_mod!`
 
-Marks a file module with a readiness level:
+Marks a file module with a stability level:
 
 ```rust
-use commonware_macros::ready_mod;
+use commonware_macros::stability_mod;
 
-ready_mod!(GAMMA, pub mod stable_module);
+stability_mod!(GAMMA, pub mod stable_module);
 ```
 
-### `ready_scope!`
+### `stability_scope!`
 
-Groups multiple items under a single readiness level:
+Groups multiple items under a single stability level:
 
 ```rust
-use commonware_macros::ready_scope;
+use commonware_macros::stability_scope;
 
-ready_scope!(GAMMA {
+stability_scope!(GAMMA {
     pub struct Config { }
     pub fn process() { }
 });
 ```
 
-### `ready_cfg!` for `#[macro_export]` Modules
+### `stability_cfg!` for `#[macro_export]` Modules
 
-For modules containing `#[macro_export]` macros, proc macros don't work. Use the `ready_cfg!` declarative macro from `commonware_utils`:
+For modules containing `#[macro_export]` macros, proc macros don't work. Use the `stability_cfg!` declarative macro from `commonware_utils`:
 
 ```rust
-commonware_utils::ready_cfg!(GAMMA, pub mod module_with_exported_macros;);
+commonware_utils::stability_cfg!(GAMMA, pub mod module_with_exported_macros;);
 ```
 
-See the [Readiness section](https://github.com/commonwarexyz/monorepo#readiness) in the main README for more details.
+See the [Stability section](https://github.com/commonwarexyz/monorepo#stability) in the main README for more details.
 
 ## Other Macros
 

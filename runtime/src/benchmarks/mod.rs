@@ -1,6 +1,6 @@
 //! Utilities for running benchmarks.
 
-use commonware_macros::ready_mod;
+use commonware_macros::stability_mod;
 
 pub mod context;
-ready_mod!(GAMMA, pub mod tokio);
+stability_mod!(GAMMA, pub mod tokio);

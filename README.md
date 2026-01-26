@@ -12,9 +12,9 @@
 
 _Primitives are designed for deployment in adversarial environments. If you find an exploit, please refer to our [security policy](./SECURITY.md) before disclosing it publicly (an exploit may equip a malicious party to attack users of a primitive)._
 
-## Readiness
+## Stability
 
-Each public API item in the Commonware Library is annotated with a readiness level (0-4) indicating its maturity:
+Each public API item in the Commonware Library is annotated with a stability level (0-4) indicating its maturity:
 
 | Level | Description |
 |-------|-------------|
@@ -24,14 +24,14 @@ Each public API item in the Commonware Library is annotated with a readiness lev
 | **3** | API stable. Wire/storage format stable. Decent test coverage. |
 | **4** | Deployed in production without issue. Audited multiple times. |
 
-Higher readiness code can only depend on code with equal or higher readiness. This is enforced at compile time:
+Higher stability code can only depend on code with equal or higher stability. This is enforced at compile time:
 
 ```bash
-# Generate docs for only code with readiness >= GAMMA (level 2)
-RUSTFLAGS="--cfg min_readiness_GAMMA" RUSTDOCFLAGS="--cfg min_readiness_GAMMA" cargo doc
+# Generate docs for only code with stability >= GAMMA (level 2)
+RUSTFLAGS="--cfg commonware_stability_GAMMA" RUSTDOCFLAGS="--cfg commonware_stability_GAMMA" cargo doc
 
-# Check if your application only uses commonware APIs with readiness >= GAMMA
-RUSTFLAGS="--cfg min_readiness_GAMMA" cargo build -p my-app
+# Check if your application only uses commonware APIs with stability >= GAMMA
+RUSTFLAGS="--cfg commonware_stability_GAMMA" cargo build -p my-app
 ```
 
 Level names: `ALPHA` (0), `BETA` (1), `GAMMA` (2), `DELTA` (3), `EPSILON` (4).

@@ -2,18 +2,18 @@
 //!
 //! # Status
 //!
-//! Stability varies by primitive. See [README](https://github.com/commonwarexyz/monorepo#readiness) for details.
+//! Stability varies by primitive. See [README](https://github.com/commonwarexyz/monorepo#stability) for details.
 
 #![doc(
     html_logo_url = "https://commonware.xyz/imgs/rustdoc_logo.svg",
     html_favicon_url = "https://commonware.xyz/favicon.ico"
 )]
 
-use commonware_macros::{ready_mod, ready_scope};
+use commonware_macros::{stability_mod, stability_scope};
 
-ready_mod!(ALPHA, pub mod simulated);
+stability_mod!(ALPHA, pub mod simulated);
 
-ready_scope!(GAMMA {
+stability_scope!(GAMMA {
     use commonware_cryptography::PublicKey;
     use commonware_runtime::{IoBuf, IoBufMut};
     use commonware_utils::ordered::Set;

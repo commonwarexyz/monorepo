@@ -18,7 +18,7 @@ use syn::{
 
 mod nextest;
 
-/// Readiness level input that accepts either a literal integer or a named constant.
+/// Stability level input that accepts either a literal integer or a named constant.
 ///
 /// Named constants:
 /// - `ALPHA` = 0: Little testing, breaking changes expected
@@ -27,23 +27,23 @@ mod nextest;
 /// - `DELTA` = 3: API + wire stable
 /// - `EPSILON` = 4: Audited, deployed in production
 #[allow(dead_code)]
-struct ReadinessLevel {
+struct StabilityLevel {
     value: u8,
     span: Span,
 }
 
-impl Parse for ReadinessLevel {
+impl Parse for StabilityLevel {
     fn parse(input: ParseStream<'_>) -> Result<Self> {
         let lookahead = input.lookahead1();
         if lookahead.peek(LitInt) {
             let lit: LitInt = input.parse()?;
             let value: u8 = lit
                 .base10_parse()
-                .map_err(|_| Error::new(lit.span(), "readiness level must be 0, 1, 2, 3, or 4"))?;
+                .map_err(|_| Error::new(lit.span(), "stability level must be 0, 1, 2, 3, or 4"))?;
             if value > 4 {
                 return Err(Error::new(
                     lit.span(),
-                    "readiness level must be 0, 1, 2, 3, or 4",
+                    "stability level must be 0, 1, 2, 3, or 4",
                 ));
             }
             Ok(Self {
@@ -61,7 +61,7 @@ impl Parse for ReadinessLevel {
                 _ => {
                     return Err(Error::new(
                         ident.span(),
-                        "expected readiness level: ALPHA, BETA, GAMMA, DELTA, EPSILON, or 0-4",
+                        "expected stability level: ALPHA, BETA, GAMMA, DELTA, EPSILON, or 0-4",
                     ));
                 }
             };
@@ -75,12 +75,12 @@ impl Parse for ReadinessLevel {
     }
 }
 
-/// Marks an item with a readiness level.
+/// Marks an item with a stability level.
 ///
-/// When building with `RUSTFLAGS="--cfg min_readiness_X"`, items with readiness
+/// When building with `RUSTFLAGS="--cfg commonware_stability_X"`, items with stability
 /// less than X are excluded. Unmarked items are always included.
 ///
-/// # Readiness Levels
+/// # Stability Levels
 ///
 /// | Level | Name | Description |
 /// |-------|------|-------------|
@@ -92,9 +92,9 @@ impl Parse for ReadinessLevel {
 ///
 /// # Example
 /// ```rust,ignore
-/// use commonware_macros::ready;
+/// use commonware_macros::stability;
 ///
-/// #[ready(GAMMA)]  // excluded at DELTA, EPSILON
+/// #[stability(GAMMA)]  // excluded at DELTA, EPSILON
 /// pub struct StableApi { }
 /// ```
 /// Map level number to named constant for cfg flag
@@ -110,14 +110,14 @@ fn level_name(level: u8) -> &'static str {
 }
 
 #[proc_macro_attribute]
-pub fn ready(attr: TokenStream, item: TokenStream) -> TokenStream {
-    let level = parse_macro_input!(attr as ReadinessLevel);
+pub fn stability(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let level = parse_macro_input!(attr as StabilityLevel);
 
     // Generate cfg attributes for each level above this item's level.
-    // #[ready(BETA)] expands to #[cfg(not(min_readiness_GAMMA))] #[cfg(not(min_readiness_DELTA))] #[cfg(not(min_readiness_EPSILON))]
+    // #[stability(BETA)] expands to #[cfg(not(commonware_stability_GAMMA))] #[cfg(not(commonware_stability_DELTA))] #[cfg(not(commonware_stability_EPSILON))]
     let mut cfg_attrs = Vec::new();
     for exclude_level in (level.value + 1)..=4 {
-        let cfg_name = format_ident!("min_readiness_{}", level_name(exclude_level));
+        let cfg_name = format_ident!("commonware_stability_{}", level_name(exclude_level));
         cfg_attrs.push(quote! { #[cfg(not(#cfg_name))] });
     }
 
@@ -130,16 +130,16 @@ pub fn ready(attr: TokenStream, item: TokenStream) -> TokenStream {
     TokenStream::from(expanded)
 }
 
-/// Input for the `ready_mod!` macro: `level, visibility mod name`
-struct ReadyModInput {
-    level: ReadinessLevel,
+/// Input for the `stability_mod!` macro: `level, visibility mod name`
+struct StabilityModInput {
+    level: StabilityLevel,
     visibility: Visibility,
     name: Ident,
 }
 
-impl Parse for ReadyModInput {
+impl Parse for StabilityModInput {
     fn parse(input: ParseStream<'_>) -> Result<Self> {
-        let level: ReadinessLevel = input.parse()?;
+        let level: StabilityLevel = input.parse()?;
         input.parse::<Token![,]>()?;
         let visibility: Visibility = input.parse()?;
         input.parse::<Token![mod]>()?;
@@ -152,28 +152,28 @@ impl Parse for ReadyModInput {
     }
 }
 
-/// Marks a module with a readiness level.
+/// Marks a module with a stability level.
 ///
-/// When building with `RUSTFLAGS="--cfg min_readiness_N"`, modules with readiness
+/// When building with `RUSTFLAGS="--cfg commonware_stability_N"`, modules with stability
 /// less than N are excluded.
 ///
 /// # Example
 /// ```rust,ignore
-/// use commonware_macros::ready_mod;
+/// use commonware_macros::stability_mod;
 ///
-/// ready_mod!(GAMMA, pub mod stable_module);
+/// stability_mod!(GAMMA, pub mod stable_module);
 /// ```
 #[proc_macro]
-pub fn ready_mod(input: TokenStream) -> TokenStream {
-    let ReadyModInput {
+pub fn stability_mod(input: TokenStream) -> TokenStream {
+    let StabilityModInput {
         level,
         visibility,
         name,
-    } = parse_macro_input!(input as ReadyModInput);
+    } = parse_macro_input!(input as StabilityModInput);
 
     let mut cfg_attrs = Vec::new();
     for exclude_level in (level.value + 1)..=4 {
-        let cfg_name = format_ident!("min_readiness_{}", level_name(exclude_level));
+        let cfg_name = format_ident!("commonware_stability_{}", level_name(exclude_level));
         cfg_attrs.push(quote! { #[cfg(not(#cfg_name))] });
     }
 
@@ -185,15 +185,15 @@ pub fn ready_mod(input: TokenStream) -> TokenStream {
     TokenStream::from(expanded)
 }
 
-/// Input for the `ready_scope!` macro: `level { items... }`
-struct ReadyScopeInput {
-    level: ReadinessLevel,
+/// Input for the `stability_scope!` macro: `level { items... }`
+struct StabilityScopeInput {
+    level: StabilityLevel,
     items: Vec<syn::Item>,
 }
 
-impl Parse for ReadyScopeInput {
+impl Parse for StabilityScopeInput {
     fn parse(input: ParseStream<'_>) -> Result<Self> {
-        let level: ReadinessLevel = input.parse()?;
+        let level: StabilityLevel = input.parse()?;
         let content;
         braced!(content in input);
 
@@ -206,27 +206,27 @@ impl Parse for ReadyScopeInput {
     }
 }
 
-/// Marks all items within a scope with a readiness level.
+/// Marks all items within a scope with a stability level.
 ///
-/// When building with `RUSTFLAGS="--cfg min_readiness_N"`, items with readiness
+/// When building with `RUSTFLAGS="--cfg commonware_stability_N"`, items with stability
 /// less than N are excluded.
 ///
 /// # Example
 /// ```rust,ignore
-/// use commonware_macros::ready_scope;
+/// use commonware_macros::stability_scope;
 ///
-/// ready_scope!(GAMMA {
+/// stability_scope!(GAMMA {
 ///     pub mod stable_module;
 ///     pub use crate::stable_module::Item;
 /// });
 /// ```
 #[proc_macro]
-pub fn ready_scope(input: TokenStream) -> TokenStream {
-    let ReadyScopeInput { level, items } = parse_macro_input!(input as ReadyScopeInput);
+pub fn stability_scope(input: TokenStream) -> TokenStream {
+    let StabilityScopeInput { level, items } = parse_macro_input!(input as StabilityScopeInput);
 
     let mut cfg_attrs = Vec::new();
     for exclude_level in (level.value + 1)..=4 {
-        let cfg_name = format_ident!("min_readiness_{}", level_name(exclude_level));
+        let cfg_name = format_ident!("commonware_stability_{}", level_name(exclude_level));
         cfg_attrs.push(quote! { #[cfg(not(#cfg_name))] });
     }
 

@@ -7,4 +7,4 @@ Communicate with authenticated peers over encrypted connections.
 
 ## Status 
 
-Stability varies by primitive. See [README](https://github.com/commonwarexyz/monorepo#readiness) for details.
+Stability varies by primitive. See [README](https://github.com/commonwarexyz/monorepo#stability) for details.

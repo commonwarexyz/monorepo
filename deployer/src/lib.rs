@@ -56,6 +56,6 @@
     html_favicon_url = "https://commonware.xyz/favicon.ico"
 )]
 
-use commonware_macros::ready_mod;
+use commonware_macros::stability_mod;
 
-ready_mod!(ALPHA, pub mod aws);
+stability_mod!(ALPHA, pub mod aws);

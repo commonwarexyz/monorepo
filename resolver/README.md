@@ -7,4 +7,4 @@ Resolve data identified by a fixed-length key.
 
 ## Status
 
-Stability varies by primitive. See [README](https://github.com/commonwarexyz/monorepo#readiness) for details.
+Stability varies by primitive. See [README](https://github.com/commonwarexyz/monorepo#stability) for details.

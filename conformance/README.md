@@ -7,4 +7,4 @@ Automatically assert the stability of encoding and mechanisms over time.
 
 ## Status
 
-Stability varies by primitive. See [README](https://github.com/commonwarexyz/monorepo#readiness) for details.
+Stability varies by primitive. See [README](https://github.com/commonwarexyz/monorepo#stability) for details.

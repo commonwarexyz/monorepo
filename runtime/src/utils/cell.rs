@@ -1,13 +1,13 @@
 use crate::{signal, Error, Handle};
-#[ready(GAMMA)]
+#[stability(GAMMA)]
 use crate::{SinkOf, StreamOf};
-use commonware_macros::ready;
-#[ready(GAMMA)]
+use commonware_macros::stability;
+#[stability(GAMMA)]
 use commonware_parallel::ThreadPool;
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use prometheus_client::registry::Metric;
 use rand::{CryptoRng, RngCore};
-#[ready(GAMMA)]
+#[stability(GAMMA)]
 use rayon::ThreadPoolBuildError;
 use std::{
     future::Future,
@@ -148,7 +148,7 @@ where
     }
 }
 
-#[ready(GAMMA)]
+#[stability(GAMMA)]
 impl<C> crate::RayonPoolSpawner for Cell<C>
 where
     C: crate::RayonPoolSpawner,
@@ -214,7 +214,7 @@ where
     }
 }
 
-commonware_macros::ready_scope!(GAMMA {
+commonware_macros::stability_scope!(GAMMA {
     impl<C> crate::Network for Cell<C>
     where
         C: crate::Network,
@@ -301,7 +301,7 @@ where
 
 impl<C> ReasonablyRealtime for Cell<C> where C: ReasonablyRealtime {}
 
-#[commonware_macros::ready(GAMMA)]
+#[commonware_macros::stability(GAMMA)]
 impl<C> crate::Resolver for Cell<C>
 where
     C: crate::Resolver,

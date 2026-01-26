@@ -9,36 +9,36 @@
 #[cfg(not(feature = "std"))]
 extern crate alloc;
 
-/// Applies readiness cfg attributes to an item.
+/// Applies stability cfg attributes to an item.
 ///
 /// Use this for modules containing `#[macro_export]` macros where proc macros don't work.
 ///
 /// # Example
 /// ```rust,ignore
-/// commonware_utils::ready_cfg!(GAMMA, pub mod my_module;);
+/// commonware_utils::stability_cfg!(GAMMA, pub mod my_module;);
 /// ```
 #[macro_export]
-macro_rules! ready_cfg {
+macro_rules! stability_cfg {
     (ALPHA, $($item:tt)*) => {
-        #[cfg(not(min_readiness_BETA))]
-        #[cfg(not(min_readiness_GAMMA))]
-        #[cfg(not(min_readiness_DELTA))]
-        #[cfg(not(min_readiness_EPSILON))]
+        #[cfg(not(commonware_stability_BETA))]
+        #[cfg(not(commonware_stability_GAMMA))]
+        #[cfg(not(commonware_stability_DELTA))]
+        #[cfg(not(commonware_stability_EPSILON))]
         $($item)*
     };
     (BETA, $($item:tt)*) => {
-        #[cfg(not(min_readiness_GAMMA))]
-        #[cfg(not(min_readiness_DELTA))]
-        #[cfg(not(min_readiness_EPSILON))]
+        #[cfg(not(commonware_stability_GAMMA))]
+        #[cfg(not(commonware_stability_DELTA))]
+        #[cfg(not(commonware_stability_EPSILON))]
         $($item)*
     };
     (GAMMA, $($item:tt)*) => {
-        #[cfg(not(min_readiness_DELTA))]
-        #[cfg(not(min_readiness_EPSILON))]
+        #[cfg(not(commonware_stability_DELTA))]
+        #[cfg(not(commonware_stability_EPSILON))]
         $($item)*
     };
     (DELTA, $($item:tt)*) => {
-        #[cfg(not(min_readiness_EPSILON))]
+        #[cfg(not(commonware_stability_EPSILON))]
         $($item)*
     };
     (EPSILON, $($item:tt)*) => {
@@ -109,7 +109,7 @@ impl core::fmt::Display for Participant {
     }
 }
 
-commonware_macros::ready_scope!(GAMMA {
+commonware_macros::stability_scope!(GAMMA {
     use bytes::Buf;
     use commonware_codec::{varint::UInt, EncodeSize, Error as CodecError, Read, ReadExt, Write};
 
@@ -254,7 +254,7 @@ pub fn union(a: &[u8], b: &[u8]) -> Vec<u8> {
 /// Concatenate a namespace and a message, prepended by a varint encoding of the namespace length.
 ///
 /// This produces a unique byte sequence (i.e. no collisions) for each `(namespace, msg)` pair.
-#[commonware_macros::ready(GAMMA)]
+#[commonware_macros::stability(GAMMA)]
 pub fn union_unique(namespace: &[u8], msg: &[u8]) -> Vec<u8> {
     use commonware_codec::EncodeSize;
     let len_prefix = namespace.len();

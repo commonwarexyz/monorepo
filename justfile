@@ -18,7 +18,7 @@ build *args='':
     cargo build $@
 
 # Runs pre-flight lints + tests before making a pull-request
-pre-pr: lint test-docs test check-readiness
+pre-pr: lint test-docs test check-stability
 
 # Fixes the formatting of the workspace
 fix-fmt:
@@ -94,12 +94,12 @@ test-conformance *args='':
 regenerate-conformance *args='':
     RUSTFLAGS="--cfg generate_conformance_tests" just test --features arbitrary --profile conformance {{ args }}
 
-# Packages to exclude from readiness checks (examples, fuzz targets, deployer)
-readiness_excludes := "--exclude commonware-deployer --exclude commonware-bridge --exclude commonware-chat --exclude commonware-estimator --exclude commonware-flood --exclude commonware-log --exclude commonware-sync --exclude commonware-broadcast-fuzz --exclude commonware-codec-fuzz --exclude commonware-coding-fuzz --exclude commonware-collector-fuzz --exclude commonware-consensus-fuzz --exclude commonware-cryptography-fuzz --exclude commonware-p2p-fuzz --exclude commonware-runtime-fuzz --exclude commonware-storage-fuzz --exclude commonware-stream-fuzz --exclude commonware-utils-fuzz"
+# Packages to exclude from stability checks (examples, fuzz targets, deployer)
+stability_excludes := "--exclude commonware-deployer --exclude commonware-bridge --exclude commonware-chat --exclude commonware-estimator --exclude commonware-flood --exclude commonware-log --exclude commonware-sync --exclude commonware-broadcast-fuzz --exclude commonware-codec-fuzz --exclude commonware-coding-fuzz --exclude commonware-collector-fuzz --exclude commonware-consensus-fuzz --exclude commonware-cryptography-fuzz --exclude commonware-p2p-fuzz --exclude commonware-runtime-fuzz --exclude commonware-storage-fuzz --exclude commonware-stream-fuzz --exclude commonware-utils-fuzz"
 
-# Check readiness builds. Optionally specify level (1-4 or name) and/or crate (-p <crate>).
-# Examples: just check-readiness, just check-readiness 3, just check-readiness DELTA, just check-readiness GAMMA -p commonware-cryptography
-check-readiness *args='':
+# Check stability builds. Optionally specify level (1-4 or name) and/or crate (-p <crate>).
+# Examples: just check-stability, just check-stability 3, just check-stability DELTA, just check-stability GAMMA -p commonware-cryptography
+check-stability *args='':
     #!/usr/bin/env bash
     all_args="{{ args }}"
     level=""
@@ -135,12 +135,12 @@ check-readiness *args='':
     fi
     if [ -z "$level" ]; then
         for l in 1 2 3 4; do
-            echo "Checking min_readiness_${LEVEL_NAMES[$l]}..."
-            RUSTFLAGS="--cfg min_readiness_${LEVEL_NAMES[$l]}" cargo build --workspace --lib {{ readiness_excludes }} $extra_args || exit 1
+            echo "Checking commonware_stability_${LEVEL_NAMES[$l]}..."
+            RUSTFLAGS="--cfg commonware_stability_${LEVEL_NAMES[$l]}" cargo build --workspace --lib {{ stability_excludes }} $extra_args || exit 1
         done
-        echo "All readiness levels pass!"
+        echo "All stability levels pass!"
     else
-        echo "Checking min_readiness_${LEVEL_NAMES[$level]}..."
-        RUSTFLAGS="--cfg min_readiness_${LEVEL_NAMES[$level]}" cargo build --workspace --lib {{ readiness_excludes }} $extra_args
+        echo "Checking commonware_stability_${LEVEL_NAMES[$level]}..."
+        RUSTFLAGS="--cfg commonware_stability_${LEVEL_NAMES[$level]}" cargo build --workspace --lib {{ stability_excludes }} $extra_args
     fi
 

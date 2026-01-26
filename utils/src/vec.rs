@@ -3,13 +3,13 @@
 use crate::TryFromIterator;
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
-#[ready(GAMMA)]
+#[stability(GAMMA)]
 use bytes::Buf;
-#[ready(GAMMA)]
+#[stability(GAMMA)]
 use bytes::BufMut;
-#[ready(GAMMA)]
+#[stability(GAMMA)]
 use commonware_codec::{EncodeSize, RangeCfg, Read, Write};
-use commonware_macros::ready;
+use commonware_macros::stability;
 use core::{
     num::NonZeroUsize,
     ops::{Deref, DerefMut},
@@ -321,21 +321,21 @@ impl<'a, T> IntoIterator for &'a mut NonEmptyVec<T> {
     }
 }
 
-#[ready(GAMMA)]
+#[stability(GAMMA)]
 impl<T: Write> Write for NonEmptyVec<T> {
     fn write(&self, buf: &mut impl BufMut) {
         self.0.write(buf);
     }
 }
 
-#[ready(GAMMA)]
+#[stability(GAMMA)]
 impl<T: EncodeSize> EncodeSize for NonEmptyVec<T> {
     fn encode_size(&self) -> usize {
         self.0.encode_size()
     }
 }
 
-#[ready(GAMMA)]
+#[stability(GAMMA)]
 impl<T: Read> Read for NonEmptyVec<T> {
     type Cfg = (RangeCfg<NonZeroUsize>, T::Cfg);
 
@@ -451,7 +451,7 @@ macro_rules! non_empty_vec {
 mod tests {
     use super::*;
     use crate::{NZUsize, TryCollect};
-    #[ready(GAMMA)]
+    #[stability(GAMMA)]
     use commonware_codec::{Error as CodecError, RangeCfg};
     use commonware_macros::ready;
     use std::num::NonZeroUsize;
@@ -789,7 +789,7 @@ mod tests {
         assert_eq!(&*v, &[11, 12, 13]);
     }
 
-    #[ready(GAMMA)]
+    #[stability(GAMMA)]
     #[test]
     fn test_codec_roundtrip() {
         use commonware_codec::{EncodeSize, Read, Write};
@@ -807,7 +807,7 @@ mod tests {
         assert_eq!(v, decoded);
     }
 
-    #[ready(GAMMA)]
+    #[stability(GAMMA)]
     #[test]
     fn test_codec_rejects_empty() {
         use commonware_codec::{Read, Write};

@@ -7,4 +7,4 @@ Leverage common functionality across multiple primitives.
 
 ## Status 
 
-Stability varies by primitive. See [README](https://github.com/commonwarexyz/monorepo#readiness) for details.
+Stability varies by primitive. See [README](https://github.com/commonwarexyz/monorepo#stability) for details.

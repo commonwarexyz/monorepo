@@ -55,7 +55,7 @@ use commonware_cryptography::{
     certificate::{self, Attestation, Subject as CertificateSubject, Verification},
     Digest, PublicKey,
 };
-use commonware_macros::ready;
+use commonware_macros::stability;
 use commonware_parallel::Strategy;
 use commonware_utils::{ordered::Set, Faults};
 use rand::{rngs::StdRng, SeedableRng};
@@ -244,7 +244,7 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
     /// The encrypted message can only be decrypted using the seed signature
     /// from a certificate of the target round (i.e. notarization, finalization,
     /// or nullification).
-    #[ready(BETA)]
+    #[stability(BETA)]
     pub fn encrypt<R: CryptoRngCore>(
         &self,
         rng: &mut R,
@@ -267,7 +267,7 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
 /// The encrypted message can only be decrypted using the seed signature
 /// from a certificate of the target round (i.e. notarization, finalization,
 /// or nullification).
-#[ready(BETA)]
+#[stability(BETA)]
 pub fn encrypt<R: CryptoRngCore, V: Variant>(
     rng: &mut R,
     identity: V::Public,
@@ -447,7 +447,7 @@ impl<V: Variant> Seed<V> {
     ///
     /// Returns `None` if the ciphertext is invalid or encrypted for a different
     /// round than this seed.
-    #[ready(BETA)]
+    #[stability(BETA)]
     pub fn decrypt(&self, ciphertext: &tle::Ciphertext<V>) -> Option<tle::Block> {
         decrypt(self, ciphertext)
     }
@@ -458,7 +458,7 @@ impl<V: Variant> Seed<V> {
 ///
 /// Returns `None` if the ciphertext is invalid or encrypted for a different
 /// round than the given seed.
-#[ready(BETA)]
+#[stability(BETA)]
 pub fn decrypt<V: Variant>(seed: &Seed<V>, ciphertext: &tle::Ciphertext<V>) -> Option<tle::Block> {
     tle::decrypt(&seed.signature, ciphertext)
 }

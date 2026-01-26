@@ -1,16 +1,16 @@
 //! Implementations of the `Storage` trait that can be used by the runtime.
 
 use crate::{Buf, BufMut};
-#[ready(GAMMA)]
+#[stability(GAMMA)]
 use commonware_codec::{DecodeExt, FixedSize, Read as CodecRead, Write as CodecWrite};
-use commonware_macros::{ready, ready_mod};
-#[ready(GAMMA)]
+use commonware_macros::{stability, stability_mod};
+#[stability(GAMMA)]
 use commonware_utils::hex;
-#[ready(GAMMA)]
+#[stability(GAMMA)]
 use std::ops::RangeInclusive;
 
 /// Errors that can occur when validating a blob header.
-#[ready(GAMMA)]
+#[stability(GAMMA)]
 #[derive(Debug)]
 pub(crate) enum HeaderError {
     InvalidMagic {
@@ -27,7 +27,7 @@ pub(crate) enum HeaderError {
     },
 }
 
-#[ready(GAMMA)]
+#[stability(GAMMA)]
 impl HeaderError {
     /// Converts this error into an [`Error`](enum@crate::Error) with partition and name context.
     pub(crate) fn into_error(self, partition: &str, name: &[u8]) -> crate::Error {
@@ -49,13 +49,13 @@ impl HeaderError {
     }
 }
 
-ready_mod!(ALPHA, pub mod audited);
+stability_mod!(ALPHA, pub mod audited);
 #[cfg(feature = "iouring-storage")]
-ready_mod!(BETA, pub mod iouring);
-ready_mod!(ALPHA, pub mod memory);
-ready_mod!(GAMMA, pub mod metered);
+stability_mod!(BETA, pub mod iouring);
+stability_mod!(ALPHA, pub mod memory);
+stability_mod!(GAMMA, pub mod metered);
 #[cfg(all(not(target_arch = "wasm32"), not(feature = "iouring-storage")))]
-ready_mod!(GAMMA, pub mod tokio);
+stability_mod!(GAMMA, pub mod tokio);
 
 /// Fixed-size header at the start of each [crate::Blob].
 ///
@@ -63,7 +63,7 @@ ready_mod!(GAMMA, pub mod tokio);
 /// - Bytes 0-3: [Header::MAGIC]
 /// - Bytes 4-5: Runtime Version (u16)
 /// - Bytes 6-7: Blob Version (u16)
-#[ready(GAMMA)]
+#[stability(GAMMA)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Header {
     magic: [u8; Self::MAGIC_LENGTH],
@@ -71,7 +71,7 @@ pub(crate) struct Header {
     pub(crate) blob_version: u16,
 }
 
-#[ready(GAMMA)]
+#[stability(GAMMA)]
 impl Header {
     /// Size of the header in bytes.
     pub(crate) const SIZE: usize = 8;
@@ -145,12 +145,12 @@ impl Header {
     }
 }
 
-#[ready(GAMMA)]
+#[stability(GAMMA)]
 impl FixedSize for Header {
     const SIZE: usize = Self::SIZE;
 }
 
-#[ready(GAMMA)]
+#[stability(GAMMA)]
 impl CodecWrite for Header {
     fn write(&self, buf: &mut impl BufMut) {
         buf.put_slice(&self.magic);
@@ -159,7 +159,7 @@ impl CodecWrite for Header {
     }
 }
 
-#[ready(GAMMA)]
+#[stability(GAMMA)]
 impl CodecRead for Header {
     type Cfg = ();
     fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
@@ -179,7 +179,7 @@ impl CodecRead for Header {
 }
 
 #[cfg(feature = "arbitrary")]
-#[ready(GAMMA)]
+#[stability(GAMMA)]
 impl arbitrary::Arbitrary<'_> for Header {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let version: u16 = u.arbitrary()?;

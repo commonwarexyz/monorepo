@@ -134,8 +134,8 @@ jobs:
     - name: Run subset doc tests
       run: just test-docs ${{ matrix.flags }} -p ${{ matrix.package }}
 
-  Readiness:
-    name: "Readiness (min_readiness_${{ matrix.level }})"
+  Stability:
+    name: "Stability (commonware_stability_${{ matrix.level }})"
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
@@ -149,18 +149,18 @@ jobs:
     - name: Run setup
       uses: ./.github/actions/setup
       with:
-        additional-cache-key: readiness-${{ matrix.level }}
+        additional-cache-key: stability-${{ matrix.level }}
     - name: Install just
       uses: taiki-e/install-action@0c5db7f7f897c03b771660e91d065338615679f4 # v2.60.0
       with:
         tool: just@1.43.0
-    - name: Build with min_readiness_${{ matrix.level }}
-      run: just check-readiness ${{ matrix.level }}
+    - name: Build with commonware_stability_${{ matrix.level }}
+      run: just check-stability ${{ matrix.level }}
 
   Tests-Gate:
     name: "Fast-Tests"
     runs-on: ubuntu-latest
-    needs: [Tests, Tests-Subset, Readiness]
+    needs: [Tests, Tests-Subset, Stability]
     if: always()
     steps:
       - name: Check test results
@@ -173,8 +173,8 @@ jobs:
             echo "Tests-Subset failed"
             exit 1
           fi
-          if [ "${{ needs.Readiness.result }}" != "success" ]; then
-            echo "Readiness checks failed"
+          if [ "${{ needs.Stability.result }}" != "success" ]; then
+            echo "Stability checks failed"
             exit 1
           fi
           echo "All tests passed!"

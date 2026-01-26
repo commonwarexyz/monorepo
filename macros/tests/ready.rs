@@ -1,24 +1,24 @@
-use commonware_macros::{ready, ready_scope};
+use commonware_macros::{stability, stability_scope};
 
 // All items at level 4 so they're always available
-#[ready(EPSILON)]
+#[stability(EPSILON)]
 const fn level_4_fn() -> u8 {
     4
 }
 
-#[ready(EPSILON)]
+#[stability(EPSILON)]
 struct Level4Struct {
     value: u32,
 }
 
-#[ready(EPSILON)]
+#[stability(EPSILON)]
 impl Level4Struct {
     const fn new() -> Self {
         Self { value: 42 }
     }
 }
 
-#[ready(EPSILON)]
+#[stability(EPSILON)]
 mod level_4_module {
     pub const fn inner() -> u32 {
         100
@@ -33,23 +33,23 @@ fn test_level_4_items_compile() {
     assert_eq!(level_4_module::inner(), 100);
 }
 
-// Test that lower-level items are excluded at higher readiness levels
-// These items and their tests are gated together using ready(2)
-#[ready(GAMMA)]
+// Test that lower-level items are excluded at higher stability levels
+// These items and their tests are gated together using stability(2)
+#[stability(GAMMA)]
 mod level_2_tests {
-    use commonware_macros::ready;
+    use commonware_macros::stability;
 
-    #[ready(GAMMA)]
+    #[stability(GAMMA)]
     const fn level_2_fn() -> u8 {
         2
     }
 
-    #[ready(GAMMA)]
+    #[stability(GAMMA)]
     struct Level2Struct {
         value: u32,
     }
 
-    #[ready(GAMMA)]
+    #[stability(GAMMA)]
     impl Level2Struct {
         const fn new() -> Self {
             Self { value: 22 }
@@ -64,8 +64,8 @@ mod level_2_tests {
     }
 }
 
-// Test ready_scope! macro at level 4 (always available)
-ready_scope!(EPSILON {
+// Test stability_scope! macro at level 4 (always available)
+stability_scope!(EPSILON {
     const fn scope_level_4_fn() -> u8 {
         44
     }
@@ -82,18 +82,18 @@ ready_scope!(EPSILON {
 });
 
 #[test]
-fn test_ready_scope_level_4() {
+fn test_stability_scope_level_4() {
     assert_eq!(scope_level_4_fn(), 44);
     let s = ScopeLevel4Struct::new();
     assert_eq!(s.value, 444);
 }
 
-// Test ready_scope! at level 2 (excluded at levels 3, 4)
-#[ready(GAMMA)]
-mod ready_scope_level_2_tests {
-    use commonware_macros::ready_scope;
+// Test stability_scope! at level 2 (excluded at levels 3, 4)
+#[stability(GAMMA)]
+mod stability_scope_level_2_tests {
+    use commonware_macros::stability_scope;
 
-    ready_scope!(GAMMA {
+    stability_scope!(GAMMA {
         pub const fn scope_level_2_fn() -> u8 {
             22
         }
@@ -110,7 +110,7 @@ mod ready_scope_level_2_tests {
     });
 
     #[test]
-    fn test_ready_scope_level_2() {
+    fn test_stability_scope_level_2() {
         assert_eq!(scope_level_2_fn(), 22);
         let s = ScopeLevel2Struct::new();
         assert_eq!(s.value, 222);

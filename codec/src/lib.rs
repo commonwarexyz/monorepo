@@ -199,9 +199,9 @@
 #[cfg(not(feature = "std"))]
 extern crate alloc;
 
-use commonware_macros::ready_scope;
+use commonware_macros::stability_scope;
 
-ready_scope!(GAMMA {
+stability_scope!(GAMMA {
     pub mod codec;
     pub mod config;
     pub mod error;

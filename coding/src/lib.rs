@@ -2,19 +2,19 @@
 //!
 //! # Status
 //!
-//! Stability varies by primitive. See [README](https://github.com/commonwarexyz/monorepo#readiness) for details.
+//! Stability varies by primitive. See [README](https://github.com/commonwarexyz/monorepo#stability) for details.
 
 #![doc(
     html_logo_url = "https://commonware.xyz/imgs/rustdoc_logo.svg",
     html_favicon_url = "https://commonware.xyz/favicon.ico"
 )]
 
-commonware_macros::ready_scope!(ALPHA {
+commonware_macros::stability_scope!(ALPHA {
     mod no_coding;
     pub use no_coding::{Error as NoCodingError, NoCoding};
 });
 
-commonware_macros::ready_scope!(BETA {
+commonware_macros::stability_scope!(BETA {
     mod reed_solomon;
     pub use reed_solomon::{Error as ReedSolomonError, ReedSolomon};
 
@@ -22,7 +22,7 @@ commonware_macros::ready_scope!(BETA {
     pub use zoda::{Error as ZodaError, Zoda};
 });
 
-commonware_macros::ready_scope!(GAMMA {
+commonware_macros::stability_scope!(GAMMA {
     use bytes::Buf;
     use commonware_codec::{Codec, FixedSize, Read, Write};
     use commonware_cryptography::Digest;

@@ -7,4 +7,4 @@ Generate keys, sign arbitrary messages, and deterministically verify untrusted s
 
 ## Status 
 
-Stability varies by primitive. See [README](https://github.com/commonwarexyz/monorepo#readiness) for details.
+Stability varies by primitive. See [README](https://github.com/commonwarexyz/monorepo#stability) for details.

@@ -4,7 +4,7 @@ Interact with the Commonware Library via [MCP](https://modelcontextprotocol.io/)
 
 ## Status
 
-Stability varies by primitive. See [README](https://github.com/commonwarexyz/monorepo#readiness) for details.
+Stability varies by primitive. See [README](https://github.com/commonwarexyz/monorepo#stability) for details.
 
 ## Tools
 

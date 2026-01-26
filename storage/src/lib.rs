@@ -2,7 +2,7 @@
 //!
 //! # Status
 //!
-//! Stability varies by primitive. See [README](https://github.com/commonwarexyz/monorepo#readiness) for details.
+//! Stability varies by primitive. See [README](https://github.com/commonwarexyz/monorepo#stability) for details.
 
 #![doc(
     html_logo_url = "https://commonware.xyz/imgs/rustdoc_logo.svg",
@@ -10,23 +10,23 @@
 )]
 #![cfg_attr(not(feature = "std"), no_std)]
 
-#[commonware_macros::ready(BETA)]
+#[commonware_macros::stability(BETA)]
 extern crate alloc;
 
-commonware_macros::ready_scope!(BETA {
+commonware_macros::stability_scope!(BETA {
     pub mod mmr;
 });
 
 cfg_if::cfg_if! {
     if #[cfg(feature = "std")] {
-        commonware_macros::ready_scope!(BETA {
+        commonware_macros::stability_scope!(BETA {
             pub mod qmdb;
             mod bitmap;
             pub use crate::bitmap::{BitMap as AuthenticatedBitMap, CleanBitMap as CleanAuthenticatedBitMap, DirtyBitMap as DirtyAuthenticatedBitMap};
             pub mod bmt;
         });
 
-        commonware_macros::ready_scope!(GAMMA {
+        commonware_macros::stability_scope!(GAMMA {
             pub mod archive;
             pub mod cache;
             pub mod freezer;

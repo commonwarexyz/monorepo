@@ -2,7 +2,7 @@
 //!
 //! # Status
 //!
-//! Stability varies by primitive. See [README](https://github.com/commonwarexyz/monorepo#readiness) for details.
+//! Stability varies by primitive. See [README](https://github.com/commonwarexyz/monorepo#stability) for details.
 
 #![doc(
     html_logo_url = "https://commonware.xyz/imgs/rustdoc_logo.svg",
@@ -18,19 +18,19 @@ use rand_chacha::ChaCha20Rng;
 use rand_core::CryptoRngCore;
 
 // Modules containing #[macro_export] macros must use direct cfg attributes
-// instead of ready_cfg! to avoid macro_expanded_macro_exports_accessed_by_absolute_paths warning.
-#[cfg(not(min_readiness_DELTA))]
-#[cfg(not(min_readiness_EPSILON))]
+// instead of stability_cfg! to avoid macro_expanded_macro_exports_accessed_by_absolute_paths warning.
+#[cfg(not(commonware_stability_DELTA))]
+#[cfg(not(commonware_stability_EPSILON))]
 pub mod bls12381;
-#[cfg(not(min_readiness_DELTA))]
-#[cfg(not(min_readiness_EPSILON))]
+#[cfg(not(commonware_stability_DELTA))]
+#[cfg(not(commonware_stability_EPSILON))]
 pub mod ed25519;
-#[cfg(not(min_readiness_GAMMA))]
-#[cfg(not(min_readiness_DELTA))]
-#[cfg(not(min_readiness_EPSILON))]
+#[cfg(not(commonware_stability_GAMMA))]
+#[cfg(not(commonware_stability_DELTA))]
+#[cfg(not(commonware_stability_EPSILON))]
 pub mod secp256r1;
 
-commonware_macros::ready_scope!(BETA {
+commonware_macros::stability_scope!(BETA {
     pub mod bloomfilter;
     pub use crate::bloomfilter::BloomFilter;
 
@@ -38,7 +38,7 @@ commonware_macros::ready_scope!(BETA {
     pub use crate::lthash::LtHash;
 });
 
-commonware_macros::ready_scope!(GAMMA {
+commonware_macros::stability_scope!(GAMMA {
     use commonware_codec::{Encode, ReadExt};
     use commonware_math::algebra::Random;
     use commonware_utils::Array;

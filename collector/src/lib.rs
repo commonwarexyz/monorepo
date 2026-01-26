@@ -2,16 +2,16 @@
 //!
 //! # Status
 //!
-//! Stability varies by primitive. See [README](https://github.com/commonwarexyz/monorepo#readiness) for details.
+//! Stability varies by primitive. See [README](https://github.com/commonwarexyz/monorepo#stability) for details.
 
 #![doc(
     html_logo_url = "https://commonware.xyz/imgs/rustdoc_logo.svg",
     html_favicon_url = "https://commonware.xyz/favicon.ico"
 )]
 
-use commonware_macros::ready_scope;
+use commonware_macros::stability_scope;
 
-ready_scope!(BETA {
+stability_scope!(BETA {
     use commonware_codec::Codec;
     use commonware_cryptography::{Committable, Digestible, PublicKey};
     use commonware_p2p::Recipients;
