@@ -57,12 +57,12 @@ ready_scope!(GAMMA {
 });
 ```
 
-### `cfg_ready!` for `#[macro_export]` Modules
+### `ready_cfg!` for `#[macro_export]` Modules
 
-For modules containing `#[macro_export]` macros, proc macros don't work. Use the `cfg_ready!` declarative macro from `commonware_utils`:
+For modules containing `#[macro_export]` macros, proc macros don't work. Use the `ready_cfg!` declarative macro from `commonware_utils`:
 
 ```rust
-commonware_utils::cfg_ready!(GAMMA, pub mod module_with_exported_macros;);
+commonware_utils::ready_cfg!(GAMMA, pub mod module_with_exported_macros;);
 ```
 
 See the [Readiness section](https://github.com/commonwarexyz/monorepo#readiness) in the main README for more details.

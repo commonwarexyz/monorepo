@@ -80,10 +80,10 @@ cfg_if::cfg_if! {
         use crate::types::Round;
         use commonware_cryptography::certificate::Scheme;
 
-        // Use cfg_ready! for file modules in proc macro input (proc macros don't work).
-        commonware_utils::cfg_ready!(BETA, pub mod application;);
-        commonware_utils::cfg_ready!(GAMMA, pub mod marshal;);
-        commonware_utils::cfg_ready!(GAMMA, use crate::marshal::ingress::mailbox::AncestorStream;);
+        // Use ready_cfg! for file modules in proc macro input (proc macros don't work).
+        commonware_utils::ready_cfg!(BETA, pub mod application;);
+        commonware_utils::ready_cfg!(GAMMA, pub mod marshal;);
+        commonware_utils::ready_cfg!(GAMMA, use crate::marshal::ingress::mailbox::AncestorStream;);
 
         mod reporter;
         pub use reporter::*;

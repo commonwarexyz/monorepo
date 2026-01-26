@@ -19,7 +19,7 @@ use rand_chacha::ChaCha20Rng;
 use rand_core::CryptoRngCore;
 
 // Modules containing #[macro_export] macros must use direct cfg attributes
-// instead of cfg_ready! to avoid macro_expanded_macro_exports_accessed_by_absolute_paths warning.
+// instead of ready_cfg! to avoid macro_expanded_macro_exports_accessed_by_absolute_paths warning.
 #[cfg(not(min_readiness_DELTA))]
 #[cfg(not(min_readiness_EPSILON))]
 pub mod bls12381;

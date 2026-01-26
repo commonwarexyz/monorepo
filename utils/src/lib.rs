@@ -15,10 +15,10 @@ extern crate alloc;
 ///
 /// # Example
 /// ```rust,ignore
-/// commonware_utils::cfg_ready!(GAMMA, pub mod my_module;);
+/// commonware_utils::ready_cfg!(GAMMA, pub mod my_module;);
 /// ```
 #[macro_export]
-macro_rules! cfg_ready {
+macro_rules! ready_cfg {
     (ALPHA, $($item:tt)*) => {
         #[cfg(not(min_readiness_BETA))]
         #[cfg(not(min_readiness_GAMMA))]
