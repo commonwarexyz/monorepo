@@ -179,7 +179,6 @@ impl CodecRead for Header {
 }
 
 #[cfg(feature = "arbitrary")]
-#[stability(GAMMA)]
 impl arbitrary::Arbitrary<'_> for Header {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let version: u16 = u.arbitrary()?;
