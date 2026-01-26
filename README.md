@@ -27,12 +27,14 @@ Each public API item in the Commonware Library is annotated with a readiness lev
 Higher readiness code can only depend on code with equal or higher readiness. This is enforced at compile time:
 
 ```bash
-# Generate docs for only code with readiness >= 2
-RUSTFLAGS="--cfg min_readiness_2" RUSTDOCFLAGS="--cfg min_readiness_2" cargo doc
+# Generate docs for only code with readiness >= GAMMA (level 2)
+RUSTFLAGS="--cfg min_readiness_GAMMA" RUSTDOCFLAGS="--cfg min_readiness_GAMMA" cargo doc
 
-# Check if your application only uses commonware APIs with readiness >= 2
-RUSTFLAGS="--cfg min_readiness_2" cargo build -p my-app
+# Check if your application only uses commonware APIs with readiness >= GAMMA
+RUSTFLAGS="--cfg min_readiness_GAMMA" cargo build -p my-app
 ```
+
+Level names: `ALPHA` (0), `BETA` (1), `GAMMA` (2), `DELTA` (3), `EPSILON` (4).
 
 * [broadcast](./broadcast/README.md): Disseminate data over a wide-area network.
 * [codec](./codec/README.md): Serialize structured data.
