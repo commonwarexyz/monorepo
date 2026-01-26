@@ -71,64 +71,65 @@ stability_scope!(GAMMA {
     pub const DEFAULT_BLOB_VERSION: u16 = 0;
 });
 
-/// Errors that can occur when interacting with the runtime.
-#[derive(Error, Debug)]
-#[commonware_macros::stability(GAMMA)]
-pub enum Error {
-    #[error("exited")]
-    Exited,
-    #[error("closed")]
-    Closed,
-    #[error("timeout")]
-    Timeout,
-    #[error("bind failed")]
-    BindFailed,
-    #[error("connection failed")]
-    ConnectionFailed,
-    #[error("write failed")]
-    WriteFailed,
-    #[error("read failed")]
-    ReadFailed,
-    #[error("send failed")]
-    SendFailed,
-    #[error("recv failed")]
-    RecvFailed,
-    #[error("dns resolution failed: {0}")]
-    ResolveFailed(String),
-    #[error("partition name invalid, must only contain alphanumeric, dash ('-'), or underscore ('_') characters: {0}")]
-    PartitionNameInvalid(String),
-    #[error("partition creation failed: {0}")]
-    PartitionCreationFailed(String),
-    #[error("partition missing: {0}")]
-    PartitionMissing(String),
-    #[error("partition corrupt: {0}")]
-    PartitionCorrupt(String),
-    #[error("blob open failed: {0}/{1} error: {2}")]
-    BlobOpenFailed(String, String, IoError),
-    #[error("blob missing: {0}/{1}")]
-    BlobMissing(String, String),
-    #[error("blob resize failed: {0}/{1} error: {2}")]
-    BlobResizeFailed(String, String, IoError),
-    #[error("blob sync failed: {0}/{1} error: {2}")]
-    BlobSyncFailed(String, String, IoError),
-    #[error("blob insufficient length")]
-    BlobInsufficientLength,
-    #[error("blob corrupt: {0}/{1} reason: {2}")]
-    BlobCorrupt(String, String, String),
-    #[error("blob version mismatch: expected one of {expected:?}, found {found}")]
-    BlobVersionMismatch {
-        expected: std::ops::RangeInclusive<u16>,
-        found: u16,
-    },
-    #[error("invalid or missing checksum")]
-    InvalidChecksum,
-    #[error("offset overflow")]
-    OffsetOverflow,
-    #[error("immutable blob")]
-    ImmutableBlob,
-    #[error("io error: {0}")]
-    Io(#[from] IoError),
-}
+stability_scope!(GAMMA {
+    /// Errors that can occur when interacting with the runtime.
+    #[derive(Error, Debug)]
+    pub enum Error {
+        #[error("exited")]
+        Exited,
+        #[error("closed")]
+        Closed,
+        #[error("timeout")]
+        Timeout,
+        #[error("bind failed")]
+        BindFailed,
+        #[error("connection failed")]
+        ConnectionFailed,
+        #[error("write failed")]
+        WriteFailed,
+        #[error("read failed")]
+        ReadFailed,
+        #[error("send failed")]
+        SendFailed,
+        #[error("recv failed")]
+        RecvFailed,
+        #[error("dns resolution failed: {0}")]
+        ResolveFailed(String),
+        #[error("partition name invalid, must only contain alphanumeric, dash ('-'), or underscore ('_') characters: {0}")]
+        PartitionNameInvalid(String),
+        #[error("partition creation failed: {0}")]
+        PartitionCreationFailed(String),
+        #[error("partition missing: {0}")]
+        PartitionMissing(String),
+        #[error("partition corrupt: {0}")]
+        PartitionCorrupt(String),
+        #[error("blob open failed: {0}/{1} error: {2}")]
+        BlobOpenFailed(String, String, IoError),
+        #[error("blob missing: {0}/{1}")]
+        BlobMissing(String, String),
+        #[error("blob resize failed: {0}/{1} error: {2}")]
+        BlobResizeFailed(String, String, IoError),
+        #[error("blob sync failed: {0}/{1} error: {2}")]
+        BlobSyncFailed(String, String, IoError),
+        #[error("blob insufficient length")]
+        BlobInsufficientLength,
+        #[error("blob corrupt: {0}/{1} reason: {2}")]
+        BlobCorrupt(String, String, String),
+        #[error("blob version mismatch: expected one of {expected:?}, found {found}")]
+        BlobVersionMismatch {
+            expected: std::ops::RangeInclusive<u16>,
+            found: u16,
+        },
+        #[error("invalid or missing checksum")]
+        InvalidChecksum,
+        #[error("offset overflow")]
+        OffsetOverflow,
+        #[error("immutable blob")]
+        ImmutableBlob,
+        #[error("io error: {0}")]
+        Io(#[from] IoError),
+    }
+});
 
 /// Interface that any task scheduler must implement to start
 /// running tasks.

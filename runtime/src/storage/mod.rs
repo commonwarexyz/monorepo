@@ -179,20 +179,22 @@ impl arbitrary::Arbitrary<'_> for Header {
     }
 }
 
-/// Validate that a partition name contains only allowed characters.
-///
-/// Partition names must only contain alphanumeric characters, dashes ('-'),
-/// or underscores ('_').
-pub fn validate_partition_name(partition: &str) -> Result<(), crate::Error> {
-    if partition.is_empty()
-        || partition
-            .chars()
-            .any(|c| !(c.is_ascii_alphanumeric() || ['_', '-'].contains(&c)))
-    {
-        return Err(crate::Error::PartitionNameInvalid(partition.into()));
+commonware_macros::stability_scope!(GAMMA {
+    /// Validate that a partition name contains only allowed characters.
+    ///
+    /// Partition names must only contain alphanumeric characters, dashes ('-'),
+    /// or underscores ('_').
+    pub fn validate_partition_name(partition: &str) -> Result<(), crate::Error> {
+        if partition.is_empty()
+            || partition
+                .chars()
+                .any(|c| !(c.is_ascii_alphanumeric() || ['_', '-'].contains(&c)))
+        {
+            return Err(crate::Error::PartitionNameInvalid(partition.into()));
+        }
+        Ok(())
     }
-    Ok(())
-}
+});
 
 #[cfg(test)]
 pub(crate) mod tests {
