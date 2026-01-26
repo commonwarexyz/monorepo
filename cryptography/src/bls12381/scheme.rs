@@ -112,7 +112,9 @@ impl crate::Signer for PrivateKey {
     type PublicKey = PublicKey;
 
     fn public_key(&self) -> Self::PublicKey {
-        PublicKey::from(ops::compute_public::<MinPk>(&self.key))
+        ops::compute_public::<MinPk>(&self.key)
+            .try_into()
+            .expect("non-zero private key produces non-identity public key")
     }
 
     fn sign(&self, namespace: &[u8], msg: &[u8]) -> Self::Signature {
@@ -179,6 +181,9 @@ impl Read for PublicKey {
         let raw = <[u8; Self::SIZE]>::read(buf)?;
         let key = <MinPk as Variant>::Public::decode(raw.as_ref())
             .map_err(|e| CodecError::Wrapped(CURVE_NAME, e.into()))?;
+        if key.is_identity() {
+            return Err(CodecError::Invalid(CURVE_NAME, "Identity"));
+        }
         Ok(Self { raw, key })
     }
 }
@@ -222,18 +227,15 @@ impl Deref for PublicKey {
     }
 }
 
-impl From<<MinPk as Variant>::Public> for PublicKey {
-    fn from(key: <MinPk as Variant>::Public) -> Self {
-        assert!(
-            !key.is_identity(),
-            "cannot create PublicKey from identity point"
-        );
-        assert!(
-            key.is_in_group(),
-            "cannot create PublicKey from point outside G1"
-        );
+impl TryFrom<<MinPk as Variant>::Public> for PublicKey {
+    type Error = CodecError;
+
+    fn try_from(key: <MinPk as Variant>::Public) -> Result<Self, Self::Error> {
+        if key.is_identity() {
+            return Err(CodecError::Invalid(CURVE_NAME, "Identity"));
+        }
         let raw = key.encode_fixed();
-        Self { raw, key }
+        Ok(Self { raw, key })
     }
 }
 
@@ -334,14 +336,6 @@ impl Deref for Signature {
 
 impl From<<MinPk as Variant>::Signature> for Signature {
     fn from(signature: <MinPk as Variant>::Signature) -> Self {
-        assert!(
-            !signature.is_identity(),
-            "cannot create Signature from identity point"
-        );
-        assert!(
-            signature.is_in_group(),
-            "cannot create Signature from point outside G2"
-        );
         let raw = signature.encode_fixed();
         Self { raw, signature }
     }
@@ -496,17 +490,27 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "cannot create PublicKey from identity point")]
-    fn test_from_public_rejects_identity() {
+    fn test_try_from_public_rejects_identity() {
         let identity = group::G1::zero();
-        let _ = PublicKey::from(identity);
+        let result = PublicKey::try_from(identity);
+        assert!(result.is_err());
     }
 
     #[test]
-    #[should_panic(expected = "cannot create Signature from identity point")]
-    fn test_from_signature_rejects_identity() {
+    fn test_public_key_read_rejects_identity() {
+        let identity = group::G1::zero();
+        let encoded = identity.encode();
+        let result = PublicKey::decode(encoded);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_signature_decode_identity() {
         let identity = group::G2::zero();
-        let _ = Signature::from(identity);
+        let encoded = identity.encode();
+        let decoded = Signature::decode(encoded).unwrap();
+        let inner: &group::G2 = decoded.as_ref();
+        assert_eq!(*inner, identity);
     }
 
     #[test]
