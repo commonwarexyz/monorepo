@@ -32,6 +32,7 @@ fn page_size() -> usize {
 }
 
 #[cfg(not(unix))]
+#[allow(clippy::missing_const_for_fn)]
 fn page_size() -> usize {
     4096
 }
@@ -49,7 +50,35 @@ pub struct BufferPoolConfig {
     pub prefill: bool,
 }
 
+impl Default for BufferPoolConfig {
+    fn default() -> Self {
+        Self::for_network()
+    }
+}
+
 impl BufferPoolConfig {
+    /// Network I/O preset: 4KB-64KB buffers, 64 per class, prefilled.
+    pub fn for_network() -> Self {
+        let page = page_size();
+        Self {
+            min_size: page,
+            max_size: 64 * 1024,
+            max_per_class: 64,
+            prefill: true,
+        }
+    }
+
+    /// Storage I/O preset: 4KB-64KB buffers, 32 per class, prefilled.
+    pub fn for_storage() -> Self {
+        let page = page_size();
+        Self {
+            min_size: page,
+            max_size: 64 * 1024,
+            max_per_class: 32,
+            prefill: true,
+        }
+    }
+
     /// Validates the configuration.
     ///
     /// # Panics
@@ -426,6 +455,45 @@ impl BufferPool {
     /// Returns the pool configuration.
     pub fn config(&self) -> &BufferPoolConfig {
         &self.inner.config
+    }
+}
+
+/// Composite type holding buffer pools for different I/O domains.
+#[derive(Clone)]
+pub struct BufferPools {
+    network: BufferPool,
+    storage: BufferPool,
+}
+
+impl BufferPools {
+    /// Creates buffer pools with the given configurations.
+    pub fn new(
+        network_config: BufferPoolConfig,
+        storage_config: BufferPoolConfig,
+        registry: &mut Registry,
+    ) -> Self {
+        let network = BufferPool::new(network_config, registry.sub_registry_with_prefix("network"));
+        let storage = BufferPool::new(storage_config, registry.sub_registry_with_prefix("storage"));
+        Self { network, storage }
+    }
+
+    /// Creates buffer pools with default configurations.
+    pub fn with_defaults(registry: &mut Registry) -> Self {
+        Self::new(
+            BufferPoolConfig::for_network(),
+            BufferPoolConfig::for_storage(),
+            registry,
+        )
+    }
+
+    /// Returns the network buffer pool.
+    pub const fn network(&self) -> &BufferPool {
+        &self.network
+    }
+
+    /// Returns the storage buffer pool.
+    pub const fn storage(&self) -> &BufferPool {
+        &self.storage
     }
 }
 
@@ -1069,5 +1137,66 @@ mod tests {
         // Can write again from the beginning
         pooled.put_slice(b"new data");
         assert_eq!(pooled.as_ref(), b"new data");
+    }
+
+    #[test]
+    fn test_config_default() {
+        let config = BufferPoolConfig::default();
+        config.validate();
+        assert_eq!(config.min_size, page_size());
+        assert_eq!(config.max_size, 64 * 1024);
+        assert_eq!(config.max_per_class, 64);
+        assert!(config.prefill);
+    }
+
+    #[test]
+    fn test_config_for_network() {
+        let config = BufferPoolConfig::for_network();
+        config.validate();
+        assert_eq!(config.min_size, page_size());
+        assert_eq!(config.max_size, 64 * 1024);
+        assert_eq!(config.max_per_class, 64);
+        assert!(config.prefill);
+    }
+
+    #[test]
+    fn test_config_for_storage() {
+        let config = BufferPoolConfig::for_storage();
+        config.validate();
+        assert_eq!(config.min_size, page_size());
+        assert_eq!(config.max_size, 64 * 1024);
+        assert_eq!(config.max_per_class, 32);
+        assert!(config.prefill);
+    }
+
+    #[test]
+    fn test_buffer_pools_with_defaults() {
+        let mut registry = test_registry();
+        let pools = BufferPools::with_defaults(&mut registry);
+
+        // Verify network pool works
+        let net_buf = pools.network().alloc(1024).expect("network alloc failed");
+        assert!(net_buf.capacity() >= page_size());
+
+        // Verify storage pool works
+        let storage_buf = pools.storage().alloc(1024).expect("storage alloc failed");
+        assert!(storage_buf.capacity() >= page_size());
+    }
+
+    #[test]
+    fn test_buffer_pools_new() {
+        let mut registry = test_registry();
+        let pools = BufferPools::new(
+            BufferPoolConfig::for_network(),
+            BufferPoolConfig::for_storage(),
+            &mut registry,
+        );
+
+        // Access and use both pools
+        let net_cfg = pools.network().config();
+        assert_eq!(net_cfg.max_per_class, 64);
+
+        let storage_cfg = pools.storage().config();
+        assert_eq!(storage_cfg.max_per_class, 32);
     }
 }

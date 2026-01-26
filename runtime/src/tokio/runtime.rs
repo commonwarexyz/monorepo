@@ -330,6 +330,11 @@ impl crate::Runner for Runner {
             }
         }
 
+        // Initialize buffer pools
+        let buffer_pools = crate::BufferPools::with_defaults(
+            runtime_registry.sub_registry_with_prefix("buffer_pool"),
+        );
+
         // Initialize executor
         let executor = Arc::new(Executor {
             registry: Mutex::new(registry),
@@ -351,6 +356,7 @@ impl crate::Runner for Runner {
             attributes: Vec::new(),
             executor: executor.clone(),
             network,
+            buffer_pools: Arc::new(buffer_pools),
             tree: Tree::root(),
             execution: Execution::default(),
             instrumented: false,
@@ -387,6 +393,7 @@ pub struct Context {
     executor: Arc<Executor>,
     storage: Storage,
     network: Network,
+    buffer_pools: Arc<crate::BufferPools>,
     tree: Arc<Tree>,
     execution: Execution,
     instrumented: bool,
@@ -401,6 +408,7 @@ impl Clone for Context {
             executor: self.executor.clone(),
             storage: self.storage.clone(),
             network: self.network.clone(),
+            buffer_pools: self.buffer_pools.clone(),
 
             tree: child,
             execution: Execution::default(),
@@ -710,5 +718,11 @@ impl crate::Storage for Context {
 
     async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
         self.storage.scan(partition).await
+    }
+}
+
+impl crate::Pooling for Context {
+    fn buffer_pools(&self) -> &crate::BufferPools {
+        &self.buffer_pools
     }
 }
