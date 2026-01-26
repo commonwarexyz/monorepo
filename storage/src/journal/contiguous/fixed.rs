@@ -161,6 +161,7 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     ///
     /// If both legacy and new blobs partitions contain data, returns corruption.
     /// If neither contains data, defaults to the new blobs partition.
+    // TODO(#2941): Remove legacy partition support
     async fn select_blob_partition(context: &E, cfg: &Config) -> Result<String, Error> {
         let legacy_partition = cfg.partition.as_str();
         let new_partition = format!("{}-blobs", cfg.partition);
