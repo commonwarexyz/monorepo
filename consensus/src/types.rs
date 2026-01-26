@@ -774,6 +774,9 @@ impl Read for CodingCommitment {
         buf: &mut impl bytes::Buf,
         _cfg: &Self::Cfg,
     ) -> Result<Self, commonware_codec::Error> {
+        if buf.remaining() < Self::SIZE {
+            return Err(commonware_codec::Error::EndOfBuffer);
+        }
         let mut arr = [0u8; Self::SIZE];
         buf.copy_to_slice(&mut arr);
         Ok(Self(arr))
