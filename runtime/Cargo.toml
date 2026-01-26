@@ -24,6 +24,7 @@ commonware-cryptography = { workspace = true, features = ["std"] }
 commonware-macros.workspace = true
 commonware-parallel = { workspace = true, features = ["std"] }
 commonware-utils = { workspace = true, features = ["std"] }
+crossbeam-queue.workspace = true
 futures.workspace = true
 governor.workspace = true
 io-uring = { workspace = true, optional = true }

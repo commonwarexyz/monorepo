@@ -4,9 +4,13 @@
 //! - [`IoBufMut`]: Mutable byte buffer
 //! - [`IoBufs`]: Container for one or more immutable buffers
 //! - [`IoBufsMut`]: Container for one or more mutable buffers
+//! - [`BufferPool`]: Pool of reusable, page-aligned buffers
+
+mod pool;
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use commonware_codec::{util::at_least, EncodeSize, Error, RangeCfg, Read, Write};
+pub use pool::{BufferPool, BufferPoolConfig, PooledBufMut};
 use std::{collections::VecDeque, ops::RangeBounds};
 
 /// Immutable byte buffer.
@@ -192,16 +196,34 @@ impl arbitrary::Arbitrary<'_> for IoBuf {
 /// Mutable byte buffer.
 ///
 /// Use this to build or mutate payloads before freezing into `IoBuf`.
-#[derive(Debug, Default)]
+///
+/// Can be either an owned buffer (backed by `BytesMut`) or a pooled buffer
+/// (allocated from a `BufferPool`). Pooled buffers are automatically returned
+/// to the pool when dropped or frozen.
+#[derive(Debug)]
 pub struct IoBufMut {
-    inner: BytesMut,
+    inner: IoBufMutInner,
+}
+
+#[derive(Debug)]
+enum IoBufMutInner {
+    Owned(BytesMut),
+    Pooled(PooledBufMut),
+}
+
+impl Default for IoBufMut {
+    fn default() -> Self {
+        Self {
+            inner: IoBufMutInner::Owned(BytesMut::new()),
+        }
+    }
 }
 
 impl IoBufMut {
     /// Create a buffer with the given capacity.
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
-            inner: BytesMut::with_capacity(capacity),
+            inner: IoBufMutInner::Owned(BytesMut::with_capacity(capacity)),
         }
     }
 
@@ -212,7 +234,14 @@ impl IoBufMut {
     /// (e.g., `file.read_exact`).
     pub fn zeroed(len: usize) -> Self {
         Self {
-            inner: BytesMut::zeroed(len),
+            inner: IoBufMutInner::Owned(BytesMut::zeroed(len)),
+        }
+    }
+
+    /// Create a buffer from a pooled allocation.
+    pub(crate) const fn from_pooled(pooled: PooledBufMut) -> Self {
+        Self {
+            inner: IoBufMutInner::Pooled(pooled),
         }
     }
 
@@ -224,7 +253,10 @@ impl IoBufMut {
     /// have been initialized.
     #[inline]
     pub unsafe fn set_len(&mut self, len: usize) {
-        self.inner.set_len(len);
+        match &mut self.inner {
+            IoBufMutInner::Owned(b) => b.set_len(len),
+            IoBufMutInner::Pooled(b) => b.set_len(len),
+        }
     }
 
     /// Number of bytes remaining in the buffer.
@@ -242,28 +274,63 @@ impl IoBufMut {
     /// Freeze into immutable `IoBuf`.
     #[inline]
     pub fn freeze(self) -> IoBuf {
-        self.inner.freeze().into()
+        match self.inner {
+            IoBufMutInner::Owned(b) => b.freeze().into(),
+            IoBufMutInner::Pooled(b) => b.freeze(),
+        }
     }
 
     /// Returns the total capacity.
     #[inline]
     pub fn capacity(&self) -> usize {
-        self.inner.capacity()
+        match &self.inner {
+            IoBufMutInner::Owned(b) => b.capacity(),
+            IoBufMutInner::Pooled(b) => b.capacity(),
+        }
     }
 
     /// Get raw mutable pointer.
     #[inline]
     pub fn as_mut_ptr(&mut self) -> *mut u8 {
-        self.inner.as_mut_ptr()
+        match &mut self.inner {
+            IoBufMutInner::Owned(b) => b.as_mut_ptr(),
+            IoBufMutInner::Pooled(b) => b.as_mut_ptr(),
+        }
     }
 
     /// Resizes the buffer to `new_len`, filling new bytes with `value`.
     ///
     /// If `new_len` is less than the current length, the buffer is truncated.
     /// If `new_len` is greater, the buffer is extended with `value` bytes.
+    ///
+    /// # Panics
+    ///
+    /// Panics if called on a pooled buffer and `new_len` exceeds capacity.
+    /// Pooled buffers have fixed capacity and cannot grow.
     #[inline]
     pub fn resize(&mut self, new_len: usize, value: u8) {
-        self.inner.resize(new_len, value);
+        match &mut self.inner {
+            IoBufMutInner::Owned(b) => b.resize(new_len, value),
+            IoBufMutInner::Pooled(b) => {
+                let current_len = b.len();
+                if new_len <= current_len {
+                    // SAFETY: Truncating to a smaller length is always safe.
+                    unsafe { b.set_len(new_len) };
+                } else {
+                    assert!(
+                        new_len <= b.capacity(),
+                        "cannot resize pooled buffer beyond capacity"
+                    );
+                    // Fill new bytes with value
+                    let ptr = b.as_mut_ptr();
+                    // SAFETY: We just verified new_len <= capacity.
+                    unsafe {
+                        std::ptr::write_bytes(ptr.add(current_len), value, new_len - current_len);
+                        b.set_len(new_len);
+                    }
+                }
+            }
+        }
     }
 
     /// Truncates the buffer to `len` bytes.
@@ -271,27 +338,44 @@ impl IoBufMut {
     /// If `len` is greater than the current length, this has no effect.
     #[inline]
     pub fn truncate(&mut self, len: usize) {
-        self.inner.truncate(len);
+        match &mut self.inner {
+            IoBufMutInner::Owned(b) => b.truncate(len),
+            IoBufMutInner::Pooled(b) => {
+                if len < b.len() {
+                    // SAFETY: Truncating to a smaller length is always safe.
+                    unsafe { b.set_len(len) };
+                }
+            }
+        }
     }
 
     /// Clears the buffer, setting its length to 0.
     #[inline]
     pub fn clear(&mut self) {
-        self.inner.clear();
+        match &mut self.inner {
+            IoBufMutInner::Owned(b) => b.clear(),
+            IoBufMutInner::Pooled(b) => b.clear(),
+        }
     }
 }
 
 impl AsRef<[u8]> for IoBufMut {
     #[inline]
     fn as_ref(&self) -> &[u8] {
-        self.inner.as_ref()
+        match &self.inner {
+            IoBufMutInner::Owned(b) => b.as_ref(),
+            IoBufMutInner::Pooled(b) => b.as_ref(),
+        }
     }
 }
 
 impl AsMut<[u8]> for IoBufMut {
     #[inline]
     fn as_mut(&mut self) -> &mut [u8] {
-        self.inner.as_mut()
+        match &mut self.inner {
+            IoBufMutInner::Owned(b) => b.as_mut(),
+            IoBufMutInner::Pooled(b) => b.as_mut(),
+        }
     }
 }
 
@@ -326,35 +410,53 @@ impl<const N: usize> PartialEq<&[u8; N]> for IoBufMut {
 impl Buf for IoBufMut {
     #[inline]
     fn remaining(&self) -> usize {
-        self.inner.remaining()
+        match &self.inner {
+            IoBufMutInner::Owned(b) => b.remaining(),
+            IoBufMutInner::Pooled(b) => b.remaining(),
+        }
     }
 
     #[inline]
     fn chunk(&self) -> &[u8] {
-        self.inner.chunk()
+        match &self.inner {
+            IoBufMutInner::Owned(b) => b.chunk(),
+            IoBufMutInner::Pooled(b) => b.chunk(),
+        }
     }
 
     #[inline]
     fn advance(&mut self, cnt: usize) {
-        self.inner.advance(cnt);
+        match &mut self.inner {
+            IoBufMutInner::Owned(b) => b.advance(cnt),
+            IoBufMutInner::Pooled(b) => b.advance(cnt),
+        }
     }
 }
 
-// SAFETY: Delegates to BytesMut which implements BufMut safely.
+// SAFETY: Delegates to BytesMut or PooledBufMut which implement BufMut safely.
 unsafe impl BufMut for IoBufMut {
     #[inline]
     fn remaining_mut(&self) -> usize {
-        self.inner.remaining_mut()
+        match &self.inner {
+            IoBufMutInner::Owned(b) => b.remaining_mut(),
+            IoBufMutInner::Pooled(b) => b.remaining_mut(),
+        }
     }
 
     #[inline]
     unsafe fn advance_mut(&mut self, cnt: usize) {
-        self.inner.advance_mut(cnt);
+        match &mut self.inner {
+            IoBufMutInner::Owned(b) => b.advance_mut(cnt),
+            IoBufMutInner::Pooled(b) => b.advance_mut(cnt),
+        }
     }
 
     #[inline]
     fn chunk_mut(&mut self) -> &mut bytes::buf::UninitSlice {
-        self.inner.chunk_mut()
+        match &mut self.inner {
+            IoBufMutInner::Owned(b) => b.chunk_mut(),
+            IoBufMutInner::Pooled(b) => b.chunk_mut(),
+        }
     }
 }
 
@@ -367,7 +469,7 @@ impl From<Vec<u8>> for IoBufMut {
 impl From<&[u8]> for IoBufMut {
     fn from(slice: &[u8]) -> Self {
         Self {
-            inner: BytesMut::from(slice),
+            inner: IoBufMutInner::Owned(BytesMut::from(slice)),
         }
     }
 }
@@ -386,14 +488,16 @@ impl<const N: usize> From<&[u8; N]> for IoBufMut {
 
 impl From<BytesMut> for IoBufMut {
     fn from(bytes: BytesMut) -> Self {
-        Self { inner: bytes }
+        Self {
+            inner: IoBufMutInner::Owned(bytes),
+        }
     }
 }
 
 impl From<Bytes> for IoBufMut {
     fn from(bytes: Bytes) -> Self {
         Self {
-            inner: BytesMut::from(bytes),
+            inner: IoBufMutInner::Owned(BytesMut::from(bytes)),
         }
     }
 }
@@ -675,7 +779,7 @@ impl IoBufsMut {
                 let total_len: usize = bufs.iter().map(|b| b.len()).fold(0, usize::saturating_add);
                 let mut result = IoBufMut::with_capacity(total_len);
                 for buf in bufs {
-                    result.inner.extend_from_slice(buf.as_ref());
+                    result.put_slice(buf.as_ref());
                 }
                 result
             }
