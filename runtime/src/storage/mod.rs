@@ -1,53 +1,7 @@
 //! Implementations of the `Storage` trait that can be used by the runtime.
 
 use crate::{Buf, BufMut};
-#[stability(GAMMA)]
-use commonware_codec::{DecodeExt, FixedSize, Read as CodecRead, Write as CodecWrite};
-use commonware_macros::{stability, stability_mod};
-#[stability(GAMMA)]
-use commonware_utils::hex;
-#[stability(GAMMA)]
-use std::ops::RangeInclusive;
-
-/// Errors that can occur when validating a blob header.
-#[stability(GAMMA)]
-#[derive(Debug)]
-pub(crate) enum HeaderError {
-    InvalidMagic {
-        expected: [u8; 4],
-        found: [u8; 4],
-    },
-    UnsupportedRuntimeVersion {
-        expected: u16,
-        found: u16,
-    },
-    VersionMismatch {
-        expected: RangeInclusive<u16>,
-        found: u16,
-    },
-}
-
-#[stability(GAMMA)]
-impl HeaderError {
-    /// Converts this error into an [`Error`](enum@crate::Error) with partition and name context.
-    pub(crate) fn into_error(self, partition: &str, name: &[u8]) -> crate::Error {
-        match self {
-            Self::InvalidMagic { expected, found } => crate::Error::BlobCorrupt(
-                partition.into(),
-                hex(name),
-                format!("invalid magic: expected {expected:?}, found {found:?}"),
-            ),
-            Self::UnsupportedRuntimeVersion { expected, found } => crate::Error::BlobCorrupt(
-                partition.into(),
-                hex(name),
-                format!("unsupported runtime version: expected {expected}, found {found}"),
-            ),
-            Self::VersionMismatch { expected, found } => {
-                crate::Error::BlobVersionMismatch { expected, found }
-            }
-        }
-    }
-}
+use commonware_macros::{stability_mod, stability_scope};
 
 stability_mod!(ALPHA, pub mod audited);
 #[cfg(feature = "iouring-storage")]
@@ -57,22 +11,63 @@ stability_mod!(GAMMA, pub mod metered);
 #[cfg(all(not(target_arch = "wasm32"), not(feature = "iouring-storage")))]
 stability_mod!(GAMMA, pub mod tokio);
 
-/// Fixed-size header at the start of each [crate::Blob].
-///
-/// On-disk layout (8 bytes, big-endian):
-/// - Bytes 0-3: [Header::MAGIC]
-/// - Bytes 4-5: Runtime Version (u16)
-/// - Bytes 6-7: Blob Version (u16)
-#[stability(GAMMA)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct Header {
-    magic: [u8; Self::MAGIC_LENGTH],
-    runtime_version: u16,
-    pub(crate) blob_version: u16,
-}
+stability_scope!(GAMMA {
+    use commonware_codec::{DecodeExt, FixedSize, Read as CodecRead, Write as CodecWrite};
+    use commonware_utils::hex;
+    use std::ops::RangeInclusive;
 
-#[stability(GAMMA)]
-impl Header {
+    /// Errors that can occur when validating a blob header.
+    #[derive(Debug)]
+    pub(crate) enum HeaderError {
+        InvalidMagic {
+            expected: [u8; 4],
+            found: [u8; 4],
+        },
+        UnsupportedRuntimeVersion {
+            expected: u16,
+            found: u16,
+        },
+        VersionMismatch {
+            expected: RangeInclusive<u16>,
+            found: u16,
+        },
+    }
+
+    impl HeaderError {
+        /// Converts this error into an [`Error`](enum@crate::Error) with partition and name context.
+        pub(crate) fn into_error(self, partition: &str, name: &[u8]) -> crate::Error {
+            match self {
+                Self::InvalidMagic { expected, found } => crate::Error::BlobCorrupt(
+                    partition.into(),
+                    hex(name),
+                    format!("invalid magic: expected {expected:?}, found {found:?}"),
+                ),
+                Self::UnsupportedRuntimeVersion { expected, found } => crate::Error::BlobCorrupt(
+                    partition.into(),
+                    hex(name),
+                    format!("unsupported runtime version: expected {expected}, found {found}"),
+                ),
+                Self::VersionMismatch { expected, found } => {
+                    crate::Error::BlobVersionMismatch { expected, found }
+                }
+            }
+        }
+    }
+
+    /// Fixed-size header at the start of each [crate::Blob].
+    ///
+    /// On-disk layout (8 bytes, big-endian):
+    /// - Bytes 0-3: [Header::MAGIC]
+    /// - Bytes 4-5: Runtime Version (u16)
+    /// - Bytes 6-7: Blob Version (u16)
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(crate) struct Header {
+        magic: [u8; Self::MAGIC_LENGTH],
+        runtime_version: u16,
+        pub(crate) blob_version: u16,
+    }
+
+    impl Header {
     /// Size of the header in bytes.
     pub(crate) const SIZE: usize = 8;
 
@@ -143,40 +138,38 @@ impl Header {
         }
         Ok(())
     }
-}
-
-#[stability(GAMMA)]
-impl FixedSize for Header {
-    const SIZE: usize = Self::SIZE;
-}
-
-#[stability(GAMMA)]
-impl CodecWrite for Header {
-    fn write(&self, buf: &mut impl BufMut) {
-        buf.put_slice(&self.magic);
-        buf.put_u16(self.runtime_version);
-        buf.put_u16(self.blob_version);
     }
-}
 
-#[stability(GAMMA)]
-impl CodecRead for Header {
-    type Cfg = ();
-    fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
-        if buf.remaining() < Self::SIZE {
-            return Err(commonware_codec::Error::EndOfBuffer);
+    impl FixedSize for Header {
+        const SIZE: usize = Self::SIZE;
+    }
+
+    impl CodecWrite for Header {
+        fn write(&self, buf: &mut impl BufMut) {
+            buf.put_slice(&self.magic);
+            buf.put_u16(self.runtime_version);
+            buf.put_u16(self.blob_version);
         }
-        let mut magic = [0u8; Self::MAGIC_LENGTH];
-        buf.copy_to_slice(&mut magic);
-        let runtime_version = buf.get_u16();
-        let blob_version = buf.get_u16();
-        Ok(Self {
-            magic,
-            runtime_version,
-            blob_version,
-        })
     }
-}
+
+    impl CodecRead for Header {
+        type Cfg = ();
+        fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+            if buf.remaining() < Self::SIZE {
+                return Err(commonware_codec::Error::EndOfBuffer);
+            }
+            let mut magic = [0u8; Self::MAGIC_LENGTH];
+            buf.copy_to_slice(&mut magic);
+            let runtime_version = buf.get_u16();
+            let blob_version = buf.get_u16();
+            Ok(Self {
+                magic,
+                runtime_version,
+                blob_version,
+            })
+        }
+    }
+});
 
 #[cfg(feature = "arbitrary")]
 impl arbitrary::Arbitrary<'_> for Header {

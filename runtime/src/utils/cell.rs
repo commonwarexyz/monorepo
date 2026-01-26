@@ -1,14 +1,7 @@
 use crate::{signal, Error, Handle};
-#[stability(GAMMA)]
-use crate::{SinkOf, StreamOf};
-use commonware_macros::stability;
-#[stability(GAMMA)]
-use commonware_parallel::ThreadPool;
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use prometheus_client::registry::Metric;
 use rand::{CryptoRng, RngCore};
-#[stability(GAMMA)]
-use rayon::ThreadPoolBuildError;
 use std::{
     future::Future,
     net::SocketAddr,
@@ -148,16 +141,6 @@ where
     }
 }
 
-#[stability(GAMMA)]
-impl<C> crate::RayonPoolSpawner for Cell<C>
-where
-    C: crate::RayonPoolSpawner,
-{
-    fn create_pool(&self, concurrency: NonZeroUsize) -> Result<ThreadPool, ThreadPoolBuildError> {
-        self.as_present().create_pool(concurrency)
-    }
-}
-
 impl<C> crate::Metrics for Cell<C>
 where
     C: crate::Metrics,
@@ -215,6 +198,19 @@ where
 }
 
 commonware_macros::stability_scope!(GAMMA {
+    use crate::{SinkOf, StreamOf};
+    use commonware_parallel::ThreadPool;
+    use rayon::ThreadPoolBuildError;
+
+    impl<C> crate::RayonPoolSpawner for Cell<C>
+    where
+        C: crate::RayonPoolSpawner,
+    {
+        fn create_pool(&self, concurrency: NonZeroUsize) -> Result<ThreadPool, ThreadPoolBuildError> {
+            self.as_present().create_pool(concurrency)
+        }
+    }
+
     impl<C> crate::Network for Cell<C>
     where
         C: crate::Network,
@@ -263,6 +259,18 @@ commonware_macros::stability_scope!(GAMMA {
             self.as_present().scan(partition)
         }
     }
+
+    impl<C> crate::Resolver for Cell<C>
+    where
+        C: crate::Resolver,
+    {
+        fn resolve(
+            &self,
+            host: &str,
+        ) -> impl Future<Output = Result<Vec<std::net::IpAddr>, crate::Error>> + Send {
+            self.as_present().resolve(host)
+        }
+    }
 });
 
 impl<C> RngCore for Cell<C>
@@ -300,16 +308,3 @@ where
 }
 
 impl<C> ReasonablyRealtime for Cell<C> where C: ReasonablyRealtime {}
-
-#[commonware_macros::stability(GAMMA)]
-impl<C> crate::Resolver for Cell<C>
-where
-    C: crate::Resolver,
-{
-    fn resolve(
-        &self,
-        host: &str,
-    ) -> impl Future<Output = Result<Vec<std::net::IpAddr>, crate::Error>> + Send {
-        self.as_present().resolve(host)
-    }
-}
