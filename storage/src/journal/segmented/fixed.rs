@@ -369,6 +369,35 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         Ok(())
     }
 
+    /// Initialize a section with a specific number of items filled with a given value.
+    ///
+    /// This creates the section's blob and fills it with `item_count` copies of `fill`.
+    /// The data is written through the Append wrapper which handles checksums properly.
+    ///
+    /// # Arguments
+    /// * `section` - The section number to initialize
+    /// * `item_count` - Number of items to write
+    /// * `fill` - The value to fill each item with
+    pub(crate) async fn init_section_at_size_with_fill(
+        &mut self,
+        section: u64,
+        item_count: u64,
+        fill: A,
+    ) -> Result<(), Error> {
+        // Get or create the blob for this section
+        let blob = self.manager.get_or_create(section).await?;
+
+        // Encode the fill value once
+        let encoded = fill.encode_mut();
+
+        // Write the encoded value repeatedly
+        for _ in 0..item_count {
+            blob.append(&encoded).await?;
+        }
+
+        Ok(())
+    }
+
     /// Ensure a section exists, creating an empty blob if needed.
     ///
     /// This is used to maintain the invariant that at least one blob always exists

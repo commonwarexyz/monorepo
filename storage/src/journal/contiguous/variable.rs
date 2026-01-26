@@ -28,6 +28,10 @@ const DATA_SUFFIX: &str = "_data";
 /// Suffix appended to the base partition name for the offsets journal.
 const OFFSETS_SUFFIX: &str = "_offsets";
 
+/// Sentinel value used to mark placeholder offsets created by `init_at_size` or `clear_to_size`.
+/// This distinguishes intentionally empty state from stale offsets left by a crash.
+const OFFSET_SENTINEL: u64 = u64::MAX;
+
 /// Calculate the section number for a given position.
 ///
 /// # Arguments
@@ -199,8 +203,10 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
         // Validate and align offsets journal to match data journal
         let (oldest_retained_pos, size) =
             Self::align_journals(&mut data, &mut offsets, items_per_section).await?;
+        // When there's data (oldest_retained_pos != size), it must be section-aligned.
+        // When there's no data (oldest_retained_pos == size), alignment doesn't matter.
         assert!(
-            oldest_retained_pos.is_multiple_of(items_per_section),
+            oldest_retained_pos == size || oldest_retained_pos.is_multiple_of(items_per_section),
             "oldest_retained_pos is not section-aligned"
         );
 
@@ -243,8 +249,8 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
         )
         .await?;
 
-        // Initialize offsets journal at the target size
-        let offsets = fixed::Journal::init_at_size(
+        // Initialize offsets journal at the target size with sentinel values
+        let offsets = fixed::Journal::init_at_size_with_fill(
             context.with_label("offsets"),
             fixed::Config {
                 partition: cfg.offsets_partition(),
@@ -253,6 +259,7 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
                 write_buffer: cfg.write_buffer,
             },
             size,
+            OFFSET_SENTINEL,
         )
         .await?;
 
@@ -598,7 +605,9 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
     pub(crate) async fn clear_to_size(&mut self, new_size: u64) -> Result<(), Error> {
         self.data.clear().await?;
 
-        self.offsets.clear_to_size(new_size).await?;
+        self.offsets
+            .clear_to_size_with_fill(new_size, OFFSET_SENTINEL)
+            .await?;
         self.size = new_size;
         self.oldest_retained_pos = new_size;
         Ok(())
@@ -663,14 +672,43 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
 
             // data.blobs is empty. This can happen in two cases:
             // 1. We completely pruned the data journal but crashed before pruning
-            //    the offsets journal.
-            // 2. The data journal was never opened.
+            //    the offsets journal (or external data loss).
+            // 2. The journal was initialized via init_at_size/clear_to_size, possibly
+            //    followed by appends that crashed before data was synced.
+            //
+            // We find the first non-sentinel offset to determine the recovery action:
+            // - First non-sentinel at oldest: normal data loss, prune to size
+            // - First non-sentinel after oldest: init_at_size crash, rewind to that pos
+            // - No non-sentinel: all sentinels, keep them (init_at_size state)
             if let Some(oldest) = offsets.oldest_retained_pos() {
-                if oldest < size {
-                    // Offsets has unpruned entries but data is gone - align by pruning
-                    info!("crash repair: pruning offsets to {size} (prune-all crash)");
-                    offsets.prune(size).await?;
-                    offsets.sync().await?;
+                let mut first_stale_pos = None;
+                for pos in oldest..size {
+                    let offset = offsets.read(pos).await?;
+                    if offset != OFFSET_SENTINEL {
+                        first_stale_pos = Some(pos);
+                        break;
+                    }
+                }
+
+                match first_stale_pos {
+                    Some(stale_pos) if stale_pos == oldest => {
+                        // Normal journal data loss - all offsets are stale
+                        info!("crash repair: pruning offsets to {size} (data loss detected)");
+                        offsets.prune(size).await?;
+                        offsets.sync().await?;
+                    }
+                    Some(stale_pos) => {
+                        // init_at_size with crashed appends - rewind to first stale
+                        info!(
+                            "crash repair: rewinding offsets to {stale_pos} (stale appends detected)"
+                        );
+                        offsets.rewind(stale_pos).await?;
+                        offsets.sync().await?;
+                        return Ok((stale_pos, stale_pos));
+                    }
+                    None => {
+                        // All sentinels - init_at_size/clear_to_size state, keep them
+                    }
                 }
             }
 
@@ -1798,6 +1836,49 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_init_at_size_mid_section_persistence_without_data() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "init_at_size_mid_persist_empty".to_string(),
+                items_per_section: NZU64!(5),
+                compression: None,
+                codec_config: (),
+                buffer_pool: PoolRef::new(SMALL_PAGE_SIZE, NZUsize!(2)),
+                write_buffer: NZUsize!(1024),
+            };
+
+            // Initialize at position 17 (mid-section, creates zero-filled offsets at 15,16)
+            let journal =
+                Journal::<_, u64>::init_at_size(context.with_label("first"), cfg.clone(), 17)
+                    .await
+                    .unwrap();
+
+            assert_eq!(journal.size(), 17);
+            assert_eq!(journal.oldest_retained_pos(), None);
+
+            // Drop without writing any data
+            drop(journal);
+
+            // Reopen and verify size persisted
+            let mut journal = Journal::<_, u64>::init(context.with_label("second"), cfg.clone())
+                .await
+                .unwrap();
+
+            // BUG CHECK: Does size still equal 17?
+            assert_eq!(journal.size(), 17);
+            assert_eq!(journal.oldest_retained_pos(), None);
+
+            // Can append starting at position 17
+            let pos = journal.append(1700).await.unwrap();
+            assert_eq!(pos, 17);
+            assert_eq!(journal.read(17).await.unwrap(), 1700);
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
     fn test_init_at_size_large_offset() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -2576,6 +2657,118 @@ mod tests {
             for i in 100..105u64 {
                 assert_eq!(journal.read(i).await.unwrap(), i * 100);
             }
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// Test crash recovery after init_at_size followed by appends.
+    ///
+    /// Scenario: init_at_size(17) creates sentinels at 15,16. Append at 17,18.
+    /// Crash before data syncs. On restart, should rewind to position 17.
+    #[test_traced]
+    fn test_init_at_size_append_crash_recovery() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "init_at_size_crash".to_string(),
+                items_per_section: NZU64!(5),
+                compression: None,
+                codec_config: (),
+                buffer_pool: PoolRef::new(SMALL_PAGE_SIZE, NZUsize!(2)),
+                write_buffer: NZUsize!(1024),
+            };
+
+            // Phase 1: init_at_size and append some data
+            let mut journal =
+                Journal::<_, u64>::init_at_size(context.with_label("first"), cfg.clone(), 17)
+                    .await
+                    .unwrap();
+
+            assert_eq!(journal.size(), 17);
+            assert_eq!(journal.oldest_retained_pos(), None);
+
+            // Append data at positions 17, 18
+            journal.append(1700).await.unwrap();
+            journal.append(1800).await.unwrap();
+            assert_eq!(journal.size(), 19);
+
+            // DON'T sync - simulate crash
+            drop(journal);
+
+            // Phase 2: Simulate data loss by removing data partition
+            context
+                .remove(&cfg.data_partition(), None)
+                .await
+                .expect("Failed to remove data partition");
+
+            // Phase 3: Reopen - should detect stale offsets and rewind to 17
+            let journal = Journal::<_, u64>::init(context.with_label("second"), cfg.clone())
+                .await
+                .unwrap();
+
+            // Should be back to init_at_size(17) state
+            assert_eq!(journal.size(), 17);
+            assert_eq!(journal.oldest_retained_pos(), None);
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// Test crash recovery after clear_to_size followed by appends.
+    ///
+    /// Similar to init_at_size test but using clear_to_size path.
+    #[test_traced]
+    fn test_clear_to_size_append_crash_recovery() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "clear_to_size_crash".to_string(),
+                items_per_section: NZU64!(5),
+                compression: None,
+                codec_config: (),
+                buffer_pool: PoolRef::new(SMALL_PAGE_SIZE, NZUsize!(2)),
+                write_buffer: NZUsize!(1024),
+            };
+
+            // Phase 1: Create journal with data, then clear
+            let mut journal = Journal::<_, u64>::init(context.with_label("first"), cfg.clone())
+                .await
+                .unwrap();
+
+            // Append some initial data
+            for i in 0..10u64 {
+                journal.append(i * 100).await.unwrap();
+            }
+            journal.sync().await.unwrap();
+
+            // Clear to position 17 (mid-section)
+            journal.clear_to_size(17).await.unwrap();
+            assert_eq!(journal.size(), 17);
+            assert_eq!(journal.oldest_retained_pos(), None);
+
+            // Append new data at positions 17, 18
+            journal.append(1700).await.unwrap();
+            journal.append(1800).await.unwrap();
+            assert_eq!(journal.size(), 19);
+
+            // DON'T sync - simulate crash
+            drop(journal);
+
+            // Phase 2: Simulate data loss by removing data partition
+            context
+                .remove(&cfg.data_partition(), None)
+                .await
+                .expect("Failed to remove data partition");
+
+            // Phase 3: Reopen - should detect stale offsets and rewind to 17
+            let journal = Journal::<_, u64>::init(context.with_label("second"), cfg.clone())
+                .await
+                .unwrap();
+
+            // Should be back to clear_to_size(17) state
+            assert_eq!(journal.size(), 17);
+            assert_eq!(journal.oldest_retained_pos(), None);
 
             journal.destroy().await.unwrap();
         });
