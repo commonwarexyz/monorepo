@@ -1,6 +1,6 @@
 use crate::Error;
 use commonware_codec::{
-    varint::{Decoder, UInt},
+    varint::{Decoder, UInt, MAX_U32_VARINT_SIZE},
     Encode,
 };
 use commonware_runtime::{Buf, IoBuf, IoBufs, Sink, Stream};
@@ -30,22 +30,56 @@ pub async fn send_frame<S: Sink>(
 /// Returns an error if the message is too large, the varint is invalid, or the
 /// stream is closed.
 pub async fn recv_frame<T: Stream>(stream: &mut T, max_message_size: u32) -> Result<IoBufs, Error> {
-    // Read and decode the varint length prefix byte-by-byte
-    let mut decoder = Decoder::<u32>::new();
-    let len = loop {
-        let mut buf = stream.recv(1).await.map_err(Error::RecvFailed)?;
-        match decoder.feed(buf.get_u8()) {
-            Ok(Some(len)) => break len as usize,
-            Ok(None) => continue,
-            Err(_) => return Err(Error::InvalidVarint),
-        }
-    };
-    if len > max_message_size as usize {
-        return Err(Error::RecvTooLarge(len));
+    let (len, skip) = recv_length(stream).await?;
+    if len > max_message_size {
+        return Err(Error::RecvTooLarge(len as usize));
     }
 
-    // Read the rest of the message
-    stream.recv(len as u64).await.map_err(Error::RecvFailed)
+    stream
+        .recv(skip as u64 + len as u64)
+        .await
+        .map(|mut bufs| {
+            bufs.advance(skip as usize);
+            bufs
+        })
+        .map_err(Error::RecvFailed)
+}
+
+/// Receives and decodes the varint length prefix from the stream.
+/// Returns (payload_len, bytes_to_skip) where bytes_to_skip is:
+/// - varint_len if decoded from peek buffer (bytes not yet consumed)
+/// - 0 if decoded via recv (bytes already consumed)
+async fn recv_length<T: Stream>(stream: &mut T) -> Result<(u32, u32), Error> {
+    let mut decoder = Decoder::<u32>::new();
+
+    // Fast path: decode from peek buffer without blocking
+    let peeked = {
+        let peeked = stream.peek(MAX_U32_VARINT_SIZE as u64);
+        for (i, byte) in peeked.iter().enumerate() {
+            match decoder.feed(*byte) {
+                Ok(Some(len)) => return Ok((len, i as u32 + 1)),
+                Ok(None) => continue,
+                Err(_) => return Err(Error::InvalidVarint),
+            }
+        }
+        peeked.len()
+    };
+
+    // Slow path: fetch bytes one at a time (skipping already-decoded peek bytes)
+    let mut buf = stream
+        .recv(peeked as u64 + 1)
+        .await
+        .map_err(Error::RecvFailed)?;
+    buf.advance(peeked);
+
+    loop {
+        match decoder.feed(buf.get_u8()) {
+            Ok(Some(len)) => return Ok((len, 0)),
+            Ok(None) => {}
+            Err(_) => return Err(Error::InvalidVarint),
+        }
+        buf = stream.recv(1).await.map_err(Error::RecvFailed)?;
+    }
 }
 
 #[cfg(test)]
@@ -220,6 +254,40 @@ mod tests {
             // Expect an error because varint overflows u32
             let result = recv_frame(&mut stream, MAX_MESSAGE_SIZE).await;
             assert!(matches!(&result, Err(Error::InvalidVarint)));
+        });
+    }
+
+    #[test]
+    fn test_recv_frame_peek_paths() {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context| async move {
+            // 300 encodes as [0xAC, 0x02] (2-byte varint)
+            let mut payload = vec![0u8; 300];
+            context.fill(&mut payload[..]);
+
+            // Fast path: peek returns complete varint
+            let (mut sink, mut stream) = mocks::Channel::init();
+            send_frame(&mut sink, payload.clone(), MAX_MESSAGE_SIZE)
+                .await
+                .unwrap();
+            let data = recv_frame(&mut stream, MAX_MESSAGE_SIZE).await.unwrap();
+            assert_eq!(data.coalesce(), &payload[..]);
+
+            // Slow path: peek returns empty
+            let (mut sink, mut stream) = mocks::Channel::init_with_read_buffer_size(0);
+            send_frame(&mut sink, payload.clone(), MAX_MESSAGE_SIZE)
+                .await
+                .unwrap();
+            let data = recv_frame(&mut stream, MAX_MESSAGE_SIZE).await.unwrap();
+            assert_eq!(data.coalesce(), &payload[..]);
+
+            // Slow path: peek returns partial varint
+            let (mut sink, mut stream) = mocks::Channel::init_with_read_buffer_size(1);
+            send_frame(&mut sink, payload.clone(), MAX_MESSAGE_SIZE)
+                .await
+                .unwrap();
+            let data = recv_frame(&mut stream, MAX_MESSAGE_SIZE).await.unwrap();
+            assert_eq!(data.coalesce(), &payload[..]);
         });
     }
 }
