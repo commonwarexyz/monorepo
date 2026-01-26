@@ -51,21 +51,20 @@ commonware_macros::stability_scope!(GAMMA {
         /// Get the parent block's digest.
         fn parent(&self) -> Self::Commitment;
     }
+
+    /// CertifiableBlock extends [Block] with consensus context information.
+    ///
+    /// This trait is required for blocks used with deferred verification in [CertifiableAutomaton].
+    /// It allows the verification context to be derived directly from the block when a validator
+    /// needs to participate in certification but never verified the block locally (necessary for liveness).
+    pub trait CertifiableBlock: Block {
+        /// The consensus context type stored in this block.
+        type Context: Clone;
+
+        /// Get the consensus context that was used when this block was proposed.
+        fn context(&self) -> Self::Context;
+    }
 });
-
-/// CertifiableBlock extends [Block] with consensus context information.
-///
-/// This trait is required for blocks used with deferred verification in [CertifiableAutomaton].
-/// It allows the verification context to be derived directly from the block when a validator
-/// needs to participate in certification but never verified the block locally (necessary for liveness).
-#[commonware_macros::stability(GAMMA)]
-pub trait CertifiableBlock: Block {
-    /// The consensus context type stored in this block.
-    type Context: Clone;
-
-    /// Get the consensus context that was used when this block was proposed.
-    fn context(&self) -> Self::Context;
-}
 
 cfg_if::cfg_if! {
     if #[cfg(not(target_arch = "wasm32"))] {
