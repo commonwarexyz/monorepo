@@ -19,11 +19,11 @@ use blst::{
     blst_fr_add, blst_fr_cneg, blst_fr_from_scalar, blst_fr_from_uint64, blst_fr_inverse,
     blst_fr_mul, blst_fr_sub, blst_hash_to_g1, blst_hash_to_g2, blst_keygen, blst_p1,
     blst_p1_add_or_double, blst_p1_affine, blst_p1_cneg, blst_p1_compress, blst_p1_double,
-    blst_p1_from_affine, blst_p1_is_inf, blst_p1_mult, blst_p1_to_affine, blst_p1_uncompress,
-    blst_p1s_mult_pippenger, blst_p1s_mult_pippenger_scratch_sizeof, blst_p1s_tile_pippenger,
-    blst_p1s_to_affine, blst_p2, blst_p2_add_or_double, blst_p2_affine, blst_p2_cneg,
-    blst_p2_compress, blst_p2_double, blst_p2_from_affine, blst_p2_is_inf, blst_p2_mult,
-    blst_p2_to_affine, blst_p2_uncompress, blst_p2s_mult_pippenger,
+    blst_p1_from_affine, blst_p1_in_g1, blst_p1_is_inf, blst_p1_mult, blst_p1_to_affine,
+    blst_p1_uncompress, blst_p1s_mult_pippenger, blst_p1s_mult_pippenger_scratch_sizeof,
+    blst_p1s_tile_pippenger, blst_p1s_to_affine, blst_p2, blst_p2_add_or_double, blst_p2_affine,
+    blst_p2_cneg, blst_p2_compress, blst_p2_double, blst_p2_from_affine, blst_p2_in_g2,
+    blst_p2_is_inf, blst_p2_mult, blst_p2_to_affine, blst_p2_uncompress, blst_p2s_mult_pippenger,
     blst_p2s_mult_pippenger_scratch_sizeof, blst_p2s_tile_pippenger, blst_p2s_to_affine,
     blst_scalar, blst_scalar_from_be_bytes, blst_scalar_from_bendian, blst_scalar_from_fr,
     blst_sk_check, Pairing, BLS12_381_G1, BLS12_381_G2, BLST_ERROR,
@@ -1051,8 +1051,8 @@ impl Read for G1 {
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let bytes = <[u8; Self::SIZE]>::read(buf)?;
         let mut ret = blst_p1::default();
-        // SAFETY: bytes is a valid 48-byte array. blst_p1_uncompress validates encoding,
-        // curve membership, and subgroup membership.
+        // SAFETY: bytes is a valid 48-byte array. blst_p1_uncompress validates encoding
+        // and curve membership.
         unsafe {
             let mut affine = blst_p1_affine::default();
             match blst_p1_uncompress(&mut affine, bytes.as_ptr()) {
@@ -1069,6 +1069,11 @@ impl Read for G1 {
                 BLST_ERROR::BLST_BAD_SCALAR => return Err(Invalid("G1", "Bad scalar")),
             }
             blst_p1_from_affine(&mut ret, &affine);
+
+            // Verify that the deserialized element is in G1
+            if !blst_p1_in_g1(&ret) {
+                return Err(Invalid("G1", "Not in group"));
+            }
         }
 
         Ok(Self(ret))
@@ -1471,8 +1476,8 @@ impl Read for G2 {
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let bytes = <[u8; Self::SIZE]>::read(buf)?;
         let mut ret = blst_p2::default();
-        // SAFETY: bytes is a valid 96-byte array. blst_p2_uncompress validates encoding,
-        // curve membership, and subgroup membership.
+        // SAFETY: bytes is a valid 96-byte array. blst_p2_uncompress validates encoding
+        // and curve membership.
         unsafe {
             let mut affine = blst_p2_affine::default();
             match blst_p2_uncompress(&mut affine, bytes.as_ptr()) {
@@ -1489,6 +1494,11 @@ impl Read for G2 {
                 BLST_ERROR::BLST_BAD_SCALAR => return Err(Invalid("G2", "Bad scalar")),
             }
             blst_p2_from_affine(&mut ret, &affine);
+
+            // Verify that the deserialized element is in G2
+            if !blst_p2_in_g2(&ret) {
+                return Err(Invalid("G2", "Not in group"));
+            }
         }
 
         Ok(Self(ret))
@@ -1820,6 +1830,58 @@ mod tests {
         let decoded = G2::decode(&mut encoded).unwrap();
         assert_eq!(decoded, identity);
         assert!(decoded.is_identity());
+    }
+
+    #[test]
+    fn test_g1_decode_rejects_not_on_curve() {
+        // Compressed G1: high bit set (0x80), X coordinate = 1.
+        // X=1 is a valid field element but not an X coordinate of any curve point.
+        let mut bad_bytes = [0u8; G1_ELEMENT_BYTE_LENGTH];
+        bad_bytes[0] = 0x80; // compression flag
+        bad_bytes[G1_ELEMENT_BYTE_LENGTH - 1] = 0x01; // X = 1
+        let result = G1::decode(&mut bad_bytes.as_slice());
+        assert!(matches!(result, Err(Invalid("G1", "Not on curve"))));
+    }
+
+    #[test]
+    fn test_g2_decode_rejects_not_on_curve() {
+        // Compressed G2: high bit set (0x80), X coordinate = 1.
+        let mut bad_bytes = [0u8; G2_ELEMENT_BYTE_LENGTH];
+        bad_bytes[0] = 0x80; // compression flag
+        bad_bytes[G2_ELEMENT_BYTE_LENGTH - 1] = 0x01; // X = 1
+        let result = G2::decode(&mut bad_bytes.as_slice());
+        assert!(matches!(result, Err(Invalid("G2", "Not on curve"))));
+    }
+
+    #[test]
+    fn test_g1_decode_rejects_not_in_subgroup() {
+        // Point with X=4 is on the BLS12-381 curve (y² = x³ + 4) but not in G1.
+        let bad_bytes: [u8; G1_ELEMENT_BYTE_LENGTH] = [
+            0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x04,
+        ];
+        let result = G1::decode(&mut bad_bytes.as_slice());
+        assert!(matches!(result, Err(Invalid("G1", "Not in group"))));
+    }
+
+    #[test]
+    fn test_g2_decode_rejects_not_in_subgroup() {
+        // Point with X=(2,0) is on the BLS12-381 G2 curve (y² = x³ + 4(1+u)) but not in G2.
+        let bad_bytes: [u8; G2_ELEMENT_BYTE_LENGTH] = [
+            // X.c1 (imaginary part) = 0, with compression flag
+            0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // X.c0 (real part) = 2
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x02,
+        ];
+        let result = G2::decode(&mut bad_bytes.as_slice());
+        assert!(matches!(result, Err(Invalid("G2", "Not in group"))));
     }
 
     /// Naive calculation of Multi-Scalar Multiplication: sum(scalar * point)
