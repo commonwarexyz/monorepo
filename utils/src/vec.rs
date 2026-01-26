@@ -451,8 +451,7 @@ macro_rules! non_empty_vec {
 mod tests {
     use super::*;
     use crate::{NZUsize, TryCollect};
-    #[stability(GAMMA)]
-    use commonware_codec::{Error as CodecError, RangeCfg};
+    use commonware_codec::{EncodeSize, Error as CodecError, RangeCfg, Read, Write};
     use std::num::NonZeroUsize;
 
     #[test]
@@ -788,10 +787,8 @@ mod tests {
         assert_eq!(&*v, &[11, 12, 13]);
     }
 
-    #[stability(GAMMA)]
     #[test]
     fn test_codec_roundtrip() {
-        use commonware_codec::{EncodeSize, Read, Write};
         let v = non_empty_vec![1u8, 2, 3];
 
         let mut buf = Vec::with_capacity(v.encode_size());
@@ -806,10 +803,8 @@ mod tests {
         assert_eq!(v, decoded);
     }
 
-    #[stability(GAMMA)]
     #[test]
     fn test_codec_rejects_empty() {
-        use commonware_codec::{Read, Write};
         let empty: Vec<u8> = vec![];
         let mut buf = Vec::new();
         empty.write(&mut buf);
