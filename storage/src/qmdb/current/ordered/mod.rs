@@ -61,7 +61,7 @@ pub mod tests {
             let db: C = open_db(context.with_label("first"), partition.clone()).await;
             assert_eq!(db.op_count(), Location::new_unchecked(1));
             assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(0));
-            assert_eq!(db.oldest_retained_loc(), Location::new_unchecked(0));
+            assert_eq!(db.oldest_retained(), 0);
             let root0 = db.root();
             drop(db);
             let db: C = open_db(context.with_label("second"), partition.clone()).await;
@@ -80,7 +80,7 @@ pub mod tests {
             assert_eq!(db.op_count(), Location::new_unchecked(4)); // 1 update, 1 commit, 1 move + 1 initial commit.
             assert!(db.get_metadata().await.unwrap().is_none());
             let root1 = db.root();
-            assert!(root1 != root0);
+            assert_ne!(root1, root0);
 
             drop(db);
             let db: C = open_db(context.with_label("third"), partition.clone()).await;
@@ -114,12 +114,21 @@ pub mod tests {
             assert!(!db.delete(k1).await.unwrap());
             let (db, _) = db.commit(None).await.unwrap();
             let db: C = db.into_merkleized().await.unwrap();
+            let root3 = db.root();
+            assert_ne!(root3, root2);
 
             // Confirm all activity bits except the last are false.
             for i in 0..*db.op_count() - 1 {
                 assert!(!db.get_bit(i));
             }
             assert!(db.get_bit(*db.op_count() - 1));
+
+            // Test that we can get a non-durable root.
+            let mut db = db.into_mutable();
+            db.update(k1, v1).await.unwrap();
+            let (db, _) = db.commit(None).await.unwrap();
+            let db: C = db.into_merkleized().await.unwrap();
+            assert_ne!(db.root(), root3);
 
             db.destroy().await.unwrap();
         });

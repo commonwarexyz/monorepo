@@ -78,7 +78,7 @@ impl<
         let last_known_inactivity_floor = Location::new_unchecked(status.len());
         let any = AnyDb::init_with_callback(
             context.with_label("any"),
-            config.to_any_config(),
+            config.into(),
             Some(last_known_inactivity_floor),
             |append: bool, loc: Option<Location>| {
                 status.push(append);

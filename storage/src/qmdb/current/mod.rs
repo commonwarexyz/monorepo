@@ -54,20 +54,19 @@ pub struct FixedConfig<T: Translator> {
     pub buffer_pool: PoolRef,
 }
 
-impl<T: Translator> FixedConfig<T> {
-    /// Convert this config to an [AnyFixedConfig] used to initialize the authenticated log.
-    pub fn to_any_config(self) -> AnyFixedConfig<T> {
-        AnyFixedConfig {
-            mmr_journal_partition: self.mmr_journal_partition,
-            mmr_metadata_partition: self.mmr_metadata_partition,
-            mmr_items_per_blob: self.mmr_items_per_blob,
-            mmr_write_buffer: self.mmr_write_buffer,
-            log_journal_partition: self.log_journal_partition,
-            log_items_per_blob: self.log_items_per_blob,
-            log_write_buffer: self.log_write_buffer,
-            translator: self.translator,
-            thread_pool: self.thread_pool,
-            buffer_pool: self.buffer_pool,
+impl<T: Translator> From<FixedConfig<T>> for AnyFixedConfig<T> {
+    fn from(cfg: FixedConfig<T>) -> Self {
+        Self {
+            mmr_journal_partition: cfg.mmr_journal_partition,
+            mmr_metadata_partition: cfg.mmr_metadata_partition,
+            mmr_items_per_blob: cfg.mmr_items_per_blob,
+            mmr_write_buffer: cfg.mmr_write_buffer,
+            log_journal_partition: cfg.log_journal_partition,
+            log_items_per_blob: cfg.log_items_per_blob,
+            log_write_buffer: cfg.log_write_buffer,
+            translator: cfg.translator,
+            thread_pool: cfg.thread_pool,
+            buffer_pool: cfg.buffer_pool,
         }
     }
 }
@@ -114,22 +113,21 @@ pub struct VariableConfig<T: Translator, C> {
     pub buffer_pool: PoolRef,
 }
 
-impl<T: Translator, C> VariableConfig<T, C> {
-    /// Convert this config to an [AnyVariableConfig] used to initialize the authenticated log.
-    pub fn to_any_config(self) -> AnyVariableConfig<T, C> {
-        AnyVariableConfig {
-            mmr_journal_partition: self.mmr_journal_partition,
-            mmr_metadata_partition: self.mmr_metadata_partition,
-            mmr_items_per_blob: self.mmr_items_per_blob,
-            mmr_write_buffer: self.mmr_write_buffer,
-            log_items_per_blob: self.log_items_per_blob,
-            log_partition: self.log_partition,
-            log_write_buffer: self.log_write_buffer,
-            log_compression: self.log_compression,
-            log_codec_config: self.log_codec_config,
-            translator: self.translator,
-            thread_pool: self.thread_pool,
-            buffer_pool: self.buffer_pool,
+impl<T: Translator, C> From<VariableConfig<T, C>> for AnyVariableConfig<T, C> {
+    fn from(cfg: VariableConfig<T, C>) -> Self {
+        Self {
+            mmr_journal_partition: cfg.mmr_journal_partition,
+            mmr_metadata_partition: cfg.mmr_metadata_partition,
+            mmr_items_per_blob: cfg.mmr_items_per_blob,
+            mmr_write_buffer: cfg.mmr_write_buffer,
+            log_items_per_blob: cfg.log_items_per_blob,
+            log_partition: cfg.log_partition,
+            log_write_buffer: cfg.log_write_buffer,
+            log_compression: cfg.log_compression,
+            log_codec_config: cfg.log_codec_config,
+            translator: cfg.translator,
+            thread_pool: cfg.thread_pool,
+            buffer_pool: cfg.buffer_pool,
         }
     }
 }
@@ -138,13 +136,13 @@ impl<T: Translator, C> VariableConfig<T, C> {
 #[cfg(any(test, feature = "test-traits"))]
 pub trait BitmapPrunedBits {
     /// Returns the number of bits that have been pruned from the bitmap.
-    fn bitmap_pruned_bits(&self) -> u64;
+    fn pruned_bits(&self) -> u64;
 
     /// Returns the value of the bit at the given index.
     fn get_bit(&self, index: u64) -> bool;
 
-    /// Returns the oldest retained location.
-    fn oldest_retained_loc(&self) -> crate::mmr::Location;
+    /// Returns the position of the oldest retained bit.
+    fn oldest_retained(&self) -> u64;
 }
 
 #[cfg(test)]
@@ -442,7 +440,7 @@ pub mod tests {
     ///
     /// This test verifies that calling `sync()` persists the bitmap pruning boundary that was
     /// set during `into_merkleized()`. If `sync()` didn't call `write_pruned`, the
-    /// `bitmap_pruned_bits()` count would be 0 after reopen instead of the expected value.
+    /// `pruned_bits()` count would be 0 after reopen instead of the expected value.
     pub fn test_sync_persists_bitmap_pruning_boundary<C, F, Fut>(mut open_db: F)
     where
         C: CleanAny + BitmapPrunedBits,
@@ -468,7 +466,7 @@ pub mod tests {
             let mut db: C = db.into_merkleized().await.unwrap();
 
             // The bitmap should have been pruned during into_merkleized().
-            let pruned_bits_before = db.bitmap_pruned_bits();
+            let pruned_bits_before = db.pruned_bits();
             warn!(
                 "pruned_bits_before={}, inactivity_floor={}, op_count={}",
                 pruned_bits_before,
@@ -495,7 +493,7 @@ pub mod tests {
 
             // The pruned bits count should match. If sync() didn't persist the bitmap pruned
             // state, this would be 0.
-            let pruned_bits_after = db.bitmap_pruned_bits();
+            let pruned_bits_after = db.pruned_bits();
             warn!("pruned_bits_after={}", pruned_bits_after);
 
             assert_eq!(

@@ -53,7 +53,7 @@ pub mod tests {
             let db: C = open_db(context.with_label("first"), partition.clone()).await;
             assert_eq!(db.op_count(), Location::new_unchecked(1));
             assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(0));
-            assert_eq!(db.oldest_retained_loc(), Location::new_unchecked(0));
+            assert_eq!(db.oldest_retained(), 0);
             let root0 = db.root();
             drop(db);
             let db: C = open_db(context.with_label("second"), partition.clone()).await;
@@ -74,7 +74,7 @@ pub mod tests {
             assert!(db.get_metadata().await.unwrap().is_none());
             assert_eq!(db.op_count(), Location::new_unchecked(4)); // 1 update, 1 commit, 1 move + 1 initial commit.
             let root1 = db.root();
-            assert!(root1 != root0);
+            assert_ne!(root1, root0);
             drop(db);
             let db: C = open_db(context.with_label("third"), partition.clone()).await;
             assert_eq!(db.op_count(), Location::new_unchecked(4)); // 1 update, 1 commit, 1 moves + 1 initial commit.
@@ -105,7 +105,7 @@ pub mod tests {
             // Commit adds a commit even for no-op, so op_count increases and root changes.
             assert_eq!(db.op_count(), Location::new_unchecked(7));
             let root3 = db.root();
-            assert!(root3 != root2);
+            assert_ne!(root3, root2);
 
             // Confirm re-open preserves state.
             drop(db);

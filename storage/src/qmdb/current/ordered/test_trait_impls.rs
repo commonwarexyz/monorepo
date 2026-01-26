@@ -215,7 +215,7 @@ impl<
         const N: usize,
     > BitmapPrunedBits for fixed::Db<E, K, V, H, T, N, Merkleized<H>, Durable>
 {
-    fn bitmap_pruned_bits(&self) -> u64 {
+    fn pruned_bits(&self) -> u64 {
         self.status.pruned_bits()
     }
 
@@ -223,8 +223,8 @@ impl<
         self.status.get_bit(index)
     }
 
-    fn oldest_retained_loc(&self) -> Location {
-        self.oldest_retained_loc()
+    fn oldest_retained(&self) -> u64 {
+        *self.oldest_retained_loc()
     }
 }
 
@@ -239,7 +239,7 @@ impl<
 where
     VariableOperation<K, V>: Read,
 {
-    fn bitmap_pruned_bits(&self) -> u64 {
+    fn pruned_bits(&self) -> u64 {
         self.status.pruned_bits()
     }
 
@@ -247,7 +247,7 @@ where
         self.status.get_bit(index)
     }
 
-    fn oldest_retained_loc(&self) -> Location {
-        self.oldest_retained_loc()
+    fn oldest_retained(&self) -> u64 {
+        *self.oldest_retained_loc()
     }
 }
