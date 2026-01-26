@@ -206,6 +206,43 @@ impl Parse for StabilityScopeInput {
     }
 }
 
+/// Input for the `stability_cfg_scope!` macro: `level, cfg(predicate) { items... }`
+struct StabilityCfgScopeInput {
+    level: StabilityLevel,
+    cfg_predicate: syn::Meta,
+    items: Vec<syn::Item>,
+}
+
+impl Parse for StabilityCfgScopeInput {
+    fn parse(input: ParseStream<'_>) -> Result<Self> {
+        let level: StabilityLevel = input.parse()?;
+        input.parse::<Token![,]>()?;
+
+        // Parse `cfg(...)` - expect the literal identifier "cfg" followed by parenthesized content
+        let cfg_ident: Ident = input.parse()?;
+        if cfg_ident != "cfg" {
+            return Err(Error::new(cfg_ident.span(), "expected `cfg`"));
+        }
+        let cfg_content;
+        syn::parenthesized!(cfg_content in input);
+        let cfg_predicate: syn::Meta = cfg_content.parse()?;
+
+        let content;
+        braced!(content in input);
+
+        let mut items = Vec::new();
+        while !content.is_empty() {
+            items.push(content.parse()?);
+        }
+
+        Ok(Self {
+            level,
+            cfg_predicate,
+            items,
+        })
+    }
+}
+
 /// Marks all items within a scope with a stability level.
 ///
 /// When building with `RUSTFLAGS="--cfg commonware_stability_N"`, items with stability
@@ -225,6 +262,63 @@ pub fn stability_scope(input: TokenStream) -> TokenStream {
     let StabilityScopeInput { level, items } = parse_macro_input!(input as StabilityScopeInput);
 
     let mut cfg_attrs = Vec::new();
+    for exclude_level in (level.value + 1)..=4 {
+        let cfg_name = format_ident!("commonware_stability_{}", level_name(exclude_level));
+        cfg_attrs.push(quote! { #[cfg(not(#cfg_name))] });
+    }
+
+    let expanded_items: Vec<_> = items
+        .into_iter()
+        .map(|item| {
+            quote! {
+                #(#cfg_attrs)*
+                #item
+            }
+        })
+        .collect();
+
+    let expanded = quote! {
+        #(#expanded_items)*
+    };
+
+    TokenStream::from(expanded)
+}
+
+/// Marks all items within a scope with both a stability level and a cfg predicate.
+///
+/// This combines the functionality of `stability_scope!` with `#[cfg(...)]` to reduce
+/// nesting when items need both conditional compilation and stability gating.
+///
+/// # Example
+/// ```rust,ignore
+/// use commonware_macros::stability_cfg_scope;
+///
+/// stability_cfg_scope!(GAMMA, cfg(feature = "std") {
+///     pub mod std_only_module;
+///     pub use crate::std_only_module::Item;
+/// });
+/// ```
+///
+/// This is equivalent to:
+/// ```rust,ignore
+/// cfg_if::cfg_if! {
+///     if #[cfg(feature = "std")] {
+///         commonware_macros::stability_scope!(GAMMA {
+///             pub mod std_only_module;
+///             pub use crate::std_only_module::Item;
+///         });
+///     }
+/// }
+/// ```
+#[proc_macro]
+pub fn stability_cfg_scope(input: TokenStream) -> TokenStream {
+    let StabilityCfgScopeInput {
+        level,
+        cfg_predicate,
+        items,
+    } = parse_macro_input!(input as StabilityCfgScopeInput);
+
+    let mut cfg_attrs = vec![quote! { #[cfg(#cfg_predicate)] }];
     for exclude_level in (level.value + 1)..=4 {
         let cfg_name = format_ident!("commonware_stability_{}", level_name(exclude_level));
         cfg_attrs.push(quote! { #[cfg(not(#cfg_name))] });

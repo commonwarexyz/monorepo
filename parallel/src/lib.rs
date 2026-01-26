@@ -445,129 +445,125 @@ commonware_macros::stability_scope!(GAMMA {
     }
 });
 
-cfg_if! {
-    if #[cfg(feature = "std")] {
-        commonware_macros::stability_scope!(GAMMA {
-            /// A clone-able wrapper around a [rayon]-compatible thread pool.
-            pub type ThreadPool = Arc<RThreadPool>;
+commonware_macros::stability_cfg_scope!(GAMMA, cfg(feature = "std") {
+    /// A clone-able wrapper around a [rayon]-compatible thread pool.
+    pub type ThreadPool = Arc<RThreadPool>;
 
-            /// A parallel execution strategy backed by a rayon thread pool.
-            ///
-            /// This strategy executes fold operations in parallel across multiple threads.
-            /// It wraps a rayon [`ThreadPool`] and uses it to schedule work.
-            ///
-            /// # Thread Pool Ownership
-            ///
-            /// `Rayon` holds an [`Arc<ThreadPool>`], so it can be cheaply cloned and shared
-            /// across threads. Multiple [`Rayon`] instances can share the same underlying
-            /// thread pool.
-            ///
-            /// # When to Use
-            ///
-            /// Use `Rayon` when:
-            ///
-            /// - Processing large collections where parallelism overhead is justified
-            /// - The fold/reduce operations are CPU-bound
-            /// - You want to utilize multiple cores
-            ///
-            /// Consider [`Sequential`] instead when:
-            ///
-            /// - The collection is small
-            /// - Operations are I/O-bound rather than CPU-bound
-            /// - Deterministic execution order is required for debugging
-            ///
-            /// # Examples
-            ///
-            /// ```rust
-            /// use commonware_parallel::{Strategy, Rayon};
-            /// use std::num::NonZeroUsize;
-            ///
-            /// let strategy = Rayon::new(NonZeroUsize::new(2).unwrap()).unwrap();
-            ///
-            /// let data: Vec<i64> = (0..1000).collect();
-            /// let sum = strategy.fold(&data, || 0i64, |acc, &n| acc + n, |a, b| a + b);
-            /// assert_eq!(sum, 499500);
-            /// ```
-            #[derive(Debug, Clone)]
-            pub struct Rayon {
-                thread_pool: ThreadPool,
-            }
-
-            impl Rayon {
-                /// Creates a [`Rayon`] strategy with a [`ThreadPool`] that is configured with the given
-                /// number of threads.
-                pub fn new(num_threads: NonZeroUsize) -> Result<Self, ThreadPoolBuildError> {
-                    ThreadPoolBuilder::new()
-                        .num_threads(num_threads.get())
-                        .build()
-                        .map(|pool| Self::with_pool(Arc::new(pool)))
-                }
-
-                /// Creates a new [`Rayon`] strategy with the given [`ThreadPool`].
-                pub const fn with_pool(thread_pool: ThreadPool) -> Self {
-                    Self { thread_pool }
-                }
-            }
-
-            impl Strategy for Rayon {
-                fn fold_init<I, INIT, T, R, ID, F, RD>(
-                    &self,
-                    iter: I,
-                    init: INIT,
-                    identity: ID,
-                    fold_op: F,
-                    reduce_op: RD,
-                ) -> R
-                where
-                    I: IntoIterator<IntoIter: Send, Item: Send> + Send,
-                    INIT: Fn() -> T + Send + Sync,
-                    T: Send,
-                    R: Send,
-                    ID: Fn() -> R + Send + Sync,
-                    F: Fn(R, &mut T, I::Item) -> R + Send + Sync,
-                    RD: Fn(R, R) -> R + Send + Sync,
-                {
-                    self.thread_pool.install(|| {
-                        // Collecting into a vec first enables `into_par_iter()` which provides
-                        // contiguous partitions. This allows each partition to accumulate with
-                        // `fold_op`, producing ~num_threads intermediate R values instead of N.
-                        // The final reduce then merges ~num_threads results instead of N.
-                        //
-                        // Alternative approaches like `par_bridge()` don't provide contiguous
-                        // partitions, which forces each item to produce its own R value that
-                        // must then be reduced one-by-one.
-                        let items: Vec<I::Item> = iter.into_iter().collect();
-                        items
-                            .into_par_iter()
-                            .fold(
-                                || (init(), identity()),
-                                |(mut init_val, acc), item| {
-                                    let new_acc = fold_op(acc, &mut init_val, item);
-                                    (init_val, new_acc)
-                                },
-                            )
-                            .map(|(_, acc)| acc)
-                            .reduce(&identity, reduce_op)
-                    })
-                }
-
-                fn join<A, B, RA, RB>(&self, a: A, b: B) -> (RA, RB)
-                where
-                    A: FnOnce() -> RA + Send,
-                    B: FnOnce() -> RB + Send,
-                    RA: Send,
-                    RB: Send,
-                {
-                    self.thread_pool.install(|| rayon::join(a, b))
-                }
-
-                fn parallelism_hint(&self) -> usize {
-                    self.thread_pool.current_num_threads()
-                }
-            }
-        });
+    /// A parallel execution strategy backed by a rayon thread pool.
+    ///
+    /// This strategy executes fold operations in parallel across multiple threads.
+    /// It wraps a rayon [`ThreadPool`] and uses it to schedule work.
+    ///
+    /// # Thread Pool Ownership
+    ///
+    /// `Rayon` holds an [`Arc<ThreadPool>`], so it can be cheaply cloned and shared
+    /// across threads. Multiple [`Rayon`] instances can share the same underlying
+    /// thread pool.
+    ///
+    /// # When to Use
+    ///
+    /// Use `Rayon` when:
+    ///
+    /// - Processing large collections where parallelism overhead is justified
+    /// - The fold/reduce operations are CPU-bound
+    /// - You want to utilize multiple cores
+    ///
+    /// Consider [`Sequential`] instead when:
+    ///
+    /// - The collection is small
+    /// - Operations are I/O-bound rather than CPU-bound
+    /// - Deterministic execution order is required for debugging
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use commonware_parallel::{Strategy, Rayon};
+    /// use std::num::NonZeroUsize;
+    ///
+    /// let strategy = Rayon::new(NonZeroUsize::new(2).unwrap()).unwrap();
+    ///
+    /// let data: Vec<i64> = (0..1000).collect();
+    /// let sum = strategy.fold(&data, || 0i64, |acc, &n| acc + n, |a, b| a + b);
+    /// assert_eq!(sum, 499500);
+    /// ```
+    #[derive(Debug, Clone)]
+    pub struct Rayon {
+        thread_pool: ThreadPool,
     }
-}
+
+    impl Rayon {
+        /// Creates a [`Rayon`] strategy with a [`ThreadPool`] that is configured with the given
+        /// number of threads.
+        pub fn new(num_threads: NonZeroUsize) -> Result<Self, ThreadPoolBuildError> {
+            ThreadPoolBuilder::new()
+                .num_threads(num_threads.get())
+                .build()
+                .map(|pool| Self::with_pool(Arc::new(pool)))
+        }
+
+        /// Creates a new [`Rayon`] strategy with the given [`ThreadPool`].
+        pub const fn with_pool(thread_pool: ThreadPool) -> Self {
+            Self { thread_pool }
+        }
+    }
+
+    impl Strategy for Rayon {
+        fn fold_init<I, INIT, T, R, ID, F, RD>(
+            &self,
+            iter: I,
+            init: INIT,
+            identity: ID,
+            fold_op: F,
+            reduce_op: RD,
+        ) -> R
+        where
+            I: IntoIterator<IntoIter: Send, Item: Send> + Send,
+            INIT: Fn() -> T + Send + Sync,
+            T: Send,
+            R: Send,
+            ID: Fn() -> R + Send + Sync,
+            F: Fn(R, &mut T, I::Item) -> R + Send + Sync,
+            RD: Fn(R, R) -> R + Send + Sync,
+        {
+            self.thread_pool.install(|| {
+                // Collecting into a vec first enables `into_par_iter()` which provides
+                // contiguous partitions. This allows each partition to accumulate with
+                // `fold_op`, producing ~num_threads intermediate R values instead of N.
+                // The final reduce then merges ~num_threads results instead of N.
+                //
+                // Alternative approaches like `par_bridge()` don't provide contiguous
+                // partitions, which forces each item to produce its own R value that
+                // must then be reduced one-by-one.
+                let items: Vec<I::Item> = iter.into_iter().collect();
+                items
+                    .into_par_iter()
+                    .fold(
+                        || (init(), identity()),
+                        |(mut init_val, acc), item| {
+                            let new_acc = fold_op(acc, &mut init_val, item);
+                            (init_val, new_acc)
+                        },
+                    )
+                    .map(|(_, acc)| acc)
+                    .reduce(&identity, reduce_op)
+            })
+        }
+
+        fn join<A, B, RA, RB>(&self, a: A, b: B) -> (RA, RB)
+        where
+            A: FnOnce() -> RA + Send,
+            B: FnOnce() -> RB + Send,
+            RA: Send,
+            RB: Send,
+        {
+            self.thread_pool.install(|| rayon::join(a, b))
+        }
+
+        fn parallelism_hint(&self) -> usize {
+            self.thread_pool.current_num_threads()
+        }
+    }
+});
 
 #[cfg(test)]
 mod test {

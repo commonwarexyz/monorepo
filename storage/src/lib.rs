@@ -17,29 +17,25 @@ commonware_macros::stability_scope!(BETA {
     pub mod mmr;
 });
 
-cfg_if::cfg_if! {
-    if #[cfg(feature = "std")] {
-        commonware_macros::stability_scope!(BETA {
-            pub mod qmdb;
-            mod bitmap;
-            pub use crate::bitmap::{BitMap as AuthenticatedBitMap, CleanBitMap as CleanAuthenticatedBitMap, DirtyBitMap as DirtyAuthenticatedBitMap};
-            pub mod bmt;
-        });
+commonware_macros::stability_cfg_scope!(BETA, cfg(feature = "std") {
+    pub mod qmdb;
+    mod bitmap;
+    pub use crate::bitmap::{BitMap as AuthenticatedBitMap, CleanBitMap as CleanAuthenticatedBitMap, DirtyBitMap as DirtyAuthenticatedBitMap};
+    pub mod bmt;
+});
 
-        commonware_macros::stability_scope!(GAMMA {
-            pub mod archive;
-            pub mod cache;
-            pub mod freezer;
-            pub mod index;
-            pub mod journal;
-            pub mod kv;
-            pub mod metadata;
-            pub mod ordinal;
-            pub mod rmap;
-            pub mod translator;
-        });
-    }
-}
+commonware_macros::stability_cfg_scope!(GAMMA, cfg(feature = "std") {
+    pub mod archive;
+    pub mod cache;
+    pub mod freezer;
+    pub mod index;
+    pub mod journal;
+    pub mod kv;
+    pub mod metadata;
+    pub mod ordinal;
+    pub mod rmap;
+    pub mod translator;
+});
 
 /// A storage structure with capabilities to persist and recover state across restarts.
 #[cfg(feature = "std")]
