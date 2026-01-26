@@ -717,8 +717,15 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
             return false;
         }
 
-        // Check if we have enough notarize votes for finalization
-        if round.votes().notarize_count() < l_quorum {
+        // Finalization requires notarization to exist first (need to know which proposal)
+        let notarization = match round.notarization() {
+            Some(n) => n,
+            None => return false,
+        };
+
+        // Count votes for the notarized proposal only
+        let payload = &notarization.proposal.payload;
+        if round.votes().notarize_count_for_payload(payload) < l_quorum {
             return false;
         }
 
@@ -1038,6 +1045,385 @@ mod tests {
 
             // Attempt to notarize after timeout
             assert!(state.construct_notarize(view).is_none());
+        });
+    }
+
+    #[test]
+    fn test_check_finalization_normal() {
+        // L votes for same proposal triggers finalization
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, NAMESPACE, 4);
+            let mut state = State::new(
+                context,
+                Config {
+                    scheme: verifier.clone(),
+                    elector: <RoundRobin>::default(),
+                    epoch: Epoch::new(1),
+                    activity_timeout: ViewDelta::new(6),
+                    leader_timeout: Duration::from_secs(1),
+                    nullify_retry: Duration::from_secs(3),
+                },
+            );
+            state.set_genesis(test_genesis());
+
+            let view = View::new(1);
+            let round = Rnd::new(Epoch::new(1), view);
+            let proposal = Proposal::new(round, GENESIS_VIEW, Sha256Digest::from([1u8; 32]));
+
+            // Add L=4 notarize votes for the same proposal
+            for scheme in schemes.iter() {
+                let vote = Notarize::sign(scheme, proposal.clone()).expect("sign");
+                state.add_notarize_vote(view, vote);
+            }
+
+            // Add notarization so check_finalization knows which proposal to check
+            let notarization = Notarization::from_notarizes(
+                &verifier,
+                schemes
+                    .iter()
+                    .map(|s| Notarize::sign(s, proposal.clone()).expect("sign"))
+                    .collect::<Vec<_>>()
+                    .iter(),
+                &Sequential,
+            )
+            .expect("notarization");
+            state.add_notarization(notarization);
+
+            // L=4 votes for same proposal should trigger finalization
+            assert!(state.check_finalization(view, 4));
+            assert_eq!(state.last_finalized, view);
+        });
+    }
+
+    #[test]
+    fn test_check_finalization_byzantine_split_votes() {
+        // L total votes split across proposals does NOT trigger finalization
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, NAMESPACE, 4);
+            let mut state = State::new(
+                context,
+                Config {
+                    scheme: verifier.clone(),
+                    elector: <RoundRobin>::default(),
+                    epoch: Epoch::new(1),
+                    activity_timeout: ViewDelta::new(6),
+                    leader_timeout: Duration::from_secs(1),
+                    nullify_retry: Duration::from_secs(3),
+                },
+            );
+            state.set_genesis(test_genesis());
+
+            let view = View::new(1);
+            let round = Rnd::new(Epoch::new(1), view);
+            let proposal_a = Proposal::new(round, GENESIS_VIEW, Sha256Digest::from([1u8; 32]));
+            let proposal_b = Proposal::new(round, GENESIS_VIEW, Sha256Digest::from([2u8; 32]));
+
+            // Add 2 votes for proposal_a
+            for scheme in schemes.iter().take(2) {
+                let vote = Notarize::sign(scheme, proposal_a.clone()).expect("sign");
+                state.add_notarize_vote(view, vote);
+            }
+
+            // Add 2 votes for proposal_b (Byzantine split)
+            for scheme in schemes.iter().skip(2) {
+                let vote = Notarize::sign(scheme, proposal_b.clone()).expect("sign");
+                state.add_notarize_vote(view, vote);
+            }
+
+            // Add notarization for proposal_a (the one we're checking finalization for)
+            let notarization = Notarization::from_notarizes(
+                &verifier,
+                schemes
+                    .iter()
+                    .take(3)
+                    .map(|s| Notarize::sign(s, proposal_a.clone()).expect("sign"))
+                    .collect::<Vec<_>>()
+                    .iter(),
+                &Sequential,
+            )
+            .expect("notarization");
+            state.add_notarization(notarization);
+
+            // Total votes = 4, but only 2 are for proposal_a
+            // With L=4, finalization should NOT trigger
+            assert!(!state.check_finalization(view, 4));
+
+            // Even with L=3, finalization should NOT trigger (only 2 for proposal_a)
+            assert!(!state.check_finalization(view, 3));
+        });
+    }
+
+    #[test]
+    fn test_check_finalization_already_finalized() {
+        // Returns false when already finalized
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, NAMESPACE, 4);
+            let mut state = State::new(
+                context,
+                Config {
+                    scheme: verifier.clone(),
+                    elector: <RoundRobin>::default(),
+                    epoch: Epoch::new(1),
+                    activity_timeout: ViewDelta::new(6),
+                    leader_timeout: Duration::from_secs(1),
+                    nullify_retry: Duration::from_secs(3),
+                },
+            );
+            state.set_genesis(test_genesis());
+
+            let view = View::new(1);
+            let round = Rnd::new(Epoch::new(1), view);
+            let proposal = Proposal::new(round, GENESIS_VIEW, Sha256Digest::from([1u8; 32]));
+
+            // Add votes and notarization
+            for scheme in schemes.iter() {
+                let vote = Notarize::sign(scheme, proposal.clone()).expect("sign");
+                state.add_notarize_vote(view, vote);
+            }
+            let notarization = Notarization::from_notarizes(
+                &verifier,
+                schemes
+                    .iter()
+                    .map(|s| Notarize::sign(s, proposal.clone()).expect("sign"))
+                    .collect::<Vec<_>>()
+                    .iter(),
+                &Sequential,
+            )
+            .expect("notarization");
+            state.add_notarization(notarization);
+
+            // First finalization should succeed
+            assert!(state.check_finalization(view, 4));
+
+            // Second finalization should return false (already finalized)
+            assert!(!state.check_finalization(view, 4));
+        });
+    }
+
+    #[test]
+    fn test_check_finalization_view_not_found() {
+        // Returns false for non-existent view
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let Fixture { verifier, .. } = ed25519::fixture(&mut context, NAMESPACE, 4);
+            let mut state = State::new(
+                context,
+                Config {
+                    scheme: verifier,
+                    elector: <RoundRobin>::default(),
+                    epoch: Epoch::new(1),
+                    activity_timeout: ViewDelta::new(6),
+                    leader_timeout: Duration::from_secs(1),
+                    nullify_retry: Duration::from_secs(3),
+                },
+            );
+            state.set_genesis(test_genesis());
+
+            // View 99 doesn't exist
+            assert!(!state.check_finalization(View::new(99), 4));
+        });
+    }
+
+    #[test]
+    fn test_check_finalization_no_notarization() {
+        // Returns false when no notarization exists
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, NAMESPACE, 4);
+            let mut state = State::new(
+                context,
+                Config {
+                    scheme: verifier,
+                    elector: <RoundRobin>::default(),
+                    epoch: Epoch::new(1),
+                    activity_timeout: ViewDelta::new(6),
+                    leader_timeout: Duration::from_secs(1),
+                    nullify_retry: Duration::from_secs(3),
+                },
+            );
+            state.set_genesis(test_genesis());
+
+            let view = View::new(1);
+            let round = Rnd::new(Epoch::new(1), view);
+            let proposal = Proposal::new(round, GENESIS_VIEW, Sha256Digest::from([1u8; 32]));
+
+            // Add L=4 notarize votes but NO notarization certificate
+            for scheme in schemes.iter() {
+                let vote = Notarize::sign(scheme, proposal.clone()).expect("sign");
+                state.add_notarize_vote(view, vote);
+            }
+
+            // Without notarization, finalization should not trigger
+            assert!(!state.check_finalization(view, 4));
+        });
+    }
+
+    #[test]
+    fn test_assemble_notarization_filters_by_proposal() {
+        // Only counts votes for leader's proposal when assembling certificate
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let Fixture { schemes, .. } = ed25519::fixture(&mut context, NAMESPACE, 4);
+            let mut state = State::new(
+                context.clone(),
+                Config {
+                    scheme: schemes[0].clone(), // schemes[0] is leader of view 1
+                    elector: <RoundRobin>::default(),
+                    epoch: Epoch::new(1),
+                    activity_timeout: ViewDelta::new(6),
+                    leader_timeout: Duration::from_secs(1),
+                    nullify_retry: Duration::from_secs(3),
+                },
+            );
+            state.set_genesis(test_genesis());
+
+            let view = View::new(1);
+            let round = Rnd::new(Epoch::new(1), view);
+            let proposal_a = Proposal::new(round, GENESIS_VIEW, Sha256Digest::from([1u8; 32]));
+            let proposal_b = Proposal::new(round, GENESIS_VIEW, Sha256Digest::from([2u8; 32]));
+
+            // Set proposal_a as the leader's proposal
+            state.set_proposal(view, proposal_a.clone());
+
+            // Add 2 votes for proposal_a (not enough for N3f1 quorum which requires 3)
+            for scheme in schemes.iter().take(2) {
+                let vote = Notarize::sign(scheme, proposal_a.clone()).expect("sign");
+                state.add_notarize_vote(view, vote);
+            }
+
+            // Add 2 votes for proposal_b (Byzantine)
+            for scheme in schemes.iter().skip(2) {
+                let vote = Notarize::sign(scheme, proposal_b.clone()).expect("sign");
+                state.add_notarize_vote(view, vote);
+            }
+
+            // Total votes = 4, but only 2 for proposal_a
+            // Even though m_quorum check passes (4 >= 3), assembly fails because
+            // the scheme requires N3f1 (3 votes) for the same proposal
+            assert!(state
+                .try_assemble_notarization(view, 3, &Sequential)
+                .is_none());
+
+            // The assembly filters by proposal, so even with m_quorum=2 passing,
+            // we still need 3 votes for proposal_a to assemble (N3f1 requirement)
+            assert!(state
+                .try_assemble_notarization(view, 2, &Sequential)
+                .is_none());
+        });
+    }
+
+    #[test]
+    fn test_assemble_notarization_already_exists() {
+        // Returns None if notarization already assembled
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, NAMESPACE, 4);
+            let mut state = State::new(
+                context,
+                Config {
+                    scheme: verifier.clone(),
+                    elector: <RoundRobin>::default(),
+                    epoch: Epoch::new(1),
+                    activity_timeout: ViewDelta::new(6),
+                    leader_timeout: Duration::from_secs(1),
+                    nullify_retry: Duration::from_secs(3),
+                },
+            );
+            state.set_genesis(test_genesis());
+
+            let view = View::new(1);
+            let round = Rnd::new(Epoch::new(1), view);
+            let proposal = Proposal::new(round, GENESIS_VIEW, Sha256Digest::from([1u8; 32]));
+
+            // Add notarization directly
+            let notarization = Notarization::from_notarizes(
+                &verifier,
+                schemes
+                    .iter()
+                    .map(|s| Notarize::sign(s, proposal.clone()).expect("sign"))
+                    .collect::<Vec<_>>()
+                    .iter(),
+                &Sequential,
+            )
+            .expect("notarization");
+            state.add_notarization(notarization);
+
+            // Add votes
+            for scheme in schemes.iter() {
+                let vote = Notarize::sign(scheme, proposal.clone()).expect("sign");
+                state.add_notarize_vote(view, vote);
+            }
+
+            // Assembly should return None since notarization already exists
+            assert!(state
+                .try_assemble_notarization(view, 3, &Sequential)
+                .is_none());
+        });
+    }
+
+    #[test]
+    fn test_assemble_notarization_insufficient_votes() {
+        // Returns None if fewer than M votes for proposal
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let Fixture { schemes, .. } = ed25519::fixture(&mut context, NAMESPACE, 4);
+            let mut state = State::new(
+                context,
+                Config {
+                    scheme: schemes[0].clone(),
+                    elector: <RoundRobin>::default(),
+                    epoch: Epoch::new(1),
+                    activity_timeout: ViewDelta::new(6),
+                    leader_timeout: Duration::from_secs(1),
+                    nullify_retry: Duration::from_secs(3),
+                },
+            );
+            state.set_genesis(test_genesis());
+
+            let view = View::new(1);
+            let round = Rnd::new(Epoch::new(1), view);
+            let proposal = Proposal::new(round, GENESIS_VIEW, Sha256Digest::from([1u8; 32]));
+
+            // Set proposal
+            state.set_proposal(view, proposal.clone());
+
+            // Add only 2 votes (less than M=3 early check, also less than N3f1=3 for assembly)
+            for scheme in schemes.iter().take(2) {
+                let vote = Notarize::sign(scheme, proposal.clone()).expect("sign");
+                state.add_notarize_vote(view, vote);
+            }
+
+            // Assembly should fail with M=3 (fails early check: 2 < 3)
+            assert!(state
+                .try_assemble_notarization(view, 3, &Sequential)
+                .is_none());
+
+            // Assembly should still fail with M=2 because N3f1 requires 3 votes
+            assert!(state
+                .try_assemble_notarization(view, 2, &Sequential)
+                .is_none());
+
+            // Add a 3rd vote to reach N3f1 threshold
+            let vote = Notarize::sign(&schemes[2], proposal).expect("sign");
+            state.add_notarize_vote(view, vote);
+
+            // Now assembly should succeed with M=3 (3 votes >= 3, and N3f1 satisfied)
+            assert!(state
+                .try_assemble_notarization(view, 3, &Sequential)
+                .is_some());
         });
     }
 }

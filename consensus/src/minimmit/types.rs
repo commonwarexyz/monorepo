@@ -167,6 +167,16 @@ impl<S: Scheme, D: Digest> VoteTracker<S, D> {
         self.notarizes.len()
     }
 
+    /// Returns the number of notarize votes for a specific payload.
+    ///
+    /// This is used for finalization which requires L votes for the same proposal.
+    pub fn notarize_count_for_payload(&self, payload: &D) -> usize {
+        self.notarize_payloads
+            .values()
+            .filter(|p| *p == payload)
+            .count()
+    }
+
     /// Returns the number of nullify votes collected.
     #[allow(clippy::missing_const_for_fn)] // len() is not const for HashMap
     pub fn nullify_count(&self) -> usize {
