@@ -592,11 +592,6 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
 
         let round = self.create_round(view);
 
-        // Check for equivocation (already voted nullify)
-        if round.votes().has_nullify(signer) {
-            return (false, equivocator_key, None);
-        }
-
         // Check for duplicate notarize (same signer, same or different payload)
         if let Some(existing) = round.votes().get_notarize(signer) {
             // Already voted notarize - check if it's for a different payload
@@ -1424,6 +1419,57 @@ mod tests {
             assert!(state
                 .try_assemble_notarization(view, 3, &Sequential)
                 .is_some());
+        });
+    }
+
+    #[test]
+    fn test_notarize_after_nullify_allowed() {
+        // Test that receiving notarize AFTER nullify (due to network reordering)
+        // does NOT block the sender - this is legitimate nullify-by-contradiction.
+        //
+        // Per minimmit protocol: validators send notarize FIRST, then nullify
+        // (after seeing M conflicting votes). Network reordering may deliver
+        // nullify before notarize at the receiver.
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let Fixture { schemes, .. } = ed25519::fixture(&mut context, NAMESPACE, 4);
+            let cfg = Config {
+                scheme: schemes[0].clone(),
+                elector: <RoundRobin>::default(),
+                epoch: Epoch::new(1),
+                activity_timeout: ViewDelta::new(5),
+                leader_timeout: Duration::from_secs(1),
+                nullify_retry: Duration::from_secs(3),
+            };
+            let mut state = State::new(context, cfg);
+            state.set_genesis(test_genesis());
+
+            let view = View::new(1);
+            let round = Rnd::new(Epoch::new(1), view);
+            let proposal = Proposal::new(round, GENESIS_VIEW, Sha256Digest::from([1u8; 32]));
+
+            // Validator 1 sends both notarize and nullify (nullify-by-contradiction)
+            // Due to network reordering, nullify arrives FIRST
+            let nullify_vote = Nullify::sign::<Sha256Digest>(&schemes[1], round).expect("sign");
+            let (nullify_added, nullify_equivocator) = state.add_nullify_vote(view, nullify_vote);
+            assert!(nullify_added, "nullify should be added");
+            assert!(nullify_equivocator.is_none(), "no equivocator for nullify");
+
+            // Now notarize arrives (sent first by validator, but arrived second)
+            let notarize_vote = Notarize::sign(&schemes[1], proposal).expect("sign");
+            let (notarize_added, notarize_equivocator, conflict) =
+                state.add_notarize_vote(view, notarize_vote);
+
+            // Notarize should be accepted - this is NOT equivocation
+            assert!(
+                notarize_added,
+                "notarize after nullify should be accepted (network reordering)"
+            );
+            assert!(
+                notarize_equivocator.is_none(),
+                "no equivocator - this is legitimate nullify-by-contradiction"
+            );
+            assert!(conflict.is_none(), "no conflicting notarize");
         });
     }
 }
