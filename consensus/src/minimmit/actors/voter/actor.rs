@@ -476,7 +476,7 @@ impl<
         resolver: &mut resolver::Mailbox<S, D>,
         sender: S::PublicKey,
         vote: Vote<S, D>,
-        vote_sender: &mut WrappedSender<Sp, Vote<S, D>>,
+        _vote_sender: &mut WrappedSender<Sp, Vote<S, D>>,
         certificate_sender: &mut WrappedSender<Sr, Certificate<S, D>>,
     ) {
         let view = vote.view();
