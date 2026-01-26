@@ -72,7 +72,7 @@ impl core::fmt::Display for Participant {
     }
 }
 
-commonware_macros::ready_scope!(WIRE_STABLE {
+commonware_macros::ready_scope!(GAMMA {
     use bytes::Buf;
     use commonware_codec::{varint::UInt, EncodeSize, Error as CodecError, Read, ReadExt, Write};
 
@@ -217,7 +217,7 @@ pub fn union(a: &[u8], b: &[u8]) -> Vec<u8> {
 /// Concatenate a namespace and a message, prepended by a varint encoding of the namespace length.
 ///
 /// This produces a unique byte sequence (i.e. no collisions) for each `(namespace, msg)` pair.
-#[commonware_macros::ready(WIRE_STABLE)]
+#[commonware_macros::ready(GAMMA)]
 pub fn union_unique(namespace: &[u8], msg: &[u8]) -> Vec<u8> {
     use commonware_codec::EncodeSize;
     let len_prefix = namespace.len();

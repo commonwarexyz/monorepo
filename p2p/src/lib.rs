@@ -12,9 +12,9 @@
 
 use commonware_macros::{ready_mod, ready_scope};
 
-ready_mod!(EXPERIMENTAL, pub mod simulated);
+ready_mod!(ALPHA, pub mod simulated);
 
-ready_scope!(WIRE_STABLE {
+ready_scope!(GAMMA {
     use commonware_cryptography::PublicKey;
     use commonware_runtime::{IoBuf, IoBufMut};
     use commonware_utils::ordered::Set;

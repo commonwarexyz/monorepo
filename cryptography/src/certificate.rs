@@ -64,7 +64,7 @@ pub use crate::{
     ed25519::certificate as ed25519,
 };
 
-#[ready(TESTED)]
+#[ready(BETA)]
 pub use crate::secp256r1::certificate as secp256r1;
 use crate::{Digest, PublicKey};
 #[cfg(not(feature = "std"))]

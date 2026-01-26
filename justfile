@@ -98,22 +98,22 @@ regenerate-conformance *args='':
 readiness_excludes := "--exclude commonware-deployer --exclude commonware-bridge --exclude commonware-chat --exclude commonware-estimator --exclude commonware-flood --exclude commonware-log --exclude commonware-sync --exclude commonware-broadcast-fuzz --exclude commonware-codec-fuzz --exclude commonware-coding-fuzz --exclude commonware-collector-fuzz --exclude commonware-consensus-fuzz --exclude commonware-cryptography-fuzz --exclude commonware-p2p-fuzz --exclude commonware-runtime-fuzz --exclude commonware-storage-fuzz --exclude commonware-stream-fuzz --exclude commonware-utils-fuzz"
 
 # Check readiness builds. Optionally specify level (1-4 or name) and/or crate (-p <crate>).
-# Examples: just check-readiness, just check-readiness 3, just check-readiness API_STABLE, just check-readiness WIRE_STABLE -p commonware-cryptography
+# Examples: just check-readiness, just check-readiness 3, just check-readiness DELTA, just check-readiness GAMMA -p commonware-cryptography
 check-readiness *args='':
     #!/usr/bin/env bash
     all_args="{{ args }}"
     level=""
     extra_args=""
     # Level names in order (index 0-4)
-    declare -a LEVEL_NAMES=(EXPERIMENTAL TESTED WIRE_STABLE API_STABLE PRODUCTION)
+    declare -a LEVEL_NAMES=(ALPHA BETA GAMMA DELTA EPSILON)
     # Convert name to number
     name_to_num() {
         case "$1" in
-            EXPERIMENTAL) echo 0 ;;
-            TESTED) echo 1 ;;
-            WIRE_STABLE) echo 2 ;;
-            API_STABLE) echo 3 ;;
-            PRODUCTION) echo 4 ;;
+            ALPHA) echo 0 ;;
+            BETA) echo 1 ;;
+            GAMMA) echo 2 ;;
+            DELTA) echo 3 ;;
+            EPSILON) echo 4 ;;
             *) echo "" ;;
         esac
     }

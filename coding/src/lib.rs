@@ -10,12 +10,12 @@
     html_favicon_url = "https://commonware.xyz/favicon.ico"
 )]
 
-commonware_macros::ready_scope!(EXPERIMENTAL {
+commonware_macros::ready_scope!(ALPHA {
     mod no_coding;
     pub use no_coding::{Error as NoCodingError, NoCoding};
 });
 
-commonware_macros::ready_scope!(TESTED {
+commonware_macros::ready_scope!(BETA {
     mod reed_solomon;
     pub use reed_solomon::{Error as ReedSolomonError, ReedSolomon};
 
@@ -23,7 +23,7 @@ commonware_macros::ready_scope!(TESTED {
     pub use zoda::{Error as ZodaError, Zoda};
 });
 
-commonware_macros::ready_scope!(WIRE_STABLE {
+commonware_macros::ready_scope!(GAMMA {
     use bytes::Buf;
     use commonware_codec::{Codec, FixedSize, Read, Write};
     use commonware_cryptography::Digest;

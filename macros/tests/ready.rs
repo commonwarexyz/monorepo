@@ -1,24 +1,24 @@
 use commonware_macros::{ready, ready_scope};
 
 // All items at level 4 so they're always available
-#[ready(PRODUCTION)]
+#[ready(EPSILON)]
 const fn level_4_fn() -> u8 {
     4
 }
 
-#[ready(PRODUCTION)]
+#[ready(EPSILON)]
 struct Level4Struct {
     value: u32,
 }
 
-#[ready(PRODUCTION)]
+#[ready(EPSILON)]
 impl Level4Struct {
     const fn new() -> Self {
         Self { value: 42 }
     }
 }
 
-#[ready(PRODUCTION)]
+#[ready(EPSILON)]
 mod level_4_module {
     pub const fn inner() -> u32 {
         100
@@ -35,21 +35,21 @@ fn test_level_4_items_compile() {
 
 // Test that lower-level items are excluded at higher readiness levels
 // These items and their tests are gated together using ready(2)
-#[ready(WIRE_STABLE)]
+#[ready(GAMMA)]
 mod level_2_tests {
     use commonware_macros::ready;
 
-    #[ready(WIRE_STABLE)]
+    #[ready(GAMMA)]
     const fn level_2_fn() -> u8 {
         2
     }
 
-    #[ready(WIRE_STABLE)]
+    #[ready(GAMMA)]
     struct Level2Struct {
         value: u32,
     }
 
-    #[ready(WIRE_STABLE)]
+    #[ready(GAMMA)]
     impl Level2Struct {
         const fn new() -> Self {
             Self { value: 22 }
@@ -65,7 +65,7 @@ mod level_2_tests {
 }
 
 // Test ready_scope! macro at level 4 (always available)
-ready_scope!(PRODUCTION {
+ready_scope!(EPSILON {
     const fn scope_level_4_fn() -> u8 {
         44
     }
@@ -89,11 +89,11 @@ fn test_ready_scope_level_4() {
 }
 
 // Test ready_scope! at level 2 (excluded at levels 3, 4)
-#[ready(WIRE_STABLE)]
+#[ready(GAMMA)]
 mod ready_scope_level_2_tests {
     use commonware_macros::ready_scope;
 
-    ready_scope!(WIRE_STABLE {
+    ready_scope!(GAMMA {
         pub const fn scope_level_2_fn() -> u8 {
             22
         }

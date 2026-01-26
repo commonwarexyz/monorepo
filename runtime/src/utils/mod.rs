@@ -11,7 +11,7 @@ use std::{
     task::{Context, Poll},
 };
 
-ready_mod!(WIRE_STABLE, pub mod buffer);
+ready_mod!(GAMMA, pub mod buffer);
 pub mod signal;
 
 mod handle;

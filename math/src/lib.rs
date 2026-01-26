@@ -10,16 +10,16 @@ extern crate alloc;
 
 use commonware_macros::ready_mod;
 
-ready_mod!(WIRE_STABLE, pub mod algebra);
+ready_mod!(GAMMA, pub mod algebra);
 // Raw cfg required: inline module contains external submodule (Rust #54727)
 // TESTED: excluded at WIRE_STABLE, API_STABLE, or PRODUCTION
-#[cfg(not(min_readiness_WIRE_STABLE))]
-#[cfg(not(min_readiness_API_STABLE))]
-#[cfg(not(min_readiness_PRODUCTION))]
+#[cfg(not(min_readiness_GAMMA))]
+#[cfg(not(min_readiness_DELTA))]
+#[cfg(not(min_readiness_EPSILON))]
 pub mod fields {
     pub mod goldilocks;
 }
-ready_mod!(TESTED, pub mod ntt);
-ready_mod!(WIRE_STABLE, pub mod poly);
+ready_mod!(BETA, pub mod ntt);
+ready_mod!(GAMMA, pub mod poly);
 #[cfg(test)]
 pub mod test;

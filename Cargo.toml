@@ -49,7 +49,7 @@ homepage = "https://commonware.xyz"
 rust-version = "1.91.1"
 
 [workspace.lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(full_bench)', 'cfg(generate_conformance_tests)', 'cfg(min_readiness_TESTED)', 'cfg(min_readiness_WIRE_STABLE)', 'cfg(min_readiness_API_STABLE)', 'cfg(min_readiness_PRODUCTION)'] }
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(full_bench)', 'cfg(generate_conformance_tests)', 'cfg(min_readiness_BETA)', 'cfg(min_readiness_GAMMA)', 'cfg(min_readiness_DELTA)', 'cfg(min_readiness_EPSILON)'] }
 unused-must-use = "deny"
 rust-2018-idioms = "deny"
 

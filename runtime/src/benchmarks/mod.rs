@@ -3,4 +3,4 @@
 use commonware_macros::ready_mod;
 
 pub mod context;
-ready_mod!(WIRE_STABLE, pub mod tokio);
+ready_mod!(GAMMA, pub mod tokio);

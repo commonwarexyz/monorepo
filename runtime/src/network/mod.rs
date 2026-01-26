@@ -1,14 +1,14 @@
 use commonware_macros::ready_mod;
 
-ready_mod!(EXPERIMENTAL, pub(crate) mod audited);
-ready_mod!(EXPERIMENTAL, pub(crate) mod deterministic);
-ready_mod!(WIRE_STABLE, pub(crate) mod metered);
+ready_mod!(ALPHA, pub(crate) mod audited);
+ready_mod!(ALPHA, pub(crate) mod deterministic);
+ready_mod!(GAMMA, pub(crate) mod metered);
 
 #[cfg(all(not(target_arch = "wasm32"), not(feature = "iouring-network")))]
-ready_mod!(WIRE_STABLE, pub(crate) mod tokio);
+ready_mod!(GAMMA, pub(crate) mod tokio);
 
 #[cfg(all(not(target_arch = "wasm32"), feature = "iouring-network"))]
-ready_mod!(TESTED, pub(crate) mod iouring);
+ready_mod!(BETA, pub(crate) mod iouring);
 
 #[cfg(test)]
 mod tests {

@@ -10,12 +10,12 @@
     html_favicon_url = "https://commonware.xyz/favicon.ico"
 )]
 
-commonware_macros::ready_scope!(TESTED {
+commonware_macros::ready_scope!(BETA {
     pub mod aggregation;
     pub mod ordered_broadcast;
 });
 
-commonware_macros::ready_scope!(WIRE_STABLE {
+commonware_macros::ready_scope!(GAMMA {
     use commonware_codec::Codec;
     use commonware_cryptography::{Committable, Digestible};
 
@@ -59,7 +59,7 @@ commonware_macros::ready_scope!(WIRE_STABLE {
 /// This trait is required for blocks used with deferred verification in [CertifiableAutomaton].
 /// It allows the verification context to be derived directly from the block when a validator
 /// needs to participate in certification but never verified the block locally (necessary for liveness).
-#[commonware_macros::ready(WIRE_STABLE)]
+#[commonware_macros::ready(GAMMA)]
 pub trait CertifiableBlock: Block {
     /// The consensus context type stored in this block.
     type Context: Clone;
@@ -70,7 +70,7 @@ pub trait CertifiableBlock: Block {
 
 cfg_if::cfg_if! {
     // WIRE_STABLE: this block is excluded at API_STABLE or PRODUCTION
-    if #[cfg(all(not(target_arch = "wasm32"), not(any(min_readiness_API_STABLE, min_readiness_PRODUCTION))))] {
+    if #[cfg(all(not(target_arch = "wasm32"), not(any(min_readiness_DELTA, min_readiness_EPSILON))))] {
         use commonware_cryptography::Digest;
         use commonware_utils::channels::fallible::OneshotExt;
         use futures::channel::{oneshot, mpsc};
@@ -82,17 +82,17 @@ cfg_if::cfg_if! {
 
         // File modules in proc macro input are unstable, so use raw cfg attributes
         // TESTED: excluded at WIRE_STABLE, API_STABLE, or PRODUCTION
-        #[cfg(not(min_readiness_WIRE_STABLE))]
-        #[cfg(not(min_readiness_API_STABLE))]
-        #[cfg(not(min_readiness_PRODUCTION))]
+        #[cfg(not(min_readiness_GAMMA))]
+        #[cfg(not(min_readiness_DELTA))]
+        #[cfg(not(min_readiness_EPSILON))]
         pub mod application;
 
         // WIRE_STABLE: excluded at API_STABLE or PRODUCTION
-        #[cfg(not(min_readiness_API_STABLE))]
-        #[cfg(not(min_readiness_PRODUCTION))]
+        #[cfg(not(min_readiness_DELTA))]
+        #[cfg(not(min_readiness_EPSILON))]
         pub mod marshal;
-        #[cfg(not(min_readiness_API_STABLE))]
-        #[cfg(not(min_readiness_PRODUCTION))]
+        #[cfg(not(min_readiness_DELTA))]
+        #[cfg(not(min_readiness_EPSILON))]
         use crate::marshal::ingress::mailbox::AncestorStream;
 
         mod reporter;
@@ -106,7 +106,7 @@ cfg_if::cfg_if! {
 
         /// Automaton is the interface responsible for driving the consensus forward by proposing new payloads
         /// and verifying payloads proposed by other participants.
-        #[commonware_macros::ready(WIRE_STABLE)]
+        #[commonware_macros::ready(GAMMA)]
         pub trait Automaton: Clone + Send + 'static {
             /// Context is metadata provided by the consensus engine associated with a given payload.
             ///
@@ -145,7 +145,7 @@ cfg_if::cfg_if! {
         /// This trait is required by consensus implementations (like Simplex) that support a certification
         /// phase between notarization and finalization. Applications that do not need custom certification
         /// logic can use the default implementation which always certifies.
-        #[commonware_macros::ready(WIRE_STABLE)]
+        #[commonware_macros::ready(GAMMA)]
         pub trait CertifiableAutomaton: Automaton {
             /// Determine whether a verified payload is safe to commit.
             ///
@@ -176,7 +176,7 @@ cfg_if::cfg_if! {
 
         /// Application is a minimal interface for standard implementations that operate over a stream
         /// of epoched blocks.
-        #[commonware_macros::ready(TESTED)]
+        #[commonware_macros::ready(BETA)]
         pub trait Application<E>: Clone + Send + 'static
         where
             E: Rng + Spawner + Metrics + Clock
@@ -210,7 +210,7 @@ cfg_if::cfg_if! {
         /// erasure coding, for example, verification only serves to verify the integrity of the
         /// received shard relative to the consensus commitment, and can therefore be
         /// hidden from the application.
-        #[commonware_macros::ready(TESTED)]
+        #[commonware_macros::ready(BETA)]
         pub trait VerifyingApplication<E>: Application<E>
         where
             E: Rng + Spawner + Metrics + Clock

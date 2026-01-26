@@ -79,7 +79,7 @@ cfg_if! {
 /// This trait abstracts over sequential and parallel execution, allowing algorithms
 /// to be written generically and then executed with different strategies depending
 /// on the use case (e.g., sequential for testing/debugging, parallel for production).
-#[ready(WIRE_STABLE)]
+#[ready(GAMMA)]
 pub trait Strategy: Clone + Send + Sync + fmt::Debug + 'static {
     /// Reduces a collection to a single value with per-partition initialization.
     ///
@@ -402,11 +402,11 @@ pub trait Strategy: Clone + Send + Sync + fmt::Debug + 'static {
 /// let sum = strategy.fold(&data, || 0, |a, &b| a + b, |a, b| a + b);
 /// assert_eq!(sum, 15);
 /// ```
-#[ready(WIRE_STABLE)]
+#[ready(GAMMA)]
 #[derive(Default, Debug, Clone)]
 pub struct Sequential;
 
-#[ready(WIRE_STABLE)]
+#[ready(GAMMA)]
 impl Strategy for Sequential {
     fn fold_init<I, INIT, T, R, ID, F, RD>(
         &self,
@@ -448,7 +448,7 @@ impl Strategy for Sequential {
 cfg_if! {
     if #[cfg(feature = "std")] {
         /// A clone-able wrapper around a [rayon]-compatible thread pool.
-        #[ready(WIRE_STABLE)]
+        #[ready(GAMMA)]
         pub type ThreadPool = Arc<RThreadPool>;
 
         /// A parallel execution strategy backed by a rayon thread pool.
@@ -488,13 +488,13 @@ cfg_if! {
         /// let sum = strategy.fold(&data, || 0i64, |acc, &n| acc + n, |a, b| a + b);
         /// assert_eq!(sum, 499500);
         /// ```
-        #[ready(WIRE_STABLE)]
+        #[ready(GAMMA)]
         #[derive(Debug, Clone)]
         pub struct Rayon {
             thread_pool: ThreadPool,
         }
 
-        #[ready(WIRE_STABLE)]
+        #[ready(GAMMA)]
         impl Rayon {
             /// Creates a [`Rayon`] strategy with a [`ThreadPool`] that is configured with the given
             /// number of threads.
@@ -511,7 +511,7 @@ cfg_if! {
             }
         }
 
-        #[ready(WIRE_STABLE)]
+        #[ready(GAMMA)]
         impl Strategy for Rayon {
             fn fold_init<I, INIT, T, R, ID, F, RD>(
                 &self,

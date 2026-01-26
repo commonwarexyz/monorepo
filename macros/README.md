@@ -15,22 +15,22 @@ Augment the development of primitives with procedural macros.
 
 | Level | Name | Description |
 |-------|------|-------------|
-| 0 | `EXPERIMENTAL` | Little testing, breaking changes expected |
-| 1 | `TESTED` | Decent coverage, wire format unstable |
-| 2 | `WIRE_STABLE` | Wire/storage format stable, API may change |
-| 3 | `API_STABLE` | API + wire stable |
-| 4 | `PRODUCTION` | Audited, deployed in production |
+| 0 | `ALPHA` | Little testing, breaking changes expected |
+| 1 | `BETA` | Decent coverage, wire format unstable |
+| 2 | `GAMMA` | Wire/storage format stable, API may change |
+| 3 | `DELTA` | API + wire stable |
+| 4 | `EPSILON` | Audited, deployed in production |
 
 ### `#[ready(LEVEL)]`
 
-Marks an item with a readiness level. When building with `RUSTFLAGS="--cfg min_readiness_N"`, items with readiness less than N are excluded.
+Marks an item with a readiness level. When building with `RUSTFLAGS="--cfg min_readiness_X"`, items with readiness less than X are excluded.
 
 ```rust
 use commonware_macros::ready;
 
-#[ready(WIRE_STABLE)]
+#[ready(GAMMA)]
 pub mod stable_api {
-    // Excluded when building with min_readiness_3 or higher
+    // Excluded when building with min_readiness_DELTA or higher
 }
 ```
 
@@ -41,7 +41,7 @@ Marks a file module with a readiness level:
 ```rust
 use commonware_macros::ready_mod;
 
-ready_mod!(WIRE_STABLE, pub mod stable_module);
+ready_mod!(GAMMA, pub mod stable_module);
 ```
 
 ### `ready_scope!`
@@ -51,7 +51,7 @@ Groups multiple items under a single readiness level:
 ```rust
 use commonware_macros::ready_scope;
 
-ready_scope!(WIRE_STABLE {
+ready_scope!(GAMMA {
     pub struct Config { }
     pub fn process() { }
 });
@@ -64,9 +64,9 @@ For modules containing `#[macro_export]` macros, you **must** use raw `#[cfg(...
 Use one `#[cfg(not(...))]` per level above the item's readiness:
 
 ```rust
-// WIRE_STABLE: excluded at API_STABLE or PRODUCTION
-#[cfg(not(min_readiness_API_STABLE))]
-#[cfg(not(min_readiness_PRODUCTION))]
+// GAMMA: excluded at DELTA or EPSILON
+#[cfg(not(min_readiness_DELTA))]
+#[cfg(not(min_readiness_EPSILON))]
 pub mod module_with_exported_macros;
 ```
 

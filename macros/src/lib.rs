@@ -21,11 +21,11 @@ mod nextest;
 /// Readiness level input that accepts either a literal integer or a named constant.
 ///
 /// Named constants:
-/// - `EXPERIMENTAL` = 0: Little testing, breaking changes expected
-/// - `TESTED` = 1: Decent coverage, wire format unstable
-/// - `WIRE_STABLE` = 2: Wire/storage format stable, API may change
-/// - `API_STABLE` = 3: API + wire stable
-/// - `PRODUCTION` = 4: Audited, deployed in production
+/// - `ALPHA` = 0: Little testing, breaking changes expected
+/// - `BETA` = 1: Decent coverage, wire format unstable
+/// - `GAMMA` = 2: Wire/storage format stable, API may change
+/// - `DELTA` = 3: API + wire stable
+/// - `EPSILON` = 4: Audited, deployed in production
 #[allow(dead_code)]
 struct ReadinessLevel {
     value: u8,
@@ -53,15 +53,15 @@ impl Parse for ReadinessLevel {
         } else if lookahead.peek(Ident) {
             let ident: Ident = input.parse()?;
             let value = match ident.to_string().as_str() {
-                "EXPERIMENTAL" => 0,
-                "TESTED" => 1,
-                "WIRE_STABLE" => 2,
-                "API_STABLE" => 3,
-                "PRODUCTION" => 4,
+                "ALPHA" => 0,
+                "BETA" => 1,
+                "GAMMA" => 2,
+                "DELTA" => 3,
+                "EPSILON" => 4,
                 _ => {
                     return Err(Error::new(
                         ident.span(),
-                        "expected readiness level: EXPERIMENTAL, TESTED, WIRE_STABLE, API_STABLE, PRODUCTION, or 0-4",
+                        "expected readiness level: ALPHA, BETA, GAMMA, DELTA, EPSILON, or 0-4",
                     ));
                 }
             };
@@ -77,34 +77,34 @@ impl Parse for ReadinessLevel {
 
 /// Marks an item with a readiness level.
 ///
-/// When building with `RUSTFLAGS="--cfg min_readiness_N"`, items with readiness
-/// less than N are excluded. Unmarked items are always included.
+/// When building with `RUSTFLAGS="--cfg min_readiness_X"`, items with readiness
+/// less than X are excluded. Unmarked items are always included.
 ///
 /// # Readiness Levels
 ///
 /// | Level | Name | Description |
 /// |-------|------|-------------|
-/// | 0 | `EXPERIMENTAL` | Little testing, breaking changes expected |
-/// | 1 | `TESTED` | Decent coverage, wire format unstable |
-/// | 2 | `WIRE_STABLE` | Wire/storage format stable, API may change |
-/// | 3 | `API_STABLE` | API + wire stable |
-/// | 4 | `PRODUCTION` | Audited, deployed in production |
+/// | 0 | `ALPHA` | Little testing, breaking changes expected |
+/// | 1 | `BETA` | Decent coverage, wire format unstable |
+/// | 2 | `GAMMA` | Wire/storage format stable, API may change |
+/// | 3 | `DELTA` | API + wire stable |
+/// | 4 | `EPSILON` | Audited, deployed in production |
 ///
 /// # Example
 /// ```rust,ignore
 /// use commonware_macros::ready;
 ///
-/// #[ready(WIRE_STABLE)]  // excluded at levels 3, 4
+/// #[ready(GAMMA)]  // excluded at DELTA, EPSILON
 /// pub struct StableApi { }
 /// ```
 /// Map level number to named constant for cfg flag
 fn level_name(level: u8) -> &'static str {
     match level {
-        0 => "EXPERIMENTAL",
-        1 => "TESTED",
-        2 => "WIRE_STABLE",
-        3 => "API_STABLE",
-        4 => "PRODUCTION",
+        0 => "ALPHA",
+        1 => "BETA",
+        2 => "GAMMA",
+        3 => "DELTA",
+        4 => "EPSILON",
         _ => unreachable!(),
     }
 }
@@ -160,7 +160,7 @@ impl Parse for ReadyModInput {
 /// ```rust,ignore
 /// use commonware_macros::ready_mod;
 ///
-/// ready_mod!(WIRE_STABLE, pub mod stable_module);
+/// ready_mod!(GAMMA, pub mod stable_module);
 /// ```
 #[proc_macro]
 pub fn ready_mod(input: TokenStream) -> TokenStream {
@@ -215,7 +215,7 @@ impl Parse for ReadyScopeInput {
 /// ```rust,ignore
 /// use commonware_macros::ready_scope;
 ///
-/// ready_scope!(WIRE_STABLE {
+/// ready_scope!(GAMMA {
 ///     pub mod stable_module;
 ///     pub use crate::stable_module::Item;
 /// });

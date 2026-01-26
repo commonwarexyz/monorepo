@@ -7,7 +7,7 @@
 
 use commonware_macros::ready_scope;
 
-ready_scope!(WIRE_STABLE {
+ready_scope!(GAMMA {
     use commonware_cryptography::PublicKey;
     use commonware_utils::{vec::NonEmptyVec, Span};
     use std::future::Future;

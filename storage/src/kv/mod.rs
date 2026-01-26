@@ -3,8 +3,8 @@
 use commonware_macros::ready;
 use commonware_macros::ready_mod;
 
-ready_mod!(TESTED, mod batch);
-#[ready(TESTED)]
+ready_mod!(BETA, mod batch);
+#[ready(BETA)]
 pub use batch::{Batch, Batchable};
 use std::future::Future;
 

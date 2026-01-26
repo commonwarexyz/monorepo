@@ -10,8 +10,8 @@
 use commonware_macros::ready_mod;
 
 mod data;
-ready_mod!(WIRE_STABLE, pub mod discovery);
-ready_mod!(WIRE_STABLE, pub mod lookup);
+ready_mod!(GAMMA, pub mod discovery);
+ready_mod!(GAMMA, pub mod lookup);
 mod mailbox;
 pub use mailbox::{Mailbox, UnboundedMailbox};
 mod relay;
