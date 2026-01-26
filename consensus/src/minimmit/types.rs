@@ -852,12 +852,16 @@ impl<S: Scheme, D: Digest> Notarization<S, D> {
     ///
     /// Only includes votes that match the given proposal. This ensures
     /// the certificate is valid even when Byzantine nodes send conflicting votes.
-    pub fn from_notarizes_for_proposal<'a>(
+    pub fn from_notarizes_for_proposal<'a, I>(
         scheme: &S,
         proposal: Proposal<D>,
-        notarizes: impl IntoIterator<Item = &'a Notarize<S, D>>,
+        notarizes: I,
         strategy: &impl commonware_parallel::Strategy,
-    ) -> Option<Self> {
+    ) -> Option<Self>
+    where
+        I: IntoIterator<Item = &'a Notarize<S, D>>,
+        I::IntoIter: Send,
+    {
         // Filter to only include votes for the specified proposal
         let certificate = scheme.assemble::<_, N3f1>(
             notarizes
@@ -877,11 +881,15 @@ impl<S: Scheme, D: Digest> Notarization<S, D> {
     ///
     /// Uses the first vote's proposal and filters all votes to match it.
     /// Prefer `from_notarizes_for_proposal` when the expected proposal is known.
-    pub fn from_notarizes<'a>(
+    pub fn from_notarizes<'a, I>(
         scheme: &S,
-        notarizes: impl IntoIterator<Item = &'a Notarize<S, D>>,
+        notarizes: I,
         strategy: &impl commonware_parallel::Strategy,
-    ) -> Option<Self> {
+    ) -> Option<Self>
+    where
+        I: IntoIterator<Item = &'a Notarize<S, D>>,
+        I::IntoIter: Send,
+    {
         let mut iter = notarizes.into_iter().peekable();
         let proposal = iter.peek()?.proposal.clone();
         Self::from_notarizes_for_proposal(scheme, proposal, iter, strategy)
@@ -1110,11 +1118,15 @@ pub struct Nullification<S: Scheme> {
 
 impl<S: Scheme> Nullification<S> {
     /// Builds a nullification certificate from nullify votes from the same round.
-    pub fn from_nullifies<'a>(
+    pub fn from_nullifies<'a, I>(
         scheme: &S,
-        nullifies: impl IntoIterator<Item = &'a Nullify<S>>,
+        nullifies: I,
         strategy: &impl commonware_parallel::Strategy,
-    ) -> Option<Self> {
+    ) -> Option<Self>
+    where
+        I: IntoIterator<Item = &'a Nullify<S>>,
+        I::IntoIter: Send,
+    {
         let mut iter = nullifies.into_iter().peekable();
         let round = iter.peek()?.round;
         let certificate =

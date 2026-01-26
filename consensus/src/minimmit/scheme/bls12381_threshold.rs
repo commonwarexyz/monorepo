@@ -19,15 +19,19 @@
 // primitives are identical. Only the Subject type (which has no Finalize variant) differs.
 use crate::minimmit::types::Notarization;
 #[cfg(feature = "mocks")]
-pub use crate::simplex::scheme::bls12381_threshold::fixture;
-pub use crate::simplex::scheme::bls12381_threshold::{
-    decrypt, encrypt, Scheme, Seed, Seedable, Signature,
+pub use crate::simplex::scheme::bls12381_threshold::vrf::fixture;
+pub use crate::simplex::scheme::bls12381_threshold::vrf::{
+    decrypt, encrypt, Certificate, Scheme, Seed, Seedable, Signature,
 };
 use commonware_cryptography::{bls12381::primitives::variant::Variant, Digest, PublicKey};
 
 // Implement Seedable for minimmit's Notarization type
 impl<P: PublicKey, V: Variant, D: Digest> Seedable<V> for Notarization<Scheme<P, V>, D> {
     fn seed(&self) -> Seed<V> {
-        Seed::new(self.proposal.round, self.certificate.seed_signature)
+        let cert = self
+            .certificate
+            .get()
+            .expect("verified certificate must decode");
+        Seed::new(self.proposal.round, cert.seed_signature)
     }
 }

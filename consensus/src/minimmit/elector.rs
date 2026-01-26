@@ -211,8 +211,12 @@ where
     P: PublicKey,
     V: Variant,
 {
-    fn elect(&self, round: Round, certificate: Option<&bls12381_threshold::Signature<V>>) -> u32 {
-        Random::select_leader::<V>(round, self.n, certificate.map(|c| c.seed_signature))
+    fn elect(&self, round: Round, certificate: Option<&bls12381_threshold::Certificate<V>>) -> u32 {
+        Random::select_leader::<V>(
+            round,
+            self.n,
+            certificate.and_then(|c| c.get().map(|sig| sig.seed_signature)),
+        )
     }
 }
 
