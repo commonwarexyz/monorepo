@@ -2690,7 +2690,7 @@ mod tests {
             assert_eq!(journal.pruning_boundary(), 0);
             // Size is 0 because blob is empty
             assert_eq!(journal.size(), 0);
-            drop(journal);
+            journal.destroy().await.unwrap();
         });
     }
 
@@ -2732,6 +2732,7 @@ mod tests {
             // Should fallback to blobs
             assert_eq!(journal.pruning_boundary(), 0);
             assert_eq!(journal.size(), 0);
+            journal.destroy().await.unwrap();
         });
     }
 }
