@@ -764,7 +764,7 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
                 .oldest_section()
                 .expect("all sections pruned - violates tail section invariant");
             // Pruning boundary only moves forward
-            debug_assert!(self.pruning_boundary < new_oldest * self.items_per_blob);
+            assert!(self.pruning_boundary < new_oldest * self.items_per_blob);
             self.pruning_boundary = new_oldest * self.items_per_blob;
         }
 
