@@ -163,6 +163,7 @@ pub(crate) fn libfontconfig_bin_s3_key(version: &str, architecture: Architecture
     )
 }
 
+/// S3 key for fontconfig-config package
 pub(crate) fn fontconfig_config_bin_s3_key(version: &str, architecture: Architecture) -> String {
     format!(
         "{TOOLS_BINARIES_PREFIX}/fontconfig-config/{version}/linux-{arch}/fontconfig-config_{version}_{arch}.deb",
