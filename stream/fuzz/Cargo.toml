@@ -10,7 +10,6 @@ cargo-fuzz = true
 
 [dependencies]
 arbitrary = { workspace = true, features = ["derive"] }
-chacha20poly1305 = { workspace = true, default-features = false, features = ["std", "getrandom"] }
 commonware-codec.workspace = true
 commonware-cryptography.workspace = true
 commonware-runtime.workspace = true
@@ -19,6 +18,11 @@ commonware-utils.workspace = true
 futures.workspace = true
 libfuzzer-sys.workspace = true
 rand_core.workspace = true
+
+[target.'cfg(target_arch = "wasm32")'.dependencies.chacha20poly1305]
+workspace = true
+default-features = false
+features = ["std", "getrandom"]
 
 [[bin]]
 name = "transport"
