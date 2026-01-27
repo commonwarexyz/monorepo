@@ -55,15 +55,8 @@ use core::{
 };
 
 commonware_macros::stability_mod!(GAMMA, pub mod faults);
-commonware_macros::stability_scope!(GAMMA {
-    pub use faults::{Faults, N3f1, N5f1};
-});
 #[cfg(feature = "std")]
 commonware_macros::stability_mod!(GAMMA, pub mod acknowledgement);
-#[cfg(feature = "std")]
-commonware_macros::stability_scope!(GAMMA {
-    pub use acknowledgement::Acknowledgement;
-});
 #[cfg(feature = "std")]
 commonware_macros::stability_mod!(GAMMA, pub mod channels);
 #[cfg(not(commonware_stability_DELTA))]
@@ -74,6 +67,13 @@ commonware_macros::stability_mod!(GAMMA, pub mod net);
 #[cfg(not(commonware_stability_DELTA))]
 #[cfg(not(commonware_stability_EPSILON))]
 pub mod vec;
+
+commonware_macros::stability_scope!(GAMMA {
+    pub use faults::{Faults, N3f1, N5f1};
+});
+commonware_macros::stability_scope!(GAMMA, cfg(feature = "std") {
+    pub use acknowledgement::Acknowledgement;
+});
 
 commonware_macros::stability_scope!(GAMMA {
     /// Represents a participant/validator index within a consensus committee.
@@ -186,8 +186,7 @@ commonware_macros::stability_mod!(GAMMA, pub mod concurrency);
 #[cfg(feature = "std")]
 commonware_macros::stability_mod!(GAMMA, pub mod futures);
 
-#[cfg(feature = "std")]
-commonware_macros::stability_scope!(GAMMA {
+commonware_macros::stability_scope!(GAMMA, cfg(feature = "std") {
     pub use net::IpAddrExt;
     pub use time::{DurationExt, SystemTimeExt};
     pub use rational::BigRationalExt;

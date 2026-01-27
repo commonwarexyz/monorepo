@@ -11,7 +11,6 @@ extern crate alloc;
 use commonware_macros::stability_mod;
 
 stability_mod!(GAMMA, pub mod algebra);
-// Use stability_cfg! for inline module with external submodule (Rust #54727)
 commonware_utils::stability_cfg!(
     BETA,
     pub mod fields {

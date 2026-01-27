@@ -17,8 +17,6 @@ use rand::SeedableRng as _;
 use rand_chacha::ChaCha20Rng;
 use rand_core::CryptoRngCore;
 
-// Modules containing #[macro_export] macros must use direct cfg attributes
-// instead of stability_cfg! to avoid macro_expanded_macro_exports_accessed_by_absolute_paths warning.
 #[cfg(not(commonware_stability_DELTA))]
 #[cfg(not(commonware_stability_EPSILON))]
 pub mod bls12381;

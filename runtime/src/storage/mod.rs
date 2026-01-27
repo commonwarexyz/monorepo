@@ -169,17 +169,7 @@ stability_scope!(GAMMA {
             })
         }
     }
-});
 
-#[cfg(feature = "arbitrary")]
-impl arbitrary::Arbitrary<'_> for Header {
-    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        let version: u16 = u.arbitrary()?;
-        Ok(Self::new(&(version..=version)).0)
-    }
-}
-
-commonware_macros::stability_scope!(GAMMA {
     /// Validate that a partition name contains only allowed characters.
     ///
     /// Partition names must only contain alphanumeric characters, dashes ('-'),
@@ -195,6 +185,14 @@ commonware_macros::stability_scope!(GAMMA {
         Ok(())
     }
 });
+
+#[cfg(feature = "arbitrary")]
+impl arbitrary::Arbitrary<'_> for Header {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let version: u16 = u.arbitrary()?;
+        Ok(Self::new(&(version..=version)).0)
+    }
+}
 
 #[cfg(test)]
 pub(crate) mod tests {

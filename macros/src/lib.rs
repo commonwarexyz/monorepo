@@ -18,14 +18,8 @@ use syn::{
 
 mod nextest;
 
-/// Stability level input that accepts either a literal integer or a named constant.
-///
-/// Named constants:
-/// - `ALPHA` = 0: Little testing, breaking changes expected
-/// - `BETA` = 1: Decent coverage, wire format unstable
-/// - `GAMMA` = 2: Wire/storage format stable, API may change
-/// - `DELTA` = 3: API + wire stable
-/// - `EPSILON` = 4: Audited, deployed in production
+/// Stability level input that accepts either a literal integer (0-4) or a named constant
+/// (ALPHA, BETA, GAMMA, DELTA, EPSILON).
 #[allow(dead_code)]
 struct StabilityLevel {
     value: u8,
@@ -80,15 +74,7 @@ impl Parse for StabilityLevel {
 /// When building with `RUSTFLAGS="--cfg commonware_stability_X"`, items with stability
 /// less than X are excluded. Unmarked items are always included.
 ///
-/// # Stability Levels
-///
-/// | Level | Name | Description |
-/// |-------|------|-------------|
-/// | 0 | `ALPHA` | Little testing, breaking changes expected |
-/// | 1 | `BETA` | Decent coverage, wire format unstable |
-/// | 2 | `GAMMA` | Wire/storage format stable, API may change |
-/// | 3 | `DELTA` | API + wire stable |
-/// | 4 | `EPSILON` | Audited, deployed in production |
+/// See [commonware README](https://github.com/commonwarexyz/monorepo#stability) for stability level definitions.
 ///
 /// # Example
 /// ```rust,ignore
@@ -97,7 +83,6 @@ impl Parse for StabilityLevel {
 /// #[stability(GAMMA)]  // excluded at DELTA, EPSILON
 /// pub struct StableApi { }
 /// ```
-/// Map level number to named constant for cfg flag
 fn level_name(level: u8) -> &'static str {
     match level {
         0 => "ALPHA",
