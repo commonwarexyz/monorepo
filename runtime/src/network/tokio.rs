@@ -197,7 +197,7 @@ pub struct Network {
 
 impl Network {
     /// Creates a new Network with the given configuration and buffer pool.
-    pub fn new(cfg: Config, pool: BufferPool) -> Self {
+    pub const fn new(cfg: Config, pool: BufferPool) -> Self {
         Self { cfg, pool }
     }
 }
