@@ -1708,6 +1708,8 @@ dependencies = [
  "arbitrary",
  "libfuzzer-sys",
  "proptest",
+ "rand_chacha 0.3.1",
+ "rand_core 0.6.4",
 ]
 
 [[package]]
