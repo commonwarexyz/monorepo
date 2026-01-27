@@ -306,30 +306,40 @@ pub(crate) struct BufferPoolInner {
 
 impl BufferPoolInner {
     /// Try to allocate a buffer from the given size class.
+    ///
+    /// Retries a few times on CAS contention to avoid unnecessary fallback
+    /// to heap allocations when pool capacity is available.
     fn try_alloc(&self, class_index: usize) -> Option<AlignedBuffer> {
+        const MAX_RETRIES: usize = 3;
+
         let class = &self.classes[class_index];
         let label = SizeClassLabel {
             size_class: class.size as u64,
         };
 
-        // Try to get a buffer from the freelist
-        if let Some(buffer) = class.freelist.pop() {
-            class.allocated.fetch_add(1, Ordering::Relaxed);
-            class.total_allocations.fetch_add(1, Ordering::Relaxed);
+        for _ in 0..MAX_RETRIES {
+            // Try to get a buffer from the freelist
+            if let Some(buffer) = class.freelist.pop() {
+                class.allocated.fetch_add(1, Ordering::Relaxed);
+                class.total_allocations.fetch_add(1, Ordering::Relaxed);
 
-            self.metrics.allocations_total.get_or_create(&label).inc();
-            self.metrics.allocated.get_or_create(&label).inc();
-            self.metrics.available.get_or_create(&label).dec();
+                self.metrics.allocations_total.get_or_create(&label).inc();
+                self.metrics.allocated.get_or_create(&label).inc();
+                self.metrics.available.get_or_create(&label).dec();
 
-            return Some(buffer);
-        }
+                return Some(buffer);
+            }
 
-        // Freelist empty - try to allocate a new buffer if under limit
-        let current = class.allocated.load(Ordering::Relaxed);
-        let available = class.freelist.len();
-        let total = current + available;
+            // Freelist empty - try to allocate a new buffer if under limit
+            let current = class.allocated.load(Ordering::Relaxed);
+            let available = class.freelist.len();
+            let total = current + available;
 
-        if total < self.config.max_per_class {
+            if total >= self.config.max_per_class {
+                // Truly at capacity, no point retrying
+                break;
+            }
+
             // Try to increment allocated count
             if class
                 .allocated
@@ -342,6 +352,8 @@ impl BufferPoolInner {
 
                 return Some(AlignedBuffer::new(class.size));
             }
+            // CAS failed due to contention, hint CPU and retry
+            std::hint::spin_loop();
         }
 
         // Pool exhausted
