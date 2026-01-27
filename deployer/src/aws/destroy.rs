@@ -45,6 +45,18 @@ pub async fn destroy(config: Option<&PathBuf>, tag: Option<&str>) -> Result<(), 
     };
     info!(tag = tag.as_str(), "loaded configuration");
 
+    // Validate that all regions are enabled
+    let ec2_client = ec2::create_client(Region::new(MONITORING_REGION)).await;
+    let enabled_regions = ec2::get_enabled_regions(&ec2_client).await?;
+    let disabled: Vec<_> = all_regions
+        .iter()
+        .filter(|r| !enabled_regions.contains(*r))
+        .cloned()
+        .collect();
+    if !disabled.is_empty() {
+        return Err(Error::RegionsNotEnabled(disabled));
+    }
+
     // Ensure deployment directory exists
     let tag_directory = deployer_directory(Some(&tag));
     if !tag_directory.exists() {
@@ -234,12 +246,13 @@ pub async fn destroy(config: Option<&PathBuf>, tag: Option<&str>) -> Result<(), 
 
             let igw_ids = find_igws_by_tag(&ec2_client, &tag).await?;
             for igw_id in igw_ids {
-                let vpc_id = find_vpc_by_igw(&ec2_client, &igw_id).await?;
-                detach_igw(&ec2_client, &igw_id, &vpc_id).await?;
-                info!(
-                    region = region.as_str(),
-                    igw_id, vpc_id, "detached internet gateway"
-                );
+                if let Some(vpc_id) = find_vpc_by_igw(&ec2_client, &igw_id).await? {
+                    detach_igw(&ec2_client, &igw_id, &vpc_id).await?;
+                    info!(
+                        region = region.as_str(),
+                        igw_id, vpc_id, "detached internet gateway"
+                    );
+                }
                 delete_igw(&ec2_client, &igw_id).await?;
                 info!(region = region.as_str(), igw_id, "deleted internet gateway");
             }

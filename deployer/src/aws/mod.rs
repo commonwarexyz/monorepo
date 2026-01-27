@@ -514,6 +514,8 @@ cfg_if::cfg_if! {
             MetadataNotFound(String),
             #[error("must specify either --config or --tag")]
             MissingTagOrConfig,
+            #[error("regions not enabled: {0:?}")]
+            RegionsNotEnabled(Vec<String>),
         }
 
         impl From<aws_sdk_s3::error::SdkError<aws_sdk_s3::operation::get_object::GetObjectError>> for Error {
