@@ -6,7 +6,9 @@ use commonware_codec::{EncodeSize, FixedSize, RangeCfg, Read, ReadExt, Write};
 use commonware_math::poly::{Interpolator, Poly};
 use commonware_parallel::Sequential;
 use commonware_utils::{ordered::Set, Faults, Participant, NZU32};
-use core::{iter, num::NonZeroU32};
+#[cfg(feature = "std")]
+use core::iter;
+use core::num::NonZeroU32;
 #[cfg(feature = "std")]
 use std::sync::{Arc, OnceLock};
 
