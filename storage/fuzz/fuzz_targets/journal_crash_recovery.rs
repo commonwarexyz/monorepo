@@ -264,8 +264,8 @@ impl FuzzJournal for FixedJournal<deterministic::Context, Item> {
     }
 
     async fn commit(&mut self) -> Result<(), commonware_storage::journal::Error> {
-        // Fixed journal doesn't have commit; no-op
-        Ok(())
+        // Fixed journal doesn't have commit; call sync instead
+        self.sync().await
     }
 
     async fn destroy(self) -> Result<(), commonware_storage::journal::Error> {
@@ -414,8 +414,12 @@ async fn run_operations<J: FuzzJournal>(
             },
 
             JournalOperation::Replay { buffer, start_pos } => {
-                let _ = journal.replay(NZUsize!(*buffer), *start_pos).await;
-                Ok(())
+                // Replay may internally do a write so failure should be treated as fatal
+                if journal.replay(NZUsize!(*buffer), *start_pos).await.is_err() {
+                    Err(())
+                } else {
+                    Ok(())
+                }
             }
 
             JournalOperation::Commit => {
