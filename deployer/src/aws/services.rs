@@ -197,6 +197,7 @@ pub(crate) fn fonts_dejavu_core_bin_s3_key(version: &str) -> String {
     )
 }
 
+/// S3 key for musl package
 pub(crate) fn musl_bin_s3_key(version: &str, architecture: Architecture) -> String {
     format!(
         "{TOOLS_BINARIES_PREFIX}/musl/{version}/linux-{arch}/musl_{version}_{arch}.deb",
