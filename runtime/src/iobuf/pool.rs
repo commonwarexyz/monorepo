@@ -421,13 +421,16 @@ impl BufferPool {
         }
     }
 
-    /// Allocates a buffer that can hold at least `size` bytes.
+    /// Allocates a buffer of exactly `size` bytes.
     ///
     /// Returns `None` if:
     /// - `size` exceeds the maximum buffer size
     /// - The pool is exhausted for the required size class
     ///
-    /// The returned buffer is page-aligned and will be returned to the pool when dropped.
+    /// The returned buffer is page-aligned and has `len() == size`, behaving
+    /// like [`IoBufMut::zeroed`]. The memory contents are uninitialized; the
+    /// caller is expected to write to the buffer before reading from it.
+    /// The buffer will be returned to the pool when dropped.
     pub fn alloc(&self, size: usize) -> Option<IoBufMut> {
         let class_index = match self.inner.config.class_index(size) {
             Some(idx) => idx,
@@ -438,16 +441,18 @@ impl BufferPool {
         };
 
         let buffer = self.inner.try_alloc(class_index)?;
-        Some(IoBufMut::from_pooled(PooledBufMut::new(
-            buffer,
-            Arc::downgrade(&self.inner),
-        )))
+        let mut pooled = PooledBufMut::new(buffer, Arc::downgrade(&self.inner));
+        // SAFETY: The caller will write to the buffer before reading from it.
+        // We set len = size so the buffer behaves like IoBufMut::zeroed.
+        unsafe { pooled.set_len(size) };
+        Some(IoBufMut::from_pooled(pooled))
     }
 
     /// Allocates a buffer optimized for I/O operations.
     ///
-    /// Currently identical to `alloc()`. In the future, this may return buffers
-    /// that are registered with io_uring for zero-copy I/O.
+    /// Like [`Self::alloc`], returns a buffer with `len() == size` that behaves
+    /// like [`IoBufMut::zeroed`]. In the future, this may return buffers that
+    /// are registered with io_uring for zero-copy I/O.
     pub fn alloc_for_io(&self, size: usize) -> Option<IoBufMut> {
         self.alloc(size)
     }
@@ -889,14 +894,10 @@ mod tests {
             &mut registry,
         );
 
-        // Allocate a buffer
-        let mut buf = pool.alloc(100).expect("alloc should succeed");
+        // Allocate a buffer - returns buffer with len == requested size
+        let buf = pool.alloc(100).expect("alloc should succeed");
         assert!(buf.capacity() >= page);
-
-        // Write some data
-        buf.put_slice(b"hello");
-        assert_eq!(buf.len(), 5);
-        assert_eq!(buf.as_ref(), b"hello");
+        assert_eq!(buf.len(), 100);
 
         // Drop returns to pool
         drop(buf);
@@ -904,6 +905,7 @@ mod tests {
         // Can allocate again
         let buf2 = pool.alloc(100).expect("alloc should succeed");
         assert!(buf2.capacity() >= page);
+        assert_eq!(buf2.len(), 100);
     }
 
     #[test]
@@ -986,15 +988,21 @@ mod tests {
             &mut registry,
         );
 
-        let mut buf = pool.alloc(100).unwrap();
-        buf.put_slice(b"hello world");
+        // Allocate a buffer
+        let mut buf = pool.alloc(11).unwrap();
+        assert_eq!(buf.len(), 11);
 
+        // Write some data
+        buf.as_mut()[..5].copy_from_slice(&[1, 2, 3, 4, 5]);
+
+        // Freeze preserves the content
         let iobuf = buf.freeze();
-        assert_eq!(iobuf.as_ref(), b"hello world");
+        assert_eq!(iobuf.len(), 11);
+        assert_eq!(&iobuf.as_ref()[..5], &[1, 2, 3, 4, 5]);
 
         // IoBuf can be sliced
         let slice = iobuf.slice(0..5);
-        assert_eq!(slice.as_ref(), b"hello");
+        assert_eq!(slice.len(), 5);
     }
 
     #[test]
@@ -1021,11 +1029,9 @@ mod tests {
         assert!(pool.alloc(100).is_none());
     }
 
-    /// Test that PooledBufMut matches BytesMut behavior for Buf and BufMut traits.
+    /// Test Buf trait implementation on pooled buffers.
     #[test]
-    fn test_pooled_matches_bytesmut_behavior() {
-        use bytes::BytesMut;
-
+    fn test_pooled_buf_trait() {
         let page = page_size();
         let mut registry = test_registry();
         let pool = BufferPool::new(
@@ -1038,65 +1044,29 @@ mod tests {
             &mut registry,
         );
 
-        // Create both buffer types
+        // Allocate a buffer
         let mut pooled = pool.alloc(100).unwrap();
-        let mut bytes_mut = BytesMut::with_capacity(page);
-
-        // Initially empty
-        assert_eq!(pooled.len(), bytes_mut.len());
-        assert_eq!(pooled.is_empty(), bytes_mut.is_empty());
-        assert_eq!(Buf::remaining(&pooled), Buf::remaining(&bytes_mut));
-
-        // Write some data using BufMut
-        pooled.put_slice(b"hello world");
-        bytes_mut.put_slice(b"hello world");
-
-        assert_eq!(pooled.len(), bytes_mut.len());
-        assert_eq!(pooled.as_ref(), bytes_mut.as_ref());
-        assert_eq!(Buf::remaining(&pooled), Buf::remaining(&bytes_mut));
-        assert_eq!(Buf::chunk(&pooled), Buf::chunk(&bytes_mut));
+        assert_eq!(pooled.len(), 100);
+        assert_eq!(Buf::remaining(&pooled), 100);
 
         // Advance (read cursor)
-        Buf::advance(&mut pooled, 6);
-        Buf::advance(&mut bytes_mut, 6);
-
-        assert_eq!(pooled.len(), bytes_mut.len());
-        assert_eq!(Buf::remaining(&pooled), Buf::remaining(&bytes_mut));
-        assert_eq!(Buf::chunk(&pooled), Buf::chunk(&bytes_mut));
-        assert_eq!(pooled.as_ref(), bytes_mut.as_ref());
-
-        // Write more data
-        pooled.put_slice(b"!");
-        bytes_mut.put_slice(b"!");
-
-        assert_eq!(pooled.len(), bytes_mut.len());
-        assert_eq!(Buf::remaining(&pooled), Buf::remaining(&bytes_mut));
-        assert_eq!(pooled.as_ref(), bytes_mut.as_ref());
+        Buf::advance(&mut pooled, 40);
+        assert_eq!(pooled.len(), 60);
+        assert_eq!(Buf::remaining(&pooled), 60);
 
         // Advance to end
-        let remaining = Buf::remaining(&pooled);
-        Buf::advance(&mut pooled, remaining);
-        Buf::advance(&mut bytes_mut, remaining);
-
+        Buf::advance(&mut pooled, 60);
         assert_eq!(pooled.len(), 0);
-        assert_eq!(bytes_mut.len(), 0);
         assert!(pooled.is_empty());
-        assert!(bytes_mut.is_empty());
 
-        // Freeze and compare
-        let pooled_frozen = pooled.freeze();
-        let bytes_frozen = bytes_mut.freeze();
-
-        assert_eq!(pooled_frozen.as_ref(), bytes_frozen.as_ref());
-        assert!(pooled_frozen.is_empty());
-        assert!(bytes_frozen.is_empty());
+        // Freeze empty buffer
+        let frozen = pooled.freeze();
+        assert!(frozen.is_empty());
     }
 
-    /// Test that PooledBufMut freeze preserves only remaining data (after advance).
+    /// Test that freeze preserves only remaining data (after advance).
     #[test]
     fn test_pooled_freeze_after_advance() {
-        use bytes::BytesMut;
-
         let page = page_size();
         let mut registry = test_registry();
         let pool = BufferPool::new(
@@ -1109,23 +1079,19 @@ mod tests {
             &mut registry,
         );
 
-        let mut pooled = pool.alloc(100).unwrap();
-        let mut bytes_mut = BytesMut::with_capacity(page);
+        // Allocate 11 bytes and fill with known pattern
+        let mut pooled = pool.alloc(11).unwrap();
+        assert_eq!(pooled.len(), 11);
+        pooled.as_mut().fill(0x42);
 
-        // Write data
-        pooled.put_slice(b"hello world");
-        bytes_mut.put_slice(b"hello world");
-
-        // Advance past "hello "
+        // Advance past first 6 bytes
         Buf::advance(&mut pooled, 6);
-        Buf::advance(&mut bytes_mut, 6);
+        assert_eq!(pooled.len(), 5);
 
-        // Freeze - should only contain "world"
-        let pooled_frozen = pooled.freeze();
-        let bytes_frozen = bytes_mut.freeze();
-
-        assert_eq!(pooled_frozen.as_ref(), b"world");
-        assert_eq!(pooled_frozen.as_ref(), bytes_frozen.as_ref());
+        // Freeze - should only contain remaining 5 bytes
+        let frozen = pooled.freeze();
+        assert_eq!(frozen.len(), 5);
+        assert!(frozen.as_ref().iter().all(|&b| b == 0x42));
     }
 
     /// Test clear resets both cursor and length.
@@ -1144,20 +1110,16 @@ mod tests {
         );
 
         let mut pooled = pool.alloc(100).unwrap();
+        assert_eq!(pooled.len(), 100);
 
-        // Write and advance
-        pooled.put_slice(b"hello world");
-        Buf::advance(&mut pooled, 6);
-        assert_eq!(pooled.len(), 5);
+        // Advance cursor
+        Buf::advance(&mut pooled, 50);
+        assert_eq!(pooled.len(), 50); // remaining readable bytes
 
         // Clear should reset everything
         pooled.clear();
         assert_eq!(pooled.len(), 0);
         assert!(pooled.is_empty());
-
-        // Can write again from the beginning
-        pooled.put_slice(b"new data");
-        assert_eq!(pooled.as_ref(), b"new data");
     }
 
     #[test]
@@ -1235,17 +1197,18 @@ mod tests {
             &mut registry,
         );
 
-        let mut buf = pool.alloc(100).unwrap();
+        // Allocate a small buffer and write known data
+        let mut buf = pool.alloc(50).unwrap();
+        assert_eq!(buf.len(), 50);
+        buf.as_mut().fill(0x11); // Fill with known pattern
 
-        // Write some initial data
-        buf.put_slice(b"hello");
-        assert_eq!(buf.len(), 5);
-
-        // Grow within capacity
-        buf.resize(10, 0);
-        assert_eq!(buf.len(), 10);
-        assert_eq!(&buf.as_ref()[..5], b"hello");
-        assert_eq!(&buf.as_ref()[5..], &[0, 0, 0, 0, 0]);
+        // Grow within capacity (page size is at least 4096)
+        buf.resize(100, 0xAB);
+        assert_eq!(buf.len(), 100);
+        // First 50 bytes should still have original pattern
+        assert!(buf.as_ref()[..50].iter().all(|&b| b == 0x11));
+        // New bytes should be filled with 0xAB
+        assert!(buf.as_ref()[50..].iter().all(|&b| b == 0xAB));
     }
 
     #[test]
@@ -1262,16 +1225,13 @@ mod tests {
             &mut registry,
         );
 
+        // Allocate a buffer
         let mut buf = pool.alloc(100).unwrap();
-
-        // Write some initial data
-        buf.put_slice(b"hello world");
-        assert_eq!(buf.len(), 11);
+        assert_eq!(buf.len(), 100);
 
         // Truncate
-        buf.resize(5, 0);
-        assert_eq!(buf.len(), 5);
-        assert_eq!(buf.as_ref(), b"hello");
+        buf.resize(30, 0);
+        assert_eq!(buf.len(), 30);
     }
 
     #[test]
@@ -1288,12 +1248,11 @@ mod tests {
             &mut registry,
         );
 
+        // Allocate a buffer at minimum size class and write known data
         let mut buf = pool.alloc(100).unwrap();
         let original_capacity = buf.capacity();
-
-        // Write some initial data
-        buf.put_slice(b"hello");
-        assert_eq!(buf.len(), 5);
+        assert_eq!(buf.len(), 100);
+        buf.as_mut().fill(0x22); // Fill with known pattern
 
         // Grow beyond capacity - should get a new buffer from the pool
         let new_size = original_capacity + 100;
@@ -1301,8 +1260,8 @@ mod tests {
         assert!(buf.capacity() >= new_size);
         assert_eq!(buf.len(), new_size);
         // Original data should be preserved
-        assert_eq!(&buf.as_ref()[..5], b"hello");
+        assert!(buf.as_ref()[..100].iter().all(|&b| b == 0x22));
         // New bytes should be filled with 0xAB
-        assert!(buf.as_ref()[5..].iter().all(|&b| b == 0xAB));
+        assert!(buf.as_ref()[100..].iter().all(|&b| b == 0xAB));
     }
 }
