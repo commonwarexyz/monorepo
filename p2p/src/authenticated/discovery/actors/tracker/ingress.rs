@@ -224,7 +224,7 @@ pub struct Releaser<C: PublicKey> {
 
 impl<C: PublicKey> Releaser<C> {
     /// Create a new releaser.
-    pub(super) const fn new(sender: UnboundedMailbox<Message<C>>) -> Self {
+    pub(crate) const fn new(sender: UnboundedMailbox<Message<C>>) -> Self {
         Self { sender }
     }
 

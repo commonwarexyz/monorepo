@@ -48,13 +48,6 @@ doc = false
 bench = false
 
 [[bin]]
-name = "stable_buf"
-path = "fuzz_targets/stable_buf.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
 name = "time"
 path = "fuzz_targets/time.rs"
 test = false

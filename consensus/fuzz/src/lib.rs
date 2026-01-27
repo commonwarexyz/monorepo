@@ -11,7 +11,6 @@ use crate::{
     utils::{link_peers, max_faults, register, Action, Partition},
 };
 use arbitrary::Arbitrary;
-use bytes::Bytes;
 use commonware_codec::{Decode, DecodeExt};
 use commonware_consensus::{
     simplex::{
@@ -33,7 +32,7 @@ use commonware_p2p::{
     Recipients,
 };
 use commonware_parallel::Sequential;
-use commonware_runtime::{buffer::PoolRef, deterministic, Clock, Metrics, Runner, Spawner};
+use commonware_runtime::{buffer::PoolRef, deterministic, Clock, IoBuf, Metrics, Runner, Spawner};
 use commonware_utils::{NZUsize, NZU16};
 use futures::{channel::mpsc::Receiver, future::join_all, StreamExt};
 use rand::{rngs::StdRng, RngCore, SeedableRng};
@@ -433,7 +432,7 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
 
             let make_vote_forwarder = || {
                 let participants = participants.clone();
-                move |origin: SplitOrigin, recipients: &Recipients<_>, message: &Bytes| {
+                move |origin: SplitOrigin, recipients: &Recipients<_>, message: &IoBuf| {
                     let Ok(msg) = Vote::<P::Scheme, Sha256Digest>::decode(message.clone()) else {
                         return Some(recipients.clone());
                     };
@@ -448,7 +447,7 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
             let make_certificate_forwarder = || {
                 let codec = schemes[idx].certificate_codec_config();
                 let participants = participants.clone();
-                move |origin: SplitOrigin, recipients: &Recipients<_>, message: &Bytes| {
+                move |origin: SplitOrigin, recipients: &Recipients<_>, message: &IoBuf| {
                     let Ok(msg) = Certificate::<P::Scheme, Sha256Digest>::decode_cfg(
                         &mut message.as_ref(),
                         &codec,
@@ -464,14 +463,14 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                 }
             };
             let make_resolver_forwarder = || {
-                move |_: SplitOrigin, recipients: &Recipients<_>, _: &Bytes| {
+                move |_: SplitOrigin, recipients: &Recipients<_>, _: &IoBuf| {
                     Some(recipients.clone())
                 }
             };
 
             let make_vote_router = || {
                 let participants = participants.clone();
-                move |(sender, message): &(_, Bytes)| {
+                move |(sender, message): &(_, IoBuf)| {
                     let Ok(msg) = Vote::<P::Scheme, Sha256Digest>::decode(message.clone()) else {
                         return SplitTarget::None;
                     };
@@ -481,7 +480,7 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
             let make_certificate_router = || {
                 let codec = schemes[idx].certificate_codec_config();
                 let participants = participants.clone();
-                move |(sender, message): &(_, Bytes)| {
+                move |(sender, message): &(_, IoBuf)| {
                     let Ok(msg) = Certificate::<P::Scheme, Sha256Digest>::decode_cfg(
                         &mut message.as_ref(),
                         &codec,
@@ -491,7 +490,7 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                     strategy.route(msg.view(), sender, participants.as_ref())
                 }
             };
-            let make_resolver_router = || move |(_sender, _message): &(_, Bytes)| SplitTarget::Both;
+            let make_resolver_router = || move |(_sender, _message): &(_, IoBuf)| SplitTarget::Both;
 
             let (vote_sender, vote_receiver) = vote_network;
             let (certificate_sender, certificate_receiver) = certificate_network;

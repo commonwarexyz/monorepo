@@ -3,7 +3,6 @@
 
 use super::get_page_from_blob;
 use crate::{Blob, Error, RwLock};
-use commonware_utils::StableBuf;
 use futures::{future::Shared, FutureExt};
 use std::{
     collections::{hash_map::Entry, HashMap},
@@ -20,8 +19,8 @@ use tracing::{debug, error, trace};
 // Type alias for the future we'll be storing for each in-flight page fetch.
 //
 // We wrap [Error] in an Arc so it will be cloneable, which is required for the future to be
-// [Shared]. The StableBuf contains only the logical (validated) bytes of the page.
-type PageFetchFut = Shared<Pin<Box<dyn Future<Output = Result<StableBuf, Arc<Error>>> + Send>>>;
+// [Shared]. The Vec<u8> contains only the logical (validated) bytes of the page.
+type PageFetchFut = Shared<Pin<Box<dyn Future<Output = Result<Vec<u8>, Arc<Error>>> + Send>>>;
 
 /// A [Pool] caches pages of [Blob] data in memory after verifying the integrity of each.
 ///
@@ -228,7 +227,7 @@ impl PoolRef {
                             .map_err(Arc::new)?;
                         // We should never be fetching partial pages through the buffer pool. This can happen
                         // if a non-last page is corrupted and falls back to a partial CRC.
-                        let len = page.as_ref().len();
+                        let len = page.len();
                         if len != page_size as usize {
                             error!(
                                 page_num,
@@ -257,10 +256,9 @@ impl PoolRef {
         if !is_first_fetcher {
             // Copy the requested portion of the page into the buffer and return immediately.
             let page_buf = fetch_result.map_err(|_| Error::ReadFailed)?;
-            let bytes_to_copy = std::cmp::min(buf.len(), page_buf.as_ref().len() - offset_in_page);
-            buf[..bytes_to_copy].copy_from_slice(
-                &page_buf.as_ref()[offset_in_page..offset_in_page + bytes_to_copy],
-            );
+            let bytes_to_copy = std::cmp::min(buf.len(), page_buf.len() - offset_in_page);
+            buf[..bytes_to_copy]
+                .copy_from_slice(&page_buf[offset_in_page..offset_in_page + bytes_to_copy]);
             return Ok(bytes_to_copy);
         }
 
@@ -282,12 +280,12 @@ impl PoolRef {
             }
         };
 
-        pool.cache(blob_id, page_buf.as_ref(), page_num);
+        pool.cache(blob_id, &page_buf, page_num);
 
         // Copy the requested portion of the page into the buffer.
-        let bytes_to_copy = std::cmp::min(buf.len(), page_buf.as_ref().len() - offset_in_page);
+        let bytes_to_copy = std::cmp::min(buf.len(), page_buf.len() - offset_in_page);
         buf[..bytes_to_copy]
-            .copy_from_slice(&page_buf.as_ref()[offset_in_page..offset_in_page + bytes_to_copy]);
+            .copy_from_slice(&page_buf[offset_in_page..offset_in_page + bytes_to_copy]);
 
         Ok(bytes_to_copy)
     }
@@ -519,7 +517,7 @@ mod tests {
                 let record = Checksum::new(PAGE_SIZE.get(), crc);
                 let mut page_data = logical_data;
                 page_data.extend_from_slice(&record.to_bytes());
-                blob.write_at(page_data, i * physical_page_size)
+                blob.write_at(i * physical_page_size, page_data)
                     .await
                     .unwrap();
             }

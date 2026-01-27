@@ -4,10 +4,9 @@ use crate::journal::{
     contiguous::{fixed, variable},
     segmented::{fixed as segmented_fixed, glob, oversized, variable as segmented_variable},
 };
-use bytes::{Buf, BufMut};
 use commonware_codec::{FixedSize, RangeCfg, Read, ReadExt, Write};
 use commonware_conformance::{conformance_tests, Conformance};
-use commonware_runtime::{buffer::PoolRef, deterministic, Metrics, Runner};
+use commonware_runtime::{buffer::PoolRef, deterministic, Buf, BufMut, Metrics, Runner};
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use core::num::{NonZeroU16, NonZeroU64, NonZeroUsize};
 use oversized::Record;

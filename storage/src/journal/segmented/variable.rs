@@ -79,21 +79,18 @@
 
 use super::manager::{AppendFactory, Config as ManagerConfig, Manager};
 use crate::journal::Error;
-use bytes::{Buf, BufMut, Bytes};
 use commonware_codec::{
-    varint::UInt, Codec, CodecShared, EncodeSize, ReadExt, Write as CodecWrite,
+    varint::{UInt, MAX_U32_VARINT_SIZE},
+    Codec, CodecShared, EncodeSize, ReadExt, Write as CodecWrite,
 };
 use commonware_runtime::{
     buffer::pool::{Append, PoolRef, Replay},
-    Blob, Metrics, Storage,
+    Blob, Buf, BufMut, IoBuf, IoBufMut, Metrics, Storage,
 };
 use futures::stream::{self, Stream, StreamExt};
 use std::{io::Cursor, num::NonZeroUsize};
 use tracing::{trace, warn};
 use zstd::{bulk::compress, decode_all};
-
-/// Maximum size of a varint for u32 (also the minimum useful read size for parsing item headers).
-const MAX_VARINT_SIZE: usize = 5;
 
 /// Configuration for `Journal` storage.
 #[derive(Clone)]
@@ -252,9 +249,10 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
         offset: u64,
     ) -> Result<(u64, u32, V), Error> {
         // Read varint header (max 5 bytes for u32)
-        let buf = vec![0u8; MAX_VARINT_SIZE];
-        let (stable_buf, available) = blob.read_up_to(buf, offset).await?;
-        let buf = Bytes::from(stable_buf);
+        let (buf, available) = blob
+            .read_up_to(IoBufMut::zeroed(MAX_U32_VARINT_SIZE), offset)
+            .await?;
+        let buf = buf.freeze();
         let mut cursor = Cursor::new(buf.slice(..available));
         let (next_offset, item_info) = find_item(&mut cursor, offset)?;
 
@@ -280,7 +278,7 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
                 let remainder_len = total_len - prefix_len;
                 let mut remainder = vec![0u8; remainder_len];
                 blob.read_into(&mut remainder, read_offset).await?;
-                let chained = prefix.chain(Bytes::from(remainder));
+                let chained = prefix.chain(IoBuf::from(remainder));
                 let decoded = decode_item::<V>(chained, cfg, compressed)?;
                 (total_len as u32, decoded)
             }
@@ -346,7 +344,7 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
                             // Ensure we have enough data for varint header.
                             // ensure() returns Ok(false) if exhausted with fewer bytes,
                             // but we still try to decode from remaining bytes.
-                            match state.replay.ensure(MAX_VARINT_SIZE).await {
+                            match state.replay.ensure(MAX_U32_VARINT_SIZE).await {
                                 Ok(true) => {}
                                 Ok(false) => {
                                     // Reader exhausted - check if buffer is empty
@@ -385,7 +383,7 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
                                     Err(err) => {
                                         // Could be incomplete varint - check if reader exhausted
                                         if state.replay.is_exhausted()
-                                            || before_remaining < MAX_VARINT_SIZE
+                                            || before_remaining < MAX_U32_VARINT_SIZE
                                         {
                                             // Treat as trailing bytes
                                             if state.valid_offset < blob_size
@@ -475,7 +473,7 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
                             }
 
                             // Return batch if we have items and buffer is low
-                            if !batch.is_empty() && state.replay.remaining() < MAX_VARINT_SIZE {
+                            if !batch.is_empty() && state.replay.remaining() < MAX_U32_VARINT_SIZE {
                                 return Some((batch, state));
                             }
                         }
@@ -659,9 +657,8 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bytes::BufMut;
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic, Blob, Metrics, Runner, Storage};
+    use commonware_runtime::{deterministic, Blob, BufMut, Metrics, Runner, Storage};
     use commonware_utils::{NZUsize, NZU16};
     use futures::{pin_mut, StreamExt};
     use std::num::NonZeroU16;
@@ -1121,7 +1118,7 @@ mod tests {
             let mut incomplete_data = Vec::new();
             UInt(u32::MAX).write(&mut incomplete_data);
             incomplete_data.truncate(1);
-            blob.write_at(incomplete_data, 0)
+            blob.write_at(0, incomplete_data)
                 .await
                 .expect("Failed to write incomplete data");
             blob.sync().await.expect("Failed to sync blob");
@@ -1178,7 +1175,7 @@ mod tests {
             UInt(item_size).write(&mut buf); // Varint encoding
             let data = [2u8; 5];
             BufMut::put_slice(&mut buf, &data);
-            blob.write_at(buf, 0)
+            blob.write_at(0, buf)
                 .await
                 .expect("Failed to write incomplete item");
             blob.sync().await.expect("Failed to sync blob");
@@ -1237,7 +1234,7 @@ mod tests {
             let mut buf = Vec::new();
             UInt(item_size).write(&mut buf);
             BufMut::put_slice(&mut buf, item_data);
-            blob.write_at(buf, 0)
+            blob.write_at(0, buf)
                 .await
                 .expect("Failed to write item without checksum");
 
@@ -1301,7 +1298,7 @@ mod tests {
             UInt(item_size).write(&mut buf);
             BufMut::put_slice(&mut buf, item_data);
             buf.put_u32(incorrect_checksum);
-            blob.write_at(buf, 0)
+            blob.write_at(0, buf)
                 .await
                 .expect("Failed to write item with bad checksum");
 
@@ -1531,7 +1528,7 @@ mod tests {
                 .open(&cfg.partition, &2u64.to_be_bytes())
                 .await
                 .expect("Failed to open blob");
-            blob.write_at(vec![0u8; 16], blob_size)
+            blob.write_at(blob_size, vec![0u8; 16])
                 .await
                 .expect("Failed to add extra data");
             blob.sync().await.expect("Failed to sync blob");
@@ -2017,7 +2014,7 @@ mod tests {
 
             // Write incomplete varint: 0xFF has continuation bit set, needs more bytes
             // This creates 2 trailing bytes that cannot form a valid item
-            blob.write_at(vec![0xFF, 0xFF], physical_size_before)
+            blob.write_at(physical_size_before, vec![0xFF, 0xFF])
                 .await
                 .unwrap();
             blob.sync().await.unwrap();

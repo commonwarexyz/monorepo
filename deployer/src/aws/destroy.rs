@@ -4,7 +4,8 @@ use crate::aws::{
     deployer_directory,
     ec2::{self, *},
     s3::{self, delete_prefix, is_no_such_bucket_error, Region, BUCKET_NAME, DEPLOYMENTS_PREFIX},
-    Config, Error, DESTROYED_FILE_NAME, LOGS_PORT, MONITORING_REGION, PROFILES_PORT, TRACES_PORT,
+    Config, Error, Metadata, DESTROYED_FILE_NAME, LOGS_PORT, METADATA_FILE_NAME, MONITORING_REGION,
+    PROFILES_PORT, TRACES_PORT,
 };
 use futures::future::try_join_all;
 use std::{
@@ -15,17 +16,37 @@ use std::{
 use tracing::{info, warn};
 
 /// Tears down all resources associated with the deployment tag
-pub async fn destroy(config: &PathBuf) -> Result<(), Error> {
-    // Load configuration
-    let config: Config = {
-        let config_file = File::open(config)?;
-        serde_yaml::from_reader(config_file)?
+pub async fn destroy(config: Option<&PathBuf>, tag: Option<&str>) -> Result<(), Error> {
+    // Determine tag and regions from either config file or metadata
+    let (tag, all_regions) = if let Some(config_path) = config {
+        let config: Config = {
+            let config_file = File::open(config_path)?;
+            serde_yaml::from_reader(config_file)?
+        };
+        let mut regions = HashSet::new();
+        regions.insert(MONITORING_REGION.to_string());
+        for instance in &config.instances {
+            regions.insert(instance.region.clone());
+        }
+        (config.tag, regions)
+    } else if let Some(tag) = tag {
+        let tag_directory = deployer_directory(Some(tag));
+        let metadata_path = tag_directory.join(METADATA_FILE_NAME);
+        if !metadata_path.exists() {
+            return Err(Error::MetadataNotFound(tag.to_string()));
+        }
+        let metadata: Metadata = {
+            let file = File::open(&metadata_path)?;
+            serde_yaml::from_reader(file)?
+        };
+        (tag.to_string(), metadata.regions.into_iter().collect())
+    } else {
+        return Err(Error::MissingTagOrConfig);
     };
-    let tag = &config.tag;
     info!(tag = tag.as_str(), "loaded configuration");
 
     // Ensure deployment directory exists
-    let tag_directory = deployer_directory(tag);
+    let tag_directory = deployer_directory(Some(&tag));
     if !tag_directory.exists() {
         return Err(Error::DeploymentDoesNotExist(tag.clone()));
     }
@@ -40,7 +61,7 @@ pub async fn destroy(config: &PathBuf) -> Result<(), Error> {
     // Clean up S3 deployment data (preserves cached tools)
     info!(bucket = BUCKET_NAME, "cleaning up S3 deployment data");
     let s3_client = s3::create_client(Region::new(MONITORING_REGION)).await;
-    let deployment_prefix = format!("{}/{}/", DEPLOYMENTS_PREFIX, tag);
+    let deployment_prefix = format!("{}/{}/", DEPLOYMENTS_PREFIX, &tag);
     match delete_prefix(&s3_client, BUCKET_NAME, &deployment_prefix).await {
         Ok(()) => {
             info!(
@@ -59,13 +80,6 @@ pub async fn destroy(config: &PathBuf) -> Result<(), Error> {
                 warn!(bucket = BUCKET_NAME, %e, "failed to delete S3 deployment data, continuing with destroy");
             }
         }
-    }
-
-    // Determine all regions involved
-    let mut all_regions = HashSet::new();
-    all_regions.insert(MONITORING_REGION.to_string());
-    for instance in &config.instances {
-        all_regions.insert(instance.region.clone());
     }
 
     // First pass: Delete instances, security groups, subnets, route tables, peering, IGWs, and key pairs
@@ -220,12 +234,13 @@ pub async fn destroy(config: &PathBuf) -> Result<(), Error> {
 
             let igw_ids = find_igws_by_tag(&ec2_client, &tag).await?;
             for igw_id in igw_ids {
-                let vpc_id = find_vpc_by_igw(&ec2_client, &igw_id).await?;
-                detach_igw(&ec2_client, &igw_id, &vpc_id).await?;
-                info!(
-                    region = region.as_str(),
-                    igw_id, vpc_id, "detached internet gateway"
-                );
+                if let Some(vpc_id) = find_vpc_by_igw(&ec2_client, &igw_id).await? {
+                    detach_igw(&ec2_client, &igw_id, &vpc_id).await?;
+                    info!(
+                        region = region.as_str(),
+                        igw_id, vpc_id, "detached internet gateway"
+                    );
+                }
                 delete_igw(&ec2_client, &igw_id).await?;
                 info!(region = region.as_str(), igw_id, "deleted internet gateway");
             }

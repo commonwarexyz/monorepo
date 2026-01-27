@@ -1,5 +1,4 @@
 use crate::{strategy::Strategy, types::Message, FuzzInput, EPOCH};
-use bytes::Bytes;
 use commonware_codec::{Encode, Read, ReadExt};
 use commonware_consensus::{
     simplex::{
@@ -12,7 +11,7 @@ use commonware_consensus::{
 use commonware_cryptography::sha256::Digest as Sha256Digest;
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
-use commonware_runtime::{Clock, Handle, Spawner};
+use commonware_runtime::{Clock, Handle, IoBuf, Spawner};
 use rand_core::CryptoRngCore;
 use std::{collections::VecDeque, time::Duration};
 
@@ -214,17 +213,17 @@ where
             select! {
                 result = vote_receiver.recv().fuse() => {
                     if let Ok((_, msg)) = result {
-                        self.handle_vote(&mut vote_sender, msg.to_vec()).await;
+                        self.handle_vote(&mut vote_sender, msg.into()).await;
                     }
                 },
                 result = cert_receiver.recv().fuse() => {
                     if let Ok((_, msg)) = result {
-                        self.handle_certificate(&mut cert_sender, msg.to_vec()).await;
+                        self.handle_certificate(&mut cert_sender, msg.into()).await;
                     }
                 },
                 result = resolver_receiver.recv().fuse() => {
                     if let Ok((_, msg)) = result {
-                        self.handle_resolver(&mut resolver_sender, msg.to_vec()).await;
+                        self.handle_resolver(&mut resolver_sender, msg.into()).await;
                     }
                 },
                 _ = self.context.sleep(TIMEOUT) => {
@@ -240,7 +239,7 @@ where
         // Optionally send mutated vote
         if self.fuzz_input.random_bool() {
             let mutated = self.mutate_bytes(&msg);
-            let _ = sender.send(Recipients::All, &mutated[..], true).await;
+            let _ = sender.send(Recipients::All, mutated, true).await;
         }
 
         let Ok(vote) = Vote::<S, Sha256Digest>::read(&mut msg.as_slice()) else {
@@ -327,7 +326,7 @@ where
         if self.fuzz_input.random_bool() {
             let mutated = self.strategy.mutate_resolver_bytes(&self.fuzz_input, &msg);
             let _ = sender
-                .send(Recipients::All, Bytes::from(mutated), true)
+                .send(Recipients::All, IoBuf::from(mutated), true)
                 .await;
         }
     }
@@ -387,7 +386,7 @@ where
 
     async fn send_random_message(&mut self, sender: &mut impl Sender) {
         let cert = self.bytes();
-        let _ = sender.send(Recipients::All, Bytes::from(cert), true).await;
+        let _ = sender.send(Recipients::All, IoBuf::from(cert), true).await;
     }
 
     async fn send_random_vote(&mut self, sender: &mut impl Sender<PublicKey = S::PublicKey>) {
@@ -446,7 +445,7 @@ where
             }
             Message::Random => {
                 let bytes = self.bytes();
-                let _ = sender.send(recipients, &bytes[..], true).await;
+                let _ = sender.send(recipients, bytes, true).await;
             }
         }
     }

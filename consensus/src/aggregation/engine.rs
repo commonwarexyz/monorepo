@@ -15,7 +15,7 @@ use commonware_cryptography::{
     certificate::{Provider, Scheme},
     Digest,
 };
-use commonware_macros::select;
+use commonware_macros::select_loop;
 use commonware_p2p::{
     utils::codec::{wrap, WrappedSender},
     Blocker, Receiver, Recipients, Sender,
@@ -235,7 +235,6 @@ impl<
         ),
     ) {
         let (mut sender, mut receiver) = wrap((), network.0, network.1);
-        let mut shutdown = self.context.stopped();
 
         // Initialize the epoch
         let (latest, mut epoch_updates) = self.monitor.subscribe().await;
@@ -270,151 +269,147 @@ impl<
             .expect("current epoch scheme must exist");
         self.safe_tip.init(scheme.participants());
 
-        loop {
-            let _ = self.metrics.tip.try_set(self.tip.get());
+        select_loop! {
+            self.context,
+            on_start => {
+                let _ = self.metrics.tip.try_set(self.tip.get());
 
-            // Propose a new digest if we are processing less than the window
-            let next = self.next();
+                // Propose a new digest if we are processing less than the window
+                let next = self.next();
 
-            // Underflow safe: next >= self.tip is guaranteed by next()
-            if next.delta_from(self.tip).unwrap() < self.window {
-                trace!(%next, "requesting new digest");
-                assert!(self
-                    .pending
-                    .insert(next, Pending::Unverified(BTreeMap::new()))
-                    .is_none());
-                self.get_digest(next);
-                continue;
-            }
-
-            // Get the rebroadcast deadline for the next height
-            let rebroadcast = match self.rebroadcast_deadlines.peek() {
-                Some((_, &deadline)) => Either::Left(self.context.sleep_until(deadline)),
-                None => Either::Right(future::pending()),
-            };
-
-            // Process the next event
-            select! {
-                // Handle shutdown signal
-                _ = &mut shutdown => {
-                    debug!("shutdown");
-                    break;
-                },
-
-                // Handle refresh epoch deadline
-                epoch = epoch_updates.next() => {
-                    // Error handling
-                    let Some(epoch) = epoch else {
-                        error!("epoch subscription failed");
-                        break;
-                    };
-
-                    // Refresh the epoch
-                    debug!(current = %self.epoch, new = %epoch, "refresh epoch");
-                    assert!(epoch >= self.epoch);
-                    self.epoch = epoch;
-
-                    // Update the tip manager
-                    let scheme = self.scheme(self.epoch)
-                        .expect("current epoch scheme must exist");
-                    self.safe_tip.reconcile(scheme.participants());
-
-                    // Update data structures by purging old epochs
-                    let min_epoch = self.epoch.saturating_sub(self.epoch_bounds.0);
-                    self.pending.iter_mut().for_each(|(_, pending)| {
-                        match pending {
-                            Pending::Unverified(acks) => {
-                                acks.retain(|epoch, _| *epoch >= min_epoch);
-                            }
-                            Pending::Verified(_, acks) => {
-                                acks.retain(|epoch, _| *epoch >= min_epoch);
-                            }
-                        }
-                    });
-
+                // Underflow safe: next >= self.tip is guaranteed by next()
+                if next.delta_from(self.tip).unwrap() < self.window {
+                    trace!(%next, "requesting new digest");
+                    assert!(self
+                        .pending
+                        .insert(next, Pending::Unverified(BTreeMap::new()))
+                        .is_none());
+                    self.get_digest(next);
                     continue;
-                },
+                }
 
-                // Sign a new ack
-                request = self.digest_requests.next_completed() => {
-                    let DigestRequest { height, result, timer } = request;
-                    drop(timer); // Record metric. Explicitly reference timer to avoid lint warning.
-                    match result {
-                        Err(err) => {
-                            warn!(?err, %height, "automaton returned error");
-                            self.metrics.digest.inc(Status::Dropped);
+                // Get the rebroadcast deadline for the next height
+                let rebroadcast = match self.rebroadcast_deadlines.peek() {
+                    Some((_, &deadline)) => Either::Left(self.context.sleep_until(deadline)),
+                    None => Either::Right(future::pending()),
+                };
+            },
+            on_stopped => {
+                debug!("shutdown");
+            },
+            // Handle refresh epoch deadline
+            epoch = epoch_updates.next() => {
+                // Error handling
+                let Some(epoch) = epoch else {
+                    error!("epoch subscription failed");
+                    break;
+                };
+
+                // Refresh the epoch
+                debug!(current = %self.epoch, new = %epoch, "refresh epoch");
+                assert!(epoch >= self.epoch);
+                self.epoch = epoch;
+
+                // Update the tip manager
+                let scheme = self.scheme(self.epoch)
+                    .expect("current epoch scheme must exist");
+                self.safe_tip.reconcile(scheme.participants());
+
+                // Update data structures by purging old epochs
+                let min_epoch = self.epoch.saturating_sub(self.epoch_bounds.0);
+                self.pending.iter_mut().for_each(|(_, pending)| {
+                    match pending {
+                        Pending::Unverified(acks) => {
+                            acks.retain(|epoch, _| *epoch >= min_epoch);
                         }
-                        Ok(digest) => {
-                            if let Err(err) = self.handle_digest(height, digest, &mut sender).await {
-                                debug!(?err, %height, "handle_digest failed");
-                                continue;
-                            }
+                        Pending::Verified(_, acks) => {
+                            acks.retain(|epoch, _| *epoch >= min_epoch);
                         }
                     }
-                },
+                });
 
-                // Handle incoming acks
-                msg = receiver.recv() => {
-                    // Error handling
-                    let (sender, msg) = match msg {
-                        Ok(r) => r,
-                        Err(err) => {
-                            warn!(?err, "ack receiver failed");
-                            break;
-                        }
-                    };
-                    let mut guard = self.metrics.acks.guard(Status::Invalid);
-                    let TipAck { ack, tip } = match msg {
-                        Ok(peer_ack) => peer_ack,
-                        Err(err) => {
-                            warn!(?err, ?sender, "ack decode failed, blocking peer");
-                            self.blocker.block(sender).await;
+                continue;
+            },
+
+            // Sign a new ack
+            request = self.digest_requests.next_completed() => {
+                let DigestRequest { height, result, timer } = request;
+                drop(timer); // Record metric. Explicitly reference timer to avoid lint warning.
+                match result {
+                    Err(err) => {
+                        warn!(?err, %height, "automaton returned error");
+                        self.metrics.digest.inc(Status::Dropped);
+                    }
+                    Ok(digest) => {
+                        if let Err(err) = self.handle_digest(height, digest, &mut sender).await {
+                            debug!(?err, %height, "handle_digest failed");
                             continue;
                         }
-                    };
-
-                    // Update the tip manager
-                    if self.safe_tip.update(sender.clone(), tip).is_some() {
-                        // Fast-forward our tip if needed
-                        let safe_tip = self.safe_tip.get();
-                        if safe_tip > self.tip {
-                           self.fast_forward_tip(safe_tip).await;
-                        }
                     }
-
-                    // Validate that we need to process the ack
-                    if let Err(err) = self.validate_ack(&ack, &sender) {
-                        if err.blockable() {
-                            warn!(?sender, ?err, "blocking peer for validation failure");
-                            self.blocker.block(sender).await;
-                        } else {
-                            debug!(?sender, ?err, "ack validate failed");
-                        }
-                        continue;
-                    };
-
-                    // Handle the ack
-                    if let Err(err) = self.handle_ack(&ack).await {
-                        debug!(?err, ?sender, "ack handle failed");
-                        guard.set(Status::Failure);
-                        continue;
-                    }
-
-                    // Update the metrics
-                    debug!(?sender, epoch = %ack.epoch, height = %ack.item.height, "ack");
-                    guard.set(Status::Success);
-                },
-
-                // Rebroadcast
-                _ = rebroadcast => {
-                    // Get the next height to rebroadcast
-                    let (height, _) = self.rebroadcast_deadlines.pop().expect("no rebroadcast deadline");
-                    trace!(%height, "rebroadcasting");
-                    if let Err(err) = self.handle_rebroadcast(height, &mut sender).await {
-                        warn!(?err, %height, "rebroadcast failed");
-                    };
                 }
-            }
+            },
+
+            // Handle incoming acks
+            msg = receiver.recv() => {
+                // Error handling
+                let (sender, msg) = match msg {
+                    Ok(r) => r,
+                    Err(err) => {
+                        warn!(?err, "ack receiver failed");
+                        break;
+                    }
+                };
+                let mut guard = self.metrics.acks.guard(Status::Invalid);
+                let TipAck { ack, tip } = match msg {
+                    Ok(peer_ack) => peer_ack,
+                    Err(err) => {
+                        warn!(?err, ?sender, "ack decode failed, blocking peer");
+                        self.blocker.block(sender).await;
+                        continue;
+                    }
+                };
+
+                // Update the tip manager
+                if self.safe_tip.update(sender.clone(), tip).is_some() {
+                    // Fast-forward our tip if needed
+                    let safe_tip = self.safe_tip.get();
+                    if safe_tip > self.tip {
+                        self.fast_forward_tip(safe_tip).await;
+                    }
+                }
+
+                // Validate that we need to process the ack
+                if let Err(err) = self.validate_ack(&ack, &sender) {
+                    if err.blockable() {
+                        warn!(?sender, ?err, "blocking peer for validation failure");
+                        self.blocker.block(sender).await;
+                    } else {
+                        debug!(?sender, ?err, "ack validate failed");
+                    }
+                    continue;
+                };
+
+                // Handle the ack
+                if let Err(err) = self.handle_ack(&ack).await {
+                    debug!(?err, ?sender, "ack handle failed");
+                    guard.set(Status::Failure);
+                    continue;
+                }
+
+                // Update the metrics
+                debug!(?sender, epoch = %ack.epoch, height = %ack.item.height, "ack");
+                guard.set(Status::Success);
+            },
+
+            // Rebroadcast
+            _ = rebroadcast => {
+                // Get the next height to rebroadcast
+                let (height, _) = self.rebroadcast_deadlines.pop().expect("no rebroadcast deadline");
+                trace!(%height, "rebroadcasting");
+                if let Err(err) = self.handle_rebroadcast(height, &mut sender).await {
+                    warn!(?err, %height, "rebroadcast failed");
+                };
+            },
         }
 
         // Close journal on shutdown

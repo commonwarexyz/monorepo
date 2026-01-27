@@ -1,7 +1,6 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use bytes::{Buf, BufMut};
 use commonware_codec::{
     Encode, EncodeSize, Error as CodecError, FixedSize, RangeCfg, Read, ReadExt, ReadRangeExt,
     Write,
@@ -16,7 +15,7 @@ use commonware_cryptography::{
     Committable, Digestible, Hasher, Sha256, Signer,
 };
 use commonware_p2p::{Blocker, CheckedSender, LimitedSender, Receiver, Recipients};
-use commonware_runtime::{deterministic, Clock, Metrics, Runner};
+use commonware_runtime::{deterministic, Buf, BufMut, Clock, IoBuf, IoBufMut, Metrics, Runner};
 use futures::{
     channel::{mpsc, oneshot},
     StreamExt,
@@ -231,7 +230,7 @@ impl CheckedSender for MockCheckedSender {
 
     async fn send(
         self,
-        _message: impl bytes::Buf + Send,
+        _message: impl Into<IoBufMut> + Send,
         _priority: bool,
     ) -> Result<Vec<Self::PublicKey>, Self::Error> {
         Ok(vec![])
@@ -251,11 +250,11 @@ impl Receiver for MockReceiver {
     type Error = MockRecvError;
     type PublicKey = PublicKey;
 
-    async fn recv(&mut self) -> Result<(Self::PublicKey, bytes::Bytes), Self::Error> {
+    async fn recv(&mut self) -> Result<(Self::PublicKey, IoBuf), Self::Error> {
         let (pk, msg) = self.rx.next().await.ok_or(MockRecvError)?;
         match msg {
             Ok(req) => {
-                let mut buf = bytes::BytesMut::new();
+                let mut buf = IoBufMut::with_capacity(req.encode_size());
                 req.write(&mut buf);
                 Ok((pk, buf.freeze()))
             }

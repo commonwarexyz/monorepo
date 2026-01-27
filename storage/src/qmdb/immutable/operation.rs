@@ -7,8 +7,8 @@ use crate::{
     mmr::Location,
     qmdb::{any::VariableValue, operation::Operation as OperationTrait},
 };
-use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
+use commonware_runtime::{Buf, BufMut};
 use commonware_utils::{hex, Array};
 use core::fmt::Display;
 
