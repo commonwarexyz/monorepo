@@ -705,23 +705,17 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Journal<E, V> {
             Some(_) => {
                 // Both journals are pruned to the same position.
             }
-            None if data_oldest_pos > 0 => {
-                // Offsets journal is empty (pruning_boundary >= size) but data exists.
-                // Recoverable if same section (init_at_size + crash before first sync).
-                // Corruption if different sections (e.g., offsets partition was deleted).
-                let offsets_size = offsets.size();
-                if offsets_size / items_per_section != data_first_section {
+            None => {
+                let offsets_pruning_boundary = offsets.pruning_boundary();
+                let offsets_first_section = offsets_pruning_boundary / items_per_section;
+                if offsets_first_section != data_first_section {
                     return Err(Error::Corruption(format!(
-                        "offsets journal empty at section {} != data section {data_first_section}",
-                        offsets_size / items_per_section
+                        "offsets journal empty at section {offsets_first_section} != data section {data_first_section}"
                     )));
                 }
                 warn!(
-                    "crash repair: offsets journal empty at {offsets_size}, will rebuild from data"
+                    "crash repair: offsets journal empty at {offsets_pruning_boundary}, will rebuild from data"
                 );
-            }
-            None => {
-                // Both journals are empty/fully pruned.
             }
         }
 
