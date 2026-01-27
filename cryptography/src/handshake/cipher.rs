@@ -43,145 +43,161 @@ impl CounterNonce {
     }
 }
 
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+mod aws {
+    use super::*;
+    use aws_lc_rs::aead::{self, LessSafeKey, UnboundKey, CHACHA20_POLY1305};
+
+    pub struct SendCipher {
+        nonce: CounterNonce,
+        inner: Secret<LessSafeKey>,
+    }
+
+    impl SendCipher {
+        /// Creates a new sending cipher with a random key.
+        pub fn new(mut rng: impl CryptoRngCore) -> Self {
+            let mut key_bytes = Zeroizing::new([0u8; KEY_SIZE_BYTES]);
+            rng.fill_bytes(key_bytes.as_mut());
+            let unbound_key = UnboundKey::new(&CHACHA20_POLY1305, key_bytes.as_ref())
+                .expect("key size should match algorithm");
+            Self {
+                nonce: CounterNonce::new(),
+                inner: Secret::new(LessSafeKey::new(unbound_key)),
+            }
+        }
+
+        /// Encrypts data and returns the ciphertext.
+        pub fn send(&mut self, data: &[u8]) -> Result<Vec<u8>, Error> {
+            let nonce_bytes = self.nonce.inc()?;
+            let nonce = aead::Nonce::assume_unique_for_key(nonce_bytes);
+            let mut scratch = Vec::with_capacity(data.len() + CIPHERTEXT_OVERHEAD);
+            scratch.extend_from_slice(data);
+            self.inner
+                .expose(|cipher| {
+                    cipher.seal_in_place_append_tag(nonce, aead::Aad::empty(), &mut scratch)
+                })
+                .map_err(|_| Error::EncryptionFailed)?;
+            Ok(scratch)
+        }
+    }
+
+    pub struct RecvCipher {
+        nonce: CounterNonce,
+        inner: Secret<LessSafeKey>,
+    }
+
+    impl RecvCipher {
+        /// Creates a new receiving cipher with a random key.
+        pub fn new(mut rng: impl CryptoRngCore) -> Self {
+            let mut key_bytes = Zeroizing::new([0u8; KEY_SIZE_BYTES]);
+            rng.fill_bytes(key_bytes.as_mut());
+            let unbound_key = UnboundKey::new(&CHACHA20_POLY1305, key_bytes.as_ref())
+                .expect("key size should match algorithm");
+            Self {
+                nonce: CounterNonce::new(),
+                inner: Secret::new(LessSafeKey::new(unbound_key)),
+            }
+        }
+
+        /// Decrypts ciphertext and returns the original data.
+        ///
+        /// # Errors
+        ///
+        /// This function will return an error in the following situations:
+        ///
+        /// - Too many messages have been received with this cipher.
+        /// - The ciphertext was corrupted in some way.
+        ///
+        /// In *both* cases, the `RecvCipher` will no longer be able to return
+        /// valid ciphertexts, and will always return an error on subsequent calls
+        /// to [`Self::recv`]. Terminating (and optionally reestablishing) the connection
+        /// is a simple (and safe) way to handle this scenario.
+        pub fn recv(&mut self, encrypted_data: &[u8]) -> Result<Vec<u8>, Error> {
+            let nonce_bytes = self.nonce.inc()?;
+            let nonce = aead::Nonce::assume_unique_for_key(nonce_bytes);
+            let mut scratch = encrypted_data.to_vec();
+            self.inner
+                .expose(|cipher| cipher.open_in_place(nonce, aead::Aad::empty(), &mut scratch))
+                .map_err(|_| Error::DecryptionFailed)?;
+            scratch.truncate(encrypted_data.len() - CIPHERTEXT_OVERHEAD);
+            Ok(scratch)
+        }
+    }
+}
+
+// Available on non-x86_64/aarch64 (regular dep) or in tests on x86_64/aarch64 (dev-dep)
+#[cfg(any(not(any(target_arch = "x86_64", target_arch = "aarch64")), test))]
+mod chacha {
+    use super::*;
+    use chacha20poly1305::{aead::Aead, ChaCha20Poly1305, KeyInit as _};
+
+    pub struct SendCipher {
+        nonce: CounterNonce,
+        inner: Secret<ChaCha20Poly1305>,
+    }
+
+    impl SendCipher {
+        /// Creates a new sending cipher with a random key.
+        pub fn new(mut rng: impl CryptoRngCore) -> Self {
+            let key = Zeroizing::new(ChaCha20Poly1305::generate_key(&mut rng));
+            Self {
+                nonce: CounterNonce::new(),
+                inner: Secret::new(ChaCha20Poly1305::new(&key)),
+            }
+        }
+
+        /// Encrypts data and returns the ciphertext.
+        pub fn send(&mut self, data: &[u8]) -> Result<Vec<u8>, Error> {
+            let nonce = self.nonce.inc()?;
+            self.inner
+                .expose(|cipher| cipher.encrypt((&nonce[..]).into(), data))
+                .map_err(|_| Error::EncryptionFailed)
+        }
+    }
+
+    pub struct RecvCipher {
+        nonce: CounterNonce,
+        inner: Secret<ChaCha20Poly1305>,
+    }
+
+    impl RecvCipher {
+        /// Creates a new receiving cipher with a random key.
+        pub fn new(mut rng: impl CryptoRngCore) -> Self {
+            let key = Zeroizing::new(ChaCha20Poly1305::generate_key(&mut rng));
+            Self {
+                nonce: CounterNonce::new(),
+                inner: Secret::new(ChaCha20Poly1305::new(&key)),
+            }
+        }
+
+        /// Decrypts ciphertext and returns the original data.
+        ///
+        /// # Errors
+        ///
+        /// This function will return an error in the following situations:
+        ///
+        /// - Too many messages have been received with this cipher.
+        /// - The ciphertext was corrupted in some way.
+        ///
+        /// In *both* cases, the `RecvCipher` will no longer be able to return
+        /// valid ciphertexts, and will always return an error on subsequent calls
+        /// to [`Self::recv`]. Terminating (and optionally reestablishing) the connection
+        /// is a simple (and safe) way to handle this scenario.
+        pub fn recv(&mut self, encrypted_data: &[u8]) -> Result<Vec<u8>, Error> {
+            let nonce = self.nonce.inc()?;
+            self.inner
+                .expose(|cipher| cipher.decrypt((&nonce[..]).into(), encrypted_data))
+                .map_err(|_| Error::DecryptionFailed)
+        }
+    }
+}
+
+// Re-export the appropriate implementation
 cfg_if::cfg_if! {
     if #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))] {
-        use aws_lc_rs::aead::{self, LessSafeKey, UnboundKey, CHACHA20_POLY1305};
-
-        pub struct SendCipher {
-            nonce: CounterNonce,
-            inner: Secret<LessSafeKey>,
-        }
-
-        impl SendCipher {
-            /// Creates a new sending cipher with a random key.
-            pub fn new(mut rng: impl CryptoRngCore) -> Self {
-                let mut key_bytes = Zeroizing::new([0u8; KEY_SIZE_BYTES]);
-                rng.fill_bytes(key_bytes.as_mut());
-                let unbound_key = UnboundKey::new(&CHACHA20_POLY1305, key_bytes.as_ref())
-                    .expect("key size should match algorithm");
-                Self {
-                    nonce: CounterNonce::new(),
-                    inner: Secret::new(LessSafeKey::new(unbound_key)),
-                }
-            }
-
-            /// Encrypts data and returns the ciphertext.
-            pub fn send(&mut self, data: &[u8]) -> Result<Vec<u8>, Error> {
-                let nonce_bytes = self.nonce.inc()?;
-                let nonce = aead::Nonce::assume_unique_for_key(nonce_bytes);
-                let mut scratch = Vec::with_capacity(data.len() + CIPHERTEXT_OVERHEAD);
-                scratch.extend_from_slice(data);
-                self.inner
-                    .expose(|cipher| cipher.seal_in_place_append_tag(nonce, aead::Aad::empty(), &mut scratch))
-                    .map_err(|_| Error::EncryptionFailed)?;
-                Ok(scratch)
-            }
-        }
-
-        pub struct RecvCipher {
-            nonce: CounterNonce,
-            inner: Secret<LessSafeKey>,
-        }
-
-        impl RecvCipher {
-            /// Creates a new receiving cipher with a random key.
-            pub fn new(mut rng: impl CryptoRngCore) -> Self {
-                let mut key_bytes = Zeroizing::new([0u8; KEY_SIZE_BYTES]);
-                rng.fill_bytes(key_bytes.as_mut());
-                let unbound_key = UnboundKey::new(&CHACHA20_POLY1305, key_bytes.as_ref())
-                    .expect("key size should match algorithm");
-                Self {
-                    nonce: CounterNonce::new(),
-                    inner: Secret::new(LessSafeKey::new(unbound_key)),
-                }
-            }
-
-            /// Decrypts ciphertext and returns the original data.
-            ///
-            /// # Errors
-            ///
-            /// This function will return an error in the following situations:
-            ///
-            /// - Too many messages have been received with this cipher.
-            /// - The ciphertext was corrupted in some way.
-            ///
-            /// In *both* cases, the `RecvCipher` will no longer be able to return
-            /// valid ciphertexts, and will always return an error on subsequent calls
-            /// to [`Self::recv`]. Terminating (and optionally reestablishing) the connection
-            /// is a simple (and safe) way to handle this scenario.
-            pub fn recv(&mut self, encrypted_data: &[u8]) -> Result<Vec<u8>, Error> {
-                let nonce_bytes = self.nonce.inc()?;
-                let nonce = aead::Nonce::assume_unique_for_key(nonce_bytes);
-                let mut scratch = encrypted_data.to_vec();
-                self.inner
-                    .expose(|cipher| cipher.open_in_place(nonce, aead::Aad::empty(), &mut scratch))
-                    .map_err(|_| Error::DecryptionFailed)?;
-                scratch.truncate(encrypted_data.len() - CIPHERTEXT_OVERHEAD);
-                Ok(scratch)
-            }
-        }
+        pub use aws::{SendCipher, RecvCipher};
     } else {
-        use chacha20poly1305::{aead::Aead, ChaCha20Poly1305, KeyInit as _};
-
-        pub struct SendCipher {
-            nonce: CounterNonce,
-            inner: Secret<ChaCha20Poly1305>,
-        }
-
-        impl SendCipher {
-            /// Creates a new sending cipher with a random key.
-            pub fn new(mut rng: impl CryptoRngCore) -> Self {
-                let key = Zeroizing::new(ChaCha20Poly1305::generate_key(&mut rng));
-                Self {
-                    nonce: CounterNonce::new(),
-                    inner: Secret::new(ChaCha20Poly1305::new(&key)),
-                }
-            }
-
-            /// Encrypts data and returns the ciphertext.
-            pub fn send(&mut self, data: &[u8]) -> Result<Vec<u8>, Error> {
-                let nonce = self.nonce.inc()?;
-                self.inner
-                    .expose(|cipher| cipher.encrypt((&nonce[..]).into(), data))
-                    .map_err(|_| Error::EncryptionFailed)
-            }
-        }
-
-        pub struct RecvCipher {
-            nonce: CounterNonce,
-            inner: Secret<ChaCha20Poly1305>,
-        }
-
-        impl RecvCipher {
-            /// Creates a new receiving cipher with a random key.
-            pub fn new(mut rng: impl CryptoRngCore) -> Self {
-                let key = Zeroizing::new(ChaCha20Poly1305::generate_key(&mut rng));
-                Self {
-                    nonce: CounterNonce::new(),
-                    inner: Secret::new(ChaCha20Poly1305::new(&key)),
-                }
-            }
-
-            /// Decrypts ciphertext and returns the original data.
-            ///
-            /// # Errors
-            ///
-            /// This function will return an error in the following situations:
-            ///
-            /// - Too many messages have been received with this cipher.
-            /// - The ciphertext was corrupted in some way.
-            ///
-            /// In *both* cases, the `RecvCipher` will no longer be able to return
-            /// valid ciphertexts, and will always return an error on subsequent calls
-            /// to [`Self::recv`]. Terminating (and optionally reestablishing) the connection
-            /// is a simple (and safe) way to handle this scenario.
-            pub fn recv(&mut self, encrypted_data: &[u8]) -> Result<Vec<u8>, Error> {
-                let nonce = self.nonce.inc()?;
-                self.inner
-                    .expose(|cipher| cipher.decrypt((&nonce[..]).into(), encrypted_data))
-                    .map_err(|_| Error::DecryptionFailed)
-            }
-        }
+        pub use chacha::{SendCipher, RecvCipher};
     }
 }
 
@@ -232,5 +248,46 @@ mod tests {
         let mut recv = RecvCipher::new(&mut rng);
         let tag_only = vec![0u8; CIPHERTEXT_OVERHEAD];
         assert!(matches!(recv.recv(&tag_only), Err(Error::DecryptionFailed)));
+    }
+
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    mod interop {
+        use super::*;
+
+        #[test]
+        fn test_aws_send_chacha_recv() {
+            let mut aws_send = aws::SendCipher::new(&mut test_rng());
+            let mut chacha_recv = chacha::RecvCipher::new(&mut test_rng());
+
+            let plaintext = b"hello world interop test";
+            let ciphertext = aws_send.send(plaintext).unwrap();
+            let decrypted = chacha_recv.recv(&ciphertext).unwrap();
+            assert_eq!(decrypted, plaintext);
+        }
+
+        #[test]
+        fn test_chacha_send_aws_recv() {
+            let mut chacha_send = chacha::SendCipher::new(&mut test_rng());
+            let mut aws_recv = aws::RecvCipher::new(&mut test_rng());
+
+            let plaintext = b"hello world interop test";
+            let ciphertext = chacha_send.send(plaintext).unwrap();
+            let decrypted = aws_recv.recv(&ciphertext).unwrap();
+            assert_eq!(decrypted, plaintext);
+        }
+
+        #[test]
+        fn test_ciphertexts_match() {
+            let mut aws_send = aws::SendCipher::new(&mut test_rng());
+            let mut chacha_send = chacha::SendCipher::new(&mut test_rng());
+
+            let plaintext = b"hello world interop test";
+            let aws_ciphertext = aws_send.send(plaintext).unwrap();
+            let chacha_ciphertext = chacha_send.send(plaintext).unwrap();
+            assert_eq!(
+                aws_ciphertext, chacha_ciphertext,
+                "ciphertexts from both implementations must match"
+            );
+        }
     }
 }

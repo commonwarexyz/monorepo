@@ -55,6 +55,7 @@ features = ["js"]
 
 [dev-dependencies]
 anyhow.workspace = true
+chacha20poly1305.workspace = true
 commonware-conformance.workspace = true
 commonware-math = { workspace = true, features = ["test_strategies"] }
 crc.workspace = true
