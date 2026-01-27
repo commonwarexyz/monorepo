@@ -102,12 +102,21 @@ fn mmr_config(
     }
 }
 
+/// Expected bounds for MMR state after recovery.
+struct ExpectedBounds {
+    min_size: u64,
+    max_size: u64,
+    min_leaves: u64,
+    max_leaves: u64,
+    min_pruned: u64,
+    max_pruned: u64,
+}
+
 async fn run_operations(
     mmr: &mut TestMmr,
     hasher: &mut StandardHasher<Sha256>,
     operations: &[MmrOperation],
-) -> (u64, u64, u64, u64, u64, u64) {
-    // Bounds: [min, max] ranges for size, leaves, pruned_to_pos
+) -> ExpectedBounds {
     let mut min_size = 0u64;
     let mut max_size = mmr.size().as_u64();
     let mut min_leaves = 0u64;
@@ -240,9 +249,14 @@ async fn run_operations(
         }
     }
 
-    (
-        min_size, max_size, min_leaves, max_leaves, min_pruned, max_pruned,
-    )
+    ExpectedBounds {
+        min_size,
+        max_size,
+        min_leaves,
+        max_leaves,
+        min_pruned,
+        max_pruned,
+    }
 }
 
 fn fuzz(input: FuzzInput) {
@@ -262,36 +276,35 @@ fn fuzz(input: FuzzInput) {
     let write_failure_rate = input.write_failure_rate;
 
     // Phase 1: Execute operations with fault injection until crash
-    let ((min_size, max_size, min_leaves, max_leaves, min_pruned, max_pruned), checkpoint) = runner
-        .start_and_recover(|ctx| {
-            let partition_suffix = partition_suffix.clone();
-            let operations = operations.clone();
-            async move {
-                let mut hasher = StandardHasher::<Sha256>::new();
-                let mut mmr = TestMmr::init(
-                    ctx.with_label("mmr"),
-                    &mut hasher,
-                    mmr_config(
-                        &partition_suffix,
-                        page_size,
-                        page_cache_size,
-                        items_per_blob,
-                        write_buffer,
-                    ),
-                )
-                .await
-                .unwrap();
+    let (bounds, checkpoint) = runner.start_and_recover(|ctx| {
+        let partition_suffix = partition_suffix.clone();
+        let operations = operations.clone();
+        async move {
+            let mut hasher = StandardHasher::<Sha256>::new();
+            let mut mmr = TestMmr::init(
+                ctx.with_label("mmr"),
+                &mut hasher,
+                mmr_config(
+                    &partition_suffix,
+                    page_size,
+                    page_cache_size,
+                    items_per_blob,
+                    write_buffer,
+                ),
+            )
+            .await
+            .unwrap();
 
-                let faults = ctx.storage_faults();
-                *faults.write().unwrap() = deterministic::FaultConfig {
-                    sync_rate: Some(sync_failure_rate),
-                    write_rate: Some(write_failure_rate),
-                    ..Default::default()
-                };
+            let faults = ctx.storage_faults();
+            *faults.write().unwrap() = deterministic::FaultConfig {
+                sync_rate: Some(sync_failure_rate),
+                write_rate: Some(write_failure_rate),
+                ..Default::default()
+            };
 
-                run_operations(&mut mmr, &mut hasher, &operations).await
-            }
-        });
+            run_operations(&mut mmr, &mut hasher, &operations).await
+        }
+    });
 
     // Phase 2: Recover and verify consistency
     let runner = deterministic::Runner::from(checkpoint);
@@ -318,31 +331,41 @@ fn fuzz(input: FuzzInput) {
         let leaves = mmr.leaves().as_u64();
         let pruned = mmr.pruned_to_pos().as_u64();
 
-        assert!(size <= max_size, "size {} > max_size {}", size, max_size);
-        assert!(size >= min_size, "size {} < min_size {}", size, min_size);
         assert!(
-            leaves <= max_leaves,
+            size <= bounds.max_size,
+            "size {} > max_size {}",
+            size,
+            bounds.max_size
+        );
+        assert!(
+            size >= bounds.min_size,
+            "size {} < min_size {}",
+            size,
+            bounds.min_size
+        );
+        assert!(
+            leaves <= bounds.max_leaves,
             "leaves {} > max_leaves {}",
             leaves,
-            max_leaves
+            bounds.max_leaves
         );
         assert!(
-            leaves >= min_leaves,
+            leaves >= bounds.min_leaves,
             "leaves {} < min_leaves {}",
             leaves,
-            min_leaves
+            bounds.min_leaves
         );
         assert!(
-            pruned <= max_pruned,
+            pruned <= bounds.max_pruned,
             "pruned {} > max_pruned {}",
             pruned,
-            max_pruned
+            bounds.max_pruned
         );
         assert!(
-            pruned >= min_pruned,
+            pruned >= bounds.min_pruned,
             "pruned {} < min_pruned {}",
             pruned,
-            min_pruned
+            bounds.min_pruned
         );
 
         // Verify we can add new data after recovery
