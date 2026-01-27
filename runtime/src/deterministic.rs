@@ -2005,16 +2005,16 @@ mod tests {
             // Access buffer pools via trait
             let pools = context.buffer_pools();
 
-            // Verify network pool is accessible and works
+            // Verify network pool is accessible and works (cache-line aligned)
             let net_buf = pools.network().alloc(1024).expect("network alloc failed");
-            assert!(net_buf.capacity() >= 4096);
+            assert!(net_buf.capacity() >= 1024); // At least requested size
 
-            // Verify storage pool is accessible and works
+            // Verify storage pool is accessible and works (page-aligned)
             let storage_buf = pools.storage().alloc(1024).expect("storage alloc failed");
-            assert!(storage_buf.capacity() >= 4096);
+            assert!(storage_buf.capacity() >= 4096); // Page-aligned min size
 
             // Verify pools have expected configurations
-            assert_eq!(pools.network().config().max_per_class, 64);
+            assert_eq!(pools.network().config().max_per_class, 4096);
             assert_eq!(pools.storage().config().max_per_class, 32);
         });
     }
