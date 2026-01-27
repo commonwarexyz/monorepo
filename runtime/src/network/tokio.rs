@@ -1,4 +1,4 @@
-use crate::{Error, IoBufMut, IoBufs};
+use crate::{BufferPool, Error, IoBufMut, IoBufs};
 use std::{net::SocketAddr, time::Duration};
 use tokio::{
     io::{AsyncReadExt as _, AsyncWriteExt as _, BufReader},
@@ -34,13 +34,17 @@ impl crate::Sink for Sink {
 pub struct Stream {
     read_timeout: Duration,
     stream: BufReader<OwnedReadHalf>,
+    pool: BufferPool,
 }
 
 impl crate::Stream for Stream {
     async fn recv(&mut self, len: u64) -> Result<IoBufs, Error> {
         let len = len as usize;
         let read_fut = async {
-            let mut buf = IoBufMut::zeroed(len);
+            let mut buf = self
+                .pool
+                .alloc(len)
+                .unwrap_or_else(|| IoBufMut::zeroed(len));
             self.stream
                 .read_exact(buf.as_mut())
                 .await
@@ -66,6 +70,7 @@ impl crate::Stream for Stream {
 pub struct Listener {
     cfg: Config,
     listener: TcpListener,
+    pool: BufferPool,
 }
 
 impl crate::Listener for Listener {
@@ -94,6 +99,7 @@ impl crate::Listener for Listener {
             Stream {
                 read_timeout: self.cfg.read_timeout,
                 stream: BufReader::with_capacity(self.cfg.read_buffer_size, stream),
+                pool: self.pool.clone(),
             },
         ))
     }
@@ -182,21 +188,17 @@ impl Default for Config {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 /// [crate::Network] implementation that uses the [tokio] runtime.
 pub struct Network {
     cfg: Config,
+    pool: BufferPool,
 }
 
-impl From<Config> for Network {
-    fn from(cfg: Config) -> Self {
-        Self { cfg }
-    }
-}
-
-impl Default for Network {
-    fn default() -> Self {
-        Self::from(Config::default())
+impl Network {
+    /// Creates a new Network with the given configuration and buffer pool.
+    pub fn new(cfg: Config, pool: BufferPool) -> Self {
+        Self { cfg, pool }
     }
 }
 
@@ -210,6 +212,7 @@ impl crate::Network for Network {
             .map(|listener| Listener {
                 cfg: self.cfg.clone(),
                 listener,
+                pool: self.pool.clone(),
             })
     }
 
@@ -239,6 +242,7 @@ impl crate::Network for Network {
             Stream {
                 read_timeout: self.cfg.read_timeout,
                 stream: BufReader::with_capacity(self.cfg.read_buffer_size, stream),
+                pool: self.pool.clone(),
             },
         ))
     }
@@ -248,18 +252,24 @@ impl crate::Network for Network {
 mod tests {
     use crate::{
         network::{tests, tokio as TokioNetwork},
-        Listener as _, Network as _, Sink as _, Stream as _,
+        BufferPool, BufferPoolConfig, Listener as _, Network as _, Sink as _, Stream as _,
     };
     use commonware_macros::test_group;
+    use prometheus_client::registry::Registry;
     use std::time::{Duration, Instant};
+
+    fn test_pool() -> BufferPool {
+        BufferPool::new(BufferPoolConfig::for_network(), &mut Registry::default())
+    }
 
     #[tokio::test]
     async fn test_trait() {
         tests::test_network_trait(|| {
-            TokioNetwork::Network::from(
+            TokioNetwork::Network::new(
                 TokioNetwork::Config::default()
                     .with_read_timeout(Duration::from_secs(15))
                     .with_write_timeout(Duration::from_secs(15)),
+                test_pool(),
             )
         })
         .await;
@@ -269,10 +279,11 @@ mod tests {
     #[tokio::test]
     async fn test_stress_trait() {
         tests::stress_test_network_trait(|| {
-            TokioNetwork::Network::from(
+            TokioNetwork::Network::new(
                 TokioNetwork::Config::default()
                     .with_read_timeout(Duration::from_secs(15))
                     .with_write_timeout(Duration::from_secs(15)),
+                test_pool(),
             )
         })
         .await;
@@ -282,10 +293,11 @@ mod tests {
     async fn test_small_send_read_quickly() {
         // Use a long read timeout to ensure we're not just waiting for timeout
         let read_timeout = Duration::from_secs(30);
-        let network = TokioNetwork::Network::from(
+        let network = TokioNetwork::Network::new(
             TokioNetwork::Config::default()
                 .with_read_timeout(read_timeout)
                 .with_write_timeout(Duration::from_secs(5)),
+            test_pool(),
         );
 
         // Bind a listener
@@ -324,10 +336,11 @@ mod tests {
     async fn test_read_timeout_with_partial_data() {
         // Use a short read timeout to make the test fast
         let read_timeout = Duration::from_millis(100);
-        let network = TokioNetwork::Network::from(
+        let network = TokioNetwork::Network::new(
             TokioNetwork::Config::default()
                 .with_read_timeout(read_timeout)
                 .with_write_timeout(Duration::from_secs(5)),
+            test_pool(),
         );
 
         // Bind a listener
@@ -362,11 +375,12 @@ mod tests {
     #[tokio::test]
     async fn test_unbuffered_mode() {
         // Set read_buffer_size to 0 to disable buffering
-        let network = TokioNetwork::Network::from(
+        let network = TokioNetwork::Network::new(
             TokioNetwork::Config::default()
                 .with_read_buffer_size(0)
                 .with_read_timeout(Duration::from_secs(5))
                 .with_write_timeout(Duration::from_secs(5)),
+            test_pool(),
         );
 
         // Bind a listener
@@ -408,10 +422,11 @@ mod tests {
     #[tokio::test]
     async fn test_peek_with_buffered_data() {
         // Use default buffer size to enable buffering
-        let network = TokioNetwork::Network::from(
+        let network = TokioNetwork::Network::new(
             TokioNetwork::Config::default()
                 .with_read_timeout(Duration::from_secs(5))
                 .with_write_timeout(Duration::from_secs(5)),
+            test_pool(),
         );
 
         let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();

@@ -300,6 +300,11 @@ impl crate::Runner for Runner {
             }
         }
 
+        // Initialize buffer pools (before network, as network uses the pool)
+        let buffer_pools = crate::BufferPools::with_defaults(
+            runtime_registry.sub_registry_with_prefix("buffer_pool"),
+        );
+
         // Initialize network
         cfg_if::cfg_if! {
             if #[cfg(feature = "iouring-network")] {
@@ -317,23 +322,20 @@ impl crate::Runner for Runner {
                     ..Default::default()
                 };
                 let network = MeteredNetwork::new(
-                    IoUringNetwork::start(config, iouring_registry).unwrap(),
+                    IoUringNetwork::start(config, iouring_registry, buffer_pools.network().clone()).unwrap(),
                 runtime_registry,
             );
         } else {
-            let config = TokioNetworkConfig::default().with_read_timeout(self.cfg.network_cfg.read_write_timeout)
+            let config = TokioNetworkConfig::default()
+                .with_read_timeout(self.cfg.network_cfg.read_write_timeout)
                 .with_write_timeout(self.cfg.network_cfg.read_write_timeout)
                 .with_tcp_nodelay(self.cfg.network_cfg.tcp_nodelay);
                 let network = MeteredNetwork::new(
-                    TokioNetwork::from(config),
+                    TokioNetwork::new(config, buffer_pools.network().clone()),
                     runtime_registry,
                 );
             }
         }
-
-        // Initialize buffer pools
-        let buffer_pools =
-            BufferPools::with_defaults(runtime_registry.sub_registry_with_prefix("buffer_pool"));
 
         // Initialize executor
         let executor = Arc::new(Executor {
