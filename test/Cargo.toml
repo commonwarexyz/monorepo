@@ -17,8 +17,11 @@ workspace = true
 arbitrary.workspace = true
 proptest.workspace = true
 libfuzzer-sys.workspace = true
+rand_chacha.workspace = true
+rand_core.workspace = true
 
 [dev-dependencies]
+arbitrary = { workspace = true, features = ["derive"] }
 
 [lib]
 bench = false
