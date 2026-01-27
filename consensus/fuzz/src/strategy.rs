@@ -70,6 +70,8 @@ pub trait Strategy: Send + Sync {
     fn mutate_certificate_bytes(&self, input: &FuzzInput, cert: &[u8]) -> Vec<u8>;
 
     fn mutate_resolver_bytes(&self, input: &FuzzInput, msg: &[u8]) -> Vec<u8>;
+
+    fn repeated_proposal_index(&self, input: &FuzzInput, proposals_len: usize) -> Option<usize>;
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -225,6 +227,19 @@ impl Strategy for SmallScope {
 
     fn mutate_resolver_bytes(&self, input: &FuzzInput, msg: &[u8]) -> Vec<u8> {
         tweak_bytes(input, msg)
+    }
+
+    fn repeated_proposal_index(&self, input: &FuzzInput, proposals_len: usize) -> Option<usize> {
+        if proposals_len == 0 {
+            return None;
+        }
+        if proposals_len <= 1 {
+            return Some(0);
+        }
+        if input.random_bool() {
+            return None;
+        }
+        Some(proposals_len - 2)
     }
 }
 
@@ -412,6 +427,17 @@ impl Strategy for AnyScope {
         }
         bytes
     }
+
+    fn repeated_proposal_index(&self, input: &FuzzInput, proposals_len: usize) -> Option<usize> {
+        if proposals_len == 0 {
+            return None;
+        }
+        if input.random_bool() {
+            return None;
+        }
+        let idx = (input.random_u64() as usize) % proposals_len;
+        Some(idx)
+    }
 }
 
 pub struct FutureScope;
@@ -536,6 +562,16 @@ impl Strategy for FutureScope {
 
     fn mutate_resolver_bytes(&self, input: &FuzzInput, msg: &[u8]) -> Vec<u8> {
         tweak_bytes(input, msg)
+    }
+
+    fn repeated_proposal_index(&self, _input: &FuzzInput, proposals_len: usize) -> Option<usize> {
+        if proposals_len == 0 {
+            return None;
+        }
+        if proposals_len <= 1 {
+            return Some(0);
+        }
+        Some(proposals_len - 2)
     }
 }
 

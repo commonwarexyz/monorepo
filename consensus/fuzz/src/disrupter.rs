@@ -81,14 +81,21 @@ where
     }
 
     fn get_proposal(&mut self) -> Proposal<Sha256Digest> {
-        let random_proposal = self.strategy.random_proposal(
-            &self.fuzz_input,
-            self.last_vote_view,
-            self.last_finalized_view,
-            self.last_notarized_view,
-            self.last_nullified_view,
-        );
-        let v = self.strategy.random_view_for_proposal(
+        let payload_source = self
+            .strategy
+            .repeated_proposal_index(&self.fuzz_input, self.latest_proposals.len())
+            .and_then(|idx| self.latest_proposals.get(idx).cloned())
+            .unwrap_or_else(|| {
+                self.strategy.random_proposal(
+                    &self.fuzz_input,
+                    self.last_vote_view,
+                    self.last_finalized_view,
+                    self.last_notarized_view,
+                    self.last_nullified_view,
+                )
+            });
+
+        let view = self.strategy.random_view_for_proposal(
             &self.fuzz_input,
             self.last_vote_view,
             self.last_finalized_view,
@@ -96,33 +103,19 @@ where
             self.last_nullified_view,
         );
 
-        let proposal = match self.fuzz_input.random_byte() % 5 {
-            0 => random_proposal,
-            1 => {
-                let len = self.latest_proposals.len();
-                if len == 0 {
-                    random_proposal
-                } else {
-                    let i = (self.fuzz_input.random_u64() % len as u64) as usize;
-                    let p = self.latest_proposals.get(i).unwrap_or(&random_proposal);
-                    self.strategy.proposal_with_view(p, v)
-                }
-            }
-            2 => {
-                let p = self.latest_proposals.back().unwrap_or(&random_proposal);
-                self.strategy.proposal_with_view(p, v)
-            }
-            3 => {
-                let p = self.latest_proposals.back().unwrap_or(&random_proposal);
-                self.strategy.proposal_with_parent_view(p, v)
-            }
-            _ => {
-                let Some(p) = self.latest_proposals.front() else {
-                    return random_proposal;
-                };
-                self.strategy.proposal_with_view(p, v)
-            }
-        };
+        let parent_view = self.strategy.random_parent_view(
+            &self.fuzz_input,
+            view,
+            self.last_finalized_view,
+            self.last_notarized_view,
+            self.last_nullified_view,
+        );
+
+        let proposal = Proposal::new(
+            Round::new(Epoch::new(EPOCH), View::new(view)),
+            View::new(parent_view),
+            payload_source.payload,
+        );
 
         self.prune_latest_proposals();
         proposal
