@@ -158,7 +158,9 @@ pub(crate) fn libfontconfig_bin_s3_key(version: &str, architecture: Architecture
 }
 
 pub(crate) fn fontconfig_config_bin_s3_key(version: &str) -> String {
-    format!("{TOOLS_BINARIES_PREFIX}/fontconfig-config/{version}/fontconfig-config_{version}_all.deb")
+    format!(
+        "{TOOLS_BINARIES_PREFIX}/fontconfig-config/{version}/fontconfig-config_{version}_all.deb"
+    )
 }
 
 pub(crate) fn unzip_bin_s3_key(version: &str, architecture: Architecture) -> String {
