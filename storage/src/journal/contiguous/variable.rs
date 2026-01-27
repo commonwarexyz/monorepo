@@ -706,6 +706,8 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Journal<E, V> {
                 // Both journals are pruned to the same position.
             }
             None => {
+                // Offsets journal is empty but data journal isn't.
+                // It should always be in the same section as the data journal, though.
                 let offsets_pruning_boundary = offsets.pruning_boundary();
                 let offsets_first_section = offsets_pruning_boundary / items_per_section;
                 if offsets_first_section != data_first_section {
