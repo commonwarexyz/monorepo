@@ -58,8 +58,8 @@ use crate::{
         supervision::Tree,
         MetricEncoder, Panicker,
     },
-    validate_label, Clock, Error, Execution, Handle, ListenerOf, Metrics as _, Panicked,
-    Spawner as _, METRICS_PREFIX,
+    validate_label, BufferPools, Clock, Error, Execution, Handle, ListenerOf, Metrics as _,
+    Panicked, Spawner as _, METRICS_PREFIX,
 };
 #[cfg(feature = "external")]
 use crate::{Blocker, Pacer};
@@ -389,7 +389,7 @@ pub struct Checkpoint {
     rng: Mutex<BoxDynRng>,
     time: Mutex<SystemTime>,
     storage: Arc<Storage>,
-    buffer_pools: Arc<crate::BufferPools>,
+    buffer_pools: Arc<BufferPools>,
     dns: Mutex<HashMap<String, Vec<IpAddr>>>,
     catch_panics: bool,
 }
@@ -812,7 +812,7 @@ pub struct Context {
     executor: Weak<Executor>,
     network: Arc<Network>,
     storage: Arc<Storage>,
-    buffer_pools: Arc<crate::BufferPools>,
+    buffer_pools: Arc<BufferPools>,
     tree: Arc<Tree>,
     execution: Execution,
     instrumented: bool,
@@ -857,9 +857,8 @@ impl Context {
         let network = MeteredNetwork::new(network, runtime_registry);
 
         // Initialize buffer pools
-        let buffer_pools = crate::BufferPools::with_defaults(
-            runtime_registry.sub_registry_with_prefix("buffer_pool"),
-        );
+        let buffer_pools =
+            BufferPools::with_defaults(runtime_registry.sub_registry_with_prefix("buffer_pool"));
 
         // Initialize panicker
         let (panicker, panicked) = Panicker::new(cfg.catch_panics);
@@ -1506,7 +1505,7 @@ impl crate::Storage for Context {
 }
 
 impl crate::Pooling for Context {
-    fn buffer_pools(&self) -> &crate::BufferPools {
+    fn buffer_pools(&self) -> &BufferPools {
         &self.buffer_pools
     }
 }

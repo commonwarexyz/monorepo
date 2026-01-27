@@ -18,7 +18,8 @@ use crate::{
     storage::metered::Storage as MeteredStorage,
     telemetry::metrics::task::Label,
     utils::{add_attribute, signal::Stopper, supervision::Tree, MetricEncoder, Panicker},
-    Clock, Error, Execution, Handle, Metrics as _, SinkOf, Spawner as _, StreamOf, METRICS_PREFIX,
+    BufferPools, Clock, Error, Execution, Handle, Metrics as _, SinkOf, Spawner as _, StreamOf,
+    METRICS_PREFIX,
 };
 use commonware_macros::select;
 use commonware_parallel::ThreadPool;
@@ -331,9 +332,8 @@ impl crate::Runner for Runner {
         }
 
         // Initialize buffer pools
-        let buffer_pools = crate::BufferPools::with_defaults(
-            runtime_registry.sub_registry_with_prefix("buffer_pool"),
-        );
+        let buffer_pools =
+            BufferPools::with_defaults(runtime_registry.sub_registry_with_prefix("buffer_pool"));
 
         // Initialize executor
         let executor = Arc::new(Executor {
@@ -393,7 +393,7 @@ pub struct Context {
     executor: Arc<Executor>,
     storage: Storage,
     network: Network,
-    buffer_pools: Arc<crate::BufferPools>,
+    buffer_pools: Arc<BufferPools>,
     tree: Arc<Tree>,
     execution: Execution,
     instrumented: bool,
@@ -722,7 +722,7 @@ impl crate::Storage for Context {
 }
 
 impl crate::Pooling for Context {
-    fn buffer_pools(&self) -> &crate::BufferPools {
+    fn buffer_pools(&self) -> &BufferPools {
         &self.buffer_pools
     }
 }
