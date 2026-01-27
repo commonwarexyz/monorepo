@@ -483,9 +483,10 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "cannot create Private from zero scalar")]
     fn test_private_rejects_zero_scalar() {
         let zero_scalar = group::Scalar::zero();
-        assert!(Private::new(zero_scalar).is_none());
+        let _ = Private::new(zero_scalar);
     }
 
     #[test]
