@@ -106,7 +106,6 @@ async fn run_operations(
     mmr: &mut TestMmr,
     hasher: &mut StandardHasher<Sha256>,
     operations: &[MmrOperation],
-    faults: &std::sync::Arc<std::sync::RwLock<deterministic::FaultConfig>>,
 ) -> (u64, u64, u64, u64, u64, u64) {
     // Bounds: [min, max] ranges for size, leaves, pruned_to_pos
     let mut min_size = 0u64;
@@ -115,7 +114,6 @@ async fn run_operations(
     let mut max_leaves = mmr.leaves().as_u64();
     let mut min_pruned = 0u64;
     let mut max_pruned = mmr.pruned_to_pos().as_u64();
-    let mut crashed = false;
 
     for op in operations.iter() {
         let step_result: Result<(), ()> = match op {
@@ -238,15 +236,8 @@ async fn run_operations(
         };
 
         if step_result.is_err() {
-            crashed = true;
             break;
         }
-    }
-
-    // If didn't crash during operations, force a crash
-    if !crashed {
-        faults.write().unwrap().sync_rate = Some(1.0);
-        let _ = mmr.sync().await;
     }
 
     (
@@ -339,15 +330,14 @@ fn fuzz(input: FuzzInput) {
                 .await
                 .unwrap();
 
-                let fault_config = deterministic::FaultConfig {
+                let faults = ctx.storage_faults();
+                *faults.write().unwrap() = deterministic::FaultConfig {
                     sync_rate: Some(sync_failure_rate),
                     write_rate: Some(write_failure_rate),
                     ..Default::default()
                 };
-                let faults = ctx.storage_faults();
-                *faults.write().unwrap() = fault_config;
 
-                run_operations(&mut mmr, &mut hasher, &operations, &faults).await
+                run_operations(&mut mmr, &mut hasher, &operations).await
             }
         });
 

@@ -329,11 +329,11 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         let (should_fail, partial_rate) = self.ctx.check_resize_fault();
         if should_fail {
             let current = self.size.load(Ordering::Relaxed);
-            if let Some(intermediate) = self.ctx.try_partial(partial_rate, current, len) {
+            if let Some(len) = self.ctx.try_partial(partial_rate, current, len) {
                 // Partial resize: resize to intermediate size, sync, then fail
-                self.inner.resize(intermediate).await?;
+                self.inner.resize(len).await?;
                 self.inner.sync().await?;
-                self.size.store(intermediate, Ordering::Relaxed);
+                self.size.store(len, Ordering::Relaxed);
                 return Err(Error::Io(injected_io_error()));
             }
             return Err(Error::Io(injected_io_error()));
