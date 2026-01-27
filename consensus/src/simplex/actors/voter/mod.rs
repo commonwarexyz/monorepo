@@ -5,7 +5,8 @@ mod slot;
 mod state;
 
 use crate::{
-    simplex::{elector::Config as Elector, types::Activity},
+    elector::Config as Elector,
+    simplex::types::Activity,
     types::{Epoch, ViewDelta},
     CertifiableAutomaton, Relay, Reporter,
 };
@@ -50,12 +51,12 @@ pub struct Config<
 mod tests {
     use super::*;
     use crate::{
+        elector::{Config as ElectorConfig, Elector, Random, RoundRobin, RoundRobinElector},
         simplex::{
             actors::{
                 batcher,
                 resolver::{self, MailboxMessage},
             },
-            elector::{Config as ElectorConfig, Elector, Random, RoundRobin, RoundRobinElector},
             mocks, quorum,
             scheme::{
                 bls12381_multisig, bls12381_threshold::vrf as bls12381_threshold_vrf, ed25519,

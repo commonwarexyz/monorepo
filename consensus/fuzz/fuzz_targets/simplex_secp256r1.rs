@@ -1,6 +1,6 @@
 #![no_main]
 
-use commonware_consensus::simplex::{elector::RoundRobin, scheme::secp256r1};
+use commonware_consensus::{elector::RoundRobin, simplex::scheme::secp256r1};
 use commonware_consensus_fuzz::{fuzz, FuzzInput, Simplex};
 use commonware_cryptography::{
     certificate::mocks::Fixture, ed25519::PublicKey as Ed25519PublicKey,
