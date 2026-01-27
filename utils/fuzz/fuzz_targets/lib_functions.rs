@@ -15,7 +15,6 @@ enum FuzzInput {
     FromHexFormatted { hex_str: String },
     MaxFaults { n: u32 },
     Quorum { n: u32 },
-    QuorumFromSlice { a: Vec<u8> },
     Union { a: Vec<u8>, b: Vec<u8> },
     UnionUnique { namespace: Vec<u8>, msg: Vec<u8> },
     Modulo { bytes: Vec<u8>, n: u64 },
@@ -130,15 +129,6 @@ fn fuzz(input: FuzzInput) {
             let faults = N3f1::max_faults(n);
 
             assert_eq!(q, n - faults);
-        }
-
-        FuzzInput::QuorumFromSlice { a } => {
-            let l = a.len() as u32;
-            if l == 0 {
-                return;
-            }
-            let q = N3f1::quorum_from_slice(a.as_slice());
-            assert_eq!(q, N3f1::quorum(l));
         }
 
         FuzzInput::Union { a, b } => {

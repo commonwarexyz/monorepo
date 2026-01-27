@@ -44,11 +44,20 @@ pub const JQ_VERSION: &str = "1.7.1-3build1";
 /// Version of libfontconfig1 package for Ubuntu 24.04
 pub const LIBFONTCONFIG1_VERSION: &str = "2.15.0-1.1ubuntu2";
 
+/// Version of fontconfig-config package for Ubuntu 24.04
+pub const FONTCONFIG_CONFIG_VERSION: &str = "2.15.0-1.1ubuntu2";
+
 /// Version of unzip package for Ubuntu 24.04
 pub const UNZIP_VERSION: &str = "6.0-28ubuntu4";
 
 /// Version of adduser package for Ubuntu 24.04 (arch-independent)
 pub const ADDUSER_VERSION: &str = "3.137ubuntu1";
+
+/// Version of fonts-dejavu-mono package for Ubuntu 24.04 (arch-independent)
+pub const FONTS_DEJAVU_MONO_VERSION: &str = "2.37-8";
+
+/// Version of fonts-dejavu-core package for Ubuntu 24.04 (arch-independent)
+pub const FONTS_DEJAVU_CORE_VERSION: &str = "2.37-8";
 
 /// Version of musl package for Ubuntu 24.04
 pub const MUSL_VERSION: &str = "1.2.4-2";
@@ -154,6 +163,14 @@ pub(crate) fn libfontconfig_bin_s3_key(version: &str, architecture: Architecture
     )
 }
 
+/// S3 key for fontconfig-config package
+pub(crate) fn fontconfig_config_bin_s3_key(version: &str, architecture: Architecture) -> String {
+    format!(
+        "{TOOLS_BINARIES_PREFIX}/fontconfig-config/{version}/linux-{arch}/fontconfig-config_{version}_{arch}.deb",
+        arch = architecture.as_str()
+    )
+}
+
 pub(crate) fn unzip_bin_s3_key(version: &str, architecture: Architecture) -> String {
     format!(
         "{TOOLS_BINARIES_PREFIX}/unzip/{version}/linux-{arch}/unzip_{version}_{arch}.deb",
@@ -166,6 +183,21 @@ pub(crate) fn adduser_bin_s3_key(version: &str) -> String {
     format!("{TOOLS_BINARIES_PREFIX}/adduser/{version}/adduser_{version}_all.deb")
 }
 
+/// S3 key for fonts-dejavu-mono (architecture-independent package)
+pub(crate) fn fonts_dejavu_mono_bin_s3_key(version: &str) -> String {
+    format!(
+        "{TOOLS_BINARIES_PREFIX}/fonts-dejavu-mono/{version}/fonts-dejavu-mono_{version}_all.deb"
+    )
+}
+
+/// S3 key for fonts-dejavu-core (architecture-independent package)
+pub(crate) fn fonts_dejavu_core_bin_s3_key(version: &str) -> String {
+    format!(
+        "{TOOLS_BINARIES_PREFIX}/fonts-dejavu-core/{version}/fonts-dejavu-core_{version}_all.deb"
+    )
+}
+
+/// S3 key for musl package
 pub(crate) fn musl_bin_s3_key(version: &str, architecture: Architecture) -> String {
     format!(
         "{TOOLS_BINARIES_PREFIX}/musl/{version}/linux-{arch}/musl_{version}_{arch}.deb",
@@ -391,6 +423,18 @@ pub(crate) fn libfontconfig_download_url(version: &str, architecture: Architectu
     )
 }
 
+/// Returns the download URL for fontconfig-config from Ubuntu archive
+pub(crate) fn fontconfig_config_download_url(version: &str, architecture: Architecture) -> String {
+    let base = match architecture {
+        Architecture::Arm64 => UBUNTU_ARCHIVE_ARM64,
+        Architecture::X86_64 => UBUNTU_ARCHIVE_X86_64,
+    };
+    format!(
+        "{base}/main/f/fontconfig/fontconfig-config_{version}_{arch}.deb",
+        arch = architecture.as_str()
+    )
+}
+
 /// Returns the download URL for unzip from Ubuntu archive
 pub(crate) fn unzip_download_url(version: &str, architecture: Architecture) -> String {
     let base = match architecture {
@@ -406,6 +450,16 @@ pub(crate) fn unzip_download_url(version: &str, architecture: Architecture) -> S
 /// Returns the download URL for adduser from Ubuntu archive (arch-independent)
 pub(crate) fn adduser_download_url(version: &str) -> String {
     format!("{UBUNTU_ARCHIVE_X86_64}/main/a/adduser/adduser_{version}_all.deb")
+}
+
+/// Returns the download URL for fonts-dejavu-mono from Ubuntu archive (arch-independent)
+pub(crate) fn fonts_dejavu_mono_download_url(version: &str) -> String {
+    format!("{UBUNTU_ARCHIVE_X86_64}/main/f/fonts-dejavu/fonts-dejavu-mono_{version}_all.deb")
+}
+
+/// Returns the download URL for fonts-dejavu-core from Ubuntu archive (arch-independent)
+pub(crate) fn fonts_dejavu_core_download_url(version: &str) -> String {
+    format!("{UBUNTU_ARCHIVE_X86_64}/main/f/fonts-dejavu/fonts-dejavu-core_{version}_all.deb")
 }
 
 pub(crate) fn musl_download_url(version: &str, architecture: Architecture) -> String {
@@ -619,6 +673,9 @@ pub struct MonitoringUrls {
     pub pyroscope_bin: String,
     pub tempo_bin: String,
     pub node_exporter_bin: String,
+    pub fonts_dejavu_mono_deb: String,
+    pub fonts_dejavu_core_deb: String,
+    pub fontconfig_config_deb: String,
     pub libfontconfig_deb: String,
     pub unzip_deb: String,
     pub adduser_deb: String,
@@ -643,7 +700,8 @@ pub(crate) fn install_monitoring_download_cmd(urls: &MonitoringUrls) -> String {
         r#"
 # Clean up any previous download artifacts (allows retries to re-download fresh copies)
 rm -f /home/ubuntu/prometheus.tar.gz /home/ubuntu/loki.zip /home/ubuntu/pyroscope.tar.gz \
-      /home/ubuntu/tempo.tar.gz /home/ubuntu/node_exporter.tar.gz /home/ubuntu/libfontconfig1.deb \
+      /home/ubuntu/tempo.tar.gz /home/ubuntu/node_exporter.tar.gz /home/ubuntu/fonts-dejavu-mono.deb \
+      /home/ubuntu/fonts-dejavu-core.deb /home/ubuntu/fontconfig-config.deb /home/ubuntu/libfontconfig1.deb \
       /home/ubuntu/unzip.deb /home/ubuntu/adduser.deb /home/ubuntu/musl.deb
 rm -rf /home/ubuntu/prometheus-* /home/ubuntu/loki-linux-* /home/ubuntu/pyroscope \
        /home/ubuntu/tempo /home/ubuntu/node_exporter-*
@@ -658,6 +716,9 @@ sudo systemctl unmask prometheus loki pyroscope tempo node_exporter grafana-serv
 {WGET} -O /home/ubuntu/pyroscope.tar.gz '{}' &
 {WGET} -O /home/ubuntu/tempo.tar.gz '{}' &
 {WGET} -O /home/ubuntu/node_exporter.tar.gz '{}' &
+{WGET} -O /home/ubuntu/fonts-dejavu-mono.deb '{}' &
+{WGET} -O /home/ubuntu/fonts-dejavu-core.deb '{}' &
+{WGET} -O /home/ubuntu/fontconfig-config.deb '{}' &
 {WGET} -O /home/ubuntu/libfontconfig1.deb '{}' &
 {WGET} -O /home/ubuntu/unzip.deb '{}' &
 {WGET} -O /home/ubuntu/adduser.deb '{}' &
@@ -678,7 +739,7 @@ wait
 
 # Verify all downloads succeeded
 for f in prometheus.tar.gz grafana.deb loki.zip pyroscope.tar.gz tempo.tar.gz node_exporter.tar.gz \
-         libfontconfig1.deb unzip.deb adduser.deb musl.deb prometheus.yml datasources.yml all.yml dashboard.json \
+         fonts-dejavu-mono.deb fonts-dejavu-core.deb fontconfig-config.deb libfontconfig1.deb unzip.deb adduser.deb musl.deb prometheus.yml datasources.yml all.yml dashboard.json \
          loki.yml pyroscope.yml tempo.yml prometheus.service loki.service pyroscope.service \
          tempo.service node_exporter.service; do
     if [ ! -f "/home/ubuntu/$f" ]; then
@@ -693,6 +754,9 @@ done
         urls.pyroscope_bin,
         urls.tempo_bin,
         urls.node_exporter_bin,
+        urls.fonts_dejavu_mono_deb,
+        urls.fonts_dejavu_core_deb,
+        urls.fontconfig_config_deb,
         urls.libfontconfig_deb,
         urls.unzip_deb,
         urls.adduser_deb,
@@ -732,11 +796,15 @@ sudo dpkg -i /home/ubuntu/adduser.deb
 sudo mkdir -p /opt/prometheus /opt/prometheus/data
 sudo chown -R ubuntu:ubuntu /opt/prometheus
 tar xvfz /home/ubuntu/prometheus.tar.gz -C /home/ubuntu
+sudo rm -rf /opt/prometheus/prometheus-{prometheus_version}.linux-{arch}
 sudo mv /home/ubuntu/prometheus-{prometheus_version}.linux-{arch} /opt/prometheus/prometheus-{prometheus_version}.linux-{arch}
 sudo ln -sf /opt/prometheus/prometheus-{prometheus_version}.linux-{arch}/prometheus /opt/prometheus/prometheus
 sudo chmod +x /opt/prometheus/prometheus
 
-# Install Grafana dependencies (libfontconfig1, musl) and Grafana
+# Install Grafana dependencies (fonts-dejavu-mono, fonts-dejavu-core, fontconfig-config, libfontconfig1, musl) and Grafana
+sudo dpkg -i /home/ubuntu/fonts-dejavu-mono.deb
+sudo dpkg -i /home/ubuntu/fonts-dejavu-core.deb
+sudo dpkg -i /home/ubuntu/fontconfig-config.deb
 sudo dpkg -i /home/ubuntu/libfontconfig1.deb
 sudo dpkg -i /home/ubuntu/musl.deb
 sudo dpkg -i /home/ubuntu/grafana.deb
@@ -745,6 +813,7 @@ sudo dpkg -i /home/ubuntu/grafana.deb
 sudo mkdir -p /opt/loki /loki/index /loki/index_cache /loki/chunks /loki/compactor /loki/wal
 sudo chown -R ubuntu:ubuntu /opt/loki /loki
 unzip -o /home/ubuntu/loki.zip -d /home/ubuntu
+sudo rm -f /opt/loki/loki
 sudo mv /home/ubuntu/loki-linux-{arch} /opt/loki/loki
 sudo chmod +x /opt/loki/loki
 
@@ -752,6 +821,7 @@ sudo chmod +x /opt/loki/loki
 sudo mkdir -p /opt/pyroscope /var/lib/pyroscope
 sudo chown -R ubuntu:ubuntu /opt/pyroscope /var/lib/pyroscope
 tar xvfz /home/ubuntu/pyroscope.tar.gz -C /home/ubuntu
+sudo rm -f /opt/pyroscope/pyroscope
 sudo mv /home/ubuntu/pyroscope /opt/pyroscope/pyroscope
 sudo chmod +x /opt/pyroscope/pyroscope
 
@@ -759,6 +829,7 @@ sudo chmod +x /opt/pyroscope/pyroscope
 sudo mkdir -p /opt/tempo /tempo/traces /tempo/wal
 sudo chown -R ubuntu:ubuntu /opt/tempo /tempo
 tar xvfz /home/ubuntu/tempo.tar.gz -C /home/ubuntu
+sudo rm -f /opt/tempo/tempo
 sudo mv /home/ubuntu/tempo /opt/tempo/tempo
 sudo chmod +x /opt/tempo/tempo
 
@@ -766,6 +837,7 @@ sudo chmod +x /opt/tempo/tempo
 sudo mkdir -p /opt/node_exporter
 sudo chown -R ubuntu:ubuntu /opt/node_exporter
 tar xvfz /home/ubuntu/node_exporter.tar.gz -C /home/ubuntu
+sudo rm -rf /opt/node_exporter/node_exporter-*.linux-{arch}
 sudo mv /home/ubuntu/node_exporter-*.linux-{arch} /opt/node_exporter/
 sudo ln -sf /opt/node_exporter/node_exporter-*.linux-{arch}/node_exporter /opt/node_exporter/node_exporter
 sudo chmod +x /opt/node_exporter/node_exporter
@@ -773,9 +845,6 @@ sudo chmod +x /opt/node_exporter/node_exporter
 # Configure Grafana
 sudo sed -i '/^\[auth.anonymous\]$/,/^\[/ {{ /^; *enabled = /s/.*/enabled = true/; /^; *org_role = /s/.*/org_role = Admin/ }}' /etc/grafana/grafana.ini
 sudo mkdir -p /etc/grafana/provisioning/datasources /etc/grafana/provisioning/dashboards /var/lib/grafana/dashboards
-
-# Install Pyroscope data source plugin
-sudo grafana-cli plugins install grafana-pyroscope-datasource
 
 # Install configuration files
 sudo mv /home/ubuntu/prometheus.yml /opt/prometheus/prometheus.yml
@@ -967,6 +1036,7 @@ sudo dpkg -i /home/ubuntu/logrotate.deb
 sudo mkdir -p /opt/promtail /etc/promtail
 sudo chown -R ubuntu:ubuntu /opt/promtail
 unzip -o /home/ubuntu/promtail.zip -d /home/ubuntu
+sudo rm -f /opt/promtail/promtail
 sudo mv /home/ubuntu/promtail-linux-{arch} /opt/promtail/promtail
 sudo chmod +x /opt/promtail/promtail
 sudo mv /home/ubuntu/promtail.yml /etc/promtail/promtail.yml
@@ -977,6 +1047,7 @@ sudo chown root:root /etc/promtail/promtail.yml
 sudo mkdir -p /opt/node_exporter
 sudo chown -R ubuntu:ubuntu /opt/node_exporter
 tar xvfz /home/ubuntu/node_exporter.tar.gz -C /home/ubuntu
+sudo rm -rf /opt/node_exporter/node_exporter-*.linux-{arch}
 sudo mv /home/ubuntu/node_exporter-*.linux-{arch} /opt/node_exporter/
 sudo ln -sf /opt/node_exporter/node_exporter-*.linux-{arch}/node_exporter /opt/node_exporter/node_exporter
 sudo chmod +x /opt/node_exporter/node_exporter
