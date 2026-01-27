@@ -257,7 +257,7 @@ mod tests {
             let releaser = Releaser::new(releaser_mailbox);
 
             // Generate 5 peers
-            let peers: Vec<PublicKey> = (1..=5)
+            let peers: Vec<PublicKey> = (0..5)
                 .map(|i| PrivateKey::from_seed(i).public_key())
                 .collect();
 
