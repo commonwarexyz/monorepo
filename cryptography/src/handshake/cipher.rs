@@ -187,7 +187,29 @@ cfg_if::cfg_if! {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_utils::test_rng;
+    use commonware_utils::{test_rng, test_rng_seeded};
+
+    #[test]
+    fn test_send_recv_roundtrip() {
+        let mut send = SendCipher::new(&mut test_rng());
+        let mut recv = RecvCipher::new(&mut test_rng());
+
+        let plaintext = b"hello world";
+        let ciphertext = send.send(plaintext).unwrap();
+        assert_eq!(ciphertext.len(), plaintext.len() + CIPHERTEXT_OVERHEAD);
+
+        let decrypted = recv.recv(&ciphertext).unwrap();
+        assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn test_recv_wrong_key_fails() {
+        let mut send = SendCipher::new(&mut test_rng_seeded(0));
+        let mut recv = RecvCipher::new(&mut test_rng_seeded(1));
+
+        let ciphertext = send.send(b"hello").unwrap();
+        assert!(matches!(recv.recv(&ciphertext), Err(Error::DecryptionFailed)));
+    }
 
     #[test]
     fn test_recv_ciphertext_too_short() {
