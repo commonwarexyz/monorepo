@@ -366,43 +366,49 @@ where
             return Ok(Some(block));
         }
 
-        let shards = self.buffer.get(None, commitment, None).await;
+        let mut shards = self.buffer.get(None, commitment, None).await;
         let config = commitment.config();
 
-        // Search for a strong shard to form the checking data. We must have at least one strong shard
-        // sent to us by the proposer. In the case of the proposer, all shards in the mailbox will be strong,
-        // but any can be used for forming the checking data.
+        // Find and extract a strong shard to form the checking data. We must have at least one
+        // strong shard sent to us by the proposer. In the case of the proposer, all shards in
+        // the mailbox will be strong, but any can be used for forming the checking data.
         //
         // NOTE: Byzantine peers may send us strong shards as well, but we don't care about those;
         // `Scheme::reshard` verifies the shard against the commitment, and if it doesn't check out,
         // it will be ignored.
         //
-        // We also extract the checked shard from the first valid reshard to avoid re-verifying it
-        // in the parallel map below (reshard performs expensive SHA-256 hashing for verification).
-        let Some((checking_data, first_checked_index, first_checked_shard)) =
-            shards.iter().find_map(|s| {
-                if let DistributionShard::Strong(shard) = s.deref() {
-                    let index = s.index() as u16;
-                    C::reshard(&config, &commitment.coding_digest(), index, shard.clone())
-                        .map(|(checking_data, checked, _)| (checking_data, index, checked))
-                        .ok()
-                } else {
-                    None
-                }
-            })
-        else {
+        // We extract the first valid strong shard by swapping it to the end and popping, avoiding
+        // a clone. The resulting checked shard is prepended to the checked_shards list.
+        let strong_shard_pos = shards.iter().position(|s| {
+            matches!(s.deref(), DistributionShard::Strong(_))
+        });
+        let Some(strong_pos) = strong_shard_pos else {
             debug!(%commitment, "no strong shards present to form checking data");
             return Ok(None);
         };
 
+        // Swap-remove the strong shard to take ownership without shifting elements
+        let strong_shard = shards.swap_remove(strong_pos);
+        let strong_index = strong_shard.index() as u16;
+        let DistributionShard::Strong(shard_data) = strong_shard.into_inner() else {
+            unreachable!("we just verified this is a strong shard");
+        };
+
+        let Some((checking_data, first_checked_shard)) = C::reshard(
+            &config,
+            &commitment.coding_digest(),
+            strong_index,
+            shard_data,
+        )
+        .map(|(checking_data, checked, _)| (checking_data, checked))
+        .ok() else {
+            debug!(%commitment, "strong shard failed verification");
+            return Ok(None);
+        };
+
+        // Process remaining shards in parallel
         let checked_shards = self.strategy.map_collect_vec(shards, |s| {
             let index = s.index() as u16;
-
-            // Skip re-verification of the shard we already verified when extracting checking_data.
-            // This avoids redundant SHA-256 hashing for the same shard.
-            if index == first_checked_index {
-                return Some(first_checked_shard.clone());
-            }
 
             match s.into_inner() {
                 DistributionShard::Strong(shard) => {
@@ -423,7 +429,12 @@ where
                 .ok(),
             }
         });
-        let checked_shards = checked_shards.into_iter().flatten().collect::<Vec<_>>();
+
+        // Prepend the first checked shard we extracted earlier
+        let mut all_checked_shards = Vec::with_capacity(checked_shards.len() + 1);
+        all_checked_shards.push(first_checked_shard);
+        all_checked_shards.extend(checked_shards.into_iter().flatten());
+        let checked_shards = all_checked_shards;
 
         if checked_shards.len() < config.minimum_shards as usize {
             debug!(%commitment, "not enough checked shards to reconstruct block");
