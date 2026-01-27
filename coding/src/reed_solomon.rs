@@ -1,7 +1,7 @@
 use crate::{Config, Scheme};
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, FixedSize, Read, ReadExt, ReadRangeExt, Write};
-use commonware_cryptography::Hasher;
+use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
 use commonware_storage::bmt::{self, Builder};
 use reed_solomon_simd::{Error as RsError, ReedSolomonDecoder, ReedSolomonEncoder};
@@ -40,7 +40,7 @@ fn total_shards(config: &Config) -> Result<u16, Error> {
 
 /// A piece of data from a Reed-Solomon encoded object.
 #[derive(Debug, Clone)]
-pub struct Chunk<H: Hasher> {
+pub struct Chunk<D: Digest> {
     /// The shard of encoded data.
     shard: Vec<u8>,
 
@@ -48,12 +48,12 @@ pub struct Chunk<H: Hasher> {
     index: u16,
 
     /// The multi-proof of the shard in the [bmt] at the given index.
-    proof: bmt::Proof<H::Digest>,
+    proof: bmt::Proof<D>,
 }
 
-impl<H: Hasher> Chunk<H> {
+impl<D: Digest> Chunk<D> {
     /// Create a new [Chunk] from the given shard, index, and proof.
-    const fn new(shard: Vec<u8>, index: u16, proof: bmt::Proof<H::Digest>) -> Self {
+    const fn new(shard: Vec<u8>, index: u16, proof: bmt::Proof<D>) -> Self {
         Self {
             shard,
             index,
@@ -62,7 +62,7 @@ impl<H: Hasher> Chunk<H> {
     }
 
     /// Verify a [Chunk] against the given root.
-    fn verify(&self, index: u16, root: &H::Digest) -> bool {
+    fn verify<H: Hasher<Digest = D>>(&self, index: u16, root: &D) -> bool {
         // Ensure the index matches
         if index != self.index {
             return false;
@@ -80,7 +80,7 @@ impl<H: Hasher> Chunk<H> {
     }
 }
 
-impl<H: Hasher> Write for Chunk<H> {
+impl<D: Digest> Write for Chunk<D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.shard.write(writer);
         self.index.write(writer);
@@ -88,14 +88,14 @@ impl<H: Hasher> Write for Chunk<H> {
     }
 }
 
-impl<H: Hasher> Read for Chunk<H> {
+impl<D: Digest> Read for Chunk<D> {
     /// The maximum size of the shard.
     type Cfg = crate::CodecConfig;
 
     fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         let shard = Vec::<u8>::read_range(reader, ..=cfg.maximum_shard_size)?;
         let index = u16::read(reader)?;
-        let proof = bmt::Proof::<H::Digest>::read_cfg(reader, &1)?;
+        let proof = bmt::Proof::<D>::read_cfg(reader, &1)?;
         Ok(Self {
             shard,
             index,
@@ -104,24 +104,24 @@ impl<H: Hasher> Read for Chunk<H> {
     }
 }
 
-impl<H: Hasher> EncodeSize for Chunk<H> {
+impl<D: Digest> EncodeSize for Chunk<D> {
     fn encode_size(&self) -> usize {
         self.shard.encode_size() + self.index.encode_size() + self.proof.encode_size()
     }
 }
 
-impl<H: Hasher> PartialEq for Chunk<H> {
+impl<D: Digest> PartialEq for Chunk<D> {
     fn eq(&self, other: &Self) -> bool {
         self.shard == other.shard && self.index == other.index && self.proof == other.proof
     }
 }
 
-impl<H: Hasher> Eq for Chunk<H> {}
+impl<D: Digest> Eq for Chunk<D> {}
 
 #[cfg(feature = "arbitrary")]
-impl<H: Hasher> arbitrary::Arbitrary<'_> for Chunk<H>
+impl<D: Digest> arbitrary::Arbitrary<'_> for Chunk<D>
 where
-    H::Digest: for<'a> arbitrary::Arbitrary<'a>,
+    D: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         Ok(Self {
@@ -176,7 +176,7 @@ fn extract_data(shards: Vec<&[u8]>, k: usize) -> Vec<u8> {
 }
 
 /// Type alias for the internal encoding result.
-type Encoding<H> = (bmt::Tree<H>, Vec<Vec<u8>>);
+type Encoding<D> = (bmt::Tree<D>, Vec<Vec<u8>>);
 
 /// Inner logic for [encode()]
 fn encode_inner<H: Hasher, S: Strategy>(
@@ -184,7 +184,7 @@ fn encode_inner<H: Hasher, S: Strategy>(
     min: u16,
     data: Vec<u8>,
     strategy: &S,
-) -> Result<Encoding<H>, Error> {
+) -> Result<Encoding<H::Digest>, Error> {
     // Validate parameters
     assert!(total > min);
     assert!(min > 0);
@@ -242,12 +242,13 @@ fn encode_inner<H: Hasher, S: Strategy>(
 ///
 /// - `root`: The root of the [bmt].
 /// - `chunks`: [Chunk]s of encoded data (that can be proven against `root`).
+#[allow(clippy::type_complexity)]
 fn encode<H: Hasher, S: Strategy>(
     total: u16,
     min: u16,
     data: Vec<u8>,
     strategy: &S,
-) -> Result<(H::Digest, Vec<Chunk<H>>), Error> {
+) -> Result<(H::Digest, Vec<Chunk<H::Digest>>), Error> {
     // Encode data
     let (tree, shards) = encode_inner::<H, _>(total, min, data, strategy)?;
     let root = tree.root();
@@ -282,7 +283,7 @@ fn decode<H: Hasher, S: Strategy>(
     total: u16,
     min: u16,
     root: &H::Digest,
-    chunks: &[Chunk<H>],
+    chunks: &[Chunk<H::Digest>],
     strategy: &S,
 ) -> Result<Vec<u8>, Error> {
     // Validate parameters
@@ -470,9 +471,9 @@ impl<H> std::fmt::Debug for ReedSolomon<H> {
 impl<H: Hasher> Scheme for ReedSolomon<H> {
     type Commitment = H::Digest;
 
-    type Shard = Chunk<H>;
-    type ReShard = Chunk<H>;
-    type CheckedShard = Chunk<H>;
+    type Shard = Chunk<H::Digest>;
+    type ReShard = Chunk<H::Digest>;
+    type CheckedShard = Chunk<H::Digest>;
     type CheckingData = ();
 
     type Error = Error;
@@ -483,7 +484,7 @@ impl<H: Hasher> Scheme for ReedSolomon<H> {
         strategy: &impl Strategy,
     ) -> Result<(Self::Commitment, Vec<Self::Shard>), Self::Error> {
         let data: Vec<u8> = data.copy_to_bytes(data.remaining()).to_vec();
-        encode(total_shards(config)?, config.minimum_shards, data, strategy)
+        encode::<H, _>(total_shards(config)?, config.minimum_shards, data, strategy)
     }
 
     fn reshard(
@@ -495,7 +496,7 @@ impl<H: Hasher> Scheme for ReedSolomon<H> {
         if shard.index != index {
             return Err(Error::WrongIndex(index));
         }
-        if shard.verify(shard.index, commitment) {
+        if shard.verify::<H>(shard.index, commitment) {
             Ok(((), shard.clone(), shard))
         } else {
             Err(Error::InvalidProof)
@@ -512,7 +513,7 @@ impl<H: Hasher> Scheme for ReedSolomon<H> {
         if reshard.index != index {
             return Err(Error::WrongIndex(reshard.index));
         }
-        if !reshard.verify(reshard.index, commitment) {
+        if !reshard.verify::<H>(reshard.index, commitment) {
             return Err(Error::InvalidProof);
         }
         Ok(reshard)
@@ -525,7 +526,7 @@ impl<H: Hasher> Scheme for ReedSolomon<H> {
         shards: &[Self::CheckedShard],
         strategy: &impl Strategy,
     ) -> Result<Vec<u8>, Self::Error> {
-        decode(
+        decode::<H, _>(
             total_shards(config)?,
             config.minimum_shards,
             commitment,
@@ -609,7 +610,7 @@ mod tests {
 
         // Verify all proofs at invalid index
         for i in 0..total {
-            assert!(!chunks[i as usize].verify(i + 1, &root));
+            assert!(!chunks[i as usize].verify::<Sha256>(i + 1, &root));
         }
     }
 
@@ -678,7 +679,7 @@ mod tests {
 
         // Verify all proofs at incorrect root
         for i in 0..total {
-            assert!(!chunks[i as usize].verify(i, &malicious_root));
+            assert!(!chunks[i as usize].verify::<Sha256>(i, &malicious_root));
         }
 
         // Collect valid pieces (these are legitimate fragments)
@@ -837,9 +838,10 @@ mod tests {
     mod conformance {
         use super::*;
         use commonware_codec::conformance::CodecConformance;
+        use commonware_cryptography::sha256::Digest as Sha256Digest;
 
         commonware_conformance::conformance_tests! {
-            CodecConformance<Chunk<Sha256>>,
+            CodecConformance<Chunk<Sha256Digest>>,
         }
     }
 }
