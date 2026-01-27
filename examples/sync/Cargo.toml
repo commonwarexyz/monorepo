@@ -26,6 +26,7 @@ clap.workspace = true
 commonware-codec.workspace = true
 commonware-cryptography.workspace = true
 commonware-macros.workspace = true
+commonware-parallel = { workspace = true, default-features = false }
 commonware-runtime.workspace = true
 commonware-storage = { workspace = true, features = ["std"] }
 commonware-stream.workspace = true

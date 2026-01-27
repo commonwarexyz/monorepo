@@ -405,10 +405,11 @@ where
     pub(crate) async fn raise_floor_with_bitmap<
         E: Storage + Clock + Metrics,
         D: Digest,
+        Y: commonware_parallel::Strategy,
         const N: usize,
     >(
         &mut self,
-        status: &mut DirtyAuthenticatedBitMap<E, D, N>,
+        status: &mut DirtyAuthenticatedBitMap<E, D, N, Y>,
         mut inactivity_floor_loc: Location,
     ) -> Result<Location, Error>
     where

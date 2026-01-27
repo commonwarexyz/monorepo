@@ -1,7 +1,7 @@
 //! Benchmark the generation of a large randomly generated keyless database.
 
 use commonware_cryptography::Sha256;
-use commonware_parallel::ThreadPool;
+use commonware_parallel::Rayon;
 use commonware_runtime::{
     benchmarks::{context, tokio},
     buffer::PoolRef,
@@ -10,7 +10,7 @@ use commonware_runtime::{
 };
 use commonware_storage::qmdb::{
     keyless::{Config as KConfig, Keyless},
-    NonDurable, Unmerkleized,
+    Durable, Merkleized, NonDurable, Unmerkleized,
 };
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use criterion::{criterion_group, Criterion};
@@ -35,8 +35,8 @@ const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10_000);
 /// configured to provide 8 cores.
 const THREADS: NonZeroUsize = NZUsize!(8);
 
-fn keyless_cfg(pool: ThreadPool) -> KConfig<(commonware_codec::RangeCfg<usize>, ())> {
-    KConfig::<(commonware_codec::RangeCfg<usize>, ())> {
+fn keyless_cfg(strategy: Rayon) -> KConfig<(commonware_codec::RangeCfg<usize>, ()), Rayon> {
+    KConfig::<(commonware_codec::RangeCfg<usize>, ()), Rayon> {
         mmr_journal_partition: format!("journal_{PARTITION_SUFFIX}"),
         mmr_metadata_partition: format!("metadata_{PARTITION_SUFFIX}"),
         mmr_items_per_blob: ITEMS_PER_BLOB,
@@ -46,22 +46,22 @@ fn keyless_cfg(pool: ThreadPool) -> KConfig<(commonware_codec::RangeCfg<usize>, 
         log_items_per_section: ITEMS_PER_BLOB,
         log_write_buffer: NZUsize!(1024),
         log_compression: None,
-        thread_pool: Some(pool),
+        strategy,
         buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
     }
 }
 
 /// Clean (Merkleized, Durable) db type alias for Keyless.
-type KeylessDb = Keyless<Context, Vec<u8>, Sha256>;
+type KeylessDb = Keyless<Context, Vec<u8>, Sha256, Merkleized<Sha256>, Durable, Rayon>;
 
 /// Mutable (Unmerkleized, NonDurable) type alias for Keyless.
-type KeylessMutable = Keyless<Context, Vec<u8>, Sha256, Unmerkleized, NonDurable>;
+type KeylessMutable = Keyless<Context, Vec<u8>, Sha256, Unmerkleized, NonDurable, Rayon>;
 
 /// Generate a keyless db by appending `num_operations` random values in total. The database is
 /// committed after every `COMMIT_FREQUENCY` operations.
 async fn gen_random_keyless(ctx: Context, num_operations: u64) -> KeylessDb {
     let pool = ctx.clone().create_pool(THREADS).unwrap();
-    let keyless_cfg = keyless_cfg(pool);
+    let keyless_cfg = keyless_cfg(Rayon::with_pool(pool));
     let clean = KeylessDb::init(ctx, keyless_cfg).await.unwrap();
 
     // Convert to mutable state for operations.

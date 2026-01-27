@@ -27,7 +27,7 @@ use crate::{
 };
 use commonware_codec::DecodeExt;
 use commonware_cryptography::Digest;
-use commonware_parallel::ThreadPool;
+use commonware_parallel::{Sequential, Strategy};
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage as RStorage};
 use commonware_utils::sequence::prefixed_u64::U64;
 use core::ops::Range;
@@ -37,12 +37,12 @@ use std::{
 };
 use tracing::{debug, error, warn};
 
-pub type DirtyMmr<E, D> = Mmr<E, D, Dirty>;
-pub type CleanMmr<E, D> = Mmr<E, D, Clean<D>>;
+pub type DirtyMmr<E, D, S> = Mmr<E, D, Dirty, S>;
+pub type CleanMmr<E, D, S> = Mmr<E, D, Clean<D>, S>;
 
 /// Configuration for a journal-backed MMR.
 #[derive(Clone)]
-pub struct Config {
+pub struct Config<S: Strategy> {
     /// The name of the `commonware-runtime::Storage` storage partition used for the journal storing
     /// the MMR nodes.
     pub journal_partition: String,
@@ -58,8 +58,8 @@ pub struct Config {
     /// The size of the write buffer to use for each blob in the backing journal.
     pub write_buffer: NonZeroUsize,
 
-    /// Optional thread pool to use for parallelizing batch operations.
-    pub thread_pool: Option<ThreadPool>,
+    /// The strategy to use for parallelizing batch operations.
+    pub strategy: S,
 
     /// The buffer pool to use for caching data.
     pub buffer_pool: PoolRef,
@@ -71,9 +71,9 @@ pub struct Config {
 /// - **Fresh Start**: Existing data < range start → discard and start fresh
 /// - **Prune and Reuse**: range contains existing data → prune and reuse
 /// - **Prune and Rewind**: existing data > range end → prune and rewind to range end
-pub struct SyncConfig<D: Digest> {
+pub struct SyncConfig<D: Digest, S: Strategy> {
     /// Base MMR configuration (journal, metadata, etc.)
-    pub config: Config,
+    pub config: Config<S>,
 
     /// Sync range - nodes outside this range are pruned/rewound.
     pub range: std::ops::Range<Position>,
@@ -85,11 +85,16 @@ pub struct SyncConfig<D: Digest> {
 }
 
 /// A MMR backed by a fixed-item-length journal.
-pub struct Mmr<E: RStorage + Clock + Metrics, D: Digest, S: State<D> + Send + Sync = Dirty> {
+pub struct Mmr<
+    E: RStorage + Clock + Metrics,
+    D: Digest,
+    St: State<D> + Send + Sync,
+    S: Strategy = Sequential,
+> {
     /// A memory resident MMR used to build the MMR structure and cache updates. It caches all
     /// un-synced nodes, and the pinned node set as derived from both its own pruning boundary and
     /// the journaled MMR's pruning boundary.
-    mem_mmr: MemMmr<D, S>,
+    mem_mmr: MemMmr<D, St>,
 
     /// Stores all unpruned MMR nodes.
     journal: Journal<E, D>,
@@ -107,19 +112,21 @@ pub struct Mmr<E: RStorage + Clock + Metrics, D: Digest, S: State<D> + Send + Sy
     /// pruned.
     pruned_to_pos: Position,
 
-    /// The thread pool to use for parallelization.
-    pool: Option<ThreadPool>,
+    /// The strategy to use for parallelization.
+    strategy: S,
 }
 
-impl<E: RStorage + Clock + Metrics, D: Digest> From<CleanMmr<E, D>> for DirtyMmr<E, D> {
-    fn from(clean: Mmr<E, D, Clean<D>>) -> Self {
+impl<E: RStorage + Clock + Metrics, D: Digest, S: Strategy> From<CleanMmr<E, D, S>>
+    for DirtyMmr<E, D, S>
+{
+    fn from(clean: Mmr<E, D, Clean<D>, S>) -> Self {
         Self {
             mem_mmr: clean.mem_mmr.into(),
             journal: clean.journal,
             journal_size: clean.journal_size,
             metadata: clean.metadata,
             pruned_to_pos: clean.pruned_to_pos,
-            pool: clean.pool,
+            strategy: clean.strategy,
         }
     }
 }
@@ -130,7 +137,9 @@ const NODE_PREFIX: u8 = 0;
 /// Prefix used for the key storing the prune_to_pos position in the metadata.
 const PRUNE_TO_POS_PREFIX: u8 = 1;
 
-impl<E: RStorage + Clock + Metrics, D: Digest, S: State<D> + Send + Sync> Mmr<E, D, S> {
+impl<E: RStorage + Clock + Metrics, D: Digest, St: State<D> + Send + Sync, S: Strategy>
+    Mmr<E, D, St, S>
+{
     /// Return the total number of nodes in the MMR, irrespective of any pruning. The next added
     /// element's position will have this value.
     pub fn size(&self) -> Position {
@@ -209,15 +218,14 @@ impl<E: RStorage + Clock + Metrics, D: Digest, S: State<D> + Send + Sync> Mmr<E,
 
     /// Adds the pinned nodes based on `prune_pos` to `mem_mmr`.
     async fn add_extra_pinned_nodes(
-        mem_mmr: &mut MemMmr<D, S>,
+        mem_mmr: &mut MemMmr<D, St>,
         metadata: &Metadata<E, U64, Vec<u8>>,
         journal: &Journal<E, D>,
         prune_pos: Position,
     ) -> Result<(), Error> {
         let mut pinned_nodes = BTreeMap::new();
         for pos in nodes_to_pin(prune_pos) {
-            let digest =
-                Mmr::<E, D, Clean<D>>::get_from_metadata_or_journal(metadata, journal, pos).await?;
+            let digest = Self::get_from_metadata_or_journal(metadata, journal, pos).await?;
             pinned_nodes.insert(pos, digest);
         }
         mem_mmr.add_pinned_nodes(pinned_nodes);
@@ -226,12 +234,12 @@ impl<E: RStorage + Clock + Metrics, D: Digest, S: State<D> + Send + Sync> Mmr<E,
     }
 }
 
-impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
+impl<E: RStorage + Clock + Metrics, D: Digest, S: Strategy> CleanMmr<E, D, S> {
     /// Initialize a new `Mmr` instance.
     pub async fn init(
         context: E,
         hasher: &mut impl Hasher<Digest = D>,
-        cfg: Config,
+        cfg: Config<S>,
     ) -> Result<Self, Error> {
         let journal_cfg = JConfig {
             partition: cfg.journal_partition,
@@ -266,7 +274,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
                 journal_size,
                 metadata,
                 pruned_to_pos: Position::new(0),
-                pool: cfg.thread_pool,
+                strategy: cfg.strategy.clone(),
             });
         }
 
@@ -319,8 +327,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
         // Initialize the mem_mmr in the "prune_all" state.
         let mut pinned_nodes = Vec::new();
         for pos in nodes_to_pin(journal_size) {
-            let digest =
-                Mmr::<E, D>::get_from_metadata_or_journal(&metadata, &journal, pos).await?;
+            let digest = Self::get_from_metadata_or_journal(&metadata, &journal, pos).await?;
             pinned_nodes.push(digest);
         }
         let mut mem_mmr = MemMmr::init(
@@ -340,7 +347,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
             journal_size,
             metadata,
             pruned_to_pos: prune_pos,
-            pool: cfg.thread_pool,
+            strategy: cfg.strategy.clone(),
         };
 
         if let Some(leaf) = orphaned_leaf {
@@ -374,7 +381,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
     ///    - Prunes the journal to `range.start`
     pub async fn init_sync(
         context: E,
-        cfg: SyncConfig<D>,
+        cfg: SyncConfig<D, S>,
         hasher: &mut impl Hasher<Digest = D>,
     ) -> Result<Self, crate::qmdb::Error> {
         let journal: Journal<E, D> = Journal::init_sync(
@@ -417,8 +424,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
         let nodes_to_pin_mem = nodes_to_pin(journal_size);
         let mut mem_pinned_nodes = Vec::new();
         for pos in nodes_to_pin_mem {
-            let digest =
-                Mmr::<E, D>::get_from_metadata_or_journal(&metadata, &journal, pos).await?;
+            let digest = Self::get_from_metadata_or_journal(&metadata, &journal, pos).await?;
             mem_pinned_nodes.push(digest);
         }
         let mut mem_mmr = MemMmr::init(
@@ -443,7 +449,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
             journal_size,
             metadata,
             pruned_to_pos: cfg.range.start,
-            pool: cfg.config.thread_pool,
+            strategy: cfg.config.strategy.clone(),
         })
     }
 
@@ -671,7 +677,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
     }
 
     /// Convert this MMR into its dirty counterpart for batched updates.
-    pub fn into_dirty(self) -> DirtyMmr<E, D> {
+    pub fn into_dirty(self) -> DirtyMmr<E, D, S> {
         self.into()
     }
 
@@ -720,16 +726,17 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
     }
 }
 
-impl<E: RStorage + Clock + Metrics, D: Digest> DirtyMmr<E, D> {
+impl<E: RStorage + Clock + Metrics, D: Digest, S: Strategy> DirtyMmr<E, D, S> {
     /// Merkleize the MMR and compute the root digest.
-    pub fn merkleize(self, h: &mut impl Hasher<Digest = D>) -> CleanMmr<E, D> {
+    pub fn merkleize(self, h: &mut impl Hasher<Digest = D>) -> CleanMmr<E, D, S> {
+        let mem_mmr = self.mem_mmr.merkleize(h, &self.strategy);
         CleanMmr {
-            mem_mmr: self.mem_mmr.merkleize(h, self.pool.clone()),
+            mem_mmr,
             journal: self.journal,
             journal_size: self.journal_size,
             metadata: self.metadata,
             pruned_to_pos: self.pruned_to_pos,
-            pool: self.pool,
+            strategy: self.strategy,
         }
     }
 
@@ -767,12 +774,8 @@ impl<E: RStorage + Clock + Metrics, D: Digest> DirtyMmr<E, D> {
 
         let mut pinned_nodes = Vec::new();
         for pos in nodes_to_pin(new_size) {
-            let digest = Mmr::<E, D, Clean<D>>::get_from_metadata_or_journal(
-                &self.metadata,
-                &self.journal,
-                pos,
-            )
-            .await?;
+            let digest =
+                Self::get_from_metadata_or_journal(&self.metadata, &self.journal, pos).await?;
             pinned_nodes.push(digest);
         }
 
@@ -819,7 +822,9 @@ impl<E: RStorage + Clock + Metrics, D: Digest> DirtyMmr<E, D> {
     }
 }
 
-impl<E: RStorage + Clock + Metrics + Sync, D: Digest> Storage<D> for CleanMmr<E, D> {
+impl<E: RStorage + Clock + Metrics + Sync, D: Digest, S: Strategy> Storage<D>
+    for CleanMmr<E, D, S>
+{
     fn size(&self) -> Position {
         self.size()
     }
@@ -841,6 +846,7 @@ mod tests {
         Hasher, Sha256,
     };
     use commonware_macros::test_traced;
+    use commonware_parallel::Sequential;
     use commonware_runtime::{buffer::PoolRef, deterministic, Blob as _, Runner};
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use std::num::NonZeroU16;
@@ -852,13 +858,13 @@ mod tests {
     const PAGE_SIZE: NonZeroU16 = NZU16!(111);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(5);
 
-    fn test_config() -> Config {
+    fn test_config() -> Config<Sequential> {
         Config {
             journal_partition: "journal_partition".into(),
             metadata_partition: "metadata_partition".into(),
             items_per_blob: NZU64!(7),
             write_buffer: NZUsize!(1024),
-            thread_pool: None,
+            strategy: Sequential,
             buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
@@ -1194,7 +1200,7 @@ mod tests {
                 metadata_partition: "unpruned_metadata_partition".into(),
                 items_per_blob: NZU64!(7),
                 write_buffer: NZUsize!(1024),
-                thread_pool: None,
+                strategy: Sequential,
                 buffer_pool: cfg_pruned.buffer_pool.clone(),
             };
             let mut mmr = Mmr::init(context.with_label("unpruned"), &mut hasher, cfg_unpruned)
@@ -1457,7 +1463,7 @@ mod tests {
                     metadata_partition: "ref_metadata_pruned".into(),
                     items_per_blob: NZU64!(7),
                     write_buffer: NZUsize!(1024),
-                    thread_pool: None,
+                    strategy: Sequential,
                     buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 },
             )
@@ -1508,7 +1514,7 @@ mod tests {
                     metadata_partition: "server_metadata".into(),
                     items_per_blob: NZU64!(7),
                     write_buffer: NZUsize!(1024),
-                    thread_pool: None,
+                    strategy: Sequential,
                     buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 },
             )
@@ -1533,7 +1539,7 @@ mod tests {
                     metadata_partition: "client_metadata".into(),
                     items_per_blob: NZU64!(7),
                     write_buffer: NZUsize!(1024),
-                    thread_pool: None,
+                    strategy: Sequential,
                     buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 },
             )
@@ -1606,7 +1612,7 @@ mod tests {
             let mut hasher = Standard::<Sha256>::new();
 
             // Test fresh start scenario with completely new MMR (no existing data)
-            let sync_cfg = SyncConfig::<sha256::Digest> {
+            let sync_cfg = SyncConfig::<sha256::Digest, Sequential> {
                 config: test_config(),
                 range: Position::new(0)..Position::new(100),
                 pinned_nodes: None,
@@ -1662,7 +1668,7 @@ mod tests {
                     mmr.get_node(Position::new(i)).await.unwrap().unwrap(),
                 );
             }
-            let sync_cfg = SyncConfig::<sha256::Digest> {
+            let sync_cfg = SyncConfig::<sha256::Digest, Sequential> {
                 config: test_config(),
                 range: lower_bound_pos..upper_bound_pos,
                 pinned_nodes: None,
@@ -1724,7 +1730,7 @@ mod tests {
                 expected_nodes.insert(pos, mmr.get_node(pos).await.unwrap().unwrap());
             }
 
-            let sync_cfg = SyncConfig::<sha256::Digest> {
+            let sync_cfg = SyncConfig::<sha256::Digest, Sequential> {
                 config: test_config(),
                 range: lower_bound_pos..upper_bound_pos,
                 pinned_nodes: None,

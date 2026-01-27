@@ -38,7 +38,7 @@ pub fn create_config() -> Config<Translator> {
         log_items_per_blob: NZU64!(4096),
         log_write_buffer: NZUsize!(1024),
         translator: Translator::default(),
-        thread_pool: None,
+        strategy: commonware_parallel::Sequential,
         buffer_pool: buffer::PoolRef::new(NZU16!(1024), NZUsize!(10)),
     }
 }

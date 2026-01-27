@@ -174,6 +174,7 @@ mod tests {
     use crate::mmr::{location::LocationRangeExt as _, mem::DirtyMmr, StandardHasher as Standard};
     use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
     use commonware_macros::test_traced;
+    use commonware_parallel::Sequential;
     use commonware_runtime::{deterministic, Runner};
 
     fn test_digest(v: u8) -> Digest {
@@ -193,7 +194,7 @@ mod tests {
                 elements.push(test_digest(i));
                 element_positions.push(mmr.add(&mut hasher, elements.last().unwrap()));
             }
-            let mmr = mmr.merkleize(&mut hasher, None);
+            let mmr = mmr.merkleize(&mut hasher, &Sequential);
             let root = mmr.root();
 
             // Extract a ProofStore from a proof over a variety of ranges, starting with the full

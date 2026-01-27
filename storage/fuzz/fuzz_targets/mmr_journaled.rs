@@ -82,13 +82,13 @@ impl<'a> Arbitrary<'a> for FuzzInput {
     }
 }
 
-fn test_config(partition_suffix: &str) -> Config {
+fn test_config(partition_suffix: &str) -> Config<commonware_parallel::Sequential> {
     Config {
         journal_partition: format!("journal_{partition_suffix}"),
         metadata_partition: format!("metadata_{partition_suffix}"),
         items_per_blob: NZU64!(ITEMS_PER_BLOB),
         write_buffer: NZUsize!(1024),
-        thread_pool: None,
+        strategy: commonware_parallel::Sequential,
         buffer_pool: PoolRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
     }
 }
@@ -97,8 +97,8 @@ enum MmrState<
     E: commonware_runtime::Storage + commonware_runtime::Clock + commonware_runtime::Metrics,
     D: commonware_cryptography::Digest,
 > {
-    Clean(CleanMmr<E, D>),
-    Dirty(DirtyMmr<E, D>),
+    Clean(CleanMmr<E, D, commonware_parallel::Sequential>),
+    Dirty(DirtyMmr<E, D, commonware_parallel::Sequential>),
 }
 
 fn fuzz(input: FuzzInput) {

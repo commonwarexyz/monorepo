@@ -20,7 +20,7 @@ use crate::{
 };
 use commonware_codec::Read;
 use commonware_cryptography::{DigestOf, Hasher as CHasher};
-use commonware_parallel::ThreadPool;
+use commonware_parallel::{Sequential, Strategy};
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage as RStorage};
 use commonware_utils::Array;
 use std::{
@@ -32,14 +32,14 @@ use tracing::warn;
 mod operation;
 pub use operation::Operation;
 
-type Journal<E, K, V, H, S> =
-    authenticated::Journal<E, variable::Journal<E, Operation<K, V>>, H, S>;
+type Journal<E, K, V, H, S, Y = Sequential> =
+    authenticated::Journal<E, variable::Journal<E, Operation<K, V>>, H, S, Y>;
 
 pub mod sync;
 
 /// Configuration for an [Immutable] authenticated db.
 #[derive(Clone)]
-pub struct Config<T: Translator, C> {
+pub struct Config<T: Translator, C, S: Strategy = Sequential> {
     /// The name of the [RStorage] partition used for the MMR's backing journal.
     pub mmr_journal_partition: String,
 
@@ -70,8 +70,8 @@ pub struct Config<T: Translator, C> {
     /// The translator used by the compressed index.
     pub translator: T,
 
-    /// An optional thread pool to use for parallelizing batch operations.
-    pub thread_pool: Option<ThreadPool>,
+    /// The strategy to use for parallelizing batch operations.
+    pub strategy: S,
 
     /// The buffer pool to use for caching data.
     pub buffer_pool: PoolRef,
@@ -260,7 +260,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: T
             metadata_partition: cfg.mmr_metadata_partition,
             items_per_blob: cfg.mmr_items_per_blob,
             write_buffer: cfg.mmr_write_buffer,
-            thread_pool: cfg.thread_pool,
+            strategy: cfg.strategy,
             buffer_pool: cfg.buffer_pool.clone(),
         };
 
@@ -325,7 +325,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: T
                     metadata_partition: cfg.db_config.mmr_metadata_partition,
                     items_per_blob: cfg.db_config.mmr_items_per_blob,
                     write_buffer: cfg.db_config.mmr_write_buffer,
-                    thread_pool: cfg.db_config.thread_pool.clone(),
+                    strategy: cfg.db_config.strategy.clone(),
                     buffer_pool: cfg.db_config.buffer_pool.clone(),
                 },
                 range: Position::try_from(cfg.range.start)?
@@ -620,7 +620,7 @@ pub(super) mod test {
             log_codec_config: ((0..=10000).into(), ()),
             log_write_buffer: NZUsize!(1024),
             translator: TwoCap,
-            thread_pool: None,
+            strategy: Sequential,
             buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }

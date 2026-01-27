@@ -23,6 +23,10 @@ use crate::{
 };
 use commonware_codec::{Codec, CodecShared};
 use commonware_cryptography::{DigestOf, Hasher};
+#[cfg(test)]
+use commonware_parallel::Sequential;
+#[cfg(any(test, feature = "test-traits"))]
+use commonware_parallel::Strategy;
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
 #[cfg(any(test, feature = "test-traits"))]
@@ -61,15 +65,16 @@ impl<
         C: Contiguous<Item = Operation<K, V>>,
         I: Index<Value = Location>,
         H: Hasher,
+        S: commonware_parallel::Strategy,
         M: MerkleizationState<DigestOf<H>> + Send + Sync,
         D: DurabilityState,
-    > Db<E, C, I, H, Update<K, V>, M, D>
+    > Db<E, C, I, H, Update<K, V>, S, M, D>
 where
     Operation<K, V>: Codec,
     V::Value: Send + Sync,
 {
     async fn get_update_op(
-        log: &AuthenticatedLog<E, C, H, M>,
+        log: &AuthenticatedLog<E, C, H, M, S>,
         loc: Location,
     ) -> Result<Update<K, V>, Error> {
         match log.read(loc).await? {
@@ -273,7 +278,8 @@ impl<
         C: MutableContiguous<Item = Operation<K, V>>,
         I: Index<Value = Location>,
         H: Hasher,
-    > Db<E, C, I, H, Update<K, V>, Unmerkleized, NonDurable>
+        S: commonware_parallel::Strategy,
+    > Db<E, C, I, H, Update<K, V>, S, Unmerkleized, NonDurable>
 where
     Operation<K, V>: Codec,
     V::Value: Send + Sync,
@@ -817,9 +823,10 @@ impl<
         C: Contiguous<Item = Operation<K, V>>,
         I: Index<Value = Location> + Send + Sync + 'static,
         H: Hasher,
+        S: commonware_parallel::Strategy,
         M: MerkleizationState<DigestOf<H>> + Send + Sync,
         D: DurabilityState,
-    > kv::Gettable for Db<E, C, I, H, Update<K, V>, M, D>
+    > kv::Gettable for Db<E, C, I, H, Update<K, V>, S, M, D>
 where
     Operation<K, V>: CodecShared,
 {
@@ -842,7 +849,8 @@ impl<
         C: MutableContiguous<Item = Operation<K, V>>,
         I: Index<Value = Location> + 'static,
         H: Hasher,
-    > kv::Updatable for Db<E, C, I, H, Update<K, V>, Unmerkleized, NonDurable>
+        S: commonware_parallel::Strategy,
+    > kv::Updatable for Db<E, C, I, H, Update<K, V>, S, Unmerkleized, NonDurable>
 where
     Operation<K, V>: CodecShared,
 {
@@ -858,7 +866,8 @@ impl<
         C: MutableContiguous<Item = Operation<K, V>>,
         I: Index<Value = Location> + 'static,
         H: Hasher,
-    > kv::Deletable for Db<E, C, I, H, Update<K, V>, Unmerkleized, NonDurable>
+        S: commonware_parallel::Strategy,
+    > kv::Deletable for Db<E, C, I, H, Update<K, V>, S, Unmerkleized, NonDurable>
 where
     Operation<K, V>: Codec,
     V::Value: Send + Sync,
@@ -906,7 +915,7 @@ fn find_prev_key<'a, K: Ord, V>(key: &K, possible_previous: &'a BTreeMap<K, V>) 
         .expect("possible_previous should not be empty")
 }
 
-impl<E, K, V, C, I, H> Batchable for Db<E, C, I, H, Update<K, V>, Unmerkleized, NonDurable>
+impl<E, K, V, C, I, H, S> Batchable for Db<E, C, I, H, Update<K, V>, S, Unmerkleized, NonDurable>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -914,6 +923,7 @@ where
     C: MutableContiguous<Item = Operation<K, V>>,
     I: Index<Value = Location> + 'static,
     H: Hasher,
+    S: commonware_parallel::Strategy,
     Operation<K, V>: Codec,
     V::Value: Send + Sync,
 {
@@ -926,7 +936,7 @@ where
 }
 
 #[cfg(any(test, feature = "test-traits"))]
-impl<E, K, V, C, I, H> CleanAny for Db<E, C, I, H, Update<K, V>, Merkleized<H>, Durable>
+impl<E, K, V, C, I, H, S> CleanAny for Db<E, C, I, H, Update<K, V>, S, Merkleized<H>, Durable>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -934,10 +944,11 @@ where
     C: MutableContiguous<Item = Operation<K, V>> + Persistable<Error = crate::journal::Error>,
     I: Index<Value = Location> + 'static,
     H: Hasher,
+    S: Strategy,
     Operation<K, V>: Codec,
     V::Value: Send + Sync,
 {
-    type Mutable = Db<E, C, I, H, Update<K, V>, Unmerkleized, NonDurable>;
+    type Mutable = Db<E, C, I, H, Update<K, V>, S, Unmerkleized, NonDurable>;
 
     fn into_mutable(self) -> Self::Mutable {
         self.into_mutable()
@@ -945,8 +956,8 @@ where
 }
 
 #[cfg(any(test, feature = "test-traits"))]
-impl<E, K, V, C, I, H> UnmerkleizedDurableAny
-    for Db<E, C, I, H, Update<K, V>, Unmerkleized, Durable>
+impl<E, K, V, C, I, H, S> UnmerkleizedDurableAny
+    for Db<E, C, I, H, Update<K, V>, S, Unmerkleized, Durable>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -954,13 +965,14 @@ where
     C: MutableContiguous<Item = Operation<K, V>> + Persistable<Error = crate::journal::Error>,
     I: Index<Value = Location> + 'static,
     H: Hasher,
+    S: Strategy,
     Operation<K, V>: Codec,
     V::Value: Send + Sync,
 {
     type Digest = H::Digest;
     type Operation = Operation<K, V>;
-    type Mutable = Db<E, C, I, H, Update<K, V>, Unmerkleized, NonDurable>;
-    type Merkleized = Db<E, C, I, H, Update<K, V>, Merkleized<H>, Durable>;
+    type Mutable = Db<E, C, I, H, Update<K, V>, S, Unmerkleized, NonDurable>;
+    type Merkleized = Db<E, C, I, H, Update<K, V>, S, Merkleized<H>, Durable>;
 
     fn into_mutable(self) -> Self::Mutable {
         self.into_mutable()
@@ -972,8 +984,8 @@ where
 }
 
 #[cfg(any(test, feature = "test-traits"))]
-impl<E, K, V, C, I, H> MerkleizedNonDurableAny
-    for Db<E, C, I, H, Update<K, V>, Merkleized<H>, NonDurable>
+impl<E, K, V, C, I, H, S> MerkleizedNonDurableAny
+    for Db<E, C, I, H, Update<K, V>, S, Merkleized<H>, NonDurable>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -981,10 +993,11 @@ where
     C: MutableContiguous<Item = Operation<K, V>> + Persistable<Error = crate::journal::Error>,
     I: Index<Value = Location> + 'static,
     H: Hasher,
+    S: Strategy,
     Operation<K, V>: Codec,
     V::Value: Send + Sync,
 {
-    type Mutable = Db<E, C, I, H, Update<K, V>, Unmerkleized, NonDurable>;
+    type Mutable = Db<E, C, I, H, Update<K, V>, S, Unmerkleized, NonDurable>;
 
     fn into_mutable(self) -> Self::Mutable {
         self.into_mutable()
@@ -992,7 +1005,7 @@ where
 }
 
 #[cfg(any(test, feature = "test-traits"))]
-impl<E, K, V, C, I, H> MutableAny for Db<E, C, I, H, Update<K, V>, Unmerkleized, NonDurable>
+impl<E, K, V, C, I, H, S> MutableAny for Db<E, C, I, H, Update<K, V>, S, Unmerkleized, NonDurable>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -1000,13 +1013,14 @@ where
     C: MutableContiguous<Item = Operation<K, V>> + Persistable<Error = crate::journal::Error>,
     I: Index<Value = Location> + 'static,
     H: Hasher,
+    S: Strategy,
     Operation<K, V>: Codec,
     V::Value: Send + Sync,
 {
     type Digest = H::Digest;
     type Operation = Operation<K, V>;
-    type Durable = Db<E, C, I, H, Update<K, V>, Unmerkleized, Durable>;
-    type Merkleized = Db<E, C, I, H, Update<K, V>, Merkleized<H>, NonDurable>;
+    type Durable = Db<E, C, I, H, Update<K, V>, S, Unmerkleized, Durable>;
+    type Merkleized = Db<E, C, I, H, Update<K, V>, S, Merkleized<H>, NonDurable>;
 
     async fn commit(
         self,
@@ -1169,8 +1183,16 @@ mod test {
     }
 
     #[allow(dead_code)]
-    type MutableFixedDb =
-        fixed::Db<Context, FixedBytes<4>, Digest, Sha256, TwoCap, Unmerkleized, NonDurable>;
+    type MutableFixedDb = fixed::Db<
+        Context,
+        FixedBytes<4>,
+        Digest,
+        Sha256,
+        TwoCap,
+        Sequential,
+        Unmerkleized,
+        NonDurable,
+    >;
 
     #[allow(dead_code)]
     fn assert_merkleized_db_futures_are_send(db: &mut FixedDb, key: FixedBytes<4>, loc: Location) {

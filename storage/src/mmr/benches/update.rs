@@ -1,5 +1,6 @@
 use commonware_cryptography::{sha256, Sha256};
 use commonware_math::algebra::Random as _;
+use commonware_parallel::{Rayon, Sequential};
 use commonware_runtime::{
     benchmarks::{context, tokio},
     tokio::Config,
@@ -12,7 +13,7 @@ use rand::{rngs::StdRng, Rng, SeedableRng};
 use std::{collections::HashMap, num::NonZeroUsize, time::Instant};
 
 #[derive(PartialEq, Debug, Clone, Copy)]
-enum Strategy {
+enum BenchStrategy {
     NoBatching,
     BatchedSerial,
     BatchedParallel,
@@ -35,9 +36,9 @@ fn bench_update(c: &mut Criterion) {
     for updates in [1_000_000, 100_000] {
         for leaves in N_LEAVES {
             for strategy in [
-                Strategy::NoBatching,
-                Strategy::BatchedSerial,
-                Strategy::BatchedParallel,
+                BenchStrategy::NoBatching,
+                BenchStrategy::BatchedSerial,
+                BenchStrategy::BatchedParallel,
             ] {
                 c.bench_function(
                     &format!(
@@ -52,7 +53,7 @@ fn bench_update(c: &mut Criterion) {
                             let mut hasher = StandardHasher::<Sha256>::new();
                             let mut mmr = CleanMmr::new(&mut hasher);
                             let pool = match strategy {
-                                Strategy::BatchedParallel => {
+                                BenchStrategy::BatchedParallel => {
                                     let ctx = context::get::<commonware_runtime::tokio::Context>();
                                     let pool = ctx.create_pool(THREADS).unwrap();
                                     Some(pool)
@@ -87,21 +88,30 @@ fn bench_update(c: &mut Criterion) {
                             }
 
                             match strategy {
-                                Strategy::NoBatching => {
+                                BenchStrategy::NoBatching => {
                                     for (loc, element) in leaf_map {
                                         mmr.update_leaf(&mut h, loc, &element).unwrap();
                                     }
                                 }
-                                _ => {
-                                    // Collect the map into a Vec of (position, element) pairs for batched updates
+                                BenchStrategy::BatchedSerial => {
                                     let updates: Vec<(
                                         Location,
                                         commonware_cryptography::sha256::Digest,
                                     )> = leaf_map.into_iter().collect();
                                     let mut mmr = mmr.into_dirty();
-                                    mmr.update_leaf_batched(&mut h, pool.clone(), &updates)
+                                    mmr.update_leaf_batched(&mut h, &Sequential, &updates)
                                         .unwrap();
-                                    mmr.merkleize(&mut h, pool);
+                                    mmr.merkleize(&mut h, &Sequential);
+                                }
+                                BenchStrategy::BatchedParallel => {
+                                    let updates: Vec<(
+                                        Location,
+                                        commonware_cryptography::sha256::Digest,
+                                    )> = leaf_map.into_iter().collect();
+                                    let mut mmr = mmr.into_dirty();
+                                    let strat = Rayon::with_pool(pool.unwrap());
+                                    mmr.update_leaf_batched(&mut h, &strat, &updates).unwrap();
+                                    mmr.merkleize(&mut h, &strat);
                                 }
                             }
 

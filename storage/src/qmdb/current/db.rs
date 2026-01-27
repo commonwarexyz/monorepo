@@ -47,23 +47,24 @@ pub struct Db<
     H: Hasher,
     U: Send + Sync,
     const N: usize,
+    S: commonware_parallel::Strategy = commonware_parallel::Sequential,
     M: MerkleizationState<DigestOf<H>> = Merkleized<H>,
     D: DurabilityState = Durable,
 > {
     /// An authenticated database that provides the ability to prove whether a key ever had a
     /// specific value.
-    pub(super) any: any::db::Db<E, C, I, H, U, M, D>,
+    pub(super) any: any::db::Db<E, C, I, H, U, S, M, D>,
 
     /// The bitmap over the activity status of each operation. Supports augmenting [Db] proofs in
     /// order to further prove whether a key _currently_ has a specific value.
-    pub(super) status: BitMap<E, H::Digest, N, M>,
+    pub(super) status: BitMap<E, H::Digest, N, S, M>,
 
     /// Cached root digest. Invariant: valid when in Clean state.
     pub(super) cached_root: Option<H::Digest>,
 }
 
 // Functionality shared across all DB states, such as most non-mutating operations.
-impl<E, K, V, C, I, H, U, const N: usize, M, D> Db<E, C, I, H, U, N, M, D>
+impl<E, K, V, C, I, H, U, const N: usize, S, M, D> Db<E, C, I, H, U, N, S, M, D>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -72,6 +73,7 @@ where
     C: Contiguous<Item = Operation<K, V, U>>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
+    S: commonware_parallel::Strategy,
     M: MerkleizationState<DigestOf<H>>,
     D: DurabilityState,
     Operation<K, V, U>: Codec,
@@ -138,7 +140,7 @@ where
 
 // Functionality shared across Merkleized states, such as the ability to prune the log and retrieve
 // the state root
-impl<E, K, V, U, C, I, H, D, const N: usize> Db<E, C, I, H, U, N, Merkleized<H>, D>
+impl<E, K, V, U, C, I, H, S, D, const N: usize> Db<E, C, I, H, U, N, S, Merkleized<H>, D>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -147,6 +149,7 @@ where
     C: MutableContiguous<Item = Operation<K, V, U>> + Persistable<Error = JournalError>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
+    S: commonware_parallel::Strategy,
     D: DurabilityState,
     Operation<K, V, U>: Codec,
 {
@@ -199,7 +202,7 @@ where
 }
 
 // Functionality specific to Clean state, such as ability to persist the database.
-impl<E, K, V, U, C, I, H, const N: usize> Db<E, C, I, H, U, N, Merkleized<H>, Durable>
+impl<E, K, V, U, C, I, H, S, const N: usize> Db<E, C, I, H, U, N, S, Merkleized<H>, Durable>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -208,6 +211,7 @@ where
     C: MutableContiguous<Item = Operation<K, V, U>> + Persistable<Error = JournalError>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
+    S: commonware_parallel::Strategy,
     Operation<K, V, U>: Codec,
 {
     /// Sync all database state to disk.
@@ -229,7 +233,7 @@ where
     }
 
     /// Convert this database into a mutable state.
-    pub fn into_mutable(self) -> Db<E, C, I, H, U, N, Unmerkleized, NonDurable> {
+    pub fn into_mutable(self) -> Db<E, C, I, H, U, N, S, Unmerkleized, NonDurable> {
         Db {
             any: self.any.into_mutable(),
             status: self.status.into_dirty(),
@@ -239,7 +243,7 @@ where
 }
 
 // Functionality specific to (Unmerkleized,Durable) state.
-impl<E, K, V, U, C, I, H, const N: usize> Db<E, C, I, H, U, N, Unmerkleized, Durable>
+impl<E, K, V, U, C, I, H, S, const N: usize> Db<E, C, I, H, U, N, S, Unmerkleized, Durable>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -248,10 +252,11 @@ where
     C: Contiguous<Item = Operation<K, V, U>>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
+    S: commonware_parallel::Strategy,
     Operation<K, V, U>: Codec,
 {
     /// Convert this database into a mutable state.
-    pub fn into_mutable(self) -> Db<E, C, I, H, U, N, Unmerkleized, NonDurable> {
+    pub fn into_mutable(self) -> Db<E, C, I, H, U, N, S, Unmerkleized, NonDurable> {
         Db {
             any: self.any.into_mutable(),
             status: self.status,
@@ -262,7 +267,7 @@ where
     /// Merkleize the database and transition to the provable state.
     pub async fn into_merkleized(
         self,
-    ) -> Result<Db<E, C, I, H, U, N, Merkleized<H>, Durable>, Error> {
+    ) -> Result<Db<E, C, I, H, U, N, S, Merkleized<H>, Durable>, Error> {
         // Merkleize the any db's log
         let mut any = any::db::Db {
             log: self.any.log.merkleize(),
@@ -293,7 +298,7 @@ where
 }
 
 // Functionality specific to (Unmerkleized,NonDurable) state.
-impl<E, K, V, U, C, I, H, const N: usize> Db<E, C, I, H, U, N, Unmerkleized, NonDurable>
+impl<E, K, V, U, C, I, H, S, const N: usize> Db<E, C, I, H, U, N, S, Unmerkleized, NonDurable>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -302,13 +307,14 @@ where
     C: MutableContiguous<Item = Operation<K, V, U>> + Persistable<Error = JournalError>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
+    S: commonware_parallel::Strategy,
     Operation<K, V, U>: Codec,
 {
     /// Merkleize the database and transition to the provable state without committing.
     /// This enables proof generation while keeping the database in the non-durable state.
     pub async fn into_merkleized(
         self,
-    ) -> Result<Db<E, C, I, H, U, N, Merkleized<H>, NonDurable>, Error> {
+    ) -> Result<Db<E, C, I, H, U, N, S, Merkleized<H>, NonDurable>, Error> {
         // Merkleize the any db's log
         let mut any = any::db::Db {
             log: self.any.log.merkleize(),
@@ -368,7 +374,13 @@ where
     pub async fn commit(
         mut self,
         metadata: Option<V::Value>,
-    ) -> Result<(Db<E, C, I, H, U, N, Unmerkleized, Durable>, Range<Location>), Error> {
+    ) -> Result<
+        (
+            Db<E, C, I, H, U, N, S, Unmerkleized, Durable>,
+            Range<Location>,
+        ),
+        Error,
+    > {
         let range = self.apply_commit_op(metadata).await?;
 
         // Transition to Durable state without merkleizing
@@ -394,7 +406,7 @@ where
 }
 
 // Functionality specific to (Merkleized,NonDurable) state.
-impl<E, K, V, U, C, I, H, const N: usize> Db<E, C, I, H, U, N, Merkleized<H>, NonDurable>
+impl<E, K, V, U, C, I, H, S, const N: usize> Db<E, C, I, H, U, N, S, Merkleized<H>, NonDurable>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -403,10 +415,11 @@ where
     C: MutableContiguous<Item = Operation<K, V, U>> + Persistable<Error = JournalError>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
+    S: commonware_parallel::Strategy,
     Operation<K, V, U>: Codec,
 {
     /// Convert this database into a mutable state.
-    pub fn into_mutable(self) -> Db<E, C, I, H, U, N, Unmerkleized, NonDurable> {
+    pub fn into_mutable(self) -> Db<E, C, I, H, U, N, S, Unmerkleized, NonDurable> {
         Db {
             any: self.any.into_mutable(),
             status: self.status.into_dirty(),
@@ -415,8 +428,8 @@ where
     }
 }
 
-impl<E, K, V, U, C, I, H, const N: usize> Persistable
-    for Db<E, C, I, H, U, N, Merkleized<H>, Durable>
+impl<E, K, V, U, C, I, H, S, const N: usize> Persistable
+    for Db<E, C, I, H, U, N, S, Merkleized<H>, Durable>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -425,6 +438,7 @@ where
     C: MutableContiguous<Item = Operation<K, V, U>> + Persistable<Error = JournalError>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
+    S: commonware_parallel::Strategy,
     Operation<K, V, U>: Codec,
 {
     type Error = Error;
@@ -447,8 +461,8 @@ where
 // TODO(https://github.com/commonwarexyz/monorepo/issues/2560): This is broken -- it's computing
 // proofs only over the any db mmr not the grafted mmr, so they won't validate against the grafted
 // root.
-impl<E, K, V, U, C, I, H, D, const N: usize> MerkleizedStore
-    for Db<E, C, I, H, U, N, Merkleized<H>, D>
+impl<E, K, V, U, C, I, H, S, D, const N: usize> MerkleizedStore
+    for Db<E, C, I, H, U, N, S, Merkleized<H>, D>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -457,6 +471,7 @@ where
     C: MutableContiguous<Item = Operation<K, V, U>> + Persistable<Error = JournalError>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
+    S: commonware_parallel::Strategy,
     D: DurabilityState,
     Operation<K, V, U>: Codec,
 {
@@ -479,7 +494,7 @@ where
     }
 }
 
-impl<E, K, V, U, C, I, H, const N: usize, M, D> LogStore for Db<E, C, I, H, U, N, M, D>
+impl<E, K, V, U, C, I, H, S, const N: usize, M, D> LogStore for Db<E, C, I, H, U, N, S, M, D>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -488,6 +503,7 @@ where
     C: Contiguous<Item = Operation<K, V, U>>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
+    S: commonware_parallel::Strategy,
     M: MerkleizationState<DigestOf<H>>,
     D: DurabilityState,
     Operation<K, V, U>: Codec,
@@ -511,8 +527,8 @@ where
     }
 }
 
-impl<E, K, V, U, C, I, H, const N: usize, D> PrunableStore
-    for Db<E, C, I, H, U, N, Merkleized<H>, D>
+impl<E, K, V, U, C, I, H, S, const N: usize, D> PrunableStore
+    for Db<E, C, I, H, U, N, S, Merkleized<H>, D>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -521,6 +537,7 @@ where
     C: MutableContiguous<Item = Operation<K, V, U>> + Persistable<Error = JournalError>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
+    S: commonware_parallel::Strategy,
     D: DurabilityState,
     Operation<K, V, U>: Codec,
 {
@@ -530,10 +547,15 @@ where
 }
 
 /// Return the root of the current QMDB represented by the provided mmr and bitmap.
-pub(super) async fn root<E: Storage + Clock + Metrics, H: Hasher, const N: usize>(
+pub(super) async fn root<
+    E: Storage + Clock + Metrics,
+    H: Hasher,
+    S: commonware_parallel::Strategy,
+    const N: usize,
+>(
     hasher: &mut StandardHasher<H>,
-    status: &CleanBitMap<E, H::Digest, N>,
-    mmr: &Mmr<E, H::Digest, Clean<DigestOf<H>>>,
+    status: &CleanBitMap<E, H::Digest, N, S>,
+    mmr: &Mmr<E, H::Digest, Clean<DigestOf<H>>, S>,
 ) -> Result<H::Digest, Error> {
     let grafted_mmr = GraftingStorage::<'_, H, _, _>::new(status, mmr, grafting_height::<N>());
     let mmr_root = grafted_mmr.root(hasher).await?;
@@ -566,11 +588,16 @@ pub(super) async fn root<E: Storage + Clock + Metrics, H: Hasher, const N: usize
 /// * `hasher` - The hasher used for merkleization.
 /// * `status` - The `DirtyBitMap` to be merkleized. Ownership is taken.
 /// * `mmr` - The MMR storage used for grafting.
-pub(super) async fn merkleize_grafted_bitmap<E, H, const N: usize>(
+pub(super) async fn merkleize_grafted_bitmap<
+    E,
+    H,
+    Y: commonware_parallel::Strategy,
+    const N: usize,
+>(
     hasher: &mut StandardHasher<H>,
-    status: DirtyBitMap<E, H::Digest, N>,
+    status: DirtyBitMap<E, H::Digest, N, Y>,
     mmr: &impl crate::mmr::storage::Storage<H::Digest>,
-) -> Result<CleanBitMap<E, H::Digest, N>, Error>
+) -> Result<CleanBitMap<E, H::Digest, N, Y>, Error>
 where
     E: Storage + Clock + Metrics,
     H: Hasher,

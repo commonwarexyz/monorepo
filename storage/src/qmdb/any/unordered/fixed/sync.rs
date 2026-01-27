@@ -10,11 +10,12 @@ use crate::{
     translator::Translator,
 };
 use commonware_cryptography::{DigestOf, Hasher};
+use commonware_parallel::Sequential;
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
 use std::ops::Range;
 
-impl<E, K, V, H, T> qmdb::sync::Database for Db<E, K, V, H, T, Merkleized<H>, Durable>
+impl<E, K, V, H, T> qmdb::sync::Database for Db<E, K, V, H, T, Sequential, Merkleized<H>, Durable>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -67,7 +68,7 @@ where
                     metadata_partition: db_config.mmr_metadata_partition,
                     items_per_blob: db_config.mmr_items_per_blob,
                     write_buffer: db_config.mmr_write_buffer,
-                    thread_pool: db_config.thread_pool.clone(),
+                    strategy: db_config.strategy.clone(),
                     buffer_pool: db_config.buffer_pool.clone(),
                 },
                 // The last node of an MMR with `range.end` leaves is at the position

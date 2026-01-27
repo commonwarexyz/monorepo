@@ -19,6 +19,7 @@ use crate::{
 };
 use commonware_codec::{CodecFixedShared, CodecShared, Encode, EncodeShared};
 use commonware_cryptography::{DigestOf, Hasher};
+use commonware_parallel::{Sequential, Strategy};
 use commonware_runtime::{Clock, Metrics, Storage};
 use core::num::{NonZeroU64, NonZeroUsize};
 use futures::{future::try_join_all, try_join, TryFutureExt as _};
@@ -38,7 +39,7 @@ pub enum Error {
 /// Mountain Range (MMR). The item at index i in the journal corresponds to the leaf at Location i
 /// in the MMR. This structure enables efficient proofs that an item is included in the journal at a
 /// specific location.
-pub struct Journal<E, C, H, S: State<H::Digest> + Send + Sync = Dirty>
+pub struct Journal<E, C, H, St: State<H::Digest> + Send + Sync, S: Strategy = Sequential>
 where
     E: Storage + Clock + Metrics,
     C: Contiguous<Item: EncodeShared>,
@@ -46,7 +47,7 @@ where
 {
     /// MMR where each leaf is an item digest.
     /// Invariant: leaf i corresponds to item i in the journal.
-    pub(crate) mmr: Mmr<E, H::Digest, S>,
+    pub(crate) mmr: Mmr<E, H::Digest, St, S>,
 
     /// Journal of items.
     /// Invariant: item i corresponds to leaf i in the MMR.
@@ -55,12 +56,13 @@ where
     pub(crate) hasher: StandardHasher<H>,
 }
 
-impl<E, C, H, S> Journal<E, C, H, S>
+impl<E, C, H, St, S> Journal<E, C, H, St, S>
 where
     E: Storage + Clock + Metrics,
     C: Contiguous<Item: EncodeShared>,
     H: Hasher,
-    S: State<DigestOf<H>> + Send + Sync,
+    St: State<DigestOf<H>> + Send + Sync,
+    S: Strategy,
 {
     /// Returns the number of items in the journal.
     pub fn size(&self) -> Location {
@@ -85,12 +87,13 @@ where
     }
 }
 
-impl<E, C, H, S> Journal<E, C, H, S>
+impl<E, C, H, St, S> Journal<E, C, H, St, S>
 where
     E: Storage + Clock + Metrics,
     C: MutableContiguous<Item: EncodeShared>,
     H: Hasher,
-    S: State<DigestOf<H>> + Send + Sync,
+    St: State<DigestOf<H>> + Send + Sync,
+    S: Strategy,
 {
     pub async fn append(&mut self, item: C::Item) -> Result<Location, Error> {
         let encoded_item = item.encode();
@@ -107,12 +110,13 @@ where
     }
 }
 
-impl<E, C, H, S> Journal<E, C, H, S>
+impl<E, C, H, St, S> Journal<E, C, H, St, S>
 where
     E: Storage + Clock + Metrics,
     C: Contiguous<Item: EncodeShared> + Persistable<Error = JournalError>,
     H: Hasher,
-    S: State<DigestOf<H>> + Send + Sync,
+    St: State<DigestOf<H>> + Send + Sync,
+    S: Strategy,
 {
     /// Durably persist the journal. This is faster than `sync()` but does not persist the MMR,
     /// meaning recovery will be required on startup if we crash before `sync()`.
@@ -121,7 +125,7 @@ where
     }
 }
 
-impl<E, C, H> Journal<E, C, H, Clean<H::Digest>>
+impl<E, C, H, S: Strategy> Journal<E, C, H, Clean<H::Digest>, S>
 where
     E: Storage + Clock + Metrics,
     C: MutableContiguous<Item: EncodeShared>,
@@ -129,7 +133,7 @@ where
 {
     /// Create a new [Journal] from the given components after aligning the MMR with the journal.
     pub async fn from_components(
-        mmr: CleanMmr<E, H::Digest>,
+        mmr: CleanMmr<E, H::Digest, S>,
         journal: C,
         mut hasher: StandardHasher<H>,
         apply_batch_size: u64,
@@ -151,11 +155,11 @@ where
     /// popped, and any items in `journal` that aren't in `mmr` are added to `mmr`. Items are added
     /// to `mmr` in batches of size `apply_batch_size` to avoid memory bloat.
     async fn align(
-        mut mmr: CleanMmr<E, H::Digest>,
+        mut mmr: CleanMmr<E, H::Digest, S>,
         journal: &C,
         hasher: &mut StandardHasher<H>,
         apply_batch_size: u64,
-    ) -> Result<CleanMmr<E, H::Digest>, Error> {
+    ) -> Result<CleanMmr<E, H::Digest, S>, Error> {
         // Pop any MMR elements that are ahead of the journal.
         // Note mmr_size is the size of the MMR in leaves, not positions.
         let journal_size = journal.size();
@@ -229,7 +233,7 @@ where
     }
 }
 
-impl<E, C, H> Journal<E, C, H, Clean<H::Digest>>
+impl<E, C, H, S: Strategy> Journal<E, C, H, Clean<H::Digest>, S>
 where
     E: Storage + Clock + Metrics,
     C: Contiguous<Item: EncodeShared>,
@@ -306,7 +310,7 @@ where
     }
 
     /// Convert this journal into its dirty counterpart for batched updates.
-    pub fn into_dirty(self) -> Journal<E, C, H, Dirty> {
+    pub fn into_dirty(self) -> Journal<E, C, H, Dirty, S> {
         Journal {
             mmr: self.mmr.into_dirty(),
             journal: self.journal,
@@ -315,7 +319,7 @@ where
     }
 }
 
-impl<E, C, H> Journal<E, C, H, Clean<H::Digest>>
+impl<E, C, H, S: Strategy> Journal<E, C, H, Clean<H::Digest>, S>
 where
     E: Storage + Clock + Metrics,
     C: Contiguous<Item: EncodeShared> + Persistable<Error = JournalError>,
@@ -341,14 +345,14 @@ where
     }
 }
 
-impl<E, C, H> Journal<E, C, H, Dirty>
+impl<E, C, H, S: Strategy> Journal<E, C, H, Dirty, S>
 where
     E: Storage + Clock + Metrics,
     C: Contiguous<Item: EncodeShared>,
     H: Hasher,
 {
     /// Merkleize the journal and compute the root digest.
-    pub fn merkleize(self) -> Journal<E, C, H, Clean<H::Digest>> {
+    pub fn merkleize(self) -> Journal<E, C, H, Clean<H::Digest>, S> {
         let Self {
             mmr,
             journal,
@@ -362,7 +366,7 @@ where
     }
 }
 
-impl<E, C, H> Journal<E, C, H, Dirty>
+impl<E, C, H, S: Strategy> Journal<E, C, H, Dirty, S>
 where
     E: Storage + Clock + Metrics,
     C: MutableContiguous<Item: EncodeShared>,
@@ -370,12 +374,12 @@ where
 {
     /// Create a new dirty journal from aligned components.
     pub async fn from_components(
-        mmr: CleanMmr<E, H::Digest>,
+        mmr: CleanMmr<E, H::Digest, S>,
         journal: C,
         hasher: StandardHasher<H>,
         apply_batch_size: u64,
     ) -> Result<Self, Error> {
-        let clean = Journal::<E, C, H, Clean<H::Digest>>::from_components(
+        let clean = Journal::<E, C, H, Clean<H::Digest>, S>::from_components(
             mmr,
             journal,
             hasher,
@@ -389,7 +393,7 @@ where
 /// The number of items to apply to the MMR in a single batch.
 const APPLY_BATCH_SIZE: u64 = 1 << 16;
 
-impl<E, O, H> Journal<E, fixed::Journal<E, O>, H, Clean<H::Digest>>
+impl<E, O, H, S: Strategy> Journal<E, fixed::Journal<E, O>, H, Clean<H::Digest>, S>
 where
     E: Storage + Clock + Metrics,
     O: CodecFixedShared,
@@ -401,7 +405,7 @@ where
     /// initialization.
     pub async fn new(
         context: E,
-        mmr_cfg: crate::mmr::journaled::Config,
+        mmr_cfg: crate::mmr::journaled::Config<S>,
         journal_cfg: fixed::Config,
         rewind_predicate: fn(&O) -> bool,
     ) -> Result<Self, Error> {
@@ -428,7 +432,7 @@ where
     }
 }
 
-impl<E, O, H> Journal<E, variable::Journal<E, O>, H, Clean<H::Digest>>
+impl<E, O, H, S: Strategy> Journal<E, variable::Journal<E, O>, H, Clean<H::Digest>, S>
 where
     E: Storage + Clock + Metrics,
     O: CodecShared,
@@ -440,7 +444,7 @@ where
     /// initialization.
     pub async fn new(
         context: E,
-        mmr_cfg: crate::mmr::journaled::Config,
+        mmr_cfg: crate::mmr::journaled::Config<S>,
         journal_cfg: variable::Config<O::Cfg>,
         rewind_predicate: fn(&O) -> bool,
     ) -> Result<Self, Error> {
@@ -468,12 +472,13 @@ where
     }
 }
 
-impl<E, C, H, S> Contiguous for Journal<E, C, H, S>
+impl<E, C, H, St, S> Contiguous for Journal<E, C, H, St, S>
 where
     E: Storage + Clock + Metrics,
     C: MutableContiguous<Item: EncodeShared>,
     H: Hasher,
-    S: State<DigestOf<H>> + Send + Sync,
+    St: State<DigestOf<H>> + Send + Sync,
+    S: Strategy,
 {
     type Item = C::Item;
 
@@ -505,7 +510,7 @@ where
     }
 }
 
-impl<E, C, H> MutableContiguous for Journal<E, C, H, Dirty>
+impl<E, C, H, S: Strategy> MutableContiguous for Journal<E, C, H, Dirty, S>
 where
     E: Storage + Clock + Metrics,
     C: MutableContiguous<Item: EncodeShared>,
@@ -539,7 +544,7 @@ where
     }
 }
 
-impl<E, C, H> MutableContiguous for Journal<E, C, H, Clean<H::Digest>>
+impl<E, C, H, S: Strategy> MutableContiguous for Journal<E, C, H, Clean<H::Digest>, S>
 where
     E: Storage + Clock + Metrics,
     C: MutableContiguous<Item: EncodeShared>,
@@ -582,7 +587,7 @@ where
     }
 }
 
-impl<E, C, H> Persistable for Journal<E, C, H, Clean<H::Digest>>
+impl<E, C, H, S: Strategy> Persistable for Journal<E, C, H, Clean<H::Digest>, S>
 where
     E: Storage + Clock + Metrics,
     C: Contiguous<Item: EncodeShared> + Persistable<Error = JournalError>,
@@ -618,7 +623,7 @@ mod tests {
     use crate::{
         journal::contiguous::fixed::{Config as JConfig, Journal as ContiguousJournal},
         mmr::{
-            journaled::{Config as MmrConfig, Mmr},
+            journaled::{CleanMmr, Config as MmrConfig, Mmr},
             Location,
         },
         qmdb::{
@@ -629,6 +634,7 @@ mod tests {
     use commonware_codec::Encode;
     use commonware_cryptography::{sha256, sha256::Digest, Sha256};
     use commonware_macros::test_traced;
+    use commonware_parallel::Sequential;
     use commonware_runtime::{
         buffer::PoolRef,
         deterministic::{self, Context},
@@ -642,13 +648,13 @@ mod tests {
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(11);
 
     /// Create MMR configuration for tests.
-    fn mmr_config(suffix: &str) -> MmrConfig {
+    fn mmr_config(suffix: &str) -> MmrConfig<Sequential> {
         MmrConfig {
             journal_partition: format!("mmr_journal_{suffix}"),
             metadata_partition: format!("mmr_metadata_{suffix}"),
             items_per_blob: NZU64!(11),
             write_buffer: NZUsize!(1024),
-            thread_pool: None,
+            strategy: Sequential,
             buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
@@ -668,6 +674,7 @@ mod tests {
         ContiguousJournal<deterministic::Context, Operation<Digest, Digest>>,
         Sha256,
         Clean<sha256::Digest>,
+        Sequential,
     >;
 
     /// Create a new empty authenticated journal.
@@ -718,7 +725,7 @@ mod tests {
         context: Context,
         suffix: &str,
     ) -> (
-        CleanMmr<deterministic::Context, sha256::Digest>,
+        CleanMmr<deterministic::Context, sha256::Digest, Sequential>,
         ContiguousJournal<deterministic::Context, Operation<Digest, Digest>>,
         StandardHasher<Sha256>,
     ) {

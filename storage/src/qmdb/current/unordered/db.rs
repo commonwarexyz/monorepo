@@ -29,8 +29,18 @@ use commonware_utils::Array;
 pub type KeyValueProof<D, const N: usize> = OperationProof<D, N>;
 
 /// The generic Db type for unordered Current QMDB variants.
-pub type Db<E, C, K, V, H, T, const N: usize, S = Merkleized<H>, D = Durable> =
-    super::super::db::Db<E, C, Index<T, Location>, H, Update<K, V>, N, S, D>;
+pub type Db<
+    E,
+    C,
+    K,
+    V,
+    H,
+    T,
+    const N: usize,
+    S = commonware_parallel::Sequential,
+    M = Merkleized<H>,
+    D = Durable,
+> = super::super::db::Db<E, C, Index<T, Location>, H, Update<K, V>, N, S, M, D>;
 
 // Functionality shared across all DB states, such as most non-mutating operations.
 impl<
@@ -41,9 +51,10 @@ impl<
         H: Hasher,
         T: Translator,
         const N: usize,
+        S: commonware_parallel::Strategy,
         M: MerkleizationState<DigestOf<H>>,
         D: DurabilityState,
-    > Db<E, C, K, V, H, T, N, M, D>
+    > Db<E, C, K, V, H, T, N, S, M, D>
 where
     Operation<K, V>: Codec,
     V::Value: Send + Sync,
@@ -77,8 +88,9 @@ impl<
         H: Hasher,
         T: Translator,
         const N: usize,
+        S: commonware_parallel::Strategy,
         D: store::State,
-    > Db<E, C, K, V, H, T, N, Merkleized<H>, D>
+    > Db<E, C, K, V, H, T, N, S, Merkleized<H>, D>
 where
     Operation<K, V>: Codec,
     V::Value: Send + Sync,
@@ -115,7 +127,8 @@ impl<
         H: Hasher,
         T: Translator,
         const N: usize,
-    > Db<E, C, K, V, H, T, N, Unmerkleized, NonDurable>
+        S: commonware_parallel::Strategy,
+    > Db<E, C, K, V, H, T, N, S, Unmerkleized, NonDurable>
 where
     Operation<K, V>: Codec,
     V::Value: Send + Sync,
@@ -167,9 +180,10 @@ impl<
         H: Hasher,
         T: Translator,
         const N: usize,
+        S: commonware_parallel::Strategy,
         M: MerkleizationState<DigestOf<H>>,
         D: DurabilityState,
-    > kv::Gettable for Db<E, C, K, V, H, T, N, M, D>
+    > kv::Gettable for Db<E, C, K, V, H, T, N, S, M, D>
 where
     Operation<K, V>: Codec,
     V::Value: Send + Sync,
@@ -192,7 +206,8 @@ impl<
         H: Hasher,
         T: Translator,
         const N: usize,
-    > kv::Updatable for Db<E, C, K, V, H, T, N, Unmerkleized, NonDurable>
+        S: commonware_parallel::Strategy,
+    > kv::Updatable for Db<E, C, K, V, H, T, N, S, Unmerkleized, NonDurable>
 where
     Operation<K, V>: Codec,
     V::Value: Send + Sync,
@@ -211,7 +226,8 @@ impl<
         H: Hasher,
         T: Translator,
         const N: usize,
-    > kv::Deletable for Db<E, C, K, V, H, T, N, Unmerkleized, NonDurable>
+        S: commonware_parallel::Strategy,
+    > kv::Deletable for Db<E, C, K, V, H, T, N, S, Unmerkleized, NonDurable>
 where
     Operation<K, V>: Codec,
     V::Value: Send + Sync,
@@ -222,8 +238,8 @@ where
 }
 
 // Batchable for (Unmerkleized, NonDurable) (aka mutable) state
-impl<E, C, K, V, T, H, const N: usize> Batchable
-    for Db<E, C, K, V, H, T, N, Unmerkleized, NonDurable>
+impl<E, C, K, V, T, H, S, const N: usize> Batchable
+    for Db<E, C, K, V, H, T, N, S, Unmerkleized, NonDurable>
 where
     E: Storage + Clock + Metrics,
     C: MutableContiguous<Item = Operation<K, V>>,
@@ -231,6 +247,7 @@ where
     V: ValueEncoding,
     T: Translator,
     H: Hasher,
+    S: commonware_parallel::Strategy,
     Operation<K, V>: Codec,
     V::Value: Send + Sync,
 {

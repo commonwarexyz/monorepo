@@ -63,7 +63,7 @@ pub trait Resolver: Send + Sync + Clone + 'static {
     ) -> impl Future<Output = Result<FetchResult<Self::Op, Self::Digest>, Self::Error>> + Send + 'a;
 }
 
-impl<E, K, V, H, T> Resolver for Arc<FixedDb<E, K, V, H, T, Merkleized<H>, Durable>>
+impl<E, K, V, H, T, S> Resolver for Arc<FixedDb<E, K, V, H, T, S, Merkleized<H>, Durable>>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -71,6 +71,7 @@ where
     H: Hasher,
     T: Translator + Send + Sync + 'static,
     T::Key: Send + Sync,
+    S: commonware_parallel::Strategy,
 {
     type Digest = H::Digest;
     type Op = FixedOperation<K, V>;
@@ -95,7 +96,7 @@ where
 
 /// Implement Resolver directly for `Arc<RwLock<FixedDb>>` to eliminate the need for wrapper types
 /// while allowing direct database access.
-impl<E, K, V, H, T> Resolver for Arc<RwLock<FixedDb<E, K, V, H, T, Merkleized<H>, Durable>>>
+impl<E, K, V, H, T, S> Resolver for Arc<RwLock<FixedDb<E, K, V, H, T, S, Merkleized<H>, Durable>>>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -103,6 +104,7 @@ where
     H: Hasher,
     T: Translator + Send + Sync + 'static,
     T::Key: Send + Sync,
+    S: commonware_parallel::Strategy,
 {
     type Digest = H::Digest;
     type Op = FixedOperation<K, V>;
@@ -126,7 +128,7 @@ where
     }
 }
 
-impl<E, K, V, H, T> Resolver for Arc<VariableDb<E, K, V, H, T, Merkleized<H>, Durable>>
+impl<E, K, V, H, T, S> Resolver for Arc<VariableDb<E, K, V, H, T, S, Merkleized<H>, Durable>>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -134,6 +136,7 @@ where
     H: Hasher,
     T: Translator + Send + Sync + 'static,
     T::Key: Send + Sync,
+    S: commonware_parallel::Strategy,
 {
     type Digest = H::Digest;
     type Op = VariableOperation<K, V>;
@@ -158,7 +161,8 @@ where
 
 /// Implement Resolver directly for `Arc<RwLock<VariableDb>>` to eliminate the need for wrapper
 /// types while allowing direct database access.
-impl<E, K, V, H, T> Resolver for Arc<RwLock<VariableDb<E, K, V, H, T, Merkleized<H>, Durable>>>
+impl<E, K, V, H, T, S> Resolver
+    for Arc<RwLock<VariableDb<E, K, V, H, T, S, Merkleized<H>, Durable>>>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -166,6 +170,7 @@ where
     H: Hasher,
     T: Translator + Send + Sync + 'static,
     T::Key: Send + Sync,
+    S: commonware_parallel::Strategy,
 {
     type Digest = H::Digest;
     type Op = VariableOperation<K, V>;
@@ -190,7 +195,8 @@ where
 }
 
 /// Implement Resolver for `Arc<RwLock<Option<FixedDb>>>` to allow taking ownership during sync.
-impl<E, K, V, H, T> Resolver for Arc<RwLock<Option<FixedDb<E, K, V, H, T, Merkleized<H>, Durable>>>>
+impl<E, K, V, H, T, S> Resolver
+    for Arc<RwLock<Option<FixedDb<E, K, V, H, T, S, Merkleized<H>, Durable>>>>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -198,6 +204,7 @@ where
     H: Hasher,
     T: Translator + Send + Sync + 'static,
     T::Key: Send + Sync,
+    S: commonware_parallel::Strategy,
 {
     type Digest = H::Digest;
     type Op = FixedOperation<K, V>;
@@ -210,7 +217,7 @@ where
         max_ops: NonZeroU64,
     ) -> Result<FetchResult<Self::Op, Self::Digest>, qmdb::Error> {
         let guard = self.read().await;
-        let db: &FixedDb<E, K, V, H, T, Merkleized<H>, Durable> =
+        let db: &FixedDb<E, K, V, H, T, S, Merkleized<H>, Durable> =
             guard.as_ref().ok_or(qmdb::Error::KeyNotFound)?;
         db.historical_proof(op_count, start_loc, max_ops)
             .await
@@ -224,8 +231,8 @@ where
 }
 
 /// Implement Resolver for `Arc<RwLock<Option<VariableDb>>>` to allow taking ownership during sync.
-impl<E, K, V, H, T> Resolver
-    for Arc<RwLock<Option<VariableDb<E, K, V, H, T, Merkleized<H>, Durable>>>>
+impl<E, K, V, H, T, S> Resolver
+    for Arc<RwLock<Option<VariableDb<E, K, V, H, T, S, Merkleized<H>, Durable>>>>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -233,6 +240,7 @@ where
     H: Hasher,
     T: Translator + Send + Sync + 'static,
     T::Key: Send + Sync,
+    S: commonware_parallel::Strategy,
 {
     type Digest = H::Digest;
     type Op = VariableOperation<K, V>;
@@ -245,7 +253,7 @@ where
         max_ops: NonZeroU64,
     ) -> Result<FetchResult<Self::Op, Self::Digest>, qmdb::Error> {
         let guard = self.read().await;
-        let db: &VariableDb<E, K, V, H, T, Merkleized<H>, Durable> =
+        let db: &VariableDb<E, K, V, H, T, S, Merkleized<H>, Durable> =
             guard.as_ref().ok_or(qmdb::Error::KeyNotFound)?;
         db.historical_proof(op_count, start_loc, max_ops)
             .await

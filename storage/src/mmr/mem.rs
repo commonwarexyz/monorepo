@@ -12,14 +12,10 @@ use alloc::{
     vec::Vec,
 };
 use commonware_cryptography::Digest;
-#[cfg(feature = "std")]
-use commonware_parallel::ThreadPool;
+use commonware_parallel::{Sequential, Strategy};
 use core::{mem, ops::Range};
-#[cfg(feature = "std")]
-use rayon::prelude::*;
 
 /// Minimum number of digest computations required during batch updates to trigger parallelization.
-#[cfg(feature = "std")]
 const MIN_TO_PARALLELIZE: usize = 20;
 
 /// An MMR whose root digest has not been computed.
@@ -295,13 +291,13 @@ impl<D: Digest> CleanMmr<D> {
             pinned_nodes,
             state: Dirty::default(),
         };
-        Ok(mmr.merkleize(hasher, None))
+        Ok(mmr.merkleize(hasher, &Sequential))
     }
 
     /// Create a new, empty MMR in the Clean state.
     pub fn new(hasher: &mut impl Hasher<Digest = D>) -> Self {
         let mmr: DirtyMmr<D> = Default::default();
-        mmr.merkleize(hasher, None)
+        mmr.merkleize(hasher, &Sequential)
     }
 
     /// Re-initialize the MMR with the given nodes, pruned_to_pos, and pinned_nodes.
@@ -311,7 +307,7 @@ impl<D: Digest> CleanMmr<D> {
         pruned_to_pos: Position,
         pinned_nodes: Vec<D>,
     ) -> Self {
-        DirtyMmr::from_components(nodes, pruned_to_pos, pinned_nodes).merkleize(hasher, None)
+        DirtyMmr::from_components(nodes, pruned_to_pos, pinned_nodes).merkleize(hasher, &Sequential)
     }
 
     /// Return the requested node or None if it is not stored in the MMR.
@@ -332,7 +328,7 @@ impl<D: Digest> CleanMmr<D> {
     ) -> Position {
         let mut dirty_mmr = mem::replace(self, Self::new(hasher)).into_dirty();
         let leaf_pos = dirty_mmr.add_leaf_digest(digest);
-        *self = dirty_mmr.merkleize(hasher, None);
+        *self = dirty_mmr.merkleize(hasher, &Sequential);
         leaf_pos
     }
 
@@ -341,7 +337,7 @@ impl<D: Digest> CleanMmr<D> {
     pub fn pop(&mut self, hasher: &mut impl Hasher<Digest = D>) -> Result<Position, Error> {
         let mut dirty_mmr = mem::replace(self, Self::new(hasher)).into_dirty();
         let result = dirty_mmr.pop();
-        *self = dirty_mmr.merkleize(hasher, None);
+        *self = dirty_mmr.merkleize(hasher, &Sequential);
         result
     }
 
@@ -393,7 +389,7 @@ impl<D: Digest> CleanMmr<D> {
     ) -> Result<(), Error> {
         let mut dirty_mmr = mem::replace(self, Self::new(hasher)).into_dirty();
         let result = dirty_mmr.update_leaf(hasher, loc, element);
-        *self = dirty_mmr.merkleize(hasher, None);
+        *self = dirty_mmr.merkleize(hasher, &Sequential);
         result
     }
 
@@ -544,16 +540,13 @@ impl<D: Digest> DirtyMmr<D> {
     pub fn merkleize(
         mut self,
         hasher: &mut impl Hasher<Digest = D>,
-        #[cfg(feature = "std")] pool: Option<ThreadPool>,
+        strategy: &impl Strategy,
     ) -> CleanMmr<D> {
-        #[cfg(feature = "std")]
-        match (pool, self.state.dirty_nodes.len() >= MIN_TO_PARALLELIZE) {
-            (Some(pool), true) => self.merkleize_parallel(hasher, pool, MIN_TO_PARALLELIZE),
-            _ => self.merkleize_serial(hasher),
+        if self.state.dirty_nodes.len() >= MIN_TO_PARALLELIZE {
+            self.merkleize_parallel(hasher, strategy);
+        } else {
+            self.merkleize_serial(hasher);
         }
-
-        #[cfg(not(feature = "std"))]
-        self.merkleize_serial(hasher);
 
         // Compute root
         let peaks = self
@@ -588,18 +581,16 @@ impl<D: Digest> DirtyMmr<D> {
     }
 
     /// Process any pending batched updates, using parallel hash workers as long as the number of
-    /// computations that can be parallelized exceeds `min_to_parallelize`.
+    /// computations that can be parallelized exceeds `MIN_TO_PARALLELIZE`.
     ///
     /// This implementation parallelizes the computation of digests across all nodes at the same
     /// height, starting from the bottom and working up to the peaks. If ever the number of
-    /// remaining digest computations is less than the `min_to_parallelize`, it switches to the
+    /// remaining digest computations is less than `MIN_TO_PARALLELIZE`, it switches to the
     /// serial implementation.
-    #[cfg(feature = "std")]
     fn merkleize_parallel(
         &mut self,
         hasher: &mut impl Hasher<Digest = D>,
-        pool: ThreadPool,
-        min_to_parallelize: usize,
+        strategy: &impl Strategy,
     ) {
         let mut nodes: Vec<(Position, u32)> = self.state.dirty_nodes.iter().copied().collect();
         self.state.dirty_nodes.clear();
@@ -613,18 +604,18 @@ impl<D: Digest> DirtyMmr<D> {
                 same_height.push(*pos);
                 continue;
             }
-            if same_height.len() < min_to_parallelize {
+            if same_height.len() < MIN_TO_PARALLELIZE {
                 self.state.dirty_nodes = nodes[i - same_height.len()..].iter().copied().collect();
                 self.merkleize_serial(hasher);
                 return;
             }
-            self.update_node_digests(hasher, pool.clone(), &same_height, current_height);
+            self.update_node_digests(hasher, strategy, &same_height, current_height);
             same_height.clear();
             current_height += 1;
             same_height.push(*pos);
         }
 
-        if same_height.len() < min_to_parallelize {
+        if same_height.len() < MIN_TO_PARALLELIZE {
             self.state.dirty_nodes = nodes[nodes.len() - same_height.len()..]
                 .iter()
                 .copied()
@@ -633,43 +624,38 @@ impl<D: Digest> DirtyMmr<D> {
             return;
         }
 
-        self.update_node_digests(hasher, pool, &same_height, current_height);
+        self.update_node_digests(hasher, strategy, &same_height, current_height);
     }
 
     /// Update digests of the given set of nodes of equal height in the MMR. Since they are all at
     /// the same height, this can be done in parallel without synchronization.
-    #[cfg(feature = "std")]
     fn update_node_digests(
         &mut self,
         hasher: &mut impl Hasher<Digest = D>,
-        pool: ThreadPool,
+        strategy: &impl Strategy,
         same_height: &[Position],
         height: u32,
     ) {
         let two_h = 1 << height;
-        pool.install(|| {
-            let computed_digests: Vec<(usize, D)> = same_height
-                .par_iter()
-                .map_init(
-                    || hasher.fork(),
-                    |hasher, &pos| {
-                        let left = pos - two_h;
-                        let right = pos - 1;
-                        let digest = hasher.node_digest(
-                            pos,
-                            self.get_node_unchecked(left),
-                            self.get_node_unchecked(right),
-                        );
-                        let index = self.pos_to_index(pos);
-                        (index, digest)
-                    },
-                )
-                .collect();
+        let computed_digests: Vec<(usize, D)> = strategy.map_init_collect_vec(
+            same_height,
+            || hasher.fork(),
+            |hasher, &pos| {
+                let left = pos - two_h;
+                let right = pos - 1;
+                let digest = hasher.node_digest(
+                    pos,
+                    self.get_node_unchecked(left),
+                    self.get_node_unchecked(right),
+                );
+                let index = self.pos_to_index(pos);
+                (index, digest)
+            },
+        );
 
-            for (index, digest) in computed_digests {
-                self.nodes[index] = digest;
-            }
-        });
+        for (index, digest) in computed_digests {
+            self.nodes[index] = digest;
+        }
     }
 
     /// Mark the non-leaf nodes in the path from the given position to the root as dirty, so that
@@ -706,7 +692,7 @@ impl<D: Digest> DirtyMmr<D> {
         loc: Location,
         element: &[u8],
     ) -> Result<(), Error> {
-        self.update_leaf_batched(hasher, None, &[(loc, element)])
+        self.update_leaf_batched(hasher, &Sequential, &[(loc, element)])
     }
 
     /// Batch update the digests of multiple retained leaves.
@@ -719,7 +705,7 @@ impl<D: Digest> DirtyMmr<D> {
     pub fn update_leaf_batched<T: AsRef<[u8]> + Sync>(
         &mut self,
         hasher: &mut impl Hasher<Digest = D>,
-        #[cfg(feature = "std")] pool: Option<ThreadPool>,
+        strategy: &impl Strategy,
         updates: &[(Location, T)],
     ) -> Result<(), Error> {
         if updates.is_empty() {
@@ -739,12 +725,9 @@ impl<D: Digest> DirtyMmr<D> {
             positions.push(pos);
         }
 
-        #[cfg(feature = "std")]
-        if let Some(pool) = pool {
-            if updates.len() >= MIN_TO_PARALLELIZE {
-                self.update_leaf_parallel(hasher, pool, updates, &positions);
-                return Ok(());
-            }
+        if updates.len() >= MIN_TO_PARALLELIZE {
+            self.update_leaf_parallel(hasher, strategy, updates, &positions);
+            return Ok(());
         }
 
         for ((_, element), pos) in updates.iter().zip(positions.iter()) {
@@ -758,34 +741,29 @@ impl<D: Digest> DirtyMmr<D> {
         Ok(())
     }
 
-    /// Batch update the digests of multiple retained leaves using multiple threads.
-    #[cfg(feature = "std")]
+    /// Batch update the digests of multiple retained leaves using parallel workers.
     fn update_leaf_parallel<T: AsRef<[u8]> + Sync>(
         &mut self,
         hasher: &mut impl Hasher<Digest = D>,
-        pool: ThreadPool,
+        strategy: &impl Strategy,
         updates: &[(Location, T)],
         positions: &[Position],
     ) {
-        pool.install(|| {
-            let digests: Vec<(Position, D)> = updates
-                .par_iter()
-                .zip(positions.par_iter())
-                .map_init(
-                    || hasher.fork(),
-                    |hasher, ((_, elem), pos)| {
-                        let digest = hasher.leaf_digest(*pos, elem.as_ref());
-                        (*pos, digest)
-                    },
-                )
-                .collect();
+        let pairs: Vec<_> = updates.iter().zip(positions.iter()).collect();
+        let digests: Vec<(Position, D)> = strategy.map_init_collect_vec(
+            &pairs,
+            || hasher.fork(),
+            |hasher, &((_, elem), pos)| {
+                let digest = hasher.leaf_digest(*pos, elem.as_ref());
+                (*pos, digest)
+            },
+        );
 
-            for (pos, digest) in digests {
-                let index = self.pos_to_index(pos);
-                self.nodes[index] = digest;
-                self.mark_dirty(pos);
-            }
-        });
+        for (pos, digest) in digests {
+            let index = self.pos_to_index(pos);
+            self.nodes[index] = digest;
+            self.mark_dirty(pos);
+        }
     }
 }
 
@@ -1038,7 +1016,7 @@ mod tests {
                 dirty_mmr.add(&mut hasher, &element);
             }
 
-            let batched_mmr = dirty_mmr.merkleize(&mut hasher, None);
+            let batched_mmr = dirty_mmr.merkleize(&mut hasher, &Sequential);
 
             assert_eq!(
                 batched_mmr.root(),
@@ -1060,7 +1038,7 @@ mod tests {
             let test_mmr = build_test_mmr(&mut hasher, test_mmr, NUM_ELEMENTS);
             let expected_root = test_mmr.root();
 
-            let pool = context.create_pool(NZUsize!(4)).unwrap();
+            let strategy = context.create_strategy(NZUsize!(4)).unwrap();
             let mut hasher: Standard<Sha256> = Standard::new();
 
             let mut mmr = Mmr::init(
@@ -1080,7 +1058,7 @@ mod tests {
                 let element = hasher.inner().finalize();
                 mmr.add(&mut hasher, &element);
             }
-            let mmr = mmr.merkleize(&mut hasher, Some(pool));
+            let mmr = mmr.merkleize(&mut hasher, &strategy);
             assert_eq!(
                 mmr.root(),
                 expected_root,
@@ -1231,7 +1209,7 @@ mod tests {
         executor.start(|_| async move {
             let mmr = CleanMmr::new(&mut hasher);
             let mmr = build_test_mmr(&mut hasher, mmr, 200);
-            do_batch_update(&mut hasher, mmr, None);
+            do_batch_update(&mut hasher, mmr, &Sequential);
         });
     }
 
@@ -1252,15 +1230,15 @@ mod tests {
             )
             .unwrap();
             let mmr = build_test_mmr(&mut hasher, mmr, 200);
-            let pool = ctx.create_pool(NZUsize!(4)).unwrap();
-            do_batch_update(&mut hasher, mmr, Some(pool));
+            let strategy = ctx.create_strategy(NZUsize!(4)).unwrap();
+            do_batch_update(&mut hasher, mmr, &strategy);
         });
     }
 
     fn do_batch_update(
         hasher: &mut Standard<Sha256>,
         mmr: CleanMmr<sha256::Digest>,
-        pool: Option<ThreadPool>,
+        strategy: &impl Strategy,
     ) {
         let element = <Sha256 as Hasher>::Digest::from(*b"01234567012345670123456701234567");
         let root = *mmr.root();
@@ -1273,10 +1251,10 @@ mod tests {
         }
         let mut dirty_mmr = mmr.into_dirty();
         dirty_mmr
-            .update_leaf_batched(hasher, pool, &updates)
+            .update_leaf_batched(hasher, strategy, &updates)
             .unwrap();
 
-        let mmr = dirty_mmr.merkleize(hasher, None);
+        let mmr = dirty_mmr.merkleize(hasher, strategy);
         let updated_root = *mmr.root();
         assert_ne!(updated_root, root);
 
@@ -1290,10 +1268,10 @@ mod tests {
         }
         let mut dirty_mmr = mmr.into_dirty();
         dirty_mmr
-            .update_leaf_batched(hasher, None, &updates)
+            .update_leaf_batched(hasher, strategy, &updates)
             .unwrap();
 
-        let mmr = dirty_mmr.merkleize(hasher, None);
+        let mmr = dirty_mmr.merkleize(hasher, strategy);
         let restored_root = *mmr.root();
         assert_eq!(root, restored_root);
     }

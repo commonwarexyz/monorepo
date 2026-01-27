@@ -35,7 +35,7 @@ pub fn create_config() -> Config<Translator, ()> {
         log_codec_config: (),
         log_write_buffer: NZUsize!(1024),
         translator: commonware_storage::translator::EightCap,
-        thread_pool: None,
+        strategy: commonware_parallel::Sequential,
         buffer_pool: commonware_runtime::buffer::PoolRef::new(NZU16!(1024), NZUsize!(10)),
     }
 }

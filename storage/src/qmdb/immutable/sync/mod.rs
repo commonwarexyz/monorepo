@@ -214,7 +214,7 @@ mod tests {
             log_codec_config: (),
             log_write_buffer: NZUsize!(1024),
             translator: TwoCap,
-            thread_pool: None,
+            strategy: commonware_parallel::Sequential,
             buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }

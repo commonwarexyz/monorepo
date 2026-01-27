@@ -10,11 +10,12 @@ use crate::{
 };
 use commonware_codec::Read;
 use commonware_cryptography::{DigestOf, Hasher};
+use commonware_parallel::Sequential;
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
 use std::ops::Range;
 
-impl<E, K, V, H, T> qmdb::sync::Database for Db<E, K, V, H, T, Merkleized<H>, Durable>
+impl<E, K, V, H, T> qmdb::sync::Database for Db<E, K, V, H, T, Sequential, Merkleized<H>, Durable>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -69,7 +70,7 @@ where
                     metadata_partition: db_config.mmr_metadata_partition,
                     items_per_blob: db_config.mmr_items_per_blob,
                     write_buffer: db_config.mmr_write_buffer,
-                    thread_pool: db_config.thread_pool.clone(),
+                    strategy: db_config.strategy.clone(),
                     buffer_pool: db_config.buffer_pool.clone(),
                 },
                 // The last node of an MMR with `range.end` leaves is at the position
@@ -131,6 +132,7 @@ mod tests {
     use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_macros::test_traced;
     use commonware_math::algebra::Random;
+    use commonware_parallel::Sequential;
     use commonware_runtime::{
         buffer::PoolRef,
         deterministic::{self, Context},
@@ -157,14 +159,22 @@ mod tests {
             log_compression: None,
             log_codec_config: ((0..=10000).into(), ()),
             translator: TwoCap,
-            thread_pool: None,
+            strategy: Sequential,
             buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
 
     /// Type alias for tests
-    type AnyTest =
-        Db<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap, Merkleized<Sha256>, Durable>;
+    type AnyTest = Db<
+        deterministic::Context,
+        Digest,
+        Vec<u8>,
+        Sha256,
+        TwoCap,
+        Sequential,
+        Merkleized<Sha256>,
+        Durable,
+    >;
 
     fn test_value(i: u64) -> Vec<u8> {
         let len = ((i % 13) + 7) as usize;
@@ -203,8 +213,16 @@ mod tests {
         ops
     }
 
-    type DirtyAnyTest =
-        Db<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap, Unmerkleized, NonDurable>;
+    type DirtyAnyTest = Db<
+        deterministic::Context,
+        Digest,
+        Vec<u8>,
+        Sha256,
+        TwoCap,
+        Sequential,
+        Unmerkleized,
+        NonDurable,
+    >;
 
     /// Applies the given operations to the database.
     async fn apply_ops_inner(

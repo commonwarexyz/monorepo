@@ -8,6 +8,7 @@ use crate::fixed::{
     variable_any_cfg, variable_current_cfg, Digest, OCurrentDb, OFixedDb, OVAnyDb, OVCurrentDb,
     UCurrentDb, UFixedDb, UVAnyDb, UVCurrentDb, Variant, THREADS, VARIANTS,
 };
+use commonware_parallel::Rayon;
 use commonware_runtime::{
     benchmarks::{context, tokio},
     tokio::{Config, Runner},
@@ -109,10 +110,11 @@ fn bench_fixed_init(c: &mut Criterion) {
                         b.to_async(&runner).iter_custom(|iters| async move {
                             let ctx = context::get::<commonware_runtime::tokio::Context>();
                             let pool = ctx.create_pool(THREADS).unwrap();
-                            let any_cfg = any_cfg(pool.clone());
-                            let current_cfg = current_cfg(pool.clone());
-                            let variable_any_cfg = variable_any_cfg(pool.clone());
-                            let variable_current_cfg = variable_current_cfg(pool);
+                            let strategy = Rayon::with_pool(pool);
+                            let any_cfg = any_cfg(strategy.clone());
+                            let current_cfg = current_cfg(strategy.clone());
+                            let variable_any_cfg = variable_any_cfg(strategy.clone());
+                            let variable_current_cfg = variable_current_cfg(strategy);
                             let start = Instant::now();
                             for _ in 0..iters {
                                 match variant {

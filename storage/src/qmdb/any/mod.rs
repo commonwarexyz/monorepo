@@ -20,7 +20,7 @@ use crate::{
 };
 use commonware_codec::CodecFixedShared;
 use commonware_cryptography::Hasher;
-use commonware_parallel::ThreadPool;
+use commonware_parallel::{Sequential, Strategy};
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage};
 use std::num::{NonZeroU64, NonZeroUsize};
 
@@ -35,7 +35,7 @@ pub mod unordered;
 
 /// Configuration for an `Any` authenticated db with fixed-size values.
 #[derive(Clone)]
-pub struct FixedConfig<T: Translator> {
+pub struct FixedConfig<T: Translator, S: Strategy = Sequential> {
     /// The name of the [Storage] partition used for the MMR's backing journal.
     pub mmr_journal_partition: String,
 
@@ -60,8 +60,8 @@ pub struct FixedConfig<T: Translator> {
     /// The translator used by the compressed index.
     pub translator: T,
 
-    /// An optional thread pool to use for parallelizing batch operations.
-    pub thread_pool: Option<ThreadPool>,
+    /// The strategy to use for parallelizing batch operations.
+    pub strategy: S,
 
     /// The buffer pool to use for caching data.
     pub buffer_pool: PoolRef,
@@ -69,7 +69,7 @@ pub struct FixedConfig<T: Translator> {
 
 /// Configuration for an `Any` authenticated db with variable-sized values.
 #[derive(Clone)]
-pub struct VariableConfig<T: Translator, C> {
+pub struct VariableConfig<T: Translator, C, S: Strategy = Sequential> {
     /// The name of the [Storage] partition used for the MMR's backing journal.
     pub mmr_journal_partition: String,
 
@@ -100,14 +100,15 @@ pub struct VariableConfig<T: Translator, C> {
     /// The translator used by the compressed index.
     pub translator: T,
 
-    /// An optional thread pool to use for parallelizing batch operations.
-    pub thread_pool: Option<ThreadPool>,
+    /// The strategy to use for parallelizing batch operations.
+    pub strategy: S,
 
     /// The buffer pool to use for caching data.
     pub buffer_pool: PoolRef,
 }
 
-type AuthenticatedLog<E, O, H, S = Merkleized<H>> = authenticated::Journal<E, Journal<E, O>, H, S>;
+type AuthenticatedLog<E, O, H, S = Merkleized<H>, Y = commonware_parallel::Sequential> =
+    authenticated::Journal<E, Journal<E, O>, H, S, Y>;
 
 /// Initialize the authenticated log from the given config, returning it along with the inactivity
 /// floor specified by the last commit.
@@ -116,16 +117,17 @@ pub(crate) async fn init_fixed_authenticated_log<
     O: Committable + CodecFixedShared,
     H: Hasher,
     T: Translator,
+    S: Strategy,
 >(
     context: E,
-    cfg: FixedConfig<T>,
-) -> Result<AuthenticatedLog<E, O, H>, Error> {
+    cfg: FixedConfig<T, S>,
+) -> Result<AuthenticatedLog<E, O, H, Merkleized<H>, S>, Error> {
     let mmr_config = MmrConfig {
         journal_partition: cfg.mmr_journal_partition,
         metadata_partition: cfg.mmr_metadata_partition,
         items_per_blob: cfg.mmr_items_per_blob,
         write_buffer: cfg.mmr_write_buffer,
-        thread_pool: cfg.thread_pool,
+        strategy: cfg.strategy,
         buffer_pool: cfg.buffer_pool.clone(),
     };
 
@@ -172,7 +174,7 @@ pub(crate) mod test {
             log_items_per_blob: NZU64!(7),
             log_write_buffer: NZUsize!(1024),
             translator: TwoCap,
-            thread_pool: None,
+            strategy: Sequential,
             buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
@@ -189,7 +191,7 @@ pub(crate) mod test {
             log_compression: None,
             log_codec_config: (),
             translator: TwoCap,
-            thread_pool: None,
+            strategy: Sequential,
             buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
