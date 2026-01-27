@@ -35,6 +35,7 @@ impl CounterNonce {
         }
         let out = self.inner.to_le_bytes();
         self.inner += 1;
+
         // Extract only the lower 96 bits (12 bytes) for the nonce
         let mut nonce = [0u8; NONCE_SIZE_BYTES];
         nonce.copy_from_slice(&out[..NONCE_SIZE_BYTES]);
@@ -208,7 +209,10 @@ mod tests {
         let mut recv = RecvCipher::new(&mut test_rng_seeded(1));
 
         let ciphertext = send.send(b"hello").unwrap();
-        assert!(matches!(recv.recv(&ciphertext), Err(Error::DecryptionFailed)));
+        assert!(matches!(
+            recv.recv(&ciphertext),
+            Err(Error::DecryptionFailed)
+        ));
     }
 
     #[test]
@@ -216,7 +220,10 @@ mod tests {
         let mut rng = test_rng();
         let mut recv = RecvCipher::new(&mut rng);
         let short_data = vec![0u8; CIPHERTEXT_OVERHEAD - 1];
-        assert!(matches!(recv.recv(&short_data), Err(Error::DecryptionFailed)));
+        assert!(matches!(
+            recv.recv(&short_data),
+            Err(Error::DecryptionFailed)
+        ));
     }
 
     #[test]
