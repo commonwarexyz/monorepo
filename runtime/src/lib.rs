@@ -51,6 +51,7 @@ pub mod iobuf;
 pub use bytes::{Buf, BufMut};
 pub use iobuf::{IoBuf, IoBufMut, IoBufs, IoBufsMut};
 mod network;
+#[cfg(not(target_arch = "wasm32"))]
 mod process;
 mod storage;
 pub mod telemetry;

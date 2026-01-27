@@ -18,7 +18,8 @@ cfg_if::cfg_if! {
         use commonware_parallel::ThreadPool;
         use rayon::prelude::*;
     } else {
-        struct ThreadPool;
+        /// Dummy type for no_std builds where parallelization is not available.
+        pub struct ThreadPool;
     }
 }
 
@@ -557,7 +558,10 @@ impl<D: Digest> DirtyMmr<D> {
         }
 
         #[cfg(not(feature = "std"))]
-        self.merkleize_serial(hasher);
+        {
+            let _ = pool;
+            self.merkleize_serial(hasher);
+        }
 
         // Compute root
         let peaks = self
@@ -750,6 +754,8 @@ impl<D: Digest> DirtyMmr<D> {
                 return Ok(());
             }
         }
+        #[cfg(not(feature = "std"))]
+        let _ = pool;
 
         for ((_, element), pos) in updates.iter().zip(positions.iter()) {
             // Update the digest of the leaf node and mark its ancestors as dirty.
