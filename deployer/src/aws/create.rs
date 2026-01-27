@@ -126,6 +126,19 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
     let mut regions: BTreeSet<String> = config.instances.iter().map(|i| i.region.clone()).collect();
     regions.insert(MONITORING_REGION.to_string());
 
+    // Validate that all regions are enabled
+    let ec2_client = ec2::create_client(Region::new(MONITORING_REGION)).await;
+    let enabled_regions = ec2::get_enabled_regions(&ec2_client).await?;
+    let disabled: Vec<_> = regions
+        .iter()
+        .filter(|r| !enabled_regions.contains(*r))
+        .cloned()
+        .collect();
+    if !disabled.is_empty() {
+        return Err(Error::RegionsNotEnabled(disabled));
+    }
+    info!(?regions, "validated all regions are enabled");
+
     // Persist deployment metadata early to enable `destroy --tag` on failure
     let metadata = Metadata {
         tag: tag.clone(),
