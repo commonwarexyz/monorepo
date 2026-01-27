@@ -157,9 +157,10 @@ pub(crate) fn libfontconfig_bin_s3_key(version: &str, architecture: Architecture
     )
 }
 
-pub(crate) fn fontconfig_config_bin_s3_key(version: &str) -> String {
+pub(crate) fn fontconfig_config_bin_s3_key(version: &str, architecture: Architecture) -> String {
     format!(
-        "{TOOLS_BINARIES_PREFIX}/fontconfig-config/{version}/fontconfig-config_{version}_all.deb"
+        "{TOOLS_BINARIES_PREFIX}/fontconfig-config/{version}/linux-{arch}/fontconfig-config_{version}_{arch}.deb",
+        arch = architecture.as_str()
     )
 }
 
@@ -400,9 +401,16 @@ pub(crate) fn libfontconfig_download_url(version: &str, architecture: Architectu
     )
 }
 
-/// Returns the download URL for fontconfig-config from Ubuntu archive (arch-independent)
-pub(crate) fn fontconfig_config_download_url(version: &str) -> String {
-    format!("{UBUNTU_ARCHIVE_X86_64}/main/f/fontconfig/fontconfig-config_{version}_all.deb")
+/// Returns the download URL for fontconfig-config from Ubuntu archive
+pub(crate) fn fontconfig_config_download_url(version: &str, architecture: Architecture) -> String {
+    let base = match architecture {
+        Architecture::Arm64 => UBUNTU_ARCHIVE_ARM64,
+        Architecture::X86_64 => UBUNTU_ARCHIVE_X86_64,
+    };
+    format!(
+        "{base}/main/f/fontconfig/fontconfig-config_{version}_{arch}.deb",
+        arch = architecture.as_str()
+    )
 }
 
 /// Returns the download URL for unzip from Ubuntu archive

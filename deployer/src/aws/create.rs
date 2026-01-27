@@ -219,17 +219,11 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
         adduser_download_url(ADDUSER_VERSION),
     )
     .await?;
-    let fontconfig_config_url = cache_tool(
-        fontconfig_config_bin_s3_key(FONTCONFIG_CONFIG_VERSION),
-        fontconfig_config_download_url(FONTCONFIG_CONFIG_VERSION),
-    )
-    .await?;
-
     // Cache tools for each architecture and store URLs per-architecture
     let mut tool_urls_by_arch: HashMap<Architecture, ToolUrls> = HashMap::new();
     for arch in &architectures_needed {
         let [prometheus_url, grafana_url, loki_url, pyroscope_url, tempo_url, node_exporter_url, promtail_url,
-             libjemalloc_url, logrotate_url, jq_url, libfontconfig_url, unzip_url, musl_url]: [String; 13] =
+             libjemalloc_url, logrotate_url, jq_url, fontconfig_config_url, libfontconfig_url, unzip_url, musl_url]: [String; 14] =
             try_join_all([
                 cache_tool(prometheus_bin_s3_key(PROMETHEUS_VERSION, *arch), prometheus_download_url(PROMETHEUS_VERSION, *arch)),
                 cache_tool(grafana_bin_s3_key(GRAFANA_VERSION, *arch), grafana_download_url(GRAFANA_VERSION, *arch)),
@@ -241,6 +235,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
                 cache_tool(libjemalloc_bin_s3_key(LIBJEMALLOC2_VERSION, *arch), libjemalloc_download_url(LIBJEMALLOC2_VERSION, *arch)),
                 cache_tool(logrotate_bin_s3_key(LOGROTATE_VERSION, *arch), logrotate_download_url(LOGROTATE_VERSION, *arch)),
                 cache_tool(jq_bin_s3_key(JQ_VERSION, *arch), jq_download_url(JQ_VERSION, *arch)),
+                cache_tool(fontconfig_config_bin_s3_key(FONTCONFIG_CONFIG_VERSION, *arch), fontconfig_config_download_url(FONTCONFIG_CONFIG_VERSION, *arch)),
                 cache_tool(libfontconfig_bin_s3_key(LIBFONTCONFIG1_VERSION, *arch), libfontconfig_download_url(LIBFONTCONFIG1_VERSION, *arch)),
                 cache_tool(unzip_bin_s3_key(UNZIP_VERSION, *arch), unzip_download_url(UNZIP_VERSION, *arch)),
                 cache_tool(musl_bin_s3_key(MUSL_VERSION, *arch), musl_download_url(MUSL_VERSION, *arch)),
@@ -261,7 +256,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
                 libjemalloc: libjemalloc_url,
                 logrotate: logrotate_url,
                 jq: jq_url,
-                fontconfig_config: fontconfig_config_url.clone(),
+                fontconfig_config: fontconfig_config_url,
                 libfontconfig: libfontconfig_url,
                 unzip: unzip_url,
                 adduser: adduser_url.clone(),
