@@ -3089,7 +3089,7 @@ mod tests {
         let wrong_fixture = setup_seeded(5, 1, &f);
         let round = Round::new(Epoch::new(0), View::new(10));
         let proposal = Proposal::new(round, View::new(5), sample_digest(3));
-        let quorum = N3f1::quorum_from_slice(&fixture.schemes) as usize;
+        let quorum = N3f1::quorum(fixture.schemes.len()) as usize;
         let notarizes: Vec<_> = fixture
             .schemes
             .iter()
@@ -3127,7 +3127,7 @@ mod tests {
         let mut rng = test_rng();
         let round = Round::new(Epoch::new(0), View::new(10));
         let proposal = Proposal::new(round, View::new(5), sample_digest(4));
-        let quorum = N3f1::quorum_from_slice(&fixture.schemes) as usize;
+        let quorum = N3f1::quorum(fixture.schemes.len()) as usize;
         let notarizes: Vec<_> = fixture
             .schemes
             .iter()
@@ -3270,7 +3270,7 @@ mod tests {
         let wrong_fixture = setup_seeded(5, 1, &f);
         let round = Round::new(Epoch::new(0), View::new(10));
         let proposal = Proposal::new(round, View::new(5), sample_digest(9));
-        let quorum = N3f1::quorum_from_slice(&fixture.schemes) as usize;
+        let quorum = N3f1::quorum(fixture.schemes.len()) as usize;
         let finalizes: Vec<_> = fixture
             .schemes
             .iter()

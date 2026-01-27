@@ -426,7 +426,7 @@ mod tests {
         } = bls12381_threshold_vrf::fixture::<MinPk, _>(&mut rng, NAMESPACE, 5);
         let participants = Set::try_from_iter(participants).unwrap();
         let elector: RandomElector<ThresholdScheme> = Random.build(&participants);
-        let quorum = N3f1::quorum_from_slice(&schemes) as usize;
+        let quorum = N3f1::quorum(schemes.len()) as usize;
 
         // Create certificate for round (1, 2)
         let round1 = Round::new(Epoch::new(1), View::new(2));
@@ -547,7 +547,7 @@ mod tests {
                 } = bls12381_threshold_vrf::fixture::<MinPk, _>(&mut rng, NAMESPACE, n);
                 let participants = Set::try_from_iter(participants).unwrap();
                 let elector: RandomElector<ThresholdScheme> = Random.build(&participants);
-                let quorum = N3f1::quorum_from_slice(&schemes) as usize;
+                let quorum = N3f1::quorum(schemes.len()) as usize;
 
                 // Generate deterministic round parameters
                 let epoch = rng.gen_range(0..1000);
