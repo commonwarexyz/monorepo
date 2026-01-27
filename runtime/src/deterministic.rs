@@ -42,14 +42,15 @@
 //! });
 //! ```
 
+pub use crate::storage::faulty::FaultConfig;
 use crate::{
     network::{
         audited::Network as AuditedNetwork, deterministic::Network as DeterministicNetwork,
         metered::Network as MeteredNetwork,
     },
     storage::{
-        audited::Storage as AuditedStorage, memory::Storage as MemStorage,
-        metered::Storage as MeteredStorage,
+        audited::Storage as AuditedStorage, faulty::Storage as FaultyStorage,
+        memory::Storage as MemStorage, metered::Storage as MeteredStorage,
     },
     telemetry::metrics::task::Label,
     utils::{
@@ -94,7 +95,7 @@ use std::{
     num::NonZeroUsize,
     panic::{catch_unwind, resume_unwind, AssertUnwindSafe},
     pin::Pin,
-    sync::{Arc, Mutex, Weak},
+    sync::{Arc, Mutex, RwLock, Weak},
     task::{self, Poll, Waker},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -210,6 +211,10 @@ pub struct Config {
 
     /// Whether spawned tasks should catch panics instead of propagating them.
     catch_panics: bool,
+
+    /// Configuration for deterministic storage fault injection.
+    /// If `None`, no faults will be injected.
+    storage_faults: Option<FaultConfig>,
 }
 
 impl Config {
@@ -220,6 +225,7 @@ impl Config {
             cycle: Duration::from_millis(1),
             timeout: None,
             catch_panics: false,
+            storage_faults: None,
         }
     }
 
@@ -252,6 +258,16 @@ impl Config {
     /// See [Config]
     pub const fn with_catch_panics(mut self, catch_panics: bool) -> Self {
         self.catch_panics = catch_panics;
+        self
+    }
+
+    /// Configure storage fault injection.
+    ///
+    /// When set, the runtime will inject deterministic storage errors based on
+    /// the provided configuration. Faults are drawn from the shared RNG, ensuring
+    /// reproducible failure patterns for a given seed.
+    pub const fn with_storage_faults(mut self, faults: FaultConfig) -> Self {
+        self.storage_faults = Some(faults);
         self
     }
 
@@ -299,7 +315,7 @@ pub struct Executor {
     deadline: Option<SystemTime>,
     metrics: Arc<Metrics>,
     auditor: Arc<Auditor>,
-    rng: Mutex<BoxDynRng>,
+    rng: Arc<Mutex<BoxDynRng>>,
     time: Mutex<SystemTime>,
     tasks: Arc<Tasks>,
     sleeping: Mutex<BinaryHeap<Alarm>>,
@@ -386,7 +402,7 @@ pub struct Checkpoint {
     cycle: Duration,
     deadline: Option<SystemTime>,
     auditor: Arc<Auditor>,
-    rng: Mutex<BoxDynRng>,
+    rng: Arc<Mutex<BoxDynRng>>,
     time: Mutex<SystemTime>,
     storage: Arc<Storage>,
     dns: Mutex<HashMap<String, Vec<IpAddr>>>,
@@ -798,7 +814,7 @@ impl Tasks {
 }
 
 type Network = MeteredNetwork<AuditedNetwork<DeterministicNetwork>>;
-type Storage = MeteredStorage<AuditedStorage<MemStorage>>;
+type Storage = MeteredStorage<AuditedStorage<FaultyStorage<MemStorage>>>;
 
 /// Implementation of [crate::Spawner], [crate::Clock],
 /// [crate::Network], and [crate::Storage] for the `deterministic`
@@ -844,10 +860,21 @@ impl Context {
             .timeout
             .map(|timeout| start_time.checked_add(timeout).expect("timeout overflowed"));
         let auditor = Arc::new(Auditor::default());
+
+        // Create shared RNG (used by both executor and storage)
+        let rng = Arc::new(Mutex::new(cfg.rng));
+
+        // Create storage fault config (default to disabled if None)
+        let storage_fault_config = Arc::new(RwLock::new(cfg.storage_faults.unwrap_or_default()));
         let storage = MeteredStorage::new(
-            AuditedStorage::new(MemStorage::default(), auditor.clone()),
+            AuditedStorage::new(
+                FaultyStorage::new(MemStorage::default(), rng.clone(), storage_fault_config),
+                auditor.clone(),
+            ),
             runtime_registry,
         );
+
+        // Create network
         let network = AuditedNetwork::new(DeterministicNetwork::default(), auditor.clone());
         let network = MeteredNetwork::new(network, runtime_registry);
 
@@ -861,7 +888,7 @@ impl Context {
             deadline,
             metrics,
             auditor,
-            rng: Mutex::new(cfg.rng),
+            rng,
             time: Mutex::new(start_time),
             tasks: Arc::new(Tasks::new()),
             sleeping: Mutex::new(BinaryHeap::new()),
@@ -962,7 +989,16 @@ impl Context {
 
     /// Compute a [Sha256] digest of all storage contents.
     pub fn storage_audit(&self) -> Digest {
-        self.storage.inner().inner().audit()
+        self.storage.inner().inner().inner().audit()
+    }
+
+    /// Access the storage fault configuration.
+    ///
+    /// Changes to the returned [`FaultConfig`] take effect immediately for
+    /// subsequent storage operations. This allows dynamically enabling or
+    /// disabling fault injection during a test.
+    pub fn storage_faults(&self) -> Arc<RwLock<FaultConfig>> {
+        self.storage.inner().inner().config()
     }
 
     /// Register a DNS mapping for a hostname.
@@ -1977,5 +2013,171 @@ mod tests {
                 .with_attribute("epoch", "old")
                 .with_attribute("epoch", "new");
         });
+    }
+
+    #[test]
+    fn test_storage_fault_injection_and_recovery() {
+        // Phase 1: Run with 100% sync failure rate
+        let cfg = deterministic::Config::default().with_storage_faults(FaultConfig {
+            sync_rate: Some(1.0),
+            ..Default::default()
+        });
+
+        let (result, checkpoint) =
+            deterministic::Runner::new(cfg).start_and_recover(|ctx| async move {
+                let (blob, _) = ctx.open("test_fault", b"blob").await.unwrap();
+                blob.write_at(0, b"data".to_vec()).await.unwrap();
+                blob.sync().await // This should fail due to fault injection
+            });
+
+        // Verify sync failed
+        assert!(result.is_err());
+
+        // Phase 2: Recover and disable faults explicitly
+        deterministic::Runner::from(checkpoint).start(|ctx| async move {
+            // Explicitly disable faults for recovery verification
+            *ctx.storage_faults().write().unwrap() = FaultConfig::default();
+
+            // Data was not synced, so blob should be empty (unsynced writes are lost)
+            let (blob, len) = ctx.open("test_fault", b"blob").await.unwrap();
+            assert_eq!(len, 0, "unsynced data should be lost after recovery");
+
+            // Now we can write and sync successfully
+            blob.write_at(0, b"recovered".to_vec()).await.unwrap();
+            blob.sync()
+                .await
+                .expect("sync should succeed with faults disabled");
+
+            // Verify data persisted
+            let read_buf = blob.read_at(0, vec![0u8; 9]).await.unwrap();
+            assert_eq!(read_buf.coalesce(), b"recovered");
+        });
+    }
+
+    #[test]
+    fn test_storage_fault_dynamic_config() {
+        let executor = deterministic::Runner::default();
+        executor.start(|ctx| async move {
+            let (blob, _) = ctx.open("test_dynamic", b"blob").await.unwrap();
+
+            // Initially no faults - sync should succeed
+            blob.write_at(0, b"initial".to_vec()).await.unwrap();
+            blob.sync().await.expect("initial sync should succeed");
+
+            // Enable sync faults dynamically
+            let faults = ctx.storage_faults();
+            faults.write().unwrap().sync_rate = Some(1.0);
+
+            // Now sync should fail
+            blob.write_at(0, b"updated".to_vec()).await.unwrap();
+            let result = blob.sync().await;
+            assert!(result.is_err(), "sync should fail with faults enabled");
+
+            // Disable faults
+            faults.write().unwrap().sync_rate = Some(0.0);
+
+            // Sync should succeed again
+            blob.sync()
+                .await
+                .expect("sync should succeed with faults disabled");
+        });
+    }
+
+    #[test]
+    fn test_storage_fault_determinism() {
+        // Run the same sequence twice with the same seed
+        fn run_with_seed(seed: u64) -> Vec<bool> {
+            let cfg = deterministic::Config::default()
+                .with_seed(seed)
+                .with_storage_faults(FaultConfig {
+                    open_rate: Some(0.5),
+                    ..Default::default()
+                });
+
+            let runner = deterministic::Runner::new(cfg);
+            runner.start(|ctx| async move {
+                let mut results = Vec::new();
+                for i in 0..20 {
+                    let name = format!("blob{i}");
+                    let result = ctx.open("test_determinism", name.as_bytes()).await;
+                    results.push(result.is_ok());
+                }
+                results
+            })
+        }
+
+        let results1 = run_with_seed(12345);
+        let results2 = run_with_seed(12345);
+        assert_eq!(
+            results1, results2,
+            "same seed should produce same failure pattern"
+        );
+
+        let results3 = run_with_seed(99999);
+        assert_ne!(
+            results1, results3,
+            "different seeds should produce different patterns"
+        );
+    }
+
+    #[test]
+    fn test_storage_fault_determinism_multi_task() {
+        // Run the same multi-task sequence twice with the same seed.
+        // This tests that task shuffling + fault decisions interleave deterministically.
+        fn run_with_seed(seed: u64) -> Vec<u32> {
+            let cfg = deterministic::Config::default()
+                .with_seed(seed)
+                .with_storage_faults(FaultConfig {
+                    open_rate: Some(0.5),
+                    write_rate: Some(0.3),
+                    sync_rate: Some(0.2),
+                    ..Default::default()
+                });
+
+            let runner = deterministic::Runner::new(cfg);
+            runner.start(|ctx| async move {
+                // Spawn multiple tasks that do storage operations
+                let mut handles = Vec::new();
+                for i in 0..5 {
+                    let ctx = ctx.clone();
+                    handles.push(ctx.spawn(move |ctx| async move {
+                        let mut successes = 0u32;
+                        for j in 0..4 {
+                            let name = format!("task{i}_blob{j}");
+                            if let Ok((blob, _)) = ctx.open("partition", name.as_bytes()).await {
+                                successes += 1;
+                                if blob.write_at(0, b"data".to_vec()).await.is_ok() {
+                                    successes += 1;
+                                }
+                                if blob.sync().await.is_ok() {
+                                    successes += 1;
+                                }
+                            }
+                        }
+                        successes
+                    }));
+                }
+
+                // Collect results from all tasks
+                let mut results = Vec::new();
+                for handle in handles {
+                    results.push(handle.await.unwrap());
+                }
+                results
+            })
+        }
+
+        let results1 = run_with_seed(42);
+        let results2 = run_with_seed(42);
+        assert_eq!(
+            results1, results2,
+            "same seed should produce same multi-task pattern"
+        );
+
+        let results3 = run_with_seed(99999);
+        assert_ne!(
+            results1, results3,
+            "different seeds should produce different patterns"
+        );
     }
 }
