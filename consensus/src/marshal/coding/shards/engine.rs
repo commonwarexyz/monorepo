@@ -196,7 +196,11 @@ where
                         continue;
                     };
 
-                    let valid = shard.verify();
+                    // Verify the shard and prepare it for broadcasting in a single operation.
+                    // This avoids redundant SHA-256 hashing that would occur if we called
+                    // verify() and then broadcast_shard() separately.
+                    let reshard = shard.verify_into_reshard();
+                    let valid = reshard.is_some();
 
                     // Notify all subscribers
                     if let Some(mut sub) = self.shard_subscriptions.remove(&(commitment, index)) {
@@ -205,11 +209,9 @@ where
                         }
                     }
 
-                    if valid {
-                        // If the shard is valid, broadcast it to all peers.
-                        if let Some(shard) = self.get_shard(commitment, index).await {
-                            self.broadcast_shard(shard).await;
-                        }
+                    // Broadcast the pre-verified reshard if valid
+                    if let Some(weak_shard) = reshard {
+                        self.broadcast_prepared_shard(weak_shard).await;
                     }
                 },
                 message = self.mailbox.next() => {
@@ -334,32 +336,18 @@ where
         }
     }
 
-    /// Broadcasts a local [Shard] of a block to all peers.
+    /// Broadcasts a pre-verified weak [Shard] to all peers.
     #[inline]
-    async fn broadcast_shard(&mut self, shard: Shard<C, H>) {
+    async fn broadcast_prepared_shard(&mut self, shard: Shard<C, H>) {
         let commitment = shard.commitment();
         let index = shard.index();
 
-        let DistributionShard::Strong(shard) = shard.into_inner() else {
-            // If the shard is already weak, it's been broadcasted to us already;
-            // no need to re-broadcast.
-            return;
-        };
+        debug_assert!(
+            matches!(shard.deref(), DistributionShard::Weak(_)),
+            "broadcast_prepared_shard expects a weak shard"
+        );
 
-        let Ok((_, _, reshard)) = C::reshard(
-            &commitment.config(),
-            &commitment.coding_digest(),
-            u16::try_from(index).expect("shard index fits in u16"),
-            shard,
-        ) else {
-            // If the shard can't be verified locally, don't broadcast anything.
-            return;
-        };
-
-        // Broadcast the weak shard to all peers for reconstruction.
-        let reshard = Shard::new(commitment, index, DistributionShard::Weak(reshard));
-        let _peers = self.buffer.broadcast(Recipients::All, reshard).await;
-
+        let _peers = self.buffer.broadcast(Recipients::All, shard).await;
         debug!(%commitment, index, "broadcasted local shard to all peers");
     }
 
@@ -505,14 +493,13 @@ where
         responder: oneshot::Sender<bool>,
         pool: &mut AbortablePool<((CodingCommitment, usize), Shard<C, H>)>,
     ) {
-        // If we already have the shard cached, send it immediately.
+        // If we already have the shard cached, verify and broadcast in one step.
         if let Some(shard) = self.get_shard(commitment, index).await {
-            let valid = shard.verify();
-            responder.send_lossy(valid);
-
-            // Broadcast the shard to all peers if it's valid.
-            if valid {
-                self.broadcast_shard(shard).await;
+            if let Some(weak_shard) = shard.verify_into_reshard() {
+                responder.send_lossy(true);
+                self.broadcast_prepared_shard(weak_shard).await;
+            } else {
+                responder.send_lossy(false);
             }
             return;
         }

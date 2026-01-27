@@ -155,6 +155,34 @@ impl<C: Scheme, H: Hasher> Shard<C, H> {
         }
     }
 
+    /// Verifies the shard and returns the weak reshard for broadcasting if valid.
+    ///
+    /// This is more efficient than calling [`Self::verify`] followed by a separate reshard
+    /// operation, as it avoids redundant SHA-256 hashing.
+    ///
+    /// Returns `Some(weak_shard)` if the shard is valid and can be rebroadcast,
+    /// or `None` if the shard is invalid or already weak.
+    pub fn verify_into_reshard(self) -> Option<Self> {
+        let DistributionShard::Strong(shard) = self.inner else {
+            return None;
+        };
+
+        let reshard = C::reshard(
+            &self.commitment.config(),
+            &self.commitment.coding_digest(),
+            u16::try_from(self.index).expect("shard index fits in u16"),
+            shard,
+        )
+        .ok()
+        .map(|(_, _, reshard)| reshard)?;
+
+        Some(Self::new(
+            self.commitment,
+            self.index,
+            DistributionShard::Weak(reshard),
+        ))
+    }
+
     /// Returns the UUID of a shard with the given commitment and index.
     #[inline]
     pub fn uuid(commitment: CodingCommitment, index: usize) -> H::Digest {
