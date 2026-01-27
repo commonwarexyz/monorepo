@@ -547,6 +547,11 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
         if self.degree::<M>() != pub_msg.commitment.degree_exact() {
             return false;
         }
+        // Reject dealers committing to a zero secret (identity point as constant term).
+        // This ensures all accepted shares are non-zero.
+        if *pub_msg.commitment.constant() == V::Public::zero() {
+            return false;
+        }
         if let Some(previous) = self.previous.as_ref() {
             let Some(share_commitment) = previous.share_commitment(dealer) else {
                 return false;
