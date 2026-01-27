@@ -256,8 +256,8 @@ mod tests {
                 UnboundedMailbox::<tracker::Message<PublicKey>>::new();
             let releaser = Releaser::new(releaser_mailbox);
 
-            // Generate 5 peers
-            let peers: Vec<PublicKey> = (0..5)
+            // Generate 10 peers
+            let peers: Vec<PublicKey> = (0..10)
                 .map(|i| PrivateKey::from_seed(i).public_key())
                 .collect();
 
@@ -273,7 +273,7 @@ mod tests {
 
             // Handle messages until deadline, counting dial attempts
             let mut dial_count = 0;
-            let deadline = context.current() + dial_frequency * 3 + Duration::from_millis(100);
+            let deadline = context.current() + dial_frequency * 3;
             loop {
                 select! {
                     msg = tracker_rx.next() => {
@@ -296,7 +296,7 @@ mod tests {
                 }
             }
 
-            // Should have dialed ~3 peers (one per tick), not all 5 at once
+            // Should have dialed ~3 peers (one per tick), not all 10 at once
             assert!(
                 (2..=4).contains(&dial_count),
                 "expected 2-4 dial attempts (one per tick), got {}",
