@@ -54,8 +54,8 @@ pub trait Contiguous: Send + Sync {
     /// errors occur during replay.
     fn replay(
         &self,
-        start_pos: u64,
         buffer: NonZeroUsize,
+        start_pos: u64,
     ) -> impl std::future::Future<
         Output = Result<impl Stream<Item = Result<(u64, Self::Item), Error>> + Send + '_, Error>,
     > + Send;

@@ -539,8 +539,8 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
     ///  - [Error::ItemOutOfRange] if `start_pos` exceeds the journal size.
     pub async fn replay(
         &self,
-        start_pos: u64,
         _buffer_size: NonZeroUsize,
+        start_pos: u64,
     ) -> Result<impl Stream<Item = Result<(u64, V), Error>> + Send + '_, Error> {
         // Validate bounds first
         {
@@ -689,7 +689,7 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
         // === Handle empty data journal case ===
         let items_in_last_section = match data.newest_section() {
             Some(last_section) => {
-                let stream = data.replay(last_section, 0, REPLAY_BUFFER_SIZE).await?;
+                let stream = data.replay(REPLAY_BUFFER_SIZE, last_section, 0).await?;
                 futures::pin_mut!(stream);
                 let mut count = 0u64;
                 while let Some(result) = stream.next().await {
@@ -874,7 +874,7 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
         // The data journal is the source of truth, so we consume the entire stream.
         // (replay streams from start_section onwards through all subsequent sections)
         let stream = data
-            .replay(start_section, resume_offset, REPLAY_BUFFER_SIZE)
+            .replay(REPLAY_BUFFER_SIZE, start_section, resume_offset)
             .await?;
         futures::pin_mut!(stream);
 
@@ -913,10 +913,10 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Contiguous for Journal<E, V> 
 
     async fn replay(
         &self,
-        start_pos: u64,
         buffer: NonZeroUsize,
+        start_pos: u64,
     ) -> Result<impl Stream<Item = Result<(u64, Self::Item), Error>> + Send + '_, Error> {
-        Self::replay(self, start_pos, buffer).await
+        Self::replay(self, buffer, start_pos).await
     }
 
     async fn read(&self, position: u64) -> Result<Self::Item, Error> {
@@ -1126,6 +1126,12 @@ mod tests {
                     journal.read(i).await,
                     Err(crate::journal::Error::ItemPruned(_))
                 ));
+            }
+
+            // Replay should fail if we try to replay pruned items.
+            {
+                let res = journal.replay(NZUsize!(20), 0).await;
+                assert!(matches!(res, Err(crate::journal::Error::ItemPruned(_))));
             }
 
             // Can append new data starting at position 20

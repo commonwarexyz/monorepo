@@ -493,13 +493,13 @@ where
 
     async fn replay(
         &self,
-        start_pos: u64,
         buffer: NonZeroUsize,
+        start_pos: u64,
     ) -> Result<
         impl futures::Stream<Item = Result<(u64, Self::Item), JournalError>> + '_,
         JournalError,
     > {
-        self.journal.replay(start_pos, buffer).await
+        self.journal.replay(buffer, start_pos).await
     }
 
     async fn read(&self, position: u64) -> Result<Self::Item, JournalError> {
@@ -1658,14 +1658,14 @@ mod tests {
         executor.start(|context| async move {
             // Test empty journal
             let journal = create_empty_journal(context.with_label("empty"), "replay").await;
-            let stream = journal.replay(0, NZUsize!(10)).await.unwrap();
+            let stream = journal.replay(NZUsize!(10), 0).await.unwrap();
             futures::pin_mut!(stream);
             assert!(stream.next().await.is_none());
 
             // Test replaying all operations
             let journal =
                 create_journal_with_ops(context.with_label("with_ops"), "replay", 50).await;
-            let stream = journal.replay(0, NZUsize!(100)).await.unwrap();
+            let stream = journal.replay(NZUsize!(100), 0).await.unwrap();
             futures::pin_mut!(stream);
 
             for i in 0..50 {
@@ -1684,7 +1684,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let journal = create_journal_with_ops(context, "replay_middle", 50).await;
-            let stream = journal.replay(25, NZUsize!(100)).await.unwrap();
+            let stream = journal.replay(NZUsize!(100), 25).await.unwrap();
             futures::pin_mut!(stream);
 
             let mut count = 0;

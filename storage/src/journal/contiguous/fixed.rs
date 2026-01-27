@@ -938,8 +938,8 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> super::Contiguous for Jo
 
     async fn replay(
         &self,
-        start_pos: u64,
         buffer: NonZeroUsize,
+        start_pos: u64,
     ) -> Result<impl Stream<Item = Result<(u64, Self::Item), Error>> + Send + '_, Error> {
         Self::replay(self, buffer, start_pos).await
     }

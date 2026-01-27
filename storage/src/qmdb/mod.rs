@@ -152,7 +152,7 @@ where
     F: FnMut(bool, Option<Location>),
 {
     let stream = log
-        .replay(*inactivity_floor_loc, SNAPSHOT_READ_BUFFER_SIZE)
+        .replay(SNAPSHOT_READ_BUFFER_SIZE, *inactivity_floor_loc)
         .await?;
     pin_mut!(stream);
     let last_commit_loc = log.size().await.saturating_sub(1);
