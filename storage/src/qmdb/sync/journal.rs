@@ -45,7 +45,7 @@ pub trait Journal: Sized + Send {
 
 impl<E, V> Journal for crate::journal::contiguous::variable::Journal<E, V>
 where
-    E: commonware_runtime::Storage + commonware_runtime::Metrics,
+    E: commonware_runtime::Clock + commonware_runtime::Storage + commonware_runtime::Metrics,
     V: commonware_codec::CodecShared,
 {
     type Context = E;
@@ -84,7 +84,7 @@ where
 
 impl<E, A> Journal for crate::journal::contiguous::fixed::Journal<E, A>
 where
-    E: commonware_runtime::Storage + commonware_runtime::Metrics,
+    E: commonware_runtime::Clock + commonware_runtime::Storage + commonware_runtime::Metrics,
     A: commonware_codec::CodecFixedShared,
 {
     type Context = E;

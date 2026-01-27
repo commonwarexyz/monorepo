@@ -107,10 +107,13 @@ pub mod tests {
         Ok(())
     }
 
-    fn next_db<D, F: NewDbIndexed<D>>(new_db: &mut F, counter: &mut usize) -> F::Fut {
+    fn next_db<D, F: NewDbIndexed<D>>(
+        new_db: &mut F,
+        counter: &mut usize,
+    ) -> std::pin::Pin<Box<F::Fut>> {
         let idx = *counter;
         *counter += 1;
-        new_db(idx)
+        Box::pin(new_db(idx))
     }
 
     async fn test_overlay_reads<D, F>(new_db: &mut F, counter: &mut usize) -> Result<(), Error>
