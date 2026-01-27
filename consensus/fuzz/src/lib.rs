@@ -7,7 +7,7 @@ pub mod utils;
 
 use crate::{
     disrupter::Disrupter,
-    strategy::{AnyScope, SmallScope, StrategyChoice},
+    strategy::{AnyScope, FutureScope, SmallScope, StrategyChoice},
     utils::{link_peers, max_faults, register, Action, Partition},
 };
 use arbitrary::Arbitrary;
@@ -144,11 +144,11 @@ impl Arbitrary<'_> for FuzzInput {
         let required_containers =
             u.int_in_range(MIN_REQUIRED_CONTAINERS..=MAX_REQUIRED_CONTINERS)?;
 
-        // SmallScope mutations - 75%, AnyScope mutations - 25%
-        let strategy = if u.int_in_range(0..=3)? == 0 {
-            StrategyChoice::AnyScope
-        } else {
-            StrategyChoice::SmallScope
+        // SmallScope mutations - 50%, AnyScope mutations - 25%, FutureScope mutations - 25%
+        let strategy = match u.int_in_range(0..=3)? {
+            0 => StrategyChoice::AnyScope,
+            1 => StrategyChoice::FutureScope,
+            _ => StrategyChoice::SmallScope,
         };
 
         let mut raw_bytes = Vec::new();
@@ -266,6 +266,11 @@ fn run<P: simplex::Simplex>(input: FuzzInput) {
                 StrategyChoice::AnyScope => {
                     let disrupter =
                         Disrupter::new(disrupter_context, scheme, input.clone(), AnyScope);
+                    disrupter.start(vote_network, certificate_network, resolver_network);
+                }
+                StrategyChoice::FutureScope => {
+                    let disrupter =
+                        Disrupter::new(disrupter_context, scheme, input.clone(), FutureScope);
                     disrupter.start(vote_network, certificate_network, resolver_network);
                 }
             }
@@ -590,6 +595,19 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                 StrategyChoice::AnyScope => {
                     let disrupter =
                         Disrupter::new(disrupter_context, scheme.clone(), input.clone(), AnyScope);
+                    disrupter.start(
+                        (vote_sender_secondary, vote_receiver_secondary),
+                        (certificate_sender_secondary, certificate_receiver_secondary),
+                        (resolver_sender_secondary, resolver_receiver_secondary),
+                    );
+                }
+                StrategyChoice::FutureScope => {
+                    let disrupter = Disrupter::new(
+                        disrupter_context,
+                        scheme.clone(),
+                        input.clone(),
+                        FutureScope,
+                    );
                     disrupter.start(
                         (vote_sender_secondary, vote_receiver_secondary),
                         (certificate_sender_secondary, certificate_receiver_secondary),

@@ -76,6 +76,7 @@ pub trait Strategy: Send + Sync {
 pub enum StrategyChoice {
     SmallScope,
     AnyScope,
+    FutureScope,
 }
 
 pub struct SmallScope;
@@ -410,6 +411,131 @@ impl Strategy for AnyScope {
             bytes.resize(len, 0);
         }
         bytes
+    }
+}
+
+pub struct FutureScope;
+
+impl Strategy for FutureScope {
+    fn random_proposal(
+        &self,
+        input: &FuzzInput,
+        last_vote_view: u64,
+        last_finalized_view: u64,
+        last_notarized_view: u64,
+        last_nullified_view: u64,
+    ) -> Proposal<Sha256Digest> {
+        let view = self.random_view_for_proposal(
+            input,
+            last_vote_view,
+            last_finalized_view,
+            last_notarized_view,
+            last_nullified_view,
+        );
+        let parent = self.random_parent_view(
+            input,
+            view,
+            last_finalized_view,
+            last_notarized_view,
+            last_nullified_view,
+        );
+        let payload = self.random_payload(input);
+        Proposal::new(
+            Round::new(Epoch::new(EPOCH), View::new(view)),
+            View::new(parent),
+            payload,
+        )
+    }
+
+    fn proposal_with_view(
+        &self,
+        proposal: &Proposal<Sha256Digest>,
+        view: u64,
+    ) -> Proposal<Sha256Digest> {
+        proposal_with_view(proposal, view)
+    }
+
+    fn proposal_with_parent_view(
+        &self,
+        proposal: &Proposal<Sha256Digest>,
+        view: u64,
+    ) -> Proposal<Sha256Digest> {
+        proposal_with_parent_view(proposal, view)
+    }
+
+    fn mutate_proposal(
+        &self,
+        input: &FuzzInput,
+        proposal: &Proposal<Sha256Digest>,
+        _last_vote_view: u64,
+        _last_finalized_view: u64,
+        _last_notarized_view: u64,
+        _last_nullified_view: u64,
+    ) -> Proposal<Sha256Digest> {
+        let view = proposal.view().get();
+        let parent = proposal.parent.get();
+        let bump = if input.random_bool() { 1 } else { 2 };
+        match input.random_byte() % 3 {
+            0 => proposal_with_view(proposal, view.saturating_add(bump)),
+            1 => proposal_with_parent(proposal, parent.saturating_add(bump)),
+            _ => {
+                let view = view.saturating_add(bump);
+                let parent = parent.saturating_add(bump);
+                Proposal::new(
+                    Round::new(Epoch::new(EPOCH), View::new(view)),
+                    View::new(parent),
+                    proposal.payload,
+                )
+            }
+        }
+    }
+
+    fn mutate_nullify_view(
+        &self,
+        input: &FuzzInput,
+        last_vote_view: u64,
+        _last_finalized_view: u64,
+        _last_notarized_view: u64,
+        _last_nullified_view: u64,
+    ) -> u64 {
+        let bump = if input.random_bool() { 1 } else { 2 };
+        last_vote_view.saturating_add(bump)
+    }
+
+    fn random_view_for_proposal(
+        &self,
+        input: &FuzzInput,
+        last_vote_view: u64,
+        _last_finalized_view: u64,
+        _last_notarized_view: u64,
+        _last_nullified_view: u64,
+    ) -> u64 {
+        let bump = if input.random_bool() { 1 } else { 2 };
+        last_vote_view.saturating_add(bump)
+    }
+
+    fn random_parent_view(
+        &self,
+        input: &FuzzInput,
+        base_view: u64,
+        _last_finalized_view: u64,
+        _last_notarized_view: u64,
+        _last_nullified_view: u64,
+    ) -> u64 {
+        let bump = if input.random_bool() { 1 } else { 2 };
+        base_view.saturating_add(bump)
+    }
+
+    fn random_payload(&self, input: &FuzzInput) -> Sha256Digest {
+        random_payload(input)
+    }
+
+    fn mutate_certificate_bytes(&self, input: &FuzzInput, cert: &[u8]) -> Vec<u8> {
+        tweak_bytes(input, cert)
+    }
+
+    fn mutate_resolver_bytes(&self, input: &FuzzInput, msg: &[u8]) -> Vec<u8> {
+        tweak_bytes(input, msg)
     }
 }
 
