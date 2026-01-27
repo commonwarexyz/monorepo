@@ -45,18 +45,6 @@ pub async fn destroy(config: Option<&PathBuf>, tag: Option<&str>) -> Result<(), 
     };
     info!(tag = tag.as_str(), "loaded configuration");
 
-    // Validate that all regions are enabled
-    let ec2_client = ec2::create_client(Region::new(MONITORING_REGION)).await;
-    let enabled_regions = ec2::get_enabled_regions(&ec2_client).await?;
-    let disabled: Vec<_> = all_regions
-        .iter()
-        .filter(|r| !enabled_regions.contains(*r))
-        .cloned()
-        .collect();
-    if !disabled.is_empty() {
-        return Err(Error::RegionsNotEnabled(disabled));
-    }
-
     // Ensure deployment directory exists
     let tag_directory = deployer_directory(Some(&tag));
     if !tag_directory.exists() {
