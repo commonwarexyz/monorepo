@@ -78,14 +78,6 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
     let tag = &config.tag;
     info!(tag = tag.as_str(), "loaded configuration");
 
-    // Create a temporary directory for local files
-    let tag_directory = deployer_directory(Some(tag));
-    if tag_directory.exists() {
-        return Err(Error::CreationAttempted);
-    }
-    std::fs::create_dir_all(&tag_directory)?;
-    info!(path = ?tag_directory, "created tag directory");
-
     // Ensure no instance is duplicated or named MONITORING_NAME
     let mut instance_names = HashSet::new();
     for instance in &config.instances {
@@ -96,6 +88,31 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
             return Err(Error::InvalidInstanceName(instance.name.clone()));
         }
     }
+
+    // Determine unique regions
+    let mut regions: BTreeSet<String> = config.instances.iter().map(|i| i.region.clone()).collect();
+    regions.insert(MONITORING_REGION.to_string());
+
+    // Validate that all regions are enabled (before writing anything to disk)
+    let ec2_client = ec2::create_client(Region::new(MONITORING_REGION)).await;
+    let enabled_regions = ec2::get_enabled_regions(&ec2_client).await?;
+    let disabled: Vec<_> = regions
+        .iter()
+        .filter(|r| !enabled_regions.contains(*r))
+        .cloned()
+        .collect();
+    if !disabled.is_empty() {
+        return Err(Error::RegionsNotEnabled(disabled));
+    }
+    info!(?regions, "validated all regions are enabled");
+
+    // Create a temporary directory for local files
+    let tag_directory = deployer_directory(Some(tag));
+    if tag_directory.exists() {
+        return Err(Error::CreationAttempted);
+    }
+    std::fs::create_dir_all(&tag_directory)?;
+    info!(path = ?tag_directory, "created tag directory");
 
     // Get public IP address of the deployer
     let deployer_ip = get_public_ip().await?;
@@ -121,10 +138,6 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
     }
     let public_key = std::fs::read_to_string(&public_key_path)?;
     let private_key = private_key_path.to_str().unwrap();
-
-    // Determine unique regions
-    let mut regions: BTreeSet<String> = config.instances.iter().map(|i| i.region.clone()).collect();
-    regions.insert(MONITORING_REGION.to_string());
 
     // Persist deployment metadata early to enable `destroy --tag` on failure
     let metadata = Metadata {
