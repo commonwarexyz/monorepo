@@ -91,12 +91,16 @@ where
             Index::new(context.with_label("snapshot"), db_config.translator.clone());
 
         // Get the start of the log.
-        let start_loc = journal.pruning_boundary();
+        let start_loc = journal.pruning_boundary().await;
 
         // Build snapshot from the log
         build_snapshot_from_log(start_loc, &journal.journal, &mut snapshot, |_, _| {}).await?;
 
-        let last_commit_loc = journal.size().checked_sub(1).expect("commit should exist");
+        let last_commit_loc = journal
+            .size()
+            .await
+            .checked_sub(1)
+            .expect("commit should exist");
 
         let mut db = Self {
             journal,

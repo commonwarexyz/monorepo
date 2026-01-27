@@ -295,7 +295,7 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
         buffer: NonZeroUsize,
         start_section: u64,
         mut start_offset: u64,
-    ) -> Result<impl Stream<Item = Result<(u64, u64, u32, V), Error>> + Send + '_, Error> {
+    ) -> Result<impl Stream<Item = Result<(u64, u64, u32, V), Error>> + Send, Error> {
         // Collect all blobs to replay (keeping blob reference for potential resize)
         let codec_config = self.codec_config.clone();
         let compressed = self.compression.is_some();

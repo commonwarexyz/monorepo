@@ -62,7 +62,7 @@ where
     }
 
     async fn resize(&mut self, start: Location) -> Result<(), Self::Error> {
-        if self.size() <= start {
+        if self.size().await <= start {
             self.clear_to_size(*start).await
         } else {
             self.prune(*start).await.map(|_| ())
@@ -101,7 +101,7 @@ where
     }
 
     async fn resize(&mut self, start: Location) -> Result<(), Self::Error> {
-        if self.size() <= start {
+        if self.size().await <= start {
             self.clear_to_size(*start).await
         } else {
             self.prune(*start).await.map(|_| ())

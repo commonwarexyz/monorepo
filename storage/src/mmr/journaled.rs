@@ -297,16 +297,19 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
                     .expect("metadata prune position is not 8 bytes"),
             )
         });
+        let pruning_boundary = journal.pruning_boundary().await;
         let oldest_retained_pos = journal
             .oldest_retained_pos()
-            .unwrap_or_else(|| journal.pruning_boundary());
+            .await
+            .unwrap_or(pruning_boundary);
         if metadata_prune_pos > oldest_retained_pos {
             // Metadata is ahead of journal (crashed before completing journal prune).
             // Prune the journal to match metadata.
             journal.prune(metadata_prune_pos).await?;
             if journal
                 .oldest_retained_pos()
-                .unwrap_or_else(|| journal.pruning_boundary())
+                .await
+                .unwrap_or(pruning_boundary)
                 != oldest_retained_pos
             {
                 // This should only happen in the event of some failure during the last attempt to
@@ -1931,8 +1934,8 @@ mod tests {
             // Prune to position 30 (this stores pinned nodes and updates metadata)
             let prune_pos = Position::new(30);
             mmr.prune_to_pos(prune_pos).await.unwrap();
-            let expected_root = mmr.root();
-            let expected_size = mmr.size();
+            let expected_root = mmr.root().await;
+            let expected_size = mmr.size().await;
             drop(mmr);
 
             // Reopen the MMR - should recover correctly with metadata ahead of
@@ -1941,9 +1944,9 @@ mod tests {
                 .await
                 .unwrap();
 
-            assert_eq!(mmr.pruned_to_pos(), prune_pos);
-            assert_eq!(mmr.size(), expected_size);
-            assert_eq!(mmr.root(), expected_root);
+            assert_eq!(mmr.pruned_to_pos().await, prune_pos);
+            assert_eq!(mmr.size().await, expected_size);
+            assert_eq!(mmr.root().await, expected_root);
 
             mmr.destroy().await.unwrap();
         });

@@ -15,7 +15,7 @@ use commonware_codec::{Codec, CodecShared};
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, RwLock, Storage};
 use commonware_utils::NZUsize;
 use core::ops::Range;
-use futures::{future::Either, lock::Mutex, stream, Stream, StreamExt as _};
+use futures::{lock::Mutex, stream, Stream, StreamExt as _};
 use std::num::{NonZeroU64, NonZeroUsize};
 use tracing::{debug, warn};
 
@@ -127,7 +127,7 @@ impl<C> Config<C> {
 /// data.oldest_retained_pos(). This should never occur because we always prune the data journal
 /// before the offsets journal.
 /// Inner state protected by a single lock.
-struct Inner<E: Storage + Metrics, V: Codec> {
+struct Inner<E: Clock + Storage + Metrics, V: Codec> {
     /// The underlying variable-length data journal.
     data: variable::Journal<E, V>,
 
@@ -169,7 +169,7 @@ pub struct Journal<E: Clock + Storage + Metrics, V: Codec> {
     items_per_section: u64,
 }
 
-impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
+impl<E: Clock + Storage + Metrics, V: CodecShared> Journal<E, V> {
     /// Initialize a contiguous variable journal.
     ///
     /// # Crash Recovery
@@ -539,54 +539,47 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
     ///  - [Error::ItemOutOfRange] if `start_pos` exceeds the journal size.
     pub async fn replay(
         &self,
-        _buffer_size: NonZeroUsize,
+        buffer_size: NonZeroUsize,
         start_pos: u64,
-    ) -> Result<impl Stream<Item = Result<(u64, V), Error>> + Send + '_, Error> {
-        // Validate bounds first
-        {
+    ) -> Result<impl Stream<Item = Result<(u64, V), Error>> + Send, Error> {
+        let items_per_section = self.items_per_section;
+
+        // Validate inputs and get inner stream.
+        let inner_stream = {
             let inner = self.inner.read().await;
+
+            // Validate bounds.
             if start_pos < inner.oldest_retained_pos {
                 return Err(Error::ItemPruned(start_pos));
             }
             if start_pos > inner.size {
                 return Err(Error::ItemOutOfRange(start_pos));
             }
-            if start_pos == inner.size {
-                return Ok(Either::Left(stream::empty()));
-            }
-        }
 
-        // Create a stream that reads items one by one using unfold.
-        // Each iteration acquires a read lock, reads one item, and releases the lock.
-        let items_per_section = self.items_per_section;
-        let replay_stream = stream::unfold(start_pos, move |pos| async move {
-            let inner = self.inner.read().await;
-
-            // Check if we've reached the end
-            if pos >= inner.size {
-                return None;
-            }
-
-            // Check if item has been pruned (can happen if a concurrent prune() removed this item).
-            if pos < inner.oldest_retained_pos {
-                return Some((Err(Error::ItemPruned(pos)), pos + 1));
-            }
-
-            // Read the item
-            let offset = match inner.offsets.read(pos).await {
-                Ok(o) => o,
-                Err(e) => return Some((Err(e), pos + 1)),
-            };
-            let section = position_to_section(pos, items_per_section);
-            let item = match inner.data.get(section, offset).await {
-                Ok(v) => v,
-                Err(e) => return Some((Err(e), pos + 1)),
+            // Get the starting offset and section. For empty range (start_pos == size),
+            // use a section beyond existing data so data.replay returns empty naturally.
+            let (start_section, start_offset) = if start_pos < inner.size {
+                let offset = inner.offsets.read(start_pos).await?;
+                let section = position_to_section(start_pos, items_per_section);
+                (section, offset)
+            } else {
+                (u64::MAX, 0)
             };
 
-            Some((Ok((pos, item)), pos + 1))
-        });
+            // Return the inner stream.
+            inner
+                .data
+                .replay(buffer_size, start_section, start_offset)
+                .await?
+        };
 
-        Ok(Either::Right(replay_stream))
+        // Map the stream to add positions. The data journal yields (section, offset, size, item),
+        // but we need (position, item). Zip with position counter starting from start_pos.
+        let stream = inner_stream
+            .zip(stream::iter(start_pos..))
+            .map(|(result, pos)| result.map(|(_section, _offset, _size, item)| (pos, item)));
+
+        Ok(stream)
     }
 
     /// Read the item at the given position.
@@ -666,12 +659,6 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
         Ok(())
     }
 
-    /// Return the section number where the next append will write.
-    async fn current_section(&self) -> u64 {
-        let inner = self.inner.read().await;
-        position_to_section(inner.size, self.items_per_section)
-    }
-
     /// Align the offsets journal and data journal to be consistent in case a crash occurred
     /// on a previous run and left the journals in an inconsistent state.
     ///
@@ -717,7 +704,7 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
                 // SAFETY: data is non-empty (checked above)
                 let data_first_section = data.oldest_section().unwrap();
                 let data_section_start = data_first_section * items_per_section;
-                let target_pos = data_section_start.max(offsets.pruning_boundary());
+                let target_pos = data_section_start.max(offsets.pruning_boundary().await);
 
                 warn!("crash repair: clearing offsets to {target_pos} (empty section crash)");
                 offsets.clear_to_size(target_pos).await?;
@@ -751,7 +738,7 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
 
         // Align pruning state
         // We always prune data before offsets, so offsets should never be "ahead" by a section.
-        match offsets.oldest_retained_pos() {
+        match offsets.oldest_retained_pos().await {
             Some(oldest_retained_pos) if oldest_retained_pos < data_oldest_pos => {
                 // Offsets behind on pruning -- prune to catch up
                 warn!("crash repair: pruning offsets journal to {data_oldest_pos}");
@@ -771,7 +758,7 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
             None => {
                 // Offsets journal is empty but data journal isn't.
                 // It should always be in the same section as the data journal, though.
-                let offsets_pruning_boundary = offsets.pruning_boundary();
+                let offsets_pruning_boundary = offsets.pruning_boundary().await;
                 let offsets_first_section = offsets_pruning_boundary / items_per_section;
                 if offsets_first_section != data_first_section {
                     return Err(Error::Corruption(format!(
@@ -790,7 +777,7 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
         //
         // Note: Corruption checks above ensure pruning_boundary is in data_first_section,
         // so the subtraction in oldest_items cannot underflow.
-        let pruning_boundary = offsets.pruning_boundary();
+        let pruning_boundary = offsets.pruning_boundary().await;
         let data_size = if data_first_section == data_last_section {
             pruning_boundary + items_in_last_section
         } else {
@@ -800,7 +787,7 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
         };
 
         // Align sizes
-        let offsets_size = offsets.size();
+        let offsets_size = offsets.size().await;
         if offsets_size > data_size {
             // Crashed after writing offsets but before writing data.
             warn!("crash repair: rewinding offsets from {offsets_size} to {data_size}");
@@ -811,12 +798,14 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
         }
 
         // Final invariant checks
+
         assert_eq!(offsets.size().await, data_size);
 
         // After alignment, offsets and data must be in the same section.
         // We return pruning_boundary from offsets as the true pruning boundary.
         let offsets_oldest = offsets
             .oldest_retained_pos()
+            .await
             .expect("offsets should have data after alignment");
         assert_eq!(
             offsets_oldest / items_per_section,
@@ -955,7 +944,7 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Persistable for Journal<E, V>
 }
 
 #[cfg(test)]
-impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
+impl<E: Clock + Storage + Metrics, V: CodecShared> Journal<E, V> {
     /// Test helper: Prune the internal data journal directly (simulates crash scenario).
     pub(crate) async fn test_prune_data(&self, section: u64) -> Result<bool, Error> {
         let mut inner = self.inner.write().await;
@@ -1128,16 +1117,111 @@ mod tests {
                 ));
             }
 
-            // Replay should fail if we try to replay pruned items.
-            {
-                let res = journal.replay(NZUsize!(20), 0).await;
-                assert!(matches!(res, Err(crate::journal::Error::ItemPruned(_))));
-            }
-
             // Can append new data starting at position 20
             let pos = journal.append(999).await.unwrap();
             assert_eq!(pos, 20);
             assert_eq!(journal.read(20).await.unwrap(), 999);
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// Test replay behavior for variable-length items.
+    #[test_traced]
+    fn test_variable_replay() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "replay".to_string(),
+                items_per_section: NZU64!(10),
+                compression: None,
+                codec_config: (),
+                buffer_pool: PoolRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
+                write_buffer: NZUsize!(1024),
+            };
+
+            // Initialize journal
+            let journal = Journal::<_, u64>::init(context, cfg).await.unwrap();
+
+            // Append 40 items across 4 sections (0-3)
+            for i in 0..40u64 {
+                journal.append(i * 100).await.unwrap();
+            }
+
+            // Test 1: Full replay
+            {
+                let stream = journal.replay(NZUsize!(20), 0).await.unwrap();
+                futures::pin_mut!(stream);
+                for i in 0..40u64 {
+                    let (pos, item) = stream.next().await.unwrap().unwrap();
+                    assert_eq!(pos, i);
+                    assert_eq!(item, i * 100);
+                }
+                assert!(stream.next().await.is_none());
+            }
+
+            // Test 2: Partial replay from middle of section
+            {
+                let stream = journal.replay(NZUsize!(20), 15).await.unwrap();
+                futures::pin_mut!(stream);
+                for i in 15..40u64 {
+                    let (pos, item) = stream.next().await.unwrap().unwrap();
+                    assert_eq!(pos, i);
+                    assert_eq!(item, i * 100);
+                }
+                assert!(stream.next().await.is_none());
+            }
+
+            // Test 3: Partial replay from section boundary
+            {
+                let stream = journal.replay(NZUsize!(20), 20).await.unwrap();
+                futures::pin_mut!(stream);
+                for i in 20..40u64 {
+                    let (pos, item) = stream.next().await.unwrap().unwrap();
+                    assert_eq!(pos, i);
+                    assert_eq!(item, i * 100);
+                }
+                assert!(stream.next().await.is_none());
+            }
+
+            // Test 4: Prune and verify replay from pruned
+            journal.prune(20).await.unwrap();
+            {
+                let res = journal.replay(NZUsize!(20), 0).await;
+                assert!(matches!(res, Err(crate::journal::Error::ItemPruned(_))));
+            }
+            {
+                let res = journal.replay(NZUsize!(20), 19).await;
+                assert!(matches!(res, Err(crate::journal::Error::ItemPruned(_))));
+            }
+
+            // Test 5: Replay from exactly at pruning boundary after prune
+            {
+                let stream = journal.replay(NZUsize!(20), 20).await.unwrap();
+                futures::pin_mut!(stream);
+                for i in 20..40u64 {
+                    let (pos, item) = stream.next().await.unwrap().unwrap();
+                    assert_eq!(pos, i);
+                    assert_eq!(item, i * 100);
+                }
+                assert!(stream.next().await.is_none());
+            }
+
+            // Test 6: Replay from the end
+            {
+                let stream = journal.replay(NZUsize!(20), 40).await.unwrap();
+                futures::pin_mut!(stream);
+                assert!(stream.next().await.is_none());
+            }
+
+            // Test 7: Replay beyond the end (should error)
+            {
+                let res = journal.replay(NZUsize!(20), 41).await;
+                assert!(matches!(
+                    res,
+                    Err(crate::journal::Error::ItemOutOfRange(41))
+                ));
+            }
 
             journal.destroy().await.unwrap();
         });
@@ -1949,7 +2033,7 @@ mod tests {
             };
 
             // Initialize at position 7 (mid-section, 7 % 5 = 2)
-            let mut journal =
+            let journal =
                 Journal::<_, u64>::init_at_size(context.with_label("first"), cfg.clone(), 7)
                     .await
                     .unwrap();
@@ -1960,8 +2044,8 @@ mod tests {
                 assert_eq!(pos, 7 + i);
             }
 
-            assert_eq!(journal.size(), 10);
-            assert_eq!(journal.oldest_retained_pos(), Some(7));
+            assert_eq!(journal.size().await, 10);
+            assert_eq!(journal.oldest_retained_pos().await, Some(7));
 
             // Sync and reopen
             journal.sync().await.unwrap();
@@ -1973,8 +2057,8 @@ mod tests {
                 .unwrap();
 
             // Size and oldest_retained_pos should be preserved correctly
-            assert_eq!(journal.size(), 10);
-            assert_eq!(journal.oldest_retained_pos(), Some(7));
+            assert_eq!(journal.size().await, 10);
+            assert_eq!(journal.oldest_retained_pos().await, Some(7));
 
             // Verify data
             for i in 0..3u64 {
@@ -2003,7 +2087,7 @@ mod tests {
             };
 
             // Initialize at position 7 (mid-section)
-            let mut journal =
+            let journal =
                 Journal::<_, u64>::init_at_size(context.with_label("first"), cfg.clone(), 7)
                     .await
                     .unwrap();
@@ -2014,8 +2098,8 @@ mod tests {
                 assert_eq!(pos, 7 + i);
             }
 
-            assert_eq!(journal.size(), 15);
-            assert_eq!(journal.oldest_retained_pos(), Some(7));
+            assert_eq!(journal.size().await, 15);
+            assert_eq!(journal.oldest_retained_pos().await, Some(7));
 
             // Sync and reopen
             journal.sync().await.unwrap();
@@ -2027,8 +2111,8 @@ mod tests {
                 .unwrap();
 
             // Verify state preserved
-            assert_eq!(journal.size(), 15);
-            assert_eq!(journal.oldest_retained_pos(), Some(7));
+            assert_eq!(journal.size().await, 15);
+            assert_eq!(journal.oldest_retained_pos().await, Some(7));
 
             // Verify all data
             for i in 0..8u64 {
@@ -2054,7 +2138,7 @@ mod tests {
             };
 
             // Phase 1: Create data and offsets, then simulate data-only pruning crash.
-            let mut journal = Journal::<_, u64>::init(context.with_label("first"), cfg.clone())
+            let journal = Journal::<_, u64>::init(context.with_label("first"), cfg.clone())
                 .await
                 .unwrap();
             for i in 0..7u64 {
@@ -2063,33 +2147,40 @@ mod tests {
             journal.sync().await.unwrap();
 
             // Simulate crash after data was cleared but before offsets were pruned.
-            journal.data.clear().await.unwrap();
+            journal.inner.write().await.data.clear().await.unwrap();
             drop(journal);
 
             // Phase 2: Init triggers data-empty repair and should treat journal as fully pruned at size 7.
-            let mut journal = Journal::<_, u64>::init(context.with_label("second"), cfg.clone())
+            let journal = Journal::<_, u64>::init(context.with_label("second"), cfg.clone())
                 .await
                 .unwrap();
-            assert_eq!(journal.size(), 7);
-            assert_eq!(journal.oldest_retained_pos(), None);
+            assert_eq!(journal.size().await, 7);
+            assert_eq!(journal.oldest_retained_pos().await, None);
 
             // Append one item at position 7.
             let pos = journal.append(777).await.unwrap();
             assert_eq!(pos, 7);
-            assert_eq!(journal.size(), 8);
+            assert_eq!(journal.size().await, 8);
             assert_eq!(journal.read(7).await.unwrap(), 777);
 
             // Sync only the data journal to simulate a crash before offsets are synced.
             let section = 7 / cfg.items_per_section.get();
-            journal.data.sync(section).await.unwrap();
+            journal
+                .inner
+                .write()
+                .await
+                .data
+                .sync(section)
+                .await
+                .unwrap();
             drop(journal);
 
             // Phase 3: Reopen and verify we did not lose the appended item.
             let journal = Journal::<_, u64>::init(context.with_label("third"), cfg.clone())
                 .await
                 .unwrap();
-            assert_eq!(journal.size(), 8);
-            assert_eq!(journal.oldest_retained_pos(), Some(7));
+            assert_eq!(journal.size().await, 8);
+            assert_eq!(journal.oldest_retained_pos().await, Some(7));
             assert_eq!(journal.read(7).await.unwrap(), 777);
 
             journal.destroy().await.unwrap();
@@ -2111,7 +2202,7 @@ mod tests {
             };
 
             // Initialize at position 7 (mid-section)
-            let mut journal =
+            let journal =
                 Journal::<_, u64>::init_at_size(context.with_label("first"), cfg.clone(), 7)
                     .await
                     .unwrap();
@@ -2122,7 +2213,7 @@ mod tests {
             }
 
             // Sync only the data journal, not offsets (simulate crash)
-            journal.data.sync(1).await.unwrap();
+            journal.inner.write().await.data.sync(1).await.unwrap();
             // Don't sync offsets - simulates crash after data write but before offsets write
             drop(journal);
 
@@ -2132,8 +2223,8 @@ mod tests {
                 .unwrap();
 
             // Verify recovery
-            assert_eq!(journal.size(), 10);
-            assert_eq!(journal.oldest_retained_pos(), Some(7));
+            assert_eq!(journal.size().await, 10);
+            assert_eq!(journal.oldest_retained_pos().await, Some(7));
 
             // Verify data is accessible
             for i in 0..3u64 {
@@ -2157,7 +2248,7 @@ mod tests {
                 write_buffer: NZUsize!(1024),
             };
 
-            let mut journal =
+            let journal =
                 Journal::<_, u64>::init_at_size(context.with_label("first"), cfg.clone(), 7)
                     .await
                     .unwrap();
@@ -2167,11 +2258,11 @@ mod tests {
                 let pos = journal.append(700 + i).await.unwrap();
                 assert_eq!(pos, 7 + i);
             }
-            assert_eq!(journal.oldest_retained_pos(), Some(7));
+            assert_eq!(journal.oldest_retained_pos().await, Some(7));
 
             // Prune to a position within the same section should not move oldest_retained_pos backwards.
             journal.prune(8).await.unwrap();
-            assert_eq!(journal.oldest_retained_pos(), Some(7));
+            assert_eq!(journal.oldest_retained_pos().await, Some(7));
             assert!(matches!(journal.read(6).await, Err(Error::ItemPruned(6))));
             assert_eq!(journal.read(7).await.unwrap(), 700);
 
@@ -2960,6 +3051,56 @@ mod tests {
             }
 
             journal.destroy().await.unwrap();
+        });
+    }
+}
+
+#[cfg(test)]
+mod repro_tests {
+    use super::*;
+    use commonware_macros::test_traced;
+    use commonware_runtime::{buffer::pool::PoolRef, deterministic, Runner};
+    use commonware_utils::{NZUsize, NZU16, NZU64};
+
+    #[test_traced]
+    fn test_variable_replay_mid_section_bug() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "repro_bug".to_string(),
+                items_per_section: NZU64!(10),
+                compression: None,
+                codec_config: (),
+                buffer_pool: PoolRef::new(NZU16!(1024), NZUsize!(10)),
+                write_buffer: NZUsize!(1024),
+            };
+
+            let journal = Journal::<_, u64>::init(context, cfg).await.unwrap();
+
+            // Append 5 items (middle of first section)
+            for i in 0..5 {
+                journal.append(i as u64).await.unwrap();
+            }
+
+            let size = journal.size().await;
+            assert_eq!(size, 5);
+
+            // Replay from size (should be empty)
+            let stream = journal.replay(NZUsize!(1024), size).await.unwrap();
+            futures::pin_mut!(stream);
+
+            let mut items = Vec::new();
+            while let Some(result) = stream.next().await {
+                items.push(result.unwrap());
+            }
+
+            assert_eq!(
+                items.len(),
+                0,
+                "Replay from size should be empty, but got {} items: {:?}",
+                items.len(),
+                items
+            );
         });
     }
 }

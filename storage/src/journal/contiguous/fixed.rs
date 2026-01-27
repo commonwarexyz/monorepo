@@ -72,7 +72,7 @@ use crate::{
 };
 use commonware_codec::CodecFixedShared;
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, RwLock, Storage};
-use futures::{lock::Mutex, stream::Stream};
+use futures::{lock::Mutex, stream::Stream, StreamExt};
 use std::{
     num::{NonZeroU64, NonZeroUsize},
     ops::Range,
@@ -107,7 +107,7 @@ pub struct Config {
 /// Inner state protected by a single RwLock.
 struct Inner<E: Clock + Storage + Metrics, A: CodecFixedShared> {
     /// The underlying segmented journal.
-    segmented: SegmentedJournal<E, A>,
+    journal: SegmentedJournal<E, A>,
 
     /// Total number of items appended (not affected by pruning).
     size: u64,
@@ -207,7 +207,7 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
             write_buffer: cfg.write_buffer,
         };
 
-        let mut segmented =
+        let mut journal =
             SegmentedJournal::init(context.with_label("blobs"), segmented_cfg).await?;
 
         // Initialize metadata store
@@ -229,7 +229,7 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
 
         // Recover bounds from metadata and/or blobs
         let (pruning_boundary, size, needs_metadata_update) =
-            Self::recover_bounds(&segmented, items_per_blob, meta_pruning_boundary).await?;
+            Self::recover_bounds(&journal, items_per_blob, meta_pruning_boundary).await?;
 
         // Persist metadata if needed
         if needs_metadata_update {
@@ -248,11 +248,11 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         // reopen even after pruning all items. The tail blob is at `size / items_per_blob` (where
         // the next append would go).
         let tail_section = size / items_per_blob;
-        segmented.ensure_section_exists(tail_section).await?;
+        journal.ensure_section_exists(tail_section).await?;
 
         Ok(Self {
             inner: RwLock::new(Inner {
-                segmented,
+                journal,
                 size,
                 metadata,
                 pruning_boundary,
@@ -440,7 +440,7 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         };
         let mut metadata =
             Metadata::<_, u64, Vec<u8>>::init(context.with_label("meta"), meta_cfg).await?;
-        let mut segmented =
+        let mut journal =
             SegmentedJournal::init(context.with_label("blobs"), segmented_cfg).await?;
 
         // Clear blobs before updating metadata.
@@ -448,8 +448,8 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         // - Crash after clear: no blobs, recovery returns (0, 0), metadata ignored
         // - Crash after create: old metadata triggers "metadata ahead" warning,
         //   recovery falls back to blob state.
-        segmented.clear().await?;
-        segmented.ensure_section_exists(tail_section).await?;
+        journal.clear().await?;
+        journal.ensure_section_exists(tail_section).await?;
 
         // Persist metadata if pruning_boundary is mid-section.
         if !size.is_multiple_of(items_per_blob) {
@@ -462,7 +462,7 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
 
         Ok(Self {
             inner: RwLock::new(Inner {
-                segmented,
+                journal,
                 size,
                 metadata,
                 pruning_boundary: size, // No data exists yet
@@ -557,26 +557,41 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     /// Only the tail section can have pending updates since historical sections are synced
     /// when they become full.
     pub async fn sync(&self) -> Result<(), Error> {
-        // Sync inner journal
-        let tail_section = self.size / self.items_per_blob;
-        self.inner.sync(tail_section).await?;
+        let _write_guard = self.write_lock.lock().await; // avoid race conditions due to metadata
+
+        let (pruning_boundary, pruning_boundary_from_metadata) = {
+            let inner = self.inner.read().await;
+
+            // Sync the tail section
+            let tail_section = inner.size / self.items_per_blob;
+
+            // The tail section may not exist yet if the previous section was just filled, but syncing a
+            // non-existent section is safe (returns Ok).
+            inner.journal.sync(tail_section).await?;
+
+            let pruning_boundary = inner.pruning_boundary;
+            let pruning_boundary_from_metadata = inner.metadata.get(&PRUNING_BOUNDARY_KEY).cloned();
+
+            (pruning_boundary, pruning_boundary_from_metadata)
+        };
 
         // Persist metadata only when pruning_boundary is mid-section.
-        if !self.pruning_boundary.is_multiple_of(self.items_per_blob) {
-            let needs_update = self
-                .metadata
-                .get(&PRUNING_BOUNDARY_KEY)
-                .is_none_or(|bytes| bytes.as_slice() != self.pruning_boundary.to_be_bytes());
+        if !pruning_boundary.is_multiple_of(self.items_per_blob) {
+            let needs_update = pruning_boundary_from_metadata
+                .is_none_or(|bytes| bytes.as_slice() != pruning_boundary.to_be_bytes());
+
             if needs_update {
-                self.metadata.put(
+                let mut inner = self.inner.write().await;
+                inner.metadata.put(
                     PRUNING_BOUNDARY_KEY,
-                    self.pruning_boundary.to_be_bytes().to_vec(),
+                    pruning_boundary.to_be_bytes().to_vec(),
                 );
-                self.metadata.sync().await?;
+                inner.metadata.sync().await?;
             }
-        } else if self.metadata.get(&PRUNING_BOUNDARY_KEY).is_some() {
-            self.metadata.remove(&PRUNING_BOUNDARY_KEY);
-            self.metadata.sync().await?;
+        } else if pruning_boundary_from_metadata.is_some() {
+            let mut inner = self.inner.write().await;
+            inner.metadata.remove(&PRUNING_BOUNDARY_KEY);
+            inner.metadata.sync().await?;
         }
 
         Ok(())
@@ -600,7 +615,7 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
             let position = inner.size;
             let (section, _pos_in_section) = self.position_to_section(position);
 
-            inner.segmented.append(section, item).await?;
+            inner.journal.append(section, item).await?;
             inner.size += 1;
 
             // Return early if no sync is needed (section not full).
@@ -617,14 +632,14 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         // this completes.
         {
             let inner = self.inner.read().await;
-            inner.segmented.sync(section).await?;
+            inner.journal.sync(section).await?;
         }
 
         // Ensure the new tail section exists, as required to maintain the invariant. This must
         // happen after the previous section is synced.
         {
             let mut inner = self.inner.write().await;
-            inner.segmented.ensure_section_exists(section + 1).await?;
+            inner.journal.ensure_section_exists(section + 1).await?;
         }
 
         Ok(position)
@@ -648,7 +663,7 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
             std::cmp::Ordering::Less => {}
         }
 
-        if size < self.pruning_boundary {
+        if size < inner.pruning_boundary {
             return Err(Error::InvalidRewind(size));
         }
 
@@ -656,11 +671,11 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         let section_start = section * self.items_per_blob;
 
         // Calculate offset within section for rewind
-        let first_in_section = self.pruning_boundary.max(section_start);
+        let first_in_section = inner.pruning_boundary.max(section_start);
         let pos_in_section = size - first_in_section;
         let byte_offset = pos_in_section * Self::CHUNK_SIZE_U64;
 
-        inner.segmented.rewind(section, byte_offset).await?;
+        inner.journal.rewind(section, byte_offset).await?;
         inner.size = size;
 
         Ok(())
@@ -711,7 +726,7 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         let pos_in_section = pos - first_in_section;
 
         inner
-            .segmented
+            .journal
             .get(section, pos_in_section)
             .await
             .map_err(|e| {
@@ -736,89 +751,71 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     /// - [Error::Corruption] if a middle section is incomplete
     pub async fn replay(
         &self,
-        _buffer: NonZeroUsize,
+        buffer: NonZeroUsize,
         start_pos: u64,
-    ) -> Result<impl Stream<Item = Result<(u64, A), Error>> + Send + '_, Error> {
+    ) -> Result<impl Stream<Item = Result<(u64, A), Error>> + Send, Error> {
         let items_per_blob = self.items_per_blob;
-        let pruning_boundary = self.pruning_boundary;
 
-        // Validate bounds and compute effective start position
-        let effective_start_pos = {
+        // Validate inputs and get inner stream.
+        let (inner_stream, pruning_boundary) = {
             let inner = self.inner.read().await;
+
+            // Validate bounds.
             if start_pos > inner.size {
                 return Err(Error::ItemOutOfRange(start_pos));
             }
-            if start_pos == inner.size {
-                return Ok(futures::future::Either::Left(futures::stream::empty()));
-            }
 
             // Make sure we aren't trying to read pruned items.
-            let pruning_boundary = inner
-                .segmented
-                .oldest_section()
-                .map(|s| s * items_per_blob)
-                .unwrap_or(0);
-            if start_pos < pruning_boundary {
+            if start_pos < inner.pruning_boundary {
                 return Err(Error::ItemPruned(start_pos));
             }
 
-            // Effective start position is max of requested start and pruning boundary
-            let effective_start_pos = start_pos.max(pruning_boundary);
+            let start_section = start_pos / self.items_per_blob;
+            let section_start = start_section * self.items_per_blob;
 
-            // Validate section integrity: all non-tail sections that we touch during replay must be
-            // full.
-            let start_section = effective_start_pos / items_per_blob;
-            let tail_section = inner.size / items_per_blob;
+            // Calculate start position within the section
+            let first_in_section = inner.pruning_boundary.max(section_start);
+            let start_pos_in_section = start_pos - first_in_section;
 
-            for section in start_section..tail_section {
-                let section_len = inner.segmented.section_len(section).await?;
-                let expected_len = items_per_blob;
-                if section_len != expected_len {
-                    return Err(Error::Corruption(format!(
-                        "section {} has {} items but expected {}",
-                        section, section_len, expected_len
+            let items_per_blob = self.items_per_blob;
+
+            // Check all middle sections (not oldest, not tail) in range are complete.
+            // The oldest section may be partial due to mid-section pruning boundary.
+            // The tail section may be partial because it's not been fully filled yet.
+            let journal = &inner.journal;
+            if let (Some(oldest), Some(newest)) =
+                (journal.oldest_section(), journal.newest_section())
+            {
+                // Start from max(start_section, oldest+1) to skip oldest which may be partial
+                let first_to_check = start_section.max(oldest + 1);
+                for section in first_to_check..newest {
+                    let len = journal.section_len(section).await?;
+                    if len < items_per_blob {
+                        return Err(Error::Corruption(format!(
+                        "section {section} incomplete: expected {items_per_blob} items, got {len}"
                     )));
+                    }
                 }
             }
 
-            effective_start_pos
+            let inner_stream = journal
+                .replay(start_section, start_pos_in_section, buffer)
+                .await?;
+            // Return inner stream.
+            (inner_stream, inner.pruning_boundary)
         };
 
-        // Create a stream that reads items one by one using unfold.
-        // Each iteration acquires a read lock, reads one item, and releases the lock.
-        let replay_stream = futures::stream::unfold(effective_start_pos, move |pos| async move {
-            let inner = self.inner.read().await;
-
-            // Check if we've reached the end
-            if pos >= inner.size {
-                return None;
-            }
-
-            // Check if position has been pruned (can happen if prune runs between iterations)
-            let pruning_boundary = inner
-                .segmented
-                .oldest_section()
-                .map(|s| s * items_per_blob)
-                .unwrap_or(0);
-
-            if pos < pruning_boundary {
-                // A concurrent prune() must have removed this item, return error.
-                return Some((Err(Error::ItemPruned(pos)), pruning_boundary));
-            }
-
-            // Read the item
-            let section = pos / items_per_blob;
-            let pos_in_section = pos % items_per_blob;
-
-            let item = match inner.segmented.get(section, pos_in_section).await {
-                Ok(v) => v,
-                Err(e) => return Some((Err(e), pos + 1)),
-            };
-
-            Some((Ok((pos, item)), pos + 1))
+        // Transform (section, pos_in_section, item) to (global_pos, item).
+        let stream = inner_stream.map(move |result| {
+            result.map(|(section, pos_in_section, item)| {
+                let section_start = section * items_per_blob;
+                let first_in_section = pruning_boundary.max(section_start);
+                let global_pos = first_in_section + pos_in_section;
+                (global_pos, item)
+            })
         });
 
-        Ok(futures::future::Either::Right(replay_stream))
+        Ok(stream)
     }
 
     /// Allow the journal to prune items older than `min_item_pos`. The journal may not prune all
@@ -841,16 +838,17 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         // Cap to tail section. The tail section is guaranteed to exist by our invariant.
         let min_section = std::cmp::min(target_section, tail_section);
 
-        let pruned = inner.segmented.prune(min_section).await?;
+        let pruned = inner.journal.prune(min_section).await?;
 
         // After pruning, update pruning_boundary to the start of the oldest remaining section
         if pruned {
             let new_oldest = inner
+                .journal
                 .oldest_section()
                 .expect("all sections pruned - violates tail section invariant");
             // Pruning boundary only moves forward
-            assert!(self.pruning_boundary < new_oldest * self.items_per_blob);
-            self.pruning_boundary = new_oldest * self.items_per_blob;
+            assert!(inner.pruning_boundary < new_oldest * self.items_per_blob);
+            inner.pruning_boundary = new_oldest * self.items_per_blob;
         }
 
         Ok(pruned)
@@ -859,10 +857,11 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     /// Remove any persisted data created by the journal.
     pub async fn destroy(self) -> Result<(), Error> {
         // Destroy inner journal
-        self.inner.into_inner().segmented.destroy().await?;
+        let inner = self.inner.into_inner();
+        inner.journal.destroy().await?;
 
         // Destroy metadata
-        self.metadata.destroy().await?;
+        inner.metadata.destroy().await?;
 
         Ok(())
     }
@@ -883,19 +882,17 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         //   recovery falls back to blob state
         let _write_guard = self.write_lock.lock().await;
         let mut inner = self.inner.write().await;
-        inner.clear().await?;
+        inner.journal.clear().await?;
         let tail_section = new_size / self.items_per_blob;
-        inner.ensure_section_exists(tail_section).await?;
+        inner.journal.ensure_section_exists(tail_section).await?;
 
         inner.size = new_size;
         inner.pruning_boundary = new_size; // No data exists
 
         // Persist metadata only when pruning_boundary is mid-section.
         if !inner.pruning_boundary.is_multiple_of(self.items_per_blob) {
-            inner.metadata.put(
-                PRUNING_BOUNDARY_KEY,
-                inner.pruning_boundary.to_be_bytes().to_vec(),
-            );
+            let value = inner.pruning_boundary.to_be_bytes().to_vec();
+            inner.metadata.put(PRUNING_BOUNDARY_KEY, value);
             inner.metadata.sync().await?;
         } else if inner.metadata.get(&PRUNING_BOUNDARY_KEY).is_some() {
             inner.metadata.remove(&PRUNING_BOUNDARY_KEY);
@@ -909,14 +906,14 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     #[cfg(test)]
     pub(crate) async fn test_oldest_section(&self) -> Option<u64> {
         let inner = self.inner.read().await;
-        inner.segmented.oldest_section()
+        inner.journal.oldest_section()
     }
 
     /// Test helper: Get the newest section from the internal segmented journal.
     #[cfg(test)]
     pub(crate) async fn test_newest_section(&self) -> Option<u64> {
         let inner = self.inner.read().await;
-        inner.segmented.newest_section()
+        inner.journal.newest_section()
     }
 }
 
@@ -1080,7 +1077,7 @@ mod tests {
                 .await
                 .expect("Failed to sync legacy blob");
 
-            let mut journal = Journal::<_, Digest>::init(context.with_label("first"), cfg.clone())
+            let journal = Journal::<_, Digest>::init(context.with_label("first"), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
             journal.append(test_digest(1)).await.unwrap();
@@ -1102,7 +1099,7 @@ mod tests {
             let legacy_partition = cfg.partition.clone();
             let blobs_partition = blob_partition(&cfg);
 
-            let mut journal = Journal::<_, Digest>::init(context.with_label("first"), cfg.clone())
+            let journal = Journal::<_, Digest>::init(context.with_label("first"), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
             journal.append(test_digest(1)).await.unwrap();
@@ -1655,7 +1652,7 @@ mod tests {
                 .await
                 .expect("Failed to re-initialize journal");
             // The truncation invalidates the last page, which is removed. This loses one item.
-            assert_eq!(journal.pruning_boundary, 0);
+            assert_eq!(journal.pruning_boundary().await, 0);
             assert_eq!(journal.size().await, 4);
             drop(journal);
 
@@ -1680,7 +1677,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(NZU64!(5));
-            let mut journal =
+            let journal =
                 Journal::<_, Digest>::init_at_size(context.with_label("first"), cfg.clone(), 7)
                     .await
                     .expect("failed to initialize journal at size");
@@ -1693,8 +1690,8 @@ mod tests {
                     .expect("failed to append data");
             }
             journal.sync().await.expect("failed to sync journal");
-            assert_eq!(journal.pruning_boundary, 7);
-            assert_eq!(journal.size(), 15);
+            assert_eq!(journal.pruning_boundary().await, 7);
+            assert_eq!(journal.size().await, 15);
             drop(journal);
 
             // Corrupt the oldest section by truncating one byte (drops one item on recovery).
@@ -2262,13 +2259,13 @@ mod tests {
 
             // Initialize at position 7 (middle of section 1 with items_per_blob=5)
             // No data exists yet, so oldest_retained_pos is None
-            let mut journal = Journal::<_, Digest>::init_at_size(context.clone(), cfg.clone(), 7)
+            let journal = Journal::<_, Digest>::init_at_size(context.clone(), cfg.clone(), 7)
                 .await
                 .unwrap();
 
             assert_eq!(journal.size().await, 7);
             // No data exists yet after init_at_size
-            assert_eq!(journal.oldest_retained_pos(), None);
+            assert_eq!(journal.oldest_retained_pos().await, None);
 
             // Reading before pruning_boundary should return ItemPruned
             assert!(matches!(journal.read(5).await, Err(Error::ItemPruned(5))));
@@ -2280,7 +2277,7 @@ mod tests {
             assert_eq!(journal.size().await, 8);
             assert_eq!(journal.read(7).await.unwrap(), test_digest(700));
             // Now oldest_retained_pos should be 7 (first data position)
-            assert_eq!(journal.oldest_retained_pos(), Some(7));
+            assert_eq!(journal.oldest_retained_pos().await, Some(7));
 
             journal.destroy().await.unwrap();
         });
@@ -2432,7 +2429,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(NZU64!(10));
-            let journal = Journal::init(context.with_label("journal"), cfg.clone())
+            let mut journal = Journal::init(context.with_label("journal"), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
 
@@ -2495,22 +2492,24 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(NZU64!(5));
-            let mut journal = Journal::<_, Digest>::init(context.with_label("first"), cfg.clone())
+            let journal = Journal::<_, Digest>::init(context.with_label("first"), cfg.clone())
                 .await
                 .unwrap();
 
             for i in 0..5u64 {
                 journal.append(test_digest(i)).await.unwrap();
             }
-            let tail_section = journal.size / journal.items_per_blob;
-            journal.inner.sync(tail_section).await.unwrap();
+            let inner = journal.inner.read().await;
+            let tail_section = inner.size / journal.items_per_blob;
+            inner.journal.sync(tail_section).await.unwrap();
+            drop(inner);
             drop(journal);
 
             let journal = Journal::<_, Digest>::init(context.with_label("second"), cfg.clone())
                 .await
                 .unwrap();
-            assert_eq!(journal.pruning_boundary(), 0);
-            assert_eq!(journal.size(), 5);
+            assert_eq!(journal.pruning_boundary().await, 0);
+            assert_eq!(journal.size().await, 5);
             journal.destroy().await.unwrap();
         });
     }
@@ -2521,19 +2520,21 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(NZU64!(5));
-            let mut journal =
+            let journal =
                 Journal::<_, Digest>::init_at_size(context.with_label("first"), cfg.clone(), 7)
                     .await
                     .unwrap();
             for i in 0..3u64 {
                 journal.append(test_digest(i)).await.unwrap();
             }
-            assert_eq!(journal.inner.newest_section(), Some(2));
+            assert_eq!(journal.inner.read().await.journal.newest_section(), Some(2));
             journal.sync().await.unwrap();
 
             // Simulate metadata deletion (corruption).
-            journal.metadata.clear();
-            journal.metadata.sync().await.unwrap();
+            let mut inner = journal.inner.write().await;
+            inner.metadata.clear();
+            inner.metadata.sync().await.unwrap();
+            drop(inner);
             drop(journal);
 
             // Section 1 has items 7,8,9 but metadata is missing, so falls back to blob-based boundary.
@@ -2556,22 +2557,24 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(NZU64!(5));
-            let mut journal =
+            let journal =
                 Journal::<_, Digest>::init_at_size(context.with_label("first"), cfg.clone(), 7)
                     .await
                     .unwrap();
             for i in 0..3u64 {
                 journal.append(test_digest(i)).await.unwrap();
             }
-            let tail_section = journal.size / journal.items_per_blob;
-            journal.inner.sync(tail_section).await.unwrap();
+            let inner = journal.inner.read().await;
+            let tail_section = inner.size / journal.items_per_blob;
+            inner.journal.sync(tail_section).await.unwrap();
+            drop(inner);
             drop(journal);
 
             let journal = Journal::<_, Digest>::init(context.with_label("second"), cfg.clone())
                 .await
                 .unwrap();
-            assert_eq!(journal.pruning_boundary(), 7);
-            assert_eq!(journal.size(), 10);
+            assert_eq!(journal.pruning_boundary().await, 7);
+            assert_eq!(journal.size().await, 10);
             journal.destroy().await.unwrap();
         });
     }
@@ -2581,25 +2584,27 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(NZU64!(5));
-            let mut journal =
+            let journal =
                 Journal::<_, Digest>::init_at_size(context.with_label("first"), cfg.clone(), 7)
                     .await
                     .unwrap();
             for i in 0..10u64 {
                 journal.append(test_digest(i)).await.unwrap();
             }
-            assert_eq!(journal.size(), 17);
+            assert_eq!(journal.size().await, 17);
             journal.prune(10).await.unwrap();
 
-            let tail_section = journal.size / journal.items_per_blob;
-            journal.inner.sync(tail_section).await.unwrap();
+            let inner = journal.inner.read().await;
+            let tail_section = inner.size / journal.items_per_blob;
+            inner.journal.sync(tail_section).await.unwrap();
+            drop(inner);
             drop(journal);
 
             let journal = Journal::<_, Digest>::init(context.with_label("second"), cfg.clone())
                 .await
                 .unwrap();
-            assert_eq!(journal.pruning_boundary(), 10);
-            assert_eq!(journal.size(), 17);
+            assert_eq!(journal.pruning_boundary().await, 10);
+            assert_eq!(journal.size().await, 17);
             journal.destroy().await.unwrap();
         });
     }
@@ -2612,7 +2617,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = test_cfg(NZU64!(5));
             // init_at_size(7) sets pruning_boundary = 7 (mid-section in section 1)
-            let mut journal =
+            let journal =
                 Journal::<_, Digest>::init_at_size(context.with_label("first"), cfg.clone(), 7)
                     .await
                     .unwrap();
@@ -2622,7 +2627,7 @@ mod tests {
             }
             // Prune to position 5 (section 1 start) should NOT move boundary back from 7 to 5
             journal.prune(5).await.unwrap();
-            assert_eq!(journal.pruning_boundary(), 7);
+            assert_eq!(journal.pruning_boundary().await, 7);
             journal.destroy().await.unwrap();
         });
     }
@@ -2637,7 +2642,7 @@ mod tests {
 
             // Initialize at position 7 (mid-section with items_per_blob=5)
             // Section 1 (positions 5-9) begins mid-section: only positions 7, 8, 9 have data
-            let mut journal = Journal::<_, Digest>::init_at_size(context.clone(), cfg.clone(), 7)
+            let journal = Journal::<_, Digest>::init_at_size(context.clone(), cfg.clone(), 7)
                 .await
                 .unwrap();
 
@@ -2646,7 +2651,7 @@ mod tests {
                 let pos = journal.append(test_digest(100 + i)).await.unwrap();
                 assert_eq!(pos, 7 + i);
             }
-            assert_eq!(journal.size(), 20);
+            assert_eq!(journal.size().await, 20);
             journal.sync().await.unwrap();
 
             // Replay from pruning_boundary
@@ -2700,7 +2705,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = test_cfg(NZU64!(5));
 
-            let mut journal = Journal::<_, Digest>::init_at_size(context.clone(), cfg.clone(), 10)
+            let journal = Journal::<_, Digest>::init_at_size(context.clone(), cfg.clone(), 10)
                 .await
                 .unwrap();
 
@@ -2708,15 +2713,15 @@ mod tests {
             for i in 0..3u64 {
                 journal.append(test_digest(i)).await.unwrap();
             }
-            assert_eq!(journal.size(), 13);
+            assert_eq!(journal.size().await, 13);
 
             // Rewind to position 11 should work
             journal.rewind(11).await.unwrap();
-            assert_eq!(journal.size(), 11);
+            assert_eq!(journal.size().await, 11);
 
             // Rewind to position 10 (pruning_boundary) should work
             journal.rewind(10).await.unwrap();
-            assert_eq!(journal.size(), 10);
+            assert_eq!(journal.size().await, 10);
 
             // Rewind to before pruning_boundary should fail
             let result = journal.rewind(9).await;
@@ -2733,7 +2738,7 @@ mod tests {
             let cfg = test_cfg(NZU64!(5));
 
             // Setup: Create a journal with some data and mid-section metadata
-            let mut journal =
+            let journal =
                 Journal::<_, Digest>::init_at_size(context.with_label("first"), cfg.clone(), 7)
                     .await
                     .unwrap();
@@ -2752,8 +2757,8 @@ mod tests {
             let journal = Journal::<_, Digest>::init(context.with_label("crash1"), cfg.clone())
                 .await
                 .expect("init failed after clear crash");
-            assert_eq!(journal.size(), 0);
-            assert_eq!(journal.pruning_boundary(), 0);
+            assert_eq!(journal.size().await, 0);
+            assert_eq!(journal.pruning_boundary().await, 0);
             drop(journal);
 
             // Restore metadata for next scenario (it might have been removed by init)
@@ -2791,9 +2796,9 @@ mod tests {
                 .expect("init failed after create crash");
 
             // Should recover to blob state (section 0 aligned)
-            assert_eq!(journal.pruning_boundary(), 0);
+            assert_eq!(journal.pruning_boundary().await, 0);
             // Size is 0 because blob is empty
-            assert_eq!(journal.size(), 0);
+            assert_eq!(journal.size().await, 0);
             journal.destroy().await.unwrap();
         });
     }
@@ -2806,7 +2811,7 @@ mod tests {
 
             // Setup: Init at 12 (Section 2, offset 2)
             // Metadata = 12
-            let mut journal =
+            let journal =
                 Journal::<_, Digest>::init_at_size(context.with_label("first"), cfg.clone(), 12)
                     .await
                     .unwrap();
@@ -2834,8 +2839,101 @@ mod tests {
                     .expect("init failed after clear_to_size crash");
 
             // Should fallback to blobs
-            assert_eq!(journal.pruning_boundary(), 0);
-            assert_eq!(journal.size(), 0);
+            assert_eq!(journal.pruning_boundary().await, 0);
+            assert_eq!(journal.size().await, 0);
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_fixed_journal_replay_error_conditions() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(NZU64!(10));
+
+            // Initialize journal
+            let journal = Journal::init(context, cfg).await.unwrap();
+
+            // Append 40 items across 4 sections (0-3)
+            for i in 0..40u64 {
+                journal.append(test_digest(i)).await.unwrap();
+            }
+
+            // Test 1: Full replay
+            {
+                let stream = journal.replay(NZUsize!(20), 0).await.unwrap();
+                futures::pin_mut!(stream);
+                for i in 0..40u64 {
+                    let (pos, item) = stream.next().await.unwrap().unwrap();
+                    assert_eq!(pos, i);
+                    assert_eq!(item, test_digest(i));
+                }
+                assert!(stream.next().await.is_none());
+            }
+
+            // Test 2: Partial replay from middle of section
+            {
+                let stream = journal.replay(NZUsize!(20), 15).await.unwrap();
+                futures::pin_mut!(stream);
+                for i in 15..40u64 {
+                    let (pos, item) = stream.next().await.unwrap().unwrap();
+                    assert_eq!(pos, i);
+                    assert_eq!(item, test_digest(i));
+                }
+                assert!(stream.next().await.is_none());
+            }
+
+            // Test 3: Partial replay from section boundary
+            {
+                let stream = journal.replay(NZUsize!(20), 20).await.unwrap();
+                futures::pin_mut!(stream);
+                for i in 20..40u64 {
+                    let (pos, item) = stream.next().await.unwrap().unwrap();
+                    assert_eq!(pos, i);
+                    assert_eq!(item, test_digest(i));
+                }
+                assert!(stream.next().await.is_none());
+            }
+
+            // Test 4: Prune and verify replay from pruned
+            journal.prune(20).await.unwrap();
+            {
+                let res = journal.replay(NZUsize!(20), 0).await;
+                assert!(matches!(res, Err(crate::journal::Error::ItemPruned(_))));
+            }
+            {
+                let res = journal.replay(NZUsize!(20), 19).await;
+                assert!(matches!(res, Err(crate::journal::Error::ItemPruned(_))));
+            }
+
+            // Test 5: Replay from exactly at pruning boundary after prune
+            {
+                let stream = journal.replay(NZUsize!(20), 20).await.unwrap();
+                futures::pin_mut!(stream);
+                for i in 20..40u64 {
+                    let (pos, item) = stream.next().await.unwrap().unwrap();
+                    assert_eq!(pos, i);
+                    assert_eq!(item, test_digest(i));
+                }
+                assert!(stream.next().await.is_none());
+            }
+
+            // Test 6: Replay from the end
+            {
+                let stream = journal.replay(NZUsize!(20), 40).await.unwrap();
+                futures::pin_mut!(stream);
+                assert!(stream.next().await.is_none());
+            }
+
+            // Test 7: Replay beyond the end (should error)
+            {
+                let res = journal.replay(NZUsize!(20), 41).await;
+                assert!(matches!(
+                    res,
+                    Err(crate::journal::Error::ItemOutOfRange(41))
+                ));
+            }
+
             journal.destroy().await.unwrap();
         });
     }
