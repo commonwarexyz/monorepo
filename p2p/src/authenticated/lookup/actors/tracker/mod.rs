@@ -7,7 +7,7 @@ use std::{collections::HashSet, net::IpAddr, time::Duration};
 
 pub mod actor;
 mod directory;
-mod ingress;
+pub(crate) mod ingress;
 mod metadata;
 mod metrics;
 mod record;

@@ -185,6 +185,7 @@ impl<E: Spawner + Clock + Network + Resolver + CryptoRngCore + Metrics, C: Signe
                         continue;
                     };
                     self.dial_peer(reservation, ingress, &mut supervisor).await;
+                    break;
                 }
             },
             _ = self.context.sleep_until(query_deadline) => {
@@ -203,5 +204,128 @@ impl<E: Spawner + Clock + Network + Resolver + CryptoRngCore + Metrics, C: Signe
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::authenticated::lookup::actors::tracker::{ingress::Releaser, Metadata};
+    use commonware_cryptography::ed25519::{PrivateKey, PublicKey};
+    use commonware_runtime::{deterministic, Runner};
+    use commonware_stream::Config as StreamConfig;
+    use futures::StreamExt;
+    use std::{
+        net::{Ipv4Addr, SocketAddr},
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        },
+        time::Duration,
+    };
+
+    fn test_stream_config(signing_key: PrivateKey) -> StreamConfig<PrivateKey> {
+        StreamConfig {
+            signing_key,
+            namespace: b"test".to_vec(),
+            max_message_size: 1024,
+            handshake_timeout: Duration::from_secs(5),
+            synchrony_bound: Duration::from_secs(5),
+            max_handshake_age: Duration::from_secs(10),
+        }
+    }
+
+    #[test]
+    fn test_dialer_dials_one_peer_per_tick() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let signer = PrivateKey::from_seed(0);
+            let dial_frequency = Duration::from_millis(100);
+
+            let dialer_cfg = Config {
+                stream_cfg: test_stream_config(signer),
+                dial_frequency,
+                query_frequency: Duration::from_secs(60),
+                allow_private_ips: true,
+            };
+
+            let dialer = Actor::new(context.with_label("dialer"), dialer_cfg);
+
+            // Create a mock tracker that counts dial attempts
+            let dial_count = Arc::new(AtomicUsize::new(0));
+            let dial_count_clone = dial_count.clone();
+
+            let (tracker_mailbox, mut tracker_rx) =
+                UnboundedMailbox::<tracker::Message<PublicKey>>::new();
+
+            // Create a releaser for reservations
+            let (releaser_mailbox, _releaser_rx) =
+                UnboundedMailbox::<tracker::Message<PublicKey>>::new();
+            let releaser = Releaser::new(releaser_mailbox);
+
+            // Generate 5 peers
+            let peers: Vec<PublicKey> = (1..=5)
+                .map(|i| PrivateKey::from_seed(i).public_key())
+                .collect();
+            let peers_clone = peers.clone();
+
+            // Mock tracker handler
+            context
+                .with_label("mock_tracker")
+                .spawn(move |context| async move {
+                    while let Some(msg) = tracker_rx.next().await {
+                        match msg {
+                            tracker::Message::Dialable { responder } => {
+                                let _ = responder.send(peers_clone.clone());
+                            }
+                            tracker::Message::Dial {
+                                public_key,
+                                reservation,
+                            } => {
+                                dial_count_clone.fetch_add(1, Ordering::SeqCst);
+                                let metadata = Metadata::Dialer(public_key);
+                                let res = tracker::Reservation::new(metadata, releaser.clone());
+                                let ingress: Ingress =
+                                    SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 8000).into();
+                                let _ = reservation.send(Some((res, ingress)));
+                            }
+                            _ => {}
+                        }
+                    }
+                    drop(context);
+                });
+
+            // Create a supervisor that just drops spawn messages
+            let (supervisor, mut supervisor_rx) =
+                Mailbox::<spawner::Message<_, _, PublicKey>>::new(100);
+            context
+                .with_label("supervisor")
+                .spawn(move |context| async move {
+                    while supervisor_rx.next().await.is_some() {}
+                    drop(context);
+                });
+
+            // Start the dialer
+            let _handle = dialer.start(tracker_mailbox, supervisor);
+
+            // Wait for the query tick to populate the queue
+            context.sleep(Duration::from_millis(50)).await;
+
+            // Reset dial count after initial setup
+            dial_count.store(0, Ordering::SeqCst);
+
+            // Wait for exactly 3 dial ticks
+            context
+                .sleep(dial_frequency * 3 + Duration::from_millis(50))
+                .await;
+
+            // Should have dialed exactly 3 peers (one per tick), not all 5
+            let count = dial_count.load(Ordering::SeqCst);
+            assert_eq!(
+                count, 3,
+                "expected 3 dial attempts (one per tick), got {}",
+                count
+            );
+        });
     }
 }
