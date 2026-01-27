@@ -68,11 +68,12 @@ cfg_if::cfg_if! {
             pub fn send(&mut self, data: &[u8]) -> Result<Vec<u8>, Error> {
                 let nonce_bytes = self.nonce.inc()?;
                 let nonce = aead::Nonce::assume_unique_for_key(nonce_bytes);
-                let mut in_out = data.to_vec();
+                let mut scratch = Vec::with_capacity(data.len() + CIPHERTEXT_OVERHEAD);
+                scratch.extend_from_slice(data);
                 self.inner
-                    .expose(|cipher| cipher.seal_in_place_append_tag(nonce, aead::Aad::empty(), &mut in_out))
+                    .expose(|cipher| cipher.seal_in_place_append_tag(nonce, aead::Aad::empty(), &mut scratch))
                     .map_err(|_| Error::EncryptionFailed)?;
-                Ok(in_out)
+                Ok(scratch)
             }
         }
 
@@ -110,11 +111,12 @@ cfg_if::cfg_if! {
             pub fn recv(&mut self, encrypted_data: &[u8]) -> Result<Vec<u8>, Error> {
                 let nonce_bytes = self.nonce.inc()?;
                 let nonce = aead::Nonce::assume_unique_for_key(nonce_bytes);
-                let mut in_out = encrypted_data.to_vec();
-                let plaintext = self.inner
-                    .expose(|cipher| cipher.open_in_place(nonce, aead::Aad::empty(), &mut in_out))
+                let mut scratch = encrypted_data.to_vec();
+                self.inner
+                    .expose(|cipher| cipher.open_in_place(nonce, aead::Aad::empty(), &mut scratch))
                     .map_err(|_| Error::DecryptionFailed)?;
-                Ok(plaintext.to_vec())
+                scratch.truncate(encrypted_data.len() - CIPHERTEXT_OVERHEAD);
+                Ok(scratch)
             }
         }
     } else {
@@ -179,5 +181,27 @@ cfg_if::cfg_if! {
                     .map_err(|_| Error::DecryptionFailed)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use commonware_utils::test_rng;
+
+    #[test]
+    fn test_recv_ciphertext_too_short() {
+        let mut rng = test_rng();
+        let mut recv = RecvCipher::new(&mut rng);
+        let short_data = vec![0u8; CIPHERTEXT_OVERHEAD - 1];
+        assert!(matches!(recv.recv(&short_data), Err(Error::DecryptionFailed)));
+    }
+
+    #[test]
+    fn test_recv_ciphertext_exactly_overhead() {
+        let mut rng = test_rng();
+        let mut recv = RecvCipher::new(&mut rng);
+        let tag_only = vec![0u8; CIPHERTEXT_OVERHEAD];
+        assert!(matches!(recv.recv(&tag_only), Err(Error::DecryptionFailed)));
     }
 }
