@@ -683,7 +683,9 @@ impl PooledBufMut {
         let buffer = unsafe { ManuallyDrop::take(&mut self.buffer) };
         let cursor = self.cursor;
         let len = self.len;
-        let pool = self.pool.clone();
+        // Move the weak out instead of cloning, otherwise cloning and then forgetting
+        // would leak the original weak reference.
+        let pool = std::mem::take(&mut self.pool);
 
         // Prevent Drop from running
         std::mem::forget(self);
