@@ -12,16 +12,11 @@ use alloc::{
     vec::Vec,
 };
 use commonware_cryptography::Digest;
+#[cfg(feature = "std")]
+use commonware_parallel::ThreadPool;
 use core::{mem, ops::Range};
-cfg_if::cfg_if! {
-    if #[cfg(feature = "std")] {
-        use commonware_parallel::ThreadPool;
-        use rayon::prelude::*;
-    } else {
-        /// Dummy type for no_std builds where parallelization is not available.
-        pub struct ThreadPool;
-    }
-}
+#[cfg(feature = "std")]
+use rayon::prelude::*;
 
 /// Minimum number of digest computations required during batch updates to trigger parallelization.
 #[cfg(feature = "std")]
@@ -546,11 +541,10 @@ impl<D: Digest> DirtyMmr<D> {
 
     /// Compute updated digests for dirty nodes and compute the root, converting this MMR into a
     /// [CleanMmr].
-    #[cfg_attr(not(feature = "std"), allow(unused_variables))]
     pub fn merkleize(
         mut self,
         hasher: &mut impl Hasher<Digest = D>,
-        pool: Option<ThreadPool>,
+        #[cfg(feature = "std")] pool: Option<ThreadPool>,
     ) -> CleanMmr<D> {
         #[cfg(feature = "std")]
         match (pool, self.state.dirty_nodes.len() >= MIN_TO_PARALLELIZE) {
@@ -722,11 +716,10 @@ impl<D: Digest> DirtyMmr<D> {
     /// Returns [Error::LeafOutOfBounds] if any location is not an existing leaf.
     /// Returns [Error::LocationOverflow] if any location exceeds [crate::mmr::MAX_LOCATION].
     /// Returns [Error::ElementPruned] if any of the leaves has been pruned.
-    #[cfg_attr(not(feature = "std"), allow(unused_variables))]
     pub fn update_leaf_batched<T: AsRef<[u8]> + Sync>(
         &mut self,
         hasher: &mut impl Hasher<Digest = D>,
-        pool: Option<ThreadPool>,
+        #[cfg(feature = "std")] pool: Option<ThreadPool>,
         updates: &[(Location, T)],
     ) -> Result<(), Error> {
         if updates.is_empty() {
