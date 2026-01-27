@@ -2,10 +2,10 @@
 //! fixed-size values.
 
 use crate::fixed::{
-    gen_random_kv, gen_random_kv_batched, get_any_ordered_fixed, get_any_ordered_variable,
-    get_any_unordered_fixed, get_any_unordered_variable, get_current_ordered_fixed,
-    get_current_ordered_variable, get_current_unordered_fixed, get_current_unordered_variable,
-    Digest, Variant, VARIANTS,
+    gen_random_kv, gen_random_kv_batched, get_any_ordered_fixed_par, get_any_ordered_variable_par,
+    get_any_unordered_fixed_par, get_any_unordered_variable_par, get_current_ordered_fixed_par,
+    get_current_ordered_variable_par, get_current_unordered_fixed_par,
+    get_current_unordered_variable_par, Digest, Variant, VARIANTS,
 };
 use commonware_runtime::{
     benchmarks::{context, tokio},
@@ -48,7 +48,7 @@ fn bench_fixed_generate(c: &mut Criterion) {
                                         (operations / COMMITS_PER_ITERATION) as u32;
                                     let duration = match variant {
                                         Variant::AnyUnorderedFixed => {
-                                            let db = get_any_unordered_fixed(ctx.clone()).await;
+                                            let db = get_any_unordered_fixed_par(ctx.clone()).await;
                                             test_db(
                                                 db,
                                                 use_batch,
@@ -60,7 +60,7 @@ fn bench_fixed_generate(c: &mut Criterion) {
                                             .unwrap()
                                         }
                                         Variant::AnyOrderedFixed => {
-                                            let db = get_any_ordered_fixed(ctx.clone()).await;
+                                            let db = get_any_ordered_fixed_par(ctx.clone()).await;
                                             test_db(
                                                 db,
                                                 use_batch,
@@ -72,7 +72,8 @@ fn bench_fixed_generate(c: &mut Criterion) {
                                             .unwrap()
                                         }
                                         Variant::AnyUnorderedVariable => {
-                                            let db = get_any_unordered_variable(ctx.clone()).await;
+                                            let db =
+                                                get_any_unordered_variable_par(ctx.clone()).await;
                                             test_db(
                                                 db,
                                                 use_batch,
@@ -84,7 +85,8 @@ fn bench_fixed_generate(c: &mut Criterion) {
                                             .unwrap()
                                         }
                                         Variant::AnyOrderedVariable => {
-                                            let db = get_any_ordered_variable(ctx.clone()).await;
+                                            let db =
+                                                get_any_ordered_variable_par(ctx.clone()).await;
                                             test_db(
                                                 db,
                                                 use_batch,
@@ -96,7 +98,8 @@ fn bench_fixed_generate(c: &mut Criterion) {
                                             .unwrap()
                                         }
                                         Variant::CurrentUnorderedFixed => {
-                                            let db = get_current_unordered_fixed(ctx.clone()).await;
+                                            let db =
+                                                get_current_unordered_fixed_par(ctx.clone()).await;
                                             test_db(
                                                 db,
                                                 use_batch,
@@ -108,7 +111,8 @@ fn bench_fixed_generate(c: &mut Criterion) {
                                             .unwrap()
                                         }
                                         Variant::CurrentOrderedFixed => {
-                                            let db = get_current_ordered_fixed(ctx.clone()).await;
+                                            let db =
+                                                get_current_ordered_fixed_par(ctx.clone()).await;
                                             test_db(
                                                 db,
                                                 use_batch,
@@ -121,7 +125,8 @@ fn bench_fixed_generate(c: &mut Criterion) {
                                         }
                                         Variant::CurrentUnorderedVariable => {
                                             let db =
-                                                get_current_unordered_variable(ctx.clone()).await;
+                                                get_current_unordered_variable_par(ctx.clone())
+                                                    .await;
                                             test_db(
                                                 db,
                                                 use_batch,
@@ -134,7 +139,7 @@ fn bench_fixed_generate(c: &mut Criterion) {
                                         }
                                         Variant::CurrentOrderedVariable => {
                                             let db =
-                                                get_current_ordered_variable(ctx.clone()).await;
+                                                get_current_ordered_variable_par(ctx.clone()).await;
                                             test_db(
                                                 db,
                                                 use_batch,

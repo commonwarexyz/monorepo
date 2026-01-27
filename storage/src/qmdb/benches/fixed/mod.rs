@@ -5,7 +5,7 @@
 //! they perform.
 
 use commonware_cryptography::{Hasher, Sha256};
-use commonware_parallel::Rayon;
+use commonware_parallel::{Rayon, Sequential, Strategy};
 use commonware_runtime::{buffer::PoolRef, tokio::Context, RayonPoolSpawner};
 use commonware_storage::{
     kv::{Deletable as _, Updatable as _},
@@ -95,20 +95,31 @@ const DELETE_FREQUENCY: u32 = 10;
 /// Default write buffer size.
 const WRITE_BUFFER_SIZE: NonZeroUsize = NZUsize!(1024);
 
-/// Clean (Merkleized, Durable) Db type aliases for Any databases.
-type UFixedDb = UFixed<Context, Digest, Digest, Sha256, EightCap, Rayon>;
-type OFixedDb = OFixed<Context, Digest, Digest, Sha256, EightCap, Rayon>;
-type UVAnyDb = UVariable<Context, Digest, Digest, Sha256, EightCap, Rayon>;
-type OVAnyDb = OVariable<Context, Digest, Digest, Sha256, EightCap, Rayon>;
+/// Clean (Merkleized, Durable) Db type aliases for Any databases (Sequential).
+type UFixedDbSeq = UFixed<Context, Digest, Digest, Sha256, EightCap, Sequential>;
+type OFixedDbSeq = OFixed<Context, Digest, Digest, Sha256, EightCap, Sequential>;
+type UVAnyDbSeq = UVariable<Context, Digest, Digest, Sha256, EightCap, Sequential>;
+type OVAnyDbSeq = OVariable<Context, Digest, Digest, Sha256, EightCap, Sequential>;
 
-type UCurrentDb = UCurrent<Context, Digest, Digest, Sha256, EightCap, CHUNK_SIZE, Rayon>;
-type OCurrentDb = OCurrent<Context, Digest, Digest, Sha256, EightCap, CHUNK_SIZE, Rayon>;
-type UVCurrentDb = UVCurrent<Context, Digest, Digest, Sha256, EightCap, CHUNK_SIZE, Rayon>;
-type OVCurrentDb = OVCurrent<Context, Digest, Digest, Sha256, EightCap, CHUNK_SIZE, Rayon>;
+type UCurrentDbSeq = UCurrent<Context, Digest, Digest, Sha256, EightCap, CHUNK_SIZE, Sequential>;
+type OCurrentDbSeq = OCurrent<Context, Digest, Digest, Sha256, EightCap, CHUNK_SIZE, Sequential>;
+type UVCurrentDbSeq = UVCurrent<Context, Digest, Digest, Sha256, EightCap, CHUNK_SIZE, Sequential>;
+type OVCurrentDbSeq = OVCurrent<Context, Digest, Digest, Sha256, EightCap, CHUNK_SIZE, Sequential>;
+
+/// Clean (Merkleized, Durable) Db type aliases for Any databases (Rayon).
+type UFixedDbPar = UFixed<Context, Digest, Digest, Sha256, EightCap, Rayon>;
+type OFixedDbPar = OFixed<Context, Digest, Digest, Sha256, EightCap, Rayon>;
+type UVAnyDbPar = UVariable<Context, Digest, Digest, Sha256, EightCap, Rayon>;
+type OVAnyDbPar = OVariable<Context, Digest, Digest, Sha256, EightCap, Rayon>;
+
+type UCurrentDbPar = UCurrent<Context, Digest, Digest, Sha256, EightCap, CHUNK_SIZE, Rayon>;
+type OCurrentDbPar = OCurrent<Context, Digest, Digest, Sha256, EightCap, CHUNK_SIZE, Rayon>;
+type UVCurrentDbPar = UVCurrent<Context, Digest, Digest, Sha256, EightCap, CHUNK_SIZE, Rayon>;
+type OVCurrentDbPar = OVCurrent<Context, Digest, Digest, Sha256, EightCap, CHUNK_SIZE, Rayon>;
 
 /// Configuration for any QMDB.
-fn any_cfg(strategy: Rayon) -> AConfig<EightCap, Rayon> {
-    AConfig::<EightCap, Rayon> {
+fn any_cfg<S: Strategy>(strategy: S) -> AConfig<EightCap, S> {
+    AConfig::<EightCap, S> {
         mmr_journal_partition: format!("journal_{PARTITION_SUFFIX}"),
         mmr_metadata_partition: format!("metadata_{PARTITION_SUFFIX}"),
         mmr_items_per_blob: ITEMS_PER_BLOB,
@@ -123,8 +134,8 @@ fn any_cfg(strategy: Rayon) -> AConfig<EightCap, Rayon> {
 }
 
 /// Configuration for current QMDB.
-fn current_cfg(strategy: Rayon) -> CConfig<EightCap, Rayon> {
-    CConfig::<EightCap, Rayon> {
+fn current_cfg<S: Strategy>(strategy: S) -> CConfig<EightCap, S> {
+    CConfig::<EightCap, S> {
         mmr_journal_partition: format!("journal_{PARTITION_SUFFIX}"),
         mmr_metadata_partition: format!("metadata_{PARTITION_SUFFIX}"),
         mmr_items_per_blob: ITEMS_PER_BLOB,
@@ -139,8 +150,8 @@ fn current_cfg(strategy: Rayon) -> CConfig<EightCap, Rayon> {
     }
 }
 
-fn variable_any_cfg(strategy: Rayon) -> VariableAnyConfig<EightCap, (), Rayon> {
-    VariableAnyConfig::<EightCap, (), Rayon> {
+fn variable_any_cfg<S: Strategy>(strategy: S) -> VariableAnyConfig<EightCap, (), S> {
+    VariableAnyConfig::<EightCap, (), S> {
         mmr_journal_partition: format!("journal_{PARTITION_SUFFIX}"),
         mmr_metadata_partition: format!("metadata_{PARTITION_SUFFIX}"),
         mmr_items_per_blob: ITEMS_PER_BLOB,
@@ -157,8 +168,8 @@ fn variable_any_cfg(strategy: Rayon) -> VariableAnyConfig<EightCap, (), Rayon> {
 }
 
 /// Configuration for variable current QMDB.
-fn variable_current_cfg(strategy: Rayon) -> VariableCurrentConfig<EightCap, (), Rayon> {
-    VariableCurrentConfig::<EightCap, (), Rayon> {
+fn variable_current_cfg<S: Strategy>(strategy: S) -> VariableCurrentConfig<EightCap, (), S> {
+    VariableCurrentConfig::<EightCap, (), S> {
         mmr_journal_partition: format!("journal_{PARTITION_SUFFIX}"),
         mmr_metadata_partition: format!("metadata_{PARTITION_SUFFIX}"),
         mmr_items_per_blob: ITEMS_PER_BLOB,
@@ -175,68 +186,144 @@ fn variable_current_cfg(strategy: Rayon) -> VariableCurrentConfig<EightCap, (), 
     }
 }
 
-/// Get an unordered fixed Any QMDB instance in clean state.
-async fn get_any_unordered_fixed(ctx: Context) -> UFixedDb {
-    let pool = ctx.clone().create_pool(THREADS).unwrap();
-    let any_cfg = any_cfg(Rayon::with_pool(pool));
-    UFixedDb::init(ctx, any_cfg).await.unwrap()
+/// Get an unordered fixed Any QMDB instance in clean state (Sequential).
+async fn get_any_unordered_fixed_seq(ctx: Context) -> UFixedDbSeq {
+    UFixedDbSeq::init(ctx, any_cfg(Sequential)).await.unwrap()
 }
 
-/// Get an ordered fixed Any QMDB instance in clean state.
-async fn get_any_ordered_fixed(ctx: Context) -> OFixedDb {
+/// Get an unordered fixed Any QMDB instance in clean state (Parallel).
+async fn get_any_unordered_fixed_par(ctx: Context) -> UFixedDbPar {
     let pool = ctx.clone().create_pool(THREADS).unwrap();
-    let any_cfg = any_cfg(Rayon::with_pool(pool));
-    OFixedDb::init(ctx, any_cfg).await.unwrap()
-}
-
-/// Get an unordered variable Any QMDB instance in clean state.
-async fn get_any_unordered_variable(ctx: Context) -> UVAnyDb {
-    let pool = ctx.clone().create_pool(THREADS).unwrap();
-    let variable_any_cfg = variable_any_cfg(Rayon::with_pool(pool));
-    UVAnyDb::init(ctx, variable_any_cfg).await.unwrap()
-}
-
-/// Get an ordered variable Any QMDB instance in clean state.
-async fn get_any_ordered_variable(ctx: Context) -> OVAnyDb {
-    let pool = ctx.clone().create_pool(THREADS).unwrap();
-    let variable_any_cfg = variable_any_cfg(Rayon::with_pool(pool));
-    OVAnyDb::init(ctx, variable_any_cfg).await.unwrap()
-}
-
-/// Get an unordered current QMDB instance.
-async fn get_current_unordered_fixed(ctx: Context) -> UCurrentDb {
-    let pool = ctx.clone().create_pool(THREADS).unwrap();
-    let current_cfg = current_cfg(Rayon::with_pool(pool));
-    UCurrent::<_, _, _, Sha256, EightCap, CHUNK_SIZE, Rayon>::init(ctx, current_cfg)
+    UFixedDbPar::init(ctx, any_cfg(Rayon::with_pool(pool)))
         .await
         .unwrap()
 }
 
-/// Get an ordered current QMDB instance.
-async fn get_current_ordered_fixed(ctx: Context) -> OCurrentDb {
+/// Get an ordered fixed Any QMDB instance in clean state (Sequential).
+async fn get_any_ordered_fixed_seq(ctx: Context) -> OFixedDbSeq {
+    OFixedDbSeq::init(ctx, any_cfg(Sequential)).await.unwrap()
+}
+
+/// Get an ordered fixed Any QMDB instance in clean state (Parallel).
+async fn get_any_ordered_fixed_par(ctx: Context) -> OFixedDbPar {
     let pool = ctx.clone().create_pool(THREADS).unwrap();
-    let current_cfg = current_cfg(Rayon::with_pool(pool));
-    OCurrent::<_, _, _, Sha256, EightCap, CHUNK_SIZE, Rayon>::init(ctx, current_cfg)
+    OFixedDbPar::init(ctx, any_cfg(Rayon::with_pool(pool)))
         .await
         .unwrap()
 }
 
-/// Get an unordered variable current QMDB instance.
-async fn get_current_unordered_variable(ctx: Context) -> UVCurrentDb {
-    let pool = ctx.clone().create_pool(THREADS).unwrap();
-    let variable_current_cfg = variable_current_cfg(Rayon::with_pool(pool));
-    UVCurrent::<_, _, _, Sha256, EightCap, CHUNK_SIZE, Rayon>::init(ctx, variable_current_cfg)
+/// Get an unordered variable Any QMDB instance in clean state (Sequential).
+async fn get_any_unordered_variable_seq(ctx: Context) -> UVAnyDbSeq {
+    UVAnyDbSeq::init(ctx, variable_any_cfg(Sequential))
         .await
         .unwrap()
 }
 
-/// Get an ordered variable current QMDB instance.
-async fn get_current_ordered_variable(ctx: Context) -> OVCurrentDb {
+/// Get an unordered variable Any QMDB instance in clean state (Parallel).
+async fn get_any_unordered_variable_par(ctx: Context) -> UVAnyDbPar {
     let pool = ctx.clone().create_pool(THREADS).unwrap();
-    let variable_current_cfg = variable_current_cfg(Rayon::with_pool(pool));
-    OVCurrent::<_, _, _, Sha256, EightCap, CHUNK_SIZE, Rayon>::init(ctx, variable_current_cfg)
+    UVAnyDbPar::init(ctx, variable_any_cfg(Rayon::with_pool(pool)))
         .await
         .unwrap()
+}
+
+/// Get an ordered variable Any QMDB instance in clean state (Sequential).
+async fn get_any_ordered_variable_seq(ctx: Context) -> OVAnyDbSeq {
+    OVAnyDbSeq::init(ctx, variable_any_cfg(Sequential))
+        .await
+        .unwrap()
+}
+
+/// Get an ordered variable Any QMDB instance in clean state (Parallel).
+async fn get_any_ordered_variable_par(ctx: Context) -> OVAnyDbPar {
+    let pool = ctx.clone().create_pool(THREADS).unwrap();
+    OVAnyDbPar::init(ctx, variable_any_cfg(Rayon::with_pool(pool)))
+        .await
+        .unwrap()
+}
+
+/// Get an unordered current QMDB instance (Sequential).
+async fn get_current_unordered_fixed_seq(ctx: Context) -> UCurrentDbSeq {
+    UCurrent::<_, _, _, Sha256, EightCap, CHUNK_SIZE, Sequential>::init(
+        ctx,
+        current_cfg(Sequential),
+    )
+    .await
+    .unwrap()
+}
+
+/// Get an unordered current QMDB instance (Parallel).
+async fn get_current_unordered_fixed_par(ctx: Context) -> UCurrentDbPar {
+    let pool = ctx.clone().create_pool(THREADS).unwrap();
+    UCurrent::<_, _, _, Sha256, EightCap, CHUNK_SIZE, Rayon>::init(
+        ctx,
+        current_cfg(Rayon::with_pool(pool)),
+    )
+    .await
+    .unwrap()
+}
+
+/// Get an ordered current QMDB instance (Sequential).
+async fn get_current_ordered_fixed_seq(ctx: Context) -> OCurrentDbSeq {
+    OCurrent::<_, _, _, Sha256, EightCap, CHUNK_SIZE, Sequential>::init(
+        ctx,
+        current_cfg(Sequential),
+    )
+    .await
+    .unwrap()
+}
+
+/// Get an ordered current QMDB instance (Parallel).
+async fn get_current_ordered_fixed_par(ctx: Context) -> OCurrentDbPar {
+    let pool = ctx.clone().create_pool(THREADS).unwrap();
+    OCurrent::<_, _, _, Sha256, EightCap, CHUNK_SIZE, Rayon>::init(
+        ctx,
+        current_cfg(Rayon::with_pool(pool)),
+    )
+    .await
+    .unwrap()
+}
+
+/// Get an unordered variable current QMDB instance (Sequential).
+async fn get_current_unordered_variable_seq(ctx: Context) -> UVCurrentDbSeq {
+    UVCurrent::<_, _, _, Sha256, EightCap, CHUNK_SIZE, Sequential>::init(
+        ctx,
+        variable_current_cfg(Sequential),
+    )
+    .await
+    .unwrap()
+}
+
+/// Get an unordered variable current QMDB instance (Parallel).
+async fn get_current_unordered_variable_par(ctx: Context) -> UVCurrentDbPar {
+    let pool = ctx.clone().create_pool(THREADS).unwrap();
+    UVCurrent::<_, _, _, Sha256, EightCap, CHUNK_SIZE, Rayon>::init(
+        ctx,
+        variable_current_cfg(Rayon::with_pool(pool)),
+    )
+    .await
+    .unwrap()
+}
+
+/// Get an ordered variable current QMDB instance (Sequential).
+async fn get_current_ordered_variable_seq(ctx: Context) -> OVCurrentDbSeq {
+    OVCurrent::<_, _, _, Sha256, EightCap, CHUNK_SIZE, Sequential>::init(
+        ctx,
+        variable_current_cfg(Sequential),
+    )
+    .await
+    .unwrap()
+}
+
+/// Get an ordered variable current QMDB instance (Parallel).
+async fn get_current_ordered_variable_par(ctx: Context) -> OVCurrentDbPar {
+    let pool = ctx.clone().create_pool(THREADS).unwrap();
+    OVCurrent::<_, _, _, Sha256, EightCap, CHUNK_SIZE, Rayon>::init(
+        ctx,
+        variable_current_cfg(Rayon::with_pool(pool)),
+    )
+    .await
+    .unwrap()
 }
 
 /// Generate a large db with random data. The function seeds the db with exactly `num_elements`

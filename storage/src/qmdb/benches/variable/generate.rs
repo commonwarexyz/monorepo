@@ -2,8 +2,8 @@
 //! that supports variable-size values.
 
 use crate::variable::{
-    gen_random_kv, gen_random_kv_batched, get_any_ordered, get_any_unordered, get_current_ordered,
-    get_current_unordered, Digest, Variant, VARIANTS,
+    gen_random_kv, gen_random_kv_batched, get_any_ordered_par, get_any_unordered_par,
+    get_current_ordered_par, get_current_unordered_par, Digest, Variant, VARIANTS,
 };
 use commonware_runtime::{
     benchmarks::{context, tokio},
@@ -47,7 +47,7 @@ fn bench_variable_generate(c: &mut Criterion) {
                                         (operations / COMMITS_PER_ITERATION) as u32;
                                     let elapsed = match variant {
                                         Variant::AnyUnordered => {
-                                            let db = get_any_unordered(ctx.clone()).await;
+                                            let db = get_any_unordered_par(ctx.clone()).await;
                                             test_db(
                                                 db,
                                                 use_batch,
@@ -59,7 +59,7 @@ fn bench_variable_generate(c: &mut Criterion) {
                                             .unwrap()
                                         }
                                         Variant::AnyOrdered => {
-                                            let db = get_any_ordered(ctx.clone()).await;
+                                            let db = get_any_ordered_par(ctx.clone()).await;
                                             test_db(
                                                 db,
                                                 use_batch,
@@ -71,7 +71,7 @@ fn bench_variable_generate(c: &mut Criterion) {
                                             .unwrap()
                                         }
                                         Variant::CurrentUnordered => {
-                                            let db = get_current_unordered(ctx.clone()).await;
+                                            let db = get_current_unordered_par(ctx.clone()).await;
                                             test_db(
                                                 db,
                                                 use_batch,
@@ -83,7 +83,7 @@ fn bench_variable_generate(c: &mut Criterion) {
                                             .unwrap()
                                         }
                                         Variant::CurrentOrdered => {
-                                            let db = get_current_ordered(ctx.clone()).await;
+                                            let db = get_current_ordered_par(ctx.clone()).await;
                                             test_db(
                                                 db,
                                                 use_batch,

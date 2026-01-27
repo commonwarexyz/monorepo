@@ -2,13 +2,15 @@
 //! generated database with fixed-size values.
 
 use crate::fixed::{
-    any_cfg, current_cfg, gen_random_kv, get_any_ordered_fixed, get_any_ordered_variable,
-    get_any_unordered_fixed, get_any_unordered_variable, get_current_ordered_fixed,
-    get_current_ordered_variable, get_current_unordered_fixed, get_current_unordered_variable,
-    variable_any_cfg, variable_current_cfg, Digest, OCurrentDb, OFixedDb, OVAnyDb, OVCurrentDb,
-    UCurrentDb, UFixedDb, UVAnyDb, UVCurrentDb, Variant, THREADS, VARIANTS,
+    any_cfg, current_cfg, gen_random_kv, get_any_ordered_fixed_par, get_any_ordered_variable_par,
+    get_any_unordered_fixed_par, get_any_unordered_variable_par, get_current_ordered_fixed_par,
+    get_current_ordered_variable_par, get_current_unordered_fixed_par,
+    get_current_unordered_variable_par, variable_any_cfg, variable_current_cfg, Digest,
+    OCurrentDbPar, OCurrentDbSeq, OFixedDbPar, OFixedDbSeq, OVAnyDbPar, OVAnyDbSeq, OVCurrentDbPar,
+    OVCurrentDbSeq, UCurrentDbPar, UCurrentDbSeq, UFixedDbPar, UFixedDbSeq, UVAnyDbPar, UVAnyDbSeq,
+    UVCurrentDbPar, UVCurrentDbSeq, Variant, THREADS, VARIANTS,
 };
-use commonware_parallel::Rayon;
+use commonware_parallel::{Rayon, Sequential};
 use commonware_runtime::{
     benchmarks::{context, tokio},
     tokio::{Config, Runner},
@@ -35,6 +37,23 @@ cfg_if::cfg_if! {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+enum Parallelism {
+    Sequential,
+    Parallel,
+}
+
+impl Parallelism {
+    pub const fn name(&self) -> &'static str {
+        match self {
+            Self::Sequential => "sequential",
+            Self::Parallel => "parallel",
+        }
+    }
+}
+
+const PARALLELISMS: [Parallelism; 2] = [Parallelism::Sequential, Parallelism::Parallel];
+
 /// Helper function to setup a database with random data, prune, and close it.
 async fn setup_db<C>(db: C, elements: u64, operations: u64)
 where
@@ -56,169 +75,276 @@ fn bench_fixed_init(c: &mut Criterion) {
     let cfg = Config::default();
     for elements in ELEMENTS {
         for operations in OPERATIONS {
-            for variant in VARIANTS {
-                // Setup phase: create and populate the database
-                let runner = Runner::new(cfg.clone());
-                runner.start(|ctx| async move {
-                    match variant {
-                        Variant::AnyUnorderedFixed => {
-                            let db = get_any_unordered_fixed(ctx.clone()).await;
-                            setup_db(db, elements, operations).await;
+            for parallelism in PARALLELISMS {
+                for variant in VARIANTS {
+                    // Setup phase: create and populate the database (use parallel for faster setup)
+                    let runner = Runner::new(cfg.clone());
+                    runner.start(|ctx| async move {
+                        match variant {
+                            Variant::AnyUnorderedFixed => {
+                                let db = get_any_unordered_fixed_par(ctx.clone()).await;
+                                setup_db(db, elements, operations).await;
+                            }
+                            Variant::AnyOrderedFixed => {
+                                let db = get_any_ordered_fixed_par(ctx.clone()).await;
+                                setup_db(db, elements, operations).await;
+                            }
+                            Variant::CurrentUnorderedFixed => {
+                                let db = get_current_unordered_fixed_par(ctx.clone()).await;
+                                setup_db(db, elements, operations).await;
+                            }
+                            Variant::CurrentOrderedFixed => {
+                                let db = get_current_ordered_fixed_par(ctx.clone()).await;
+                                setup_db(db, elements, operations).await;
+                            }
+                            Variant::AnyUnorderedVariable => {
+                                let db = get_any_unordered_variable_par(ctx.clone()).await;
+                                setup_db(db, elements, operations).await;
+                            }
+                            Variant::AnyOrderedVariable => {
+                                let db = get_any_ordered_variable_par(ctx.clone()).await;
+                                setup_db(db, elements, operations).await;
+                            }
+                            Variant::CurrentUnorderedVariable => {
+                                let db = get_current_unordered_variable_par(ctx.clone()).await;
+                                setup_db(db, elements, operations).await;
+                            }
+                            Variant::CurrentOrderedVariable => {
+                                let db = get_current_ordered_variable_par(ctx.clone()).await;
+                                setup_db(db, elements, operations).await;
+                            }
                         }
-                        Variant::AnyOrderedFixed => {
-                            let db = get_any_ordered_fixed(ctx.clone()).await;
-                            setup_db(db, elements, operations).await;
-                        }
-                        Variant::CurrentUnorderedFixed => {
-                            let db = get_current_unordered_fixed(ctx.clone()).await;
-                            setup_db(db, elements, operations).await;
-                        }
-                        Variant::CurrentOrderedFixed => {
-                            let db = get_current_ordered_fixed(ctx.clone()).await;
-                            setup_db(db, elements, operations).await;
-                        }
-                        Variant::AnyUnorderedVariable => {
-                            let db = get_any_unordered_variable(ctx.clone()).await;
-                            setup_db(db, elements, operations).await;
-                        }
-                        Variant::AnyOrderedVariable => {
-                            let db = get_any_ordered_variable(ctx.clone()).await;
-                            setup_db(db, elements, operations).await;
-                        }
-                        Variant::CurrentUnorderedVariable => {
-                            let db = get_current_unordered_variable(ctx.clone()).await;
-                            setup_db(db, elements, operations).await;
-                        }
-                        Variant::CurrentOrderedVariable => {
-                            let db = get_current_ordered_variable(ctx.clone()).await;
-                            setup_db(db, elements, operations).await;
-                        }
-                    }
-                });
+                    });
 
-                // Benchmark phase: measure initialization time
-                let runner = tokio::Runner::new(cfg.clone());
-                c.bench_function(
-                    &format!(
-                        "{}/variant={} elements={} operations={}",
-                        module_path!(),
-                        variant.name(),
-                        elements,
-                        operations,
-                    ),
-                    |b| {
-                        b.to_async(&runner).iter_custom(|iters| async move {
-                            let ctx = context::get::<commonware_runtime::tokio::Context>();
-                            let pool = ctx.create_pool(THREADS).unwrap();
-                            let strategy = Rayon::with_pool(pool);
-                            let any_cfg = any_cfg(strategy.clone());
-                            let current_cfg = current_cfg(strategy.clone());
-                            let variable_any_cfg = variable_any_cfg(strategy.clone());
-                            let variable_current_cfg = variable_current_cfg(strategy);
-                            let start = Instant::now();
-                            for _ in 0..iters {
-                                match variant {
-                                    Variant::AnyUnorderedFixed => {
-                                        let db = UFixedDb::init(ctx.clone(), any_cfg.clone())
+                    // Benchmark phase: measure initialization time
+                    let runner = tokio::Runner::new(cfg.clone());
+                    c.bench_function(
+                        &format!(
+                            "{}/variant={} parallelism={} elements={} operations={}",
+                            module_path!(),
+                            variant.name(),
+                            parallelism.name(),
+                            elements,
+                            operations,
+                        ),
+                        |b| {
+                            b.to_async(&runner).iter_custom(|iters| async move {
+                                let ctx = context::get::<commonware_runtime::tokio::Context>();
+                                let start = Instant::now();
+                                for _ in 0..iters {
+                                    match (variant, parallelism) {
+                                        (Variant::AnyUnorderedFixed, Parallelism::Sequential) => {
+                                            let db =
+                                                UFixedDbSeq::init(ctx.clone(), any_cfg(Sequential))
+                                                    .await
+                                                    .unwrap();
+                                            assert_ne!(db.op_count(), 0);
+                                        }
+                                        (Variant::AnyUnorderedFixed, Parallelism::Parallel) => {
+                                            let pool = ctx.create_pool(THREADS).unwrap();
+                                            let db = UFixedDbPar::init(
+                                                ctx.clone(),
+                                                any_cfg(Rayon::with_pool(pool)),
+                                            )
                                             .await
                                             .unwrap();
-                                        assert_ne!(db.op_count(), 0);
-                                    }
-                                    Variant::AnyOrderedFixed => {
-                                        let db = OFixedDb::init(ctx.clone(), any_cfg.clone())
+                                            assert_ne!(db.op_count(), 0);
+                                        }
+                                        (Variant::AnyOrderedFixed, Parallelism::Sequential) => {
+                                            let db =
+                                                OFixedDbSeq::init(ctx.clone(), any_cfg(Sequential))
+                                                    .await
+                                                    .unwrap();
+                                            assert_ne!(db.op_count(), 0);
+                                        }
+                                        (Variant::AnyOrderedFixed, Parallelism::Parallel) => {
+                                            let pool = ctx.create_pool(THREADS).unwrap();
+                                            let db = OFixedDbPar::init(
+                                                ctx.clone(),
+                                                any_cfg(Rayon::with_pool(pool)),
+                                            )
                                             .await
                                             .unwrap();
-                                        assert_ne!(db.op_count(), 0);
-                                    }
-                                    Variant::CurrentUnorderedFixed => {
-                                        let db = UCurrentDb::init(ctx.clone(), current_cfg.clone())
+                                            assert_ne!(db.op_count(), 0);
+                                        }
+                                        (
+                                            Variant::CurrentUnorderedFixed,
+                                            Parallelism::Sequential,
+                                        ) => {
+                                            let db = UCurrentDbSeq::init(
+                                                ctx.clone(),
+                                                current_cfg(Sequential),
+                                            )
                                             .await
                                             .unwrap();
-                                        assert_ne!(db.op_count(), 0);
-                                    }
-                                    Variant::CurrentOrderedFixed => {
-                                        let db = OCurrentDb::init(ctx.clone(), current_cfg.clone())
+                                            assert_ne!(db.op_count(), 0);
+                                        }
+                                        (Variant::CurrentUnorderedFixed, Parallelism::Parallel) => {
+                                            let pool = ctx.create_pool(THREADS).unwrap();
+                                            let db = UCurrentDbPar::init(
+                                                ctx.clone(),
+                                                current_cfg(Rayon::with_pool(pool)),
+                                            )
                                             .await
                                             .unwrap();
-                                        assert_ne!(db.op_count(), 0);
-                                    }
-                                    Variant::AnyUnorderedVariable => {
-                                        let db =
-                                            UVAnyDb::init(ctx.clone(), variable_any_cfg.clone())
-                                                .await
-                                                .unwrap();
-                                        assert_ne!(db.op_count(), 0);
-                                    }
-                                    Variant::AnyOrderedVariable => {
-                                        let db =
-                                            OVAnyDb::init(ctx.clone(), variable_any_cfg.clone())
-                                                .await
-                                                .unwrap();
-                                        assert_ne!(db.op_count(), 0);
-                                    }
-                                    Variant::CurrentUnorderedVariable => {
-                                        let db = UVCurrentDb::init(
-                                            ctx.clone(),
-                                            variable_current_cfg.clone(),
-                                        )
-                                        .await
-                                        .unwrap();
-                                        assert_ne!(db.op_count(), 0);
-                                    }
-                                    Variant::CurrentOrderedVariable => {
-                                        let db = OVCurrentDb::init(
-                                            ctx.clone(),
-                                            variable_current_cfg.clone(),
-                                        )
-                                        .await
-                                        .unwrap();
-                                        assert_ne!(db.op_count(), 0);
+                                            assert_ne!(db.op_count(), 0);
+                                        }
+                                        (Variant::CurrentOrderedFixed, Parallelism::Sequential) => {
+                                            let db = OCurrentDbSeq::init(
+                                                ctx.clone(),
+                                                current_cfg(Sequential),
+                                            )
+                                            .await
+                                            .unwrap();
+                                            assert_ne!(db.op_count(), 0);
+                                        }
+                                        (Variant::CurrentOrderedFixed, Parallelism::Parallel) => {
+                                            let pool = ctx.create_pool(THREADS).unwrap();
+                                            let db = OCurrentDbPar::init(
+                                                ctx.clone(),
+                                                current_cfg(Rayon::with_pool(pool)),
+                                            )
+                                            .await
+                                            .unwrap();
+                                            assert_ne!(db.op_count(), 0);
+                                        }
+                                        (
+                                            Variant::AnyUnorderedVariable,
+                                            Parallelism::Sequential,
+                                        ) => {
+                                            let db = UVAnyDbSeq::init(
+                                                ctx.clone(),
+                                                variable_any_cfg(Sequential),
+                                            )
+                                            .await
+                                            .unwrap();
+                                            assert_ne!(db.op_count(), 0);
+                                        }
+                                        (Variant::AnyUnorderedVariable, Parallelism::Parallel) => {
+                                            let pool = ctx.create_pool(THREADS).unwrap();
+                                            let db = UVAnyDbPar::init(
+                                                ctx.clone(),
+                                                variable_any_cfg(Rayon::with_pool(pool)),
+                                            )
+                                            .await
+                                            .unwrap();
+                                            assert_ne!(db.op_count(), 0);
+                                        }
+                                        (Variant::AnyOrderedVariable, Parallelism::Sequential) => {
+                                            let db = OVAnyDbSeq::init(
+                                                ctx.clone(),
+                                                variable_any_cfg(Sequential),
+                                            )
+                                            .await
+                                            .unwrap();
+                                            assert_ne!(db.op_count(), 0);
+                                        }
+                                        (Variant::AnyOrderedVariable, Parallelism::Parallel) => {
+                                            let pool = ctx.create_pool(THREADS).unwrap();
+                                            let db = OVAnyDbPar::init(
+                                                ctx.clone(),
+                                                variable_any_cfg(Rayon::with_pool(pool)),
+                                            )
+                                            .await
+                                            .unwrap();
+                                            assert_ne!(db.op_count(), 0);
+                                        }
+                                        (
+                                            Variant::CurrentUnorderedVariable,
+                                            Parallelism::Sequential,
+                                        ) => {
+                                            let db = UVCurrentDbSeq::init(
+                                                ctx.clone(),
+                                                variable_current_cfg(Sequential),
+                                            )
+                                            .await
+                                            .unwrap();
+                                            assert_ne!(db.op_count(), 0);
+                                        }
+                                        (
+                                            Variant::CurrentUnorderedVariable,
+                                            Parallelism::Parallel,
+                                        ) => {
+                                            let pool = ctx.create_pool(THREADS).unwrap();
+                                            let db = UVCurrentDbPar::init(
+                                                ctx.clone(),
+                                                variable_current_cfg(Rayon::with_pool(pool)),
+                                            )
+                                            .await
+                                            .unwrap();
+                                            assert_ne!(db.op_count(), 0);
+                                        }
+                                        (
+                                            Variant::CurrentOrderedVariable,
+                                            Parallelism::Sequential,
+                                        ) => {
+                                            let db = OVCurrentDbSeq::init(
+                                                ctx.clone(),
+                                                variable_current_cfg(Sequential),
+                                            )
+                                            .await
+                                            .unwrap();
+                                            assert_ne!(db.op_count(), 0);
+                                        }
+                                        (
+                                            Variant::CurrentOrderedVariable,
+                                            Parallelism::Parallel,
+                                        ) => {
+                                            let pool = ctx.create_pool(THREADS).unwrap();
+                                            let db = OVCurrentDbPar::init(
+                                                ctx.clone(),
+                                                variable_current_cfg(Rayon::with_pool(pool)),
+                                            )
+                                            .await
+                                            .unwrap();
+                                            assert_ne!(db.op_count(), 0);
+                                        }
                                     }
                                 }
-                            }
-                            start.elapsed()
-                        });
-                    },
-                );
+                                start.elapsed()
+                            });
+                        },
+                    );
 
-                // Cleanup phase: destroy the database
-                let runner = Runner::new(cfg.clone());
-                runner.start(|ctx| async move {
-                    match variant {
-                        Variant::AnyUnorderedFixed => {
-                            let db = get_any_unordered_fixed(ctx.clone()).await;
-                            db.destroy().await.unwrap();
+                    // Cleanup phase: destroy the database (use parallel for faster cleanup)
+                    let runner = Runner::new(cfg.clone());
+                    runner.start(|ctx| async move {
+                        match variant {
+                            Variant::AnyUnorderedFixed => {
+                                let db = get_any_unordered_fixed_par(ctx.clone()).await;
+                                db.destroy().await.unwrap();
+                            }
+                            Variant::AnyOrderedFixed => {
+                                let db = get_any_ordered_fixed_par(ctx.clone()).await;
+                                db.destroy().await.unwrap();
+                            }
+                            Variant::CurrentUnorderedFixed => {
+                                let db = get_current_unordered_fixed_par(ctx.clone()).await;
+                                db.destroy().await.unwrap();
+                            }
+                            Variant::CurrentOrderedFixed => {
+                                let db = get_current_ordered_fixed_par(ctx.clone()).await;
+                                db.destroy().await.unwrap();
+                            }
+                            Variant::AnyUnorderedVariable => {
+                                let db = get_any_unordered_variable_par(ctx.clone()).await;
+                                db.destroy().await.unwrap();
+                            }
+                            Variant::AnyOrderedVariable => {
+                                let db = get_any_ordered_variable_par(ctx.clone()).await;
+                                db.destroy().await.unwrap();
+                            }
+                            Variant::CurrentUnorderedVariable => {
+                                let db = get_current_unordered_variable_par(ctx.clone()).await;
+                                db.destroy().await.unwrap();
+                            }
+                            Variant::CurrentOrderedVariable => {
+                                let db = get_current_ordered_variable_par(ctx.clone()).await;
+                                db.destroy().await.unwrap();
+                            }
                         }
-                        Variant::AnyOrderedFixed => {
-                            let db = get_any_ordered_fixed(ctx.clone()).await;
-                            db.destroy().await.unwrap();
-                        }
-                        Variant::CurrentUnorderedFixed => {
-                            let db = get_current_unordered_fixed(ctx.clone()).await;
-                            db.destroy().await.unwrap();
-                        }
-                        Variant::CurrentOrderedFixed => {
-                            let db = get_current_ordered_fixed(ctx.clone()).await;
-                            db.destroy().await.unwrap();
-                        }
-                        Variant::AnyUnorderedVariable => {
-                            let db = get_any_unordered_variable(ctx.clone()).await;
-                            db.destroy().await.unwrap();
-                        }
-                        Variant::AnyOrderedVariable => {
-                            let db = get_any_ordered_variable(ctx.clone()).await;
-                            db.destroy().await.unwrap();
-                        }
-                        Variant::CurrentUnorderedVariable => {
-                            let db = get_current_unordered_variable(ctx.clone()).await;
-                            db.destroy().await.unwrap();
-                        }
-                        Variant::CurrentOrderedVariable => {
-                            let db = get_current_ordered_variable(ctx.clone()).await;
-                            db.destroy().await.unwrap();
-                        }
-                    }
-                });
+                    });
+                }
             }
         }
     }
