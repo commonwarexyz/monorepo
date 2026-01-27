@@ -8,7 +8,7 @@ use commonware_runtime::{
     },
     Clock, Metrics,
 };
-use commonware_utils::{PrioritySet, Span, SystemTimeExt};
+use commonware_utils::{PrioritySet, Span};
 use prometheus_client::{
     encoding::EncodeLabelSet,
     metrics::{family::Family, gauge::Gauge, histogram::Histogram},
@@ -349,7 +349,7 @@ where
             self.context.current() + self.retry_timeout
         } else {
             // No eligible peers - wait for external changes
-            self.context.current().saturating_add(Duration::MAX)
+            commonware_utils::SystemTimeExt::saturating_add(&self.context.current(), Duration::MAX)
         });
     }
 
