@@ -297,7 +297,7 @@ mod tests {
 
             // Should have dialed ~3 peers (one per tick), not all 5 at once
             assert!(
-                dial_count >= 2 && dial_count <= 4,
+                (2..=4).contains(&dial_count),
                 "expected 2-4 dial attempts (one per tick), got {}",
                 dial_count
             );
