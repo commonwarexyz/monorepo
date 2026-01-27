@@ -1,10 +1,10 @@
 //! Core sync engine components that are shared across sync clients.
-
 use crate::{
     mmr::{Location, StandardHasher},
     qmdb::{
         self,
         sync::{
+            database::Config as _,
             error::EngineError,
             requests::Requests,
             resolver::{FetchResult, Resolver},
@@ -16,6 +16,7 @@ use crate::{
 use commonware_codec::Encode;
 use commonware_cryptography::Digest;
 use commonware_macros::select;
+use commonware_runtime::Metrics as _;
 use commonware_utils::NZU64;
 use futures::{channel::mpsc, future::Either, StreamExt};
 use std::{collections::BTreeMap, fmt::Debug, num::NonZeroU64};
@@ -164,7 +165,7 @@ where
 {
     /// Create a new sync engine with the given configuration
     pub async fn new(config: Config<DB, R>) -> Result<Self, Error<DB, R>> {
-        if config.target.range.is_empty() {
+        if config.target.range.is_empty() || !config.target.range.end.is_valid() {
             return Err(SyncError::Engine(EngineError::InvalidTarget {
                 lower_bound_pos: config.target.range.start,
                 upper_bound_pos: config.target.range.end,
@@ -172,9 +173,9 @@ where
         }
 
         // Create journal and verifier using the database's factory methods
-        let journal = DB::create_journal(
-            config.context.clone(),
-            &config.db_config,
+        let journal = <DB::Journal as Journal>::new(
+            config.context.with_label("journal"),
+            config.db_config.journal_config(),
             config.target.range.clone(),
         )
         .await?;
@@ -269,10 +270,10 @@ where
 
     /// Clear all sync state for a target update
     pub async fn reset_for_target_update(
-        self,
+        mut self,
         new_target: Target<DB::Digest>,
     ) -> Result<Self, Error<DB, R>> {
-        let journal = DB::resize_journal(self.journal, new_target.range.clone()).await?;
+        self.journal.resize(new_target.range.start).await?;
 
         Ok(Self {
             outstanding_requests: Requests::new(),
@@ -282,7 +283,7 @@ where
             max_outstanding_requests: self.max_outstanding_requests,
             fetch_batch_size: self.fetch_batch_size,
             apply_batch_size: self.apply_batch_size,
-            journal,
+            journal: self.journal,
             resolver: self.resolver,
             hasher: self.hasher,
             context: self.context,

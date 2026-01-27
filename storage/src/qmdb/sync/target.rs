@@ -74,7 +74,7 @@ where
     U: std::error::Error + Send + 'static,
     D: Digest,
 {
-    if new_target.range.is_empty() {
+    if new_target.range.is_empty() || !new_target.range.end.is_valid() {
         return Err(sync::Error::Engine(EngineError::InvalidTarget {
             lower_bound_pos: new_target.range.start,
             upper_bound_pos: new_target.range.end,

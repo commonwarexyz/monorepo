@@ -9,7 +9,6 @@ use crate::{
         segmented::variable,
         Error,
     },
-    mmr::Location,
     Persistable,
 };
 use commonware_codec::{Codec, CodecShared};
@@ -293,7 +292,7 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
         context: E,
         cfg: Config<V::Cfg>,
         range: Range<u64>,
-    ) -> Result<Self, crate::qmdb::Error> {
+    ) -> Result<Self, Error> {
         assert!(!range.is_empty(), "range must not be empty");
 
         debug!(
@@ -319,15 +318,13 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
                     "no existing journal data, initializing at sync range start"
                 );
                 journal.destroy().await?;
-                return Ok(Self::init_at_size(context, cfg, range.start).await?);
+                return Self::init_at_size(context, cfg, range.start).await;
             }
         }
 
         // Check if data exceeds the sync range
         if size > range.end {
-            return Err(crate::qmdb::Error::UnexpectedData(Location::new_unchecked(
-                size,
-            )));
+            return Err(Error::ItemOutOfRange(size));
         }
 
         // If all existing data is before our sync range, destroy and recreate fresh
@@ -338,7 +335,7 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
                 range.start, "existing journal data is stale, re-initializing at start position"
             );
             journal.destroy().await?;
-            return Ok(Self::init_at_size(context, cfg, range.start).await?);
+            return Self::init_at_size(context, cfg, range.start).await;
         }
 
         // Prune to lower bound if needed
@@ -2114,8 +2111,8 @@ mod tests {
                 )
                 .await;
 
-                // Should return UnexpectedData error since data exists beyond upper_bound
-                assert!(matches!(result, Err(crate::qmdb::Error::UnexpectedData(_))));
+                // Should return ItemOutOfRange error since data exists beyond upper_bound
+                assert!(matches!(result, Err(Error::ItemOutOfRange(_))));
             }
         });
     }
