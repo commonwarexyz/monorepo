@@ -40,6 +40,7 @@ struct ToolUrls {
     libjemalloc: String,
     logrotate: String,
     jq: String,
+    fontconfig_config: String,
     libfontconfig: String,
     unzip: String,
     adduser: String,
@@ -212,10 +213,15 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
         }
     };
 
-    // Cache adduser (arch-independent) once before the loop
+    // Cache arch-independent packages once before the loop
     let adduser_url = cache_tool(
         adduser_bin_s3_key(ADDUSER_VERSION),
         adduser_download_url(ADDUSER_VERSION),
+    )
+    .await?;
+    let fontconfig_config_url = cache_tool(
+        fontconfig_config_bin_s3_key(FONTCONFIG_CONFIG_VERSION),
+        fontconfig_config_download_url(FONTCONFIG_CONFIG_VERSION),
     )
     .await?;
 
@@ -255,6 +261,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
                 libjemalloc: libjemalloc_url,
                 logrotate: logrotate_url,
                 jq: jq_url,
+                fontconfig_config: fontconfig_config_url.clone(),
                 libfontconfig: libfontconfig_url,
                 unzip: unzip_url,
                 adduser: adduser_url.clone(),
@@ -1092,6 +1099,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
         pyroscope_bin: tool_urls.pyroscope.clone(),
         tempo_bin: tool_urls.tempo.clone(),
         node_exporter_bin: tool_urls.node_exporter.clone(),
+        fontconfig_config_deb: tool_urls.fontconfig_config.clone(),
         libfontconfig_deb: tool_urls.libfontconfig.clone(),
         unzip_deb: tool_urls.unzip.clone(),
         adduser_deb: tool_urls.adduser.clone(),
