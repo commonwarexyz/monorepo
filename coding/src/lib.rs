@@ -139,7 +139,7 @@ pub trait Scheme: Debug + Clone + Send + Sync + 'static {
     ///
     /// This allows excluding [Scheme::ReShard]s which are invalid, and shouldn't
     /// be considered as progress towards meeting the minimum number of shards.
-    type CheckedShard: Clone + Send;
+    type CheckedShard: Clone + Send + Sync;
     type Error: std::fmt::Debug + Send;
 
     /// Encode a piece of data, returning a commitment, along with shards, and proofs.

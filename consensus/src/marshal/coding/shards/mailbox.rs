@@ -15,6 +15,7 @@ use futures::{
     channel::{mpsc, oneshot},
     SinkExt,
 };
+use std::sync::Arc;
 use tracing::error;
 
 /// A message that can be sent to the coding [Engine].
@@ -50,14 +51,14 @@ where
         commitment: CodingCommitment,
         /// A response channel to send the reconstructed block to.
         #[allow(clippy::type_complexity)]
-        response: oneshot::Sender<Result<Option<CodedBlock<B, C>>, ReconstructionError<C>>>,
+        response: oneshot::Sender<Result<Option<Arc<CodedBlock<B, C>>>, ReconstructionError<C>>>,
     },
     /// Subscribe to notifications for when a block is fully reconstructed.
     SubscribeBlock {
         /// The [DigestOrCommitment] of the block to subscribe to.
         id: DigestOrCommitment<B::Digest>,
         /// A response channel to send the reconstructed block to.
-        response: oneshot::Sender<CodedBlock<B, C>>,
+        response: oneshot::Sender<Arc<CodedBlock<B, C>>>,
     },
     /// A notarization vote to be processed.
     Notarize {
@@ -124,7 +125,7 @@ where
     pub async fn try_reconstruct(
         &mut self,
         commitment: CodingCommitment,
-    ) -> Result<Option<CodedBlock<B, C>>, ReconstructionError<C>> {
+    ) -> Result<Option<Arc<CodedBlock<B, C>>>, ReconstructionError<C>> {
         let (tx, rx) = oneshot::channel();
         let msg = Message::TryReconstruct {
             commitment,
@@ -139,7 +140,7 @@ where
     pub async fn subscribe_block(
         &mut self,
         id: DigestOrCommitment<B::Digest>,
-    ) -> oneshot::Receiver<CodedBlock<B, C>> {
+    ) -> oneshot::Receiver<Arc<CodedBlock<B, C>>> {
         let (tx, rx) = oneshot::channel();
         let msg = Message::SubscribeBlock { id, response: tx };
         self.sender.send(msg).await.expect("mailbox closed");

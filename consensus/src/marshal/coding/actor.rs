@@ -287,6 +287,7 @@ where
         K: PublicKey,
     {
         // Create a local pool for waiter futures.
+        // Waiters receive Arc<CodedBlock> from the shards buffer and unwrap to owned.
         let mut waiters = AbortablePool::<CodedBlock<B, C>>::default();
 
         // Get tip and send to application
@@ -493,7 +494,9 @@ where
                                 Entry::Vacant(entry) => {
                                     let rx = buffer.subscribe_block(id).await;
                                     let aborter = waiters.push(async move {
-                                        rx.await.expect("buffer subscriber closed")
+                                        let block = rx.await.expect("buffer subscriber closed");
+                                        // Convert Arc<CodedBlock> to owned CodedBlock
+                                        Arc::unwrap_or_clone(block)
                                     });
                                     entry.insert(BlockSubscription {
                                         subscribers: vec![response],
@@ -968,7 +971,7 @@ where
             DigestOrCommitment::Commitment(commitment) => {
                 // Check buffer.
                 if let Some(block) = buffer.try_reconstruct(commitment).await.ok().flatten() {
-                    return Some(block);
+                    return Some(Arc::unwrap_or_clone(block));
                 }
 
                 let digest = commitment.block_digest();

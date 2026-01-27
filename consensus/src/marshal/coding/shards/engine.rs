@@ -31,6 +31,7 @@ use rand::Rng;
 use std::{
     collections::{btree_map::Entry, BTreeMap},
     ops::Deref,
+    sync::Arc,
     time::Instant,
 };
 use thiserror::Error;
@@ -49,9 +50,9 @@ pub enum ReconstructionError<C: CodingScheme> {
 }
 
 /// A subscription for a reconstructed [Block] by its [CodingCommitment].
-struct BlockSubscription<B: Block> {
+struct BlockSubscription<B: Block, C: CodingScheme> {
     /// A list of subscribers waiting for the block to be reconstructed
-    subscribers: Vec<oneshot::Sender<B>>,
+    subscribers: Vec<oneshot::Sender<Arc<CodedBlock<B, C>>>>,
 }
 
 /// A subscription for a [Shard]'s validity, relative to a [CodingCommitment].
@@ -93,7 +94,7 @@ where
     strategy: T,
 
     /// Open subscriptions for [CodedBlock]s by digest.
-    block_subscriptions: BTreeMap<B::Digest, BlockSubscription<CodedBlock<B, C>>>,
+    block_subscriptions: BTreeMap<B::Digest, BlockSubscription<B, C>>,
 
     /// Open subscriptions for [Shard]s checks by commitment and index
     shard_subscriptions: BTreeMap<(CodingCommitment, usize), ShardSubscription>,
@@ -101,7 +102,8 @@ where
     /// An ephemeral cache of reconstructed blocks, keyed by commitment.
     ///
     /// These blocks are evicted by marshal after they are durably persisted to disk.
-    reconstructed_blocks: BTreeMap<CodingCommitment, CodedBlock<B, C>>,
+    /// Wrapped in [Arc] to enable cheap cloning when serving multiple subscribers.
+    reconstructed_blocks: BTreeMap<CodingCommitment, Arc<CodedBlock<B, C>>>,
 
     erasure_decode_duration: Gauge,
     reconstructed_blocks_count: Gauge,
@@ -328,9 +330,9 @@ where
     async fn try_reconstruct(
         &mut self,
         commitment: CodingCommitment,
-    ) -> Result<Option<CodedBlock<B, C>>, ReconstructionError<C>> {
+    ) -> Result<Option<Arc<CodedBlock<B, C>>>, ReconstructionError<C>> {
         if let Some(block) = self.reconstructed_blocks.get(&commitment) {
-            let block = block.clone();
+            let block = Arc::clone(block);
             self.notify_subscribers(&block).await;
             return Ok(Some(block));
         }
@@ -345,26 +347,34 @@ where
         // NOTE: Byzantine peers may send us strong shards as well, but we don't care about those;
         // `Scheme::reshard` verifies the shard against the commitment, and if it doesn't check out,
         // it will be ignored.
-        let Some(checking_data) = shards.iter().find_map(|s| {
-            if let DistributionShard::Strong(shard) = s.deref() {
-                C::reshard(
-                    &config,
-                    &commitment.coding_digest(),
-                    s.index() as u16,
-                    shard.clone(),
-                )
-                .map(|(checking_data, _, _)| checking_data)
-                .ok()
-            } else {
-                None
-            }
-        }) else {
+        //
+        // We also extract the checked shard from the first valid reshard to avoid re-verifying it
+        // in the parallel map below (reshard performs expensive SHA-256 hashing for verification).
+        let Some((checking_data, first_checked_index, first_checked_shard)) =
+            shards.iter().find_map(|s| {
+                if let DistributionShard::Strong(shard) = s.deref() {
+                    let index = s.index() as u16;
+                    C::reshard(&config, &commitment.coding_digest(), index, shard.clone())
+                        .map(|(checking_data, checked, _)| (checking_data, index, checked))
+                        .ok()
+                } else {
+                    None
+                }
+            })
+        else {
             debug!(%commitment, "no strong shards present to form checking data");
             return Ok(None);
         };
 
         let checked_shards = self.strategy.map_collect_vec(shards, |s| {
             let index = s.index() as u16;
+
+            // Skip re-verification of the shard we already verified when extracting checking_data.
+            // This avoids redundant SHA-256 hashing for the same shard.
+            if index == first_checked_index {
+                return Some(first_checked_shard.clone());
+            }
+
             match s.into_inner() {
                 DistributionShard::Strong(shard) => {
                     // Any strong shards, at this point, were sent from the proposer.
@@ -409,7 +419,7 @@ where
 
         // Construct a coding block with a _trusted_ commitment. `S::decode` verified the blob's
         // integrity against the commitment, so shards can be lazily re-constructed if need be.
-        let block = CodedBlock::new_trusted(inner, commitment);
+        let block = Arc::new(CodedBlock::new_trusted(inner, commitment));
 
         debug!(
             %commitment,
@@ -418,7 +428,8 @@ where
             "successfully reconstructed block from shards"
         );
 
-        self.reconstructed_blocks.insert(commitment, block.clone());
+        self.reconstructed_blocks
+            .insert(commitment, Arc::clone(&block));
         let _ = self
             .reconstructed_blocks_count
             .try_set(self.reconstructed_blocks.len() as i64);
@@ -489,7 +500,7 @@ where
     async fn subscribe_block(
         &mut self,
         id: DigestOrCommitment<B::Digest>,
-        responder: oneshot::Sender<CodedBlock<B, C>>,
+        responder: oneshot::Sender<Arc<CodedBlock<B, C>>>,
     ) {
         let block = match id {
             DigestOrCommitment::Digest(digest) => self
@@ -502,7 +513,7 @@ where
         };
         if let Some(block) = block {
             // If we already have the block reconstructed, send it immediately.
-            responder.send_lossy(block.clone());
+            responder.send_lossy(Arc::clone(block));
             return;
         }
 
@@ -548,10 +559,10 @@ where
 
     /// Notifies any subscribers waiting for a block to be reconstructed that it is now available.
     #[inline]
-    async fn notify_subscribers(&mut self, block: &CodedBlock<B, C>) {
+    async fn notify_subscribers(&mut self, block: &Arc<CodedBlock<B, C>>) {
         if let Some(mut sub) = self.block_subscriptions.remove(&block.digest()) {
             for sub in sub.subscribers.drain(..) {
-                sub.send_lossy(block.clone());
+                sub.send_lossy(Arc::clone(block));
             }
         }
     }
@@ -849,7 +860,10 @@ mod test {
                     .try_reconstruct(coded_block.commitment())
                     .await
                     .unwrap();
-                assert!(result.is_some(), "reconstruction should succeed with valid shards");
+                assert!(
+                    result.is_some(),
+                    "reconstruction should succeed with valid shards"
+                );
                 assert_eq!(result.unwrap().commitment(), coded_block.commitment());
             }
         });
@@ -905,12 +919,11 @@ mod test {
             // Reconstruction may or may not succeed depending on timing.
             // What we're really testing is that it doesn't panic and handles
             // the insufficient shards case gracefully.
-            if result.is_none() {
-                // Expected: not enough shards yet
-            } else {
+            if let Some(block) = result {
                 // Also acceptable: enough shards arrived through gossip
-                assert_eq!(result.unwrap().commitment(), coded_block.commitment());
+                assert_eq!(block.commitment(), coded_block.commitment());
             }
+            // Otherwise: not enough shards yet (expected)
         });
     }
 
@@ -921,33 +934,38 @@ mod test {
             link: DEFAULT_LINK,
         };
 
-        fixture.start(|_config, context, mut mailboxes, coding_config| async move {
-            let inner1 = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 2);
-            let coded_block1 = CodedBlock::<B, C>::new(inner1, coding_config, &STRATEGY);
+        fixture.start(
+            |_config, context, mut mailboxes, coding_config| async move {
+                let inner1 = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 2);
+                let coded_block1 = CodedBlock::<B, C>::new(inner1, coding_config, &STRATEGY);
 
-            let inner2 = B::new::<H>((), Sha256Digest::EMPTY, Height::new(2), 3);
-            let coded_block2 = CodedBlock::<B, C>::new(inner2, coding_config, &STRATEGY);
+                let inner2 = B::new::<H>((), Sha256Digest::EMPTY, Height::new(2), 3);
+                let coded_block2 = CodedBlock::<B, C>::new(inner2, coding_config, &STRATEGY);
 
-            let peers: Vec<P> = mailboxes.keys().cloned().collect();
+                let peers: Vec<P> = mailboxes.keys().cloned().collect();
 
-            // Broadcast shards for block 1
-            let first_mailbox = mailboxes.get_mut(peers.first().unwrap()).unwrap();
-            first_mailbox
-                .proposed(coded_block1.clone(), peers.clone())
-                .await;
+                // Broadcast shards for block 1
+                let first_mailbox = mailboxes.get_mut(peers.first().unwrap()).unwrap();
+                first_mailbox
+                    .proposed(coded_block1.clone(), peers.clone())
+                    .await;
 
-            context.sleep(Duration::from_millis(100)).await;
+                context.sleep(Duration::from_millis(100)).await;
 
-            // Try to reconstruct using block 2's commitment (which we don't have shards for)
-            let second_mailbox = mailboxes.get_mut(&peers[1]).unwrap();
-            let result = second_mailbox
-                .try_reconstruct(coded_block2.commitment())
-                .await
-                .unwrap();
+                // Try to reconstruct using block 2's commitment (which we don't have shards for)
+                let second_mailbox = mailboxes.get_mut(&peers[1]).unwrap();
+                let result = second_mailbox
+                    .try_reconstruct(coded_block2.commitment())
+                    .await
+                    .unwrap();
 
-            // Should return None since we don't have shards for block 2
-            assert!(result.is_none(), "reconstruction should fail for unknown commitment");
-        });
+                // Should return None since we don't have shards for block 2
+                assert!(
+                    result.is_none(),
+                    "reconstruction should fail for unknown commitment"
+                );
+            },
+        );
     }
 
     #[test_traced]
