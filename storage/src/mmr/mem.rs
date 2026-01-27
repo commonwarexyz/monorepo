@@ -546,6 +546,7 @@ impl<D: Digest> DirtyMmr<D> {
 
     /// Compute updated digests for dirty nodes and compute the root, converting this MMR into a
     /// [CleanMmr].
+    #[cfg_attr(not(feature = "std"), allow(unused_variables))]
     pub fn merkleize(
         mut self,
         hasher: &mut impl Hasher<Digest = D>,
@@ -558,10 +559,7 @@ impl<D: Digest> DirtyMmr<D> {
         }
 
         #[cfg(not(feature = "std"))]
-        {
-            let _ = pool;
-            self.merkleize_serial(hasher);
-        }
+        self.merkleize_serial(hasher);
 
         // Compute root
         let peaks = self
@@ -724,6 +722,7 @@ impl<D: Digest> DirtyMmr<D> {
     /// Returns [Error::LeafOutOfBounds] if any location is not an existing leaf.
     /// Returns [Error::LocationOverflow] if any location exceeds [crate::mmr::MAX_LOCATION].
     /// Returns [Error::ElementPruned] if any of the leaves has been pruned.
+    #[cfg_attr(not(feature = "std"), allow(unused_variables))]
     pub fn update_leaf_batched<T: AsRef<[u8]> + Sync>(
         &mut self,
         hasher: &mut impl Hasher<Digest = D>,
@@ -754,8 +753,6 @@ impl<D: Digest> DirtyMmr<D> {
                 return Ok(());
             }
         }
-        #[cfg(not(feature = "std"))]
-        let _ = pool;
 
         for ((_, element), pos) in updates.iter().zip(positions.iter()) {
             // Update the digest of the leaf node and mark its ancestors as dirty.
