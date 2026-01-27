@@ -47,6 +47,10 @@ pub enum ReconstructionError<C: CodingScheme> {
     /// An error occurred while decoding the reconstructed blob into a [CodedBlock]
     #[error(transparent)]
     Codec(#[from] CodecError),
+
+    /// The reconstructed block's digest does not match the commitment's block digest
+    #[error("block digest mismatch: reconstructed block does not match commitment")]
+    DigestMismatch,
 }
 
 /// A subscription for a reconstructed [Block] by its [CodingCommitment].
@@ -453,6 +457,13 @@ where
 
         // Attempt to decode the block from the encoded blob
         let inner = B::read_cfg(&mut decoded.as_slice(), &self.block_codec_cfg)?;
+
+        // Verify the reconstructed block's digest matches the commitment's block digest.
+        // This is a defense-in-depth check - the coding scheme should have already verified
+        // integrity, but this ensures the block we decoded is actually the one committed to.
+        if inner.digest() != commitment.block_digest() {
+            return Err(ReconstructionError::DigestMismatch);
+        }
 
         // Construct a coding block with a _trusted_ commitment. `S::decode` verified the blob's
         // integrity against the commitment, so shards can be lazily re-constructed if need be.
