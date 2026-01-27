@@ -40,6 +40,7 @@ struct ToolUrls {
     libjemalloc: String,
     logrotate: String,
     jq: String,
+    fonts_dejavu_core: String,
     fontconfig_config: String,
     libfontconfig: String,
     unzip: String,
@@ -219,6 +220,11 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
         adduser_download_url(ADDUSER_VERSION),
     )
     .await?;
+    let fonts_dejavu_core_url = cache_tool(
+        fonts_dejavu_core_bin_s3_key(FONTS_DEJAVU_CORE_VERSION),
+        fonts_dejavu_core_download_url(FONTS_DEJAVU_CORE_VERSION),
+    )
+    .await?;
     // Cache tools for each architecture and store URLs per-architecture
     let mut tool_urls_by_arch: HashMap<Architecture, ToolUrls> = HashMap::new();
     for arch in &architectures_needed {
@@ -256,6 +262,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
                 libjemalloc: libjemalloc_url,
                 logrotate: logrotate_url,
                 jq: jq_url,
+                fonts_dejavu_core: fonts_dejavu_core_url.clone(),
                 fontconfig_config: fontconfig_config_url,
                 libfontconfig: libfontconfig_url,
                 unzip: unzip_url,
@@ -1094,6 +1101,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
         pyroscope_bin: tool_urls.pyroscope.clone(),
         tempo_bin: tool_urls.tempo.clone(),
         node_exporter_bin: tool_urls.node_exporter.clone(),
+        fonts_dejavu_core_deb: tool_urls.fonts_dejavu_core.clone(),
         fontconfig_config_deb: tool_urls.fontconfig_config.clone(),
         libfontconfig_deb: tool_urls.libfontconfig.clone(),
         unzip_deb: tool_urls.unzip.clone(),

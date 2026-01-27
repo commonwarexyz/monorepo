@@ -53,6 +53,9 @@ pub const UNZIP_VERSION: &str = "6.0-28ubuntu4";
 /// Version of adduser package for Ubuntu 24.04 (arch-independent)
 pub const ADDUSER_VERSION: &str = "3.137ubuntu1";
 
+/// Version of fonts-dejavu-core package for Ubuntu 24.04 (arch-independent)
+pub const FONTS_DEJAVU_CORE_VERSION: &str = "2.37-8";
+
 /// Version of musl package for Ubuntu 24.04
 pub const MUSL_VERSION: &str = "1.2.4-2";
 
@@ -174,6 +177,13 @@ pub(crate) fn unzip_bin_s3_key(version: &str, architecture: Architecture) -> Str
 /// S3 key for adduser (architecture-independent package)
 pub(crate) fn adduser_bin_s3_key(version: &str) -> String {
     format!("{TOOLS_BINARIES_PREFIX}/adduser/{version}/adduser_{version}_all.deb")
+}
+
+/// S3 key for fonts-dejavu-core (architecture-independent package)
+pub(crate) fn fonts_dejavu_core_bin_s3_key(version: &str) -> String {
+    format!(
+        "{TOOLS_BINARIES_PREFIX}/fonts-dejavu-core/{version}/fonts-dejavu-core_{version}_all.deb"
+    )
 }
 
 pub(crate) fn musl_bin_s3_key(version: &str, architecture: Architecture) -> String {
@@ -430,6 +440,11 @@ pub(crate) fn adduser_download_url(version: &str) -> String {
     format!("{UBUNTU_ARCHIVE_X86_64}/main/a/adduser/adduser_{version}_all.deb")
 }
 
+/// Returns the download URL for fonts-dejavu-core from Ubuntu archive (arch-independent)
+pub(crate) fn fonts_dejavu_core_download_url(version: &str) -> String {
+    format!("{UBUNTU_ARCHIVE_X86_64}/main/f/fonts-dejavu/fonts-dejavu-core_{version}_all.deb")
+}
+
 pub(crate) fn musl_download_url(version: &str, architecture: Architecture) -> String {
     let base = match architecture {
         Architecture::Arm64 => UBUNTU_ARCHIVE_ARM64,
@@ -641,6 +656,7 @@ pub struct MonitoringUrls {
     pub pyroscope_bin: String,
     pub tempo_bin: String,
     pub node_exporter_bin: String,
+    pub fonts_dejavu_core_deb: String,
     pub fontconfig_config_deb: String,
     pub libfontconfig_deb: String,
     pub unzip_deb: String,
@@ -666,8 +682,9 @@ pub(crate) fn install_monitoring_download_cmd(urls: &MonitoringUrls) -> String {
         r#"
 # Clean up any previous download artifacts (allows retries to re-download fresh copies)
 rm -f /home/ubuntu/prometheus.tar.gz /home/ubuntu/loki.zip /home/ubuntu/pyroscope.tar.gz \
-      /home/ubuntu/tempo.tar.gz /home/ubuntu/node_exporter.tar.gz /home/ubuntu/fontconfig-config.deb \
-      /home/ubuntu/libfontconfig1.deb /home/ubuntu/unzip.deb /home/ubuntu/adduser.deb /home/ubuntu/musl.deb
+      /home/ubuntu/tempo.tar.gz /home/ubuntu/node_exporter.tar.gz /home/ubuntu/fonts-dejavu-core.deb \
+      /home/ubuntu/fontconfig-config.deb /home/ubuntu/libfontconfig1.deb /home/ubuntu/unzip.deb \
+      /home/ubuntu/adduser.deb /home/ubuntu/musl.deb
 rm -rf /home/ubuntu/prometheus-* /home/ubuntu/loki-linux-* /home/ubuntu/pyroscope \
        /home/ubuntu/tempo /home/ubuntu/node_exporter-*
 
@@ -681,6 +698,7 @@ sudo systemctl unmask prometheus loki pyroscope tempo node_exporter grafana-serv
 {WGET} -O /home/ubuntu/pyroscope.tar.gz '{}' &
 {WGET} -O /home/ubuntu/tempo.tar.gz '{}' &
 {WGET} -O /home/ubuntu/node_exporter.tar.gz '{}' &
+{WGET} -O /home/ubuntu/fonts-dejavu-core.deb '{}' &
 {WGET} -O /home/ubuntu/fontconfig-config.deb '{}' &
 {WGET} -O /home/ubuntu/libfontconfig1.deb '{}' &
 {WGET} -O /home/ubuntu/unzip.deb '{}' &
@@ -702,7 +720,7 @@ wait
 
 # Verify all downloads succeeded
 for f in prometheus.tar.gz grafana.deb loki.zip pyroscope.tar.gz tempo.tar.gz node_exporter.tar.gz \
-         fontconfig-config.deb libfontconfig1.deb unzip.deb adduser.deb musl.deb prometheus.yml datasources.yml all.yml dashboard.json \
+         fonts-dejavu-core.deb fontconfig-config.deb libfontconfig1.deb unzip.deb adduser.deb musl.deb prometheus.yml datasources.yml all.yml dashboard.json \
          loki.yml pyroscope.yml tempo.yml prometheus.service loki.service pyroscope.service \
          tempo.service node_exporter.service; do
     if [ ! -f "/home/ubuntu/$f" ]; then
@@ -717,6 +735,7 @@ done
         urls.pyroscope_bin,
         urls.tempo_bin,
         urls.node_exporter_bin,
+        urls.fonts_dejavu_core_deb,
         urls.fontconfig_config_deb,
         urls.libfontconfig_deb,
         urls.unzip_deb,
@@ -762,7 +781,8 @@ sudo mv /home/ubuntu/prometheus-{prometheus_version}.linux-{arch} /opt/prometheu
 sudo ln -sf /opt/prometheus/prometheus-{prometheus_version}.linux-{arch}/prometheus /opt/prometheus/prometheus
 sudo chmod +x /opt/prometheus/prometheus
 
-# Install Grafana dependencies (fontconfig-config, libfontconfig1, musl) and Grafana
+# Install Grafana dependencies (fonts-dejavu-core, fontconfig-config, libfontconfig1, musl) and Grafana
+sudo dpkg -i /home/ubuntu/fonts-dejavu-core.deb
 sudo dpkg -i /home/ubuntu/fontconfig-config.deb
 sudo dpkg -i /home/ubuntu/libfontconfig1.deb
 sudo dpkg -i /home/ubuntu/musl.deb
