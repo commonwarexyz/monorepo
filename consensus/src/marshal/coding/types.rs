@@ -138,27 +138,7 @@ impl<C: Scheme, H: Hasher> Shard<C, H> {
         self.inner
     }
 
-    /// Verifies that this shard is valid for the given commitment and index.
-    ///
-    /// NOTE: If the inner shard is a weak shard, this will always return false, as weak shards
-    /// cannot be verified in isolation.
-    pub fn verify(&self) -> bool {
-        match &self.inner {
-            DistributionShard::Strong(shard) => C::reshard(
-                &self.commitment.config(),
-                &self.commitment.coding_digest(),
-                u16::try_from(self.index).expect("shard index fits in u16"),
-                shard.clone(),
-            )
-            .is_ok(),
-            DistributionShard::Weak(_) => false,
-        }
-    }
-
     /// Verifies the shard and returns the weak reshard for broadcasting if valid.
-    ///
-    /// This is more efficient than calling [`Self::verify`] followed by a separate reshard
-    /// operation, as it avoids redundant SHA-256 hashing.
     ///
     /// Returns `Some(weak_shard)` if the shard is valid and can be rebroadcast,
     /// or `None` if the shard is invalid or already weak.

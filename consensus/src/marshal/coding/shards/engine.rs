@@ -379,9 +379,9 @@ where
         //
         // We extract the first valid strong shard by swapping it to the end and popping, avoiding
         // a clone. The resulting checked shard is prepended to the checked_shards list.
-        let strong_shard_pos = shards.iter().position(|s| {
-            matches!(s.deref(), DistributionShard::Strong(_))
-        });
+        let strong_shard_pos = shards
+            .iter()
+            .position(|s| matches!(s.deref(), DistributionShard::Strong(_)));
         let Some(strong_pos) = strong_shard_pos else {
             debug!(%commitment, "no strong shards present to form checking data");
             return Ok(None);
@@ -608,8 +608,8 @@ where
         self.buffer
             .get(None, commitment, Some(index_hash))
             .await
-            .first()
-            .cloned()
+            .into_iter()
+            .next()
     }
 
     /// Notifies any subscribers waiting for a block to be reconstructed that it is now available.
