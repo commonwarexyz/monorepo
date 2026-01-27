@@ -415,17 +415,14 @@ pub struct Private {
 impl Private {
     /// Creates a new private key from a scalar.
     ///
-    /// # Panics
-    ///
-    /// Panics if the scalar is zero.
-    pub(crate) fn new(private: Scalar) -> Self {
-        assert!(
-            private != Scalar::zero(),
-            "cannot create Private from zero scalar"
-        );
-        Self {
-            scalar: Secret::new(private),
+    /// Returns `None` if the scalar is zero.
+    pub(crate) fn new(private: Scalar) -> Option<Self> {
+        if private == Scalar::zero() {
+            return None;
         }
+        Some(Self {
+            scalar: Secret::new(private),
+        })
     }
 
     /// Temporarily exposes the inner scalar to a closure.
@@ -482,14 +479,14 @@ impl FixedSize for Private {
 
 impl Random for Private {
     fn random(rng: impl CryptoRngCore) -> Self {
-        Self::new(Scalar::random(rng))
+        Self::new(Scalar::random(rng)).expect("random scalar is non-zero")
     }
 }
 
 #[cfg(feature = "arbitrary")]
 impl arbitrary::Arbitrary<'_> for Private {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        Ok(Self::new(u.arbitrary::<Scalar>()?))
+        Ok(Self::new(u.arbitrary::<Scalar>()?).expect("arbitrary scalar is non-zero"))
     }
 }
 
