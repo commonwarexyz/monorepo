@@ -455,6 +455,7 @@ async fn verify_recovery<J: FuzzJournal>(
 ) {
     let size = journal.size();
     let oldest = journal.oldest_retained_pos();
+    assert!(size >= oldest.unwrap_or(0));
 
     assert!(
         size <= max_expected_size,
@@ -472,8 +473,6 @@ async fn verify_recovery<J: FuzzJournal>(
     if let Some(oldest) = oldest {
         assert!(oldest >= min_expected_oldest);
         assert!(oldest <= max_expected_oldest);
-    } else if size > 0 {
-        assert!(max_expected_oldest >= size);
     }
 
     // Verify we can append new data after recovery

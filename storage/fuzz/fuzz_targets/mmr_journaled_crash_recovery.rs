@@ -245,54 +245,6 @@ async fn run_operations(
     )
 }
 
-async fn verify_recovery(
-    mmr: &mut TestMmr,
-    hasher: &mut StandardHasher<Sha256>,
-    min_size: u64,
-    max_size: u64,
-    min_leaves: u64,
-    max_leaves: u64,
-    min_pruned: u64,
-    max_pruned: u64,
-) {
-    let size = mmr.size().as_u64();
-    let leaves = mmr.leaves().as_u64();
-    let pruned = mmr.pruned_to_pos().as_u64();
-
-    assert!(size <= max_size, "size {} > max_size {}", size, max_size);
-    assert!(size >= min_size, "size {} < min_size {}", size, min_size);
-    assert!(
-        leaves <= max_leaves,
-        "leaves {} > max_leaves {}",
-        leaves,
-        max_leaves
-    );
-    assert!(
-        leaves >= min_leaves,
-        "leaves {} < min_leaves {}",
-        leaves,
-        min_leaves
-    );
-    assert!(
-        pruned <= max_pruned,
-        "pruned {} > max_pruned {}",
-        pruned,
-        max_pruned
-    );
-    assert!(
-        pruned >= min_pruned,
-        "pruned {} < min_pruned {}",
-        pruned,
-        min_pruned
-    );
-
-    // Verify we can add new data after recovery
-    let test_data = [0xABu8; DATA_SIZE];
-    mmr.add(hasher, &test_data)
-        .await
-        .expect("Should be able to add after recovery");
-}
-
 fn fuzz(input: FuzzInput) {
     if input.operations.is_empty() {
         return;
@@ -361,17 +313,43 @@ fn fuzz(input: FuzzInput) {
         .await
         .expect("MMR recovery should succeed");
 
-        verify_recovery(
-            &mut mmr,
-            &mut hasher,
-            min_size,
-            max_size,
-            min_leaves,
-            max_leaves,
-            min_pruned,
-            max_pruned,
-        )
-        .await;
+        // Verify recovered state is within expected bounds
+        let size = mmr.size().as_u64();
+        let leaves = mmr.leaves().as_u64();
+        let pruned = mmr.pruned_to_pos().as_u64();
+
+        assert!(size <= max_size, "size {} > max_size {}", size, max_size);
+        assert!(size >= min_size, "size {} < min_size {}", size, min_size);
+        assert!(
+            leaves <= max_leaves,
+            "leaves {} > max_leaves {}",
+            leaves,
+            max_leaves
+        );
+        assert!(
+            leaves >= min_leaves,
+            "leaves {} < min_leaves {}",
+            leaves,
+            min_leaves
+        );
+        assert!(
+            pruned <= max_pruned,
+            "pruned {} > max_pruned {}",
+            pruned,
+            max_pruned
+        );
+        assert!(
+            pruned >= min_pruned,
+            "pruned {} < min_pruned {}",
+            pruned,
+            min_pruned
+        );
+
+        // Verify we can add new data after recovery
+        let test_data = [0xABu8; DATA_SIZE];
+        mmr.add(&mut hasher, &test_data)
+            .await
+            .expect("Should be able to add after recovery");
 
         mmr.destroy().await.expect("Should be able to destroy MMR");
     });
