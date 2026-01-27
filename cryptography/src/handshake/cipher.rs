@@ -29,7 +29,7 @@ impl CounterNonce {
 
     /// Increments the counter and returns the current value as bytes.
     /// Returns an error if the counter would overflow.
-    pub const fn inc(&mut self) -> Result<[u8; NONCE_SIZE_BYTES], Error> {
+    pub fn inc(&mut self) -> Result<[u8; NONCE_SIZE_BYTES], Error> {
         if self.inner >= 1 << (8 * NONCE_SIZE_BYTES) {
             return Err(Error::MessageLimitReached);
         }
@@ -37,11 +37,7 @@ impl CounterNonce {
         self.inner += 1;
         // Extract only the lower 96 bits (12 bytes) for the nonce
         let mut nonce = [0u8; NONCE_SIZE_BYTES];
-        let mut i = 0;
-        while i < NONCE_SIZE_BYTES {
-            nonce[i] = out[i];
-            i += 1;
-        }
+        nonce.copy_from_slice(&out[..NONCE_SIZE_BYTES]);
         Ok(nonce)
     }
 }
