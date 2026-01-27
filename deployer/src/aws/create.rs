@@ -40,6 +40,9 @@ struct ToolUrls {
     libjemalloc: String,
     logrotate: String,
     jq: String,
+    fonts_dejavu_mono: String,
+    fonts_dejavu_core: String,
+    fontconfig_config: String,
     libfontconfig: String,
     unzip: String,
     adduser: String,
@@ -212,18 +215,27 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
         }
     };
 
-    // Cache adduser (arch-independent) once before the loop
+    // Cache arch-independent packages once before the loop
     let adduser_url = cache_tool(
         adduser_bin_s3_key(ADDUSER_VERSION),
         adduser_download_url(ADDUSER_VERSION),
     )
     .await?;
-
+    let fonts_dejavu_mono_url = cache_tool(
+        fonts_dejavu_mono_bin_s3_key(FONTS_DEJAVU_MONO_VERSION),
+        fonts_dejavu_mono_download_url(FONTS_DEJAVU_MONO_VERSION),
+    )
+    .await?;
+    let fonts_dejavu_core_url = cache_tool(
+        fonts_dejavu_core_bin_s3_key(FONTS_DEJAVU_CORE_VERSION),
+        fonts_dejavu_core_download_url(FONTS_DEJAVU_CORE_VERSION),
+    )
+    .await?;
     // Cache tools for each architecture and store URLs per-architecture
     let mut tool_urls_by_arch: HashMap<Architecture, ToolUrls> = HashMap::new();
     for arch in &architectures_needed {
         let [prometheus_url, grafana_url, loki_url, pyroscope_url, tempo_url, node_exporter_url, promtail_url,
-             libjemalloc_url, logrotate_url, jq_url, libfontconfig_url, unzip_url, musl_url]: [String; 13] =
+             libjemalloc_url, logrotate_url, jq_url, fontconfig_config_url, libfontconfig_url, unzip_url, musl_url]: [String; 14] =
             try_join_all([
                 cache_tool(prometheus_bin_s3_key(PROMETHEUS_VERSION, *arch), prometheus_download_url(PROMETHEUS_VERSION, *arch)),
                 cache_tool(grafana_bin_s3_key(GRAFANA_VERSION, *arch), grafana_download_url(GRAFANA_VERSION, *arch)),
@@ -235,6 +247,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
                 cache_tool(libjemalloc_bin_s3_key(LIBJEMALLOC2_VERSION, *arch), libjemalloc_download_url(LIBJEMALLOC2_VERSION, *arch)),
                 cache_tool(logrotate_bin_s3_key(LOGROTATE_VERSION, *arch), logrotate_download_url(LOGROTATE_VERSION, *arch)),
                 cache_tool(jq_bin_s3_key(JQ_VERSION, *arch), jq_download_url(JQ_VERSION, *arch)),
+                cache_tool(fontconfig_config_bin_s3_key(FONTCONFIG_CONFIG_VERSION, *arch), fontconfig_config_download_url(FONTCONFIG_CONFIG_VERSION, *arch)),
                 cache_tool(libfontconfig_bin_s3_key(LIBFONTCONFIG1_VERSION, *arch), libfontconfig_download_url(LIBFONTCONFIG1_VERSION, *arch)),
                 cache_tool(unzip_bin_s3_key(UNZIP_VERSION, *arch), unzip_download_url(UNZIP_VERSION, *arch)),
                 cache_tool(musl_bin_s3_key(MUSL_VERSION, *arch), musl_download_url(MUSL_VERSION, *arch)),
@@ -255,6 +268,9 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
                 libjemalloc: libjemalloc_url,
                 logrotate: logrotate_url,
                 jq: jq_url,
+                fonts_dejavu_mono: fonts_dejavu_mono_url.clone(),
+                fonts_dejavu_core: fonts_dejavu_core_url.clone(),
+                fontconfig_config: fontconfig_config_url,
                 libfontconfig: libfontconfig_url,
                 unzip: unzip_url,
                 adduser: adduser_url.clone(),
@@ -1092,6 +1108,9 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
         pyroscope_bin: tool_urls.pyroscope.clone(),
         tempo_bin: tool_urls.tempo.clone(),
         node_exporter_bin: tool_urls.node_exporter.clone(),
+        fonts_dejavu_mono_deb: tool_urls.fonts_dejavu_mono.clone(),
+        fonts_dejavu_core_deb: tool_urls.fonts_dejavu_core.clone(),
+        fontconfig_config_deb: tool_urls.fontconfig_config.clone(),
         libfontconfig_deb: tool_urls.libfontconfig.clone(),
         unzip_deb: tool_urls.unzip.clone(),
         adduser_deb: tool_urls.adduser.clone(),
