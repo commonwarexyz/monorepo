@@ -7,13 +7,9 @@
 //! [lookup] operates under the assumption that peer addresses are known in advance,
 //! and that they can be looked up by their identifiers.
 
-use commonware_macros::stability_scope;
-
 mod data;
-stability_scope!(GAMMA {
-    pub mod discovery;
-    pub mod lookup;
-});
+pub mod discovery;
+pub mod lookup;
 mod mailbox;
 pub use mailbox::{Mailbox, UnboundedMailbox};
 mod relay;
