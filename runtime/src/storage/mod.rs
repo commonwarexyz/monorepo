@@ -1,6 +1,5 @@
 //! Implementations of the `Storage` trait that can be used by the runtime.
 
-use crate::{Buf, BufMut};
 use commonware_macros::stability_scope;
 
 stability_scope!(ALPHA {
@@ -15,6 +14,7 @@ stability_scope!(GAMMA, cfg(all(not(target_arch = "wasm32"), not(feature = "iour
 });
 
 stability_scope!(GAMMA {
+    use crate::{Buf, BufMut};
     use commonware_codec::{DecodeExt, FixedSize, Read as CodecRead, Write as CodecWrite};
     use commonware_utils::hex;
     use std::ops::RangeInclusive;

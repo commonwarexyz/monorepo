@@ -23,7 +23,18 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
     pub use crate::bitmap::{BitMap as AuthenticatedBitMap, CleanBitMap as CleanAuthenticatedBitMap, DirtyBitMap as DirtyAuthenticatedBitMap};
     pub mod bmt;
     pub mod cache;
+});
 
+commonware_macros::stability_scope!(GAMMA, cfg(feature = "std") {
+    pub mod archive;
+    pub mod freezer;
+    pub mod index;
+    pub mod journal;
+    pub mod kv;
+    pub mod metadata;
+    pub mod ordinal;
+    pub mod rmap;
+    pub mod translator;
 
     /// A storage structure with capabilities to persist and recover state across restarts.
     pub trait Persistable {
@@ -49,17 +60,4 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
         /// artifacts. This can be used to clean up disk resources in tests.
         fn destroy(self) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send;
     }
-});
-
-commonware_macros::stability_scope!(GAMMA, cfg(feature = "std") {
-    pub mod archive;
-    pub mod freezer;
-    pub mod index;
-    pub mod journal;
-    pub mod kv;
-    pub mod metadata;
-    pub mod ordinal;
-    pub mod rmap;
-    pub mod translator;
-
 });
