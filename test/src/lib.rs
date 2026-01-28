@@ -5,7 +5,7 @@
     html_favicon_url = "https://commonware.xyz/favicon.ico"
 )]
 
-mod minifuzz;
+pub mod minifuzz;
 
 use libfuzzer_sys::Corpus;
 use proptest::{
