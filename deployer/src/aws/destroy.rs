@@ -234,12 +234,13 @@ pub async fn destroy(config: Option<&PathBuf>, tag: Option<&str>) -> Result<(), 
 
             let igw_ids = find_igws_by_tag(&ec2_client, &tag).await?;
             for igw_id in igw_ids {
-                let vpc_id = find_vpc_by_igw(&ec2_client, &igw_id).await?;
-                detach_igw(&ec2_client, &igw_id, &vpc_id).await?;
-                info!(
-                    region = region.as_str(),
-                    igw_id, vpc_id, "detached internet gateway"
-                );
+                if let Some(vpc_id) = find_vpc_by_igw(&ec2_client, &igw_id).await? {
+                    detach_igw(&ec2_client, &igw_id, &vpc_id).await?;
+                    info!(
+                        region = region.as_str(),
+                        igw_id, vpc_id, "detached internet gateway"
+                    );
+                }
                 delete_igw(&ec2_client, &igw_id).await?;
                 info!(region = region.as_str(), igw_id, "deleted internet gateway");
             }

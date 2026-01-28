@@ -1243,3 +1243,356 @@ where
         mmr.destroy().await.unwrap();
     });
 }
+
+mod harnesses {
+    use super::SyncTestHarness;
+    use crate::{qmdb::any::value::VariableEncoding, translator::TwoCap};
+    use commonware_cryptography::sha256::Digest;
+    use commonware_runtime::deterministic::Context;
+
+    // ----- Ordered/Fixed -----
+
+    pub struct OrderedFixedHarness;
+
+    impl SyncTestHarness for OrderedFixedHarness {
+        type Db = crate::qmdb::any::ordered::fixed::test::CleanAnyTest;
+
+        fn config(suffix: &str) -> crate::qmdb::any::FixedConfig<TwoCap> {
+            crate::qmdb::any::ordered::fixed::test::create_test_config(suffix.parse().unwrap_or(0))
+        }
+
+        fn clone_config(
+            config: &crate::qmdb::any::FixedConfig<TwoCap>,
+        ) -> crate::qmdb::any::FixedConfig<TwoCap> {
+            config.clone()
+        }
+
+        fn create_ops(
+            n: usize,
+        ) -> Vec<crate::qmdb::any::ordered::fixed::Operation<Digest, Digest>> {
+            crate::qmdb::any::ordered::fixed::test::create_test_ops(n)
+        }
+
+        fn create_ops_seeded(
+            n: usize,
+            seed: u64,
+        ) -> Vec<crate::qmdb::any::ordered::fixed::Operation<Digest, Digest>> {
+            crate::qmdb::any::ordered::fixed::test::create_test_ops_seeded(n, seed)
+        }
+
+        async fn init_db(ctx: Context) -> Self::Db {
+            crate::qmdb::any::ordered::fixed::test::create_test_db(ctx).await
+        }
+
+        async fn init_db_with_config(
+            ctx: Context,
+            config: crate::qmdb::any::FixedConfig<TwoCap>,
+        ) -> Self::Db {
+            Self::Db::init(ctx, config).await.unwrap()
+        }
+
+        async fn apply_ops(
+            db: Self::Db,
+            ops: Vec<crate::qmdb::any::ordered::fixed::Operation<Digest, Digest>>,
+        ) -> Self::Db {
+            let mut db = db.into_mutable();
+            crate::qmdb::any::ordered::fixed::test::apply_ops(&mut db, ops).await;
+            db.commit(None::<Digest>).await.unwrap().0.into_merkleized()
+        }
+    }
+
+    // ----- Ordered/Variable -----
+
+    pub struct OrderedVariableHarness;
+
+    impl SyncTestHarness for OrderedVariableHarness {
+        type Db = crate::qmdb::any::ordered::variable::test::AnyTest;
+
+        fn config(suffix: &str) -> crate::qmdb::any::ordered::variable::test::VarConfig {
+            crate::qmdb::any::ordered::variable::test::create_test_config(
+                suffix.parse().unwrap_or(0),
+            )
+        }
+
+        fn clone_config(
+            config: &crate::qmdb::any::ordered::variable::test::VarConfig,
+        ) -> crate::qmdb::any::ordered::variable::test::VarConfig {
+            config.clone()
+        }
+
+        fn create_ops_seeded(
+            n: usize,
+            seed: u64,
+        ) -> Vec<crate::qmdb::any::ordered::variable::Operation<Digest, Vec<u8>>> {
+            crate::qmdb::any::ordered::variable::test::create_test_ops_seeded(n, seed)
+        }
+
+        fn create_ops(
+            n: usize,
+        ) -> Vec<crate::qmdb::any::ordered::variable::Operation<Digest, Vec<u8>>> {
+            crate::qmdb::any::ordered::variable::test::create_test_ops(n)
+        }
+
+        async fn init_db(ctx: Context) -> Self::Db {
+            crate::qmdb::any::ordered::variable::test::create_test_db(ctx).await
+        }
+
+        async fn init_db_with_config(
+            ctx: Context,
+            config: crate::qmdb::any::ordered::variable::test::VarConfig,
+        ) -> Self::Db {
+            Self::Db::init(ctx, config).await.unwrap()
+        }
+
+        async fn apply_ops(
+            db: Self::Db,
+            ops: Vec<crate::qmdb::any::ordered::variable::Operation<Digest, Vec<u8>>>,
+        ) -> Self::Db {
+            let mut db = db.into_mutable();
+            crate::qmdb::any::ordered::variable::test::apply_ops(&mut db, ops).await;
+            db.commit(None::<Vec<u8>>)
+                .await
+                .unwrap()
+                .0
+                .into_merkleized()
+        }
+    }
+
+    // ----- Unordered/Fixed -----
+
+    pub struct UnorderedFixedHarness;
+
+    impl SyncTestHarness for UnorderedFixedHarness {
+        type Db = crate::qmdb::any::unordered::fixed::test::AnyTest;
+
+        fn config(suffix: &str) -> crate::qmdb::any::FixedConfig<TwoCap> {
+            crate::qmdb::any::unordered::fixed::test::create_test_config(
+                suffix.parse().unwrap_or(0),
+            )
+        }
+
+        fn clone_config(
+            config: &crate::qmdb::any::FixedConfig<TwoCap>,
+        ) -> crate::qmdb::any::FixedConfig<TwoCap> {
+            config.clone()
+        }
+
+        fn create_ops_seeded(
+            n: usize,
+            seed: u64,
+        ) -> Vec<crate::qmdb::any::unordered::fixed::Operation<Digest, Digest>> {
+            crate::qmdb::any::unordered::fixed::test::create_test_ops_seeded(n, seed)
+        }
+
+        fn create_ops(
+            n: usize,
+        ) -> Vec<crate::qmdb::any::unordered::fixed::Operation<Digest, Digest>> {
+            crate::qmdb::any::unordered::fixed::test::create_test_ops(n)
+        }
+
+        async fn init_db(ctx: Context) -> Self::Db {
+            crate::qmdb::any::unordered::fixed::test::create_test_db(ctx).await
+        }
+
+        async fn init_db_with_config(
+            ctx: Context,
+            config: crate::qmdb::any::FixedConfig<TwoCap>,
+        ) -> Self::Db {
+            Self::Db::init(ctx, config).await.unwrap()
+        }
+
+        async fn apply_ops(
+            db: Self::Db,
+            ops: Vec<crate::qmdb::any::unordered::fixed::Operation<Digest, Digest>>,
+        ) -> Self::Db {
+            let mut db = db.into_mutable();
+            crate::qmdb::any::unordered::fixed::test::apply_ops(&mut db, ops).await;
+            db.commit(None::<Digest>).await.unwrap().0.into_merkleized()
+        }
+    }
+
+    // ----- Unordered/Variable -----
+
+    pub struct UnorderedVariableHarness;
+
+    impl SyncTestHarness for UnorderedVariableHarness {
+        type Db = crate::qmdb::any::unordered::variable::test::AnyTest;
+
+        fn config(suffix: &str) -> crate::qmdb::any::unordered::variable::test::VarConfig {
+            crate::qmdb::any::unordered::variable::test::create_test_config(
+                suffix.parse().unwrap_or(0),
+            )
+        }
+
+        fn clone_config(
+            config: &crate::qmdb::any::unordered::variable::test::VarConfig,
+        ) -> crate::qmdb::any::unordered::variable::test::VarConfig {
+            config.clone()
+        }
+
+        fn create_ops(
+            n: usize,
+        ) -> Vec<crate::qmdb::any::unordered::Operation<Digest, VariableEncoding<Vec<u8>>>>
+        {
+            crate::qmdb::any::unordered::variable::test::create_test_ops(n)
+        }
+
+        fn create_ops_seeded(n: usize, seed: u64) -> Vec<super::OpOf<Self>> {
+            crate::qmdb::any::unordered::variable::test::create_test_ops_seeded(n, seed)
+        }
+
+        async fn init_db(ctx: Context) -> Self::Db {
+            crate::qmdb::any::unordered::variable::test::create_test_db(ctx).await
+        }
+
+        async fn init_db_with_config(
+            ctx: Context,
+            config: crate::qmdb::any::unordered::variable::test::VarConfig,
+        ) -> Self::Db {
+            Self::Db::init(ctx, config).await.unwrap()
+        }
+
+        async fn apply_ops(
+            db: Self::Db,
+            ops: Vec<crate::qmdb::any::unordered::Operation<Digest, VariableEncoding<Vec<u8>>>>,
+        ) -> Self::Db {
+            let mut db = db.into_mutable();
+            crate::qmdb::any::unordered::variable::test::apply_ops(&mut db, ops).await;
+            db.commit(None::<Vec<u8>>)
+                .await
+                .unwrap()
+                .0
+                .into_merkleized()
+        }
+    }
+}
+
+// ===== Test Generation Macro =====
+
+/// Macro to generate all standard sync tests for a given harness.
+macro_rules! sync_tests_for_harness {
+    ($harness:ty, $mod_name:ident) => {
+        mod $mod_name {
+            use super::harnesses;
+            use commonware_macros::test_traced;
+            use rstest::rstest;
+            use std::num::NonZeroU64;
+
+            #[test_traced]
+            fn test_sync_invalid_bounds() {
+                super::test_sync_invalid_bounds::<$harness>();
+            }
+
+            #[test_traced]
+            fn test_sync_subset_of_target_database() {
+                super::test_sync_subset_of_target_database::<$harness>(1000);
+            }
+
+            #[rstest]
+            #[case::small_batch_size_one(10, 1)]
+            #[case::small_batch_size_gt_db_size(10, 20)]
+            #[case::batch_size_one(1000, 1)]
+            #[case::floor_div_db_batch_size(1000, 3)]
+            #[case::floor_div_db_batch_size_2(1000, 999)]
+            #[case::div_db_batch_size(1000, 100)]
+            #[case::db_size_eq_batch_size(1000, 1000)]
+            #[case::batch_size_gt_db_size(1000, 1001)]
+            fn test_sync(#[case] target_db_ops: usize, #[case] fetch_batch_size: u64) {
+                super::test_sync::<$harness>(
+                    target_db_ops,
+                    NonZeroU64::new(fetch_batch_size).unwrap(),
+                );
+            }
+
+            #[test_traced]
+            fn test_sync_use_existing_db_partial_match() {
+                super::test_sync_use_existing_db_partial_match::<$harness>(1000);
+            }
+
+            #[test_traced]
+            fn test_sync_use_existing_db_exact_match() {
+                super::test_sync_use_existing_db_exact_match::<$harness>(1000);
+            }
+
+            #[test_traced("WARN")]
+            fn test_target_update_lower_bound_decrease() {
+                super::test_target_update_lower_bound_decrease::<$harness>();
+            }
+
+            #[test_traced("WARN")]
+            fn test_target_update_upper_bound_decrease() {
+                super::test_target_update_upper_bound_decrease::<$harness>();
+            }
+
+            #[test_traced("WARN")]
+            fn test_target_update_bounds_increase() {
+                super::test_target_update_bounds_increase::<$harness>();
+            }
+
+            #[test_traced("WARN")]
+            fn test_target_update_invalid_bounds() {
+                super::test_target_update_invalid_bounds::<$harness>();
+            }
+
+            #[test_traced("WARN")]
+            fn test_target_update_on_done_client() {
+                super::test_target_update_on_done_client::<$harness>();
+            }
+
+            #[rstest]
+            #[case(1, 1)]
+            #[case(1, 2)]
+            #[case(1, 100)]
+            #[case(2, 1)]
+            #[case(2, 2)]
+            #[case(2, 100)]
+            // Regression test: panicked when we didn't set pinned nodes after updating target
+            #[case(20, 10)]
+            #[case(100, 1)]
+            #[case(100, 2)]
+            #[case(100, 100)]
+            #[case(100, 1000)]
+            fn test_target_update_during_sync(
+                #[case] initial_ops: usize,
+                #[case] additional_ops: usize,
+            ) {
+                super::test_target_update_during_sync::<$harness>(initial_ops, additional_ops);
+            }
+
+            #[test_traced]
+            fn test_sync_database_persistence() {
+                super::test_sync_database_persistence::<$harness>();
+            }
+
+            #[test_traced]
+            fn test_sync_resolver_fails() {
+                super::test_sync_resolver_fails::<$harness>();
+            }
+
+            #[test_traced("WARN")]
+            fn test_from_sync_result_empty_to_empty() {
+                super::test_from_sync_result_empty_to_empty::<$harness>();
+            }
+
+            #[test_traced]
+            fn test_from_sync_result_empty_to_nonempty() {
+                super::test_from_sync_result_empty_to_nonempty::<$harness>();
+            }
+
+            #[test_traced]
+            fn test_from_sync_result_nonempty_to_nonempty_partial_match() {
+                super::test_from_sync_result_nonempty_to_nonempty_partial_match::<$harness>();
+            }
+
+            #[test_traced]
+            fn test_from_sync_result_nonempty_to_nonempty_exact_match() {
+                super::test_from_sync_result_nonempty_to_nonempty_exact_match::<$harness>();
+            }
+        }
+    };
+}
+
+sync_tests_for_harness!(harnesses::OrderedFixedHarness, ordered_fixed);
+sync_tests_for_harness!(harnesses::OrderedVariableHarness, ordered_variable);
+sync_tests_for_harness!(harnesses::UnorderedFixedHarness, unordered_fixed);
+sync_tests_for_harness!(harnesses::UnorderedVariableHarness, unordered_variable);

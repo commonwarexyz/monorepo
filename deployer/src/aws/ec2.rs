@@ -926,21 +926,44 @@ pub async fn find_igws_by_tag(ec2_client: &Ec2Client, tag: &str) -> Result<Vec<S
         .collect())
 }
 
-/// Finds the VPC ID attached to an Internet Gateway
-pub async fn find_vpc_by_igw(ec2_client: &Ec2Client, igw_id: &str) -> Result<String, Ec2Error> {
+/// Finds the VPC ID attached to an Internet Gateway, if any
+pub async fn find_vpc_by_igw(
+    ec2_client: &Ec2Client,
+    igw_id: &str,
+) -> Result<Option<String>, Ec2Error> {
     let resp = ec2_client
         .describe_internet_gateways()
         .internet_gateway_ids(igw_id)
         .send()
         .await?;
-    Ok(resp.internet_gateways.unwrap()[0]
-        .attachments
-        .as_ref()
-        .unwrap()[0]
-        .vpc_id
-        .as_ref()
-        .unwrap()
-        .clone())
+    Ok(resp
+        .internet_gateways
+        .and_then(|gws| gws.into_iter().next())
+        .and_then(|gw| gw.attachments)
+        .and_then(|attachments| attachments.into_iter().next())
+        .and_then(|attachment| attachment.vpc_id))
+}
+
+/// Returns the set of regions that are enabled for the AWS account
+pub async fn get_enabled_regions(ec2_client: &Ec2Client) -> Result<HashSet<String>, Ec2Error> {
+    let resp = ec2_client
+        .describe_regions()
+        .all_regions(true)
+        .filters(
+            Filter::builder()
+                .name("opt-in-status")
+                .values("opt-in-not-required")
+                .values("opted-in")
+                .build(),
+        )
+        .send()
+        .await?;
+    Ok(resp
+        .regions
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|r| r.region_name)
+        .collect())
 }
 
 /// Detaches an Internet Gateway from a VPC

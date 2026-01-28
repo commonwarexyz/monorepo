@@ -8,10 +8,7 @@ use crate::{
         contiguous::variable::{self, Config as JournalConfig},
     },
     kv,
-    mmr::{
-        journaled::{Config as MmrConfig, Mmr},
-        Location, Position, Proof, StandardHasher as Standard,
-    },
+    mmr::{journaled::Config as MmrConfig, Location, Proof},
     qmdb::{
         any::VariableValue, build_snapshot_from_log, DurabilityState, Durable, Error,
         MerkleizationState, Merkleized, NonDurable, Unmerkleized,
@@ -305,69 +302,6 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: T
         })
     }
 
-    /// The number of operations to apply to the MMR in a single batch.
-    const APPLY_BATCH_SIZE: u64 = 1 << 16;
-
-    /// Returns an [Immutable] built from the config and sync data in `cfg`.
-    #[allow(clippy::type_complexity)]
-    pub async fn init_synced(
-        context: E,
-        cfg: sync::Config<E, K, V, T, H::Digest, <Operation<K, V> as Read>::Cfg>,
-    ) -> Result<Self, Error> {
-        let mut hasher = Standard::new();
-
-        // Initialize MMR for sync
-        let mmr = Mmr::init_sync(
-            context.with_label("mmr"),
-            crate::mmr::journaled::SyncConfig {
-                config: MmrConfig {
-                    journal_partition: cfg.db_config.mmr_journal_partition,
-                    metadata_partition: cfg.db_config.mmr_metadata_partition,
-                    items_per_blob: cfg.db_config.mmr_items_per_blob,
-                    write_buffer: cfg.db_config.mmr_write_buffer,
-                    thread_pool: cfg.db_config.thread_pool.clone(),
-                    buffer_pool: cfg.db_config.buffer_pool.clone(),
-                },
-                range: Position::try_from(cfg.range.start)?
-                    ..Position::try_from(cfg.range.end.saturating_add(1))?,
-                pinned_nodes: cfg.pinned_nodes,
-            },
-            &mut hasher,
-        )
-        .await?;
-
-        let journal = Journal::<_, _, _, _, Merkleized<H>>::from_components(
-            mmr,
-            cfg.log,
-            hasher,
-            Self::APPLY_BATCH_SIZE,
-        )
-        .await?;
-
-        let mut snapshot: Index<T, Location> = Index::new(
-            context.with_label("snapshot"),
-            cfg.db_config.translator.clone(),
-        );
-
-        // Get the start of the log.
-        let start_loc = journal.pruning_boundary();
-
-        // Build snapshot from the log
-        build_snapshot_from_log(start_loc, &journal.journal, &mut snapshot, |_, _| {}).await?;
-
-        let last_commit_loc = journal.size().checked_sub(1).expect("commit should exist");
-
-        let mut db = Self {
-            journal,
-            snapshot,
-            last_commit_loc,
-            _durable: core::marker::PhantomData,
-        };
-
-        db.sync().await?;
-        Ok(db)
-    }
-
     /// Sync all database state to disk. While this isn't necessary to ensure durability of
     /// committed operations, periodic invocation may reduce memory usage and the time required to
     /// recover the database on restart.
@@ -592,7 +526,7 @@ impl<
 #[cfg(test)]
 pub(super) mod test {
     use super::*;
-    use crate::{qmdb::verify_proof, translator::TwoCap};
+    use crate::{mmr::StandardHasher, qmdb::verify_proof, translator::TwoCap};
     use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{
@@ -743,7 +677,7 @@ pub(super) mod test {
         // Build a db with `ELEMENTS` key/value pairs and prove ranges over them.
         const ELEMENTS: u64 = 2_000;
         executor.start(|context| async move {
-            let mut hasher = Standard::<Sha256>::new();
+            let mut hasher = StandardHasher::<Sha256>::new();
             let db = open_db(context.with_label("first")).await;
             let mut db = db.into_mutable();
 

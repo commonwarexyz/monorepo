@@ -282,13 +282,18 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
                     .expect("metadata prune position is not 8 bytes"),
             )
         });
-        let oldest_retained_pos = journal.oldest_retained_pos().unwrap_or(0);
-        if metadata_prune_pos != oldest_retained_pos {
-            assert!(metadata_prune_pos >= oldest_retained_pos);
-            // These positions may differ only due to blob boundary alignment, so this case isn't
-            // unusual.
+        let oldest_retained_pos = journal
+            .oldest_retained_pos()
+            .unwrap_or_else(|| journal.pruning_boundary());
+        if metadata_prune_pos > oldest_retained_pos {
+            // Metadata is ahead of journal (crashed before completing journal prune).
+            // Prune the journal to match metadata.
             journal.prune(metadata_prune_pos).await?;
-            if journal.oldest_retained_pos().unwrap_or(0) != oldest_retained_pos {
+            if journal
+                .oldest_retained_pos()
+                .unwrap_or_else(|| journal.pruning_boundary())
+                != oldest_retained_pos
+            {
                 // This should only happen in the event of some failure during the last attempt to
                 // prune the journal.
                 warn!(
@@ -296,7 +301,18 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
                     metadata_prune_pos, "journal pruned to match metadata"
                 );
             }
+        } else if metadata_prune_pos < oldest_retained_pos {
+            // Metadata is stale (e.g., missing/corrupted while journal has valid state).
+            // Use the journal's state as authoritative.
+            warn!(
+                metadata_prune_pos,
+                oldest_retained_pos, "metadata stale, using journal pruning boundary"
+            );
         }
+
+        // Use the more restrictive (higher) pruning boundary between metadata and journal.
+        // This handles both cases: metadata ahead (crash during prune) and metadata stale.
+        let effective_prune_pos = std::cmp::max(metadata_prune_pos, oldest_retained_pos);
 
         let last_valid_size = PeakIterator::to_nearest_size(journal_size);
         let mut orphaned_leaf: Option<D> = None;
@@ -331,7 +347,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
             },
             hasher,
         )?;
-        let prune_pos = Position::new(metadata_prune_pos);
+        let prune_pos = Position::new(effective_prune_pos);
         Self::add_extra_pinned_nodes(&mut mem_mmr, &metadata, &journal, prune_pos).await?;
 
         let mut s = Self {
@@ -366,12 +382,12 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
     ///
     /// 2. **Prune and Reuse**: range.start ≤ existing_size ≤ range.end
     ///    - Sets in-memory MMR size to `existing_size`
-    ///    - Prunes the journal to `range.start`
+    ///    - Prunes the journal toward `range.start` (section-aligned)
     ///
     /// 3. **Prune and Rewind**: existing_size > range.end
     ///    - Rewinds the journal to size `range.end`
     ///    - Sets in-memory MMR size to `range.end`
-    ///    - Prunes the journal to `range.start`
+    ///    - Prunes the journal toward `range.start` (section-aligned)
     pub async fn init_sync(
         context: E,
         cfg: SyncConfig<D>,
@@ -1143,7 +1159,7 @@ mod tests {
             // The very last element we added (pos=495) resulted in new parents at positions 496 &
             // 497. Simulate a partial write by corrupting the last page's checksum by truncating
             // the last blob by a single byte.
-            let partition: String = "journal_partition".into();
+            let partition: String = "journal_partition-blobs".into();
             let (blob, len) = context
                 .open(&partition, &71u64.to_be_bytes())
                 .await
@@ -1753,6 +1769,108 @@ mod tests {
             }
 
             sync_mmr.destroy().await.unwrap();
+        });
+    }
+
+    // Regression test that MMR init() handles stale metadata (lower pruning boundary than journal).
+    // Before the fix, this would panic with an assertion failure. After the fix, it
+    // returns a MissingNode error (which is expected when metadata is corrupted and
+    // pinned nodes are lost).
+    #[test_traced("WARN")]
+    fn test_journaled_mmr_init_stale_metadata_returns_error() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut hasher = Standard::<Sha256>::new();
+
+            // Create an MMR with some data and prune it
+            let mut mmr = Mmr::init(context.with_label("init"), &mut hasher, test_config())
+                .await
+                .unwrap();
+
+            // Add 50 elements
+            for i in 0..50 {
+                mmr.add(&mut hasher, &test_digest(i)).await.unwrap();
+            }
+            mmr.sync().await.unwrap();
+
+            // Prune to position 20 (this stores pinned nodes in metadata for position 20)
+            let prune_pos = Position::new(20);
+            mmr.prune_to_pos(prune_pos).await.unwrap();
+            drop(mmr);
+
+            // Tamper with metadata to have a stale (lower) pruning boundary
+            let meta_cfg = MConfig {
+                partition: test_config().metadata_partition,
+                codec_config: ((0..).into(), ()),
+            };
+            let mut metadata =
+                Metadata::<_, U64, Vec<u8>>::init(context.with_label("meta_tamper"), meta_cfg)
+                    .await
+                    .unwrap();
+
+            // Set pruning boundary to 0 (stale)
+            let key = U64::new(PRUNE_TO_POS_PREFIX, 0);
+            metadata.put(key, 0u64.to_be_bytes().to_vec());
+            metadata.sync().await.unwrap();
+            drop(metadata);
+
+            // Reopen the MMR - before the fix, this would panic with assertion failure
+            // After the fix, it returns MissingNode error (pinned nodes for the lower
+            // boundary don't exist since they were pruned from journal and weren't
+            // stored in metadata at the lower position)
+            let result = CleanMmr::<_, Digest>::init(
+                context.with_label("reopened"),
+                &mut hasher,
+                test_config(),
+            )
+            .await;
+
+            match result {
+                Err(Error::MissingNode(_)) => {} // expected
+                Ok(_) => panic!("expected MissingNode error, got Ok"),
+                Err(e) => panic!("expected MissingNode error, got {:?}", e),
+            }
+        });
+    }
+
+    // Test that MMR init() handles the case where metadata pruning boundary is ahead
+    // of journal (crashed before journal prune completed). This should successfully
+    // prune the journal to match metadata.
+    #[test_traced("WARN")]
+    fn test_journaled_mmr_init_metadata_ahead() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut hasher = Standard::<Sha256>::new();
+
+            // Create an MMR with some data
+            let mut mmr = Mmr::init(context.with_label("init"), &mut hasher, test_config())
+                .await
+                .unwrap();
+
+            // Add 50 elements
+            for i in 0..50 {
+                mmr.add(&mut hasher, &test_digest(i)).await.unwrap();
+            }
+            mmr.sync().await.unwrap();
+
+            // Prune to position 30 (this stores pinned nodes and updates metadata)
+            let prune_pos = Position::new(30);
+            mmr.prune_to_pos(prune_pos).await.unwrap();
+            let expected_root = mmr.root();
+            let expected_size = mmr.size();
+            drop(mmr);
+
+            // Reopen the MMR - should recover correctly with metadata ahead of
+            // journal boundary (metadata says 30, journal is section-aligned to 28)
+            let mmr = Mmr::init(context.with_label("reopened"), &mut hasher, test_config())
+                .await
+                .unwrap();
+
+            assert_eq!(mmr.pruned_to_pos(), prune_pos);
+            assert_eq!(mmr.size(), expected_size);
+            assert_eq!(mmr.root(), expected_root);
+
+            mmr.destroy().await.unwrap();
         });
     }
 }
