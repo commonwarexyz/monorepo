@@ -503,6 +503,15 @@ pub struct BufferPool {
     inner: Arc<BufferPoolInner>,
 }
 
+impl std::fmt::Debug for BufferPool {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BufferPool")
+            .field("config", &self.inner.config)
+            .field("num_classes", &self.inner.classes.len())
+            .finish()
+    }
+}
+
 impl BufferPool {
     /// Creates a new buffer pool with the given configuration.
     ///
@@ -557,6 +566,7 @@ impl BufferPool {
     ///
     /// The actual capacity is rounded up to the next power-of-two size class.
     /// The buffer will be returned to the pool when dropped.
+    #[must_use]
     pub fn alloc(&self, capacity: usize) -> Option<IoBufMut> {
         self.try_alloc(capacity).ok()
     }
@@ -565,6 +575,7 @@ impl BufferPool {
     ///
     /// This is like [`Self::alloc`] but returns a [`Result`] that distinguishes
     /// between different failure modes.
+    #[must_use]
     pub fn try_alloc(&self, capacity: usize) -> Result<IoBufMut, PoolError> {
         let class_index = match self.inner.config.class_index(capacity) {
             Some(idx) => idx,

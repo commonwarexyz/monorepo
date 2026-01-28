@@ -245,6 +245,12 @@ impl IoBufMut {
         }
     }
 
+    /// Returns `true` if this buffer was allocated from a pool.
+    #[inline]
+    pub const fn is_pooled(&self) -> bool {
+        matches!(self.inner, IoBufMutInner::Pooled(_))
+    }
+
     /// Set the length of the buffer.
     ///
     /// # Safety
