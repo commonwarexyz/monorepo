@@ -1194,10 +1194,15 @@ impl<V: Variant, S: Signer> Dealer<V, S> {
             .map(|pk| {
                 (
                     pk.clone(),
-                    DealerPrivMsg::new(Private::new(my_poly.eval_msm(
-                        &info.player_scalar(pk).expect("player should exist"),
-                        &Sequential,
-                    ))),
+                    DealerPrivMsg::new(
+                        my_poly
+                            .eval_msm(
+                                &info.player_scalar(pk).expect("player should exist"),
+                                &Sequential,
+                            )
+                            .try_into()
+                            .expect("non-zero dealer share"),
+                    ),
                 )
             })
             .collect::<Vec<_>>();
@@ -1527,7 +1532,10 @@ impl<V: Variant, S: Signer> Player<V, S> {
                     .expect("select ensures that we can recover")
             },
         );
-        let share = Share::new(self.index, Private::new(private));
+        let share = Share::new(
+            self.index,
+            private.try_into().expect("non-zero combined share"),
+        );
         Ok((output, share))
     }
 }
@@ -1558,7 +1566,10 @@ pub fn deal<V: Variant, P: Clone + Ord, M: Faults>(
                     .expect("player index should be valid"),
                 &Sequential,
             );
-            let share = Share::new(participant, Private::new(eval));
+            let share = Share::new(
+                participant,
+                Private::try_from(eval).expect("non-zero dealt share"),
+            );
             (p.clone(), share)
         })
         .try_collect()
@@ -1967,10 +1978,17 @@ mod test_plan {
                                 .map(|pk| {
                                     (
                                         pk.clone(),
-                                        DealerPrivMsg::new(Private::new(my_poly.eval_msm(
-                                            &info.player_scalar(pk).expect("player should exist"),
-                                            &Sequential,
-                                        ))),
+                                        DealerPrivMsg::new(
+                                            my_poly
+                                                .eval_msm(
+                                                    &info
+                                                        .player_scalar(pk)
+                                                        .expect("player should exist"),
+                                                    &Sequential,
+                                                )
+                                                .try_into()
+                                                .expect("non-zero dealer share"),
+                                        ),
                                     )
                                 })
                                 .collect::<Vec<_>>();

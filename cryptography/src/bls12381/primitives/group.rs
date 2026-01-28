@@ -413,21 +413,6 @@ pub struct Private {
 }
 
 impl Private {
-    /// Creates a new private key from a scalar.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the scalar is zero.
-    pub(crate) fn new(private: Scalar) -> Self {
-        assert!(
-            private != Scalar::zero(),
-            "cannot create Private from zero scalar"
-        );
-        Self {
-            scalar: Secret::new(private),
-        }
-    }
-
     /// Temporarily exposes the inner scalar to a closure.
     ///
     /// See [`Secret::expose`](crate::Secret::expose) for more details.
@@ -440,6 +425,22 @@ impl Private {
     /// See [`Secret::expose_unwrap`](crate::Secret::expose_unwrap) for more details.
     pub fn expose_unwrap(self) -> Scalar {
         self.scalar.expose_unwrap()
+    }
+}
+
+impl TryFrom<Scalar> for Private {
+    type Error = ();
+
+    /// Converts a scalar to a private key.
+    ///
+    /// Returns `Err(())` if the scalar is zero.
+    fn try_from(scalar: Scalar) -> Result<Self, Self::Error> {
+        if scalar == Scalar::zero() {
+            return Err(());
+        }
+        Ok(Self {
+            scalar: Secret::new(scalar),
+        })
     }
 }
 
@@ -482,14 +483,16 @@ impl FixedSize for Private {
 
 impl Random for Private {
     fn random(rng: impl CryptoRngCore) -> Self {
-        Self::new(Scalar::random(rng))
+        Scalar::random(rng)
+            .try_into()
+            .expect("random scalar is non-zero")
     }
 }
 
 #[cfg(feature = "arbitrary")]
 impl arbitrary::Arbitrary<'_> for Private {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        Ok(Self::new(u.arbitrary::<Scalar>()?))
+        Ok(Self::try_from(u.arbitrary::<Scalar>()?).expect("arbitrary scalar is non-zero"))
     }
 }
 
