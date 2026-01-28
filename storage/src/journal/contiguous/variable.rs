@@ -89,6 +89,33 @@ impl<C> Config<C> {
     }
 }
 
+/// Inner jounal state protected by a lock for interior mutability.
+struct Inner<E: Clock + Storage + Metrics, V: Codec> {
+    /// The underlying variable-length data journal.
+    data: variable::Journal<E, V>,
+
+    /// Index mapping positions to byte offsets within the data journal.
+    /// The section can be calculated from the position using items_per_section.
+    offsets: fixed::Journal<E, u64>,
+
+    /// The next position to be assigned on append (total items appended).
+    ///
+    /// # Invariant
+    ///
+    /// Always >= `oldest_retained_pos`. Equal when data journal is empty or fully pruned.
+    size: u64,
+
+    /// The position of the first item that remains after pruning.
+    ///
+    /// After normal operation and pruning, `oldest_retained_pos` is section-aligned.
+    /// After `init_at_size(N)`, `oldest_retained_pos` may be mid-section.
+    ///
+    /// # Invariant
+    ///
+    /// Never decreases (pruning only moves forward).
+    oldest_retained_pos: u64,
+}
+
 /// A contiguous journal with variable-size entries.
 ///
 /// This journal manages section assignment automatically, allowing callers to append items
@@ -126,33 +153,6 @@ impl<C> Config<C> {
 /// Note that we don't recover from the case where offsets.oldest_retained_pos() >
 /// data.oldest_retained_pos(). This should never occur because we always prune the data journal
 /// before the offsets journal.
-/// Inner state protected by a single lock.
-struct Inner<E: Clock + Storage + Metrics, V: Codec> {
-    /// The underlying variable-length data journal.
-    data: variable::Journal<E, V>,
-
-    /// Index mapping positions to byte offsets within the data journal.
-    /// The section can be calculated from the position using items_per_section.
-    offsets: fixed::Journal<E, u64>,
-
-    /// The next position to be assigned on append (total items appended).
-    ///
-    /// # Invariant
-    ///
-    /// Always >= `oldest_retained_pos`. Equal when data journal is empty or fully pruned.
-    size: u64,
-
-    /// The position of the first item that remains after pruning.
-    ///
-    /// After normal operation and pruning, `oldest_retained_pos` is section-aligned.
-    /// After `init_at_size(N)`, `oldest_retained_pos` may be mid-section.
-    ///
-    /// # Invariant
-    ///
-    /// Never decreases (pruning only moves forward).
-    oldest_retained_pos: u64,
-}
-
 pub struct Journal<E: Clock + Storage + Metrics, V: Codec> {
     inner: RwLock<Inner<E, V>>,
 
