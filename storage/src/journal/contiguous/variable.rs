@@ -102,18 +102,18 @@ struct Inner<E: Clock + Storage + Metrics, V: Codec> {
     ///
     /// # Invariant
     ///
-    /// Always >= `oldest_retained_pos`. Equal when data journal is empty or fully pruned.
+    /// Always >= `pruning_boundary`. Equal when data journal is empty or fully pruned.
     size: u64,
 
-    /// The position of the first item that remains after pruning.
+    /// The position before which all items have been pruned.
     ///
-    /// After normal operation and pruning, `oldest_retained_pos` is section-aligned.
-    /// After `init_at_size(N)`, `oldest_retained_pos` may be mid-section.
+    /// After normal operation and pruning, the value is section-aligned.
+    /// After `init_at_size(N)`, the value may be mid-section.
     ///
     /// # Invariant
     ///
     /// Never decreases (pruning only moves forward).
-    oldest_retained_pos: u64,
+    pruning_boundary: u64,
 }
 
 /// A contiguous journal with variable-size entries.
@@ -207,7 +207,7 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Journal<E, V> {
         .await?;
 
         // Validate and align offsets journal to match data journal
-        let (oldest_retained_pos, size) =
+        let (pruning_boundary, size) =
             Self::align_journals(&mut data, &mut offsets, items_per_section).await?;
 
         Ok(Self {
@@ -215,7 +215,7 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Journal<E, V> {
                 data,
                 offsets,
                 size,
-                oldest_retained_pos,
+                pruning_boundary,
             }),
             write_lock: Mutex::new(()),
             items_per_section,
@@ -270,7 +270,7 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Journal<E, V> {
                 data,
                 offsets,
                 size,
-                oldest_retained_pos: size,
+                pruning_boundary: size,
             }),
             write_lock: Mutex::new(()),
             items_per_section: cfg.items_per_section.get(),
@@ -374,7 +374,8 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Journal<E, V> {
     ///
     /// # Errors
     ///
-    /// Returns [Error::InvalidRewind] if size is invalid (too large or points to pruned data).
+    /// Returns [Error::InvalidRewind] if `size` is larger than current size.
+    /// Returns [Error::ItemPruned] if `size` is smaller than the pruning boundary.
     ///
     /// # Warning
     ///
@@ -390,8 +391,8 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Journal<E, V> {
             std::cmp::Ordering::Less => {}
         }
 
-        // Rewind never updates oldest_retained_pos.
-        if size < inner.oldest_retained_pos {
+        // Rewind never updates the pruning boundary.
+        if size < inner.pruning_boundary {
             return Err(Error::ItemPruned(size));
         }
 
@@ -480,19 +481,18 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Journal<E, V> {
     /// Returns `None` if the journal is empty or if all items have been pruned.
     pub async fn oldest_retained_pos(&self) -> Option<u64> {
         let inner = self.inner.read().await;
-        if inner.size == inner.oldest_retained_pos {
+        if inner.size == inner.pruning_boundary {
             // No items retained: either never had data or fully pruned
             None
         } else {
-            Some(inner.oldest_retained_pos)
+            Some(inner.pruning_boundary)
         }
     }
 
     /// Returns the location before which all items have been pruned.
     pub async fn pruning_boundary(&self) -> u64 {
-        self.oldest_retained_pos()
-            .await
-            .unwrap_or(self.size().await)
+        let inner = self.inner.read().await;
+        inner.pruning_boundary
     }
 
     /// Prune items at positions strictly less than `min_position`.
@@ -509,7 +509,7 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Journal<E, V> {
         let _write_guard = self.write_lock.lock().await;
         let mut inner = self.inner.write().await;
 
-        if min_position <= inner.oldest_retained_pos {
+        if min_position <= inner.pruning_boundary {
             return Ok(false);
         }
 
@@ -521,8 +521,8 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Journal<E, V> {
 
         let pruned = inner.data.prune(min_section).await?;
         if pruned {
-            let new_oldest = (min_section * self.items_per_section).max(inner.oldest_retained_pos);
-            inner.oldest_retained_pos = new_oldest;
+            let new_oldest = (min_section * self.items_per_section).max(inner.pruning_boundary);
+            inner.pruning_boundary = new_oldest;
             inner.offsets.prune(new_oldest).await?;
         }
         Ok(pruned)
@@ -549,7 +549,7 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Journal<E, V> {
             let inner = self.inner.read().await;
 
             // Validate bounds.
-            if start_pos < inner.oldest_retained_pos {
+            if start_pos < inner.pruning_boundary {
                 return Err(Error::ItemPruned(start_pos));
             }
             if start_pos > inner.size {
@@ -597,7 +597,7 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Journal<E, V> {
             return Err(Error::ItemOutOfRange(position));
         }
 
-        if position < inner.oldest_retained_pos {
+        if position < inner.pruning_boundary {
             return Err(Error::ItemPruned(position));
         }
 
@@ -655,7 +655,7 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Journal<E, V> {
 
         inner.offsets.clear_to_size(new_size).await?;
         inner.size = new_size;
-        inner.oldest_retained_pos = new_size;
+        inner.pruning_boundary = new_size;
         Ok(())
     }
 
