@@ -722,12 +722,7 @@ where
             .insert((round, block_digest), task);
 
         match scheme.me() {
-            Some(me) => {
-                // TODO: Update interface to use `Participant` type.
-                self.shards
-                    .subscribe_shard_validity(payload, me.get() as usize)
-                    .await
-            }
+            Some(me) => self.shards.subscribe_shard_validity(payload, me).await,
             None => {
                 // If we are not participating, there's no shard to verify; just accept the proposal.
                 //

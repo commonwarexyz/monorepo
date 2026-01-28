@@ -107,7 +107,7 @@ mod tests {
         archive::{immutable, prunable},
         translator::EightCap,
     };
-    use commonware_utils::{vec::NonEmptyVec, NZUsize, NZU16, NZU64};
+    use commonware_utils::{vec::NonEmptyVec, NZUsize, Participant, NZU16, NZU64};
     use futures::StreamExt;
     use rand::{
         seq::{IteratorRandom, SliceRandom},
@@ -531,7 +531,9 @@ mod tests {
                 // Ask each peer to validate their received shards. This will inform them to broadcast
                 // their shards to each other.
                 for (i, (_, shards)) in actors.iter_mut().enumerate() {
-                    let _recv = shards.subscribe_shard_validity(block.commitment(), i).await;
+                    let _recv = shards
+                        .subscribe_shard_validity(block.commitment(), Participant::new(i as u32))
+                        .await;
                 }
 
                 // Give peers enough time to broadcast their received shards to each other.
@@ -695,7 +697,9 @@ mod tests {
                 // Ask each peer to validate their received shards. This will inform them to broadcast
                 // their shards to each other.
                 for (i, (_, shards)) in actors.iter_mut().enumerate() {
-                    let _recv = shards.subscribe_shard_validity(block.commitment(), i).await;
+                    let _recv = shards
+                        .subscribe_shard_validity(block.commitment(), Participant::new(i as u32))
+                        .await;
                 }
 
                 // Give peers enough time to broadcast their received shards to each other.
@@ -1370,7 +1374,7 @@ mod tests {
             // Have each peer validate their received shards
             for (i, (_, shards)) in actors.iter_mut().enumerate() {
                 let _recv = shards
-                    .subscribe_shard_validity(block1.commitment(), i)
+                    .subscribe_shard_validity(block1.commitment(), Participant::new(i as u32))
                     .await;
             }
             context.sleep(LINK.latency * 2).await;
@@ -1395,7 +1399,7 @@ mod tests {
             // Have each peer validate their received shards
             for (i, (_, shards)) in actors.iter_mut().enumerate() {
                 let _recv = shards
-                    .subscribe_shard_validity(block2.commitment(), i)
+                    .subscribe_shard_validity(block2.commitment(), Participant::new(i as u32))
                     .await;
             }
             context.sleep(LINK.latency * 2).await;
@@ -1423,7 +1427,7 @@ mod tests {
             // Have each peer validate their received shards
             for (i, (_, shards)) in actors.iter_mut().enumerate() {
                 let _recv = shards
-                    .subscribe_shard_validity(block3.commitment(), i)
+                    .subscribe_shard_validity(block3.commitment(), Participant::new(i as u32))
                     .await;
             }
             context.sleep(LINK.latency * 2).await;

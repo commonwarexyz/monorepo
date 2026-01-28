@@ -327,7 +327,6 @@ where
             "number of participants must equal number of shards"
         );
 
-        // TODO(clabby): Measure perf; Consider adding batched broadcast in buffered mailbox.
         for (index, peer) in participants.into_iter().enumerate() {
             let message = block
                 .shard(index)
@@ -646,6 +645,7 @@ mod test {
     use commonware_runtime::{
         deterministic, telemetry::traces::collector::TraceStorage, Metrics, Quota, Runner,
     };
+    use commonware_utils::Participant;
     use std::{future::Future, num::NonZeroU32, time::Duration};
     use tracing::Level;
 
@@ -843,7 +843,7 @@ mod test {
             for (i, peer) in peers.iter().enumerate() {
                 let mailbox = mailboxes.get_mut(peer).unwrap();
                 let valid = mailbox
-                    .subscribe_shard_validity(coded_block.commitment(), i)
+                    .subscribe_shard_validity(coded_block.commitment(), Participant::new(i as u32))
                     .await
                     .await
                     .unwrap();
@@ -893,7 +893,7 @@ mod test {
             for (i, peer) in peers.iter().enumerate() {
                 let mailbox = mailboxes.get_mut(peer).unwrap();
                 let valid = mailbox
-                    .subscribe_shard_validity(coded_block.commitment(), i)
+                    .subscribe_shard_validity(coded_block.commitment(), Participant::new(i as u32))
                     .await
                     .await
                     .unwrap();
@@ -953,7 +953,7 @@ mod test {
             for (i, peer) in partial_peers.iter().enumerate() {
                 let mailbox = mailboxes.get_mut(peer).unwrap();
                 let _valid = mailbox
-                    .subscribe_shard_validity(coded_block.commitment(), i)
+                    .subscribe_shard_validity(coded_block.commitment(), Participant::new(i as u32))
                     .await
                     .await
                     .unwrap();
@@ -1061,7 +1061,7 @@ mod test {
             for (i, peer) in peers.iter().enumerate() {
                 let mailbox = mailboxes.get_mut(peer).unwrap();
                 let valid = mailbox
-                    .subscribe_shard_validity(coded_block.commitment(), i)
+                    .subscribe_shard_validity(coded_block.commitment(), Participant::new(i as u32))
                     .await
                     .await
                     .unwrap();
@@ -1115,7 +1115,10 @@ mod test {
             for (i, peer) in peers.iter().enumerate() {
                 let mailbox = mailboxes.get_mut(peer).unwrap();
                 let valid = mailbox
-                    .subscribe_shard_validity(finalized_block.commitment(), i)
+                    .subscribe_shard_validity(
+                        finalized_block.commitment(),
+                        Participant::new(i as u32),
+                    )
                     .await
                     .await
                     .unwrap();
@@ -1151,7 +1154,7 @@ mod test {
             for (i, peer) in peers.iter().enumerate() {
                 let mailbox = mailboxes.get_mut(peer).unwrap();
                 let valid = mailbox
-                    .subscribe_shard_validity(orphan_block.commitment(), i)
+                    .subscribe_shard_validity(orphan_block.commitment(), Participant::new(i as u32))
                     .await
                     .await
                     .unwrap();

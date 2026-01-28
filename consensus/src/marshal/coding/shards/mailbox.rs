@@ -11,6 +11,7 @@ use crate::{
 };
 use commonware_coding::Scheme as CodingScheme;
 use commonware_cryptography::PublicKey;
+use commonware_utils::Participant;
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt,
@@ -108,12 +109,12 @@ where
     pub async fn subscribe_shard_validity(
         &mut self,
         commitment: CodingCommitment,
-        index: usize,
+        index: Participant,
     ) -> oneshot::Receiver<bool> {
         let (tx, rx) = oneshot::channel();
         let msg = Message::SubscribeShardValidity {
             commitment,
-            index,
+            index: index.get() as usize,
             response: tx,
         };
         self.sender.send(msg).await.expect("mailbox closed");
