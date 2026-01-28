@@ -27,8 +27,13 @@ use std::{
 /// On other systems (Windows), defaults to 4KB.
 #[cfg(unix)]
 fn page_size() -> usize {
-    // SAFETY: sysconf is safe to call and _SC_PAGESIZE always succeeds on Unix systems.
-    unsafe { libc::sysconf(libc::_SC_PAGESIZE) as usize }
+    // SAFETY: sysconf is safe to call.
+    let size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+    if size <= 0 {
+        4096 // Safe fallback if sysconf fails
+    } else {
+        size as usize
+    }
 }
 
 #[cfg(not(unix))]
@@ -482,18 +487,21 @@ impl BufferPool {
         }
     }
 
-    /// Allocates a buffer of exactly `size` bytes.
+    /// Allocates a buffer with the given capacity.
     ///
     /// Returns `None` if:
-    /// - `size` exceeds the maximum buffer size
+    /// - `capacity` exceeds the maximum buffer size
     /// - The pool is exhausted for the required size class
     ///
-    /// The returned buffer is page-aligned and has `len() == size`, behaving
-    /// like [`IoBufMut::zeroed`]. The memory contents are uninitialized; the
-    /// caller is expected to write to the buffer before reading from it.
+    /// The returned buffer has `len() == 0` and `capacity() >= capacity`,
+    /// matching the semantics of [`IoBufMut::with_capacity`] and
+    /// [`BytesMut::with_capacity`]. Use [`IoBufMut::resize`] to initialize
+    /// the buffer to a specific length.
+    ///
+    /// The actual capacity is rounded up to the next power-of-two size class.
     /// The buffer will be returned to the pool when dropped.
-    pub fn alloc(&self, size: usize) -> Option<IoBufMut> {
-        let class_index = match self.inner.config.class_index(size) {
+    pub fn alloc(&self, capacity: usize) -> Option<IoBufMut> {
+        let class_index = match self.inner.config.class_index(capacity) {
             Some(idx) => idx,
             None => {
                 self.inner.metrics.oversized_total.inc();
@@ -502,20 +510,16 @@ impl BufferPool {
         };
 
         let buffer = self.inner.try_alloc(class_index)?;
-        let mut pooled = PooledBufMut::new(buffer, Arc::downgrade(&self.inner));
-        // SAFETY: The caller will write to the buffer before reading from it.
-        // We set len = size so the buffer behaves like IoBufMut::zeroed.
-        unsafe { pooled.set_len(size) };
+        let pooled = PooledBufMut::new(buffer, Arc::downgrade(&self.inner));
         Some(IoBufMut::from_pooled(pooled))
     }
 
     /// Allocates a buffer optimized for I/O operations.
     ///
-    /// Like [`Self::alloc`], returns a buffer with `len() == size` that behaves
-    /// like [`IoBufMut::zeroed`]. In the future, this may return buffers that
-    /// are registered with io_uring for zero-copy I/O.
-    pub fn alloc_for_io(&self, size: usize) -> Option<IoBufMut> {
-        self.alloc(size)
+    /// Currently identical to [`Self::alloc`]. In the future, this may return
+    /// buffers registered with io_uring for zero-copy I/O.
+    pub fn alloc_for_io(&self, capacity: usize) -> Option<IoBufMut> {
+        self.alloc(capacity)
     }
 
     /// Returns the pool configuration.
@@ -644,6 +648,18 @@ impl PooledBufMut {
     pub const fn clear(&mut self) {
         self.cursor = 0;
         self.len = 0;
+    }
+
+    /// Truncates the buffer to at most `len` readable bytes.
+    ///
+    /// If `len` is greater than the current readable length, this has no effect.
+    /// This operates on readable bytes (after cursor), matching `BytesMut::truncate`
+    /// semantics for buffers that have been advanced.
+    #[inline]
+    pub const fn truncate(&mut self, len: usize) {
+        if len < self.len() {
+            self.len = self.cursor + len;
+        }
     }
 
     /// Resizes the buffer to `new_len`, filling new bytes with `value`.
@@ -960,10 +976,10 @@ mod tests {
         let mut registry = test_registry();
         let pool = BufferPool::new(test_config(page, page * 4, 2), &mut registry);
 
-        // Allocate a buffer - returns buffer with len == requested size
+        // Allocate a buffer - returns buffer with len=0, capacity >= requested
         let buf = pool.alloc(100).expect("alloc should succeed");
         assert!(buf.capacity() >= page);
-        assert_eq!(buf.len(), 100);
+        assert_eq!(buf.len(), 0);
 
         // Drop returns to pool
         drop(buf);
@@ -971,7 +987,7 @@ mod tests {
         // Can allocate again
         let buf2 = pool.alloc(100).expect("alloc should succeed");
         assert!(buf2.capacity() >= page);
-        assert_eq!(buf2.len(), 100);
+        assert_eq!(buf2.len(), 0);
     }
 
     #[test]
@@ -1022,8 +1038,9 @@ mod tests {
         let mut registry = test_registry();
         let pool = BufferPool::new(test_config(page, page, 2), &mut registry);
 
-        // Allocate a buffer
+        // Allocate and initialize a buffer
         let mut buf = pool.alloc(11).unwrap();
+        buf.resize(11, 0);
         assert_eq!(buf.len(), 11);
 
         // Write some data
@@ -1071,8 +1088,9 @@ mod tests {
         let mut registry = test_registry();
         let pool = BufferPool::new(test_config(page, page * 4, 10), &mut registry);
 
-        // Allocate a buffer
+        // Allocate and initialize a buffer
         let mut pooled = pool.alloc(100).unwrap();
+        pooled.resize(100, 0);
         assert_eq!(pooled.len(), 100);
         assert_eq!(Buf::remaining(&pooled), 100);
 
@@ -1098,10 +1116,10 @@ mod tests {
         let mut registry = test_registry();
         let pool = BufferPool::new(test_config(page, page, 10), &mut registry);
 
-        // Allocate 11 bytes and fill with known pattern
+        // Allocate and fill with known pattern
         let mut pooled = pool.alloc(11).unwrap();
+        pooled.resize(11, 0x42);
         assert_eq!(pooled.len(), 11);
-        pooled.as_mut().fill(0x42);
 
         // Advance past first 6 bytes
         Buf::advance(&mut pooled, 6);
@@ -1121,6 +1139,7 @@ mod tests {
         let pool = BufferPool::new(test_config(page, page, 10), &mut registry);
 
         let mut pooled = pool.alloc(100).unwrap();
+        pooled.resize(100, 0);
         assert_eq!(pooled.len(), 100);
 
         // Advance cursor
@@ -1203,10 +1222,10 @@ mod tests {
         let mut registry = test_registry();
         let pool = BufferPool::new(test_config(page, page, 10), &mut registry);
 
-        // Allocate a small buffer and write known data
+        // Allocate and initialize a small buffer
         let mut buf = pool.alloc(50).unwrap();
+        buf.resize(50, 0x11); // Fill with known pattern
         assert_eq!(buf.len(), 50);
-        buf.as_mut().fill(0x11); // Fill with known pattern
 
         // Grow within capacity (page size is at least 4096)
         buf.resize(100, 0xAB);
@@ -1223,8 +1242,9 @@ mod tests {
         let mut registry = test_registry();
         let pool = BufferPool::new(test_config(page, page, 10), &mut registry);
 
-        // Allocate a buffer
+        // Allocate and initialize a buffer
         let mut buf = pool.alloc(100).unwrap();
+        buf.resize(100, 0);
         assert_eq!(buf.len(), 100);
 
         // Truncate
@@ -1238,11 +1258,11 @@ mod tests {
         let mut registry = test_registry();
         let pool = BufferPool::new(test_config(page, page * 4, 10), &mut registry);
 
-        // Allocate a buffer at minimum size class and write known data
+        // Allocate and initialize a buffer at minimum size class
         let mut buf = pool.alloc(100).unwrap();
+        buf.resize(100, 0x22); // Fill with known pattern
         let original_capacity = buf.capacity();
         assert_eq!(buf.len(), 100);
-        buf.as_mut().fill(0x22); // Fill with known pattern
 
         // Grow beyond capacity - should get a new buffer from the pool
         let new_size = original_capacity + 100;
@@ -1331,7 +1351,8 @@ mod tests {
         let mut registry = test_registry();
         let pool = BufferPool::new(test_config(page, page, 2), &mut registry);
 
-        let buf = pool.alloc(100).unwrap();
+        let mut buf = pool.alloc(100).unwrap();
+        buf.resize(100, 0);
         let iobuf = buf.freeze();
 
         // Create a slice - this should hold a reference to the underlying buffer
@@ -1357,7 +1378,7 @@ mod tests {
         let pool = BufferPool::new(test_config(page, page, 2), &mut registry);
 
         let mut buf = pool.alloc(100).unwrap();
-        buf.as_mut().fill(0x42);
+        buf.resize(100, 0x42);
         let mut iobuf = buf.freeze();
 
         // copy_to_bytes should create a slice sharing the same buffer
@@ -1441,13 +1462,14 @@ mod tests {
         for _ in 0..100 {
             // Step 1: Incoming message
             let mut incoming = pool.alloc(100).unwrap();
-            incoming.as_mut().fill(0x42);
+            incoming.resize(100, 0x42);
 
             // Step 2: Freeze into "Data.message"
             let data_message = incoming.freeze();
 
             // Step 3: Allocate encoding buffer
             let mut encoding_buf = pool.alloc(200).unwrap();
+            encoding_buf.resize(200, 0);
 
             // Step 4: Copy data into encoding buffer (simulating encode)
             encoding_buf.as_mut()[..100].copy_from_slice(data_message.as_ref());
@@ -1470,7 +1492,6 @@ mod tests {
 
         // All buffers should be returned
         assert_eq!(get_allocated(&pool, page), 0);
-        println!("Available in freelist: {}", get_available(&pool, page));
     }
 
     #[test]
@@ -1527,16 +1548,18 @@ mod tests {
         for _ in 0..100 {
             // Incoming data (could be IoBuf or IoBufMut)
             let mut incoming = pool.alloc(100).unwrap();
-            incoming.as_mut().fill(0x42);
+            incoming.resize(100, 0x42);
             let incoming_iobuf = incoming.freeze();
 
             // Convert to IoBufs (what send() does)
             let mut bufs: IoBufs = incoming_iobuf.into();
             let plaintext_len = bufs.remaining();
 
-            // Allocate encryption buffer
+            // Allocate encryption buffer with capacity (no init needed, we write to it)
             let ciphertext_len = plaintext_len + 16; // +16 for tag
             let mut encryption_buf = pool.alloc(ciphertext_len).unwrap();
+            // SAFETY: We fill the entire buffer before reading
+            unsafe { encryption_buf.set_len(ciphertext_len) };
 
             // Copy plaintext into encryption buffer
             let mut offset = 0;
@@ -1685,7 +1708,8 @@ mod tests {
         let mut registry = test_registry();
         let pool = BufferPool::new(test_config(page, page, 2), &mut registry);
 
-        let buf = pool.alloc(100).unwrap();
+        let mut buf = pool.alloc(100).unwrap();
+        buf.resize(100, 0);
         let iobuf = buf.freeze();
 
         // Drop the pool while buffer is still alive

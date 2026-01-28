@@ -44,7 +44,11 @@ impl crate::Stream for Stream {
             let mut buf = self
                 .pool
                 .alloc(len)
-                .unwrap_or_else(|| IoBufMut::zeroed(len));
+                .unwrap_or_else(|| IoBufMut::with_capacity(len));
+            // SAFETY: We will write exactly `len` bytes before returning
+            // (read_exact fills the entire buffer). The buffer contents
+            // are uninitialized but we only write to it, never read.
+            unsafe { buf.set_len(len) };
             self.stream
                 .read_exact(buf.as_mut())
                 .await

@@ -313,19 +313,14 @@ impl IoBufMut {
         }
     }
 
-    /// Truncates the buffer to `len` bytes.
+    /// Truncates the buffer to `len` readable bytes.
     ///
     /// If `len` is greater than the current length, this has no effect.
     #[inline]
     pub fn truncate(&mut self, len: usize) {
         match &mut self.inner {
             IoBufMutInner::Owned(b) => b.truncate(len),
-            IoBufMutInner::Pooled(b) => {
-                if len < b.len() {
-                    // SAFETY: Truncating to a smaller length is always safe.
-                    unsafe { b.set_len(len) };
-                }
-            }
+            IoBufMutInner::Pooled(b) => b.truncate(len),
         }
     }
 
