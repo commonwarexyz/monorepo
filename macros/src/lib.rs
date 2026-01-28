@@ -98,18 +98,20 @@ fn level_name(level: u8) -> &'static str {
 pub fn stability(attr: TokenStream, item: TokenStream) -> TokenStream {
     let level = parse_macro_input!(attr as StabilityLevel);
 
-    // Generate cfg attributes for each level above this item's level.
-    // #[stability(BETA)] expands to #[cfg(not(commonware_stability_GAMMA))] #[cfg(not(commonware_stability_DELTA))] #[cfg(not(commonware_stability_EPSILON))]
-    let mut cfg_attrs = Vec::new();
-    for exclude_level in (level.value + 1)..=4 {
-        let cfg_name = format_ident!("commonware_stability_{}", level_name(exclude_level));
-        cfg_attrs.push(quote! { #[cfg(not(#cfg_name))] });
-    }
+    // Generate a single cfg(not(any(...))) for all levels above this item's level.
+    // #[stability(BETA)] expands to #[cfg(not(any(commonware_stability_GAMMA, commonware_stability_DELTA, commonware_stability_EPSILON)))]
+    let exclude_names: Vec<_> = ((level.value + 1)..=4)
+        .map(|l| format_ident!("commonware_stability_{}", level_name(l)))
+        .collect();
 
     let item2: proc_macro2::TokenStream = item.into();
-    let expanded = quote! {
-        #(#cfg_attrs)*
-        #item2
+    let expanded = if exclude_names.is_empty() {
+        quote! { #item2 }
+    } else {
+        quote! {
+            #[cfg(not(any(#(#exclude_names),*)))]
+            #item2
+        }
     };
 
     TokenStream::from(expanded)
@@ -156,19 +158,23 @@ pub fn stability_mod(input: TokenStream) -> TokenStream {
         name,
     } = parse_macro_input!(input as StabilityModInput);
 
-    let mut cfg_attrs = Vec::new();
-    for exclude_level in (level.value + 1)..=4 {
-        let cfg_name = format_ident!("commonware_stability_{}", level_name(exclude_level));
-        cfg_attrs.push(quote! { #[cfg(not(#cfg_name))] });
-    }
+    let exclude_names: Vec<_> = ((level.value + 1)..=4)
+        .map(|l| format_ident!("commonware_stability_{}", level_name(l)))
+        .collect();
 
-    let expanded = quote! {
-        #(#cfg_attrs)*
-        #visibility mod #name;
+    let expanded = if exclude_names.is_empty() {
+        quote! { #visibility mod #name; }
+    } else {
+        quote! {
+            #[cfg(not(any(#(#exclude_names),*)))]
+            #visibility mod #name;
+        }
     };
 
     TokenStream::from(expanded)
 }
+
+
 
 /// Input for the `stability_scope!` macro: `level [, cfg(predicate)] { items... }`
 struct StabilityScopeInput {
@@ -241,20 +247,22 @@ pub fn stability_scope(input: TokenStream) -> TokenStream {
         items,
     } = parse_macro_input!(input as StabilityScopeInput);
 
-    let mut cfg_attrs = Vec::new();
-    if let Some(predicate) = cfg_predicate {
-        cfg_attrs.push(quote! { #[cfg(#predicate)] });
-    }
-    for exclude_level in (level.value + 1)..=4 {
-        let cfg_name = format_ident!("commonware_stability_{}", level_name(exclude_level));
-        cfg_attrs.push(quote! { #[cfg(not(#cfg_name))] });
-    }
+    let exclude_names: Vec<_> = ((level.value + 1)..=4)
+        .map(|l| format_ident!("commonware_stability_{}", level_name(l)))
+        .collect();
+
+    let cfg_attr = match (cfg_predicate, exclude_names.is_empty()) {
+        (None, true) => None,
+        (None, false) => Some(quote! { #[cfg(not(any(#(#exclude_names),*)))] }),
+        (Some(pred), true) => Some(quote! { #[cfg(#pred)] }),
+        (Some(pred), false) => Some(quote! { #[cfg(all(#pred, not(any(#(#exclude_names),*))))] }),
+    };
 
     let expanded_items: Vec<_> = items
         .into_iter()
         .map(|item| {
             quote! {
-                #(#cfg_attrs)*
+                #cfg_attr
                 #item
             }
         })

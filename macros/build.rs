@@ -2,35 +2,65 @@ use std::env;
 
 const LEVELS: [&str; 5] = ["ALPHA", "BETA", "GAMMA", "DELTA", "EPSILON"];
 
-fn has_stability_cfg() -> bool {
+fn count_stability_cfgs() -> usize {
+    let mut count = 0;
+
     // Check CARGO_CFG_* env vars (set by cargo for --cfg flags)
     for level in LEVELS {
         let var = format!("CARGO_CFG_COMMONWARE_STABILITY_{}", level);
         if env::var_os(var).is_some() {
-            return true;
+            count += 1;
         }
+    }
+
+    // If we found any via CARGO_CFG_*, return that count
+    if count > 0 {
+        return count;
     }
 
     // Check RUSTFLAGS directly
     let rustflags = env::var("RUSTFLAGS").unwrap_or_default();
-    if rustflags.contains("commonware_stability_") {
-        return true;
+    for level in LEVELS {
+        let cfg = format!("commonware_stability_{}", level);
+        if rustflags.contains(&cfg) {
+            count += 1;
+        }
+    }
+
+    if count > 0 {
+        return count;
     }
 
     // Check CARGO_ENCODED_RUSTFLAGS
     let encoded = env::var("CARGO_ENCODED_RUSTFLAGS").unwrap_or_default();
-    encoded
-        .split('\u{1f}')
-        .any(|flag| flag.contains("commonware_stability_"))
+    for level in LEVELS {
+        let cfg = format!("commonware_stability_{}", level);
+        if encoded.split('\u{1f}').any(|flag| flag.contains(&cfg)) {
+            count += 1;
+        }
+    }
+
+    count
 }
 
 fn main() {
     println!("cargo:rerun-if-env-changed=RUSTFLAGS");
     println!("cargo:rerun-if-env-changed=CARGO_ENCODED_RUSTFLAGS");
 
-    if !has_stability_cfg() {
+    println!("cargo:rustc-check-cfg=cfg(commonware_stability_ALPHA)");
+    println!("cargo:rustc-check-cfg=cfg(commonware_stability_BETA)");
+    println!("cargo:rustc-check-cfg=cfg(commonware_stability_GAMMA)");
+    println!("cargo:rustc-check-cfg=cfg(commonware_stability_DELTA)");
+    println!("cargo:rustc-check-cfg=cfg(commonware_stability_EPSILON)");
+
+    let count = count_stability_cfgs();
+    if count == 0 {
         println!(
             "cargo:warning=stability cfg not set; set RUSTFLAGS=\"--cfg commonware_stability_X\" (ALPHA/BETA/GAMMA/DELTA/EPSILON) to enforce stability gating"
+        );
+    } else if count > 1 {
+        println!(
+            "cargo:warning=multiple stability cfgs detected; only one stability level (ALPHA/BETA/GAMMA/DELTA/EPSILON) should be set at a time"
         );
     }
 }

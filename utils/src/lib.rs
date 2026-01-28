@@ -11,8 +11,6 @@ extern crate alloc;
 
 /// Applies stability cfg attributes to an item.
 ///
-/// Use this for modules containing `#[macro_export]` macros where proc macros don't work.
-///
 /// # Example
 /// ```rust,ignore
 /// commonware_utils::stability_cfg!(GAMMA, pub mod my_module;);
@@ -20,29 +18,47 @@ extern crate alloc;
 #[macro_export]
 macro_rules! stability_cfg {
     (ALPHA, $($item:tt)*) => {
-        #[cfg(not(commonware_stability_BETA))]
-        #[cfg(not(commonware_stability_GAMMA))]
-        #[cfg(not(commonware_stability_DELTA))]
-        #[cfg(not(commonware_stability_EPSILON))]
+        #[cfg(not(any(
+            commonware_stability_BETA,
+            commonware_stability_GAMMA,
+            commonware_stability_DELTA,
+            commonware_stability_EPSILON
+        )))]
         $($item)*
+    };
+    (0, $($item:tt)*) => {
+        $crate::stability_cfg!(ALPHA, $($item)*);
     };
     (BETA, $($item:tt)*) => {
-        #[cfg(not(commonware_stability_GAMMA))]
-        #[cfg(not(commonware_stability_DELTA))]
-        #[cfg(not(commonware_stability_EPSILON))]
+        #[cfg(not(any(
+            commonware_stability_GAMMA,
+            commonware_stability_DELTA,
+            commonware_stability_EPSILON
+        )))]
         $($item)*
     };
+    (1, $($item:tt)*) => {
+        $crate::stability_cfg!(BETA, $($item)*);
+    };
     (GAMMA, $($item:tt)*) => {
-        #[cfg(not(commonware_stability_DELTA))]
-        #[cfg(not(commonware_stability_EPSILON))]
+        #[cfg(not(any(commonware_stability_DELTA, commonware_stability_EPSILON)))]
         $($item)*
+    };
+    (2, $($item:tt)*) => {
+        $crate::stability_cfg!(GAMMA, $($item)*);
     };
     (DELTA, $($item:tt)*) => {
         #[cfg(not(commonware_stability_EPSILON))]
         $($item)*
     };
+    (3, $($item:tt)*) => {
+        $crate::stability_cfg!(DELTA, $($item)*);
+    };
     (EPSILON, $($item:tt)*) => {
         $($item)*
+    };
+    (4, $($item:tt)*) => {
+        $crate::stability_cfg!(EPSILON, $($item)*);
     };
 }
 
@@ -59,13 +75,11 @@ commonware_macros::stability_mod!(GAMMA, pub mod faults);
 commonware_macros::stability_mod!(GAMMA, pub mod acknowledgement);
 #[cfg(feature = "std")]
 commonware_macros::stability_mod!(GAMMA, pub mod channels);
-#[cfg(not(commonware_stability_DELTA))]
-#[cfg(not(commonware_stability_EPSILON))]
+#[cfg(not(any(commonware_stability_DELTA, commonware_stability_EPSILON)))]
 pub mod hex_literal;
 #[cfg(feature = "std")]
 commonware_macros::stability_mod!(GAMMA, pub mod net);
-#[cfg(not(commonware_stability_DELTA))]
-#[cfg(not(commonware_stability_EPSILON))]
+#[cfg(not(any(commonware_stability_DELTA, commonware_stability_EPSILON)))]
 pub mod vec;
 
 commonware_macros::stability_scope!(GAMMA {
