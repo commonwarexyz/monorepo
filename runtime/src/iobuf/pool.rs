@@ -1407,6 +1407,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn test_multithreaded_alloc_freeze_return() {
         use std::{sync::Arc, thread};
 
