@@ -9,9 +9,8 @@ license.workspace = true
 cargo-fuzz = true
 
 [dependencies]
-arbitrary = { workspace = true, features = ["derive"] }
+arbitrary.workspace = true
 commonware-math = { workspace = true, features = ["fuzz"] }
-commonware-test.workspace = true
 libfuzzer-sys.workspace = true
 
 [[bin]]

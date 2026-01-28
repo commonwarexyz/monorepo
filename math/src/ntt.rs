@@ -922,76 +922,68 @@ impl EvaluationVector {
 }
 
 #[cfg(any(test, feature = "fuzz"))]
-pub(crate) mod fuzz {
+pub mod fuzz {
     use super::*;
     use crate::algebra::Ring;
-    use commonware_test::FuzzPlan;
-    use proptest::{
-        prop_assert_eq, prop_assert_ne, strategy::Strategy, test_runner::TestCaseResult,
-    };
-    use proptest_derive::Arbitrary;
+    use arbitrary::{Arbitrary, Unstructured};
 
-    fn any_f() -> impl Strategy<Value = F> {
-        proptest::arbitrary::any::<u64>().prop_map(F::from)
-    }
-
-    fn any_polynomial_vector(
-        max_log_rows: usize,
+    fn arb_polynomial_vector(
+        u: &mut Unstructured<'_>,
+        max_log_rows: u32,
         max_cols: usize,
-    ) -> impl Strategy<Value = PolynomialVector> {
-        (0..=max_log_rows).prop_flat_map(move |lg_rows| {
-            (1..=max_cols).prop_flat_map(move |cols| {
-                let rows = 1 << lg_rows;
-                proptest::collection::vec(any_f(), rows * cols).prop_map(move |coefficients| {
-                    PolynomialVector::new(rows, cols, coefficients.into_iter())
-                })
-            })
-        })
+    ) -> arbitrary::Result<PolynomialVector> {
+        let lg_rows = u.int_in_range(0..=max_log_rows)?;
+        let cols = u.int_in_range(1..=max_cols)?;
+        let rows = 1usize << lg_rows;
+        let coefficients: Vec<F> = (0..rows * cols)
+            .map(|_| Ok(F::from(u.arbitrary::<u64>()?)))
+            .collect::<arbitrary::Result<_>>()?;
+        Ok(PolynomialVector::new(rows, cols, coefficients.into_iter()))
     }
 
-    fn any_bit_vec_not_all_0(max_log_rows: usize) -> impl Strategy<Value = BitMap> {
-        (0..=max_log_rows).prop_flat_map(move |lg_rows| {
-            let rows = (1 << lg_rows) as usize;
-            (0..rows).prop_flat_map(move |set_row| {
-                proptest::collection::vec(proptest::arbitrary::any::<bool>(), 1 << lg_rows)
-                    .prop_map(move |mut bools| {
-                        bools[set_row] = true;
-                        BitMap::from(bools.as_slice())
-                    })
-            })
-        })
+    fn arb_bit_vec_not_all_0(
+        u: &mut Unstructured<'_>,
+        max_log_rows: u32,
+    ) -> arbitrary::Result<BitMap> {
+        let lg_rows = u.int_in_range(0..=max_log_rows)?;
+        let rows = 1usize << lg_rows;
+        let set_row = u.int_in_range(0..=rows - 1)?;
+        let mut bools: Vec<bool> = (0..rows)
+            .map(|_| u.arbitrary())
+            .collect::<arbitrary::Result<_>>()?;
+        bools[set_row] = true;
+        Ok(BitMap::from(bools.as_slice()))
     }
 
-    fn any_recovery_setup(
+    fn arb_recovery_setup(
+        u: &mut Unstructured<'_>,
         max_n: usize,
         max_k: usize,
         max_cols: usize,
-    ) -> impl Strategy<Value = RecoverySetup> {
-        (1..=max_n).prop_flat_map(move |n| {
-            (0..=max_k).prop_flat_map(move |k| {
-                (1..=max_cols).prop_flat_map(move |cols| {
-                    proptest::collection::vec(any_f(), n * cols).prop_flat_map(move |data| {
-                        let padded_rows = (n + k).next_power_of_two();
-                        proptest::sample::subsequence(
-                            (0..padded_rows).collect::<Vec<_>>(),
-                            n..=padded_rows,
-                        )
-                        .prop_map(move |indices| {
-                            let mut present = BitMap::zeroes(padded_rows as u64);
-                            for i in indices {
-                                present.set(i as u64, true);
-                            }
-                            RecoverySetup {
-                                n,
-                                k,
-                                cols,
-                                data: data.clone(),
-                                present,
-                            }
-                        })
-                    })
-                })
-            })
+    ) -> arbitrary::Result<RecoverySetup> {
+        let n = u.int_in_range(1..=max_n)?;
+        let k = u.int_in_range(0..=max_k)?;
+        let cols = u.int_in_range(1..=max_cols)?;
+        let data: Vec<F> = (0..n * cols)
+            .map(|_| Ok(F::from(u.arbitrary::<u64>()?)))
+            .collect::<arbitrary::Result<_>>()?;
+        let padded_rows = (n + k).next_power_of_two();
+        let num_present = u.int_in_range(n..=padded_rows)?;
+        let mut indices: Vec<usize> = (0..padded_rows).collect();
+        for i in 0..num_present {
+            let j = u.int_in_range(i..=padded_rows - 1)?;
+            indices.swap(i, j);
+        }
+        let mut present = BitMap::zeroes(padded_rows as u64);
+        for &i in &indices[..num_present] {
+            present.set(i as u64, true);
+        }
+        Ok(RecoverySetup {
+            n,
+            k,
+            cols,
+            data,
+            present,
         })
     }
 
@@ -1018,31 +1010,40 @@ pub(crate) mod fuzz {
         }
     }
 
-    #[derive(Debug, Arbitrary)]
+    #[derive(Debug)]
     pub enum Plan {
-        NttEqNaive(#[proptest(strategy = "any_polynomial_vector(4, 2)")] PolynomialVector),
-        EvaluationThenInverse(
-            #[proptest(strategy = "any_polynomial_vector(4, 2)")] PolynomialVector,
-        ),
-        VanishingPolynomial(#[proptest(strategy = "any_bit_vec_not_all_0(4)")] BitMap),
-        Recovery(#[proptest(strategy = "any_recovery_setup(8, 8, 2)")] RecoverySetup),
+        NttEqNaive(PolynomialVector),
+        EvaluationThenInverse(PolynomialVector),
+        VanishingPolynomial(BitMap),
+        Recovery(RecoverySetup),
     }
 
-    impl FuzzPlan for Plan {
-        fn run(self) -> TestCaseResult {
+    impl<'a> Arbitrary<'a> for Plan {
+        fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
+            match u.int_in_range(0..=3)? {
+                0 => Ok(Plan::NttEqNaive(arb_polynomial_vector(u, 4, 2)?)),
+                1 => Ok(Plan::EvaluationThenInverse(arb_polynomial_vector(u, 4, 2)?)),
+                2 => Ok(Plan::VanishingPolynomial(arb_bit_vec_not_all_0(u, 4)?)),
+                _ => Ok(Plan::Recovery(arb_recovery_setup(u, 8, 8, 2)?)),
+            }
+        }
+    }
+
+    impl Plan {
+        pub fn run(self) {
             match self {
                 Plan::NttEqNaive(p) => {
                     let ntt = p.clone().evaluate();
                     let ntt_naive = p.evaluate_naive();
-                    prop_assert_eq!(ntt, ntt_naive);
+                    assert_eq!(ntt, ntt_naive);
                 }
                 Plan::EvaluationThenInverse(p) => {
-                    prop_assert_eq!(p.clone(), p.evaluate().interpolate());
+                    assert_eq!(p.clone(), p.evaluate().interpolate());
                 }
                 Plan::VanishingPolynomial(bv) => {
                     let v = NTTPolynomial::vanishing(&bv);
                     let expected_degree = bv.count_zeros();
-                    prop_assert_eq!(
+                    assert_eq!(
                         v.degree(),
                         expected_degree as usize,
                         "expected v to have degree {}",
@@ -1053,14 +1054,9 @@ pub(crate) mod fuzz {
                     for b_i in bv.iter() {
                         let v_at_w_i = v.evaluate(w_i);
                         if !b_i {
-                            prop_assert_eq!(
-                                v_at_w_i,
-                                F::zero(),
-                                "v should evaluate to 0 at {:?}",
-                                w_i
-                            );
+                            assert_eq!(v_at_w_i, F::zero(), "v should evaluate to 0 at {:?}", w_i);
                         } else {
-                            prop_assert_ne!(v_at_w_i, F::zero());
+                            assert_ne!(v_at_w_i, F::zero());
                         }
                         w_i = w_i * w;
                     }
@@ -1069,8 +1065,15 @@ pub(crate) mod fuzz {
                     setup.test();
                 }
             }
-            Ok(())
         }
+    }
+
+    #[test]
+    fn test_fuzz() {
+        commonware_test::test(|u| {
+            u.arbitrary::<Plan>()?.run();
+            Ok(())
+        });
     }
 }
 
@@ -1078,8 +1081,6 @@ pub(crate) mod fuzz {
 mod test {
     use super::*;
     use crate::algebra::Ring;
-    use commonware_test::FuzzPlan as _;
-    use proptest::proptest;
 
     #[test]
     fn test_reverse_bits() {
@@ -1120,13 +1121,6 @@ mod test {
             present: vec![false, true].into(),
         }
         .test()
-    }
-
-    proptest! {
-        #[test]
-        fn test_fuzz(plan: fuzz::Plan) {
-            plan.run()?;
-        }
     }
 
     #[cfg(feature = "arbitrary")]
