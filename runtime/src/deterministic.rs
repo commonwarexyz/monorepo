@@ -1110,9 +1110,7 @@ impl crate::Spawner for Context {
                 result.map_err(|_| Error::Closed)?;
                 Ok(())
             },
-            _ = timeout_future => {
-                Err(Error::Timeout)
-            }
+            _ = timeout_future => Err(Error::Timeout),
         }
     }
 

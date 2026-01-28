@@ -129,11 +129,11 @@ impl<E: Spawner, S: Sender, R: Receiver> Muxer<E, S, R> {
                         let (tx, rx) = mpsc::channel(self.mailbox_size);
                         self.routes.insert(subchannel, tx);
                         let _ = sender.send(rx);
-                    },
+                    }
                     Some(Control::Deregister { subchannel }) => {
                         // Remove the route.
                         self.routes.remove(&subchannel);
-                    },
+                    }
                     None => {
                         // If the control channel is closed, we can shut down since there must
                         // be no more registrations, and all receivers must have been dropped.
@@ -180,7 +180,7 @@ impl<E: Spawner, S: Sender, R: Receiver> Muxer<E, S, R> {
                         debug!(?subchannel, "subchannel full, dropping message");
                     }
                 }
-            }
+            },
         }
 
         Ok(())

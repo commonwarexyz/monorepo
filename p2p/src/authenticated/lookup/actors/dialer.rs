@@ -172,10 +172,7 @@ impl<E: Spawner + Clock + Network + Resolver + CryptoRngCore + Metrics, C: Signe
             },
             _ = self.context.sleep_until(dial_deadline) => {
                 // Update the deadline.
-                dial_deadline = dial_deadline.add_jittered(
-                    &mut self.context,
-                    self.dial_frequency,
-                );
+                dial_deadline = dial_deadline.add_jittered(&mut self.context, self.dial_frequency);
 
                 // Pop the queue until we can reserve a peer.
                 // If a peer is reserved, attempt to dial it.
@@ -190,10 +187,8 @@ impl<E: Spawner + Clock + Network + Resolver + CryptoRngCore + Metrics, C: Signe
             },
             _ = self.context.sleep_until(query_deadline) => {
                 // Update the deadline.
-                query_deadline = query_deadline.add_jittered(
-                    &mut self.context,
-                    self.query_frequency,
-                );
+                query_deadline =
+                    query_deadline.add_jittered(&mut self.context, self.query_frequency);
 
                 // Only update the queue if it is empty.
                 if self.queue.is_empty() {
@@ -202,7 +197,7 @@ impl<E: Spawner + Clock + Network + Resolver + CryptoRngCore + Metrics, C: Signe
                     self.queue = tracker.dialable().await;
                     self.queue.shuffle(&mut self.context);
                 }
-            }
+            },
         }
     }
 }
@@ -276,21 +271,22 @@ mod tests {
             let deadline = context.current() + dial_frequency * 3;
             loop {
                 select! {
-                    msg = tracker_rx.next() => {
-                        match msg {
-                            Some(tracker::Message::Dialable { responder }) => {
-                                let _ = responder.send(peers.clone());
-                            }
-                            Some(tracker::Message::Dial { public_key, reservation }) => {
-                                dial_count += 1;
-                                let metadata = Metadata::Dialer(public_key);
-                                let res = tracker::Reservation::new(metadata, releaser.clone());
-                                let ingress: Ingress =
-                                    SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 8000).into();
-                                let _ = reservation.send(Some((res, ingress)));
-                            }
-                            _ => {}
+                    msg = tracker_rx.next() => match msg {
+                        Some(tracker::Message::Dialable { responder }) => {
+                            let _ = responder.send(peers.clone());
                         }
+                        Some(tracker::Message::Dial {
+                            public_key,
+                            reservation,
+                        }) => {
+                            dial_count += 1;
+                            let metadata = Metadata::Dialer(public_key);
+                            let res = tracker::Reservation::new(metadata, releaser.clone());
+                            let ingress: Ingress =
+                                SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 8000).into();
+                            let _ = reservation.send(Some((res, ingress)));
+                        }
+                        _ => {}
                     },
                     _ = context.sleep_until(deadline) => break,
                 }

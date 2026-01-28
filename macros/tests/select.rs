@@ -74,11 +74,9 @@ mod tests {
             select_loop! {
                 mock_context,
                 on_stopped => {},
-                msg = rx.next() => {
-                    match msg {
-                        Some(v) => received.push(v),
-                        None => break,
-                    }
+                msg = rx.next() => match msg {
+                    Some(v) => received.push(v),
+                    None => break,
                 },
             }
             assert_eq!(received, vec![1, 2, 3]);
@@ -124,12 +122,10 @@ mod tests {
             select_loop! {
                 mock_context,
                 on_stopped => {},
-                msg = rx.next() => {
-                    match msg {
-                        Some(v) if v % 2 != 0 => continue,
-                        Some(v) => evens.push(v),
-                        None => break,
-                    }
+                msg = rx.next() => match msg {
+                    Some(v) if v % 2 != 0 => continue,
+                    Some(v) => evens.push(v),
+                    None => break,
                 },
             }
             assert_eq!(evens, vec![2, 4]);
@@ -197,11 +193,9 @@ mod tests {
                     start_count += 1;
                 },
                 on_stopped => {},
-                msg = rx.next() => {
-                    match msg {
-                        Some(v) => received.push(v),
-                        None => break,
-                    }
+                msg = rx.next() => match msg {
+                    Some(v) => received.push(v),
+                    None => break,
                 },
                 on_end => {
                     end_count += 1;
@@ -240,11 +234,9 @@ mod tests {
                     }
                 },
                 on_stopped => {},
-                msg = rx.next() => {
-                    match msg {
-                        Some(v) => received.push(v),
-                        None => break,
-                    }
+                msg = rx.next() => match msg {
+                    Some(v) => received.push(v),
+                    None => break,
                 },
                 on_end => {
                     end_count += 1;
@@ -360,8 +352,10 @@ mod tests {
             drop(tx3);
 
             select! {
-                msg = rx3.next() => if let Some(v) = msg {
-                    results.push(v);
+                msg = rx3.next() => {
+                    if let Some(v) = msg {
+                        results.push(v);
+                    }
                 },
             }
 

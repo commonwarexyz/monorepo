@@ -111,21 +111,21 @@ impl<'a, V: Eq + Send + Sync, E: IndexEntry<V>> Cursor<'a, V, E> {
         self.past_pushed_list = next.next.is_some();
 
         // Add `next` to the tail of `past`.
-        if self.past_tail.is_none() {
-            self.past = Some(next);
-            self.past_tail = self.past.as_mut().map(|b| &mut **b as *mut Record<V>);
-        } else {
+        if let Some(past_tail) = self.past_tail {
             // SAFETY: `past_tail` is always either `None` or points to a valid `Record`
             // within the `self.past` linked list. We only enter this branch when `past_tail`
             // is `Some`, meaning it was previously set to point to an owned node. The
             // assertion verifies the invariant that `past_tail.next` is `None` before we
             // append to it.
             unsafe {
-                assert!((*self.past_tail.unwrap()).next.is_none());
-                (*self.past_tail.unwrap()).next = Some(next);
-                let tail_next = (*self.past_tail.unwrap()).next.as_mut().unwrap();
+                assert!((*past_tail).next.is_none());
+                (*past_tail).next = Some(next);
+                let tail_next = (*past_tail).next.as_mut().unwrap();
                 self.past_tail = Some(&mut **tail_next as *mut Record<V>);
             }
+        } else {
+            self.past = Some(next);
+            self.past_tail = self.past.as_mut().map(|b| &mut **b as *mut Record<V>);
         }
     }
 
@@ -278,10 +278,7 @@ impl<V: Eq + Send + Sync, E: IndexEntry<V>> CursorTrait for Cursor<'_, V, E> {
 
     /// Removes anything in the cursor that satisfies the predicate.
     fn prune(&mut self, predicate: &impl Fn(&V) -> bool) {
-        loop {
-            let Some(old) = self.next() else {
-                break;
-            };
+        while let Some(old) = self.next() {
             if predicate(old) {
                 self.delete();
             }

@@ -162,7 +162,7 @@ impl<E: Spawner + Metrics, P: PublicKey> Actor<E, P> {
                         let _ = response.send(receiver);
                     }
                 }
-            }
+            },
         }
     }
 

@@ -476,7 +476,7 @@ fn spawn_peer_jobs<C: Spawner + Metrics + Clock>(
                 },
                 _ = &mut listener => {
                     break;
-                }
+                },
             }
 
             (region, completions, maybe_proposer)

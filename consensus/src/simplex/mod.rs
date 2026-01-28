@@ -1136,7 +1136,7 @@ mod tests {
                             }
                         }
                         true
-                    }
+                    },
                 };
 
                 // Ensure no blocked connections
@@ -2011,7 +2011,7 @@ mod tests {
                                 _timeout = context.sleep(Duration::from_secs(60)) => {},
                                 _done = monitor.next() => {
                                     panic!("engine should not notarize or finalize anything");
-                                }
+                                },
                             }
                         }),
                 );
@@ -2249,7 +2249,7 @@ mod tests {
                                 _timeout = context.sleep(Duration::from_secs(60)) => {},
                                 _done = monitor.next() => {
                                     panic!("engine should not notarize or finalize anything");
-                                }
+                                },
                             }
                         }),
                 );

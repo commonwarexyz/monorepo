@@ -162,7 +162,8 @@ impl<E: Spawner + Clock + CryptoRngCore + Metrics, O: Sink, I: Stream, C: Public
                                 );
 
                                 // Register peer with the router (may fail during shutdown)
-                                let Some(channels) = router.ready(peer.clone(), messenger).await else {
+                                let Some(channels) = router.ready(peer.clone(), messenger).await
+                                else {
                                     debug!(?peer, "router shut down during peer setup");
                                     connections.dec();
                                     return;
@@ -186,7 +187,7 @@ impl<E: Spawner + Clock + CryptoRngCore + Metrics, O: Sink, I: Stream, C: Public
                         });
                     }
                 }
-            }
+            },
         }
     }
 }

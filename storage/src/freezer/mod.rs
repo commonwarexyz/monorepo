@@ -202,6 +202,8 @@
 //! });
 //! ```
 
+#[cfg(test)]
+mod conformance;
 mod storage;
 use commonware_runtime::buffer::PoolRef;
 use commonware_utils::Array;
@@ -273,7 +275,7 @@ pub struct Config<C> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_codec::DecodeExt;
+    use crate::kv::tests::test_key;
     use commonware_macros::{test_group, test_traced};
     use commonware_runtime::{deterministic, Blob, IoBufMut, Metrics, Runner, Storage};
     use commonware_utils::{hex, sequence::FixedBytes, NZUsize, NZU16};
@@ -288,14 +290,6 @@ mod tests {
     const DEFAULT_TABLE_REPLAY_BUFFER: usize = 64 * 1024; // 64KB
     const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
-
-    fn test_key(key: &str) -> FixedBytes<64> {
-        let mut buf = [0u8; 64];
-        let key = key.as_bytes();
-        assert!(key.len() <= buf.len());
-        buf[..key.len()].copy_from_slice(key);
-        FixedBytes::decode(buf.as_ref()).unwrap()
-    }
 
     fn test_put_get(compression: Option<u8>) {
         // Initialize the deterministic context
