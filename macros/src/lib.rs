@@ -247,10 +247,10 @@ pub fn stability_scope(input: TokenStream) -> TokenStream {
 
     let exclude_names = exclusion_cfg_names(level.value);
 
-    let cfg_attr = match cfg_predicate {
-        None => quote! { #[cfg(not(any(#(#exclude_names),*)))] },
-        Some(pred) => quote! { #[cfg(all(#pred, not(any(#(#exclude_names),*))))] },
-    };
+    let cfg_attr = cfg_predicate.map_or_else(
+        || quote! { #[cfg(not(any(#(#exclude_names),*)))] },
+        |pred| quote! { #[cfg(all(#pred, not(any(#(#exclude_names),*))))] },
+    );
 
     let expanded_items: Vec<_> = items
         .into_iter()
