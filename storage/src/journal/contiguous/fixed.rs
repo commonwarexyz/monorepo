@@ -71,7 +71,7 @@ use crate::{
     Persistable,
 };
 use commonware_codec::CodecFixedShared;
-use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage};
+use commonware_runtime::{buffer::CacheRef, Clock, Metrics, Storage};
 use futures::{stream::Stream, StreamExt};
 use std::{
     num::{NonZeroU64, NonZeroUsize},
@@ -98,7 +98,7 @@ pub struct Config {
     pub items_per_blob: NonZeroU64,
 
     /// The buffer pool to use for caching data.
-    pub buffer_pool: PoolRef,
+    pub page_cache: CacheRef,
 
     /// The size of the write buffer to use for each blob.
     pub write_buffer: NonZeroUsize,
@@ -192,7 +192,7 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         let blob_partition = Self::select_blob_partition(&context, &cfg).await?;
         let segmented_cfg = SegmentedConfig {
             partition: blob_partition,
-            buffer_pool: cfg.buffer_pool,
+            page_cache: cfg.page_cache,
             write_buffer: cfg.write_buffer,
         };
 
@@ -413,7 +413,7 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         let blob_partition = Self::select_blob_partition(&context, &cfg).await?;
         let segmented_cfg = SegmentedConfig {
             partition: blob_partition,
-            buffer_pool: cfg.buffer_pool,
+            page_cache: cfg.page_cache,
             write_buffer: cfg.write_buffer,
         };
 
@@ -903,7 +903,7 @@ mod tests {
         Config {
             partition: "test_partition".into(),
             items_per_blob,
-            buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             write_buffer: NZUsize!(2048),
         }
     }
@@ -1902,7 +1902,7 @@ mod tests {
             let cfg = Config {
                 partition: "single_item_per_blob".into(),
                 items_per_blob: NZU64!(1),
-                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(2048),
             };
 

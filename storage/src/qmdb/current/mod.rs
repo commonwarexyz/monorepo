@@ -9,7 +9,7 @@ use crate::{
     translator::Translator,
 };
 use commonware_parallel::ThreadPool;
-use commonware_runtime::buffer::PoolRef;
+use commonware_runtime::buffer::CacheRef;
 use std::num::{NonZeroU64, NonZeroUsize};
 
 pub mod db;
@@ -51,7 +51,7 @@ pub struct FixedConfig<T: Translator> {
     pub thread_pool: Option<ThreadPool>,
 
     /// The buffer pool to use for caching data.
-    pub buffer_pool: PoolRef,
+    pub page_cache: CacheRef,
 }
 
 impl<T: Translator> From<FixedConfig<T>> for AnyFixedConfig<T> {
@@ -66,7 +66,7 @@ impl<T: Translator> From<FixedConfig<T>> for AnyFixedConfig<T> {
             log_write_buffer: cfg.log_write_buffer,
             translator: cfg.translator,
             thread_pool: cfg.thread_pool,
-            buffer_pool: cfg.buffer_pool,
+            page_cache: cfg.page_cache,
         }
     }
 }
@@ -110,7 +110,7 @@ pub struct VariableConfig<T: Translator, C> {
     pub thread_pool: Option<ThreadPool>,
 
     /// The buffer pool to use for caching data.
-    pub buffer_pool: PoolRef,
+    pub page_cache: CacheRef,
 }
 
 impl<T: Translator, C> From<VariableConfig<T, C>> for AnyVariableConfig<T, C> {
@@ -127,7 +127,7 @@ impl<T: Translator, C> From<VariableConfig<T, C>> for AnyVariableConfig<T, C> {
             log_codec_config: cfg.log_codec_config,
             translator: cfg.translator,
             thread_pool: cfg.thread_pool,
-            buffer_pool: cfg.buffer_pool,
+            page_cache: cfg.page_cache,
         }
     }
 }

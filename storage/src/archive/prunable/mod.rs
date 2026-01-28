@@ -111,7 +111,7 @@
 //! # Example
 //!
 //! ```rust
-//! use commonware_runtime::{Spawner, Runner, deterministic, buffer::PoolRef};
+//! use commonware_runtime::{Spawner, Runner, deterministic, buffer::CacheRef};
 //! use commonware_cryptography::{Hasher as _, Sha256};
 //! use commonware_storage::{
 //!     translator::FourCap,
@@ -128,7 +128,7 @@
 //!     let cfg = Config {
 //!         translator: FourCap,
 //!         key_partition: "demo_index".into(),
-//!         key_buffer_pool: PoolRef::new(NZU16!(1024), NZUsize!(10)),
+//!         key_page_cache: CacheRef::new(NZU16!(1024), NZUsize!(10)),
 //!         value_partition: "demo_value".into(),
 //!         compression: Some(3),
 //!         codec_config: (),
@@ -148,7 +148,7 @@
 //! ```
 
 use crate::translator::Translator;
-use commonware_runtime::buffer::PoolRef;
+use commonware_runtime::buffer::CacheRef;
 use std::num::{NonZeroU64, NonZeroUsize};
 
 mod storage;
@@ -167,7 +167,7 @@ pub struct Config<T: Translator, C> {
     pub key_partition: String,
 
     /// The buffer pool to use for the key journal.
-    pub key_buffer_pool: PoolRef,
+    pub key_page_cache: CacheRef,
 
     /// The partition to use for the value blob (stores values).
     pub value_partition: String,
@@ -224,7 +224,7 @@ mod tests {
             let cfg = Config {
                 translator: FourCap,
                 key_partition: "test_index".into(),
-                key_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                key_page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test_value".into(),
                 codec_config: (),
                 compression: Some(3),
@@ -255,7 +255,7 @@ mod tests {
             let cfg = Config {
                 translator: FourCap,
                 key_partition: "test_index".into(),
-                key_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                key_page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test_value".into(),
                 codec_config: (),
                 compression: None,
@@ -293,7 +293,7 @@ mod tests {
             let cfg = Config {
                 translator: FourCap,
                 key_partition: "test_index".into(),
-                key_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                key_page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test_value".into(),
                 codec_config: (),
                 compression: None,
@@ -358,7 +358,7 @@ mod tests {
             let cfg = Config {
                 translator: FourCap,
                 key_partition: "test_index".into(),
-                key_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                key_page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test_value".into(),
                 codec_config: (),
                 compression: None,
@@ -417,7 +417,7 @@ mod tests {
             let cfg = Config {
                 translator: FourCap,
                 key_partition: "test_index".into(),
-                key_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                key_page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test_value".into(),
                 codec_config: (),
                 compression: None,
@@ -505,7 +505,7 @@ mod tests {
             let cfg = Config {
                 translator: TwoCap,
                 key_partition: "test_index".into(),
-                key_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                key_page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test_value".into(),
                 codec_config: (),
                 compression: None,
@@ -566,7 +566,7 @@ mod tests {
             let cfg = Config {
                 translator: TwoCap,
                 key_partition: "test_index".into(),
-                key_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                key_page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test_value".into(),
                 codec_config: (),
                 compression: None,

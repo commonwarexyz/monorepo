@@ -4,7 +4,7 @@ use commonware_cryptography::Sha256;
 use commonware_parallel::ThreadPool;
 use commonware_runtime::{
     benchmarks::{context, tokio},
-    buffer::PoolRef,
+    buffer::CacheRef,
     tokio::{Config, Context},
     RayonPoolSpawner,
 };
@@ -47,7 +47,7 @@ fn keyless_cfg(pool: ThreadPool) -> KConfig<(commonware_codec::RangeCfg<usize>, 
         log_write_buffer: NZUsize!(1024),
         log_compression: None,
         thread_pool: Some(pool),
-        buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+        page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
     }
 }
 
