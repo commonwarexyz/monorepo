@@ -42,6 +42,7 @@ impl CounterNonce {
     }
 }
 
+/// ChaCha20-Poly1305 cipher backend abstraction for platform-specific implementations.
 trait Backend: Sized {
     /// Creates a new cipher backend from a 256-bit key.
     fn from_key(key: &[u8; KEY_SIZE_BYTES]) -> Self;
