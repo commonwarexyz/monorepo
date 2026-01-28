@@ -5,6 +5,7 @@ use crate::variable::{
     gen_random_kv, gen_random_kv_batched, get_any_ordered, get_any_unordered, get_current_ordered,
     get_current_unordered, Digest, Variant, VARIANTS,
 };
+use commonware_parallel::Sequential;
 use commonware_runtime::{
     benchmarks::{context, tokio},
     tokio::{Config, Context},
@@ -136,7 +137,7 @@ where
     };
 
     // Convert durable → provable (clean) for pruning
-    let mut clean = durable.into_merkleized().await?;
+    let mut clean = durable.into_merkleized(&Sequential).await?;
     clean.prune(clean.inactivity_floor_loc()).await?;
     clean.sync().await?;
 

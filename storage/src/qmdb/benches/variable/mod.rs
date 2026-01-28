@@ -1,8 +1,7 @@
 //! Benchmarks of QMDB variants on variable-sized values.
 
 use commonware_cryptography::{Hasher, Sha256};
-use commonware_parallel::ThreadPool;
-use commonware_runtime::{buffer::PoolRef, tokio::Context, RayonPoolSpawner};
+use commonware_runtime::{buffer::PoolRef, tokio::Context};
 use commonware_storage::{
     kv::{Deletable as _, Updatable as _},
     qmdb::{
@@ -79,14 +78,14 @@ const DELETE_FREQUENCY: u32 = 10;
 const WRITE_BUFFER_SIZE: NonZeroUsize = NZUsize!(1024);
 
 /// Clean (Merkleized, Durable) db type aliases for Any databases.
-type UVariableDb = UVariable<Context, Digest, Vec<u8>, Sha256, EightCap>;
-type OVariableDb = OVariable<Context, Digest, Vec<u8>, Sha256, EightCap>;
+pub type UVariableDb = UVariable<Context, Digest, Vec<u8>, Sha256, EightCap>;
+pub type OVariableDb = OVariable<Context, Digest, Vec<u8>, Sha256, EightCap>;
 
 /// Clean (Merkleized, Durable) db type aliases for Current databases.
-type UVCurrentDb = UVCurrent<Context, Digest, Vec<u8>, Sha256, EightCap, CHUNK_SIZE>;
-type OVCurrentDb = OVCurrent<Context, Digest, Vec<u8>, Sha256, EightCap, CHUNK_SIZE>;
+pub type UVCurrentDb = UVCurrent<Context, Digest, Vec<u8>, Sha256, EightCap, CHUNK_SIZE>;
+pub type OVCurrentDb = OVCurrent<Context, Digest, Vec<u8>, Sha256, EightCap, CHUNK_SIZE>;
 
-fn any_cfg(pool: ThreadPool) -> AConfig<EightCap, (commonware_codec::RangeCfg<usize>, ())> {
+pub fn any_cfg() -> AConfig<EightCap, (commonware_codec::RangeCfg<usize>, ())> {
     AConfig::<EightCap, (commonware_codec::RangeCfg<usize>, ())> {
         mmr_journal_partition: format!("journal_{PARTITION_SUFFIX}"),
         mmr_metadata_partition: format!("metadata_{PARTITION_SUFFIX}"),
@@ -98,24 +97,19 @@ fn any_cfg(pool: ThreadPool) -> AConfig<EightCap, (commonware_codec::RangeCfg<us
         log_write_buffer: WRITE_BUFFER_SIZE,
         log_compression: None,
         translator: EightCap,
-        thread_pool: Some(pool),
         buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
     }
 }
 
-async fn get_any_unordered(ctx: Context) -> UVariableDb {
-    let pool = ctx.clone().create_pool(THREADS).unwrap();
-    let any_cfg = any_cfg(pool);
-    UVariableDb::init(ctx, any_cfg).await.unwrap()
+pub async fn get_any_unordered(ctx: Context) -> UVariableDb {
+    UVariableDb::init(ctx, any_cfg()).await.unwrap()
 }
 
-async fn get_any_ordered(ctx: Context) -> OVariableDb {
-    let pool = ctx.clone().create_pool(THREADS).unwrap();
-    let any_cfg = any_cfg(pool);
-    OVariableDb::init(ctx, any_cfg).await.unwrap()
+pub async fn get_any_ordered(ctx: Context) -> OVariableDb {
+    OVariableDb::init(ctx, any_cfg()).await.unwrap()
 }
 
-fn current_cfg(pool: ThreadPool) -> CConfig<EightCap, (commonware_codec::RangeCfg<usize>, ())> {
+pub fn current_cfg() -> CConfig<EightCap, (commonware_codec::RangeCfg<usize>, ())> {
     CConfig::<EightCap, (commonware_codec::RangeCfg<usize>, ())> {
         mmr_journal_partition: format!("journal_{PARTITION_SUFFIX}"),
         mmr_metadata_partition: format!("metadata_{PARTITION_SUFFIX}"),
@@ -128,25 +122,16 @@ fn current_cfg(pool: ThreadPool) -> CConfig<EightCap, (commonware_codec::RangeCf
         log_compression: None,
         bitmap_metadata_partition: format!("bitmap_metadata_{PARTITION_SUFFIX}"),
         translator: EightCap,
-        thread_pool: Some(pool),
         buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
     }
 }
 
-async fn get_current_unordered(ctx: Context) -> UVCurrentDb {
-    let pool = ctx.clone().create_pool(THREADS).unwrap();
-    let current_cfg = current_cfg(pool);
-    UVCurrent::<_, _, _, Sha256, EightCap, CHUNK_SIZE>::init(ctx, current_cfg)
-        .await
-        .unwrap()
+pub async fn get_current_unordered(ctx: Context) -> UVCurrentDb {
+    UVCurrentDb::init(ctx, current_cfg()).await.unwrap()
 }
 
-async fn get_current_ordered(ctx: Context) -> OVCurrentDb {
-    let pool = ctx.clone().create_pool(THREADS).unwrap();
-    let current_cfg = current_cfg(pool);
-    OVCurrent::<_, _, _, Sha256, EightCap, CHUNK_SIZE>::init(ctx, current_cfg)
-        .await
-        .unwrap()
+pub async fn get_current_ordered(ctx: Context) -> OVCurrentDb {
+    OVCurrentDb::init(ctx, current_cfg()).await.unwrap()
 }
 
 /// Generate a large db with random data. The function seeds the db with exactly `num_elements`

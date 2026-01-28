@@ -29,8 +29,8 @@
 //! - `Clean.into_mutable()`                        → `Mutable`
 //! - `(Unmerkleized,Durable).into_mutable()`       → `Mutable`
 //! - `(Merkleized,NonDurable).into_mutable()`      → `Mutable`
-//! - `(Unmerkleized,Durable).into_merkleized()`    → `Clean`
-//! - `Mutable.into_merkleized()`                   → `(Merkleized,NonDurable)`
+//! - `(Unmerkleized,Durable).into_merkleized(&Sequential)`    → `Clean`
+//! - `Mutable.into_merkleized(&Sequential)`                   → `(Merkleized,NonDurable)`
 //! - `Mutable.commit()`                            → `(Unmerkleized,Durable)`
 //!
 //! An authenticated database implements [store::LogStore] in every state, and keyed databases

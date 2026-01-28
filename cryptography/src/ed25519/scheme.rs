@@ -1,9 +1,8 @@
-use crate::{BatchVerifier, Secret};
+#[cfg(feature = "std")]
+use crate::BatchVerifier;
+use crate::Secret;
 #[cfg(not(feature = "std"))]
-use alloc::{
-    borrow::{Cow, ToOwned},
-    vec::Vec,
-};
+use alloc::borrow::{Cow, ToOwned};
 use bytes::{Buf, BufMut};
 use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
 use commonware_math::algebra::Random;

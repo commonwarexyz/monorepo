@@ -29,6 +29,7 @@ pub mod tests {
             },
         },
     };
+    use commonware_parallel::Sequential;
     use commonware_runtime::{
         deterministic::{self, Context},
         Metrics as _, Runner as _,
@@ -68,7 +69,7 @@ pub mod tests {
             assert!(db.create(k1, v1.clone()).await.unwrap());
             assert_eq!(db.get(&k1).await.unwrap().unwrap(), v1);
             let (db, range) = db.commit(None).await.unwrap();
-            let db: C = db.into_merkleized().await.unwrap();
+            let db: C = db.into_merkleized(&Sequential).await.unwrap();
             assert_eq!(*range.start, 1);
             assert_eq!(*range.end, 4);
             assert!(db.get_metadata().await.unwrap().is_none());
@@ -89,7 +90,7 @@ pub mod tests {
             assert!(db.delete(k1).await.unwrap());
             let metadata: <C as LogStore>::Value = TestValue::from_seed(1);
             let (db, range) = db.commit(Some(metadata.clone())).await.unwrap();
-            let db: C = db.into_merkleized().await.unwrap();
+            let db: C = db.into_merkleized(&Sequential).await.unwrap();
             assert_eq!(*range.start, 4);
             assert_eq!(*range.end, 6);
             assert_eq!(db.op_count(), Location::new_unchecked(6)); // 1 update, 2 commits, 1 move, 1 delete.
@@ -100,7 +101,7 @@ pub mod tests {
             let mut db = db.into_mutable();
             assert!(!db.delete(k1).await.unwrap());
             let (db, _) = db.commit(None).await.unwrap();
-            let mut db: C = db.into_merkleized().await.unwrap();
+            let mut db: C = db.into_merkleized(&Sequential).await.unwrap();
             db.sync().await.unwrap();
             // Commit adds a commit even for no-op, so op_count increases and root changes.
             assert_eq!(db.op_count(), Location::new_unchecked(7));
@@ -125,7 +126,7 @@ pub mod tests {
             let mut db = db.into_mutable();
             db.update(k1, v1).await.unwrap();
             let (db, _) = db.commit(None).await.unwrap();
-            let db: C = db.into_merkleized().await.unwrap();
+            let db: C = db.into_merkleized(&Sequential).await.unwrap();
             assert_ne!(db.root(), root3);
 
             db.destroy().await.unwrap();

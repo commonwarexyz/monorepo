@@ -2,6 +2,7 @@
 
 use crate::{Hasher, Key, Translator, Value};
 use commonware_cryptography::Hasher as CryptoHasher;
+use commonware_parallel::Sequential;
 use commonware_runtime::{buffer, Clock, Metrics, Storage};
 use commonware_storage::{
     mmr::{Location, Proof},
@@ -38,7 +39,6 @@ pub fn create_config() -> Config<Translator> {
         log_items_per_blob: NZU64!(4096),
         log_write_buffer: NZUsize!(1024),
         translator: Translator::default(),
-        thread_pool: None,
         buffer_pool: buffer::PoolRef::new(NZU16!(1024), NZUsize!(10)),
     }
 }
@@ -101,7 +101,7 @@ where
                     let (durable_db, _) = db.commit(metadata).await?;
                     if i == num_ops - 1 {
                         // Last operation - return the clean database
-                        return Ok(durable_db.into_merkleized());
+                        return Ok(durable_db.into_merkleized(&Sequential));
                     }
                     // Not the last operation - continue in mutable state
                     db = durable_db.into_mutable();

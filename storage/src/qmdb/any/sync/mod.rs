@@ -98,7 +98,6 @@ fn mmr_config_from_fixed<T: Translator>(config: &FixedConfig<T>) -> MmrConfig {
         metadata_partition: config.mmr_metadata_partition.clone(),
         items_per_blob: config.mmr_items_per_blob,
         write_buffer: config.mmr_write_buffer,
-        thread_pool: config.thread_pool.clone(),
         buffer_pool: config.buffer_pool.clone(),
     }
 }
@@ -110,7 +109,6 @@ fn mmr_config_from_variable<T: Translator, C>(config: &VariableConfig<T, C>) -> 
         metadata_partition: config.mmr_metadata_partition.clone(),
         items_per_blob: config.mmr_items_per_blob,
         write_buffer: config.mmr_write_buffer,
-        thread_pool: config.thread_pool.clone(),
         buffer_pool: config.buffer_pool.clone(),
     }
 }
@@ -153,7 +151,7 @@ where
     }
 
     fn root(&self) -> Self::Digest {
-        self.log.root()
+        self.root()
     }
 }
 
@@ -196,7 +194,7 @@ where
     }
 
     fn root(&self) -> Self::Digest {
-        self.log.root()
+        self.root()
     }
 }
 
@@ -238,7 +236,7 @@ where
     }
 
     fn root(&self) -> Self::Digest {
-        self.log.root()
+        self.root()
     }
 }
 
@@ -281,6 +279,6 @@ where
     }
 
     fn root(&self) -> Self::Digest {
-        self.log.root()
+        self.root()
     }
 }

@@ -29,8 +29,8 @@ pub type Operation<K, V> = unordered::Operation<K, VariableEncoding<V>>;
 
 /// A key-value QMDB based on an authenticated log of operations, supporting authentication of any
 /// value ever associated with a key.
-pub type Db<E, K, V, H, T, S = Merkleized<H>, D = Durable> =
-    super::Db<E, Journal<E, Operation<K, V>>, Index<T, Location>, H, Update<K, V>, S, D>;
+pub type Db<E, K, V, H, T, M = Merkleized<H>, D = Durable> =
+    super::Db<E, Journal<E, Operation<K, V>>, Index<T, Location>, H, Update<K, V>, M, D>;
 
 impl<E: Storage + Clock + Metrics, K: Array, V: VariableValue, H: Hasher, T: Translator>
     Db<E, K, V, H, T, Merkleized<H>, Durable>
@@ -61,7 +61,6 @@ impl<E: Storage + Clock + Metrics, K: Array, V: VariableValue, H: Hasher, T: Tra
             metadata_partition: cfg.mmr_metadata_partition,
             items_per_blob: cfg.mmr_items_per_blob,
             write_buffer: cfg.mmr_write_buffer,
-            thread_pool: cfg.thread_pool,
             buffer_pool: cfg.buffer_pool.clone(),
         };
 
@@ -114,6 +113,7 @@ pub(crate) mod test {
     use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
     use commonware_macros::test_traced;
     use commonware_math::algebra::Random;
+    use commonware_parallel::Sequential;
     use commonware_runtime::{
         buffer::PoolRef,
         deterministic::{self, Context},
@@ -138,7 +138,6 @@ pub(crate) mod test {
             log_compression: None,
             log_codec_config: ((0..=10000).into(), ()),
             translator: TwoCap,
-            thread_pool: None,
             buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
@@ -250,7 +249,12 @@ pub(crate) mod test {
                 let v = to_bytes(i);
                 db.update(k, v).await.unwrap();
             }
-            let db = db.commit(None).await.unwrap().0.into_merkleized();
+            let db = db
+                .commit(None)
+                .await
+                .unwrap()
+                .0
+                .into_merkleized(&Sequential);
             let root = db.root();
 
             // Simulate a failed commit and test that the log replay doesn't leave behind old data.
@@ -307,7 +311,12 @@ pub(crate) mod test {
                 let v = vec![(i % 255) as u8; ((i % 13) + 7) as usize];
                 db.update(k, v.clone()).await.unwrap();
             }
-            let db = db.commit(None).await.unwrap().0.into_merkleized();
+            let db = db
+                .commit(None)
+                .await
+                .unwrap()
+                .0
+                .into_merkleized(&Sequential);
             let root = db.root();
 
             // Update every 3rd key
@@ -336,7 +345,12 @@ pub(crate) mod test {
                 let v = vec![((i + 1) % 255) as u8; ((i % 13) + 8) as usize];
                 db.update(k, v.clone()).await.unwrap();
             }
-            let db = db.commit(None).await.unwrap().0.into_merkleized();
+            let db = db
+                .commit(None)
+                .await
+                .unwrap()
+                .0
+                .into_merkleized(&Sequential);
             let root = db.root();
 
             // Delete every 7th key
@@ -363,7 +377,12 @@ pub(crate) mod test {
                 let k = Sha256::hash(&i.to_be_bytes());
                 db.delete(k).await.unwrap();
             }
-            let mut db = db.commit(None).await.unwrap().0.into_merkleized();
+            let mut db = db
+                .commit(None)
+                .await
+                .unwrap()
+                .0
+                .into_merkleized(&Sequential);
 
             let root = db.root();
             assert_eq!(db.op_count(), 1961);
@@ -452,7 +471,7 @@ pub(crate) mod test {
             let beyond_floor = Location::new_unchecked(*inactivity_floor + 1);
 
             // Try to prune beyond the inactivity floor
-            let mut db = db.into_merkleized();
+            let mut db = db.into_merkleized(&Sequential);
             let result = db.prune(beyond_floor).await;
             assert!(
                 matches!(result, Err(Error::PruneBeyondMinRequired(loc, floor))

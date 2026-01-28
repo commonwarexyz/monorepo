@@ -27,7 +27,7 @@ use crate::{
 };
 use commonware_codec::DecodeExt;
 use commonware_cryptography::Digest;
-use commonware_parallel::ThreadPool;
+use commonware_parallel::Strategy;
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage as RStorage};
 use commonware_utils::sequence::prefixed_u64::U64;
 use core::ops::Range;
@@ -57,9 +57,6 @@ pub struct Config {
 
     /// The size of the write buffer to use for each blob in the backing journal.
     pub write_buffer: NonZeroUsize,
-
-    /// Optional thread pool to use for parallelizing batch operations.
-    pub thread_pool: Option<ThreadPool>,
 
     /// The buffer pool to use for caching data.
     pub buffer_pool: PoolRef,
@@ -106,9 +103,6 @@ pub struct Mmr<E: RStorage + Clock + Metrics, D: Digest, S: State<D> + Send + Sy
     /// The highest position for which this MMR has been pruned, or 0 if this MMR has never been
     /// pruned.
     pruned_to_pos: Position,
-
-    /// The thread pool to use for parallelization.
-    pool: Option<ThreadPool>,
 }
 
 impl<E: RStorage + Clock + Metrics, D: Digest> From<CleanMmr<E, D>> for DirtyMmr<E, D> {
@@ -119,7 +113,6 @@ impl<E: RStorage + Clock + Metrics, D: Digest> From<CleanMmr<E, D>> for DirtyMmr
             journal_size: clean.journal_size,
             metadata: clean.metadata,
             pruned_to_pos: clean.pruned_to_pos,
-            pool: clean.pool,
         }
     }
 }
@@ -216,8 +209,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest, S: State<D> + Send + Sync> Mmr<E,
     ) -> Result<(), Error> {
         let mut pinned_nodes = BTreeMap::new();
         for pos in nodes_to_pin(prune_pos) {
-            let digest =
-                Mmr::<E, D, Clean<D>>::get_from_metadata_or_journal(metadata, journal, pos).await?;
+            let digest = Self::get_from_metadata_or_journal(metadata, journal, pos).await?;
             pinned_nodes.insert(pos, digest);
         }
         mem_mmr.add_pinned_nodes(pinned_nodes);
@@ -266,7 +258,6 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
                 journal_size,
                 metadata,
                 pruned_to_pos: Position::new(0),
-                pool: cfg.thread_pool,
             });
         }
 
@@ -335,8 +326,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
         // Initialize the mem_mmr in the "prune_all" state.
         let mut pinned_nodes = Vec::new();
         for pos in nodes_to_pin(journal_size) {
-            let digest =
-                Mmr::<E, D>::get_from_metadata_or_journal(&metadata, &journal, pos).await?;
+            let digest = Self::get_from_metadata_or_journal(&metadata, &journal, pos).await?;
             pinned_nodes.push(digest);
         }
         let mut mem_mmr = MemMmr::init(
@@ -356,7 +346,6 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
             journal_size,
             metadata,
             pruned_to_pos: prune_pos,
-            pool: cfg.thread_pool,
         };
 
         if let Some(leaf) = orphaned_leaf {
@@ -433,8 +422,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
         let nodes_to_pin_mem = nodes_to_pin(journal_size);
         let mut mem_pinned_nodes = Vec::new();
         for pos in nodes_to_pin_mem {
-            let digest =
-                Mmr::<E, D>::get_from_metadata_or_journal(&metadata, &journal, pos).await?;
+            let digest = Self::get_from_metadata_or_journal(&metadata, &journal, pos).await?;
             mem_pinned_nodes.push(digest);
         }
         let mut mem_mmr = MemMmr::init(
@@ -459,7 +447,6 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
             journal_size,
             metadata,
             pruned_to_pos: cfg.range.start,
-            pool: cfg.config.thread_pool,
         })
     }
 
@@ -738,14 +725,18 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
 
 impl<E: RStorage + Clock + Metrics, D: Digest> DirtyMmr<E, D> {
     /// Merkleize the MMR and compute the root digest.
-    pub fn merkleize(self, h: &mut impl Hasher<Digest = D>) -> CleanMmr<E, D> {
+    pub fn merkleize(
+        self,
+        h: &mut impl Hasher<Digest = D>,
+        strategy: &impl Strategy,
+    ) -> CleanMmr<E, D> {
+        let mem_mmr = self.mem_mmr.merkleize(h, strategy);
         CleanMmr {
-            mem_mmr: self.mem_mmr.merkleize(h, self.pool.clone()),
+            mem_mmr,
             journal: self.journal,
             journal_size: self.journal_size,
             metadata: self.metadata,
             pruned_to_pos: self.pruned_to_pos,
-            pool: self.pool,
         }
     }
 
@@ -783,12 +774,8 @@ impl<E: RStorage + Clock + Metrics, D: Digest> DirtyMmr<E, D> {
 
         let mut pinned_nodes = Vec::new();
         for pos in nodes_to_pin(new_size) {
-            let digest = Mmr::<E, D, Clean<D>>::get_from_metadata_or_journal(
-                &self.metadata,
-                &self.journal,
-                pos,
-            )
-            .await?;
+            let digest =
+                Self::get_from_metadata_or_journal(&self.metadata, &self.journal, pos).await?;
             pinned_nodes.push(digest);
         }
 
@@ -810,13 +797,14 @@ impl<E: RStorage + Clock + Metrics, D: Digest> DirtyMmr<E, D> {
     pub async fn simulate_partial_sync(
         self,
         hasher: &mut impl Hasher<Digest = D>,
+        strategy: &impl Strategy,
         write_limit: usize,
     ) -> Result<(), Error> {
         if write_limit == 0 {
             return Ok(());
         }
 
-        let mut clean_mmr = self.merkleize(hasher);
+        let mut clean_mmr = self.merkleize(hasher, strategy);
 
         // Write the nodes cached in the memory-resident MMR to the journal, aborting after
         // write_count nodes have been written.
@@ -857,6 +845,7 @@ mod tests {
         Hasher, Sha256,
     };
     use commonware_macros::test_traced;
+    use commonware_parallel::Sequential;
     use commonware_runtime::{buffer::PoolRef, deterministic, Blob as _, Runner};
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use std::num::NonZeroU16;
@@ -874,7 +863,6 @@ mod tests {
             metadata_partition: "metadata_partition".into(),
             items_per_blob: NZU64!(7),
             write_buffer: NZUsize!(1024),
-            thread_pool: None,
             buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
@@ -905,7 +893,7 @@ mod tests {
                 journaled_mmr.add(&mut hasher, &element).await.unwrap();
             }
 
-            let journaled_mmr = journaled_mmr.merkleize(&mut hasher);
+            let journaled_mmr = journaled_mmr.merkleize(&mut hasher, &Sequential);
             assert_eq!(journaled_mmr.root(), *expected_root);
 
             journaled_mmr.destroy().await.unwrap();
@@ -1210,7 +1198,6 @@ mod tests {
                 metadata_partition: "unpruned_metadata_partition".into(),
                 items_per_blob: NZU64!(7),
                 write_buffer: NZUsize!(1024),
-                thread_pool: None,
                 buffer_pool: cfg_pruned.buffer_pool.clone(),
             };
             let mut mmr = Mmr::init(context.with_label("unpruned"), &mut hasher, cfg_unpruned)
@@ -1473,7 +1460,6 @@ mod tests {
                     metadata_partition: "ref_metadata_pruned".into(),
                     items_per_blob: NZU64!(7),
                     write_buffer: NZUsize!(1024),
-                    thread_pool: None,
                     buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 },
             )
@@ -1524,7 +1510,6 @@ mod tests {
                     metadata_partition: "server_metadata".into(),
                     items_per_blob: NZU64!(7),
                     write_buffer: NZUsize!(1024),
-                    thread_pool: None,
                     buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 },
             )
@@ -1549,7 +1534,6 @@ mod tests {
                     metadata_partition: "client_metadata".into(),
                     items_per_blob: NZU64!(7),
                     write_buffer: NZUsize!(1024),
-                    thread_pool: None,
                     buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 },
             )

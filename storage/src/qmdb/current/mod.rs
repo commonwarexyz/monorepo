@@ -8,7 +8,6 @@ use crate::{
     qmdb::any::{FixedConfig as AnyFixedConfig, VariableConfig as AnyVariableConfig},
     translator::Translator,
 };
-use commonware_parallel::ThreadPool;
 use commonware_runtime::buffer::PoolRef;
 use std::num::{NonZeroU64, NonZeroUsize};
 
@@ -47,9 +46,6 @@ pub struct FixedConfig<T: Translator> {
     /// The translator used by the compressed index.
     pub translator: T,
 
-    /// An optional thread pool to use for parallelizing batch operations.
-    pub thread_pool: Option<ThreadPool>,
-
     /// The buffer pool to use for caching data.
     pub buffer_pool: PoolRef,
 }
@@ -65,7 +61,6 @@ impl<T: Translator> From<FixedConfig<T>> for AnyFixedConfig<T> {
             log_items_per_blob: cfg.log_items_per_blob,
             log_write_buffer: cfg.log_write_buffer,
             translator: cfg.translator,
-            thread_pool: cfg.thread_pool,
             buffer_pool: cfg.buffer_pool,
         }
     }
@@ -106,9 +101,6 @@ pub struct VariableConfig<T: Translator, C> {
     /// The translator used by the compressed index.
     pub translator: T,
 
-    /// An optional thread pool to use for parallelizing batch operations.
-    pub thread_pool: Option<ThreadPool>,
-
     /// The buffer pool to use for caching data.
     pub buffer_pool: PoolRef,
 }
@@ -126,7 +118,6 @@ impl<T: Translator, C> From<VariableConfig<T, C>> for AnyVariableConfig<T, C> {
             log_compression: cfg.log_compression,
             log_codec_config: cfg.log_codec_config,
             translator: cfg.translator,
-            thread_pool: cfg.thread_pool,
             buffer_pool: cfg.buffer_pool,
         }
     }
@@ -161,6 +152,7 @@ pub mod tests {
             Error,
         },
     };
+    use commonware_parallel::Sequential;
     use commonware_runtime::{
         deterministic::{self, Context},
         Metrics as _, Runner as _,
@@ -205,13 +197,13 @@ pub mod tests {
             if commit_changes && rng.next_u32() % 20 == 0 {
                 // Commit every ~20 updates.
                 let (durable_db, _) = db.commit(None).await?;
-                let clean_db: C = durable_db.into_merkleized().await?;
+                let clean_db: C = durable_db.into_merkleized(&Sequential).await?;
                 db = clean_db.into_mutable();
             }
         }
         if commit_changes {
             let (durable_db, _) = db.commit(None).await?;
-            let clean_db: C = durable_db.into_merkleized().await?;
+            let clean_db: C = durable_db.into_merkleized(&Sequential).await?;
             db = clean_db.into_mutable();
         }
         Ok(db)
@@ -241,7 +233,7 @@ pub mod tests {
                 .await
                 .unwrap();
             let (db, _) = db.commit(None).await.unwrap();
-            let mut db: C = db.into_merkleized().await.unwrap();
+            let mut db: C = db.into_merkleized(&Sequential).await.unwrap();
             db.sync().await.unwrap();
 
             // Drop and reopen the db
@@ -266,7 +258,7 @@ pub mod tests {
                 .await
                 .unwrap();
             let (db, _) = db.commit(None).await.unwrap();
-            let mut db: C = db.into_merkleized().await.unwrap();
+            let mut db: C = db.into_merkleized(&Sequential).await.unwrap();
             db.sync().await.unwrap();
 
             let root = db.root();
@@ -304,7 +296,7 @@ pub mod tests {
                 .await
                 .unwrap();
             let (db, _) = db.commit(None).await.unwrap();
-            let mut db: C = db.into_merkleized().await.unwrap();
+            let mut db: C = db.into_merkleized(&Sequential).await.unwrap();
             let committed_root = db.root();
             let committed_op_count = db.op_count();
             let committed_inactivity_floor = db.inactivity_floor_loc();
@@ -352,7 +344,7 @@ pub mod tests {
                 .await
                 .unwrap();
             let (db, _) = db.commit(None).await.unwrap();
-            let mut db: C = db.into_merkleized().await.unwrap();
+            let mut db: C = db.into_merkleized(&Sequential).await.unwrap();
             db.prune(db.inactivity_floor_loc()).await.unwrap();
             // State from scenario #2 should match that of a successful commit.
             assert_eq!(db.op_count(), committed_op_count);
@@ -402,9 +394,9 @@ pub mod tests {
                 // Commit periodically
                 if i % 50 == 49 {
                     let (db_1, _) = db_no_pruning_mut.commit(None).await.unwrap();
-                    let clean_no_pruning: C = db_1.into_merkleized().await.unwrap();
+                    let clean_no_pruning: C = db_1.into_merkleized(&Sequential).await.unwrap();
                     let (db_2, _) = db_pruning_mut.commit(None).await.unwrap();
-                    let mut clean_pruning: C = db_2.into_merkleized().await.unwrap();
+                    let mut clean_pruning: C = db_2.into_merkleized(&Sequential).await.unwrap();
                     clean_pruning
                         .prune(clean_no_pruning.inactivity_floor_loc())
                         .await
@@ -416,9 +408,9 @@ pub mod tests {
 
             // Final commit
             let (db_1, _) = db_no_pruning_mut.commit(None).await.unwrap();
-            db_no_pruning = db_1.into_merkleized().await.unwrap();
+            db_no_pruning = db_1.into_merkleized(&Sequential).await.unwrap();
             let (db_2, _) = db_pruning_mut.commit(None).await.unwrap();
-            db_pruning = db_2.into_merkleized().await.unwrap();
+            db_pruning = db_2.into_merkleized(&Sequential).await.unwrap();
 
             // Get roots from both databases - they should match
             let root_no_pruning = db_no_pruning.root();
@@ -463,7 +455,7 @@ pub mod tests {
                 .await
                 .unwrap();
             let (db, _) = db.commit(None).await.unwrap();
-            let mut db: C = db.into_merkleized().await.unwrap();
+            let mut db: C = db.into_merkleized(&Sequential).await.unwrap();
 
             // The bitmap should have been pruned during into_merkleized().
             let pruned_bits_before = db.pruned_bits();
@@ -569,7 +561,7 @@ pub mod tests {
 
             // Test that commit + sync w/ pruning will raise the activity floor.
             let (db, _) = db.commit(None).await.unwrap();
-            let mut db: C = db.into_merkleized().await.unwrap();
+            let mut db: C = db.into_merkleized(&Sequential).await.unwrap();
             db.sync().await.unwrap();
             db.prune(db.inactivity_floor_loc()).await.unwrap();
 

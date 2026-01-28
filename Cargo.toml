@@ -49,6 +49,7 @@ homepage = "https://commonware.xyz"
 rust-version = "1.91.1"
 
 [workspace.lints.rust]
+warnings = "deny"
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(full_bench)', 'cfg(generate_conformance_tests)'] }
 unused-must-use = "deny"
 rust-2018-idioms = "deny"

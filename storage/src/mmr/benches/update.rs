@@ -1,5 +1,6 @@
 use commonware_cryptography::{sha256, Sha256};
 use commonware_math::algebra::Random as _;
+use commonware_parallel::{Rayon, Sequential};
 use commonware_runtime::{
     benchmarks::{context, tokio},
     tokio::Config,
@@ -92,16 +93,24 @@ fn bench_update(c: &mut Criterion) {
                                         mmr.update_leaf(&mut h, loc, &element).unwrap();
                                     }
                                 }
-                                _ => {
-                                    // Collect the map into a Vec of (position, element) pairs for batched updates
+                                Strategy::BatchedSerial => {
                                     let updates: Vec<(
                                         Location,
                                         commonware_cryptography::sha256::Digest,
                                     )> = leaf_map.into_iter().collect();
                                     let mut mmr = mmr.into_dirty();
-                                    mmr.update_leaf_batched(&mut h, pool.clone(), &updates)
-                                        .unwrap();
-                                    mmr.merkleize(&mut h, pool);
+                                    mmr.update_leaves(&mut h, &Sequential, &updates).unwrap();
+                                    mmr.merkleize(&mut h, &Sequential);
+                                }
+                                Strategy::BatchedParallel => {
+                                    let updates: Vec<(
+                                        Location,
+                                        commonware_cryptography::sha256::Digest,
+                                    )> = leaf_map.into_iter().collect();
+                                    let mut mmr = mmr.into_dirty();
+                                    let strat = Rayon::with_pool(pool.unwrap());
+                                    mmr.update_leaves(&mut h, &strat, &updates).unwrap();
+                                    mmr.merkleize(&mut h, &strat);
                                 }
                             }
 

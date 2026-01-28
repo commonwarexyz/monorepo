@@ -20,7 +20,6 @@ use crate::{
 };
 use commonware_codec::CodecFixedShared;
 use commonware_cryptography::Hasher;
-use commonware_parallel::ThreadPool;
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage};
 use std::num::{NonZeroU64, NonZeroUsize};
 
@@ -61,9 +60,6 @@ pub struct FixedConfig<T: Translator> {
     /// The translator used by the compressed index.
     pub translator: T,
 
-    /// An optional thread pool to use for parallelizing batch operations.
-    pub thread_pool: Option<ThreadPool>,
-
     /// The buffer pool to use for caching data.
     pub buffer_pool: PoolRef,
 }
@@ -101,9 +97,6 @@ pub struct VariableConfig<T: Translator, C> {
     /// The translator used by the compressed index.
     pub translator: T,
 
-    /// An optional thread pool to use for parallelizing batch operations.
-    pub thread_pool: Option<ThreadPool>,
-
     /// The buffer pool to use for caching data.
     pub buffer_pool: PoolRef,
 }
@@ -126,7 +119,6 @@ pub(crate) async fn init_fixed_authenticated_log<
         metadata_partition: cfg.mmr_metadata_partition,
         items_per_blob: cfg.mmr_items_per_blob,
         write_buffer: cfg.mmr_write_buffer,
-        thread_pool: cfg.thread_pool,
         buffer_pool: cfg.buffer_pool.clone(),
     };
 
@@ -156,6 +148,7 @@ pub(crate) mod test {
         qmdb::any::{FixedConfig, VariableConfig},
         translator::TwoCap,
     };
+    use commonware_parallel::Sequential;
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use std::num::NonZeroU16;
 
@@ -173,7 +166,6 @@ pub(crate) mod test {
             log_items_per_blob: NZU64!(7),
             log_write_buffer: NZUsize!(1024),
             translator: TwoCap,
-            thread_pool: None,
             buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
@@ -190,7 +182,6 @@ pub(crate) mod test {
             log_compression: None,
             log_codec_config: (),
             translator: TwoCap,
-            thread_pool: None,
             buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
@@ -233,13 +224,13 @@ pub(crate) mod test {
         assert_ne!(steps, 0);
 
         // Steps shouldn't change from merkleization.
-        let db = db.into_merkleized().await.unwrap();
+        let db = db.into_merkleized(&Sequential).await.unwrap();
         let db = db.into_mutable();
         assert_eq!(db.steps(), steps);
 
         // Cleanup
         let (db, _) = db.commit(None).await.unwrap();
-        let db = db.into_merkleized().await.unwrap();
+        let db = db.into_merkleized(&Sequential).await.unwrap();
         db.destroy().await.unwrap();
     }
 }

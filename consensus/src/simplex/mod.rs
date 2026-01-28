@@ -259,9 +259,11 @@ cfg_if::cfg_if! {
 #[cfg(any(test, feature = "fuzz"))]
 pub mod mocks;
 
+#[cfg(not(target_arch = "wasm32"))]
 use crate::types::{View, ViewDelta};
 
 /// The minimum view we are tracking both in-memory and on-disk.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) const fn min_active(activity_timeout: ViewDelta, last_finalized: View) -> View {
     last_finalized.saturating_sub(activity_timeout)
 }
@@ -269,6 +271,7 @@ pub(crate) const fn min_active(activity_timeout: ViewDelta, last_finalized: View
 /// Whether or not a view is interesting to us. This is a function
 /// of both `min_active` and whether or not the view is too far
 /// in the future (based on the view we are currently in).
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn interesting(
     activity_timeout: ViewDelta,
     last_finalized: View,

@@ -27,12 +27,13 @@ use crate::{
 };
 use commonware_codec::FixedSize;
 use commonware_cryptography::Hasher;
+use commonware_parallel::Sequential;
 use commonware_runtime::{Clock, Metrics, Storage as RStorage};
 use commonware_utils::Array;
 
 /// A specialization of [super::db::Db] for unordered key spaces and fixed-size values.
-pub type Db<E, K, V, H, T, const N: usize, S = Merkleized<H>, D = Durable> =
-    super::db::Db<E, Journal<E, Operation<K, V>>, K, FixedEncoding<V>, H, T, N, S, D>;
+pub type Db<E, K, V, H, T, const N: usize, M = Merkleized<H>, D = Durable> =
+    super::db::Db<E, Journal<E, Operation<K, V>>, K, FixedEncoding<V>, H, T, N, M, D>;
 
 // Functionality for the Clean state - init only.
 impl<
@@ -44,8 +45,7 @@ impl<
         const N: usize,
     > Db<E, K, V, H, T, N, Merkleized<H>, Durable>
 {
-    /// Initializes a [Db] authenticated database from the given `config`. Leverages parallel
-    /// Merkleization to initialize the bitmap MMR if a thread pool is provided.
+    /// Initializes a [Db] authenticated database from the given `config`.
     pub async fn init(context: E, config: Config<T>) -> Result<Self, Error> {
         // TODO: Re-evaluate assertion placement after `generic_const_exprs` is stable.
         const {
@@ -61,14 +61,12 @@ impl<
             assert!(N.is_power_of_two(), "chunk size must be a power of 2");
         }
 
-        let thread_pool = config.thread_pool.clone();
         let bitmap_metadata_partition = config.bitmap_metadata_partition.clone();
 
         let mut hasher = StandardHasher::<H>::new();
         let mut status = CleanBitMap::init(
             context.with_label("bitmap"),
             &bitmap_metadata_partition,
-            thread_pool,
             &mut hasher,
         )
         .await?
@@ -89,7 +87,8 @@ impl<
         )
         .await?;
 
-        let status = merkleize_grafted_bitmap(&mut hasher, status, &any.log.mmr).await?;
+        let status =
+            merkleize_grafted_bitmap(&mut hasher, status, &any.log.mmr, &Sequential).await?;
 
         // Compute and cache the root
         let cached_root = Some(root(&mut hasher, &status, &any.log.mmr).await?);
@@ -143,13 +142,13 @@ pub mod test {
             log_write_buffer: NZUsize!(1024),
             bitmap_metadata_partition: format!("{partition_prefix}_bitmap_metadata_partition"),
             translator: TwoCap,
-            thread_pool: None,
             buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
 
     /// A type alias for the concrete clean [Db] type used in these unit tests.
-    type CleanCurrentTest = Db<deterministic::Context, Digest, Digest, Sha256, TwoCap, 32>;
+    type CleanCurrentTest =
+        Db<deterministic::Context, Digest, Digest, Sha256, TwoCap, 32, Merkleized<Sha256>, Durable>;
 
     /// A type alias for the concrete mutable [Db] type used in these unit tests.
     type MutableCurrentTest =
@@ -204,7 +203,7 @@ pub mod test {
             let v1 = Sha256::fill(0xA1);
             db.update(k, v1).await.unwrap();
             let (db, _) = db.commit(None).await.unwrap();
-            let db = db.into_merkleized().await.unwrap();
+            let db = db.into_merkleized(&Sequential).await.unwrap();
 
             let (_, op_loc) = db.any.get_with_loc(&k).await.unwrap().unwrap();
             let proof = db.key_value_proof(hasher.inner(), k).await.unwrap();
@@ -233,7 +232,7 @@ pub mod test {
             let mut db = db.into_mutable();
             db.update(k, v2).await.unwrap();
             let (db, _) = db.commit(None).await.unwrap();
-            let db = db.into_merkleized().await.unwrap();
+            let db = db.into_merkleized(&Sequential).await.unwrap();
             let root = db.root();
 
             // New value should not be verifiable against the old proof.
@@ -374,7 +373,7 @@ pub mod test {
             .await
             .unwrap();
             let (db, _) = db.commit(None).await.unwrap();
-            let db = db.into_merkleized().await.unwrap();
+            let db = db.into_merkleized(&Sequential).await.unwrap();
             let root = db.root();
 
             // Make sure size-constrained batches of operations are provable from the oldest
@@ -430,7 +429,7 @@ pub mod test {
                 .await
                 .unwrap();
             let (db, _) = db.commit(None).await.unwrap();
-            let db = db.into_merkleized().await.unwrap();
+            let db = db.into_merkleized(&Sequential).await.unwrap();
             let root = db.root();
 
             // Confirm bad keys produce the expected error.
@@ -529,7 +528,7 @@ pub mod test {
                 dirty_db.update(k, v).await.unwrap();
                 assert_eq!(dirty_db.get(&k).await.unwrap().unwrap(), v);
                 let (durable_db, _) = dirty_db.commit(None).await.unwrap();
-                db = durable_db.into_merkleized().await.unwrap();
+                db = durable_db.into_merkleized(&Sequential).await.unwrap();
                 let root = db.root();
 
                 // Create a proof for the current value of k.

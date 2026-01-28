@@ -174,8 +174,97 @@ impl_resolver!(OrderedFixedDb, OrderedFixedOperation, FixedValue);
 // Ordered Variable
 impl_resolver!(OrderedVariableDb, OrderedVariableOperation, VariableValue);
 
-// Immutable
-impl_resolver!(Immutable, ImmutableOp, VariableValue);
+// Immutable - separate impl since it doesn't have Strategy parameter
+impl<E, K, V, H, T> Resolver for Arc<Immutable<E, K, V, H, T, Merkleized<H>, Durable>>
+where
+    E: Storage + Clock + Metrics,
+    K: Array,
+    V: VariableValue + Send + Sync + 'static,
+    H: Hasher,
+    T: Translator + Send + Sync + 'static,
+    T::Key: Send + Sync,
+{
+    type Digest = H::Digest;
+    type Op = ImmutableOp<K, V>;
+    type Error = qmdb::Error;
+
+    async fn get_operations(
+        &self,
+        op_count: Location,
+        start_loc: Location,
+        max_ops: NonZeroU64,
+    ) -> Result<FetchResult<Self::Op, Self::Digest>, Self::Error> {
+        self.historical_proof(op_count, start_loc, max_ops)
+            .await
+            .map(|(proof, operations)| FetchResult {
+                proof,
+                operations,
+                success_tx: oneshot::channel().0,
+            })
+    }
+}
+
+impl<E, K, V, H, T> Resolver for Arc<RwLock<Immutable<E, K, V, H, T, Merkleized<H>, Durable>>>
+where
+    E: Storage + Clock + Metrics,
+    K: Array,
+    V: VariableValue + Send + Sync + 'static,
+    H: Hasher,
+    T: Translator + Send + Sync + 'static,
+    T::Key: Send + Sync,
+{
+    type Digest = H::Digest;
+    type Op = ImmutableOp<K, V>;
+    type Error = qmdb::Error;
+
+    async fn get_operations(
+        &self,
+        op_count: Location,
+        start_loc: Location,
+        max_ops: NonZeroU64,
+    ) -> Result<FetchResult<Self::Op, Self::Digest>, qmdb::Error> {
+        let db = self.read().await;
+        db.historical_proof(op_count, start_loc, max_ops)
+            .await
+            .map(|(proof, operations)| FetchResult {
+                proof,
+                operations,
+                success_tx: oneshot::channel().0,
+            })
+    }
+}
+
+impl<E, K, V, H, T> Resolver
+    for Arc<RwLock<Option<Immutable<E, K, V, H, T, Merkleized<H>, Durable>>>>
+where
+    E: Storage + Clock + Metrics,
+    K: Array,
+    V: VariableValue + Send + Sync + 'static,
+    H: Hasher,
+    T: Translator + Send + Sync + 'static,
+    T::Key: Send + Sync,
+{
+    type Digest = H::Digest;
+    type Op = ImmutableOp<K, V>;
+    type Error = qmdb::Error;
+
+    async fn get_operations(
+        &self,
+        op_count: Location,
+        start_loc: Location,
+        max_ops: NonZeroU64,
+    ) -> Result<FetchResult<Self::Op, Self::Digest>, qmdb::Error> {
+        let guard = self.read().await;
+        let db = guard.as_ref().ok_or(qmdb::Error::KeyNotFound)?;
+        db.historical_proof(op_count, start_loc, max_ops)
+            .await
+            .map(|(proof, operations)| FetchResult {
+                proof,
+                operations,
+                success_tx: oneshot::channel().0,
+            })
+    }
+}
 
 #[cfg(test)]
 pub(crate) mod tests {

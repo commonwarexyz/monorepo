@@ -2,6 +2,7 @@
 
 use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
+use commonware_parallel::Sequential;
 use commonware_runtime::{buffer::PoolRef, deterministic, Metrics, Runner};
 use commonware_storage::{
     mmr::{hasher::Standard, Location},
@@ -134,7 +135,6 @@ fn test_config(test_name: &str) -> Config<(commonware_codec::RangeCfg<usize>, ()
         log_compression: None,
         log_codec_config: ((0..=10000).into(), ()),
         log_items_per_section: NZU64!(7),
-        thread_pool: None,
         buffer_pool: PoolRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
     }
 }
@@ -178,7 +178,7 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 Operation::Prune => {
-                    let mut merkleized_db = db.into_merkleized();
+                    let mut merkleized_db = db.into_merkleized(&Sequential);
                     merkleized_db.prune(merkleized_db.last_commit_loc())
                         .await
                         .expect("Prune should not fail");
@@ -187,7 +187,7 @@ fn fuzz(input: FuzzInput) {
 
                 Operation::Sync => {
                     let (durable_db, _) = db.commit(None).await.expect("Commit should not fail");
-                    let mut clean_db = durable_db.into_merkleized();
+                    let mut clean_db = durable_db.into_merkleized(&Sequential);
                     clean_db.sync().await.expect("Sync should not fail");
                     db = clean_db.into_mutable();
                 }
@@ -205,7 +205,7 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 Operation::Root => {
-                    let merkleized_db = db.into_merkleized();
+                    let merkleized_db = db.into_merkleized(&Sequential);
                     let _ = merkleized_db.root();
                     db = merkleized_db.into_mutable();
                 }
@@ -218,7 +218,7 @@ fn fuzz(input: FuzzInput) {
                     if op_count == 0 {
                         continue;
                     }
-                    let merkleized_db = db.into_merkleized();
+                    let merkleized_db = db.into_merkleized(&Sequential);
                     let start_loc = (*start_offset as u64) % op_count.as_u64();
                     let max_ops_value = ((*max_ops as u64) % MAX_PROOF_OPS) + 1;
                     let start_loc = Location::new(start_loc).unwrap();
@@ -241,7 +241,7 @@ fn fuzz(input: FuzzInput) {
                     if op_count == 0 {
                         continue;
                     }
-                    let merkleized_db = db.into_merkleized();
+                    let merkleized_db = db.into_merkleized(&Sequential);
                     let size = ((*size_offset as u64) % op_count.as_u64()) + 1;
                     let size = Location::new(size).unwrap();
                     let start_loc = (*start_offset as u64) % *size;
@@ -272,7 +272,7 @@ fn fuzz(input: FuzzInput) {
         }
 
         let (durable_db, _) = db.commit(None).await.expect("Commit should not fail");
-        let clean_db = durable_db.into_merkleized();
+        let clean_db = durable_db.into_merkleized(&Sequential);
         clean_db.destroy().await.expect("Destroy should not fail");
     });
 }

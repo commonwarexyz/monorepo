@@ -33,8 +33,8 @@ pub struct KeyValueProof<K: Array, D: Digest, const N: usize> {
 }
 
 /// The generic Db type for ordered Current QMDB variants.
-pub type Db<E, C, K, V, H, T, const N: usize, S = Merkleized<H>, D = Durable> =
-    super::super::db::Db<E, C, Index<T, Location>, H, Update<K, V>, N, S, D>;
+pub type Db<E, C, K, V, H, T, const N: usize, M = Merkleized<H>, D = Durable> =
+    super::super::db::Db<E, C, Index<T, Location>, H, Update<K, V>, N, M, D>;
 
 // Functionality shared across all DB states, such as most non-mutating operations.
 impl<

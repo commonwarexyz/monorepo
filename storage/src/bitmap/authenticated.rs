@@ -24,7 +24,7 @@ use crate::{
 };
 use commonware_codec::DecodeExt;
 use commonware_cryptography::{Digest, Hasher};
-use commonware_parallel::ThreadPool;
+use commonware_parallel::Strategy;
 use commonware_runtime::{Clock, Metrics, Storage as RStorage};
 use commonware_utils::{
     bitmap::{BitMap as UtilsBitMap, Prunable as PrunableBitMap},
@@ -95,9 +95,6 @@ pub struct BitMap<E: Clock + RStorage + Metrics, D: Digest, const N: usize, S: S
     ///
     /// Invariant: Indices are always in the range [0,`authenticated_len`).
     dirty_chunks: HashSet<usize>,
-
-    /// The thread pool to use for parallelization.
-    pool: Option<ThreadPool>,
 
     /// The cached root digest. This is always `Some` for a clean bitmap and computed during
     /// merkleization. For a dirty bitmap, this may be stale or `None`.
@@ -271,7 +268,6 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> CleanBitMap<E, D,
     pub async fn init(
         context: E,
         partition: &str,
-        pool: Option<ThreadPool>,
         hasher: &mut impl MmrHasher<Digest = D>,
     ) -> Result<Self, Error> {
         let metadata_cfg = MConfig {
@@ -300,7 +296,6 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> CleanBitMap<E, D,
                 authenticated_len: 0,
                 mmr,
                 dirty_chunks: HashSet::new(),
-                pool,
                 cached_root: Some(cached_root),
                 metadata,
             });
@@ -338,7 +333,6 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> CleanBitMap<E, D,
             authenticated_len: 0,
             mmr,
             dirty_chunks: HashSet::new(),
-            pool,
             cached_root: Some(cached_root),
             metadata,
         })
@@ -478,7 +472,6 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> CleanBitMap<E, D,
             authenticated_len: self.authenticated_len,
             mmr: self.mmr.into_dirty(),
             dirty_chunks: self.dirty_chunks,
-            pool: self.pool,
             cached_root: self.cached_root,
             metadata: self.metadata,
         }
@@ -532,6 +525,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> DirtyBitMap<E, D,
     pub async fn merkleize(
         mut self,
         hasher: &mut impl MmrHasher<Digest = D>,
+        strategy: &impl Strategy,
     ) -> Result<CleanBitMap<E, D, N>, Error> {
         // Add newly pushed complete chunks to the MMR.
         let start = self.authenticated_len;
@@ -551,10 +545,9 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> DirtyBitMap<E, D,
                 (loc, self.bitmap.get_chunk(*chunk))
             })
             .collect::<Vec<_>>();
-        self.mmr
-            .update_leaf_batched(hasher, self.pool.clone(), &updates)?;
         self.dirty_chunks.clear();
-        let mmr = self.mmr.merkleize(hasher, self.pool.clone());
+        self.mmr.update_leaves(hasher, strategy, &updates)?;
+        let mmr = self.mmr.merkleize(hasher, strategy);
 
         // Compute the bitmap root
         let mmr_root = *mmr.root();
@@ -571,7 +564,6 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> DirtyBitMap<E, D,
             authenticated_len: self.authenticated_len,
             mmr,
             dirty_chunks: self.dirty_chunks,
-            pool: self.pool,
             cached_root: Some(cached_root),
             metadata: self.metadata,
         })
@@ -595,6 +587,7 @@ mod tests {
     use commonware_codec::FixedSize;
     use commonware_cryptography::{sha256, Hasher, Sha256};
     use commonware_macros::test_traced;
+    use commonware_parallel::Sequential;
     use commonware_runtime::{deterministic, Metrics, Runner as _};
 
     const SHA256_SIZE: usize = sha256::Digest::SIZE;
@@ -673,7 +666,7 @@ mod tests {
         executor.start(|context| async move {
             let mut hasher = StandardHasher::<Sha256>::new();
             let mut bitmap: TestCleanBitMap<SHA256_SIZE> =
-                TestCleanBitMap::init(context.with_label("bitmap"), "test", None, &mut hasher)
+                TestCleanBitMap::init(context.with_label("bitmap"), "test", &mut hasher)
                     .await
                     .unwrap();
             assert_eq!(bitmap.len(), 0);
@@ -685,7 +678,7 @@ mod tests {
             let root = bitmap.root();
             let mut dirty = bitmap.into_dirty();
             dirty.push(true);
-            bitmap = dirty.merkleize(&mut hasher).await.unwrap();
+            bitmap = dirty.merkleize(&mut hasher, &Sequential).await.unwrap();
             // Root should change
             let new_root = bitmap.root();
             assert_ne!(root, new_root);
@@ -703,7 +696,7 @@ mod tests {
             for i in 0..(TestCleanBitMap::<SHA256_SIZE>::CHUNK_SIZE_BITS - 1) {
                 dirty.push(i % 2 != 0);
             }
-            bitmap = dirty.merkleize(&mut hasher).await.unwrap();
+            bitmap = dirty.merkleize(&mut hasher, &Sequential).await.unwrap();
             assert_eq!(bitmap.len(), 256);
             assert_ne!(root, bitmap.root());
             let root = bitmap.root();
@@ -756,7 +749,7 @@ mod tests {
 
             // Add each bit one at a time after the first chunk.
             let bitmap: TestCleanBitMap<SHA256_SIZE> =
-                TestCleanBitMap::init(context.with_label("bitmap1"), "test1", None, &mut hasher)
+                TestCleanBitMap::init(context.with_label("bitmap1"), "test1", &mut hasher)
                     .await
                     .unwrap();
             let mut dirty = bitmap.into_dirty();
@@ -770,7 +763,7 @@ mod tests {
             }
             assert_eq!(dirty.len(), 256 * 2);
 
-            let bitmap = dirty.merkleize(&mut hasher).await.unwrap();
+            let bitmap = dirty.merkleize(&mut hasher, &Sequential).await.unwrap();
             let root = bitmap.root();
             let inner_root = *bitmap.mmr.root();
             assert_eq!(root, inner_root);
@@ -778,37 +771,29 @@ mod tests {
             {
                 // Repeat the above MMR build only using push_chunk instead, and make
                 // sure root digests match.
-                let bitmap: TestCleanBitMap<SHA256_SIZE> = TestCleanBitMap::init(
-                    context.with_label("bitmap2"),
-                    "test2",
-                    None,
-                    &mut hasher,
-                )
-                .await
-                .unwrap();
+                let bitmap: TestCleanBitMap<SHA256_SIZE> =
+                    TestCleanBitMap::init(context.with_label("bitmap2"), "test2", &mut hasher)
+                        .await
+                        .unwrap();
                 let mut dirty = bitmap.into_dirty();
                 dirty.push_chunk(&test_chunk);
                 dirty.push_chunk(&test_chunk);
-                let bitmap = dirty.merkleize(&mut hasher).await.unwrap();
+                let bitmap = dirty.merkleize(&mut hasher, &Sequential).await.unwrap();
                 let same_root = bitmap.root();
                 assert_eq!(root, same_root);
             }
             {
                 // Repeat build again using push_byte this time.
-                let bitmap: TestCleanBitMap<SHA256_SIZE> = TestCleanBitMap::init(
-                    context.with_label("bitmap3"),
-                    "test3",
-                    None,
-                    &mut hasher,
-                )
-                .await
-                .unwrap();
+                let bitmap: TestCleanBitMap<SHA256_SIZE> =
+                    TestCleanBitMap::init(context.with_label("bitmap3"), "test3", &mut hasher)
+                        .await
+                        .unwrap();
                 let mut dirty = bitmap.into_dirty();
                 dirty.push_chunk(&test_chunk);
                 for b in test_chunk {
                     dirty.push_byte(b);
                 }
-                let bitmap = dirty.merkleize(&mut hasher).await.unwrap();
+                let bitmap = dirty.merkleize(&mut hasher, &Sequential).await.unwrap();
                 let same_root = bitmap.root();
                 assert_eq!(root, same_root);
             }
@@ -822,7 +807,7 @@ mod tests {
         executor.start(|context| async move {
             let mut hasher: StandardHasher<Sha256> = StandardHasher::new();
             let bitmap: TestCleanBitMap<SHA256_SIZE> =
-                TestCleanBitMap::init(context.with_label("bitmap"), "test", None, &mut hasher)
+                TestCleanBitMap::init(context.with_label("bitmap"), "test", &mut hasher)
                     .await
                     .unwrap();
             let mut dirty = bitmap.into_dirty();
@@ -839,7 +824,7 @@ mod tests {
         executor.start(|context| async move {
             let mut hasher: StandardHasher<Sha256> = StandardHasher::new();
             let bitmap: TestCleanBitMap<SHA256_SIZE> =
-                TestCleanBitMap::init(context.with_label("bitmap"), "test", None, &mut hasher)
+                TestCleanBitMap::init(context.with_label("bitmap"), "test", &mut hasher)
                     .await
                     .unwrap();
             let mut dirty = bitmap.into_dirty();
@@ -856,7 +841,7 @@ mod tests {
         executor.start(|context| async move {
             let mut hasher: StandardHasher<Sha256> = StandardHasher::new();
             let bitmap: TestCleanBitMap<SHA256_SIZE> =
-                TestCleanBitMap::init(context.with_label("bitmap"), "test", None, &mut hasher)
+                TestCleanBitMap::init(context.with_label("bitmap"), "test", &mut hasher)
                     .await
                     .unwrap();
             let mut dirty = bitmap.into_dirty();
@@ -872,13 +857,13 @@ mod tests {
         executor.start(|context| async move {
             let mut hasher: StandardHasher<Sha256> = StandardHasher::new();
             let bitmap: TestCleanBitMap<SHA256_SIZE> =
-                TestCleanBitMap::init(context.with_label("bitmap"), "test", None, &mut hasher)
+                TestCleanBitMap::init(context.with_label("bitmap"), "test", &mut hasher)
                     .await
                     .unwrap();
             let mut dirty = bitmap.into_dirty();
             dirty.push_chunk(&test_chunk(b"test"));
             dirty.push_chunk(&test_chunk(b"test2"));
-            let mut bitmap = dirty.merkleize(&mut hasher).await.unwrap();
+            let mut bitmap = dirty.merkleize(&mut hasher, &Sequential).await.unwrap();
 
             bitmap.prune_to_bit(256).unwrap();
             bitmap.get_bit(255);
@@ -892,20 +877,20 @@ mod tests {
             // Build a starting test MMR with two chunks worth of bits.
             let mut hasher = StandardHasher::<Sha256>::new();
             let bitmap: TestCleanBitMap<SHA256_SIZE> =
-                TestCleanBitMap::init(context.with_label("bitmap"), "test", None, &mut hasher)
+                TestCleanBitMap::init(context.with_label("bitmap"), "test", &mut hasher)
                     .await
                     .unwrap();
             let mut dirty = bitmap.into_dirty();
             dirty.push_chunk(&test_chunk(b"test"));
             dirty.push_chunk(&test_chunk(b"test2"));
-            let mut bitmap = dirty.merkleize(&mut hasher).await.unwrap();
+            let mut bitmap = dirty.merkleize(&mut hasher, &Sequential).await.unwrap();
 
             let root = bitmap.root();
 
             // Confirm that root changes if we add a 1 bit, even though we won't fill a chunk.
             let mut dirty = bitmap.into_dirty();
             dirty.push(true);
-            bitmap = dirty.merkleize(&mut hasher).await.unwrap();
+            bitmap = dirty.merkleize(&mut hasher, &Sequential).await.unwrap();
             let new_root = bitmap.root();
             assert_ne!(root, new_root);
             assert_eq!(bitmap.mmr.size(), 3); // shouldn't include the trailing bits
@@ -914,7 +899,7 @@ mod tests {
             for _ in 0..(SHA256_SIZE * 8 - 1) {
                 let mut dirty = bitmap.into_dirty();
                 dirty.push(false);
-                bitmap = dirty.merkleize(&mut hasher).await.unwrap();
+                bitmap = dirty.merkleize(&mut hasher, &Sequential).await.unwrap();
                 let newer_root = bitmap.root();
                 // root will change when adding 0s within the same chunk
                 assert_ne!(new_root, newer_root);
@@ -925,7 +910,7 @@ mod tests {
             let mut dirty = bitmap.into_dirty();
             dirty.push(false);
             assert_eq!(dirty.len(), 256 * 3 + 1);
-            bitmap = dirty.merkleize(&mut hasher).await.unwrap();
+            bitmap = dirty.merkleize(&mut hasher, &Sequential).await.unwrap();
             let newer_root = bitmap.root();
             assert_ne!(new_root, newer_root);
 
@@ -944,7 +929,7 @@ mod tests {
             // Build a test MMR with a few chunks worth of bits.
             let mut hasher = StandardHasher::<Sha256>::new();
             let bitmap: TestCleanBitMap<SHA256_SIZE> =
-                TestCleanBitMap::init(context.with_label("bitmap"), "test", None, &mut hasher)
+                TestCleanBitMap::init(context.with_label("bitmap"), "test", &mut hasher)
                     .await
                     .unwrap();
             let mut dirty = bitmap.into_dirty();
@@ -958,7 +943,7 @@ mod tests {
             dirty.push(false);
             dirty.push(true);
 
-            let mut bitmap = dirty.merkleize(&mut hasher).await.unwrap();
+            let mut bitmap = dirty.merkleize(&mut hasher, &Sequential).await.unwrap();
             let root = bitmap.root();
 
             // Flip each bit and confirm the root changes, then flip it back to confirm it is safely
@@ -967,13 +952,13 @@ mod tests {
                 let bit = bitmap.get_bit(bit_pos);
                 let mut dirty = bitmap.into_dirty();
                 dirty.set_bit(bit_pos, !bit);
-                bitmap = dirty.merkleize(&mut hasher).await.unwrap();
+                bitmap = dirty.merkleize(&mut hasher, &Sequential).await.unwrap();
                 let new_root = bitmap.root();
                 assert_ne!(root, new_root, "failed at bit {bit_pos}");
                 // flip it back
                 let mut dirty = bitmap.into_dirty();
                 dirty.set_bit(bit_pos, bit);
-                bitmap = dirty.merkleize(&mut hasher).await.unwrap();
+                bitmap = dirty.merkleize(&mut hasher, &Sequential).await.unwrap();
                 let new_root = bitmap.root();
                 assert_eq!(root, new_root);
             }
@@ -985,13 +970,13 @@ mod tests {
                 let bit = bitmap.get_bit(bit_pos);
                 let mut dirty = bitmap.into_dirty();
                 dirty.set_bit(bit_pos, !bit);
-                bitmap = dirty.merkleize(&mut hasher).await.unwrap();
+                bitmap = dirty.merkleize(&mut hasher, &Sequential).await.unwrap();
                 let new_root = bitmap.root();
                 assert_ne!(root, new_root, "failed at bit {bit_pos}");
                 // flip it back
                 let mut dirty = bitmap.into_dirty();
                 dirty.set_bit(bit_pos, bit);
-                bitmap = dirty.merkleize(&mut hasher).await.unwrap();
+                bitmap = dirty.merkleize(&mut hasher, &Sequential).await.unwrap();
                 let new_root = bitmap.root();
                 assert_eq!(root, new_root);
             }
@@ -1018,7 +1003,7 @@ mod tests {
             // Build a bitmap with 10 chunks worth of bits.
             let mut hasher = StandardHasher::<Sha256>::new();
             let bitmap: CleanBitMap<TestContext, sha256::Digest, N> =
-                CleanBitMap::init(context.with_label("bitmap"), "test", None, &mut hasher)
+                CleanBitMap::init(context.with_label("bitmap"), "test", &mut hasher)
                     .await
                     .unwrap();
             let mut dirty = bitmap.into_dirty();
@@ -1033,7 +1018,7 @@ mod tests {
             dirty.push(true);
             dirty.push(false);
 
-            let mut bitmap = dirty.merkleize(&mut hasher).await.unwrap();
+            let mut bitmap = dirty.merkleize(&mut hasher, &Sequential).await.unwrap();
             let root = bitmap.root();
 
             // Make sure every bit is provable, even after pruning in intervals of 251 bits (251 is
@@ -1083,7 +1068,7 @@ mod tests {
             let mut hasher = StandardHasher::<Sha256>::new();
             // Initializing from an empty partition should result in an empty bitmap.
             let bitmap: TestCleanBitMap<SHA256_SIZE> =
-                TestCleanBitMap::init(context.with_label("initial"), PARTITION, None, &mut hasher)
+                TestCleanBitMap::init(context.with_label("initial"), PARTITION, &mut hasher)
                     .await
                     .unwrap();
             assert_eq!(bitmap.len(), 0);
@@ -1093,7 +1078,7 @@ mod tests {
             for i in 0..FULL_CHUNK_COUNT {
                 dirty.push_chunk(&test_chunk(format!("test{i}").as_bytes()));
             }
-            let mut bitmap = dirty.merkleize(&mut hasher).await.unwrap();
+            let mut bitmap = dirty.merkleize(&mut hasher, &Sequential).await.unwrap();
             let chunk_aligned_root = bitmap.root();
 
             // Add a few extra bits beyond the last chunk boundary.
@@ -1102,7 +1087,7 @@ mod tests {
             dirty.push(true);
             dirty.push(false);
             dirty.push(true);
-            bitmap = dirty.merkleize(&mut hasher).await.unwrap();
+            bitmap = dirty.merkleize(&mut hasher, &Sequential).await.unwrap();
             let root = bitmap.root();
 
             // prune 10 chunks at a time and make sure replay will restore the bitmap every time.
@@ -1116,7 +1101,6 @@ mod tests {
                 bitmap = TestCleanBitMap::init(
                     context.with_label(&format!("restore_{i}")),
                     PARTITION,
-                    None,
                     &mut hasher,
                 )
                 .await
@@ -1130,7 +1114,7 @@ mod tests {
                 }
                 assert_eq!(dirty.bitmap.pruned_chunks(), i);
                 assert_eq!(dirty.len(), FULL_CHUNK_COUNT as u64 * 256);
-                bitmap = dirty.merkleize(&mut hasher).await.unwrap();
+                bitmap = dirty.merkleize(&mut hasher, &Sequential).await.unwrap();
                 assert_eq!(bitmap.root(), chunk_aligned_root);
 
                 // Replay missing partial chunk.
@@ -1139,7 +1123,7 @@ mod tests {
                 dirty.push(true);
                 dirty.push(false);
                 dirty.push(true);
-                bitmap = dirty.merkleize(&mut hasher).await.unwrap();
+                bitmap = dirty.merkleize(&mut hasher, &Sequential).await.unwrap();
                 assert_eq!(bitmap.root(), root);
             }
         });
@@ -1151,12 +1135,12 @@ mod tests {
         executor.start(|context| async move {
             let mut hasher = StandardHasher::<Sha256>::new();
             let bitmap: TestCleanBitMap<SHA256_SIZE> =
-                TestCleanBitMap::init(context.with_label("bitmap"), "test", None, &mut hasher)
+                TestCleanBitMap::init(context.with_label("bitmap"), "test", &mut hasher)
                     .await
                     .unwrap();
             let mut dirty = bitmap.into_dirty();
             dirty.push_chunk(&test_chunk(b"test"));
-            let bitmap = dirty.merkleize(&mut hasher).await.unwrap();
+            let bitmap = dirty.merkleize(&mut hasher, &Sequential).await.unwrap();
 
             // Proof for bit_offset >= bit_count should fail
             let result = bitmap.proof(&mut hasher, 256).await;

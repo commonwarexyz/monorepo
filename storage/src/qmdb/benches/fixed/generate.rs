@@ -7,6 +7,7 @@ use crate::fixed::{
     get_current_ordered_variable, get_current_unordered_fixed, get_current_unordered_variable,
     Digest, Variant, VARIANTS,
 };
+use commonware_parallel::Sequential;
 use commonware_runtime::{
     benchmarks::{context, tokio},
     tokio::{Config, Context},
@@ -187,7 +188,7 @@ where
     };
 
     // Convert durable → provable (clean) for pruning
-    let mut clean = durable.into_merkleized().await?;
+    let mut clean = durable.into_merkleized(&Sequential).await?;
     clean.prune(clean.inactivity_floor_loc()).await?;
     clean.sync().await?;
 

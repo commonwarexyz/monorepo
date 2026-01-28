@@ -27,8 +27,6 @@
 //! ```
 
 use crate::Hasher;
-#[cfg(not(feature = "std"))]
-use alloc::vec;
 use bytes::{Buf, BufMut};
 use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
 use commonware_math::algebra::Random;

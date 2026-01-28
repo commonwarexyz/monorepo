@@ -30,8 +30,8 @@ pub type Operation<K, V> = ordered::Operation<K, VariableEncoding<V>>;
 
 /// A key-value QMDB based on an authenticated log of operations, supporting authentication of any
 /// value ever associated with a key.
-pub type Db<E, K, V, H, T, S = Merkleized<H>, D = Durable> =
-    super::Db<E, Journal<E, Operation<K, V>>, Index<T, Location>, H, Update<K, V>, S, D>;
+pub type Db<E, K, V, H, T, M = Merkleized<H>, D = Durable> =
+    super::Db<E, Journal<E, Operation<K, V>>, Index<T, Location>, H, Update<K, V>, M, D>;
 
 impl<E: Storage + Clock + Metrics, K: Array, V: VariableValue, H: Hasher, T: Translator>
     Db<E, K, V, H, T, Merkleized<H>, Durable>
@@ -62,7 +62,6 @@ impl<E: Storage + Clock + Metrics, K: Array, V: VariableValue, H: Hasher, T: Tra
             metadata_partition: cfg.mmr_metadata_partition,
             items_per_blob: cfg.mmr_items_per_blob,
             write_buffer: cfg.mmr_write_buffer,
-            thread_pool: cfg.thread_pool,
             buffer_pool: cfg.buffer_pool.clone(),
         };
 
@@ -137,7 +136,6 @@ pub(crate) mod test {
             log_compression: None,
             log_codec_config: ((0..=10000).into(), ()),
             translator: TwoCap,
-            thread_pool: None,
             buffer_pool: PoolRef::new(NZU16!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
         }
     }

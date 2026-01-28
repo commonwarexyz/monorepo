@@ -12,6 +12,7 @@ pub mod tests {
     };
     use commonware_codec::Codec;
     use commonware_cryptography::{sha256, Hasher};
+    use commonware_parallel::Sequential;
     use commonware_runtime::{
         deterministic::{self, Context},
         Metrics, Runner as _,
@@ -47,7 +48,7 @@ pub mod tests {
     /// Destroy an MutableAny database by committing and then destroying.
     async fn destroy_db<D: MutableAny>(db: D) -> Result<(), Error> {
         let db = db.commit(None).await?.0;
-        db.into_merkleized().await?.destroy().await
+        db.into_merkleized(&Sequential).await?.destroy().await
     }
 
     /// Run the batch test suite against a database factory within a deterministic executor twice,

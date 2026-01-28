@@ -19,6 +19,7 @@ use crate::{
 };
 use commonware_codec::{CodecFixedShared, CodecShared, Encode, EncodeShared};
 use commonware_cryptography::{DigestOf, Hasher};
+use commonware_parallel::{Sequential, Strategy};
 use commonware_runtime::{Clock, Metrics, Storage};
 use core::num::{NonZeroU64, NonZeroUsize};
 use futures::{future::try_join_all, try_join, TryFutureExt as _};
@@ -183,11 +184,11 @@ where
                 mmr_size += 1;
                 batch_size += 1;
                 if batch_size >= apply_batch_size {
-                    mmr = mmr.merkleize(hasher).into_dirty();
+                    mmr = mmr.merkleize(hasher, &Sequential).into_dirty();
                     batch_size = 0;
                 }
             }
-            return Ok(mmr.merkleize(hasher));
+            return Ok(mmr.merkleize(hasher, &Sequential));
         }
 
         // At this point the MMR and journal should be consistent.
@@ -348,14 +349,14 @@ where
     H: Hasher,
 {
     /// Merkleize the journal and compute the root digest.
-    pub fn merkleize(self) -> Journal<E, C, H, Clean<H::Digest>> {
+    pub fn merkleize(self, strategy: &impl Strategy) -> Journal<E, C, H, Clean<H::Digest>> {
         let Self {
             mmr,
             journal,
             mut hasher,
         } = self;
         Journal {
-            mmr: mmr.merkleize(&mut hasher),
+            mmr: mmr.merkleize(&mut hasher, strategy),
             journal,
             hasher,
         }
@@ -618,7 +619,7 @@ mod tests {
     use crate::{
         journal::contiguous::fixed::{Config as JConfig, Journal as ContiguousJournal},
         mmr::{
-            journaled::{Config as MmrConfig, Mmr},
+            journaled::{CleanMmr, Config as MmrConfig, Mmr},
             Location,
         },
         qmdb::{
@@ -648,7 +649,6 @@ mod tests {
             metadata_partition: format!("mmr_metadata_{suffix}"),
             items_per_blob: NZU64!(11),
             write_buffer: NZUsize!(1024),
-            thread_pool: None,
             buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }

@@ -17,7 +17,7 @@
 //! - [`map_init_collect_vec`](Strategy::map_init_collect_vec): Like `map_collect_vec` with
 //!   per-partition initialization
 //! - [`map_partition_collect_vec`](Strategy::map_partition_collect_vec): Maps elements, collecting
-//!   successful results and tracking indices of filtered elements
+//!   successful results and tracking keys of filtered elements
 //!
 //! Two implementations are provided:
 //!
@@ -558,6 +558,32 @@ cfg_if! {
 
             fn parallelism_hint(&self) -> usize {
                 self.thread_pool.current_num_threads()
+            }
+
+            fn map_collect_vec<I, F, T>(&self, iter: I, map_op: F) -> Vec<T>
+            where
+                I: IntoIterator<IntoIter: Send, Item: Send> + Send,
+                F: Fn(I::Item) -> T + Send + Sync,
+                T: Send,
+            {
+                self.thread_pool.install(|| {
+                    let items: Vec<I::Item> = iter.into_iter().collect();
+                    items.into_par_iter().map(map_op).collect()
+                })
+            }
+
+            fn map_init_collect_vec<I, INIT, T, F, R>(&self, iter: I, init: INIT, map_op: F) -> Vec<R>
+            where
+                I: IntoIterator<IntoIter: Send, Item: Send> + Send,
+                INIT: Fn() -> T + Send + Sync,
+                T: Send,
+                F: Fn(&mut T, I::Item) -> R + Send + Sync,
+                R: Send,
+            {
+                self.thread_pool.install(|| {
+                    let items: Vec<I::Item> = iter.into_iter().collect();
+                    items.into_par_iter().map_init(init, map_op).collect()
+                })
             }
         }
     }

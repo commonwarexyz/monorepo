@@ -2,7 +2,7 @@ use super::bandwidth::{self, Flow, Rate};
 use crate::Channel;
 use commonware_cryptography::PublicKey;
 use commonware_runtime::IoBuf;
-use commonware_utils::{time::SYSTEM_TIME_PRECISION, BigRationalExt, SystemTimeExt};
+use commonware_utils::{time::SYSTEM_TIME_PRECISION, BigRationalExt};
 use num_rational::BigRational;
 use num_traits::Zero;
 use std::{
@@ -436,7 +436,8 @@ impl<P: PublicKey> State<P> {
         completed.sort();
 
         // Record the next time at which a bandwidth event should fire.
-        self.next_bandwidth_event = earliest.map(|duration| now.saturating_add(duration));
+        self.next_bandwidth_event = earliest
+            .map(|duration| commonware_utils::SystemTimeExt::saturating_add(&now, duration));
 
         self.finish(completed, now)
     }
