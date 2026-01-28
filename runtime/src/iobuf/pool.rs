@@ -1792,7 +1792,6 @@ mod tests {
 
         // All buffers should be returned
         assert_eq!(get_allocated(&pool, page), 0);
-        println!("Cross-thread: available = {}", get_available(&pool, page));
     }
 
     #[test]
@@ -2111,5 +2110,261 @@ mod tests {
 
         let owned = IoBufMut::with_capacity(100);
         assert!(!owned.is_pooled());
+    }
+
+    #[test]
+    fn test_bytesmut_parity_capacity_after_advance() {
+        use bytes::BytesMut;
+
+        let page = page_size();
+        let mut registry = test_registry();
+        let pool = BufferPool::new(test_config(page, page * 4, 10), &mut registry);
+
+        let mut bytes = BytesMut::with_capacity(page);
+        bytes.resize(50, 0xAA);
+
+        let mut pooled = pool.alloc(page).unwrap();
+        pooled.resize(50, 0xAA);
+
+        // Before advance
+        assert_eq!(bytes.len(), pooled.len(), "len before advance");
+
+        Buf::advance(&mut bytes, 20);
+        Buf::advance(&mut pooled, 20);
+
+        // After advance: capacity shrinks, len shrinks
+        assert_eq!(bytes.len(), pooled.len(), "len after advance");
+        assert_eq!(
+            bytes.capacity(),
+            pooled.capacity(),
+            "capacity after advance"
+        );
+    }
+
+    #[test]
+    fn test_bytesmut_parity_set_len_after_advance() {
+        use bytes::BytesMut;
+
+        let page = page_size();
+        let mut registry = test_registry();
+        let pool = BufferPool::new(test_config(page, page * 4, 10), &mut registry);
+
+        let mut bytes = BytesMut::with_capacity(page);
+        bytes.resize(50, 0xBB);
+        Buf::advance(&mut bytes, 20);
+
+        let mut pooled = pool.alloc(page).unwrap();
+        pooled.resize(50, 0xBB);
+        Buf::advance(&mut pooled, 20);
+
+        // set_len is view-relative
+        unsafe {
+            bytes.set_len(40);
+            pooled.set_len(40);
+        }
+
+        assert_eq!(bytes.len(), pooled.len(), "len after set_len");
+        assert_eq!(bytes.as_ref(), pooled.as_ref(), "content after set_len");
+    }
+
+    #[test]
+    fn test_bytesmut_parity_clear_preserves_view() {
+        use bytes::BytesMut;
+
+        let page = page_size();
+        let mut registry = test_registry();
+        let pool = BufferPool::new(test_config(page, page * 4, 10), &mut registry);
+
+        let mut bytes = BytesMut::with_capacity(page);
+        bytes.resize(50, 0xCC);
+        Buf::advance(&mut bytes, 20);
+        let cap_before_clear = bytes.capacity();
+        bytes.clear();
+
+        let mut pooled = pool.alloc(page).unwrap();
+        pooled.resize(50, 0xCC);
+        Buf::advance(&mut pooled, 20);
+        let pooled_cap_before = pooled.capacity();
+        pooled.clear();
+
+        // clear() sets len to 0 but preserves capacity (doesn't resurrect prefix)
+        assert_eq!(bytes.len(), pooled.len(), "len after clear");
+        assert_eq!(bytes.capacity(), cap_before_clear, "bytes cap unchanged");
+        assert_eq!(pooled.capacity(), pooled_cap_before, "pooled cap unchanged");
+    }
+
+    #[test]
+    fn test_bytesmut_parity_put_after_advance() {
+        use bytes::BytesMut;
+
+        let page = page_size();
+        let mut registry = test_registry();
+        let pool = BufferPool::new(test_config(page, page * 4, 10), &mut registry);
+
+        let mut bytes = BytesMut::with_capacity(100);
+        bytes.resize(30, 0xAA);
+        Buf::advance(&mut bytes, 10);
+        bytes.put_slice(&[0xBB; 10]);
+
+        let mut pooled = pool.alloc(100).unwrap();
+        pooled.resize(30, 0xAA);
+        Buf::advance(&mut pooled, 10);
+        pooled.put_slice(&[0xBB; 10]);
+
+        assert_eq!(bytes.as_ref(), pooled.as_ref(), "content after put_slice");
+    }
+
+    #[test]
+    fn test_resize_beyond_max_pool_size() {
+        let page = page_size();
+        let mut registry = test_registry();
+        let pool = BufferPool::new(test_config(page, page, 10), &mut registry);
+
+        let mut buf = pool.alloc(100).unwrap();
+        buf.resize(100, 0x11);
+
+        // Resize beyond max_size - should fall back to heap
+        buf.resize(page * 10, 0x22);
+
+        assert_eq!(buf.len(), page * 10);
+        assert!(buf.as_ref()[..100].iter().all(|&b| b == 0x11));
+        assert!(buf.as_ref()[100..].iter().all(|&b| b == 0x22));
+    }
+
+    #[test]
+    fn test_buffer_alignment() {
+        let page = page_size();
+        let cache_line = cache_line_size();
+        let mut registry = test_registry();
+
+        // Storage preset - page aligned
+        let storage_pool = BufferPool::new(BufferPoolConfig::for_storage(), &mut registry);
+        let mut buf = storage_pool.alloc(100).unwrap();
+        assert_eq!(
+            buf.as_mut_ptr() as usize % page,
+            0,
+            "storage buffer not page-aligned"
+        );
+
+        // Network preset - cache-line aligned
+        let network_pool = BufferPool::new(BufferPoolConfig::for_network(), &mut registry);
+        let mut buf = network_pool.alloc(100).unwrap();
+        assert_eq!(
+            buf.as_mut_ptr() as usize % cache_line,
+            0,
+            "network buffer not cache-line aligned"
+        );
+    }
+
+    #[test]
+    fn test_freeze_after_advance_to_end() {
+        let page = page_size();
+        let mut registry = test_registry();
+        let pool = BufferPool::new(test_config(page, page, 10), &mut registry);
+
+        let mut buf = pool.alloc(100).unwrap();
+        buf.resize(100, 0x42);
+        Buf::advance(&mut buf, 100);
+
+        let frozen = buf.freeze();
+        assert!(frozen.is_empty());
+    }
+
+    #[test]
+    fn test_zero_capacity_allocation() {
+        let page = page_size();
+        let mut registry = test_registry();
+        let pool = BufferPool::new(test_config(page, page, 10), &mut registry);
+
+        let buf = pool.alloc(0);
+        assert!(buf.is_some());
+        let buf = buf.unwrap();
+        assert_eq!(buf.capacity(), page);
+        assert_eq!(buf.len(), 0);
+    }
+
+    #[test]
+    fn test_exact_max_size_allocation() {
+        let page = page_size();
+        let mut registry = test_registry();
+        let pool = BufferPool::new(test_config(page, page, 10), &mut registry);
+
+        let buf = pool.alloc(page);
+        assert!(buf.is_some());
+        assert_eq!(buf.unwrap().capacity(), page);
+    }
+
+    #[test]
+    fn test_stress_resize_with_advance() {
+        let page = page_size();
+        let mut registry = test_registry();
+        let pool = BufferPool::new(test_config(page, page * 4, 10), &mut registry);
+
+        for _ in 0..100 {
+            let mut buf = pool.alloc(100).unwrap();
+            buf.resize(50, 0xAA);
+            Buf::advance(&mut buf, 25);
+            buf.resize(100, 0xBB);
+            assert_eq!(buf.len(), 100);
+            assert!(buf.as_ref()[..25].iter().all(|&b| b == 0xAA));
+            assert!(buf.as_ref()[25..].iter().all(|&b| b == 0xBB));
+            buf.resize(10, 0);
+            assert_eq!(buf.len(), 10);
+            drop(buf);
+        }
+        assert_eq!(get_allocated(&pool, page), 0);
+    }
+
+    #[test]
+    fn test_freeze_after_partial_advance_mut() {
+        let page = page_size();
+        let mut registry = test_registry();
+        let pool = BufferPool::new(test_config(page, page, 10), &mut registry);
+
+        let mut buf = pool.alloc(100).unwrap();
+        // Write 50 bytes via BufMut
+        unsafe { buf.advance_mut(50) };
+        // Consume 20 bytes via Buf
+        Buf::advance(&mut buf, 20);
+        // Freeze should only contain 30 bytes
+        let frozen = buf.freeze();
+        assert_eq!(frozen.len(), 30);
+    }
+
+    #[test]
+    fn test_interleaved_advance_and_write() {
+        let page = page_size();
+        let mut registry = test_registry();
+        let pool = BufferPool::new(test_config(page, page, 10), &mut registry);
+
+        let mut buf = pool.alloc(100).unwrap();
+        buf.put_slice(b"hello");
+        Buf::advance(&mut buf, 2);
+        buf.put_slice(b"world");
+        assert_eq!(buf.as_ref(), b"lloworld");
+    }
+
+    #[test]
+    fn test_freeze_slice_clone_refcount() {
+        let page = page_size();
+        let mut registry = test_registry();
+        let pool = BufferPool::new(test_config(page, page, 10), &mut registry);
+
+        let mut buf = pool.alloc(100).unwrap();
+        buf.resize(100, 0x42);
+        let iobuf = buf.freeze();
+        let slice = iobuf.slice(10..50);
+        let clone1 = slice.clone();
+        let clone2 = iobuf.clone();
+
+        drop(iobuf);
+        drop(slice);
+        assert_eq!(get_allocated(&pool, page), 1); // Still held by clones
+
+        drop(clone1);
+        assert_eq!(get_allocated(&pool, page), 1); // Still held by clone2
+
+        drop(clone2);
+        assert_eq!(get_allocated(&pool, page), 0); // Finally returned
     }
 }
