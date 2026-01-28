@@ -287,17 +287,6 @@ impl PoolMetrics {
             metrics.oversized_total.clone(),
         );
 
-        // Initialize metrics for all size classes
-        for i in 0..config.num_classes() {
-            let label = SizeClassLabel {
-                size_class: config.class_size(i) as u64,
-            };
-            let _ = metrics.allocated.get_or_create(&label);
-            let _ = metrics.available.get_or_create(&label);
-            let _ = metrics.allocations_total.get_or_create(&label);
-            let _ = metrics.exhausted_total.get_or_create(&label);
-        }
-
         metrics
     }
 }
