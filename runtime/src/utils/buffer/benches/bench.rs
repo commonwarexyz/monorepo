@@ -1,12 +1,12 @@
-//! Benchmarks for the buffer pool page cache via the Append blob wrapper.
+//! Benchmarks for the page cache via the Append blob wrapper.
 //!
-//! Uses memory-based storage (deterministic runtime) to isolate buffer pool
-//! performance from disk I/O.
+//! Uses memory-based storage (deterministic runtime) to isolate page cache performance from disk
+//! I/O.
 //!
-//! Run with: `cargo bench --bench buffer_pool -p commonware-runtime`
+//! Run with: `cargo bench --bench buffer_paged -p commonware-runtime`
 
 use commonware_runtime::{
-    buffer::{pool::Append, PoolRef},
+    buffer::{paged::Append, CacheRef},
     deterministic::Context,
     Storage as _,
 };
@@ -25,9 +25,9 @@ const CACHE_SIZE: usize = 10_000;
 type MemBlob = <Context as commonware_runtime::Storage>::Blob;
 
 /// Create a new Append wrapper for benchmarking.
-async fn create_append(ctx: &Context, name: &[u8], pool_ref: PoolRef) -> Append<MemBlob> {
+async fn create_append(ctx: &Context, name: &[u8], cache_ref: CacheRef) -> Append<MemBlob> {
     let (blob, size) = ctx.open("bench_partition", name).await.unwrap();
-    Append::new(blob, size, WRITE_BUFFER_SIZE, pool_ref)
+    Append::new(blob, size, WRITE_BUFFER_SIZE, cache_ref)
         .await
         .unwrap()
 }
