@@ -99,7 +99,7 @@ fn bench_update(c: &mut Criterion) {
                                         commonware_cryptography::sha256::Digest,
                                     )> = leaf_map.into_iter().collect();
                                     let mut mmr = mmr.into_dirty();
-                                    mmr.update_leaf_batched(&mut h, &Sequential, &updates)
+                                    mmr.update_leaves(&mut h, &Sequential, &updates)
                                         .unwrap();
                                     mmr.merkleize(&mut h, &Sequential);
                                 }
@@ -110,7 +110,7 @@ fn bench_update(c: &mut Criterion) {
                                     )> = leaf_map.into_iter().collect();
                                     let mut mmr = mmr.into_dirty();
                                     let strat = Rayon::with_pool(pool.unwrap());
-                                    mmr.update_leaf_batched(&mut h, &strat, &updates).unwrap();
+                                    mmr.update_leaves(&mut h, &strat, &updates).unwrap();
                                     mmr.merkleize(&mut h, &strat);
                                 }
                             }
