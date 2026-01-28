@@ -429,14 +429,14 @@ impl Private {
 }
 
 impl TryFrom<Scalar> for Private {
-    type Error = ();
+    type Error = Error;
 
     /// Converts a scalar to a private key.
     ///
-    /// Returns `Err(())` if the scalar is zero.
+    /// Returns an error if the scalar is zero.
     fn try_from(scalar: Scalar) -> Result<Self, Self::Error> {
         if scalar == Scalar::zero() {
-            return Err(());
+            return Err(Invalid("Private", "Zero"));
         }
         Ok(Self {
             scalar: Secret::new(scalar),
