@@ -349,7 +349,7 @@ where
             self.context.current() + self.retry_timeout
         } else {
             // No eligible peers - wait for external changes
-            self.context.current().saturating_add(Duration::MAX)
+            self.context.current().saturating_add_ext(Duration::MAX)
         });
     }
 
