@@ -195,7 +195,7 @@ where
                 // We ignore resolver messages
                 _ = self.context.sleep(TIMEOUT) => {
                     self.send_random(&mut vote_sender).await;
-                }
+                },
             }
         }
     }

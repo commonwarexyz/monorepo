@@ -40,21 +40,22 @@ async fn run_loop<E, Si, St, M>(
         on_stopped => {
             debug!("context shutdown, terminating I/O task");
         },
-        outgoing = request_rx.next() => {
-            match outgoing {
-                Some(Request { request, response_tx }) => {
-                    let request_id = request.request_id();
-                    pending_requests.insert(request_id, response_tx);
-                    let data = request.encode();
-                    if let Err(e) = send_frame(&mut sink, data, MAX_MESSAGE_SIZE).await {
-                        if let Some(sender) = pending_requests.remove(&request_id) {
-                            let _ = sender.send(Err(Error::Network(e)));
-                        }
-                        return;
+        outgoing = request_rx.next() => match outgoing {
+            Some(Request {
+                request,
+                response_tx,
+            }) => {
+                let request_id = request.request_id();
+                pending_requests.insert(request_id, response_tx);
+                let data = request.encode();
+                if let Err(e) = send_frame(&mut sink, data, MAX_MESSAGE_SIZE).await {
+                    if let Some(sender) = pending_requests.remove(&request_id) {
+                        let _ = sender.send(Err(Error::Network(e)));
                     }
-                },
-                None => return,
+                    return;
+                }
             }
+            None => return,
         },
         incoming = recv_frame(&mut stream, MAX_MESSAGE_SIZE) => {
             match incoming {
@@ -65,10 +66,10 @@ async fn run_loop<E, Si, St, M>(
                             if let Some(sender) = pending_requests.remove(&request_id) {
                                 let _ = sender.send(Ok(message));
                             }
-                        },
+                        }
                         Err(_) => { /* ignore */ }
                     }
-                },
+                }
                 Err(_e) => {
                     for (_, sender) in pending_requests.drain() {
                         let _ = sender.send(Err(Error::RequestChannelClosed));
@@ -76,7 +77,7 @@ async fn run_loop<E, Si, St, M>(
                     return;
                 }
             }
-        }
+        },
     }
 }
 

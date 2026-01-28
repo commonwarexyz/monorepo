@@ -349,7 +349,11 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
                         let digest = self.propose(context).await;
                         response.send_lossy(digest);
                     }
-                    Message::Verify { context, payload, response } => {
+                    Message::Verify {
+                        context,
+                        payload,
+                        response,
+                    } => {
                         if let Some(contents) = seen.get(&payload) {
                             let verified = self.verify(context, payload, contents.clone()).await;
                             response.send_lossy(verified);
@@ -360,7 +364,11 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
                                 .push((context, response));
                         }
                     }
-                    Message::Certify { round: _, payload, response } => {
+                    Message::Certify {
+                        round: _,
+                        payload,
+                        response,
+                    } => {
                         let contents = seen.get(&payload).cloned().unwrap_or_default();
                         // If certify returns None (Cancel mode), drop the sender without
                         // responding, causing the receiver to return Err(Canceled).
@@ -385,7 +393,7 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
                         sender.send_lossy(verified);
                     }
                 }
-            }
+            },
         }
     }
 }

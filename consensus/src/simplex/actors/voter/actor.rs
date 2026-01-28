@@ -841,11 +841,17 @@ impl<
                 debug!("context shutdown, stopping voter");
 
                 // Sync and drop journal
-                self.journal.take().unwrap().sync_all().await.expect("unable to sync journal");
+                self.journal
+                    .take()
+                    .unwrap()
+                    .sync_all()
+                    .await
+                    .expect("unable to sync journal");
             },
             _ = self.context.sleep_until(timeout) => {
                 // Trigger the timeout
-                self.handle_timeout(&mut batcher, &mut vote_sender, &mut certificate_sender).await;
+                self.handle_timeout(&mut batcher, &mut vote_sender, &mut certificate_sender)
+                    .await;
                 view = self.state.current_view();
             },
             (context, proposed) = propose_wait => {
@@ -870,11 +876,7 @@ impl<
                 }
 
                 // Construct proposal
-                let proposal = Proposal::new(
-                    context.round,
-                    context.parent.0,
-                    proposed,
-                );
+                let proposal = Proposal::new(context.round, context.parent.0, proposed);
                 if !self.state.proposed(proposal) {
                     warn!(round = ?context.round, "dropped our proposal");
                     continue;
@@ -894,13 +896,17 @@ impl<
                     Ok(true) => {
                         // Mark verification complete
                         self.state.verified(view);
-                    },
+                    }
                     Ok(false) => {
                         // Verification failed for current view proposal, treat as immediate timeout
                         debug!(round = ?context.round, "proposal failed verification");
-                        self.handle_timeout(&mut batcher, &mut vote_sender, &mut certificate_sender)
-                            .await;
-                    },
+                        self.handle_timeout(
+                            &mut batcher,
+                            &mut vote_sender,
+                            &mut certificate_sender,
+                        )
+                        .await;
+                    }
                     Err(err) => {
                         debug!(?err, round = ?context.round, "failed to verify proposal");
                     }
@@ -976,7 +982,8 @@ impl<
                             }
                             Certificate::Nullification(nullification) => {
                                 trace!(%view, from_resolver, "received nullification");
-                                if let Some(floor) = self.handle_nullification(nullification).await {
+                                if let Some(floor) = self.handle_nullification(nullification).await
+                                {
                                     warn!(?floor, "broadcasting nullification floor");
                                     self.broadcast_certificate(&mut certificate_sender, floor)
                                         .await;

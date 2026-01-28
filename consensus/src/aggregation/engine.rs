@@ -311,29 +311,34 @@ impl<
                 self.epoch = epoch;
 
                 // Update the tip manager
-                let scheme = self.scheme(self.epoch)
+                let scheme = self
+                    .scheme(self.epoch)
                     .expect("current epoch scheme must exist");
                 self.safe_tip.reconcile(scheme.participants());
 
                 // Update data structures by purging old epochs
                 let min_epoch = self.epoch.saturating_sub(self.epoch_bounds.0);
-                self.pending.iter_mut().for_each(|(_, pending)| {
-                    match pending {
+                self.pending
+                    .iter_mut()
+                    .for_each(|(_, pending)| match pending {
                         Pending::Unverified(acks) => {
                             acks.retain(|epoch, _| *epoch >= min_epoch);
                         }
                         Pending::Verified(_, acks) => {
                             acks.retain(|epoch, _| *epoch >= min_epoch);
                         }
-                    }
-                });
+                    });
 
                 continue;
             },
 
             // Sign a new ack
             request = self.digest_requests.next_completed() => {
-                let DigestRequest { height, result, timer } = request;
+                let DigestRequest {
+                    height,
+                    result,
+                    timer,
+                } = request;
                 drop(timer); // Record metric. Explicitly reference timer to avoid lint warning.
                 match result {
                     Err(err) => {
@@ -404,7 +409,10 @@ impl<
             // Rebroadcast
             _ = rebroadcast => {
                 // Get the next height to rebroadcast
-                let (height, _) = self.rebroadcast_deadlines.pop().expect("no rebroadcast deadline");
+                let (height, _) = self
+                    .rebroadcast_deadlines
+                    .pop()
+                    .expect("no rebroadcast deadline");
                 trace!(%height, "rebroadcasting");
                 if let Err(err) = self.handle_rebroadcast(height, &mut sender).await {
                     warn!(?err, %height, "rebroadcast failed");

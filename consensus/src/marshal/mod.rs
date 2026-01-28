@@ -2448,10 +2448,7 @@ mod tests {
             // Use select with timeout to detect never-resolving receiver
             select! {
                 result = certify_a => {
-                    assert!(
-                        result.unwrap(),
-                        "Block A certification should succeed"
-                    );
+                    assert!(result.unwrap(), "Block A certification should succeed");
                 },
                 _ = context.sleep(Duration::from_secs(5)) => {
                     panic!("Block A certification timed out");

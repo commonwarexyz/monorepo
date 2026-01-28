@@ -114,7 +114,10 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
             },
             _ = self.directory.wait_for_unblock() => {
                 if self.directory.unblock_expired() {
-                    self.listener.0.send_lossy(self.directory.listenable()).await;
+                    self.listener
+                        .0
+                        .send_lossy(self.directory.listenable())
+                        .await;
                 }
             },
             msg = self.receiver.next() => {
@@ -123,7 +126,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                     break;
                 };
                 self.handle_msg(msg).await;
-            }
+            },
         }
     }
 

@@ -812,7 +812,7 @@ mod tests {
                                 _ = context.stopped() => {
                                     // Graceful shutdown signal received
                                     break;
-                                }
+                                },
                             }
                         }
                     }
@@ -1112,8 +1112,12 @@ mod tests {
                                 });
 
                         select! {
-                            receiver = receiver => { panic!("receiver exited: {receiver:?}") },
-                            sender = sender_task => { panic!("sender exited: {sender:?}") },
+                            receiver = receiver => {
+                                panic!("receiver exited: {receiver:?}")
+                            },
+                            sender = sender_task => {
+                                panic!("sender exited: {sender:?}")
+                            },
                         }
                     }
                 });
@@ -1242,8 +1246,12 @@ mod tests {
                                 });
 
                         select! {
-                            receiver = receiver => { panic!("receiver exited: {receiver:?}") },
-                            sender = sender_task => { panic!("sender exited: {sender:?}") },
+                            receiver = receiver => {
+                                panic!("receiver exited: {receiver:?}")
+                            },
+                            sender = sender_task => {
+                                panic!("sender exited: {sender:?}")
+                            },
                         }
                     }
                 });
@@ -1335,7 +1343,7 @@ mod tests {
                 },
                 _ = context.sleep(Duration::from_secs(1)) => {
                     // Expected: timeout with no message
-                }
+                },
             }
         });
     }
