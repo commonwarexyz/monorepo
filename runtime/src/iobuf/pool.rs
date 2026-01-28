@@ -161,16 +161,15 @@ impl BufferPoolConfig {
         }
     }
 
-    /// Validates the configuration.
+    /// Validates the configuration, panicking on invalid values.
     ///
     /// # Panics
     ///
-    /// Panics if:
     /// - `alignment` is not a power of two
     /// - `min_size` is not a power of two
     /// - `max_size` is not a power of two
-    /// - `min_size` < `alignment`
-    /// - `max_size` < `min_size`
+    /// - `min_size < alignment`
+    /// - `max_size < min_size`
     /// - `max_per_class` is 0
     fn validate(&self) {
         assert!(
@@ -731,16 +730,20 @@ impl PooledBufMut {
         unsafe { self.buffer.as_ptr().add(self.cursor) }
     }
 
-    /// Sets the length of the buffer.
+    /// Sets the length of the buffer (view-relative).
     ///
     /// This will explicitly set the size of the buffer without actually
     /// modifying the data, so it is up to the caller to ensure that the data
     /// has been initialized.
     ///
+    /// The `len` parameter is relative to the current view (after any `advance`
+    /// calls), matching `BytesMut::set_len` semantics.
+    ///
     /// # Safety
     ///
-    /// Caller must ensure all bytes in `0..len` are initialized before any
-    /// read operations.
+    /// Caller must ensure:
+    /// - All bytes in the range `[cursor, cursor + len)` are initialized
+    /// - `len <= capacity()` (where capacity is also view-relative)
     #[inline]
     pub unsafe fn set_len(&mut self, len: usize) {
         self.len = self.cursor + len;
