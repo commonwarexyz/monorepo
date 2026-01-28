@@ -1,12 +1,19 @@
 use std::env;
 
 const LEVELS: [&str; 5] = ["ALPHA", "BETA", "GAMMA", "DELTA", "EPSILON"];
+/// MAX is a special level that excludes ALL stability-marked items, used for finding unmarked public API.
+const MAX_LEVEL: &str = "MAX";
+
+/// Returns all levels to check, including MAX.
+fn all_levels() -> impl Iterator<Item = &'static str> {
+    LEVELS.iter().copied().chain(std::iter::once(MAX_LEVEL))
+}
 
 fn count_stability_cfgs() -> usize {
     let mut count = 0;
 
     // Check CARGO_CFG_* env vars (set by cargo for --cfg flags)
-    for level in LEVELS {
+    for level in all_levels() {
         let var = format!("CARGO_CFG_COMMONWARE_STABILITY_{}", level);
         if env::var_os(var).is_some() {
             count += 1;
@@ -20,7 +27,7 @@ fn count_stability_cfgs() -> usize {
 
     // Check RUSTFLAGS directly
     let rustflags = env::var("RUSTFLAGS").unwrap_or_default();
-    for level in LEVELS {
+    for level in all_levels() {
         let cfg = format!("commonware_stability_{}", level);
         if rustflags.contains(&cfg) {
             count += 1;
@@ -33,7 +40,7 @@ fn count_stability_cfgs() -> usize {
 
     // Check CARGO_ENCODED_RUSTFLAGS
     let encoded = env::var("CARGO_ENCODED_RUSTFLAGS").unwrap_or_default();
-    for level in LEVELS {
+    for level in all_levels() {
         let cfg = format!("commonware_stability_{}", level);
         if encoded.split('\u{1f}').any(|flag| flag.contains(&cfg)) {
             count += 1;
@@ -52,6 +59,10 @@ fn main() {
     println!("cargo:rustc-check-cfg=cfg(commonware_stability_GAMMA)");
     println!("cargo:rustc-check-cfg=cfg(commonware_stability_DELTA)");
     println!("cargo:rustc-check-cfg=cfg(commonware_stability_EPSILON)");
+    println!(
+        "cargo:rustc-check-cfg=cfg(commonware_stability_{})",
+        MAX_LEVEL
+    );
 
     let count = count_stability_cfgs();
     if count == 0 {

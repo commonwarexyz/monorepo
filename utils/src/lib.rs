@@ -44,9 +44,17 @@ commonware_macros::stability_scope!(GAMMA, cfg(feature = "std") {
     pub use rational::BigRationalExt;
     pub use priority_set::PrioritySet;
 });
-#[cfg(not(any(commonware_stability_DELTA, commonware_stability_EPSILON)))]
+#[cfg(not(any(
+    commonware_stability_DELTA,
+    commonware_stability_EPSILON,
+    commonware_stability_MAX
+)))]
 pub mod hex_literal;
-#[cfg(not(any(commonware_stability_DELTA, commonware_stability_EPSILON)))]
+#[cfg(not(any(
+    commonware_stability_DELTA,
+    commonware_stability_EPSILON,
+    commonware_stability_MAX
+)))]
 pub mod vec;
 
 commonware_macros::stability_scope!(GAMMA {
@@ -136,22 +144,22 @@ commonware_macros::stability_scope!(GAMMA {
     impl<I: Iterator> TryCollect for I {}
 });
 
-/// Returns a seeded RNG for deterministic testing.
-///
-/// Uses seed 0 by default to ensure reproducible test results.
-#[cfg(feature = "std")]
-pub fn test_rng() -> rand::rngs::StdRng {
-    rand::SeedableRng::seed_from_u64(0)
-}
+commonware_macros::stability_scope!(GAMMA, cfg(feature = "std") {
+    /// Returns a seeded RNG for deterministic testing.
+    ///
+    /// Uses seed 0 by default to ensure reproducible test results.
+    pub fn test_rng() -> rand::rngs::StdRng {
+        rand::SeedableRng::seed_from_u64(0)
+    }
 
-/// Returns a seeded RNG with a custom seed for deterministic testing.
-///
-/// Use this when you need multiple independent RNG streams in the same test,
-/// or when a helper function needs its own RNG that won't collide with the caller's.
-#[cfg(feature = "std")]
-pub fn test_rng_seeded(seed: u64) -> rand::rngs::StdRng {
-    rand::SeedableRng::seed_from_u64(seed)
-}
+    /// Returns a seeded RNG with a custom seed for deterministic testing.
+    ///
+    /// Use this when you need multiple independent RNG streams in the same test,
+    /// or when a helper function needs its own RNG that won't collide with the caller's.
+    pub fn test_rng_seeded(seed: u64) -> rand::rngs::StdRng {
+        rand::SeedableRng::seed_from_u64(seed)
+    }
+});
 
 commonware_macros::stability_scope!(GAMMA {
     /// Alias for boxed errors that are `Send` and `Sync`.

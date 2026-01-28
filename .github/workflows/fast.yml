@@ -157,10 +157,26 @@ jobs:
     - name: Build with commonware_stability_${{ matrix.level }}
       run: just check-stability ${{ matrix.level }}
 
+  Stability-Coverage:
+    name: "Stability Coverage"
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
+    - name: Run setup
+      uses: ./.github/actions/setup
+      with:
+        additional-cache-key: stability-coverage
+    - name: Install nightly Rust toolchain
+      run: rustup toolchain install ${{ env.NIGHTLY_VERSION }}
+    - name: Check all public items have stability annotations
+      run: ./scripts/find_unstable_public.sh
+
   Tests-Gate:
     name: "Fast-Tests"
     runs-on: ubuntu-latest
-    needs: [Tests, Tests-Subset, Stability]
+    needs: [Tests, Tests-Subset, Stability, Stability-Coverage]
     if: always()
     steps:
       - name: Check test results
@@ -175,6 +191,10 @@ jobs:
           fi
           if [ "${{ needs.Stability.result }}" != "success" ]; then
             echo "Stability checks failed"
+            exit 1
+          fi
+          if [ "${{ needs.Stability-Coverage.result }}" != "success" ]; then
+            echo "Stability-Coverage check failed"
             exit 1
           fi
           echo "All tests passed!"

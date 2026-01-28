@@ -19,14 +19,23 @@ use rand_core::CryptoRngCore;
 
 // Modules containing #[macro_export] macros must remain outside stability_scope!.
 // See rust-lang/rust#52234: macro-expanded macro_export macros cannot be referenced by absolute paths.
-#[cfg(not(any(commonware_stability_DELTA, commonware_stability_EPSILON)))]
+#[cfg(not(any(
+    commonware_stability_DELTA,
+    commonware_stability_EPSILON,
+    commonware_stability_MAX
+)))]
 pub mod bls12381;
-#[cfg(not(any(commonware_stability_DELTA, commonware_stability_EPSILON)))]
+#[cfg(not(any(
+    commonware_stability_DELTA,
+    commonware_stability_EPSILON,
+    commonware_stability_MAX
+)))]
 pub mod ed25519;
 #[cfg(not(any(
     commonware_stability_GAMMA,
     commonware_stability_DELTA,
-    commonware_stability_EPSILON
+    commonware_stability_EPSILON,
+    commonware_stability_MAX
 )))]
 pub mod secp256r1;
 

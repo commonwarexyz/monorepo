@@ -44,6 +44,11 @@ mod process;
 mod storage;
 cfg_if::cfg_if! {
     if #[cfg(not(target_arch = "wasm32"))] {
+        #[cfg(not(any(
+            commonware_stability_DELTA,
+            commonware_stability_EPSILON,
+            commonware_stability_MAX
+        )))]
         pub mod benchmarks;
     }
 }
