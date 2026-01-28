@@ -21,6 +21,7 @@ struct CounterNonce {
 }
 
 impl CounterNonce {
+    /// Creates a new counter nonce starting at zero.
     pub const fn new() -> Self {
         Self { inner: 0 }
     }
