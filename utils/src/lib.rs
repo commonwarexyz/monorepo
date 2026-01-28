@@ -19,42 +19,49 @@ use core::{
 
 commonware_macros::stability_scope!(GAMMA {
     pub mod faults;
+    pub use faults::{Faults, N3f1, N5f1};
+
     pub mod sequence;
-    pub mod bitmap;
+    pub use sequence::{Array, Span};
+
     pub mod hostname;
+    pub use hostname::Hostname;
+
+    pub mod bitmap;
     pub mod ordered;
 
-    pub use faults::{Faults, N3f1, N5f1};
-    pub use sequence::{Array, Span};
-    pub use hostname::Hostname;
 });
 commonware_macros::stability_scope!(GAMMA, cfg(feature = "std") {
     pub mod acknowledgement;
-    pub mod channels;
+    pub use acknowledgement::Acknowledgement;
+
     pub mod net;
+    pub use net::IpAddrExt;
+
     pub mod time;
+    pub use time::{DurationExt, SystemTimeExt};
+
     pub mod rational;
+    pub use rational::BigRationalExt;
+
+    mod priority_set;
+    pub use priority_set::PrioritySet;
+
+    pub mod channels;
     pub mod concurrency;
     pub mod futures;
-    mod priority_set;
-
-    pub use acknowledgement::Acknowledgement;
-    pub use net::IpAddrExt;
-    pub use time::{DurationExt, SystemTimeExt};
-    pub use rational::BigRationalExt;
-    pub use priority_set::PrioritySet;
 });
 #[cfg(not(any(
     commonware_stability_DELTA,
     commonware_stability_EPSILON,
     commonware_stability_RESERVED
-)))]
+)))] // GAMMA
 pub mod hex_literal;
 #[cfg(not(any(
     commonware_stability_DELTA,
     commonware_stability_EPSILON,
     commonware_stability_RESERVED
-)))]
+)))] // GAMMA
 pub mod vec;
 
 commonware_macros::stability_scope!(GAMMA {

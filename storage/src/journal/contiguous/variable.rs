@@ -11,7 +11,6 @@ use crate::{
     },
     Persistable,
 };
-
 use commonware_codec::{Codec, CodecShared};
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage};
 use commonware_utils::NZUsize;

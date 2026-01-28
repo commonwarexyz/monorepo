@@ -70,7 +70,6 @@ use crate::{
     metadata::{Config as MetadataConfig, Metadata},
     Persistable,
 };
-
 use commonware_codec::CodecFixedShared;
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage};
 use futures::{stream::Stream, StreamExt};
