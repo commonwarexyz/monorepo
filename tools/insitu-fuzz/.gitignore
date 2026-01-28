@@ -1,0 +1,36 @@
+# Rust
+/target/
+Cargo.lock
+*.rlib
+*.rmeta
+*.so
+*.dylib
+*.dll
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Fuzzer artifacts
+/fuzz/artifacts/
+/fuzz/corpus/
+/fuzz/target/
+/afl/corpus/
+/afl/findings/
+/afl/target/
+
+# Local development
+*.orig
+.env
+.env.local
+
+# Coverage
+/coverage_html
+/fuzz/coverage
+
+# Test code locations
+test_oracle.txt

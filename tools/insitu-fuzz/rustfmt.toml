@@ -1,0 +1,2 @@
+# Skip auto-generated files (those containing @generated marker)
+format_generated_files = false
