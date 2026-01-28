@@ -214,12 +214,29 @@ impl Entry {
         }
     }
 
+    /// Create a new empty [Entry].
+    const fn new_empty() -> Self {
+        Self {
+            epoch: 0,
+            section: 0,
+            position: 0,
+            added: 0,
+            crc: 0,
+        }
+    }
+
     /// Check if this entry is empty (all zeros).
     const fn is_empty(&self) -> bool {
-        self.section == 0 && self.position == 0 && self.crc == 0
+        self.epoch == 0
+            && self.section == 0
+            && self.position == 0
+            && self.added == 0
+            && self.crc == 0
     }
 
     /// Check if this entry is valid.
+    ///
+    /// An empty entry does not have a valid checksum and is treated as invalid by this function.
     fn is_valid(&self) -> bool {
         Self::compute_crc(self.epoch, self.section, self.position, self.added) == self.crc
     }
@@ -453,7 +470,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: CodecShared> Freezer<E, K, V> {
                 entry_epoch = entry.epoch,
                 "found invalid table entry"
             );
-            *entry = Entry::new(0, 0, 0, 0);
+            *entry = Entry::new_empty();
             let zero_buf = vec![0u8; Entry::SIZE];
             blob.write_at(entry_offset, zero_buf).await?;
             Ok(true)
@@ -978,9 +995,8 @@ impl<E: Storage + Metrics + Clock, K: Array, V: CodecShared> Freezer<E, K, V> {
 
     /// Continue a resize operation by processing the next chunk of entries.
     ///
-    /// This function processes `table_resize_chunk_size` entries at a time,
-    /// allowing the resize to be spread across multiple sync operations to
-    /// avoid latency spikes.
+    /// This function processes `table_resize_chunk_size` entries at a time, allowing the resize to
+    /// be spread across multiple sync operations to avoid latency spikes.
     async fn advance_resize(&mut self) -> Result<(), Error> {
         // Compute the range to update
         let current_index = self.resize_progress.unwrap();
@@ -1009,16 +1025,21 @@ impl<E: Storage + Metrics + Clock, K: Array, V: CodecShared> Freezer<E, K, V> {
             let (entry1, entry2) = Self::parse_entries(entry_buf)?;
 
             // Get the current head
-            let (section, position, added) =
-                Self::read_latest_entry(&entry1, &entry2).unwrap_or((0, 0, 0));
+            let head = Self::read_latest_entry(&entry1, &entry2);
 
-            // If the entry was over the threshold, decrement the resizable entries
-            if added >= self.table_resize_frequency {
-                self.resizable -= 1;
-            }
+            // Get the reset entry (may be empty)
+            let reset_entry = match head {
+                Some((section, position, added)) => {
+                    // If the entry was at or over the threshold, decrement the resizable entries.
+                    if added >= self.table_resize_frequency {
+                        self.resizable -= 1;
+                    }
+                    Entry::new(self.next_epoch, section, position, 0)
+                }
+                None => Entry::new_empty(),
+            };
 
             // Rewrite the entries
-            let reset_entry = Entry::new(self.next_epoch, section, position, 0);
             Self::rewrite_entries(&mut writes, &entry1, &entry2, &reset_entry);
         }
 
@@ -1187,9 +1208,15 @@ mod conformance {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::kv::tests::{assert_gettable, assert_send, assert_updatable};
-    use commonware_runtime::deterministic::Context;
-    use commonware_utils::sequence::U64;
+    use crate::kv::tests::{assert_gettable, assert_send, assert_updatable, test_key};
+    use commonware_macros::test_traced;
+    use commonware_runtime::{
+        buffer::PoolRef, deterministic, deterministic::Context, IoBufMut, Runner, Storage,
+    };
+    use commonware_utils::{
+        sequence::{FixedBytes, U64},
+        NZUsize, NZU16,
+    };
 
     type TestFreezer = Freezer<Context, U64, u64>;
 
@@ -1202,5 +1229,128 @@ mod tests {
     #[allow(dead_code)]
     fn assert_freezer_destroy_is_send(freezer: TestFreezer) {
         assert_send(freezer.destroy());
+    }
+
+    #[test_traced]
+    fn issue_2966_regression() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = super::super::Config {
+                key_partition: "test_key_index".into(),
+                key_write_buffer: NZUsize!(1024),
+                key_buffer_pool: PoolRef::new(NZU16!(1024), NZUsize!(10)),
+                value_partition: "test_value_journal".into(),
+                value_compression: None,
+                value_write_buffer: NZUsize!(1024),
+                value_target_size: 10 * 1024 * 1024,
+                table_partition: "test_table".into(),
+                // Use 4 entries but only insert to 2, leaving 2 empty
+                table_initial_size: 4,
+                table_resize_frequency: 1,
+                table_resize_chunk_size: 4,
+                table_replay_buffer: NZUsize!(64 * 1024),
+                codec_config: (),
+            };
+            let mut freezer =
+                Freezer::<_, FixedBytes<64>, i32>::init(context.with_label("first"), cfg.clone())
+                    .await
+                    .unwrap();
+
+            // Insert only 2 keys to different entries. With table_size=4, entries 2 and 3
+            // should remain empty.
+            freezer.put(test_key("key0"), 0).await.unwrap();
+            freezer.put(test_key("key2"), 1).await.unwrap();
+            freezer.close().await.unwrap();
+
+            let (blob, size) = context.open(&cfg.table_partition, b"table").await.unwrap();
+            let table_data = blob
+                .read_at(0, IoBufMut::zeroed(size as usize))
+                .await
+                .unwrap()
+                .coalesce();
+
+            // Verify resize happened (table doubled from 4 to 8)
+            let num_entries = size as usize / Entry::FULL_SIZE;
+            assert_eq!(num_entries, 8);
+
+            // Count entries where both slots are truly empty. The bug would cause empty
+            // entries to have one slot with epoch != 0 and valid CRC.
+            let mut both_empty_count = 0;
+            for entry_idx in 0..num_entries {
+                let offset = entry_idx * Entry::FULL_SIZE;
+                let buf = &table_data.as_ref()[offset..offset + Entry::FULL_SIZE];
+                let (slot0, slot1) =
+                    Freezer::<Context, FixedBytes<64>, i32>::parse_entries(buf).unwrap();
+                if slot0.is_empty() && slot1.is_empty() {
+                    both_empty_count += 1;
+                }
+            }
+            // 2 keys in 4 entries = 2 empty. After resize to 8, those become 4 empty.
+            assert_eq!(both_empty_count, 4);
+        });
+    }
+
+    #[test_traced]
+    fn issue_2955_regression() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = super::super::Config {
+                key_partition: "test_key_index".into(),
+                key_write_buffer: NZUsize!(1024),
+                key_buffer_pool: PoolRef::new(NZU16!(1024), NZUsize!(10)),
+                value_partition: "test_value_journal".into(),
+                value_compression: None,
+                value_write_buffer: NZUsize!(1024),
+                value_target_size: 10 * 1024 * 1024,
+                table_partition: "test_table".into(),
+                table_initial_size: 4,
+                table_resize_frequency: 1,
+                table_resize_chunk_size: 4,
+                table_replay_buffer: NZUsize!(64 * 1024),
+                codec_config: (),
+            };
+
+            // Create freezer with data
+            let checkpoint = {
+                let mut freezer = Freezer::<_, FixedBytes<64>, i32>::init(
+                    context.with_label("first"),
+                    cfg.clone(),
+                )
+                .await
+                .unwrap();
+                freezer.put(test_key("key0"), 42).await.unwrap();
+                freezer.sync().await.unwrap();
+                freezer.close().await.unwrap()
+            };
+
+            // Corrupt the CRC in both slots of the table entry
+            {
+                let (blob, _) = context.open(&cfg.table_partition, b"table").await.unwrap();
+                let entry_data = blob
+                    .read_at(0, IoBufMut::zeroed(Entry::FULL_SIZE))
+                    .await
+                    .unwrap();
+                let mut corrupted = entry_data.coalesce();
+                // Corrupt CRC of first slot (last 4 bytes of first slot)
+                corrupted.as_mut()[Entry::SIZE - 4] ^= 0xFF;
+                // Corrupt CRC of second slot (last 4 bytes of second slot)
+                corrupted.as_mut()[Entry::FULL_SIZE - 4] ^= 0xFF;
+                blob.write_at(0, corrupted).await.unwrap();
+                blob.sync().await.unwrap();
+            }
+
+            // Reopen to trigger recovery. The bug would set both cleared entries to
+            // Entry::new(0,0,0,0) which has is_empty()=false and is_valid()=true.
+            // read_latest_entry would then see two "valid" entries with epoch=0 and
+            // panic on unreachable!().
+            let freezer = Freezer::<_, FixedBytes<64>, i32>::init_with_checkpoint(
+                context.with_label("second"),
+                cfg.clone(),
+                Some(checkpoint),
+            )
+            .await
+            .unwrap();
+            drop(freezer);
+        });
     }
 }
