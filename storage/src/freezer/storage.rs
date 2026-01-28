@@ -1027,7 +1027,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: CodecShared> Freezer<E, K, V> {
             // Get the current head
             let head = Self::read_latest_entry(&entry1, &entry2);
 
-            // Get the reset entry (may be empty).
+            // Get the reset entry (may be empty)
             let reset_entry = match head {
                 Some((section, position, added)) => {
                     // If the entry was at or over the threshold, decrement the resizable entries.
@@ -1038,6 +1038,8 @@ impl<E: Storage + Metrics + Clock, K: Array, V: CodecShared> Freezer<E, K, V> {
                 }
                 None => Entry::new_empty(),
             };
+
+            // Rewrite the entries
             Self::rewrite_entries(&mut writes, &entry1, &entry2, &reset_entry);
         }
 
