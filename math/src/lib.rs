@@ -11,12 +11,11 @@ extern crate alloc;
 use commonware_macros::stability_mod;
 
 stability_mod!(GAMMA, pub mod algebra);
-commonware_utils::stability_cfg!(
-    BETA,
+commonware_macros::stability_scope!(BETA {
     pub mod fields {
         pub mod goldilocks;
     }
-);
+});
 stability_mod!(BETA, pub mod ntt);
 stability_mod!(GAMMA, pub mod poly);
 #[cfg(test)]

@@ -9,59 +9,6 @@
 #[cfg(not(feature = "std"))]
 extern crate alloc;
 
-/// Applies stability cfg attributes to an item.
-///
-/// # Example
-/// ```rust,ignore
-/// commonware_utils::stability_cfg!(GAMMA, pub mod my_module;);
-/// ```
-#[macro_export]
-macro_rules! stability_cfg {
-    (ALPHA, $($item:tt)*) => {
-        #[cfg(not(any(
-            commonware_stability_BETA,
-            commonware_stability_GAMMA,
-            commonware_stability_DELTA,
-            commonware_stability_EPSILON
-        )))]
-        $($item)*
-    };
-    (0, $($item:tt)*) => {
-        $crate::stability_cfg!(ALPHA, $($item)*);
-    };
-    (BETA, $($item:tt)*) => {
-        #[cfg(not(any(
-            commonware_stability_GAMMA,
-            commonware_stability_DELTA,
-            commonware_stability_EPSILON
-        )))]
-        $($item)*
-    };
-    (1, $($item:tt)*) => {
-        $crate::stability_cfg!(BETA, $($item)*);
-    };
-    (GAMMA, $($item:tt)*) => {
-        #[cfg(not(any(commonware_stability_DELTA, commonware_stability_EPSILON)))]
-        $($item)*
-    };
-    (2, $($item:tt)*) => {
-        $crate::stability_cfg!(GAMMA, $($item)*);
-    };
-    (DELTA, $($item:tt)*) => {
-        #[cfg(not(commonware_stability_EPSILON))]
-        $($item)*
-    };
-    (3, $($item:tt)*) => {
-        $crate::stability_cfg!(DELTA, $($item)*);
-    };
-    (EPSILON, $($item:tt)*) => {
-        $($item)*
-    };
-    (4, $($item:tt)*) => {
-        $crate::stability_cfg!(EPSILON, $($item)*);
-    };
-}
-
 #[cfg(not(feature = "std"))]
 use alloc::{boxed::Box, string::String, vec::Vec};
 use bytes::{BufMut, BytesMut};
@@ -191,10 +138,9 @@ commonware_macros::stability_scope!(GAMMA {
 commonware_macros::stability_mod!(GAMMA, pub mod time);
 #[cfg(feature = "std")]
 commonware_macros::stability_mod!(GAMMA, pub mod rational);
-#[cfg(feature = "std")]
-#[cfg(not(commonware_stability_DELTA))]
-#[cfg(not(commonware_stability_EPSILON))]
-mod priority_set;
+commonware_macros::stability_scope!(GAMMA, cfg(feature = "std") {
+    mod priority_set;
+});
 #[cfg(feature = "std")]
 commonware_macros::stability_mod!(GAMMA, pub mod concurrency);
 #[cfg(feature = "std")]

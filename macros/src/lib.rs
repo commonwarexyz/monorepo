@@ -174,8 +174,6 @@ pub fn stability_mod(input: TokenStream) -> TokenStream {
     TokenStream::from(expanded)
 }
 
-
-
 /// Input for the `stability_scope!` macro: `level [, cfg(predicate)] { items... }`
 struct StabilityScopeInput {
     level: StabilityLevel,
