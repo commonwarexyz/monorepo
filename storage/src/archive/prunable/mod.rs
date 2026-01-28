@@ -10,7 +10,7 @@
 //!
 //! # Format
 //!
-//! [Archive] uses a two-journal structure for efficient buffer pool usage:
+//! [Archive] uses a two-journal structure for efficient page cache usage:
 //!
 //! **Index Journal (segmented/fixed)** - Fixed-size entries for fast startup replay:
 //! ```text
@@ -21,7 +21,7 @@
 //! +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
 //! ```
 //!
-//! **Value Blob** - Raw values with CRC32 checksums (direct reads, no buffer pool):
+//! **Value Blob** - Raw values with CRC32 checksums (direct reads, no page cache):
 //! ```text
 //! +---+---+---+---+---+---+---+---+---+---+---+---+
 //! |     Compressed Data (variable)    |   CRC32   |
@@ -93,8 +93,8 @@
 //!
 //! All reads (by index or key) first read the index entry from the index journal to get the
 //! value location (offset and size), then read the value from the value blob. The index journal
-//! uses a buffer pool for caching, so hot entries are served from memory. Values are read directly
-//! from disk without caching to avoid polluting the buffer pool with large values.
+//! uses a page cache for caching, so hot entries are served from memory. Values are read directly
+//! from disk without caching to avoid polluting the page cache with large values.
 //!
 //! # Compression
 //!
@@ -166,7 +166,7 @@ pub struct Config<T: Translator, C> {
     /// The partition to use for the key journal (stores index+key metadata).
     pub key_partition: String,
 
-    /// The buffer pool to use for the key journal.
+    /// The page cache to use for the key journal.
     pub key_page_cache: CacheRef,
 
     /// The partition to use for the value blob (stores values).

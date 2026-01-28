@@ -48,7 +48,7 @@ pub struct Config {
     /// The partition to use for storing blobs.
     pub partition: String,
 
-    /// The buffer pool to use for caching data.
+    /// The page cache to use for caching data.
     pub page_cache: CacheRef,
 
     /// The size of the write buffer to use for each blob.

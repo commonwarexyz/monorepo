@@ -53,7 +53,7 @@ pub trait BufferFactory<B: Blob>: Clone + Send + Sync {
 pub struct AppendFactory {
     /// The size of the write buffer.
     pub write_buffer: NonZeroUsize,
-    /// The buffer pool for read caching.
+    /// The page cache for read caching.
     pub page_cache_ref: CacheRef,
 }
 

@@ -64,7 +64,7 @@ pub struct FixedConfig<T: Translator> {
     /// An optional thread pool to use for parallelizing batch operations.
     pub thread_pool: Option<ThreadPool>,
 
-    /// The buffer pool to use for caching data.
+    /// The page cache to use for caching data.
     pub page_cache: CacheRef,
 }
 
@@ -104,7 +104,7 @@ pub struct VariableConfig<T: Translator, C> {
     /// An optional thread pool to use for parallelizing batch operations.
     pub thread_pool: Option<ThreadPool>,
 
-    /// The buffer pool to use for caching data.
+    /// The page cache to use for caching data.
     pub page_cache: CacheRef,
 }
 

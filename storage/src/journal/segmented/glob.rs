@@ -54,7 +54,7 @@ pub struct Config<C> {
 ///
 /// Uses [`buffer::Write`](commonware_runtime::buffer::Write) for batching writes.
 /// Reads go directly to blobs without any caching (ideal for large values that
-/// shouldn't pollute a buffer pool cache).
+/// shouldn't pollute a page cache).
 pub struct Glob<E: Storage + Metrics, V: Codec> {
     manager: Manager<E, WriteFactory>,
 

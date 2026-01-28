@@ -70,7 +70,7 @@ pub struct Config<C> {
     /// [Codec] configuration for encoding/decoding items.
     pub codec_config: C,
 
-    /// Buffer pool for caching data.
+    /// Page cache for caching data.
     pub page_cache: CacheRef,
 
     /// Write buffer size for each section.

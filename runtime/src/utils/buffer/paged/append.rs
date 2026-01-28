@@ -355,7 +355,7 @@ impl<B: Blob> Append<B> {
     ) -> Result<(), Error> {
         let buffer = &mut *buf_guard;
 
-        // Cache the pages we are writing in the buffer pool so they remain cached for concurrent
+        // Cache the pages we are writing in the page cache so they remain cached for concurrent
         // reads while we flush the buffer.
         let remaining_byte_count = self
             .cache_ref
@@ -383,7 +383,7 @@ impl<B: Blob> Append<B> {
             return Ok(());
         }
 
-        // Drain the provided buffer of the full pages that are now cached in the buffer pool and
+        // Drain the provided buffer of the full pages that are now cached in the page cache and
         // will be written to the blob.
         let bytes_to_drain = buffer.data.len() - remaining_byte_count;
         buffer.data.drain(0..bytes_to_drain);
@@ -818,7 +818,7 @@ impl<B: Blob> Blob for Append<B> {
 
     /// This [Blob] trait method is unimplemented by [Append] and unconditionally panics.
     async fn write_at(&self, _offset: u64, _buf: impl Into<IoBufs> + Send) -> Result<(), Error> {
-        // TODO(<https://github.com/commonwarexyz/monorepo/issues/1207>): Extend the buffer pool to
+        // TODO(<https://github.com/commonwarexyz/monorepo/issues/1207>): Extend the page cache to
         // support arbitrary writes.
         unimplemented!("append-only blob type does not support write_at")
     }
@@ -845,7 +845,7 @@ impl<B: Blob> Blob for Append<B> {
         }
 
         // Implementation note: rewinding the blob across a page boundary potentially results in
-        // stale data remaining in the buffer pool's cache. We don't proactively purge the data
+        // stale data remaining in the page cache. We don't proactively purge the data
         // within this function since it would be inaccessible anyway. Instead we ensure it is
         // always updated should the blob grow back to the point where we have new data for the same
         // page, if any old data hasn't expired naturally by then.
@@ -931,7 +931,7 @@ mod tests {
             let (blob, blob_size) = context.open("test_partition", b"test_blob").await.unwrap();
             assert_eq!(blob_size, 0);
 
-            // Create a buffer pool reference.
+            // Create a page cache reference.
             let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(BUFFER_SIZE));
 
             // Create an Append wrapper.
@@ -965,7 +965,7 @@ mod tests {
             let (blob, blob_size) = context.open("test_partition", b"test_blob").await.unwrap();
             assert_eq!(blob_size, 0);
 
-            // Create a buffer pool reference.
+            // Create a page cache reference.
             let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(BUFFER_SIZE));
 
             // Create an Append wrapper.

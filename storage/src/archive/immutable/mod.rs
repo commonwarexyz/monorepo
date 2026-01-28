@@ -91,7 +91,7 @@ pub struct Config<C> {
     /// The partition to use for the archive's freezer keys.
     pub freezer_key_partition: String,
 
-    /// The buffer pool to use for the archive's freezer keys.
+    /// The page cache to use for the archive's freezer keys.
     pub freezer_key_page_cache: CacheRef,
 
     /// The partition to use for the archive's freezer values.

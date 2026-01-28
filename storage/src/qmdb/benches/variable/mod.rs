@@ -69,7 +69,7 @@ const THREADS: NonZeroUsize = NZUsize!(8);
 /// Use a "prod sized" page size to test the performance of the journal.
 const PAGE_SIZE: NonZeroU16 = NZU16!(16384);
 
-/// The number of pages to cache in the buffer pool.
+/// The number of pages to cache in the page cache.
 const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10_000);
 
 /// Default delete frequency (1/10th of the updates will be deletes).

@@ -74,7 +74,7 @@ pub struct Config<C> {
     /// Partition for the glob value storage.
     pub value_partition: String,
 
-    /// Buffer pool for index journal caching.
+    /// Page cache for index journal caching.
     pub index_page_cache: commonware_runtime::buffer::CacheRef,
 
     /// Write buffer size for the index journal.

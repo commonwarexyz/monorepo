@@ -108,7 +108,7 @@ pub struct Config<C> {
     /// The codec configuration to use for encoding and decoding items.
     pub codec_config: C,
 
-    /// The buffer pool to use for caching data.
+    /// The page cache to use for caching data.
     pub page_cache: CacheRef,
 
     /// The size of the write buffer to use for each blob.

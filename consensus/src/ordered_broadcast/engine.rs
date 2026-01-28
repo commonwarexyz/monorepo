@@ -156,7 +156,7 @@ pub struct Engine<
     // Compression level for the journal.
     journal_compression: Option<u8>,
 
-    // Buffer pool for the journal.
+    // Page cache for the journal.
     journal_page_cache: CacheRef,
 
     // A map of sequencer public keys to their journals.

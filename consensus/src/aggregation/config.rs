@@ -77,7 +77,7 @@ pub struct Config<
     /// Compression level for the journal.
     pub journal_compression: Option<u8>,
 
-    /// Buffer pool for the journal.
+    /// Page cache for the journal.
     pub journal_page_cache: CacheRef,
 
     /// Strategy for parallel operations.

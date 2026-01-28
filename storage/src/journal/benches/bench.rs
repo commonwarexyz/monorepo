@@ -32,7 +32,7 @@ const WRITE_BUFFER: NonZeroUsize = NZUsize!(1_024 * 1024); // 1MB
 /// Use a "prod sized" page size to test the performance of the journal.
 const PAGE_SIZE: NonZeroU16 = NZU16!(8_192);
 
-/// The number of pages to cache in the buffer pool. Make it big enough to be
+/// The number of pages to cache in the page cache. Make it big enough to be
 /// fast, but not so big we avoid any page faults for the larger benchmarks.
 const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10_000);
 

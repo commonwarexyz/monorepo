@@ -237,7 +237,7 @@ pub struct Config<C> {
     /// The size of the write buffer for the key index journal.
     pub key_write_buffer: NonZeroUsize,
 
-    /// The buffer pool for the key index journal.
+    /// The page cache for the key index journal.
     pub key_page_cache: CacheRef,
 
     /// The [commonware_runtime::Storage] partition for the value journal.

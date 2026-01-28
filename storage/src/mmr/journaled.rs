@@ -61,7 +61,7 @@ pub struct Config {
     /// Optional thread pool to use for parallelizing batch operations.
     pub thread_pool: Option<ThreadPool>,
 
-    /// The buffer pool to use for caching data.
+    /// The page cache to use for caching data.
     pub page_cache: CacheRef,
 }
 

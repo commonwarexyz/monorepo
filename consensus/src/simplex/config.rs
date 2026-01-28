@@ -79,7 +79,7 @@ pub struct Config<
     /// The size of the write buffer to use for each blob in the journal.
     pub write_buffer: NonZeroUsize,
 
-    /// Buffer pool for the journal.
+    /// Page cache for the journal.
     pub page_cache: CacheRef,
 
     /// Amount of time to wait for a leader to propose a payload

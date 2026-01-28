@@ -97,7 +97,7 @@ pub struct Config {
     /// Only the newest blob may contain fewer items.
     pub items_per_blob: NonZeroU64,
 
-    /// The buffer pool to use for caching data.
+    /// The page cache to use for caching data.
     pub page_cache: CacheRef,
 
     /// The size of the write buffer to use for each blob.
@@ -1156,7 +1156,7 @@ mod tests {
         });
     }
 
-    /// Append a lot of data to make sure we exercise buffer pool paging boundaries.
+    /// Append a lot of data to make sure we exercise page cache paging boundaries.
     #[test_traced]
     fn test_fixed_journal_append_a_lot_of_data() {
         // Initialize the deterministic context

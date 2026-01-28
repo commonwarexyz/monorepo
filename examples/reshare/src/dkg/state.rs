@@ -40,7 +40,7 @@ use std::{
 };
 use tracing::{debug, warn};
 
-// Configure 32MB buffer pool
+// Configure 32MB page cache
 const PAGE_SIZE: NonZeroU16 = NZU16!(1 << 12);
 const PAGE_CACHE_CAPACITY: NonZeroUsize = NZUsize!(1 << 13);
 
