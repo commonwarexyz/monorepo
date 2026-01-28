@@ -12,7 +12,8 @@ set -euo pipefail
 STABILITY_CFG="commonware_stability_RESERVED"
 
 # Crates to skip (examples, fuzz crates, internal tooling)
-SKIP_REGEX="commonware-bridge|commonware-chat|commonware-estimator|commonware-flood|commonware-log|commonware-sync|commonware-reshare|commonware-conformance|-fuzz$|-macros$"
+# deployer is skipped because it has heavy AWS SDK dependencies
+SKIP_REGEX="commonware-bridge|commonware-chat|commonware-estimator|commonware-flood|commonware-log|commonware-sync|commonware-reshare|commonware-conformance|commonware-deployer|-fuzz$|-macros$"
 
 # Items to ignore (#[macro_export] macros can't be inside stability_scope due to Rust limitations)
 IGNORE_ITEMS="NZDuration|NZU8|NZU16|NZU32|NZU64|NZUsize"
@@ -22,13 +23,13 @@ if ! command -v jq &> /dev/null; then
     exit 1
 fi
 
-# Get list of library crates
+# Get list of library crates (includes "lib", "rlib", "cdylib" target kinds)
 get_crates() {
     if [[ $# -gt 0 ]]; then
         echo "$@"
     else
         cargo metadata --no-deps --format-version=1 2>/dev/null | \
-            jq -r '.packages[] | select(.targets[] | .kind[] == "lib") | .name' | \
+            jq -r '.packages[] | select(.targets[] | .kind[] | . == "lib" or . == "rlib" or . == "cdylib") | .name' | \
             grep -Ev "$SKIP_REGEX" | \
             sort -u
     fi
