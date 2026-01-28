@@ -298,39 +298,27 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
             )
         });
         let pruning_boundary = journal.pruning_boundary().await;
-        let oldest_retained_pos = journal
-            .oldest_retained_pos()
-            .await
-            .unwrap_or(pruning_boundary);
-        if metadata_prune_pos > oldest_retained_pos {
+        if metadata_prune_pos > pruning_boundary {
             // Metadata is ahead of journal (crashed before completing journal prune).
             // Prune the journal to match metadata.
-            journal.prune(metadata_prune_pos).await?;
-            if journal
-                .oldest_retained_pos()
-                .await
-                .unwrap_or(pruning_boundary)
-                != oldest_retained_pos
-            {
-                // This should only happen in the event of some failure during the last attempt to
-                // prune the journal.
+            if journal.prune(metadata_prune_pos).await.is_err() {
                 warn!(
-                    oldest_retained_pos,
+                    pruning_boundary,
                     metadata_prune_pos, "journal pruned to match metadata"
                 );
             }
-        } else if metadata_prune_pos < oldest_retained_pos {
+        } else if metadata_prune_pos < pruning_boundary {
             // Metadata is stale (e.g., missing/corrupted while journal has valid state).
             // Use the journal's state as authoritative.
             warn!(
                 metadata_prune_pos,
-                oldest_retained_pos, "metadata stale, using journal pruning boundary"
+                pruning_boundary, "metadata stale, using journal pruning boundary"
             );
         }
 
         // Use the more restrictive (higher) pruning boundary between metadata and journal.
         // This handles both cases: metadata ahead (crash during prune) and metadata stale.
-        let effective_prune_pos = std::cmp::max(metadata_prune_pos, oldest_retained_pos);
+        let effective_prune_pos = std::cmp::max(metadata_prune_pos, pruning_boundary);
 
         let last_valid_size = PeakIterator::to_nearest_size(journal_size);
         let mut orphaned_leaf: Option<D> = None;
