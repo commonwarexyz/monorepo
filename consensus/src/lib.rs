@@ -14,6 +14,7 @@ use commonware_codec::Codec;
 use commonware_cryptography::{Committable, Digestible};
 
 pub mod aggregation;
+pub mod minimmit;
 pub mod ordered_broadcast;
 pub mod simplex;
 pub mod types;
