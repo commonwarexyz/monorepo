@@ -58,9 +58,9 @@ cfg_if::cfg_if! {
     if #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))] {
         use aws_lc_rs::aead::{self, LessSafeKey, UnboundKey, CHACHA20_POLY1305};
 
-        struct Impl(LessSafeKey);
+        struct Cipher(LessSafeKey);
 
-        impl Backend for Impl {
+        impl Backend for Cipher {
             fn from_key(key: &[u8; KEY_SIZE_BYTES]) -> Self {
                 let unbound_key = UnboundKey::new(&CHACHA20_POLY1305, key)
                     .expect("key size should match algorithm");
@@ -90,9 +90,9 @@ cfg_if::cfg_if! {
     } else {
         use chacha20poly1305::{aead::Aead, ChaCha20Poly1305, KeyInit as _};
 
-        struct Impl(ChaCha20Poly1305);
+        struct Cipher(ChaCha20Poly1305);
 
-        impl Backend for Impl {
+        impl Backend for Cipher {
             fn from_key(key: &[u8; KEY_SIZE_BYTES]) -> Self {
                 Self(ChaCha20Poly1305::new(key.into()))
             }
@@ -115,7 +115,7 @@ cfg_if::cfg_if! {
 /// Encrypts outgoing messages with an auto-incrementing nonce.
 pub struct SendCipher {
     nonce: CounterNonce,
-    inner: Secret<Impl>,
+    inner: Secret<Cipher>,
 }
 
 impl SendCipher {
@@ -125,7 +125,7 @@ impl SendCipher {
         rng.fill_bytes(key_bytes.as_mut());
         Self {
             nonce: CounterNonce::new(),
-            inner: Secret::new(Impl::from_key(&key_bytes)),
+            inner: Secret::new(Cipher::from_key(&key_bytes)),
         }
     }
 
@@ -139,7 +139,7 @@ impl SendCipher {
 /// Decrypts incoming messages with an auto-incrementing nonce.
 pub struct RecvCipher {
     nonce: CounterNonce,
-    inner: Secret<Impl>,
+    inner: Secret<Cipher>,
 }
 
 impl RecvCipher {
@@ -149,7 +149,7 @@ impl RecvCipher {
         rng.fill_bytes(key_bytes.as_mut());
         Self {
             nonce: CounterNonce::new(),
-            inner: Secret::new(Impl::from_key(&key_bytes)),
+            inner: Secret::new(Cipher::from_key(&key_bytes)),
         }
     }
 
