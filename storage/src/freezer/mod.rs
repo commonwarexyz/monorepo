@@ -226,6 +226,8 @@ pub enum Error {
     Journal(#[from] crate::journal::Error),
     #[error("codec error: {0}")]
     Codec(#[from] commonware_codec::Error),
+    #[error("collision chain corruption detected: exceeded {0} iterations")]
+    ChainCorruption(u32),
 }
 
 /// Configuration for [Freezer].

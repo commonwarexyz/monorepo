@@ -279,6 +279,14 @@ impl Read for Entry {
 const NO_NEXT_SECTION: u64 = u64::MAX;
 const NO_NEXT_POSITION: u64 = u64::MAX;
 
+/// Maximum number of iterations allowed when traversing a collision chain.
+///
+/// This limit protects against infinite loops caused by corrupted storage
+/// (e.g., cyclic pointers) or maliciously crafted data. The value is set
+/// high enough to accommodate any legitimate chain length while preventing
+/// resource exhaustion.
+const MAX_CHAIN_ITERATIONS: u32 = 65536;
+
 /// Key entry stored in the segmented/fixed key index journal.
 ///
 /// All fields are fixed size, enabling efficient collision chain traversal
@@ -925,8 +933,16 @@ impl<E: Storage + Metrics + Clock, K: Array, V: CodecShared> Freezer<E, K, V> {
             return Ok(None);
         };
 
-        // Follow the linked list chain to find the first matching key
+        // Follow the linked list chain to find the first matching key.
+        // Track iterations to detect corrupted chains (e.g., cycles).
+        let mut iterations: u32 = 0;
         loop {
+            // Check for chain corruption (cycle or excessive length)
+            if iterations >= MAX_CHAIN_ITERATIONS {
+                return Err(Error::ChainCorruption(MAX_CHAIN_ITERATIONS));
+            }
+            iterations += 1;
+
             // Get the key entry from the fixed key index (efficient, good cache locality)
             let key_entry = self.oversized.get(section, position).await?;
 
