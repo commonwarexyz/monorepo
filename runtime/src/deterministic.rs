@@ -58,8 +58,8 @@ use crate::{
         supervision::Tree,
         MetricEncoder, Panicker,
     },
-    validate_label, Clock, Error, Execution, Handle, ListenerOf, Metrics as _, Panicked,
-    Spawner as _, METRICS_PREFIX,
+    validate_label, BufferPools, Clock, Error, Execution, Handle, ListenerOf, Metrics as _,
+    Panicked, Spawner as _, METRICS_PREFIX,
 };
 #[cfg(feature = "external")]
 use crate::{Blocker, Pacer};
@@ -389,6 +389,7 @@ pub struct Checkpoint {
     rng: Mutex<BoxDynRng>,
     time: Mutex<SystemTime>,
     storage: Arc<Storage>,
+    buffer_pools: Arc<BufferPools>,
     dns: Mutex<HashMap<String, Vec<IpAddr>>>,
     catch_panics: bool,
 }
@@ -466,6 +467,7 @@ impl Runner {
 
         // Pin root task to the heap
         let storage = context.storage.clone();
+        let buffer_pools = context.buffer_pools.clone();
         let mut root = Box::pin(panicked.interrupt(f(context)));
 
         // Register the root task
@@ -626,6 +628,7 @@ impl Runner {
             rng: executor.rng,
             time: executor.time,
             storage,
+            buffer_pools,
             dns: executor.dns,
             catch_panics: executor.panicker.catch(),
         };
@@ -809,6 +812,7 @@ pub struct Context {
     executor: Weak<Executor>,
     network: Arc<Network>,
     storage: Arc<Storage>,
+    buffer_pools: Arc<BufferPools>,
     tree: Arc<Tree>,
     execution: Execution,
     instrumented: bool,
@@ -823,6 +827,7 @@ impl Clone for Context {
             executor: self.executor.clone(),
             network: self.network.clone(),
             storage: self.storage.clone(),
+            buffer_pools: self.buffer_pools.clone(),
 
             tree: child,
             execution: Execution::default(),
@@ -851,6 +856,10 @@ impl Context {
         let network = AuditedNetwork::new(DeterministicNetwork::default(), auditor.clone());
         let network = MeteredNetwork::new(network, runtime_registry);
 
+        // Initialize buffer pools
+        let buffer_pools =
+            BufferPools::with_defaults(runtime_registry.sub_registry_with_prefix("buffer_pool"));
+
         // Initialize panicker
         let (panicker, panicked) = Panicker::new(cfg.catch_panics);
 
@@ -877,6 +886,7 @@ impl Context {
                 executor: Arc::downgrade(&executor),
                 network: Arc::new(network),
                 storage: Arc::new(storage),
+                buffer_pools: Arc::new(buffer_pools),
                 tree: Tree::root(),
                 execution: Execution::default(),
                 instrumented: false,
@@ -936,6 +946,7 @@ impl Context {
                 executor: Arc::downgrade(&executor),
                 network: Arc::new(network),
                 storage: checkpoint.storage,
+                buffer_pools: checkpoint.buffer_pools,
                 tree: Tree::root(),
                 execution: Execution::default(),
                 instrumented: false,
@@ -1491,6 +1502,12 @@ impl crate::Storage for Context {
     }
 }
 
+impl crate::Pooling for Context {
+    fn buffer_pools(&self) -> &BufferPools {
+        &self.buffer_pools
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1974,6 +1991,29 @@ mod tests {
                 .with_label("test")
                 .with_attribute("epoch", "old")
                 .with_attribute("epoch", "new");
+        });
+    }
+
+    #[test]
+    fn test_pooling_trait() {
+        use crate::Pooling;
+
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Access buffer pools via trait
+            let pools = context.buffer_pools();
+
+            // Verify network pool is accessible and works (cache-line aligned)
+            let net_buf = pools.network().alloc(1024).expect("network alloc failed");
+            assert!(net_buf.capacity() >= 1024); // At least requested size
+
+            // Verify storage pool is accessible and works (page-aligned)
+            let storage_buf = pools.storage().alloc(1024).expect("storage alloc failed");
+            assert!(storage_buf.capacity() >= 4096); // Page-aligned min size
+
+            // Verify pools have expected configurations
+            assert_eq!(pools.network().config().max_per_class, 4096);
+            assert_eq!(pools.storage().config().max_per_class, 32);
         });
     }
 }

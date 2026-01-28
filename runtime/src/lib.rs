@@ -24,6 +24,7 @@
 
 use commonware_macros::select;
 use commonware_parallel::{Rayon, ThreadPool};
+use iobuf::PoolError;
 use prometheus_client::registry::Metric;
 use rayon::ThreadPoolBuildError;
 use std::{
@@ -49,7 +50,7 @@ cfg_if::cfg_if! {
 pub mod iobuf;
 /// Re-export of `Buf` and `BufMut` traits for usage with [I/O buffers](iobuf).
 pub use bytes::{Buf, BufMut};
-pub use iobuf::{IoBuf, IoBufMut, IoBufs, IoBufsMut};
+pub use iobuf::{BufferPool, BufferPoolConfig, BufferPools, IoBuf, IoBufMut, IoBufs, IoBufsMut};
 mod network;
 mod process;
 mod storage;
@@ -121,6 +122,8 @@ pub enum Error {
     ImmutableBlob,
     #[error("io error: {0}")]
     Io(#[from] IoError),
+    #[error("buffer pool: {0}")]
+    Pool(#[from] PoolError),
 }
 
 /// Interface that any task scheduler must implement to start
@@ -756,6 +759,12 @@ pub trait Blob: Clone + Send + Sync + 'static {
 
     /// Ensure all pending data is durably persisted.
     fn sync(&self) -> impl Future<Output = Result<(), Error>> + Send;
+}
+
+/// Interface that any runtime must implement to provide buffer pools.
+pub trait Pooling: Clone + Send + Sync + 'static {
+    /// Returns the buffer pools for this runtime.
+    fn buffer_pools(&self) -> &BufferPools;
 }
 
 #[cfg(test)]

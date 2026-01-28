@@ -102,6 +102,7 @@ console-subscriber = "0.5.0"
 crc = "3.4.0"
 crc-fast = { version = "1.10.0", default-features = false }
 criterion = "0.7.0"
+crossbeam-queue = "0.3.12"
 crossterm = "0.29.0"
 ctutils = "0.3.1"
 ecdsa = { version = "0.16.9", default-features = false }

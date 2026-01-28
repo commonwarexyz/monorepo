@@ -304,3 +304,12 @@ where
         self.as_present().resolve(host)
     }
 }
+
+impl<C> crate::Pooling for Cell<C>
+where
+    C: crate::Pooling,
+{
+    fn buffer_pools(&self) -> &crate::BufferPools {
+        self.as_present().buffer_pools()
+    }
+}

@@ -18,7 +18,8 @@ use crate::{
     storage::metered::Storage as MeteredStorage,
     telemetry::metrics::task::Label,
     utils::{add_attribute, signal::Stopper, supervision::Tree, MetricEncoder, Panicker},
-    Clock, Error, Execution, Handle, Metrics as _, SinkOf, Spawner as _, StreamOf, METRICS_PREFIX,
+    BufferPools, Clock, Error, Execution, Handle, Metrics as _, SinkOf, Spawner as _, StreamOf,
+    METRICS_PREFIX,
 };
 use commonware_macros::select;
 use commonware_parallel::ThreadPool;
@@ -299,6 +300,11 @@ impl crate::Runner for Runner {
             }
         }
 
+        // Initialize buffer pools (before network, as network uses the pool)
+        let buffer_pools = crate::BufferPools::with_defaults(
+            runtime_registry.sub_registry_with_prefix("buffer_pool"),
+        );
+
         // Initialize network
         cfg_if::cfg_if! {
             if #[cfg(feature = "iouring-network")] {
@@ -316,15 +322,16 @@ impl crate::Runner for Runner {
                     ..Default::default()
                 };
                 let network = MeteredNetwork::new(
-                    IoUringNetwork::start(config, iouring_registry).unwrap(),
+                    IoUringNetwork::start(config, iouring_registry, buffer_pools.network().clone()).unwrap(),
                 runtime_registry,
             );
         } else {
-            let config = TokioNetworkConfig::default().with_read_timeout(self.cfg.network_cfg.read_write_timeout)
+            let config = TokioNetworkConfig::default()
+                .with_read_timeout(self.cfg.network_cfg.read_write_timeout)
                 .with_write_timeout(self.cfg.network_cfg.read_write_timeout)
                 .with_tcp_nodelay(self.cfg.network_cfg.tcp_nodelay);
                 let network = MeteredNetwork::new(
-                    TokioNetwork::from(config),
+                    TokioNetwork::new(config, buffer_pools.network().clone()),
                     runtime_registry,
                 );
             }
@@ -351,6 +358,7 @@ impl crate::Runner for Runner {
             attributes: Vec::new(),
             executor: executor.clone(),
             network,
+            buffer_pools: Arc::new(buffer_pools),
             tree: Tree::root(),
             execution: Execution::default(),
             instrumented: false,
@@ -387,6 +395,7 @@ pub struct Context {
     executor: Arc<Executor>,
     storage: Storage,
     network: Network,
+    buffer_pools: Arc<BufferPools>,
     tree: Arc<Tree>,
     execution: Execution,
     instrumented: bool,
@@ -401,6 +410,7 @@ impl Clone for Context {
             executor: self.executor.clone(),
             storage: self.storage.clone(),
             network: self.network.clone(),
+            buffer_pools: self.buffer_pools.clone(),
 
             tree: child,
             execution: Execution::default(),
@@ -708,5 +718,11 @@ impl crate::Storage for Context {
 
     async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
         self.storage.scan(partition).await
+    }
+}
+
+impl crate::Pooling for Context {
+    fn buffer_pools(&self) -> &BufferPools {
+        &self.buffer_pools
     }
 }
