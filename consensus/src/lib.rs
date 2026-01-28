@@ -13,7 +13,6 @@ commonware_macros::stability_scope!(BETA {
     pub mod aggregation;
     pub mod ordered_broadcast;
 });
-
 commonware_macros::stability_scope!(GAMMA {
     use commonware_codec::Codec;
     use commonware_cryptography::{Committable, Digestible};
@@ -65,7 +64,6 @@ commonware_macros::stability_scope!(GAMMA {
         fn context(&self) -> Self::Context;
     }
 });
-
 commonware_macros::stability_scope!(GAMMA, cfg(not(target_arch = "wasm32")) {
     use commonware_cryptography::Digest;
     use commonware_cryptography::certificate::Scheme;
@@ -200,7 +198,6 @@ commonware_macros::stability_scope!(GAMMA, cfg(not(target_arch = "wasm32")) {
         fn subscribe(&mut self) -> impl Future<Output = (Self::Index, mpsc::Receiver<Self::Index>)> + Send;
     }
 });
-
 commonware_macros::stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     pub mod application;
 

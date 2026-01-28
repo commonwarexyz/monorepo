@@ -150,7 +150,6 @@ commonware_macros::stability_scope!(GAMMA {
 
     impl<I: Iterator> TryCollect for I {}
 });
-
 commonware_macros::stability_scope!(GAMMA, cfg(feature = "std") {
     /// Returns a seeded RNG for deterministic testing.
     ///
@@ -167,7 +166,6 @@ commonware_macros::stability_scope!(GAMMA, cfg(feature = "std") {
         rand::SeedableRng::seed_from_u64(seed)
     }
 });
-
 commonware_macros::stability_scope!(GAMMA {
     /// Alias for boxed errors that are `Send` and `Sync`.
     pub type BoxedError = Box<dyn core::error::Error + Send + Sync>;

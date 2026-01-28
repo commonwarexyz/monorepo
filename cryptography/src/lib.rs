@@ -46,7 +46,6 @@ commonware_macros::stability_scope!(BETA {
     pub use crate::bloomfilter::BloomFilter;
     pub use crate::lthash::LtHash;
 });
-
 commonware_macros::stability_scope!(GAMMA {
     use commonware_codec::{Encode, ReadExt};
     use commonware_math::algebra::Random;

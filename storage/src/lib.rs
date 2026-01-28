@@ -16,7 +16,6 @@ extern crate alloc;
 commonware_macros::stability_scope!(BETA {
     pub mod mmr;
 });
-
 commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
     pub mod qmdb;
     mod bitmap;
@@ -24,7 +23,6 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
     pub mod bmt;
     pub mod cache;
 });
-
 commonware_macros::stability_scope!(GAMMA, cfg(feature = "std") {
     pub mod archive;
     pub mod freezer;
