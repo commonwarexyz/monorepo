@@ -99,7 +99,8 @@ macro_rules! impl_resolver {
             }
         }
 
-        impl<E, K, V, H, T, S> Resolver for Arc<RwLock<$db<E, K, V, H, T, S, Merkleized<H>, Durable>>>
+        impl<E, K, V, H, T, S> Resolver
+            for Arc<RwLock<$db<E, K, V, H, T, S, Merkleized<H>, Durable>>>
         where
             E: Storage + Clock + Metrics,
             K: Array,
@@ -227,13 +228,13 @@ where
         max_ops: NonZeroU64,
     ) -> Result<FetchResult<Self::Op, Self::Digest>, qmdb::Error> {
         let db = self.read().await;
-        db.historical_proof(op_count, start_loc, max_ops).await.map(
-            |(proof, operations)| FetchResult {
+        db.historical_proof(op_count, start_loc, max_ops)
+            .await
+            .map(|(proof, operations)| FetchResult {
                 proof,
                 operations,
                 success_tx: oneshot::channel().0,
-            },
-        )
+            })
     }
 }
 
@@ -259,13 +260,13 @@ where
     ) -> Result<FetchResult<Self::Op, Self::Digest>, qmdb::Error> {
         let guard = self.read().await;
         let db = guard.as_ref().ok_or(qmdb::Error::KeyNotFound)?;
-        db.historical_proof(op_count, start_loc, max_ops).await.map(
-            |(proof, operations)| FetchResult {
+        db.historical_proof(op_count, start_loc, max_ops)
+            .await
+            .map(|(proof, operations)| FetchResult {
                 proof,
                 operations,
                 success_tx: oneshot::channel().0,
-            },
-        )
+            })
     }
 }
 

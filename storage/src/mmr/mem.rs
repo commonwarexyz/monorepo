@@ -1175,9 +1175,7 @@ mod tests {
             updates.push((leaf_loc, &element));
         }
         let mut dirty_mmr = mmr.into_dirty();
-        dirty_mmr
-            .update_leaves(hasher, strategy, &updates)
-            .unwrap();
+        dirty_mmr.update_leaves(hasher, strategy, &updates).unwrap();
 
         let mmr = dirty_mmr.merkleize(hasher, strategy);
         let updated_root = *mmr.root();
@@ -1192,9 +1190,7 @@ mod tests {
             updates.push((leaf_loc, element));
         }
         let mut dirty_mmr = mmr.into_dirty();
-        dirty_mmr
-            .update_leaves(hasher, strategy, &updates)
-            .unwrap();
+        dirty_mmr.update_leaves(hasher, strategy, &updates).unwrap();
 
         let mmr = dirty_mmr.merkleize(hasher, strategy);
         let restored_root = *mmr.root();

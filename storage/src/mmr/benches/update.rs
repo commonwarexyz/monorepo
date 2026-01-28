@@ -99,8 +99,7 @@ fn bench_update(c: &mut Criterion) {
                                         commonware_cryptography::sha256::Digest,
                                     )> = leaf_map.into_iter().collect();
                                     let mut mmr = mmr.into_dirty();
-                                    mmr.update_leaves(&mut h, &Sequential, &updates)
-                                        .unwrap();
+                                    mmr.update_leaves(&mut h, &Sequential, &updates).unwrap();
                                     mmr.merkleize(&mut h, &Sequential);
                                 }
                                 BenchStrategy::BatchedParallel => {
