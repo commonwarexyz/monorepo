@@ -740,22 +740,33 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
     });
 }
 
-pub fn fuzz<P: simplex::Simplex>(input: FuzzInput) {
-    let seed = input.seed;
-    match panic::catch_unwind(panic::AssertUnwindSafe(|| run::<P>(input))) {
-        Ok(()) => {}
-        Err(payload) => {
-            println!("Panicked with seed: {}", seed);
-            panic::resume_unwind(payload);
-        }
-    }
+pub trait FuzzMode {
+    const TWIN: bool;
 }
 
-pub fn fuzz_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
+pub struct Standard;
+
+impl FuzzMode for Standard {
+    const TWIN: bool = false;
+}
+
+pub struct Twinable;
+
+impl FuzzMode for Twinable {
+    const TWIN: bool = true;
+}
+
+pub fn fuzz<P: simplex::Simplex, M: FuzzMode>(input: FuzzInput) {
     let seed = input.seed;
-    match panic::catch_unwind(panic::AssertUnwindSafe(|| {
-        run_with_twin_mutator::<P>(input)
-    })) {
+    let run_result = if M::TWIN {
+        panic::catch_unwind(panic::AssertUnwindSafe(|| {
+            run_with_twin_mutator::<P>(input)
+        }))
+    } else {
+        panic::catch_unwind(panic::AssertUnwindSafe(|| run::<P>(input)))
+    };
+
+    match run_result {
         Ok(()) => {}
         Err(payload) => {
             println!("Panicked with seed: {}", seed);
