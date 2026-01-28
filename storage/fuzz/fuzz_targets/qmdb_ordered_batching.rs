@@ -2,6 +2,7 @@
 
 use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
+use commonware_parallel::Sequential;
 use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
 use commonware_storage::{
     kv::{Batchable as _, Deletable as _, Gettable as _, Updatable as _},
@@ -105,7 +106,7 @@ fn fuzz(data: FuzzInput) {
                         .commit(Some(Value::new(*value)))
                         .await
                         .expect("commit should not fail");
-                    db = durable_db.into_merkleized().into_mutable();
+                    db = durable_db.into_merkleized(&Sequential).into_mutable();
 
                     // Restore batch for subsequent operations
                     batch = Some(db.start_batch());
@@ -148,7 +149,7 @@ fn fuzz(data: FuzzInput) {
             .await
             .expect("write batch should not fail");
         let (durable_db, _) = db.commit(None).await.expect("commit should not fail");
-        let db = durable_db.into_merkleized();
+        let db = durable_db.into_merkleized(&Sequential);
 
         // Comprehensive final verification - check ALL keys ever touched
         for key in &all_keys {

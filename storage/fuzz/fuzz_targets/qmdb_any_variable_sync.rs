@@ -2,6 +2,7 @@
 
 use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
+use commonware_parallel::Sequential;
 use commonware_runtime::{buffer::PoolRef, deterministic, Metrics, Runner};
 use commonware_storage::{
     mmr::{self, hasher::Standard, MAX_LOCATION},
@@ -188,13 +189,13 @@ fn fuzz(input: FuzzInput) {
                         .commit(metadata_bytes.clone())
                         .await
                         .expect("Commit should not fail");
-                    let clean_db = durable_db.into_merkleized();
+                    let clean_db = durable_db.into_merkleized(&Sequential);
                     historical_roots.insert(clean_db.op_count(), clean_db.root());
                     db = clean_db.into_mutable();
                 }
 
                 Operation::Prune => {
-                    let mut merkleized_db = db.into_merkleized();
+                    let mut merkleized_db = db.into_merkleized(&Sequential);
                     merkleized_db
                         .prune(merkleized_db.inactivity_floor_loc())
                         .await
@@ -220,7 +221,7 @@ fn fuzz(input: FuzzInput) {
                         continue;
                     }
 
-                    let clean_db = db.into_merkleized();
+                    let clean_db = db.into_merkleized(&Sequential);
                     if let Ok((proof, log)) = clean_db.proof(*start_loc, *max_ops).await {
                         let root = clean_db.root();
                         assert!(verify_proof(&mut hasher, &proof, *start_loc, &log, &root));
@@ -243,7 +244,7 @@ fn fuzz(input: FuzzInput) {
                         continue;
                     }
 
-                    let clean_db = db.into_merkleized();
+                    let clean_db = db.into_merkleized(&Sequential);
                     if let Ok((proof, log)) = clean_db
                         .historical_proof(op_count, *start_loc, *max_ops)
                         .await
@@ -257,7 +258,7 @@ fn fuzz(input: FuzzInput) {
 
                 Operation::Sync => {
                     let (durable_db, _) = db.commit(None).await.expect("commit should not fail");
-                    let mut clean_db = durable_db.into_merkleized();
+                    let mut clean_db = durable_db.into_merkleized(&Sequential);
                     clean_db.sync().await.expect("Sync should not fail");
                     db = clean_db.into_mutable();
                 }
@@ -271,7 +272,7 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 Operation::Root => {
-                    let clean_db = db.into_merkleized();
+                    let clean_db = db.into_merkleized(&Sequential);
                     let _ = clean_db.root();
                     db = clean_db.into_mutable();
                 }
@@ -295,7 +296,7 @@ fn fuzz(input: FuzzInput) {
         }
 
         let db = db.commit(None).await.expect("commit should not fail").0;
-        let db = db.into_merkleized();
+        let db = db.into_merkleized(&Sequential);
         db.destroy().await.expect("Destroy should not fail");
     });
 }

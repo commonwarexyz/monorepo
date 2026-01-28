@@ -1,6 +1,7 @@
 //! Benchmark the generation of a large randomly generated keyless database.
 
 use commonware_cryptography::Sha256;
+use commonware_parallel::Sequential;
 use commonware_runtime::{
     benchmarks::{context, tokio},
     buffer::PoolRef,
@@ -70,7 +71,7 @@ async fn gen_random_keyless(ctx: Context, num_operations: u64) -> KeylessDb {
         }
     }
     let (durable, _) = db.commit(None).await.unwrap();
-    let mut clean = durable.into_merkleized();
+    let mut clean = durable.into_merkleized(&Sequential);
     clean.sync().await.unwrap();
 
     clean

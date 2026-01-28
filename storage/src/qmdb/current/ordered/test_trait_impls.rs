@@ -18,6 +18,7 @@ use crate::{
 };
 use commonware_codec::Read;
 use commonware_cryptography::Hasher;
+use commonware_parallel::Strategy;
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
 use core::ops::Range;
@@ -60,8 +61,8 @@ impl<
         self.into_mutable()
     }
 
-    async fn into_merkleized(self) -> Result<Self::Merkleized, Error> {
-        self.into_merkleized().await
+    async fn into_merkleized(self, strategy: &impl Strategy) -> Result<Self::Merkleized, Error> {
+        self.into_merkleized(strategy).await
     }
 }
 
@@ -99,8 +100,8 @@ impl<
         self.commit(metadata).await
     }
 
-    async fn into_merkleized(self) -> Result<Self::Merkleized, Error> {
-        self.into_merkleized().await
+    async fn into_merkleized(self, strategy: &impl Strategy) -> Result<Self::Merkleized, Error> {
+        self.into_merkleized(strategy).await
     }
 
     fn steps(&self) -> u64 {
@@ -150,8 +151,8 @@ where
         self.into_mutable()
     }
 
-    async fn into_merkleized(self) -> Result<Self::Merkleized, Error> {
-        self.into_merkleized().await
+    async fn into_merkleized(self, strategy: &impl Strategy) -> Result<Self::Merkleized, Error> {
+        self.into_merkleized(strategy).await
     }
 }
 
@@ -193,8 +194,8 @@ where
         self.commit(metadata).await
     }
 
-    async fn into_merkleized(self) -> Result<Self::Merkleized, Error> {
-        self.into_merkleized().await
+    async fn into_merkleized(self, strategy: &impl Strategy) -> Result<Self::Merkleized, Error> {
+        self.into_merkleized(strategy).await
     }
 
     fn steps(&self) -> u64 {

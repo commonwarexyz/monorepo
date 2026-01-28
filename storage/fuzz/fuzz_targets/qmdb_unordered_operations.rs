@@ -2,6 +2,7 @@
 
 use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
+use commonware_parallel::Sequential;
 use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
 use commonware_storage::{
     mmr::{Location, StandardHasher as Standard},
@@ -108,7 +109,7 @@ fn fuzz(data: FuzzInput) {
 
                 QmdbOperation::Root => {
                     // root requires merkleization but not commit
-                    let clean_db = db.into_merkleized();
+                    let clean_db = db.into_merkleized(&Sequential);
                     clean_db.root();
                     db = clean_db.into_mutable();
                 }
@@ -120,7 +121,7 @@ fn fuzz(data: FuzzInput) {
                         continue;
                     }
 
-                    let clean_db = db.into_merkleized();
+                    let clean_db = db.into_merkleized(&Sequential);
 
                     let current_root = clean_db.root();
                     // Adjust start_loc to be within valid range
@@ -217,7 +218,7 @@ fn fuzz(data: FuzzInput) {
         }
 
         let (durable_db, _) = db.commit(None).await.expect("final commit should not fail");
-        durable_db.into_merkleized().destroy().await.expect("destroy should not fail");
+        durable_db.into_merkleized(&Sequential).destroy().await.expect("destroy should not fail");
         expected_state.clear();
         all_keys.clear();
     });

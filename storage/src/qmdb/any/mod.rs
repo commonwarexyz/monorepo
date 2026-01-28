@@ -148,6 +148,7 @@ pub(crate) mod test {
         qmdb::any::{FixedConfig, VariableConfig},
         translator::TwoCap,
     };
+    use commonware_parallel::Sequential;
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use std::num::NonZeroU16;
 
@@ -223,13 +224,13 @@ pub(crate) mod test {
         assert_ne!(steps, 0);
 
         // Steps shouldn't change from merkleization.
-        let db = db.into_merkleized().await.unwrap();
+        let db = db.into_merkleized(&Sequential).await.unwrap();
         let db = db.into_mutable();
         assert_eq!(db.steps(), steps);
 
         // Cleanup
         let (db, _) = db.commit(None).await.unwrap();
-        let db = db.into_merkleized().await.unwrap();
+        let db = db.into_merkleized(&Sequential).await.unwrap();
         db.destroy().await.unwrap();
     }
 }

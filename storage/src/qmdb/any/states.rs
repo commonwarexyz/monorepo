@@ -12,6 +12,7 @@ use crate::{
 };
 use commonware_codec::Codec;
 use commonware_cryptography::Digest;
+use commonware_parallel::Strategy;
 use commonware_utils::Array;
 use std::{future::Future, ops::Range};
 
@@ -67,7 +68,10 @@ pub trait UnmerkleizedDurableAny:
     fn into_mutable(self) -> Self::Mutable;
 
     /// Convert this database into the provable (Merkleized,Durable) state.
-    fn into_merkleized(self) -> impl Future<Output = Result<Self::Merkleized, Error>> + Send;
+    fn into_merkleized(
+        self,
+        strategy: &impl Strategy,
+    ) -> impl Future<Output = Result<Self::Merkleized, Error>> + Send;
 }
 
 /// Trait for the (Merkleized,NonDurable) state.
@@ -121,7 +125,10 @@ pub trait MutableAny:
     ) -> impl Future<Output = Result<(Self::Durable, Range<Location>), Error>> + Send;
 
     /// Convert this database into the provable (Merkleized, Non-durable) state.
-    fn into_merkleized(self) -> impl Future<Output = Result<Self::Merkleized, Error>> + Send;
+    fn into_merkleized(
+        self,
+        strategy: &impl Strategy,
+    ) -> impl Future<Output = Result<Self::Merkleized, Error>> + Send;
 
     /// Returns the number of steps to raise the inactivity floor on the next commit.
     fn steps(&self) -> u64;

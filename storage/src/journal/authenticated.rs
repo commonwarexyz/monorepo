@@ -19,7 +19,7 @@ use crate::{
 };
 use commonware_codec::{CodecFixedShared, CodecShared, Encode, EncodeShared};
 use commonware_cryptography::{DigestOf, Hasher};
-use commonware_parallel::Sequential;
+use commonware_parallel::{Sequential, Strategy};
 use commonware_runtime::{Clock, Metrics, Storage};
 use core::num::{NonZeroU64, NonZeroUsize};
 use futures::{future::try_join_all, try_join, TryFutureExt as _};
@@ -86,12 +86,12 @@ where
     }
 }
 
-impl<E, C, H, St> Journal<E, C, H, St>
+impl<E, C, H, S> Journal<E, C, H, S>
 where
     E: Storage + Clock + Metrics,
     C: MutableContiguous<Item: EncodeShared>,
     H: Hasher,
-    St: State<DigestOf<H>> + Send + Sync,
+    S: State<DigestOf<H>> + Send + Sync,
 {
     pub async fn append(&mut self, item: C::Item) -> Result<Location, Error> {
         let encoded_item = item.encode();
@@ -108,12 +108,12 @@ where
     }
 }
 
-impl<E, C, H, St> Journal<E, C, H, St>
+impl<E, C, H, S> Journal<E, C, H, S>
 where
     E: Storage + Clock + Metrics,
     C: Contiguous<Item: EncodeShared> + Persistable<Error = JournalError>,
     H: Hasher,
-    St: State<DigestOf<H>> + Send + Sync,
+    S: State<DigestOf<H>> + Send + Sync,
 {
     /// Durably persist the journal. This is faster than `sync()` but does not persist the MMR,
     /// meaning recovery will be required on startup if we crash before `sync()`.
@@ -349,14 +349,14 @@ where
     H: Hasher,
 {
     /// Merkleize the journal and compute the root digest.
-    pub fn merkleize(self) -> Journal<E, C, H, Clean<H::Digest>> {
+    pub fn merkleize(self, strategy: &impl Strategy) -> Journal<E, C, H, Clean<H::Digest>> {
         let Self {
             mmr,
             journal,
             mut hasher,
         } = self;
         Journal {
-            mmr: mmr.merkleize(&mut hasher, &Sequential),
+            mmr: mmr.merkleize(&mut hasher, strategy),
             journal,
             hasher,
         }

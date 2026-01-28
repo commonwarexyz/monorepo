@@ -30,6 +30,7 @@ use crate::{
 };
 use commonware_codec::{Codec, CodecShared};
 use commonware_cryptography::{DigestOf, Hasher};
+use commonware_parallel::Strategy;
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::{bitmap::Prunable as PrunableBitMap, Array};
 use core::{num::NonZeroU64, ops::Range};
@@ -262,10 +263,11 @@ where
     /// Merkleize the database and transition to the provable state.
     pub async fn into_merkleized(
         self,
+        strategy: &impl Strategy,
     ) -> Result<Db<E, C, I, H, U, N, Merkleized<H>, Durable>, Error> {
         // Merkleize the any db's log
         let mut any = any::db::Db {
-            log: self.any.log.merkleize(),
+            log: self.any.log.merkleize(strategy),
             inactivity_floor_loc: self.any.inactivity_floor_loc,
             last_commit_loc: self.any.last_commit_loc,
             snapshot: self.any.snapshot,
@@ -276,7 +278,8 @@ where
 
         // Merkleize the bitmap using the clean MMR
         let hasher = &mut any.log.hasher;
-        let mut status = merkleize_grafted_bitmap(hasher, self.status, &any.log.mmr).await?;
+        let mut status =
+            merkleize_grafted_bitmap(hasher, self.status, &any.log.mmr, strategy).await?;
 
         // Prune the bitmap of no-longer-necessary bits.
         status.prune_to_bit(*any.inactivity_floor_loc)?;
@@ -308,10 +311,11 @@ where
     /// This enables proof generation while keeping the database in the non-durable state.
     pub async fn into_merkleized(
         self,
+        strategy: &impl Strategy,
     ) -> Result<Db<E, C, I, H, U, N, Merkleized<H>, NonDurable>, Error> {
         // Merkleize the any db's log
         let mut any = any::db::Db {
-            log: self.any.log.merkleize(),
+            log: self.any.log.merkleize(strategy),
             inactivity_floor_loc: self.any.inactivity_floor_loc,
             last_commit_loc: self.any.last_commit_loc,
             snapshot: self.any.snapshot,
@@ -322,7 +326,8 @@ where
 
         // Merkleize the bitmap using the clean MMR
         let hasher = &mut any.log.hasher;
-        let mut status = merkleize_grafted_bitmap(hasher, self.status, &any.log.mmr).await?;
+        let mut status =
+            merkleize_grafted_bitmap(hasher, self.status, &any.log.mmr, strategy).await?;
 
         // Prune the bitmap of no-longer-necessary bits.
         status.prune_to_bit(*any.inactivity_floor_loc)?;
@@ -566,10 +571,12 @@ pub(super) async fn root<E: Storage + Clock + Metrics, H: Hasher, const N: usize
 /// * `hasher` - The hasher used for merkleization.
 /// * `status` - The `DirtyBitMap` to be merkleized. Ownership is taken.
 /// * `mmr` - The MMR storage used for grafting.
+/// * `strategy` - The strategy for parallelizing batch operations.
 pub(super) async fn merkleize_grafted_bitmap<E, H, const N: usize>(
     hasher: &mut StandardHasher<H>,
     status: DirtyBitMap<E, H::Digest, N>,
     mmr: &impl crate::mmr::storage::Storage<H::Digest>,
+    strategy: &impl Strategy,
 ) -> Result<CleanBitMap<E, H::Digest, N>, Error>
 where
     E: Storage + Clock + Metrics,
@@ -579,5 +586,8 @@ where
     grafter
         .load_grafted_digests(&status.dirty_chunks(), mmr)
         .await?;
-    status.merkleize(&mut grafter).await.map_err(Into::into)
+    status
+        .merkleize(&mut grafter, strategy)
+        .await
+        .map_err(Into::into)
 }

@@ -89,6 +89,7 @@ pub(crate) mod test {
     use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
     use commonware_macros::test_traced;
     use commonware_math::algebra::Random;
+    use commonware_parallel::Sequential;
     use commonware_runtime::{
         buffer::PoolRef,
         deterministic::{self, Context},
@@ -266,7 +267,12 @@ pub(crate) mod test {
                 let v = Sha256::hash(&(i * 1000).to_be_bytes());
                 db.update(k, v).await.unwrap();
             }
-            let db = db.commit(None).await.unwrap().0.into_merkleized();
+            let db = db
+                .commit(None)
+                .await
+                .unwrap()
+                .0
+                .into_merkleized(&Sequential);
             let root = db.root();
 
             // Simulate a failed commit and test that the log replay doesn't leave behind old data.
@@ -313,7 +319,12 @@ pub(crate) mod test {
             let mut db = create_test_db(context.clone()).await.into_mutable();
             let ops = create_test_ops(20);
             apply_ops(&mut db, ops.clone()).await;
-            let db = db.commit(None).await.unwrap().0.into_merkleized();
+            let db = db
+                .commit(None)
+                .await
+                .unwrap()
+                .0
+                .into_merkleized(&Sequential);
             let root_hash = db.root();
             let original_op_count = db.op_count();
 
@@ -344,7 +355,12 @@ pub(crate) mod test {
             let mut db = db.into_mutable();
             let more_ops = create_test_ops_seeded(5, 1);
             apply_ops(&mut db, more_ops.clone()).await;
-            let db = db.commit(None).await.unwrap().0.into_merkleized();
+            let db = db
+                .commit(None)
+                .await
+                .unwrap()
+                .0
+                .into_merkleized(&Sequential);
 
             // Historical proof should remain the same even though database has grown
             let (historical_proof, historical_ops) = db
@@ -385,7 +401,12 @@ pub(crate) mod test {
                 .into_mutable();
             let ops = create_test_ops(50);
             apply_ops(&mut db, ops.clone()).await;
-            let db = db.commit(None).await.unwrap().0.into_merkleized();
+            let db = db
+                .commit(None)
+                .await
+                .unwrap()
+                .0
+                .into_merkleized(&Sequential);
 
             let mut hasher = StandardHasher::<Sha256>::new();
 
@@ -406,7 +427,7 @@ pub(crate) mod test {
                 .await
                 .into_mutable();
             apply_ops(&mut single_db, ops[0..1].to_vec()).await;
-            let single_db = single_db.into_merkleized();
+            let single_db = single_db.into_merkleized(&Sequential);
             let single_root = single_db.root();
 
             assert!(verify_proof(
@@ -459,7 +480,12 @@ pub(crate) mod test {
                 .into_mutable();
             let ops = create_test_ops(100);
             apply_ops(&mut db, ops.clone()).await;
-            let db = db.commit(None).await.unwrap().0.into_merkleized();
+            let db = db
+                .commit(None)
+                .await
+                .unwrap()
+                .0
+                .into_merkleized(&Sequential);
 
             let mut hasher = StandardHasher::<Sha256>::new();
 
@@ -480,7 +506,7 @@ pub(crate) mod test {
                     .await
                     .into_mutable();
                 apply_ops(&mut ref_db, ops[0..(*end_loc - 1) as usize].to_vec()).await;
-                let ref_db = ref_db.into_merkleized();
+                let ref_db = ref_db.into_merkleized(&Sequential);
 
                 let (ref_proof, ref_ops) = ref_db.proof(start_loc, max_ops).await.unwrap();
                 assert_eq!(ref_proof.leaves, historical_proof.leaves);
@@ -517,7 +543,12 @@ pub(crate) mod test {
             let mut db = create_test_db(context.clone()).await.into_mutable();
             let ops = create_test_ops(10);
             apply_ops(&mut db, ops).await;
-            let db = db.commit(None).await.unwrap().0.into_merkleized();
+            let db = db
+                .commit(None)
+                .await
+                .unwrap()
+                .0
+                .into_merkleized(&Sequential);
 
             let historical_op_count = Location::new_unchecked(5);
             let (proof, ops) = db

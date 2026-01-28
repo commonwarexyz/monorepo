@@ -23,6 +23,8 @@ use crate::{
 };
 use commonware_codec::{Codec, CodecShared};
 use commonware_cryptography::{DigestOf, Hasher};
+#[cfg(any(test, feature = "test-traits"))]
+use commonware_parallel::Strategy;
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
 #[cfg(any(test, feature = "test-traits"))]
@@ -966,8 +968,8 @@ where
         self.into_mutable()
     }
 
-    async fn into_merkleized(self) -> Result<Self::Merkleized, Error> {
-        Ok(self.into_merkleized())
+    async fn into_merkleized(self, strategy: &impl Strategy) -> Result<Self::Merkleized, Error> {
+        Ok(self.into_merkleized(strategy))
     }
 }
 
@@ -1015,8 +1017,8 @@ where
         self.commit(metadata).await
     }
 
-    async fn into_merkleized(self) -> Result<Self::Merkleized, Error> {
-        Ok(self.into_merkleized())
+    async fn into_merkleized(self, strategy: &impl Strategy) -> Result<Self::Merkleized, Error> {
+        Ok(self.into_merkleized(strategy))
     }
 
     fn steps(&self) -> u64 {
@@ -1043,6 +1045,7 @@ mod test {
     };
     use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_macros::test_traced;
+    use commonware_parallel::Sequential;
     use commonware_runtime::{
         deterministic::{Context, Runner},
         Runner as _,
@@ -1116,7 +1119,7 @@ mod test {
         let metadata = Sha256::fill(3u8);
         let db = db.into_mutable();
         let (db, range) = db.commit(Some(metadata)).await.unwrap();
-        let mut db = db.into_merkleized().await.unwrap();
+        let mut db = db.into_merkleized(&Sequential).await.unwrap();
         assert_eq!(range.start, Location::new_unchecked(1));
         assert_eq!(range.end, Location::new_unchecked(2));
         assert_eq!(db.op_count(), 2); // floor op added
@@ -1142,7 +1145,7 @@ mod test {
             .await
             .unwrap()
             .0
-            .into_merkleized()
+            .into_merkleized(&Sequential)
             .await
             .unwrap()
             .destroy()
@@ -1242,7 +1245,11 @@ mod test {
         assert_eq!(db.op_count(), 9);
         assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(0));
         let (durable_db, _) = db.commit(None).await.unwrap();
-        let mut db = durable_db.into_merkleized().await.unwrap().into_mutable();
+        let mut db = durable_db
+            .into_merkleized(&Sequential)
+            .await
+            .unwrap()
+            .into_mutable();
 
         // Make sure create won't modify active keys.
         assert!(!db.create(key1.clone(), val1).await.unwrap());
@@ -1259,7 +1266,7 @@ mod test {
             .await
             .unwrap()
             .0
-            .into_merkleized()
+            .into_merkleized(&Sequential)
             .await
             .unwrap();
 
@@ -1281,7 +1288,7 @@ mod test {
             .await
             .unwrap()
             .0
-            .into_merkleized()
+            .into_merkleized(&Sequential)
             .await
             .unwrap();
         let op_count = db.op_count();
@@ -1303,7 +1310,7 @@ mod test {
             .await
             .unwrap()
             .0
-            .into_merkleized()
+            .into_merkleized(&Sequential)
             .await
             .unwrap();
 
@@ -1323,7 +1330,7 @@ mod test {
             .await
             .unwrap()
             .0
-            .into_merkleized()
+            .into_merkleized(&Sequential)
             .await
             .unwrap();
 
@@ -1386,7 +1393,12 @@ mod test {
         assert_eq!(db.get(&key3).await.unwrap().unwrap(), val);
 
         let db = db.commit(None).await.unwrap().0;
-        db.into_merkleized().await.unwrap().destroy().await.unwrap();
+        db.into_merkleized(&Sequential)
+            .await
+            .unwrap()
+            .destroy()
+            .await
+            .unwrap();
     }
 
     #[test_traced("WARN")]
@@ -1449,7 +1461,7 @@ mod test {
             assert_eq!(span3.1.next_key, key1);
 
             let db = db.into_mutable().commit(None).await.unwrap().0;
-            db.into_merkleized().destroy().await.unwrap();
+            db.into_merkleized(&Sequential).destroy().await.unwrap();
         });
     }
 
@@ -1484,7 +1496,7 @@ mod test {
             assert_eq!(span2.1.next_key, preceeding_key);
 
             let db = db.into_mutable().commit(None).await.unwrap().0;
-            db.into_merkleized().destroy().await.unwrap();
+            db.into_merkleized(&Sequential).destroy().await.unwrap();
         });
     }
 
@@ -1519,7 +1531,12 @@ mod test {
             let mut batch = db.start_batch();
             batch.delete(key_b.clone()).await.unwrap();
             db.write_batch(batch.into_iter()).await.unwrap();
-            let db = db.commit(None).await.unwrap().0.into_merkleized();
+            let db = db
+                .commit(None)
+                .await
+                .unwrap()
+                .0
+                .into_merkleized(&Sequential);
 
             // Verify B is deleted
             assert!(db.get(&key_b).await.unwrap().is_none());
@@ -1570,7 +1587,7 @@ mod test {
             let span3 = db.get_span(&key3).await.unwrap().unwrap();
             assert_eq!(span3.1.next_key, key2);
             let db = db.commit(None).await.unwrap().0;
-            db.into_merkleized().destroy().await.unwrap();
+            db.into_merkleized(&Sequential).destroy().await.unwrap();
 
             // Create a key that becomes the previous key of a concurrently deleted key.
             let mut db = open_variable_db(context.with_label("second"))
@@ -1593,7 +1610,7 @@ mod test {
             let span2 = db.get_span(&key2).await.unwrap().unwrap();
             assert_eq!(span2.1.next_key, key1);
             let db = db.commit(None).await.unwrap().0;
-            db.into_merkleized().destroy().await.unwrap();
+            db.into_merkleized(&Sequential).destroy().await.unwrap();
         });
     }
 
@@ -1713,7 +1730,7 @@ mod test {
             }
 
             let db = db.into_mutable().commit(None).await.unwrap().0;
-            db.into_merkleized().destroy().await.unwrap();
+            db.into_merkleized(&Sequential).destroy().await.unwrap();
         });
     }
 }

@@ -2,6 +2,7 @@
 
 use arbitrary::Arbitrary;
 use commonware_cryptography::{sha256::Digest, Sha256};
+use commonware_parallel::Sequential;
 use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
 use commonware_storage::{
     mmr::{Location, Proof, StandardHasher as Standard},
@@ -139,7 +140,7 @@ fn fuzz(data: FuzzInput) {
 
                 QmdbOperation::Root => {
                     // root requires merkleization but not commit
-                    let clean_db = db.into_merkleized();
+                    let clean_db = db.into_merkleized(&Sequential);
                     clean_db.root();
                     db = clean_db.into_mutable();
                 }
@@ -149,7 +150,7 @@ fn fuzz(data: FuzzInput) {
 
                     // Only generate proof if QMDB has operations and valid parameters
                     if actual_op_count > 0 {
-                        let clean_db = db.into_merkleized();
+                        let clean_db = db.into_merkleized(&Sequential);
                         let current_root = clean_db.root();
                         // Adjust start_loc to be within valid range
                         // Locations are 0-indexed (first operation is at location 0)
@@ -183,7 +184,7 @@ fn fuzz(data: FuzzInput) {
 
                     // Only generate proof if QMDB has operations and valid parameters
                     if actual_op_count > 0 {
-                        let clean_db = db.into_merkleized();
+                        let clean_db = db.into_merkleized(&Sequential);
                         let current_root = clean_db.root();
                         let adjusted_start = Location::new(*start_loc % *actual_op_count).unwrap();
 
@@ -264,7 +265,7 @@ fn fuzz(data: FuzzInput) {
         }
 
         let (durable_db, _) = db.commit(None).await.expect("final commit should not fail");
-        durable_db.into_merkleized().destroy().await.expect("destroy should not fail");
+        durable_db.into_merkleized(&Sequential).destroy().await.expect("destroy should not fail");
         expected_state.clear();
         all_keys.clear();
     });

@@ -27,6 +27,7 @@ use crate::{
 };
 use commonware_codec::{FixedSize, Read};
 use commonware_cryptography::Hasher;
+use commonware_parallel::Sequential;
 use commonware_runtime::{Clock, Metrics, Storage as RStorage};
 use commonware_utils::Array;
 
@@ -45,8 +46,7 @@ impl<
 where
     Operation<K, V>: Read,
 {
-    /// Initializes a [Db] from the given `config`. Leverages parallel Merkleization to initialize
-    /// the bitmap MMR if a thread pool is provided.
+    /// Initializes a [Db] from the given `config`.
     pub async fn init(
         context: E,
         config: Config<T, <Operation<K, V> as Read>::Cfg>,
@@ -91,7 +91,8 @@ where
         )
         .await?;
 
-        let status = merkleize_grafted_bitmap(&mut hasher, status, &any.log.mmr).await?;
+        let status =
+            merkleize_grafted_bitmap(&mut hasher, status, &any.log.mmr, &Sequential).await?;
 
         // Compute and cache the root
         let cached_root = Some(root(&mut hasher, &status, &any.log.mmr).await?);
@@ -128,6 +129,7 @@ mod test {
     };
     use commonware_cryptography::{sha256::Digest, Hasher as _, Sha256};
     use commonware_macros::test_traced;
+    use commonware_parallel::Sequential;
     use commonware_runtime::{buffer::PoolRef, deterministic, Metrics as _, Runner as _};
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use rand::RngCore;
@@ -210,7 +212,7 @@ mod test {
             let v1 = Sha256::fill(0xA1);
             db.update(k, v1).await.unwrap();
             let (db, _) = db.commit(None).await.unwrap();
-            let db = db.into_merkleized().await.unwrap();
+            let db = db.into_merkleized(&Sequential).await.unwrap();
 
             let (_, op_loc) = db.any.get_with_loc(&k).await.unwrap().unwrap();
             let proof = db.key_value_proof(hasher.inner(), k).await.unwrap();
@@ -239,7 +241,7 @@ mod test {
             let mut db = db.into_mutable();
             db.update(k, v2).await.unwrap();
             let (db, _) = db.commit(None).await.unwrap();
-            let db = db.into_merkleized().await.unwrap();
+            let db = db.into_merkleized(&Sequential).await.unwrap();
             let root = db.root();
 
             // New value should not be verifiable against the old proof.
@@ -380,7 +382,7 @@ mod test {
             .await
             .unwrap();
             let (db, _) = db.commit(None).await.unwrap();
-            let db = db.into_merkleized().await.unwrap();
+            let db = db.into_merkleized(&Sequential).await.unwrap();
             let root = db.root();
 
             // Make sure size-constrained batches of operations are provable from the oldest
@@ -436,7 +438,7 @@ mod test {
                 .await
                 .unwrap();
             let (db, _) = db.commit(None).await.unwrap();
-            let db = db.into_merkleized().await.unwrap();
+            let db = db.into_merkleized(&Sequential).await.unwrap();
             let root = db.root();
 
             // Confirm bad keys produce the expected error.
@@ -533,7 +535,7 @@ mod test {
                 dirty_db.update(k, v).await.unwrap();
                 assert_eq!(dirty_db.get(&k).await.unwrap().unwrap(), v);
                 let (durable_db, _) = dirty_db.commit(None).await.unwrap();
-                db = durable_db.into_merkleized().await.unwrap();
+                db = durable_db.into_merkleized(&Sequential).await.unwrap();
                 let root = db.root();
 
                 // Create a proof for the current value of k.

@@ -3,6 +3,7 @@
 use arbitrary::Arbitrary;
 use commonware_codec::RangeCfg;
 use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
+use commonware_parallel::Sequential;
 use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
 use commonware_storage::{
     mmr::Location,
@@ -170,7 +171,7 @@ fn fuzz(input: FuzzInput) {
                     if let Some(commit_loc) = last_commit_loc {
                         let safe_loc = loc % (commit_loc + 1).as_u64();
                         let safe_loc = Location::new(safe_loc).unwrap();
-                        let mut merkleized_db = db.into_merkleized();
+                        let mut merkleized_db = db.into_merkleized(&Sequential);
                         merkleized_db
                             .prune(safe_loc)
                             .await
@@ -192,7 +193,7 @@ fn fuzz(input: FuzzInput) {
                         let safe_start = Location::new(safe_start).unwrap();
                         let safe_max_ops =
                             NonZeroU64::new((max_ops % MAX_PROOF_OPS).max(1)).unwrap();
-                        let merkleized_db = db.into_merkleized();
+                        let merkleized_db = db.into_merkleized(&Sequential);
                         if let Ok((proof, ops)) =
                             merkleized_db.proof(safe_start, safe_max_ops).await
                         {
@@ -217,7 +218,7 @@ fn fuzz(input: FuzzInput) {
                         let safe_max_ops =
                             NonZeroU64::new((max_ops % MAX_PROOF_OPS).max(1)).unwrap();
 
-                        let merkleized_db = db.into_merkleized();
+                        let merkleized_db = db.into_merkleized(&Sequential);
                         if safe_start >= merkleized_db.oldest_retained_loc() {
                             let _ = merkleized_db
                                 .historical_proof(safe_size, safe_start, safe_max_ops)
@@ -240,7 +241,7 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 ImmutableOperation::Root => {
-                    let clean_db = db.into_merkleized();
+                    let clean_db = db.into_merkleized(&Sequential);
                     let _ = clean_db.root();
                     db = clean_db.into_mutable();
                 }
@@ -248,7 +249,7 @@ fn fuzz(input: FuzzInput) {
         }
 
         let (durable_db, _) = db.commit(None).await.unwrap();
-        let clean_db = durable_db.into_merkleized();
+        let clean_db = durable_db.into_merkleized(&Sequential);
         clean_db.destroy().await.unwrap();
     });
 }

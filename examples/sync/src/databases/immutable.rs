@@ -2,6 +2,7 @@
 
 use crate::{Hasher, Key, Translator, Value};
 use commonware_cryptography::{Hasher as CryptoHasher, Sha256};
+use commonware_parallel::Sequential;
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_storage::{
     mmr::{Location, Proof},
@@ -101,7 +102,7 @@ where
                     let (durable_db, _) = db.commit(metadata).await?;
                     if i == num_ops - 1 {
                         // Last operation - return the clean database
-                        return Ok(durable_db.into_merkleized());
+                        return Ok(durable_db.into_merkleized(&Sequential));
                     }
                     // Not the last operation - continue in mutable state
                     db = durable_db.into_mutable();

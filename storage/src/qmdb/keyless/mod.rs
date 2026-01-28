@@ -15,6 +15,7 @@ use crate::{
     },
 };
 use commonware_cryptography::{DigestOf, Hasher};
+use commonware_parallel::Strategy;
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage};
 use core::{marker::PhantomData, ops::Range};
 use std::num::{NonZeroU64, NonZeroUsize};
@@ -293,9 +294,12 @@ impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher>
         Ok((durable, start_loc..op_count))
     }
 
-    pub fn into_merkleized(self) -> Keyless<E, V, H, Merkleized<H>, Durable> {
+    pub fn into_merkleized(
+        self,
+        strategy: &impl Strategy,
+    ) -> Keyless<E, V, H, Merkleized<H>, Durable> {
         Keyless {
-            journal: self.journal.merkleize(),
+            journal: self.journal.merkleize(strategy),
             last_commit_loc: self.last_commit_loc,
             _durability: PhantomData,
         }
@@ -317,9 +321,12 @@ impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher>
     }
 
     /// Compute the merkle root and transition to the Merkleized, Durable state.
-    pub fn into_merkleized(self) -> Keyless<E, V, H, Merkleized<H>, Durable> {
+    pub fn into_merkleized(
+        self,
+        strategy: &impl Strategy,
+    ) -> Keyless<E, V, H, Merkleized<H>, Durable> {
         Keyless {
-            journal: self.journal.merkleize(),
+            journal: self.journal.merkleize(strategy),
             last_commit_loc: self.last_commit_loc,
             _durability: PhantomData,
         }
@@ -462,7 +469,7 @@ mod test {
             let metadata = vec![3u8; 10];
             let db = db.into_mutable();
             let (durable, _) = db.commit(Some(metadata.clone())).await.unwrap();
-            let db = durable.into_merkleized();
+            let db = durable.into_merkleized(&Sequential);
             assert_eq!(db.op_count(), 2); // 2 commit ops
             assert_eq!(db.get_metadata().await.unwrap(), Some(metadata.clone()));
             assert_eq!(
@@ -501,7 +508,7 @@ mod test {
 
             // Make sure closing/reopening gets us back to the same state.
             let (durable, _) = db.commit(None).await.unwrap();
-            let mut db = durable.into_merkleized();
+            let mut db = durable.into_merkleized(&Sequential);
             assert_eq!(db.op_count(), 4); // 2 appends, 1 commit + 1 initial commit
             assert_eq!(db.get_metadata().await.unwrap(), None);
             assert_eq!(db.get(Location::new_unchecked(3)).await.unwrap(), None); // the commit op
@@ -564,7 +571,7 @@ mod test {
             let mut db = db.into_mutable();
             append_elements(&mut db, &mut context, ELEMENTS).await;
             let (durable, _) = db.commit(None).await.unwrap();
-            let db = durable.into_merkleized();
+            let db = durable.into_merkleized(&Sequential);
             let root = db.root();
 
             // Append more values.
@@ -581,7 +588,7 @@ mod test {
             let mut db = db.into_mutable();
             append_elements(&mut db, &mut context, ELEMENTS).await;
             let (durable, _) = db.commit(None).await.unwrap();
-            let db = durable.into_merkleized();
+            let db = durable.into_merkleized(&Sequential);
             let root = db.root();
 
             // Make sure we can reopen and get back to the same state.
@@ -607,7 +614,7 @@ mod test {
             let mut db = db.into_mutable();
             append_elements(&mut db, &mut context, ELEMENTS).await;
             let (durable, _) = db.commit(None).await.unwrap();
-            let db = durable.into_merkleized();
+            let db = durable.into_merkleized(&Sequential);
             let root = db.root();
             let op_count = db.op_count();
 
@@ -739,7 +746,7 @@ mod test {
                 db.append(v).await.unwrap();
             }
             let (durable, _) = db.commit(None).await.unwrap();
-            let db = durable.into_merkleized();
+            let db = durable.into_merkleized(&Sequential);
 
             // Test that historical proof fails with op_count > number of operations
             assert!(matches!(
@@ -848,7 +855,7 @@ mod test {
                 db.append(v).await.unwrap();
             }
             let (durable, _) = db.commit(None).await.unwrap();
-            let mut db = durable.into_merkleized();
+            let mut db = durable.into_merkleized(&Sequential);
             let root = db.root();
 
             println!("last commit loc: {}", db.last_commit_loc());
@@ -966,7 +973,7 @@ mod test {
                 db.append(v).await.unwrap();
             }
             let (durable, _) = db.commit(None).await.unwrap();
-            let db = durable.into_merkleized();
+            let db = durable.into_merkleized(&Sequential);
             let committed_root = db.root();
             let committed_size = db.op_count();
 
@@ -1009,7 +1016,7 @@ mod test {
 
             // Test with multiple trailing appends to ensure robustness
             let (durable, _) = db.commit(None).await.unwrap();
-            let db = durable.into_merkleized();
+            let db = durable.into_merkleized(&Sequential);
             let new_committed_root = db.root();
             let new_committed_size = db.op_count();
 
@@ -1077,7 +1084,7 @@ mod test {
                 matches!(result, Err(Error::LocationOutOfBounds(loc, size)) if loc == Location::new_unchecked(4) && size == Location::new_unchecked(4))
             );
 
-            let db = durable.into_merkleized();
+            let db = durable.into_merkleized(&Sequential);
             db.destroy().await.unwrap();
         });
     }
@@ -1112,7 +1119,7 @@ mod test {
 
             // Test valid prune (at last commit) - need Clean state for prune
             let (durable, _) = db.commit(None).await.unwrap();
-            let mut db = durable.into_merkleized();
+            let mut db = durable.into_merkleized(&Sequential);
             assert!(db.prune(Location::new_unchecked(3)).await.is_ok());
 
             // Test pruning beyond last commit
@@ -1132,6 +1139,7 @@ mod test {
         kv::tests::assert_send,
         qmdb::store::tests::{assert_log_store, assert_merkleized_store, assert_prunable_store},
     };
+    use commonware_parallel::Sequential;
 
     #[allow(dead_code)]
     fn assert_clean_db_futures_are_send(db: &mut CleanDb, loc: Location) {

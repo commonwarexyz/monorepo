@@ -82,6 +82,7 @@ pub(crate) mod test {
     use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
     use commonware_macros::test_traced;
     use commonware_math::algebra::Random;
+    use commonware_parallel::Sequential;
     use commonware_runtime::{
         buffer::PoolRef,
         deterministic::{self, Context},
@@ -279,7 +280,7 @@ pub(crate) mod test {
             assert!(db.get_span(&key1).await.unwrap().is_none());
             assert!(db.get_span(&key2).await.unwrap().is_none());
             let (db, _) = db.commit(None).await.unwrap();
-            let db = db.into_merkleized();
+            let db = db.into_merkleized(&Sequential);
 
             db.destroy().await.unwrap();
         });
@@ -332,7 +333,7 @@ pub(crate) mod test {
 
             // Test that commit + sync w/ pruning will raise the activity floor.
             let (db, _) = db.commit(None).await.unwrap();
-            let mut db = db.into_merkleized();
+            let mut db = db.into_merkleized(&Sequential);
             db.sync().await.unwrap();
             db.prune(db.inactivity_floor_loc()).await.unwrap();
             assert_eq!(db.op_count(), 4241);
@@ -372,7 +373,7 @@ pub(crate) mod test {
             // are still provable.
             let db = db.into_mutable();
             let (db, _) = db.commit(None).await.unwrap();
-            let db = db.into_merkleized();
+            let db = db.into_merkleized(&Sequential);
             let root = db.root();
             assert!(start_loc < db.inactivity_floor_loc());
 
@@ -403,7 +404,7 @@ pub(crate) mod test {
                 db.update(k, v).await.unwrap();
             }
             let (db, _) = db.commit(None).await.unwrap();
-            let mut db = db.into_merkleized();
+            let mut db = db.into_merkleized(&Sequential);
             db.prune(db.inactivity_floor_loc()).await.unwrap();
             let root = db.root();
             let op_count = db.op_count();
@@ -539,7 +540,7 @@ pub(crate) mod test {
                 db.update(k, v).await.unwrap();
             }
             let (db, _) = db.commit(None).await.unwrap();
-            let db = db.into_merkleized();
+            let db = db.into_merkleized(&Sequential);
             let root = db.root();
 
             // Simulate a failed commit and test that the log replay doesn't leave behind old data.
@@ -586,7 +587,7 @@ pub(crate) mod test {
 
             // Drop & reopen the db, making sure the re-opened db has exactly the same state.
             let (db, _) = db.into_mutable().commit(None).await.unwrap();
-            let mut db = db.into_merkleized();
+            let mut db = db.into_merkleized(&Sequential);
             let root = db.root();
             db.sync().await.unwrap();
             drop(db);
@@ -617,7 +618,7 @@ pub(crate) mod test {
             let ops = create_test_ops(20);
             apply_ops(&mut db, ops.clone()).await;
             let (db, _) = db.commit(None).await.unwrap();
-            let db = db.into_merkleized();
+            let db = db.into_merkleized(&Sequential);
             let mut hasher = Standard::<Sha256>::new();
             let root_hash = db.root();
             let original_op_count = db.op_count();
@@ -648,7 +649,7 @@ pub(crate) mod test {
             let mut db = db.into_mutable();
             apply_ops(&mut db, more_ops.clone()).await;
             let (db, _) = db.commit(None).await.unwrap();
-            let db = db.into_merkleized();
+            let db = db.into_merkleized(&Sequential);
 
             // Historical proof should remain the same even though database has grown
             let (historical_proof, historical_ops) = db
@@ -681,7 +682,7 @@ pub(crate) mod test {
             let ops = create_test_ops(50);
             apply_ops(&mut db, ops.clone()).await;
             let (db, _) = db.commit(None).await.unwrap();
-            let db = db.into_merkleized();
+            let db = db.into_merkleized(&Sequential);
 
             let mut hasher = Standard::<Sha256>::new();
 
@@ -703,7 +704,7 @@ pub(crate) mod test {
                 .into_mutable();
             apply_ops(&mut single_db, ops[0..1].to_vec()).await;
             // Don't commit - this changes the root due to commit operations
-            let single_db = single_db.into_merkleized();
+            let single_db = single_db.into_merkleized(&Sequential);
             let single_root = single_db.root();
 
             assert!(verify_proof(
@@ -750,7 +751,7 @@ pub(crate) mod test {
             let ops = create_test_ops(100);
             apply_ops(&mut db, ops.clone()).await;
             let (db, _) = db.commit(None).await.unwrap();
-            let db = db.into_merkleized();
+            let db = db.into_merkleized(&Sequential);
 
             let mut hasher = Standard::<Sha256>::new();
             let root = db.root();
@@ -768,7 +769,7 @@ pub(crate) mod test {
                 let more_ops = create_test_ops_seeded(100, i);
                 apply_ops(&mut db, more_ops).await;
                 let (clean_db, _) = db.commit(None).await.unwrap();
-                let clean_db = clean_db.into_merkleized();
+                let clean_db = clean_db.into_merkleized(&Sequential);
 
                 let (historical_proof, historical_ops) = clean_db
                     .historical_proof(historical_size, start_loc, max_ops)
@@ -791,7 +792,7 @@ pub(crate) mod test {
             }
 
             let (db, _) = db.commit(None).await.unwrap();
-            db.into_merkleized().destroy().await.unwrap();
+            db.into_merkleized(&Sequential).destroy().await.unwrap();
         });
     }
 
@@ -803,7 +804,7 @@ pub(crate) mod test {
             let ops = create_test_ops(10);
             apply_ops(&mut db, ops).await;
             let (db, _) = db.commit(None).await.unwrap();
-            let db = db.into_merkleized();
+            let db = db.into_merkleized(&Sequential);
 
             let historical_op_count = Location::new_unchecked(5);
             let (proof, ops) = db
@@ -988,7 +989,7 @@ pub(crate) mod test {
             .unwrap();
             let db = insert_random(db.into_mutable(), &mut rng).await;
             let (db, _) = db.commit(None).await.unwrap();
-            db.into_merkleized().destroy().await.unwrap();
+            db.into_merkleized(&Sequential).destroy().await.unwrap();
 
             // Repeat test with TwoCap to test low/no collisions.
             let config = create_generic_test_config::<TwoCap>(seed, TwoCap);
@@ -1000,7 +1001,7 @@ pub(crate) mod test {
             .unwrap();
             let db = insert_random(db.into_mutable(), &mut rng).await;
             let (db, _) = db.commit(None).await.unwrap();
-            db.into_merkleized().destroy().await.unwrap();
+            db.into_merkleized(&Sequential).destroy().await.unwrap();
         });
     }
 

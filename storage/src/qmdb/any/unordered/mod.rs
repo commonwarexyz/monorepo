@@ -21,6 +21,8 @@ use crate::{
 };
 use commonware_codec::{Codec, CodecShared};
 use commonware_cryptography::{DigestOf, Hasher};
+#[cfg(any(test, feature = "test-traits"))]
+use commonware_parallel::Strategy;
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
 use futures::future::try_join_all;
@@ -380,8 +382,8 @@ where
         self.into_mutable()
     }
 
-    async fn into_merkleized(self) -> Result<Self::Merkleized, Error> {
-        Ok(self.into_merkleized())
+    async fn into_merkleized(self, strategy: &impl Strategy) -> Result<Self::Merkleized, Error> {
+        Ok(self.into_merkleized(strategy))
     }
 }
 
@@ -429,8 +431,8 @@ where
         self.commit(metadata).await
     }
 
-    async fn into_merkleized(self) -> Result<Self::Merkleized, Error> {
-        Ok(self.into_merkleized())
+    async fn into_merkleized(self, strategy: &impl Strategy) -> Result<Self::Merkleized, Error> {
+        Ok(self.into_merkleized(strategy))
     }
 
     fn steps(&self) -> u64 {
@@ -454,6 +456,7 @@ pub(super) mod test {
     };
     use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_macros::test_traced;
+    use commonware_parallel::Sequential;
     use commonware_runtime::{
         deterministic::{Context, Runner},
         Runner as _,
@@ -534,7 +537,7 @@ pub(super) mod test {
         assert_eq!(range.end, 2);
         assert_eq!(db.op_count(), 2); // another commit op added
         assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
-        let mut db = db.into_merkleized().await.unwrap();
+        let mut db = db.into_merkleized(&Sequential).await.unwrap();
         let root = db.root();
         assert!(matches!(db.prune(db.inactivity_floor_loc()).await, Ok(())));
 
@@ -564,7 +567,7 @@ pub(super) mod test {
         assert!(db.is_empty());
         assert_eq!(db.op_count() - 1, db.inactivity_floor_loc());
 
-        let db = db.into_merkleized().await.unwrap();
+        let db = db.into_merkleized(&Sequential).await.unwrap();
         db.destroy().await.unwrap();
     }
 
@@ -644,7 +647,7 @@ pub(super) mod test {
 
         // Commit + sync with pruning raises inactivity floor.
         let (db, _) = db.commit(None).await.unwrap();
-        let mut db = db.into_merkleized().await.unwrap();
+        let mut db = db.into_merkleized(&Sequential).await.unwrap();
         db.sync().await.unwrap();
         db.prune(db.inactivity_floor_loc()).await.unwrap();
         assert_eq!(db.op_count(), Location::new_unchecked(1957));
@@ -768,7 +771,7 @@ pub(super) mod test {
             .await
             .unwrap()
             .0
-            .into_merkleized()
+            .into_merkleized(&Sequential)
             .await
             .unwrap();
         assert_eq!(db.op_count(), 14);
@@ -792,7 +795,7 @@ pub(super) mod test {
             .await
             .unwrap()
             .0
-            .into_merkleized()
+            .into_merkleized(&Sequential)
             .await
             .unwrap();
 
@@ -812,7 +815,7 @@ pub(super) mod test {
             .await
             .unwrap()
             .0
-            .into_merkleized()
+            .into_merkleized(&Sequential)
             .await
             .unwrap();
 
@@ -874,7 +877,7 @@ pub(super) mod test {
             .await
             .unwrap()
             .0
-            .into_merkleized()
+            .into_merkleized(&Sequential)
             .await
             .unwrap();
         db.prune(db.inactivity_floor_loc()).await.unwrap();
@@ -993,7 +996,7 @@ pub(super) mod test {
             .await
             .unwrap()
             .0
-            .into_merkleized()
+            .into_merkleized(&Sequential)
             .await
             .unwrap();
         drop(db);
@@ -1026,14 +1029,18 @@ pub(super) mod test {
                 map.insert(k, v);
             }
             let (clean_db, _) = db.commit(Some(metadata_value.clone())).await.unwrap();
-            db = clean_db.into_merkleized().await.unwrap().into_mutable();
+            db = clean_db
+                .into_merkleized(&Sequential)
+                .await
+                .unwrap()
+                .into_mutable();
         }
         assert_eq!(db.get_metadata().await.unwrap(), Some(metadata_value));
         let k = key_at(ELEMENTS - 1, ELEMENTS - 1);
 
         db.delete(k).await.unwrap();
         let (db, _) = db.commit(None).await.unwrap();
-        let db = db.into_merkleized().await.unwrap();
+        let db = db.into_merkleized(&Sequential).await.unwrap();
         assert_eq!(db.get_metadata().await.unwrap(), None);
         assert!(db.get(&k).await.unwrap().is_none());
 

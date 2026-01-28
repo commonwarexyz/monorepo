@@ -1248,6 +1248,7 @@ mod harnesses {
     use super::SyncTestHarness;
     use crate::{qmdb::any::value::VariableEncoding, translator::TwoCap};
     use commonware_cryptography::sha256::Digest;
+    use commonware_parallel::Sequential;
     use commonware_runtime::deterministic::Context;
 
     // ----- Ordered/Fixed -----
@@ -1297,7 +1298,11 @@ mod harnesses {
         ) -> Self::Db {
             let mut db = db.into_mutable();
             crate::qmdb::any::ordered::fixed::test::apply_ops(&mut db, ops).await;
-            db.commit(None::<Digest>).await.unwrap().0.into_merkleized()
+            db.commit(None::<Digest>)
+                .await
+                .unwrap()
+                .0
+                .into_merkleized(&Sequential)
         }
     }
 
@@ -1354,7 +1359,7 @@ mod harnesses {
                 .await
                 .unwrap()
                 .0
-                .into_merkleized()
+                .into_merkleized(&Sequential)
         }
     }
 
@@ -1407,7 +1412,11 @@ mod harnesses {
         ) -> Self::Db {
             let mut db = db.into_mutable();
             crate::qmdb::any::unordered::fixed::test::apply_ops(&mut db, ops).await;
-            db.commit(None::<Digest>).await.unwrap().0.into_merkleized()
+            db.commit(None::<Digest>)
+                .await
+                .unwrap()
+                .0
+                .into_merkleized(&Sequential)
         }
     }
 
@@ -1462,7 +1471,7 @@ mod harnesses {
                 .await
                 .unwrap()
                 .0
-                .into_merkleized()
+                .into_merkleized(&Sequential)
         }
     }
 }

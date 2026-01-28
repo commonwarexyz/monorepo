@@ -17,6 +17,7 @@ use crate::{
 };
 use commonware_codec::Read;
 use commonware_cryptography::{DigestOf, Hasher as CHasher};
+use commonware_parallel::Strategy;
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage as RStorage};
 use commonware_utils::Array;
 use std::{
@@ -335,9 +336,12 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: T
     }
 
     /// Convert to merkleized state.
-    pub fn into_merkleized(self) -> Immutable<E, K, V, H, T, Merkleized<H>, Durable> {
+    pub fn into_merkleized(
+        self,
+        strategy: &impl Strategy,
+    ) -> Immutable<E, K, V, H, T, Merkleized<H>, Durable> {
         Immutable {
-            journal: self.journal.merkleize(),
+            journal: self.journal.merkleize(strategy),
             snapshot: self.snapshot,
             last_commit_loc: self.last_commit_loc,
             _durable: core::marker::PhantomData,
@@ -418,9 +422,12 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: T
     }
 
     /// Convert to merkleized state without committing (for read-only merkle operations).
-    pub fn into_merkleized(self) -> Immutable<E, K, V, H, T, Merkleized<H>, NonDurable> {
+    pub fn into_merkleized(
+        self,
+        strategy: &impl Strategy,
+    ) -> Immutable<E, K, V, H, T, Merkleized<H>, NonDurable> {
         Immutable {
-            journal: self.journal.merkleize(),
+            journal: self.journal.merkleize(strategy),
             snapshot: self.snapshot,
             last_commit_loc: self.last_commit_loc,
             _durable: core::marker::PhantomData,
@@ -585,7 +592,7 @@ pub(super) mod test {
             // Test calling commit on an empty db which should make it (durably) non-empty.
             let db = db.into_mutable();
             let (durable_db, _) = db.commit(None).await.unwrap();
-            let db = durable_db.into_merkleized();
+            let db = durable_db.into_merkleized(&Sequential);
             assert_eq!(db.op_count(), 2); // commit op added
             let root = db.root();
             drop(db);
@@ -621,7 +628,7 @@ pub(super) mod test {
             // Commit the first key.
             let metadata = Some(vec![99, 100]);
             let (durable_db, _) = db.commit(metadata.clone()).await.unwrap();
-            let db = durable_db.into_merkleized();
+            let db = durable_db.into_merkleized(&Sequential);
             assert_eq!(db.get(&k1).await.unwrap().unwrap(), v1);
             assert!(db.get(&k2).await.unwrap().is_none());
             assert_eq!(db.op_count(), 3);
@@ -638,7 +645,7 @@ pub(super) mod test {
 
             // Commit the second key.
             let (durable_db, _) = db.commit(None).await.unwrap();
-            let db = durable_db.into_merkleized();
+            let db = durable_db.into_merkleized(&Sequential);
             assert_eq!(db.op_count(), 5);
             assert_eq!(db.get_metadata().await.unwrap(), None);
 
@@ -684,7 +691,7 @@ pub(super) mod test {
             assert_eq!(db.op_count(), ELEMENTS + 1);
 
             let (durable_db, _) = db.commit(None).await.unwrap();
-            let db = durable_db.into_merkleized();
+            let db = durable_db.into_merkleized(&Sequential);
             assert_eq!(db.op_count(), ELEMENTS + 2);
 
             // Drop & reopen the db, making sure it has exactly the same state.
@@ -735,7 +742,7 @@ pub(super) mod test {
 
             assert_eq!(db.op_count(), ELEMENTS + 1);
             let (durable_db, _) = db.commit(None).await.unwrap();
-            let mut db = durable_db.into_merkleized();
+            let mut db = durable_db.into_merkleized(&Sequential);
             db.sync().await.unwrap();
             let halfway_root = db.root();
 
@@ -780,7 +787,7 @@ pub(super) mod test {
             let v1 = vec![1, 2, 3];
             db.set(k1, v1).await.unwrap();
             let (durable_db, _) = db.commit(None).await.unwrap();
-            let db = durable_db.into_merkleized();
+            let db = durable_db.into_merkleized(&Sequential);
             let first_commit_root = db.root();
 
             // Insert 1000 keys then sync.
@@ -833,7 +840,7 @@ pub(super) mod test {
             assert_eq!(db.op_count(), ELEMENTS + 1);
 
             let (durable_db, _) = db.commit(None).await.unwrap();
-            let mut db = durable_db.into_merkleized();
+            let mut db = durable_db.into_merkleized(&Sequential);
             assert_eq!(db.op_count(), ELEMENTS + 2);
 
             // Prune the db to the first half of the operations.
@@ -935,7 +942,7 @@ pub(super) mod test {
             db.set(k1, v1.clone()).await.unwrap();
             db.set(k2, v2.clone()).await.unwrap();
             let (durable_db, _) = db.commit(None).await.unwrap();
-            let db = durable_db.into_merkleized();
+            let db = durable_db.into_merkleized(&Sequential);
             let mut db = db.into_mutable();
             db.set(k3, v3.clone()).await.unwrap();
 
@@ -944,7 +951,7 @@ pub(super) mod test {
 
             // Test valid prune (at last commit) - need Merkleized state for prune
             let (durable_db, _) = db.commit(None).await.unwrap();
-            let mut db = durable_db.into_merkleized();
+            let mut db = durable_db.into_merkleized(&Sequential);
             assert!(db.prune(Location::new_unchecked(3)).await.is_ok());
 
             // Test pruning beyond last commit
@@ -964,6 +971,7 @@ pub(super) mod test {
         kv::tests::{assert_gettable, assert_send},
         qmdb::store::tests::{assert_log_store, assert_merkleized_store, assert_prunable_store},
     };
+    use commonware_parallel::Sequential;
 
     type MerkleizedDb =
         Immutable<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap, Merkleized<Sha256>>;

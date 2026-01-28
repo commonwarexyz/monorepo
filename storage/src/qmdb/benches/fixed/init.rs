@@ -8,6 +8,7 @@ use crate::fixed::{
     variable_any_cfg, variable_current_cfg, Digest, OCurrentDb, OFixedDb, OVAnyDb, OVCurrentDb,
     UCurrentDb, UFixedDb, UVAnyDb, UVCurrentDb, Variant, VARIANTS,
 };
+use commonware_parallel::Sequential;
 use commonware_runtime::{
     benchmarks::{context, tokio},
     tokio::{Config, Runner},
@@ -44,7 +45,7 @@ where
 {
     let mutable = db.into_mutable();
     let durable = gen_random_kv(mutable, elements, operations, Some(COMMIT_FREQUENCY)).await;
-    let mut clean = durable.into_merkleized().await.unwrap();
+    let mut clean = durable.into_merkleized(&Sequential).await.unwrap();
     clean.prune(clean.inactivity_floor_loc()).await.unwrap();
     clean.sync().await.unwrap();
     drop(clean);

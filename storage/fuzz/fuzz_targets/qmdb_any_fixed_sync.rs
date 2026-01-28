@@ -2,6 +2,7 @@
 
 use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
+use commonware_parallel::Sequential;
 use commonware_runtime::{buffer::PoolRef, deterministic, Metrics, Runner, RwLock};
 use commonware_storage::{
     qmdb::{
@@ -187,11 +188,11 @@ fn fuzz(mut input: FuzzInput) {
                         .commit(Some(FixedBytes::new(commit_id)))
                         .await
                         .expect("Commit should not fail");
-                    db = durable_db.into_merkleized().into_mutable();
+                    db = durable_db.into_merkleized(&Sequential).into_mutable();
                 }
 
                 Operation::Prune => {
-                    let mut merkleized_db = db.into_merkleized();
+                    let mut merkleized_db = db.into_merkleized(&Sequential);
                     merkleized_db
                         .prune(merkleized_db.inactivity_floor_loc())
                         .await
@@ -210,7 +211,7 @@ fn fuzz(mut input: FuzzInput) {
                         .commit(Some(FixedBytes::new(commit_id)))
                         .await
                         .expect("commit should not fail");
-                    let clean_db = durable_db.into_merkleized();
+                    let clean_db = durable_db.into_merkleized(&Sequential);
 
                     let target = sync::Target {
                         root: clean_db.root(),
@@ -253,7 +254,7 @@ fn fuzz(mut input: FuzzInput) {
         }
 
         let db = db.commit(None).await.expect("commit should not fail").0;
-        let db = db.into_merkleized();
+        let db = db.into_merkleized(&Sequential);
         db.destroy().await.expect("Destroy should not fail");
     });
 }

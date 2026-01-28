@@ -23,6 +23,7 @@ use crate::{
 };
 use commonware_codec::{Codec, CodecShared};
 use commonware_cryptography::{Digest, DigestOf, Hasher};
+use commonware_parallel::Strategy;
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
 use core::{num::NonZeroU64, ops::Range};
@@ -286,9 +287,12 @@ where
         }
     }
 
-    pub fn into_merkleized(self) -> Db<E, C, I, H, U, Merkleized<H>, Durable> {
+    pub fn into_merkleized(
+        self,
+        strategy: &impl Strategy,
+    ) -> Db<E, C, I, H, U, Merkleized<H>, Durable> {
         Db {
-            log: self.log.merkleize(),
+            log: self.log.merkleize(strategy),
             inactivity_floor_loc: self.inactivity_floor_loc,
             last_commit_loc: self.last_commit_loc,
             snapshot: self.snapshot,
@@ -311,9 +315,12 @@ where
     H: Hasher,
     Operation<K, V, U>: Codec,
 {
-    pub fn into_merkleized(self) -> Db<E, C, I, H, U, Merkleized<H>, NonDurable> {
+    pub fn into_merkleized(
+        self,
+        strategy: &impl Strategy,
+    ) -> Db<E, C, I, H, U, Merkleized<H>, NonDurable> {
         Db {
-            log: self.log.merkleize(),
+            log: self.log.merkleize(strategy),
             inactivity_floor_loc: self.inactivity_floor_loc,
             last_commit_loc: self.last_commit_loc,
             snapshot: self.snapshot,
