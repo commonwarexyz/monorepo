@@ -202,6 +202,8 @@
 //! });
 //! ```
 
+#[cfg(test)]
+mod conformance;
 mod storage;
 use commonware_runtime::buffer::PoolRef;
 use commonware_utils::Array;
