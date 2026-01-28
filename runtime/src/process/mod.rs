@@ -1,3 +1,3 @@
 //! Process implementations.
 
-commonware_macros::stability_mod!(GAMMA, pub mod metered);
+commonware_macros::stability_mod!(BETA, pub mod metered);

@@ -9,10 +9,11 @@
 /// label. Call `MetricHandle::finish` once the task completes to decrement the
 /// gauge.
 #[cfg(not(any(
+    commonware_stability_GAMMA,
     commonware_stability_DELTA,
     commonware_stability_EPSILON,
     commonware_stability_RESERVED
-)))] // GAMMA
+)))] // BETA
 #[macro_export]
 macro_rules! spawn_metrics {
     // Handle future tasks

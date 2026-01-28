@@ -10,7 +10,7 @@ use std::{
     task::{Context, Poll},
 };
 
-commonware_macros::stability_mod!(GAMMA, pub mod buffer);
+commonware_macros::stability_mod!(BETA, pub mod buffer);
 pub mod signal;
 
 mod handle;

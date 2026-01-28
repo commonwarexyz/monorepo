@@ -6,13 +6,13 @@ stability_scope!(ALPHA {
     pub mod audited;
     pub mod memory;
 });
-stability_scope!(BETA, cfg(feature = "iouring-storage") {
+stability_scope!(ALPHA, cfg(feature = "iouring-storage") {
     pub mod iouring;
 });
-stability_scope!(GAMMA, cfg(all(not(target_arch = "wasm32"), not(feature = "iouring-storage"))) {
+stability_scope!(BETA, cfg(all(not(target_arch = "wasm32"), not(feature = "iouring-storage"))) {
     pub mod tokio;
 });
-stability_scope!(GAMMA {
+stability_scope!(BETA {
     use crate::{Buf, BufMut};
     use commonware_codec::{DecodeExt, FixedSize, Read as CodecRead, Write as CodecWrite};
     use commonware_utils::hex;

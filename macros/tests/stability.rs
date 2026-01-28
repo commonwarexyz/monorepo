@@ -35,21 +35,21 @@ fn test_level_4_items_compile() {
 
 // Test that lower-level items are excluded at higher stability levels
 // These items and their tests are gated together using stability(2)
-#[stability(GAMMA)]
+#[stability(BETA)]
 mod level_2_tests {
     use commonware_macros::stability;
 
-    #[stability(GAMMA)]
+    #[stability(BETA)]
     const fn level_2_fn() -> u8 {
         2
     }
 
-    #[stability(GAMMA)]
+    #[stability(BETA)]
     struct Level2Struct {
         value: u32,
     }
 
-    #[stability(GAMMA)]
+    #[stability(BETA)]
     impl Level2Struct {
         const fn new() -> Self {
             Self { value: 22 }
@@ -89,11 +89,11 @@ fn test_stability_scope_level_4() {
 }
 
 // Test stability_scope! at level 2 (excluded at levels 3, 4)
-#[stability(GAMMA)]
+#[stability(BETA)]
 mod stability_scope_level_2_tests {
     use commonware_macros::stability_scope;
 
-    stability_scope!(GAMMA {
+    stability_scope!(BETA {
         pub const fn scope_level_2_fn() -> u8 {
             22
         }
@@ -142,11 +142,11 @@ fn test_stability_scope_with_cfg() {
 }
 
 // Test stability_scope! with cfg at GAMMA level
-#[stability(GAMMA)]
+#[stability(BETA)]
 mod stability_scope_with_cfg_level_2_tests {
     use commonware_macros::stability_scope;
 
-    stability_scope!(GAMMA, cfg(test) {
+    stability_scope!(BETA, cfg(test) {
         pub const fn cfg_scope_level_2_fn() -> u8 {
             33
         }

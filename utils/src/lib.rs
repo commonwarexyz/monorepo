@@ -17,7 +17,7 @@ use core::{
     time::Duration,
 };
 
-commonware_macros::stability_scope!(GAMMA {
+commonware_macros::stability_scope!(BETA {
     pub mod faults;
     pub use faults::{Faults, N3f1, N5f1};
 
@@ -225,7 +225,7 @@ commonware_macros::stability_scope!(GAMMA {
         }
     }
 });
-commonware_macros::stability_scope!(GAMMA, cfg(feature = "std") {
+commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
     pub mod acknowledgement;
     pub use acknowledgement::Acknowledgement;
 
@@ -261,16 +261,18 @@ commonware_macros::stability_scope!(GAMMA, cfg(feature = "std") {
     }
 });
 #[cfg(not(any(
+    commonware_stability_GAMMA,
     commonware_stability_DELTA,
     commonware_stability_EPSILON,
     commonware_stability_RESERVED
-)))] // GAMMA
+)))] // BETA
 pub mod hex_literal;
 #[cfg(not(any(
+    commonware_stability_GAMMA,
     commonware_stability_DELTA,
     commonware_stability_EPSILON,
     commonware_stability_RESERVED
-)))] // GAMMA
+)))] // BETA
 pub mod vec;
 
 #[inline]

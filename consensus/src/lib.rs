@@ -9,11 +9,11 @@
     html_favicon_url = "https://commonware.xyz/favicon.ico"
 )]
 
-commonware_macros::stability_scope!(BETA {
+commonware_macros::stability_scope!(ALPHA {
     pub mod aggregation;
     pub mod ordered_broadcast;
 });
-commonware_macros::stability_scope!(GAMMA {
+commonware_macros::stability_scope!(BETA {
     use commonware_codec::Codec;
     use commonware_cryptography::{Committable, Digestible};
 
@@ -64,7 +64,7 @@ commonware_macros::stability_scope!(GAMMA {
         fn context(&self) -> Self::Context;
     }
 });
-commonware_macros::stability_scope!(GAMMA, cfg(not(target_arch = "wasm32")) {
+commonware_macros::stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     use commonware_cryptography::Digest;
     use commonware_cryptography::certificate::Scheme;
     use commonware_utils::channels::fallible::OneshotExt;
@@ -198,7 +198,7 @@ commonware_macros::stability_scope!(GAMMA, cfg(not(target_arch = "wasm32")) {
         fn subscribe(&mut self) -> impl Future<Output = (Self::Index, mpsc::Receiver<Self::Index>)> + Send;
     }
 });
-commonware_macros::stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
+commonware_macros::stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
     pub mod application;
 
     /// Application is a minimal interface for standard implementations that operate over a stream

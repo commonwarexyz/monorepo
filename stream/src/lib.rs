@@ -9,7 +9,7 @@
     html_favicon_url = "https://commonware.xyz/favicon.ico"
 )]
 
-commonware_macros::stability_scope!(GAMMA {
+commonware_macros::stability_scope!(BETA {
     pub mod encrypted;
     pub mod utils;
 });

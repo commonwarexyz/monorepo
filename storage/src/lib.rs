@@ -10,20 +10,20 @@
 )]
 #![cfg_attr(not(feature = "std"), no_std)]
 
-#[commonware_macros::stability(BETA)]
+#[commonware_macros::stability(ALPHA)]
 extern crate alloc;
 
-commonware_macros::stability_scope!(BETA {
+commonware_macros::stability_scope!(ALPHA {
     pub mod mmr;
 });
-commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
+commonware_macros::stability_scope!(ALPHA, cfg(feature = "std") {
     pub mod qmdb;
     mod bitmap;
     pub use crate::bitmap::{BitMap as AuthenticatedBitMap, CleanBitMap as CleanAuthenticatedBitMap, DirtyBitMap as DirtyAuthenticatedBitMap};
     pub mod bmt;
     pub mod cache;
 });
-commonware_macros::stability_scope!(GAMMA, cfg(feature = "std") {
+commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
     pub mod archive;
     pub mod freezer;
     pub mod index;

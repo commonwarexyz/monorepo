@@ -199,7 +199,7 @@
 #[cfg(not(feature = "std"))]
 extern crate alloc;
 
-commonware_macros::stability_scope!(GAMMA {
+commonware_macros::stability_scope!(BETA {
     pub mod codec;
     pub mod config;
     pub mod error;

@@ -244,7 +244,7 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
     /// The encrypted message can only be decrypted using the seed signature
     /// from a certificate of the target round (i.e. notarization, finalization,
     /// or nullification).
-    #[stability(BETA)]
+    #[stability(ALPHA)]
     pub fn encrypt<R: CryptoRngCore>(
         &self,
         rng: &mut R,
@@ -267,7 +267,7 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
 /// The encrypted message can only be decrypted using the seed signature
 /// from a certificate of the target round (i.e. notarization, finalization,
 /// or nullification).
-#[stability(BETA)]
+#[stability(ALPHA)]
 pub fn encrypt<R: CryptoRngCore, V: Variant>(
     rng: &mut R,
     identity: V::Public,
@@ -447,7 +447,7 @@ impl<V: Variant> Seed<V> {
     ///
     /// Returns `None` if the ciphertext is invalid or encrypted for a different
     /// round than this seed.
-    #[stability(BETA)]
+    #[stability(ALPHA)]
     pub fn decrypt(&self, ciphertext: &tle::Ciphertext<V>) -> Option<tle::Block> {
         decrypt(self, ciphertext)
     }
@@ -458,7 +458,7 @@ impl<V: Variant> Seed<V> {
 ///
 /// Returns `None` if the ciphertext is invalid or encrypted for a different
 /// round than the given seed.
-#[stability(BETA)]
+#[stability(ALPHA)]
 pub fn decrypt<V: Variant>(seed: &Seed<V>, ciphertext: &tle::Ciphertext<V>) -> Option<tle::Block> {
     tle::decrypt(&seed.signature, ciphertext)
 }

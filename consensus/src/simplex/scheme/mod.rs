@@ -47,7 +47,7 @@ use commonware_utils::union;
 pub mod bls12381_multisig;
 pub mod bls12381_threshold;
 pub mod ed25519;
-commonware_macros::stability_mod!(BETA, pub mod secp256r1);
+commonware_macros::stability_mod!(ALPHA, pub mod secp256r1);
 
 #[cfg(not(target_arch = "wasm32"))]
 pub mod reporter;

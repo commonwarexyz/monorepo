@@ -73,7 +73,7 @@ cfg_if! {
     }
 }
 
-commonware_macros::stability_scope!(GAMMA {
+commonware_macros::stability_scope!(BETA {
     /// A strategy for executing fold operations.
     ///
     /// This trait abstracts over sequential and parallel execution, allowing algorithms
@@ -442,7 +442,7 @@ commonware_macros::stability_scope!(GAMMA {
         }
     }
 });
-commonware_macros::stability_scope!(GAMMA, cfg(feature = "std") {
+commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
     /// A clone-able wrapper around a [rayon]-compatible thread pool.
     pub type ThreadPool = Arc<RThreadPool>;
 

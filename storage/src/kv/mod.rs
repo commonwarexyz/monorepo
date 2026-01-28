@@ -3,8 +3,8 @@
 use commonware_macros::stability;
 use commonware_macros::stability_mod;
 
-stability_mod!(BETA, mod batch);
-#[stability(BETA)]
+stability_mod!(ALPHA, mod batch);
+#[stability(ALPHA)]
 pub use batch::{Batch, Batchable};
 use std::future::Future;
 

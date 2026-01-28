@@ -197,7 +197,7 @@ where
     }
 }
 
-commonware_macros::stability_scope!(GAMMA {
+commonware_macros::stability_scope!(BETA {
     use crate::{SinkOf, StreamOf};
     use commonware_parallel::ThreadPool;
     use rayon::ThreadPoolBuildError;

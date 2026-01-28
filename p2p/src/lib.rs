@@ -13,7 +13,7 @@ use commonware_macros::{stability_mod, stability_scope};
 
 stability_mod!(ALPHA, pub mod simulated);
 
-stability_scope!(GAMMA {
+stability_scope!(BETA {
     use commonware_cryptography::PublicKey;
     use commonware_runtime::{IoBuf, IoBufMut};
     use commonware_utils::ordered::Set;

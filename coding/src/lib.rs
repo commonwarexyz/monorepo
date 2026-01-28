@@ -13,7 +13,7 @@ commonware_macros::stability_scope!(ALPHA {
     mod no_coding;
     pub use no_coding::{Error as NoCodingError, NoCoding};
 });
-commonware_macros::stability_scope!(BETA {
+commonware_macros::stability_scope!(ALPHA {
     use bytes::Buf;
     use commonware_codec::{Codec, FixedSize, Read, Write};
     use commonware_cryptography::Digest;

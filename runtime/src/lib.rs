@@ -49,13 +49,13 @@ stability_scope!(ALPHA {
 stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
     pub mod benchmarks;
 });
-stability_scope!(BETA, cfg(any(feature = "iouring-storage", feature = "iouring-network")) {
+stability_scope!(ALPHA, cfg(any(feature = "iouring-storage", feature = "iouring-network")) {
     mod iouring;
 });
-stability_scope!(GAMMA, cfg(not(target_arch = "wasm32")) {
+stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     pub mod tokio;
 });
-stability_scope!(GAMMA {
+stability_scope!(BETA {
     use commonware_parallel::{Rayon, ThreadPool};
     use rayon::ThreadPoolBuildError;
 

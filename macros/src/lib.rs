@@ -80,7 +80,7 @@ impl Parse for StabilityLevel {
 /// ```rust,ignore
 /// use commonware_macros::stability;
 ///
-/// #[stability(GAMMA)]  // excluded at DELTA, EPSILON
+/// #[stability(BETA)]  // excluded at GAMMA, DELTA, EPSILON
 /// pub struct StableApi { }
 /// ```
 fn level_name(level: u8) -> &'static str {
@@ -110,7 +110,7 @@ pub fn stability(attr: TokenStream, item: TokenStream) -> TokenStream {
     let level = parse_macro_input!(attr as StabilityLevel);
 
     // Generate a single cfg(not(any(...))) for all levels above this item's level.
-    // #[stability(BETA)] expands to #[cfg(not(any(commonware_stability_GAMMA, commonware_stability_DELTA, commonware_stability_EPSILON, commonware_stability_RESERVED)))]
+    // #[stability(ALPHA)] expands to #[cfg(not(any(commonware_stability_BETA, commonware_stability_GAMMA, commonware_stability_DELTA, commonware_stability_EPSILON, commonware_stability_RESERVED)))]
     // RESERVED is always included so that building with --cfg commonware_stability_RESERVED excludes ALL marked items.
     let exclude_names = exclusion_cfg_names(level.value);
 
@@ -154,7 +154,7 @@ impl Parse for StabilityModInput {
 /// ```rust,ignore
 /// use commonware_macros::stability_mod;
 ///
-/// stability_mod!(GAMMA, pub mod stable_module);
+/// stability_mod!(BETA, pub mod stable_module);
 /// ```
 #[proc_macro]
 pub fn stability_mod(input: TokenStream) -> TokenStream {
@@ -227,13 +227,13 @@ impl Parse for StabilityScopeInput {
 /// use commonware_macros::stability_scope;
 ///
 /// // Without cfg predicate
-/// stability_scope!(GAMMA {
+/// stability_scope!(BETA {
 ///     pub mod stable_module;
 ///     pub use crate::stable_module::Item;
 /// });
 ///
 /// // With cfg predicate
-/// stability_scope!(GAMMA, cfg(feature = "std") {
+/// stability_scope!(BETA, cfg(feature = "std") {
 ///     pub mod std_only_module;
 /// });
 /// ```

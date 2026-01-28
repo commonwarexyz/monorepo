@@ -7,7 +7,7 @@
 
 use thiserror::Error;
 
-commonware_macros::stability_mod!(BETA, pub mod authenticated);
+commonware_macros::stability_mod!(ALPHA, pub mod authenticated);
 pub mod contiguous;
 pub mod segmented;
 

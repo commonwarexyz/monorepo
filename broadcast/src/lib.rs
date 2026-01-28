@@ -5,7 +5,7 @@
     html_favicon_url = "https://commonware.xyz/favicon.ico"
 )]
 
-commonware_macros::stability_scope!(GAMMA {
+commonware_macros::stability_scope!(BETA {
     use commonware_codec::Codec;
     use futures::channel::oneshot;
     use std::future::Future;
