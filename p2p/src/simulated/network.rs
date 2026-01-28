@@ -1,4 +1,5 @@
 //! Implementation of a simulated p2p network.
+//! Implementation of a simulated p2p network.
 
 use super::{
     ingress::{self, Oracle},
@@ -121,6 +122,9 @@ pub struct Network<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> 
     // Incremented for each new peer
     next_addr: SocketAddr,
 
+    // If true, peers bind to ephemeral ports and the actual addresses are recorded.
+    ephemeral_ports: bool,
+
     // Channel to receive messages from the oracle
     ingress: mpsc::UnboundedReceiver<ingress::Message<P, E>>,
 
@@ -172,6 +176,24 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
     /// Returns a tuple containing the network instance and the oracle that can
     /// be used to modify the state of the network during context.
     pub fn new(mut context: E, cfg: Config) -> (Self, Oracle<P, E>) {
+        let ip = Ipv4Addr::from_bits(context.next_u32());
+        let mut port = context.next_u32() as u16;
+        if port == 0 {
+            port = 1;
+        }
+        let base_addr = SocketAddr::new(IpAddr::V4(ip), port);
+        Self::new_with_base_addr(context, cfg, base_addr)
+    }
+
+    /// Create a new simulated network with an explicit base socket address.
+    ///
+    /// When the base address uses port 0, each peer binds to an OS-assigned port and the actual
+    /// address is recorded for later dials.
+    pub fn new_with_base_addr(
+        context: E,
+        cfg: Config,
+        base_addr: SocketAddr,
+    ) -> (Self, Oracle<P, E>) {
         let (sender, receiver) = mpsc::unbounded();
         let (oracle_mailbox, oracle_receiver) = UnboundedMailbox::new();
         let sent_messages = Family::<metrics::Message, Counter>::default();
@@ -183,16 +205,15 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
             received_messages.clone(),
         );
 
-        // Start with a pseudo-random IP address to assign sockets to for new peers
-        let next_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::from_bits(context.next_u32())), 0);
-
+        let ephemeral_ports = base_addr.port() == 0;
         (
             Self {
                 context: ContextCell::new(context),
                 max_size: cfg.max_size,
                 disconnect_on_block: cfg.disconnect_on_block,
                 tracked_peer_sets: cfg.tracked_peer_sets,
-                next_addr,
+                next_addr: base_addr,
+                ephemeral_ports,
                 ingress: oracle_receiver,
                 oracle_mailbox: oracle_mailbox.clone(),
                 sender,
@@ -218,6 +239,9 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
     /// number overflows.
     fn get_next_socket(&mut self) -> SocketAddr {
         let result = self.next_addr;
+        if self.ephemeral_ports {
+            return result;
+        }
 
         // Increment the port number, or the IP address if the port number overflows.
         // Allows the ip address to overflow (wrapping).
@@ -492,6 +516,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
             .await;
 
             // Once ready, add to peers
+            let socket = peer.socket;
             self.peers.insert(public_key.clone(), peer);
 
             (socket, true)
@@ -1162,13 +1187,16 @@ impl<P: PublicKey> Peer<P> {
             }
         });
 
+        // Initialize listener and capture the bound address.
+        let listener = context.bind(socket).await.unwrap();
+        let socket = listener.local_addr().unwrap_or(socket);
+
         // Spawn a task that accepts new connections and spawns a task for each connection
         let (ready_tx, ready_rx) = oneshot::channel();
         context
             .with_label("listener")
             .spawn(move |context| async move {
-                // Initialize listener
-                let mut listener = context.bind(socket).await.unwrap();
+                let mut listener = listener;
                 let _ = ready_tx.send(());
 
                 // Continually accept new connections
@@ -1732,8 +1760,21 @@ mod tests {
             let next = network.get_next_socket();
             assert_eq!(next, original);
             let next = network.get_next_socket();
-            original.set_port(1);
-            assert_eq!(next, original);
+            let expected = match original.port().checked_add(1) {
+                Some(port) => {
+                    original.set_port(port);
+                    original
+                }
+                None => {
+                    let ip = match original.ip() {
+                        IpAddr::V4(ipv4) => ipv4,
+                        _ => unreachable!(),
+                    };
+                    let next_ip = Ipv4Addr::to_bits(ip).wrapping_add(1);
+                    SocketAddr::new(IpAddr::V4(Ipv4Addr::from_bits(next_ip)), 0)
+                }
+            };
+            assert_eq!(next, expected);
 
             // Test that the port number overflows correctly
             let max_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(255, 0, 255, 255)), 65535);
