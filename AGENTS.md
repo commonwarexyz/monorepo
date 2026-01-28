@@ -663,7 +663,22 @@ mod tests {
 ### Module Structure
 - Keep `mod.rs` minimal with re-exports
 - Use `cfg_if!` for platform-specific code
-- Always place imports at the top of a module (never inline)
+- Always place imports at the top of a module (never inline within functions)
+
+```rust
+// BAD - inline import inside function
+fn foo() -> usize {
+    use crate::Bar;
+    Bar::get()
+}
+
+// GOOD - import at module top
+use crate::Bar;
+
+fn foo() -> usize {
+    Bar::get()
+}
+```
 
 ### Performance Patterns
 - Prefer `Bytes` over `Vec<u8>` for zero-copy operations

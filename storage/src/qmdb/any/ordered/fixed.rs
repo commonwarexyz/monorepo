@@ -68,7 +68,7 @@ impl<E: Storage + Clock + Metrics, K: Array, V: FixedValue, H: Hasher, T: Transl
 }
 
 #[cfg(test)]
-mod test {
+pub(crate) mod test {
     use super::*;
     use crate::{
         index::Unordered as _,
@@ -114,9 +114,9 @@ mod test {
     }
 
     /// Type aliases for concrete [Db] types used in these unit tests.
-    type CleanAnyTest =
+    pub(crate) type CleanAnyTest =
         Db<deterministic::Context, Digest, Digest, Sha256, TwoCap, Merkleized<Sha256>, Durable>;
-    type MutableAnyTest =
+    pub(crate) type MutableAnyTest =
         Db<deterministic::Context, Digest, Digest, Sha256, TwoCap, Unmerkleized, NonDurable>;
 
     /// Return an `Any` database initialized with a fixed config.
@@ -126,11 +126,11 @@ mod test {
             .unwrap()
     }
 
-    fn create_test_config(seed: u64) -> Config<TwoCap> {
+    pub(crate) fn create_test_config(seed: u64) -> Config<TwoCap> {
         create_generic_test_config::<TwoCap>(seed, TwoCap)
     }
 
-    fn create_generic_test_config<T: Translator>(seed: u64, t: T) -> Config<T> {
+    pub(crate) fn create_generic_test_config<T: Translator>(seed: u64, t: T) -> Config<T> {
         Config {
             mmr_journal_partition: format!("mmr_journal_{seed}"),
             mmr_metadata_partition: format!("mmr_metadata_{seed}"),
@@ -146,7 +146,7 @@ mod test {
     }
 
     /// Create a test database with unique partition names
-    async fn create_test_db(mut context: Context) -> CleanAnyTest {
+    pub(crate) async fn create_test_db(mut context: Context) -> CleanAnyTest {
         let seed = context.next_u64();
         let config = create_test_config(seed);
         CleanAnyTest::init(context, config).await.unwrap()
@@ -155,13 +155,13 @@ mod test {
     /// Create n random operations using the default seed (0). Some portion of
     /// the updates are deletes. create_test_ops(n) is a prefix of
     /// create_test_ops(n') for n < n'.
-    fn create_test_ops(n: usize) -> Vec<Operation<Digest, Digest>> {
+    pub(crate) fn create_test_ops(n: usize) -> Vec<Operation<Digest, Digest>> {
         create_test_ops_seeded(n, 0)
     }
 
     /// Create n random operations using a specific seed. Use different seeds
     /// when you need non-overlapping keys in the same test.
-    fn create_test_ops_seeded(n: usize, seed: u64) -> Vec<Operation<Digest, Digest>> {
+    pub(crate) fn create_test_ops_seeded(n: usize, seed: u64) -> Vec<Operation<Digest, Digest>> {
         let mut rng = test_rng_seeded(seed);
         let mut prev_key = Digest::random(&mut rng);
         let mut ops = Vec::new();
@@ -184,7 +184,7 @@ mod test {
     }
 
     /// Applies the given operations to the database.
-    async fn apply_ops(db: &mut MutableAnyTest, ops: Vec<Operation<Digest, Digest>>) {
+    pub(crate) async fn apply_ops(db: &mut MutableAnyTest, ops: Vec<Operation<Digest, Digest>>) {
         for op in ops {
             match op {
                 Operation::Update(data) => {
@@ -1009,5 +1009,38 @@ mod test {
     #[test_traced("DEBUG")]
     fn test_any_ordered_fixed_batch() {
         batch_tests::test_batch(|ctx| async move { create_test_db(ctx).await.into_mutable() });
+    }
+
+    // FromSyncTestable implementation for from_sync_result tests
+    mod from_sync_testable {
+        use super::*;
+        use crate::{
+            mmr::{iterator::nodes_to_pin, journaled::Mmr, mem::Clean, Position},
+            qmdb::any::sync::tests::FromSyncTestable,
+        };
+        use futures::future::join_all;
+
+        type TestMmr = Mmr<deterministic::Context, Digest, Clean<Digest>>;
+
+        impl FromSyncTestable for CleanAnyTest {
+            type Mmr = TestMmr;
+
+            fn into_log_components(self) -> (Self::Mmr, Self::Journal) {
+                (self.log.mmr, self.log.journal)
+            }
+
+            async fn pinned_nodes_at(&self, pos: Position) -> Vec<Digest> {
+                join_all(nodes_to_pin(pos).map(|p| self.log.mmr.get_node(p)))
+                    .await
+                    .into_iter()
+                    .map(|n| n.unwrap().unwrap())
+                    .collect()
+            }
+
+            fn pinned_nodes_from_map(&self, pos: Position) -> Vec<Digest> {
+                let map = self.log.mmr.get_pinned_nodes();
+                nodes_to_pin(pos).map(|p| *map.get(&p).unwrap()).collect()
+            }
+        }
     }
 }

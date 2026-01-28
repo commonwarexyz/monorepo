@@ -199,6 +199,7 @@ mod tests {
     use crate::{
         archive::{Archive as _, Error, Identifier},
         journal::Error as JournalError,
+        kv::tests::test_key,
         translator::{FourCap, TwoCap},
     };
     use commonware_codec::{DecodeExt, Error as CodecError};
@@ -213,14 +214,6 @@ mod tests {
     const DEFAULT_REPLAY_BUFFER: usize = 4096;
     const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
-
-    fn test_key(key: &str) -> FixedBytes<64> {
-        let mut buf = [0u8; 64];
-        let key = key.as_bytes();
-        assert!(key.len() <= buf.len());
-        buf[..key.len()].copy_from_slice(key);
-        FixedBytes::decode(buf.as_ref()).unwrap()
-    }
 
     #[test_traced]
     fn test_archive_compression_then_none() {

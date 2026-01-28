@@ -75,6 +75,10 @@ impl<S: crate::Stream> crate::Stream for Stream<S> {
         self.metrics.inbound_bandwidth.inc_by(len);
         Ok(bufs)
     }
+
+    fn peek(&self, max_len: u64) -> &[u8] {
+        self.inner.peek(max_len)
+    }
 }
 
 /// Listens for incoming connections using the `inner` listener

@@ -2,7 +2,10 @@
 
 use crate::aws::{deployer_directory, Error, Metadata, DESTROYED_FILE_NAME, METADATA_FILE_NAME};
 use chrono::{DateTime, Local, Utc};
-use std::fs::{self, File};
+use std::{
+    cmp::Reverse,
+    fs::{self, File},
+};
 use tracing::info;
 
 /// Lists all active deployments (created but not destroyed)
@@ -43,7 +46,7 @@ pub fn list() -> Result<(), Error> {
     if active.is_empty() {
         info!("no active deployments");
     } else {
-        active.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        active.sort_by_key(|a| Reverse(a.created_at));
         for d in &active {
             let created_at = DateTime::<Utc>::from_timestamp(d.created_at as i64, 0).map(|dt| {
                 dt.with_timezone(&Local)

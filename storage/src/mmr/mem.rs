@@ -576,7 +576,7 @@ impl<D: Digest> DirtyMmr<D> {
     fn merkleize_serial(&mut self, hasher: &mut impl Hasher<Digest = D>) {
         let mut nodes: Vec<(Position, u32)> = self.state.dirty_nodes.iter().copied().collect();
         self.state.dirty_nodes.clear();
-        nodes.sort_by(|a, b| a.1.cmp(&b.1));
+        nodes.sort_by_key(|a| a.1);
 
         for (pos, height) in nodes {
             let left = pos - (1 << height);
@@ -608,7 +608,7 @@ impl<D: Digest> DirtyMmr<D> {
         let mut nodes: Vec<(Position, u32)> = self.state.dirty_nodes.iter().copied().collect();
         self.state.dirty_nodes.clear();
         // Sort by increasing height.
-        nodes.sort_by(|a, b| a.1.cmp(&b.1));
+        nodes.sort_by_key(|a| a.1);
 
         let mut same_height = Vec::new();
         let mut current_height = 1;

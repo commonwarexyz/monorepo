@@ -80,7 +80,8 @@
 use super::manager::{AppendFactory, Config as ManagerConfig, Manager};
 use crate::journal::Error;
 use commonware_codec::{
-    varint::UInt, Codec, CodecShared, EncodeSize, ReadExt, Write as CodecWrite,
+    varint::{UInt, MAX_U32_VARINT_SIZE},
+    Codec, CodecShared, EncodeSize, ReadExt, Write as CodecWrite,
 };
 use commonware_runtime::{
     buffer::pool::{Append, PoolRef, Replay},
@@ -90,9 +91,6 @@ use futures::stream::{self, Stream, StreamExt};
 use std::{io::Cursor, num::NonZeroUsize};
 use tracing::{trace, warn};
 use zstd::{bulk::compress, decode_all};
-
-/// Maximum size of a varint for u32 (also the minimum useful read size for parsing item headers).
-const MAX_VARINT_SIZE: usize = 5;
 
 /// Configuration for `Journal` storage.
 #[derive(Clone)]
@@ -252,7 +250,7 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
     ) -> Result<(u64, u32, V), Error> {
         // Read varint header (max 5 bytes for u32)
         let (buf, available) = blob
-            .read_up_to(IoBufMut::zeroed(MAX_VARINT_SIZE), offset)
+            .read_up_to(IoBufMut::zeroed(MAX_U32_VARINT_SIZE), offset)
             .await?;
         let buf = buf.freeze();
         let mut cursor = Cursor::new(buf.slice(..available));
@@ -346,7 +344,7 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
                             // Ensure we have enough data for varint header.
                             // ensure() returns Ok(false) if exhausted with fewer bytes,
                             // but we still try to decode from remaining bytes.
-                            match state.replay.ensure(MAX_VARINT_SIZE).await {
+                            match state.replay.ensure(MAX_U32_VARINT_SIZE).await {
                                 Ok(true) => {}
                                 Ok(false) => {
                                     // Reader exhausted - check if buffer is empty
@@ -385,7 +383,7 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
                                     Err(err) => {
                                         // Could be incomplete varint - check if reader exhausted
                                         if state.replay.is_exhausted()
-                                            || before_remaining < MAX_VARINT_SIZE
+                                            || before_remaining < MAX_U32_VARINT_SIZE
                                         {
                                             // Treat as trailing bytes
                                             if state.valid_offset < blob_size
@@ -475,7 +473,7 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
                             }
 
                             // Return batch if we have items and buffer is low
-                            if !batch.is_empty() && state.replay.remaining() < MAX_VARINT_SIZE {
+                            if !batch.is_empty() && state.replay.remaining() < MAX_U32_VARINT_SIZE {
                                 return Some((batch, state));
                             }
                         }

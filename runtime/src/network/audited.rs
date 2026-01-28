@@ -63,6 +63,10 @@ impl<S: crate::Stream> crate::Stream for Stream<S> {
 
         Ok(buf.into())
     }
+
+    fn peek(&self, max_len: u64) -> &[u8] {
+        self.inner.peek(max_len)
+    }
 }
 
 /// A listener that audits network operations.

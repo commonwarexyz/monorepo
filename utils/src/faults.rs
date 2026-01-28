@@ -65,21 +65,6 @@ pub trait Faults {
         assert!(n > 0, "n must not be zero");
         n - Self::max_faults(n)
     }
-
-    /// Compute the quorum size from a slice length.
-    ///
-    /// Convenience method that converts the slice length to `u32` and calls [`Self::quorum`].
-    ///
-    /// # Panics
-    ///
-    /// Panics if the slice is empty or its length exceeds `u32::MAX`.
-    fn quorum_from_slice<T>(slice: &[T]) -> u32 {
-        let n: u32 = slice
-            .len()
-            .try_into()
-            .expect("slice length must be less than u32::MAX");
-        Self::quorum(n)
-    }
 }
 
 /// Fault model requiring `n >= 3f + 1` participants.
@@ -280,20 +265,6 @@ mod tests {
         // Verify invariants
         assert_eq!(n, expected_f + expected_l_quorum); // n = f + q
         assert_eq!(expected_m_quorum, 2 * expected_f + 1); // m = 2f + 1
-    }
-
-    #[test]
-    fn test_quorum_from_slice() {
-        let items = vec![1, 2, 3, 4, 5, 6, 7];
-        assert_eq!(N3f1::quorum_from_slice(&items), 5); // n=7, f=2, q=5
-        assert_eq!(N5f1::quorum_from_slice(&items), 6); // n=7, f=1, q=6
-    }
-
-    #[test]
-    #[should_panic(expected = "n must not be zero")]
-    fn test_quorum_from_empty_slice_panics() {
-        let items: Vec<u8> = vec![];
-        N3f1::quorum_from_slice(&items);
     }
 
     #[test]
