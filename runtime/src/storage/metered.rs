@@ -1,6 +1,9 @@
-use crate::{Buf, Error, IoBufs, IoBufsMut};
+use crate::{
+    telemetry::metrics::histogram::{self, Buckets},
+    Buf, Clock, Error, IoBufs, IoBufsMut,
+};
 use prometheus_client::{
-    metrics::{counter::Counter, gauge::Gauge},
+    metrics::{counter::Counter, gauge::Gauge, histogram::Histogram},
     registry::Registry,
 };
 use std::{
@@ -8,67 +11,106 @@ use std::{
     sync::Arc,
 };
 
-pub struct Metrics {
+pub struct Metrics<C: Clock> {
     pub open_blobs: Gauge,
     pub storage_reads: Counter,
     pub storage_read_bytes: Counter,
     pub storage_writes: Counter,
     pub storage_write_bytes: Counter,
+
+    pub read_at_duration: histogram::Timed<C>,
+    pub write_at_duration: histogram::Timed<C>,
+    pub resize_duration: histogram::Timed<C>,
+    pub sync_duration: histogram::Timed<C>,
 }
 
-impl Metrics {
+impl<C: Clock> Metrics<C> {
     /// Initialize the `Metrics` struct and register the metrics in the provided registry.
-    fn new(registry: &mut Registry) -> Self {
-        let metrics = Self {
-            open_blobs: Gauge::default(),
-            storage_reads: Counter::default(),
-            storage_read_bytes: Counter::default(),
-            storage_writes: Counter::default(),
-            storage_write_bytes: Counter::default(),
-        };
+    fn new(registry: &mut Registry, clock: C) -> Self {
+        let open_blobs = Gauge::default();
+        let storage_reads = Counter::default();
+        let storage_read_bytes = Counter::default();
+        let storage_writes = Counter::default();
+        let storage_write_bytes = Counter::default();
 
-        registry.register(
-            "open_blobs",
-            "Number of open blobs",
-            metrics.open_blobs.clone(),
-        );
+        let read_at_duration = Histogram::new(Buckets::LOCAL);
+        let write_at_duration = Histogram::new(Buckets::LOCAL);
+        let resize_duration = Histogram::new(Buckets::LOCAL);
+        let sync_duration = Histogram::new(Buckets::LOCAL);
+
+        registry.register("open_blobs", "Number of open blobs", open_blobs.clone());
         registry.register(
             "storage_reads",
             "Total number of disk reads",
-            metrics.storage_reads.clone(),
+            storage_reads.clone(),
         );
         registry.register(
             "storage_read_bytes",
             "Total amount of data read from disk",
-            metrics.storage_read_bytes.clone(),
+            storage_read_bytes.clone(),
         );
         registry.register(
             "storage_writes",
             "Total number of disk writes",
-            metrics.storage_writes.clone(),
+            storage_writes.clone(),
         );
         registry.register(
             "storage_write_bytes",
             "Total amount of data written to disk",
-            metrics.storage_write_bytes.clone(),
+            storage_write_bytes.clone(),
+        );
+        registry.register(
+            "read_at_duration",
+            "Histogram for the duration to execute a Blob::read_at operation",
+            read_at_duration.clone(),
+        );
+        registry.register(
+            "write_at_duration",
+            "Histogram for the duration to execute a Blob::write_at operation",
+            write_at_duration.clone(),
+        );
+        registry.register(
+            "resize_duration",
+            "Histogram for the duration to execute a Blob::resize operation",
+            resize_duration.clone(),
+        );
+        registry.register(
+            "sync_duration",
+            "Histogram for the duration to execute a Blob::sync operation",
+            sync_duration.clone(),
         );
 
-        metrics
+        let clock = Arc::new(clock);
+        let read_at_duration = histogram::Timed::new(read_at_duration, clock.clone());
+        let write_at_duration = histogram::Timed::new(write_at_duration, clock.clone());
+        let resize_duration = histogram::Timed::new(resize_duration, clock.clone());
+        let sync_duration = histogram::Timed::new(sync_duration, clock.clone());
+        Self {
+            open_blobs,
+            storage_reads,
+            storage_read_bytes,
+            storage_writes,
+            storage_write_bytes,
+            read_at_duration,
+            write_at_duration,
+            resize_duration,
+            sync_duration,
+        }
     }
 }
 
 /// A wrapper around a `Storage` implementation that tracks metrics.
 #[derive(Clone)]
-pub struct Storage<S> {
+pub struct Storage<S, C: Clock> {
     inner: S,
-    metrics: Arc<Metrics>,
+    metrics: Arc<Metrics<C>>,
 }
 
-impl<S> Storage<S> {
-    pub fn new(inner: S, registry: &mut Registry) -> Self {
+impl<S, C: Clock> Storage<S, C> {
+    pub fn new(inner: S, registry: &mut Registry, clock: C) -> Self {
         Self {
             inner,
-            metrics: Metrics::new(registry).into(),
+            metrics: Metrics::new(registry, clock).into(),
         }
     }
 
@@ -78,8 +120,8 @@ impl<S> Storage<S> {
     }
 }
 
-impl<S: crate::Storage> crate::Storage for Storage<S> {
-    type Blob = Blob<S::Blob>;
+impl<S: crate::Storage, C: Clock> crate::Storage for Storage<S, C> {
+    type Blob = Blob<S::Blob, C>;
 
     async fn open_versioned(
         &self,
@@ -111,37 +153,38 @@ impl<S: crate::Storage> crate::Storage for Storage<S> {
 
 /// A wrapper around a `Blob` implementation that tracks metrics
 #[derive(Clone)]
-pub struct Blob<B> {
+pub struct Blob<B, C: Clock> {
     inner: B,
-    metrics: Arc<MetricsHandle>,
+    metrics: Arc<MetricsHandle<C>>,
 }
 
 /// A wrapper around a `Metrics` implementation that updates
 /// metrics when a blob (that may have been cloned multiple times)
 /// is dropped.
-struct MetricsHandle(Arc<Metrics>);
+struct MetricsHandle<C: Clock>(Arc<Metrics<C>>);
 
-impl Deref for MetricsHandle {
-    type Target = Metrics;
+impl<C: Clock> Deref for MetricsHandle<C> {
+    type Target = Metrics<C>;
 
     fn deref(&self) -> &Self::Target {
         &self.0
     }
 }
 
-impl Drop for MetricsHandle {
+impl<C: Clock> Drop for MetricsHandle<C> {
     fn drop(&mut self) {
         // Only decrement when the last reference to the blob is dropped
         self.0.open_blobs.dec();
     }
 }
 
-impl<B: crate::Blob> crate::Blob for Blob<B> {
+impl<B: crate::Blob, C: Clock> crate::Blob for Blob<B, C> {
     async fn read_at(
         &self,
         offset: u64,
         buf: impl Into<IoBufsMut> + Send,
     ) -> Result<IoBufsMut, Error> {
+        let _timer = self.metrics.read_at_duration.timer();
         let buf = buf.into();
         let read = self.inner.read_at(offset, buf).await?;
         self.metrics.storage_reads.inc();
@@ -150,6 +193,7 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
     }
 
     async fn write_at(&self, offset: u64, buf: impl Into<IoBufs> + Send) -> Result<(), Error> {
+        let _timer = self.metrics.write_at_duration.timer();
         let buf = buf.into();
         let buf_len = buf.remaining();
         self.inner.write_at(offset, buf).await?;
@@ -159,10 +203,12 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
     }
 
     async fn resize(&self, len: u64) -> Result<(), Error> {
+        let _timer = self.metrics.resize_duration.timer();
         self.inner.resize(len).await
     }
 
     async fn sync(&self) -> Result<(), Error> {
+        let _timer = self.metrics.sync_duration.timer();
         self.inner.sync().await
     }
 }
@@ -172,6 +218,7 @@ mod tests {
     use super::*;
     use crate::{
         storage::{memory::Storage as MemoryStorage, tests::run_storage_tests},
+        tokio::RuntimeClock,
         Blob, IoBufMut, Storage as _,
     };
     use prometheus_client::registry::Registry;
@@ -180,7 +227,7 @@ mod tests {
     async fn test_metered_storage() {
         let mut registry = Registry::default();
         let inner = MemoryStorage::default();
-        let storage = Storage::new(inner, &mut registry);
+        let storage = Storage::new(inner, &mut registry, RuntimeClock);
 
         run_storage_tests(storage).await;
     }
@@ -190,7 +237,7 @@ mod tests {
     async fn test_metered_blob_metrics() {
         let mut registry = Registry::default();
         let inner = MemoryStorage::default();
-        let storage = Storage::new(inner, &mut registry);
+        let storage = Storage::new(inner, &mut registry, RuntimeClock);
 
         // Open a blob
         let (blob, _) = storage.open("partition", b"test_blob").await.unwrap();
@@ -246,7 +293,7 @@ mod tests {
     async fn test_metered_blob_multiple_blobs() {
         let mut registry = Registry::default();
         let inner = MemoryStorage::default();
-        let storage = Storage::new(inner, &mut registry);
+        let storage = Storage::new(inner, &mut registry, RuntimeClock);
 
         // Open multiple blobs
         let (blob1, _) = storage.open("partition", b"blob1").await.unwrap();
@@ -287,7 +334,7 @@ mod tests {
     async fn test_cloned_blobs_share_metrics() {
         let mut registry = Registry::default();
         let inner = MemoryStorage::default();
-        let storage = Storage::new(inner, &mut registry);
+        let storage = Storage::new(inner, &mut registry, RuntimeClock);
 
         // Open a blob
         let (blob, _) = storage.open("partition", b"test_blob").await.unwrap();

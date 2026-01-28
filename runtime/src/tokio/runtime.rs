@@ -287,6 +287,7 @@ impl crate::Runner for Runner {
                         iouring_config: Default::default(),
                     }, iouring_registry),
                     runtime_registry,
+                    RuntimeClock,
                 );
             } else {
                 let storage = MeteredStorage::new(
@@ -295,6 +296,7 @@ impl crate::Runner for Runner {
                         self.cfg.maximum_buffer_size,
                     )),
                     runtime_registry,
+                    RuntimeClock,
                 );
             }
         }
@@ -364,9 +366,9 @@ impl crate::Runner for Runner {
 
 cfg_if::cfg_if! {
     if #[cfg(feature = "iouring-storage")] {
-        type Storage = MeteredStorage<IoUringStorage>;
+        type Storage = MeteredStorage<IoUringStorage, RuntimeClock>;
     } else {
-        type Storage = MeteredStorage<TokioStorage>;
+        type Storage = MeteredStorage<TokioStorage, RuntimeClock>;
     }
 }
 
@@ -602,21 +604,15 @@ impl crate::Metrics for Context {
 
 impl Clock for Context {
     fn current(&self) -> SystemTime {
-        SystemTime::now()
+        Clock::current(&RuntimeClock)
     }
 
     fn sleep(&self, duration: Duration) -> impl Future<Output = ()> + Send + 'static {
-        tokio::time::sleep(duration)
+        Clock::sleep(&RuntimeClock, duration)
     }
 
     fn sleep_until(&self, deadline: SystemTime) -> impl Future<Output = ()> + Send + 'static {
-        let now = SystemTime::now();
-        let duration_until_deadline = deadline.duration_since(now).unwrap_or_else(|_| {
-            // Deadline is in the past
-            Duration::from_secs(0)
-        });
-        let target_instant = tokio::time::Instant::now() + duration_until_deadline;
-        tokio::time::sleep_until(target_instant)
+        Clock::sleep_until(&RuntimeClock, deadline)
     }
 }
 
@@ -637,14 +633,46 @@ impl Pacer for Context {
 }
 
 impl GClock for Context {
+    type Instant = <RuntimeClock as GClock>::Instant;
+
+    fn now(&self) -> Self::Instant {
+        GClock::now(&RuntimeClock)
+    }
+}
+
+impl ReasonablyRealtime for Context {}
+
+/// A clock to use when there is no `Context` available.
+#[derive(Clone)]
+pub struct RuntimeClock;
+
+impl ReasonablyRealtime for RuntimeClock {}
+impl GClock for RuntimeClock {
     type Instant = SystemTime;
 
     fn now(&self) -> Self::Instant {
         self.current()
     }
 }
+impl Clock for RuntimeClock {
+    fn current(&self) -> SystemTime {
+        SystemTime::now()
+    }
 
-impl ReasonablyRealtime for Context {}
+    fn sleep(&self, duration: Duration) -> impl Future<Output = ()> + Send + 'static {
+        tokio::time::sleep(duration)
+    }
+
+    fn sleep_until(&self, deadline: SystemTime) -> impl Future<Output = ()> + Send + 'static {
+        let now = SystemTime::now();
+        let duration_until_deadline = deadline.duration_since(now).unwrap_or_else(|_| {
+            // Deadline is in the past
+            Duration::from_secs(0)
+        });
+        let target_instant = tokio::time::Instant::now() + duration_until_deadline;
+        tokio::time::sleep_until(target_instant)
+    }
+}
 
 impl crate::Network for Context {
     type Listener = <Network as crate::Network>::Listener;

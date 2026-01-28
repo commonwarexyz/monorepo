@@ -300,7 +300,7 @@ pub struct Executor {
     metrics: Arc<Metrics>,
     auditor: Arc<Auditor>,
     rng: Mutex<BoxDynRng>,
-    time: Mutex<SystemTime>,
+    time: Arc<Mutex<SystemTime>>,
     tasks: Arc<Tasks>,
     sleeping: Mutex<BinaryHeap<Alarm>>,
     shutdown: Mutex<Stopper>,
@@ -387,7 +387,7 @@ pub struct Checkpoint {
     deadline: Option<SystemTime>,
     auditor: Arc<Auditor>,
     rng: Mutex<BoxDynRng>,
-    time: Mutex<SystemTime>,
+    time: Arc<Mutex<SystemTime>>,
     storage: Arc<Storage>,
     dns: Mutex<HashMap<String, Vec<IpAddr>>>,
     catch_panics: bool,
@@ -798,7 +798,7 @@ impl Tasks {
 }
 
 type Network = MeteredNetwork<AuditedNetwork<DeterministicNetwork>>;
-type Storage = MeteredStorage<AuditedStorage<MemStorage>>;
+type Storage = MeteredStorage<AuditedStorage<MemStorage>, DeterministicClock>;
 
 /// Implementation of [crate::Spawner], [crate::Clock],
 /// [crate::Network], and [crate::Storage] for the `deterministic`
@@ -844,9 +844,12 @@ impl Context {
             .timeout
             .map(|timeout| start_time.checked_add(timeout).expect("timeout overflowed"));
         let auditor = Arc::new(Auditor::default());
+
+        let time = Arc::new(Mutex::new(start_time));
         let storage = MeteredStorage::new(
             AuditedStorage::new(MemStorage::default(), auditor.clone()),
             runtime_registry,
+            DeterministicClock(time.clone()),
         );
         let network = AuditedNetwork::new(DeterministicNetwork::default(), auditor.clone());
         let network = MeteredNetwork::new(network, runtime_registry);
@@ -862,7 +865,7 @@ impl Context {
             metrics,
             auditor,
             rng: Mutex::new(cfg.rng),
-            time: Mutex::new(start_time),
+            time,
             tasks: Arc::new(Tasks::new()),
             sleeping: Mutex::new(BinaryHeap::new()),
             shutdown: Mutex::new(Stopper::default()),
@@ -1388,6 +1391,33 @@ impl Pacer for Context {
             started: false,
             registered: false,
         }
+    }
+}
+
+#[derive(Clone)]
+pub struct DeterministicClock(Arc<Mutex<SystemTime>>);
+
+impl GClock for DeterministicClock {
+    type Instant = SystemTime;
+
+    fn now(&self) -> Self::Instant {
+        *self.0.lock().unwrap()
+    }
+}
+
+impl ReasonablyRealtime for DeterministicClock {}
+
+impl Clock for DeterministicClock {
+    fn current(&self) -> SystemTime {
+        *self.0.lock().unwrap()
+    }
+
+    fn sleep(&self, _duration: Duration) -> impl Future<Output = ()> + Send + 'static {
+        async { unimplemented!("DeterministicTime is only intended to be used for metrics") }
+    }
+
+    fn sleep_until(&self, _deadline: SystemTime) -> impl Future<Output = ()> + Send + 'static {
+        async { unimplemented!("DeterministicTime is only intended to be used for metrics") }
     }
 }
 
