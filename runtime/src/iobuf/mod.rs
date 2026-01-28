@@ -543,7 +543,13 @@ impl IoBufs {
 
     /// Prepend a buffer to the front.
     pub fn prepend(&mut self, buf: IoBuf) {
+        if buf.is_empty() {
+            return;
+        }
         match std::mem::take(self) {
+            Self::Single(existing) if existing.is_empty() => {
+                *self = Self::Single(buf);
+            }
             Self::Single(existing) => {
                 *self = Self::Chunked(VecDeque::from([buf, existing]));
             }
@@ -556,7 +562,13 @@ impl IoBufs {
 
     /// Append a buffer to the back.
     pub fn append(&mut self, buf: IoBuf) {
+        if buf.is_empty() {
+            return;
+        }
         match std::mem::take(self) {
+            Self::Single(existing) if existing.is_empty() => {
+                *self = Self::Single(buf);
+            }
             Self::Single(existing) => {
                 *self = Self::Chunked(VecDeque::from([existing, buf]));
             }
