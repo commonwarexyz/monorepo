@@ -748,13 +748,13 @@ impl PooledBufMut {
     /// - All bytes in the range `[cursor, cursor + len)` are initialized
     /// - `len <= capacity()` (where capacity is also view-relative)
     #[inline]
-    pub unsafe fn set_len(&mut self, len: usize) {
+    pub const unsafe fn set_len(&mut self, len: usize) {
         self.len = self.cursor + len;
     }
 
     /// Clears the buffer, removing all data. Existing capacity is preserved.
     #[inline]
-    pub fn clear(&mut self) {
+    pub const fn clear(&mut self) {
         self.len = self.cursor;
     }
 
@@ -1941,7 +1941,8 @@ mod tests {
         pooled.resize(50, 0xBB);
         Buf::advance(&mut pooled, 20);
 
-        // set_len is view-relative
+        // SAFETY: 40 bytes are initialized (we resized to 50, advanced 20, so 30 readable
+        // but underlying buffer has 50 initialized bytes from cursor position)
         unsafe {
             bytes.set_len(40);
             pooled.set_len(40);
@@ -2106,7 +2107,7 @@ mod tests {
         let pool = BufferPool::new(test_config(page, page, 10), &mut registry);
 
         let mut buf = pool.alloc(100).unwrap();
-        // Write 50 bytes via BufMut
+        // SAFETY: We claim 50 bytes as written (uninitialized, but we don't read them)
         unsafe { buf.advance_mut(50) };
         // Consume 20 bytes via Buf
         Buf::advance(&mut buf, 20);
