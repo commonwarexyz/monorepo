@@ -82,11 +82,11 @@ pub struct SyncConfig<D: Digest> {
 }
 
 /// A MMR backed by a fixed-item-length journal.
-pub struct Mmr<E: RStorage + Clock + Metrics, D: Digest, St: State<D> + Send + Sync> {
+pub struct Mmr<E: RStorage + Clock + Metrics, D: Digest, S: State<D> + Send + Sync = Dirty> {
     /// A memory resident MMR used to build the MMR structure and cache updates. It caches all
     /// un-synced nodes, and the pinned node set as derived from both its own pruning boundary and
     /// the journaled MMR's pruning boundary.
-    mem_mmr: MemMmr<D, St>,
+    mem_mmr: MemMmr<D, S>,
 
     /// Stores all unpruned MMR nodes.
     journal: Journal<E, D>,
@@ -123,7 +123,7 @@ const NODE_PREFIX: u8 = 0;
 /// Prefix used for the key storing the prune_to_pos position in the metadata.
 const PRUNE_TO_POS_PREFIX: u8 = 1;
 
-impl<E: RStorage + Clock + Metrics, D: Digest, St: State<D> + Send + Sync> Mmr<E, D, St> {
+impl<E: RStorage + Clock + Metrics, D: Digest, S: State<D> + Send + Sync> Mmr<E, D, S> {
     /// Return the total number of nodes in the MMR, irrespective of any pruning. The next added
     /// element's position will have this value.
     pub fn size(&self) -> Position {
@@ -202,7 +202,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest, St: State<D> + Send + Sync> Mmr<E
 
     /// Adds the pinned nodes based on `prune_pos` to `mem_mmr`.
     async fn add_extra_pinned_nodes(
-        mem_mmr: &mut MemMmr<D, St>,
+        mem_mmr: &mut MemMmr<D, S>,
         metadata: &Metadata<E, U64, Vec<u8>>,
         journal: &Journal<E, D>,
         prune_pos: Position,

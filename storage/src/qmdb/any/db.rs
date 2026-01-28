@@ -29,7 +29,7 @@ use core::{num::NonZeroU64, ops::Range};
 use tracing::debug;
 
 /// Type alias for the authenticated journal used by [Db].
-pub(crate) type AuthenticatedLog<E, C, H, M> = authenticated::Journal<E, C, H, M>;
+pub(crate) type AuthenticatedLog<E, C, H, M = Merkleized<H>> = authenticated::Journal<E, C, H, M>;
 
 /// An "Any" QMDB implementation generic over ordered/unordered keys and variable/fixed values.
 /// Consider using one of the following specialized variants instead, which may be more ergonomic:
@@ -206,7 +206,7 @@ where
     /// Panics if the log is empty or the last operation is not a commit floor operation.
     pub async fn init_from_log<F>(
         mut index: I,
-        log: AuthenticatedLog<E, C, H, Merkleized<H>>,
+        log: AuthenticatedLog<E, C, H>,
         known_inactivity_floor: Option<Location>,
         mut callback: F,
     ) -> Result<Self, Error>

@@ -39,7 +39,7 @@ pub enum Error {
 /// Mountain Range (MMR). The item at index i in the journal corresponds to the leaf at Location i
 /// in the MMR. This structure enables efficient proofs that an item is included in the journal at a
 /// specific location.
-pub struct Journal<E, C, H, St: State<H::Digest> + Send + Sync>
+pub struct Journal<E, C, H, S: State<H::Digest> + Send + Sync = Dirty>
 where
     E: Storage + Clock + Metrics,
     C: Contiguous<Item: EncodeShared>,
@@ -47,7 +47,7 @@ where
 {
     /// MMR where each leaf is an item digest.
     /// Invariant: leaf i corresponds to item i in the journal.
-    pub(crate) mmr: Mmr<E, H::Digest, St>,
+    pub(crate) mmr: Mmr<E, H::Digest, S>,
 
     /// Journal of items.
     /// Invariant: item i corresponds to leaf i in the MMR.
@@ -56,12 +56,12 @@ where
     pub(crate) hasher: StandardHasher<H>,
 }
 
-impl<E, C, H, St> Journal<E, C, H, St>
+impl<E, C, H, S> Journal<E, C, H, S>
 where
     E: Storage + Clock + Metrics,
     C: Contiguous<Item: EncodeShared>,
     H: Hasher,
-    St: State<DigestOf<H>> + Send + Sync,
+    S: State<DigestOf<H>> + Send + Sync,
 {
     /// Returns the number of items in the journal.
     pub fn size(&self) -> Location {
@@ -469,12 +469,12 @@ where
     }
 }
 
-impl<E, C, H, St> Contiguous for Journal<E, C, H, St>
+impl<E, C, H, S> Contiguous for Journal<E, C, H, S>
 where
     E: Storage + Clock + Metrics,
     C: MutableContiguous<Item: EncodeShared>,
     H: Hasher,
-    St: State<DigestOf<H>> + Send + Sync,
+    S: State<DigestOf<H>> + Send + Sync,
 {
     type Item = C::Item;
 

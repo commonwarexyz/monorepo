@@ -55,6 +55,8 @@ impl<D: Digest> RangeProof<D> {
 
         let (last_chunk, next_bit) = status.last_chunk();
         let partial_chunk_digest = if next_bit != CleanBitMap::<E, D, N>::CHUNK_SIZE_BITS {
+            // Last chunk is incomplete, meaning it's not yet in the MMR and needs to be included
+            // in the proof.
             hasher.update(last_chunk);
             Some(hasher.finalize())
         } else {

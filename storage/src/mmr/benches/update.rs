@@ -13,7 +13,7 @@ use rand::{rngs::StdRng, Rng, SeedableRng};
 use std::{collections::HashMap, num::NonZeroUsize, time::Instant};
 
 #[derive(PartialEq, Debug, Clone, Copy)]
-enum BenchStrategy {
+enum Strategy {
     NoBatching,
     BatchedSerial,
     BatchedParallel,
@@ -36,9 +36,9 @@ fn bench_update(c: &mut Criterion) {
     for updates in [1_000_000, 100_000] {
         for leaves in N_LEAVES {
             for strategy in [
-                BenchStrategy::NoBatching,
-                BenchStrategy::BatchedSerial,
-                BenchStrategy::BatchedParallel,
+                Strategy::NoBatching,
+                Strategy::BatchedSerial,
+                Strategy::BatchedParallel,
             ] {
                 c.bench_function(
                     &format!(
@@ -53,7 +53,7 @@ fn bench_update(c: &mut Criterion) {
                             let mut hasher = StandardHasher::<Sha256>::new();
                             let mut mmr = CleanMmr::new(&mut hasher);
                             let pool = match strategy {
-                                BenchStrategy::BatchedParallel => {
+                                Strategy::BatchedParallel => {
                                     let ctx = context::get::<commonware_runtime::tokio::Context>();
                                     let pool = ctx.create_pool(THREADS).unwrap();
                                     Some(pool)
@@ -88,12 +88,12 @@ fn bench_update(c: &mut Criterion) {
                             }
 
                             match strategy {
-                                BenchStrategy::NoBatching => {
+                                Strategy::NoBatching => {
                                     for (loc, element) in leaf_map {
                                         mmr.update_leaf(&mut h, loc, &element).unwrap();
                                     }
                                 }
-                                BenchStrategy::BatchedSerial => {
+                                Strategy::BatchedSerial => {
                                     let updates: Vec<(
                                         Location,
                                         commonware_cryptography::sha256::Digest,
@@ -102,7 +102,7 @@ fn bench_update(c: &mut Criterion) {
                                     mmr.update_leaves(&mut h, &Sequential, &updates).unwrap();
                                     mmr.merkleize(&mut h, &Sequential);
                                 }
-                                BenchStrategy::BatchedParallel => {
+                                Strategy::BatchedParallel => {
                                     let updates: Vec<(
                                         Location,
                                         commonware_cryptography::sha256::Digest,
