@@ -146,7 +146,6 @@ fn test_config(test_name: &str) -> Config<TwoCap, (commonware_codec::RangeCfg<us
         log_compression: None,
         log_codec_config: ((0..=100000).into(), ()),
         translator: TwoCap,
-        strategy: commonware_parallel::Sequential,
         buffer_pool: PoolRef::new(PAGE_SIZE, NZUsize!(1)),
     }
 }

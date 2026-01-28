@@ -5,8 +5,7 @@
 //! they perform.
 
 use commonware_cryptography::{Hasher, Sha256};
-use commonware_parallel::{Rayon, Sequential, Strategy};
-use commonware_runtime::{buffer::PoolRef, tokio::Context, RayonPoolSpawner};
+use commonware_runtime::{buffer::PoolRef, tokio::Context};
 use commonware_storage::{
     kv::{Deletable as _, Updatable as _},
     qmdb::{
@@ -95,31 +94,21 @@ const DELETE_FREQUENCY: u32 = 10;
 /// Default write buffer size.
 const WRITE_BUFFER_SIZE: NonZeroUsize = NZUsize!(1024);
 
-/// Clean (Merkleized, Durable) Db type aliases for Any databases (Sequential).
-type UFixedDbSeq = UFixed<Context, Digest, Digest, Sha256, EightCap, Sequential>;
-type OFixedDbSeq = OFixed<Context, Digest, Digest, Sha256, EightCap, Sequential>;
-type UVAnyDbSeq = UVariable<Context, Digest, Digest, Sha256, EightCap, Sequential>;
-type OVAnyDbSeq = OVariable<Context, Digest, Digest, Sha256, EightCap, Sequential>;
+/// Clean (Merkleized, Durable) Db type aliases for Any databases.
+type UFixedDb = UFixed<Context, Digest, Digest, Sha256, EightCap>;
+type OFixedDb = OFixed<Context, Digest, Digest, Sha256, EightCap>;
+type UVAnyDb = UVariable<Context, Digest, Digest, Sha256, EightCap>;
+type OVAnyDb = OVariable<Context, Digest, Digest, Sha256, EightCap>;
 
-type UCurrentDbSeq = UCurrent<Context, Digest, Digest, Sha256, EightCap, CHUNK_SIZE, Sequential>;
-type OCurrentDbSeq = OCurrent<Context, Digest, Digest, Sha256, EightCap, CHUNK_SIZE, Sequential>;
-type UVCurrentDbSeq = UVCurrent<Context, Digest, Digest, Sha256, EightCap, CHUNK_SIZE, Sequential>;
-type OVCurrentDbSeq = OVCurrent<Context, Digest, Digest, Sha256, EightCap, CHUNK_SIZE, Sequential>;
-
-/// Clean (Merkleized, Durable) Db type aliases for Any databases (Rayon).
-type UFixedDbPar = UFixed<Context, Digest, Digest, Sha256, EightCap, Rayon>;
-type OFixedDbPar = OFixed<Context, Digest, Digest, Sha256, EightCap, Rayon>;
-type UVAnyDbPar = UVariable<Context, Digest, Digest, Sha256, EightCap, Rayon>;
-type OVAnyDbPar = OVariable<Context, Digest, Digest, Sha256, EightCap, Rayon>;
-
-type UCurrentDbPar = UCurrent<Context, Digest, Digest, Sha256, EightCap, CHUNK_SIZE, Rayon>;
-type OCurrentDbPar = OCurrent<Context, Digest, Digest, Sha256, EightCap, CHUNK_SIZE, Rayon>;
-type UVCurrentDbPar = UVCurrent<Context, Digest, Digest, Sha256, EightCap, CHUNK_SIZE, Rayon>;
-type OVCurrentDbPar = OVCurrent<Context, Digest, Digest, Sha256, EightCap, CHUNK_SIZE, Rayon>;
+/// Clean (Merkleized, Durable) Db type aliases for Current databases.
+type UCurrentDb = UCurrent<Context, Digest, Digest, Sha256, EightCap, CHUNK_SIZE>;
+type OCurrentDb = OCurrent<Context, Digest, Digest, Sha256, EightCap, CHUNK_SIZE>;
+type UVCurrentDb = UVCurrent<Context, Digest, Digest, Sha256, EightCap, CHUNK_SIZE>;
+type OVCurrentDb = OVCurrent<Context, Digest, Digest, Sha256, EightCap, CHUNK_SIZE>;
 
 /// Configuration for any QMDB.
-fn any_cfg<S: Strategy>(strategy: S) -> AConfig<EightCap, S> {
-    AConfig::<EightCap, S> {
+fn any_cfg() -> AConfig<EightCap> {
+    AConfig::<EightCap> {
         mmr_journal_partition: format!("journal_{PARTITION_SUFFIX}"),
         mmr_metadata_partition: format!("metadata_{PARTITION_SUFFIX}"),
         mmr_items_per_blob: ITEMS_PER_BLOB,
@@ -128,14 +117,13 @@ fn any_cfg<S: Strategy>(strategy: S) -> AConfig<EightCap, S> {
         log_items_per_blob: ITEMS_PER_BLOB,
         log_write_buffer: WRITE_BUFFER_SIZE,
         translator: EightCap,
-        strategy,
         buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
     }
 }
 
 /// Configuration for current QMDB.
-fn current_cfg<S: Strategy>(strategy: S) -> CConfig<EightCap, S> {
-    CConfig::<EightCap, S> {
+fn current_cfg() -> CConfig<EightCap> {
+    CConfig::<EightCap> {
         mmr_journal_partition: format!("journal_{PARTITION_SUFFIX}"),
         mmr_metadata_partition: format!("metadata_{PARTITION_SUFFIX}"),
         mmr_items_per_blob: ITEMS_PER_BLOB,
@@ -145,13 +133,12 @@ fn current_cfg<S: Strategy>(strategy: S) -> CConfig<EightCap, S> {
         log_write_buffer: WRITE_BUFFER_SIZE,
         bitmap_metadata_partition: format!("bitmap_metadata_{PARTITION_SUFFIX}"),
         translator: EightCap,
-        strategy,
         buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
     }
 }
 
-fn variable_any_cfg<S: Strategy>(strategy: S) -> VariableAnyConfig<EightCap, (), S> {
-    VariableAnyConfig::<EightCap, (), S> {
+fn variable_any_cfg() -> VariableAnyConfig<EightCap, ()> {
+    VariableAnyConfig::<EightCap, ()> {
         mmr_journal_partition: format!("journal_{PARTITION_SUFFIX}"),
         mmr_metadata_partition: format!("metadata_{PARTITION_SUFFIX}"),
         mmr_items_per_blob: ITEMS_PER_BLOB,
@@ -162,14 +149,13 @@ fn variable_any_cfg<S: Strategy>(strategy: S) -> VariableAnyConfig<EightCap, (),
         log_write_buffer: WRITE_BUFFER_SIZE,
         log_compression: None,
         translator: EightCap,
-        strategy,
         buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
     }
 }
 
 /// Configuration for variable current QMDB.
-fn variable_current_cfg<S: Strategy>(strategy: S) -> VariableCurrentConfig<EightCap, (), S> {
-    VariableCurrentConfig::<EightCap, (), S> {
+fn variable_current_cfg() -> VariableCurrentConfig<EightCap, ()> {
+    VariableCurrentConfig::<EightCap, ()> {
         mmr_journal_partition: format!("journal_{PARTITION_SUFFIX}"),
         mmr_metadata_partition: format!("metadata_{PARTITION_SUFFIX}"),
         mmr_items_per_blob: ITEMS_PER_BLOB,
@@ -181,149 +167,52 @@ fn variable_current_cfg<S: Strategy>(strategy: S) -> VariableCurrentConfig<Eight
         log_compression: None,
         bitmap_metadata_partition: format!("bitmap_metadata_{PARTITION_SUFFIX}"),
         translator: EightCap,
-        strategy,
         buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
     }
 }
 
-/// Get an unordered fixed Any QMDB instance in clean state (Sequential).
-async fn get_any_unordered_fixed_seq(ctx: Context) -> UFixedDbSeq {
-    UFixedDbSeq::init(ctx, any_cfg(Sequential)).await.unwrap()
+/// Get an unordered fixed Any QMDB instance in clean state.
+async fn get_any_unordered_fixed(ctx: Context) -> UFixedDb {
+    UFixedDb::init(ctx, any_cfg()).await.unwrap()
 }
 
-/// Get an unordered fixed Any QMDB instance in clean state (Parallel).
-async fn get_any_unordered_fixed_par(ctx: Context) -> UFixedDbPar {
-    let pool = ctx.clone().create_pool(THREADS).unwrap();
-    UFixedDbPar::init(ctx, any_cfg(Rayon::with_pool(pool)))
+/// Get an ordered fixed Any QMDB instance in clean state.
+async fn get_any_ordered_fixed(ctx: Context) -> OFixedDb {
+    OFixedDb::init(ctx, any_cfg()).await.unwrap()
+}
+
+/// Get an unordered variable Any QMDB instance in clean state.
+async fn get_any_unordered_variable(ctx: Context) -> UVAnyDb {
+    UVAnyDb::init(ctx, variable_any_cfg()).await.unwrap()
+}
+
+/// Get an ordered variable Any QMDB instance in clean state.
+async fn get_any_ordered_variable(ctx: Context) -> OVAnyDb {
+    OVAnyDb::init(ctx, variable_any_cfg()).await.unwrap()
+}
+
+/// Get an unordered current QMDB instance.
+async fn get_current_unordered_fixed(ctx: Context) -> UCurrentDb {
+    UCurrentDb::init(ctx, current_cfg()).await.unwrap()
+}
+
+/// Get an ordered current QMDB instance.
+async fn get_current_ordered_fixed(ctx: Context) -> OCurrentDb {
+    OCurrentDb::init(ctx, current_cfg()).await.unwrap()
+}
+
+/// Get an unordered variable current QMDB instance.
+async fn get_current_unordered_variable(ctx: Context) -> UVCurrentDb {
+    UVCurrentDb::init(ctx, variable_current_cfg())
         .await
         .unwrap()
 }
 
-/// Get an ordered fixed Any QMDB instance in clean state (Sequential).
-async fn get_any_ordered_fixed_seq(ctx: Context) -> OFixedDbSeq {
-    OFixedDbSeq::init(ctx, any_cfg(Sequential)).await.unwrap()
-}
-
-/// Get an ordered fixed Any QMDB instance in clean state (Parallel).
-async fn get_any_ordered_fixed_par(ctx: Context) -> OFixedDbPar {
-    let pool = ctx.clone().create_pool(THREADS).unwrap();
-    OFixedDbPar::init(ctx, any_cfg(Rayon::with_pool(pool)))
+/// Get an ordered variable current QMDB instance.
+async fn get_current_ordered_variable(ctx: Context) -> OVCurrentDb {
+    OVCurrentDb::init(ctx, variable_current_cfg())
         .await
         .unwrap()
-}
-
-/// Get an unordered variable Any QMDB instance in clean state (Sequential).
-async fn get_any_unordered_variable_seq(ctx: Context) -> UVAnyDbSeq {
-    UVAnyDbSeq::init(ctx, variable_any_cfg(Sequential))
-        .await
-        .unwrap()
-}
-
-/// Get an unordered variable Any QMDB instance in clean state (Parallel).
-async fn get_any_unordered_variable_par(ctx: Context) -> UVAnyDbPar {
-    let pool = ctx.clone().create_pool(THREADS).unwrap();
-    UVAnyDbPar::init(ctx, variable_any_cfg(Rayon::with_pool(pool)))
-        .await
-        .unwrap()
-}
-
-/// Get an ordered variable Any QMDB instance in clean state (Sequential).
-async fn get_any_ordered_variable_seq(ctx: Context) -> OVAnyDbSeq {
-    OVAnyDbSeq::init(ctx, variable_any_cfg(Sequential))
-        .await
-        .unwrap()
-}
-
-/// Get an ordered variable Any QMDB instance in clean state (Parallel).
-async fn get_any_ordered_variable_par(ctx: Context) -> OVAnyDbPar {
-    let pool = ctx.clone().create_pool(THREADS).unwrap();
-    OVAnyDbPar::init(ctx, variable_any_cfg(Rayon::with_pool(pool)))
-        .await
-        .unwrap()
-}
-
-/// Get an unordered current QMDB instance (Sequential).
-async fn get_current_unordered_fixed_seq(ctx: Context) -> UCurrentDbSeq {
-    UCurrent::<_, _, _, Sha256, EightCap, CHUNK_SIZE, Sequential>::init(
-        ctx,
-        current_cfg(Sequential),
-    )
-    .await
-    .unwrap()
-}
-
-/// Get an unordered current QMDB instance (Parallel).
-async fn get_current_unordered_fixed_par(ctx: Context) -> UCurrentDbPar {
-    let pool = ctx.clone().create_pool(THREADS).unwrap();
-    UCurrent::<_, _, _, Sha256, EightCap, CHUNK_SIZE, Rayon>::init(
-        ctx,
-        current_cfg(Rayon::with_pool(pool)),
-    )
-    .await
-    .unwrap()
-}
-
-/// Get an ordered current QMDB instance (Sequential).
-async fn get_current_ordered_fixed_seq(ctx: Context) -> OCurrentDbSeq {
-    OCurrent::<_, _, _, Sha256, EightCap, CHUNK_SIZE, Sequential>::init(
-        ctx,
-        current_cfg(Sequential),
-    )
-    .await
-    .unwrap()
-}
-
-/// Get an ordered current QMDB instance (Parallel).
-async fn get_current_ordered_fixed_par(ctx: Context) -> OCurrentDbPar {
-    let pool = ctx.clone().create_pool(THREADS).unwrap();
-    OCurrent::<_, _, _, Sha256, EightCap, CHUNK_SIZE, Rayon>::init(
-        ctx,
-        current_cfg(Rayon::with_pool(pool)),
-    )
-    .await
-    .unwrap()
-}
-
-/// Get an unordered variable current QMDB instance (Sequential).
-async fn get_current_unordered_variable_seq(ctx: Context) -> UVCurrentDbSeq {
-    UVCurrent::<_, _, _, Sha256, EightCap, CHUNK_SIZE, Sequential>::init(
-        ctx,
-        variable_current_cfg(Sequential),
-    )
-    .await
-    .unwrap()
-}
-
-/// Get an unordered variable current QMDB instance (Parallel).
-async fn get_current_unordered_variable_par(ctx: Context) -> UVCurrentDbPar {
-    let pool = ctx.clone().create_pool(THREADS).unwrap();
-    UVCurrent::<_, _, _, Sha256, EightCap, CHUNK_SIZE, Rayon>::init(
-        ctx,
-        variable_current_cfg(Rayon::with_pool(pool)),
-    )
-    .await
-    .unwrap()
-}
-
-/// Get an ordered variable current QMDB instance (Sequential).
-async fn get_current_ordered_variable_seq(ctx: Context) -> OVCurrentDbSeq {
-    OVCurrent::<_, _, _, Sha256, EightCap, CHUNK_SIZE, Sequential>::init(
-        ctx,
-        variable_current_cfg(Sequential),
-    )
-    .await
-    .unwrap()
-}
-
-/// Get an ordered variable current QMDB instance (Parallel).
-async fn get_current_ordered_variable_par(ctx: Context) -> OVCurrentDbPar {
-    let pool = ctx.clone().create_pool(THREADS).unwrap();
-    OVCurrent::<_, _, _, Sha256, EightCap, CHUNK_SIZE, Rayon>::init(
-        ctx,
-        variable_current_cfg(Rayon::with_pool(pool)),
-    )
-    .await
-    .unwrap()
 }
 
 /// Generate a large db with random data. The function seeds the db with exactly `num_elements`

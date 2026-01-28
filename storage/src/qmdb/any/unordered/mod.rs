@@ -21,8 +21,6 @@ use crate::{
 };
 use commonware_codec::{Codec, CodecShared};
 use commonware_cryptography::{DigestOf, Hasher};
-#[cfg(any(test, feature = "test-traits"))]
-use commonware_parallel::Strategy;
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
 use futures::future::try_join_all;
@@ -40,10 +38,9 @@ impl<
         C: Contiguous<Item = Operation<K, V>>,
         I: Index<Value = Location>,
         H: Hasher,
-        S: commonware_parallel::Strategy,
         M: MerkleizationState<DigestOf<H>> + Send + Sync,
         D: DurabilityState,
-    > Db<E, C, I, H, Update<K, V>, S, M, D>
+    > Db<E, C, I, H, Update<K, V>, M, D>
 where
     Operation<K, V>: Codec,
 {
@@ -84,8 +81,7 @@ impl<
         C: MutableContiguous<Item = Operation<K, V>>,
         I: Index<Value = Location>,
         H: Hasher,
-        S: commonware_parallel::Strategy,
-    > Db<E, C, I, H, Update<K, V>, S, Unmerkleized, NonDurable>
+    > Db<E, C, I, H, Update<K, V>, Unmerkleized, NonDurable>
 where
     Operation<K, V>: Codec,
     V::Value: Send + Sync,
@@ -242,16 +238,15 @@ impl<
         O: OperationTrait + Codec + Committable + Send + Sync,
         I: Index<Value = Location>,
         H: Hasher,
-        S: commonware_parallel::Strategy,
         U: Send + Sync,
-    > Db<E, C, I, H, U, S, Merkleized<H>, Durable>
+    > Db<E, C, I, H, U, Merkleized<H>, Durable>
 {
     /// Returns an [Db] initialized directly from the given components. The log is
     /// replayed from `inactivity_floor_loc` to build the snapshot, and that value is used as the
     /// inactivity floor. The last operation is assumed to be a commit.
     pub(crate) async fn from_components(
         inactivity_floor_loc: Location,
-        log: AuthenticatedLog<E, C, H, Merkleized<H>, S>,
+        log: AuthenticatedLog<E, C, H, Merkleized<H>>,
         mut snapshot: I,
     ) -> Result<Self, Error> {
         let active_keys =
@@ -278,10 +273,9 @@ impl<
         C: Contiguous<Item = Operation<K, V>>,
         I: Index<Value = Location> + Send + Sync + 'static,
         H: Hasher,
-        S: commonware_parallel::Strategy,
         M: MerkleizationState<DigestOf<H>> + Send + Sync,
         D: DurabilityState,
-    > kv::Gettable for Db<E, C, I, H, Update<K, V>, S, M, D>
+    > kv::Gettable for Db<E, C, I, H, Update<K, V>, M, D>
 where
     Operation<K, V>: Codec,
     V::Value: Send + Sync,
@@ -302,8 +296,7 @@ impl<
         C: MutableContiguous<Item = Operation<K, V>>,
         I: Index<Value = Location> + Send + Sync + 'static,
         H: Hasher,
-        S: commonware_parallel::Strategy,
-    > kv::Updatable for Db<E, C, I, H, Update<K, V>, S, Unmerkleized, NonDurable>
+    > kv::Updatable for Db<E, C, I, H, Update<K, V>, Unmerkleized, NonDurable>
 where
     Operation<K, V>: Codec,
     V::Value: Send + Sync,
@@ -320,8 +313,7 @@ impl<
         C: MutableContiguous<Item = Operation<K, V>>,
         I: Index<Value = Location> + Send + Sync + 'static,
         H: Hasher,
-        S: commonware_parallel::Strategy,
-    > kv::Deletable for Db<E, C, I, H, Update<K, V>, S, Unmerkleized, NonDurable>
+    > kv::Deletable for Db<E, C, I, H, Update<K, V>, Unmerkleized, NonDurable>
 where
     Operation<K, V>: CodecShared,
 {
@@ -330,7 +322,7 @@ where
     }
 }
 
-impl<E, K, V, C, I, H, S> Batchable for Db<E, C, I, H, Update<K, V>, S, Unmerkleized, NonDurable>
+impl<E, K, V, C, I, H> Batchable for Db<E, C, I, H, Update<K, V>, Unmerkleized, NonDurable>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -338,7 +330,6 @@ where
     C: MutableContiguous<Item = Operation<K, V>>,
     I: Index<Value = Location> + Send + Sync + 'static,
     H: Hasher,
-    S: commonware_parallel::Strategy,
     Operation<K, V>: CodecShared,
 {
     async fn write_batch<'a, Iter>(&'a mut self, iter: Iter) -> Result<(), Error>
@@ -350,7 +341,7 @@ where
 }
 
 #[cfg(any(test, feature = "test-traits"))]
-impl<E, K, V, C, I, H, S> CleanAny for Db<E, C, I, H, Update<K, V>, S, Merkleized<H>, Durable>
+impl<E, K, V, C, I, H> CleanAny for Db<E, C, I, H, Update<K, V>, Merkleized<H>, Durable>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -358,10 +349,9 @@ where
     C: MutableContiguous<Item = Operation<K, V>> + Persistable<Error = crate::journal::Error>,
     I: Index<Value = Location> + Send + Sync + 'static,
     H: Hasher,
-    S: Strategy,
     Operation<K, V>: CodecShared,
 {
-    type Mutable = Db<E, C, I, H, Update<K, V>, S, Unmerkleized, NonDurable>;
+    type Mutable = Db<E, C, I, H, Update<K, V>, Unmerkleized, NonDurable>;
 
     fn into_mutable(self) -> Self::Mutable {
         self.into_mutable()
@@ -369,8 +359,8 @@ where
 }
 
 #[cfg(any(test, feature = "test-traits"))]
-impl<E, K, V, C, I, H, S> UnmerkleizedDurableAny
-    for Db<E, C, I, H, Update<K, V>, S, Unmerkleized, Durable>
+impl<E, K, V, C, I, H> UnmerkleizedDurableAny
+    for Db<E, C, I, H, Update<K, V>, Unmerkleized, Durable>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -378,14 +368,13 @@ where
     C: MutableContiguous<Item = Operation<K, V>> + Persistable<Error = crate::journal::Error>,
     I: Index<Value = Location> + Send + Sync + 'static,
     H: Hasher,
-    S: Strategy,
     Operation<K, V>: Codec,
     V::Value: Send + Sync,
 {
     type Digest = H::Digest;
     type Operation = Operation<K, V>;
-    type Mutable = Db<E, C, I, H, Update<K, V>, S, Unmerkleized, NonDurable>;
-    type Merkleized = Db<E, C, I, H, Update<K, V>, S, Merkleized<H>, Durable>;
+    type Mutable = Db<E, C, I, H, Update<K, V>, Unmerkleized, NonDurable>;
+    type Merkleized = Db<E, C, I, H, Update<K, V>, Merkleized<H>, Durable>;
 
     fn into_mutable(self) -> Self::Mutable {
         self.into_mutable()
@@ -397,8 +386,8 @@ where
 }
 
 #[cfg(any(test, feature = "test-traits"))]
-impl<E, K, V, C, I, H, S> MerkleizedNonDurableAny
-    for Db<E, C, I, H, Update<K, V>, S, Merkleized<H>, NonDurable>
+impl<E, K, V, C, I, H> MerkleizedNonDurableAny
+    for Db<E, C, I, H, Update<K, V>, Merkleized<H>, NonDurable>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -406,11 +395,10 @@ where
     C: MutableContiguous<Item = Operation<K, V>> + Persistable<Error = crate::journal::Error>,
     I: Index<Value = Location> + Send + Sync + 'static,
     H: Hasher,
-    S: Strategy,
     Operation<K, V>: Codec,
     V::Value: Send + Sync,
 {
-    type Mutable = Db<E, C, I, H, Update<K, V>, S, Unmerkleized, NonDurable>;
+    type Mutable = Db<E, C, I, H, Update<K, V>, Unmerkleized, NonDurable>;
 
     fn into_mutable(self) -> Self::Mutable {
         self.into_mutable()
@@ -418,7 +406,7 @@ where
 }
 
 #[cfg(any(test, feature = "test-traits"))]
-impl<E, K, V, C, I, H, S> MutableAny for Db<E, C, I, H, Update<K, V>, S, Unmerkleized, NonDurable>
+impl<E, K, V, C, I, H> MutableAny for Db<E, C, I, H, Update<K, V>, Unmerkleized, NonDurable>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -426,14 +414,13 @@ where
     C: MutableContiguous<Item = Operation<K, V>> + Persistable<Error = crate::journal::Error>,
     I: Index<Value = Location> + Send + Sync + 'static,
     H: Hasher,
-    S: Strategy,
     Operation<K, V>: Codec,
     V::Value: Send + Sync,
 {
     type Digest = H::Digest;
     type Operation = Operation<K, V>;
-    type Durable = Db<E, C, I, H, Update<K, V>, S, Unmerkleized, Durable>;
-    type Merkleized = Db<E, C, I, H, Update<K, V>, S, Merkleized<H>, NonDurable>;
+    type Durable = Db<E, C, I, H, Update<K, V>, Unmerkleized, Durable>;
+    type Merkleized = Db<E, C, I, H, Update<K, V>, Merkleized<H>, NonDurable>;
 
     async fn commit(
         self,
@@ -467,7 +454,6 @@ pub(super) mod test {
     };
     use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_macros::test_traced;
-    use commonware_parallel::Sequential;
     use commonware_runtime::{
         deterministic::{Context, Runner},
         Runner as _,
@@ -477,20 +463,11 @@ pub(super) mod test {
     use std::collections::HashMap;
 
     /// A type alias for the concrete [fixed::Db] type used in these unit tests.
-    type FixedDb =
-        fixed::Db<Context, Digest, Digest, Sha256, TwoCap, Sequential, Merkleized<Sha256>, Durable>;
+    type FixedDb = fixed::Db<Context, Digest, Digest, Sha256, TwoCap, Merkleized<Sha256>, Durable>;
 
     /// A type alias for the concrete [variable::Db] type used in these unit tests.
-    type VariableDb = variable::Db<
-        Context,
-        Digest,
-        Digest,
-        Sha256,
-        TwoCap,
-        Sequential,
-        Merkleized<Sha256>,
-        Durable,
-    >;
+    type VariableDb =
+        variable::Db<Context, Digest, Digest, Sha256, TwoCap, Merkleized<Sha256>, Durable>;
 
     /// Helper trait for testing Any databases that cycle through all four states.
     pub(crate) trait TestableAnyDb<V>:

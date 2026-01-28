@@ -41,12 +41,11 @@ impl<D: Digest> RangeProof<D> {
     pub async fn new<
         E: RStorage + Clock + Metrics,
         H: CHasher<Digest = D>,
-        Y: commonware_parallel::Strategy,
         S: Storage<D>,
         const N: usize,
     >(
         hasher: &mut H,
-        status: &CleanBitMap<E, D, N, Y>,
+        status: &CleanBitMap<E, D, N>,
         grafting_height: u32,
         mmr: &S,
         range: Range<Location>,
@@ -55,9 +54,7 @@ impl<D: Digest> RangeProof<D> {
         let proof = verification::range_proof(&grafted_mmr, range).await?;
 
         let (last_chunk, next_bit) = status.last_chunk();
-        let partial_chunk_digest = if next_bit != CleanBitMap::<E, D, N, Y>::CHUNK_SIZE_BITS {
-            // Last chunk is incomplete, meaning it's not yet in the MMR and needs to be included
-            // in the proof.
+        let partial_chunk_digest = if next_bit != CleanBitMap::<E, D, N>::CHUNK_SIZE_BITS {
             hasher.update(last_chunk);
             Some(hasher.finalize())
         } else {
@@ -82,13 +79,12 @@ impl<D: Digest> RangeProof<D> {
         E: RStorage + Clock + Metrics,
         H: CHasher<Digest = D>,
         C: Contiguous,
-        S: commonware_parallel::Strategy,
         const N: usize,
     >(
         hasher: &mut H,
-        status: &CleanBitMap<E, D, N, S>,
+        status: &CleanBitMap<E, D, N>,
         height: u32,
-        mmr: &Mmr<E, D, Clean<D>, S>,
+        mmr: &Mmr<E, D, Clean<D>>,
         log: &C,
         start_loc: Location,
         max_ops: NonZeroU64,
@@ -247,14 +243,9 @@ impl<D: Digest, const N: usize> OperationProof<D, N> {
     /// # Panics
     ///
     /// - Panics if `loc` is out of bounds.
-    pub async fn new<
-        E: RStorage + Clock + Metrics,
-        H: CHasher<Digest = D>,
-        Y: commonware_parallel::Strategy,
-        S: Storage<D>,
-    >(
+    pub async fn new<E: RStorage + Clock + Metrics, H: CHasher<Digest = D>, S: Storage<D>>(
         hasher: &mut H,
-        status: &CleanBitMap<E, D, N, Y>,
+        status: &CleanBitMap<E, D, N>,
         grafting_height: u32,
         mmr: &S,
         loc: Location,

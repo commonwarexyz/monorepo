@@ -30,17 +30,8 @@ use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics, Storage as RStorage};
 use commonware_utils::Array;
 
-pub type Db<
-    E,
-    K,
-    V,
-    H,
-    T,
-    const N: usize,
-    S = commonware_parallel::Sequential,
-    M = Merkleized<H>,
-    D = Durable,
-> = super::db::Db<E, Journal<E, Operation<K, V>>, K, VariableEncoding<V>, H, T, N, S, M, D>;
+pub type Db<E, K, V, H, T, const N: usize, M = Merkleized<H>, D = Durable> =
+    super::db::Db<E, Journal<E, Operation<K, V>>, K, VariableEncoding<V>, H, T, N, M, D>;
 
 // Functionality for the Clean state - init only.
 impl<
@@ -49,9 +40,8 @@ impl<
         V: VariableValue,
         H: Hasher,
         T: Translator,
-        S: commonware_parallel::Strategy,
         const N: usize,
-    > Db<E, K, V, H, T, N, S, Merkleized<H>, Durable>
+    > Db<E, K, V, H, T, N, Merkleized<H>, Durable>
 where
     Operation<K, V>: Read,
 {
@@ -59,7 +49,7 @@ where
     /// the bitmap MMR if a thread pool is provided.
     pub async fn init(
         context: E,
-        config: Config<T, <Operation<K, V> as Read>::Cfg, S>,
+        config: Config<T, <Operation<K, V> as Read>::Cfg>,
     ) -> Result<Self, Error> {
         // TODO: Re-evaluate assertion placement after `generic_const_exprs` is stable.
         const {
@@ -75,14 +65,12 @@ where
             assert!(N.is_power_of_two(), "chunk size must be a power of 2");
         }
 
-        let strategy = config.strategy.clone();
         let bitmap_metadata_partition = config.bitmap_metadata_partition.clone();
 
         let mut hasher = StandardHasher::<H>::new();
         let mut status = CleanBitMap::init(
             context.with_label("bitmap"),
             &bitmap_metadata_partition,
-            strategy,
             &mut hasher,
         )
         .await?
@@ -161,36 +149,17 @@ mod test {
             log_codec_config: (),
             bitmap_metadata_partition: format!("{partition_prefix}_bitmap_metadata_partition"),
             translator: TwoCap,
-            strategy: commonware_parallel::Sequential,
             buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
 
     /// A type alias for the concrete [Db] type used in these unit tests (Merkleized, Durable).
-    type CleanCurrentTest = Db<
-        deterministic::Context,
-        Digest,
-        Digest,
-        Sha256,
-        TwoCap,
-        32,
-        commonware_parallel::Sequential,
-        Merkleized<Sha256>,
-        Durable,
-    >;
+    type CleanCurrentTest =
+        Db<deterministic::Context, Digest, Digest, Sha256, TwoCap, 32, Merkleized<Sha256>, Durable>;
 
     /// A type alias for the Mutable (Unmerkleized, NonDurable) variant of CurrentTest.
-    type MutableCurrentTest = Db<
-        deterministic::Context,
-        Digest,
-        Digest,
-        Sha256,
-        TwoCap,
-        32,
-        commonware_parallel::Sequential,
-        Unmerkleized,
-        NonDurable,
-    >;
+    type MutableCurrentTest =
+        Db<deterministic::Context, Digest, Digest, Sha256, TwoCap, 32, Unmerkleized, NonDurable>;
 
     /// Return a [Db] database initialized with a fixed config.
     async fn open_db(

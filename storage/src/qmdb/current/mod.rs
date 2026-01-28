@@ -8,7 +8,6 @@ use crate::{
     qmdb::any::{FixedConfig as AnyFixedConfig, VariableConfig as AnyVariableConfig},
     translator::Translator,
 };
-use commonware_parallel::{Sequential, Strategy};
 use commonware_runtime::buffer::PoolRef;
 use std::num::{NonZeroU64, NonZeroUsize};
 
@@ -19,7 +18,7 @@ pub mod unordered;
 
 /// Configuration for a `Current` authenticated db with fixed-size values.
 #[derive(Clone)]
-pub struct FixedConfig<T: Translator, S: Strategy = Sequential> {
+pub struct FixedConfig<T: Translator> {
     /// The name of the storage partition used for the MMR's backing journal.
     pub mmr_journal_partition: String,
 
@@ -47,15 +46,12 @@ pub struct FixedConfig<T: Translator, S: Strategy = Sequential> {
     /// The translator used by the compressed index.
     pub translator: T,
 
-    /// The strategy to use for parallelizing batch operations.
-    pub strategy: S,
-
     /// The buffer pool to use for caching data.
     pub buffer_pool: PoolRef,
 }
 
-impl<T: Translator, S: Strategy> From<FixedConfig<T, S>> for AnyFixedConfig<T, S> {
-    fn from(cfg: FixedConfig<T, S>) -> Self {
+impl<T: Translator> From<FixedConfig<T>> for AnyFixedConfig<T> {
+    fn from(cfg: FixedConfig<T>) -> Self {
         Self {
             mmr_journal_partition: cfg.mmr_journal_partition,
             mmr_metadata_partition: cfg.mmr_metadata_partition,
@@ -65,14 +61,13 @@ impl<T: Translator, S: Strategy> From<FixedConfig<T, S>> for AnyFixedConfig<T, S
             log_items_per_blob: cfg.log_items_per_blob,
             log_write_buffer: cfg.log_write_buffer,
             translator: cfg.translator,
-            strategy: cfg.strategy,
             buffer_pool: cfg.buffer_pool,
         }
     }
 }
 
 #[derive(Clone)]
-pub struct VariableConfig<T: Translator, C, S: Strategy = Sequential> {
+pub struct VariableConfig<T: Translator, C> {
     /// The name of the storage partition used for the MMR's backing journal.
     pub mmr_journal_partition: String,
 
@@ -106,15 +101,12 @@ pub struct VariableConfig<T: Translator, C, S: Strategy = Sequential> {
     /// The translator used by the compressed index.
     pub translator: T,
 
-    /// The strategy to use for parallelizing batch operations.
-    pub strategy: S,
-
     /// The buffer pool to use for caching data.
     pub buffer_pool: PoolRef,
 }
 
-impl<T: Translator, C, S: Strategy> From<VariableConfig<T, C, S>> for AnyVariableConfig<T, C, S> {
-    fn from(cfg: VariableConfig<T, C, S>) -> Self {
+impl<T: Translator, C> From<VariableConfig<T, C>> for AnyVariableConfig<T, C> {
+    fn from(cfg: VariableConfig<T, C>) -> Self {
         Self {
             mmr_journal_partition: cfg.mmr_journal_partition,
             mmr_metadata_partition: cfg.mmr_metadata_partition,
@@ -126,7 +118,6 @@ impl<T: Translator, C, S: Strategy> From<VariableConfig<T, C, S>> for AnyVariabl
             log_compression: cfg.log_compression,
             log_codec_config: cfg.log_codec_config,
             translator: cfg.translator,
-            strategy: cfg.strategy,
             buffer_pool: cfg.buffer_pool,
         }
     }

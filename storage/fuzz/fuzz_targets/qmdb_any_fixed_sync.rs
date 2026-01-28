@@ -98,7 +98,6 @@ fn test_config(test_name: &str) -> Config<TwoCap> {
         log_items_per_blob: NZU64!(3),
         log_write_buffer: NZUsize!(1024),
         translator: TwoCap,
-        strategy: commonware_parallel::Sequential,
         buffer_pool: PoolRef::new(PAGE_SIZE, NZUsize!(1)),
     }
 }
