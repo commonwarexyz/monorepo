@@ -1227,25 +1227,20 @@ mod tests {
         FixedBytes::decode(buf.as_ref()).unwrap()
     }
 
-    /// Test that empty table entries remain truly empty after resize.
-    ///
-    /// This test verifies the fix for a bug where empty entries would incorrectly get a non-zero
-    /// epoch and valid CRC during resize, causing is_empty() to return false for what should be
-    /// empty slots.
+    /// Verifies empty table entries remain empty after resize (regression test for #2957).
     #[test_traced]
     fn test_empty_entries_remain_empty_after_resize() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = super::super::Config {
-                key_partition: "test_key_index".into(),
+                key_partition: "key".into(),
                 key_write_buffer: NZUsize!(1024),
                 key_buffer_pool: PoolRef::new(NZU16!(1024), NZUsize!(10)),
-                value_partition: "test_value_journal".into(),
+                value_partition: "value".into(),
                 value_compression: None,
                 value_write_buffer: NZUsize!(1024),
                 value_target_size: 10 * 1024 * 1024,
-                table_partition: "test_table".into(),
-                // Use 4 entries but only insert to 2, leaving 2 empty
+                table_partition: "table".into(),
                 table_initial_size: 4,
                 table_resize_frequency: 1,
                 table_resize_chunk_size: 4,
@@ -1253,58 +1248,44 @@ mod tests {
                 codec_config: (),
             };
             let mut freezer =
-                Freezer::<_, FixedBytes<64>, i32>::init(context.with_label("first"), cfg.clone())
+                Freezer::<_, FixedBytes<64>, i32>::init(context.with_label("freezer"), cfg.clone())
                     .await
                     .unwrap();
 
-            // Insert only 2 keys to different entries. "key0" and "key2" are known to hash to
-            // different entries (entry 0 and entry 1 respectively). With table_size=4, entries 2
-            // and 3 should remain empty.
+            // Insert 2 keys to trigger resize (need 50% of entries to have adds)
             freezer.put(test_key("key0"), 0).await.unwrap();
             freezer.put(test_key("key2"), 1).await.unwrap();
 
-            // Sync until resize triggers and completes
+            // Sync until resize completes
             for _ in 0..10 {
                 freezer.sync().await.unwrap();
-                if freezer.resizing().is_none() {
+                if freezer.table_size > 4 {
                     break;
                 }
             }
-
-            // Close the freezer
             freezer.close().await.unwrap();
 
-            // Read the raw table and parse entries
+            // Count empty entries in raw table
             let (blob, size) = context.open(&cfg.table_partition, b"table").await.unwrap();
-            let table_data = blob
+            let data = blob
                 .read_at(0, IoBufMut::zeroed(size as usize))
                 .await
                 .unwrap()
                 .coalesce();
-
             let num_entries = size as usize / Entry::FULL_SIZE;
+            let empty_count = (0..num_entries)
+                .filter(|i| {
+                    let off = i * Entry::FULL_SIZE;
+                    let (s0, s1) = Freezer::<Context, FixedBytes<64>, i32>::parse_entries(
+                        &data.as_ref()[off..off + Entry::FULL_SIZE],
+                    )
+                    .unwrap();
+                    s0.is_empty() && s1.is_empty()
+                })
+                .count();
 
-            // Verify resize happened (table doubled from 4 to 8)
-            assert_eq!(
-                num_entries, 8,
-                "resize should have doubled table from 4 to 8"
-            );
-
-            // Count entries where both slots are truly empty. The bug would cause empty entries to
-            // have one slot with epoch != 0 and valid CRC.
-            let mut both_empty_count = 0;
-            for entry_idx in 0..num_entries {
-                let offset = entry_idx * Entry::FULL_SIZE;
-                let buf = &table_data.as_ref()[offset..offset + Entry::FULL_SIZE];
-                let (slot0, slot1) =
-                    Freezer::<Context, FixedBytes<64>, i32>::parse_entries(buf).unwrap();
-                if slot0.is_empty() && slot1.is_empty() {
-                    both_empty_count += 1;
-                }
-            }
-
-            // 2 keys in 4 entries = 2 empty. After resize to 8, those become 4 empty.
-            assert_eq!(both_empty_count, 4);
+            // 2 keys in 4 entries = 2 empty. After resize to 8, expect 4 empty.
+            assert_eq!(empty_count, 4);
         });
     }
 }
