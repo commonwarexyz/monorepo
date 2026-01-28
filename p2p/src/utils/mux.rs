@@ -274,15 +274,13 @@ impl<R: Receiver> Debug for SubReceiver<R> {
 impl<R: Receiver> Drop for SubReceiver<R> {
     fn drop(&mut self) {
         // Take the control channel to avoid cloning.
-        let control_tx = self
-            .control_tx
-            .take()
-            .expect("SubReceiver::drop called twice");
-
-        // Deregister the subchannel immediately.
-        control_tx.send_lossy(Control::Deregister {
-            subchannel: self.subchannel,
-        });
+        // Use if-let instead of expect to avoid panic during unwinding.
+        if let Some(control_tx) = self.control_tx.take() {
+            // Deregister the subchannel immediately.
+            control_tx.send_lossy(Control::Deregister {
+                subchannel: self.subchannel,
+            });
+        }
     }
 }
 
