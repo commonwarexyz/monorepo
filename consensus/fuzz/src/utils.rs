@@ -7,6 +7,36 @@ use std::{collections::HashMap, num::NonZeroU32};
 /// Default rate limit set high enough to not interfere with normal operation
 const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
 
+// We use static thresholds to eliminate potential critical bugs
+// if the threshold functions (e.g., `max_faults`, `quorum`) in the codebase are changed.
+const THRESHOLD_TABLE: &[(u32, u32, u32)] = &[
+    // n, f, q
+    (1, 0, 1),
+    (2, 0, 2),
+    (3, 0, 3),
+    (4, 1, 3),
+    (5, 1, 4),
+    (6, 1, 5),
+    (7, 2, 5),
+    (8, 2, 6),
+    (9, 2, 7),
+];
+
+fn table_entry(n: u32) -> (u32, u32, u32) {
+    *THRESHOLD_TABLE
+        .iter()
+        .find(|(tn, _, _)| *tn == n)
+        .expect("threshold must exist")
+}
+
+pub fn max_faults(n: u32) -> u32 {
+    table_entry(n).1
+}
+
+pub fn quorum(n: u32) -> usize {
+    table_entry(n).2 as usize
+}
+
 #[derive(Clone)]
 pub enum Action {
     Link(Link),
@@ -26,7 +56,7 @@ pub enum Partition {
     /// No connections between any validators.
     Isolated,
     /// Ring topology: node i connects to i-1 and i+1 (with wraparound).
-    Linear,
+    Ring,
 }
 
 impl Partition {
@@ -36,7 +66,7 @@ impl Partition {
             Partition::Isolated => Some(|_, i, j| i == j),
             Partition::TwoPartitionsWithByzantine => Some(two_partitions_with_byzantine),
             Partition::ManyPartitionsWithByzantine => Some(many_partitions_with_byzantine),
-            Partition::Linear => Some(linear),
+            Partition::Ring => Some(ring),
         }
     }
 }
@@ -58,7 +88,7 @@ fn many_partitions_with_byzantine(_: usize, i: usize, j: usize) -> bool {
 }
 
 // Ring topology: node i connects to i-1 and i+1 (with wraparound).
-fn linear(n: usize, i: usize, j: usize) -> bool {
+fn ring(n: usize, i: usize, j: usize) -> bool {
     i.abs_diff(j) == 1 || i.abs_diff(j) == n - 1
 }
 
