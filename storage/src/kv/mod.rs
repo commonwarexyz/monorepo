@@ -79,8 +79,19 @@ pub trait Deletable: Updatable {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::{Batchable, Deletable, Gettable, Updatable};
+    use commonware_codec::DecodeExt;
+    use commonware_utils::sequence::FixedBytes;
 
     pub fn assert_send<T: Send>(_: T) {}
+
+    /// Create a test key from a string.
+    pub fn test_key(key: &str) -> FixedBytes<64> {
+        let mut buf = [0u8; 64];
+        let key = key.as_bytes();
+        assert!(key.len() <= buf.len());
+        buf[..key.len()].copy_from_slice(key);
+        FixedBytes::decode(buf.as_ref()).unwrap()
+    }
 
     #[allow(dead_code)]
     pub fn assert_gettable<T: Gettable + Send>(db: &T, key: &T::Key) {

@@ -1206,8 +1206,7 @@ mod conformance {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::kv::tests::{assert_gettable, assert_send, assert_updatable};
-    use commonware_codec::DecodeExt;
+    use crate::kv::tests::{assert_gettable, assert_send, assert_updatable, test_key};
     use commonware_macros::test_traced;
     use commonware_runtime::{
         buffer::PoolRef, deterministic, deterministic::Context, IoBufMut, Runner, Storage,
@@ -1228,14 +1227,6 @@ mod tests {
     #[allow(dead_code)]
     fn assert_freezer_destroy_is_send(freezer: TestFreezer) {
         assert_send(freezer.destroy());
-    }
-
-    fn test_key(key: &str) -> FixedBytes<64> {
-        let mut buf = [0u8; 64];
-        let key = key.as_bytes();
-        assert!(key.len() <= buf.len());
-        buf[..key.len()].copy_from_slice(key);
-        FixedBytes::decode(buf.as_ref()).unwrap()
     }
 
     /// Test that empty table entries remain truly empty after resize.
