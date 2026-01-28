@@ -40,41 +40,10 @@ fn try_catch<T>(f: impl FnOnce() -> T + UnwindSafe) -> Result<T, Error> {
 
 type Property = dyn Fn(&mut arbitrary::Unstructured<'_>) -> Result<(), arbitrary::Error>;
 
-struct Randomness {
-    seed: u64,
-    cache: Vec<u8>,
-    rng: ChaCha8Rng,
-}
-
-impl Randomness {
-    fn new(seed: u64) -> Self {
-        Self {
-            seed,
-            cache: Vec::with_capacity(1 << 16),
-            rng: ChaCha8Rng::seed_from_u64(seed),
-        }
-    }
-
-    fn sample(&mut self, seed: u64, len: usize) -> &[u8] {
-        if seed != self.seed {
-            self.seed = seed;
-            self.rng = ChaCha8Rng::seed_from_u64(seed);
-            self.cache.clear();
-        }
-        {
-            let mut buffer = [0u8; 64];
-            while self.cache.len() < len {
-                self.rng.fill_bytes(&mut buffer);
-                self.cache.extend_from_slice(&buffer);
-            }
-        }
-        &self.cache[..len]
-    }
-}
-
 #[derive(Copy, Clone)]
 struct Branch {
     seed: u32,
+    thread: u32,
     size: u32,
 }
 
@@ -82,18 +51,27 @@ impl Branch {
     fn grow(self) -> Self {
         Self {
             seed: self.seed,
-            size: self.size.saturating_add(1)
+            thread: self.thread.wrapping_add(1),
+            size: self.size.saturating_add(1),
         }
     }
 
-    fn sample(self, rand: &mut Randomness) -> &[u8] {
-        rand.sample(self.seed.into(), self.size as usize)
+    fn sample(self, buf: &mut Vec<u8>) {
+        let combined_seed = ((self.seed as u64) << 32) | (self.thread as u64);
+        let mut rng = ChaCha8Rng::seed_from_u64(combined_seed);
+        buf.clear();
+        let mut chunk = [0u8; 64];
+        while buf.len() < self.size as usize {
+            rng.fill_bytes(&mut chunk);
+            buf.extend_from_slice(&chunk);
+        }
+        buf.truncate(self.size as usize);
     }
 }
 
 impl std::fmt::Display for Branch {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "0x{:08x}{:08x}", self.seed, self.size)
+        write!(f, "0x{:08x}{:08x}{:08x}", self.seed, self.thread, self.size)
     }
 }
 
@@ -110,11 +88,15 @@ impl Builder {
         self,
         s: impl Fn(&mut arbitrary::Unstructured<'_>) -> Result<(), arbitrary::Error> + RefUnwindSafe,
     ) {
-        let mut branch = Branch { seed: 0, size: 0 };
-        let mut rand = Randomness::new(0);
+        let mut branch = Branch {
+            seed: 0,
+            thread: 0,
+            size: 0,
+        };
+        let mut buf = Vec::new();
         for _ in 0..self.search_limit {
-            let data = branch.sample(&mut rand);
-            if let Err(e) = try_catch(|| s(&mut Unstructured::new(data))) {
+            branch.sample(&mut buf);
+            if let Err(e) = try_catch(|| s(&mut Unstructured::new(&buf))) {
                 panic!("failure (MINIFUZZ_BRANCH = {}):\n{}", branch, e)
             }
             branch = branch.grow();
@@ -131,20 +113,64 @@ pub fn test(
 
 #[cfg(test)]
 mod test {
-    use arbitrary::Arbitrary;
+    use arbitrary::Unstructured;
 
-    #[derive(Arbitrary)]
-    struct Plan {
-        x: u8,
+    enum Plan {
+        Leaf(u8),
+        Branch(bool, Box<Plan>),
+    }
+
+    impl Plan {
+        fn generate(u: &mut Unstructured<'_>, depth: usize) -> arbitrary::Result<Self> {
+            if depth == 0 {
+                Ok(Plan::Leaf(u.arbitrary()?))
+            } else {
+                let b: bool = u.arbitrary()?;
+                let child = Plan::generate(u, depth - 1)?;
+                Ok(Plan::Branch(b, Box::new(child)))
+            }
+        }
+
+        fn follow_path(&self, path: &mut impl Iterator<Item = bool>) -> Option<u8> {
+            match self {
+                Plan::Leaf(v) => Some(*v),
+                Plan::Branch(b, child) => {
+                    if *b == path.next()? {
+                        child.follow_path(path)
+                    } else {
+                        None
+                    }
+                }
+            }
+        }
+    }
+
+    fn search_haystack(depth: usize) {
+        super::test(|u| {
+            let plan = Plan::generate(u, depth)?;
+            let mut path = [true, false].into_iter().cycle();
+            if let Some(leaf) = plan.follow_path(&mut path) {
+                assert_ne!(leaf, 77);
+            }
+            Ok(())
+        });
     }
 
     #[test]
-    fn test_foo() {
-        super::test(|u| {
-            let plan = Plan::arbitrary(u)?;
-            eprintln!("X {}", plan.x);
-            assert_ne!(plan.x, 1);
-            Ok(())
-        });
+    #[should_panic]
+    fn search_haystack_depth_0() {
+        search_haystack(0);
+    }
+
+    #[test]
+    #[should_panic]
+    fn search_haystack_depth_1() {
+        search_haystack(1);
+    }
+
+    #[test]
+    #[should_panic]
+    fn search_haystack_depth_2() {
+        search_haystack(2);
     }
 }
