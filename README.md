@@ -12,30 +12,6 @@
 
 _Primitives are designed for deployment in adversarial environments. If you find an exploit, please refer to our [security policy](./SECURITY.md) before disclosing it publicly (an exploit may equip a malicious party to attack users of a primitive)._
 
-## Stability
-
-Each public API item in the Commonware Library is annotated with a stability level (0-4) indicating its maturity:
-
-| Level | Description |
-|-------|-------------|
-| **0** | Experimental with little testing. Breaking changes expected. |
-| **1** | Decent test coverage. Breaking wire/storage format changes possible with no migration path. |
-| **2** | Wire/storage format stable. Decent test coverage. Breaking API changes possible. |
-| **3** | API stable. Wire/storage format stable. Decent test coverage. |
-| **4** | Deployed in production without issue. Audited multiple times. |
-
-Higher stability code can only depend on code with equal or higher stability. This is enforced at compile time:
-
-```bash
-# Generate docs for only code with stability >= GAMMA (level 2)
-RUSTFLAGS="--cfg commonware_stability_GAMMA" RUSTDOCFLAGS="--cfg commonware_stability_GAMMA" cargo doc
-
-# Check if your application only uses commonware APIs with stability >= GAMMA
-RUSTFLAGS="--cfg commonware_stability_GAMMA" cargo build -p my-app
-```
-
-Level names: `ALPHA` (0), `BETA` (1), `GAMMA` (2), `DELTA` (3), `EPSILON` (4).
-
 * [broadcast](./broadcast/README.md): Disseminate data over a wide-area network.
 * [codec](./codec/README.md): Serialize structured data.
 * [coding](./coding/README.md): Encode data to enable recovery from a subset of fragments.
@@ -76,6 +52,30 @@ _Sometimes, we opt to maintain software that is neither a primitive nor an examp
 * [mcp](./mcp/README.md): Interact with the Commonware Library via MCP at https://mcp.commonware.xyz.
 * [pipeline](./pipeline): Mechanisms under development.
 * [utils](./utils/README.md): Leverage common functionality across multiple primitives.
+
+## Stability
+
+Each public API item in the Commonware Library is annotated with a stability level:
+
+| Level | Description |
+|-------|-------------|
+| **ALPHA** | Experimental with little testing. Breaking changes expected. |
+| **BETA** | Decent test coverage. Breaking wire/storage format changes possible with no migration path. |
+| **GAMMA** | Wire/storage format stable. Decent test coverage. Breaking API changes possible. |
+| **DELTA** | API stable. Wire/storage format stable. Decent test coverage. |
+| **EPSILON** | Deployed in production without issue. Audited multiple times. |
+
+Higher stability code can only depend on code with equal or higher stability. This is enforced at compile time:
+
+```bash
+# Generate docs for only code with stability >= GAMMA (level 2)
+RUSTFLAGS="--cfg commonware_stability_GAMMA" RUSTDOCFLAGS="--cfg commonware_stability_GAMMA" cargo doc
+
+# Check if your application only uses commonware APIs with stability >= GAMMA
+RUSTFLAGS="--cfg commonware_stability_GAMMA" cargo build -p my-app
+```
+
+Level names: `ALPHA` (0), `BETA` (1), `GAMMA` (2), `DELTA` (3), `EPSILON` (4).
 
 ## Licensing
 
