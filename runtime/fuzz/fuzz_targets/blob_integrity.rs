@@ -16,7 +16,7 @@
 
 use arbitrary::{Arbitrary, Unstructured};
 use commonware_runtime::{
-    buffer::pool::{Append, PoolRef},
+    buffer::paged::{Append, CacheRef},
     deterministic, Blob, Buf, Error, IoBufMut, Runner, Storage,
 };
 use commonware_utils::{NZUsize, NZU16};
@@ -37,8 +37,8 @@ struct FuzzInput {
     seed: u64,
     /// Logical page size (1-255).
     page_size: u8,
-    /// Pool page cache capacity (1-10).
-    pool_capacity: u8,
+    /// Page cache capacity (1-10).
+    cache_capacity: u8,
     /// Number of pages to write (1-10).
     num_pages: u8,
     /// Byte offset within the blob to corrupt (will be modulo physical_size).
@@ -59,7 +59,7 @@ impl<'a> Arbitrary<'a> for FuzzInput {
         Ok(FuzzInput {
             seed: u.arbitrary()?,
             page_size: u.int_in_range(1..=255)?,
-            pool_capacity: u.int_in_range(1..=10)?,
+            cache_capacity: u.int_in_range(1..=10)?,
             num_pages: u.int_in_range(1..=10)?,
             corrupt_byte_offset: u.arbitrary()?,
             corrupt_bit: u.int_in_range(0..=7)?,
@@ -93,8 +93,8 @@ fn fuzz(input: FuzzInput) {
     executor.start(|context| async move {
         let page_size = input.page_size as u64;
         let physical_page_size = page_size + CRC_SIZE;
-        let pool_capacity = input.pool_capacity as usize;
-        let pool_ref = PoolRef::new(NZU16!(page_size as u16), NZUsize!(pool_capacity));
+        let cache_capacity = input.cache_capacity as usize;
+        let cache_ref = CacheRef::new(NZU16!(page_size as u16), NZUsize!(cache_capacity));
 
         // Compute logical size from number of pages.
         let logical_size = input.num_pages as u64 * page_size;
@@ -110,7 +110,7 @@ fn fuzz(input: FuzzInput) {
             .await
             .expect("cannot open blob");
 
-        let append = Append::new(blob.clone(), 0, BUFFER_CAPACITY, pool_ref.clone())
+        let append = Append::new(blob.clone(), 0, BUFFER_CAPACITY, cache_ref.clone())
             .await
             .expect("cannot create append wrapper");
 
@@ -156,7 +156,7 @@ fn fuzz(input: FuzzInput) {
 
         // The append wrapper may truncate if the corruption affected the last page's CRC
         // during initialization, so we handle both cases.
-        let append = match Append::new(blob, size, BUFFER_CAPACITY, pool_ref.clone()).await {
+        let append = match Append::new(blob, size, BUFFER_CAPACITY, cache_ref.clone()).await {
             Ok(a) => a,
             Err(_) => {
                 // Corruption was severe enough to fail initialization - this is acceptable.

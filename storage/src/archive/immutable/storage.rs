@@ -127,7 +127,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: CodecShared> Archive<E, K, V> {
             freezer::Config {
                 key_partition: cfg.freezer_key_partition,
                 key_write_buffer: cfg.freezer_key_write_buffer,
-                key_buffer_pool: cfg.freezer_key_buffer_pool,
+                key_page_cache: cfg.freezer_key_page_cache,
                 value_partition: cfg.freezer_value_partition,
                 value_compression: cfg.freezer_value_compression,
                 value_write_buffer: cfg.freezer_value_write_buffer,

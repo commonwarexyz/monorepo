@@ -1,7 +1,7 @@
 //! Benchmark sequential append performance.
 
 use super::{create_append, destroy_append, CACHE_SIZE, PAGE_SIZE};
-use commonware_runtime::{buffer::PoolRef, deterministic, Runner as _};
+use commonware_runtime::{buffer::CacheRef, deterministic, Runner as _};
 use commonware_utils::NZUsize;
 use criterion::Criterion;
 use std::time::Instant;
@@ -10,13 +10,13 @@ pub fn bench(c: &mut Criterion) {
     for chunk_size in [64, 256, 1024, 4096] {
         c.bench_function(&format!("{}/chunk={}", module_path!(), chunk_size), |b| {
             b.iter_custom(|iters| {
-                let pool_ref = PoolRef::new(PAGE_SIZE, NZUsize!(CACHE_SIZE));
+                let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(CACHE_SIZE));
                 let name = format!("append_seq_{chunk_size}").into_bytes();
                 let data = vec![0xABu8; chunk_size];
 
                 let executor = deterministic::Runner::default();
                 executor.start(|ctx| async move {
-                    let append = create_append(&ctx, &name, pool_ref).await;
+                    let append = create_append(&ctx, &name, cache_ref).await;
 
                     let start = Instant::now();
                     for _ in 0..iters {

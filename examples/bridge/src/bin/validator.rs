@@ -17,7 +17,7 @@ use commonware_cryptography::{
 };
 use commonware_p2p::{authenticated, Manager};
 use commonware_runtime::{
-    buffer::PoolRef, tokio, Metrics, Network, Quota, RayonPoolSpawner, Runner,
+    buffer::CacheRef, tokio, Metrics, Network, Quota, RayonPoolSpawner, Runner,
 };
 use commonware_stream::{dial, Config as StreamConfig};
 use commonware_utils::{from_hex, ordered::Set, union, NZUsize, TryCollect, NZU16, NZU32};
@@ -258,7 +258,7 @@ fn main() {
                 activity_timeout: ViewDelta::new(10),
                 skip_timeout: ViewDelta::new(5),
                 fetch_concurrent: 32,
-                buffer_pool: PoolRef::new(NZU16!(16_384), NZUsize!(10_000)),
+                page_cache: CacheRef::new(NZU16!(16_384), NZUsize!(10_000)),
                 strategy,
             },
         );
