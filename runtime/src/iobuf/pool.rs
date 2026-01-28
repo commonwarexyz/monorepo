@@ -561,12 +561,11 @@ impl BufferPool {
     ///
     /// The returned buffer has `len() == 0` and `capacity() >= capacity`,
     /// matching the semantics of [`IoBufMut::with_capacity`] and
-    /// [`BytesMut::with_capacity`]. Use [`IoBufMut::resize`] to initialize
+    /// `BytesMut::with_capacity`. Use [`IoBufMut::resize`] to initialize
     /// the buffer to a specific length.
     ///
     /// The actual capacity is rounded up to the next power-of-two size class.
     /// The buffer will be returned to the pool when dropped.
-    #[must_use]
     pub fn alloc(&self, capacity: usize) -> Option<IoBufMut> {
         self.try_alloc(capacity).ok()
     }
@@ -575,7 +574,6 @@ impl BufferPool {
     ///
     /// This is like [`Self::alloc`] but returns a [`Result`] that distinguishes
     /// between different failure modes.
-    #[must_use]
     pub fn try_alloc(&self, capacity: usize) -> Result<IoBufMut, PoolError> {
         let class_index = match self.inner.config.class_index(capacity) {
             Some(idx) => idx,
@@ -735,7 +733,7 @@ impl PooledBufMut {
     /// - `len <= self.capacity()`
     /// - All bytes in `0..len` are initialized before any read operations
     #[inline]
-    pub unsafe fn set_len(&mut self, len: usize) {
+    pub const unsafe fn set_len(&mut self, len: usize) {
         self.len = len;
     }
 
