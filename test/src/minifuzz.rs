@@ -77,13 +77,19 @@ impl Branch {
         }
     }
 
-    fn from_hex(s: &str) -> Self {
+    fn try_from_hex(s: &str) -> Option<Self> {
         let s = s.strip_prefix("0x").unwrap_or(s);
-        assert!(s.len() == 24, "expected 24 hex chars, got {}", s.len());
-        let seed = u32::from_str_radix(&s[0..8], 16).expect("invalid hex for seed");
-        let thread = u32::from_str_radix(&s[8..16], 16).expect("invalid hex for thread");
-        let size = u32::from_str_radix(&s[16..24], 16).expect("invalid hex for size");
-        Self { seed, thread, size }
+        if s.len() != 24 {
+            return None;
+        }
+        let seed = u32::from_str_radix(&s[0..8], 16).ok()?;
+        let thread = u32::from_str_radix(&s[8..16], 16).ok()?;
+        let size = u32::from_str_radix(&s[16..24], 16).ok()?;
+        Some(Self { seed, thread, size })
+    }
+
+    fn from_hex(s: &str) -> Self {
+        Self::try_from_hex(s).expect("invalid MINIFUZZ_BRANCH hex format (expected 24 hex chars)")
     }
 
     const fn next(self) -> Self {
@@ -103,6 +109,14 @@ impl std::fmt::Display for Branch {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "0x{:08x}{:08x}{:08x}", self.seed, self.thread, self.size)
     }
+}
+
+const ENV_VAR: &str = "MINIFUZZ_BRANCH";
+
+fn branch_from_env() -> Option<Branch> {
+    std::env::var(ENV_VAR)
+        .ok()
+        .and_then(|s| Branch::try_from_hex(&s))
 }
 
 const DIVISOR: usize = 1000;
@@ -328,12 +342,10 @@ impl Builder {
         self,
         s: impl Fn(&mut arbitrary::Unstructured<'_>) -> Result<(), arbitrary::Error> + RefUnwindSafe,
     ) {
-        let mut branch = match self.reproduce {
-            Some(b) => b,
-            None => {
-                let initial_seed = self.seed.unwrap_or_else(rand::random);
-                Branch::new(initial_seed)
-            }
+        let mut branch = match (self.reproduce, self.seed) {
+            (Some(b), _) => b,
+            (None, Some(seed)) => Branch::new(seed),
+            (None, None) => branch_from_env().unwrap_or_else(|| Branch::new(rand::random())),
         };
         let mut sampler = Sampler::new(branch);
         let mut tries: u64 = 0;
@@ -355,7 +367,7 @@ impl Builder {
                 }));
                 match result {
                     Err(e) => {
-                        panic!("failure (MINIFUZZ_BRANCH = {}):\n{}", branch, e)
+                        panic!("failure ({ENV_VAR} = {branch}):\n{e}")
                     }
                     Ok((Err(arbitrary::Error::NotEnoughData), _)) => {
                         sampler.strategy_add_bytes(true);
