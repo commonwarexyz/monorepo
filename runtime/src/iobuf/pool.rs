@@ -773,21 +773,24 @@ impl PooledBufMut {
         if new_len > self.capacity() {
             // Need a bigger buffer - calculate raw capacity needed
             // After reallocation, cursor resets to 0, so raw capacity = new_len
-            let new_capacity = new_len.next_power_of_two().max(page_size());
+            let new_capacity = new_len.next_power_of_two();
 
             // Try to get from pool first, fall back to direct allocation
             let (new_buffer, new_pool) = self
                 .pool
                 .upgrade()
                 .and_then(|pool| {
-                    let idx = pool.config.class_index(new_capacity)?;
+                    // Use pool's min_size as floor for capacity
+                    let capacity = new_capacity.max(pool.config.min_size);
+                    let idx = pool.config.class_index(capacity)?;
                     let buf = pool.try_alloc(idx)?;
                     Some((buf, Arc::downgrade(&pool)))
                 })
                 .unwrap_or_else(|| {
-                    // Use same alignment as current buffer for fallback
+                    // Fallback: use alignment as minimum (matches pool behavior)
                     let alignment = self.buffer.alignment;
-                    (AlignedBuffer::new(new_capacity, alignment), Weak::new())
+                    let capacity = new_capacity.max(alignment);
+                    (AlignedBuffer::new(capacity, alignment), Weak::new())
                 });
 
             // Copy existing data (only the readable portion: cursor..len)
