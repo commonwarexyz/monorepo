@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use std::panic::{catch_unwind, AssertUnwindSafe, RefUnwindSafe, UnwindSafe};
 
 use arbitrary::Unstructured;
@@ -76,18 +78,19 @@ impl std::fmt::Display for Branch {
 }
 
 const DIVISOR: usize = 1000;
-const ADD_BYTES_COEFFS: [usize; 3] = [100, 1000, 4000];
+const ADD_BYTES_COEFFS: [usize; 3] = [100, 1000, 8000];
 const MODIFY_PREFIX_NUMERATOR: usize = 100;
 const MODIFY_PREFIX_MIN_BYTES: usize = 8;
 const COPY_PORTION_NUMERATOR: usize = 50;
 
-const STRATEGY_WEIGHTS: [u32; 6] = [50, 20, 10, 10, 10, 200];
+const STRATEGY_WEIGHTS: [u32; 6] = [200, 20, 10, 50, 10, 200];
 
 struct Sampler {
     branch: Branch,
     rng: ChaCha8Rng,
     buf: Vec<u8>,
     count: i64,
+    last_bytes_used: usize,
 }
 
 impl Sampler {
@@ -99,7 +102,12 @@ impl Sampler {
             rng,
             buf,
             count: branch.size.into(),
+            last_bytes_used: 0,
         }
+    }
+
+    fn set_bytes_used(&mut self, used: usize) {
+        self.last_bytes_used = used;
     }
 
     fn new(branch: Branch) -> Self {
@@ -112,12 +120,17 @@ impl Sampler {
     }
 
     fn strategy_add_bytes(&mut self) {
+        const MAX_BUF_SIZE: usize = 1 << 13; // 8KB cap
+        if self.buf.len() >= MAX_BUF_SIZE {
+            return;
+        }
         let size = self.buf.len();
         let num_bytes =
             (ADD_BYTES_COEFFS[0] * size * size + ADD_BYTES_COEFFS[1] * size + ADD_BYTES_COEFFS[2])
                 / DIVISOR;
+        let new_size = (self.buf.len() + num_bytes).min(MAX_BUF_SIZE);
         let start = self.buf.len();
-        self.buf.resize(start + num_bytes, 0);
+        self.buf.resize(new_size, 0);
         self.rng.fill_bytes(&mut self.buf[start..]);
     }
 
@@ -168,9 +181,27 @@ impl Sampler {
     }
 
     fn pick_strategy(&mut self) -> u32 {
-        let total: u32 = STRATEGY_WEIGHTS.iter().sum();
+        let mut weights = STRATEGY_WEIGHTS;
+
+        // If we have lots of unused bytes, reduce add_bytes weight
+        let unused = self.buf.len().saturating_sub(self.last_bytes_used);
+        if unused > 64 {
+            weights[5] = 0; // Don't grow if we have plenty of unused bytes
+        } else if unused > 16 {
+            weights[5] /= 4; // Reduce growth rate
+        }
+
+        // If buffer is small, favor modify_prefix more
+        if self.buf.len() <= 16 {
+            weights[0] = weights[0].saturating_mul(2);
+        }
+
+        let total: u32 = weights.iter().sum();
+        if total == 0 {
+            return 0; // Fallback to modify_prefix
+        }
         let mut choice = self.rng.next_u32() % total;
-        for (i, &w) in STRATEGY_WEIGHTS.iter().enumerate() {
+        for (i, &w) in weights.iter().enumerate() {
             if choice < w {
                 return i as u32;
             }
@@ -186,12 +217,16 @@ impl Sampler {
         }
         self.count -= 1;
 
-        match self.pick_strategy() {
-            0 => self.strategy_modify_prefix(),
-            1 => self.strategy_copy_portion(),
-            2 => self.strategy_clear_non_prefix(),
-            3 => self.strategy_arithmetic_non_prefix(),
-            _ => self.strategy_add_bytes(),
+        if self.buf.is_empty() {
+            self.strategy_add_bytes();
+        } else {
+            match self.pick_strategy() {
+                0 => self.strategy_modify_prefix(),
+                1 => self.strategy_copy_portion(),
+                2 => self.strategy_clear_non_prefix(),
+                3 => self.strategy_arithmetic_non_prefix(),
+                _ => self.strategy_add_bytes(),
+            }
         }
 
         Some(self.buf.as_slice())
@@ -204,7 +239,9 @@ struct Builder {
 
 impl Builder {
     fn new() -> Self {
-        Self { search_limit: 1000 }
+        Self {
+            search_limit: 100_000,
+        }
     }
 
     fn test(
@@ -220,20 +257,30 @@ impl Builder {
         let mut tries = 0;
         'search: loop {
             while let Some(sample) = sampler.next() {
-                tries += 1;
-                if tries >= self.search_limit {
-                    break 'search;
-                }
+                let sample_len = sample.len();
                 let result = try_catch(AssertUnwindSafe(|| {
                     let mut u = Unstructured::new(sample);
-                    s(&mut u)
+                    let res = s(&mut u);
+                    (res, u.len())
                 }));
-                if let Err(e) = result {
-                    panic!("failure (MINIFUZZ_BRANCH = {}):\n{}", branch, e)
+                match result {
+                    Err(e) => {
+                        panic!("failure (MINIFUZZ_BRANCH = {}):\n{}", branch, e)
+                    }
+                    Ok((Err(arbitrary::Error::NotEnoughData), _)) => {
+                        sampler.strategy_add_bytes();
+                    }
+                    Ok((_, remaining)) => {
+                        sampler.set_bytes_used(sample_len - remaining);
+                        tries += 1;
+                        if tries >= self.search_limit {
+                            break 'search;
+                        }
+                    }
                 }
-                branch = branch.next();
-                sampler.switch(branch);
             }
+            branch = branch.next();
+            sampler.switch(branch);
         }
         eprintln!("failed to find, final: {}", branch);
     }
@@ -283,7 +330,6 @@ mod test {
     fn search_haystack(depth: usize) {
         super::test(|u| {
             let plan = Plan::generate(u, depth)?;
-            eprintln!("{:?}", plan);
             let mut path = [true, false].into_iter().cycle();
             if let Some(leaf) = plan.follow_path(&mut path) {
                 assert_ne!(leaf, 77);
@@ -314,5 +360,23 @@ mod test {
     #[should_panic]
     fn search_haystack_depth_4() {
         search_haystack(4);
+    }
+
+    #[test]
+    #[should_panic]
+    fn search_haystack_depth_6() {
+        search_haystack(6);
+    }
+
+    #[test]
+    #[should_panic]
+    fn search_haystack_depth_8() {
+        search_haystack(8);
+    }
+
+    #[test]
+    #[should_panic]
+    fn search_haystack_depth_10() {
+        search_haystack(10);
     }
 }
