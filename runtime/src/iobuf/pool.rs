@@ -710,38 +710,44 @@ impl PooledBufMut {
         self.cursor == self.len
     }
 
-    /// Returns the total capacity of the buffer.
+    /// Returns the number of bytes the buffer can hold without reallocating.
     #[inline]
     pub fn capacity(&self) -> usize {
+        self.buffer.capacity() - self.cursor
+    }
+
+    /// Returns the raw allocation capacity (internal use only).
+    #[inline]
+    fn raw_capacity(&self) -> usize {
         self.buffer.capacity()
     }
 
-    /// Returns a raw mutable pointer to the buffer data.
-    ///
-    /// This points to the current read position (cursor), matching `BytesMut` semantics.
+    /// Returns an unsafe mutable pointer to the buffer's data.
     #[inline]
     pub fn as_mut_ptr(&mut self) -> *mut u8 {
-        // SAFETY: cursor is always <= capacity
+        // SAFETY: cursor is always <= raw capacity
         unsafe { self.buffer.as_ptr().add(self.cursor) }
     }
 
-    /// Sets the length of the initialized data.
+    /// Sets the length of the buffer.
+    ///
+    /// This will explicitly set the size of the buffer without actually
+    /// modifying the data, so it is up to the caller to ensure that the data
+    /// has been initialized.
     ///
     /// # Safety
     ///
-    /// Caller must ensure:
-    /// - `len <= self.capacity()`
-    /// - All bytes in `0..len` are initialized before any read operations
+    /// Caller must ensure all bytes in `0..len` are initialized before any
+    /// read operations.
     #[inline]
-    pub const unsafe fn set_len(&mut self, len: usize) {
-        self.len = len;
+    pub unsafe fn set_len(&mut self, len: usize) {
+        self.len = self.cursor + len;
     }
 
-    /// Clears the buffer, resetting both cursor and length to 0.
+    /// Clears the buffer, removing all data. Existing capacity is preserved.
     #[inline]
-    pub const fn clear(&mut self) {
-        self.cursor = 0;
-        self.len = 0;
+    pub fn clear(&mut self) {
+        self.len = self.cursor;
     }
 
     /// Truncates the buffer to at most `len` readable bytes.
@@ -772,10 +778,11 @@ impl PooledBufMut {
         }
 
         // Growing - check if we need a bigger buffer
-        let required_capacity = self.cursor + new_len;
-        if required_capacity > self.capacity() {
-            // Need a bigger buffer
-            let new_capacity = required_capacity.next_power_of_two().max(page_size());
+        // new_len is relative to current view, capacity() is also view-relative
+        if new_len > self.capacity() {
+            // Need a bigger buffer - calculate raw capacity needed
+            // After reallocation, cursor resets to 0, so raw capacity = new_len
+            let new_capacity = new_len.next_power_of_two().max(page_size());
 
             // Try to get from pool first, fall back to direct allocation
             let (new_buffer, new_pool) = self
@@ -908,10 +915,13 @@ impl Buf for PooledBufMut {
 }
 
 // SAFETY: BufMut implementation for PooledBufMut.
+// - `remaining_mut()` reports bytes available for writing (raw_capacity - write_pos)
+// - `chunk_mut()` returns uninitialized memory from write_pos to raw_capacity
+// - `advance_mut()` advances the write position within bounds
 unsafe impl BufMut for PooledBufMut {
     #[inline]
     fn remaining_mut(&self) -> usize {
-        self.capacity() - self.len
+        self.raw_capacity() - self.len
     }
 
     #[inline]
@@ -925,12 +935,12 @@ unsafe impl BufMut for PooledBufMut {
 
     #[inline]
     fn chunk_mut(&mut self) -> &mut bytes::buf::UninitSlice {
-        let cap = self.capacity();
+        let raw_cap = self.raw_capacity();
         let len = self.len;
-        // SAFETY: We have exclusive access and the slice is within capacity.
+        // SAFETY: We have exclusive access and the slice is within raw capacity.
         unsafe {
             let ptr = self.buffer.as_ptr().add(len);
-            bytes::buf::UninitSlice::from_raw_parts_mut(ptr, cap - len)
+            bytes::buf::UninitSlice::from_raw_parts_mut(ptr, raw_cap - len)
         }
     }
 }

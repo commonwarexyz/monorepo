@@ -251,15 +251,16 @@ impl IoBufMut {
         matches!(self.inner, IoBufMutInner::Pooled(_))
     }
 
-    /// Set the length of the buffer.
+    /// Sets the length of the buffer.
+    ///
+    /// This will explicitly set the size of the buffer without actually
+    /// modifying the data, so it is up to the caller to ensure that the data
+    /// has been initialized.
     ///
     /// # Safety
     ///
     /// Caller must ensure all bytes in `0..len` are initialized before any
     /// read operations.
-    ///
-    /// Note: It is safe to set `len` before writing if no reads occur until
-    /// after the write completes (e.g., passing the buffer to `read_exact`).
     ///
     /// # Panics
     ///
@@ -298,7 +299,7 @@ impl IoBufMut {
         }
     }
 
-    /// Returns the total capacity.
+    /// Returns the number of bytes the buffer can hold without reallocating.
     #[inline]
     pub fn capacity(&self) -> usize {
         match &self.inner {
@@ -307,7 +308,7 @@ impl IoBufMut {
         }
     }
 
-    /// Get raw mutable pointer.
+    /// Returns an unsafe mutable pointer to the buffer's data.
     #[inline]
     pub fn as_mut_ptr(&mut self) -> *mut u8 {
         match &mut self.inner {
@@ -342,7 +343,7 @@ impl IoBufMut {
         }
     }
 
-    /// Clears the buffer, setting its length to 0.
+    /// Clears the buffer, removing all data. Existing capacity is preserved.
     #[inline]
     pub fn clear(&mut self) {
         match &mut self.inner {
