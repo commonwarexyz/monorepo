@@ -118,7 +118,7 @@ pub struct Config<C> {
     /// The buffer size to use when replaying a [commonware_runtime::Blob].
     pub replay_buffer: NonZeroUsize,
 
-    /// The page cache to use for the cache's [crate::journal] storage.
+    /// The page cache to use for the underlying [crate::journal] storage.
     pub page_cache: CacheRef,
 }
 
