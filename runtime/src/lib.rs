@@ -24,6 +24,7 @@
 
 use commonware_macros::select;
 use commonware_parallel::{Rayon, ThreadPool};
+use iobuf::PoolError;
 use prometheus_client::registry::Metric;
 use rayon::ThreadPoolBuildError;
 use std::{
@@ -121,6 +122,8 @@ pub enum Error {
     ImmutableBlob,
     #[error("io error: {0}")]
     Io(#[from] IoError),
+    #[error("buffer pool: {0}")]
+    Pool(#[from] PoolError),
 }
 
 /// Interface that any task scheduler must implement to start

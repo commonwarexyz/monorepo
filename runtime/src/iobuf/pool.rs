@@ -50,6 +50,26 @@ use std::{
     },
 };
 
+/// Error returned when buffer pool allocation fails.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PoolError {
+    /// The requested capacity exceeds the maximum buffer size.
+    Oversized,
+    /// The pool is exhausted for the required size class.
+    Exhausted,
+}
+
+impl std::fmt::Display for PoolError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Oversized => write!(f, "requested capacity exceeds maximum buffer size"),
+            Self::Exhausted => write!(f, "pool exhausted for required size class"),
+        }
+    }
+}
+
+impl std::error::Error for PoolError {}
+
 /// Returns the system page size.
 ///
 /// On Unix systems, queries the actual page size via `sysconf`.
@@ -538,17 +558,7 @@ impl BufferPool {
     /// The actual capacity is rounded up to the next power-of-two size class.
     /// The buffer will be returned to the pool when dropped.
     pub fn alloc(&self, capacity: usize) -> Option<IoBufMut> {
-        let class_index = match self.inner.config.class_index(capacity) {
-            Some(idx) => idx,
-            None => {
-                self.inner.metrics.oversized_total.inc();
-                return None;
-            }
-        };
-
-        let buffer = self.inner.try_alloc(class_index)?;
-        let pooled = PooledBufMut::new(buffer, Arc::downgrade(&self.inner));
-        Some(IoBufMut::from_pooled(pooled))
+        self.try_alloc(capacity).ok()
     }
 
     /// Allocates a buffer optimized for I/O operations.
@@ -557,6 +567,30 @@ impl BufferPool {
     /// buffers registered with io_uring for zero-copy I/O.
     pub fn alloc_for_io(&self, capacity: usize) -> Option<IoBufMut> {
         self.alloc(capacity)
+    }
+
+    /// Attempts to allocate a buffer, returning an error on failure.
+    ///
+    /// This is like [`Self::alloc`] but returns a [`Result`] that distinguishes
+    /// between different failure modes.
+    pub fn try_alloc(&self, capacity: usize) -> Result<IoBufMut, PoolError> {
+        let class_index = match self.inner.config.class_index(capacity) {
+            Some(idx) => idx,
+            None => {
+                self.inner.metrics.oversized_total.inc();
+                return Err(PoolError::Oversized);
+            }
+        };
+
+        let buffer = self.inner.try_alloc(class_index).ok_or_else(|| {
+            let label = SizeClassLabel {
+                size_class: self.inner.config.class_size(class_index) as u64,
+            };
+            self.inner.metrics.exhausted_total.get_or_create(&label).inc();
+            PoolError::Exhausted
+        })?;
+        let pooled = PooledBufMut::new(buffer, Arc::downgrade(&self.inner));
+        Ok(IoBufMut::from_pooled(pooled))
     }
 
     /// Returns the pool configuration.
