@@ -98,31 +98,31 @@ impl<H: Hasher> Builder<H> {
     ///
     /// It is valid to build a tree with no leaves, in which case
     /// just an "empty" node is included (no leaves will be provable).
-    pub fn build(self) -> Tree<H> {
+    pub fn build(self) -> Tree<H::Digest> {
         Tree::new(self.hasher, self.leaves)
     }
 }
 
 /// Constructed Binary Merkle Tree (BMT).
 #[derive(Clone, Debug)]
-pub struct Tree<H: Hasher> {
+pub struct Tree<D: Digest> {
     /// Records whether the tree is empty.
     empty: bool,
 
     /// The digests at each level of the tree (from leaves to root).
-    levels: NonEmptyVec<NonEmptyVec<H::Digest>>,
+    levels: NonEmptyVec<NonEmptyVec<D>>,
 
     /// The finalized root digest, which incorporates the leaf count.
     ///
     /// This is computed as `H(leaf_count || tree_root)` to prevent
     /// proof malleability where proofs that declare different leaf
     /// counts could verify against the same root.
-    root: H::Digest,
+    root: D,
 }
 
-impl<H: Hasher> Tree<H> {
+impl<D: Digest> Tree<D> {
     /// Builds a Merkle Tree from a slice of position-hashed leaf digests.
-    fn new(mut hasher: H, mut leaves: Vec<H::Digest>) -> Self {
+    fn new<H: Hasher<Digest = D>>(mut hasher: H, mut leaves: Vec<D>) -> Self {
         // If no leaves, add an empty node.
         //
         // Because this node only includes a position, there is no way a valid proof
@@ -181,7 +181,7 @@ impl<H: Hasher> Tree<H> {
     /// The root incorporates the leaf count via `H(leaf_count || tree_root)`,
     /// which prevents proof malleability attacks where different tree sizes
     /// could produce valid proofs for the same root.
-    pub const fn root(&self) -> H::Digest {
+    pub const fn root(&self) -> D {
         self.root
     }
 
@@ -189,7 +189,7 @@ impl<H: Hasher> Tree<H> {
     ///
     /// This is a single-element multi-proof, which includes the minimal siblings
     /// needed to reconstruct the root.
-    pub fn proof(&self, position: u32) -> Result<Proof<H::Digest>, Error> {
+    pub fn proof(&self, position: u32) -> Result<Proof<D>, Error> {
         self.multi_proof(core::iter::once(position))
     }
 
@@ -199,7 +199,7 @@ impl<H: Hasher> Tree<H> {
     /// The proof contains the minimal set of sibling digests needed to reconstruct
     /// the root for all elements in the range. This is more efficient than individual
     /// proofs when proving multiple consecutive elements.
-    pub fn range_proof(&self, start: u32, end: u32) -> Result<Proof<H::Digest>, Error> {
+    pub fn range_proof(&self, start: u32, end: u32) -> Result<Proof<D>, Error> {
         // For empty trees, return an empty proof
         if self.empty {
             if start == 0 && end == 0 {
@@ -222,7 +222,7 @@ impl<H: Hasher> Tree<H> {
 
         // Compute required siblings without enumerating every leaf in the range.
         let sibling_positions = siblings_required_for_range_proof(leaf_count, start, end)?;
-        let siblings: Vec<H::Digest> = sibling_positions
+        let siblings: Vec<D> = sibling_positions
             .iter()
             .map(|&(level, index)| self.levels[level][index])
             .collect();
@@ -241,7 +241,7 @@ impl<H: Hasher> Tree<H> {
     /// are deduplicated.
     ///
     /// Positions are sorted internally; duplicate positions will return an error.
-    pub fn multi_proof<I, P>(&self, positions: I) -> Result<Proof<H::Digest>, Error>
+    pub fn multi_proof<I, P>(&self, positions: I) -> Result<Proof<D>, Error>
     where
         I: IntoIterator<Item = P>,
         P: core::borrow::Borrow<u32>,
@@ -263,7 +263,7 @@ impl<H: Hasher> Tree<H> {
             siblings_required_for_multi_proof(leaf_count, positions.map(|p| *p.borrow()))?;
 
         // Collect sibling digests in order
-        let siblings: Vec<H::Digest> = sibling_positions
+        let siblings: Vec<D> = sibling_positions
             .iter()
             .map(|&(level, index)| self.levels[level][index])
             .collect();

@@ -7,7 +7,7 @@ use std::time::Duration;
 
 mod actor;
 mod directory;
-mod ingress;
+pub(crate) mod ingress;
 mod metadata;
 mod metrics;
 mod record;

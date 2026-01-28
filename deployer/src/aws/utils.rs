@@ -59,7 +59,7 @@ pub async fn ssh_execute(key_file: &str, ip: &str, command: &str) -> Result<(), 
         if output.status.success() {
             return Ok(());
         }
-        warn!(ip, error = ?String::from_utf8_lossy(&output.stderr), "SSH command failed");
+        warn!(ip, stderr = ?String::from_utf8_lossy(&output.stderr), stdout = ?String::from_utf8_lossy(&output.stdout), "SSH command failed");
         sleep(RETRY_INTERVAL).await;
     }
     Err(Error::SshFailed)

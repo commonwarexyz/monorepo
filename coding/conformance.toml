@@ -6,7 +6,7 @@ hash = "07854d2fef297a06ba81685e660c332de36d5d18d546927d30daad6d7fda1541"
 n_cases = 65536
 hash = "edc22446bb2952609d0c8daccf2d22f8ad2b71eedfcf45296c3f4db49d78404a"
 
-["commonware_coding::reed_solomon::tests::conformance::CodecConformance<Chunk<Sha256>>"]
+["commonware_coding::reed_solomon::tests::conformance::CodecConformance<Chunk<Sha256Digest>>"]
 n_cases = 65536
 hash = "45545e4d4aeb18b8bdb019e630fb9a1fa6dda9ed32b2d529a9213ec07ccab07c"
 
@@ -14,10 +14,10 @@ hash = "45545e4d4aeb18b8bdb019e630fb9a1fa6dda9ed32b2d529a9213ec07ccab07c"
 n_cases = 65536
 hash = "1a412c5c279f981857081765537b85474184048d1b17053394f94fc42ac1dbf4"
 
-["commonware_coding::zoda::tests::conformance::CodecConformance<ReShard<Sha256>>"]
+["commonware_coding::zoda::tests::conformance::CodecConformance<ReShard<Sha256Digest>>"]
 n_cases = 65536
 hash = "0571442797c611b3822c8a9c54138de9f54fc5b9daaf01796f611a5c74466710"
 
-["commonware_coding::zoda::tests::conformance::CodecConformance<Shard<Sha256>>"]
+["commonware_coding::zoda::tests::conformance::CodecConformance<Shard<Sha256Digest>>"]
 n_cases = 65536
 hash = "fbf783e8550fe15cd7000f8185e1ca3bc9641ba0baf156ba6365d3b224e2222d"
