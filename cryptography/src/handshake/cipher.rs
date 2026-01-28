@@ -41,7 +41,7 @@ impl CounterNonce {
     }
 }
 
-trait CipherBackend: Sized {
+trait Backend: Sized {
     /// Creates a new cipher backend from a 256-bit key.
     fn from_key(key: &[u8; KEY_SIZE_BYTES]) -> Self;
 
@@ -56,9 +56,9 @@ cfg_if::cfg_if! {
     if #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))] {
         use aws_lc_rs::aead::{self, LessSafeKey, UnboundKey, CHACHA20_POLY1305};
 
-        struct Backend(LessSafeKey);
+        struct Impl(LessSafeKey);
 
-        impl CipherBackend for Backend {
+        impl Backend for Impl {
             fn from_key(key: &[u8; KEY_SIZE_BYTES]) -> Self {
                 let unbound_key = UnboundKey::new(&CHACHA20_POLY1305, key)
                     .expect("key size should match algorithm");
@@ -88,9 +88,9 @@ cfg_if::cfg_if! {
     } else {
         use chacha20poly1305::{aead::Aead, ChaCha20Poly1305, KeyInit as _};
 
-        struct Backend(ChaCha20Poly1305);
+        struct Impl(ChaCha20Poly1305);
 
-        impl CipherBackend for Backend {
+        impl Backend for Impl {
             fn from_key(key: &[u8; KEY_SIZE_BYTES]) -> Self {
                 Self(ChaCha20Poly1305::new(key.into()))
             }
@@ -112,7 +112,7 @@ cfg_if::cfg_if! {
 
 pub struct SendCipher {
     nonce: CounterNonce,
-    inner: Secret<Backend>,
+    inner: Secret<Impl>,
 }
 
 impl SendCipher {
@@ -122,7 +122,7 @@ impl SendCipher {
         rng.fill_bytes(key_bytes.as_mut());
         Self {
             nonce: CounterNonce::new(),
-            inner: Secret::new(Backend::from_key(&key_bytes)),
+            inner: Secret::new(Impl::from_key(&key_bytes)),
         }
     }
 
@@ -135,7 +135,7 @@ impl SendCipher {
 
 pub struct RecvCipher {
     nonce: CounterNonce,
-    inner: Secret<Backend>,
+    inner: Secret<Impl>,
 }
 
 impl RecvCipher {
@@ -145,7 +145,7 @@ impl RecvCipher {
         rng.fill_bytes(key_bytes.as_mut());
         Self {
             nonce: CounterNonce::new(),
-            inner: Secret::new(Backend::from_key(&key_bytes)),
+            inner: Secret::new(Impl::from_key(&key_bytes)),
         }
     }
 
