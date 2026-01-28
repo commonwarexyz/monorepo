@@ -130,7 +130,7 @@ impl Default for BufferPoolConfig {
 }
 
 impl BufferPoolConfig {
-    /// Network I/O preset: cache-line aligned, cache_line_size to 1MB buffers,
+    /// Network I/O preset: cache-line aligned, cache_line_size to 64KB buffers,
     /// 4096 per class, not prefilled.
     ///
     /// Network operations typically need multiple concurrent buffers per connection
@@ -141,7 +141,7 @@ impl BufferPoolConfig {
         let cache_line = cache_line_size();
         Self {
             min_size: cache_line,
-            max_size: 1048576,
+            max_size: 64 * 1024,
             max_per_class: 4096,
             prefill: false,
             alignment: cache_line,
@@ -565,8 +565,7 @@ impl BufferPool {
     /// # Initialization
     ///
     /// The returned buffer contains **uninitialized memory**. Do not read from
-    /// it until data has been written. Use `resize()` to initialize with a
-    /// specific value.
+    /// it until data has been written.
     pub fn alloc(&self, capacity: usize) -> Option<IoBufMut> {
         self.try_alloc(capacity).ok()
     }
@@ -684,8 +683,7 @@ impl BufferPools {
 /// automatically. Calling `put_slice()` or other `BufMut` methods that would
 /// exceed capacity will panic (per the `BufMut` trait contract).
 ///
-/// Always check `remaining_mut()` before writing variable-length data, or use
-/// `resize()` which handles reallocation from the pool (or falls back to heap).
+/// Always check `remaining_mut()` before writing variable-length data.
 pub struct PooledBufMut {
     buffer: ManuallyDrop<AlignedBuffer>,
     /// Read cursor position (for `Buf` trait).
@@ -1133,7 +1131,7 @@ mod tests {
         let config = BufferPoolConfig::for_network();
         config.validate();
         assert_eq!(config.min_size, cache_line_size());
-        assert_eq!(config.max_size, 1048576);
+        assert_eq!(config.max_size, 64 * 1024);
         assert_eq!(config.max_per_class, 4096);
         assert!(!config.prefill);
         assert_eq!(config.alignment, cache_line_size());
