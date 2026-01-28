@@ -168,15 +168,31 @@ impl<E: Clock + Spawner + Metrics, P: PublicKey, M: Committable + Digestible + C
                     break;
                 };
                 match msg {
-                    Message::Broadcast{ recipients, message, responder } => {
+                    Message::Broadcast {
+                        recipients,
+                        message,
+                        responder,
+                    } => {
                         trace!("mailbox: broadcast");
-                        self.handle_broadcast(&mut sender, recipients, message, responder).await;
+                        self.handle_broadcast(&mut sender, recipients, message, responder)
+                            .await;
                     }
-                    Message::Subscribe{ peer, commitment, digest, responder } => {
+                    Message::Subscribe {
+                        peer,
+                        commitment,
+                        digest,
+                        responder,
+                    } => {
                         trace!("mailbox: subscribe");
-                        self.handle_subscribe(peer, commitment, digest, responder).await;
+                        self.handle_subscribe(peer, commitment, digest, responder)
+                            .await;
                     }
-                    Message::Get{ peer, commitment, digest, responder } => {
+                    Message::Get {
+                        peer,
+                        commitment,
+                        digest,
+                        responder,
+                    } => {
                         trace!("mailbox: get");
                         self.handle_get(peer, commitment, digest, responder).await;
                     }
@@ -204,7 +220,10 @@ impl<E: Clock + Spawner + Metrics, P: PublicKey, M: Committable + Digestible + C
                 };
 
                 trace!(?peer, "network");
-                self.metrics.peer.get_or_create(&SequencerLabel::from(&peer)).inc();
+                self.metrics
+                    .peer
+                    .get_or_create(&SequencerLabel::from(&peer))
+                    .inc();
                 self.handle_network(peer, msg).await;
             },
         }

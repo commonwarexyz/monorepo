@@ -447,8 +447,8 @@ mod tests {
                 );
 
                 select! {
-                    _ = crash => { false },
-                    _ = run => { true },
+                    _ = crash => false,
+                    _ = run => true,
                 }
             };
 

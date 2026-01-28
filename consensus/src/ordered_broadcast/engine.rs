@@ -374,7 +374,10 @@ impl<
                 };
 
                 // Propose the chunk
-                if let Err(err) = self.propose(context.clone(), payload, &mut node_sender).await {
+                if let Err(err) = self
+                    .propose(context.clone(), payload, &mut node_sender)
+                    .await
+                {
                     warn!(?err, ?context, "propose new failed");
                     continue;
                 }
@@ -414,7 +417,12 @@ impl<
                 // Handle the parent certificate
                 if let Some(parent_chunk) = result {
                     let parent = node.parent.as_ref().unwrap();
-                    self.handle_certificate(&parent_chunk, parent.epoch, parent.certificate.clone()).await;
+                    self.handle_certificate(
+                        &parent_chunk,
+                        parent.epoch,
+                        parent.certificate.clone(),
+                    )
+                    .await;
                 }
 
                 // Process the node
@@ -459,7 +467,12 @@ impl<
 
             // Handle completed verification futures.
             verify = self.pending_verifies.next_completed() => {
-                let Verify { timer, context, payload, result } = verify;
+                let Verify {
+                    timer,
+                    context,
+                    payload,
+                    result,
+                } = verify;
                 drop(timer); // Record metric. Explicitly reference timer to avoid lint warning.
                 match result {
                     Err(err) => {
@@ -473,10 +486,13 @@ impl<
                     Ok(true) => {
                         debug!(?context, "verified");
                         self.metrics.verify.inc(Status::Success);
-                        if let Err(err) = self.handle_app_verified(&context, &payload, &mut ack_sender).await {
+                        if let Err(err) = self
+                            .handle_app_verified(&context, &payload, &mut ack_sender)
+                            .await
+                        {
                             debug!(?err, ?context, ?payload, "verified handle failed");
                         }
-                    },
+                    }
                 }
             },
         }

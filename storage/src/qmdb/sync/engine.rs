@@ -65,9 +65,10 @@ async fn wait_for_event<Op, D: Digest, E>(
     );
 
     select! {
-        target = target_update_fut => {
-            target.map_or_else(|| Some(Event::UpdateChannelClosed), |target| Some(Event::TargetUpdate(target)))
-        },
+        target = target_update_fut => target.map_or_else(
+            || Some(Event::UpdateChannelClosed),
+            |target| Some(Event::TargetUpdate(target))
+        ),
         result = outstanding_requests.futures_mut().next() => {
             result.map(|fetch_result| Event::BatchReceived(fetch_result))
         },

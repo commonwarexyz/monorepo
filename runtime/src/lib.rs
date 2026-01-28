@@ -480,12 +480,8 @@ pub trait Clock:
     {
         async move {
             select! {
-                result = future => {
-                    Ok(result)
-                },
-                _ = self.sleep(duration) => {
-                    Err(Error::Timeout)
-                },
+                result = future => Ok(result),
+                _ = self.sleep(duration) => Err(Error::Timeout),
             }
         }
     }

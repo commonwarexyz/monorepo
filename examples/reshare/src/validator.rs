@@ -600,11 +600,18 @@ mod test {
                                 failures += 1;
                                 (epoch, None)
                             }
-                            Update::Success { epoch, output, share } => {
+                            Update::Success {
+                                epoch,
+                                output,
+                                share,
+                            } => {
                                 info!(epoch = ?epoch, pk = ?update.pk, ?output, "DKG success");
 
                                 // Check if a delayed participant got an acknowledged share
-                                if delayed.contains(&update.pk) && share.is_some() && output.revealed().position(&update.pk).is_none() {
+                                if delayed.contains(&update.pk)
+                                    && share.is_some()
+                                    && output.revealed().position(&update.pk).is_none()
+                                {
                                     info!(pk = ?update.pk, "delayed participant acknowledged");
                                     delayed_acknowledged.insert(update.pk.clone());
                                 }
@@ -643,12 +650,9 @@ mod test {
                         } else {
                             PostUpdate::Continue
                         };
-                        if update
-                            .callback
-                            .send(post_update)
-                            .is_err() {
-                                error!("update callback closed unexpectedly");
-                                continue;
+                        if update.callback.send(post_update).is_err() {
+                            error!("update callback closed unexpectedly");
+                            continue;
                         }
 
                         // Check if all active participants have reported
@@ -720,21 +724,40 @@ mod test {
 
                         info!(pk = ?pk, "restarting participant");
                         if team.output.is_none() {
-                            team.start_one::<EdScheme, RoundRobin>(&ctx, &mut oracle, updates_in.clone(), pk).await;
+                            team.start_one::<EdScheme, RoundRobin>(
+                                &ctx,
+                                &mut oracle,
+                                updates_in.clone(),
+                                pk,
+                            )
+                            .await;
                         } else {
-                            team.start_one::<ThresholdScheme<MinSig>, Random>(&ctx, &mut oracle, updates_in.clone(), pk).await;
+                            team.start_one::<ThresholdScheme<MinSig>, Random>(
+                                &ctx,
+                                &mut oracle,
+                                updates_in.clone(),
+                                pk,
+                            )
+                            .await;
                         }
                     },
                     _ = crash_receiver.next() => {
                         // Crash ticker fired (only for Random crashes)
-                        let Some(Crash::Random { count, downtime, .. }) = &self.crash else {
+                        let Some(Crash::Random {
+                            count, downtime, ..
+                        }) = &self.crash
+                        else {
                             continue;
                         };
 
                         // Pick multiple random participants to crash
-                        let all_participants: Vec<PublicKey> = team.participants.keys().cloned().collect();
+                        let all_participants: Vec<PublicKey> =
+                            team.participants.keys().cloned().collect();
                         let crash_count = (*count).min(all_participants.len());
-                        let to_crash: Vec<PublicKey> = all_participants.choose_multiple(&mut ctx, crash_count).cloned().collect();
+                        let to_crash: Vec<PublicKey> = all_participants
+                            .choose_multiple(&mut ctx, crash_count)
+                            .cloned()
+                            .collect();
                         for pk in to_crash {
                             // Try to abort the handle if it exists
                             let Some(handle) = team.handles.remove(&pk) else {

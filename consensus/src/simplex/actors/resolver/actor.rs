@@ -137,7 +137,9 @@ impl<
                         self.state.handle(certificate, None, &mut resolver).await;
                     }
                     MailboxMessage::Certified { view, success } => {
-                        self.state.handle_certified(view, success, &mut resolver).await;
+                        self.state
+                            .handle_certified(view, success, &mut resolver)
+                            .await;
                     }
                 }
             },
@@ -145,7 +147,8 @@ impl<
                 let Some(message) = handler else {
                     break;
                 };
-                self.handle_resolver(message, &mut voter, &mut resolver).await;
+                self.handle_resolver(message, &mut voter, &mut resolver)
+                    .await;
             },
         }
     }
