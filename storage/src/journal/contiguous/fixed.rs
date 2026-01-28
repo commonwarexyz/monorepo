@@ -70,8 +70,7 @@ use crate::{
     metadata::{Config as MetadataConfig, Metadata},
     Persistable,
 };
-#[commonware_macros::stability(BETA)]
-use crate::mmr::Location;
+
 use commonware_codec::CodecFixedShared;
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage};
 use futures::{stream::Stream, StreamExt};

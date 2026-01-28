@@ -11,8 +11,7 @@ use crate::{
     },
     Persistable,
 };
-#[commonware_macros::stability(BETA)]
-use crate::mmr::Location;
+
 use commonware_codec::{Codec, CodecShared};
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage};
 use commonware_utils::NZUsize;

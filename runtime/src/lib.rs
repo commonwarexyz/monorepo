@@ -36,11 +36,12 @@ use thiserror::Error;
 mod macros;
 
 stability_mod!(ALPHA, pub mod deterministic);
+stability_scope!(BETA, cfg(any(feature = "iouring-storage", feature = "iouring-network")) {
+    mod iouring;
+});
 mod network;
 mod process;
 mod storage;
-#[cfg(any(feature = "iouring-storage", feature = "iouring-network"))]
-mod iouring;
 cfg_if::cfg_if! {
     if #[cfg(not(target_arch = "wasm32"))] {
         pub mod benchmarks;

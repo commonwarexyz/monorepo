@@ -17,8 +17,20 @@ use rand::SeedableRng as _;
 use rand_chacha::ChaCha20Rng;
 use rand_core::CryptoRngCore;
 
+// Modules containing #[macro_export] macros must remain outside stability_scope!.
+// See rust-lang/rust#52234: macro-expanded macro_export macros cannot be referenced by absolute paths.
+#[cfg(not(any(commonware_stability_DELTA, commonware_stability_EPSILON)))]
+pub mod bls12381;
+#[cfg(not(any(commonware_stability_DELTA, commonware_stability_EPSILON)))]
+pub mod ed25519;
+#[cfg(not(any(
+    commonware_stability_GAMMA,
+    commonware_stability_DELTA,
+    commonware_stability_EPSILON
+)))]
+pub mod secp256r1;
+
 commonware_macros::stability_scope!(BETA {
-    pub mod secp256r1;
     pub mod bloomfilter;
     pub mod lthash;
 
@@ -31,8 +43,6 @@ commonware_macros::stability_scope!(GAMMA {
     use commonware_math::algebra::Random;
     use commonware_utils::Array;
 
-    pub mod bls12381;
-    pub mod ed25519;
     pub mod certificate;
     pub mod sha256;
     pub mod blake3;
