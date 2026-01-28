@@ -33,8 +33,8 @@ pub trait AncestryProvider: Clone + Send + 'static {
 
 /// Yields the ancestors of a block while prefetching parents, _not_ including the genesis block.
 ///
-/// TODO(clabby): Once marshal can also yield the genesis block, this stream should end
-/// at block height 0 rather than 1.
+/// TODO(<https://github.com/commonwarexyz/monorepo/issues/2982>): Once marshal can also yield the genesis block,
+/// this stream should end at block height 0 rather than 1.
 #[pin_project]
 pub struct AncestorStream<M, B: Block> {
     buffered: Vec<B>,
@@ -59,6 +59,11 @@ impl<M, B: Block> AncestorStream<M, B> {
                 window[0].height().next(),
                 window[1].height(),
                 "initial blocks must be contiguous in height"
+            );
+            assert_eq!(
+                window[0].digest(),
+                window[1].parent(),
+                "initial blocks must be contiguous in ancestry"
             );
         });
 
@@ -156,12 +161,24 @@ mod test {
 
     #[test]
     #[should_panic = "initial blocks must be contiguous in height"]
-    fn test_panics_on_non_contiguous_initial_blocks() {
+    fn test_panics_on_non_contiguous_initial_blocks_height() {
         AncestorStream::new(
             MockProvider::default(),
             vec![
                 Block::new::<Sha256>((), Sha256Digest::EMPTY, Height::new(1), 1),
                 Block::new::<Sha256>((), Sha256Digest::EMPTY, Height::new(3), 3),
+            ],
+        );
+    }
+
+    #[test]
+    #[should_panic = "initial blocks must be contiguous in ancestry"]
+    fn test_panics_on_non_contiguous_initial_blocks_digest() {
+        AncestorStream::new(
+            MockProvider::default(),
+            vec![
+                Block::new::<Sha256>((), Sha256Digest::EMPTY, Height::new(1), 1),
+                Block::new::<Sha256>((), Sha256Digest::EMPTY, Height::new(2), 2),
             ],
         );
     }

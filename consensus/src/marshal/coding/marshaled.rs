@@ -486,15 +486,14 @@ where
     /// available in storage. This indicates a critical error in the consensus engine startup
     /// sequence, as engines must always have the genesis block before starting.
     async fn genesis(&mut self, epoch: Epoch) -> Self::Digest {
-        if epoch.is_zero() {
+        let Some(previous_epoch) = epoch.previous() else {
             let genesis_block = self.application.genesis().await;
             return genesis_coding_commitment(&genesis_block);
-        }
+        };
 
-        let prev = epoch.previous().expect("checked to be non-zero above");
         let last_height = self
             .epocher
-            .last(prev)
+            .last(previous_epoch)
             .expect("previous epoch should exist");
         let Some(block) = self.marshal.get_block(last_height).await else {
             // A new consensus engine will never be started without having the genesis block
