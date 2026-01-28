@@ -1,6 +1,36 @@
-#![allow(dead_code)]
+//! Simple fuzzing harness for in-module tests.
+//!
+//! # Examples
+//!
+//! Basic usage:
+//!
+//! ```ignore
+//! minifuzz::test(|u| {
+//!     let x: u32 = u.arbitrary()?;
+//!     let y: u32 = u.arbitrary()?;
+//!     assert!(x.checked_add(y).is_some() || x > 1000);
+//!     Ok(())
+//! });
+//! ```
+//!
+//! On failure, the output includes a hex token like `MINIFUZZ_BRANCH = 0x...`.
+//! Use `with_reproduce` to replay that exact failure:
+//!
+//! ```ignore
+//! Builder::default()
+//!     .with_reproduce("0x000000000000002a0000002a")
+//!     .test(|u| {
+//!         // same test body
+//!         Ok(())
+//!     });
+//! ```
+//!
+//! Use `with_search_limit` or `with_search_time` to control how long the fuzzer runs.
 
-use std::panic::{catch_unwind, AssertUnwindSafe, RefUnwindSafe, UnwindSafe};
+use std::{
+    panic::{catch_unwind, AssertUnwindSafe, RefUnwindSafe, UnwindSafe},
+    time::{Duration, Instant},
+};
 
 use arbitrary::Unstructured;
 use rand_chacha::ChaCha8Rng;
@@ -21,11 +51,7 @@ impl std::fmt::Display for Error {
 }
 
 fn try_catch<T>(f: impl FnOnce() -> T + UnwindSafe) -> Result<T, Error> {
-    // Save the current panic hook and install a silent one
-    let prev_hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(|_| {}));
-
-    let result = catch_unwind(f).map_err(|e| {
+    catch_unwind(f).map_err(|e| {
         if let Some(s) = e.downcast_ref::<String>() {
             Error::String(s.to_string())
         } else if let Some(s) = e.downcast_ref::<&'static str>() {
@@ -33,14 +59,8 @@ fn try_catch<T>(f: impl FnOnce() -> T + UnwindSafe) -> Result<T, Error> {
         } else {
             Error::NoDisplay
         }
-    });
-
-    // Restore the previous hook
-    std::panic::set_hook(prev_hook);
-    result
+    })
 }
-
-type Property = dyn Fn(&mut arbitrary::Unstructured<'_>) -> Result<(), arbitrary::Error>;
 
 #[derive(Copy, Clone)]
 struct Branch {
@@ -58,6 +78,15 @@ impl Branch {
         }
     }
 
+    fn from_hex(s: &str) -> Self {
+        let s = s.strip_prefix("0x").unwrap_or(s);
+        assert!(s.len() == 24, "expected 24 hex chars, got {}", s.len());
+        let seed = u32::from_str_radix(&s[0..8], 16).expect("invalid hex for seed");
+        let thread = u32::from_str_radix(&s[8..16], 16).expect("invalid hex for thread");
+        let size = u32::from_str_radix(&s[16..24], 16).expect("invalid hex for size");
+        Self { seed, thread, size }
+    }
+
     fn next(self) -> Self {
         Self {
             seed: self.seed,
@@ -66,7 +95,7 @@ impl Branch {
         }
     }
 
-    fn seed(self) -> u64 {
+    fn rng_seed(self) -> u64 {
         (self.seed as u64) << 32 | self.thread as u64
     }
 }
@@ -86,7 +115,6 @@ const COPY_PORTION_NUMERATOR: usize = 50;
 const STRATEGY_WEIGHTS: [u32; 6] = [200, 20, 10, 50, 10, 200];
 
 struct Sampler {
-    branch: Branch,
     rng: ChaCha8Rng,
     buf: Vec<u8>,
     count: i64,
@@ -96,9 +124,8 @@ struct Sampler {
 impl Sampler {
     fn new_with_buf(branch: Branch, mut buf: Vec<u8>) -> Self {
         buf.clear();
-        let rng = ChaCha8Rng::seed_from_u64(branch.seed());
+        let rng = ChaCha8Rng::seed_from_u64(branch.rng_seed());
         Self {
-            branch,
             rng,
             buf,
             count: branch.size.into(),
@@ -119,16 +146,20 @@ impl Sampler {
         *self = Self::new_with_buf(branch, buf)
     }
 
-    fn strategy_add_bytes(&mut self) {
+    fn strategy_add_bytes(&mut self, force: bool) {
         const MAX_BUF_SIZE: usize = 1 << 13; // 8KB cap
-        if self.buf.len() >= MAX_BUF_SIZE {
+        if !force && self.buf.len() >= MAX_BUF_SIZE {
             return;
         }
         let size = self.buf.len();
         let num_bytes =
             (ADD_BYTES_COEFFS[0] * size * size + ADD_BYTES_COEFFS[1] * size + ADD_BYTES_COEFFS[2])
                 / DIVISOR;
-        let new_size = (self.buf.len() + num_bytes).min(MAX_BUF_SIZE);
+        let new_size = if force {
+            self.buf.len() + num_bytes
+        } else {
+            (self.buf.len() + num_bytes).min(MAX_BUF_SIZE)
+        };
         let start = self.buf.len();
         self.buf.resize(new_size, 0);
         self.rng.fill_bytes(&mut self.buf[start..]);
@@ -183,12 +214,14 @@ impl Sampler {
     fn pick_strategy(&mut self) -> u32 {
         let mut weights = STRATEGY_WEIGHTS;
 
-        // If we have lots of unused bytes, reduce add_bytes weight
+        // If we have lots of unused bytes, reduce add_bytes weight (indices 4 and 5)
         let unused = self.buf.len().saturating_sub(self.last_bytes_used);
         if unused > 64 {
-            weights[5] = 0; // Don't grow if we have plenty of unused bytes
+            weights[4] = 0; // Don't grow if we have plenty of unused bytes
+            weights[5] = 0;
         } else if unused > 16 {
-            weights[5] /= 4; // Reduce growth rate
+            weights[4] /= 4; // Reduce growth rate
+            weights[5] /= 4;
         }
 
         // If buffer is small, favor modify_prefix more
@@ -218,14 +251,14 @@ impl Sampler {
         self.count -= 1;
 
         if self.buf.is_empty() {
-            self.strategy_add_bytes();
+            self.strategy_add_bytes(false);
         } else {
             match self.pick_strategy() {
                 0 => self.strategy_modify_prefix(),
                 1 => self.strategy_copy_portion(),
                 2 => self.strategy_clear_non_prefix(),
                 3 => self.strategy_arithmetic_non_prefix(),
-                _ => self.strategy_add_bytes(),
+                _ => self.strategy_add_bytes(false),
             }
         }
 
@@ -233,28 +266,83 @@ impl Sampler {
     }
 }
 
-struct Builder {
-    search_limit: u64,
+enum SearchBound {
+    Limit(u64),
+    Time(Duration),
+}
+
+/// Configures and runs a fuzz test.
+pub struct Builder {
+    search_bound: SearchBound,
+    seed: Option<u64>,
+    reproduce: Option<Branch>,
+}
+
+impl Default for Builder {
+    fn default() -> Self {
+        Self {
+            search_bound: SearchBound::Limit(500_000),
+            seed: None,
+            reproduce: None,
+        }
+    }
 }
 
 impl Builder {
-    fn new() -> Self {
+    /// Sets the RNG seed for deterministic fuzzing.
+    pub fn with_seed(self, seed: u64) -> Self {
         Self {
-            search_limit: 100_000,
+            seed: Some(seed),
+            ..self
         }
     }
 
-    fn test(
+    /// Limits the fuzzer to run a fixed number of test cases.
+    pub fn with_search_limit(self, search_limit: u64) -> Self {
+        Self {
+            search_bound: SearchBound::Limit(search_limit),
+            ..self
+        }
+    }
+
+    /// Limits the fuzzer to run for a fixed duration.
+    pub fn with_search_time(self, duration: Duration) -> Self {
+        Self {
+            search_bound: SearchBound::Time(duration),
+            ..self
+        }
+    }
+
+    /// Reproduces a failure from its hex token (the `MINIFUZZ_BRANCH = ...` output).
+    pub fn with_reproduce(self, hex: &str) -> Self {
+        Self {
+            reproduce: Some(Branch::from_hex(hex)),
+            ..self
+        }
+    }
+
+    /// Runs the fuzz test. Panics if a failure is found.
+    pub fn test(
         self,
         s: impl Fn(&mut arbitrary::Unstructured<'_>) -> Result<(), arbitrary::Error> + RefUnwindSafe,
     ) {
-        let mut branch = Branch {
-            seed: 0,
-            thread: 0,
-            size: 0,
+        let mut branch = match self.reproduce {
+            Some(b) => b,
+            None => {
+                let initial_seed = self.seed.unwrap_or_else(rand::random);
+                Branch::new(initial_seed)
+            }
         };
         let mut sampler = Sampler::new(branch);
-        let mut tries = 0;
+        let mut tries: u64 = 0;
+        let deadline = match self.search_bound {
+            SearchBound::Time(d) => Some(Instant::now() + d),
+            SearchBound::Limit(_) => None,
+        };
+        let limit = match self.search_bound {
+            SearchBound::Limit(l) => l,
+            SearchBound::Time(_) => u64::MAX,
+        };
         'search: loop {
             while let Some(sample) = sampler.next() {
                 let sample_len = sample.len();
@@ -268,12 +356,14 @@ impl Builder {
                         panic!("failure (MINIFUZZ_BRANCH = {}):\n{}", branch, e)
                     }
                     Ok((Err(arbitrary::Error::NotEnoughData), _)) => {
-                        sampler.strategy_add_bytes();
+                        sampler.strategy_add_bytes(true);
                     }
                     Ok((_, remaining)) => {
                         sampler.set_bytes_used(sample_len - remaining);
                         tries += 1;
-                        if tries >= self.search_limit {
+                        let should_stop = tries >= limit
+                            || deadline.is_some_and(|d| Instant::now() >= d);
+                        if should_stop {
                             break 'search;
                         }
                     }
@@ -286,10 +376,11 @@ impl Builder {
     }
 }
 
+/// Runs a fuzz test with default settings. See [`Builder`] for configuration options.
 pub fn test(
     s: impl Fn(&mut arbitrary::Unstructured<'_>) -> Result<(), arbitrary::Error> + RefUnwindSafe,
 ) {
-    Builder::new().test(s)
+    Builder::default().test(s)
 }
 
 #[cfg(test)]
@@ -328,7 +419,7 @@ mod test {
     }
 
     fn search_haystack(depth: usize) {
-        super::test(|u| {
+        super::Builder::default().with_seed(0).test(|u| {
             let plan = Plan::generate(u, depth)?;
             let mut path = [true, false].into_iter().cycle();
             if let Some(leaf) = plan.follow_path(&mut path) {
