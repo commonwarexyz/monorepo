@@ -1229,13 +1229,8 @@ mod tests {
         assert_send(freezer.destroy());
     }
 
-    /// Test that empty table entries remain truly empty after resize.
-    ///
-    /// This test verifies the fix for a bug where empty entries would incorrectly get a non-zero
-    /// epoch and valid CRC during resize, causing is_empty() to return false for what should be
-    /// empty slots.
     #[test_traced]
-    fn test_empty_entries_remain_empty_after_resize() {
+    fn issue_2966_regression() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = super::super::Config {
@@ -1259,24 +1254,12 @@ mod tests {
                     .await
                     .unwrap();
 
-            // Insert only 2 keys to different entries. "key0" and "key2" are known to hash to
-            // different entries (entry 0 and entry 1 respectively). With table_size=4, entries 2
-            // and 3 should remain empty.
+            // Insert only 2 keys to different entries. With table_size=4, entries 2 and 3
+            // should remain empty.
             freezer.put(test_key("key0"), 0).await.unwrap();
             freezer.put(test_key("key2"), 1).await.unwrap();
-
-            // Sync until resize triggers and completes
-            for _ in 0..10 {
-                freezer.sync().await.unwrap();
-                if freezer.resizing().is_none() {
-                    break;
-                }
-            }
-
-            // Close the freezer
             freezer.close().await.unwrap();
 
-            // Read the raw table and parse entries
             let (blob, size) = context.open(&cfg.table_partition, b"table").await.unwrap();
             let table_data = blob
                 .read_at(0, IoBufMut::zeroed(size as usize))
@@ -1284,16 +1267,12 @@ mod tests {
                 .unwrap()
                 .coalesce();
 
-            let num_entries = size as usize / Entry::FULL_SIZE;
-
             // Verify resize happened (table doubled from 4 to 8)
-            assert_eq!(
-                num_entries, 8,
-                "resize should have doubled table from 4 to 8"
-            );
+            let num_entries = size as usize / Entry::FULL_SIZE;
+            assert_eq!(num_entries, 8);
 
-            // Count entries where both slots are truly empty. The bug would cause empty entries to
-            // have one slot with epoch != 0 and valid CRC.
+            // Count entries where both slots are truly empty. The bug would cause empty
+            // entries to have one slot with epoch != 0 and valid CRC.
             let mut both_empty_count = 0;
             for entry_idx in 0..num_entries {
                 let offset = entry_idx * Entry::FULL_SIZE;
@@ -1304,7 +1283,6 @@ mod tests {
                     both_empty_count += 1;
                 }
             }
-
             // 2 keys in 4 entries = 2 empty. After resize to 8, those become 4 empty.
             assert_eq!(both_empty_count, 4);
         });
