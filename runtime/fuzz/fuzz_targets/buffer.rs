@@ -65,7 +65,7 @@ enum FuzzOperation {
         new_size: u16,
     },
     AppendSync,
-    PoolCache {
+    PageCache {
         blob_id: u16,
         data: Vec<u8>,
         offset: u16,
@@ -263,7 +263,7 @@ fn fuzz(input: FuzzInput) {
                     }
                 }
 
-                FuzzOperation::PoolCache {
+                FuzzOperation::PageCache {
                     blob_id,
                     data,
                     offset,
