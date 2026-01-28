@@ -112,6 +112,7 @@ cfg_if::cfg_if! {
     }
 }
 
+/// Encrypts outgoing messages with an auto-incrementing nonce.
 pub struct SendCipher {
     nonce: CounterNonce,
     inner: Secret<Impl>,
@@ -135,6 +136,7 @@ impl SendCipher {
     }
 }
 
+/// Decrypts incoming messages with an auto-incrementing nonce.
 pub struct RecvCipher {
     nonce: CounterNonce,
     inner: Secret<Impl>,
