@@ -69,7 +69,7 @@ pub trait Resolver: Send + Sync + Clone + 'static {
 
 macro_rules! impl_resolver {
     ($db:ident, $op:ident, $val_bound:ident) => {
-        impl<E, K, V, H, T, S> Resolver for Arc<$db<E, K, V, H, T, S, Merkleized<H>, Durable>>
+        impl<E, K, V, H, T> Resolver for Arc<$db<E, K, V, H, T, Merkleized<H>, Durable>>
         where
             E: Storage + Clock + Metrics,
             K: Array,
@@ -77,7 +77,6 @@ macro_rules! impl_resolver {
             H: Hasher,
             T: Translator + Send + Sync + 'static,
             T::Key: Send + Sync,
-            S: commonware_parallel::Strategy,
         {
             type Digest = H::Digest;
             type Op = $op<K, V>;
@@ -99,8 +98,7 @@ macro_rules! impl_resolver {
             }
         }
 
-        impl<E, K, V, H, T, S> Resolver
-            for Arc<RwLock<$db<E, K, V, H, T, S, Merkleized<H>, Durable>>>
+        impl<E, K, V, H, T> Resolver for Arc<RwLock<$db<E, K, V, H, T, Merkleized<H>, Durable>>>
         where
             E: Storage + Clock + Metrics,
             K: Array,
@@ -108,7 +106,6 @@ macro_rules! impl_resolver {
             H: Hasher,
             T: Translator + Send + Sync + 'static,
             T::Key: Send + Sync,
-            S: commonware_parallel::Strategy,
         {
             type Digest = H::Digest;
             type Op = $op<K, V>;
@@ -131,8 +128,8 @@ macro_rules! impl_resolver {
             }
         }
 
-        impl<E, K, V, H, T, S> Resolver
-            for Arc<RwLock<Option<$db<E, K, V, H, T, S, Merkleized<H>, Durable>>>>
+        impl<E, K, V, H, T> Resolver
+            for Arc<RwLock<Option<$db<E, K, V, H, T, Merkleized<H>, Durable>>>>
         where
             E: Storage + Clock + Metrics,
             K: Array,
@@ -140,7 +137,6 @@ macro_rules! impl_resolver {
             H: Hasher,
             T: Translator + Send + Sync + 'static,
             T::Key: Send + Sync,
-            S: commonware_parallel::Strategy,
         {
             type Digest = H::Digest;
             type Op = $op<K, V>;

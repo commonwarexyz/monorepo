@@ -102,7 +102,6 @@ fn db_config(suffix: &str) -> Config<TwoCap, (RangeCfg<usize>, ())> {
         log_codec_config: ((0..=10000).into(), ()),
         log_write_buffer: NZUsize!(1024),
         translator: TwoCap,
-        strategy: commonware_parallel::Sequential,
         buffer_pool: PoolRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
     }
 }

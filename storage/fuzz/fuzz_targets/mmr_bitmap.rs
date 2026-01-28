@@ -62,7 +62,6 @@ fn fuzz(input: FuzzInput) {
         let init_bitmap = CleanAuthenticatedBitMap::<_, _, CHUNK_SIZE>::init(
             context.with_label("bitmap"),
             PARTITION,
-            commonware_parallel::Sequential,
             &mut hasher,
         )
         .await
@@ -237,7 +236,6 @@ fn fuzz(input: FuzzInput) {
                             .with_label("bitmap")
                             .with_attribute("instance", restarts),
                         PARTITION,
-                        commonware_parallel::Sequential,
                         &mut hasher,
                     )
                     .await

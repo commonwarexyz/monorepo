@@ -20,7 +20,6 @@ use crate::{
 };
 use commonware_codec::Read;
 use commonware_cryptography::Hasher;
-use commonware_parallel::{Sequential, Strategy};
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
 use tracing::warn;
@@ -30,23 +29,17 @@ pub type Operation<K, V> = unordered::Operation<K, VariableEncoding<V>>;
 
 /// A key-value QMDB based on an authenticated log of operations, supporting authentication of any
 /// value ever associated with a key.
-pub type Db<E, K, V, H, T, S = Sequential, M = Merkleized<H>, D = Durable> =
-    super::Db<E, Journal<E, Operation<K, V>>, Index<T, Location>, H, Update<K, V>, S, M, D>;
+pub type Db<E, K, V, H, T, M = Merkleized<H>, D = Durable> =
+    super::Db<E, Journal<E, Operation<K, V>>, Index<T, Location>, H, Update<K, V>, M, D>;
 
-impl<
-        E: Storage + Clock + Metrics,
-        K: Array,
-        V: VariableValue,
-        H: Hasher,
-        T: Translator,
-        S: Strategy,
-    > Db<E, K, V, H, T, S, Merkleized<H>, Durable>
+impl<E: Storage + Clock + Metrics, K: Array, V: VariableValue, H: Hasher, T: Translator>
+    Db<E, K, V, H, T, Merkleized<H>, Durable>
 {
     /// Returns a [Db] QMDB initialized from `cfg`. Uncommitted log operations will be
     /// discarded and the state of the db will be as of the last committed operation.
     pub async fn init(
         context: E,
-        cfg: VariableConfig<T, <Operation<K, V> as Read>::Cfg, S>,
+        cfg: VariableConfig<T, <Operation<K, V> as Read>::Cfg>,
     ) -> Result<Self, Error> {
         Self::init_with_callback(context, cfg, None, |_, _| {}).await
     }
@@ -59,7 +52,7 @@ impl<
     /// status and previous location (if any).
     pub(crate) async fn init_with_callback(
         context: E,
-        cfg: VariableConfig<T, <Operation<K, V> as Read>::Cfg, S>,
+        cfg: VariableConfig<T, <Operation<K, V> as Read>::Cfg>,
         known_inactivity_floor: Option<Location>,
         callback: impl FnMut(bool, Option<Location>),
     ) -> Result<Self, Error> {
@@ -68,7 +61,6 @@ impl<
             metadata_partition: cfg.mmr_metadata_partition,
             items_per_blob: cfg.mmr_items_per_blob,
             write_buffer: cfg.mmr_write_buffer,
-            strategy: cfg.strategy,
             buffer_pool: cfg.buffer_pool.clone(),
         };
 
@@ -81,7 +73,7 @@ impl<
             write_buffer: cfg.log_write_buffer,
         };
 
-        let mut log = authenticated::Journal::<_, Journal<_, _>, _, _, _>::new(
+        let mut log = authenticated::Journal::<_, Journal<_, _>, _, _>::new(
             context.with_label("log"),
             mmr_config,
             journal_config,
@@ -121,7 +113,6 @@ pub(crate) mod test {
     use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
     use commonware_macros::test_traced;
     use commonware_math::algebra::Random;
-    use commonware_parallel::Sequential;
     use commonware_runtime::{
         buffer::PoolRef,
         deterministic::{self, Context},
@@ -146,7 +137,6 @@ pub(crate) mod test {
             log_compression: None,
             log_codec_config: ((0..=10000).into(), ()),
             translator: TwoCap,
-            strategy: Sequential,
             buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
@@ -154,26 +144,10 @@ pub(crate) mod test {
     pub(crate) type VarConfig = VariableConfig<TwoCap, (commonware_codec::RangeCfg<usize>, ())>;
 
     /// A type alias for the concrete [Db] type used in these unit tests.
-    pub(crate) type AnyTest = Db<
-        deterministic::Context,
-        Digest,
-        Vec<u8>,
-        Sha256,
-        TwoCap,
-        Sequential,
-        Merkleized<Sha256>,
-        Durable,
-    >;
-    type MutableAnyTest = Db<
-        deterministic::Context,
-        Digest,
-        Vec<u8>,
-        Sha256,
-        TwoCap,
-        Sequential,
-        Unmerkleized,
-        NonDurable,
-    >;
+    pub(crate) type AnyTest =
+        Db<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap, Merkleized<Sha256>, Durable>;
+    type MutableAnyTest =
+        Db<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap, Unmerkleized, NonDurable>;
 
     /// Create a test database with unique partition names
     pub(crate) async fn create_test_db(mut context: Context) -> AnyTest {
@@ -556,16 +530,8 @@ pub(crate) mod test {
         }
     }
 
-    type MutableDb = Db<
-        deterministic::Context,
-        Digest,
-        Vec<u8>,
-        Sha256,
-        TwoCap,
-        Sequential,
-        Unmerkleized,
-        NonDurable,
-    >;
+    type MutableDb =
+        Db<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap, Unmerkleized, NonDurable>;
 
     #[allow(dead_code)]
     fn assert_merkleized_db_futures_are_send(db: &mut AnyTest, key: Digest, loc: Location) {

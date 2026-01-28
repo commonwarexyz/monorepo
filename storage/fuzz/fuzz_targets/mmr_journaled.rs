@@ -82,13 +82,12 @@ impl<'a> Arbitrary<'a> for FuzzInput {
     }
 }
 
-fn test_config(partition_suffix: &str) -> Config<commonware_parallel::Sequential> {
+fn test_config(partition_suffix: &str) -> Config {
     Config {
         journal_partition: format!("journal_{partition_suffix}"),
         metadata_partition: format!("metadata_{partition_suffix}"),
         items_per_blob: NZU64!(ITEMS_PER_BLOB),
         write_buffer: NZUsize!(1024),
-        strategy: commonware_parallel::Sequential,
         buffer_pool: PoolRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
     }
 }
@@ -97,8 +96,8 @@ enum MmrState<
     E: commonware_runtime::Storage + commonware_runtime::Clock + commonware_runtime::Metrics,
     D: commonware_cryptography::Digest,
 > {
-    Clean(CleanMmr<E, D, commonware_parallel::Sequential>),
-    Dirty(DirtyMmr<E, D, commonware_parallel::Sequential>),
+    Clean(CleanMmr<E, D>),
+    Dirty(DirtyMmr<E, D>),
 }
 
 fn fuzz(input: FuzzInput) {
@@ -135,7 +134,9 @@ fn fuzz(input: FuzzInput) {
                     // Add only works on Clean MMR, so merkleize if Dirty first
                     let mut mmr = match mmr {
                         MmrState::Clean(m) => m,
-                        MmrState::Dirty(m) => m.merkleize(&mut hasher),
+                        MmrState::Dirty(m) => {
+                            m.merkleize(&mut hasher, &commonware_parallel::Sequential)
+                        }
                     };
 
                     let size_before = mmr.size();
@@ -179,7 +180,9 @@ fn fuzz(input: FuzzInput) {
                     // Pop requires Clean MMR
                     let mut mmr = match mmr {
                         MmrState::Clean(m) => m,
-                        MmrState::Dirty(m) => m.merkleize(&mut hasher),
+                        MmrState::Dirty(m) => {
+                            m.merkleize(&mut hasher, &commonware_parallel::Sequential)
+                        }
                     };
 
                     if count as u64 <= mmr.leaves() {
@@ -193,7 +196,9 @@ fn fuzz(input: FuzzInput) {
                 MmrJournaledOperation::GetNode { pos } => {
                     let mmr = match mmr {
                         MmrState::Clean(m) => m,
-                        MmrState::Dirty(m) => m.merkleize(&mut hasher),
+                        MmrState::Dirty(m) => {
+                            m.merkleize(&mut hasher, &commonware_parallel::Sequential)
+                        }
                     };
                     let _ = mmr.get_node(Position::new(pos)).await;
                     MmrState::Clean(mmr)
@@ -203,7 +208,9 @@ fn fuzz(input: FuzzInput) {
                     // Proof requires Clean MMR
                     let mmr = match mmr {
                         MmrState::Clean(m) => m,
-                        MmrState::Dirty(m) => m.merkleize(&mut hasher),
+                        MmrState::Dirty(m) => {
+                            m.merkleize(&mut hasher, &commonware_parallel::Sequential)
+                        }
                     };
 
                     if mmr.leaves() > 0 {
@@ -237,7 +244,9 @@ fn fuzz(input: FuzzInput) {
                     let state = mmr;
                     let mmr = match state {
                         MmrState::Clean(m) => m,
-                        MmrState::Dirty(m) => m.merkleize(&mut hasher),
+                        MmrState::Dirty(m) => {
+                            m.merkleize(&mut hasher, &commonware_parallel::Sequential)
+                        }
                     };
 
                     if mmr.leaves() > 0 {
@@ -273,7 +282,9 @@ fn fuzz(input: FuzzInput) {
                     let state = mmr;
                     let mmr = match state {
                         MmrState::Clean(m) => m,
-                        MmrState::Dirty(m) => m.merkleize(&mut hasher),
+                        MmrState::Dirty(m) => {
+                            m.merkleize(&mut hasher, &commonware_parallel::Sequential)
+                        }
                     };
 
                     if mmr.leaves() > 0 {
@@ -307,7 +318,9 @@ fn fuzz(input: FuzzInput) {
                 MmrJournaledOperation::Sync => {
                     let mut mmr = match mmr {
                         MmrState::Clean(m) => m,
-                        MmrState::Dirty(m) => m.merkleize(&mut hasher),
+                        MmrState::Dirty(m) => {
+                            m.merkleize(&mut hasher, &commonware_parallel::Sequential)
+                        }
                     };
                     mmr.sync().await.unwrap();
                     MmrState::Clean(mmr)
@@ -317,7 +330,9 @@ fn fuzz(input: FuzzInput) {
                     let state = mmr;
                     let mmr = match state {
                         MmrState::Clean(m) => m, // No-op for Clean
-                        MmrState::Dirty(m) => m.merkleize(&mut hasher),
+                        MmrState::Dirty(m) => {
+                            m.merkleize(&mut hasher, &commonware_parallel::Sequential)
+                        }
                     };
                     MmrState::Clean(mmr)
                 }
@@ -326,7 +341,9 @@ fn fuzz(input: FuzzInput) {
                     // PruneAll requires Clean MMR
                     let mut mmr = match mmr {
                         MmrState::Clean(m) => m,
-                        MmrState::Dirty(m) => m.merkleize(&mut hasher),
+                        MmrState::Dirty(m) => {
+                            m.merkleize(&mut hasher, &commonware_parallel::Sequential)
+                        }
                     };
                     mmr.prune_all().await.unwrap();
                     MmrState::Clean(mmr)
@@ -336,7 +353,9 @@ fn fuzz(input: FuzzInput) {
                     // PruneToPos requires Clean MMR
                     let mut mmr = match mmr {
                         MmrState::Clean(m) => m,
-                        MmrState::Dirty(m) => m.merkleize(&mut hasher),
+                        MmrState::Dirty(m) => {
+                            m.merkleize(&mut hasher, &commonware_parallel::Sequential)
+                        }
                     };
                     if mmr.size() > 0 {
                         let safe_pos = pos % (mmr.size() + 1).as_u64();
@@ -350,7 +369,9 @@ fn fuzz(input: FuzzInput) {
                     // GetRoot requires Clean MMR
                     let mmr = match mmr {
                         MmrState::Clean(m) => m,
-                        MmrState::Dirty(m) => m.merkleize(&mut hasher),
+                        MmrState::Dirty(m) => {
+                            m.merkleize(&mut hasher, &commonware_parallel::Sequential)
+                        }
                     };
                     let _ = mmr.root();
                     MmrState::Clean(mmr)

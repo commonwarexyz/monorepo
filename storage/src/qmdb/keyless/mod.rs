@@ -15,7 +15,6 @@ use crate::{
     },
 };
 use commonware_cryptography::{DigestOf, Hasher};
-use commonware_parallel::{Sequential, Strategy};
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage};
 use core::{marker::PhantomData, ops::Range};
 use std::num::{NonZeroU64, NonZeroUsize};
@@ -26,7 +25,7 @@ pub use operation::Operation;
 
 /// Configuration for a [Keyless] authenticated db.
 #[derive(Clone)]
-pub struct Config<C, S: Strategy = Sequential> {
+pub struct Config<C> {
     /// The name of the [Storage] partition used for the MMR's backing journal.
     pub mmr_journal_partition: String,
 
@@ -54,16 +53,12 @@ pub struct Config<C, S: Strategy = Sequential> {
     /// The max number of operations to put in each section of the operations log.
     pub log_items_per_section: NonZeroU64,
 
-    /// The strategy to use for parallelizing batch MMR operations.
-    pub strategy: S,
-
     /// The buffer pool to use for caching data.
     pub buffer_pool: PoolRef,
 }
 
 /// A keyless QMDB for variable length data.
-type Journal<E, V, H, S, Y = Sequential> =
-    authenticated::Journal<E, ContiguousJournal<E, Operation<V>>, H, S, Y>;
+type Journal<E, V, H, S> = authenticated::Journal<E, ContiguousJournal<E, Operation<V>>, H, S>;
 
 /// A keyless authenticated database for variable-length data.
 pub struct Keyless<
@@ -72,10 +67,9 @@ pub struct Keyless<
     H: Hasher,
     M: MerkleizationState<DigestOf<H>> = Merkleized<H>,
     D: DurabilityState = Durable,
-    S: Strategy = Sequential,
 > {
     /// Authenticated journal of operations.
-    journal: Journal<E, V, H, M, S>,
+    journal: Journal<E, V, H, M>,
 
     /// The location of the last commit, if any.
     last_commit_loc: Location,
@@ -91,8 +85,7 @@ impl<
         H: Hasher,
         M: MerkleizationState<DigestOf<H>>,
         D: DurabilityState,
-        S: Strategy,
-    > Keyless<E, V, H, M, D, S>
+    > Keyless<E, V, H, M, D>
 {
     /// Get the value at location `loc` in the database.
     ///
@@ -144,18 +137,17 @@ impl<
 }
 
 // Implementation for the Clean state.
-impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher, S: Strategy>
-    Keyless<E, V, H, Merkleized<H>, Durable, S>
+impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher>
+    Keyless<E, V, H, Merkleized<H>, Durable>
 {
     /// Returns a [Keyless] qmdb initialized from `cfg`. Any uncommitted operations will be discarded
     /// and the state of the db will be as of the last committed operation.
-    pub async fn init(context: E, cfg: Config<V::Cfg, S>) -> Result<Self, Error> {
+    pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
         let mmr_cfg = MmrConfig {
             journal_partition: cfg.mmr_journal_partition,
             metadata_partition: cfg.mmr_metadata_partition,
             items_per_blob: cfg.mmr_items_per_blob,
             write_buffer: cfg.mmr_write_buffer,
-            strategy: cfg.strategy,
             buffer_pool: cfg.buffer_pool.clone(),
         };
 
@@ -256,7 +248,7 @@ impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher, S: Strategy>
     }
 
     /// Convert this database into the Mutable state for accepting new operations.
-    pub fn into_mutable(self) -> Keyless<E, V, H, Unmerkleized, NonDurable, S> {
+    pub fn into_mutable(self) -> Keyless<E, V, H, Unmerkleized, NonDurable> {
         Keyless {
             journal: self.journal.into_dirty(),
             last_commit_loc: self.last_commit_loc,
@@ -266,8 +258,8 @@ impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher, S: Strategy>
 }
 
 // Implementation for the Mutable state.
-impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher, S: Strategy>
-    Keyless<E, V, H, Unmerkleized, NonDurable, S>
+impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher>
+    Keyless<E, V, H, Unmerkleized, NonDurable>
 {
     /// Append a value to the db, returning its location which can be used to retrieve it.
     pub async fn append(&mut self, value: V) -> Result<Location, Error> {
@@ -285,7 +277,7 @@ impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher, S: Strategy>
     pub async fn commit(
         mut self,
         metadata: Option<V>,
-    ) -> Result<(Keyless<E, V, H, Unmerkleized, Durable, S>, Range<Location>), Error> {
+    ) -> Result<(Keyless<E, V, H, Unmerkleized, Durable>, Range<Location>), Error> {
         let start_loc = self.last_commit_loc + 1;
         self.last_commit_loc = self.journal.append(Operation::Commit(metadata)).await?;
         self.journal.commit().await?;
@@ -301,7 +293,7 @@ impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher, S: Strategy>
         Ok((durable, start_loc..op_count))
     }
 
-    pub fn into_merkleized(self) -> Keyless<E, V, H, Merkleized<H>, Durable, S> {
+    pub fn into_merkleized(self) -> Keyless<E, V, H, Merkleized<H>, Durable> {
         Keyless {
             journal: self.journal.merkleize(),
             last_commit_loc: self.last_commit_loc,
@@ -311,12 +303,12 @@ impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher, S: Strategy>
 }
 
 // Implementation for the (Unmerkleized, Durable) state.
-impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher, S: Strategy>
-    Keyless<E, V, H, Unmerkleized, Durable, S>
+impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher>
+    Keyless<E, V, H, Unmerkleized, Durable>
 {
     /// Convert this database into the Mutable state for accepting more operations without
     /// re-merkleizing.
-    pub fn into_mutable(self) -> Keyless<E, V, H, Unmerkleized, NonDurable, S> {
+    pub fn into_mutable(self) -> Keyless<E, V, H, Unmerkleized, NonDurable> {
         Keyless {
             journal: self.journal,
             last_commit_loc: self.last_commit_loc,
@@ -325,7 +317,7 @@ impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher, S: Strategy>
     }
 
     /// Compute the merkle root and transition to the Merkleized, Durable state.
-    pub fn into_merkleized(self) -> Keyless<E, V, H, Merkleized<H>, Durable, S> {
+    pub fn into_merkleized(self) -> Keyless<E, V, H, Merkleized<H>, Durable> {
         Keyless {
             journal: self.journal.merkleize(),
             last_commit_loc: self.last_commit_loc,
@@ -335,13 +327,8 @@ impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher, S: Strategy>
 }
 
 // Implementation of MerkleizedStore for the Merkleized state (any durability).
-impl<
-        E: Storage + Clock + Metrics,
-        V: VariableValue,
-        H: Hasher,
-        D: DurabilityState,
-        S: Strategy,
-    > MerkleizedStore for Keyless<E, V, H, Merkleized<H>, D, S>
+impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher, D: DurabilityState> MerkleizedStore
+    for Keyless<E, V, H, Merkleized<H>, D>
 {
     type Digest = H::Digest;
     type Operation = Operation<V>;
@@ -370,8 +357,7 @@ impl<
         H: Hasher,
         M: MerkleizationState<DigestOf<H>>,
         D: DurabilityState,
-        S: Strategy,
-    > LogStore for Keyless<E, V, H, M, D, S>
+    > LogStore for Keyless<E, V, H, M, D>
 {
     type Value = V;
 
@@ -395,13 +381,8 @@ impl<
 }
 
 // Implementation of PrunableStore for the Merkleized state (any durability).
-impl<
-        E: Storage + Clock + Metrics,
-        V: VariableValue,
-        H: Hasher,
-        D: DurabilityState,
-        S: Strategy,
-    > PrunableStore for Keyless<E, V, H, Merkleized<H>, D, S>
+impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher, D: DurabilityState> PrunableStore
+    for Keyless<E, V, H, Merkleized<H>, D>
 {
     async fn prune(&mut self, loc: Location) -> Result<(), Error> {
         if loc > self.last_commit_loc {
@@ -438,7 +419,6 @@ mod test {
             log_compression: None,
             log_codec_config: ((0..=10000).into(), ()),
             log_items_per_section: NZU64!(7),
-            strategy: Sequential,
             buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }

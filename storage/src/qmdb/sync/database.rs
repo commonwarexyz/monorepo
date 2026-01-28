@@ -7,9 +7,7 @@ pub trait Config {
     fn journal_config(&self) -> Self::JournalConfig;
 }
 
-impl<T: Translator, S: commonware_parallel::Strategy> Config
-    for crate::qmdb::any::FixedConfig<T, S>
-{
+impl<T: Translator> Config for crate::qmdb::any::FixedConfig<T> {
     type JournalConfig = crate::journal::contiguous::fixed::Config;
 
     fn journal_config(&self) -> Self::JournalConfig {
@@ -22,9 +20,7 @@ impl<T: Translator, S: commonware_parallel::Strategy> Config
     }
 }
 
-impl<T: Translator, C: Clone, S: commonware_parallel::Strategy> Config
-    for crate::qmdb::any::VariableConfig<T, C, S>
-{
+impl<T: Translator, C: Clone> Config for crate::qmdb::any::VariableConfig<T, C> {
     type JournalConfig = crate::journal::contiguous::variable::Config<C>;
 
     fn journal_config(&self) -> Self::JournalConfig {

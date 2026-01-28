@@ -1,8 +1,7 @@
 //! Benchmarks of QMDB variants on variable-sized values.
 
 use commonware_cryptography::{Hasher, Sha256};
-use commonware_parallel::{Rayon, Sequential, Strategy};
-use commonware_runtime::{buffer::PoolRef, tokio::Context, RayonPoolSpawner};
+use commonware_runtime::{buffer::PoolRef, tokio::Context};
 use commonware_storage::{
     kv::{Deletable as _, Updatable as _},
     qmdb::{
@@ -78,28 +77,16 @@ const DELETE_FREQUENCY: u32 = 10;
 /// Default write buffer size.
 const WRITE_BUFFER_SIZE: NonZeroUsize = NZUsize!(1024);
 
-/// Clean (Merkleized, Durable) db type aliases for Any databases (Sequential).
-pub type UVariableDbSeq = UVariable<Context, Digest, Vec<u8>, Sha256, EightCap, Sequential>;
-pub type OVariableDbSeq = OVariable<Context, Digest, Vec<u8>, Sha256, EightCap, Sequential>;
+/// Clean (Merkleized, Durable) db type aliases for Any databases.
+pub type UVariableDb = UVariable<Context, Digest, Vec<u8>, Sha256, EightCap>;
+pub type OVariableDb = OVariable<Context, Digest, Vec<u8>, Sha256, EightCap>;
 
-/// Clean (Merkleized, Durable) db type aliases for Any databases (Parallel).
-pub type UVariableDbPar = UVariable<Context, Digest, Vec<u8>, Sha256, EightCap, Rayon>;
-pub type OVariableDbPar = OVariable<Context, Digest, Vec<u8>, Sha256, EightCap, Rayon>;
+/// Clean (Merkleized, Durable) db type aliases for Current databases.
+pub type UVCurrentDb = UVCurrent<Context, Digest, Vec<u8>, Sha256, EightCap, CHUNK_SIZE>;
+pub type OVCurrentDb = OVCurrent<Context, Digest, Vec<u8>, Sha256, EightCap, CHUNK_SIZE>;
 
-/// Clean (Merkleized, Durable) db type aliases for Current databases (Sequential).
-pub type UVCurrentDbSeq =
-    UVCurrent<Context, Digest, Vec<u8>, Sha256, EightCap, CHUNK_SIZE, Sequential>;
-pub type OVCurrentDbSeq =
-    OVCurrent<Context, Digest, Vec<u8>, Sha256, EightCap, CHUNK_SIZE, Sequential>;
-
-/// Clean (Merkleized, Durable) db type aliases for Current databases (Parallel).
-pub type UVCurrentDbPar = UVCurrent<Context, Digest, Vec<u8>, Sha256, EightCap, CHUNK_SIZE, Rayon>;
-pub type OVCurrentDbPar = OVCurrent<Context, Digest, Vec<u8>, Sha256, EightCap, CHUNK_SIZE, Rayon>;
-
-pub fn any_cfg<S: Strategy>(
-    strategy: S,
-) -> AConfig<EightCap, (commonware_codec::RangeCfg<usize>, ()), S> {
-    AConfig::<EightCap, (commonware_codec::RangeCfg<usize>, ()), S> {
+pub fn any_cfg() -> AConfig<EightCap, (commonware_codec::RangeCfg<usize>, ())> {
+    AConfig::<EightCap, (commonware_codec::RangeCfg<usize>, ())> {
         mmr_journal_partition: format!("journal_{PARTITION_SUFFIX}"),
         mmr_metadata_partition: format!("metadata_{PARTITION_SUFFIX}"),
         mmr_items_per_blob: ITEMS_PER_BLOB,
@@ -110,41 +97,20 @@ pub fn any_cfg<S: Strategy>(
         log_write_buffer: WRITE_BUFFER_SIZE,
         log_compression: None,
         translator: EightCap,
-        strategy,
         buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
     }
 }
 
-pub async fn get_any_unordered_seq(ctx: Context) -> UVariableDbSeq {
-    UVariableDbSeq::init(ctx, any_cfg(Sequential))
-        .await
-        .unwrap()
+pub async fn get_any_unordered(ctx: Context) -> UVariableDb {
+    UVariableDb::init(ctx, any_cfg()).await.unwrap()
 }
 
-pub async fn get_any_unordered_par(ctx: Context) -> UVariableDbPar {
-    let pool = ctx.clone().create_pool(THREADS).unwrap();
-    UVariableDbPar::init(ctx, any_cfg(Rayon::with_pool(pool)))
-        .await
-        .unwrap()
+pub async fn get_any_ordered(ctx: Context) -> OVariableDb {
+    OVariableDb::init(ctx, any_cfg()).await.unwrap()
 }
 
-pub async fn get_any_ordered_seq(ctx: Context) -> OVariableDbSeq {
-    OVariableDbSeq::init(ctx, any_cfg(Sequential))
-        .await
-        .unwrap()
-}
-
-pub async fn get_any_ordered_par(ctx: Context) -> OVariableDbPar {
-    let pool = ctx.clone().create_pool(THREADS).unwrap();
-    OVariableDbPar::init(ctx, any_cfg(Rayon::with_pool(pool)))
-        .await
-        .unwrap()
-}
-
-pub fn current_cfg<S: Strategy>(
-    strategy: S,
-) -> CConfig<EightCap, (commonware_codec::RangeCfg<usize>, ()), S> {
-    CConfig::<EightCap, (commonware_codec::RangeCfg<usize>, ()), S> {
+pub fn current_cfg() -> CConfig<EightCap, (commonware_codec::RangeCfg<usize>, ())> {
+    CConfig::<EightCap, (commonware_codec::RangeCfg<usize>, ())> {
         mmr_journal_partition: format!("journal_{PARTITION_SUFFIX}"),
         mmr_metadata_partition: format!("metadata_{PARTITION_SUFFIX}"),
         mmr_items_per_blob: ITEMS_PER_BLOB,
@@ -156,35 +122,16 @@ pub fn current_cfg<S: Strategy>(
         log_compression: None,
         bitmap_metadata_partition: format!("bitmap_metadata_{PARTITION_SUFFIX}"),
         translator: EightCap,
-        strategy,
         buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
     }
 }
 
-pub async fn get_current_unordered_seq(ctx: Context) -> UVCurrentDbSeq {
-    UVCurrentDbSeq::init(ctx, current_cfg(Sequential))
-        .await
-        .unwrap()
+pub async fn get_current_unordered(ctx: Context) -> UVCurrentDb {
+    UVCurrentDb::init(ctx, current_cfg()).await.unwrap()
 }
 
-pub async fn get_current_unordered_par(ctx: Context) -> UVCurrentDbPar {
-    let pool = ctx.clone().create_pool(THREADS).unwrap();
-    UVCurrentDbPar::init(ctx, current_cfg(Rayon::with_pool(pool)))
-        .await
-        .unwrap()
-}
-
-pub async fn get_current_ordered_seq(ctx: Context) -> OVCurrentDbSeq {
-    OVCurrentDbSeq::init(ctx, current_cfg(Sequential))
-        .await
-        .unwrap()
-}
-
-pub async fn get_current_ordered_par(ctx: Context) -> OVCurrentDbPar {
-    let pool = ctx.clone().create_pool(THREADS).unwrap();
-    OVCurrentDbPar::init(ctx, current_cfg(Rayon::with_pool(pool)))
-        .await
-        .unwrap()
+pub async fn get_current_ordered(ctx: Context) -> OVCurrentDb {
+    OVCurrentDb::init(ctx, current_cfg()).await.unwrap()
 }
 
 /// Generate a large db with random data. The function seeds the db with exactly `num_elements`

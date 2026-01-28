@@ -18,7 +18,6 @@ use crate::{
     translator::Translator,
 };
 use commonware_cryptography::Hasher;
-use commonware_parallel::Sequential;
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
 use tracing::warn;
@@ -28,21 +27,15 @@ pub type Operation<K, V> = ordered::Operation<K, FixedEncoding<V>>;
 
 /// A key-value QMDB based on an authenticated log of operations, supporting authentication of any
 /// value ever associated with a key.
-pub type Db<E, K, V, H, T, S = Sequential, M = Merkleized<H>, D = Durable> =
-    super::Db<E, Journal<E, Operation<K, V>>, Index<T, Location>, H, Update<K, V>, S, M, D>;
+pub type Db<E, K, V, H, T, M = Merkleized<H>, D = Durable> =
+    super::Db<E, Journal<E, Operation<K, V>>, Index<T, Location>, H, Update<K, V>, M, D>;
 
-impl<
-        E: Storage + Clock + Metrics,
-        K: Array,
-        V: FixedValue,
-        H: Hasher,
-        T: Translator,
-        S: commonware_parallel::Strategy,
-    > Db<E, K, V, H, T, S, Merkleized<H>, Durable>
+impl<E: Storage + Clock + Metrics, K: Array, V: FixedValue, H: Hasher, T: Translator>
+    Db<E, K, V, H, T, Merkleized<H>, Durable>
 {
     /// Returns a [Db] qmdb initialized from `cfg`. Any uncommitted log operations will be
     /// discarded and the state of the db will be as of the last committed operation.
-    pub async fn init(context: E, cfg: Config<T, S>) -> Result<Self, Error> {
+    pub async fn init(context: E, cfg: Config<T>) -> Result<Self, Error> {
         Self::init_with_callback(context, cfg, None, |_, _| {}).await
     }
 
@@ -54,7 +47,7 @@ impl<
     /// status and previous location (if any).
     pub(crate) async fn init_with_callback(
         context: E,
-        cfg: Config<T, S>,
+        cfg: Config<T>,
         known_inactivity_floor: Option<Location>,
         callback: impl FnMut(bool, Option<Location>),
     ) -> Result<Self, Error> {
@@ -89,7 +82,6 @@ pub(crate) mod test {
     use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
     use commonware_macros::test_traced;
     use commonware_math::algebra::Random;
-    use commonware_parallel::Sequential;
     use commonware_runtime::{
         buffer::PoolRef,
         deterministic::{self, Context},
@@ -116,32 +108,15 @@ pub(crate) mod test {
             log_items_per_blob: NZU64!(7),
             log_write_buffer: NZUsize!(1024),
             translator: TwoCap,
-            strategy: commonware_parallel::Sequential,
             buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
 
     /// Type aliases for concrete [Db] types used in these unit tests.
-    pub(crate) type CleanAnyTest = Db<
-        deterministic::Context,
-        Digest,
-        Digest,
-        Sha256,
-        TwoCap,
-        Sequential,
-        Merkleized<Sha256>,
-        Durable,
-    >;
-    pub(crate) type MutableAnyTest = Db<
-        deterministic::Context,
-        Digest,
-        Digest,
-        Sha256,
-        TwoCap,
-        Sequential,
-        Unmerkleized,
-        NonDurable,
-    >;
+    pub(crate) type CleanAnyTest =
+        Db<deterministic::Context, Digest, Digest, Sha256, TwoCap, Merkleized<Sha256>, Durable>;
+    pub(crate) type MutableAnyTest =
+        Db<deterministic::Context, Digest, Digest, Sha256, TwoCap, Unmerkleized, NonDurable>;
 
     /// Return an `Any` database initialized with a fixed config.
     async fn open_db(context: deterministic::Context) -> CleanAnyTest {
@@ -164,7 +139,6 @@ pub(crate) mod test {
             log_items_per_blob: NZU64!(14), // intentionally small and janky size
             log_write_buffer: NZUsize!(64),
             translator: t,
-            strategy: commonware_parallel::Sequential,
             buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
@@ -240,7 +214,6 @@ pub(crate) mod test {
                 i32,
                 Sha256,
                 OneCap,
-                Sequential,
                 Merkleized<Sha256>,
                 Durable,
             >::init(context.clone(), config)
@@ -945,10 +918,9 @@ pub(crate) mod test {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             async fn insert_random<T: Translator>(
-                mut db: Db<Context, Digest, i32, Sha256, T, Sequential, Unmerkleized, NonDurable>,
+                mut db: Db<Context, Digest, i32, Sha256, T, Unmerkleized, NonDurable>,
                 rng: &mut StdRng,
-            ) -> Db<Context, Digest, i32, Sha256, T, Sequential, Unmerkleized, NonDurable>
-            {
+            ) -> Db<Context, Digest, i32, Sha256, T, Unmerkleized, NonDurable> {
                 let mut keys = BTreeMap::new();
 
                 // Insert 1000 random keys into both the db and an ordered map.
@@ -1008,16 +980,10 @@ pub(crate) mod test {
 
             // Use a OneCap to ensure many collisions.
             let config = create_generic_test_config::<OneCap>(seed, OneCap);
-            let db = Db::<
-                Context,
-                Digest,
-                i32,
-                Sha256,
-                OneCap,
-                Sequential,
-                Merkleized<Sha256>,
-                Durable,
-            >::init(context.with_label("first"), config)
+            let db = Db::<Context, Digest, i32, Sha256, OneCap, Merkleized<Sha256>, Durable>::init(
+                context.with_label("first"),
+                config,
+            )
             .await
             .unwrap();
             let db = insert_random(db.into_mutable(), &mut rng).await;
@@ -1026,16 +992,10 @@ pub(crate) mod test {
 
             // Repeat test with TwoCap to test low/no collisions.
             let config = create_generic_test_config::<TwoCap>(seed, TwoCap);
-            let db = Db::<
-                Context,
-                Digest,
-                i32,
-                Sha256,
-                TwoCap,
-                Sequential,
-                Merkleized<Sha256>,
-                Durable,
-            >::init(context.with_label("second"), config)
+            let db = Db::<Context, Digest, i32, Sha256, TwoCap, Merkleized<Sha256>, Durable>::init(
+                context.with_label("second"),
+                config,
+            )
             .await
             .unwrap();
             let db = insert_random(db.into_mutable(), &mut rng).await;

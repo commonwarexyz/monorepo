@@ -68,7 +68,6 @@ where
                     metadata_partition: db_config.mmr_metadata_partition.clone(),
                     items_per_blob: db_config.mmr_items_per_blob,
                     write_buffer: db_config.mmr_write_buffer,
-                    strategy: db_config.strategy.clone(),
                     buffer_pool: db_config.buffer_pool.clone(),
                 },
                 range: Position::try_from(range.start)?
@@ -180,7 +179,6 @@ mod tests {
             log_codec_config: (),
             log_write_buffer: NZUsize!(1024),
             translator: TwoCap,
-            strategy: commonware_parallel::Sequential,
             buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
