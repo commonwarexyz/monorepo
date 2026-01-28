@@ -1,7 +1,9 @@
 use std::env;
 
+/// Stability levels in order of increasing stability.
 const LEVELS: [&str; 5] = ["ALPHA", "BETA", "GAMMA", "DELTA", "EPSILON"];
-/// RESERVED is a special level that excludes ALL stability-marked items, used for finding unmarked public API.
+
+/// `RESERVED` is a special level that excludes ALL stability-marked items, used for finding unmarked public API.
 const RESERVED_LEVEL: &str = "RESERVED";
 
 /// Returns all levels to check, including RESERVED.
@@ -12,6 +14,7 @@ fn all_levels() -> impl Iterator<Item = &'static str> {
         .chain(std::iter::once(RESERVED_LEVEL))
 }
 
+/// Counts the number of stability cfgs in the environment.
 fn count_stability_cfgs() -> usize {
     let mut count = 0;
 
@@ -57,8 +60,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=RUSTFLAGS");
     println!("cargo:rerun-if-env-changed=CARGO_ENCODED_RUSTFLAGS");
 
-    // Note: check-cfg for stability cfgs is defined in workspace Cargo.toml [workspace.lints.rust]
-
+    // Print a warning if no stability cfg is set or if multiple stability cfgs are set.
     let count = count_stability_cfgs();
     if count == 0 {
         println!(

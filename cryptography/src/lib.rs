@@ -23,20 +23,20 @@ use rand_core::CryptoRngCore;
     commonware_stability_DELTA,
     commonware_stability_EPSILON,
     commonware_stability_RESERVED
-)))]
+)))] // GAMMA
 pub mod bls12381;
 #[cfg(not(any(
     commonware_stability_DELTA,
     commonware_stability_EPSILON,
     commonware_stability_RESERVED
-)))]
+)))] // GAMMA
 pub mod ed25519;
 #[cfg(not(any(
     commonware_stability_GAMMA,
     commonware_stability_DELTA,
     commonware_stability_EPSILON,
     commonware_stability_RESERVED
-)))]
+)))] // BETA
 pub mod secp256r1;
 
 commonware_macros::stability_scope!(BETA {
@@ -52,19 +52,21 @@ commonware_macros::stability_scope!(GAMMA {
     use commonware_math::algebra::Random;
     use commonware_utils::Array;
 
-    pub mod certificate;
-    pub mod sha256;
-    pub mod blake3;
-    pub mod crc32;
-    #[cfg(feature = "std")]
-    pub mod handshake;
     pub mod secret;
+    pub use crate::secret::Secret;
+
+    pub mod certificate;
     pub mod transcript;
 
+    pub mod sha256;
     pub use crate::sha256::{CoreSha256, Sha256};
+    pub mod blake3;
     pub use crate::blake3::{Blake3, CoreBlake3};
+    pub mod crc32;
     pub use crate::crc32::Crc32;
-    pub use crate::secret::Secret;
+    #[cfg(feature = "std")]
+    pub mod handshake;
+
 
     /// Produces [Signature]s over messages that can be verified with a corresponding [PublicKey].
     pub trait Signer: Random + Send + Sync + Clone + 'static {

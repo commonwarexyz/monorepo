@@ -21,7 +21,7 @@ commonware_macros::stability_scope!(GAMMA {
     pub mod simplex;
     pub mod types;
 
-    use types::{Epoch, Height, View};
+    use types::{Epoch, Height, View, Round};
 
     /// Epochable is a trait that provides access to the epoch number.
     /// Any consensus message or object that is associated with a specific epoch should implement this.
@@ -74,7 +74,6 @@ commonware_macros::stability_scope!(GAMMA, cfg(not(target_arch = "wasm32")) {
     use std::future::Future;
     use commonware_runtime::{Spawner, Metrics, Clock};
     use rand::Rng;
-    use crate::types::Round;
 
     pub mod marshal;
     use crate::marshal::ingress::mailbox::AncestorStream;

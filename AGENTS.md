@@ -142,7 +142,6 @@ cargo llvm-cov --workspace --lcov --output-path lcov.info
 - **Toolchain**: Stable (default), Nightly (formatting/fuzzing)
 
 ### Stability Coverage
-
 All public API items must have stability annotations. CI enforces this via `./scripts/find_unstable_public.sh`.
 
 **How it works**: The script uses a synthetic `commonware_stability_RESERVED` cfg that excludes ALL stability-marked items. Any public items remaining in rustdoc output are unmarked and will fail CI.
