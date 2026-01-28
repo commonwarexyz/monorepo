@@ -1749,11 +1749,12 @@ mod tests {
         pooled.put_slice(&[0xBB; 50]);
         Buf::advance(&mut pooled, 20);
 
-        // SAFETY: 40 bytes are initialized (we resized to 50, advanced 20, so 30 readable
-        // but underlying buffer has 50 initialized bytes from cursor position)
+        // After put_slice(50) and advance(20): cursor=20, len=50, readable=30 bytes (20..50)
+        // set_len(25) shrinks readable region to 25 bytes (20..45), which is within initialized range
+        // SAFETY: We're shrinking the readable region, all bytes in range are initialized.
         unsafe {
-            bytes.set_len(40);
-            pooled.set_len(40);
+            bytes.set_len(25);
+            pooled.set_len(25);
         }
 
         assert_eq!(bytes.len(), pooled.len(), "len after set_len");
