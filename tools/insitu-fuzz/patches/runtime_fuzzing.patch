@@ -1,0 +1,24 @@
+diff --git a/runtime/Cargo.toml b/runtime/Cargo.toml
+index fafaa5c7..0fc711f0 100644
+--- a/runtime/Cargo.toml
++++ b/runtime/Cargo.toml
+@@ -55,6 +55,7 @@ test-utils = []
+ iouring-storage = [ "io-uring" ]
+ iouring-network = [ "io-uring" ]
+ tokio-console = [ "dep:console-subscriber", "tokio/tracing" ]
++fuzzing = [ "test-utils" ]
+
+ [lib]
+ bench = false
+diff --git a/runtime/src/lib.rs b/runtime/src/lib.rs
+index cc65d3ad..73fff475 100644
+--- a/runtime/src/lib.rs
++++ b/runtime/src/lib.rs
+@@ -21,6 +21,7 @@
+     html_logo_url = "https://commonware.xyz/imgs/rustdoc_logo.svg",
+     html_favicon_url = "https://commonware.xyz/favicon.ico"
+ )]
++#![cfg_attr(feature = "fuzzing", feature(linkage))]
+
+ use commonware_macros::select;
+ use commonware_utils::StableBuf;

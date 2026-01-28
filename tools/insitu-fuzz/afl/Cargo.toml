@@ -1,0 +1,60 @@
+[package]
+name = "commonware-afl-targets"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+afl = "0.17"
+insitu-fuzz = { path = "..", features = ["afl-fuzz", "test-registry"] }
+commonware-consensus = { path = "../../../consensus", features = ["fuzzing"] }
+once_cell = "1.19"
+
+[[bin]]
+name = "all_tests"
+path = "src/bin/all_tests.rs"
+
+[[bin]]
+name = "fast_tests"
+path = "src/bin/fast_tests.rs"
+
+[[bin]]
+name = "slow_tests"
+path = "src/bin/slow_tests.rs"
+
+[[bin]]
+name = "single_range"
+path = "src/bin/single_range.rs"
+
+[[bin]]
+name = "reshare_restart"
+path = "src/bin/reshare_restart.rs"
+
+[[bin]]
+name = "task_order_fast_tests"
+path = "src/bin/task_order_fast_tests.rs"
+
+[[bin]]
+name = "task_order_aggregate"
+path = "src/bin/task_order_aggregate.rs"
+
+[[bin]]
+name = "task_order_simplex"
+path = "src/bin/task_order_simplex.rs"
+
+[[bin]]
+name = "task_order_reshare"
+path = "src/bin/task_order_reshare.rs"
+
+[[bin]]
+name = "broadcast_get_cached"
+path = "src/bin/broadcast_get_cached.rs"
+
+[profile.release]
+opt-level = 3
+incremental = true
+
+[profile.dev]
+opt-level = 1

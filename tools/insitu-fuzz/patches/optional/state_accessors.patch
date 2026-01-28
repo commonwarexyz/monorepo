@@ -1,0 +1,23 @@
+diff --git a/consensus/src/simplex/actors/voter/state.rs b/consensus/src/simplex/actors/voter/state.rs
+index 385feeeb..da07bd89 100644
+--- a/consensus/src/simplex/actors/voter/state.rs
++++ b/consensus/src/simplex/actors/voter/state.rs
+@@ -108,6 +108,18 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D>
+         self.last_finalized
+     }
+ 
++    /// Returns a reference to the signing scheme.
++    #[cfg(feature = "fuzzing")]
++    pub fn scheme(&self) -> &S {
++        &self.scheme
++    }
++
++    /// Returns a reference to the namespace bytes.
++    #[cfg(feature = "fuzzing")]
++    pub fn namespace(&self) -> &[u8] {
++        &self.namespace
++    }
++
+     /// Returns the lowest view that must remain in memory to satisfy the activity timeout.
+     pub const fn min_active(&self) -> View {
+         min_active(self.activity_timeout, self.last_finalized)
