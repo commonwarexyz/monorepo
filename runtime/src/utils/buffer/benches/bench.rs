@@ -1,7 +1,7 @@
 //! Benchmarks for the page cache via the Append blob wrapper.
 //!
-//! Uses memory-based storage (deterministic runtime) to isolate page cache performance from disk
-//! I/O.
+//! Uses memory-based storage (deterministic runtime) to isolate
+//! page cache performance from disk I/O.
 //!
 //! Run with: `cargo bench --bench buffer_paged -p commonware-runtime`
 
