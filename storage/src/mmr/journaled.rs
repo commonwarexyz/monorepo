@@ -299,9 +299,11 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
         });
         let pruning_boundary = journal.pruning_boundary().await;
         if metadata_prune_pos > pruning_boundary {
-            // Metadata is ahead of journal (crashed before completing journal prune).
-            // Prune the journal to match metadata.
-            if journal.prune(metadata_prune_pos).await.is_err() {
+            // Metadata is ahead of journal, which could be indicative of a crash during a prune
+            // operation. Prune the journal to match metadata.
+            if journal.prune(metadata_prune_pos).await? {
+                // Only warn! if pruning actually took place. Otherwise the difference in boundaries
+                // is simply due to the fact that pruning_boundary is always section aligned.
                 warn!(
                     pruning_boundary,
                     metadata_prune_pos, "journal pruned to match metadata"
