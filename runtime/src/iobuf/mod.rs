@@ -245,13 +245,19 @@ impl IoBufMut {
         }
     }
 
-    /// Returns `true` if this buffer uses pooled storage.
+    /// Returns `true` if this buffer uses pooled storage AND will return to
+    /// the pool when dropped.
     ///
-    /// Note: After `resize()` exceeds pool capacity, the buffer may fall back
-    /// to heap allocation but this still returns `true` (the variant is unchanged).
+    /// Returns `false` if:
+    /// - The buffer is owned (backed by `BytesMut`)
+    /// - The buffer was created via fallback allocation (pool exhausted or size exceeded)
+    /// - The pool has been dropped
     #[inline]
-    pub const fn is_pooled(&self) -> bool {
-        matches!(self.inner, IoBufMutInner::Pooled(_))
+    pub fn is_pooled(&self) -> bool {
+        match &self.inner {
+            IoBufMutInner::Owned(_) => false,
+            IoBufMutInner::Pooled(b) => b.returns_to_pool(),
+        }
     }
 
     /// Sets the length of the buffer.

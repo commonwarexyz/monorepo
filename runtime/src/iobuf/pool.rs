@@ -45,7 +45,7 @@ use std::{
     mem::ManuallyDrop,
     ptr::NonNull,
     sync::{
-        atomic::{AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicUsize, Ordering},
         Arc, Weak,
     },
 };
@@ -93,8 +93,10 @@ fn page_size() -> usize {
 
 /// Returns the cache line size for the current architecture.
 ///
-/// Uses 128 bytes for x86_64 and aarch64 (common for modern CPUs with
-/// prefetching), and 64 bytes for other architectures.
+/// Uses 128 bytes for x86_64 and aarch64 as a conservative estimate that
+/// accounts for spatial prefetching. Uses 64 bytes for other architectures.
+///
+/// See: <https://github.com/crossbeam-rs/crossbeam/blob/983d56b6007ca4c22b56a665a7785f40f55c2a53/crossbeam-utils/src/cache_padded.rs>
 const fn cache_line_size() -> usize {
     cfg_if::cfg_if! {
         if #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))] {
@@ -361,8 +363,6 @@ struct SizeClass {
     /// Total buffers ever created for this class (monotonically increasing).
     /// Used to enforce `max_per_class` limit without races.
     total_created: AtomicUsize,
-    /// Total allocations from this class (includes reuse from freelist).
-    total_allocations: AtomicU64,
 }
 
 impl SizeClass {
@@ -373,7 +373,6 @@ impl SizeClass {
             freelist: ArrayQueue::new(max_buffers),
             allocated: AtomicUsize::new(0),
             total_created: AtomicUsize::new(0),
-            total_allocations: AtomicU64::new(0),
         }
     }
 
@@ -405,7 +404,9 @@ impl BufferPoolInner {
     /// Retries a few times on CAS contention to avoid unnecessary fallback
     /// to heap allocations when pool capacity is available.
     fn try_alloc(&self, class_index: usize) -> Option<AlignedBuffer> {
-        const MAX_RETRIES: usize = 3;
+        // Spurious CAS failures are possible under extreme contention, so we
+        // retry several times before giving up and falling back to heap.
+        const MAX_RETRIES: usize = 8;
 
         let class = &self.classes[class_index];
         let label = SizeClassLabel {
@@ -416,8 +417,6 @@ impl BufferPoolInner {
             // Try to get a buffer from the freelist
             if let Some(buffer) = class.freelist.pop() {
                 class.allocated.fetch_add(1, Ordering::Relaxed);
-                class.total_allocations.fetch_add(1, Ordering::Relaxed);
-
                 self.metrics.allocations_total.get_or_create(&label).inc();
                 self.metrics.allocated.get_or_create(&label).inc();
                 self.metrics.available.get_or_create(&label).dec();
@@ -440,7 +439,6 @@ impl BufferPoolInner {
                 .is_ok()
             {
                 class.allocated.fetch_add(1, Ordering::Relaxed);
-                class.total_allocations.fetch_add(1, Ordering::Relaxed);
                 self.metrics.allocations_total.get_or_create(&label).inc();
                 self.metrics.allocated.get_or_create(&label).inc();
 
@@ -486,6 +484,13 @@ impl BufferPoolInner {
 /// Buffers are organized into power-of-two size classes. When a buffer is requested,
 /// the smallest size class that fits is used. Buffers are automatically returned to
 /// the pool when dropped.
+///
+/// # Alignment
+///
+/// Buffer alignment is guaranteed only at the base pointer (when `cursor == 0`).
+/// After calling `Buf::advance()`, the pointer returned by `as_mut_ptr()` may
+/// no longer be aligned. For direct I/O operations that require alignment,
+/// do not advance the buffer before use.
 #[derive(Clone)]
 pub struct BufferPool {
     inner: Arc<BufferPoolInner>,
@@ -543,10 +548,6 @@ impl BufferPool {
 
     /// Allocates a buffer with the given capacity.
     ///
-    /// Returns `None` if:
-    /// - `capacity` exceeds the maximum buffer size
-    /// - The pool is exhausted for the required size class
-    ///
     /// The returned buffer has `len() == 0` and `capacity() >= capacity`,
     /// matching the semantics of [`IoBufMut::with_capacity`] and
     /// `BytesMut::with_capacity`. Use [`IoBufMut::resize`] to initialize
@@ -554,6 +555,18 @@ impl BufferPool {
     ///
     /// The actual capacity is rounded up to the next power-of-two size class.
     /// The buffer will be returned to the pool when dropped.
+    ///
+    /// # Errors
+    ///
+    /// Returns `None` if:
+    /// - `capacity` exceeds the configured `max_size` (oversized request)
+    /// - The pool is exhausted for the required size class
+    ///
+    /// # Initialization
+    ///
+    /// The returned buffer contains **uninitialized memory**. Do not read from
+    /// it until data has been written. Use `resize()` to initialize with a
+    /// specific value.
     pub fn alloc(&self, capacity: usize) -> Option<IoBufMut> {
         self.try_alloc(capacity).ok()
     }
@@ -562,6 +575,11 @@ impl BufferPool {
     ///
     /// This is like [`Self::alloc`] but returns a [`Result`] that distinguishes
     /// between different failure modes.
+    ///
+    /// # Errors
+    ///
+    /// - [`PoolError::Oversized`]: `capacity` exceeds `max_size`
+    /// - [`PoolError::Exhausted`]: Pool exhausted for required size class
     pub fn try_alloc(&self, capacity: usize) -> Result<IoBufMut, PoolError> {
         let class_index = match self.inner.config.class_index(capacity) {
             Some(idx) => idx,
@@ -659,6 +677,15 @@ impl BufferPools {
 /// - `remaining_mut()` = writable bytes = `raw_capacity - self.len`
 ///
 /// This matches `BytesMut` semantics.
+///
+/// # Fixed Capacity
+///
+/// Unlike `BytesMut`, pooled buffers have **fixed capacity** and do NOT grow
+/// automatically. Calling `put_slice()` or other `BufMut` methods that would
+/// exceed capacity will panic (per the `BufMut` trait contract).
+///
+/// Always check `remaining_mut()` before writing variable-length data, or use
+/// `resize()` which handles reallocation from the pool (or falls back to heap).
 pub struct PooledBufMut {
     buffer: ManuallyDrop<AlignedBuffer>,
     /// Read cursor position (for `Buf` trait).
@@ -765,6 +792,17 @@ impl PooledBufMut {
     /// If `new_len` is greater and exceeds capacity, this will:
     /// 1. Try to get a larger buffer from the pool
     /// 2. Fall back to direct allocation if the pool is exhausted
+    ///
+    /// # Pool Fallback
+    ///
+    /// When reallocating, if the pool is exhausted or the new size exceeds
+    /// `max_size`, the buffer falls back to direct heap allocation. Such buffers
+    /// will NOT return to the pool when dropped. Use `returns_to_pool()` to check.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `new_len` is extremely large (would overflow when rounded to
+    /// next power of two).
     pub fn resize(&mut self, new_len: usize, value: u8) {
         let current_len = self.len();
 
@@ -852,14 +890,24 @@ impl PooledBufMut {
         // Wrap self in ManuallyDrop first to prevent Drop from running
         // if any subsequent code panics.
         let mut me = ManuallyDrop::new(self);
-        // SAFETY: me won't be dropped, so we can read out the buffer. The
-        // ManuallyDrop wrapper on buffer prevents double-free.
-        let buffer = unsafe { std::ptr::read(&*me.buffer) };
+        // SAFETY: me is wrapped in ManuallyDrop so its Drop impl won't run.
+        // ManuallyDrop::take moves the inner buffer out, leaving the wrapper empty.
+        let buffer = unsafe { ManuallyDrop::take(&mut me.buffer) };
         let cursor = me.cursor;
         let len = me.len;
         let pool = std::mem::take(&mut me.pool);
 
         Bytes::from_owner(PooledOwner::new(buffer, cursor, len, pool)).into()
+    }
+
+    /// Returns `true` if this buffer will return to a pool when dropped.
+    ///
+    /// Returns `false` if:
+    /// - The buffer was created via fallback allocation (pool exhausted or size exceeded max)
+    /// - The pool has been dropped
+    #[inline]
+    pub fn returns_to_pool(&self) -> bool {
+        self.pool.strong_count() > 0
     }
 }
 
@@ -882,7 +930,8 @@ impl AsMut<[u8]> for PooledBufMut {
 
 impl Drop for PooledBufMut {
     fn drop(&mut self) {
-        // SAFETY: Drop is only called once, and freeze() uses mem::forget to skip this.
+        // SAFETY: Drop is only called once. freeze() wraps self in ManuallyDrop
+        // to prevent this Drop impl from running after ownership is transferred.
         let buffer = unsafe { ManuallyDrop::take(&mut self.buffer) };
         if let Some(pool) = self.pool.upgrade() {
             pool.return_buffer(buffer);
@@ -2140,5 +2189,202 @@ mod tests {
 
         drop(clone2);
         assert_eq!(get_allocated(&pool, page), 0); // Finally returned
+    }
+
+    #[test]
+    fn test_resize_fallback_on_pool_exhaustion() {
+        let page = page_size();
+        let mut registry = test_registry();
+        // Pool with only 1 buffer per class
+        let pool = BufferPool::new(test_config(page, page * 4, 1), &mut registry);
+
+        // Allocate the only buffer in the smallest class
+        let _held = pool.alloc(100).unwrap();
+        assert_eq!(get_allocated(&pool, page), 1);
+        assert_eq!(get_available(&pool, page), 0);
+
+        // Allocate another buffer (will get from pool)
+        let mut buf = pool.alloc(page * 2).unwrap();
+        buf.resize(100, 0x11);
+
+        // Now resize to a size that needs the smallest class, but it's exhausted
+        // This should fall back to heap allocation
+        buf.resize(page * 3, 0x22);
+
+        // Buffer works correctly
+        assert_eq!(buf.len(), page * 3);
+        assert!(buf.as_ref()[..100].iter().all(|&b| b == 0x11));
+        assert!(buf.as_ref()[100..].iter().all(|&b| b == 0x22));
+
+        // The old buffer (page*2 class) should have been returned
+        assert_eq!(get_available(&pool, page * 2), 1);
+    }
+
+    #[test]
+    fn test_resize_after_pool_dropped() {
+        let page = page_size();
+        let mut registry = test_registry();
+        let pool = BufferPool::new(test_config(page, page * 4, 10), &mut registry);
+
+        let mut buf = pool.alloc(100).unwrap();
+        buf.resize(50, 0x11);
+
+        // Drop the pool
+        drop(pool);
+
+        // Resize should fall back to heap (pool reference is gone)
+        buf.resize(page * 2, 0x22);
+
+        // Buffer should work correctly
+        assert_eq!(buf.len(), page * 2);
+        assert!(buf.as_ref()[..50].iter().all(|&b| b == 0x11));
+        assert!(buf.as_ref()[50..].iter().all(|&b| b == 0x22));
+
+        // Drop should not panic
+        drop(buf);
+    }
+
+    #[test]
+    fn test_truncate_beyond_len_is_noop() {
+        use bytes::BytesMut;
+
+        let page = page_size();
+        let mut registry = test_registry();
+        let pool = BufferPool::new(test_config(page, page, 10), &mut registry);
+
+        // BytesMut behavior
+        let mut bytes = BytesMut::with_capacity(100);
+        bytes.resize(50, 0xAA);
+        bytes.truncate(100); // Should be no-op
+        assert_eq!(bytes.len(), 50);
+
+        // PooledBufMut should match
+        let mut pooled = pool.alloc(100).unwrap();
+        pooled.resize(50, 0xAA);
+        pooled.truncate(100); // Should be no-op
+        assert_eq!(pooled.len(), 50);
+    }
+
+    #[test]
+    fn test_returns_to_pool() {
+        let page = page_size();
+        let mut registry = test_registry();
+        let pool = BufferPool::new(test_config(page, page, 10), &mut registry);
+
+        // Normal pooled buffer returns to pool
+        let buf = pool.alloc(100).unwrap();
+        assert!(buf.is_pooled());
+
+        // After resize beyond max, still reports correctly
+        let mut buf2 = pool.alloc(100).unwrap();
+        assert!(buf2.is_pooled());
+        buf2.resize(page * 10, 0); // Falls back to heap
+        assert!(!buf2.is_pooled()); // Now returns false
+
+        drop(buf);
+        drop(buf2);
+    }
+
+    #[test]
+    fn test_freelist_full_on_return() {
+        let page = page_size();
+        let mut registry = test_registry();
+        let pool = BufferPool::new(test_config(page, page, 2), &mut registry);
+
+        // Allocate and return to fill freelist
+        let buf1 = pool.alloc(100).unwrap();
+        let buf2 = pool.alloc(100).unwrap();
+        drop(buf1);
+        drop(buf2);
+
+        // Freelist should have 2 buffers
+        assert_eq!(get_available(&pool, page), 2);
+        assert_eq!(get_allocated(&pool, page), 0);
+
+        // Allocate from freelist, then resize to heap fallback
+        let mut buf3 = pool.alloc(100).unwrap();
+        assert_eq!(get_available(&pool, page), 1);
+        buf3.resize(page * 10, 0); // Falls back to heap
+
+        // Old buffer returned, freelist should be full again
+        assert_eq!(get_available(&pool, page), 2);
+
+        // Drop buf3 - the heap-allocated buffer just gets deallocated
+        drop(buf3);
+        // Freelist unchanged since buf3 doesn't return to pool
+        assert_eq!(get_available(&pool, page), 2);
+    }
+
+    #[test]
+    fn test_concurrent_resize() {
+        use std::{sync::Arc, thread};
+
+        let page = page_size();
+        let mut registry = test_registry();
+        let pool = Arc::new(BufferPool::new(
+            test_config(page, page * 8, 100),
+            &mut registry,
+        ));
+
+        let handles: Vec<_> = (0..10)
+            .map(|_| {
+                let pool = Arc::clone(&pool);
+                thread::spawn(move || {
+                    for _ in 0..50 {
+                        let mut buf = pool.alloc(100).unwrap();
+                        buf.resize(50, 0xAA);
+                        Buf::advance(&mut buf, 25);
+                        buf.resize(page * 2, 0xBB); // Cross-class resize
+                        assert_eq!(buf.len(), page * 2);
+                        buf.resize(100, 0); // Shrink
+                        drop(buf);
+                    }
+                })
+            })
+            .collect();
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        // All buffers should be returned
+        assert_eq!(get_allocated(&pool, page), 0);
+    }
+
+    #[test]
+    fn test_freeze_empty_after_clear() {
+        let page = page_size();
+        let mut registry = test_registry();
+        let pool = BufferPool::new(test_config(page, page, 10), &mut registry);
+
+        let mut buf = pool.alloc(100).unwrap();
+        buf.resize(50, 0xAA);
+        buf.clear();
+
+        let frozen = buf.freeze();
+        assert!(frozen.is_empty());
+        assert_eq!(frozen.len(), 0);
+
+        // Should still return to pool on drop
+        drop(frozen);
+        assert_eq!(get_available(&pool, page), 1);
+    }
+
+    #[test]
+    fn test_alignment_after_advance() {
+        let page = page_size();
+        let mut registry = test_registry();
+        let pool = BufferPool::new(BufferPoolConfig::for_storage(), &mut registry);
+
+        let mut buf = pool.alloc(100).unwrap();
+        buf.resize(100, 0);
+
+        // Initially aligned
+        assert_eq!(buf.as_mut_ptr() as usize % page, 0);
+
+        // After advance, alignment may be broken
+        Buf::advance(&mut buf, 7);
+        // Pointer is now at offset 7, not page-aligned
+        assert_ne!(buf.as_mut_ptr() as usize % page, 0);
     }
 }
