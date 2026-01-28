@@ -167,6 +167,10 @@ jobs:
       run: |
         cd storage
         just miri index::tests --partition hash:${{matrix.partition}}/8
+    - name: Run miri tests for runtime::iobuf::pool
+      run: |
+        cd runtime
+        just miri iobuf::pool::tests --partition hash:${{matrix.partition}}/8
 
   Unsafe-Tests-Gate:
     name: "Unsafe-Tests"
