@@ -563,8 +563,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize, Y: Strategy>
             })
             .collect::<Vec<_>>();
         self.dirty_chunks.clear();
-        self.mmr
-            .update_leaf_batched(hasher, &self.strategy, &updates)?;
+        self.mmr.update_leaves(hasher, &self.strategy, &updates)?;
         let mmr = self.mmr.merkleize(hasher, &self.strategy);
 
         // Compute the bitmap root

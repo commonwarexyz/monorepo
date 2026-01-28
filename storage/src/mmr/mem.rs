@@ -15,9 +15,6 @@ use commonware_cryptography::Digest;
 use commonware_parallel::{Sequential, Strategy};
 use core::{mem, ops::Range};
 
-/// Minimum number of digest computations required during batch updates to trigger parallelization.
-const MIN_TO_PARALLELIZE: usize = 20;
-
 /// An MMR whose root digest has not been computed.
 pub type DirtyMmr<D> = Mmr<D, Dirty>;
 
@@ -542,10 +539,25 @@ impl<D: Digest> DirtyMmr<D> {
         hasher: &mut impl Hasher<Digest = D>,
         strategy: &impl Strategy,
     ) -> CleanMmr<D> {
-        if self.state.dirty_nodes.len() >= MIN_TO_PARALLELIZE {
-            self.merkleize_parallel(hasher, strategy);
-        } else {
-            self.merkleize_serial(hasher);
+        // Process dirty nodes level by level (by height)
+        let mut nodes: Vec<(Position, u32)> = self.state.dirty_nodes.iter().copied().collect();
+        self.state.dirty_nodes.clear();
+        nodes.sort_by(|a, b| a.1.cmp(&b.1));
+
+        let mut same_height = Vec::new();
+        let mut current_height = 1;
+        for (pos, height) in nodes.iter() {
+            if *height == current_height {
+                same_height.push(*pos);
+                continue;
+            }
+            self.update_node_digests(hasher, strategy, &same_height, current_height);
+            same_height.clear();
+            current_height += 1;
+            same_height.push(*pos);
+        }
+        if !same_height.is_empty() {
+            self.update_node_digests(hasher, strategy, &same_height, current_height);
         }
 
         // Compute root
@@ -560,71 +572,6 @@ impl<D: Digest> DirtyMmr<D> {
             pinned_nodes: self.pinned_nodes,
             state: Clean { root: digest },
         }
-    }
-
-    fn merkleize_serial(&mut self, hasher: &mut impl Hasher<Digest = D>) {
-        let mut nodes: Vec<(Position, u32)> = self.state.dirty_nodes.iter().copied().collect();
-        self.state.dirty_nodes.clear();
-        nodes.sort_by(|a, b| a.1.cmp(&b.1));
-
-        for (pos, height) in nodes {
-            let left = pos - (1 << height);
-            let right = pos - 1;
-            let digest = hasher.node_digest(
-                pos,
-                self.get_node_unchecked(left),
-                self.get_node_unchecked(right),
-            );
-            let index = self.pos_to_index(pos);
-            self.nodes[index] = digest;
-        }
-    }
-
-    /// Process any pending batched updates, using parallel hash workers as long as the number of
-    /// computations that can be parallelized exceeds `MIN_TO_PARALLELIZE`.
-    ///
-    /// This implementation parallelizes the computation of digests across all nodes at the same
-    /// height, starting from the bottom and working up to the peaks. If ever the number of
-    /// remaining digest computations is less than `MIN_TO_PARALLELIZE`, it switches to the
-    /// serial implementation.
-    fn merkleize_parallel(
-        &mut self,
-        hasher: &mut impl Hasher<Digest = D>,
-        strategy: &impl Strategy,
-    ) {
-        let mut nodes: Vec<(Position, u32)> = self.state.dirty_nodes.iter().copied().collect();
-        self.state.dirty_nodes.clear();
-        // Sort by increasing height.
-        nodes.sort_by(|a, b| a.1.cmp(&b.1));
-
-        let mut same_height = Vec::new();
-        let mut current_height = 1;
-        for (i, (pos, height)) in nodes.iter().enumerate() {
-            if *height == current_height {
-                same_height.push(*pos);
-                continue;
-            }
-            if same_height.len() < MIN_TO_PARALLELIZE {
-                self.state.dirty_nodes = nodes[i - same_height.len()..].iter().copied().collect();
-                self.merkleize_serial(hasher);
-                return;
-            }
-            self.update_node_digests(hasher, strategy, &same_height, current_height);
-            same_height.clear();
-            current_height += 1;
-            same_height.push(*pos);
-        }
-
-        if same_height.len() < MIN_TO_PARALLELIZE {
-            self.state.dirty_nodes = nodes[nodes.len() - same_height.len()..]
-                .iter()
-                .copied()
-                .collect();
-            self.merkleize_serial(hasher);
-            return;
-        }
-
-        self.update_node_digests(hasher, strategy, &same_height, current_height);
     }
 
     /// Update digests of the given set of nodes of equal height in the MMR. Since they are all at
@@ -692,7 +639,7 @@ impl<D: Digest> DirtyMmr<D> {
         loc: Location,
         element: &[u8],
     ) -> Result<(), Error> {
-        self.update_leaf_batched(hasher, &Sequential, &[(loc, element)])
+        self.update_leaves(hasher, &Sequential, &[(loc, element)])
     }
 
     /// Batch update the digests of multiple retained leaves.
@@ -702,7 +649,7 @@ impl<D: Digest> DirtyMmr<D> {
     /// Returns [Error::LeafOutOfBounds] if any location is not an existing leaf.
     /// Returns [Error::LocationOverflow] if any location exceeds [crate::mmr::MAX_LOCATION].
     /// Returns [Error::ElementPruned] if any of the leaves has been pruned.
-    pub fn update_leaf_batched<T: AsRef<[u8]> + Sync>(
+    pub fn update_leaves<T: AsRef<[u8]> + Sync>(
         &mut self,
         hasher: &mut impl Hasher<Digest = D>,
         strategy: &impl Strategy,
@@ -725,30 +672,6 @@ impl<D: Digest> DirtyMmr<D> {
             positions.push(pos);
         }
 
-        if updates.len() >= MIN_TO_PARALLELIZE {
-            self.update_leaf_parallel(hasher, strategy, updates, &positions);
-            return Ok(());
-        }
-
-        for ((_, element), pos) in updates.iter().zip(positions.iter()) {
-            // Update the digest of the leaf node and mark its ancestors as dirty.
-            let digest = hasher.leaf_digest(*pos, element.as_ref());
-            let index = self.pos_to_index(*pos);
-            self.nodes[index] = digest;
-            self.mark_dirty(*pos);
-        }
-
-        Ok(())
-    }
-
-    /// Batch update the digests of multiple retained leaves using parallel workers.
-    fn update_leaf_parallel<T: AsRef<[u8]> + Sync>(
-        &mut self,
-        hasher: &mut impl Hasher<Digest = D>,
-        strategy: &impl Strategy,
-        updates: &[(Location, T)],
-        positions: &[Position],
-    ) {
         let pairs: Vec<_> = updates.iter().zip(positions.iter()).collect();
         let digests: Vec<(Position, D)> = strategy.map_init_collect_vec(
             &pairs,
@@ -764,6 +687,8 @@ impl<D: Digest> DirtyMmr<D> {
             self.nodes[index] = digest;
             self.mark_dirty(pos);
         }
+
+        Ok(())
     }
 }
 
@@ -1250,9 +1175,7 @@ mod tests {
             updates.push((leaf_loc, &element));
         }
         let mut dirty_mmr = mmr.into_dirty();
-        dirty_mmr
-            .update_leaf_batched(hasher, strategy, &updates)
-            .unwrap();
+        dirty_mmr.update_leaves(hasher, strategy, &updates).unwrap();
 
         let mmr = dirty_mmr.merkleize(hasher, strategy);
         let updated_root = *mmr.root();
@@ -1267,9 +1190,7 @@ mod tests {
             updates.push((leaf_loc, element));
         }
         let mut dirty_mmr = mmr.into_dirty();
-        dirty_mmr
-            .update_leaf_batched(hasher, strategy, &updates)
-            .unwrap();
+        dirty_mmr.update_leaves(hasher, strategy, &updates).unwrap();
 
         let mmr = dirty_mmr.merkleize(hasher, strategy);
         let restored_root = *mmr.root();
