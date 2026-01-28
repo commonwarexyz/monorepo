@@ -688,34 +688,26 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
     }
 
     async fn run(mut self) {
-        loop {
-            let tick = match self.transmitter.next() {
-                Some(when) => Either::Left(self.context.sleep_until(when)),
-                None => Either::Right(future::pending()),
-            };
-            select! {
-                _ = tick => {
-                    let now = self.context.current();
-                    let completions = self.transmitter.advance(now);
-                    self.process_completions(completions);
-                },
-                message = self.ingress.next() => {
-                    // If ingress is closed, exit
-                    let message = match message {
-                        Some(message) => message,
-                        None => break,
-                    };
-                    self.handle_ingress(message).await;
-                },
-                task = self.receiver.next() => {
-                    // If receiver is closed, exit
-                    let task = match task {
-                        Some(task) => task,
-                        None => break,
-                    };
-                    self.handle_task(task);
-                },
-            }
+        select_loop! {
+            self.context,
+            on_start => {
+                let tick = match self.transmitter.next() {
+                    Some(when) => Either::Left(self.context.sleep_until(when)),
+                    None => Either::Right(future::pending()),
+                };
+            },
+            on_stopped => {},
+            _ = tick => {
+                let now = self.context.current();
+                let completions = self.transmitter.advance(now);
+                self.process_completions(completions);
+            },
+            Some(message) = self.ingress.next() else break => {
+                self.handle_ingress(message).await;
+            },
+            Some(task) = self.receiver.next() else break => {
+                self.handle_task(task);
+            },
         }
     }
 }
