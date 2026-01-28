@@ -609,6 +609,24 @@ impl BufferPools {
 /// When dropped, the underlying buffer is returned to the pool (if it came from one).
 /// Buffers that were allocated as fallback (when the pool was exhausted) are simply
 /// deallocated on drop.
+///
+/// # Invariants
+///
+/// The following invariants are always maintained:
+/// - `cursor <= len <= capacity`
+/// - Bytes in `0..len` are initialized (safe to read)
+/// - Bytes in `len..capacity` are uninitialized (write-only via `BufMut`)
+/// - `len()` returns readable bytes: `self.len - self.cursor`
+/// - `remaining_mut()` returns writable capacity: `capacity - self.len`
+///
+/// # Cursor Semantics
+///
+/// The `cursor` tracks consumed bytes (via `Buf::advance`). After `advance(n)`:
+/// - `cursor` increases by `n`
+/// - `len()` (readable bytes) decreases by `n`
+/// - `remaining_mut()` is unchanged (writes always append past `self.len`)
+///
+/// This matches `BytesMut` semantics where `advance` consumes bytes from the front.
 pub struct PooledBufMut {
     buffer: ManuallyDrop<AlignedBuffer>,
     /// Read cursor position (for `Buf` trait).
