@@ -589,7 +589,11 @@ impl BufferPool {
             let label = SizeClassLabel {
                 size_class: self.inner.config.class_size(class_index) as u64,
             };
-            self.inner.metrics.exhausted_total.get_or_create(&label).inc();
+            self.inner
+                .metrics
+                .exhausted_total
+                .get_or_create(&label)
+                .inc();
             PoolError::Exhausted
         })?;
         let pooled = PooledBufMut::new(buffer, Arc::downgrade(&self.inner));
@@ -1855,7 +1859,11 @@ mod tests {
             pooled.resize(10, 0);
 
             assert_eq!(bytes.len(), pooled.len(), "len after resize shrink");
-            assert_eq!(bytes.as_ref(), pooled.as_ref(), "content after resize shrink");
+            assert_eq!(
+                bytes.as_ref(),
+                pooled.as_ref(),
+                "content after resize shrink"
+            );
         }
 
         // Test: resize that requires reallocation
@@ -1874,7 +1882,11 @@ mod tests {
             pooled.resize(new_size, 0xEE);
 
             assert_eq!(bytes.len(), pooled.len(), "len after realloc resize");
-            assert_eq!(bytes.as_ref(), pooled.as_ref(), "content after realloc resize");
+            assert_eq!(
+                bytes.as_ref(),
+                pooled.as_ref(),
+                "content after realloc resize"
+            );
         }
     }
 }
