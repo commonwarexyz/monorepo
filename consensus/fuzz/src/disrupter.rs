@@ -79,6 +79,24 @@ where
         }
     }
 
+    fn current_view(&self) -> u64 {
+        self.last_vote_view
+            .max(self.last_notarized_view)
+            .max(self.last_finalized_view)
+            .max(self.last_nullified_view)
+    }
+
+    fn should_inject_fault(&self, view: u64) -> bool {
+        let Some((faults, bound)) = self.strategy.fault_bounds() else {
+            return true;
+        };
+        if bound == 0 || faults == 0 {
+            return false;
+        }
+        let round_fault = self.fuzz_input.seed.wrapping_add(view) % bound;
+        round_fault < faults
+    }
+
     fn get_proposal(&mut self) -> Proposal<Sha256Digest> {
         let payload_source = self
             .strategy
@@ -236,20 +254,27 @@ where
     }
 
     async fn handle_vote(&mut self, sender: &mut impl Sender, msg: Vec<u8>) {
+        let Ok(vote) = Vote::<S, Sha256Digest>::read(&mut msg.as_slice()) else {
+            return;
+        };
+
+        // Update the state for effective fuzzing
+        self.last_vote_view = self.last_vote_view.max(vote.view().get());
+        if let Vote::Notarize(notarize) = &vote {
+            self.latest_proposals.push_back(notarize.proposal.clone());
+        }
+
+        if !self.should_inject_fault(self.last_vote_view) {
+            return;
+        }
+
         // Optionally send mutated vote
         if self.fuzz_input.random_bool() {
             let mutated = self.mutate_bytes(&msg);
             let _ = sender.send(Recipients::All, mutated, true).await;
         }
-
-        let Ok(vote) = Vote::<S, Sha256Digest>::read(&mut msg.as_slice()) else {
-            return;
-        };
-        self.last_vote_view = vote.view().get();
         match vote {
             Vote::Notarize(notarize) => {
-                self.latest_proposals.push_back(notarize.proposal.clone());
-
                 let proposal = self.strategy.mutate_proposal(
                     &self.fuzz_input,
                     &notarize.proposal,
@@ -295,6 +320,30 @@ where
     }
 
     async fn handle_certificate(&mut self, sender: &mut impl Sender, msg: Vec<u8>) {
+        let cfg = self.scheme.certificate_codec_config();
+        let Ok(cert) = Certificate::<S, Sha256Digest>::read_cfg(&mut msg.as_slice(), &cfg) else {
+            return;
+        };
+
+        let view = match cert {
+            Certificate::Notarization(n) => {
+                self.last_notarized_view = n.view().get();
+                self.last_notarized_view
+            }
+            Certificate::Nullification(n) => {
+                self.last_nullified_view = n.view().get();
+                self.last_nullified_view
+            }
+            Certificate::Finalization(f) => {
+                self.last_finalized_view = f.view().get();
+                self.last_finalized_view
+            }
+        };
+
+        if !self.should_inject_fault(view) {
+            return;
+        }
+
         // Optionally send mutated certificate
         if self.fuzz_input.random_bool() {
             let cert = self
@@ -302,26 +351,12 @@ where
                 .mutate_certificate_bytes(&self.fuzz_input, &msg);
             let _ = sender.send(Recipients::All, &cert[..], true).await;
         }
-
-        let cfg = self.scheme.certificate_codec_config();
-        let Ok(cert) = Certificate::<S, Sha256Digest>::read_cfg(&mut msg.as_slice(), &cfg) else {
-            return;
-        };
-
-        match cert {
-            Certificate::Notarization(n) => {
-                self.last_notarized_view = n.view().get();
-            }
-            Certificate::Nullification(n) => {
-                self.last_nullified_view = n.view().get();
-            }
-            Certificate::Finalization(f) => {
-                self.last_finalized_view = f.view().get();
-            }
-        }
     }
 
     async fn handle_resolver(&mut self, sender: &mut impl Sender, msg: Vec<u8>) {
+        if !self.should_inject_fault(self.current_view()) {
+            return;
+        }
         // Optionally send malformed resolver data
         if self.fuzz_input.random_bool() {
             let mutated = self.strategy.mutate_resolver_bytes(&self.fuzz_input, &msg);
@@ -332,6 +367,9 @@ where
     }
 
     async fn flood_victim(&mut self, sender: &mut impl Sender<PublicKey = S::PublicKey>) {
+        if !self.should_inject_fault(self.current_view()) {
+            return;
+        }
         let Some(me) = self.scheme.me() else {
             return;
         };
@@ -371,6 +409,9 @@ where
     }
 
     async fn send_proposal(&mut self, sender: &mut impl Sender) {
+        if !self.should_inject_fault(self.current_view()) {
+            return;
+        }
         let proposal = self.get_proposal();
         let proposal = self.strategy.mutate_proposal(
             &self.fuzz_input,
@@ -385,6 +426,9 @@ where
     }
 
     async fn send_random_message(&mut self, sender: &mut impl Sender) {
+        if !self.should_inject_fault(self.current_view()) {
+            return;
+        }
         let cert = self.bytes();
         let _ = sender.send(Recipients::All, IoBuf::from(cert), true).await;
     }
@@ -398,6 +442,9 @@ where
         sender: &mut impl Sender<PublicKey = S::PublicKey>,
         recipients: Recipients<S::PublicKey>,
     ) {
+        if !self.should_inject_fault(self.current_view()) {
+            return;
+        }
         let proposal = self.get_proposal();
 
         match self.message() {

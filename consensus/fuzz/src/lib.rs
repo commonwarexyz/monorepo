@@ -52,6 +52,8 @@ pub const EPOCH: u64 = 333;
 
 const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
 const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
+const FAULT_INJECTION_RATIO: u64 = 5;
+const MIN_NUMBER_OF_FAULTS: u64 = 2;
 const MIN_REQUIRED_CONTAINERS: u64 = 5;
 const MAX_REQUIRED_CONTINERS: u64 = 50;
 const MAX_SLEEP_DURATION: Duration = Duration::from_secs(10);
@@ -69,7 +71,7 @@ pub struct FuzzInput {
     pub raw_bytes: Vec<u8>,
     pub seed: u64,
     pub required_containers: u64,
-    pub degraded_network_node: bool,
+    pub degraded_network: bool,
     offset: RefCell<usize>,
     rng: RefCell<StdRng>,
     pub configuration: (u32, u32, u32),
@@ -143,11 +145,23 @@ impl Arbitrary<'_> for FuzzInput {
         let required_containers =
             u.int_in_range(MIN_REQUIRED_CONTAINERS..=MAX_REQUIRED_CONTINERS)?;
 
-        // SmallScope mutations - 50%, AnyScope mutations - 25%, FutureScope mutations - 25%
-        let strategy = match u.int_in_range(0..=3)? {
+        // SmallScope mutations with round-based injections - 80%,
+        // AnyScope mutations - 10%,
+        // FutureScope mutations with round-based injections - 10%
+        let fault_rounds_bound = u.int_in_range(1..=required_containers)?;
+        let fault_rounds = u
+            .int_in_range(0..=fault_rounds_bound / FAULT_INJECTION_RATIO)?
+            .max(MIN_NUMBER_OF_FAULTS);
+        let strategy = match u.int_in_range(0..=9)? {
             0 => StrategyChoice::AnyScope,
-            1 => StrategyChoice::FutureScope,
-            _ => StrategyChoice::SmallScope,
+            1 => StrategyChoice::FutureScope {
+                fault_rounds,
+                fault_rounds_bound,
+            },
+            _ => StrategyChoice::SmallScope {
+                fault_rounds,
+                fault_rounds_bound,
+            },
         };
 
         let mut raw_bytes = Vec::new();
@@ -167,7 +181,7 @@ impl Arbitrary<'_> for FuzzInput {
             seed,
             partition,
             configuration,
-            degraded_network_node,
+            degraded_network: degraded_network_node,
             raw_bytes,
             required_containers,
             offset: RefCell::new(0),
@@ -218,7 +232,7 @@ fn run<P: simplex::Simplex>(input: FuzzInput) {
 
         if input.partition == Partition::Connected
             && input.configuration == N4C3F1
-            && input.degraded_network_node
+            && input.degraded_network
         {
             if let Some(victim) = participants.last() {
                 let degraded = Link {
@@ -257,9 +271,19 @@ fn run<P: simplex::Simplex>(input: FuzzInput) {
                 registrations.remove(&validator).unwrap();
             let disrupter_context = context.with_label("disrupter");
             match input.strategy {
-                StrategyChoice::SmallScope => {
-                    let disrupter =
-                        Disrupter::new(disrupter_context, scheme, input.clone(), SmallScope);
+                StrategyChoice::SmallScope {
+                    fault_rounds,
+                    fault_rounds_bound,
+                } => {
+                    let disrupter = Disrupter::new(
+                        disrupter_context,
+                        scheme,
+                        input.clone(),
+                        SmallScope {
+                            fault_rounds,
+                            fault_rounds_bound,
+                        },
+                    );
                     disrupter.start(vote_network, certificate_network, resolver_network);
                 }
                 StrategyChoice::AnyScope => {
@@ -267,9 +291,19 @@ fn run<P: simplex::Simplex>(input: FuzzInput) {
                         Disrupter::new(disrupter_context, scheme, input.clone(), AnyScope);
                     disrupter.start(vote_network, certificate_network, resolver_network);
                 }
-                StrategyChoice::FutureScope => {
-                    let disrupter =
-                        Disrupter::new(disrupter_context, scheme, input.clone(), FutureScope);
+                StrategyChoice::FutureScope {
+                    fault_rounds,
+                    fault_rounds_bound,
+                } => {
+                    let disrupter = Disrupter::new(
+                        disrupter_context,
+                        scheme,
+                        input.clone(),
+                        FutureScope {
+                            fault_rounds,
+                            fault_rounds_bound,
+                        },
+                    );
                     disrupter.start(vote_network, certificate_network, resolver_network);
                 }
             }
@@ -393,7 +427,7 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
 
         if input.partition == Partition::Connected
             && input.configuration == N4C3F1
-            && input.degraded_network_node
+            && input.degraded_network
         {
             if let Some(victim) = participants.last() {
                 let degraded = Link {
@@ -578,12 +612,18 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
             let mutator_context = context.with_label(&mutator_label);
             let disrupter_context = mutator_context.with_label("disrupter");
             match input.strategy {
-                StrategyChoice::SmallScope => {
+                StrategyChoice::SmallScope {
+                    fault_rounds,
+                    fault_rounds_bound,
+                } => {
                     let disrupter = Disrupter::new(
                         disrupter_context,
                         scheme.clone(),
                         input.clone(),
-                        SmallScope,
+                        SmallScope {
+                            fault_rounds,
+                            fault_rounds_bound,
+                        },
                     );
                     disrupter.start(
                         (vote_sender_secondary, vote_receiver_secondary),
@@ -600,12 +640,18 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                         (resolver_sender_secondary, resolver_receiver_secondary),
                     );
                 }
-                StrategyChoice::FutureScope => {
+                StrategyChoice::FutureScope {
+                    fault_rounds,
+                    fault_rounds_bound,
+                } => {
                     let disrupter = Disrupter::new(
                         disrupter_context,
                         scheme.clone(),
                         input.clone(),
-                        FutureScope,
+                        FutureScope {
+                            fault_rounds,
+                            fault_rounds_bound,
+                        },
                     );
                     disrupter.start(
                         (vote_sender_secondary, vote_receiver_secondary),

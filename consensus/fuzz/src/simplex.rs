@@ -152,8 +152,8 @@ mod tests {
             offset: RefCell::new(0),
             rng: RefCell::new(StdRng::seed_from_u64(seed)),
             required_containers: containers,
-            degraded_network_node: false,
-            strategy: StrategyChoice::SmallScope,
+            degraded_network: false,
+            strategy: StrategyChoice::AnyScope,
         }
     }
 
@@ -171,8 +171,8 @@ mod tests {
                 offset: RefCell::new(0),
                 rng: RefCell::new(StdRng::seed_from_u64(seed)),
                 required_containers: PROPERTY_TEST_CONTAINERS,
-                degraded_network_node: false,
-                strategy: StrategyChoice::SmallScope,
+                degraded_network: false,
+                strategy: StrategyChoice::AnyScope,
             }
         })
     }

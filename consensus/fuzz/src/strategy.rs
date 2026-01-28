@@ -72,16 +72,27 @@ pub trait Strategy: Send + Sync {
     fn mutate_resolver_bytes(&self, input: &FuzzInput, msg: &[u8]) -> Vec<u8>;
 
     fn repeated_proposal_index(&self, input: &FuzzInput, proposals_len: usize) -> Option<usize>;
+
+    fn fault_bounds(&self) -> Option<(u64, u64)>;
 }
 
 #[derive(Clone, Copy, Debug)]
 pub enum StrategyChoice {
-    SmallScope,
+    SmallScope {
+        fault_rounds: u64,
+        fault_rounds_bound: u64,
+    },
     AnyScope,
-    FutureScope,
+    FutureScope {
+        fault_rounds: u64,
+        fault_rounds_bound: u64,
+    },
 }
 
-pub struct SmallScope;
+pub struct SmallScope {
+    pub fault_rounds: u64,
+    pub fault_rounds_bound: u64,
+}
 
 impl Strategy for SmallScope {
     fn random_proposal(
@@ -240,6 +251,10 @@ impl Strategy for SmallScope {
             return None;
         }
         Some(proposals_len - 2)
+    }
+
+    fn fault_bounds(&self) -> Option<(u64, u64)> {
+        Some((self.fault_rounds, self.fault_rounds_bound))
     }
 }
 
@@ -438,9 +453,16 @@ impl Strategy for AnyScope {
         let idx = (input.random_u64() as usize) % proposals_len;
         Some(idx)
     }
+
+    fn fault_bounds(&self) -> Option<(u64, u64)> {
+        None
+    }
 }
 
-pub struct FutureScope;
+pub struct FutureScope {
+    pub fault_rounds: u64,
+    pub fault_rounds_bound: u64,
+}
 
 impl Strategy for FutureScope {
     fn random_proposal(
@@ -564,14 +586,21 @@ impl Strategy for FutureScope {
         tweak_bytes(input, msg)
     }
 
-    fn repeated_proposal_index(&self, _input: &FuzzInput, proposals_len: usize) -> Option<usize> {
+    fn repeated_proposal_index(&self, input: &FuzzInput, proposals_len: usize) -> Option<usize> {
         if proposals_len == 0 {
             return None;
         }
         if proposals_len <= 1 {
             return Some(0);
         }
+        if input.random_bool() {
+            return None;
+        }
         Some(proposals_len - 2)
+    }
+
+    fn fault_bounds(&self) -> Option<(u64, u64)> {
+        Some((self.fault_rounds, self.fault_rounds_bound))
     }
 }
 
