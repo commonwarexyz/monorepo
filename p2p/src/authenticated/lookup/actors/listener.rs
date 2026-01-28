@@ -184,11 +184,10 @@ impl<E: Spawner + Clock + Network + CryptoRngCore + Metrics, C: Signer> Actor<E,
             on_stopped => {
                 debug!("context shutdown, stopping listener");
             },
-            update = self.mailbox.next() => {
-                let Some(registered_ips) = update else {
-                    debug!("mailbox closed");
-                    break;
-                };
+            Some(registered_ips) = self.mailbox.next() else {
+                debug!("mailbox closed");
+                break;
+            } => {
                 self.registered_ips = registered_ips;
             },
             listener = listener.accept() => {

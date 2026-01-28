@@ -349,11 +349,10 @@ where
                 }
             },
             // Handle consensus inputs before backfill or resolver traffic
-            mailbox_message = self.mailbox.next() => {
-                let Some(message) = mailbox_message else {
-                    info!("mailbox closed, shutting down");
-                    break;
-                };
+            Some(message) = self.mailbox.next() else {
+                info!("mailbox closed, shutting down");
+                break;
+            } => {
                 match message {
                     Message::GetInfo {
                         identifier,
@@ -570,11 +569,10 @@ where
                 }
             },
             // Handle resolver messages last
-            message = resolver_rx.next() => {
-                let Some(message) = message else {
-                    info!("handler closed, shutting down");
-                    break;
-                };
+            Some(message) = resolver_rx.next() else {
+                info!("handler closed, shutting down");
+                break;
+            } => {
                 match message {
                     handler::Message::Produce { key, response } => {
                         match key {

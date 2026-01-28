@@ -160,11 +160,9 @@ impl<E: Spawner + Clock + CryptoRngCore + Metrics, C: PublicKey> Actor<E, C> {
                             // Reset ticker
                             deadline = context.current() + self.gossip_bit_vec_frequency;
                         },
-                        msg_control = self.control.next() => {
-                            let msg = match msg_control {
-                                Some(msg_control) => msg_control,
-                                None => return Err(Error::PeerDisconnected),
-                            };
+                        Some(msg) = self.control.next() else {
+                            return Err(Error::PeerDisconnected);
+                        } => {
                             let (metric, payload) = match msg {
                                 Message::BitVec(bit_vec) => (
                                     metrics::Message::new_bit_vec(&peer),

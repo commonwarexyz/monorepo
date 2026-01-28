@@ -203,13 +203,12 @@ where
             on_stopped => {
                 debug!("context shutdown, stopping orchestrator");
             },
-            message = vote_backup.next() => {
+            Some((their_epoch, (from, _))) = vote_backup.next() else {
+                warn!("vote mux backup channel closed, shutting down orchestrator");
+                break;
+            } => {
                 // If a message is received in an unregistered sub-channel in the vote network,
                 // ensure we have the boundary finalization.
-                let Some((their_epoch, (from, _))) = message else {
-                    warn!("vote mux backup channel closed, shutting down orchestrator");
-                    break;
-                };
                 let their_epoch = Epoch::new(their_epoch);
                 let Some(our_epoch) = engines.keys().last().copied() else {
                     debug!(%their_epoch, ?from, "received message from unregistered epoch with no known epochs");

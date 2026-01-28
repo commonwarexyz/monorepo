@@ -162,40 +162,37 @@ impl<E: Clock + Spawner + Metrics, P: PublicKey, M: Committable + Digestible + C
                 debug!("shutdown");
             },
             // Handle mailbox messages
-            mail = self.mailbox_receiver.next() => {
-                let Some(msg) = mail else {
-                    error!("mailbox receiver failed");
-                    break;
-                };
-                match msg {
-                    Message::Broadcast {
-                        recipients,
-                        message,
-                        responder,
-                    } => {
-                        trace!("mailbox: broadcast");
-                        self.handle_broadcast(&mut sender, recipients, message, responder)
-                            .await;
-                    }
-                    Message::Subscribe {
-                        peer,
-                        commitment,
-                        digest,
-                        responder,
-                    } => {
-                        trace!("mailbox: subscribe");
-                        self.handle_subscribe(peer, commitment, digest, responder)
-                            .await;
-                    }
-                    Message::Get {
-                        peer,
-                        commitment,
-                        digest,
-                        responder,
-                    } => {
-                        trace!("mailbox: get");
-                        self.handle_get(peer, commitment, digest, responder).await;
-                    }
+            Some(msg) = self.mailbox_receiver.next() else {
+                error!("mailbox receiver failed");
+                break;
+            } => match msg {
+                Message::Broadcast {
+                    recipients,
+                    message,
+                    responder,
+                } => {
+                    trace!("mailbox: broadcast");
+                    self.handle_broadcast(&mut sender, recipients, message, responder)
+                        .await;
+                }
+                Message::Subscribe {
+                    peer,
+                    commitment,
+                    digest,
+                    responder,
+                } => {
+                    trace!("mailbox: subscribe");
+                    self.handle_subscribe(peer, commitment, digest, responder)
+                        .await;
+                }
+                Message::Get {
+                    peer,
+                    commitment,
+                    digest,
+                    responder,
+                } => {
+                    trace!("mailbox: get");
+                    self.handle_get(peer, commitment, digest, responder).await;
                 }
             },
             // Handle incoming messages
