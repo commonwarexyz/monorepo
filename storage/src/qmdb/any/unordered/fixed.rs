@@ -19,8 +19,6 @@ use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
 use tracing::warn;
 
-pub mod sync;
-
 pub type Update<K, V> = unordered::Update<K, FixedEncoding<V>>;
 pub type Operation<K, V> = unordered::Operation<K, FixedEncoding<V>>;
 
@@ -77,9 +75,9 @@ impl<
     }
 }
 
-// pub(super) so helpers can be used by the sync module.
+// pub(crate) so helpers can be used by the sync module.
 #[cfg(test)]
-pub(super) mod test {
+pub(crate) mod test {
     use super::*;
     use crate::{
         index::Unordered as _,
@@ -680,7 +678,7 @@ pub(super) mod test {
         use super::*;
         use crate::{
             mmr::{iterator::nodes_to_pin, journaled::Mmr, mem::Clean},
-            qmdb::any::unordered::sync_tests::FromSyncTestable,
+            qmdb::any::sync::tests::FromSyncTestable,
         };
         use futures::future::join_all;
 

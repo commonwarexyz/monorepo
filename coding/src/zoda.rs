@@ -119,7 +119,7 @@ use bytes::BufMut;
 use commonware_codec::{Encode, EncodeSize, FixedSize, RangeCfg, Read, ReadExt, Write};
 use commonware_cryptography::{
     transcript::{Summary, Transcript},
-    Hasher,
+    Digest, Hasher,
 };
 use commonware_math::{
     fields::goldilocks::F,
@@ -323,15 +323,15 @@ use topology::Topology;
 
 /// A shard of data produced by the encoding scheme.
 #[derive(Clone)]
-pub struct Shard<H: Hasher> {
+pub struct Shard<D: Digest> {
     data_bytes: usize,
-    root: H::Digest,
-    inclusion_proof: Proof<H::Digest>,
+    root: D,
+    inclusion_proof: Proof<D>,
     rows: Matrix,
     checksum: Arc<Matrix>,
 }
 
-impl<H: Hasher> PartialEq for Shard<H> {
+impl<D: Digest> PartialEq for Shard<D> {
     fn eq(&self, other: &Self) -> bool {
         self.data_bytes == other.data_bytes
             && self.root == other.root
@@ -341,9 +341,9 @@ impl<H: Hasher> PartialEq for Shard<H> {
     }
 }
 
-impl<H: Hasher> Eq for Shard<H> {}
+impl<D: Digest> Eq for Shard<D> {}
 
-impl<H: Hasher> EncodeSize for Shard<H> {
+impl<D: Digest> EncodeSize for Shard<D> {
     fn encode_size(&self) -> usize {
         self.data_bytes.encode_size()
             + self.root.encode_size()
@@ -353,7 +353,7 @@ impl<H: Hasher> EncodeSize for Shard<H> {
     }
 }
 
-impl<H: Hasher> Write for Shard<H> {
+impl<D: Digest> Write for Shard<D> {
     fn write(&self, buf: &mut impl BufMut) {
         self.data_bytes.write(buf);
         self.root.write(buf);
@@ -363,7 +363,7 @@ impl<H: Hasher> Write for Shard<H> {
     }
 }
 
-impl<H: Hasher> Read for Shard<H> {
+impl<D: Digest> Read for Shard<D> {
     type Cfg = crate::CodecConfig;
 
     fn read_cfg(
@@ -383,9 +383,9 @@ impl<H: Hasher> Read for Shard<H> {
 }
 
 #[cfg(feature = "arbitrary")]
-impl<H: Hasher> arbitrary::Arbitrary<'_> for Shard<H>
+impl<D: Digest> arbitrary::Arbitrary<'_> for Shard<D>
 where
-    H::Digest: for<'a> arbitrary::Arbitrary<'a>,
+    D: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         Ok(Self {
@@ -399,33 +399,33 @@ where
 }
 
 #[derive(Clone, Debug)]
-pub struct ReShard<H: Hasher> {
-    inclusion_proof: Proof<H::Digest>,
+pub struct ReShard<D: Digest> {
+    inclusion_proof: Proof<D>,
     shard: Matrix,
 }
 
-impl<H: Hasher> PartialEq for ReShard<H> {
+impl<D: Digest> PartialEq for ReShard<D> {
     fn eq(&self, other: &Self) -> bool {
         self.inclusion_proof == other.inclusion_proof && self.shard == other.shard
     }
 }
 
-impl<H: Hasher> Eq for ReShard<H> {}
+impl<D: Digest> Eq for ReShard<D> {}
 
-impl<H: Hasher> EncodeSize for ReShard<H> {
+impl<D: Digest> EncodeSize for ReShard<D> {
     fn encode_size(&self) -> usize {
         self.inclusion_proof.encode_size() + self.shard.encode_size()
     }
 }
 
-impl<H: Hasher> Write for ReShard<H> {
+impl<D: Digest> Write for ReShard<D> {
     fn write(&self, buf: &mut impl BufMut) {
         self.inclusion_proof.write(buf);
         self.shard.write(buf);
     }
 }
 
-impl<H: Hasher> Read for ReShard<H> {
+impl<D: Digest> Read for ReShard<D> {
     type Cfg = crate::CodecConfig;
 
     fn read_cfg(
@@ -443,9 +443,9 @@ impl<H: Hasher> Read for ReShard<H> {
 }
 
 #[cfg(feature = "arbitrary")]
-impl<H: Hasher> arbitrary::Arbitrary<'_> for ReShard<H>
+impl<D: Digest> arbitrary::Arbitrary<'_> for ReShard<D>
 where
-    H::Digest: for<'a> arbitrary::Arbitrary<'a>,
+    D: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         Ok(Self {
@@ -490,15 +490,15 @@ fn checking_matrix(transcript: &Transcript, topology: &Topology) -> Matrix {
 
 /// Data used to check [ReShard]s.
 #[derive(Clone)]
-pub struct CheckingData<H: Hasher> {
+pub struct CheckingData<D: Digest> {
     topology: Topology,
-    root: H::Digest,
+    root: D,
     checking_matrix: Matrix,
     encoded_checksum: Matrix,
     shuffled_indices: Vec<u32>,
 }
 
-impl<H: Hasher> CheckingData<H> {
+impl<D: Digest> CheckingData<D> {
     /// Calculate the values of this struct, based on information received.
     ///
     /// We control `config`.
@@ -511,7 +511,7 @@ impl<H: Hasher> CheckingData<H> {
         config: &Config,
         commitment: &Summary,
         data_bytes: usize,
-        root: H::Digest,
+        root: D,
         checksum: &Matrix,
     ) -> Result<Self, Error> {
         let topology = Topology::reckon(config, data_bytes);
@@ -543,7 +543,11 @@ impl<H: Hasher> CheckingData<H> {
         })
     }
 
-    fn check(&self, index: u16, reshard: &ReShard<H>) -> Result<CheckedShard, Error> {
+    fn check<H: Hasher<Digest = D>>(
+        &self,
+        index: u16,
+        reshard: &ReShard<D>,
+    ) -> Result<CheckedShard, Error> {
         self.topology.check_index(index)?;
         if reshard.shard.rows() != self.topology.samples
             || reshard.shard.cols() != self.topology.data_cols
@@ -619,11 +623,11 @@ impl<H> std::fmt::Debug for Zoda<H> {
 impl<H: Hasher> Scheme for Zoda<H> {
     type Commitment = Summary;
 
-    type Shard = Shard<H>;
+    type Shard = Shard<H::Digest>;
 
-    type ReShard = ReShard<H>;
+    type ReShard = ReShard<H::Digest>;
 
-    type CheckingData = CheckingData<H>;
+    type CheckingData = CheckingData<H::Digest>;
 
     type CheckedShard = CheckedShard;
 
@@ -676,7 +680,7 @@ impl<H: Hasher> Scheme for Zoda<H> {
         let checksum = Arc::new(data.mul(&checking_matrix));
 
         // Step 7: Produce the shards in parallel.
-        let shard_results: Vec<Result<Shard<H>, Error>> =
+        let shard_results: Vec<Result<Shard<H::Digest>, Error>> =
             strategy.map_collect_vec(0..topology.total_shards, |shard_idx| {
                 let indices = &shuffled_indices
                     [shard_idx * topology.samples..(shard_idx + 1) * topology.samples];
@@ -721,7 +725,7 @@ impl<H: Hasher> Scheme for Zoda<H> {
             shard.root,
             shard.checksum.as_ref(),
         )?;
-        let checked_shard = checking_data.check(index, &reshard)?;
+        let checked_shard = checking_data.check::<H>(index, &reshard)?;
         Ok((checking_data, checked_shard, reshard))
     }
 
@@ -732,7 +736,7 @@ impl<H: Hasher> Scheme for Zoda<H> {
         index: u16,
         reshard: Self::ReShard,
     ) -> Result<Self::CheckedShard, Self::Error> {
-        checking_data.check(index, &reshard)
+        checking_data.check::<H>(index, &reshard)
     }
 
     fn decode(
@@ -787,7 +791,8 @@ impl<H: Hasher> ValidatingScheme for Zoda<H> {}
 mod tests {
     use super::*;
     use crate::{CodecConfig, Config};
-    use commonware_cryptography::Sha256;
+    use bytes::BytesMut;
+    use commonware_cryptography::{sha256::Digest as Sha256Digest, Sha256};
     use commonware_parallel::Sequential;
 
     const STRATEGY: Sequential = Sequential;
@@ -816,9 +821,6 @@ mod tests {
 
     #[test]
     fn reshard_roundtrip_handles_field_packing() {
-        use bytes::BytesMut;
-        use commonware_cryptography::Sha256;
-
         let config = Config {
             minimum_shards: 3,
             extra_shards: 2,
@@ -834,7 +836,7 @@ mod tests {
         let mut buf = BytesMut::new();
         reshard.write(&mut buf);
         let mut bytes = buf.freeze();
-        let decoded = ReShard::<Sha256>::read_cfg(
+        let decoded = ReShard::<Sha256Digest>::read_cfg(
             &mut bytes,
             &CodecConfig {
                 maximum_shard_size: data.len(),
@@ -877,8 +879,8 @@ mod tests {
         use commonware_codec::conformance::CodecConformance;
 
         commonware_conformance::conformance_tests! {
-            CodecConformance<Shard<Sha256>>,
-            CodecConformance<ReShard<Sha256>>,
+            CodecConformance<Shard<Sha256Digest>>,
+            CodecConformance<ReShard<Sha256Digest>>,
         }
     }
 }

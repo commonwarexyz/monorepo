@@ -9,7 +9,7 @@ use crate::{
             ValueEncoding,
         },
         build_snapshot_from_log, create_key, delete_key, delete_known_loc,
-        operation::{Committable as _, Operation as OperationTrait},
+        operation::{Committable, Operation as OperationTrait},
         update_key, update_known_loc, DurabilityState, Durable, Error, MerkleizationState,
         Merkleized, NonDurable, Unmerkleized,
     },
@@ -30,9 +30,6 @@ use std::collections::BTreeMap;
 
 pub mod fixed;
 pub mod variable;
-
-#[cfg(test)]
-pub(crate) mod sync_tests;
 
 pub use crate::qmdb::any::operation::{update::Unordered as Update, Unordered as Operation};
 
@@ -241,21 +238,18 @@ where
 
 impl<
         E: Storage + Clock + Metrics,
-        K: Array,
-        V: ValueEncoding,
-        C: MutableContiguous<Item = Operation<K, V>>,
+        C: MutableContiguous<Item = O>,
+        O: OperationTrait + Codec + Committable + Send + Sync,
         I: Index<Value = Location>,
         H: Hasher,
         S: commonware_parallel::Strategy,
-    > Db<E, C, I, H, Update<K, V>, S, Merkleized<H>, Durable>
-where
-    Operation<K, V>: Codec,
-    V::Value: Send + Sync,
+        U: Send + Sync,
+    > Db<E, C, I, H, U, S, Merkleized<H>, Durable>
 {
     /// Returns an [Db] initialized directly from the given components. The log is
     /// replayed from `inactivity_floor_loc` to build the snapshot, and that value is used as the
     /// inactivity floor. The last operation is assumed to be a commit.
-    async fn from_components(
+    pub(crate) async fn from_components(
         inactivity_floor_loc: Location,
         log: AuthenticatedLog<E, C, H, Merkleized<H>, S>,
         mut snapshot: I,
