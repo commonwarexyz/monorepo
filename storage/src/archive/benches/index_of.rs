@@ -2,6 +2,9 @@
 //!
 //! This benchmark demonstrates the performance benefit of using `index_of`
 //! when only the index is needed, as it avoids loading the full value.
+//!
+//! Note: Only `prunable::Archive` is benchmarked because `immutable::Archive`
+//! does not support the `index_of` optimization (it returns `None`).
 
 use super::utils::{append_random, Archive, Key, Variant};
 use commonware_runtime::{
@@ -45,13 +48,13 @@ async fn lookup_via_get(a: &Archive, keys: &[Key]) {
 /// Lookup using `index_of(k)` - returns only index, no value loading
 async fn lookup_via_index_of(a: &Archive, keys: &[Key]) {
     for k in keys {
-        black_box(a.index_of(k).await.unwrap());
+        let _idx: Option<u64> = black_box(a.index_of(k).await.unwrap());
     }
 }
 
 fn bench_index_of(c: &mut Criterion) {
     let cfg = Config::default();
-    for variant in [Variant::Prunable, Variant::Immutable] {
+    for variant in [Variant::Prunable] {
         for compression in [None, Some(3)] {
             // Create a shared on-disk archive once so later setup is fast.
             let builder = commonware_runtime::tokio::Runner::new(cfg.clone());
