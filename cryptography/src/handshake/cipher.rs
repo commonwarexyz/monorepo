@@ -42,25 +42,13 @@ impl CounterNonce {
     }
 }
 
-/// ChaCha20-Poly1305 cipher backend abstraction for platform-specific implementations.
-trait Backend: Sized {
-    /// Creates a new cipher backend from a 256-bit key.
-    fn from_key(key: &[u8; KEY_SIZE_BYTES]) -> Self;
-
-    /// Encrypts plaintext using the given nonce, returning ciphertext with appended auth tag.
-    fn encrypt(&self, nonce: &[u8; NONCE_SIZE_BYTES], data: &[u8]) -> Result<Vec<u8>, Error>;
-
-    /// Decrypts ciphertext using the given nonce, verifying and stripping the auth tag.
-    fn decrypt(&self, nonce: &[u8; NONCE_SIZE_BYTES], data: &[u8]) -> Result<Vec<u8>, Error>;
-}
-
 cfg_if::cfg_if! {
     if #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))] {
         use aws_lc_rs::aead::{self, LessSafeKey, UnboundKey, CHACHA20_POLY1305};
 
         struct Cipher(LessSafeKey);
 
-        impl Backend for Cipher {
+        impl Cipher {
             fn from_key(key: &[u8; KEY_SIZE_BYTES]) -> Self {
                 let unbound_key = UnboundKey::new(&CHACHA20_POLY1305, key)
                     .expect("key size should match algorithm");
@@ -92,7 +80,7 @@ cfg_if::cfg_if! {
 
         struct Cipher(ChaCha20Poly1305);
 
-        impl Backend for Cipher {
+        impl Cipher {
             fn from_key(key: &[u8; KEY_SIZE_BYTES]) -> Self {
                 Self(ChaCha20Poly1305::new(key.into()))
             }
