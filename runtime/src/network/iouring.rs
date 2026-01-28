@@ -372,7 +372,7 @@ impl Stream {
         len: usize,
     ) -> (IoBufMut, Result<usize, crate::Error>) {
         loop {
-            // SAFETY: offset + len <= buffer.len() as guaranteed by callers.
+            // SAFETY: offset + len <= buffer.capacity() as guaranteed by callers.
             // `buffer` is an `IoBufMut` guaranteeing the memory won't move.
             let ptr = unsafe { buffer.as_mut_ptr().add(offset) };
             let op = io_uring::opcode::Recv::new(self.as_raw_fd(), ptr, len as u32).build();

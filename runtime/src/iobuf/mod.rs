@@ -245,7 +245,10 @@ impl IoBufMut {
         }
     }
 
-    /// Returns `true` if this buffer was allocated from a pool.
+    /// Returns `true` if this buffer uses pooled storage.
+    ///
+    /// Note: After `resize()` exceeds pool capacity, the buffer may fall back
+    /// to heap allocation but this still returns `true` (the variant is unchanged).
     #[inline]
     pub const fn is_pooled(&self) -> bool {
         matches!(self.inner, IoBufMutInner::Pooled(_))
@@ -649,7 +652,9 @@ impl Buf for IoBufs {
         let mut result = BytesMut::with_capacity(len);
         let mut remaining = len;
         while remaining > 0 {
-            let front = bufs.front_mut().unwrap();
+            let front = bufs
+                .front_mut()
+                .expect("remaining > 0 implies non-empty bufs");
             let avail = front.remaining();
             let to_copy = remaining.min(avail);
             result.extend_from_slice(&front.chunk()[..to_copy]);
