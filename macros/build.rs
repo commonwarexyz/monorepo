@@ -6,7 +6,10 @@ const RESERVED_LEVEL: &str = "RESERVED";
 
 /// Returns all levels to check, including RESERVED.
 fn all_levels() -> impl Iterator<Item = &'static str> {
-    LEVELS.iter().copied().chain(std::iter::once(RESERVED_LEVEL))
+    LEVELS
+        .iter()
+        .copied()
+        .chain(std::iter::once(RESERVED_LEVEL))
 }
 
 fn count_stability_cfgs() -> usize {
