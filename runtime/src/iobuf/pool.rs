@@ -640,23 +640,34 @@ impl BufferPools {
 /// Buffers that were allocated as fallback (when the pool was exhausted) are simply
 /// deallocated on drop.
 ///
+/// # Buffer Layout
+///
+/// ```text
+/// [0................cursor..............len.............raw_capacity]
+///  ^                 ^                   ^                 ^
+///  |                 |                   |                 |
+///  allocation start  read position       write position    allocation end
+///                    (consumed prefix)   (initialized)
+///
+/// Regions:
+/// - [0..cursor]:        consumed (via Buf::advance), no longer accessible
+/// - [cursor..len]:      readable bytes (as_ref returns this slice)
+/// - [len..raw_capacity]: uninitialized, writable via BufMut
+/// ```
+///
 /// # Invariants
 ///
-/// The following invariants are always maintained:
-/// - `cursor <= len <= capacity`
+/// - `cursor <= len <= raw_capacity`
 /// - Bytes in `0..len` are initialized (safe to read)
-/// - Bytes in `len..capacity` are uninitialized (write-only via `BufMut`)
-/// - `len()` returns readable bytes: `self.len - self.cursor`
-/// - `remaining_mut()` returns writable capacity: `capacity - self.len`
+/// - Bytes in `len..raw_capacity` are uninitialized (write-only via `BufMut`)
 ///
-/// # Cursor Semantics
+/// # Computed Values
 ///
-/// The `cursor` tracks consumed bytes (via `Buf::advance`). After `advance(n)`:
-/// - `cursor` increases by `n`
-/// - `len()` (readable bytes) decreases by `n`
-/// - `remaining_mut()` is unchanged (writes always append past `self.len`)
+/// - `len()` = readable bytes = `self.len - cursor`
+/// - `capacity()` = view capacity = `raw_capacity - cursor` (shrinks after advance)
+/// - `remaining_mut()` = writable bytes = `raw_capacity - self.len`
 ///
-/// This matches `BytesMut` semantics where `advance` consumes bytes from the front.
+/// This matches `BytesMut` semantics.
 pub struct PooledBufMut {
     buffer: ManuallyDrop<AlignedBuffer>,
     /// Read cursor position (for `Buf` trait).
@@ -844,9 +855,11 @@ impl PooledBufMut {
     /// The underlying buffer will be returned to the pool when all references
     /// to the `IoBuf` (including slices) are dropped.
     pub fn freeze(self) -> IoBuf {
-        // SAFETY: Wrap self in ManuallyDrop first to prevent Drop from running
-        // if any subsequent code panics. Then use ptr::read to extract fields.
+        // Wrap self in ManuallyDrop first to prevent Drop from running
+        // if any subsequent code panics.
         let mut me = ManuallyDrop::new(self);
+        // SAFETY: me won't be dropped, so we can read out the buffer. The
+        // ManuallyDrop wrapper on buffer prevents double-free.
         let buffer = unsafe { std::ptr::read(&*me.buffer) };
         let cursor = me.cursor;
         let len = me.len;
