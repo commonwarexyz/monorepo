@@ -425,7 +425,7 @@ impl Field for F {
     }
 }
 
-#[cfg(any(test, feature = "fuzz"))]
+#[cfg(any(test, feature = "test_strategies"))]
 mod impl_proptest_arbitrary {
     use super::*;
     use proptest::prelude::*;
@@ -441,48 +441,64 @@ mod impl_proptest_arbitrary {
 }
 
 #[cfg(any(test, feature = "fuzz"))]
-pub(crate) mod fuzz {
+pub mod fuzz {
     use super::*;
     use crate::algebra::Ring;
-    use commonware_test::FuzzPlan;
-    use proptest::{prop_assert_eq, test_runner::TestCaseResult};
-    use proptest_derive::Arbitrary;
+    use arbitrary::{Arbitrary, Unstructured};
 
-    #[derive(Debug, Arbitrary)]
+    #[derive(Debug)]
     pub enum Plan {
         Exp(F, u8),
         Div2(F),
-        StreamRoundtrip(
-            #[proptest(
-                strategy = "proptest::collection::vec(proptest::arbitrary::any::<u64>(), 0..128)"
-            )]
-            Vec<u64>,
-        ),
+        StreamRoundtrip(Vec<u64>),
     }
 
-    impl FuzzPlan for Plan {
-        fn run(self) -> TestCaseResult {
+    impl<'a> Arbitrary<'a> for Plan {
+        fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
+            match u.int_in_range(0..=2)? {
+                0 => Ok(Plan::Exp(u.arbitrary()?, u.arbitrary()?)),
+                1 => Ok(Plan::Div2(u.arbitrary()?)),
+                _ => {
+                    let len = u.int_in_range(0..=127)?;
+                    let data: Vec<u64> = (0..len)
+                        .map(|_| u.arbitrary())
+                        .collect::<arbitrary::Result<_>>()?;
+                    Ok(Plan::StreamRoundtrip(data))
+                }
+            }
+        }
+    }
+
+    impl Plan {
+        pub fn run(self) {
             match self {
                 Plan::Exp(x, k) => {
                     let mut naive = F::one();
                     for _ in 0..k {
                         naive = naive * x;
                     }
-                    prop_assert_eq!(naive, x.exp(&[k as u64]));
+                    assert_eq!(naive, x.exp(&[k as u64]));
                 }
                 Plan::Div2(x) => {
-                    prop_assert_eq!((x + x).div_2(), x);
+                    assert_eq!((x + x).div_2(), x);
                 }
                 Plan::StreamRoundtrip(data) => {
                     let mut roundtrip =
                         F::stream_to_u64s(F::stream_from_u64s(data.clone().into_iter()))
                             .collect::<Vec<_>>();
                     roundtrip.truncate(data.len());
-                    prop_assert_eq!(data, roundtrip);
+                    assert_eq!(data, roundtrip);
                 }
             }
-            Ok(())
         }
+    }
+
+    #[test]
+    fn test_fuzz() {
+        commonware_test::test(|u| {
+            u.arbitrary::<Plan>()?.run();
+            Ok(())
+        });
     }
 }
 
@@ -490,8 +506,7 @@ pub(crate) mod fuzz {
 mod test {
     use super::*;
     use crate::algebra;
-    use commonware_test::FuzzPlan as _;
-    use proptest::{prelude::Arbitrary, proptest};
+    use proptest::prelude::Arbitrary;
 
     #[test]
     fn test_generator_calculation() {
@@ -516,13 +531,6 @@ mod test {
     #[test]
     fn test_root_of_unity_exp() {
         assert_eq!(F::ROOT_OF_UNITY.exp(&[1 << 26]), F(8));
-    }
-
-    proptest! {
-        #[test]
-        fn test_fuzz(plan: fuzz::Plan) {
-            plan.run()?;
-        }
     }
 
     #[test]

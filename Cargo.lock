@@ -1423,7 +1423,6 @@ dependencies = [
  "commonware-test",
  "commonware-utils",
  "proptest",
- "proptest-derive",
  "rand 0.8.5",
  "rand_chacha 0.3.1",
  "rand_core 0.6.4",
@@ -1435,7 +1434,6 @@ version = "0.0.65"
 dependencies = [
  "arbitrary",
  "commonware-math",
- "commonware-test",
  "libfuzzer-sys",
 ]
 
@@ -1700,8 +1698,6 @@ name = "commonware-test"
 version = "0.0.65"
 dependencies = [
  "arbitrary",
- "libfuzzer-sys",
- "proptest",
  "rand 0.8.5",
  "rand_chacha 0.3.1",
  "rand_core 0.6.4",
@@ -3976,17 +3972,6 @@ dependencies = [
  "rusty-fork",
  "tempfile",
  "unarray",
-]
-
-[[package]]
-name = "proptest-derive"
-version = "0.5.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4ee1c9ac207483d5e7db4940700de86a9aae46ef90c48b57f99fe7edb8345e49"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn",
 ]
 
 [[package]]

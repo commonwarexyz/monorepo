@@ -243,7 +243,7 @@ impl arbitrary::Arbitrary<'_> for G {
     }
 }
 
-#[cfg(any(test, feature = "fuzz"))]
+#[cfg(any(test, feature = "test_strategies"))]
 mod impl_proptest_arbitrary {
     use super::*;
     use proptest::prelude::*;
@@ -268,12 +268,10 @@ mod impl_proptest_arbitrary {
 }
 
 #[cfg(any(test, feature = "fuzz"))]
-pub(crate) mod fuzz {
+pub mod fuzz {
     use super::*;
+    use arbitrary::Arbitrary;
     use commonware_codec::Encode as _;
-    use commonware_test::FuzzPlan;
-    use proptest::{prop_assert_eq, test_runner::TestCaseResult};
-    use proptest_derive::Arbitrary;
 
     #[derive(Debug, Arbitrary)]
     pub enum Plan {
@@ -281,18 +279,25 @@ pub(crate) mod fuzz {
         GCodec(G),
     }
 
-    impl FuzzPlan for Plan {
-        fn run(self) -> TestCaseResult {
+    impl Plan {
+        pub fn run(self) {
             match self {
                 Plan::FCodec(x) => {
-                    prop_assert_eq!(&x, &F::read(&mut x.encode()).unwrap());
+                    assert_eq!(&x, &F::read(&mut x.encode()).unwrap());
                 }
                 Plan::GCodec(x) => {
-                    prop_assert_eq!(&x, &G::read(&mut x.encode()).unwrap());
+                    assert_eq!(&x, &G::read(&mut x.encode()).unwrap());
                 }
             }
-            Ok(())
         }
+    }
+
+    #[test]
+    fn test_fuzz() {
+        commonware_test::test(|u| {
+            u.arbitrary::<Plan>()?.run();
+            Ok(())
+        });
     }
 }
 
@@ -301,8 +306,7 @@ pub(crate) mod fuzz {
 mod test {
     use super::*;
     use crate::algebra;
-    use commonware_test::FuzzPlan as _;
-    use proptest::{prelude::Arbitrary, proptest};
+    use proptest::prelude::Arbitrary;
 
     #[test]
     fn test_field() {
@@ -312,13 +316,6 @@ mod test {
     #[test]
     fn test_group() {
         algebra::test_suites::test_space(file!(), &F::arbitrary(), &G::arbitrary());
-    }
-
-    proptest! {
-        #[test]
-        fn test_fuzz(plan: super::fuzz::Plan) {
-            plan.run()?;
-        }
     }
 
     #[cfg(feature = "arbitrary")]

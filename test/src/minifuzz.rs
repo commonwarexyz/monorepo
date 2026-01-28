@@ -27,14 +27,13 @@
 //!
 //! Use `with_search_limit` or `with_search_time` to control how long the fuzzer runs.
 
+use arbitrary::Unstructured;
+use rand_chacha::ChaCha8Rng;
+use rand_core::{RngCore as _, SeedableRng};
 use std::{
     panic::{catch_unwind, AssertUnwindSafe, RefUnwindSafe, UnwindSafe},
     time::{Duration, Instant},
 };
-
-use arbitrary::Unstructured;
-use rand_chacha::ChaCha8Rng;
-use rand_core::{RngCore as _, SeedableRng};
 
 enum Error {
     NoDisplay,
@@ -44,21 +43,21 @@ enum Error {
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Error::NoDisplay => write!(f, "<not displayable>"),
-            Error::String(s) => write!(f, "{}", s),
+            Self::NoDisplay => write!(f, "<not displayable>"),
+            Self::String(s) => write!(f, "{}", s),
         }
     }
 }
 
 fn try_catch<T>(f: impl FnOnce() -> T + UnwindSafe) -> Result<T, Error> {
     catch_unwind(f).map_err(|e| {
-        if let Some(s) = e.downcast_ref::<String>() {
-            Error::String(s.to_string())
-        } else if let Some(s) = e.downcast_ref::<&'static str>() {
-            Error::String(s.to_string())
-        } else {
-            Error::NoDisplay
-        }
+        e.downcast_ref::<String>()
+            .map(|s| Error::String(s.to_string()))
+            .or_else(|| {
+                e.downcast_ref::<&'static str>()
+                    .map(|s| Error::String((*s).to_string()))
+            })
+            .unwrap_or(Error::NoDisplay)
     })
 }
 
@@ -70,7 +69,7 @@ struct Branch {
 }
 
 impl Branch {
-    fn new(seed: u64) -> Self {
+    const fn new(seed: u64) -> Self {
         Self {
             seed: (seed >> 32) as u32,
             thread: seed as u32,
@@ -87,7 +86,7 @@ impl Branch {
         Self { seed, thread, size }
     }
 
-    fn next(self) -> Self {
+    const fn next(self) -> Self {
         Self {
             seed: self.seed,
             thread: self.thread.wrapping_add(1),
@@ -95,7 +94,7 @@ impl Branch {
         }
     }
 
-    fn rng_seed(self) -> u64 {
+    const fn rng_seed(self) -> u64 {
         (self.seed as u64) << 32 | self.thread as u64
     }
 }
@@ -133,7 +132,7 @@ impl Sampler {
         }
     }
 
-    fn set_bytes_used(&mut self, used: usize) {
+    const fn set_bytes_used(&mut self, used: usize) {
         self.last_bytes_used = used;
     }
 
@@ -290,26 +289,29 @@ impl Default for Builder {
 
 impl Builder {
     /// Sets the RNG seed for deterministic fuzzing.
-    pub fn with_seed(self, seed: u64) -> Self {
+    pub const fn with_seed(self, seed: u64) -> Self {
         Self {
             seed: Some(seed),
-            ..self
+            search_bound: self.search_bound,
+            reproduce: self.reproduce,
         }
     }
 
     /// Limits the fuzzer to run a fixed number of test cases.
-    pub fn with_search_limit(self, search_limit: u64) -> Self {
+    pub const fn with_search_limit(self, search_limit: u64) -> Self {
         Self {
             search_bound: SearchBound::Limit(search_limit),
-            ..self
+            seed: self.seed,
+            reproduce: self.reproduce,
         }
     }
 
     /// Limits the fuzzer to run for a fixed duration.
-    pub fn with_search_time(self, duration: Duration) -> Self {
+    pub const fn with_search_time(self, duration: Duration) -> Self {
         Self {
             search_bound: SearchBound::Time(duration),
-            ..self
+            seed: self.seed,
+            reproduce: self.reproduce,
         }
     }
 
@@ -361,8 +363,8 @@ impl Builder {
                     Ok((_, remaining)) => {
                         sampler.set_bytes_used(sample_len - remaining);
                         tries += 1;
-                        let should_stop = tries >= limit
-                            || deadline.is_some_and(|d| Instant::now() >= d);
+                        let should_stop =
+                            tries >= limit || deadline.is_some_and(|d| Instant::now() >= d);
                         if should_stop {
                             break 'search;
                         }
@@ -384,30 +386,30 @@ pub fn test(
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
     use arbitrary::Unstructured;
 
     #[derive(Debug)]
     enum Plan {
         Leaf(u8),
-        Branch(bool, Box<Plan>),
+        Branch(bool, Box<Self>),
     }
 
     impl Plan {
         fn generate(u: &mut Unstructured<'_>, depth: usize) -> arbitrary::Result<Self> {
             if depth == 0 {
-                Ok(Plan::Leaf(u.arbitrary()?))
+                Ok(Self::Leaf(u.arbitrary()?))
             } else {
                 let b: bool = u.arbitrary()?;
-                let child = Plan::generate(u, depth - 1)?;
-                Ok(Plan::Branch(b, Box::new(child)))
+                let child = Self::generate(u, depth - 1)?;
+                Ok(Self::Branch(b, Box::new(child)))
             }
         }
 
         fn follow_path(&self, path: &mut impl Iterator<Item = bool>) -> Option<u8> {
             match self {
-                Plan::Leaf(v) => Some(*v),
-                Plan::Branch(b, child) => {
+                Self::Leaf(v) => Some(*v),
+                Self::Branch(b, child) => {
                     if *b == path.next()? {
                         child.follow_path(path)
                     } else {

@@ -15,8 +15,6 @@ workspace = true
 
 [dependencies]
 arbitrary.workspace = true
-proptest.workspace = true
-libfuzzer-sys.workspace = true
 rand = { workspace = true, features = ["std", "std_rng"] }
 rand_chacha.workspace = true
 rand_core.workspace = true
