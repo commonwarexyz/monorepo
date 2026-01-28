@@ -188,7 +188,7 @@ where
             replay_buffer: config.replay_buffer,
             key_write_buffer: config.key_write_buffer,
             value_write_buffer: config.value_write_buffer,
-            key_buffer_pool: config.buffer_pool.clone(),
+            key_page_cache: config.page_cache.clone(),
         };
         let cache = cache::Manager::init(
             context.with_label("cache"),

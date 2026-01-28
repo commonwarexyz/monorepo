@@ -22,7 +22,7 @@ use commonware_cryptography::Digest;
 use commonware_macros::select_loop;
 use commonware_p2p::{utils::codec::WrappedSender, Blocker, Recipients, Sender};
 use commonware_runtime::{
-    buffer::PoolRef, spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner, Storage,
+    buffer::CacheRef, spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner, Storage,
 };
 use commonware_storage::journal::segmented::variable::{Config as JConfig, Journal};
 use commonware_utils::futures::AbortablePool;
@@ -109,7 +109,7 @@ pub struct Actor<
     partition: String,
     replay_buffer: NonZeroUsize,
     write_buffer: NonZeroUsize,
-    buffer_pool: PoolRef,
+    page_cache: CacheRef,
     journal: Option<Journal<E, Artifact<S, D>>>,
 
     mailbox_receiver: mpsc::Receiver<Message<S, D>>,
@@ -185,7 +185,7 @@ impl<
                 partition: cfg.partition,
                 replay_buffer: cfg.replay_buffer,
                 write_buffer: cfg.write_buffer,
-                buffer_pool: cfg.buffer_pool,
+                page_cache: cfg.page_cache,
                 journal: None,
 
                 mailbox_receiver,
@@ -687,7 +687,7 @@ impl<
                 partition: self.partition.clone(),
                 compression: None, // most of the data is not compressible
                 codec_config: self.certificate_config.clone(),
-                buffer_pool: self.buffer_pool.clone(),
+                page_cache: self.page_cache.clone(),
                 write_buffer: self.write_buffer,
             },
         )

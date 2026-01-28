@@ -5,7 +5,7 @@ use crate::{
 };
 use commonware_cryptography::{certificate::Provider, Digest, Signer};
 use commonware_parallel::Strategy;
-use commonware_runtime::buffer::PoolRef;
+use commonware_runtime::buffer::CacheRef;
 use std::{
     num::{NonZeroU64, NonZeroUsize},
     time::Duration,
@@ -95,7 +95,7 @@ pub struct Config<
     pub journal_compression: Option<u8>,
 
     /// Buffer pool for the journal.
-    pub journal_buffer_pool: PoolRef,
+    pub journal_page_cache: CacheRef,
 
     /// Strategy for parallel operations.
     pub strategy: T,

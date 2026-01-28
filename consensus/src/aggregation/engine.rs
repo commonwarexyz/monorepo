@@ -22,7 +22,7 @@ use commonware_p2p::{
 };
 use commonware_parallel::Strategy;
 use commonware_runtime::{
-    buffer::PoolRef,
+    buffer::CacheRef,
     spawn_cell,
     telemetry::metrics::{
         histogram,
@@ -142,7 +142,7 @@ pub struct Engine<
     journal_replay_buffer: NonZeroUsize,
     journal_heights_per_section: NonZeroU64,
     journal_compression: Option<u8>,
-    journal_buffer_pool: PoolRef,
+    journal_page_cache: CacheRef,
 
     // ---------- Network ----------
     /// Whether to send acks as priority messages.
@@ -194,7 +194,7 @@ impl<
             journal_replay_buffer: cfg.journal_replay_buffer,
             journal_heights_per_section: cfg.journal_heights_per_section,
             journal_compression: cfg.journal_compression,
-            journal_buffer_pool: cfg.journal_buffer_pool,
+            journal_page_cache: cfg.journal_page_cache,
             priority_acks: cfg.priority_acks,
             metrics,
         }
@@ -245,7 +245,7 @@ impl<
             partition: self.journal_partition.clone(),
             compression: self.journal_compression,
             codec_config: P::Scheme::certificate_codec_config_unbounded(),
-            buffer_pool: self.journal_buffer_pool.clone(),
+            page_cache: self.journal_page_cache.clone(),
             write_buffer: self.journal_write_buffer,
         };
         let journal = Journal::init(
