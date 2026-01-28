@@ -1,12 +1,12 @@
 use std::env;
 
 const LEVELS: [&str; 5] = ["ALPHA", "BETA", "GAMMA", "DELTA", "EPSILON"];
-/// MAX is a special level that excludes ALL stability-marked items, used for finding unmarked public API.
-const MAX_LEVEL: &str = "MAX";
+/// RESERVED is a special level that excludes ALL stability-marked items, used for finding unmarked public API.
+const RESERVED_LEVEL: &str = "RESERVED";
 
-/// Returns all levels to check, including MAX.
+/// Returns all levels to check, including RESERVED.
 fn all_levels() -> impl Iterator<Item = &'static str> {
-    LEVELS.iter().copied().chain(std::iter::once(MAX_LEVEL))
+    LEVELS.iter().copied().chain(std::iter::once(RESERVED_LEVEL))
 }
 
 fn count_stability_cfgs() -> usize {
@@ -59,10 +59,6 @@ fn main() {
     println!("cargo:rustc-check-cfg=cfg(commonware_stability_GAMMA)");
     println!("cargo:rustc-check-cfg=cfg(commonware_stability_DELTA)");
     println!("cargo:rustc-check-cfg=cfg(commonware_stability_EPSILON)");
-    println!(
-        "cargo:rustc-check-cfg=cfg(commonware_stability_{})",
-        MAX_LEVEL
-    );
 
     let count = count_stability_cfgs();
     if count == 0 {

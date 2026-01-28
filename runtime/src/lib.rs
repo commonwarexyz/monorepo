@@ -47,7 +47,7 @@ cfg_if::cfg_if! {
         #[cfg(not(any(
             commonware_stability_DELTA,
             commonware_stability_EPSILON,
-            commonware_stability_MAX
+            commonware_stability_RESERVED
         )))]
         pub mod benchmarks;
     }

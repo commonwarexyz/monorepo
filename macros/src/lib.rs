@@ -95,13 +95,13 @@ fn level_name(level: u8) -> &'static str {
 }
 
 /// Generates cfg exclusion identifiers for levels above the given level.
-/// Always includes `commonware_stability_MAX` to allow finding unmarked items.
+/// Always includes `commonware_stability_RESERVED` to allow finding unmarked items.
 fn exclusion_cfg_names(level: u8) -> Vec<proc_macro2::Ident> {
     let mut names: Vec<_> = ((level + 1)..=4)
         .map(|l| format_ident!("commonware_stability_{}", level_name(l)))
         .collect();
-    // MAX excludes all stability-marked items, leaving only unmarked ones
-    names.push(format_ident!("commonware_stability_MAX"));
+    // RESERVED excludes all stability-marked items, leaving only unmarked ones
+    names.push(format_ident!("commonware_stability_RESERVED"));
     names
 }
 
@@ -110,8 +110,8 @@ pub fn stability(attr: TokenStream, item: TokenStream) -> TokenStream {
     let level = parse_macro_input!(attr as StabilityLevel);
 
     // Generate a single cfg(not(any(...))) for all levels above this item's level.
-    // #[stability(BETA)] expands to #[cfg(not(any(commonware_stability_GAMMA, commonware_stability_DELTA, commonware_stability_EPSILON, commonware_stability_MAX)))]
-    // MAX is always included so that building with --cfg commonware_stability_MAX excludes ALL marked items.
+    // #[stability(BETA)] expands to #[cfg(not(any(commonware_stability_GAMMA, commonware_stability_DELTA, commonware_stability_EPSILON, commonware_stability_RESERVED)))]
+    // RESERVED is always included so that building with --cfg commonware_stability_RESERVED excludes ALL marked items.
     let exclude_names = exclusion_cfg_names(level.value);
 
     let item2: proc_macro2::TokenStream = item.into();

@@ -9,13 +9,13 @@
 
 set -euo pipefail
 
-STABILITY_CFG="commonware_stability_MAX"
+STABILITY_CFG="commonware_stability_RESERVED"
 
-# Crates to skip (mirrors stability_excludes in justfile, plus internal tooling)
-SKIP_REGEX="commonware-bridge|commonware-chat|commonware-estimator|commonware-flood|commonware-log|commonware-sync|commonware-deployer|commonware-reshare|commonware-conformance|-fuzz$|-macros$"
+# Crates to skip (examples, fuzz crates, internal tooling)
+SKIP_REGEX="commonware-bridge|commonware-chat|commonware-estimator|commonware-flood|commonware-log|commonware-sync|commonware-reshare|commonware-conformance|-fuzz$|-macros$"
 
-# Items to ignore (macros that can't be inside stability_scope)
-IGNORE_ITEMS="commonware_utils|NZDuration|NZU8|NZU16|NZU32|NZU64|NZUsize"
+# Items to ignore (#[macro_export] macros can't be inside stability_scope due to Rust limitations)
+IGNORE_ITEMS="NZDuration|NZU8|NZU16|NZU32|NZU64|NZUsize"
 
 if ! command -v jq &> /dev/null; then
     echo "Error: jq is required but not installed." >&2

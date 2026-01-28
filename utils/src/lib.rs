@@ -47,13 +47,13 @@ commonware_macros::stability_scope!(GAMMA, cfg(feature = "std") {
 #[cfg(not(any(
     commonware_stability_DELTA,
     commonware_stability_EPSILON,
-    commonware_stability_MAX
+    commonware_stability_RESERVED
 )))]
 pub mod hex_literal;
 #[cfg(not(any(
     commonware_stability_DELTA,
     commonware_stability_EPSILON,
-    commonware_stability_MAX
+    commonware_stability_RESERVED
 )))]
 pub mod vec;
 

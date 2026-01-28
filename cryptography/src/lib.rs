@@ -22,20 +22,20 @@ use rand_core::CryptoRngCore;
 #[cfg(not(any(
     commonware_stability_DELTA,
     commonware_stability_EPSILON,
-    commonware_stability_MAX
+    commonware_stability_RESERVED
 )))]
 pub mod bls12381;
 #[cfg(not(any(
     commonware_stability_DELTA,
     commonware_stability_EPSILON,
-    commonware_stability_MAX
+    commonware_stability_RESERVED
 )))]
 pub mod ed25519;
 #[cfg(not(any(
     commonware_stability_GAMMA,
     commonware_stability_DELTA,
     commonware_stability_EPSILON,
-    commonware_stability_MAX
+    commonware_stability_RESERVED
 )))]
 pub mod secp256r1;
 

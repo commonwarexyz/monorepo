@@ -11,7 +11,7 @@
 #[cfg(not(any(
     commonware_stability_DELTA,
     commonware_stability_EPSILON,
-    commonware_stability_MAX
+    commonware_stability_RESERVED
 )))]
 #[macro_export]
 macro_rules! spawn_metrics {
