@@ -1887,4 +1887,224 @@ mod tests {
             );
         }
     }
+
+    /// Verify PooledBufMut matches BytesMut semantics for Buf trait.
+    #[test]
+    fn test_bytesmut_parity_buf_trait() {
+        use bytes::BytesMut;
+
+        let page = page_size();
+        let mut registry = test_registry();
+        let pool = BufferPool::new(test_config(page, page, 10), &mut registry);
+
+        let mut bytes = BytesMut::with_capacity(100);
+        bytes.resize(50, 0xAA);
+
+        let mut pooled = pool.alloc(100).unwrap();
+        pooled.resize(50, 0xAA);
+
+        // remaining()
+        assert_eq!(Buf::remaining(&bytes), Buf::remaining(&pooled));
+
+        // chunk()
+        assert_eq!(Buf::chunk(&bytes), Buf::chunk(&pooled));
+
+        // advance()
+        Buf::advance(&mut bytes, 10);
+        Buf::advance(&mut pooled, 10);
+        assert_eq!(Buf::remaining(&bytes), Buf::remaining(&pooled));
+        assert_eq!(Buf::chunk(&bytes), Buf::chunk(&pooled));
+
+        // advance to end
+        let remaining = Buf::remaining(&bytes);
+        Buf::advance(&mut bytes, remaining);
+        Buf::advance(&mut pooled, remaining);
+        assert_eq!(Buf::remaining(&bytes), 0);
+        assert_eq!(Buf::remaining(&pooled), 0);
+        assert!(!Buf::has_remaining(&bytes));
+        assert!(!Buf::has_remaining(&pooled));
+    }
+
+    /// Verify PooledBufMut matches BytesMut semantics for BufMut trait.
+    #[test]
+    fn test_bytesmut_parity_bufmut_trait() {
+        use bytes::BytesMut;
+
+        let page = page_size();
+        let mut registry = test_registry();
+        let pool = BufferPool::new(test_config(page, page, 10), &mut registry);
+
+        let mut bytes = BytesMut::with_capacity(100);
+        let mut pooled = pool.alloc(100).unwrap();
+
+        // remaining_mut()
+        assert!(BufMut::remaining_mut(&bytes) >= 100);
+        assert!(BufMut::remaining_mut(&pooled) >= 100);
+
+        // put_slice()
+        BufMut::put_slice(&mut bytes, b"hello");
+        BufMut::put_slice(&mut pooled, b"hello");
+        assert_eq!(bytes.as_ref(), pooled.as_ref());
+
+        // put_u8()
+        BufMut::put_u8(&mut bytes, 0x42);
+        BufMut::put_u8(&mut pooled, 0x42);
+        assert_eq!(bytes.as_ref(), pooled.as_ref());
+
+        // chunk_mut() - verify we can write to it
+        let bytes_chunk = BufMut::chunk_mut(&mut bytes);
+        let pooled_chunk = BufMut::chunk_mut(&mut pooled);
+        assert!(bytes_chunk.len() > 0);
+        assert!(pooled_chunk.len() > 0);
+    }
+
+    /// Verify truncate works correctly after advance.
+    #[test]
+    fn test_bytesmut_parity_truncate_after_advance() {
+        use bytes::BytesMut;
+
+        let page = page_size();
+        let mut registry = test_registry();
+        let pool = BufferPool::new(test_config(page, page, 10), &mut registry);
+
+        let mut bytes = BytesMut::with_capacity(100);
+        bytes.resize(50, 0xAA);
+        Buf::advance(&mut bytes, 10);
+
+        let mut pooled = pool.alloc(100).unwrap();
+        pooled.resize(50, 0xAA);
+        Buf::advance(&mut pooled, 10);
+
+        // Both should have 40 bytes remaining
+        assert_eq!(bytes.len(), 40);
+        assert_eq!(pooled.len(), 40);
+
+        // Truncate to 20 readable bytes
+        bytes.truncate(20);
+        pooled.truncate(20);
+
+        assert_eq!(bytes.len(), pooled.len(), "len after truncate");
+        assert_eq!(bytes.as_ref(), pooled.as_ref(), "content after truncate");
+    }
+
+    /// Verify clear works correctly after advance.
+    #[test]
+    fn test_bytesmut_parity_clear_after_advance() {
+        use bytes::BytesMut;
+
+        let page = page_size();
+        let mut registry = test_registry();
+        let pool = BufferPool::new(test_config(page, page, 10), &mut registry);
+
+        let mut bytes = BytesMut::with_capacity(100);
+        bytes.resize(50, 0xAA);
+        Buf::advance(&mut bytes, 10);
+
+        let mut pooled = pool.alloc(100).unwrap();
+        pooled.resize(50, 0xAA);
+        Buf::advance(&mut pooled, 10);
+
+        bytes.clear();
+        pooled.clear();
+
+        assert_eq!(bytes.len(), 0);
+        assert_eq!(pooled.len(), 0);
+        assert!(bytes.is_empty());
+        assert!(pooled.is_empty());
+    }
+
+    /// Test pool exhaustion and recovery.
+    #[test]
+    fn test_pool_exhaustion_and_recovery() {
+        let page = page_size();
+        let mut registry = test_registry();
+        let pool = BufferPool::new(test_config(page, page, 3), &mut registry);
+
+        // Exhaust the pool
+        let buf1 = pool.alloc(100).expect("first alloc");
+        let buf2 = pool.alloc(100).expect("second alloc");
+        let buf3 = pool.alloc(100).expect("third alloc");
+        assert!(pool.alloc(100).is_none(), "pool should be exhausted");
+
+        // Return one buffer
+        drop(buf1);
+
+        // Should be able to allocate again
+        let buf4 = pool.alloc(100).expect("alloc after return");
+        assert!(pool.alloc(100).is_none(), "pool exhausted again");
+
+        // Return all and verify freelist reuse
+        drop(buf2);
+        drop(buf3);
+        drop(buf4);
+
+        assert_eq!(get_allocated(&pool, page), 0);
+        assert_eq!(get_available(&pool, page), 3);
+
+        // Allocate again - should reuse from freelist
+        let _buf5 = pool.alloc(100).expect("reuse from freelist");
+        assert_eq!(get_available(&pool, page), 2);
+    }
+
+    /// Test cross-size-class resize.
+    #[test]
+    fn test_cross_size_class_resize() {
+        let page = page_size();
+        let mut registry = test_registry();
+        let pool = BufferPool::new(test_config(page, page * 8, 10), &mut registry);
+
+        // Allocate smallest class
+        let mut buf = pool.alloc(100).unwrap();
+        assert_eq!(buf.capacity(), page);
+        buf.resize(100, 0x11);
+
+        // Grow to require larger class
+        let new_size = page * 2 + 100;
+        buf.resize(new_size, 0x22);
+        assert!(buf.capacity() >= new_size);
+
+        // Original data preserved
+        assert!(buf.as_ref()[..100].iter().all(|&b| b == 0x11));
+        // New data filled
+        assert!(buf.as_ref()[100..].iter().all(|&b| b == 0x22));
+
+        // Shrink back (doesn't change capacity)
+        buf.resize(50, 0);
+        assert_eq!(buf.len(), 50);
+        assert!(buf.capacity() >= new_size);
+    }
+
+    /// Test try_alloc error variants.
+    #[test]
+    fn test_try_alloc_errors() {
+        let page = page_size();
+        let mut registry = test_registry();
+        let pool = BufferPool::new(test_config(page, page, 2), &mut registry);
+
+        // Oversized request
+        let result = pool.try_alloc(page * 10);
+        assert_eq!(result.unwrap_err(), PoolError::Oversized);
+
+        // Exhaust pool
+        let _buf1 = pool.try_alloc(100).unwrap();
+        let _buf2 = pool.try_alloc(100).unwrap();
+        let result = pool.try_alloc(100);
+        assert_eq!(result.unwrap_err(), PoolError::Exhausted);
+    }
+
+    /// Test is_pooled method.
+    #[test]
+    fn test_is_pooled() {
+        use crate::IoBufMut;
+
+        let page = page_size();
+        let mut registry = test_registry();
+        let pool = BufferPool::new(test_config(page, page, 10), &mut registry);
+
+        let pooled = pool.alloc(100).unwrap();
+        assert!(pooled.is_pooled());
+
+        let owned = IoBufMut::with_capacity(100);
+        assert!(!owned.is_pooled());
+    }
 }
