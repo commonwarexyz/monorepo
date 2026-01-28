@@ -57,11 +57,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=RUSTFLAGS");
     println!("cargo:rerun-if-env-changed=CARGO_ENCODED_RUSTFLAGS");
 
-    println!("cargo:rustc-check-cfg=cfg(commonware_stability_ALPHA)");
-    println!("cargo:rustc-check-cfg=cfg(commonware_stability_BETA)");
-    println!("cargo:rustc-check-cfg=cfg(commonware_stability_GAMMA)");
-    println!("cargo:rustc-check-cfg=cfg(commonware_stability_DELTA)");
-    println!("cargo:rustc-check-cfg=cfg(commonware_stability_EPSILON)");
+    // Note: check-cfg for stability cfgs is defined in workspace Cargo.toml [workspace.lints.rust]
 
     let count = count_stability_cfgs();
     if count == 0 {

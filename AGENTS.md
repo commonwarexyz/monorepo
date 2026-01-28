@@ -113,6 +113,9 @@ cargo build --target wasm32-unknown-unknown --release -p commonware-cryptography
 
 # 6. Unsafe code (if adding unsafe blocks)
 just miri <module>::
+
+# 7. Stability coverage (if adding public API)
+./scripts/find_unstable_public.sh
 ```
 
 _Always use `just` commands for testing (uses `nextest` for parallel execution)._
@@ -137,6 +140,20 @@ cargo llvm-cov --workspace --lcov --output-path lcov.info
 - **OS**: Ubuntu, Windows, macOS
 - **Features**: Standard, io_uring storage, io_uring network (Linux only)
 - **Toolchain**: Stable (default), Nightly (formatting/fuzzing)
+
+### Stability Coverage
+
+All public API items must have stability annotations. CI enforces this via `./scripts/find_unstable_public.sh`.
+
+**How it works**: The script uses a synthetic `commonware_stability_RESERVED` cfg that excludes ALL stability-marked items. Any public items remaining in rustdoc output are unmarked and will fail CI.
+
+**To annotate public items**, use one of:
+- `#[stability(LEVEL)]` for individual items (structs, functions, traits, etc.)
+- `stability_scope!(LEVEL { ... })` for groups of items
+- `stability_mod!(LEVEL, pub mod name)` for modules
+- Manual `#[cfg(not(any(..., commonware_stability_RESERVED)))]` for `#[macro_export]` macros (can't use `stability_scope!` due to Rust limitations)
+
+See [README](README.md#stability) for stability level definitions (ALPHA through EPSILON).
 
 ## Testing Strategy
 - Unit tests: Core logic validation

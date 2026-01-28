@@ -40,8 +40,10 @@ check_crate() {
     
     echo "=== Checking $crate ===" >&2
     
-    # Generate rustdoc JSON at MAX stability level
-    if ! RUSTDOCFLAGS="-Z unstable-options --output-format json --cfg $STABILITY_CFG" \
+    # Generate rustdoc JSON at RESERVED stability level
+    # Use both RUSTFLAGS and RUSTDOCFLAGS for consistent cfg propagation
+    if ! RUSTFLAGS="--cfg $STABILITY_CFG" \
+        RUSTDOCFLAGS="-Z unstable-options --output-format json --cfg $STABILITY_CFG" \
         cargo +nightly doc -p "$crate" --no-deps 2>/dev/null; then
         echo "  Warning: Could not generate rustdoc for $crate" >&2
         return 1
@@ -94,6 +96,14 @@ if [[ $exit_code -eq 0 ]]; then
     echo "All public items have stability annotations."
 else
     echo "Some crates have unmarked public items (see above)."
+    echo ""
+    echo "To fix, wrap public items with one of:"
+    echo "  - #[stability(LEVEL)] for individual items"
+    echo "  - stability_scope!(LEVEL { ... }) for groups of items"
+    echo "  - stability_mod!(LEVEL, pub mod name) for modules"
+    echo "  - Manual #[cfg(not(any(..., commonware_stability_RESERVED)))] for #[macro_export] macros"
+    echo ""
+    echo "See README.md for stability level definitions."
 fi
 
 exit $exit_code
