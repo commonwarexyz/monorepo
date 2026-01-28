@@ -1,10 +1,10 @@
 //! A vector type that guarantees at least one element.
 
-use bytes::{Buf, BufMut};
 use crate::TryFromIterator;
-use commonware_codec::{EncodeSize, RangeCfg, Read, Write};
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
+use bytes::{Buf, BufMut};
+use commonware_codec::{EncodeSize, RangeCfg, Read, Write};
 use core::{
     num::NonZeroUsize,
     ops::{Deref, DerefMut},
