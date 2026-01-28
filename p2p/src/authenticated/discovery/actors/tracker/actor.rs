@@ -134,11 +134,10 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
             _ = self.directory.wait_for_unblock() => {
                 self.directory.unblock_expired();
             },
-            msg = self.receiver.next() => {
-                let Some(msg) = msg else {
-                    debug!("mailbox closed, stopping tracker");
-                    break;
-                };
+            Some(msg) = self.receiver.next() else {
+                debug!("mailbox closed, stopping tracker");
+                break;
+            } => {
                 self.handle_msg(msg).await;
             },
         }

@@ -1096,7 +1096,11 @@ impl<P: PublicKey> Peer<P> {
     ) -> Self {
         // The control is used to register channels.
         // There is exactly one mailbox created for each channel that the peer is registered for.
-        let (control_sender, mut control_receiver) = mpsc::unbounded();
+        #[allow(clippy::type_complexity)]
+        let (control_sender, mut control_receiver): (
+            mpsc::UnboundedSender<(Channel, Handle<()>, oneshot::Sender<MessageReceiver<P>>)>,
+            _,
+        ) = mpsc::unbounded();
 
         // Whenever a message is received from a peer, it is placed in the inbox.
         // The router polls the inbox and forwards the message to the appropriate mailbox.
@@ -1112,17 +1116,7 @@ impl<P: PublicKey> Peer<P> {
                 context,
                 on_stopped => {},
                 // Listen for control messages, which are used to register channels
-                control = control_receiver.next() => {
-                    // If control is closed, exit
-                    let (channel, sender, result_tx): (
-                        Channel,
-                        Handle<()>,
-                        oneshot::Sender<MessageReceiver<P>>,
-                    ) = match control {
-                        Some(control) => control,
-                        None => break,
-                    };
-
+                Some((channel, sender, result_tx)) = control_receiver.next() else break => {
                     // Register channel
                     let (receiver_tx, receiver_rx) = mpsc::unbounded();
                     if let Some((_, existing_sender)) =
@@ -1135,13 +1129,7 @@ impl<P: PublicKey> Peer<P> {
                 },
 
                 // Listen for messages from the inbox, which are forwarded to the appropriate mailbox
-                inbox = inbox_receiver.next() => {
-                    // If inbox is closed, exit
-                    let (channel, message) = match inbox {
-                        Some(message) => message,
-                        None => break,
-                    };
-
+                Some((channel, message)) = inbox_receiver.next() else break => {
                     // Send message to mailbox
                     match mailboxes.get_mut(&channel) {
                         Some((receiver_tx, _)) => {

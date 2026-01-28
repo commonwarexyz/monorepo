@@ -335,11 +335,7 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
             on_stopped => {
                 debug!("context shutdown, stopping application");
             },
-            message = self.mailbox.next() => {
-                let message = match message {
-                    Some(message) => message,
-                    None => break,
-                };
+            Some(message) = self.mailbox.next() else break => {
                 match message {
                     Message::Genesis { epoch, response } => {
                         let digest = self.genesis(epoch);

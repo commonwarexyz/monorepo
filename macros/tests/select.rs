@@ -509,4 +509,27 @@ mod tests {
             assert_eq!(received, vec![1]);
         });
     }
+
+    #[test]
+    fn test_select_loop_backward_compatibility() {
+        // Verify existing patterns still work exactly as before
+        block_on(async move {
+            let (mut tx, mut rx) = mpsc::unbounded();
+            tx.send(1).await.unwrap();
+            tx.send(2).await.unwrap();
+            drop(tx);
+
+            let mut received = Vec::new();
+            let mock_context = MockSignaler;
+            select_loop! {
+                mock_context,
+                on_stopped => {},
+                msg = rx.next() => match msg {
+                    Some(v) => received.push(v),
+                    None => break,
+                },
+            }
+            assert_eq!(received, vec![1, 2]);
+        });
+    }
 }

@@ -944,12 +944,7 @@ impl<
                     }
                 };
             },
-            mailbox = self.mailbox_receiver.next() => {
-                // Extract message
-                let Some(msg) = mailbox else {
-                    break;
-                };
-
+            Some(msg) = self.mailbox_receiver.next() else break => {
                 // Handle messages from resolver and batcher
                 match msg {
                     Message::Proposal(proposal) => {

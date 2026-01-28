@@ -133,42 +133,40 @@ where
                 debug!("context shutdown, stopping engine");
             },
             // Command from the mailbox
-            command = self.mailbox.next() => {
-                if let Some(command) = command {
-                    match command {
-                        Message::Send {
-                            request,
-                            recipients,
-                            responder,
-                        } => {
-                            // Track commitment (if not already tracked)
-                            let commitment = request.commitment();
-                            let entry = self.tracked.entry(commitment).or_insert_with(|| {
-                                self.outstanding.inc();
-                                (HashSet::new(), HashSet::new())
-                            });
+            Some(command) = self.mailbox.next() else continue => {
+                match command {
+                    Message::Send {
+                        request,
+                        recipients,
+                        responder,
+                    } => {
+                        // Track commitment (if not already tracked)
+                        let commitment = request.commitment();
+                        let entry = self.tracked.entry(commitment).or_insert_with(|| {
+                            self.outstanding.inc();
+                            (HashSet::new(), HashSet::new())
+                        });
 
-                            // Send the request to recipients
-                            match req_tx
-                                .send(recipients, request, self.priority_request)
-                                .await
-                            {
-                                Ok(recipients) => {
-                                    entry.0.extend(recipients.iter().cloned());
-                                    responder.send_lossy(Ok(recipients));
-                                }
-                                Err(err) => {
-                                    error!(?err, ?commitment, "failed to send message");
-                                    responder.send_lossy(Err(Error::SendFailed(err.into())));
-                                }
+                        // Send the request to recipients
+                        match req_tx
+                            .send(recipients, request, self.priority_request)
+                            .await
+                        {
+                            Ok(recipients) => {
+                                entry.0.extend(recipients.iter().cloned());
+                                responder.send_lossy(Ok(recipients));
+                            }
+                            Err(err) => {
+                                error!(?err, ?commitment, "failed to send message");
+                                responder.send_lossy(Err(Error::SendFailed(err.into())));
                             }
                         }
-                        Message::Cancel { commitment } => {
-                            if self.tracked.remove(&commitment).is_none() {
-                                debug!(?commitment, "ignoring removal of unknown commitment");
-                            }
-                            let _ = self.outstanding.try_set(self.tracked.len());
+                    }
+                    Message::Cancel { commitment } => {
+                        if self.tracked.remove(&commitment).is_none() {
+                            debug!(?commitment, "ignoring removal of unknown commitment");
                         }
+                        let _ = self.outstanding.try_set(self.tracked.len());
                     }
                 }
             },
