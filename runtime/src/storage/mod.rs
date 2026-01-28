@@ -44,6 +44,7 @@ impl HeaderError {
 }
 
 pub mod audited;
+pub mod faulty;
 #[cfg(feature = "iouring-storage")]
 pub mod iouring;
 pub mod memory;

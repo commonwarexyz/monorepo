@@ -228,3 +228,17 @@ path = "fuzz_targets/oversized_recovery.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "journal_crash_recovery"
+path = "fuzz_targets/journal_crash_recovery.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "mmr_journaled_crash_recovery"
+path = "fuzz_targets/mmr_journaled_crash_recovery.rs"
+test = false
+doc = false
+bench = false
