@@ -252,7 +252,7 @@ struct PoolMetrics {
 }
 
 impl PoolMetrics {
-    fn new(registry: &mut Registry, config: &BufferPoolConfig) -> Self {
+    fn new(registry: &mut Registry) -> Self {
         let metrics = Self {
             allocated: Family::default(),
             available: Family::default(),
@@ -509,7 +509,7 @@ impl BufferPool {
     pub fn new(config: BufferPoolConfig, registry: &mut Registry) -> Self {
         config.validate();
 
-        let metrics = PoolMetrics::new(registry, &config);
+        let metrics = PoolMetrics::new(registry);
 
         let mut classes = Vec::with_capacity(config.num_classes());
         for i in 0..config.num_classes() {
