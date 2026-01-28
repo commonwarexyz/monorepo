@@ -1501,7 +1501,9 @@ mod tests {
     use crate::{
         deterministic, reschedule, Blob, IoBufMut, Metrics, Resolver, Runner as _, Storage,
     };
-    use futures::stream::{FuturesUnordered, StreamExt as _};
+    use futures::stream::FuturesUnordered;
+    #[allow(unused_imports)]
+    use futures::StreamExt as _;
 
     async fn task(i: usize) -> usize {
         for _ in 0..5 {
