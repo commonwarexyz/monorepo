@@ -30,41 +30,9 @@ commonware_macros::stability_scope!(GAMMA {
     pub mod bitmap;
     pub mod ordered;
 
-});
-commonware_macros::stability_scope!(GAMMA, cfg(feature = "std") {
-    pub mod acknowledgement;
-    pub use acknowledgement::Acknowledgement;
+    use bytes::Buf;
+    use commonware_codec::{varint::UInt, EncodeSize, Error as CodecError, Read, ReadExt, Write};
 
-    pub mod net;
-    pub use net::IpAddrExt;
-
-    pub mod time;
-    pub use time::{DurationExt, SystemTimeExt};
-
-    pub mod rational;
-    pub use rational::BigRationalExt;
-
-    mod priority_set;
-    pub use priority_set::PrioritySet;
-
-    pub mod channels;
-    pub mod concurrency;
-    pub mod futures;
-});
-#[cfg(not(any(
-    commonware_stability_DELTA,
-    commonware_stability_EPSILON,
-    commonware_stability_RESERVED
-)))] // GAMMA
-pub mod hex_literal;
-#[cfg(not(any(
-    commonware_stability_DELTA,
-    commonware_stability_EPSILON,
-    commonware_stability_RESERVED
-)))] // GAMMA
-pub mod vec;
-
-commonware_macros::stability_scope!(GAMMA {
     /// Represents a participant/validator index within a consensus committee.
     ///
     /// Participant indices are used to identify validators in attestations,
@@ -107,9 +75,6 @@ commonware_macros::stability_scope!(GAMMA {
         }
     }
 
-    use bytes::Buf;
-    use commonware_codec::{varint::UInt, EncodeSize, Error as CodecError, Read, ReadExt, Write};
-
     impl Read for Participant {
         type Cfg = ();
 
@@ -149,24 +114,7 @@ commonware_macros::stability_scope!(GAMMA {
     }
 
     impl<I: Iterator> TryCollect for I {}
-});
-commonware_macros::stability_scope!(GAMMA, cfg(feature = "std") {
-    /// Returns a seeded RNG for deterministic testing.
-    ///
-    /// Uses seed 0 by default to ensure reproducible test results.
-    pub fn test_rng() -> rand::rngs::StdRng {
-        rand::SeedableRng::seed_from_u64(0)
-    }
 
-    /// Returns a seeded RNG with a custom seed for deterministic testing.
-    ///
-    /// Use this when you need multiple independent RNG streams in the same test,
-    /// or when a helper function needs its own RNG that won't collide with the caller's.
-    pub fn test_rng_seeded(seed: u64) -> rand::rngs::StdRng {
-        rand::SeedableRng::seed_from_u64(seed)
-    }
-});
-commonware_macros::stability_scope!(GAMMA {
     /// Alias for boxed errors that are `Send` and `Sync`.
     pub type BoxedError = Box<dyn core::error::Error + Send + Sync>;
 
@@ -245,7 +193,85 @@ commonware_macros::stability_scope!(GAMMA {
         // Result is either 0 or modulo `n`, so we can safely cast to u64
         result as u64
     }
+
+    /// A wrapper around `Duration` that guarantees the duration is non-zero.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    pub struct NonZeroDuration(Duration);
+
+    impl NonZeroDuration {
+        /// Creates a `NonZeroDuration` if the given duration is non-zero.
+        pub fn new(duration: Duration) -> Option<Self> {
+            if duration == Duration::ZERO {
+                None
+            } else {
+                Some(Self(duration))
+            }
+        }
+
+        /// Creates a `NonZeroDuration` from the given duration, panicking if it's zero.
+        pub fn new_panic(duration: Duration) -> Self {
+            Self::new(duration).expect("duration must be non-zero")
+        }
+
+        /// Returns the wrapped `Duration`.
+        pub const fn get(self) -> Duration {
+            self.0
+        }
+    }
+
+    impl From<NonZeroDuration> for Duration {
+        fn from(nz_duration: NonZeroDuration) -> Self {
+            nz_duration.0
+        }
+    }
 });
+commonware_macros::stability_scope!(GAMMA, cfg(feature = "std") {
+    pub mod acknowledgement;
+    pub use acknowledgement::Acknowledgement;
+
+    pub mod net;
+    pub use net::IpAddrExt;
+
+    pub mod time;
+    pub use time::{DurationExt, SystemTimeExt};
+
+    pub mod rational;
+    pub use rational::BigRationalExt;
+
+    mod priority_set;
+    pub use priority_set::PrioritySet;
+
+    pub mod channels;
+    pub mod concurrency;
+    pub mod futures;
+
+    /// Returns a seeded RNG for deterministic testing.
+    ///
+    /// Uses seed 0 by default to ensure reproducible test results.
+    pub fn test_rng() -> rand::rngs::StdRng {
+        rand::SeedableRng::seed_from_u64(0)
+    }
+
+    /// Returns a seeded RNG with a custom seed for deterministic testing.
+    ///
+    /// Use this when you need multiple independent RNG streams in the same test,
+    /// or when a helper function needs its own RNG that won't collide with the caller's.
+    pub fn test_rng_seeded(seed: u64) -> rand::rngs::StdRng {
+        rand::SeedableRng::seed_from_u64(seed)
+    }
+});
+#[cfg(not(any(
+    commonware_stability_DELTA,
+    commonware_stability_EPSILON,
+    commonware_stability_RESERVED
+)))] // GAMMA
+pub mod hex_literal;
+#[cfg(not(any(
+    commonware_stability_DELTA,
+    commonware_stability_EPSILON,
+    commonware_stability_RESERVED
+)))] // GAMMA
+pub mod vec;
 
 #[inline]
 const fn decode_hex_digit(byte: u8) -> Option<u8> {
@@ -326,39 +352,6 @@ macro_rules! NZU64 {
         ::core::num::NonZeroU64::new($val).expect("value must be non-zero")
     };
 }
-
-commonware_macros::stability_scope!(GAMMA {
-    /// A wrapper around `Duration` that guarantees the duration is non-zero.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-    pub struct NonZeroDuration(Duration);
-
-    impl NonZeroDuration {
-        /// Creates a `NonZeroDuration` if the given duration is non-zero.
-        pub fn new(duration: Duration) -> Option<Self> {
-            if duration == Duration::ZERO {
-                None
-            } else {
-                Some(Self(duration))
-            }
-        }
-
-        /// Creates a `NonZeroDuration` from the given duration, panicking if it's zero.
-        pub fn new_panic(duration: Duration) -> Self {
-            Self::new(duration).expect("duration must be non-zero")
-        }
-
-        /// Returns the wrapped `Duration`.
-        pub const fn get(self) -> Duration {
-            self.0
-        }
-    }
-
-    impl From<NonZeroDuration> for Duration {
-        fn from(nz_duration: NonZeroDuration) -> Self {
-            nz_duration.0
-        }
-    }
-});
 
 /// A macro to create a `NonZeroDuration` from a duration, panicking if the duration is zero.
 #[macro_export]

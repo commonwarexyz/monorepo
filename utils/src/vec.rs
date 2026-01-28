@@ -1,6 +1,8 @@
 //! A vector type that guarantees at least one element.
 
+use bytes::{Buf, BufMut};
 use crate::TryFromIterator;
+use commonware_codec::{EncodeSize, RangeCfg, Read, Write};
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
 use core::{
@@ -8,11 +10,6 @@ use core::{
     ops::{Deref, DerefMut},
 };
 use thiserror::Error;
-
-commonware_macros::stability_scope!(GAMMA {
-    use bytes::{Buf, BufMut};
-    use commonware_codec::{EncodeSize, RangeCfg, Read, Write};
-});
 
 /// Errors that can occur when creating a [`NonEmptyVec`].
 #[derive(Error, Debug, PartialEq, Eq)]
@@ -319,34 +316,32 @@ impl<'a, T> IntoIterator for &'a mut NonEmptyVec<T> {
     }
 }
 
-commonware_macros::stability_scope!(GAMMA {
-    impl<T: Write> Write for NonEmptyVec<T> {
-        fn write(&self, buf: &mut impl BufMut) {
-            self.0.write(buf);
-        }
+impl<T: Write> Write for NonEmptyVec<T> {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.0.write(buf);
     }
+}
 
-    impl<T: EncodeSize> EncodeSize for NonEmptyVec<T> {
-        fn encode_size(&self) -> usize {
-            self.0.encode_size()
-        }
+impl<T: EncodeSize> EncodeSize for NonEmptyVec<T> {
+    fn encode_size(&self) -> usize {
+        self.0.encode_size()
     }
+}
 
-    impl<T: Read> Read for NonEmptyVec<T> {
-        type Cfg = (RangeCfg<NonZeroUsize>, T::Cfg);
+impl<T: Read> Read for NonEmptyVec<T> {
+    type Cfg = (RangeCfg<NonZeroUsize>, T::Cfg);
 
-        fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
-            let items = Vec::read_cfg(buf, &(cfg.0.into(), cfg.1.clone()))?;
-            if items.is_empty() {
-                return Err(commonware_codec::Error::Invalid(
-                    "NonEmptyVec",
-                    "cannot decode empty vector",
-                ));
-            }
-            Ok(Self(items))
+    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+        let items = Vec::read_cfg(buf, &(cfg.0.into(), cfg.1.clone()))?;
+        if items.is_empty() {
+            return Err(commonware_codec::Error::Invalid(
+                "NonEmptyVec",
+                "cannot decode empty vector",
+            ));
         }
+        Ok(Self(items))
     }
-});
+}
 
 #[cfg(feature = "arbitrary")]
 impl<'a, T: arbitrary::Arbitrary<'a>> arbitrary::Arbitrary<'a> for NonEmptyVec<T> {
