@@ -1,0 +1,47 @@
+[package]
+name = "insitu-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[build-dependencies]
+syn = { version = "2", features = ["full", "visit"] }
+walkdir = "2"
+quote = "1"
+proc-macro2 = { version = "1", features = ["span-locations"] }
+
+[dependencies]
+once_cell = "1.20.2"
+commonware-broadcast = { path = "../../broadcast", optional = true }
+commonware-collector = { path = "../../collector", optional = true }
+commonware-consensus = { path = "../../consensus", optional = true }
+commonware-resolver = { path = "../../resolver", optional = true }
+commonware-runtime = { path = "../../runtime", optional = true }
+commonware-reshare = { path = "../../examples/reshare", optional = true }
+backtrace = "0.3.76"
+object = { version = "0.37", default-features = false, features = ["read"] }
+serde_json = "1.0"
+
+[dev-dependencies]
+serial_test = "3.2"
+
+[features]
+fuzzing = ["dep:commonware-broadcast", "commonware-broadcast?/fuzzing", "dep:commonware-runtime", "commonware-runtime?/fuzzing"]
+afl-fuzz = ["fuzzing"]
+# Test registry feature - enables centralized test list for harnesses
+test-registry = [
+    "dep:commonware-broadcast", "commonware-broadcast?/fuzzing",
+    "dep:commonware-collector", "commonware-collector?/fuzzing",
+    "dep:commonware-consensus", "commonware-consensus?/fuzzing",
+    "dep:commonware-resolver", "commonware-resolver?/fuzzing",
+    "dep:commonware-reshare", "commonware-reshare?/fuzzing",
+]
+
+[profile.release]
+opt-level = 3
+incremental = true
+
+[profile.dev]
+opt-level = 1

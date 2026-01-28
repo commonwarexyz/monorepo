@@ -1,0 +1,55 @@
+diff --git a/p2p/Cargo.toml b/p2p/Cargo.toml
+index b1df4b23..9354ac47 100644
+--- a/p2p/Cargo.toml
++++ b/p2p/Cargo.toml
+@@ -21,33 +21,38 @@ commonware-runtime.workspace = true
+ commonware-stream.workspace = true
+ commonware-utils.workspace = true
++commonware-math = { workspace = true, optional = true }
++commonware-conformance = { workspace = true, optional = true }
++bytes.workspace = true
+ either.workspace = true
++libc.workspace = true
+ futures.workspace = true
+ num-bigint.workspace = true
+ num-integer.workspace = true
+ num-rational.workspace = true
+ num-traits.workspace = true
+ prometheus-client.workspace = true
+ rand.workspace = true
+ rand_core.workspace = true
+ rand_distr.workspace = true
+ thiserror.workspace = true
+ tracing.workspace = true
+
+ [dev-dependencies]
+ commonware-conformance.workspace = true
+ commonware-math.workspace = true
+ commonware-runtime = { workspace = true, features = ["test-utils"] }
+ tracing-subscriber.workspace = true
+
+ [features]
+ arbitrary = [
+ 	"commonware-codec/arbitrary",
+ 	"commonware-cryptography/arbitrary",
+ 	"commonware-runtime/arbitrary",
+ 	"commonware-utils/arbitrary",
+ 	"dep:arbitrary",
+ 	"num-bigint/arbitrary",
+ ]
++fuzzing = ["dep:commonware-math", "dep:commonware-conformance"]
+
+ [lib]
+ bench = false
+diff --git a/p2p/src/lib.rs b/p2p/src/lib.rs
+index f315459e..9c19d653 100644
+--- a/p2p/src/lib.rs
++++ b/p2p/src/lib.rs
+@@ -9,6 +9,7 @@
+     html_logo_url = "https://commonware.xyz/imgs/rustdoc_logo.svg",
+     html_favicon_url = "https://commonware.xyz/favicon.ico"
+ )]
++#![cfg_attr(feature = "fuzzing", feature(linkage))]
+
+ use bytes::Bytes;
+ use commonware_cryptography::PublicKey;
