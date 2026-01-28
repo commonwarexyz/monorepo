@@ -583,17 +583,8 @@ impl BufferPool {
             }
         };
 
-        let buffer = self.inner.try_alloc(class_index).ok_or_else(|| {
-            let label = SizeClassLabel {
-                size_class: self.inner.config.class_size(class_index) as u64,
-            };
-            self.inner
-                .metrics
-                .exhausted_total
-                .get_or_create(&label)
-                .inc();
-            PoolError::Exhausted
-        })?;
+        // Note: exhausted_total metric is incremented inside try_alloc
+        let buffer = self.inner.try_alloc(class_index).ok_or(PoolError::Exhausted)?;
         let pooled = PooledBufMut::new(buffer, Arc::downgrade(&self.inner));
         Ok(IoBufMut::from_pooled(pooled))
     }
