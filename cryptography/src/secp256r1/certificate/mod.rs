@@ -1306,7 +1306,7 @@ mod tests {
         use commonware_codec::conformance::CodecConformance;
 
         commonware_conformance::conformance_tests! {
-            CodecConformance<Certificate>,
+            CodecConformance<Certificate> => 1024,
         }
     }
 }
