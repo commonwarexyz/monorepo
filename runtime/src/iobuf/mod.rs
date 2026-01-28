@@ -1070,9 +1070,11 @@ mod tests {
 
     #[test]
     fn test_iobuf_mut_set_len() {
-        let mut buf = IoBufMut::with_capacity(10);
+        let mut buf = IoBufMut::zeroed(10);
+        buf.truncate(0);
         assert_eq!(buf.len(), 0);
-        // SAFETY: 5 bytes were written
+        assert!(buf.capacity() >= 10);
+        // SAFETY: Buffer has capacity >= 5, and we write 5 bytes before set_len.
         unsafe {
             std::ptr::write_bytes(buf.as_mut_ptr(), 0xAB, 5);
             buf.set_len(5);
