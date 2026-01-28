@@ -374,14 +374,6 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: T
 impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: Translator>
     Immutable<E, K, V, H, T, Unmerkleized, NonDurable>
 {
-    /// Update the operations MMR with the given operation, and append the operation to the log. The
-    /// `commit` method must be called to make any applied operation persistent & recoverable.
-    pub(super) async fn apply_op(&mut self, op: Operation<K, V>) -> Result<(), Error> {
-        self.journal.append(op).await?;
-
-        Ok(())
-    }
-
     /// Sets `key` to have value `value`, assuming `key` hasn't already been assigned. The operation
     /// is reflected in the snapshot, but will be subject to rollback until the next successful
     /// `commit`. Attempting to set an already-set key results in undefined behavior.
@@ -394,8 +386,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: T
         self.snapshot
             .insert_and_prune(&key, op_count, |v| *v < oldest);
 
-        let op = Operation::Set(key, value);
-        self.apply_op(op).await
+        self.journal.append(Operation::Set(key, value)).await?;
+        Ok(())
     }
 
     /// Commit any pending operations to the database, ensuring their durability upon return from
@@ -476,13 +468,6 @@ impl<
     // All unpruned operations are active in an immutable store.
     async fn inactivity_floor_loc(&self) -> Location {
         self.journal.pruning_boundary().await
-    }
-
-    fn is_empty(&self) -> bool {
-        // An immutable store is never empty since it always has at least one commit.
-        // We consider it "empty" if there are only commits and no data operations.
-        // Since we always have at least one commit, this is a rough approximation.
-        self.last_commit_loc == 0
     }
 
     async fn get_metadata(&self) -> Result<Option<V>, Error> {

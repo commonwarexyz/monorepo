@@ -513,10 +513,6 @@ where
     async fn get_metadata(&self) -> Result<Option<V>, Error> {
         self.get_metadata().await
     }
-
-    fn is_empty(&self) -> bool {
-        self.is_empty()
-    }
 }
 
 impl<E, K, V, T, S> PrunableStore for Db<E, K, V, T, S>

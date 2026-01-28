@@ -50,9 +50,6 @@ impl State for NonDurable {}
 pub trait LogStore: Send + Sync {
     type Value: CodecShared + Clone;
 
-    /// Returns true if there are no active keys in the database.
-    fn is_empty(&self) -> bool;
-
     /// The number of operations that have been applied to this db, including those that have been
     /// pruned and those that are not yet committed.
     fn op_count(&self) -> impl Future<Output = Location> + Send;

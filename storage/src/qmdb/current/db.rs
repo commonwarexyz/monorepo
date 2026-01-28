@@ -514,10 +514,6 @@ where
     async fn get_metadata(&self) -> Result<Option<V::Value>, Error> {
         self.get_metadata().await
     }
-
-    fn is_empty(&self) -> bool {
-        self.is_empty()
-    }
 }
 
 impl<E, K, V, U, C, I, H, const N: usize, D> PrunableStore

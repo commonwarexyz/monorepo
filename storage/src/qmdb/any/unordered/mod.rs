@@ -571,7 +571,6 @@ pub(super) mod test {
         // Confirm the inactivity floor is raised to tip when the db becomes empty.
         db.delete(k1).await.unwrap();
         let (db, _) = db.commit(None).await.unwrap();
-        assert!(db.is_empty());
         assert_eq!(db.op_count().await - 1, db.inactivity_floor_loc().await);
 
         let db = db.into_merkleized().await.unwrap();

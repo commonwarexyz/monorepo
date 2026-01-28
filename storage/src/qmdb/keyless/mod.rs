@@ -369,13 +369,6 @@ impl<
 {
     type Value = V;
 
-    fn is_empty(&self) -> bool {
-        // A keyless database is never "empty" in the traditional sense since it always
-        // has at least one commit operation. We consider it empty if there are no appends.
-        // Check if last_commit_loc is 0 (first commit), meaning no appends have been made.
-        self.last_commit_loc == Location::new_unchecked(0)
-    }
-
     async fn op_count(&self) -> Location {
         self.op_count().await
     }
