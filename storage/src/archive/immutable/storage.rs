@@ -10,7 +10,7 @@ use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::{bitmap::BitMap, sequence::prefixed_u64::U64, Array};
 use futures::join;
 use prometheus_client::metrics::counter::Counter;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use tracing::debug;
 
 /// Prefix for [Freezer] records.
@@ -97,9 +97,6 @@ pub struct Archive<E: Storage + Metrics + Clock, K: Array, V: CodecShared> {
     /// Ordinal for the archive.
     ordinal: Ordinal<E, Cursor>,
 
-    /// Reverse mapping from cursor to index for efficient key→index lookups.
-    cursor_to_index: HashMap<Cursor, u64>,
-
     // Metrics
     gets: Counter,
     has: Counter,
@@ -177,20 +174,6 @@ impl<E: Storage + Metrics + Clock, K: Array, V: CodecShared> Archive<E, K, V> {
         )
         .await?;
 
-        // Build cursor→index reverse mapping for efficient key→index lookups
-        let mut cursor_to_index = HashMap::new();
-        for (start, end) in ordinal.ranges() {
-            for index in start..=end {
-                if let Some(cursor) = ordinal.get(index).await? {
-                    cursor_to_index.insert(cursor, index);
-                }
-            }
-        }
-        debug!(
-            count = cursor_to_index.len(),
-            "built cursor-to-index mapping"
-        );
-
         // Initialize metrics
         let gets = Counter::default();
         let has = Counter::default();
@@ -204,7 +187,6 @@ impl<E: Storage + Metrics + Clock, K: Array, V: CodecShared> Archive<E, K, V> {
             metadata,
             freezer,
             ordinal,
-            cursor_to_index,
             gets,
             has,
             syncs,
@@ -286,9 +268,6 @@ impl<E: Storage + Metrics + Clock, K: Array, V: CodecShared> crate::archive::Arc
         // Put section and offset in ordinal
         self.ordinal.put(index, cursor).await?;
 
-        // Update cursor→index mapping
-        self.cursor_to_index.insert(cursor, index);
-
         Ok(())
     }
 
@@ -310,14 +289,14 @@ impl<E: Storage + Metrics + Clock, K: Array, V: CodecShared> crate::archive::Arc
         }
     }
 
-    async fn index_of(&self, key: &K) -> Result<Option<u64>, Error> {
-        // Get cursor for key without loading the value
-        let Some(cursor) = self.freezer.cursor_for_key(key).await? else {
-            return Ok(None);
-        };
-
-        // Look up index from cursor→index mapping
-        Ok(self.cursor_to_index.get(&cursor).copied())
+    async fn index_of(&self, _key: &K) -> Result<Option<u64>, Error> {
+        // The immutable archive's Freezer does not maintain a key-to-index mapping,
+        // so this optimization is not available. Callers should fall back to loading
+        // the full value when this returns None.
+        //
+        // A future optimization could add index tracking to the Freezer or maintain
+        // a commitment-to-index mapping during replay.
+        Ok(None)
     }
 
     async fn sync(&mut self) -> Result<(), Error> {

@@ -266,10 +266,11 @@ where
         &self,
         commitment: &<Self::Block as Committable>::Commitment,
     ) -> Result<Option<Height>, Self::Error> {
-        // Use the optimized index_of method which avoids loading the full block
-        <Self as Archive>::index_of(self, commitment)
+        // immutable::Archive does not support index_of optimization,
+        // so we fall back to loading the full block.
+        <Self as Archive>::get(self, Identifier::Key(commitment))
             .await
-            .map(|opt| opt.map(Height::new))
+            .map(|opt| opt.map(|b| b.height()))
     }
 }
 
