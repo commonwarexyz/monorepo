@@ -1071,15 +1071,18 @@ mod tests {
     #[test]
     fn test_iobuf_mut_set_len() {
         let mut buf = IoBufMut::zeroed(10);
-        buf.truncate(0);
-        assert_eq!(buf.len(), 0);
-        assert!(buf.capacity() >= 10);
-        // SAFETY: Buffer has capacity >= 5, and we write 5 bytes before set_len.
+        assert_eq!(buf.len(), 10);
+
+        // Test shrinking via set_len
+        // SAFETY: Shrinking to 5 bytes, all of which are initialized (zeros from zeroed()).
         unsafe {
-            std::ptr::write_bytes(buf.as_mut_ptr(), 0xAB, 5);
             buf.set_len(5);
         }
         assert_eq!(buf.len(), 5);
+        assert_eq!(buf, &[0u8; 5]);
+
+        // Modify the content and verify
+        buf.as_mut()[..5].copy_from_slice(&[0xAB; 5]);
         assert_eq!(buf, &[0xAB; 5]);
     }
 
