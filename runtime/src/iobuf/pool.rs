@@ -321,7 +321,10 @@ struct SizeClass {
     freelist: ArrayQueue<AlignedBuffer>,
     /// Number of buffers currently allocated (out of pool).
     allocated: AtomicUsize,
-    /// Total allocations from this class.
+    /// Total buffers ever created for this class (monotonically increasing).
+    /// Used to enforce `max_per_class` limit without races.
+    total_created: AtomicUsize,
+    /// Total allocations from this class (includes reuse from freelist).
     total_allocations: AtomicU64,
 }
 
@@ -332,17 +335,23 @@ impl SizeClass {
             alignment,
             freelist: ArrayQueue::new(max_buffers),
             allocated: AtomicUsize::new(0),
+            total_created: AtomicUsize::new(0),
             total_allocations: AtomicU64::new(0),
         }
     }
 
     /// Pre-fill the freelist with buffers.
-    fn prefill(&self) {
-        while self
-            .freelist
-            .push(AlignedBuffer::new(self.size, self.alignment))
-            .is_ok()
-        {}
+    fn prefill(&self, max_buffers: usize) {
+        for _ in 0..max_buffers {
+            if self
+                .freelist
+                .push(AlignedBuffer::new(self.size, self.alignment))
+                .is_err()
+            {
+                break;
+            }
+            self.total_created.fetch_add(1, Ordering::Relaxed);
+        }
     }
 }
 
@@ -379,22 +388,21 @@ impl BufferPoolInner {
                 return Some(buffer);
             }
 
-            // Freelist empty - try to allocate a new buffer if under limit
-            let current = class.allocated.load(Ordering::Relaxed);
-            let available = class.freelist.len();
-            let total = current + available;
-
-            if total >= self.config.max_per_class {
-                // Truly at capacity, no point retrying
+            // Freelist empty - try to create a new buffer if under limit.
+            // Use total_created (not allocated + freelist.len()) to avoid races.
+            let created = class.total_created.load(Ordering::Acquire);
+            if created >= self.config.max_per_class {
+                // At hard limit, no point retrying
                 break;
             }
 
-            // Try to increment allocated count
+            // Try to reserve a slot for a new buffer
             if class
-                .allocated
-                .compare_exchange(current, current + 1, Ordering::Relaxed, Ordering::Relaxed)
+                .total_created
+                .compare_exchange(created, created + 1, Ordering::AcqRel, Ordering::Relaxed)
                 .is_ok()
             {
+                class.allocated.fetch_add(1, Ordering::Relaxed);
                 class.total_allocations.fetch_add(1, Ordering::Relaxed);
                 self.metrics.allocations_total.get_or_create(&label).inc();
                 self.metrics.allocated.get_or_create(&label).inc();
@@ -462,7 +470,7 @@ impl BufferPool {
             let size = config.class_size(i);
             let class = SizeClass::new(size, config.alignment, config.max_per_class);
             if config.prefill {
-                class.prefill();
+                class.prefill(config.max_per_class);
             }
             classes.push(class);
         }
