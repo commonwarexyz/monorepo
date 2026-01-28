@@ -59,11 +59,11 @@ Each public API item in the Commonware Library is annotated with a stability lev
 
 | Level | Description |
 |-------|-------------|
-| **ALPHA** | Experimental with little testing. Breaking changes expected. |
-| **BETA** | Decent test coverage. Breaking wire/storage format changes possible with no migration path. |
-| **GAMMA** | Wire/storage format stable. Decent test coverage. Breaking API changes possible. |
-| **DELTA** | API stable. Wire/storage format stable. Decent test coverage. |
-| **EPSILON** | Deployed in production without issue. Audited multiple times. |
+| **ALPHA** | Significant breaking changes expected with no migration path. Critical vulnerabilities possible. |
+| **BETA** | Wire and storage format stable. All breaking changes include a migration path. |
+| **GAMMA** | API stable. Audited multiple times and fuzzed extensively. |
+| **DELTA** | Battle-tested. Only changes expected are performance optimizations. |
+| **EPSILON** | Primitive is frozen. No changes expected. |
 
 Higher stability code can only depend on code with equal or higher stability. This is enforced at compile time:
 
