@@ -33,10 +33,9 @@ impl<P: PublicKey> Reservation<P> {
 
 impl<P: PublicKey> Drop for Reservation<P> {
     fn drop(&mut self) {
-        let mut releaser = self
-            .releaser
-            .take()
-            .expect("Reservation::drop called twice");
-        releaser.release(self.metadata.clone());
+        // Use if-let instead of expect to avoid panic during unwinding.
+        if let Some(mut releaser) = self.releaser.take() {
+            releaser.release(self.metadata.clone());
+        }
     }
 }
