@@ -670,15 +670,12 @@ impl PooledBufMut {
         }
     }
 
-    /// Resizes the buffer to `new_len`, filling new bytes with `value`.
+    /// Resizes the buffer to `new_len` bytes, filling new bytes with `value`.
     ///
     /// If `new_len` is less than the current length, the buffer is truncated.
     /// If `new_len` is greater and exceeds capacity, this will:
     /// 1. Try to get a larger buffer from the pool
     /// 2. Fall back to direct allocation if the pool is exhausted
-    ///
-    /// When a larger buffer is obtained, data from `cursor..len` is copied
-    /// to the new buffer, and the cursor is reset to 0.
     pub fn resize(&mut self, new_len: usize, value: u8) {
         let current_len = self.len();
 
@@ -1729,5 +1726,71 @@ mod tests {
         // Dropping the buffer should not panic (Weak upgrade fails, buffer is deallocated)
         drop(iobuf);
         // No assertion here - we just want to make sure it doesn't panic
+    }
+
+    /// Verify PooledBufMut matches BytesMut semantics for advance + resize.
+    #[test]
+    fn test_bytesmut_parity_advance_resize() {
+        use bytes::BytesMut;
+
+        let page = page_size();
+        let mut registry = test_registry();
+        let pool = BufferPool::new(test_config(page, page * 4, 10), &mut registry);
+
+        // Test: advance then resize (grow within capacity)
+        {
+            let mut bytes = BytesMut::with_capacity(100);
+            bytes.resize(50, 0xAA);
+            Buf::advance(&mut bytes, 20);
+
+            let mut pooled = pool.alloc(100).unwrap();
+            pooled.resize(50, 0xAA);
+            Buf::advance(&mut pooled, 20);
+
+            assert_eq!(bytes.len(), pooled.len(), "len after advance");
+            assert_eq!(bytes.as_ref(), pooled.as_ref(), "content after advance");
+
+            bytes.resize(40, 0xBB);
+            pooled.resize(40, 0xBB);
+
+            assert_eq!(bytes.len(), pooled.len(), "len after resize grow");
+            assert_eq!(bytes.as_ref(), pooled.as_ref(), "content after resize grow");
+        }
+
+        // Test: advance then resize (shrink)
+        {
+            let mut bytes = BytesMut::with_capacity(100);
+            bytes.resize(50, 0xCC);
+            Buf::advance(&mut bytes, 20);
+
+            let mut pooled = pool.alloc(100).unwrap();
+            pooled.resize(50, 0xCC);
+            Buf::advance(&mut pooled, 20);
+
+            bytes.resize(10, 0);
+            pooled.resize(10, 0);
+
+            assert_eq!(bytes.len(), pooled.len(), "len after resize shrink");
+            assert_eq!(bytes.as_ref(), pooled.as_ref(), "content after resize shrink");
+        }
+
+        // Test: resize that requires reallocation
+        {
+            let mut bytes = BytesMut::with_capacity(page);
+            bytes.resize(100, 0xDD);
+            Buf::advance(&mut bytes, 30);
+
+            let mut pooled = pool.alloc(page).unwrap();
+            pooled.resize(100, 0xDD);
+            Buf::advance(&mut pooled, 30);
+
+            // Grow beyond original capacity
+            let new_size = page + 100;
+            bytes.resize(new_size, 0xEE);
+            pooled.resize(new_size, 0xEE);
+
+            assert_eq!(bytes.len(), pooled.len(), "len after realloc resize");
+            assert_eq!(bytes.as_ref(), pooled.as_ref(), "content after realloc resize");
+        }
     }
 }
