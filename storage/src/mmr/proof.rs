@@ -19,7 +19,7 @@ use alloc::{
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Read, ReadExt, ReadRangeExt, Write};
 use commonware_cryptography::Digest;
-use core::ops::Range;
+use core::{cmp::Reverse, ops::Range};
 #[cfg(feature = "std")]
 use tracing::debug;
 
@@ -545,7 +545,7 @@ pub(crate) fn nodes_required_for_range_proof(
         // If the range spans more than one tree, then the digests must already be in the correct
         // order. Otherwise, we enforce the desired order through sorting.
         if start_tree_peak == end_tree_peak {
-            siblings.sort_by(|a, b| b.0.cmp(&a.0));
+            siblings.sort_by_key(|a| Reverse(a.0));
         }
     }
     positions.extend(siblings.into_iter().map(|(_, pos)| pos));
