@@ -1,8 +1,8 @@
 //! Mock sender implementations for testing.
 
-use bytes::Buf;
 use commonware_cryptography::PublicKey;
 use commonware_p2p::{CheckedSender, LimitedSender, Recipients};
+use commonware_runtime::IoBufMut;
 use std::time::SystemTime;
 use thiserror::Error;
 
@@ -47,7 +47,11 @@ impl<P: PublicKey> CheckedSender for CheckedFailing<P> {
     type PublicKey = P;
     type Error = Error;
 
-    async fn send(self, _message: impl Buf + Send, _priority: bool) -> Result<Vec<P>, Self::Error> {
+    async fn send(
+        self,
+        _message: impl Into<IoBufMut> + Send,
+        _priority: bool,
+    ) -> Result<Vec<P>, Self::Error> {
         Err(Error::Failed)
     }
 }

@@ -14,7 +14,6 @@ documentation = "https://docs.rs/commonware-estimator"
 workspace = true
 
 [dependencies]
-bytes.workspace = true
 clap.workspace = true
 colored.workspace = true
 commonware-codec.workspace = true

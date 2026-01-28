@@ -25,12 +25,13 @@ use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage};
 use std::num::{NonZeroU64, NonZeroUsize};
 
 pub(crate) mod db;
-mod operation;
+pub(crate) mod operation;
 #[cfg(any(test, feature = "test-traits"))]
 pub mod states;
-mod value;
+pub(crate) mod value;
 pub(crate) use value::{FixedValue, ValueEncoding, VariableValue};
 pub mod ordered;
+pub(crate) mod sync;
 pub mod unordered;
 
 /// Configuration for an `Any` authenticated db with fixed-size values.

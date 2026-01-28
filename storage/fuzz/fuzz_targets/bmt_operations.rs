@@ -181,7 +181,7 @@ fn fuzz(input: FuzzInput) {
 
             BmtOperation::BuildLargeTree { size } => {
                 let count = (*size as usize).min(100); // Limit size
-                let mut b = Builder::new(count);
+                let mut b = Builder::<Sha256>::new(count);
                 leaf_values.clear();
 
                 for i in 0..count {

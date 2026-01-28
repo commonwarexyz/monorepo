@@ -10,8 +10,8 @@
     html_favicon_url = "https://commonware.xyz/favicon.ico"
 )]
 
-use bytes::{Buf, Bytes};
 use commonware_cryptography::PublicKey;
+use commonware_runtime::{IoBuf, IoBufMut};
 use commonware_utils::ordered::Set;
 use futures::channel::mpsc;
 use std::{error::Error as StdError, fmt::Debug, future::Future, time::SystemTime};
@@ -27,7 +27,7 @@ pub use types::{Address, Ingress};
 ///
 /// This message is guaranteed to adhere to the configuration of the channel and
 /// will already be decrypted and authenticated.
-pub type Message<P> = (P, Bytes);
+pub type Message<P> = (P, IoBuf);
 
 /// Alias for identifying communication channels.
 pub type Channel = u64;
@@ -74,7 +74,7 @@ pub trait UnlimitedSender: Clone + Send + Sync + 'static {
     fn send(
         &mut self,
         recipients: Recipients<Self::PublicKey>,
-        message: impl Buf + Send,
+        message: impl Into<IoBufMut> + Send,
         priority: bool,
     ) -> impl Future<Output = Result<Vec<Self::PublicKey>, Self::Error>> + Send;
 }
@@ -142,7 +142,7 @@ pub trait CheckedSender: Send {
     /// that the caller can act upon.
     fn send(
         self,
-        message: impl Buf + Send,
+        message: impl Into<IoBufMut> + Send,
         priority: bool,
     ) -> impl Future<Output = Result<Vec<Self::PublicKey>, Self::Error>> + Send;
 }
@@ -181,7 +181,7 @@ pub trait Sender: LimitedSender {
     fn send(
         &mut self,
         recipients: Recipients<Self::PublicKey>,
-        message: impl Buf + Send,
+        message: impl Into<IoBufMut> + Send,
         priority: bool,
     ) -> impl Future<
         Output = Result<Vec<Self::PublicKey>, <Self::Checked<'_> as CheckedSender>::Error>,

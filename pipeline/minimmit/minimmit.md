@@ -81,7 +81,7 @@ fn select_parent(r, v) -> (c', v') {
     return (genesis, ⊥);
 }
 
-// Replica `r` ensures there are nullifications for all views `[v', v)` and that there is a `notarization(c', v')`
+// Replica `r` ensures there are nullifications for all views `(v', v)` and that there is a `notarization(c', v')`
 fn valid_parent(r, v, (c', v')) -> bool {
     let i = v - 1;
     while i > v' {

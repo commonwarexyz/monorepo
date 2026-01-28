@@ -1,8 +1,8 @@
 use crate::Scheme;
-use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error, Read, ReadExt, Write};
 use commonware_consensus::simplex::types::Finalization;
 use commonware_cryptography::Digest;
+use commonware_runtime::{Buf, BufMut};
 
 /// Enum representing the valid formats for blocks.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,9 +67,12 @@ mod tests {
         types::{Epoch, Round, View},
     };
     use commonware_cryptography::{
-        bls12381::primitives::{
-            group::{self},
-            variant::{MinSig, Variant},
+        bls12381::{
+            certificate::threshold::Certificate,
+            primitives::{
+                group,
+                variant::{MinSig, Variant},
+            },
         },
         sha256::Digest as Sha256Digest,
     };
@@ -90,7 +93,7 @@ mod tests {
                 parent: View::new(54321),
                 payload: new_digest(),
             },
-            certificate: signature,
+            certificate: Certificate::new(signature),
         }
     }
 

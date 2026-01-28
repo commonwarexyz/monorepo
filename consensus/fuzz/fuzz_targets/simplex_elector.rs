@@ -24,8 +24,8 @@ use rand::{rngs::StdRng, SeedableRng};
 enum FuzzElector {
     RoundRobin,
     RoundRobinShuffled([u8; 32]),
-    RandomMinPk(bls12381_threshold_vrf::Signature<MinPk>),
-    RandomMinSig(bls12381_threshold_vrf::Signature<MinSig>),
+    RandomMinPk(bls12381_threshold_vrf::Certificate<MinPk>),
+    RandomMinSig(bls12381_threshold_vrf::Certificate<MinSig>),
 }
 
 #[derive(Arbitrary, Debug)]
