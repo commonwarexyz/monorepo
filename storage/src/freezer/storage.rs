@@ -470,7 +470,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: CodecShared> Freezer<E, K, V> {
                 entry_epoch = entry.epoch,
                 "found invalid table entry"
             );
-            *entry = Entry::new(0, 0, 0, 0);
+            *entry = Entry::new_empty();
             let zero_buf = vec![0u8; Entry::SIZE];
             blob.write_at(entry_offset, zero_buf).await?;
             Ok(true)
@@ -1287,6 +1287,68 @@ mod tests {
             }
             // 2 keys in 4 entries = 2 empty. After resize to 8, those become 4 empty.
             assert_eq!(both_empty_count, 4);
+        });
+    }
+
+    #[test_traced]
+    fn issue_2955_regression() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = super::super::Config {
+                key_partition: "test_key_index".into(),
+                key_write_buffer: NZUsize!(1024),
+                key_buffer_pool: PoolRef::new(NZU16!(1024), NZUsize!(10)),
+                value_partition: "test_value_journal".into(),
+                value_compression: None,
+                value_write_buffer: NZUsize!(1024),
+                value_target_size: 10 * 1024 * 1024,
+                table_partition: "test_table".into(),
+                table_initial_size: 4,
+                table_resize_frequency: 1,
+                table_resize_chunk_size: 4,
+                table_replay_buffer: NZUsize!(64 * 1024),
+                codec_config: (),
+            };
+
+            // Create freezer with data
+            let checkpoint = {
+                let mut freezer =
+                    Freezer::<_, FixedBytes<64>, i32>::init(context.with_label("first"), cfg.clone())
+                        .await
+                        .unwrap();
+                freezer.put(test_key("key0"), 42).await.unwrap();
+                freezer.sync().await.unwrap();
+                freezer.close().await.unwrap()
+            };
+
+            // Corrupt the CRC in both slots of the table entry
+            {
+                let (blob, _) = context.open(&cfg.table_partition, b"table").await.unwrap();
+                let entry_data = blob
+                    .read_at(0, IoBufMut::zeroed(Entry::FULL_SIZE))
+                    .await
+                    .unwrap();
+                let mut corrupted = entry_data.coalesce();
+                // Corrupt CRC of first slot (last 4 bytes of first slot)
+                corrupted.as_mut()[Entry::SIZE - 4] ^= 0xFF;
+                // Corrupt CRC of second slot (last 4 bytes of second slot)
+                corrupted.as_mut()[Entry::FULL_SIZE - 4] ^= 0xFF;
+                blob.write_at(0, corrupted).await.unwrap();
+                blob.sync().await.unwrap();
+            }
+
+            // Reopen to trigger recovery. The bug would set both cleared entries to
+            // Entry::new(0,0,0,0) which has is_empty()=false and is_valid()=true.
+            // read_latest_entry would then see two "valid" entries with epoch=0 and
+            // panic on unreachable!().
+            let freezer = Freezer::<_, FixedBytes<64>, i32>::init_with_checkpoint(
+                context.with_label("second"),
+                cfg.clone(),
+                Some(checkpoint),
+            )
+            .await
+            .unwrap();
+            drop(freezer);
         });
     }
 }
