@@ -4,8 +4,10 @@
 //! uniquely associated with both an `index` and a `key`.
 
 use commonware_codec::Codec;
+use commonware_runtime::{telemetry::metrics::histogram, Clock, Metrics};
 use commonware_utils::Array;
-use std::future::Future;
+use prometheus_client::metrics::histogram::Histogram;
+use std::{future::Future, sync::Arc};
 use thiserror::Error;
 
 pub mod immutable;
@@ -37,6 +39,134 @@ pub enum Error {
     AlreadyPrunedTo(u64),
     #[error("record too large")]
     RecordTooLarge,
+}
+
+/// A wrapper of an archive to measure the latency of its async [`Archive`] trait methods.
+///
+/// The measured archive delegates all method calls to its wrapped `T` but also
+/// records how long they took to execute.
+pub struct Metered<E: Clock, T> {
+    inner: T,
+    destroy_duration: histogram::Timed<E>,
+    get_duration: histogram::Timed<E>,
+    has_duration: histogram::Timed<E>,
+    put_duration: histogram::Timed<E>,
+    sync_duration: histogram::Timed<E>,
+}
+
+impl<E: Clock + Metrics, T> Metered<E, T> {
+    /// Wraps `archive` to measures all of its async [`Archive`] trait methods.
+    pub fn new(context: E, archive: T) -> Self {
+        let destroy_duration = Histogram::new(histogram::Buckets::LOCAL);
+        let clock = Arc::new(context.clone());
+        context.register(
+            "destroy_duration",
+            "Histogram of storage destroy duration",
+            destroy_duration.clone(),
+        );
+        let destroy_duration = histogram::Timed::new(destroy_duration, clock.clone());
+        let get_duration = Histogram::new(histogram::Buckets::LOCAL);
+        context.register(
+            "get_duration",
+            "Histogram of storage get duration",
+            get_duration.clone(),
+        );
+        let get_duration = histogram::Timed::new(get_duration, clock.clone());
+        let has_duration = Histogram::new(histogram::Buckets::LOCAL);
+        context.register(
+            "has_duration",
+            "Histogram of storage sync duration",
+            has_duration.clone(),
+        );
+        let has_duration = histogram::Timed::new(has_duration, clock.clone());
+        let put_duration = Histogram::new(histogram::Buckets::LOCAL);
+        context.register(
+            "put_duration",
+            "Histogram of storage put duration",
+            put_duration.clone(),
+        );
+        let put_duration = histogram::Timed::new(put_duration, clock.clone());
+        let sync_duration = Histogram::new(histogram::Buckets::LOCAL);
+        context.register(
+            "sync_duration",
+            "Histogram of storage sync duration",
+            sync_duration.clone(),
+        );
+        let sync_duration = histogram::Timed::new(sync_duration, clock.clone());
+        Self {
+            inner: archive,
+            destroy_duration,
+            get_duration,
+            has_duration,
+            put_duration,
+            sync_duration,
+        }
+    }
+}
+
+impl<E: Clock, T: Archive + Send> Archive for Metered<E, T> {
+    type Key = T::Key;
+
+    type Value = T::Value;
+
+    async fn put(&mut self, index: u64, key: Self::Key, value: Self::Value) -> Result<(), Error> {
+        let _timer = self.put_duration.timer();
+        self.inner.put(index, key, value).await
+    }
+
+    fn get<'a>(
+        &'a self,
+        identifier: Identifier<'a, Self::Key>,
+    ) -> impl Future<Output = Result<Option<Self::Value>, Error>> + Send + use<'a, E, T> {
+        let timer = self.get_duration.timer();
+        let get = self.inner.get(identifier);
+        async move {
+            let _timer = timer;
+            get.await
+        }
+    }
+
+    fn has<'a>(
+        &'a self,
+        identifier: Identifier<'a, Self::Key>,
+    ) -> impl Future<Output = Result<bool, Error>> + Send + use<'a, E, T> {
+        let timer = self.has_duration.timer();
+        let has = self.inner.has(identifier);
+        async move {
+            let _timer = timer;
+            has.await
+        }
+    }
+
+    fn next_gap(&self, index: u64) -> (Option<u64>, Option<u64>) {
+        self.inner.next_gap(index)
+    }
+
+    fn missing_items(&self, index: u64, max: usize) -> Vec<u64> {
+        self.inner.missing_items(index, max)
+    }
+
+    fn ranges(&self) -> impl Iterator<Item = (u64, u64)> {
+        self.inner.ranges()
+    }
+
+    fn first_index(&self) -> Option<u64> {
+        self.inner.first_index()
+    }
+
+    fn last_index(&self) -> Option<u64> {
+        self.inner.last_index()
+    }
+
+    async fn sync(&mut self) -> Result<(), Error> {
+        let _timer = self.sync_duration.timer();
+        self.inner.sync().await
+    }
+
+    async fn destroy(self) -> Result<(), Error> {
+        let _timer = self.destroy_duration.timer();
+        self.inner.destroy().await
+    }
 }
 
 /// A write-once key-value store where each key is associated with a unique index.
