@@ -28,7 +28,7 @@ hash = "9add8634d4f06c3fb7f6dfd80630f38013ecb20849c18accd0579d7eb2ca11d5"
 
 ["commonware_storage::freezer::conformance::Freezer"]
 n_cases = 512
-hash = "5c86f0fe0900206655d0688e55c40aa1edcbdd2bb814e2f300489ea7048b1c08"
+hash = "96804c24d9913b87424a9091d19bf4ecc8e011d1561a64c77de6333df92fcfad"
 
 ["commonware_storage::freezer::storage::conformance::CodecConformance<Checkpoint>"]
 n_cases = 65536
