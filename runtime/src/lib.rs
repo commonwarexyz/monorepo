@@ -36,42 +36,39 @@ use thiserror::Error;
 mod macros;
 
 stability_mod!(ALPHA, pub mod deterministic);
-stability_mod!(GAMMA, pub mod mocks);
+mod network;
+mod process;
+mod storage;
+#[cfg(any(feature = "iouring-storage", feature = "iouring-network"))]
+mod iouring;
 cfg_if::cfg_if! {
     if #[cfg(not(target_arch = "wasm32"))] {
-        stability_mod!(GAMMA, pub mod tokio);
         pub mod benchmarks;
     }
 }
+
 stability_scope!(GAMMA {
     use commonware_parallel::{Rayon, ThreadPool};
     use rayon::ThreadPoolBuildError;
 
     pub mod iobuf;
+    pub mod mocks;
+    pub mod telemetry;
+    pub mod utils;
+
     pub use iobuf::{IoBuf, IoBufMut, IoBufs, IoBufsMut};
+    pub use utils::*;
+});
+stability_scope!(GAMMA, cfg(not(target_arch = "wasm32")) {
+    pub mod tokio;
 });
 /// Re-export of `Buf` and `BufMut` traits for usage with [I/O buffers](iobuf).
 pub use bytes::{Buf, BufMut};
-mod network;
-mod process;
-mod storage;
-stability_mod!(GAMMA, pub mod telemetry);
-stability_mod!(GAMMA, pub mod utils);
 stability_scope!(GAMMA {
-    pub use utils::*;
-});
-#[cfg(any(feature = "iouring-storage", feature = "iouring-network"))]
-mod iouring;
 
-/// Prefix for runtime metrics.
-const METRICS_PREFIX: &str = "runtime";
-
-stability_scope!(GAMMA {
     /// Default [`Blob`] version used when no version is specified via [`Storage::open`].
     pub const DEFAULT_BLOB_VERSION: u16 = 0;
-});
 
-stability_scope!(GAMMA {
     /// Errors that can occur when interacting with the runtime.
     #[derive(Error, Debug)]
     pub enum Error {
@@ -130,6 +127,9 @@ stability_scope!(GAMMA {
         Io(#[from] IoError),
     }
 });
+
+/// Prefix for runtime metrics.
+const METRICS_PREFIX: &str = "runtime";
 
 /// Interface that any task scheduler must implement to start
 /// running tasks.
@@ -660,9 +660,7 @@ commonware_macros::stability_scope!(GAMMA {
         /// or paying the cost of async.
         fn peek(&self, max_len: u64) -> &[u8];
     }
-});
 
-commonware_macros::stability_scope!(GAMMA {
     /// Interface to interact with storage.
     ///
     /// To support storage implementations that enable concurrent reads and

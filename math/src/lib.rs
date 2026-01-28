@@ -8,15 +8,15 @@
 #[cfg(not(feature = "std"))]
 extern crate alloc;
 
-use commonware_macros::stability_mod;
-
-stability_mod!(GAMMA, pub mod algebra);
 commonware_macros::stability_scope!(BETA {
     pub mod fields {
         pub mod goldilocks;
     }
+    pub mod ntt;
 });
-stability_mod!(BETA, pub mod ntt);
-stability_mod!(GAMMA, pub mod poly);
+commonware_macros::stability_scope!(GAMMA {
+    pub mod algebra;
+    pub mod poly;
+});
 #[cfg(test)]
 pub(crate) mod test;

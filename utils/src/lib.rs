@@ -17,24 +17,37 @@ use core::{
     time::Duration,
 };
 
-commonware_macros::stability_mod!(GAMMA, pub mod faults);
-#[cfg(feature = "std")]
-commonware_macros::stability_mod!(GAMMA, pub mod acknowledgement);
-#[cfg(feature = "std")]
-commonware_macros::stability_mod!(GAMMA, pub mod channels);
-#[cfg(not(any(commonware_stability_DELTA, commonware_stability_EPSILON)))]
-pub mod hex_literal;
-#[cfg(feature = "std")]
-commonware_macros::stability_mod!(GAMMA, pub mod net);
-#[cfg(not(any(commonware_stability_DELTA, commonware_stability_EPSILON)))]
-pub mod vec;
-
 commonware_macros::stability_scope!(GAMMA {
+    pub mod faults;
+    pub mod sequence;
+    pub mod bitmap;
+    pub mod hostname;
+    pub mod ordered;
+
     pub use faults::{Faults, N3f1, N5f1};
+    pub use sequence::{Array, Span};
+    pub use hostname::Hostname;
 });
 commonware_macros::stability_scope!(GAMMA, cfg(feature = "std") {
+    pub mod acknowledgement;
+    pub mod channels;
+    pub mod net;
+    pub mod time;
+    pub mod rational;
+    pub mod concurrency;
+    pub mod futures;
+    mod priority_set;
+
     pub use acknowledgement::Acknowledgement;
+    pub use net::IpAddrExt;
+    pub use time::{DurationExt, SystemTimeExt};
+    pub use rational::BigRationalExt;
+    pub use priority_set::PrioritySet;
 });
+#[cfg(not(any(commonware_stability_DELTA, commonware_stability_EPSILON)))]
+pub mod hex_literal;
+#[cfg(not(any(commonware_stability_DELTA, commonware_stability_EPSILON)))]
+pub mod vec;
 
 commonware_macros::stability_scope!(GAMMA {
     /// Represents a participant/validator index within a consensus committee.
@@ -78,18 +91,9 @@ commonware_macros::stability_scope!(GAMMA {
             write!(f, "{}", self.0)
         }
     }
-});
 
-commonware_macros::stability_scope!(GAMMA {
     use bytes::Buf;
     use commonware_codec::{varint::UInt, EncodeSize, Error as CodecError, Read, ReadExt, Write};
-
-    pub mod sequence;
-    pub use sequence::{Array, Span};
-    pub mod bitmap;
-    pub mod hostname;
-    pub use hostname::Hostname;
-    pub mod ordered;
 
     impl Read for Participant {
         type Cfg = ();
@@ -111,9 +115,7 @@ commonware_macros::stability_scope!(GAMMA {
             UInt(self.0).encode_size()
         }
     }
-});
 
-commonware_macros::stability_scope!(GAMMA {
     /// A type that can be constructed from an iterator, possibly failing.
     pub trait TryFromIterator<T>: Sized {
         /// The error type returned when construction fails.
@@ -132,25 +134,6 @@ commonware_macros::stability_scope!(GAMMA {
     }
 
     impl<I: Iterator> TryCollect for I {}
-});
-
-#[cfg(feature = "std")]
-commonware_macros::stability_mod!(GAMMA, pub mod time);
-#[cfg(feature = "std")]
-commonware_macros::stability_mod!(GAMMA, pub mod rational);
-commonware_macros::stability_scope!(GAMMA, cfg(feature = "std") {
-    mod priority_set;
-});
-#[cfg(feature = "std")]
-commonware_macros::stability_mod!(GAMMA, pub mod concurrency);
-#[cfg(feature = "std")]
-commonware_macros::stability_mod!(GAMMA, pub mod futures);
-
-commonware_macros::stability_scope!(GAMMA, cfg(feature = "std") {
-    pub use net::IpAddrExt;
-    pub use time::{DurationExt, SystemTimeExt};
-    pub use rational::BigRationalExt;
-    pub use priority_set::PrioritySet;
 });
 
 /// Returns a seeded RNG for deterministic testing.
